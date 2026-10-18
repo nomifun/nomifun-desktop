@@ -27,7 +27,6 @@
             "action_allowlist": [
               "workspace.process/cancel",
               "workspace.process/close_stdin",
-              "workspace.process/exec",
               "workspace.process/input",
               "workspace.process/poll",
               "workspace.process/resize",
@@ -148,7 +147,6 @@
             "action_allowlist": [
               "workspace.process/cancel",
               "workspace.process/close_stdin",
-              "workspace.process/exec",
               "workspace.process/input",
               "workspace.process/poll",
               "workspace.process/resize",
@@ -316,7 +314,6 @@
             "action_allowlist": [
               "workspace.process/cancel",
               "workspace.process/close_stdin",
-              "workspace.process/exec",
               "workspace.process/input",
               "workspace.process/poll",
               "workspace.process/resize",
@@ -485,7 +482,6 @@
             "action_allowlist": [
               "workspace.process/cancel",
               "workspace.process/close_stdin",
-              "workspace.process/exec",
               "workspace.process/input",
               "workspace.process/poll",
               "workspace.process/resize",
@@ -708,7 +704,6 @@
             "action_allowlist": [
               "workspace.process/cancel",
               "workspace.process/close_stdin",
-              "workspace.process/exec",
               "workspace.process/input",
               "workspace.process/poll",
               "workspace.process/resize",
@@ -982,7 +977,6 @@
             "action_allowlist": [
               "workspace.process/cancel",
               "workspace.process/close_stdin",
-              "workspace.process/exec",
               "workspace.process/input",
               "workspace.process/poll",
               "workspace.process/resize",
@@ -1097,7 +1091,6 @@
             "action_allowlist": [
               "workspace.process/cancel",
               "workspace.process/close_stdin",
-              "workspace.process/exec",
               "workspace.process/input",
               "workspace.process/poll",
               "workspace.process/resize",
@@ -1545,5 +1538,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "1822ab3ffa286a20ef4f8c3a067c7c7cce5f4ab5b8fb3c372e0f774642edd0d6"
+  "payload_digest": "957613739cb167649ef22d51a180b55fb0c5b5d8bd53c8f6e666e193aa58a0ff"
 }

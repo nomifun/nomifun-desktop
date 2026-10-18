@@ -15,6 +15,21 @@ test('request presentation preserves structured classification and exact path wi
   expect(conversationRequestError(new Error('Opaque upstream text'), 'CONVERSATION_SEND_FAILED').code).toBe('CONVERSATION_SEND_FAILED');
 });
 
+test('direct AppError native details reach the same renderer diagnostic without guessing OS facts from prose', () => {
+  const diagnostic = {code:'SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED',message:'Windows UAC runner was not started',kind:'Uncategorized',raw_os_error:1223,user_code_not_started:true,cleanup_proven:true};
+  const http = new BackendHttpError({method:'POST',path:'/api/agent-sessions/session-1/turns',status:403,
+    body:{code:diagnostic.code,error:diagnostic.message,details:{system_execution_error:diagnostic}}});
+  const error = conversationRequestError(http, 'CONVERSATION_SEND_FAILED');
+  expect(error.code).toBe(diagnostic.code);
+  expect(error.systemExecutionError).toEqual(diagnostic);
+  expect(error.retryable).toBe(false);
+  const unknown = conversationRequestError(new BackendHttpError({method:'POST',path:'/api/agent-sessions/session-1/turns',status:502,
+    body:{code:'SYSTEM_READ_RESULT_UNKNOWN',error:'authentication cancelled raw_os_error=1223',details:{system_execution_error:{code:'SYSTEM_READ_RESULT_UNKNOWN',message:'incomplete transport reply'}}}}), 'CONVERSATION_SEND_FAILED');
+  expect(unknown.code).toBe('SYSTEM_READ_RESULT_UNKNOWN');
+  expect(unknown.systemExecutionError?.raw_os_error).toBeNull();
+  expect(unknown.systemExecutionError?.user_code_not_started).toBeNull();
+});
+
 test.each(['CONFLICT', 'AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED'])('the exact configuration rejection in a %s envelope keeps its code and technical detail', code => {
   const detail = 'Conflict: AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED: capability agent.tool-discovery changed authority, effects, resources, dependencies or provenance';
   const error = new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/session-1/turns', status: 409,

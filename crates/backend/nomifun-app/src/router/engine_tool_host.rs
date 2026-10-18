@@ -125,21 +125,31 @@ impl EngineToolInvoker for EngineToolHost {
                 self.unobserved.clone(),
             );
             let execution = self.execution.clone();
-            let before_dispatch = cancellation.clone();
-            let effect_cancellation = CancellationToken::new();
-            let cancel_effect = effect_cancellation.clone();
-            let task = self.tasks.spawn(async move {
+            // The Runtime may drop its waiter before this select is polled
+            // again. Parent cancellation must still reach retained work;
+            // dropping a waiter alone must not cancel that work.
+            let effect_cancellation = cancellation.child_token();
+            self.tasks.spawn(async move {
                 // Fair shared/exclusive gate, retained through settlement.
                 // Kernel verifies classification against the exact mapping
                 // before any real effect; an engine cannot self-label a write
                 // as parallel-safe to bypass canonical admission.
-                let _guard = if invocation.binding.parallel_safe
-                    && invocation.binding.effect_class == nomifun_engine_core::EngineEffectClass::ReadOnly {
-                    futures_util::future::Either::Left(execution.read_owned().await)
-                } else {
-                    futures_util::future::Either::Right(execution.write_owned().await)
+                let admission = async {
+                    if invocation.binding.parallel_safe
+                        && invocation.binding.effect_class == nomifun_engine_core::EngineEffectClass::ReadOnly {
+                        futures_util::future::Either::Left(execution.read_owned().await)
+                    } else {
+                        futures_util::future::Either::Right(execution.write_owned().await)
+                    }
                 };
-                if before_dispatch.is_cancelled() { return Err(EngineToolError::Cancelled); }
+                // A queued call has not entered the owner. Cancellation must
+                // release its task without waiting behind a long-running write.
+                let _guard = tokio::select! {
+                    biased;
+                    _ = effect_cancellation.cancelled() => return Err(EngineToolError::Cancelled),
+                    guard = admission => guard,
+                };
+                if effect_cancellation.is_cancelled() { return Err(EngineToolError::Cancelled); }
                 let dispatch = EngineToolDispatchRecord {
                     operation_id: invocation.operation_id.as_ref().to_owned(), call_id: invocation.call.call_id.as_ref().to_owned(),
                     capability_id: invocation.binding.capability_id.as_ref().to_owned(), action_id: invocation.binding.action_id.as_ref().to_owned(),
@@ -169,15 +179,10 @@ impl EngineToolInvoker for EngineToolHost {
                 unobserved.lock().map_err(|_| { failed.store(true, Ordering::Release); tool_error("observation lock poisoned") })?
                     .insert(dispatch.call_id);
                 result
-            }).map_err(tool_error)?;
-            (task, cancel_effect)
+            }).map_err(tool_error)?
         };
-        let (task, cancel_effect) = task;
         tokio::select! {
-            _ = cancellation.cancelled() => {
-                cancel_effect.cancel();
-                Err(EngineToolError::Cancelled)
-            },
+            _ = cancellation.cancelled() => Err(EngineToolError::Cancelled),
             result = task.result() => result.map_err(tool_error)?,
         }
     }
@@ -276,6 +281,81 @@ mod tests {
         ) -> Result<EngineToolResult, EngineToolError> {
             panic!("not used")
         }
+    }
+
+    fn cancellation_invocation() -> EngineToolInvocation {
+        EngineToolInvocation {
+            agent_session_id: "0190f5fe-7c00-7a00-8000-000000000002".into(),
+            principal: PrincipalRef { principal_kind: "user".into(), principal_id: "0190f5fe-7c00-7a00-8000-000000000001".into() },
+            resolved_snapshot_ref: ResolvedSnapshotRef { snapshot_id: "snapshot".into(), snapshot_digest: "b".repeat(64).into() },
+            active_set_generation: 1, turn_operation_id: "turn".into(), operation_id: "queued-operation".into(),
+            idempotency_key: "queued-key".into(), correlation_id: "queued-correlation".into(),
+            call: ChatToolCall { call_id: "queued-call".into(), name: "write_file".into(), arguments: StrictJsonValue(serde_json::json!({})), provider_metadata: Default::default() },
+            binding: serde_json::from_value(serde_json::json!({
+                "model_name":"write_file", "definition":{"name":"write_file","description":"fixture","input_schema":{}},
+                "schema_digest":"a".repeat(64), "canonical_input_schema_ref":"fixture", "capability_contract_digest":"b".repeat(64),
+                "capability_id":"workspace.files", "action_id":"workspace.files/write", "resource_binding_ids":[],
+                "effect_class":"managed_effect", "parallel_safe":false
+            })).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_queued_call_without_waiting_for_business_gate() {
+        let owner = Arc::new(tools(Arc::new(NeverInvoke)));
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        owner.bind_turn("turn".into(), journal).unwrap();
+        let gate = owner.execution.clone().write_owned().await;
+        let invocation = cancellation_invocation();
+        let cancellation = CancellationToken::new();
+        let caller_owner = owner.clone();
+        let token = cancellation.clone();
+        let caller = tokio::spawn(async move { caller_owner.invoke(invocation, token).await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while owner.tasks.pending_tasks().unwrap() == 0 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        cancellation.cancel();
+        assert!(matches!(caller.await.unwrap(), Err(EngineToolError::Cancelled)));
+        tokio::time::timeout(std::time::Duration::from_secs(1), owner.join()).await.unwrap().unwrap();
+        let dispatched: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE kind = 'runtime/progress-recorded'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(dispatched, 0, "queued cancellation must not dispatch or fabricate a settlement");
+        drop(gate);
+    }
+
+    #[tokio::test]
+    async fn parent_cancel_reaches_retained_effect_after_its_waiter_was_dropped() {
+        struct CooperativeEffect { started: CancellationToken }
+        #[async_trait]
+        impl EngineToolInvoker for CooperativeEffect {
+            async fn invoke(&self, invocation: EngineToolInvocation, cancellation: CancellationToken)
+                -> Result<EngineToolResult, EngineToolError> {
+                self.started.cancel();
+                cancellation.cancelled().await;
+                Ok(EngineToolResult::text(invocation.call.call_id, "original owner observed cancellation", false))
+            }
+        }
+        let started = CancellationToken::new();
+        let owner = Arc::new(tools(Arc::new(CooperativeEffect { started: started.clone() })));
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        owner.bind_turn("turn".into(), journal).unwrap();
+        let cancellation = CancellationToken::new();
+        let caller_owner = owner.clone();
+        let token = cancellation.clone();
+        let caller = tokio::spawn(async move { caller_owner.invoke(cancellation_invocation(), token).await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.cancelled()).await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert_eq!(owner.tasks.pending_tasks().unwrap(), 1, "dropping a waiter must retain its original effect");
+        cancellation.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), owner.join()).await.unwrap().unwrap();
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT inline_json FROM agent_events WHERE kind='runtime/progress-recorded' ORDER BY seq")
+            .fetch_all(&pool).await.unwrap();
+        let records = rows.iter().map(|(value,)| serde_json::from_str::<Value>(value).unwrap()).collect::<Vec<_>>();
+        let settlements = records.iter().filter(|record| record.pointer("/event/event").and_then(Value::as_str) == Some("host_tool_settled")).collect::<Vec<_>>();
+        assert_eq!(settlements.len(), 1);
+        assert_eq!(settlements[0].pointer("/event/operation_id").and_then(Value::as_str), Some("queued-operation"));
+        assert!(settlements[0].pointer("/event/result").is_some_and(|value| !value.is_null()));
     }
 
     #[tokio::test]
@@ -592,6 +672,7 @@ mod tests {
                 Err(EngineToolError::CapabilityKernel {
                     code:"CAPABILITY_UNAVAILABLE".to_owned(),
                     message:"The workspace owner reported success, but the canonical receipt was not stored. Do not retry automatically. Re-read the affected owner state and reconcile the pending effect.".to_owned(),
+                    details:None,
                 })
             }
         }
@@ -618,7 +699,7 @@ mod tests {
         );
         owner.bind_turn("turn".into(),journal).unwrap();
         let error = owner.invoke(invocation,CancellationToken::new()).await.unwrap_err();
-        let EngineToolError::CapabilityKernel { code,message } = error else {
+        let EngineToolError::CapabilityKernel { code,message, .. } = error else {
             panic!("settlement loss changed error class")
         };
         assert_eq!(code,"CAPABILITY_UNAVAILABLE");
@@ -664,6 +745,7 @@ mod tests {
                 Err(EngineToolError::CapabilityKernel {
                     code:"CAPABILITY_UNAVAILABLE".to_owned(),
                     message:"The owner outcome is unknown. Do not retry automatically. Reconcile the external owner.".to_owned(),
+                    details:None,
                 })
             }
         }
@@ -689,7 +771,7 @@ mod tests {
             })).unwrap(),
         };
         let error = owner.invoke(invocation,CancellationToken::new()).await.unwrap_err();
-        assert!(matches!(error,EngineToolError::CapabilityKernel { ref code,ref message }
+        assert!(matches!(error,EngineToolError::CapabilityKernel { ref code,ref message, .. }
             if code=="CAPABILITY_UNAVAILABLE" && message.contains("Reconcile")));
         owner.mark_observed("reopen-settlement-call").unwrap();
         owner.close_turn().unwrap();

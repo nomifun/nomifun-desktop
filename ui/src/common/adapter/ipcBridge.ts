@@ -990,7 +990,6 @@ export const fromApiTurnCompletedEvent = (raw: unknown): IConversationTurnComple
   const runtime: IConversationTurnCompletedEvent['runtime'] = {
     state: (rawRuntime.state ?? 'idle') as IConversationTurnCompletedEvent['runtime']['state'],
     can_send_message: (rawRuntime.can_send_message ?? true) as boolean,
-    can_steer: rawRuntime.can_steer === true,
     // Missing terminal runtime authority must never be interpreted as an
     // already-released turn. Lifecycle consumers fail closed on `true`.
     is_processing:
@@ -1109,6 +1108,23 @@ export const conversation = {
   ),
   sendMessage: {
     provider: () => {},
+    invoke: async (p: ISendMessageParams): Promise<IAcceptMessageResult> => {
+      const idempotencyKey = requireConversationIdempotencyKey(p.idempotency_key);
+      const result = await httpRequest<{ agent_session_id: string; message_id: string; status: string; replayed: boolean }>(
+        'POST', `/api/agent-sessions/${p.conversation_id}/messages`, {
+          idempotency_key: idempotencyKey,
+          input: { content: p.input, files: p.files, inject_skills: p.inject_skills },
+        }, { idempotencyKey, initialOnly: p.initial_only === true }
+      );
+      if (result.status !== 'accepted' || result.agent_session_id !== p.conversation_id || typeof result.replayed !== 'boolean') {
+        throw new TypeError('The Session did not return a canonical accepted-message receipt');
+      }
+      return { msg_id: parseMessageId(result.message_id), replayed: result.replayed };
+    },
+  },
+  /** Explicit domain Turn admission. Ordinary user input uses sendMessage. */
+  sendTurn: {
+    provider: () => {},
     invoke: async (p: ISendMessageParams): Promise<ISendMessageResult> => {
       const idempotencyKey = requireConversationIdempotencyKey(p.idempotency_key);
       const result = await httpRequest<CreateAgentSessionTurnResponse>(
@@ -1138,7 +1154,7 @@ export const conversation = {
   },
   steer: {
     provider: () => {},
-    invoke: async (p: ISendMessageParams): Promise<ISendMessageResult> => {
+    invoke: async (p: ISendMessageParams & { expected_turn_id: MessageId }): Promise<ISendMessageResult> => {
       const idempotencyKey = requireConversationIdempotencyKey(p.idempotency_key);
       const result = await httpRequest<{
         message_id: string;
@@ -1148,6 +1164,7 @@ export const conversation = {
         `/api/agent-sessions/${p.conversation_id}/turns/steer`,
         {
           idempotency_key: idempotencyKey,
+          expected_turn_id: parseMessageId(p.expected_turn_id),
           ...(p.expected_wait ? { expected_wait: p.expected_wait } : {}),
           input: {
             content: p.input,
@@ -1207,7 +1224,6 @@ export const conversation = {
       runtime: {
         state: (rawRuntime.state ?? 'starting') as IConversationTurnStartedEvent['runtime']['state'],
         can_send_message: (rawRuntime.can_send_message ?? false) as boolean,
-        can_steer: rawRuntime.can_steer === true,
         is_processing: (rawRuntime.is_processing ?? true) as boolean,
         ...(rawRuntime.active_turn_id == null
           ? {}
@@ -1951,7 +1967,7 @@ export const mcpService = {
       www_authenticate?: string;
     },
     McpConnectionTestRequest
-  >('/api/mcp/test-connection', undefined, { timeoutMs: 13 * 60_000 }),
+  >('/api/mcp/test-connection'),
   checkOAuthStatus: httpPost<{ authenticated: boolean }, { server_url: string }>('/api/mcp/oauth/check-status'),
   loginMcpOAuth: httpPost<{ success: boolean; error?: string }, { server_url: string }>('/api/mcp/oauth/login'),
   logoutMcpOAuth: httpPost<void, { server_url: string }>('/api/mcp/oauth/logout'),
@@ -3243,6 +3259,12 @@ export interface ISendMessageResult {
   result_error_retryable: boolean | null;
 }
 
+/** Durable intake receipt. It makes no assertion that a Turn has started or completed. */
+export interface IAcceptMessageResult {
+  msg_id: MessageId;
+  replayed: boolean;
+}
+
 export interface ICreateConversationParams {
   type: 'nomi';
   name?: string;
@@ -3341,6 +3363,7 @@ export interface IResponseMessage {
 
 /** A newly accepted canonical input, shared by all windows and sending surfaces. */
 export interface IUserMessageCreatedEvent {
+  input_delivery?: import('../chat/inputDelivery').InputDelivery;
   idmm_decision?: IdmmDecisionExplanation;
   interaction?: import('../chat/chatLib').IMessageText['content']['interaction'];
   conversation_id: ConversationId;
@@ -3374,7 +3397,6 @@ export interface IConversationTurnStartedEvent {
   runtime: {
     state: 'idle' | 'starting' | 'running' | 'waiting' | 'paused' | 'reconciliation';
     can_send_message: boolean;
-    can_steer?: boolean;
     is_processing: boolean;
     turn_outcome?: AgentTurnOutcome;
     active_turn_id?: MessageId;
@@ -3402,7 +3424,6 @@ export interface IConversationTurnCompletedEvent {
   runtime: {
     state: 'idle' | 'starting' | 'running' | 'waiting' | 'paused' | 'reconciliation';
     can_send_message: boolean;
-    can_steer?: boolean;
     is_processing: boolean;
     turn_outcome?: AgentTurnOutcome;
     active_turn_id?: MessageId;

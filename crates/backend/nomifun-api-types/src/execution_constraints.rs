@@ -53,7 +53,7 @@ impl ExecutionConstraints {
     pub fn instruction(&self) -> Option<&'static str> {
         if self.managed_process_only {
             return Some(
-                "This execution Attempt is restricted to one managed process lifecycle. Only start_process, poll_process, write_process_stdin, close_process_stdin, resize_process, and cancel_process are available from workspace tools. Do not inspect files, run exec_command/Bash, probe the directory, or substitute raw PIDs or shell backgrounding. Use the exact process_id returned by start_process and prove cleanup before completion.",
+                "This execution Attempt is restricted to one managed process lifecycle. Only start_process, poll_process, write_process_stdin, close_process_stdin, resize_process, and cancel_process are available from workspace tools. Do not inspect files, probe the directory, or substitute raw PIDs or shell backgrounding. Use the exact process_id returned by start_process and prove cleanup before completion.",
             );
         }
         match (self.tool_scope, self.exclude_delegation) {
@@ -66,44 +66,6 @@ impl ExecutionConstraints {
             ),
             (AgentToolPolicy::ReadShell, _) => Some(
                 "This execution Attempt permits selected file read/search and process execution, but no other external tools or delegation. Shell execution is not a read-only sandbox and can modify the workspace; follow the task's requested scope. Report unavailable capabilities rather than substituting an unrelated route.",
-            ),
-        }
-    }
-
-    /// Nomi's persistent native registration ceiling; never adds a grant.
-    pub fn allows_nomi_tool(&self, name: &str) -> bool {
-        if self.exclude_delegation
-            && matches!(name, "nomi_delegate" | "subagent_send" | "subagent_wait")
-        {
-            return false;
-        }
-        if self.managed_process_only {
-            return matches!(
-                name,
-                "start_process"
-                    | "poll_process"
-                    | "write_process_stdin"
-                    | "close_process_stdin"
-                    | "resize_process"
-                    | "cancel_process"
-            );
-        }
-        match self.tool_scope {
-            AgentToolPolicy::Full => true,
-            AgentToolPolicy::ReadOnly => matches!(
-                name,
-                "Read" | "Grep" | "Glob" | "ToolSearch" | "activate_vision_input"
-            ),
-            AgentToolPolicy::ReadShell => matches!(
-                name,
-                "Read"
-                    | "Grep"
-                    | "Glob"
-                    | "ToolSearch"
-                    | "activate_vision_input"
-                    | "Bash"
-                    | "exec_command"
-                    | "write_stdin"
             ),
         }
     }
@@ -131,7 +93,7 @@ impl ExecutionConstraints {
             },
             "workspace.process" => match self.tool_scope {
                 AgentToolPolicy::Full => true,
-                AgentToolPolicy::ReadShell => action_id == "workspace.process/exec",
+                AgentToolPolicy::ReadShell => action_id == "workspace.process/start",
                 AgentToolPolicy::ReadOnly => false,
             },
             "workspace.vcs" | "workspace.artifacts" => {

@@ -445,6 +445,19 @@ impl KernelRegistry {
             .await
     }
 
+    /// Invoke with the owning task's cooperative cancellation. The control is
+    /// process-local and does not change Snapshot or resource authorization.
+    pub async fn invoke_controlled(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityInvocationRequest,
+        control: crate::InvocationControl,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
+        self.invoke_shared_controlled(Arc::new(snapshot.clone()), active, request, control)
+            .await
+    }
+
     /// The Session-owned plan is shared with nested calls rather than copied
     /// for every Tool. This is the same admission/dispatch as `invoke`.
     pub async fn invoke_shared(
@@ -453,9 +466,21 @@ impl KernelRegistry {
         active: &ActiveCapabilitySetSnapshot,
         request: CapabilityInvocationRequest,
     ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
+        self.invoke_shared_controlled(snapshot, active, request, Default::default())
+            .await
+    }
+
+    pub async fn invoke_shared_controlled(
+        &self,
+        snapshot: Arc<CompiledSnapshot>,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityInvocationRequest,
+        control: crate::InvocationControl,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
         snapshot.require_contribution(&request.capability_id)?;
         self.invoke_scoped(
             snapshot, Arc::new(active.clone()), request, Arc::new(Vec::new()),
+            control,
         )
         .await
     }
@@ -466,6 +491,7 @@ impl KernelRegistry {
         active: Arc<ActiveCapabilitySetSnapshot>,
         request: CapabilityInvocationRequest,
         ancestry: Arc<Vec<crate::dependency_call::DependencyAncestor>>,
+        control: crate::InvocationControl,
     ) -> std::pin::Pin<Box<
         dyn std::future::Future<Output = Result<nomifun_agent_contracts::StrictJsonValue, KernelError>>
             + Send + '_,
@@ -485,8 +511,9 @@ impl KernelRegistry {
                 Arc::clone(&snapshot),
                 Arc::clone(&active),
                 Arc::new(lineage),
+                control.clone(),
             );
-            self.invoke_admitted(&snapshot, &active, request, dependencies)
+            self.invoke_admitted(&snapshot, &active, request, dependencies, control)
                 .await
         })
     }
@@ -497,8 +524,10 @@ impl KernelRegistry {
         active: &ActiveCapabilitySetSnapshot,
         request: CapabilityInvocationRequest,
         dependencies: crate::CapabilityDependencyCaller,
+        control: crate::InvocationControl,
     ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
         self.validate_invocation_admission(snapshot, active, &request)?;
+        require_invocation_open(&control)?;
         let role_request = agent_role_request(&request);
         if snapshot
             .content()
@@ -515,6 +544,7 @@ impl KernelRegistry {
             )
             .await?;
         }
+        require_invocation_open(&control)?;
         let role_dispatch = {
             let published = self
                 .published
@@ -550,6 +580,7 @@ impl KernelRegistry {
                 request.idempotency_key,
                 request.input,
                 Some(dependencies),
+                control,
             )
             .await;
         }
@@ -590,6 +621,7 @@ impl KernelRegistry {
             (
                 Arc::clone(&binding.handler),
                 CapabilityInvocationContext {
+                    control,
                     dependencies,
                     principal: request.principal,
                     agent_session_id: request.agent_session_id,
@@ -1002,6 +1034,7 @@ impl KernelRegistry {
             request.idempotency_key,
             request.input,
             None,
+            Default::default(),
         )
         .await
     }
@@ -1147,6 +1180,7 @@ impl KernelRegistry {
         crate::CapabilityDependencyCaller::scoped(
             self.clone(), Arc::new(snapshot.clone()), Arc::new(active.clone()),
             Arc::new(vec![crate::dependency_call::DependencyAncestor::Context(request)]),
+            Default::default(),
         )
     }
 
@@ -1745,6 +1779,7 @@ async fn dispatch_resolved_role_tool(
     idempotency_key: nomifun_agent_contracts::IdempotencyKey,
     input: nomifun_agent_contracts::StrictJsonValue,
     dependencies: Option<crate::CapabilityDependencyCaller>,
+    control: crate::InvocationControl,
 ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
     match target {
         RoleMemberDispatchTarget::AgentTool(handler) => {
@@ -1767,6 +1802,7 @@ async fn dispatch_resolved_role_tool(
             handler
                 .invoke(
                     CapabilityInvocationContext {
+                        control,
                         dependencies: dependencies.ok_or(KernelError::RegistryPoisoned)?,
                         principal: context.principal,
                         agent_session_id,
@@ -1810,6 +1846,16 @@ async fn dispatch_resolved_role_tool(
             reason: "role member dispatch target is not a Tool".to_owned(),
         }),
     }
+}
+
+fn require_invocation_open(control: &crate::InvocationControl) -> Result<(), KernelError> {
+    if control.is_cancelled() {
+        return Err(KernelError::capability_execution_failed(
+            "INVOCATION_CANCELLED",
+            "the owning task cancelled this invocation before handler dispatch",
+        ));
+    }
+    Ok(())
 }
 
 fn resource_handle_key(

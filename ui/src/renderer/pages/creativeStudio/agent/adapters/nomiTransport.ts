@@ -38,7 +38,7 @@ export function createNomiCreativeStudioAgentTransport(): NomiCreativeStudioAgen
     },
 
     sendMessage({ conversationId, modelInput, skillIds, idempotencyKey }) {
-      return conversation.sendMessage.invoke({
+      return conversation.sendTurn.invoke({
         conversation_id: conversationId,
         input: modelInput,
         idempotency_key: idempotencyKey,

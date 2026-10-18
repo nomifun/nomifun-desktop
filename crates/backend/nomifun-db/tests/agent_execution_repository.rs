@@ -53,6 +53,8 @@ async fn database_with_provider(database: nomifun_db::Database) -> nomifun_db::D
 async fn autowork_attempt_reuses_lead_without_becoming_disposable_attempt_transcript() {
     let db = database().await;
     insert_canonical_session(&db, CANONICAL_LEAD_ID, OWNER_ID, "live").await;
+    nomifun_db::sqlx::query("INSERT INTO agent_session_heads(session_id,status,active_turn_id,active_set_generation,last_seq,unread_count) VALUES (?,'ready',NULL,0,0,0)")
+        .bind(CANONICAL_LEAD_ID).execute(db.pool()).await.unwrap();
     let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
     let participant_id = nomifun_common::generate_id();
     let mut params = execution_params();
@@ -118,6 +120,19 @@ async fn autowork_attempt_reuses_lead_without_becoming_disposable_attempt_transc
         .await
         .unwrap();
     let attempt = queued.current_attempt.as_ref().unwrap().attempt.clone();
+    // Domain linking shares the database writer with owner input/resume. It
+    // cannot turn a parked user Session into an Attempt while that input is
+    // being prepared, nor leave an active link after failed Turn admission.
+    for status in ["paused","reconciliation","running"] {
+        nomifun_db::sqlx::query("UPDATE agent_session_heads SET status=?,active_turn_id='original-user-turn' WHERE session_id=?")
+            .bind(status).bind(CANONICAL_LEAD_ID).execute(db.pool()).await.unwrap();
+        assert!(repository.start_attempt(OWNER_ID,&created.execution_id,&planned.steps[0].step_id,queued.step.version,
+            &attempt.attempt_id,attempt.version,CANONICAL_LEAD_ID,AgentExecutionAttemptSessionKind::AutomationLead,None,
+            &event(AgentExecutionEventKind::AttemptChanged)).await.is_err(),"{status} cannot acquire automation input ownership");
+        assert_eq!(repository.list_conversation_links(OWNER_ID,&created.execution_id).await.unwrap().len(),1);
+    }
+    nomifun_db::sqlx::query("UPDATE agent_session_heads SET status='ready',active_turn_id=NULL WHERE session_id=?")
+        .bind(CANONICAL_LEAD_ID).execute(db.pool()).await.unwrap();
     let running = repository
         .start_attempt(
             OWNER_ID,

@@ -70,6 +70,10 @@ pub struct ChannelStreamRelay {
     /// Resolves workshop asset UUIDv7 ids to bytes for outbound media. `None`
     /// disables sending.
     asset_resolver: Option<Arc<dyn crate::message_service::AssetResolver>>,
+    question_delivery_owner: Option<Arc<ChannelMessageService>>,
+    question_receipts: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    initial_question: Option<nomifun_agent_contracts::AgentUserInputRequest>,
+    terminal_delivered: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A tool call has exactly one terminal projection per turn. Provider retries
@@ -96,14 +100,24 @@ impl TerminalToolCallGate {
     }
 }
 
-fn remember_input_request(
-    pending: &mut Option<nomifun_agent_contracts::AgentUserInputRequest>,
-    request: nomifun_agent_contracts::AgentUserInputRequest,
-) -> Result<(), &'static str> {
-    match pending {
-        Some(recorded) if recorded != &request => Err("The response stream contains conflicting input handoffs; no question was delivered."),
-        Some(_) => Ok(()),
-        None => { *pending = Some(request); Ok(()) }
+#[derive(Default)]
+struct InputRequestGate {
+    pending: Option<nomifun_agent_contracts::AgentUserInputRequest>,
+    delivered: std::collections::HashMap<String, nomifun_agent_contracts::AgentUserInputRequest>,
+}
+
+impl InputRequestGate {
+    fn remember(&mut self, request: nomifun_agent_contracts::AgentUserInputRequest) -> Result<(), &'static str> {
+        if self.delivered.get(request.request_id.as_ref()).is_some_and(|old| old != &request)
+            || self.pending.as_ref().is_some_and(|old| old != &request) {
+            return Err("The response stream contains conflicting input handoffs; no question was delivered.");
+        }
+        self.pending = Some(request);
+        Ok(())
+    }
+
+    fn undelivered(&self) -> Option<&nomifun_agent_contracts::AgentUserInputRequest> {
+        self.pending.as_ref().filter(|request| !self.delivered.contains_key(request.request_id.as_ref()))
     }
 }
 
@@ -119,6 +133,58 @@ impl ChannelStreamRelay {
             sender,
             stop_confirmations,
             asset_resolver,
+            question_delivery_owner: None,
+            question_receipts: Default::default(),
+            initial_question: None,
+            terminal_delivered: Default::default(),
+        }
+    }
+
+    pub fn with_input_question_delivery(mut self, owner: Arc<ChannelMessageService>) -> Self {
+        self.question_delivery_owner = Some(owner);
+        self
+    }
+
+    pub(crate) fn with_question_receipts(mut self,receipts:Arc<std::sync::Mutex<std::collections::HashSet<String>>>) ->Self {
+        self.question_receipts=receipts;self
+    }
+
+    pub(crate) fn with_initial_question(mut self,request:nomifun_agent_contracts::AgentUserInputRequest)->Self {
+        self.initial_question=Some(request);self
+    }
+
+    fn input_gate(&self)->InputRequestGate {
+        let mut gate=InputRequestGate::default();
+        if let Some(request)=&self.initial_question {
+            gate.pending=Some(request.clone());
+            gate.delivered.insert(request.request_id.as_ref().to_owned(),request.clone());
+        }
+        gate
+    }
+
+    pub(crate) async fn send_input_question(&self, data: &nomifun_ai_agent::protocol::events::InputQuestionEventData) -> bool {
+        let receipt_key=format!("{}:{}",data.target.turn_id,data.target.question_seq);
+        if self.question_receipts.lock().unwrap_or_else(|e|e.into_inner()).contains(&receipt_key) {return true;}
+        let text = format!("{}\n\n可直接补充信息；引用这条消息可注明对应的问题。", channel_reply_text(None, Some(&data.request)).unwrap_or_default());
+        let formatted = format_text_for_platform(&text, self.config.platform);
+        let mut message = ChannelMessageService::build_final_message(&formatted);
+        message.parse_mode = formatted_parse_mode(self.config.platform);
+        match self.sender.send_message(&self.config.plugin_id, &self.config.chat_id, message).await {
+            Ok(provider_message_id) => {
+                if let Some(owner) = &self.question_delivery_owner {
+                    if let Err(error) = owner.record_question_delivery(&self.config.conversation_id, crate::session_port::ChannelQuestionDelivery {
+                        target: data.target.clone(), request_id: data.request.request_id.as_ref().to_owned(),
+                        platform: self.config.platform.to_string(), channel_plugin_id: self.config.plugin_id.clone(),
+                        chat_id: self.config.chat_id.clone(), provider_message_id,
+                    }).await {
+                        warn!(%error, "the delivered question has no canonical platform reply proof");
+                        return false;
+                    }
+                }
+                self.question_receipts.lock().unwrap_or_else(|e|e.into_inner()).insert(receipt_key);
+                true
+            },
+            Err(error) => { warn!(%error, "could not publish the original live input question"); false }
         }
     }
 
@@ -397,12 +463,14 @@ impl ChannelStreamRelay {
     }
 
     /// Run the relay loop until the agent stream ends.
-    pub async fn run(self, rx: broadcast::Receiver<AgentStreamEvent>) {
+    pub async fn run(self, rx: broadcast::Receiver<AgentStreamEvent>) ->bool {
+        let delivered=self.terminal_delivered.clone();
         if is_send_once_platform(self.config.platform) {
             self.run_send_once(rx).await;
         } else {
             self.run_editable(rx).await;
         }
+        delivered.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Send-once relay (WeChat/Twitch/Nostr): no edit support, accumulate text
@@ -411,7 +479,7 @@ impl ChannelStreamRelay {
         let mut text_buffer = String::new();
         let mut accepted_turn_text_checkpoint: Option<usize> = None;
         let mut attempt_text_checkpoint: Option<usize> = None;
-        let mut input_request = None;
+        let mut input_request = self.input_gate();
         let mut media_ids: Vec<String> = Vec::new();
         let mut media_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut artifacts = Vec::new();
@@ -481,10 +549,22 @@ impl ChannelStreamRelay {
                         text_buffer.push_str(&chunk);
                     }
                     Some(StreamAction::UserInputRequest(request)) => {
-                        if let Err(reason) = remember_input_request(&mut input_request, request) {
+                        if let Err(reason) = input_request.remember(request) {
                             let _ = self.sender.send_message(&self.config.plugin_id, &self.config.chat_id,
                                 self.terminal_failure_message(&text_buffer, reason)).await;
                             break;
+                        }
+                    }
+                    Some(StreamAction::InputQuestion(data)) => {
+                        let request = &data.request;
+                        if let Err(reason) = input_request.remember(request.clone()) {
+                            let _ = self.sender.send_message(&self.config.plugin_id, &self.config.chat_id,
+                                self.terminal_failure_message(&text_buffer, reason)).await;
+                            break;
+                        }
+                        if !input_request.delivered.contains_key(request.request_id.as_ref()) {
+                            if !self.send_input_question(&data).await { break; }
+                            input_request.delivered.insert(request.request_id.as_ref().to_owned(), request.clone());
                         }
                     }
                     Some(StreamAction::Thinking(_)) => {}
@@ -505,7 +585,7 @@ impl ChannelStreamRelay {
                         self.record_and_send_stop_confirmation(target_conversation_id).await;
                     }
                     Some(action @ (StreamAction::Finish | StreamAction::FinishInputRequired)) => {
-                        if matches!(action, StreamAction::FinishInputRequired) != input_request.is_some() {
+                        if matches!(action, StreamAction::FinishInputRequired) != input_request.pending.is_some() {
                             let _ = self.sender.send_message(&self.config.plugin_id, &self.config.chat_id,
                                 self.terminal_failure_message(&text_buffer, "The response terminal does not match its structured input handoff; no question was delivered.")).await;
                             break;
@@ -545,15 +625,17 @@ impl ChannelStreamRelay {
                                 .await;
                             break;
                         }
-                        let visible = channel_reply_text(Some(&visible), input_request.as_ref()).unwrap_or_default();
+                        let visible = channel_reply_text(Some(&visible), input_request.undelivered()).unwrap_or_default();
+                        let mut delivered=true;
                         if !visible.trim().is_empty() {
                             let formatted = format_text_for_platform(&visible, self.config.platform);
                             let final_msg = ChannelMessageService::build_final_message(&formatted);
-                            let _ = self
+                            delivered = self
                                 .sender
                                 .send_message(&self.config.plugin_id, &self.config.chat_id, final_msg)
-                                .await;
+                                .await.is_ok();
                         }
+                        self.terminal_delivered.store(delivered,std::sync::atomic::Ordering::Release);
                         info!(
                             plugin_id = %self.config.plugin_id,
                             chat_id = %self.config.chat_id,
@@ -661,7 +743,7 @@ impl ChannelStreamRelay {
         };
 
         let mut text_buffer = String::new();
-        let mut input_request = None;
+        let mut input_request = self.input_gate();
         let mut accepted_turn_text_checkpoint: Option<usize> = None;
         let mut attempt_text_checkpoint: Option<usize> = None;
         let mut last_edit = Instant::now() - throttle;
@@ -765,10 +847,22 @@ impl ChannelStreamRelay {
                         }
                     }
                     Some(StreamAction::UserInputRequest(request)) => {
-                        if let Err(reason) = remember_input_request(&mut input_request, request) {
+                        if let Err(reason) = input_request.remember(request) {
                             let _ = self.sender.edit_message(&self.config.plugin_id, &self.config.chat_id, &thinking_msg_id,
                                 self.terminal_failure_message(&text_buffer, reason)).await;
                             break;
+                        }
+                    }
+                    Some(StreamAction::InputQuestion(data)) => {
+                        let request = &data.request;
+                        if let Err(reason) = input_request.remember(request.clone()) {
+                            let _ = self.sender.edit_message(&self.config.plugin_id, &self.config.chat_id, &thinking_msg_id,
+                                self.terminal_failure_message(&text_buffer, reason)).await;
+                            break;
+                        }
+                        if !input_request.delivered.contains_key(request.request_id.as_ref()) {
+                            if !self.send_input_question(&data).await { break; }
+                            input_request.delivered.insert(request.request_id.as_ref().to_owned(), request.clone());
                         }
                     }
                     Some(StreamAction::Thinking(_)) => {}
@@ -795,7 +889,7 @@ impl ChannelStreamRelay {
                         self.record_and_send_stop_confirmation(target_conversation_id).await;
                     }
                     Some(action @ (StreamAction::Finish | StreamAction::FinishInputRequired)) => {
-                        if matches!(action, StreamAction::FinishInputRequired) != input_request.is_some() {
+                        if matches!(action, StreamAction::FinishInputRequired) != input_request.pending.is_some() {
                             let _ = self.sender.edit_message(&self.config.plugin_id, &self.config.chat_id, &thinking_msg_id,
                                 self.terminal_failure_message(&text_buffer, "The response terminal does not match its structured input handoff; no question was delivered.")).await;
                             break;
@@ -834,13 +928,14 @@ impl ChannelStreamRelay {
                                 .await;
                             break;
                         }
-                        self.send_final_edit(
+                        let delivered=self.send_final_edit(
                             &text_buffer,
-                            input_request.as_ref(),
+                            input_request.undelivered(),
                             stop_confirmation_forwarded,
                             &thinking_msg_id,
                         )
                             .await;
+                        self.terminal_delivered.store(delivered,std::sync::atomic::Ordering::Release);
                         info!(
                             plugin_id = %self.config.plugin_id,
                             chat_id = %self.config.chat_id,
@@ -941,24 +1036,24 @@ impl ChannelStreamRelay {
         input_request: Option<&nomifun_agent_contracts::AgentUserInputRequest>,
         stop_confirmation_forwarded: bool,
         msg_id: &str,
-    ) {
+    ) ->bool {
         let visible = channel_reply_text(Some(&strip_reasoning(text_buffer, Stage::Final)), input_request).unwrap_or_default();
         if !visible.trim().is_empty() {
             let formatted = format_text_for_platform(&visible, self.config.platform);
             let mut final_msg = ChannelMessageService::build_final_message(&formatted);
             final_msg.parse_mode = formatted_parse_mode(self.config.platform);
-            let _ = self
+            self
                 .sender
                 .edit_message(&self.config.plugin_id, &self.config.chat_id, msg_id, final_msg)
-                .await;
+                .await.is_ok()
         } else if !stop_confirmation_forwarded {
             // Plain text — no formatter output here, so no parse mode.
             let final_msg = ChannelMessageService::build_final_message("（无文本输出）");
-            let _ = self
+            self
                 .sender
                 .edit_message(&self.config.plugin_id, &self.config.chat_id, msg_id, final_msg)
-                .await;
-        }
+                .await.is_ok()
+        } else {true}
     }
 
     /// Records the channel-owned remote-stop confirmation (batch-1 handover
@@ -1045,6 +1140,7 @@ impl MessageRecorder {
     pub fn take_sends(&self) -> Vec<UnifiedOutgoingMessage> {
         std::mem::take(&mut self.sends.lock().unwrap())
     }
+    pub fn send_count(&self)->usize {self.sends.lock().unwrap().len()}
 
     pub fn take_edits(&self) -> Vec<UnifiedOutgoingMessage> {
         std::mem::take(&mut self.edits.lock().unwrap())
@@ -1111,6 +1207,42 @@ mod input_handoff_tests {
     fn request() -> AgentUserInputRequest {
         AgentUserInputRequest { request_id: "question-1".into(), question: "What name should appear?".into(),
             remaining_work: "Finish the personal introduction slides.".into() }
+    }
+
+    fn live_request() -> nomifun_ai_agent::protocol::events::InputQuestionEventData {
+        nomifun_ai_agent::protocol::events::InputQuestionEventData { request: request(), target: nomifun_api_types::AgentQuestionReplyTargetDto {
+            turn_id: "0190f5fe-7c00-7a00-8000-000000000902".into(), question_seq: 41,
+        } }
+    }
+
+    #[tokio::test]
+    async fn committed_question_reaches_both_platforms_before_finite_finish_without_duplicate_delivery() {
+        for platform in [PluginType::Weixin, PluginType::Telegram] {
+            let recorder = Arc::new(MessageRecorder::new());
+            let relay = ChannelStreamRelay::new(RelayConfig { platform, plugin_id: "plugin".into(), chat_id: "chat".into(),
+                throttle_ms: 0, conversation_id: "session".into() }, recorder.clone(), ChannelStopConfirmationStore::new(), None);
+            let (tx, rx) = broadcast::channel(16);
+            let task = tokio::spawn(relay.run(rx));
+            tx.send(AgentStreamEvent::InputQuestion(live_request())).unwrap();
+            tx.send(AgentStreamEvent::InputQuestion(live_request())).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if recorder.sends.lock().unwrap().iter().any(|message|
+                        message.text.as_deref().is_some_and(|text| text.contains("What name should appear?"))) { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("the committed question is visible before finite handoff");
+            tx.send(input_note(request())).unwrap();
+            tx.send(AgentStreamEvent::Finish(FinishEventData { turn_outcome: None, session_id: None,
+                stop_reason: Some(TurnStopReason::InputRequired) })).unwrap();
+            drop(tx);
+            tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap();
+            let texts = recorder.take_sends().into_iter().chain(recorder.take_edits())
+                .filter_map(|message|message.text).collect::<Vec<_>>().join("\n");
+            assert_eq!(texts.matches("What name should appear?").count(), 1);
+            assert!(!texts.contains("terminal does not match"));
+            assert!(!texts.contains("conflicting input handoffs"));
+        }
     }
 
     #[tokio::test]

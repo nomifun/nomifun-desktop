@@ -13,7 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::time::{Instant, timeout, timeout_at};
+use tokio::time::{Instant, timeout};
 
 use crate::oauth_service::McpOAuthService;
 use crate::types::McpServerTransport;
@@ -27,8 +27,8 @@ pub const MCP_EXECUTION_OPERATION_META_KEY: &str = "com.nomifun.execution.operat
 pub const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 const MCP_CLIENT_NAME: &str = "nomifun-agent-mcp-owner";
 const MCP_CLIENT_VERSION: &str = "1.0.0";
-const DEFAULT_OWNER_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+const CANCELLATION_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_ARGUMENT_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OPERATION_ID_BYTES: usize = 128;
@@ -38,6 +38,10 @@ const MAX_CURSOR_BYTES: usize = 4096;
 
 #[path = "owner_stream.rs"]
 mod stream;
+#[path = "owner_control.rs"]
+mod control;
+pub use control::{McpCleanupFacts, McpCleanupStatus, McpExecutionFacts, McpInvocationControl, McpInvocationOutcome, McpSetupPolicy};
+use control::{SetupBudget, controlled, execution_deadline_error, is_interruption};
 #[path = "owner_legacy_sse.rs"]
 mod legacy_sse;
 #[path = "owner_stdio.rs"]
@@ -53,6 +57,8 @@ pub use resources::{McpResourceFailure, McpResourceOperation, McpResourceRequest
 
 pub(crate) use discovery::discover_network;
 pub(crate) use stdio::discover as discover_stdio;
+#[cfg(test)]
+pub(crate) use stdio::is_package_runner;
 
 /// A typed error emitted by the MCP owner.
 ///
@@ -64,6 +70,7 @@ pub struct McpOwnerError {
     message: String,
     authentication_challenge: Option<String>,
     http_status: Option<u16>,
+    setup_timeout: Option<(&'static str, Duration)>,
 }
 
 impl McpOwnerError {
@@ -74,6 +81,7 @@ impl McpOwnerError {
             message: sanitize_diagnostic(&message),
             authentication_challenge: None,
             http_status: None,
+            setup_timeout: None,
         }
     }
 
@@ -91,6 +99,10 @@ impl McpOwnerError {
 
     pub(crate) fn http_status(&self) -> Option<u16> {
         self.http_status
+    }
+
+    pub(crate) fn setup_timeout_details(&self) -> Option<Value> {
+        self.setup_timeout.map(|(phase, budget)| json!({"phase":phase,"timeout_seconds":budget.as_secs_f64()}))
     }
 
     fn credential_required(headers: &reqwest::header::HeaderMap) -> Self {
@@ -347,175 +359,158 @@ impl McpCredentialAuthority for OAuthMcpCredentialAuthority {
 pub struct McpOwner {
     credentials: Arc<dyn McpCredentialAuthority>,
     http_client: Result<reqwest::Client, McpOwnerError>,
-    timeout: Duration,
+    setup_policy: McpSetupPolicy,
 }
 
 impl McpOwner {
-    /// Construct an owner with a caller-supplied client.
-    ///
-    /// Production callers should prefer [`Self::new_dynamic`] or
-    /// [`Self::try_new_dynamic`]. Injected clients must disable redirects.
-    pub fn new(
-        credentials: Arc<dyn McpCredentialAuthority>,
-        http_client: reqwest::Client,
-    ) -> Self {
-        Self {
-            credentials,
-            http_client: Ok(http_client),
-            timeout: DEFAULT_OWNER_TIMEOUT,
-        }
+    /// Injected clients must disable redirects and must not install a business
+    /// response/header/read deadline. Connection establishment may be bounded.
+    pub fn new(credentials: Arc<dyn McpCredentialAuthority>, http_client: reqwest::Client) -> Self {
+        Self { credentials, http_client: Ok(http_client), setup_policy: McpSetupPolicy::default() }
     }
 
     pub fn new_dynamic(credentials: Arc<dyn McpCredentialAuthority>) -> Self {
-        Self {
-            credentials,
-            http_client: build_dynamic_http_client(),
-            timeout: DEFAULT_OWNER_TIMEOUT,
-        }
+        Self { credentials, http_client: build_dynamic_http_client(), setup_policy: McpSetupPolicy::default() }
     }
 
-    pub fn try_new_dynamic(
-        credentials: Arc<dyn McpCredentialAuthority>,
-    ) -> Result<Self, McpOwnerError> {
+    pub fn try_new_dynamic(credentials: Arc<dyn McpCredentialAuthority>) -> Result<Self, McpOwnerError> {
         Ok(Self::new(credentials, build_dynamic_http_client()?))
     }
 
-    pub fn with_timeout(self, timeout: Duration) -> Self {
-        Self { timeout, ..self }
+    pub fn with_setup_policy(self, setup_policy: McpSetupPolicy) -> Self {
+        Self { setup_policy, ..self }
     }
 
-    /// Execute one exact MCP tool binding.
-    ///
-    /// All three transports share frozen tool admission. Local stdio processes
-    /// use the platform tree owner, never a legacy Nomi/Gateway fallback.
-    pub async fn invoke(
-        &self,
-        request: McpToolInvocationRequest,
-    ) -> Result<McpToolInvocationResult, McpOwnerError> {
-        validate_invocation(&request)?;
-        let (url, static_headers, legacy) = match &request.server.transport {
-            McpServerTransport::Http { url, headers } => (url.clone(), headers.clone(), false),
-            McpServerTransport::Sse { url, headers } => (url.clone(), headers.clone(), true),
-            McpServerTransport::Stdio { command, args, env } => {
-                let transport = stdio::StdioTransport::launch(command, args, env, self.timeout).await?;
-                let deadline = Instant::now() + self.timeout;
-                return self.invoke_session(&request, McpSession::from_stdio(transport), deadline).await;
-            }
+    /// Convenience entry point. Effect hosts use invoke_controlled to retain
+    /// the independent execution and cleanup facts.
+    pub async fn invoke(&self, request: McpToolInvocationRequest) -> Result<McpToolInvocationResult, McpOwnerError> {
+        self.invoke_controlled(request, McpInvocationControl::default()).await.into_result()
+    }
+
+    pub async fn invoke_controlled(
+        &self, request: McpToolInvocationRequest, control: McpInvocationControl,
+    ) -> McpInvocationOutcome<McpToolInvocationResult> {
+        if let Err(error) = validate_invocation(&request) {
+            return McpInvocationOutcome::rejected(error, &control);
+        }
+        let setup = self.setup_policy.start();
+        let mut session = match self.prepare_session(&request.server, &setup, &control).await {
+            Ok(session) => session,
+            Err(error) => return startup_failure(error, &control),
         };
-        validate_http_endpoint(&url)?;
-        // OAuth storage keys use the exact configured endpoint. URL parsing
-        // may add a slash/remove a default port; do not silently look up a
-        // different credential key after validating the bound URL.
-        self.invoke_http(&request, url, static_headers, legacy).await
-    }
-
-    async fn invoke_http(
-        &self,
-        request: &McpToolInvocationRequest,
-        endpoint: String,
-        static_headers: HashMap<String, String>,
-        legacy: bool,
-    ) -> Result<McpToolInvocationResult, McpOwnerError> {
-        let http_client = match &self.http_client {
-            Ok(client) => client.clone(),
-            Err(error) => return Err(error.clone()),
-        };
-        let deadline = Instant::now() + self.timeout;
-        let credential = timeout_at(
-            deadline,
-            self.credentials.resolve(McpCredentialLookup {
-                server_id: request.server.server_id.clone(),
-                resource_id: request.server.resource_id.clone(),
-                connection_config_ref: request.server.connection_config_ref.clone(),
-                endpoint: endpoint.clone(),
-            }),
-        )
-        .await
-        .map_err(|_| owner_timeout_error(self.timeout))??;
-        let headers = build_headers(&static_headers, credential.as_ref())?;
-        let mut session = McpSession::new(http_client, endpoint, headers);
-        session.legacy_mode = legacy;
-        self.invoke_session(request, session, deadline).await
-    }
-
-    async fn invoke_session(
-        &self,
-        request: &McpToolInvocationRequest,
-        mut session: McpSession,
-        deadline: Instant,
-    ) -> Result<McpToolInvocationResult, McpOwnerError> {
-        // Launching a configured local program can itself mutate external
-        // state before tools/call. Tree cleanup is not rollback.
-        let local_process_started = session.stdio.is_some();
-        let mut call_started = false;
-        let transaction = async {
+        let phase = setup.phase("protocol_setup", protocol_setup_cap(&setup.policy, &request.server.transport));
+        let prepared = controlled(async {
             session.initialize().await?;
-
-            let call_id = session.require_exact_tool(&request.tool).await?;
-
-            // A failed request from this point can already have applied an
-            // effect. Do not replay it as though execution never started.
-            call_started = true;
-            let call = session
-                .request(tool_call_request(
-                    call_id,
-                    &request.tool.remote_tool_name,
-                    &request.arguments,
-                    &request.operation_id,
-                ))
-                .await?;
+            session.require_exact_tool(&request.tool).await
+        }, &control, Some(phase.deadline), || phase.error()).await;
+        let call_id = match prepared {
+            Ok(id) => id,
+            Err(error) => return finish_session(session, Err(error), &control).await,
+        };
+        session.execution_phase = true;
+        let result = controlled(async {
+            let call = session.request(tool_call_request(call_id, &request.tool.remote_tool_name,
+                &request.arguments, &request.operation_id)).await?;
             ensure_response_id(&call, call_id)?;
             if call.jsonrpc != "2.0" || call.result.is_some() == call.error.is_some() {
                 return Err(McpOwnerError::protocol_failed("tools/call must return exactly one JSON-RPC result or error"));
             }
             let result = if let Some(error) = call.error {
-                // A correlated RPC rejection is an observed failed call, not
-                // a lost response. Do not echo untrusted RPC message/data.
-                // Publication still waits for the independent cleanup below.
                 json!({"isError":true,"content":[{"type":"text","text":format!(
                     "The bound MCP tool returned JSON-RPC error {}. This is a returned failure, not proof of no effects or rollback. Do not automatically replay it.", error.code)}]})
             } else {
-                call.result.ok_or_else(|| {
-                    McpOwnerError::protocol_failed("tools/call response has no result")
-                })?
+                call.result.ok_or_else(|| McpOwnerError::protocol_failed("tools/call response has no result"))?
             };
             validate_tool_result(&result)?;
-
             Ok(McpToolInvocationResult {
                 server_id: request.server.server_id.clone(),
                 canonical_tool_key: request.tool.canonical_tool_key.clone(),
                 schema_digest: request.tool.schema_digest.clone(),
-                remote_tool_name: request.tool.remote_tool_name.clone(),
-                result,
+                remote_tool_name: request.tool.remote_tool_name.clone(), result,
             })
-        };
-        let outcome = timeout_at(deadline, transaction)
-            .await
-            .unwrap_or_else(|_| Err(owner_timeout_error(self.timeout)));
-        let cleanup_budget = if session.stdio.is_some() { stdio::CLEANUP_TIMEOUT } else { SESSION_CLEANUP_TIMEOUT };
-        let cleanup = timeout(cleanup_budget, session.close())
-            .await
-            .unwrap_or_else(|_| {
-                Err(McpOwnerError::new(
-                    "MCP_SESSION_CLEANUP_FAILED",
-                    "MCP session cleanup exceeded its bounded deadline",
-                ))
-            });
+        }, &control, control.execution_deadline, execution_deadline_error).await;
+        finish_session(session, result, &control).await
+    }
 
-        match (outcome, cleanup) {
-            (Ok(result), Ok(_)) => Ok(result),
-            // An earlier protocol failure cannot hide cleanup uncertainty.
-            (_, Err(cleanup_error)) => Err(McpOwnerError::new(
-                "MCP_SESSION_CLEANUP_FAILED",
-                format!("MCP transaction cleanup is unproven ({})", cleanup_error.code()),
-            )),
-            (Err(operation_error), Ok(_)) if call_started || local_process_started => Err(McpOwnerError::new(
-                "MCP_OUTCOME_UNKNOWN",
-                format!("MCP tool or local server may have applied effects; do not replay ({})", operation_error.code()),
-            )),
-            (Err(operation_error), Ok(_)) => Err(operation_error),
+    async fn prepare_session(
+        &self, server: &McpServerBinding, setup: &SetupBudget, control: &McpInvocationControl,
+    ) -> Result<McpSession, McpOwnerError> {
+        if control.cancellation.is_cancelled() { return Err(control::cancelled_error()); }
+        if control.execution_deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            return Err(execution_deadline_error());
+        }
+        match &server.transport {
+            McpServerTransport::Stdio { command, args, env } => {
+                Ok(McpSession::from_stdio(stdio::StdioTransport::launch(command, args, env, setup, control).await?))
+            }
+            McpServerTransport::Http { url, headers } | McpServerTransport::Sse { url, headers } => {
+                validate_http_endpoint(url)?;
+                let client = self.http_client.as_ref().map_err(Clone::clone)?.clone();
+                let phase = setup.phase("credential_resolution", setup.policy.protocol_timeout);
+                let credential = controlled(self.credentials.resolve(McpCredentialLookup {
+                    server_id: server.server_id.clone(), resource_id: server.resource_id.clone(),
+                    connection_config_ref: server.connection_config_ref.clone(), endpoint: url.clone(),
+                }), control, Some(phase.deadline), || phase.error()).await?;
+                let mut session = McpSession::new(client, url.clone(), build_headers(headers, credential.as_ref())?);
+                session.legacy_mode = matches!(server.transport, McpServerTransport::Sse { .. });
+                Ok(session)
+            }
         }
     }
+}
+
+fn protocol_setup_cap(policy: &McpSetupPolicy, transport: &McpServerTransport) -> Duration {
+    match transport {
+        McpServerTransport::Stdio { command, args, .. } if stdio::is_package_runner(command, args) => policy.package_bootstrap_timeout,
+        _ => policy.protocol_timeout,
+    }
+}
+
+fn startup_failure<T>(error: McpOwnerError, control: &McpInvocationControl) -> McpInvocationOutcome<T> {
+    let uncertain = error.code() == "MCP_PROCESS_START_UNCERTAIN";
+    let mut outcome = McpInvocationOutcome::rejected(error.clone(), control);
+    if uncertain {
+        outcome.execution.local_process_started = true;
+        outcome.cleanup.local = McpCleanupStatus::Unproven;
+        outcome.cleanup.error = Some(error);
+    }
+    outcome
+}
+
+async fn finish_session<T>(
+    mut session: McpSession, result: Result<T, McpOwnerError>, control: &McpInvocationControl,
+) -> McpInvocationOutcome<T> {
+    let interrupted = result.as_ref().err().is_some_and(is_interruption);
+    if interrupted { session.cancel_active().await; }
+    let mut execution = McpExecutionFacts {
+        request_dispatched: session.request_dispatched,
+        local_process_started: session.stdio.is_some(),
+        cancellation_requested: control.cancellation.is_cancelled()
+            || result.as_ref().err().is_some_and(|error| matches!(error.code(), "MCP_REQUEST_CANCELLED" | "MCP_EXECUTION_DEADLINE_EXCEEDED")),
+    };
+    let local_process = session.stdio.is_some();
+    let allocated_remote = session.session_id.is_some();
+    let budget = if local_process { stdio::CLEANUP_TIMEOUT } else { SESSION_CLEANUP_TIMEOUT };
+    let closed = timeout(budget, session.close()).await.unwrap_or_else(|_| Err(McpOwnerError::new(
+        "MCP_SESSION_CLEANUP_FAILED", "MCP local cleanup exceeded its bounded deadline")));
+    let mut cleanup = McpCleanupFacts {
+        local: McpCleanupStatus::Confirmed,
+        remote: if allocated_remote { McpCleanupStatus::Confirmed } else { McpCleanupStatus::NotRequired },
+        error: None,
+    };
+    if let Err(error) = closed {
+        if error.code() == "MCP_SESSION_CLEANUP_UNSUPPORTED" {
+            cleanup.remote = McpCleanupStatus::Unsupported;
+        } else {
+            if local_process { cleanup.local = McpCleanupStatus::Unproven; }
+            else { cleanup.remote = McpCleanupStatus::Unproven; }
+            cleanup.error = Some(error);
+        }
+    }
+    // A host may cancel while independent cleanup is in progress. Preserve
+    // the already observed business result and record that late request too.
+    execution.cancellation_requested |= control.cancellation.is_cancelled();
+    McpInvocationOutcome { result, execution, cleanup }
 }
 
 fn build_dynamic_http_client() -> Result<reqwest::Client, McpOwnerError> {
@@ -525,16 +520,6 @@ fn build_dynamic_http_client() -> Result<reqwest::Client, McpOwnerError> {
             "MCP HTTP client could not be initialized with redirects disabled",
         )
     })
-}
-
-fn owner_timeout_error(timeout: Duration) -> McpOwnerError {
-    McpOwnerError::new(
-        "MCP_TIMEOUT",
-        format!(
-            "MCP invocation exceeded the {} second owner deadline",
-            timeout.as_secs()
-        ),
-    )
 }
 
 fn sanitize_diagnostic(message: &str) -> String {
@@ -847,6 +832,42 @@ struct McpSession {
     legacy: Option<legacy_sse::LegacyStream>,
     stdio: Option<stdio::StdioTransport>,
     resources_supported: bool,
+    epoch: u64,
+    active_request: Option<ActiveRequest>,
+    execution_phase: bool,
+    request_dispatched: bool,
+    traffic: PeerTraffic,
+}
+
+struct ActiveRequest {
+    epoch: u64,
+    id: u64,
+    initializing: bool,
+}
+
+/// Resource limits apply to a time window or one message, never to the age of
+/// a legitimate operation. No notification history is retained.
+struct PeerTraffic { window: Instant, bytes: usize, messages: usize }
+impl Default for PeerTraffic {
+    fn default() -> Self { Self { window: Instant::now(), bytes: 0, messages: 0 } }
+}
+impl PeerTraffic {
+    fn observe(&mut self, bytes: usize, message: bool) -> Result<(), McpOwnerError> {
+        if self.window.elapsed() >= Duration::from_secs(1) {
+            self.window = Instant::now(); self.bytes = 0; self.messages = 0;
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.messages += usize::from(message);
+        if self.bytes > 32 * 1024 * 1024 || self.messages > 32 * 1024 {
+            return Err(McpOwnerError::new("MCP_PEER_RATE_LIMIT", "MCP peer exceeded its bounded traffic rate"));
+        }
+        Ok(())
+    }
+}
+
+fn next_connection_epoch() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl McpSession {
@@ -880,7 +901,7 @@ impl McpSession {
 
     /// Validate every bounded page, including pages after a match, so an
     /// incomplete catalog or duplicate name cannot silently select a tool.
-    /// All pages share the invocation's outer deadline; none resets it.
+    /// All pages share the cumulative setup deadline; none resets it.
     async fn require_exact_tool(&mut self, expected: &McpToolBinding) -> Result<u64, McpOwnerError> {
         self.read_catalog(Some(expected)).await.map(|(id, _)| id)
     }
@@ -953,6 +974,8 @@ impl McpSession {
             legacy: None,
             stdio: None,
             resources_supported: false,
+            epoch: next_connection_epoch(), active_request: None,
+            execution_phase: false, request_dispatched: false, traffic: PeerTraffic::default(),
         }
     }
 
@@ -967,6 +990,8 @@ impl McpSession {
             legacy: None,
             stdio: Some(transport),
             resources_supported: false,
+            epoch: next_connection_epoch(), active_request: None,
+            execution_phase: false, request_dispatched: false, traffic: PeerTraffic::default(),
         }
     }
 
@@ -978,6 +1003,17 @@ impl McpSession {
         &mut self,
         request: JsonRpcRequest,
     ) -> Result<JsonRpcResponse, McpOwnerError> {
+        let id = request.id.ok_or_else(|| McpOwnerError::protocol_failed("MCP request has no correlation ID"))?;
+        self.active_request = Some(ActiveRequest {
+            epoch: self.epoch, id, initializing: request.method == "initialize",
+        });
+        if self.execution_phase { self.request_dispatched = true; }
+        let result = self.request_inner(request).await;
+        self.active_request = None;
+        result
+    }
+
+    async fn request_inner(&mut self, request: JsonRpcRequest) -> Result<JsonRpcResponse, McpOwnerError> {
         let initializing = request.method == "initialize";
         let expected = request.id.ok_or_else(|| McpOwnerError::protocol_failed("MCP request has no correlation ID"))?;
         if let Some(transport) = &self.stdio {
@@ -1054,7 +1090,7 @@ impl McpSession {
             _ => false,
         }).ok_or_else(|| McpOwnerError::protocol_failed("MCP server request has an invalid ID"))?;
         let key = serde_json::to_string(id).map_err(|_| McpOwnerError::protocol_failed("MCP server request ID is not serializable"))?;
-        if self.server_request_ids.len() >= 64 || !self.server_request_ids.insert(key) {
+        if self.server_request_ids.len() >= 64 || !self.server_request_ids.insert(key.clone()) {
             return Err(McpOwnerError::protocol_failed("MCP server requests exceed the bound or reuse an ID"));
         }
         let method = request.get("method").and_then(Value::as_str)
@@ -1069,11 +1105,32 @@ impl McpSession {
             // advertised. A remote method is never a new authority grant.
             serde_json::json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32601,"message":"Client method not supported"}})
         };
-        if let Some(transport) = &self.stdio {
-            return stdio::write_frame(transport.writer(), stdio::encode(&reply)?).await;
-        }
-        let response = self.send_payload(&reply, false).await?;
-        self.accept_empty_ack(response).await
+        let result = async {
+            if let Some(transport) = &self.stdio {
+                return stdio::write_frame(transport.writer(), stdio::encode(&reply)?).await;
+            }
+            let response = self.send_payload(&reply, false).await?;
+            self.accept_empty_ack(response).await
+        }.await;
+        self.server_request_ids.remove(&key);
+        result
+    }
+
+    /// Only this session's own still-active outgoing request can be cancelled.
+    /// The notification acknowledgment is delivery evidence, never stop proof.
+    async fn cancel_active(&mut self) {
+        let Some(active) = self.active_request.take() else { return; };
+        if active.epoch != self.epoch || active.initializing { return; }
+        let notification = json!({"jsonrpc":"2.0","method":"notifications/cancelled",
+            "params":{"requestId":active.id,"reason":"Host cancelled this request"}});
+        let delivery = async {
+            if let Some(transport) = &self.stdio {
+                return stdio::write_frame(transport.writer(), stdio::encode(&notification)?).await;
+            }
+            let response = self.send_payload(&notification, false).await?;
+            self.accept_empty_ack(response).await
+        };
+        let _ = timeout(CANCELLATION_DELIVERY_TIMEOUT, delivery).await;
     }
 
     fn capture_session_id(&mut self, headers: &reqwest::header::HeaderMap, initializing: bool) -> Result<(), McpOwnerError> {
@@ -1122,18 +1179,23 @@ impl McpSession {
             .await
             .map_err(|error| map_cleanup_request_error(error))?;
         let status = response.status();
-        drain_response_body(response).await.map_err(|_| {
-            McpOwnerError::new(
-                "MCP_SESSION_CLEANUP_FAILED",
-                "MCP session cleanup response could not be consumed",
-            )
-        })?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            // This exact initialized session has already expired. It cannot be
+            // reused; no business request is retried or reinitialized here.
+            return Ok(());
+        }
         if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
             return Err(McpOwnerError::new(
                 "MCP_SESSION_CLEANUP_UNSUPPORTED",
                 "MCP server does not support explicit session cleanup",
             ));
         }
+        drain_response_body(response).await.map_err(|_| {
+            McpOwnerError::new(
+                "MCP_SESSION_CLEANUP_FAILED",
+                "MCP session cleanup response could not be consumed",
+            )
+        })?;
         if !status.is_success() {
             return Err(McpOwnerError::new(
                 "MCP_SESSION_CLEANUP_FAILED",
@@ -1227,18 +1289,11 @@ async fn parse_response(
         return Err(McpOwnerError::credential_required(response.headers()));
     }
     if !status.is_success() {
-        let _ = drain_response_body(response).await;
+        // The HTTP rejection is already known. An untrusted error body must
+        // not keep a business task alive waiting for EOF.
         return Err(McpOwnerError::http_error(
             status,
             format!("MCP server returned HTTP {}", status.as_u16()),
-        ));
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-    {
-        return Err(McpOwnerError::protocol_failed(
-            "MCP response exceeds the bounded response limit",
         ));
     }
     let content_type = response
@@ -1249,6 +1304,9 @@ async fn parse_response(
         .to_owned();
     if content_type.split(';').next().is_some_and(|kind| kind.trim().eq_ignore_ascii_case("text/event-stream")) {
         return stream::read_response(response, expected, session).await;
+    }
+    if response.content_length().is_some_and(|length| length > MAX_RESPONSE_BYTES as u64) {
+        return Err(McpOwnerError::protocol_failed("MCP response exceeds the bounded response limit"));
     }
     if !content_type.split(';').next().is_some_and(|kind| kind.trim().eq_ignore_ascii_case("application/json")) {
         return Err(McpOwnerError::protocol_failed("MCP response has an unsupported content type"));
@@ -1811,7 +1869,7 @@ mod tests {
             Arc::new(authority.clone()),
             reqwest::Client::builder().no_proxy().build().unwrap(),
         )
-        .with_timeout(Duration::from_secs(5));
+        .with_setup_policy(crate::McpSetupPolicy::uniform(Duration::from_secs(5)));
         let mut server = server();
         if let McpServerTransport::Http { url, .. } = &mut server.transport {
             *url = endpoint.clone();
@@ -1937,7 +1995,7 @@ mod tests {
                 .build()
                 .unwrap(),
         )
-        .with_timeout(Duration::from_secs(5));
+        .with_setup_policy(crate::McpSetupPolicy::uniform(Duration::from_secs(5)));
         let mut request = invocation(server(), "operation-session-cleanup");
         if let McpServerTransport::Http { url, .. } = &mut request.server.transport {
             *url = endpoint;
@@ -2008,7 +2066,7 @@ mod tests {
             Arc::new(AnonymousMcpCredentialAuthority),
             reqwest::Client::builder().no_proxy().build().unwrap(),
         )
-        .with_timeout(Duration::from_millis(200));
+        .with_setup_policy(crate::McpSetupPolicy::uniform(Duration::from_millis(200)));
         let request = McpToolInvocationRequest {
             principal_kind: "user".to_owned(),
             principal_id: "owner".to_owned(),

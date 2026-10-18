@@ -15,7 +15,7 @@ export const UserInputRequestNote = ({ message }: { message: IMessageTips }) => 
     && context.hideSendBox !== true && (context.isProcessing !== true || context.executionWait?.turnId === message.turn_id);
   return <div role='note' aria-label={t('conversation.userInputRequest.title')}
     data-testid='user-input-request-note' data-request-id={request.request_id}
-    className='bg-message-tips rd-8px px-12px py-10px flex flex-col gap-8px'>
+    className='bg-1 border-1px border-solid border-[var(--border-base)] rd-8px px-12px py-10px flex flex-col gap-8px'>
     <span className='text-13px font-600 text-t-primary'>{t('conversation.userInputRequest.title')}</span>
     <MarkdownView fontSize={MESSAGE_BODY_FONT_SIZE} lineHeight={MESSAGE_BODY_LINE_HEIGHT}>{request.question}</MarkdownView>
     <div className='text-t-secondary'>

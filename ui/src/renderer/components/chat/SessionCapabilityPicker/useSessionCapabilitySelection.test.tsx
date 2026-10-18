@@ -84,14 +84,14 @@ test('selection events update canonical state without polling and Agent switches
   expect(get).toHaveBeenCalledTimes(2);
 });
 
-test('new-session defaults choose auto Skills and only enabled ready MCP; explicit empty means none', () => {
+test('new-session defaults choose auto Skills and require explicit MCP selection; explicit empty means none', () => {
   const skill = (name: string, auto: boolean) => ({ name, auto, source: 'builtin', is_custom: false, location: '', description: '' } as const);
   const server = (mcp_server_id: string, enabled: boolean, tools: unknown[], last_test_status?: string) => ({ mcp_server_id, enabled, tools, last_test_status } as any);
   const defaults = defaultSessionCapabilityDraft({ skills: [skill('auto', true), skill('optional', false), { ...skill('bad-auto', true), session_available: false, session_error: 'Invalid resource' }], autoSkillNames: new Set(['auto']), mcpServers: [
     server('ready', true, [{}], 'connected'), server('unverified', true, [{}]), server('disabled', false, [{}]), server('empty', true, []), server('failed', true, [{}], 'error'),
     { ...server('app', true, [{}], 'connected'), appSource: true },
   ] });
-  expect(defaults).toEqual({ skillNames: ['auto'], mcpServerIds: ['ready'] });
+  expect(defaults).toEqual({ skillNames: ['auto'], mcpServerIds: [] });
   expect(toSessionCapabilitySelection({ skillNames: [], mcpServerIds: [] })).toEqual({ skill_names: [], mcp_server_ids: [] });
 });
 

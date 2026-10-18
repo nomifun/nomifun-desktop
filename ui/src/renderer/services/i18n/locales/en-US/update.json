@@ -12,7 +12,7 @@
   "installBlockedBundleNotFound": "NomiFun can't tell which NomiFun.app is running. Reopen NomiFun from Applications and check again. Or download the new version manually.",
   "installBlockedLocation": "Running from: {{path}}",
   "packageNoLongerReady": "The downloaded update is no longer held in memory (the app restarted, or a different version was fetched). Download it again, then install.",
-  "upToDateTitle": "You're up to date",
+  "upToDateTitle": "No updates available for this platform",
   "currentVersion": "Current version: {{version}}",
   "availableTitle": "Update available",
   "viewDetails": "View details",

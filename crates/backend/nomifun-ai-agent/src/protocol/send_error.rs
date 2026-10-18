@@ -224,6 +224,7 @@ impl AgentSendError {
         use nomifun_agent_runtime::AgentTurnFailure;
         let detail = detail.into();
         match failure {
+            Some(AgentTurnFailure::SystemExecution { diagnostic }) => Self::from_system_execution_failure(diagnostic),
             Some(AgentTurnFailure::Model { code, diagnostic }) => Self::from_model_failure(*code, diagnostic.as_ref()),
             Some(AgentTurnFailure::ModelStreamEndedWithoutTerminal) => Self::new(
                 "The model response ended before completion was confirmed", AgentErrorCode::UserLlmProviderStreamInterrupted,
@@ -440,6 +441,7 @@ impl AgentSendError {
     pub fn from_app_error_ref(err: &AppError) -> Self {
         let detail = strip_error_prefix(&err.to_string());
         match err {
+            AppError::SystemExecution(failure) => Self::from_system_execution_failure(failure),
             AppError::SessionConfigurationChanged(_) => Self::session_configuration_changed(detail),
             AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(path) => Self {
                 stream_error: AgentStreamErrorData {
@@ -453,6 +455,7 @@ impl AgentSendError {
                     model_name: None,
                     task_incomplete_reason: None,
                     provider_diagnostic: None,
+                    system_execution_error: None,
                     retryable: Some(false),
                     feedback_recommended: Some(false),
                     resolution: Some(AgentErrorResolution::new(
@@ -473,6 +476,7 @@ impl AgentSendError {
                     model_name: None,
                     task_incomplete_reason: None,
                     provider_diagnostic: None,
+                    system_execution_error: None,
                     retryable: Some(false),
                     feedback_recommended: Some(false),
                     resolution: Some(AgentErrorResolution::new(
@@ -597,6 +601,26 @@ impl AgentSendError {
 
     pub fn stream_error(&self) -> &AgentStreamErrorData {
         &self.stream_error
+    }
+
+    fn from_system_execution_failure(failure: &nomifun_agent_contracts::SystemExecutionFailure) -> Self {
+        let code = match failure.code.as_str() {
+            "SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED" => AgentErrorCode::SystemExecutionAuthenticationCancelled,
+            "SYSTEM_EXECUTION_AUTHENTICATION_DENIED" => AgentErrorCode::SystemExecutionAuthenticationDenied,
+            "SYSTEM_EXECUTION_AUTHENTICATION_TIMED_OUT" => AgentErrorCode::SystemExecutionAuthenticationTimedOut,
+            "SYSTEM_EXECUTION_AUTHENTICATION_UNAVAILABLE" => AgentErrorCode::SystemExecutionAuthenticationUnavailable,
+            "SYSTEM_EXECUTION_APPROVAL_REQUIRED" => AgentErrorCode::SystemExecutionApprovalRequired,
+            "SYSTEM_EXECUTION_NOT_AVAILABLE" => AgentErrorCode::SystemExecutionNotAvailable,
+            "SYSTEM_EXECUTION_RESULT_UNKNOWN" | "system_result_unknown" => AgentErrorCode::SystemExecutionResultUnknown,
+            "SYSTEM_READ_RESULT_UNKNOWN" => AgentErrorCode::SystemReadResultUnknown,
+            _ => AgentErrorCode::SystemExecutionFailed,
+        };
+        let mut error = Self::new("Native system execution could not complete", code,
+            AgentErrorOwnership::Nomifun, None, false, false, None);
+        let mut diagnostic = failure.clone();
+        diagnostic.message = sanitize_error_detail(&diagnostic.message);
+        error.stream_error.system_execution_error = Some(diagnostic);
+        error
     }
 
     pub fn into_stream_error(self) -> AgentStreamErrorData {
@@ -1293,6 +1317,28 @@ fn truncate_chars(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_authentication_codes_are_preserved_without_reclassifying_binding_acl_or_unknown() {
+        for code in ["SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED", "SYSTEM_EXECUTION_AUTHENTICATION_DENIED",
+            "SYSTEM_EXECUTION_AUTHENTICATION_TIMED_OUT", "SYSTEM_EXECUTION_AUTHENTICATION_UNAVAILABLE",
+            "SYSTEM_EXECUTION_APPROVAL_REQUIRED", "SYSTEM_EXECUTION_NOT_AVAILABLE", "SYSTEM_EXECUTION_RESULT_UNKNOWN", "SYSTEM_READ_RESULT_UNKNOWN"] {
+            let failure = nomifun_agent_contracts::SystemExecutionFailure::from_owner(code.into(), "PRESET_RESOURCE_NOT_BOUND; raw_os_error=1223 is only text".into(), &serde_json::json!({}));
+            let error = AgentSendError::from_runtime_turn_failure(failure.message.clone(),
+                Some(&nomifun_agent_runtime::AgentTurnFailure::SystemExecution { diagnostic:failure.clone() }));
+            let api = error.stream_error();
+            assert_eq!(serde_json::to_value(api.code).unwrap(), code);
+            assert_eq!(api.system_execution_error.as_ref(), Some(&failure));
+            assert_eq!(api.retryable, Some(false));
+            assert!(api.provider_diagnostic.is_none() && api.resolution.is_none());
+            assert_eq!(api.system_execution_error.as_ref().unwrap().raw_os_error, None);
+            let from_app = AgentSendError::from_app_error(AppError::SystemExecution(failure));
+            assert_eq!(from_app.stream_error(), api);
+        }
+        assert_eq!(AgentSendError::from_app_error(AppError::Forbidden("real missing resource binding".into())).code(), Some(AgentErrorCode::NomifunPermissionError));
+        assert!(AgentSendError::from_app_error(AppError::NativeSystemAccessDenied { operation:"ordinary ACL".into(), source:std::io::Error::from_raw_os_error(5) }).stream_error().system_execution_error.is_none());
+        assert!(AgentSendError::from_app_error(AppError::Internal("SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED raw_os_error=1223".into())).stream_error().system_execution_error.is_none());
+    }
 
     #[test]
     fn typed_model_failure_never_guesses_an_agent_code_from_provider_prose() {

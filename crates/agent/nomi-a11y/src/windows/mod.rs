@@ -16,6 +16,7 @@ use crate::engine::{
 };
 
 mod actor;
+pub(crate) mod focus;
 mod tree_map;
 
 

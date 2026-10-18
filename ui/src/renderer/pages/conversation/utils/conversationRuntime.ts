@@ -76,7 +76,7 @@ export type ConversationPauseNotice = NonNullable<ReturnType<typeof getConversat
 export const getConversationWaitingNotice = (conversation?: ActivitySnapshot | null) => {
   const runtime = conversation?.runtime;
   if (getConversationActivity(conversation) !== 'waiting' || !runtime?.active_turn_id || runtime.turn_outcome?.kind !== 'waiting') return null;
-  return { turnId: runtime.active_turn_id, outcome: runtime.turn_outcome, canSteer: runtime.can_steer === true };
+  return { turnId: runtime.active_turn_id, outcome: runtime.turn_outcome };
 };
 export type ConversationWaitingNotice = NonNullable<ReturnType<typeof getConversationWaitingNotice>>;
 

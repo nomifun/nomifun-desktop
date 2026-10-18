@@ -82,7 +82,7 @@ impl AgentTurnRequest {
         active_set_generation: u64,
     ) -> Self {
         let coding_workflow = tool_plan.model_name_for_action(
-            "workspace.process", "workspace.process/exec",
+            "workspace.process", "workspace.process/start",
         ).is_some() && (
             tool_plan.model_name_for_action("workspace.files", "workspace.files/write").is_some()
                 || tool_plan.model_name_for_action("workspace.files", "workspace.files/patch").is_some()
@@ -647,10 +647,14 @@ pub(crate) async fn run_turn(
                 loop {
                     match crate::stop_resolution::attention(!state.work_status.running_processes.is_empty()) {
                         crate::stop_resolution::StopResolution::Park => {
+                            adaptive.activate(crate::adaptive::LEDGER_MODULES,
+                                crate::AgentRuntimeActivationReason::EffectfulToolCall,event_sink.as_ref()).await?;
                             let (inputs, observations) = park_wait(&event_sink, request.wait_port.as_ref(), request.input_port.as_ref(),
                                 &model_request.causality, &cancellation, model_steps, None,
-                                nomifun_agent_contracts::AgentWaitReason::InterventionRequired, &mut state.work_status, &mut process_settlement).await?;
+                                if control_rejections.is_exhausted() {nomifun_agent_contracts::AgentWaitReason::InterventionRequired}
+                                else {nomifun_agent_contracts::AgentWaitReason::ExternalResource}, &mut state.work_status, &mut process_settlement).await?;
                             if let Some(segments) = segments.as_mut() { for observation in &observations { segments.observe_owner(observation)?; } }
+                            for observation in &observations {state.completion.observe_owned_process(observation)?;}
                             incorporate_wait_observations(&mut model_request, &observations)?;
                             let accepted = crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs,
                                 &mut steering_receipts, &mut steering_receipt_order)?;
@@ -726,7 +730,7 @@ pub(crate) async fn run_turn(
         // A durable pause preserves the original correction budget. Resume
         // alone cannot buy another model sample; only a real accepted input
         // above or the explicit native retry-stall grant may reset it.
-        if control_rejections.is_exhausted() {
+        if control_rejections.is_exhausted() || protocol_recovery.continuation_stopped() {
             let state=long_horizon.get_or_insert_with(LongHorizonState::default);
             intervene!(state);
         }
@@ -743,7 +747,7 @@ pub(crate) async fn run_turn(
                     Err(reason) => stop = Some(reason),
                     Ok(candidate) => {
                         if let Some(state) = long_horizon.as_ref().filter(|state| !state.work_status.running_processes.is_empty()) {
-                            stop = process_settlement.at_boundary(model_steps, current, &state.work_status.running_processes, &request.tool_plan);
+                            stop = process_settlement.at_boundary(model_steps, current, &state.work_status.running_processes, &request.tool_plan, request.wait_port.is_some());
                         } else { next = Some(candidate); }
                     }
                 }
@@ -885,13 +889,22 @@ pub(crate) async fn run_turn(
                     && state.execution_plan.revision == 0
                     && state.execution_plan.steps.is_empty()));
         let delivery_review_step = long_horizon.as_ref().is_some_and(|state| state.completion.review.delivery_pending);
-        if report_only_locked || account_repair || delivery_review_step {
-            model_request.input.tools.retain(|tool| tool.name != crate::user_input_request::TOOL_NAME);
-        }
         let phase = synchronize_completion_review(&mut model_request, &mut adaptive_slots,
             long_horizon.as_ref().is_some_and(|state| state.completion.review.phase != AgentExecutionPhase::Execution) || account_repair || report_only_locked, review_can_report,
-            plan_blocks_report, review_has_running_processes, continuing_planned_task);
+            plan_blocks_report, review_has_running_processes, continuing_planned_task, report_only_locked || account_repair);
         let phase = synchronize_delivery_review(&mut model_request, &mut adaptive_slots, delivery_review_step, phase);
+        let requires_input_handoff=long_horizon.as_ref().is_some_and(|state| state.completion.current(
+            &state.execution_plan, &state.work_status, retained_inputs.len()).is_some_and(|report| report.is_blocked()))
+            && adaptive_slots.user_input_enabled && !patch_recovery.pending() && !patch_recovery.unresolved()
+            && !crate::requirements::failure_stop_requested(&retained_inputs);
+        if requires_input_handoff {
+            // A blocked account is neither a completed task nor a technical
+            // pause. Request the exact missing input without reopening work.
+            upsert_instruction(&mut model_request.input.instructions, &mut adaptive_slots.completion_review,
+                "The recorded completion account contains unfinished work. Submit request_user_input alone with the concrete user information or external action needed now, and preserve the remaining work and known failures. An expired helper/link must not be presented as still live. Do not resubmit the blocked account, repeat effects or claim task completion. This declaration uses the existing bounded control and model budgets.".into());
+            model_request.input.tools.retain(|tool| tool.name == crate::user_input_request::TOOL_NAME);
+            model_request.input.tool_choice = ChatToolChoice::Specific { name: crate::user_input_request::TOOL_NAME.into() };
+        }
         if let Some(state) = long_horizon.as_mut() { state.completion.review.phase = phase; }
         if matches!(phase, AgentExecutionPhase::Execution | AgentExecutionPhase::EndIntentReview) {
             process_settlement.constrain_tools(&mut model_request.input.tools, &mut model_request.input.tool_choice, &request.tool_plan);
@@ -944,8 +957,8 @@ pub(crate) async fn run_turn(
                 model_steps, &output_text, &reasoning_text, tool_call_count, provider_round_id.clone()).await;
         }
         model_steps = model_steps.saturating_add(1);
-        let strict_publication=model_request.input.tools.len()==1&&model_request.input.tools[0].name==crate::completion::TOOL_NAME
-            && model_request.input.tools[0].input_schema.0["properties"].get("short_summary").is_some();
+        let strict_publication=requires_input_handoff || (model_request.input.tools.len()==1&&model_request.input.tools[0].name==crate::completion::TOOL_NAME
+            && model_request.input.tools[0].input_schema.0["properties"].get("short_summary").is_some());
         let model_operation_id =
             OperationId::from(format!("{}:model:{}", turn_operation_id.as_ref(), model_steps));
         model_request.causality.operation_id = model_operation_id.clone();
@@ -1540,6 +1553,19 @@ pub(crate) async fn run_turn(
             && !step.has_tool_calls()
             && !step.assistant_content.iter().any(|part|
                 matches!(part, ChatContentPart::Text { text } if !text.trim().is_empty()));
+        if !step.has_tool_calls() && matches!(finish_reason,ChatFinishReason::Completed) && requires_input_handoff {
+            // Specific tool_choice is a provider request, not proof of a
+            // native declaration. Reject this stop through the same durable,
+            // bounded protocol coordinator used by live/replay/recovery.
+            let prepared=protocol_recovery.prepare_rejection(model_steps,vec![],AgentModelResponseRejection::RequiredInputHandoff,
+                Some(crate::user_input_request::TOOL_NAME.into()),model_steps<total_model_limit)?;
+            let continuation=prepared.continuation();
+            event_sink.emit(prepared.event().clone()).await?;
+            model_request.input.messages.push(protocol_recovery.commit_rejection(prepared)?);
+            model_request.input.provider_round_parent=None;provider_round_id=None;
+            if !continuation {intervene!(long_horizon.as_mut().expect("blocked account has runtime state"));}
+            continue 'model_steps;
+        }
         if delivery_review_step && !step.has_tool_calls() {
             return fail_turn(&event_sink, model_steps,
                 "the single delivery review did not submit its final report; the candidate was not delivered").await;
@@ -2003,27 +2029,12 @@ pub(crate) async fn run_turn(
                 }).await?;
             }
             if let Some(input_request) = pending_user_input.clone() {
-                if !state.work_status.running_processes.is_empty() {
-                    let (inputs, observations) = park_wait(&event_sink, request.wait_port.as_ref(), request.input_port.as_ref(),
-                        &model_request.causality, &cancellation, model_steps, Some(input_request.request_id.as_ref().to_owned()),
-                        nomifun_agent_contracts::AgentWaitReason::UserInput, &mut state.work_status, &mut process_settlement).await?;
-                    pending_user_input = None;
-                    if let Some(segments) = segments.as_mut() { for observation in &observations { segments.observe_owner(observation)?; } }
-                    incorporate_wait_observations(&mut model_request, &observations)?;
-                    let accepted = crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs,
-                        &mut steering_receipts, &mut steering_receipt_order)?;
-                    if accepted { state.execution_plan.needs_replan = true; protocol_recovery.observe_new_input(); control_rejections.reset(); }
-                    state.completion.invalidate();
-                    model_request.input.provider_round_parent = None;
-                    continue 'model_steps;
-                }
-                let receipt = persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
-                    request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
-                    &steering_receipt_order, Some(state), &patch_recovery, segments.as_ref(), &control_rejections,
-                    Some(&input_request)).await?;
-                if event_sink.supports_checkpoints() && receipt.is_none() {
-                    return Err(AgentEngineError::EventSink("input handoff checkpoint was not durably acknowledged".into()));
-                }
+                // A question ends this computation, independently of managed
+                // Session processes. Their exit, deadline or output is not a
+                // human reply and must never reopen model execution. The
+                // committed source question and terminal are sufficient for
+                // the next Turn's canonical context; normal conversation does
+                // not require a recoverable native checkpoint.
                 let candidate = AgentTurnResult { agent_session_id:agent_session_id.clone(), turn_operation_id:turn_operation_id.clone(),
                     model_steps, output_text:output_text.clone(), reasoning_text:reasoning_text.clone(), tool_call_count,
                     provider_round_id:provider_round_id.clone(), terminal:AgentTurnTerminal::InputRequired { request:input_request.clone() } };
@@ -2048,6 +2059,30 @@ pub(crate) async fn run_turn(
             if delivery_review_step && terminal_report.is_none() {
                 return fail_turn(&event_sink, model_steps,
                     "the single report-only delivery review did not produce a valid final account; the candidate was not delivered").await;
+            }
+            if let Some(report) = terminal_report.as_ref().filter(|report| report.is_blocked()) {
+                // Publishing the actual partial account does not close input
+                // or prove delivery. Ask for a structured handoff in the same
+                // bounded, action-locked review instead of suspending business
+                // dependencies behind native recovery controls.
+                let mut delivery = report.delivery_text();
+                if !output_text.is_empty() { delivery.insert_str(0, "\n\n"); }
+                output_text.push_str(&delivery);
+                event_sink.emit(AgentEngineEvent::CompletionDelivered { step:model_steps,text:delivery }).await?;
+                if crate::requirements::failure_stop_requested(&retained_inputs) || patch_recovery.pending() || patch_recovery.unresolved() {
+                    return fail_turn(&event_sink,model_steps,"completion account contains blocked work after a required failure stop or unresolved recovery; task completion was not accepted").await;
+                }
+                if adaptive_slots.user_input_enabled {
+                    state.completion.review.phase = AgentExecutionPhase::CompletionReview;
+                    state.completion.review.input_revision = retained_inputs.len();
+                    event_sink.emit(AgentEngineEvent::CompletionReview { status:state.work_status.clone() }).await?;
+                    model_request.input.provider_round_parent = None;
+                    continue 'model_steps;
+                }
+                // No interactive ingress exists for this invocation. Its
+                // owner must resolve this real capability/policy boundary;
+                // a missing human response is never fabricated as success.
+                intervene!(state);
             }
             let terminal_handoff = terminal_collaboration_accepted
                 && (!adaptive.task_ledger()
@@ -2083,16 +2118,6 @@ pub(crate) async fn run_turn(
                         if !output_text.is_empty() { delivery.insert_str(0, "\n\n"); }
                         output_text.push_str(&delivery);
                         event_sink.emit(AgentEngineEvent::CompletionDelivered { step:model_steps,text:delivery }).await?;
-                        if report.is_blocked() {
-                            if crate::requirements::failure_stop_requested(&retained_inputs) || patch_recovery.pending() || patch_recovery.unresolved() {
-                                return fail_turn(&event_sink,model_steps,"completion account contains blocked work after a required failure stop; task completion was not accepted").await;
-                            }
-                            persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id, request.active_set_generation,
-                                model_steps, tool_call_count, retained_inputs.len(), &steering_receipt_order, Some(state),
-                                &patch_recovery, segments.as_ref(), &control_rejections, None).await?;
-                            return paused_turn(&event_sink, &agent_session_id, &turn_operation_id, model_steps, &output_text,
-                                &reasoning_text, tool_call_count, provider_round_id.clone(), "EXECUTION_DEPENDENCY_BLOCKED").await;
-                        }
                     }
                     if output_text.trim().is_empty()
                         && state.work_status.failed_tools == 0
@@ -2192,7 +2217,7 @@ pub(crate) async fn run_turn(
             let state = long_horizon.as_ref();
             let resolution = crate::stop_resolution::resolve(crate::stop_resolution::StopFacts {
                 needs_account: adaptive.task_ledger(),
-                account_current: state.is_some_and(|state| state.completion.current(&state.execution_plan, &state.work_status, retained_inputs.len()).is_some()),
+                account_allows_completion: state.is_some_and(|state| state.completion.current(&state.execution_plan, &state.work_status, retained_inputs.len()).is_some_and(|report|!report.is_blocked())),
                 plan_open: state.is_some_and(|state| state.execution_plan.is_open()),
                 running_processes: state.is_some_and(|state| !state.work_status.running_processes.is_empty()),
                 review_used: state.is_some_and(|state| state.completion.review.phase != AgentExecutionPhase::Execution), can_review: model_steps < total_model_limit,
@@ -2200,8 +2225,7 @@ pub(crate) async fn run_turn(
             match resolution {
                 crate::stop_resolution::StopResolution::Review => {
                     let state = long_horizon.as_mut().ok_or_else(|| AgentEngineError::InvalidContract("unfinished work has no runtime state".into()))?;
-                    if adaptive_slots.user_input_enabled && !state.completion.review.is_report_only()
-                        && !state.completion.settled_failure_gate() {
+                    if adaptive_slots.user_input_enabled && !state.completion.review.is_report_only() {
                         state.completion.review.phase = AgentExecutionPhase::EndIntentReview;
                         event_sink.emit(AgentEngineEvent::EndIntentReview { status: state.work_status.clone() }).await?;
                         model_request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::User,
@@ -2441,9 +2465,10 @@ fn synchronize_completion_review(
     plan_blocks_report: bool,
     has_running_processes: bool,
     continuing_planned_task: bool,
+    execution_locked: bool,
 ) -> AgentExecutionPhase {
     if active {
-        if has_running_processes || continuing_planned_task {
+        if !execution_locked && (has_running_processes || continuing_planned_task) {
             upsert_instruction(&mut request.input.instructions, &mut slots.completion_review,
                 "A response stopped while accepted work remains. Continue only the remaining authorized work. If a user answer or external user action is required, submit request_user_input alone; the host preserves original owned processes while waiting. Otherwise report_completion when the actual work settles. Preserve original receipts and never cancel a helper merely to end a reply. Another text stop without a valid ending intent requires human intervention, not task success or failure.".into());
             return AgentExecutionPhase::EndIntentReview;
@@ -2453,7 +2478,8 @@ fn synchronize_completion_review(
                 "The reply stopped without an explicit task-ending intent. This is one bounded declaration opportunity within the same budget, not proof of task completion. Submit request_user_input alone if necessary user information is missing: preserve unfinished work and known failures, and ask without fabricating an answer. Otherwise submit report_completion alone using the original evidence and exact counts. Do not perform new actions, reread or repeat settled effects to repair this declaration. A question is a normal input handoff, not a completed task; actual completion still requires its original account.".into());
             request.input.tools.retain(|tool| tool.name == crate::user_input_request::TOOL_NAME || tool.name == crate::completion::TOOL_NAME);
             request.input.tool_choice = ChatToolChoice::Required;
-            return AgentExecutionPhase::EndIntentReview;
+            // A question never reopens execution, even after a durable resume.
+            return if execution_locked { AgentExecutionPhase::CompletionReview } else { AgentExecutionPhase::EndIntentReview };
         }
         // The transcript review can be summarized with an oversized tool
         // suffix. Keep this host-owned phase in mandatory instructions; the
@@ -2493,8 +2519,11 @@ fn synchronize_delivery_review(request: &mut ChatModelRequest, slots: &mut Adapt
     if active {
         upsert_instruction(&mut request.input.instructions, &mut slots.delivery_review,
             crate::delivery_review::INSTRUCTION.to_owned());
-        request.input.tools.retain(|tool| tool.name == crate::completion::TOOL_NAME);
-        request.input.tool_choice = ChatToolChoice::Specific { name: crate::completion::TOOL_NAME.into() };
+        request.input.tools.retain(|tool| tool.name == crate::completion::TOOL_NAME || tool.name == crate::user_input_request::TOOL_NAME);
+        request.input.tool_choice = if request.input.tools.iter().any(|tool| tool.name == crate::user_input_request::TOOL_NAME) {
+            if let Some(slot) = slots.delivery_review { request.input.instructions[slot].push_str(" If required user information or an external user action is missing, submit request_user_input alone. This does not publish the candidate, erase failures or reopen execution tools."); }
+            ChatToolChoice::Required
+        } else { ChatToolChoice::Specific { name: crate::completion::TOOL_NAME.into() } };
         return AgentExecutionPhase::DeliveryReview;
     } else if let Some(slot) = slots.delivery_review {
         request.input.instructions[slot].clear();
@@ -2938,7 +2967,10 @@ async fn park_wait(
     settlement: &mut process_settlement::ProcessSettlement,
 ) -> Result<(Vec<crate::AgentSteeringInput>, Vec<crate::AgentOwnedProcessObservation>), AgentEngineError> {
     let wait_port = wait_port.ok_or_else(|| AgentEngineError::InvalidContract("live waiting requires the original host wait port".into()))?;
-    let request = settlement.wait_request(&work.running_processes);
+    let wake_policy = if matches!(reason,nomifun_agent_contracts::AgentWaitReason::UserInput|nomifun_agent_contracts::AgentWaitReason::InterventionRequired) {
+        crate::AgentWaitWakePolicy::TerminalOnly
+    } else { crate::AgentWaitWakePolicy::OutputOrTerminal };
+    let request = settlement.wait_request(&work.running_processes, wake_policy);
     if request.processes.is_empty() { return Err(AgentEngineError::InvalidContract("a live wait requires an owned process".into())); }
     sink.emit(AgentEngineEvent::TurnWaiting { model_steps, request_id, reason }).await?;
     // The host registers wake notifications before checking its durable inbox
@@ -2967,6 +2999,14 @@ async fn park_wait(
                     sink.emit(AgentEngineEvent::OwnedProcessObserved { model_steps, observation: observation.clone() }).await?;
                     *work = next;
                     settlement.observe_owner(observation);
+                    if observation.requires_reconciliation() {
+                        // A frozen unknown/unreaped terminal is not resource
+                        // progress. Keep the unresolved wait and original
+                        // owner fence for reconciliation, never sample a model
+                        // or repeatedly wake on the same terminal snapshot.
+                        sink.emit(AgentEngineEvent::WorkStatus { status:work.clone() }).await?;
+                        return Err(AgentEngineError::WaitOwnerUnavailable);
+                    }
                 }
                 sink.emit(AgentEngineEvent::WorkStatus { status: work.clone() }).await?;
                 // A reply accepted concurrently with the resource change belongs
@@ -3122,17 +3162,11 @@ async fn invoke_tool_calls(
     if completed.iter().any(|call| call.name == crate::user_input_request::TOOL_NAME) {
         let refusal = if completed.len() != 1 {
             Some("Not executed: request_user_input must be submitted alone; no action in this batch ran.".to_owned())
-        } else if !matches!(phase, AgentExecutionPhase::Execution | AgentExecutionPhase::EndIntentReview) {
-            Some("Not executed: an input handoff cannot escape a locked completion or delivery review.".to_owned())
-        } else if completion.settled_failure_gate() {
-            Some("Not executed: settled failure-stop accounting must finish through the original completion review; an input question cannot bypass that gate.".to_owned())
         } else if patch_recovery.pending() || patch_recovery.unresolved() {
             Some("Not executed: settle the original patch obligations before handing back input; this request cannot cancel work, declare completion or erase unknown results.".to_owned())
         } else { None };
         let mut runtime_hold = refusal.as_ref().map(|_| if completed.len() != 1 {
             crate::RuntimeToolHoldReason::BatchRejected
-        } else if !matches!(phase, AgentExecutionPhase::Execution | AgentExecutionPhase::EndIntentReview) {
-            crate::RuntimeToolHoldReason::PhaseRestricted
         } else { crate::RuntimeToolHoldReason::RuntimeGate });
         let result = if let Some(reason) = refusal { AgentToolResult::text(completed[0].call_id.clone(), reason, true) }
         else {
@@ -3750,10 +3784,14 @@ async fn record_tool_result_with_hold(
         // Only an ordinary owner invocation failure is a model-observable tool
         // result. Structural/host contract failures must terminate the turn;
         // allowing the model to continue would hide a failed enforcement layer.
-        Err(AgentEngineError::CapabilityKernel { code, message }) => {
+        Err(error @ AgentEngineError::CapabilityKernel { .. }) => {
+            if let Some(result) = crate::tool::typed_owner_error_result(call_id.clone(), &error) { result }
+            else {
+            let AgentEngineError::CapabilityKernel { code, message, .. } = &error else { unreachable!() };
             let output = nomifun_engine_core::system_permission_error_carrier(&code, &message)
-                .unwrap_or_else(|| AgentEngineError::CapabilityKernel { code, message }.to_string());
+                .unwrap_or_else(|| error.to_string());
             AgentToolResult::text(call_id.clone(), output, true)
+            }
         }
         Err(error @ AgentEngineError::ToolInvocation(_)) => {
             AgentToolResult::text(call_id.clone(), error.to_string(), true)
@@ -4261,6 +4299,7 @@ mod tests {
                 Err(AgentEngineError::CapabilityKernel {
                     code:"CAPABILITY_UNAVAILABLE".to_owned(),
                     message:message.to_owned(),
+                    details:None,
                 }),
                 &sink,
                 (step+1) as u16,
@@ -4298,7 +4337,7 @@ mod tests {
             "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
             "execution":"not_executed"}).to_string();
         let (_, result) = record_tool_result("permission-call".into(), Err(AgentEngineError::CapabilityKernel {
-            code: "SYSTEM_PERMISSION_REQUIRED".into(), message: body.clone(),
+            code: "SYSTEM_PERMISSION_REQUIRED".into(), message: body.clone(), details:None,
         }), &sink, 1).await.unwrap();
         assert!(result.is_error);
         assert!(nomifun_engine_core::project_system_permission_required(Some("computer"), Some("computer/observe"),
@@ -4311,6 +4350,29 @@ mod tests {
             &sink, 2).await.unwrap();
         assert!(nomifun_engine_core::project_system_permission_required(Some("computer"), Some("computer/observe"),
             unrelated.is_error, &unrelated.output_text()).is_none());
+    }
+
+    #[tokio::test]
+    async fn typed_native_owner_error_is_preserved_in_the_same_canonical_tool_result() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        let details = json!({"native_file_error":{"code":"SYSTEM_ACCESS_DENIED","message":"native root denied","kind":"PermissionDenied","raw_os_error":5}});
+        let sink = Sink::default();
+        let (_, result) = record_tool_result("native-owner-failure".into(), Err(AgentEngineError::CapabilityKernel {
+            code:"ROLE_HOST_NATIVE_FILE_FAILURE".into(), message:"opaque owner message".into(), details:Some(details.clone()),
+        }), &sink, 1).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&result.output_text()).unwrap();
+        assert_eq!(value["details"], details); assert_eq!(value["message"], "opaque owner message");
+        assert_eq!(result.call_id.as_ref(), "native-owner-failure"); assert!(result.is_error);
+        let events = sink.0.lock().unwrap(); assert_eq!(events.len(), 1);
+        let AgentEngineEvent::ToolCompleted { result: persisted, runtime_hold: None, .. } = &events[0] else { panic!("owner error left the canonical tool-result chain") };
+        assert_eq!(persisted, &result);
     }
 
     fn configured_test_budget() -> crate::AgentModelBudget {
@@ -4401,7 +4463,7 @@ mod tests {
     fn coding_workflow_gets_a_larger_bounded_model_step_budget() {
         let coding = AgentToolPlan::new([
             tool_binding("write_file", "workspace.files", "workspace.files/write", AgentEffectClass::ManagedEffect, false),
-            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            tool_binding("start_process", "workspace.process", "workspace.process/start", AgentEffectClass::ExternalUncertainEffect, false),
         ]).unwrap();
         assert_eq!(AgentTurnRequest::new(request(), coding, principal(), 0).max_model_steps,
             CODING_MAX_MODEL_STEPS);
@@ -4417,7 +4479,7 @@ mod tests {
             let name = if index % 2 == 0 { crate::planning::TOOL_NAME } else { crate::completion::TOOL_NAME };
             assert!(rejections.observe(name, &failed, false).is_none());
             if index == 3 {
-                assert!(rejections.observe("exec_command", &failed, false).is_none());
+                assert!(rejections.observe("start_process", &failed, false).is_none());
                 assert_eq!(rejections.total, 4);
             }
         }
@@ -4977,7 +5039,7 @@ mod tests {
             ("git_status", "workspace.vcs", "workspace.vcs/status", AgentEffectClass::ReadOnly, true),
             ("git_stage", "workspace.vcs", "workspace.vcs/stage", AgentEffectClass::ManagedEffect, false),
             ("publish_artifact", "workspace.artifacts", "workspace.artifacts/publish", AgentEffectClass::ManagedEffect, false),
-            ("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            ("start_process", "workspace.process", "workspace.process/start", AgentEffectClass::ExternalUncertainEffect, false),
         ].into_iter().map(|(name, capability, action, effect, parallel)| {
             tool_binding(name, capability, action, effect, parallel)
         }))
@@ -5027,7 +5089,7 @@ mod tests {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<std::collections::BTreeSet<_>>();
-        for name in ["read_file", "git_status", "exec_command"] {
+        for name in ["read_file", "git_status", "start_process"] {
             assert!(names.contains(name));
         }
         for name in ["write_file", "apply_patch", "git_stage", "publish_artifact"] {
@@ -5262,7 +5324,7 @@ mod tests {
                 self.writes.fetch_add(1, Ordering::SeqCst);
                 return Ok(workspace_result(invocation));
             }
-            assert_eq!(invocation.binding.action_id.as_ref(), "workspace.process/exec");
+            assert_eq!(invocation.binding.action_id.as_ref(), "workspace.process/start");
             Ok(AgentToolResult::text(invocation.call.call_id,
                 json!({"process_id":"failed-process","state":"exited",
                     "exit_code":1,"cleanup":{"reaped":true},"success":false}).to_string(), true))
@@ -5279,7 +5341,7 @@ mod tests {
             if let Some(result) = instruction_result(&invocation) {
                 return Ok(result);
             }
-            assert_eq!(invocation.binding.action_id.as_ref(), "workspace.process/exec");
+            assert_eq!(invocation.binding.action_id.as_ref(), "workspace.process/start");
             self.calls.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
             Ok(AgentToolResult::text(
                 invocation.call.call_id,
@@ -5302,7 +5364,7 @@ mod tests {
             }
             assert_eq!(
                 invocation.binding.action_id.as_ref(),
-                "workspace.process/exec"
+                "workspace.process/start"
             );
             Ok(AgentToolResult::text(
                 invocation.call.call_id,
@@ -5334,7 +5396,7 @@ mod tests {
             assert!(matches!(path, "." | "README.md" | "a" | "b"));
             json!({"path":path, "canonical_path":if path == "." { "" } else { path },
                 "kind":if path == "." { "directory" } else { "file" },
-                "recursive":args["recursive"], "directories":[""],
+                "recursive":args["recursive"], "path_semantics":args.get("path_semantics").cloned().unwrap_or(json!("follow")), "directories":[""],
                 "complete":true, "incomplete_reasons":[]})
         } else {
             return None;
@@ -5729,7 +5791,7 @@ mod tests {
         request.input.messages.push(ChatMessage {
             role: ChatRole::Assistant,
             content: calls.iter().map(|id| ChatContentPart::ToolCall {
-                call_id: (*id).into(), name: "exec_command".into(),
+                call_id: (*id).into(), name: "start_process".into(),
                 arguments: nomifun_agent_contracts::StrictJsonValue(json!({"command":"bun","args":["test",id]})),
                 provider_metadata: None,
             }).collect(),
@@ -5794,7 +5856,7 @@ mod tests {
         request.input.messages.push(ChatMessage {
             role: ChatRole::Assistant,
             content: vec![ChatContentPart::ToolCall {
-                call_id: "settled-check".into(), name: "exec_command".into(),
+                call_id: "settled-check".into(), name: "start_process".into(),
                 arguments: nomifun_agent_contracts::StrictJsonValue(json!({"command":"bun","args":["test","one"]})),
                 provider_metadata: None,
             }], provider_round_id: None,
@@ -6056,7 +6118,7 @@ mod tests {
         request.input.messages.push(ChatMessage {
             role: ChatRole::Assistant,
             content: vec![ChatContentPart::ToolCall {
-                call_id: "already-exited".into(), name: "exec_command".into(),
+                call_id: "already-exited".into(), name: "start_process".into(),
                 arguments: nomifun_agent_contracts::StrictJsonValue(json!({"command":"bun","args":["test","diagnostic.test.ts"]})),
                 provider_metadata: None,
             }], provider_round_id: None,
@@ -6150,7 +6212,7 @@ mod tests {
             request.input.max_output_tokens=Some(4096);
             let original=request.input.messages[0].clone();
             request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,"OLDER_HISTORY ".repeat(1000)));
-            let call=ChatContentPart::ToolCall {call_id:"settled-diagnostic".into(),name:"exec_command".into(),
+            let call=ChatContentPart::ToolCall {call_id:"settled-diagnostic".into(),name:"start_process".into(),
                 arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"diagnostic","args":["PUBLIC_LITERAL"]})),
                 provider_metadata:None};
             request.input.messages.push(ChatMessage {role:ChatRole::Assistant,
@@ -6221,7 +6283,7 @@ mod tests {
                 lifecycle.observe_usage(&nomifun_chat_model_broker::ChatUsage {input_tokens:(bare_estimate+extra_tokens) as u64,..Default::default()});
             }
             request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,"OLDER_HISTORY ".repeat(1200)));
-            let call=ChatContentPart::ToolCall {call_id:"latest-terminal".into(),name:"exec_command".into(),
+            let call=ChatContentPart::ToolCall {call_id:"latest-terminal".into(),name:"start_process".into(),
                 arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"diagnostic"})),provider_metadata:None};
             request.input.messages.push(ChatMessage {role:ChatRole::Assistant,content:vec![call.clone()],provider_round_id:None});
             let receipt=ChatMessage {role:ChatRole::Tool,provider_round_id:None,
@@ -6257,7 +6319,7 @@ mod tests {
         let original=request.input.messages[0].clone();
         request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,"OLD ".repeat(3500)));
         request.input.messages.push(ChatMessage {role:ChatRole::Assistant,provider_round_id:None,
-            content:vec![ChatContentPart::ToolCall {call_id:"terminal-under-rejection".into(),name:"exec_command".into(),
+            content:vec![ChatContentPart::ToolCall {call_id:"terminal-under-rejection".into(),name:"start_process".into(),
                 arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"diagnostic"})),provider_metadata:None}]});
         let receipt=ChatMessage {role:ChatRole::Tool,provider_round_id:None,
             content:vec![ChatContentPart::ToolResult {call_id:"terminal-under-rejection".into(),is_error:true,
@@ -6344,7 +6406,7 @@ mod tests {
         let original = request.input.messages[0].clone();
         request.input.messages.extend([
             ChatMessage { role:ChatRole::Assistant, provider_round_id:None,
-                content:vec![ChatContentPart::ToolCall { call_id:"diagnostic".into(), name:"exec_command".into(),
+                content:vec![ChatContentPart::ToolCall { call_id:"diagnostic".into(), name:"start_process".into(),
                     arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"bun","args":["test"]})), provider_metadata:None }] },
             ChatMessage { role:ChatRole::Tool, provider_round_id:None,
                 content:vec![ChatContentPart::ToolResult { call_id:"diagnostic".into(), is_error:true,
@@ -6356,7 +6418,7 @@ mod tests {
         let transcript_review = work.completion_review_message().unwrap();
         request.input.messages.push(transcript_review.clone());
         let mut slots = AdaptiveContextSlots::default();
-        synchronize_completion_review(&mut request, &mut slots, true, false, false, false, false);
+        synchronize_completion_review(&mut request, &mut slots, true, false, false, false, false, false);
         assert!(slots.completion_review.is_some(), "active review must have a host instruction independent of the transcript");
         assert!(request.input.instructions.iter().any(|instruction| instruction.contains("explicit prohibitions, including read-only probes")),
             "user restrictions must be explicit in the preserved model policy");
@@ -6374,9 +6436,9 @@ mod tests {
         assert_eq!(request.input.tools,tools, "review context grants no new tools");
         assert_eq!(request.input.messages.iter().filter(|message| **message==original).count(),1);
         assert!(serde_json::to_vec(&request.input).unwrap().len()<=resource.max_context_bytes);
-        synchronize_completion_review(&mut request,&mut slots,true,false,false,false,false);
+        synchronize_completion_review(&mut request,&mut slots,true,false,false,false,false,false);
         assert_eq!(request.input.instructions,instructions, "reconstruction must not append duplicate phase instructions");
-        synchronize_completion_review(&mut request,&mut slots,false,false,false,false,false);
+        synchronize_completion_review(&mut request,&mut slots,false,false,false,false,false,false);
         assert!(request.input.instructions[slots.completion_review.unwrap()].is_empty(), "new input/observations clear the old phase");
         assert_eq!(request.input.instructions[0],instructions[0]);
         request.validate().expect("clearing the turn-local review must leave a valid model request");
@@ -6430,13 +6492,13 @@ mod tests {
                 Ok(())
             }
         }
-        let bad="<tool_call>\n<exec_command>\n<args><cmd>DO_NOT_PUBLISH_OR_EXECUTE</cmd></args>";
+        let bad="<tool_call>\n<start_process>\n<args><cmd>DO_NOT_PUBLISH_OR_EXECUTE</cmd></args>";
         for invalid_kind in ["xml","json","wrapped_json","native"] {
         for invalid_twice in [false,true] {
             let invalid_step = || match invalid_kind {
-                "native" => control_step("not-admitted","exec_command",json!({"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"})),
-                "json" => text_step(r#"{"call_id":"not-admitted","name":"exec_command","arguments":{"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"}}"#),
-                "wrapped_json" => text_step(r#"{"tool_call":{"call_id":"not-admitted","name":"exec_command","arguments":{"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"}}}"#),
+                "native" => control_step("not-admitted","start_process",json!({"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"})),
+                "json" => text_step(r#"{"call_id":"not-admitted","name":"start_process","arguments":{"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"}}"#),
+                "wrapped_json" => text_step(r#"{"tool_call":{"call_id":"not-admitted","name":"start_process","arguments":{"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"}}}"#),
                 _ => text_step(bad),
             };
             let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
@@ -6921,7 +6983,7 @@ mod tests {
                     return Ok(AgentToolResult::text(invocation.call.call_id, value.to_string(), false));
                 }
                 if let Some(result) = instruction_result(&invocation) { return Ok(result); }
-                if invocation.binding.action_id.as_ref() == "workspace.process/exec" {
+                if invocation.binding.action_id.as_ref() == "workspace.process/start" {
                     self.effects.fetch_add(1, Ordering::SeqCst);
                     self.changed.store(true, Ordering::SeqCst);
                     return Ok(AgentToolResult::text(invocation.call.call_id,
@@ -6940,7 +7002,7 @@ mod tests {
             control_step("prewarm-admin", "read_file", json!({"path":"a","execution_identity":"administrator"})),
         );
         let mutate_then_read = combine(
-            control_step("change-rules-once", "exec_command", json!({"command":"fixture-effect","execution_identity":effect_identity})),
+            control_step("change-rules-once", "start_process", json!({"command":"fixture-effect","execution_identity":effect_identity})),
             control_step("after-effect-read", "read_file", json!({"path":"a","execution_identity":read_identity})),
         );
         let quote = "Inspect the fixture once.";
@@ -6953,7 +7015,7 @@ mod tests {
         read_binding.schema_digest = crate::tool::input_schema_digest(&read_binding.definition.input_schema).unwrap();
         let plan = AgentToolPlan::new([
             read_binding,
-            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+            tool_binding("start_process","workspace.process","workspace.process/start",AgentEffectClass::ExternalUncertainEffect,false),
         ]).unwrap();
         let mut initial = request();
         initial.input.messages[0].content = vec![ChatContentPart::Text { text: quote.into() }];
@@ -7000,6 +7062,114 @@ mod tests {
     #[tokio::test]
     async fn serial_administrator_effect_defers_current_user_read_for_new_instructions() {
         serial_effect_instruction_refresh_case("administrator", "current_user").await;
+    }
+
+    #[tokio::test]
+    async fn settled_namespace_removal_retires_history_but_holds_new_calls_to_that_namespace() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        struct Tools {
+            removed: std::sync::atomic::AtomicBool,
+            dispatched: std::sync::Mutex<Vec<String>>,
+            root: String,
+        }
+        #[async_trait]
+        impl AgentToolInvoker for Tools {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                let args = &invocation.call.arguments.0;
+                let internal = args["missing_ok"] == true || args["format"] == "instruction_scope";
+                if internal {
+                    let path = args["path"].as_str().unwrap();
+                    let affected = std::path::Path::new(path).starts_with(&self.root);
+                    if affected && self.removed.load(Ordering::SeqCst) {
+                        return Err(AgentEngineError::CapabilityKernel {
+                            code:"ROLE_HOST_NATIVE_FILE_FAILURE".into(), message:"The native owner could not acquire the requested scope".into(),
+                            details:Some(json!({"native_file_error":{"code":"RESOURCE_NOT_FOUND","kind":"NotFound","raw_os_error":67,
+                                "message":"the removed fixture namespace is unavailable"}})),
+                        });
+                    }
+                    let value = if args["format"] == "instruction_scope" {
+                        let directory = path == self.root;
+                        json!({"path":path,"canonical_path":if path == "." {""} else {path},
+                            "kind":if path == "." || directory {"directory"} else {"file"},
+                            "recursive":args["recursive"],"path_semantics":args.get("path_semantics").cloned().unwrap_or(json!("follow")),
+                            "directories":[if directory {self.root.clone()} else {crate::agents_md::parent_directory(path)}],
+                            "complete":true,"incomplete_reasons":[]})
+                    } else if std::path::Path::new(path) == std::path::Path::new(&self.root).join("AGENTS.md") {
+                        let content = "RULE_FROM_REMOVED_NAMESPACE";
+                        json!({"path":path,"content":content,"offset":0,"total_bytes":content.len(),"eof":true,"next_offset":null,
+                            "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes())})
+                    } else { json!({"kind":"workspace_file_absent","path":path}) };
+                    return Ok(AgentToolResult::text(invocation.call.call_id, value.to_string(), false));
+                }
+                self.dispatched.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                if invocation.binding.action_id.as_ref() == "workspace.process/exec" {
+                    self.removed.store(true, Ordering::SeqCst);
+                    return Ok(AgentToolResult::text(invocation.call.call_id, json!({"process_id":"namespace-removal",
+                        "state":"exited","exit_code":0,"cleanup":{"reaped":true},"success":true,"output":{"text":"removed unique namespace"}}).to_string(), false));
+                }
+                assert!(!std::path::Path::new(args["path"].as_str().unwrap()).starts_with(&self.root)
+                    || !self.removed.load(Ordering::SeqCst), "the unavailable target reached business dispatch");
+                Ok(workspace_result(invocation))
+            }
+        }
+        let root = if cfg!(windows) { r"C:\removed-namespace" } else { "/removed-namespace" };
+        let target = std::path::Path::new(root).join("sample.txt").to_str().unwrap().to_owned();
+        let independent = if cfg!(windows) { r"D:\independent.txt" } else { "/independent.txt" };
+        let quote = "Inspect the controlled sample, remove its temporary namespace, then inspect an independent sample.";
+        let replan = |id: &str| {
+            let mut step = plan_step("in_progress", quote);
+            if let Ok(ChatModelEvent::ToolCallCompleted { call }) = &mut step[0] { call.call_id = id.into(); }
+            step
+        };
+        let model = Arc::new(ObservingModel { requests: Default::default(), steps: std::sync::Mutex::new(vec![
+            replan("initial-plan"),
+            control_step("warm-proposal", "read_file", json!({"path":target})),
+            replan("plan-current-rules"),
+            control_step("warm-accepted", "read_file", json!({"path":target})),
+            control_step("remove-once", "exec_command", json!({"command":"controlled-remove-namespace"})),
+            replan("plan-unavailable-observation"),
+            control_step("retired-target-held", "read_file", json!({"path":target})),
+            control_step("independent-accepted", "read_file", json!({"path":independent})),
+            vec![Err(ChatModelError::protocol_violation("controlled end after independent dispatch"))],
+        ]) });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let mut initial = request(); initial.input.messages[0].content = vec![ChatContentPart::Text { text: quote.into() }];
+        let tools = Arc::new(Tools { removed: std::sync::atomic::AtomicBool::new(false), dispatched: Default::default(), root: root.into() });
+        let sink = Arc::new(Sink::default());
+        let engine = AgentEngine::new(AgentEngineBuild { build_id: EngineBuildId::from("coding-dev"), build_digest: DigestHex::from("a".repeat(64)) }).unwrap();
+        let result = engine.open_session(binding(), model.clone(), tools.clone(), Some(sink.clone())).unwrap()
+            .run_turn(AgentTurnRequest::new(initial, plan, principal(), 0)).await;
+        assert!(result.is_err(), "the provider deliberately ends only after observing the final request");
+        assert_eq!(*tools.dispatched.lock().unwrap(), ["warm-accepted", "remove-once", "independent-accepted"]);
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 9, "history retirement must reach the next model boundary after the settled effect");
+        assert!(requests[4].input.instructions.iter().any(|text| text.contains("RULE_FROM_REMOVED_NAMESPACE")));
+        let after = &requests[5];
+        assert!(after.input.instructions.iter().any(|text| text.contains("\"status\":\"unavailable\"") && text.contains("raw_os_error")));
+        assert!(!after.input.instructions.iter().any(|text| text.contains("RULE_FROM_REMOVED_NAMESPACE")));
+        let events = sink.0.lock().unwrap();
+        let settled = events.iter().position(|event| matches!(event, AgentEngineEvent::ToolCompleted { result, .. } if result.call_id.as_ref() == "remove-once")).unwrap();
+        let unavailable = events.iter().position(|event| matches!(event, AgentEngineEvent::InstructionsUpdated { context } if context.contains("\"status\":\"unavailable\""))).unwrap();
+        let held = events.iter().position(|event| matches!(event, AgentEngineEvent::ToolCompleted { result, runtime_hold: Some(crate::RuntimeToolHoldReason::RuntimeGate), .. }
+            if result.call_id.as_ref() == "retired-target-held" && result.is_error)).unwrap();
+        assert!(settled < unavailable && unavailable < held);
+        assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::ToolCompleted { result, .. }
+            if result.is_error && result.call_id.as_ref().starts_with("agent-instructions:")
+                && serde_json::from_str::<serde_json::Value>(&result.output_text()).is_ok_and(|value|
+                    value["details"]["native_file_error"]["raw_os_error"] == 67
+                    && value["details"]["native_file_error"]["kind"] == "NotFound"))),
+            "the full typed native error must survive in the original canonical instruction ToolCompleted");
+        assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::ToolStarted { call_id, .. } if call_id.as_ref() == "retired-target-held")));
     }
 
     #[tokio::test]
@@ -7070,7 +7240,7 @@ mod tests {
     async fn settled_nonzero_can_report_without_reopening_an_optional_plan() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![
-                control_step("diagnostic", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("diagnostic", "start_process", json!({"command":"bun","args":["test"]})),
                 control_step("account", "report_completion", json!({
                     "summary":"The diagnostic command exited with code 1; no success claim.",
                     "observed_command_failure_count":1,
@@ -7085,7 +7255,7 @@ mod tests {
         let tools = Arc::new(FailedProcessTool { is_error:true, ..Default::default() });
         let plan = AgentToolPlan::new([
             tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
-            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            tool_binding("start_process", "workspace.process", "workspace.process/start", AgentEffectClass::ExternalUncertainEffect, false),
         ]).unwrap();
         let result = open_session(model.clone(), tools.clone())
             .run_turn(AgentTurnRequest::new(request(), plan, principal(), 0)).await
@@ -7105,7 +7275,7 @@ mod tests {
     async fn terminal_answer_review_is_projected_into_the_next_model_instructions() {
         let model = Arc::new(ObservingModel { requests:Default::default(),
             steps:std::sync::Mutex::new(vec![
-                control_step("diagnostic", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("diagnostic", "start_process", json!({"command":"bun","args":["test"]})),
                 text_step("The diagnostic ended with code 1. This is its result, not a successful test."),
                 control_step("account", "report_completion", json!({
                     "summary":"The diagnostic exited with code 1.","observed_tool_error_count":1,"observed_command_failure_count":1,
@@ -7115,7 +7285,7 @@ mod tests {
         let tools = Arc::new(FailedProcessTool { is_error:true, ..Default::default() });
         let plan = AgentToolPlan::new([
             tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
-            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            tool_binding("start_process", "workspace.process", "workspace.process/start", AgentEffectClass::ExternalUncertainEffect, false),
         ]).unwrap();
         let result = open_session(model.clone(), tools.clone())
             .run_turn(AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
@@ -7129,7 +7299,7 @@ mod tests {
             "a settled terminal answer needs the exact report tool, not another autonomous task attempt");
         assert_eq!(captured[2].input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
             [crate::completion::TOOL_NAME], "a settled terminal answer exposes only its completion control");
-        assert!(captured[1].input.tools.iter().any(|tool| tool.name=="exec_command"));
+        assert!(captured[1].input.tools.iter().any(|tool| tool.name=="start_process"));
         assert_eq!(*tools.calls.lock().unwrap(),["diagnostic"]);
     }
 
@@ -7153,8 +7323,8 @@ mod tests {
                     "output":{"text":"observed\n","dropped_bytes":0,"decode_errors":0}}).to_string(),false))
             }
         }
-        let mut commands=control_step("cwd","exec_command",json!({"command":"/bin/pwd","args":["-P"]}));commands.pop();
-        commands.extend(control_step("entries","exec_command",json!({"command":"/bin/ls","args":["-a"]})));
+        let mut commands=control_step("cwd","start_process",json!({"command":"/bin/pwd","args":["-P"]}));commands.pop();
+        commands.extend(control_step("entries","start_process",json!({"command":"/bin/ls","args":["-a"]})));
         let report=|summary:&str|json!({"summary":summary,"criteria":[{"disposition":"unverified","rationale":"Earlier observations are described without a later file-state claim."}],
             "delivery_items":[{"item_id":"input_0_part_0_line_0","status":"delivered","results":[{"result_ref":"cwd","label":"Directory observation"}]},
                 {"item_id":"input_0_part_0_line_1","status":"delivered","results":[{"result_ref":"remaining-read","label":"Read result"}]}]});
@@ -7166,7 +7336,7 @@ mod tests {
         ])});
         let plan=AgentToolPlan::new([
             tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
-            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+            tool_binding("start_process","workspace.process","workspace.process/start",AgentEffectClass::ExternalUncertainEffect,false),
         ]).unwrap();
         let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {text:"1. Inspect the directory once.\n2. Read a once and give the actual results.".into()}];
         let tools=Arc::new(Tools::default());let result=open_session(model.clone(),tools.clone())
@@ -7191,12 +7361,12 @@ mod tests {
         }
         let model = Arc::new(ObservingModel { requests:Default::default(), steps:std::sync::Mutex::new(vec![
             control_step("plan", "update_plan", json!({"plan":[{"step":"Inspect process","status":"in_progress"}]})),
-            control_step("launch", "exec_command", json!({"command":"worker","args":[]})),
+            control_step("launch", "start_process", json!({"command":"worker","args":[]})),
             text_step("A process is still running."),
             text_step("A process is still running; completion is unproven."),
         ]) });
         let plan = AgentToolPlan::new([
-            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            tool_binding("start_process", "workspace.process", "workspace.process/start", AgentEffectClass::ExternalUncertainEffect, false),
             tool_binding("poll_process", "workspace.process", "workspace.process/poll", AgentEffectClass::ReadOnly, true),
         ]).unwrap();
         assert!(open_session(model.clone(),Arc::new(RunningTool))
@@ -7217,10 +7387,10 @@ mod tests {
     #[tokio::test]
     async fn ignored_completion_choice_cannot_dispatch_another_command() {
         let model = Arc::new(ObservingModel { requests:Default::default(), steps:std::sync::Mutex::new(vec![
-            control_step("diagnostic", "exec_command", json!({"command":"bun","args":["test"]})),
+            control_step("diagnostic", "start_process", json!({"command":"bun","args":["test"]})),
             text_step("The diagnostic exited with code 1."),
             control_step("unrequested-plan", "update_plan", json!({"plan":[{"step":"Repeat diagnostic","status":"in_progress"}]})),
-            control_step("unrequested-repeat", "exec_command", json!({"command":"bun","args":["test"]})),
+            control_step("unrequested-repeat", "start_process", json!({"command":"bun","args":["test"]})),
             control_step("account", "report_completion", json!({
                 "summary":"The diagnostic exited with code 1; the additional command was not executed.",
                 "observed_tool_error_count":1,"observed_command_failure_count":1,
@@ -7231,7 +7401,7 @@ mod tests {
         let tools = Arc::new(FailedProcessTool { is_error:true, ..Default::default() });
         let plan = AgentToolPlan::new([
             tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
-            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            tool_binding("start_process", "workspace.process", "workspace.process/start", AgentEffectClass::ExternalUncertainEffect, false),
         ]).unwrap();
         let result = open_session(model.clone(),tools.clone())
             .run_turn(AgentTurnRequest::new(request(),plan,principal(),0)).await
@@ -7358,9 +7528,9 @@ mod tests {
             }
         }
         let observations=|| {
-            let mut observed=control_step("cwd","exec_command",json!({"command":"/bin/pwd","args":["-P"]}));
+            let mut observed=control_step("cwd","start_process",json!({"command":"/bin/pwd","args":["-P"]}));
             observed.pop();
-            observed.extend(control_step("entries","exec_command",json!({"command":"/bin/ls","args":["-a"]})));
+            observed.extend(control_step("entries","start_process",json!({"command":"/bin/ls","args":["-a"]})));
             observed
         };
         let empty=||vec![Ok(ChatModelEvent::ReasoningDelta {text:
@@ -7377,13 +7547,13 @@ mod tests {
         ])});
         let plan=AgentToolPlan::new([
             tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
-            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+            tool_binding("start_process","workspace.process","workspace.process/start",AgentEffectClass::ExternalUncertainEffect,false),
         ]).unwrap();
         let tools=Arc::new(Tools::default());
         let result=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(request(),plan.clone(),principal(),0)).await.unwrap();
         assert!(model.requests.lock().unwrap()[2].input.tools.iter().any(|tool|tool.name=="read_file"),
             "a reasoning-only stop is not a public closing answer or terminal account");
-        assert!(model.requests.lock().unwrap()[2].input.tools.iter().any(|tool|tool.name=="exec_command"),
+        assert!(model.requests.lock().unwrap()[2].input.tools.iter().any(|tool|tool.name=="start_process"),
             "private pretend calls must not revoke the other already exposed frozen tools during formatting correction");
         let correction = model.requests.lock().unwrap()[2].clone();
         let encoded = serde_json::to_string(&correction.input).unwrap();
@@ -7698,7 +7868,7 @@ mod tests {
                 input_schema:nomifun_agent_contracts::StrictJsonValue(json!({"type":"object"})),deferred:false},
         ];
         let mut slots=AdaptiveContextSlots::default();
-        let phase = synchronize_completion_review(&mut req,&mut slots,true,true,true,false,false);
+        let phase = synchronize_completion_review(&mut req,&mut slots,true,true,true,false,false,false);
         assert_eq!(phase, AgentExecutionPhase::Execution,
             "the plan correction must stay in execution so update_plan can reach its owner");
         assert_eq!(req.input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),["update_plan","report_completion"],
@@ -7709,7 +7879,7 @@ mod tests {
         let mut without_plan=request();
         without_plan.input.tools=vec![crate::completion::definition()];
         let mut without_slots=AdaptiveContextSlots::default();
-        let phase = synchronize_completion_review(&mut without_plan,&mut without_slots,true,true,true,false,false);
+        let phase = synchronize_completion_review(&mut without_plan,&mut without_slots,true,true,true,false,false,false);
         assert_eq!(phase, AgentExecutionPhase::CompletionReview);
         assert_eq!(without_plan.input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),["report_completion"],
             "when update_plan is not exposed the original report narrowing applies");
@@ -7724,7 +7894,7 @@ mod tests {
             crate::completion::definition(),
         ];
         let mut slots=AdaptiveContextSlots::default();
-        let phase = synchronize_completion_review(&mut req,&mut slots,true,true,false,false,false);
+        let phase = synchronize_completion_review(&mut req,&mut slots,true,true,false,false,false,false);
         assert_eq!(phase, AgentExecutionPhase::CompletionReview);
         assert_eq!(req.input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),["report_completion"]);
         assert!(matches!(req.input.tool_choice,ChatToolChoice::Specific{ref name} if name=="report_completion"));
@@ -7755,14 +7925,14 @@ mod tests {
                 "observed_tool_error_count":count,"observed_command_failure_count":0})
         };
         let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
-            control_step("cwd","exec_command",json!({"command":"/bin/pwd","args":["-P"]})),
-            control_step("second-observation","exec_command",json!({"command":"/bin/pwd","args":["-P"]})),
+            control_step("cwd","start_process",json!({"command":"/bin/pwd","args":["-P"]})),
+            control_step("second-observation","start_process",json!({"command":"/bin/pwd","args":["-P"]})),
             control_step("omitted","report_completion",account(false,0)),
             control_step("fixed","report_completion",account(true,1)),
         ])});
         let tools=Arc::new(Tools::default());
         let plan=AgentToolPlan::new([
-            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+            tool_binding("start_process","workspace.process","workspace.process/start",AgentEffectClass::ExternalUncertainEffect,false),
             tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
         ]).unwrap();
         let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {
@@ -7847,9 +8017,9 @@ mod tests {
             control_step("premature-write","write_file",json!({"path":"a","content":"premature-final"})),
             control_step("ordered-plan","update_plan",json!({"plan":[{"step":"Create original then run the specified command","status":"in_progress"}],
                 "exact_actions":[{"id":"create","source":{"input":0,"quote":"Create a once."},"tool":"write_file","expected_arguments":{"path":"a","content":"original"}},
-                    {"id":"command","source":{"input":0,"quote":"Run the original command"},"tool":"exec_command","expected_arguments":{"command":"bun","args":["test"]}}]})),
+                    {"id":"command","source":{"input":0,"quote":"Run the original command"},"tool":"start_process","expected_arguments":{"command":"bun","args":["test"]}}]})),
             control_step("created","write_file",json!({"path":"a","content":"original"})),
-            control_step("original","exec_command",json!({"command":"bun","args":["test"]})),
+            control_step("original","start_process",json!({"command":"bun","args":["test"]})),
             control_step("settled-plan","update_plan",json!({"plan":[{"step":"Create original then run the specified command","status":"completed"}]})),
             control_step("bad-report","report_completion",report(2)),
             control_step("recreated-file","write_file",json!({"path":"a","content":"replayed"})),
@@ -7860,7 +8030,7 @@ mod tests {
         let plan=AgentToolPlan::new([
             tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
             tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false),
-            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+            tool_binding("start_process","workspace.process","workspace.process/start",AgentEffectClass::ExternalUncertainEffect,false),
         ]).unwrap();
         let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {
             text:"1. Create a once.\n2. Run the original command and report without repeating it.".into()}];
@@ -7887,7 +8057,7 @@ mod tests {
             "criteria":[{"disposition":"unverified","rationale":"Only the recorded diagnostic result is disclosed."}]});
         let model = Arc::new(ObservingModel { requests:Default::default(),
             steps:std::sync::Mutex::new(vec![
-                control_step("diagnostic", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("diagnostic", "start_process", json!({"command":"bun","args":["test"]})),
                 control_step("wrong-count", "report_completion", report(0)),
                 control_step("correct-count", "report_completion", report(2)),
                 text_step("No more work is authorized"), text_step("No more work is authorized"),
@@ -7895,7 +8065,7 @@ mod tests {
         let tools = Arc::new(FailedProcessTool { is_error:true, ..Default::default() });
         let plan = AgentToolPlan::new([
             tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
-            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            tool_binding("start_process", "workspace.process", "workspace.process/start", AgentEffectClass::ExternalUncertainEffect, false),
         ]).unwrap();
         let result = open_session(model.clone(), tools.clone()).run_turn(
             AgentTurnRequest::new(request(), plan, principal(), 0)).await.unwrap();
@@ -7911,7 +8081,7 @@ mod tests {
             "observed_tool_error_count":count,"observed_command_failure_count":1,
             "criteria":[{"disposition":"unverified","rationale":"Earlier results are disclosed without a current-state claim."}]});
         let model = Arc::new(ObservingModel { requests:Default::default(), steps:std::sync::Mutex::new(vec![
-            control_step("diagnostic","exec_command",json!({"command":"bun","args":["test"]})),
+            control_step("diagnostic","start_process",json!({"command":"bun","args":["test"]})),
             control_step("wrong-account","report_completion",report(0)),
             control_step("correct-account","report_completion",report(2)),
             control_step("old-undercount","report_completion",report(1)),
@@ -7920,7 +8090,7 @@ mod tests {
         let tools = Arc::new(FailedProcessTool {is_error:true,..Default::default()});
         let plan = AgentToolPlan::new([
             tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
-            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+            tool_binding("start_process","workspace.process","workspace.process/start",AgentEffectClass::ExternalUncertainEffect,false),
         ]).unwrap();
         let result = open_session(model.clone(),tools.clone()).run_turn(
             AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
@@ -7964,7 +8134,7 @@ mod tests {
             "observed_tool_error_count":count,"observed_command_failure_count":1,
             "criteria":[{"disposition":"unverified","rationale":"Only the earlier diagnostic is disclosed."}]});
         let model = Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
-            control_step("diagnostic","exec_command",json!({"command":"bun","args":["test"]})),
+            control_step("diagnostic","start_process",json!({"command":"bun","args":["test"]})),
             control_step("bad-report","report_completion",report(0)),
             control_step("reopen","update_plan",json!({"plan":[{"step":"Repeat the settled diagnostic","status":"in_progress"}]})),
             control_step("fixed-report","report_completion",report(2)),
@@ -7973,7 +8143,7 @@ mod tests {
         let tools = Arc::new(FailedProcessTool {is_error:true,..Default::default()});
         let plan = AgentToolPlan::new([
             tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
-            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+            tool_binding("start_process","workspace.process","workspace.process/start",AgentEffectClass::ExternalUncertainEffect,false),
         ]).unwrap();
         let result = open_session(model.clone(),tools.clone()).run_turn(
             AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
@@ -7994,7 +8164,7 @@ mod tests {
             "observed_tool_error_count":count,"observed_command_failure_count":1,
             "criteria":[{"disposition":"unverified","rationale":"No broader verification is claimed."}]});
         let model = Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
-            control_step("diagnostic","exec_command",json!({"command":"bun","args":["test"]})),
+            control_step("diagnostic","start_process",json!({"command":"bun","args":["test"]})),
             control_step("plan","update_plan",json!({"plan":[{"step":"Diagnose and repair","status":"in_progress"}]})),
             control_step("bad-report","report_completion",report(0)),
             control_step("repair","write_file",json!({"path":"a","content":"after"})),
@@ -8006,7 +8176,7 @@ mod tests {
         let plan = AgentToolPlan::new([
             tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
             tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false),
-            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+            tool_binding("start_process","workspace.process","workspace.process/start",AgentEffectClass::ExternalUncertainEffect,false),
         ]).unwrap();
         let result=open_session(model.clone(),tools.clone()).run_turn(
             AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
@@ -8092,7 +8262,7 @@ mod tests {
     async fn failed_process_exit_activates_replanning_before_a_terminal_reply() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![
-                control_step("failed-exec", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("failed-exec", "start_process", json!({"command":"bun","args":["test"]})),
                 text_step("All done"),
                 text_step("Still done"),
             ]),
@@ -8100,7 +8270,7 @@ mod tests {
         });
         let plan = AgentToolPlan::new([
             tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
-            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            tool_binding("start_process", "workspace.process", "workspace.process/start", AgentEffectClass::ExternalUncertainEffect, false),
         ]).unwrap();
         let result = open_session(model.clone(), Arc::new(FailedProcessTool::default()))
             .run_turn(AgentTurnRequest::new(request(), plan, principal(), 0))
@@ -8118,7 +8288,7 @@ mod tests {
             steps: std::sync::Mutex::new(vec![
                 control_step(
                     "not-started",
-                    "exec_command",
+                    "start_process",
                     json!({"command":"missing-program","args":[]}),
                 ),
                 text_step("All done"),
@@ -8135,9 +8305,9 @@ mod tests {
                 true,
             ),
             tool_binding(
-                "exec_command",
+                "start_process",
                 "workspace.process",
-                "workspace.process/exec",
+                "workspace.process/start",
                 AgentEffectClass::ExternalUncertainEffect,
                 false,
             ),
@@ -8180,22 +8350,22 @@ mod tests {
                 .unwrap()
                 .contains(&json!("observed_tool_error_count"))
         );
-        assert!(requests[1].input.tools.iter().any(|tool| tool.name == "exec_command"));
+        assert!(requests[1].input.tools.iter().any(|tool| tool.name == "start_process"));
     }
 
     #[tokio::test]
     async fn failed_process_keeps_its_name_visible_while_plan_gate_blocks_retry() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![
-                control_step("first-exec", "exec_command", json!({"command":"bun","args":["test"]})),
-                control_step("bad-args", "exec_command", json!({"command":"cmd.exe","args":"[\"/c\",\"dir\",\"/a\"]"})),
-                control_step("held-exec", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("first-exec", "start_process", json!({"command":"bun","args":["test"]})),
+                control_step("bad-args", "start_process", json!({"command":"cmd.exe","args":"[\"/c\",\"dir\",\"/a\"]"})),
+                control_step("held-exec", "start_process", json!({"command":"bun","args":["test"]})),
                 plan_step("in_progress", "inspect"),
-                control_step("after-plan", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("after-plan", "start_process", json!({"command":"bun","args":["test"]})),
             ]),
             requests: std::sync::Mutex::new(Vec::new()),
         });
-        let mut exec = tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false);
+        let mut exec = tool_binding("start_process", "workspace.process", "workspace.process/start", AgentEffectClass::ExternalUncertainEffect, false);
         exec.definition.input_schema = nomifun_agent_contracts::StrictJsonValue(json!({
             "type":"object", "additionalProperties":false,
             "required":["command","args"],
@@ -8215,7 +8385,7 @@ mod tests {
             "neither the malformed nor plan-held retry may cross the owner tool port");
         let requests = model.requests.lock().unwrap();
         assert_eq!(requests.len(), 5);
-        assert!(requests[1].input.tools.iter().any(|tool| tool.name == "exec_command"),
+        assert!(requests[1].input.tools.iter().any(|tool| tool.name == "start_process"),
             "ledger activation must not revoke an advertised frozen tool name");
         assert!(requests[1].input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
         assert!(requests[2].input.messages.iter().flat_map(|message| &message.content).any(|part|
@@ -8226,7 +8396,7 @@ mod tests {
             matches!(part, ChatContentPart::ToolResult { call_id, output, is_error }
                 if call_id.as_ref() == "held-exec" && *is_error
                     && format!("{output:?}").contains("Call update_plan alone now"))));
-        assert!(requests[4].input.tools.iter().any(|tool| tool.name == "exec_command"));
+        assert!(requests[4].input.tools.iter().any(|tool| tool.name == "start_process"));
         let unknown = ChatToolCall {
             call_id: "invented".into(), name: "unknown_exec".into(),
             arguments: nomifun_agent_contracts::StrictJsonValue(json!({})), provider_metadata: None,
@@ -8239,9 +8409,9 @@ mod tests {
     async fn failed_test_command_does_not_block_the_next_repair_in_an_active_plan() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![
-                control_step("failed-first", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("failed-first", "start_process", json!({"command":"bun","args":["test"]})),
                 plan_step("in_progress", "inspect"),
-                control_step("failed-second", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("failed-second", "start_process", json!({"command":"bun","args":["test"]})),
                 control_step("repair", "write_file", json!({"path":"README.md","content":"fixed"})),
                 text_step("done"),
                 text_step("still done"),
@@ -8250,7 +8420,7 @@ mod tests {
         });
         let plan = AgentToolPlan::new([
             tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
-            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+            tool_binding("start_process", "workspace.process", "workspace.process/start", AgentEffectClass::ExternalUncertainEffect, false),
             tool_binding("write_file", "workspace.files", "workspace.files/write", AgentEffectClass::ManagedEffect, false),
         ]).unwrap();
         let tools = Arc::new(ProcessThenWriteTool { writes: AtomicUsize::new(0) });
@@ -9195,7 +9365,7 @@ mod tests {
                         "observation":{"failed_file":1,"published":[0],"restored":[],
                             "restore_published_unconfirmed":[],"retained_created":[],"skipped_changed_or_unreadable":[0],
                             "rollback_failed":[],"temporary_cleanup_unconfirmed":[]},"recovery":"re-read targets"
-                    }).to_string()})
+                    }).to_string(),details:None})
                 }
                 "workspace.files/read" => {
                     let path=path.unwrap();

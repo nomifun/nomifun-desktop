@@ -168,6 +168,8 @@ impl PresetRevisionCompiler {
                 return Err(ControlPlaneError::Wire("default local OS evolution requires the former exact-empty personal Agent".into()));
             }
             payload.enabled_capabilities = nomifun_agent_contracts::default_local_os_capability_selections();
+        } else {
+            payload = nomifun_agent_contracts::bounded_process_launch_payload(&payload);
         }
         let (revision, snapshot) = self.compile_session_configuration(
             owner, preset_id, payload, source_snapshot, catalog,

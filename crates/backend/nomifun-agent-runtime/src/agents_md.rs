@@ -246,6 +246,15 @@ mod tests {
 
     use super::*;
 
+    fn native_path(path: &str) -> String {
+        std::path::Path::new(path)
+            .components()
+            .collect::<std::path::PathBuf>()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
     struct MemoryWorkspace {
         files: BTreeMap<String, String>,
         reads: Mutex<Vec<String>>,
@@ -271,8 +280,8 @@ mod tests {
         let workspace = MemoryWorkspace {
             files: BTreeMap::from([
                 ("AGENTS.md".to_owned(), "root".to_owned()),
-                ("crates/AGENTS.md".to_owned(), "crates".to_owned()),
-                ("crates/runtime/AGENTS.md".to_owned(), "runtime".to_owned()),
+                (native_path("crates/AGENTS.md"), "crates".to_owned()),
+                (native_path("crates/runtime/AGENTS.md"), "runtime".to_owned()),
             ]),
             reads: Mutex::new(Vec::new()),
         };
@@ -290,9 +299,9 @@ mod tests {
             context
                 .layers
                 .iter()
-                .map(|layer| layer.path.as_str())
+                .map(|layer| layer.path.clone())
                 .collect::<Vec<_>>(),
-            vec!["AGENTS.md", "crates/AGENTS.md", "crates/runtime/AGENTS.md"]
+            vec![native_path("AGENTS.md"), native_path("crates/AGENTS.md"), native_path("crates/runtime/AGENTS.md")]
         );
         assert!(context.combined.find("root").unwrap() < context.combined.find("runtime").unwrap());
     }
@@ -311,7 +320,7 @@ mod tests {
             )
             .await.unwrap();
         assert!(result.layers.is_empty());
-        assert!(workspace.reads.lock().unwrap().iter().any(|path| path == "../outside/AGENTS.md"));
+        assert!(workspace.reads.lock().unwrap().iter().any(|path| path == &native_path("../outside/AGENTS.md")));
     }
 
     #[tokio::test]

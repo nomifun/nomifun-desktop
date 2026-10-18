@@ -40,7 +40,6 @@ type TConversationRuntimeStateKind = 'idle' | 'starting' | 'running' | 'waiting'
 type TConversationRuntimeSummary = {
   state: TConversationRuntimeStateKind;
   can_send_message: boolean;
-  can_steer?: boolean;
   is_processing: boolean;
   turn_outcome?: import('../protocolBindings/AgentTurnOutcome').AgentTurnOutcome;
   /** Exact backend turn currently owning this runtime. This is lifecycle
@@ -255,6 +254,4 @@ export interface ICssTheme {
   cover?: string; // 封面图片 base64 或 URL / Cover image base64 or URL
   css: string; // CSS 样式代码 / CSS style code
   is_preset?: boolean; // 是否为预设主题 / Whether it's a preset theme
-  created_at: number; // 创建时间 / Creation time
-  updated_at: number; // 更新时间 / Update time
 }

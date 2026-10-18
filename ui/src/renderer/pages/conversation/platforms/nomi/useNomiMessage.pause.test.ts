@@ -77,13 +77,14 @@ test('cold paused hydration shows the cause without completing or rewriting the 
 });
 
 test('parked hydration and resume retain the same Turn without a terminal or a pause error', async () => {
-  const waiting = { ...processing, runtime: { ...processing.runtime!, state: 'waiting', is_processing: false, can_steer: true,
+  const waiting = { ...processing, runtime: { ...processing.runtime!, state: 'waiting', is_processing: false,
     turn_outcome: { kind: 'waiting', wait_seq: 41, request_id: 'authorize', reason: 'user_input' } } } as TChatConversation;
   const run = await mount(waiting);
   expect(run.hook.result.current.running).toBe(true);
   expect(run.hook.result.current.activeTurnId).toBe(turnId);
+  expect(run.hook.result.current.executing).toBe(false);
   expect(run.hook.result.current.waitingNotice).toEqual({ turnId,
-    outcome: { kind: 'waiting', wait_seq: 41, request_id: 'authorize', reason: 'user_input' }, canSteer: true });
+    outcome: { kind: 'waiting', wait_seq: 41, request_id: 'authorize', reason: 'user_input' } });
   expect(run.hook.result.current.pauseNotice).toBeNull();
   const completions = run.hook.result.current.getTurnCompletionGeneration();
   run.project(processing);
@@ -93,6 +94,7 @@ test('parked hydration and resume retain the same Turn without a terminal or a p
   await waitFor(() => expect(run.hook.result.current.waitingNotice).toBeNull());
   expect(run.hook.result.current.running).toBe(true);
   expect(run.hook.result.current.activeTurnId).toBe(turnId);
+  expect(run.hook.result.current.executing).toBe(true);
   expect(run.hook.result.current.getTurnCompletionGeneration()).toBe(completions);
   expect(run.persist).not.toHaveBeenCalled();
 });

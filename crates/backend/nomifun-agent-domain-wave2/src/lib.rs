@@ -173,7 +173,6 @@ pub const WORKSPACE_VCS_ACTION_IDS: &[&str] = &[
     "workspace.vcs/push",
 ];
 pub const WORKSPACE_PROCESS_ACTION_IDS: &[&str] = &[
-    "workspace.process/exec",
     "workspace.process/start",
     "workspace.process/poll",
     "workspace.process/input",
@@ -417,7 +416,6 @@ pub enum Wave2TypedCapabilityOperation {
     WorkspaceVcsStage { input: StrictJsonValue },
     WorkspaceVcsCommit { input: StrictJsonValue },
     WorkspaceVcsPush { input: StrictJsonValue },
-    WorkspaceProcessExec { input: StrictJsonValue },
     WorkspaceProcessStart { input: StrictJsonValue },
     WorkspaceProcessPoll { input: StrictJsonValue },
     WorkspaceProcessInput { input: StrictJsonValue },
@@ -457,8 +455,7 @@ impl Wave2TypedCapabilityOperation {
             | Self::WorkspaceVcsStage { .. }
             | Self::WorkspaceVcsCommit { .. }
             | Self::WorkspaceVcsPush { .. } => WORKSPACE_VCS_MODULE_ID,
-            Self::WorkspaceProcessExec { .. }
-            | Self::WorkspaceProcessStart { .. }
+            Self::WorkspaceProcessStart { .. }
             | Self::WorkspaceProcessPoll { .. }
             | Self::WorkspaceProcessInput { .. }
             | Self::WorkspaceProcessCloseStdin { .. }
@@ -497,7 +494,6 @@ impl Wave2TypedCapabilityOperation {
             Self::WorkspaceVcsStage { .. } => "workspace.vcs/stage",
             Self::WorkspaceVcsCommit { .. } => "workspace.vcs/commit",
             Self::WorkspaceVcsPush { .. } => "workspace.vcs/push",
-            Self::WorkspaceProcessExec { .. } => "workspace.process/exec",
             Self::WorkspaceProcessStart { .. } => "workspace.process/start",
             Self::WorkspaceProcessPoll { .. } => "workspace.process/poll",
             Self::WorkspaceProcessInput { .. } => "workspace.process/input",
@@ -537,7 +533,6 @@ impl Wave2TypedCapabilityOperation {
             | Self::WorkspaceVcsStage { input }
             | Self::WorkspaceVcsCommit { input }
             | Self::WorkspaceVcsPush { input }
-            | Self::WorkspaceProcessExec { input }
             | Self::WorkspaceProcessStart { input }
             | Self::WorkspaceProcessPoll { input }
             | Self::WorkspaceProcessInput { input }
@@ -635,6 +630,7 @@ impl Wave2HostRequest {
 pub struct Wave2HostPortError {
     pub code: String,
     pub message: String,
+    pub details: Option<serde_json::Value>,
 }
 
 impl Wave2HostPortError {
@@ -642,7 +638,15 @@ impl Wave2HostPortError {
         Self {
             code: code.into(),
             message: message.into(),
+            details: None,
         }
+    }
+
+    /// Attach typed owner diagnostics without encoding them in display text.
+    /// The engine applies its bounded, redacted projection before exposure.
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
     }
 
     pub fn unavailable(message: impl Into<String>) -> Self {
@@ -933,7 +937,6 @@ const WORKSPACE_VCS_ACTIONS: &[ActionDefinition] = &[
 ];
 
 const WORKSPACE_PROCESS_ACTIONS: &[ActionDefinition] = &[
-    ActionDefinition::function("workspace.process/exec", EffectClass::ExecuteLocal),
     ActionDefinition::function("workspace.process/start", EffectClass::ExecuteLocal),
     ActionDefinition::function("workspace.process/poll", EffectClass::ReadLocal),
     ActionDefinition::function("workspace.process/input", EffectClass::ExecuteLocal),
@@ -1488,7 +1491,7 @@ fn action_input_schema(action_id: &str) -> StrictJsonValue {
                 "element":browser_observed_element_schema(),
                 "files":{
                     "type":"array",
-                    "items":{"type":"string","minLength":1,"maxLength":4096},
+                    "items":{"type":"string","minLength":1,"maxLength":4096,"description":"Local native absolute file path or path relative to the Session default directory; parent traversal, legal links, Windows drive/UNC paths and mounted volumes follow native OS semantics."},
                     "minItems":1,
                     "maxItems":16
                 }
@@ -1941,7 +1944,10 @@ impl CapabilityHandler for Wave2CapabilityHandler {
 }
 
 fn wave2_host_error_to_kernel(error: Wave2HostPortError) -> KernelError {
-    KernelError::capability_execution_failed(error.canonical_code(), error.message)
+    let code = error.canonical_code();
+    let mut failure = nomifun_agent_kernel::CapabilityExecutionFailure::new(code, error.message);
+    failure.details = error.details;
+    KernelError::CapabilityExecutionFailed { failure }
 }
 
 fn wave2_input_error_to_kernel(error: KernelError) -> KernelError {
@@ -2006,9 +2012,6 @@ pub fn typed_operation_for(
         }
         (WORKSPACE_VCS_MODULE_ID, "workspace.vcs/push") => {
             Wave2TypedCapabilityOperation::WorkspaceVcsPush { input }
-        }
-        (WORKSPACE_PROCESS_MODULE_ID, "workspace.process/exec") => {
-            Wave2TypedCapabilityOperation::WorkspaceProcessExec { input }
         }
         (WORKSPACE_PROCESS_MODULE_ID, "workspace.process/start") => {
             Wave2TypedCapabilityOperation::WorkspaceProcessStart { input }
@@ -4184,11 +4187,28 @@ mod tests {
             .expect("Wave 2 host errors cross the Kernel as a typed failure");
         assert_eq!(failure.code.as_ref(), "VCS_OWNER_REJECTED");
         assert_eq!(failure.message, "VCS owner rejected the request");
+        assert_eq!(failure.details, None);
 
         let invalid = wave2_input_error_to_kernel(KernelError::CapabilityExecution {
             reason: "request body was invalid".to_owned(),
         });
         assert_eq!(invalid.canonical_code().as_ref(), INVALID_PAYLOAD);
+    }
+
+    #[test]
+    fn native_owner_failure_details_cross_the_kernel_without_message_parsing() {
+        let details = serde_json::json!({"native_file_error": {
+            "code": "RESOURCE_NOT_FOUND", "message": "share is unavailable",
+            "kind": "NotFound", "raw_os_error": 53,
+        }});
+        let error = Wave2HostPortError::new("INVALID_PAYLOAD", "an unrelated outer diagnostic")
+            .with_details(details.clone());
+        assert_eq!(error.clone().details, Some(details.clone()));
+        let kernel_error = wave2_host_error_to_kernel(error);
+        let failure = kernel_error.capability_execution_failure().unwrap();
+        assert_eq!(failure.code.as_ref(), "INVALID_PAYLOAD");
+        assert_eq!(failure.message, "an unrelated outer diagnostic");
+        assert_eq!(failure.details, Some(details));
     }
 
     #[test]

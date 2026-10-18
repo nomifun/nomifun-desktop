@@ -18,12 +18,12 @@ pub struct EngineHistoryRecord {
 }
 
 pub struct EngineHistoryTurn {
-    pub source_seq: u64,
+    /// The actual turn/started sequence anchors history merging and budgets.
+    pub claim_seq: u64,
     pub unstarted_terminal: bool,
     pub operation_id: String,
     pub receipt_status: String,
     pub root_content_json: String,
-    pub request_payload_json: String,
     pub records: Vec<EngineHistoryRecord>,
     pub serialized_bytes: usize,
 }
@@ -38,21 +38,35 @@ fn failure(message: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Engine history: {message}"))
 }
 
-fn require_prior_cursor(cursor_seq: u64, accepted_root_seq: u64) -> Result<(), AppError> {
-    if cursor_seq >= accepted_root_seq {
-        return Err(failure("historical cursor is not before the fixed accepted root"));
+fn require_prior_cursor(cursor_seq: u64, current_claim_seq: u64) -> Result<(), AppError> {
+    if cursor_seq >= current_claim_seq {
+        return Err(failure("historical cursor is not before the fixed Turn claim"));
     }
     Ok(())
 }
 
-fn addressed_turn_eligible(event: &SessionEventRecord, fixed_root: u64, floor: u64, operation: &str) -> bool {
-    event.kind.0 == "turn/started" && event.seq > floor && event.seq < fixed_root
+fn addressed_turn_eligible(event: &SessionEventRecord, current_claim: u64, floor: u64, operation: &str) -> bool {
+    event.kind.0 == "turn/started" && event.seq > floor && event.seq < current_claim
         && event.correlation_id.as_ref() == operation
 }
 
-fn addressed_terminal_eligible(terminal: &SessionEventRecord, started: u64, fixed_root: u64) -> bool {
+fn addressed_terminal_eligible(terminal: &SessionEventRecord, started: u64, current_claim: u64) -> bool {
     matches!(terminal.kind.0.as_str(), "turn/completed" | "turn/failed" | "turn/cancelled")
-        && terminal.seq > started && terminal.seq < fixed_root
+        && terminal.seq > started && terminal.seq < current_claim
+}
+
+/// Acceptance can precede the previous Turn's final output. Freeze history at
+/// this Turn's actual claim, while retaining the original accepted causality.
+fn current_history_boundary(events:&[SessionEventRecord],payloads:&BTreeMap<String,Value>,
+    operation:&str,root:&SessionEventRecord)->Result<u64,AppError> {
+    let starts=events.iter().filter(|event|event.agent_session_id==root.agent_session_id
+        && event.kind.0=="turn/started" && event.correlation_id.as_ref()==operation).collect::<Vec<_>>();
+    let [start]=starts.as_slice() else {return Err(failure("current Turn has no unique canonical claim"));};
+    if start.kind_version!=1 || start.seq<=root.seq || start.causation_event_id.as_ref()!=Some(&root.event_id)
+        || payloads.get(start.event_id.as_ref()).and_then(|payload|payload.get("source_message_id")).and_then(Value::as_str)!=Some(root.event_id.as_ref()) {
+        return Err(failure("current Turn claim differs from its original accepted input"));
+    }
+    Ok(start.seq)
 }
 
 fn native_replay_floor(
@@ -172,8 +186,8 @@ pub(super) async fn load_before(
     load_selected(store, receipt, limit, before_operation, None).await
 }
 
-/// Exact addressed data-only history uses the same owner facts, fixed accepted
-/// root, clear-context/Agent-transition floor and complete journal decoder as
+/// Exact addressed data-only history uses the same owner facts, fixed execution
+/// claim, clear-context/Agent-transition floor and complete journal decoder as
 /// the ordinary reader. It selects one eligible CLOSED Turn, not a later cursor.
 pub(super) async fn load_exact(
     store: &AgentSessionStore,
@@ -210,6 +224,7 @@ async fn load_selected(
         .iter()
         .find(|event| event.event_id.as_ref() == receipt.root_message_id())
         .ok_or_else(|| failure("current root message is missing"))?;
+    let current_boundary=current_history_boundary(&facts.events,&facts.event_payloads,receipt.operation_id(),current_root)?;
     let before_seq = match before_operation {
         Some(operation) => facts
             .events
@@ -219,15 +234,15 @@ async fn load_selected(
             })
             .ok_or_else(|| failure("historical cursor is outside the current Session"))?
             .seq,
-        None => current_root.seq,
+        None => current_boundary,
     };
-    if before_operation.is_some() {require_prior_cursor(before_seq,current_root.seq)?;}
+    if before_operation.is_some() {require_prior_cursor(before_seq,current_boundary)?;}
     let mut turns = facts
         .events
         .iter()
         .filter(|event| {
             event.kind.0 == "turn/started" && event.seq < before_seq && event.seq > floor
-                && exact_operation.is_none_or(|operation| addressed_turn_eligible(event,current_root.seq,floor,operation))
+                && exact_operation.is_none_or(|operation| addressed_turn_eligible(event,current_boundary,floor,operation))
         })
         .collect::<Vec<_>>();
     turns.sort_by_key(|event| std::cmp::Reverse(event.seq));
@@ -246,7 +261,7 @@ async fn load_selected(
     let mut window_budget = 32 * 1024 * 1024usize;
     for turn in turns.into_iter().take(limit) {
         let operation_id = turn.correlation_id.as_ref().to_owned();
-        let (root, root_payload) = source_message(&facts, turn)?;
+        let (_, root_payload) = source_message(&facts, turn)?;
         let terminal = facts.events.iter().find(|event| {
             event.correlation_id == turn.correlation_id
                 && matches!(
@@ -255,17 +270,16 @@ async fn load_selected(
                 )
         });
         if exact_operation.is_some() && !terminal.is_some_and(|terminal|
-            addressed_terminal_eligible(terminal,turn.seq,current_root.seq))
+            addressed_terminal_eligible(terminal,turn.seq,current_boundary))
         {
-            return Err(failure("exact historical Turn is not canonically closed before the accepted root"));
+            return Err(failure("exact historical Turn is not canonically closed before the current claim"));
         }
         let receipt_status = terminal
             .map(|event| event.kind.0.trim_start_matches("turn/").to_owned())
             .unwrap_or_else(|| "running".to_owned());
         let mut records = Vec::new();
-        let mut serialized_bytes = serde_json::to_vec(root_payload)
-            .map_err(failure)?
-            .len();
+        let root_content_json = serde_json::to_string(root_payload).map_err(failure)?;
+        let mut serialized_bytes = root_content_json.len();
         let mut progress = facts
             .events
             .iter()
@@ -318,7 +332,6 @@ async fn load_selected(
             break;
         }
         total = total.saturating_add(serialized_bytes);
-        let root_content_json = serde_json::to_string(root_payload).map_err(failure)?;
         let unstarted_terminal = records.is_empty()
             && terminal.is_some_and(|terminal| {
                 terminal.kind.0 == "turn/cancelled"
@@ -332,11 +345,10 @@ async fn load_selected(
                 && (event.kind.0 == "context/model-visible-applied"
                     || event.kind.0.starts_with("tool/") || event.kind.0.starts_with("effect/")));
         window.turns.push(EngineHistoryTurn {
-            source_seq: root.seq,
+            claim_seq: turn.seq,
             unstarted_terminal,
             operation_id,
             receipt_status,
-            request_payload_json: root_content_json.clone(),
             root_content_json,
             records,
             serialized_bytes,
@@ -346,10 +358,11 @@ async fn load_selected(
         let context_floor = facts.events.iter().filter(|event| event.kind.0 == "context/cleared")
             .map(|event| event.seq).max().unwrap_or(0);
         let retained_floor = if window.has_older {
-            window.turns.last().map_or(context_floor, |turn| turn.source_seq.saturating_sub(1))
+            window.turns.last().map_or(context_floor, |turn| turn.claim_seq.saturating_sub(1))
         } else { context_floor };
+        let historical_events=facts.events.iter().filter(|event|event.event_id!=current_root.event_id).cloned().collect::<Vec<_>>();
         window.context_messages = canonical_context_messages(
-            &facts.events, &facts.event_payloads, retained_floor, floor, current_root.seq,
+            &facts.session.owner_ref, &historical_events, &facts.event_payloads, retained_floor, floor, current_boundary,
         ).map_err(failure)?;
         if context_floor == 0 && !window.has_older {
             if let Some(base) = &facts.fork_context {
@@ -379,6 +392,20 @@ mod tests {
         assert!(require_prior_cursor(10,10).is_err());
         assert!(require_prior_cursor(11,10).is_err());
         assert!(require_prior_cursor(u64::MAX,10).is_err());
+    }
+
+    #[test]
+    fn queued_input_reads_predecessor_output_until_its_actual_claim_not_early_acceptance() {
+        let root=event(10,"message/user-accepted");
+        let mut current=event(30,"turn/started");current.correlation_id="current".into();current.causation_event_id=Some(root.event_id.clone());
+        let mut terminal=event(20,"turn/completed");terminal.correlation_id="previous".into();
+        let payloads=BTreeMap::from([(current.event_id.as_ref().to_owned(),serde_json::json!({"source_message_id":root.event_id}))]);
+        let boundary=current_history_boundary(&[root.clone(),terminal.clone(),current.clone()],&payloads,"current",&root).unwrap();
+        assert_eq!(boundary,30);
+        assert!(addressed_terminal_eligible(&terminal,3,boundary),"previous output finished after this message was saved, before it started work");
+        assert!(!addressed_terminal_eligible(&terminal,3,root.seq),"the retired acceptance-time bound would lose the real predecessor output");
+        current.causation_event_id=Some("unrelated-input".into());
+        assert!(current_history_boundary(&[root.clone(),current],&payloads,"current",&root).is_err());
     }
 
     #[test]
@@ -540,7 +567,7 @@ mod tests {
     fn context_rows(rows: Vec<(SessionEventRecord, Value)>, floor: u64, native_floor: u64, before: u64)
         -> Result<Vec<CanonicalContextMessage>, AppError> {
         let payloads = rows.iter().map(|(event, value)| (event.event_id.as_ref().to_owned(), value.clone())).collect();
-        canonical_context_messages(&rows.into_iter().map(|(event, _)| event).collect::<Vec<_>>(),
+        canonical_context_messages(&nomifun_agent_contracts::PrincipalRef {principal_kind:"user".into(),principal_id:"test-owner".into()}, &rows.into_iter().map(|(event, _)| event).collect::<Vec<_>>(),
             &payloads, floor, native_floor, before).map_err(failure)
     }
 

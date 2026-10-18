@@ -221,8 +221,8 @@ pub struct CompanionService {
     authoritative_user_id: Arc<str>,
     /// Shared multi-companion home (`{data_dir}/companion/shared`): config + events + db.
     shared_dir: PathBuf,
-    /// Cached ML assets (`{data_dir}/companion/models`): the MODNet matting model
-    /// proxied + served locally (see [`crate::matting_model`]).
+    /// Persistent ML asset cache (`{data_dir}/companion/models`), owned and
+    /// integrity-verified by the backend (see [`crate::matting_model`]).
     models_dir: PathBuf,
     /// Serializes first-time matting-model downloads (one fetch for N callers).
     model_lock: Mutex<()>,
@@ -924,16 +924,12 @@ impl CompanionService {
             .ok_or_else(|| AppError::NotFound(format!("companion '{companion_id}' has no custom figure")))
     }
 
-    // ----- matting model proxy (fixes the DIY 30s-timeout dead-end) -----
+    // ----- verified matting model supply -----
 
-    /// Ensure the MODNet matting model is cached on disk and return its bytes.
-    /// Downloads from a mirror on first use (uncapped, so a slow 25 MB transfer
-    /// completes instead of being killed by the old in-worker 30 s timeout).
+    /// Return bytes matching the shared pinned model identity. The backend is
+    /// the persistent cache owner and reacquires missing or corrupt artifacts.
     pub async fn matting_model_bytes(&self) -> Result<Vec<u8>, AppError> {
-        let path = crate::matting_model::ensure_model(&self.models_dir, &self.model_lock).await?;
-        tokio::fs::read(&path)
-            .await
-            .map_err(|e| AppError::Internal(format!("read matting model: {e}")))
+        crate::matting_model::model_bytes(&self.models_dir, &self.model_lock).await
     }
 
     // ----- custom-figure library (decoupled from companions) -----

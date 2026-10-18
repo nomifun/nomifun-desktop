@@ -54,6 +54,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new(managed_source: bool) -> Self {
+        Self::with_previous_contract(managed_source,false).await
+    }
+
+    async fn with_previous_contract(managed_source: bool, start_only_defaults: bool) -> Self {
         let upstream = MockServer::start().await;
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
@@ -108,6 +112,7 @@ impl Fixture {
         };
         // workspace.files is present on every supported host. The mechanism
         // deliberately has no Browser, application version, or digest exception.
+        if !start_only_defaults {
         let capability = previous.content.enabled_capabilities.iter_mut()
             .find(|capability| capability.capability.id.as_ref() == "workspace.files").unwrap();
         assert_eq!(capability.resolved_source.source_kind, PluginSourceKind::Bundled);
@@ -129,17 +134,45 @@ impl Fixture {
             provider.provider.role.contract_digest = digest_payload(&"previous bundled role").unwrap();
             provider.provider.contribution_digest = digest_payload(&"previous bundled provider").unwrap();
         }
+        }
+        // Preserve a real old grant ceiling: this Session selected only the
+        // retired synchronous launch, not poll or stdin controls. The forward
+        // launch transition must not silently add those unselected Actions.
+        let process = previous.content.enabled_capabilities.iter_mut()
+            .find(|capability|capability.capability.id.as_ref()=="workspace.process").unwrap();
+        if start_only_defaults {
+            let start=process.actions.iter().find(|action|action.action_id.as_ref()=="workspace.process/start").unwrap();
+            let mut prior_schema=nomifun_agent_domain_wave2::resolve_action_schema("workspace.process",&start.input_schema).unwrap();
+            prior_schema.0["properties"]["timeout_ms"]["default"]=json!(30000);
+            prior_schema.0["properties"]["timeout_ms"]["maximum"]=json!(600000);
+            prior_schema.0["properties"]["wait_ms"]["default"]=json!(0);
+            let lock=process.contribution_lock.clone();
+            process.actions.iter_mut().find(|action|action.action_id.as_ref()=="workspace.process/start").unwrap().input_schema=
+                format!("schema://fixture.previous/process-start/input#{}",digest_payload(&prior_schema).unwrap().as_ref()).into();
+            process.schema_digest=digest_payload(&("previous process defaults",&prior_schema)).unwrap();
+            process.contribution_lock.contract_digest=process.schema_digest.clone();
+            process.target_artifact_digest=digest_payload(&"previous bounded launch artifact").unwrap();
+            for saved in &mut revision.contribution_locks {if *saved==lock {*saved=process.contribution_lock.clone();}}
+            process.action_allowlist=std::collections::BTreeSet::from(["workspace.process/start".into()]);
+        } else {
+            let mut retired_launch = process.actions.iter().find(|action|action.action_id.as_ref()=="workspace.process/start").unwrap().clone();
+            retired_launch.action_id = "workspace.process/exec".into();
+            process.actions.insert(0,retired_launch);
+            process.action_allowlist = std::collections::BTreeSet::from(["workspace.process/exec".into()]);
+        }
+        revision.payload.enabled_capabilities.iter_mut().find(|selection|selection.capability.id.as_ref()=="workspace.process")
+            .unwrap().action_allowlist = process.action_allowlist.clone();
         // The immediately preceding current-generation publisher did not
         // encode per-Action resource operations. Its exact execution ceiling
         // was the complete owning module resource-kind set, including the
         // empty set for hidden tool discovery. Exercise the real forward
         // transition for every Action, rather than merely changing an input
         // schema on one already-normalized capability.
-        for capability in &mut previous.content.enabled_capabilities {
+        if !start_only_defaults { for capability in &mut previous.content.enabled_capabilities {
             for action in &mut capability.actions {
                 action.required_resource_operations = None;
             }
-        }
+        }}
         let latest: i64 = sqlx::query_scalar("SELECT MAX(revision_no) FROM agent_preset_revisions WHERE preset_id=?")
             .bind(reference.preset_id.as_ref()).fetch_one(pool).await.unwrap();
         revision.reference.revision = u64::try_from(latest).unwrap() + 1;
@@ -323,6 +356,13 @@ async fn bundled_contract_evolution_prepares_warmup_send_and_model_with_canonica
         assert_eq!(transitioned.agent_binding.typed_resource_bindings, fixture.old_binding.typed_resource_bindings);
         assert!(transitioned.agent_binding.binding_version > fixture.old_binding.binding_version);
         assert_ne!(transitioned.agent_binding.resolved_snapshot_ref, fixture.old_binding.resolved_snapshot_ref);
+        let current_json: String = sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
+            .bind(transitioned.agent_binding.resolved_snapshot_ref.snapshot_id.as_ref()).fetch_one(fixture.services.database.pool()).await.unwrap();
+        let current: ResolvedSnapshotEnvelope = serde_json::from_str(&current_json).unwrap();
+        let process = current.content.enabled_capabilities.iter().find(|capability|capability.capability.id.as_ref()=="workspace.process").unwrap();
+        assert_eq!(process.action_allowlist,std::collections::BTreeSet::from(["workspace.process/start".into()]),
+            "the exact old launch grant becomes bounded launch without new control authority");
+        assert!(!process.actions.iter().any(|action|action.action_id.as_ref()=="workspace.process/exec"));
         let requests = fixture.requests.lock().unwrap();
         assert!(requests.last().unwrap()["messages"].to_string().contains(OLD_INPUT), "old input enters the actual next model request as canonical context");
         drop(requests);
@@ -332,6 +372,52 @@ async fn bundled_contract_evolution_prepares_warmup_send_and_model_with_canonica
         let old_json: String = sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
             .bind(fixture.previous.snapshot_ref.snapshot_id.as_ref()).fetch_one(fixture.services.database.pool()).await.unwrap();
         assert_eq!(serde_json::from_str::<ResolvedSnapshotEnvelope>(&old_json).unwrap(), fixture.previous, "normal preparation preserves immutable old Snapshot");
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn prior_start_schema_defaults_evolve_only_at_idle_and_leave_authority_and_history_exact() {
+    let fixture=Fixture::with_previous_contract(false,true).await;
+    let old_start=fixture.previous.content.enabled_capabilities.iter().find(|capability|capability.capability.id.as_ref()=="workspace.process").unwrap()
+        .actions.iter().find(|action|action.action_id.as_ref()=="workspace.process/start").unwrap().clone();
+    for trigger in ["warmup","send","model"] {
+        let id=fixture.old_session(false).await;let sid=id.as_ref();
+        match trigger {
+            "warmup"=>{call(&fixture.router,"POST",&format!("/api/agent-sessions/{sid}/warmup"),json!({})).await;},
+            "model"=>{call(&fixture.router,"PUT",&format!("/api/agent-sessions/{sid}/model"),fixture.second_model.clone()).await;},
+            _=>{},
+        }
+        let before=fixture.requests.lock().unwrap().len();
+        let operation=fixture.start(&id).await;
+        fixture.wait_for_reply(&id,&operation).await;
+        assert_eq!(fixture.transitions(&id).await,1);
+        let binding=fixture.store.get_live_session(&id).await.unwrap().agent_binding;
+        assert_eq!(binding.typed_resource_bindings,fixture.old_binding.typed_resource_bindings);
+        let current_json:String=sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
+            .bind(binding.resolved_snapshot_ref.snapshot_id.as_ref()).fetch_one(fixture.services.database.pool()).await.unwrap();
+        let current:ResolvedSnapshotEnvelope=serde_json::from_str(&current_json).unwrap();
+        let process=current.content.enabled_capabilities.iter().find(|capability|capability.capability.id.as_ref()=="workspace.process").unwrap();
+        assert_eq!(process.action_allowlist,std::collections::BTreeSet::from(["workspace.process/start".into()]));
+        let start=process.actions.iter().find(|action|action.action_id.as_ref()=="workspace.process/start").unwrap();
+        assert_ne!(start.input_schema,old_start.input_schema);
+        assert_eq!(start.effect_class,old_start.effect_class);
+        assert_eq!(start.required_resource_operations,old_start.required_resource_operations);
+        let requests=fixture.requests.lock().unwrap();
+        let starts=requests[before..].iter().flat_map(|request|request["tools"].as_array().into_iter().flatten())
+            .filter(|tool|tool["function"]["name"]=="start_process").collect::<Vec<_>>();
+        assert!(!starts.is_empty(),"the evolved launch definition must reach the actual model boundary");
+        for tool in starts {
+            let parameters=&tool["function"]["parameters"];
+            assert!(parameters["properties"]["timeout_ms"].get("default").is_none());
+            assert!(parameters["properties"]["timeout_ms"].get("maximum").is_none());
+            assert_eq!(parameters["properties"]["wait_ms"]["default"],1000);
+            let text=tool.to_string();assert!(!text.contains("Default 30000") && !text.contains("default 30000"));
+        }
+        drop(requests);
+        let old_json:String=sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
+            .bind(fixture.previous.snapshot_ref.snapshot_id.as_ref()).fetch_one(fixture.services.database.pool()).await.unwrap();
+        assert_eq!(serde_json::from_str::<ResolvedSnapshotEnvelope>(&old_json).unwrap(),fixture.previous);
     }
     fixture.finish().await;
 }

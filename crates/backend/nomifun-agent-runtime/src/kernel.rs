@@ -437,7 +437,7 @@ mod tests {
                 },
                 CancellationToken::new(),
             ).await.unwrap_err();
-            let AgentEngineError::CapabilityKernel { code,message } = error else {
+            let AgentEngineError::CapabilityKernel { code,message,.. } = error else {
                 panic!("Runtime changed settlement loss error class")
             };
             assert_eq!(code,"CAPABILITY_UNAVAILABLE");

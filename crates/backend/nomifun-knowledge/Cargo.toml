@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+nomi-native-files.workspace = true
 nomifun-common.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-db.workspace = true

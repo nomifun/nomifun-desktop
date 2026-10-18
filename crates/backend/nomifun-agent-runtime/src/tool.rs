@@ -16,6 +16,17 @@ pub use nomifun_engine_core::{
     EngineToolResult as AgentToolResult, RuntimeToolHoldReason,
 };
 
+/// Preserve the owner's optional typed details in the ordinary canonical
+/// tool-result carrier. Callers retain their existing None/error semantics;
+/// a message that happens to contain JSON never supplies typed details.
+pub(crate) fn typed_owner_error_result(
+    call_id: nomifun_chat_model_broker::ToolCallId,
+    error: &AgentEngineError,
+) -> Option<AgentToolResult> {
+    let AgentEngineError::CapabilityKernel { code, message, details: Some(details) } = error else { return None; };
+    Some(AgentToolResult::text(call_id, serde_json::json!({"code":code,"message":message,"details":details}).to_string(), true))
+}
+
 #[async_trait]
 pub trait AgentToolInvoker: Send + Sync {
     async fn invoke(

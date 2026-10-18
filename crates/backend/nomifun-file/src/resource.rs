@@ -125,7 +125,11 @@ impl AgentSessionWorkspaceBinding {
         {
             return Err(AppError::BadRequest("use an absolute drive/UNC path or a path relative to the Session default directory".into()));
         }
-        Ok(if path.is_absolute() { path.to_owned() } else { self.workspace_root.join(path) })
+        let resolved = if path.is_absolute() { path.to_owned() } else { self.workspace_root.join(path) };
+        #[cfg(windows)]
+        { nomi_native_files::windows::normalize_path(&resolved).map_err(|error| crate::path_safety::native_io_error("resolving native Windows file path", error)) }
+        #[cfg(not(windows))]
+        { Ok(resolved) }
     }
 
     /// Project APIs (VCS, inventories and artifact ownership) retain a real
@@ -208,7 +212,10 @@ mod tests {
         let scope = AgentSessionWorkspaceBinding::new(valid_session_id(), binding(), &root)
             .expect("valid workspace binding");
         for path in ["../outside", r"nested\outside", ".nomifun/artifacts/receipt", "./.nomifun/artifacts/receipt", "nested//file.txt", "./nested/file.txt"] {
+            #[cfg(not(windows))]
             assert_eq!(scope.resolve_path(path).unwrap(), root.join(path));
+            #[cfg(windows)]
+            assert_eq!(scope.resolve_path(path).unwrap(), nomi_native_files::windows::normalize_path(&root.join(path)).unwrap());
         }
         assert!(scope.resolve_path("bad\0path").is_err());
         let absolute = root.parent().unwrap().join("outside");

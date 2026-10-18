@@ -86,7 +86,7 @@ const SiderThemeControl: React.FC<SiderThemeControlProps> = ({ collapsed, siderT
     setPopupVisible(true);
   };
 
-  const handleSave = async (data: Omit<ICssTheme, 'id' | 'created_at' | 'updated_at' | 'is_preset'>) => {
+  const handleSave = async (data: Omit<ICssTheme, 'id' | 'is_preset'>) => {
     await saveUserTheme(data, editingTheme);
     closeModal();
     Message.success(t('common.saveSuccess'));

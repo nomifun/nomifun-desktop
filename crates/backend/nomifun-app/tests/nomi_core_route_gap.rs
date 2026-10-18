@@ -3776,7 +3776,7 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
     for (module_id, action_id) in [
         ("workspace.artifacts", "workspace.artifacts/read"),
         ("workspace.files", "workspace.files/patch"),
-        ("workspace.process", "workspace.process/exec"),
+        ("workspace.process", "workspace.process/start"),
         ("workspace.vcs", "workspace.vcs/commit"),
         ("agent.collaboration", "agent/delegate"),
         ("requirements", "requirements/read"),
@@ -3814,7 +3814,7 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
     for (module_id, action_id) in [
         ("workspace.files", "workspace.files/patch"),
         ("workspace.vcs", "workspace.vcs/commit"),
-        ("workspace.process", "workspace.process/exec"),
+        ("workspace.process", "workspace.process/start"),
         ("workspace.artifacts", "workspace.artifacts/publish"),
         ("project.memory", "project.memory/read"),
         ("agent.collaboration", "agent/delegate"),
@@ -5187,7 +5187,7 @@ async fn robot_and_desktop_roles_coexist_with_independent_canonical_sessions() {
     let names = actual["tools"].as_array().into_iter().flatten().filter_map(|tool|
         tool["function"]["name"].as_str()).collect::<Vec<_>>();
     assert!(names.iter().all(|name| !matches!(*name,
-        "read_file" | "write_file" | "apply_patch" | "list_directory" | "exec_command" | "write_stdin")
+        "read_file" | "write_file" | "apply_patch" | "list_directory" | "start_process" | "write_stdin")
         && !name.starts_with("terminal_") && !name.starts_with("workspace_")),
         "Robot does not inherit local desktop execution tools: {names:?}");
     assert!(names.iter().all(|name| !name.starts_with("robot_")), "the empty physical device catalog has no callable tool surface");

@@ -1,5 +1,5 @@
 use std::{collections::BTreeSet, path::{Path, PathBuf}, time::{Duration, Instant}};
-use crate::{NativeFileError, NativeInstructionScope};
+use crate::{NativeFileError, NativeInstructionScope, NativePathSemantics};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeEntryKind { Directory, File, Link, Other }
@@ -10,28 +10,50 @@ pub struct NativeDirectoryEntry { pub path: PathBuf, pub kind: NativeEntryKind }
 /// adapters. Traversal, scope rules and bounds remain one implementation here.
 pub trait NativeDirectoryAccess {
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, NativeFileError>;
+    fn canonicalize_entry(&self, path: &Path) -> Result<PathBuf, NativeFileError>;
     fn metadata(&self, path: &Path) -> Result<Option<NativeEntryKind>, NativeFileError>;
     fn entries(&self, path: &Path) -> Result<Box<dyn Iterator<Item = Result<NativeDirectoryEntry, NativeFileError>>>, NativeFileError>;
 }
 
 pub fn acquire_instruction_scope(path: &Path, recursive: bool) -> Result<NativeInstructionScope, NativeFileError> {
+    acquire_instruction_scope_with_semantics(path, recursive, NativePathSemantics::Follow)
+}
+
+pub fn acquire_instruction_scope_with_semantics(path: &Path, recursive: bool, semantics: NativePathSemantics) -> Result<NativeInstructionScope, NativeFileError> {
     #[cfg(unix)]
-    { acquire_instruction_scope_with_access(path, recursive, &crate::unix_directory::NativeUnixAccess, || {}, || {}, |_| {}, |_| {}) }
-    #[cfg(not(unix))]
-    { let _ = (path, recursive); Err(NativeFileError::Unavailable("native privileged instruction discovery needs this platform's directory adapter".into())) }
+    { acquire_instruction_scope_with_semantics_and_access(path, recursive, semantics, &crate::unix_directory::NativeUnixAccess, || {}, || {}, |_| {}, |_| {}) }
+    #[cfg(windows)]
+    { acquire_instruction_scope_with_semantics_and_access(path, recursive, semantics, &crate::windows::NativeWindowsAccess, || {}, || {}, |_| {}, |_| {}) }
+    #[cfg(not(any(unix, windows)))]
+    { let _ = (path, recursive, semantics); Err(NativeFileError::Unavailable("native privileged instruction discovery needs this platform's directory adapter".into())) }
 }
 
 pub fn acquire_instruction_scope_with_access(
     path: &Path, recursive: bool, access: &impl NativeDirectoryAccess,
     before_metadata: impl FnOnce(), after_metadata: impl FnOnce(),
+    before_listing: impl FnMut(&Path), after_listing: impl FnMut(&Path),
+) -> Result<NativeInstructionScope, NativeFileError> {
+    acquire_instruction_scope_with_semantics_and_access(path, recursive, NativePathSemantics::Follow, access,
+        before_metadata, after_metadata, before_listing, after_listing)
+}
+
+pub fn acquire_instruction_scope_with_semantics_and_access(
+    path: &Path, recursive: bool, semantics: NativePathSemantics, access: &impl NativeDirectoryAccess,
+    before_metadata: impl FnOnce(), after_metadata: impl FnOnce(),
     mut before_listing: impl FnMut(&Path), mut after_listing: impl FnMut(&Path),
 ) -> Result<NativeInstructionScope, NativeFileError> {
     crate::validate_path(path)?;
-    let (canonical, _) = crate::resolve_missing(path, 64, |path| access.canonicalize(path))?;
+    let resolve = || crate::resolve_missing(path, 64, |candidate| {
+        if semantics == NativePathSemantics::Entry && candidate == path { access.canonicalize_entry(candidate) }
+        else { access.canonicalize(candidate) }
+    }).map(|(path, _)| path);
+    let canonical = resolve()?;
     before_metadata();
     let metadata = access.metadata(&canonical);
     after_metadata();
-    let (kind, directory) = match metadata? {
+    let observed_kind = metadata?;
+    let (kind, directory) = match observed_kind {
+        Some(NativeEntryKind::Link) if semantics == NativePathSemantics::Entry => ("link", canonical.parent().ok_or_else(invalid)?.to_owned()),
         Some(NativeEntryKind::Link) => return Err(NativeFileError::Changed("INSTRUCTION_SCOPE_CHANGED: target became a symbolic link".into())),
         Some(NativeEntryKind::Directory) => ("directory", canonical.clone()),
         Some(NativeEntryKind::File) => ("file", canonical.parent().ok_or_else(invalid)?.to_owned()),
@@ -39,7 +61,7 @@ pub fn acquire_instruction_scope_with_access(
         _ => return Err(invalid()),
     };
     let mut result = NativeInstructionScope {
-        canonical_path: crate::path_string(&canonical)?, kind: kind.into(), recursive,
+        canonical_path: crate::path_string(&canonical)?, kind: kind.into(), recursive, path_semantics: semantics,
         directories: BTreeSet::from([crate::path_string(&directory)?]),
         complete: true, incomplete_reasons: BTreeSet::new(), entries_scanned: 0,
     };
@@ -68,10 +90,21 @@ pub fn acquire_instruction_scope_with_access(
                     Ok(entry) => entry,
                     Err(_) => { result.incomplete_reasons.insert("unreadable_entry".into()); continue; }
                 };
-                if entry.kind == NativeEntryKind::Link { result.incomplete_reasons.insert("symlink_entry".into()); continue; }
                 let instruction = entry.path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
                     ["AGENTS.md", "AGENTS.override.md"].iter().any(|expected| name == *expected || (cfg!(windows) && name.eq_ignore_ascii_case(expected)))
                 });
+                if entry.kind == NativeEntryKind::Link {
+                    if semantics == NativePathSemantics::Follow { result.incomplete_reasons.insert("symlink_entry".into()); }
+                    else if instruction {
+                        // The mutation removes this link, not its target, but
+                        // this real directory still has an instruction source.
+                        // The existing Source reader follows that named source
+                        // or returns its actual ACL/type/dangling-link error.
+                        result.directories.insert(crate::path_string(&directory)?);
+                        if result.directories.len() > 64 { result.incomplete_reasons.insert("instruction_directory_budget".into()); break; }
+                    }
+                    continue;
+                }
                 if instruction {
                     if entry.kind != NativeEntryKind::File { result.incomplete_reasons.insert("invalid_instruction_file".into()); }
                     result.directories.insert(crate::path_string(&directory)?);
@@ -87,8 +120,11 @@ pub fn acquire_instruction_scope_with_access(
             if result.incomplete_reasons.contains("scan_budget") || result.incomplete_reasons.contains("instruction_directory_budget") { break; }
         }
     }
-    if crate::resolve_missing(path, 64, |path| access.canonicalize(path))?.0 != canonical {
+    if resolve()? != canonical {
         return Err(NativeFileError::Changed("INSTRUCTION_SCOPE_CHANGED: target identity changed".into()));
+    }
+    if access.metadata(&canonical)? != observed_kind {
+        return Err(NativeFileError::Changed("INSTRUCTION_SCOPE_CHANGED: target entry kind changed".into()));
     }
     result.complete = result.incomplete_reasons.is_empty();
     Ok(result)

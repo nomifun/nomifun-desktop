@@ -12,7 +12,7 @@ async fn public_history(router: &Router, phase: &'static str, session: &str) -> 
 pub(super) async fn run(router: &Router, api_key: &str, model: &str, root: &Path) -> Result<(), SmokeFailure> {
     let provider = configure_stepfun(router, api_key, STEPFUN_PLAN_BASE_URL, model).await?;
     let (preset, _) = create_agent_preset(router, &provider, model,
-        &[("workspace.process", &["workspace.process/exec"], "process_session")]).await?;
+        &[("workspace.process", &["workspace.process/start"], "process_session")]).await?;
     let (session, binding) = create_session(router, &preset, &provider, model,
         json!([{"resource_kind":"process_session","resource_id":"managed-process-session"}])).await?;
     let cursor = session_message_cursor(router, "input.cursor", &session).await?;
@@ -20,9 +20,9 @@ pub(super) async fn run(router: &Router, api_key: &str, model: &str, root: &Path
     // output limit: this case verifies the input handoff, not huge CLI help.
     let operation = start_session_turn(router, "input.start", &session, &uuid::Uuid::now_v7().to_string(),
         r#"我需要一个开学自我介绍PPT，但还没有给你我的个人资料。本轮只准备并询问资料：
-先完成两个独立的 exec_command 调用，严格使用如下两个参数对象：
-{"component":"officecli","args":["help","batch"]}
-{"component":"officecli","args":["--version"]}
+先完成两个独立的 start_process 调用，严格使用如下两个参数对象：
+{"component":"officecli","args":["help","batch"],"wait_ms":30000}
+{"component":"officecli","args":["--version"],"wait_ms":30000}
 这两次都是只读查询；不要用 shell 合并，不要省略任一调用。
 两个调用实际结束后，询问我的姓名和爱好，等我回答后再制作。此时不生成文件，不编造个人资料。
 缺少资料是正常等待用户，不能声称PPT已交付。"#.into()).await?;
@@ -59,7 +59,7 @@ pub(super) async fn run(router: &Router, api_key: &str, model: &str, root: &Path
                 && event.correlation_id.as_ref() == operation.as_str()).ok_or_else(failure)?;
             let starts = facts.events.iter().filter(|event| event.kind.0 == "tool/call-started"
                 && event.causation_event_id.as_ref() == Some(&turn_start.event_id)
-                && facts.event_payloads[event.event_id.as_ref()]["action_id"] == "workspace.process/exec").collect::<Vec<_>>();
+                && facts.event_payloads[event.event_id.as_ref()]["action_id"] == "workspace.process/start").collect::<Vec<_>>();
             let mut successful = 0;
             let mut observations = Vec::new();
             let mut arguments = Vec::new();
@@ -89,8 +89,8 @@ pub(super) async fn run(router: &Router, api_key: &str, model: &str, root: &Path
                     && command["success"] == true && command["exit_code"] == 0
                     && command.pointer("/cleanup/reaped") == Some(&json!(true)) { successful += 1; }
             }
-            let expected = [json!({"component":"officecli","args":["help","batch"]}),
-                json!({"component":"officecli","args":["--version"]})];
+            let expected = [json!({"component":"officecli","args":["help","batch"],"wait_ms":30000}),
+                json!({"component":"officecli","args":["--version"],"wait_ms":30000})];
             if starts.len() != 2 || successful != 2 || !expected.iter().all(|expected| arguments.contains(expected))
                 || facts.events.iter().any(|event|
                 event.kind.0 == "turn/failed" || facts.event_payloads.get(event.event_id.as_ref())

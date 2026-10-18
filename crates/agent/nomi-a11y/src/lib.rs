@@ -27,6 +27,8 @@ pub use engine::{
     A11yEngine, A11yError, Capabilities, Effect, ElementAction, ElementEntry, ElementId,
     InputKind, ObserveOpts, Rect, Snapshot, SnapshotGen, Source, Target,
 };
+#[cfg(windows)]
+pub use windows::focus::{WindowsFocusError, focus_windows_window};
 
 use std::sync::{Arc, RwLock};
 

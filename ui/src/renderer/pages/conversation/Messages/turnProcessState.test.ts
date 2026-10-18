@@ -43,12 +43,7 @@ describe('turn process state', () => {
         call_id: 'call-search',
         name: 'search_files',
         status: 'error',
-        output: JSON.stringify({
-          kind: 'search_context_withheld',
-          search_executed: true,
-          snippets_withheld: true,
-          notice: 'Narrow the search before using snippets.',
-        }),
+        bounded_result: 'search_context_withheld', non_fatal_failure: true,
       },
     } as any])).toBe('completed');
   });
@@ -117,10 +112,9 @@ describe('turn process state', () => {
           type: 'tool_call',
           content: {
             call_id: 'call-bash',
-            name: 'Bash',
+            name: 'start_process',
             status: 'error',
-            args: { command: 'node test.js' },
-            output: 'Exit code: 1\nSTDERR:\nReferenceError: location is not defined',
+            description: 'node test.js', command_exit_code: 1, non_fatal_failure: true,
           },
         } as any,
       ])
@@ -153,8 +147,7 @@ describe('turn process state', () => {
             call_id: 'call-read',
             name: 'Read',
             status: 'error',
-            args: { file_path: 'missing.file' },
-            output: 'Failed to read file missing.file: No such file or directory (os error 2)',
+            description: 'missing.file', non_fatal_failure: true,
           },
         } as any,
       ])

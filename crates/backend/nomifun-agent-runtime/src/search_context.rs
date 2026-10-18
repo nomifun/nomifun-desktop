@@ -149,7 +149,7 @@ mod tests {
         let matches = (0..files)
             .map(|index| {
                 json!({
-                    "path": format!("burst/file-{index:03}.txt"),
+                    "path": std::path::Path::new("burst").join(format!("file-{index:03}.txt")).to_str().unwrap(),
                     "line": 1,
                     "column_bytes": 1,
                     "byte_offset": 0,

@@ -230,15 +230,15 @@ mod tests {
     fn workspace_process_terminal_failure_is_model_visible_without_legacy_identity() {
         assert!(is_workspace_process_action(
             &CapabilityId::from("workspace.process"),
-            &ActionId::from("workspace.process/exec"),
+            &ActionId::from("workspace.process/start"),
         ));
         assert!(!is_workspace_process_action(
-            &CapabilityId::from("workspace.process/exec"),
+            &CapabilityId::from("workspace.process/start"),
             &ActionId::from("process.exec.invoke"),
         ));
         assert!(process_result_is_error(
             true,
-            "workspace.process/exec",
+            "workspace.process/start",
             &json!({"state":"exited", "success":false, "exit_code":7}),
         ));
         assert!(!process_result_is_error(
@@ -268,7 +268,7 @@ mod tests {
         ));
         assert!(process_result_is_error(
             true,
-            "workspace.process/exec",
+            "workspace.process/start",
             &json!({"state":"cancelled", "success":false, "cleanup":{"reaped":true}}),
         ));
     }
@@ -278,7 +278,7 @@ mod tests {
         let actual = std::env::consts::OS;
         let mismatched = if actual == "windows" { "macos" } else { "windows" };
         let definition = |host: &str| ChatToolDefinition {
-            name: "exec_command".into(),
+            name: "start_process".into(),
             description: format!(
                 "{PROCESS_HOST_OS_DESCRIPTION_PREFIX}{host}. Execute a command."
             ),
@@ -288,7 +288,7 @@ mod tests {
         let call_id = ToolCallId::from("host-os-call");
         assert!(process_host_os_mapping_error(
             true,
-            "workspace.process/exec",
+            "workspace.process/start",
             &definition(actual),
             &call_id,
         )
@@ -303,7 +303,7 @@ mod tests {
 
         let result = process_host_os_mapping_error(
             true,
-            "workspace.process/exec",
+            "workspace.process/start",
             &definition(mismatched),
             &call_id,
         )
@@ -343,6 +343,134 @@ mod tests {
         assert!(!unrelated.contains("Put only the executable in command"));
     }
 
+    fn native_failure_details(message: &str) -> serde_json::Value {
+        json!({"native_file_error": {
+            "code": "RESOURCE_NOT_FOUND", "message": message,
+            "kind": "NotFound", "raw_os_error": 53,
+        }})
+    }
+
+    fn failure_with_details(message: &str, details: serde_json::Value) -> KernelError {
+        KernelError::CapabilityExecutionFailed {
+            failure: nomifun_agent_kernel::CapabilityExecutionFailure::new("INVALID_PAYLOAD", message)
+                .with_details(details),
+        }
+    }
+
+    #[test]
+    fn native_failure_details_survive_generic_and_action_feedback_branches() {
+        let details = native_failure_details("the network share is unavailable");
+        let ordinary = kernel_error(failure_with_details("unrelated outer diagnostic", details.clone()));
+        let EngineToolError::CapabilityKernel { code, details: actual, .. } = ordinary else {
+            panic!("typed owner failure changed class")
+        };
+        assert_eq!(code, "INVALID_PAYLOAD");
+        assert_eq!(actual, Some(details.clone()));
+
+        for (is_process, is_file_write, is_computer_launch, message) in [
+            (false, false, false, "unrelated outer diagnostic"),
+            (true, false, false, "process owner failed"),
+            (false, true, false, "workspace.files failed: cannot resolve parent of a file"),
+            (false, false, true, "launch target path does not exist"),
+            (true, true, false, "owner reported success but the canonical terminal observation could not be committed"),
+        ] {
+            let mapped = kernel_error_for_action(
+                failure_with_details(message, details.clone()),
+                is_process, is_file_write, is_computer_launch,
+            );
+            let EngineToolError::CapabilityKernel { code, details: actual, .. } = mapped else {
+                panic!("typed owner failure changed class")
+            };
+            assert_eq!(code, "INVALID_PAYLOAD");
+            assert_eq!(actual, Some(details.clone()));
+        }
+        let ordinary = kernel_error(KernelError::capability_execution_failed("INVALID_PAYLOAD", "no typed details"));
+        assert!(matches!(ordinary, EngineToolError::CapabilityKernel { details: None, .. }));
+    }
+
+    #[test]
+    fn native_failure_details_are_redacted_bounded_and_whitelisted() {
+        let mut details = native_failure_details(&format!("token=NEVER_EMIT\n{}", "边界".repeat(2048)));
+        details["unrelated"] = json!({"secret": "NEVER_EMIT"});
+        details["native_file_error"]["unexpected"] = json!("NEVER_EMIT");
+        let projected = owner_failure_details(Some(&details)).unwrap();
+        assert_eq!(projected.as_object().unwrap().len(), 1);
+        let native = projected["native_file_error"].as_object().unwrap();
+        assert_eq!(native.len(), 4);
+        assert_eq!(native["code"], "RESOURCE_NOT_FOUND");
+        assert_eq!(native["kind"], "NotFound");
+        assert_eq!(native["raw_os_error"], 53);
+        let message = native["message"].as_str().unwrap();
+        assert!(message.contains("[REDACTED_SECRET]"));
+        assert!(!message.contains("NEVER_EMIT"));
+        assert!(message.ends_with("...[truncated]"));
+        assert!(message.len() <= 2048);
+        assert!(serde_json::to_vec(&projected).unwrap().len() <= 8 * 1024);
+
+        // Each one-byte control character expands to six JSON bytes. This
+        // exercises the serialized envelope budget rather than only byte length.
+        let controls = native_failure_details(&"\u{0001}".repeat(4096));
+        let projected = owner_failure_details(Some(&controls)).unwrap();
+        assert!(serde_json::to_vec(&projected).unwrap().len() <= 8 * 1024);
+        assert!(projected["native_file_error"]["message"].as_str().unwrap().ends_with("...[truncated]"));
+
+        let null_fields = json!({"native_file_error": {
+            "code": "FILE_CHANGED_DURING_READ", "message": "identity changed",
+            "kind": null, "raw_os_error": null,
+        }});
+        assert_eq!(owner_failure_details(Some(&null_fields)), Some(null_fields));
+    }
+
+    #[test]
+    fn invalid_native_failure_details_do_not_fabricate_os_facts_or_change_failure() {
+        for (field, value) in [
+            ("code", json!("UNRECOGNIZED_NATIVE_CODE")),
+            ("message", json!(53)),
+            ("kind", json!("NotFound secret=NEVER_EMIT")),
+            ("kind", json!(53)),
+            ("raw_os_error", json!("53")),
+            ("raw_os_error", json!(i64::MAX)),
+        ] {
+            let mut details = native_failure_details("typed owner diagnostic");
+            details["native_file_error"][field] = value;
+            let mapped = kernel_error(failure_with_details("original failure", details));
+            let EngineToolError::CapabilityKernel { code, message, details } = mapped else {
+                panic!("invalid diagnostics changed failure class")
+            };
+            assert_eq!(code, "INVALID_PAYLOAD");
+            assert_eq!(message, "original failure");
+            assert_eq!(details, None);
+        }
+        assert_eq!(owner_failure_details(None), None);
+        assert_eq!(owner_failure_details(Some(&json!({"kind": "NotFound", "raw_os_error": 53}))), None);
+    }
+
+    #[test]
+    fn system_execution_details_keep_authentication_and_unknown_states_without_prose_inference() {
+        for (code, facts) in [
+            ("SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED", json!({"kind":"Uncategorized","raw_os_error":1223,"user_code_not_started":true,"cleanup_proven":true})),
+            ("SYSTEM_READ_RESULT_UNKNOWN", json!({"user_code_not_started":false,"cleanup_proven":false})),
+            ("SYSTEM_EXECUTION_AUTHENTICATION_DENIED", json!({})),
+        ] {
+            let native = nomifun_agent_contracts::SystemExecutionFailure::from_owner(code.into(), "original native result".into(), &facts);
+            let details = json!({"system_execution_error":native});
+            let error = kernel_error(KernelError::CapabilityExecutionFailed {
+                failure: nomifun_agent_kernel::CapabilityExecutionFailure::new(code, "different outer prose: os error 0").with_details(details.clone()),
+            });
+            let EngineToolError::CapabilityKernel { code: actual, details: actual_details, .. } = error else { panic!("native class lost"); };
+            assert_eq!(actual, code);
+            assert_eq!(actual_details, Some(details));
+        }
+        let mut failure = nomifun_agent_contracts::SystemExecutionFailure::from_owner("SYSTEM_READ_RESULT_UNKNOWN".into(), format!("token=NEVER_EMIT {}", "界".repeat(5000)), &json!({}));
+        let projected = owner_failure_details(Some(&json!({"system_execution_error":failure}))).unwrap();
+        assert!(!projected.to_string().contains("NEVER_EMIT"));
+        assert!(serde_json::to_vec(&projected).unwrap().len() <= 8192);
+        assert!(projected["system_execution_error"]["raw_os_error"].is_null());
+        failure.kind = Some("NotFound raw_os_error=1223".into());
+        assert!(owner_failure_details(Some(&json!({"system_execution_error":failure}))).is_none());
+        assert!(owner_failure_details(Some(&json!({"message":"SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED raw_os_error=1223"}))).is_none());
+    }
+
     #[test]
     fn system_identity_privacy_and_platform_failure_codes_keep_the_owner_fact() {
         for (code, detail) in [
@@ -351,7 +479,7 @@ mod tests {
             (crate::SYSTEM_PERMISSION_REQUIRED, r#"{"kind":"system-permission-required.v1","permissions":["accessibility"],"status":"not_executed"}"#),
         ] {
             let mapped = kernel_error_for_action(KernelError::capability_execution_failed(code, detail), true, false, false);
-            let EngineToolError::CapabilityKernel { code: actual, message } = mapped else { panic!("changed typed failure") };
+            let EngineToolError::CapabilityKernel { code: actual, message, .. } = mapped else { panic!("changed typed failure") };
             assert_eq!(actual, code);
             assert_eq!(message, detail);
         }
@@ -383,7 +511,7 @@ mod tests {
             false,
             true,
         );
-        let EngineToolError::CapabilityKernel { code, message } = mapped else {
+        let EngineToolError::CapabilityKernel { code, message, .. } = mapped else {
             panic!("Computer launch failure changed error class")
         };
         assert_eq!(code, "ROLE_HOST_PROVIDER_FAILURE");
@@ -417,7 +545,7 @@ mod tests {
                 true,
                 false,
             );
-            let EngineToolError::CapabilityKernel { code,message } = mapped else {
+            let EngineToolError::CapabilityKernel { code,message, .. } = mapped else {
                 panic!("settlement loss changed error class")
             };
             assert_eq!(code,"CAPABILITY_UNAVAILABLE");
@@ -456,7 +584,7 @@ mod tests {
                 false,
                 false,
             );
-            let EngineToolError::CapabilityKernel { code,message } = mapped else {
+            let EngineToolError::CapabilityKernel { code,message, .. } = mapped else {
                 panic!("settlement loss changed error class")
             };
             assert_eq!(code,"CAPABILITY_UNAVAILABLE");
@@ -641,7 +769,7 @@ mod tests {
             "AGENT_EXECUTION_ALREADY_ACTIVE",
             "private sqlite path and api_key=secret",
         ));
-        let EngineToolError::CapabilityKernel { code, message } = error else {
+        let EngineToolError::CapabilityKernel { code, message, .. } = error else {
             panic!("typed capability failure changed error class");
         };
         assert_eq!(code, "AGENT_EXECUTION_ALREADY_ACTIVE");
@@ -706,7 +834,7 @@ fn system_permission_kernel_failure_preserves_the_typed_host_body() {
         "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
         "execution":"not_executed"}).to_string();
     let mapped = super::kernel_error(nomifun_agent_kernel::KernelError::capability_execution_failed("SYSTEM_PERMISSION_REQUIRED", body.clone()));
-    let crate::EngineToolError::CapabilityKernel { code, message } = mapped else { panic!("explicit Kernel failure was collapsed") };
+    let crate::EngineToolError::CapabilityKernel { code, message, .. } = mapped else { panic!("explicit Kernel failure was collapsed") };
     assert_eq!(code, "SYSTEM_PERMISSION_REQUIRED");
     assert_eq!(message, body);
 }

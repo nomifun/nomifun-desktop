@@ -129,11 +129,10 @@ fn initial_visibility_priority(binding: &nomifun_agent_runtime::AgentToolBinding
     match (binding.capability_id.as_ref(), binding.action_id.as_ref()) {
         ("workspace.files", "workspace.files/read" | "workspace.files/write" | "workspace.files/search") => 0,
         ("workspace.process", "workspace.process/poll") | ("web.research", "web.research/search" | "web.research/fetch") => 1,
-        ("workspace.process", "workspace.process/exec") => 2,
+        ("workspace.process", "workspace.process/start") => 2,
         ("workspace.vcs", "workspace.vcs/status" | "workspace.vcs/diff")
         | ("workspace.process", "workspace.process/input" | "workspace.process/close_stdin" | "workspace.process/cancel") => 3,
         ("agent.collaboration", "agent/delegate" | "agent/fork" | "agent/request_user_decision") => 4,
-        ("workspace.process", "workspace.process/start") => 5,
         ("workspace.files", "workspace.files/patch") | ("workspace.process", "workspace.process/resize") => 7,
         _ => 5,
     }
@@ -600,11 +599,12 @@ mod tests {
             &NativeSchemas, &NativeSchemas, &BTreeSet::new()).await.unwrap();
         assert!(serde_json::to_vec(&original.model_definitions()).unwrap().len() > INITIAL_TOOL_BYTES);
         let projected = project(original.clone(), true).unwrap();
-        for name in ["read_file", "write_file", "search_files", "poll_process", "exec_command"] {
+        assert!(projected.binding("exec_command").is_none());
+        for name in ["read_file", "write_file", "search_files", "poll_process", "start_process"] {
             assert!(!projected.binding(name).unwrap().definition.deferred, "basic native work must be initially visible: {name}");
         }
-        assert!(["apply_patch", "start_process"].iter().any(|name|
-            projected.binding(name).unwrap().definition.deferred), "heavy native definitions must leave room for basic file work");
+        assert!(projected.binding("apply_patch").unwrap().definition.deferred,
+            "heavy native definitions must leave room for basic file and command work");
         let visible = projected.model_definitions().into_iter().filter(|definition| !definition.deferred).collect::<Vec<_>>();
         assert!(visible.len() <= INITIAL_VISIBLE_TOOLS);
         assert!(serde_json::to_vec(&visible).unwrap().len() <= INITIAL_TOOL_BYTES);

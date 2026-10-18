@@ -8,6 +8,7 @@ import type { McpOAuthStatus } from '@/renderer/hooks/mcp/useMcpOAuth';
 import FeedbackButton from '@/renderer/components/base/FeedbackButton';
 import { iconColors } from '@/renderer/styles/colors';
 import { getMcpConfigurationFields, supportsMcpOAuthLogin } from '@/renderer/hooks/mcp/mcpAuthConfig';
+import { useMcpDisplayName } from '@/renderer/services/mcp/useMcpDisplayName';
 
 interface McpServerHeaderProps {
   server: IMcpServer;
@@ -143,6 +144,8 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
   onToggleEnabled,
 }) => {
   const { t } = useTranslation();
+  const getDisplayName = useMcpDisplayName();
+  const displayName = getDisplayName(server);
 
   const configurationFields = getMcpConfigurationFields(server.transport);
   const needsConfiguration = configurationFields.length > 0;
@@ -181,7 +184,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
   return (
     <div className='group flex min-w-0 w-full items-center justify-between gap-8px'>
       <div className='flex min-w-0 flex-1 items-center gap-8px'>
-        <span className='min-w-0 truncate text-14px leading-24px'>{server.name}</span>
+        <span className='min-w-0 truncate text-14px leading-24px' title={displayName}>{displayName}</span>
         {statusPopoverContent ? (
           <Popover content={statusPopoverContent} trigger='hover' position='top'>
             <span className='inline-flex size-24px flex-none cursor-default items-center justify-center line-height-0'>
@@ -250,7 +253,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
           loading={isTogglingEnabled}
           disabled={isTogglingEnabled || isTestingConnection || server.last_test_status === 'testing' || isLoggingIn}
           aria-busy={Boolean(isTogglingEnabled)}
-          aria-label={t(server.enabled ? 'settings.mcpDisableServer' : 'settings.mcpEnableServer', { name: server.name })}
+          aria-label={t(server.enabled ? 'settings.mcpDisableServer' : 'settings.mcpEnableServer', { name: displayName })}
           onChange={() => onToggleEnabled(server)}
         />
         {!server.builtin && (

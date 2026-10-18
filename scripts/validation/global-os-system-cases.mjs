@@ -197,7 +197,7 @@ export function createMacSystemScenario({ fixture, workspace, uid, loopbackPort,
   const serviceScript = 'set -eu; umask 077; set -C; { printf "%s\\n" "$2"; /usr/bin/id -u; /bin/pwd; printf "%s\\n" "$$"; } > "$1"; exec /bin/sleep 900';
   const programArguments = ['/bin/sh', '-c', serviceScript, 'nomifun-global-os-service', serviceMarker, markerValue];
   const plistContent = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${xmlText(label)}</string>\n<key>ProgramArguments</key><array>${programArguments.map(value => `<string>${xmlText(value)}</string>`).join('')}</array>\n<key>WorkingDirectory</key><string>${xmlText(root)}</string>\n<key>RunAtLoad</key><false/>\n<key>KeepAlive</key><false/>\n<key>AbandonProcessGroup</key><false/>\n<key>ProcessType</key><string>Background</string>\n<key>Umask</key><integer>63</integer>\n<key>StandardOutPath</key><string>${xmlText(join(root, 'service.stdout'))}</string>\n<key>StandardErrorPath</key><string>${xmlText(join(root, 'service.stderr'))}</string>\n</dict></plist>\n`;
-  const execStep = (id, command, args, verify, extra = {}) => ({ id: `system-${id}`, name: 'exec_command', args: { command, args, timeout_ms: 15000 }, verify: async value => { requireExited(value); await verify?.(value); }, ...extra });
+  const execStep = (id, command, args, verify, extra = {}) => ({ id: `system-${id}`, name: 'start_process', args: { command, args, timeout_ms: 15000 }, verify: async value => { requireExited(value); await verify?.(value); }, ...extra });
   const absentStep = id => execStep(id, '/bin/sh', ['-c', absentServiceScript, 'nomifun-exact-service-absence', target, label], async value => {
     assert.match(value.output.text, /NOMIFUN_EXPECTED_SERVICE_ABSENT:[1-9]\d*/);
     await observeService({ absent: true });
@@ -301,7 +301,7 @@ export function createMacSystemScenario({ fixture, workspace, uid, loopbackPort,
     }),
     execStep('service-print', '/bin/launchctl', ['print', target], value => { assert.match(value.output.text, /state = running/); assert(value.output.text.includes(`pid = ${servicePid}`)); }),
     { id: 'system-service-marker-read', name: 'read_file', args: { path: serviceMarker }, verify: value => assert.equal(textOf(value), `${markerValue}\n${uid}\n${root}\n${servicePid}\n`) },
-    { id: 'system-network-start', name: 'start_process', args: { command: '/usr/bin/nc', args: ['-4', '-l', '127.0.0.1', String(loopbackPort)], cwd: root, wait_ms: 0, timeout_ms: 60000 }, verify: value => {
+    { id: 'system-network-start', name: 'start_process', awaitExit: false, args: { command: '/usr/bin/nc', args: ['-4', '-l', '127.0.0.1', String(loopbackPort)], cwd: root, wait_ms: 0, timeout_ms: 60000 }, verify: value => {
       assert.equal(value.state, 'running'); networkProcessId = value.process_id; networkPid = value.pid; networkCursor = value.output.next_cursor; networkOutput = value.output.text;
       assert(networkProcessId); assert(Number.isInteger(networkPid)); process.kill(networkPid, 0);
     } },

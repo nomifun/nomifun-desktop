@@ -568,7 +568,6 @@ async fn build_nomi_core_agent_api_state(
         owner: nomifun_agent_contracts::UserId::from(services.authoritative_user_id.as_ref().to_owned()),
         skills: Arc::clone(&services.skill_paths),
         mcp: services.app_mcp_sources.clone(),
-        app_mcp: services.app_mcp_sources.clone(),
     });
     let control_plane = Arc::new(AgentControlPlane::new(
         store.clone(),
@@ -629,6 +628,7 @@ async fn build_nomi_core_agent_api_state(
             builtin_plan.host_dynamic_tool_capability_ids.clone(),
             idmm,
         ))?;
+    services.official_runtime.install_process_owner(Arc::clone(&builtin_plan.wave2_owner))?;
     conversation_owner.install_official_runtime(Arc::clone(&services.official_runtime), Arc::downgrade(&control_plane))?;
     let reconciled_turns = conversation_owner.reconcile_orphaned_active_turns(engine_sessions).await?;
     if reconciled_turns > 0 {

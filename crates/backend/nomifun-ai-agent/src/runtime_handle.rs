@@ -308,6 +308,30 @@ impl AgentRuntimeHandle {
         }
     }
 
+    pub async fn validate_session_input(&self,files:Vec<String>,skills:Vec<String>)->Result<(),AppError> {
+        match self {
+            Self::Official(runtime)=>runtime.validate_session_input(files,skills).await,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mock(_)=>Ok(()),
+        }
+    }
+
+    pub async fn session_input_changed(&self,retry_input:Option<String>)->Result<(),AppError> {
+        match self {
+            Self::Official(runtime)=>runtime.session_input_changed(retry_input).await,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mock(_)=>Ok(()),
+        }
+    }
+
+    pub async fn admit_steer(&self,admission:crate::RuntimeSteerAdmission)->Result<crate::RuntimeSteerAdmissionOutcome,AppError> {
+        match self {
+            Self::Official(runtime)=>runtime.admit_steer(admission).await,
+            #[cfg(any(test,feature="test-support"))]
+            Self::Mock(_)=>Err(AppError::BadRequest("this Runtime has no canonical steering admission owner".into())),
+        }
+    }
+
     /// Queue trusted host resource state without creating a turn or pretending
     /// the event came from the user.
     ///

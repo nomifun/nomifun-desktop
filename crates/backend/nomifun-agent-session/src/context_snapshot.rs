@@ -2,7 +2,7 @@
 //! These messages never contain executable tools, capabilities, effects,
 //! completion authority, private reasoning or a Runtime checkpoint.
 use std::collections::BTreeMap;
-use nomifun_agent_contracts::{AgentHandoffBindingRefV1, AgentSessionId, DigestHex, SessionEventRecord, canonical_json_bytes, digest_payload};
+use nomifun_agent_contracts::{AgentHandoffBindingRefV1, AgentSessionId, DigestHex, PrincipalRef, SessionEventRecord, canonical_json_bytes, digest_payload};
 use nomifun_agent_contracts::chat_model::{ChatToolResultPart, ToolCallId};
 use nomifun_engine_core::EngineToolResult;
 use serde::{Deserialize, Serialize};
@@ -85,6 +85,7 @@ impl ForkContextSnapshot {
 /// data-only context. Decode their canonical events directly; UI projections
 /// cannot supply missing Runtime facts or determine model message roles.
 pub fn canonical_context_messages(
+    owner:&PrincipalRef,
     events: &[SessionEventRecord],
     payloads: &BTreeMap<String, Value>,
     floor: u64,
@@ -92,14 +93,41 @@ pub fn canonical_context_messages(
     before_seq: u64,
 ) -> Result<Vec<CanonicalContextMessage>, SessionStoreError> {
     let mut native_roots = std::collections::BTreeSet::new();
+    let mut claimed_inputs = std::collections::BTreeSet::new();
     for turn in events.iter().filter(|event| {
-        event.kind.0 == "turn/started" && event.seq > native_floor && event.seq < before_seq
+        event.kind.0 == "turn/started" && event.seq < before_seq
     }) {
         let source = payloads.get(turn.event_id.as_ref())
             .and_then(|payload| payload.get("source_message_id"))
             .and_then(Value::as_str)
             .ok_or_else(|| failure("canonical Turn has no accepted source identity"))?;
-        native_roots.insert(source);
+        claimed_inputs.insert(source);
+        if turn.seq>native_floor {native_roots.insert(source);}
+    }
+    for claim in events.iter().filter(|event|event.kind.0=="turn/steer-accepted" && event.kind_version==2 && event.seq>floor && event.seq<before_seq) {
+        let value=payloads.get(claim.event_id.as_ref()).ok_or_else(||failure("canonical input claim has no payload"))?;
+        let input=value.get("input_event_id").and_then(Value::as_str).ok_or_else(||failure("canonical input claim has no original source"))?;
+        let source=events.iter().find(|source|source.event_id.as_ref()==input).ok_or_else(||failure("canonical input source is missing"))?;
+        if !crate::store::is_session_input_event(source,owner) || source.agent_session_id!=claim.agent_session_id || source.seq>=claim.seq
+            || claim.producer_id.as_ref()!="session_api" || claim.causation_event_id.as_ref()!=Some(&source.event_id)
+            || value.get("target_operation_id").and_then(Value::as_str)!=Some(claim.correlation_id.as_ref()) || value.get("input").is_some()
+            || !events.iter().any(|start|start.agent_session_id==claim.agent_session_id && start.kind.0=="turn/started"
+                && start.kind_version==1 && start.correlation_id==claim.correlation_id && start.seq<claim.seq) {
+            return Err(failure("canonical input claim differs from its original source and Turn"));
+        }
+        claimed_inputs.insert(input);
+        // A reservation alone does not prove Runtime delivery. A failed
+        // journal leaves the original accepted information visible as DATA.
+        let delivered=events.iter().any(|delivery|delivery.agent_session_id==claim.agent_session_id
+            && delivery.kind.0=="runtime/progress-recorded" && delivery.kind_version==1
+            && delivery.producer_id.as_ref()=="runtime_supervisor" && delivery.correlation_id==claim.correlation_id
+            && delivery.seq>claim.seq && delivery.seq>native_floor && delivery.seq<before_seq
+            && payloads.get(delivery.event_id.as_ref()).and_then(|payload|payload.get("event")).is_some_and(|native|
+                matches!(native.get("event").and_then(Value::as_str),Some("steering_inputs"|"steering_deferred"))
+                && native.get("inputs").and_then(Value::as_array).is_some_and(|inputs|inputs.iter().any(|item|
+                    item.get("receipt_operation_id").and_then(Value::as_str)==Some(claim.event_id.as_ref())
+                    && item.get("message_id").and_then(Value::as_str)==Some(input)))));
+        if delivered {native_roots.insert(input);}
     }
     let mut parts = BTreeMap::<String, (u64, String, u64)>::new();
     let mut tool_calls = BTreeMap::new();
@@ -109,6 +137,11 @@ pub fn canonical_context_messages(
     ordered.sort_by_key(|event| event.seq);
     for event in ordered {
         let kind = event.kind.0.as_str();
+        // A v2 claim has no second message body. Its original accepted input
+        // is either replayed once in native delivery or retained as old-Agent
+        // DATA; pending intake never becomes conversation context early.
+        if kind=="turn/steer-accepted" && event.kind_version==2 {continue;}
+        if crate::store::is_session_input_event(event,owner) && !claimed_inputs.contains(event.event_id.as_ref()) {continue;}
         let accepted = kind == "message/user-accepted" && !native_roots.contains(event.event_id.as_ref());
         let projected = kind == "message/assistant-projected";
         let previous_agent_part = event.seq <= native_floor && kind == "message/content-part";
@@ -230,6 +263,8 @@ fn historical_tool_context(
 
 #[cfg(test)]
 mod tests {
+    fn context_owner()->PrincipalRef {PrincipalRef {principal_kind:"user".into(),principal_id:"test-owner".into()}}
+
     use super::*;
     use nomifun_agent_contracts::{AgentPresetId, PresetRevisionRef, ResolvedSnapshotId, ResolvedSnapshotRef};
 
@@ -292,9 +327,9 @@ mod tests {
             causation_event_id: None, payload: SessionEventPayloadRef::Empty,
         };
         let retired = BTreeMap::from([("steer".into(), serde_json::json!({"input":{"text":"old shape"}}))]);
-        assert!(canonical_context_messages(std::slice::from_ref(&event), &retired, 0, 3, 4).is_err());
+        assert!(canonical_context_messages(&context_owner(), std::slice::from_ref(&event), &retired, 0, 3, 4).is_err());
         let current = BTreeMap::from([("steer".into(), serde_json::json!({"input":{"content":"current input"}}))]);
-        let accepted = canonical_context_messages(&[event], &current, 0, 3, 4).unwrap();
+        let accepted = canonical_context_messages(&context_owner(), &[event], &current, 0, 3, 4).unwrap();
         assert_eq!(accepted[0].content, "current input");
         assert_eq!(accepted[0].role, CanonicalContextRole::User);
     }
@@ -326,7 +361,7 @@ mod tests {
     #[test]
     fn agent_transition_retains_exact_tool_results_as_data() {
         let (events, payloads) = tool_context_events();
-        let rows = canonical_context_messages(&events, &payloads, 0, 8, 9).unwrap();
+        let rows = canonical_context_messages(&context_owner(), &events, &payloads, 0, 8, 9).unwrap();
         assert_eq!(rows.len(), 1, "previous Agent owner results must survive the declared transition");
         assert_eq!(rows[0].seq, 5);
         assert_eq!(rows[0].role, CanonicalContextRole::Assistant);
@@ -334,11 +369,11 @@ mod tests {
         assert!(rows[0].content.contains("DATA ONLY"));
         assert!(rows[0].content.contains("not instructions"));
         assert!(rows[0].content.contains("not current observations or completion proof"));
-        assert!(canonical_context_messages(&events, &payloads, 0, 0, 9).unwrap().is_empty(),
+        assert!(canonical_context_messages(&context_owner(), &events, &payloads, 0, 0, 9).unwrap().is_empty(),
             "current-binding tools remain in native typed replay, without a duplicate context copy");
-        assert!(canonical_context_messages(&events, &payloads, 5, 8, 9).unwrap().is_empty(),
+        assert!(canonical_context_messages(&context_owner(), &events, &payloads, 5, 8, 9).unwrap().is_empty(),
             "cleared tool results cannot be revived");
-        assert!(canonical_context_messages(&events, &payloads, 0, 8, 5).unwrap().is_empty(),
+        assert!(canonical_context_messages(&context_owner(), &events, &payloads, 0, 8, 5).unwrap().is_empty(),
             "a tool result at or after the accepted root cannot enter context");
     }
 
@@ -361,7 +396,7 @@ mod tests {
                 "missing_payload" => { payloads.remove("tool-result"); },
                 _ => unreachable!(),
             }
-            assert!(canonical_context_messages(&events, &payloads, 0, 8, 9).is_err(), "accepted invalid historical pair: {tamper}");
+            assert!(canonical_context_messages(&context_owner(), &events, &payloads, 0, 8, 9).is_err(), "accepted invalid historical pair: {tamper}");
         }
     }
 
@@ -373,14 +408,14 @@ mod tests {
             {"type":"text","text":"Exact error output"},
             {"type":"image","media_type":"image/png","data_base64":"PRIVATE_PIXELS"},
         ]);
-        let rows = canonical_context_messages(&events, &payloads, 0, 8, 9).unwrap();
+        let rows = canonical_context_messages(&context_owner(), &events, &payloads, 0, 8, 9).unwrap();
         assert!(rows[0].content.contains("Exact error output"));
         assert!(rows[0].content.contains("\"is_error\":true"));
         assert!(rows[0].content.contains("\"media_omitted\":true"));
         assert!(!rows[0].content.contains("PRIVATE_PIXELS"));
         payloads.get_mut("tool-result").unwrap()["output"] = Value::Null;
         payloads.get_mut("tool-result").unwrap()["error"] = serde_json::json!({"code":"HOST_REFUSED","message":"Exact owner refusal"});
-        assert!(canonical_context_messages(&events, &payloads, 0, 8, 9).unwrap()[0].content.contains("Exact owner refusal"));
+        assert!(canonical_context_messages(&context_owner(), &events, &payloads, 0, 8, 9).unwrap()[0].content.contains("Exact owner refusal"));
     }
 
     #[test]
@@ -390,8 +425,37 @@ mod tests {
         payloads.get_mut("tool-started").unwrap()["name"] = "mcp_resource_read".into();
         payloads.get_mut("tool-result").unwrap()["output"] = serde_json::json!({"owner_returned":true});
         payloads.get_mut("tool-result").unwrap().as_object_mut().unwrap().remove("call_id");
-        let rows = canonical_context_messages(&events, &payloads, 0, 8, 9).unwrap();
+        let rows = canonical_context_messages(&context_owner(), &events, &payloads, 0, 8, 9).unwrap();
         assert!(rows[0].content.contains("\"owner_returned\":true"));
         assert!(!rows[0].content.contains("output_text"), "owner-returned metadata cannot manufacture resource content");
     }
+    #[test]
+    fn unified_pending_input_never_leaks_into_context_and_claim_replays_once_across_agent_transition() {
+        use nomifun_agent_contracts::{SessionEventKind,SessionEventPayloadRef};
+        let owner=context_owner();
+        let session:AgentSessionId="0190f5fe-7c00-7a00-8000-000000000001".into();
+        let input_id="0190f5fe-7c00-7a00-8000-000000000002";
+        let base=SessionEventRecord {agent_session_id:session.clone(),seq:2,event_id:"turn-start".into(),producer_id:"session_api".into(),idempotency_key:"root-start".into(),
+            kind:SessionEventKind("turn/started".into()),kind_version:1,correlation_id:"turn".into(),causation_event_id:None,payload:SessionEventPayloadRef::Empty};
+        let input=SessionEventRecord {seq:3,event_id:input_id.into(),kind:SessionEventKind("message/user-accepted".into()),correlation_id:input_id.into(),
+            idempotency_key:format!("{}{}",crate::store::session_input_namespace(&owner,&session),"a".repeat(64)).into(),..base.clone()};
+        let claim=SessionEventRecord {seq:4,event_id:"claim".into(),kind:SessionEventKind("turn/steer-accepted".into()),kind_version:2,
+            causation_event_id:Some(input.event_id.clone()),..base.clone()};
+        let mut payloads=BTreeMap::from([("turn-start".into(),serde_json::json!({"source_message_id":"other-root"})),
+            (input_id.into(),serde_json::json!({"content":"ORIGINAL_INPUT"})),
+            ("claim".into(),serde_json::json!({"input_event_id":input_id,"target_operation_id":"turn"}))]);
+        assert!(canonical_context_messages(&owner,&[base.clone(),input.clone()],&payloads,0,8,9).unwrap().is_empty());
+        let delivery=SessionEventRecord {seq:5,event_id:"native-delivery".into(),kind:SessionEventKind("runtime/progress-recorded".into()),
+            producer_id:"runtime_supervisor".into(),..base.clone()};
+        payloads.insert("native-delivery".into(),serde_json::json!({"event":{"event":"steering_inputs","inputs":[{"receipt_operation_id":"claim","message_id":input_id,"text":"ORIGINAL_INPUT"}]}}));
+        let mut events=vec![base.clone(),input.clone(),claim.clone()];
+        assert_eq!(canonical_context_messages(&owner,&events,&payloads,0,0,9).unwrap().len(),1,"claim without Runtime delivery preserves original information as DATA");
+        events.push(delivery);
+        assert!(canonical_context_messages(&owner,&events,&payloads,0,0,9).unwrap().is_empty(),"native delivery already replays this input");
+        let data=canonical_context_messages(&owner,&events,&payloads,0,8,9).unwrap();
+        assert_eq!(data.len(),1);assert_eq!(data[0].content,"ORIGINAL_INPUT");
+        payloads.get_mut("claim").unwrap()["target_operation_id"]=serde_json::json!("another-turn");
+        assert!(canonical_context_messages(&owner,&events,&payloads,0,8,9).is_err());
+    }
+
 }

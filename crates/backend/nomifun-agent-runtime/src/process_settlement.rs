@@ -40,10 +40,10 @@ fn input_read(binding: &AgentToolBinding) -> bool {
 }
 
 impl ProcessSettlement {
-    pub(super) fn wait_request(&self, running: &BTreeSet<String>) -> crate::AgentWaitRequest {
+    pub(super) fn wait_request(&self, running: &BTreeSet<String>, wake_policy: crate::AgentWaitWakePolicy) -> crate::AgentWaitRequest {
         crate::AgentWaitRequest { processes: running.iter().map(|id| crate::AgentWaitProcess {
             process_id: id.clone(), output_cursor: self.observations.get(id).map_or(0, |observation| observation.cursor),
-        }).collect() }
+        }).collect(), wake_policy }
     }
 
     pub(super) fn observe_owner(&mut self, observation: &crate::AgentOwnedProcessObservation) {
@@ -61,11 +61,11 @@ impl ProcessSettlement {
     }
 
     pub(super) fn at_boundary(&mut self, step: u16, segments: &AgentExecutionSegmentState,
-        running: &BTreeSet<String>, plan: &AgentToolPlan) -> Option<AgentExecutionStopReason> {
-        if !plan.model_definitions().iter().any(|tool| plan.binding(&tool.name).is_some_and(process_control)) {
-            // A launch grant is not a control grant. Without an original
-            // settlement action, keep the existing safe pause instead of
-            // inventing authority or spending requests on an empty surface.
+        running: &BTreeSet<String>, plan: &AgentToolPlan, original_wait_owner: bool) -> Option<AgentExecutionStopReason> {
+        if !original_wait_owner && !plan.model_definitions().iter().any(|tool| plan.binding(&tool.name).is_some_and(process_control)) {
+            // The trusted owner can passively observe its original process
+            // without a model poll grant. Without either real path, retain the
+            // safe pause; neither path creates new control authority.
             return Some(AgentExecutionStopReason::NonQuiescentBoundary);
         }
         let boundary = self.boundary.get_or_insert_with(|| Boundary {
@@ -138,7 +138,7 @@ impl ProcessSettlement {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&result.output_text()) else { return; };
         let Some(id) = value.get("process_id").and_then(serde_json::Value::as_str)
             .filter(|id| !id.is_empty() && id.len() <= 128) else { return; };
-        let launch = matches!(binding.action_id.as_ref(), "workspace.process/start" | "workspace.process/exec");
+        let launch = binding.action_id.as_ref() == "workspace.process/start";
         if !launch && call.arguments.0.get("process_id").and_then(serde_json::Value::as_str) != Some(id) { return; }
         if !self.observations.contains_key(id) {
             // Same bound as the existing live-process observation/owner scope.

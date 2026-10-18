@@ -12,18 +12,12 @@ pub(super) async fn read_response(
     session: &mut McpSession,
 ) -> Result<JsonRpcResponse, McpOwnerError> {
     let mut decoder = EventDecoder::default();
-    let mut received = 0usize;
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|_| McpOwnerError::connection_failed("MCP event stream could not be read"))?
     {
-        received = received.saturating_add(chunk.len());
-        if received > MAX_RESPONSE_BYTES {
-            return Err(McpOwnerError::protocol_failed(
-                "MCP event stream exceeds the aggregate byte bound",
-            ));
-        }
+        session.traffic.observe(chunk.len(), false)?;
         for byte in chunk {
             let Some(event) = decoder.push(byte)? else {
                 continue;
@@ -37,6 +31,7 @@ pub(super) async fn read_response(
                 return Ok(result);
             }
         }
+        tokio::task::yield_now().await;
     }
     Err(McpOwnerError::protocol_failed(
         "MCP event stream ended without its correlated response",
@@ -50,6 +45,9 @@ pub(super) async fn process_message(
     expected: u64,
     session: &mut McpSession,
 ) -> Result<Option<JsonRpcResponse>, McpOwnerError> {
+    session.traffic.observe(0, true)?;
+    // An immediately-ready notification stream must not starve host control.
+    if session.traffic.messages.is_multiple_of(64) { tokio::task::yield_now().await; }
     let value: Value = serde_json::from_str(data)
         .map_err(|_| McpOwnerError::protocol_failed("MCP event is not JSON-RPC"))?;
     let envelope = value
@@ -74,11 +72,16 @@ pub(super) async fn process_message(
             ));
         }
         if envelope.contains_key("id") {
-            // Same endpoint/credential/session and outer deadline. The
+            // Same endpoint/credential/session and host request control. The
             // reply path accepts only an empty acknowledgment, not a
             // second stream of arbitrary server requests.
             session.reply_to_server(&value).await?;
         } else {
+            // A server may only cancel requests it previously sent to this
+            // client. It cannot cancel our outgoing call, even with the same
+            // numeric ID. We handle server requests synchronously, so there is
+            // no cancellable server-origin task here. Invalid cancels are ignored.
+            if method == "notifications/cancelled" { return Ok(None); }
             if value
                 .get("params")
                 .is_some_and(|params| !params.is_object())
@@ -95,25 +98,6 @@ pub(super) async fn process_message(
                     "MCP catalog changed during the frozen invocation",
                 ));
             }
-            if method == "notifications/cancelled" {
-                let request_id = value
-                    .get("params")
-                    .and_then(|params| params.get("requestId"))
-                    .ok_or_else(|| {
-                        McpOwnerError::protocol_failed("MCP cancellation has no request ID")
-                    })?;
-                if !matches!(request_id, Value::String(_) | Value::Number(_)) {
-                    return Err(McpOwnerError::protocol_failed(
-                        "MCP cancellation has an invalid request ID",
-                    ));
-                }
-                if request_id.as_u64() == Some(expected) {
-                    return Err(McpOwnerError::new(
-                        "MCP_REQUEST_CANCELLED",
-                        "MCP server cancelled the active request",
-                    ));
-                }
-            }
             // Other bounded notifications are untrusted observations.
             // They do not rewrite tools, workspace roots or authority.
         }
@@ -125,6 +109,7 @@ pub(super) async fn process_message(
     Ok(Some(result))
 }
 
+#[derive(Debug)]
 pub(super) struct Event {
     pub(super) kind: String,
     pub(super) data: String,
@@ -140,7 +125,6 @@ pub(super) struct EventDecoder {
     event_type: String,
     data: String,
     has_data: bool,
-    events: usize,
 }
 
 impl EventDecoder {
@@ -149,6 +133,9 @@ impl EventDecoder {
             return Ok(None);
         }
         if byte != b'\r' && byte != b'\n' {
+            if self.line.len() >= MAX_RESPONSE_BYTES {
+                return Err(McpOwnerError::protocol_failed("MCP SSE line exceeds its byte limit"));
+            }
             self.line.push(byte);
             return Ok(None);
         }
@@ -162,12 +149,6 @@ impl EventDecoder {
             line
         };
         if line.is_empty() {
-            self.events += 1;
-            if self.events > 4096 {
-                return Err(McpOwnerError::protocol_failed(
-                    "MCP event stream exceeds the event bound",
-                ));
-            }
             let kind = std::mem::take(&mut self.event_type);
             let has_data = std::mem::take(&mut self.has_data);
             let data = std::mem::take(&mut self.data);
@@ -180,6 +161,9 @@ impl EventDecoder {
         let value = value.strip_prefix(' ').unwrap_or(value);
         match field {
             "data" => {
+                if self.data.len().saturating_add(value.len()).saturating_add(usize::from(self.has_data)) > MAX_RESPONSE_BYTES {
+                    return Err(McpOwnerError::protocol_failed("MCP SSE message exceeds its byte limit"));
+                }
                 if self.has_data {
                     self.data.push('\n');
                 }
@@ -194,5 +178,28 @@ impl EventDecoder {
             _ => {}
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heartbeat_events_have_no_lifetime_event_count() {
+        let mut decoder = EventDecoder::default();
+        for _ in 0..10_000 {
+            for byte in b": heartbeat\r\n\r\n" { assert!(decoder.push(*byte).unwrap().is_none()); }
+        }
+        let mut event = None;
+        for byte in b"data: {}\n\n" { if let Some(value) = decoder.push(*byte).unwrap() { event = Some(value); } }
+        assert_eq!(event.unwrap().data,"{}");
+    }
+
+    #[test]
+    fn an_unterminated_single_line_is_bounded() {
+        let mut decoder = EventDecoder::default();
+        for _ in 0..MAX_RESPONSE_BYTES { decoder.push(b'x').unwrap(); }
+        assert_eq!(decoder.push(b'x').unwrap_err().code(),"MCP_PROTOCOL_ERROR");
     }
 }

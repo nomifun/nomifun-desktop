@@ -4,9 +4,9 @@
 
    主题：本文件全程使用全局主题变量（--bg-*、--text-*、--border-base、--primary）。
    桌宠窗口在模块初始化时已应用 data-theme(亮/暗) + data-color-scheme='default' 基础 palette
-   （default-color-scheme.css 定义了亮/暗两套变量；4 套氛围预设走 Layout 的 customCss 注入，
-   桌宠不挂 Layout 故不镜像预设——只跟随亮/暗，用中性基础 palette）。主窗切换亮/暗时由
-   index.tsx 的跨窗口事件实时同步 data-theme。 */
+   （default-color-scheme.css 定义了亮/暗两套变量）。主窗由 AppThemeRuntime 应用预设 CSS；
+   桌宠在 index.tsx 中读取同一 customCss，并通过跨窗口事件同步亮/暗与预设。
+   applyCustomCss 注入预设时保留窗口背景透明，使可见 chrome 跟随主题变量。 */
 
 .nomi-companion-window,
 .nomi-companion-window * {

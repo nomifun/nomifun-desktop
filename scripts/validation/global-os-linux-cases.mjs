@@ -92,7 +92,7 @@ export function createLinuxSystemScenario({ fixture, workspace, uid, loopbackPor
     }
     throw new Error('The exact systemd service/PID cleanup remains unproven');
   };
-  const exec = (id, command, args, verify, extra = {}) => ({ id: `linux-${id}`, name: 'exec_command', args: { command, args, timeout_ms: 15000 }, verify: async value => { exited(value); await verify?.(value); }, ...extra });
+  const exec = (id, command, args, verify, extra = {}) => ({ id: `linux-${id}`, name: 'start_process', args: { command, args, timeout_ms: 15000 }, verify: async value => { exited(value); await verify?.(value); }, ...extra });
   const scope = (id, path) => ({ id: `linux-${id}`, name: 'read_file', args: { path, format: 'instruction_scope', recursive: true }, verify: value => { assert.equal(value.observation_kind, 'instruction_scope'); assert.equal(value.complete, true); } });
   const serviceCleanupScript = 'set -eu; state=$(/usr/bin/systemctl --user show --property=LoadState --value -- "$1"); if [ "$state" != not-found ]; then /usr/bin/systemctl --user show --property=MainPID --value -- "$1"; /usr/bin/systemctl --user stop -- "$1"; else printf "NOMIFUN_ALREADY_ABSENT\\n"; fi';
   const cleanupService = () => exec('service-stop', '/bin/sh', ['-c', serviceCleanupScript, 'nomifun-exact-service-cleanup', target], async value => {
@@ -139,7 +139,7 @@ export function createLinuxSystemScenario({ fixture, workspace, uid, loopbackPor
   ];
   const serverProgram = 'import http.server,sys\nport=int(sys.argv[1]); body=sys.argv[2].encode(); path=sys.argv[3]\nclass Handler(http.server.BaseHTTPRequestHandler):\n def do_GET(self):\n  assert self.path==path\n  print("NOMIFUN_REQUEST:"+self.path,flush=True)\n  self.send_response(200); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)\n def log_message(self,*args): pass\nserver=http.server.HTTPServer(("127.0.0.1",port),Handler)\nprint("NOMIFUN_LISTENING",flush=True)\nserver.serve_forever()\n';
   const network = [
-    { id: 'linux-network-start', name: 'start_process', args: { command: '/usr/bin/python3', args: ['-u', '-c', serverProgram, String(loopbackPort), networkBody, networkPath], cwd: root, wait_ms: 0, timeout_ms: 60000 }, verify: value => { assert.equal(value.state, 'running'); networkProcessId = value.process_id; networkPid = value.pid; cursor = value.output.next_cursor; networkOutput = value.output.text; assert(Number.isInteger(networkPid)); } },
+    { id: 'linux-network-start', name: 'start_process', awaitExit: false, args: { command: '/usr/bin/python3', args: ['-u', '-c', serverProgram, String(loopbackPort), networkBody, networkPath], cwd: root, wait_ms: 0, timeout_ms: 60000 }, verify: value => { assert.equal(value.state, 'running'); networkProcessId = value.process_id; networkPid = value.pid; cursor = value.output.next_cursor; networkOutput = value.output.text; assert(Number.isInteger(networkPid)); } },
     { id: 'linux-network-running', name: 'poll_process', repeatable: true, maxAttempts: 20, args: () => ({ process_id: networkProcessId, cursor, wait_ms: 100 }), verify: async value => {
       assert.equal(value.state, 'running'); cursor = value.output.next_cursor; networkOutput += value.output.text;
       const listening = await observeLinuxListener({ pid: networkPid, port: loopbackPort });

@@ -753,21 +753,32 @@ async fn get_figure(
         .map_err(|e| AppError::Internal(e.to_string()))
 }
 
-/// Binary serve of the cached MODNet matting model, downloading it from a
-/// mirror on first use (see [`crate::matting_model`]). The renderer fetches
-/// this from `127.0.0.1` and mirrors it into Cache Storage, so the matting
-/// Web Worker reads a local copy instead of hitting huggingface behind a 30 s
-/// timeout. Immutable + long-lived: the filename is versioned, so the browser
-/// may cache it forever.
+#[derive(Default, Deserialize)]
+struct MattingModelQuery {
+    sha256: Option<String>,
+}
+
+/// Serve the backend-owned, verified artifact. An explicit requested digest
+/// fences stale frontend/backend combinations before acquiring any model.
 async fn get_matting_model(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
+    Query(query): Query<MattingModelQuery>,
 ) -> Result<Response, AppError> {
+    let sha256 = crate::matting_model::approved_sha256();
+    if query.sha256.as_deref().is_some_and(|requested| requested != sha256) {
+        return Err(AppError::Conflict("抠图模型版本不匹配，请刷新页面或更新应用".into()));
+    }
     let bytes = state.service.matting_model_bytes().await?;
+    matting_model_response(bytes)
+}
+
+fn matting_model_response(bytes: Vec<u8>) -> Result<Response, AppError> {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .header(header::CONTENT_LENGTH, bytes.len().to_string())
+        .header(header::CACHE_CONTROL, "private, no-store")
         .body(Body::from(bytes))
         .map_err(|e| AppError::Internal(e.to_string()))
 }
@@ -1089,6 +1100,30 @@ mod tests {
     async fn json_body(resp: axum::response::Response) -> serde_json::Value {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn matting_model_identity_mismatch_is_rejected_before_acquisition() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _) = test_app(dir.path()).await;
+        let response = app.oneshot(Request::get("/api/companion/matting-model?sha256=stale-model")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(response).await["code"], "CONFLICT");
+        assert!(!dir.path().join(crate::COMPANION_MODELS_REL_DIR).exists(),
+            "an incompatible renderer must not trigger model acquisition");
+    }
+
+    #[tokio::test]
+    async fn matting_model_response_serves_exact_binary_without_browser_persistence() {
+        let bytes = vec![0, 255, 13, 10, 128, 42];
+        let response = matting_model_response(bytes.clone()).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/octet-stream");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], bytes.len().to_string());
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "private, no-store");
+        assert!(!response.headers().contains_key(header::ETAG));
+        assert_eq!(response.into_body().collect().await.unwrap().to_bytes(), bytes);
     }
 
     fn post_json(uri: &str, body: serde_json::Value) -> Request<Body> {

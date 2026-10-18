@@ -110,7 +110,8 @@ pub(super) async fn guard_agent_import_exact(owner: &NomiCoreSessionOwner,
 
 pub(super) fn directory_lock(owner: &NomiCoreSessionOwner, owner_id: &str, root: &std::path::Path)
     -> Arc<tokio::sync::RwLock<()>> {
-    // The path has already passed the ordinary workspace canonicalization.
+    // The path is canonical, or the same verified genuinely missing frozen
+    // anchor. Both spellings retain the original directory lock identity.
     // Delimit and hash both fields so arbitrary path text cannot collide with
     // a Session identity or another authenticated owner's admission key.
     let identity = json!({"owner":owner_id,"root":root.to_string_lossy()});
@@ -196,9 +197,10 @@ impl NomiCoreSessionOwner {
         for resource in resources {
             if let Some(path) = resource.typed_parameters.get("workspace_root") {
                 // A frozen default remains the same project admission key
-                // when absent. Keep the directory fence without requiring a
-                // directory that independent absolute OS targets do not use.
-                let canonical = super::super::nomi_core_wave2::canonical_workspace_root(std::path::Path::new(path))?;
+                // when absent. Native proof retains that identity without
+                // recreating the directory or following a changed ancestor.
+                let canonical = nomifun_common::paths::simplified(
+                    &nomifun_knowledge::resolve_unbound_workspace_anchor(std::path::Path::new(path))?);
                 if root.as_ref().is_some_and(|previous| previous != &canonical) {
                     return Err(AppError::Conflict("A Session cannot admit work in ambiguous project directories".into()));
                 }

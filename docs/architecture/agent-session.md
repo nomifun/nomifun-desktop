@@ -149,36 +149,49 @@ Guidance changes recompute the actual model-schema digest. New source and data p
 the original native build digest without changing canonical registration identities, Snapshots,
 Session content, database schemas or data generations. Active Turns do not hot-swap rules;
 native checkpoints retain exact build/binding fences and history is never backfilled.
-`start_process` keeps its canonical `wait_ms=0..30000` range; interactive usage recommends 0
-followed by explicit polling rather than restoring the old template's non-production zero ceiling.
+`start_process` uses its canonical `wait_ms=0..30000` range with a 1000 ms initial observation by default.
+The original owner observes later running-process changes without repeated model polling.
 The early-visible component notice reads the same guidance and is derived only from actual
 component fields in the exact authorized ToolPlan, preserving visibility budgets and grants.
 
 ### User-input handoff and owned-resource waiting
 
-`request_user_input` declares the exact question and remaining work; the host verifies the owner,
-Session and active Turn. A question supplies neither an answer, authority nor completion evidence.
-`report_completion` retains the delivery-evidence gate. The host selects a quiescent closed-turn
-handoff or live waiting from the original resource owners, never from a model-authored keep-alive
-grant. Waiting uses the existing typed Runtime Event/Payload chain, without a wait table, question
-ledger, copied task state or additional checkpoint.
+`request_user_input` records the exact question and remaining work in the existing typed
+Event/Payload chain and ends the computational Turn normally as `InputRequired`, including when
+Session-owned background processes remain alive. Questions are neither answers nor completion
+or execution authority. Normal replies use canonical Session context in a new Turn; they do not
+resume a native checkpoint. Inputs genuinely admitted before the terminal fence may still be
+consumed at that safe boundary. No wait table, question ledger or copied task state is introduced.
 
-With no resource requiring its continued lifetime, the original terminal-input fence, cleanup
-proof and canonical commit close the Turn normally with `user_input_request` on `turn/completed`.
-Already-admitted replies use steering; later replies start a new Turn in the same Session. Canonical
-context retains the question and unfinished requirements. Quiescent checkpoint recovery settles
-only that original handoff, without re-asking, replaying effects or restoring live process handles.
+Processes belong to their original Session owner and retain their immutable creator Turn, call,
+Effect, resource and frozen authority. Later controls require both current and creator grants.
+Turn opening and process actions use the same shared comparison for canonical workspace paths.
+Ordinary Windows paths and native `\\?\` paths for the same directory preserve authority;
+a different directory cannot reuse the original owner.
+`wait_ms` bounds one observation and returns the same handle without killing or relaunching it.
+`timeout_ms` is an optional actual workload deadline; omission imposes neither a default 5/10-minute
+limit nor an idle lease derived from human silence. An explicit deadline remains enforceable.
+Turn settlement closes admission and joins dispatched calls; real Session teardown cancels and
+reaps the processes. Typed retention in the original cleanup witness distinguishes retained owners from reaped processes.
+Only real owner cleanup appends `session/process-owner-released` for the exact original resource set
+and generation with reaped receipts. This settles that resource fence without a new ledger or replay
+authority. Unknown Effects, binding changes,
+workspace relocation and restart retain their owner fences.
 
-An authorization helper that must survive human action parks the same Turn inside the host.
-The model stops sampling and `run_turn` does not return a terminal result. Its owner retains the
-execution lease, resources, cancellation and original process deadline. Public `waiting` references
-the original question ID. The host registers notifications before reading durable steering and
-resource revisions, preventing lost replies at the sleep boundary. Real input, original-owner
-observations, expiry and cancellation settle the wait. Owner observations are canonical facts,
-not fabricated `poll_process` calls or tool evidence. Waiting consumes no model steps, tool-failure
-counts or model no-progress windows, and renews neither budgets nor authorization lifetimes.
-A user saying authorization finished is not its success receipt; actual timeout remains a command
-attempt result while unfinished work can still require attention.
+The 64-process Session limit covers active handles and handles lacking proven cleanup. Only an
+original first-party launch plus its committed terminal owner result and real reap receipt retires
+a native handle from that quota. Historical results remain; old handles are never recreated.
+Session deletion and application shutdown drain the shared resource owner even without a Runtime.
+After restart, unproven old ownership fences new process operations while ordinary chat remains
+available; neither PID adoption nor automatic command restart is permitted.
+
+Human replies have no application timeout. Background output, exit, deadline or external link
+expiry never answers a question, reopens model execution or authorizes a fresh launch. The next
+user input can continue the task or change topic; continuation verifies the original process or
+actual configuration first. External services may expire authorization codes independently.
+Pure machine-resource observation may still park an active Turn; it is independent of human
+handoff. Native checkpoints retain exact recovery safety without claiming that old handles
+survive restart or replaying unknown Effects.
 
 A provider stop ends one response. One stop-resolution decision uses actual plans, current reports
 and resource state to select review, live waiting, native suspension or completion. An unfinished
@@ -188,12 +201,11 @@ stay with their owner; their exit grants no additional correction attempt. Only 
 can use native suspension. An owner deferred beyond its soft window retains the acknowledged
 checkpoint and canonical tail; suspension creates no renewal or invented checkpoint receipt.
 Actual faults, failure-stop policy, unknown Effects and patch recovery retain their
-original fences and cannot be escaped by a question.
+original fences and cannot be escaped by a question. Non-effectful input handoffs remain available during locked execution review and after settled command failures, without erasing observations or reopening action tools. A blocked account requires an explicit input handoff rather than a business-dependency native pause.
 
 REST, realtime, history, task progress and domain consumers use the same typed public outcome.
 Plan steps describe work progress independently of waiting or suspension; a Turn fault cannot
-make every pending item a failed task. A parked Turn accepts its exact steering reply while
-retaining new-Turn and queue admission fences. IDMM does not treat legitimate waiting as a stalled
+make every pending item a failed task. A human question closes its Turn as `input_required`; ordinary input remains receivable independently of active execution. IDMM does not treat legitimate waiting as a stalled
 model; Cron and Execution distinguish human attention from failure retries or delivered work.
 A closed Cron input handoff settles its existing invocation as the non-fault `input_required`
 terminal, consuming that occurrence without a retry or permanent reservation. A live resource
@@ -210,12 +222,29 @@ The existing settlement CAS consumes the terminal result once before ordinary sc
 Restart never treats a durable wait as proof a process survived:
 missing owner proof enters recovery/reconciliation without restoring handles or restarting commands.
 
-Waiting replies carry `expected_wait` with the exact source Turn and canonical wait-event `wait_seq`.
-The question remains referenced by its original fact rather than mirrored as client authority.
-The original steering writer validates the active wait and single reply consumption in one
-transaction. Old notices, replaced questions and concurrent windows cannot inject answers into
-a successor. Idempotent retries return their original accepted receipt; changing or removing
-the guard cannot replay it. Ordinary steering uses the same writer.
+An explicit question reply references its original source Turn and `question_seq`. Ordinary
+messages never implicitly answer the latest question. A late reply retains the original reference
+and cannot steer a different active question. Channel delivery records
+`channel/input-question-delivered` after platform acknowledgement, preserving the exact original
+question and platform/plugin/chat/message identities even after that Turn closes. The SDK publishes
+`InputQuestion` immediately after committing the source question, independently of live resource
+waiting. Missing proof or an explicit reply reference never selects a newer question. These facts
+supply no execution authority, additional model context or question table.
+
+Approved Channel inputs commit trusted `channel_source` with the original accepted body: the actual
+transport Session binding, platform/plugin/chat and inbound command identity. Ordinary message JSON
+cannot author this source. Inputs for different receivers, or Channel and desktop inputs, cannot
+steer each other's active Turn in a shared Session. Only supplements for the same actual
+platform/plugin/chat may be consumed together; the Host and Store share this rule and defer the
+others to later Turns. Read-only observers address the original input Event ID, publish committed
+questions, and deliver complete text and artifacts from the exact canonical terminal. Late stream
+fragments cannot substitute for complete delivery. QueueDrain startup and its existing sweep restore
+observation after rechecking the original authorization, binding and plugin; they never reroute old
+output through a newer binding. `channel/input-delivery-state` records only original input/Turn/transport
+delivery start, actual provider ACKs or unknown outcome. It copies no body and adds no queue table.
+Confirmed delivery is skipped; an unknown attempt never resends text or artifacts. Question ACK cuts
+settle from the original `channel/input-question-delivered` proof. Delivery uncertainty grants no tool
+replay or execution authority.
 
 ### Execution windows and suspension
 
@@ -230,12 +259,37 @@ polls, poll argument changes and instruction reads do not extend stall protectio
 exhaustion, unknown outcomes, cancellation and missing checkpoint acknowledgement keep the
 existing fail-closed behavior.
 
-The renderer shares an idle/running/waiting/paused interpretation of the existing canonical projection
-without another persistent lifecycle. Suspension retains the original Turn and input fence;
-an explicit end-turn action replaces the execution animation and cancels that exact Turn.
-Input reopens only after release is confirmed. Public pause notices preserve known execution,
-recovery and cleanup codes at the exact Operation and observed cursor. Private prose stays
-private, and a reason code never substitutes for cleanup evidence.
+Ordinary messages use one `/messages` intake. The Host commits `message/user-accepted` once
+and returns its stable message ID, cursor and accepted receipt, independently of execution.
+A single Session scheduler derives pending inputs from the same canonical chain, claims them at
+an active safe boundary or starts a later Turn. Consumption references the original input without
+copying its body or introducing a queue/recovery ledger. The Store also records new native input
+delivery by exact claim/accepted references, restoring typed Runtime content only after validating
+Session, Turn, causation and fields. Missing originals fail closed without Runtime-body fallback.
+Unclaimed messages never enter context early. A claim alone does not prove native delivery: the
+exact claim/input pair must have a committed native receipt, and a closed undelivered claim retains
+its visible reason. Exhausting an active Turn's input capacity leaves legal unclaimed inputs for a
+later Turn instead of permanently rejecting them or keeping the model sampling. Permanent input
+shape errors fail before acceptance; accepted input that cannot currently be prepared retains a
+visible typed status without creating a failed Turn or blocking unrelated valid messages.
+Unknown Effects and technical pauses still fence execution; accepting
+text never grants budget increases, cleanup attestations or native resume authority.
+
+The renderer keeps unsent drafts and stable payload/idempotency retry identity, without a second
+business queue or new-turn/steer/resume routing. Ordinary human handoff shows the question and
+normal Send without an end-turn action. Actual generation cancellation remains exact-Turn scoped;
+process cancellation belongs to its original resource owner. Closing a Turn preserves Session
+context. Forward `/messages` and renderer history derive the same question and outcome from typed
+facts with real cursors and complete equal-sequence pagination groups. Public technical pause
+notices remain exact-operation observations, never cleanup or recovery authority.
+
+A valid, current blocked account never permits completion. Plain text in place of the required input handoff uses the existing bounded `ModelResponseRejected` and `ProtocolRecovery` budget. `tool_choice` is a request; only a committed typed question or actual accepted user input establishes that handoff.
+
+Queued inputs freeze their history boundary at their actual Turn claim, rather than their earlier
+acceptance. They therefore retain the preceding Turn's complete output committed while queued.
+Closed Turns and domain DATA also merge at the actual claim sequence; early acceptance cannot
+stand in for execution order. The current input appears once, and later unclaimed messages never
+enter that history window.
 
 ### Model derivation and bundled contract evolution
 
@@ -337,7 +391,7 @@ It can follow the final motion/display batch, with real execution still serializ
 atomic terminal-input fence must pass before the typed `silent_completion` observation is committed. An exact completed
 Turn with that intent and its empty closing seal derives `AgentTurnOutcome::Silent`; old empty answers remain unavailable.
 This is reply intent, never evidence that physical movement or delegated work finished. UI history retains tool activity
-without a manufactured answer, while Robot receives only `Done` and does not start TTS. UI/API contract version 37 requires
+without a manufactured answer, while Robot receives only `Done` and does not start TTS. UI/API contract version 39 requires
 matching frontend and backend builds. Other Agent empty-answer and delivery guarantees stay unchanged.
 
 Robot ASR runs as an owned task, with at most one recognition in flight and two queued recordings per connection.
@@ -445,13 +499,16 @@ the same Turn may continue thinking or using unrelated tools. A pending browser 
 keeps the gate until safe completion. Failed acquisition, uncertain cleanup and Effect-result persistence failure
 retain the original recovery owner; cancellation or a dropped caller is not completion proof. Normal local release
 does not require a durable Turn terminal and does not mutate canonical Turn state or Effect facts.
-A committed same-Turn human wait can settle remaining Browser ownership: the original Store verifies the exact owner,
-active Operation, `waiting` outcome and absence of pending/unknown Effects before and after settlement. Original
-process owners and deadlines remain. The next Browser invocation binds the current Workspace generation under the
-frozen grants; native target, document and observation checks continue to reject stale references. Terminal cleanup
-still drains retained work and retries failed releases. User APIs use the actual coordinator gate, without deriving
-ownership from Session running or paused, model prose or configured Browser permissions. Chat, file work, attached
-Chrome and isolated background rendering leave the managed browser available whenever it has no active browser owner.
+Ordinary human handoff closes with `InputRequired`, settling any retained Browser work through the terminal lifecycle
+while preserving Session background processes. A real parked machine-resource or intervention wait may yield Browser
+within the same Turn: the Store verifies the exact owner, active Operation, committed `waiting` outcome and absence of
+pending/unknown Effects before and after settlement. Only Browser ownership is released; the next Browser action needs
+a fresh lazy admission and observation under the frozen grants. Normal per-call release instead preserves usable
+observations within the same Turn; native target, document and observation checks reject navigation, closed tabs and
+replaced runtime generations. Terminal cleanup still drains retained work and retries failed releases. User APIs use
+the actual coordinator gate, without deriving ownership from Session running or paused, model prose or configured
+Browser permissions. Chat, file work, attached Chrome and isolated background rendering leave the managed browser
+available whenever it has no active browser owner.
 User profiles use owner/Session identity independent of grant definitions: Windows uses
 `browser-v4/agent-sessions/<hash>/`; macOS 14+ uses a separate persistent
 WKWebsiteDataStore with a stable derived identifier and does not read former directory profiles. Session deletion includes this browser and its
@@ -462,7 +519,10 @@ See the [browser architecture](browser-platform.md).
 
 Skills and MCP are shared installation capabilities without a preset master gate. Creation or an explicit
 idle update captures the global Skill inventory and compiles selected MCP tools into the same
-Session-only Revision/Snapshot. Variants use the existing Agent Store, with no second binding or
+Session-only Revision/Snapshot. All MCP sources require an explicit Agent or Session choice; enabling
+or testing an installed source never selects it by default. Omitting Session selection keeps default
+Skills and the Agent's saved MCP grants without adding other installed sources.
+Variants use the existing Agent Store, with no second binding or
 permission ledger. Library locks freeze bodies, supporting resources, sources, and digests; `selected`
 controls default input injection. Current Package locks retain their exact JSON contract.
 
@@ -478,6 +538,17 @@ recompiled first, so removing a withdrawn MCP tool or Package Skill does not req
 The owner commits one canonical transition after the same idle, cleanup and effect checks.
 Bodies and resources use the same native frozen context reader; Skill hooks, shell, and forks do not
 execute or grant tools. Tool search is a built-in Runtime facility.
+
+MCP business execution has no default total or silence deadline; setup and
+cancellation/cleanup remain bounded separately. Cancellation fences new
+admission and targets the exact original request while the original TaskGroup
+retains execution and cleanup. The native lease remains renewable until owner
+settlement or an explicit fence, rather than treating a caller ending its wait
+as producer exit. Results, dispatch facts and local/remote cleanup observations
+remain on the original Event/Payload/Effect chain. An observed result survives
+unproven cleanup. Only a proved pre-effect rejection can settle as rejected;
+unknown effects still forbid replay. Memory owns mutual exclusion, not a second
+permanent unknown ledger; reconciliation must retain exact-instance cleanup proof.
 
 ## Consumers and deletion
 
@@ -495,7 +566,7 @@ Each text source and reasoning activity commits its first real fragment before l
 
 Process narration and public answers share `ConversationProse` and a Session-scoped ephemeral display cursor. Messages retain their original zero-delay ingress batches and complete received text; copying, result membership, cancellation and Runtime busy state never wait for animation. Live ingress explicitly admits sources for frame-paced presentation, sharing progress across exact canonical source/ranges; history reads do not grant live eligibility or replay a process-to-answer handoff. Each narration block uses one Markdown tree, reused within its presented source revision, revealing only arrived characters and complete syntax ranges. Code blocks and display math keep stable widgets containing their actual received content; other Markdown consumers keep their default renderer. Cursors are neither persisted nor another appended body. Replacement, withdrawal, cancellation, pause, Session changes and reduced-motion settings retain their immediate boundaries.
 
-The existing ToolCall product projection retains capability/action identity, call names, existing path/operation labels and actual status. Live history and conversation exports exclude file bodies, search snippets, write content, patches, stdin, inline scripts and raw tool output. Existing operation rows remain unchanged; no replacement file list, card or interaction is introduced, and a row with no remaining detail has no empty disclosure. Canonical model arguments and observations are unaffected. Typed process outcomes, permission requirements, bounded-search results, knowledge-write notices and produced media are extracted before product-body removal and continue through their existing product paths. The renderer does not reconstruct these states from arbitrary output JSON. The unused `content_mode` query option and business-ignored knowledge-write `title` are retired. UI/API contract version 37 requires matching frontend/backend builds instead of allowing an old renderer to infer status from retired bodies.
+The existing ToolCall product projection retains capability/action identity, call names, existing path/operation labels and actual status. Live history and conversation exports exclude file bodies, search snippets, write content, patches, stdin, inline scripts and raw tool output. Existing operation rows remain unchanged; no replacement file list, card or interaction is introduced, and a row with no remaining detail has no empty disclosure. Canonical model arguments and observations are unaffected. Typed process outcomes, permission requirements, bounded-search results, knowledge-write notices and produced media are extracted before product-body removal and continue through their existing product paths. The renderer does not reconstruct these states from arbitrary output JSON. The unused `content_mode` query option and business-ignored knowledge-write `title` are retired. UI/API contract version 39 requires matching frontend/backend builds instead of allowing an old renderer to infer status from retired bodies.
 
 `ToolCompleted.runtime_hold` records only a bounded Runtime reason why one proposal did not reach its owner port. `ToolStarted` remains write-ahead admission intent. Discovery, held proposals, owner failures, cancellation and unknown Effects keep distinct semantics. Missing historical reasons remain unclassified rather than guessed from English output. Host settlement remains readable when cancellation prevents a Runtime completion. Display metadata never changes authority, work accounting, delivery review or replay decisions. New reports use the v5 public format without automatically appended aggregate failure counts. Work accounting and delivery gates retain their original values; saved current-generation older deliveries keep exact text validation without rewriting history.
 
@@ -714,3 +785,9 @@ Run targeted Rust/UI tests, contract generator check, `bun run check:agent-sessi
 Cover new and sequential turns, rejected admission followed by a new turn, Agent switches, context clear, cancellation, restart, pause recovery, unknown effects and deletion. Missing structured history must not be repaired by a projection fallback.
 
 Preset completion also covers real first-Companion file writes and artifact receipts, asset/Office Actions without Canvas, other tools remaining available when optional environments are absent, read-only recommendations and SaveRevision CAS, an existing Session's next Turn after applying saved updates, and management owner/version/PTY-epoch fences. Temporary directories and simulated HTTP do not prove external generation services, real devices or production behavior.
+
+### Bounded process launch and owner input
+
+The current process launch contract is `workspace.process/start`. It returns a terminal observation within a bounded initial window, or the same owner's running handle, retained output and cursor. The default observation window is 1000 ms; returning does not terminate the process, renew its hard deadline or prove command success. Synchronous exec execution is retired; historical events and immutable snapshots remain read-only. Existing Sessions evolve exact bundled exec grants to the equivalent launch grant at the idle CAS boundary. New Sessions opened from an older Agent reuse the same proof to derive a hidden execution configuration while preserving its authored Revision/Snapshot. Neither path grants process controls or translates old checkpoints.
+
+Owner output observations do not consume pipes or renew leases. Waiting to understand new output wakes on a real cursor advance or terminal; after asking the user, only accepted input or the original resource terminal wakes model sampling. Spinner output is not model progress. Settled command failures and report-only phases preserve non-effectful input handoffs without reopening effect admission or erasing failures. Blocked completion accounts require an explicit handoff rather than a business-dependency native pause or false task delivery.

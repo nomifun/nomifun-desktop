@@ -3,7 +3,29 @@
 //! This module never mutates the multi-threaded host environment. The user owns
 //! command precedence and configuration; verified runtimes are fallback tools.
 use crate::{ToolError, ToolId};
-use std::{collections::HashMap, ffi::OsString, path::{Path, PathBuf}};
+use std::{
+    collections::HashMap,
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+};
+
+/// The already selected execution path, before composing a child environment.
+#[derive(Clone, Copy, Debug)]
+pub enum ProcessEnvironmentTarget<'a> {
+    Program(&'a OsStr),
+    Shell(nomi_process_runtime::ShellKind),
+}
+
+impl ProcessEnvironmentTarget<'_> {
+    /// The existing Agent process owner's default shell for this platform.
+    pub fn platform_shell() -> Self {
+        Self::Shell(if cfg!(windows) {
+            nomi_process_runtime::ShellKind::PowerShell
+        } else {
+            nomi_process_runtime::ShellKind::Posix
+        })
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedProcessLaunch {
@@ -14,7 +36,8 @@ pub struct PreparedProcessLaunch {
 
 impl std::fmt::Debug for PreparedProcessLaunch {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("PreparedProcessLaunch")
+        formatter
+            .debug_struct("PreparedProcessLaunch")
             .field("program", &self.program)
             .field("argument_count", &self.args.len())
             .field("environment_entries", &self.environment.len())
@@ -29,11 +52,17 @@ pub fn user_cli_root() -> Option<PathBuf> {
 }
 
 fn same_key(left: &str, right: &str) -> bool {
-    if cfg!(windows) { left.eq_ignore_ascii_case(right) } else { left == right }
+    nomi_process_runtime::environment_key_eq(
+        std::ffi::OsStr::new(left),
+        std::ffi::OsStr::new(right),
+    )
 }
 
 fn value<'a>(environment: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
-    environment.iter().find(|(key, _)| same_key(key, name)).map(|(_, value)| value.as_str())
+    environment
+        .iter()
+        .find(|(key, _)| same_key(key, name))
+        .map(|(_, value)| value.as_str())
 }
 
 fn insert(environment: &mut HashMap<String, String>, name: &str, value: String) {
@@ -45,16 +74,27 @@ fn inherited_environment(
     entries: impl IntoIterator<Item = (OsString, OsString)>,
     configured: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, ToolError> {
-    let unrepresentable = |part| ToolError::Io(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!("An inherited environment {part} cannot be represented by the UTF-8 process contract; the requested process was not started"),
-    ));
+    let unrepresentable = |part| {
+        ToolError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "An inherited environment {part} cannot be represented by the UTF-8 process contract; the requested process was not started"
+            ),
+        ))
+    };
     let mut environment = HashMap::new();
     for (key, entry) in entries {
-        if nomi_process_runtime::is_inherited_application_environment_key(&key) { continue; }
+        if nomi_process_runtime::is_inherited_application_environment_key(&key) {
+            continue;
+        }
         let key = key.into_string().map_err(|_| unrepresentable("name"))?;
         // A valid explicit task value replaces this inherited entry completely.
-        if configured.keys().any(|configured| same_key(configured, &key)) { continue; }
+        if configured
+            .keys()
+            .any(|configured| same_key(configured, &key))
+        {
+            continue;
+        }
         let entry = entry.into_string().map_err(|_| unrepresentable("value"))?;
         environment.insert(key, entry);
     }
@@ -62,15 +102,31 @@ fn inherited_environment(
 }
 
 fn npm_prefix_setting(environment: &HashMap<String, String>) -> Option<String> {
-    if let Some(prefix) = value(environment, "NPM_CONFIG_PREFIX") { return Some(prefix.to_owned()); }
+    if let Some(prefix) = value(environment, "NPM_CONFIG_PREFIX") {
+        return Some(prefix.to_owned());
+    }
     let configured = value(environment, "NPM_CONFIG_USERCONFIG").map(PathBuf::from);
-    let home = value(environment, if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    let home = value(
+        environment,
+        if cfg!(windows) { "USERPROFILE" } else { "HOME" },
+    )
+    .map(PathBuf::from);
     let path = configured.or_else(|| home.map(|home| home.join(".npmrc")));
-    path.and_then(|path| std::fs::read_to_string(path).ok()).and_then(|contents| {
-        contents.lines().filter_map(|line| line.split_once('='))
-            .filter(|(key, _)| key.trim().eq_ignore_ascii_case("prefix"))
-            .map(|(_, prefix)| prefix.trim().trim_matches('"').trim_matches('\'').to_owned()).last()
-    })
+    path.and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|contents| {
+            contents
+                .lines()
+                .filter_map(|line| line.split_once('='))
+                .filter(|(key, _)| key.trim().eq_ignore_ascii_case("prefix"))
+                .map(|(_, prefix)| {
+                    prefix
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_owned()
+                })
+                .last()
+        })
 }
 
 fn npm_user_prefix_configured(environment: &HashMap<String, String>) -> bool {
@@ -80,24 +136,43 @@ fn npm_user_prefix_configured(environment: &HashMap<String, String>) -> bool {
 fn configured_npm_bin(environment: &HashMap<String, String>) -> Option<PathBuf> {
     let mut prefix = npm_prefix_setting(environment)?;
     for _ in 0..32 {
-        let Some(start) = prefix.find("${") else { break; };
+        let Some(start) = prefix.find("${") else {
+            break;
+        };
         let end = prefix[start + 2..].find('}')? + start + 2;
         let replacement = value(environment, &prefix[start + 2..end])?;
         prefix.replace_range(start..=end, replacement);
     }
-    if prefix.contains("${") { return None; }
+    if prefix.contains("${") {
+        return None;
+    }
     if let Some(suffix) = prefix.strip_prefix("~/") {
-        prefix = PathBuf::from(value(environment, if cfg!(windows) { "USERPROFILE" } else { "HOME" })?)
-            .join(suffix).to_string_lossy().into_owned();
+        prefix = PathBuf::from(value(
+            environment,
+            if cfg!(windows) { "USERPROFILE" } else { "HOME" },
+        )?)
+        .join(suffix)
+        .to_string_lossy()
+        .into_owned();
     }
     let prefix = PathBuf::from(prefix);
-    if !prefix.is_absolute() { return None; }
-    Some(if cfg!(windows) { prefix } else { prefix.join("bin") })
+    if !prefix.is_absolute() {
+        return None;
+    }
+    Some(if cfg!(windows) {
+        prefix
+    } else {
+        prefix.join("bin")
+    })
 }
 
 fn executable_in_path(command: &str, path: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     std::env::split_paths(path).find_map(|directory| {
-        let directory = if directory.is_absolute() { directory } else { cwd.unwrap_or(Path::new(".")).join(directory) };
+        let directory = if directory.is_absolute() {
+            directory
+        } else {
+            cwd.unwrap_or(Path::new(".")).join(directory)
+        };
         crate::resolve_command_in(command, &directory)
     })
 }
@@ -105,13 +180,65 @@ fn executable_in_path(command: &str, path: &str, cwd: Option<&Path>) -> Option<P
 /// Compose a new child environment without downloads, directory creation or
 /// global environment mutation. Explicit PATH (including empty) is authoritative
 /// for user discovery; durable tools and verified runtime fallbacks follow it.
-pub fn process_environment(configured: &HashMap<String, String>) -> Result<HashMap<String, String>, ToolError> {
+pub fn process_environment(
+    configured: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, ToolError> {
     process_environment_in(configured, None)
 }
 
-pub(crate) fn process_environment_in(configured: &HashMap<String, String>, cwd: Option<&Path>) -> Result<HashMap<String, String>, ToolError> {
+/// Prepare an explicit shell with the same environment rules as resolved
+/// program launches. Only ambient module paths are adjusted for Windows
+/// PowerShell; explicit caller settings, including an empty value, prevail.
+pub fn process_environment_for(
+    target: ProcessEnvironmentTarget<'_>,
+    configured: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, ToolError> {
+    let mut environment = process_environment(configured)?;
+    finish_environment(target, configured, &mut environment)?;
+    Ok(environment)
+}
+
+fn finish_environment(
+    target: ProcessEnvironmentTarget<'_>,
+    configured: &HashMap<String, String>,
+    environment: &mut HashMap<String, String>,
+) -> Result<(), ToolError> {
+    let windows_powershell = match target {
+        ProcessEnvironmentTarget::Program(program) => {
+            nomi_process_runtime::program_uses_windows_powershell(program)
+        }
+        ProcessEnvironmentTarget::Shell(shell) => {
+            cfg!(windows)
+                && matches!(
+                    shell,
+                    nomi_process_runtime::ShellKind::PowerShell
+                        | nomi_process_runtime::ShellKind::PowerShellLiteral
+                )
+        }
+    };
+    // Keep inherited custom directories; only the actual WinPS system module
+    // path precedes incompatible PS7 copies of standard modules.
+    if windows_powershell && value(configured, "PSModulePath").is_none() {
+        if let Some(ambient) = value(environment, "PSModulePath").map(str::to_owned) {
+            let compatible = nomi_process_runtime::windows_powershell_module_path(OsStr::new(&ambient))?
+                .into_string().map_err(|_| ToolError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "The native Windows PowerShell module directory cannot be represented by the UTF-8 process contract; the requested process was not started",
+                )))?;
+            insert(environment, "PSModulePath", compatible);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn process_environment_in(
+    configured: &HashMap<String, String>,
+    cwd: Option<&Path>,
+) -> Result<HashMap<String, String>, ToolError> {
     let mut environment = inherited_environment(std::env::vars_os(), configured)?;
-    if configured.keys().any(|key| same_key(key, "LANG") || same_key(key, "LC_CTYPE"))
+    if configured
+        .keys()
+        .any(|key| same_key(key, "LANG") || same_key(key, "LC_CTYPE"))
         && !configured.keys().any(|key| same_key(key, "LC_ALL"))
     {
         environment.retain(|key, _| !same_key(key, "LC_ALL"));
@@ -121,18 +248,30 @@ pub(crate) fn process_environment_in(configured: &HashMap<String, String>, cwd: 
     {
         environment.retain(|key, _| !same_key(key, "LC_CTYPE"));
     }
-    for (key, entry) in configured { insert(&mut environment, key, entry.clone()); }
+    for (key, entry) in configured {
+        insert(&mut environment, key, entry.clone());
+    }
     for (key, entry) in nomifun_net::proxy::child_proxy_env(configured.keys().map(String::as_str)) {
-        if value(&environment, &key).is_none() { insert(&mut environment, &key, entry); }
+        if value(&environment, &key).is_none() {
+            insert(&mut environment, &key, entry);
+        }
     }
     let explicit_path = value(configured, "PATH");
     let original = value(&environment, "PATH").unwrap_or_default().to_owned();
     let mut bins: Vec<PathBuf> = std::env::split_paths(&original).collect();
-    if explicit_path.is_none() { bins.extend(crate::shell_env::platform_extra_bins()); }
-    if let Some(bin) = configured_npm_bin(&environment) { bins.push(bin); }
+    if explicit_path.is_none() {
+        bins.extend(crate::shell_env::platform_extra_bins());
+    }
+    if let Some(bin) = configured_npm_bin(&environment) {
+        bins.push(bin);
+    }
     let user_root = user_cli_root();
     if let Some(root) = &user_root {
-        bins.push(if cfg!(windows) { root.clone() } else { root.join("bin") });
+        bins.push(if cfg!(windows) {
+            root.clone()
+        } else {
+            root.join("bin")
+        });
     }
     // Check the user's own Node before adding the managed fallback. A genuine
     // user toolchain keeps npm's own prefix/config semantics.
@@ -142,18 +281,32 @@ pub(crate) fn process_environment_in(configured: &HashMap<String, String>, cwd: 
         .is_some_and(|path| !crate::managed::is_managed_path(&path));
     let mut managed_node = false;
     for id in [ToolId::Bun, ToolId::Node] {
-        if let Some(Ok(tool)) = crate::managed::cached_tool(id).or_else(|| crate::managed::published_tool(id)) {
-            if let Some(bin) = tool.executable_path.parent() { bins.push(bin.to_owned()); }
+        if let Some(Ok(tool)) =
+            crate::managed::cached_tool(id).or_else(|| crate::managed::published_tool(id))
+        {
+            if let Some(bin) = tool.executable_path.parent() {
+                bins.push(bin.to_owned());
+            }
             managed_node |= id == ToolId::Node;
         }
     }
     let path = nomi_process_runtime::merge_process_path(bins)
         .map_err(|error| ToolError::Io(std::io::Error::other(error)))?;
-    insert(&mut environment, "PATH", path.to_string_lossy().into_owned());
-    if managed_node && !user_node && !npm_user_prefix_configured(&environment)
+    insert(
+        &mut environment,
+        "PATH",
+        path.to_string_lossy().into_owned(),
+    );
+    if managed_node
+        && !user_node
+        && !npm_user_prefix_configured(&environment)
         && let Some(root) = user_root
     {
-        insert(&mut environment, "NPM_CONFIG_PREFIX", root.to_string_lossy().into_owned());
+        insert(
+            &mut environment,
+            "NPM_CONFIG_PREFIX",
+            root.to_string_lossy().into_owned(),
+        );
     }
     Ok(environment)
 }
@@ -168,53 +321,92 @@ pub async fn prepare_process_launch(
 ) -> Result<PreparedProcessLaunch, ToolError> {
     let configured_owned = configured.clone();
     let local_cwd = cwd.to_owned();
-    let mut environment = tokio::task::spawn_blocking(move || process_environment_in(&configured_owned, Some(&local_cwd)))
-        .await.map_err(|error| ToolError::Worker(error.to_string()))??;
-    let prepared = crate::prepare_managed_command_with_env(command, args, &environment, Some(cwd)).await?;
+    let mut environment = tokio::task::spawn_blocking(move || {
+        process_environment_in(&configured_owned, Some(&local_cwd))
+    })
+    .await
+    .map_err(|error| ToolError::Worker(error.to_string()))??;
+    let prepared =
+        crate::prepare_managed_command_with_env(command, args, &environment, Some(cwd)).await?;
     // Preparation may have published a runtime. Compose again so shebangs,
     // lifecycle scripts and later subcommands immediately see it in PATH.
     if prepared.is_some() {
         let configured_owned = configured.clone();
         let local_cwd = cwd.to_owned();
-        environment = tokio::task::spawn_blocking(move || process_environment_in(&configured_owned, Some(&local_cwd)))
-            .await.map_err(|error| ToolError::Worker(error.to_string()))??;
+        environment = tokio::task::spawn_blocking(move || {
+            process_environment_in(&configured_owned, Some(&local_cwd))
+        })
+        .await
+        .map_err(|error| ToolError::Worker(error.to_string()))??;
     }
     // A user may have Node but lack npm. The managed npm fallback executes its
     // own pinned Node, whose default prefix would otherwise be the immutable
     // distribution directory; keep installed CLIs in durable user data.
-    if prepared.as_ref().is_some_and(|prepared| crate::managed::is_managed_path(&prepared.executable_path))
-        && matches!(command.to_ascii_lowercase().as_str(), "npm" | "npx" | "npm.cmd" | "npx.cmd")
+    if prepared
+        .as_ref()
+        .is_some_and(|prepared| crate::managed::is_managed_path(&prepared.executable_path))
+        && matches!(
+            command.to_ascii_lowercase().as_str(),
+            "npm" | "npx" | "npm.cmd" | "npx.cmd"
+        )
         && !npm_user_prefix_configured(&environment)
         && let Some(root) = user_cli_root()
     {
-        insert(&mut environment, "NPM_CONFIG_PREFIX", root.to_string_lossy().into_owned());
+        insert(
+            &mut environment,
+            "NPM_CONFIG_PREFIX",
+            root.to_string_lossy().into_owned(),
+        );
     }
     let native = if prepared.is_none() {
         if command.contains(['/', '\\']) {
             let path = PathBuf::from(command);
-            Some(if path.is_absolute() { path } else { cwd.join(path) }).filter(|path| path.is_file())
+            Some(if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            })
+            .filter(|path| path.is_file())
         } else {
-            crate::resolver::command_in_environment(command,
-                value(&environment, "PATH").map(std::ffi::OsStr::new), Some(cwd))?
+            crate::resolver::command_in_environment(
+                command,
+                value(&environment, "PATH").map(std::ffi::OsStr::new),
+                Some(cwd),
+            )?
         }
-    } else { None };
+    } else {
+        None
+    };
     if let Some(native) = &native {
-        let default_bin = user_cli_root().map(|root| if cfg!(windows) { root } else { root.join("bin") });
+        let default_bin = user_cli_root().map(|root| {
+            if cfg!(windows) {
+                root
+            } else {
+                root.join("bin")
+            }
+        });
         let npm_bin = configured_npm_bin(&environment).or(default_bin);
-        let node_ready = executable_in_path("node", value(&environment, "PATH").unwrap_or_default(), Some(cwd))
-            .is_some_and(|path| !crate::managed::is_managed_path(&path)
-                || matches!(crate::managed::cached_tool(ToolId::Node), Some(Ok(_))));
+        let node_ready = executable_in_path(
+            "node",
+            value(&environment, "PATH").unwrap_or_default(),
+            Some(cwd),
+        )
+        .is_some_and(|path| {
+            !crate::managed::is_managed_path(&path)
+                || matches!(crate::managed::cached_tool(ToolId::Node), Some(Ok(_)))
+        });
         // A durable npm CLI still needs Node after runtime-cache cleanup. Its
         // install directory identifies the ecosystem without rewriting argv or
         // guessing arbitrary command text.
-        if npm_bin.is_some_and(|bin| native.starts_with(bin))
-            && !node_ready
-        {
+        if npm_bin.is_some_and(|bin| native.starts_with(bin)) && !node_ready {
             crate::managed::prepare_managed_tool(ToolId::Node).await?;
             let configured_owned = configured.clone();
             let local_cwd = cwd.to_owned();
-            environment = tokio::task::spawn_blocking(move || process_environment_in(&configured_owned, Some(&local_cwd)))
-                .await.map_err(|error| ToolError::Worker(error.to_string()))??;
+            environment = tokio::task::spawn_blocking(move || {
+                process_environment_in(&configured_owned, Some(&local_cwd))
+            })
+            .await
+            .map_err(|error| ToolError::Worker(error.to_string()))??;
         }
     }
     if value(&environment, "NPM_CONFIG_PREFIX").is_some()
@@ -224,34 +416,231 @@ pub async fn prepare_process_launch(
         tokio::fs::create_dir_all(&root).await?;
     }
     let (program, args) = match prepared {
-        Some(prepared) => (prepared.executable_path.to_string_lossy().into_owned(), prepared.args),
+        Some(prepared) => (
+            prepared.executable_path.to_string_lossy().into_owned(),
+            prepared.args,
+        ),
         None => {
-            let program = if command.contains(['/', '\\']) {
+            let program = if Path::new(command).is_absolute() {
                 command.to_owned()
             } else {
-                native
-                    .map_or_else(|| command.to_owned(), |path| path.to_string_lossy().into_owned())
+                // stdio CreateProcess paths are resolved before child cwd is
+                // installed. Carry the already discovered native path so a
+                // relative executable means the same file for every owner.
+                native.map_or_else(
+                    || command.to_owned(),
+                    |path| path.to_string_lossy().into_owned(),
+                )
             };
             (program, args.to_vec())
-        },
+        }
     };
-    Ok(PreparedProcessLaunch { program, args, environment })
+    let environment_program = cwd.join(&program);
+    finish_environment(
+        ProcessEnvironmentTarget::Program(environment_program.as_os_str()),
+        configured,
+        &mut environment,
+    )?;
+    Ok(PreparedProcessLaunch {
+        program,
+        args,
+        environment,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_module_path_adjustment_keeps_configuration_provenance() {
+        use nomi_process_runtime::ShellKind;
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe");
+        assert!(nomi_process_runtime::program_uses_windows_powershell(system.as_os_str()));
+        let targets = [
+            ProcessEnvironmentTarget::Program(system.as_os_str()),
+            ProcessEnvironmentTarget::Program(OsStr::new("fixture.ps1")),
+            ProcessEnvironmentTarget::Program(OsStr::new("fixture.PS1. ")),
+            ProcessEnvironmentTarget::platform_shell(),
+            ProcessEnvironmentTarget::Shell(ShellKind::PowerShell),
+            ProcessEnvironmentTarget::Shell(ShellKind::PowerShellLiteral),
+        ];
+        for target in targets {
+            let mut ambient = HashMap::from([("pSmOdUlEpAtH".into(), "ambient-pwsh-modules".into())]);
+            finish_environment(target, &HashMap::new(), &mut ambient).unwrap();
+            let modules = value(&ambient, "PSModulePath").unwrap();
+            assert!(modules.ends_with(";ambient-pwsh-modules"));
+            assert!(Path::new(modules.split(';').next().unwrap()).is_dir());
+            for configured_value in ["", "explicit-task-modules"] {
+                let configured = HashMap::from([("pSmOdUlEpAtH".into(), configured_value.into())]);
+                let mut environment = configured.clone();
+                finish_environment(target, &configured, &mut environment).unwrap();
+                assert_eq!(value(&environment, "PSModulePath"), Some(configured_value));
+            }
+        }
+        let untrusted = tempfile::tempdir().unwrap();
+        let fake = untrusted.path().join("powershell.exe");
+        std::fs::write(&fake, b"not a system executable").unwrap();
+        for target in [
+            ProcessEnvironmentTarget::Program(OsStr::new("node.exe")),
+            ProcessEnvironmentTarget::Program(OsStr::new("fixture.cmd")),
+            ProcessEnvironmentTarget::Program(OsStr::new("fixture.bat")),
+            ProcessEnvironmentTarget::Program(OsStr::new("pwsh.exe")),
+            ProcessEnvironmentTarget::Program(fake.as_os_str()),
+            ProcessEnvironmentTarget::Shell(ShellKind::Posix),
+        ] {
+            let mut environment = HashMap::from([("PSModulePath".into(), "ambient-pwsh-modules".into())]);
+            finish_environment(target, &HashMap::new(), &mut environment).unwrap();
+            assert_eq!(value(&environment, "PSModulePath"), Some("ambient-pwsh-modules"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_powershell_native_custom_module_and_system_cmdlet_are_both_available() {
+        use nomi_process_runtime::ChildProcessBuilder;
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let module_root = root.path().join("inherited custom module directory");
+        let module = module_root.join("NomiFunInheritedFixture");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(module.join("NomiFunInheritedFixture.psm1"),
+            "function Get-NomiFunInheritedFixture { 'inherited-custom-present' }; Export-ModuleMember -Function Get-NomiFunInheritedFixture").unwrap();
+        let fixture = root.path().join("fixture.txt");
+        std::fs::write(&fixture, b"native custom and standard modules").unwrap();
+        let source = "Import-Module NomiFunInheritedFixture -ErrorAction Stop; [Console]::Write((Get-NomiFunInheritedFixture) + '|' + (Get-FileHash -LiteralPath $env:NOMIFUN_HASH_FIXTURE -Algorithm SHA256).Hash)";
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe");
+        let configured = HashMap::from([
+            ("NOMIFUN_HASH_FIXTURE".into(), fixture.to_str().unwrap().into()),
+            ("NPM_CONFIG_PREFIX".into(), root.path().join("npm-prefix").to_str().unwrap().into()),
+        ]);
+        let mut inherited = process_environment(&configured).unwrap();
+        let mut ambient = module_root.as_os_str().to_owned();
+        if let Some(existing) = std::env::var_os("PSModulePath") {
+            ambient.push(";");
+            ambient.push(existing);
+        }
+        // Inject a parent-only fixture into this local map, never the global
+        // process environment or the explicit task map.
+        insert(&mut inherited, "PSModulePath", ambient.to_str().unwrap().into());
+        finish_environment(ProcessEnvironmentTarget::Program(system.as_os_str()),
+            &configured, &mut inherited).unwrap();
+        assert!(value(&inherited, "PSModulePath").unwrap().ends_with(ambient.to_str().unwrap()));
+        let mut child = ChildProcessBuilder::clean_cli(&system);
+        child.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", source])
+            .envs(&inherited).current_dir(root.path());
+        let output = child.output().await.unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("inherited-custom-present|{}",
+            hex::encode(Sha256::digest(b"native custom and standard modules")).to_uppercase()));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_powershell_native_get_file_hash_uses_prepared_program_and_shell_environments() {
+        use nomi_process_runtime::{ChildProcessBuilder, CommandSpec, NormalizedProcessRequest,
+            OutputCursor, OutputStream, PollResult, ProcessOutcome, ProcessOwner, ProcessPolicy,
+            ProcessSupervisor, ShellKind, SupervisorConfig, Transport};
+        use sha2::{Digest, Sha256};
+        use std::time::{Duration, Instant};
+        let root = tempfile::tempdir().unwrap();
+        let fixture = root.path().join("hash fixture.txt");
+        let fixture_bytes = b"native Get-FileHash regression\r\n";
+        std::fs::write(&fixture, fixture_bytes).unwrap();
+        let expected = hex::encode(Sha256::digest(fixture_bytes)).to_uppercase();
+        let source = "[Console]::Write((Get-FileHash -LiteralPath $env:NOMIFUN_HASH_FIXTURE -Algorithm SHA256).Hash)";
+        let script = root.path().join("hash-fixture.ps1");
+        std::fs::write(&script, source).unwrap();
+        let configured = HashMap::from([
+            ("PATH".into(), root.path().to_str().unwrap().into()),
+            ("NPM_CONFIG_PREFIX".into(), root.path().join("npm-prefix").to_str().unwrap().into()),
+            ("NOMIFUN_HASH_FIXTURE".into(), fixture.to_str().unwrap().into()),
+        ]);
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe");
+        let shell_args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", source]
+            .into_iter().map(String::from).collect::<Vec<_>>();
+        let system_drive = system.ancestors().last().unwrap();
+        let relative_system = system.strip_prefix(system_drive).unwrap();
+        for (command, args, cwd) in [
+            ("hash-fixture.ps1", Vec::new(), root.path()),
+            (system.to_str().unwrap(), shell_args.clone(), root.path()),
+            (relative_system.to_str().unwrap(), shell_args, system_drive),
+        ] {
+            let prepared = prepare_process_launch(command, &args, cwd, &configured).await.unwrap();
+            if let Ok(ambient) = std::env::var("PSModulePath") {
+                assert_eq!(value(&prepared.environment, "PSModulePath"),
+                    nomi_process_runtime::windows_powershell_module_path(OsStr::new(&ambient)).unwrap().to_str());
+            }
+            let mut child = ChildProcessBuilder::clean_cli(&prepared.program);
+            child.args(&prepared.args).envs(&prepared.environment).current_dir(cwd);
+            let output = child.output().await.unwrap_or_else(|error| panic!("{command}: {error}"));
+            assert!(output.status.success(), "{command}: {}", String::from_utf8_lossy(&output.stderr));
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), expected, "{command}");
+        }
+        for shell in [ShellKind::PowerShell, ShellKind::PowerShellLiteral] {
+            let environment = process_environment_for(ProcessEnvironmentTarget::Shell(shell), &configured).unwrap();
+            if let Ok(ambient) = std::env::var("PSModulePath") {
+                assert_eq!(value(&environment, "PSModulePath"),
+                    nomi_process_runtime::windows_powershell_module_path(OsStr::new(&ambient)).unwrap().to_str());
+            }
+            let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+            let process = NormalizedProcessRequest {
+                owner: ProcessOwner::new(Default::default(), Default::default()),
+                command: CommandSpec::Shell { shell, script: source.into() },
+                cwd: root.path().to_owned(),
+                env: environment.into_iter().map(|(key, value)| (key.into(), value.into())).collect(),
+                transport: Transport::Pipe, policy: ProcessPolicy::default(),
+            };
+            let handle = supervisor.start(process).await.unwrap();
+            let result = supervisor.poll(&handle.owner, &handle.session_id, OutputCursor::START,
+                Instant::now() + Duration::from_secs(20)).await.unwrap();
+            let PollResult::Finished(ProcessOutcome::Exited { code, output, cleanup, .. }) = result else {
+                panic!("native shell did not finish: {result:?}");
+            };
+            assert_eq!(code, Some(0), "{shell:?}: {}", output.text());
+            assert!(cleanup.reaped && cleanup.errors.is_empty(), "{cleanup:?}");
+            let stdout = output.chunks.iter().filter(|chunk| chunk.stream != OutputStream::Stderr)
+                .map(|chunk| chunk.text.as_str()).collect::<String>();
+            assert_eq!(stdout, expected, "{shell:?}");
+            assert!(supervisor.shutdown().await.is_exact());
+        }
+        eprintln!("WINDOWS_POWERSHELL_NATIVE_HASH_EVIDENCE inherited_psmodulepath={} program_paths=3 shell_paths=2 all_exact=true",
+            std::env::var_os("PSModulePath").is_some());
+    }
+
+    #[test]
+    fn configured_native_unicode_environment_alias_replaces_the_inherited_name() {
+        let configured = HashMap::from([("TOOL_Ä".into(), "explicit".into())]);
+        let mut inherited =
+            inherited_environment([("tool_ä".into(), "ambient".into())], &configured).unwrap();
+        for (key, entry) in configured {
+            insert(&mut inherited, &key, entry);
+        }
+        assert_eq!(inherited["TOOL_Ä"], "explicit");
+        assert_eq!(inherited.len(), if cfg!(windows) { 1 } else { 2 });
+    }
+
     #[test]
     fn inherited_application_controls_are_filtered_before_explicit_values_are_applied() {
-        let configured = HashMap::from([("NOMIFUN_TASK_VALUE".into(), "explicit-user-value".into())]);
-        let mut actual = inherited_environment([
-            ("NOMIFUN_INTERNAL".into(), "internal".into()),
-            ("CLAUDECODE".into(), "internal".into()),
-            ("NOMIFUN_TASK_VALUE".into(), "inherited".into()),
-            ("NODE_OPTIONS".into(), "--max-old-space-size=4096".into()),
-        ], &configured).unwrap();
-        for (key, entry) in configured { insert(&mut actual, &key, entry); }
+        let configured =
+            HashMap::from([("NOMIFUN_TASK_VALUE".into(), "explicit-user-value".into())]);
+        let mut actual = inherited_environment(
+            [
+                ("NOMIFUN_INTERNAL".into(), "internal".into()),
+                ("CLAUDECODE".into(), "internal".into()),
+                ("NOMIFUN_TASK_VALUE".into(), "inherited".into()),
+                ("NODE_OPTIONS".into(), "--max-old-space-size=4096".into()),
+            ],
+            &configured,
+        )
+        .unwrap();
+        for (key, entry) in configured {
+            insert(&mut actual, &key, entry);
+        }
         assert_eq!(actual.len(), 2);
         assert_eq!(actual["NODE_OPTIONS"], "--max-old-space-size=4096");
         assert_eq!(actual["NOMIFUN_TASK_VALUE"], "explicit-user-value");
@@ -267,14 +656,29 @@ mod tests {
             vec![(OsString::from("USER_TOOL_SETTING"), private.clone())],
         ] {
             let error = inherited_environment(entries, &HashMap::new()).unwrap_err();
-            assert!(matches!(&error, ToolError::Io(error) if error.kind() == std::io::ErrorKind::InvalidData));
+            assert!(
+                matches!(&error, ToolError::Io(error) if error.kind() == std::io::ErrorKind::InvalidData)
+            );
             assert!(!error.to_string().contains("private-value"));
             assert!(!format!("{error:?}").contains("private-value"));
         }
         // Filter app controls in their native encoding before decoding values.
-        assert!(inherited_environment([(OsString::from("NOMIFUN_INTERNAL"), private.clone())], &HashMap::new()).unwrap().is_empty());
-        assert!(inherited_environment([(OsString::from("USER_TOOL_SETTING"), private)],
-            &HashMap::from([("USER_TOOL_SETTING".into(), "explicit".into())])).unwrap().is_empty());
+        assert!(
+            inherited_environment(
+                [(OsString::from("NOMIFUN_INTERNAL"), private.clone())],
+                &HashMap::new()
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            inherited_environment(
+                [(OsString::from("USER_TOOL_SETTING"), private)],
+                &HashMap::from([("USER_TOOL_SETTING".into(), "explicit".into())])
+            )
+            .unwrap()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -291,9 +695,14 @@ mod tests {
         ]);
         let actual = process_environment(&configured).unwrap();
         for (key, entry) in &configured {
-            if key != "PATH" { assert_eq!(value(&actual, key), Some(entry.as_str()), "{key}"); }
+            if key != "PATH" {
+                assert_eq!(value(&actual, key), Some(entry.as_str()), "{key}");
+            }
         }
-        assert_eq!(std::env::split_paths(&actual["PATH"]).next(), Some(PathBuf::from("explicit-task-bin")));
+        assert_eq!(
+            std::env::split_paths(&actual["PATH"]).next(),
+            Some(PathBuf::from("explicit-task-bin"))
+        );
         assert!(value(&actual, "LC_ALL").is_none());
         assert_eq!(configured.len(), 8);
     }
@@ -302,18 +711,35 @@ mod tests {
     fn persisted_npm_user_configuration_is_authoritative() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("npmrc");
-        std::fs::write(&path, "registry=https://registry.invalid\nprefix = /user/prefix\n").unwrap();
-        let configured = HashMap::from([("NPM_CONFIG_USERCONFIG".into(), path.to_string_lossy().into_owned())]);
+        std::fs::write(
+            &path,
+            "registry=https://registry.invalid\nprefix = /user/prefix\n",
+        )
+        .unwrap();
+        let configured = HashMap::from([(
+            "NPM_CONFIG_USERCONFIG".into(),
+            path.to_string_lossy().into_owned(),
+        )]);
         assert!(npm_user_prefix_configured(&configured));
-        std::fs::write(&path, "# prefix=/comment\nregistry=https://registry.invalid\n").unwrap();
+        std::fs::write(
+            &path,
+            "# prefix=/comment\nregistry=https://registry.invalid\n",
+        )
+        .unwrap();
         assert!(!npm_user_prefix_configured(&configured));
     }
 
     #[tokio::test]
     async fn native_launch_keeps_empty_unicode_and_shell_metacharacters_literal() {
-        let args = vec!["".into(), "有 空格".into(), "'\";$(printf injected)&".into()];
+        let args = vec![
+            "".into(),
+            "有 空格".into(),
+            "'\";$(printf injected)&".into(),
+        ];
         let environment = HashMap::from([("PATH".into(), "".into())]);
-        let result = prepare_process_launch("/usr/bin/printf", &args, Path::new("/"), &environment).await.unwrap();
+        let result = prepare_process_launch("/usr/bin/printf", &args, Path::new("/"), &environment)
+            .await
+            .unwrap();
         assert_eq!(result.program, "/usr/bin/printf");
         assert_eq!(result.args, args);
     }
@@ -321,7 +747,10 @@ mod tests {
     #[test]
     fn user_tools_do_not_live_in_runtime_cache() {
         let root = user_cli_root().unwrap();
-        assert!(root.components().any(|part| part.as_os_str() == "nomifun-user-tools"));
+        assert!(
+            root.components()
+                .any(|part| part.as_os_str() == "nomifun-user-tools")
+        );
         assert!(!root.starts_with(crate::runtime_root().unwrap()));
     }
 }

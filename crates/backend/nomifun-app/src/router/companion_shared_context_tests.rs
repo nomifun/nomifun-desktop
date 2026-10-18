@@ -1370,3 +1370,34 @@ async fn small_history_byte_pages_retry_each_unreturned_matching_source() {
         "a source that did not fit must be retried, never skipped by its cursor"
     );
 }
+
+#[tokio::test]
+async fn unified_input_claims_share_original_speech_once_and_pending_input_stays_out_of_context() {
+    let database=nomifun_db::init_database_memory().await.unwrap();
+    let canonical=CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
+    let store=canonical.store();let owner=principal();
+    let (_directory,service,companion)=memory_service(&owner).await;
+    let desktop=open(&canonical,&owner,&companion,None).await;
+    let robot=open(&canonical,&owner,&companion,Some("physical-robot")).await;
+    let snapshot=store.get_live_session(&desktop).await.unwrap().agent_binding.resolved_snapshot_ref;
+    let operation=uuid::Uuid::now_v7().to_string();
+    let (root,_)=store.start_turn(&desktop,"session_api".into(),format!("{operation}:root").into(),operation.clone().into(),
+        StrictJsonValue(json!({"content":"VISIBLE_ROOT","files":[],"inject_skills":[],"hidden":false,
+            "admission":{"resolved_snapshot_ref":snapshot,"route_identity":nomifun_agent_contracts::ChatRouteIdentity::new(
+                "shared-context-fixture@1","agent_chat","fixture-route".into(),1)}}))).await.unwrap();
+    let root_id=root.record.unwrap().event_id;
+    let accepted=store.accept_session_input(&owner,&desktop,"session_api".into(),"shared-input-claimed".into(),
+        StrictJsonValue(json!({"content":"VISIBLE_ONCE","files":[],"inject_skills":[],"hidden":false}))).await.unwrap().record.unwrap();
+    store.claim_session_input_as_steering(&owner,&desktop,&accepted.event_id,&operation.clone().into()).await.unwrap();
+    store.accept_session_input(&owner,&desktop,"session_api".into(),"shared-input-pending".into(),
+        StrictJsonValue(json!({"content":"PENDING_NEVER_CONTEXT","files":[],"inject_skills":[],"hidden":false}))).await.unwrap();
+    let recent=recent_context(database.pool(),store,&service,&owner,&robot,&companion).await.unwrap();
+    let rendered=serde_json::to_string(&recent).unwrap();
+    assert!(rendered.contains("VISIBLE_ROOT"));
+    assert_eq!(rendered.matches("VISIBLE_ONCE").count(),1,"the v2 claim cannot repeat the original utterance");
+    assert!(!rendered.contains("PENDING_NEVER_CONTEXT"));
+    let sources=history::resolve_companion_turn_human_sources(database.pool(),store,&owner,&companion,&desktop,&operation,u64::MAX)
+        .await.unwrap().unwrap();
+    let ids=sources.iter().map(|source|source.message_id.as_str()).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(ids,std::collections::BTreeSet::from([root_id.as_ref(),accepted.event_id.as_ref()]));
+}

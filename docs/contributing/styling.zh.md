@@ -42,6 +42,8 @@ Arco 色阶是逗号分隔的 RGB 三元组。UnoCSS 注入的 slash-alpha 会�
 
 ## 预设主题
 
+内置预设为「经典」（默认）与「冰晶幻境」，同时支持自定义 CSS 主题。
+
 主题明暗模式与色系分开。优先使用
 [styles/themes](../../ui/src/renderer/styles/themes) 中的语义 token；
 `--aou-1..10` 是当前品牌色阶的兼容名称。

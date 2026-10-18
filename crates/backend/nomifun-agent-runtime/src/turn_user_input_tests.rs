@@ -14,7 +14,6 @@ impl crate::AgentUserInputRequestPort for InputPolicy {
 struct InputJournal {
     journal: SettlementJournal,
     fail_source: bool,
-    no_pending_ack: bool,
 }
 
 #[derive(Debug)]
@@ -48,7 +47,6 @@ impl AgentEventSink for InputJournal {
     fn supports_checkpoints(&self) -> bool { true }
     async fn save_checkpoint(&self, checkpoint: crate::AgentExecutionCheckpoint)
         -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
-        if self.no_pending_ack && checkpoint.pending_user_input.is_some() { return Ok(None); }
         self.journal.save_checkpoint(checkpoint).await
     }
 }
@@ -82,9 +80,10 @@ async fn user_input_direct_handoff_has_source_and_unfinished_requirements_withou
     assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::UserInputRequested { request, .. } if request == question)));
     assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::CompletionReported { .. })));
     let cp = journal.journal.checkpoints.lock().unwrap().last().unwrap().clone();
-    assert_eq!(cp.pending_user_input.as_ref(), Some(question));
-    assert_eq!(cp.plan.requirements[0].source.input, 0);
-    assert_eq!(cp.plan.requirements[0].source.quote, "inspect");
+    assert!(cp.pending_user_input.is_none(), "ordinary questions are canonical context, not a resumable checkpoint");
+    let plan = events.iter().rev().find_map(|event| match event { AgentEngineEvent::PlanUpdated {plan} => Some(plan),_=>None }).unwrap();
+    assert_eq!(plan.requirements[0].source.input, 0);
+    assert_eq!(plan.requirements[0].source.quote, "inspect");
     let mut history = vec![];
     crate::replay_closed_turn(&mut history, request().input.messages[0].clone(), &events).unwrap();
     let encoded = serde_json::to_string(&history).unwrap();
@@ -104,8 +103,8 @@ impl AgentToolInvoker for InputHelpTool {
 
 #[tokio::test]
 async fn user_input_after_two_help_calls_text_stop_can_declare_input_without_report_failure() {
-    let mut help = control_step("help-a", "exec_command", json!({"command":"help batch"}));
-    help.insert(1, Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall { call_id:"help-b".into(), name:"exec_command".into(),
+    let mut help = control_step("help-a", "start_process", json!({"command":"help batch"}));
+    help.insert(1, Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall { call_id:"help-b".into(), name:"start_process".into(),
         arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"help shape"})),provider_metadata:None } }));
     let model = Arc::new(ObservingModel { steps:std::sync::Mutex::new(vec![help, text_step("Please supply your name and interests."), input_step("question")]), requests:Default::default() });
     let tool = Arc::new(InputHelpTool { calls:AtomicUsize::new(0), failed:false });
@@ -123,11 +122,11 @@ async fn user_input_after_two_help_calls_text_stop_can_declare_input_without_rep
 
 #[tokio::test]
 async fn user_input_open_plan_is_retained_and_mixed_batch_never_executes() {
-    let mut help = control_step("help-a", "exec_command", json!({"command":"help batch"}));
-    help.insert(1, Ok(ChatModelEvent::ToolCallCompleted {call:ChatToolCall {call_id:"help-b".into(),name:"exec_command".into(),
+    let mut help = control_step("help-a", "start_process", json!({"command":"help batch"}));
+    help.insert(1, Ok(ChatModelEvent::ToolCallCompleted {call:ChatToolCall {call_id:"help-b".into(),name:"start_process".into(),
         arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"help shape"})),provider_metadata:None}}));
     let mut mixed = input_step("mixed-question");
-    mixed.insert(1, Ok(ChatModelEvent::ToolCallCompleted { call:ChatToolCall { call_id:"held-help".into(), name:"exec_command".into(),
+    mixed.insert(1, Ok(ChatModelEvent::ToolCallCompleted { call:ChatToolCall { call_id:"held-help".into(), name:"start_process".into(),
         arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"help"})),provider_metadata:None } }));
     let model = Arc::new(ScriptedModel { steps:std::sync::Mutex::new(vec![help, plan_step("in_progress", "inspect"), mixed, input_step("fresh-question")]) });
     let tool = Arc::new(InputHelpTool {calls:AtomicUsize::new(0),failed:false});
@@ -159,9 +158,9 @@ async fn user_input_policy_and_shape_rejections_share_existing_control_budget() 
 }
 
 #[tokio::test]
-async fn user_input_source_checkpoint_failure_and_cancellation_never_deliver_handoff() {
-    for (fail_source, no_pending_ack, cancel) in [(true,false,false),(false,true,false),(false,false,true)] {
-        let journal = Arc::new(InputJournal {fail_source,no_pending_ack,..Default::default()});
+async fn user_input_source_failure_and_cancellation_never_deliver_handoff() {
+    for (fail_source, cancel) in [(true,false),(false,true)] {
+        let journal = Arc::new(InputJournal {fail_source,..Default::default()});
         let token = CancellationToken::new();
         let turn = input_request(Default::default()).with_user_input_request_port(Arc::new(InputPolicy {deny:false,cancel:cancel.then(|| token.clone())}));
         let session = input_session(Arc::new(ScriptedModel {steps:std::sync::Mutex::new(vec![input_step("question")])}),Arc::new(EchoTool),journal.clone());
@@ -184,10 +183,11 @@ async fn user_input_terminal_fence_real_reply_retires_pending_question() {
     assert!(matches!(result.terminal, AgentTurnTerminal::InputRequired { request } if request.request_id.as_ref()=="fresh-question"));
     assert_eq!(model.requests.lock().unwrap().len(),2);
     let cp = journal.journal.checkpoints.lock().unwrap().last().unwrap().clone();
-    assert_eq!(cp.accepted_input_count,2);
-    assert_eq!(cp.plan.requirements.len(),2);
-    assert_eq!(cp.pending_user_input.unwrap().request_id.as_ref(),"fresh-question");
+    assert!(cp.pending_user_input.is_none());
     let events = journal.journal.events.lock().unwrap();
+    assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::SteeringInputs {inputs} if inputs.len()==1 && inputs[0].message_id=="answer-message")));
+    let plan=events.iter().rev().find_map(|event|match event {AgentEngineEvent::PlanUpdated {plan}=>Some(plan),_=>None}).unwrap();
+    assert_eq!(plan.requirements.len(),2);
     assert_eq!(events.iter().filter(|event| matches!(event, AgentEngineEvent::TurnInputRequired { .. })).count(),1);
     assert!(crate::user_input_request::recorded_pending(&events).is_ok());
 }
@@ -201,7 +201,13 @@ async fn user_input_pending_checkpoint_recovers_terminal_fence_without_model_or_
     let events = journal.journal.events.lock().unwrap().clone();
     let at = events.iter().rposition(|event| matches!(event, AgentEngineEvent::ExecutionCheckpointSaved { .. })).unwrap();
     let AgentEngineEvent::ExecutionCheckpointSaved { revision, .. } = events[at] else { unreachable!() };
-    let prefix = events[..=at].to_vec();
+    let terminal = events.iter().position(|event| matches!(event,AgentEngineEvent::TurnInputRequired {..})).unwrap();
+    let reconciled = crate::reconcile_execution_tail(&cp,revision,&events[at+1..terminal],&Default::default(),&Default::default(),&Default::default()).unwrap();
+    let mut prefix = events[..terminal].to_vec();
+    prefix.extend(reconciled.observations);
+    let revision = revision+1;
+    prefix.push(AgentEngineEvent::ExecutionCheckpointSaved {step:reconciled.checkpoint.model_steps,revision,digest:"d".repeat(64).into()});
+    let cp = reconciled.checkpoint;
     let recovery = crate::AgentTurnRecovery::new(cp.clone(),revision,2,prefix.clone(),vec![],vec![]).unwrap();
     let model = Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![]),requests:Default::default()});
     let resumed = Arc::new(InputJournal::default());
@@ -226,8 +232,8 @@ async fn user_input_pending_checkpoint_recovers_terminal_fence_without_model_or_
 
 #[tokio::test]
 async fn user_input_rejection_keeps_the_bounded_end_intent_surface_closed() {
-    let mut help = control_step("help-a", "exec_command", json!({"command":"help batch"}));
-    help.insert(1, Ok(ChatModelEvent::ToolCallCompleted {call:ChatToolCall {call_id:"help-b".into(),name:"exec_command".into(),
+    let mut help = control_step("help-a", "start_process", json!({"command":"help batch"}));
+    help.insert(1, Ok(ChatModelEvent::ToolCallCompleted {call:ChatToolCall {call_id:"help-b".into(),name:"start_process".into(),
         arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"help shape"})),provider_metadata:None}}));
     let mut steps = vec![help,text_step("Please provide your name.")];
     steps.extend((0..4).map(|index| input_step(&format!("denied-{index}"))));
@@ -245,7 +251,7 @@ async fn user_input_rejection_keeps_the_bounded_end_intent_surface_closed() {
 }
 
 #[tokio::test]
-async fn user_input_recovered_locked_report_phase_cannot_reopen_ending_intent() {
+async fn user_input_recovered_locked_report_phase_keeps_communication_without_reopening_execution() {
     let cp = crate::AgentExecutionCheckpoint {version:1,binding:binding(),turn_operation_id:"turn".into(),active_set_generation:0,
         model_steps:0,tool_call_count:0,accepted_input_count:1,applied_steering_receipts:vec![],plan:Default::default(),work:Default::default(),
         patch_recovery:Default::default(),segments:None,control_rejections:Default::default(),
@@ -254,26 +260,89 @@ async fn user_input_recovered_locked_report_phase_cannot_reopen_ending_intent() 
         AgentEngineEvent::RuntimeModulesActivated{modules:crate::adaptive::LEDGER_MODULES.to_vec(),reason:crate::AgentRuntimeActivationReason::ExplicitPlan},
         AgentEngineEvent::ExecutionCheckpointSaved{step:0,revision:1,digest:"d".repeat(64).into()}];
     let recovery = crate::AgentTurnRecovery::new(cp,1,2,prefix,vec![],vec![]).unwrap();
-    let model = Arc::new(ObservingModel {steps:std::sync::Mutex::new((0..4).map(|index| input_step(&format!("refused-{index}"))).collect()),requests:Default::default()});
+    let model = Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![input_step("question")]),requests:Default::default()});
     let journal = Arc::new(InputJournal::default());
     let result = input_session(model.clone(),Arc::new(EchoTool),journal.clone()).run_turn(input_request(Default::default()).with_recovery(recovery)).await;
-    assert!(matches!(result.unwrap().terminal, AgentTurnTerminal::Paused { reason } if reason == "EXECUTION_INTERVENTION_REQUIRED"));
+    assert!(matches!(result.unwrap().terminal, AgentTurnTerminal::InputRequired { request } if request.request_id.as_ref() == "question"));
     let requests = model.requests.lock().unwrap();
-    assert_eq!(requests.len(),4);
-    assert!(requests.iter().all(|request| request.input.tools.iter().all(|tool|tool.name==crate::completion::TOOL_NAME)));
-    assert!(!journal.journal.events.lock().unwrap().iter().any(|event|matches!(event,AgentEngineEvent::UserInputRequested{..}|AgentEngineEvent::TurnInputRequired{..}|AgentEngineEvent::EndIntentReview{..})));
+    assert_eq!(requests.len(),1);
+    assert_eq!(requests[0].input.tools.iter().map(|tool|tool.name.as_str()).collect::<BTreeSet<_>>(),
+        BTreeSet::from([crate::completion::TOOL_NAME, crate::user_input_request::TOOL_NAME]));
+    assert!(!journal.journal.events.lock().unwrap().iter().any(|event|matches!(event,AgentEngineEvent::TurnPaused{..}|AgentEngineEvent::TurnFailed{..}|AgentEngineEvent::EndIntentReview{..})));
+    let checkpoint=journal.journal.checkpoints.lock().unwrap().last().unwrap().clone();
+    assert_eq!(checkpoint.completion_review.phase, AgentExecutionPhase::CompletionReview);
+    assert!(checkpoint.pending_user_input.is_none());
+    checkpoint.validate().unwrap();
 }
 
 #[tokio::test]
-async fn user_input_cannot_escape_a_real_failure_stop() {
-    let mut steps = vec![control_step("failure","exec_command",json!({"command":"help"}))];
-    steps.extend((0..4).map(|index| input_step(&format!("refused-{index}"))));
+async fn user_input_after_settled_command_failure_preserves_the_failure_and_releases_normal_input() {
+    let steps = vec![control_step("failure","start_process",json!({"command":"help"})),
+        text_step("The helper exited unsuccessfully; I need your input before continuing."), input_step("question")];
     let tools = Arc::new(InputHelpTool {calls:AtomicUsize::new(0),failed:true});
     let journal = Arc::new(InputJournal::default());
     let result = input_session(Arc::new(ScriptedModel {steps:std::sync::Mutex::new(steps)}),tools,journal.clone())
         .run_turn(input_request(settlement_tool_plan())).await;
-    assert!(matches!(result.unwrap().terminal, AgentTurnTerminal::Paused { reason } if reason == "EXECUTION_INTERVENTION_REQUIRED"));
-    assert!(!journal.journal.events.lock().unwrap().iter().any(|event| matches!(event,AgentEngineEvent::UserInputRequested{..}|AgentEngineEvent::TurnInputRequired{..})));
+    assert!(matches!(result.unwrap().terminal, AgentTurnTerminal::InputRequired { request } if request.request_id.as_ref() == "question"));
+    let checkpoint=journal.journal.checkpoints.lock().unwrap().last().unwrap().clone();
+    assert_eq!(checkpoint.work.failed_commands,1);
+    assert_eq!(checkpoint.work.failed_tools,1);
+    assert!(checkpoint.pending_user_input.is_none());
+    assert!(!journal.journal.events.lock().unwrap().iter().any(|event| matches!(event,AgentEngineEvent::TurnPaused{..}|AgentEngineEvent::TurnFailed{..}|AgentEngineEvent::TurnCompleted{..})));
+}
+
+struct TimedOutInputTool;
+#[async_trait]
+impl AgentToolInvoker for TimedOutInputTool {
+    async fn invoke(&self, invocation:AgentToolInvocation, _:CancellationToken) -> Result<AgentToolResult,AgentEngineError> {
+        if let Some(result)=instruction_result(&invocation) { return Ok(result); }
+        assert_eq!(invocation.call.name,"start_process");
+        Ok(AgentToolResult::text(invocation.call.call_id,json!({"process_id":"expired-authorization","state":"timed_out","success":false,
+            "output":{"text":"Authorization expired","next_cursor":21},"cleanup":{"reaped":true,"errors":[]}}).to_string(),true))
+    }
+}
+
+#[tokio::test]
+async fn user_input_after_a_real_reaped_timeout_remains_available_without_erasing_failure_counts() {
+    let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+        control_step("expired","start_process",json!({"command":"authorization-helper"})),
+        text_step("The authorization attempt expired. I need your choice before a new attempt."),input_step("retry-choice")])});
+    let journal=Arc::new(InputJournal::default());
+    let result=input_session(model.clone(),Arc::new(TimedOutInputTool),journal.clone())
+        .run_turn(input_request(settlement_tool_plan())).await.unwrap();
+    assert!(matches!(result.terminal,AgentTurnTerminal::InputRequired {request} if request.request_id.as_ref()=="retry-choice"));
+    let checkpoint=journal.journal.checkpoints.lock().unwrap().last().unwrap().clone();
+    assert_eq!((checkpoint.work.failed_commands,checkpoint.work.failed_tools),(1,1));
+    assert!(checkpoint.work.running_processes.is_empty());
+    let requests=model.requests.lock().unwrap();
+    assert_eq!(requests.len(),3);
+    assert_eq!(requests[2].input.tools.iter().map(|tool|tool.name.as_str()).collect::<BTreeSet<_>>(),
+        BTreeSet::from([crate::completion::TOOL_NAME,crate::user_input_request::TOOL_NAME]));
+    assert!(!journal.journal.events.lock().unwrap().iter().any(|event|matches!(event,
+        AgentEngineEvent::TurnFailed{..}|AgentEngineEvent::TurnPaused{..}|AgentEngineEvent::TurnCompleted{..})));
+}
+
+#[tokio::test]
+async fn blocked_timeout_account_requires_an_explicit_handoff_and_keeps_execution_locked() {
+    let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+        control_step("expired","start_process",json!({"command":"authorization-helper"})),
+        control_step("blocked","report_completion",json!({"summary":"The authorization attempt expired; installation is retained and login remains unfinished.",
+            "observed_tool_error_count":1,"observed_command_failure_count":1,
+            "criteria":[{"disposition":"blocked","rationale":"A fresh user authorization is required before login verification can continue."}]})),
+        input_step("fresh-authorization")])});
+    let journal=Arc::new(InputJournal::default());
+    let result=input_session(model.clone(),Arc::new(TimedOutInputTool),journal.clone())
+        .run_turn(input_request(settlement_tool_plan())).await.unwrap();
+    assert!(matches!(result.terminal,AgentTurnTerminal::InputRequired {request} if request.request_id.as_ref()=="fresh-authorization"));
+    assert!(result.output_text.contains("authorization attempt expired"));
+    let requests=model.requests.lock().unwrap();
+    assert_eq!(requests.len(),3);
+    assert_eq!(requests[2].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::user_input_request::TOOL_NAME]);
+    let checkpoint=journal.journal.checkpoints.lock().unwrap().last().unwrap().clone();
+    assert_eq!(checkpoint.completion_review.phase,AgentExecutionPhase::CompletionReview);
+    assert_eq!((checkpoint.work.failed_commands,checkpoint.work.failed_tools),(1,1));
+    assert!(!journal.journal.events.lock().unwrap().iter().any(|event|matches!(event,
+        AgentEngineEvent::TurnFailed{..}|AgentEngineEvent::TurnPaused{..}|AgentEngineEvent::TurnCompleted{..})));
 }
 
 #[test]
@@ -288,6 +357,13 @@ fn user_input_reconciliation_rebuilds_only_committed_source_and_new_input_retire
         AgentEngineEvent::ToolCallCompleted{step:1,call},AgentEngineEvent::UserInputRequested{step:1,request:question.clone()}];
     let restored = crate::reconcile_execution_tail(&cp,1,&tail,&Default::default(),&Default::default(),&Default::default()).unwrap();
     assert_eq!(restored.checkpoint.pending_user_input,Some(question.clone()));
+    let mut locked=cp.clone();
+    locked.completion_review.phase=AgentExecutionPhase::CompletionReview;
+    locked.completion_review.input_revision=1;
+    let locked_handoff=crate::reconcile_execution_tail(&locked,1,&tail,&Default::default(),&Default::default(),&Default::default()).unwrap();
+    assert_eq!(locked_handoff.checkpoint.pending_user_input,Some(question.clone()));
+    assert_eq!(locked_handoff.checkpoint.completion_review.phase,AgentExecutionPhase::CompletionReview,
+        "reconstructing a normal question cannot reopen a locked execution phase");
     assert!(restored.observations.iter().any(|event| matches!(event,AgentEngineEvent::ToolOutcomeReconciled{result,source:crate::AgentReconciliationSource::NativeControlReceipt,..}
         if result.call_id==question.request_id && !result.is_error)));
     tail.push(AgentEngineEvent::SteeringInputs{inputs:vec![crate::AgentSteeringInput {receipt_operation_id:"answer".into(),message_id:"message".into(),text:"Alice".into(),

@@ -26,7 +26,7 @@ use nomifun_agent_domain_wave2::{
 };
 use nomifun_ai_agent::ContextContributor;
 use nomifun_api_types::TypedResourceBindingDto;
-use nomifun_common::AppError;
+use nomifun_common::{AppError, paths::paths_equivalent};
 use nomifun_file::{
     AgentSessionWorkspaceBinding, WORKSPACE_DELETE_OPERATION,
     WORKSPACE_RESOURCE_KIND, WORKSPACE_ROOT_PARAMETER,
@@ -297,7 +297,8 @@ pub(crate) struct NomiCoreWave2Host {
     ssh: Option<nomifun_ssh::SshActionOwner>,
     effect_store: Option<nomifun_agent_session::AgentSessionStore>,
     roots: Mutex<HashMap<PathBuf, Arc<Wave2ApplicationHost>>>,
-    processes: Mutex<HashMap<(String, String, String), Arc<super::engine_process_host::EngineProcessScope>>>,
+    processes: Mutex<HashMap<(String, String), Arc<super::engine_process_host::EngineProcessScope>>>,
+    processes_closing: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(test)]
@@ -324,6 +325,7 @@ impl NomiCoreWave2Host {
             effect_store: None,
             roots: Mutex::new(HashMap::new()),
             processes: Mutex::new(HashMap::new()),
+            processes_closing: false.into(),
         }
     }
 
@@ -347,9 +349,11 @@ impl NomiCoreWave2Host {
 
     pub(crate) async fn read_mcp_resource(&self, principal: PrincipalRef, session: AgentSessionId,
         operation_id: nomifun_agent_contracts::OperationId, resource: TypedResourceBinding,
-        operation: nomifun_mcp::McpResourceOperation) -> Result<StrictJsonValue, AppError> {
+        operation: nomifun_mcp::McpResourceOperation, control: nomifun_agent_kernel::InvocationControl,
+        turn_id: nomifun_agent_contracts::OperationId,
+        snapshot: nomifun_agent_contracts::ResolvedSnapshotRef) -> Result<StrictJsonValue, AppError> {
         self.mcp.as_ref().ok_or_else(|| AppError::Conflict("MCP owner is unavailable".into()))?
-            .resource(principal, session, operation_id, resource, operation).await
+            .resource(principal, session, operation_id, resource, operation, control, turn_id, snapshot).await
             .map_err(|error| AppError::Conflict(error.to_string()))
     }
 
@@ -402,40 +406,120 @@ impl NomiCoreWave2Host {
             None => Ok(()),
         }
     }
-    pub(crate) fn open_runtime_turn(&self, user: &str, session: &str, operation: &str, root: &str, journal: super::engine_journal::EngineTurnJournal) -> Result<(), AppError> {
-        let key = (user.to_owned(), session.to_owned(), operation.to_owned());
+    pub(crate) fn open_runtime_turn(&self, user: &str, session: &str, operation: &str, root: &str,
+        journal: super::engine_journal::EngineTurnJournal, authority: super::engine_process_host::ProcessAuthority) -> Result<(), AppError> {
+        let key = (user.to_owned(), session.to_owned());
         let root = canonical_workspace_root(Path::new(root))?;
         let mut scopes = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?;
-        if scopes.contains_key(&key) { return Err(AppError::Conflict("process turn already registered".into())); }
-        let scope = super::engine_process_host::EngineProcessScope::new(&root, journal).map_err(|error| AppError::Conflict(error.to_string()))?;
-        scopes.insert(key, Arc::new(scope));
+        if self.processes_closing.load(std::sync::atomic::Ordering::Acquire) {return Err(AppError::Conflict("Session process owner is shutting down".into()));}
+        let scope = match scopes.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(Arc::new(
+                super::engine_process_host::EngineProcessScope::new_session(&root,user,session).map_err(|error| AppError::Conflict(error.to_string()))?)),
+        };
+        if !paths_equivalent(scope.workspace_root(), &root) { return Err(AppError::Conflict("Session process workspace authority changed".into())); }
+        scope.open_turn(operation, journal, Some(authority)).map_err(|error| AppError::Conflict(error.to_string()))
+    }
+
+    pub(crate) fn finish_runtime_process_turn(&self, user: &str, session: &str, operation: &str) -> Result<(), AppError> {
+        let scope = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?
+            .get(&(user.to_owned(), session.to_owned())).cloned();
+        if let Some(scope) = scope { scope.finish_turn(operation).map_err(|error| AppError::Conflict(error.to_string()))?; }
         Ok(())
     }
 
+    pub(crate) async fn ensure_runtime_processes_retained(&self, user: &str, session: &str) -> Result<(), AppError> {
+        let scope = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?
+            .get(&(user.to_owned(), session.to_owned())).cloned();
+        if let Some(scope) = scope { scope.ensure_retained().await.map_err(|error| AppError::Conflict(error.to_string()))?; }
+        Ok(())
+    }
+
+    pub(crate) async fn runtime_process_retention(&self,user:&str,session:&str)
+        ->Result<Option<nomifun_agent_contracts::NativeSessionProcessRetention>,AppError> {
+        let scope=self.processes.lock().map_err(|_|AppError::Conflict("process scopes poisoned".into()))?
+            .get(&(user.to_owned(),session.to_owned())).cloned();
+        match scope {Some(scope)=>scope.retention().await.map(Some).map_err(|error|AppError::Conflict(error.to_string())),None=>Ok(None)}
+    }
+
+    async fn unavailable_process_owner(&self,owner:&PrincipalRef,session:&AgentSessionId,generation:&str,action:&str)
+        ->Result<Option<StrictJsonValue>,Wave2HostPortError> {
+        let store=self.effect_store.as_ref().ok_or_else(||Wave2HostPortError::unavailable("process admission has no canonical Session owner evidence"))?;
+        let unreleased=store.unreleased_session_process_generations(owner,session).await
+            .map_err(|error|Wave2HostPortError::unavailable(error.to_string()))?;
+        if unreleased.iter().all(|original|original==generation){return Ok(None);}
+        let launch=action=="workspace.process/start";
+        Ok(Some(StrictJsonValue(serde_json::json!({"schema":if launch {"nomifun.process-start-observation.v1"}else{"nomifun.process-control-observation.v1"},
+            "state":if launch {"not_started"}else{"not_executed"},"success":false,"user_code_started":false,"control_applied":false,
+            "code":"OWNER_UNAVAILABLE","message":"The original retained Session process owner is unavailable. No process was started or controlled. Its outcome remains unknown; reconcile that original owner before another process attempt. Do not adopt a PID or restart merely to recover the missing handle."}))))
+    }
+
     pub(crate) async fn cleanup_runtime_session(&self, user: &str, session: &str) -> Result<(), AppError> {
-        let scopes = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?
-            .iter().filter(|((owner, id, _), _)| owner == user && id == session)
+        let scopes = {
+        let retained=self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?;
+        let scopes=retained
+            .iter().filter(|((owner, id), _)| owner == user && id == session)
             .map(|(key, scope)| (key.clone(), scope.clone())).collect::<Vec<_>>();
         // Close every scope before waiting; one failed cleanup must not leave
         // other scopes accepting launches or skip their cleanup attempts.
         for (_, scope) in &scopes { scope.close_admission(); }
+        scopes
+        };
         let mut failures = Vec::new();
         for (key, scope) in scopes {
             match scope.cleanup().await {
-                Ok(()) => { self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?.remove(&key); }
+                Ok(()) => {
+                    let mut receipt=scope.release_receipt().await.map_err(|error|AppError::Conflict(error.to_string()))?;
+                    if !receipt.retention.processes.is_empty() {
+                        let store=self.effect_store.as_ref().ok_or_else(||AppError::Conflict("Session process owner release has no canonical Store".into()))?;
+                        if let Some(original)=store.session_process_owner_retention(&receipt.retention.owner_ref,&receipt.retention.agent_session_id,
+                            &receipt.retention.owner_generation).await.map_err(|error|AppError::Conflict(error.to_string()))? {
+                            if original.processes.iter().any(|process| !receipt.retention.processes.contains(process)) {
+                                return Err(AppError::Conflict("Session process release lost its original retained creator authority".into()));
+                            }
+                            receipt.retention=original;
+                            store.record_session_process_owner_released(&receipt.retention.owner_ref,receipt.clone()).await
+                                .map_err(|error|AppError::Conflict(error.to_string()))?;
+                        }
+                    }
+                    let mut owners=self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?;
+                    match owners.get(&key) {
+                        Some(current) if !Arc::ptr_eq(current,&scope)=>return Err(AppError::Conflict("Session process owner changed while the original generation was settling".into())),
+                        Some(_)=>{owners.remove(&key);},
+                        None=>{},
+                    }
+                }
                 Err(error) => failures.push(error.to_string()),
             }
         }
         if failures.is_empty() { Ok(()) } else { Err(AppError::Conflict(failures.join("; "))) }
     }
 
+    /// Drain the same Session owners even after their Runtime transport was
+    /// recycled. Failed native cleanup stays retained for the next attempt.
+    pub(crate) async fn shutdown_runtime_process_sessions(&self) ->Result<(),AppError> {
+        let sessions={
+            let scopes=self.processes.lock().map_err(|_|AppError::Conflict("process scopes poisoned".into()))?;
+            self.processes_closing.store(true,std::sync::atomic::Ordering::Release);
+            for scope in scopes.values(){scope.close_admission();}
+            scopes.keys().cloned().collect::<Vec<_>>()
+        };
+        let mut failures=Vec::new();
+        for (owner,session) in sessions {
+            if let Err(error)=self.cleanup_runtime_session(&owner,&session).await {failures.push(error.to_string());}
+        }
+        if failures.is_empty(){Ok(())}else{Err(AppError::Conflict(failures.join("; ")))}
+    }
+
     pub(crate) async fn wait_runtime_processes(&self, user: &str, session: &str, operation: &str,
-        processes: &[nomifun_agent_runtime::AgentWaitProcess], cancellation: tokio_util::sync::CancellationToken)
+        processes: &[nomifun_agent_runtime::AgentWaitProcess], wake_policy: nomifun_agent_runtime::AgentWaitWakePolicy,
+        cancellation: tokio_util::sync::CancellationToken)
         -> Result<Vec<nomifun_agent_runtime::AgentOwnedProcessObservation>, AppError> {
         let scope = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?
-            .get(&(user.to_owned(), session.to_owned(), operation.to_owned())).cloned()
+            .get(&(user.to_owned(), session.to_owned())).cloned()
             .ok_or_else(|| AppError::Conflict("wait has no original Turn process owner".into()))?;
-        scope.wait_for_changes(processes, cancellation).await.map_err(|error| AppError::Conflict(error.to_string()))
+        scope.require_turn(operation).map_err(|error| AppError::Conflict(error.to_string()))?;
+        scope.wait_for_changes(processes, wake_policy, cancellation).await.map_err(|error| AppError::Conflict(error.to_string()))
     }
 
     async fn invoke_ssh(
@@ -715,19 +799,17 @@ impl Wave2HostPort for NomiCoreWave2Host {
                 )
                     .map_err(|error| Wave2HostPortError::new("INVALID_PAYLOAD", error))?;
                 let root = exact_session_process_root(&request.context)?;
-                let key = (request.context.principal.principal_id.clone(), request.context.agent_session_id.as_ref().to_owned(), request.context.correlation_id.as_ref().to_owned());
+                let key = (request.context.principal.principal_id.clone(), request.context.agent_session_id.as_ref().to_owned());
                 let scope = self.processes.lock().map_err(|_| Wave2HostPortError::unavailable("process scopes poisoned"))?.get(&key).cloned()
                     .ok_or_else(|| Wave2HostPortError::unavailable("no admitted Runtime process turn for this exact authority"))?;
-                // The process runtime uses native canonical paths (including
-                // Windows extended prefixes); compare like representations.
-                let native_root = std::fs::canonicalize(&root).or_else(|error| {
-                    if error.kind() == std::io::ErrorKind::NotFound { Ok(root.clone()) } else { Err(error) }
-                }).map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
-                if scope.workspace_root() != native_root.as_path() { return Err(Wave2HostPortError::unavailable("process workspace authority changed")); }
+                scope.authorize(&request.context)?;
+                if let Some(observation)=self.unavailable_process_owner(&request.context.principal,&request.context.agent_session_id,scope.owner_generation(),
+                    request.context.action_id.as_ref()).await? {return Ok(observation);}
+                if !paths_equivalent(scope.workspace_root(), &root) { return Err(Wave2HostPortError::unavailable("process workspace authority changed")); }
                 let owner_input = process_owner_input(request.context.action_id.as_ref(), input)?;
                 if request.context.action_id.as_ref() == "workspace.process/poll" {
                     return scope
-                        .invoke(owner_input, request.context.operation_id.as_ref())
+                        .invoke_for_turn(owner_input, request.context.operation_id.as_ref(), Some(request.context.turn_id.as_ref()))
                         .await;
                 }
                 let [binding] = request.context.resource_bindings.as_slice() else {
@@ -737,17 +819,19 @@ impl Wave2HostPort for NomiCoreWave2Host {
                 };
                 let effect_owner = self.host_for(&request.context)?;
                 let operation_id = request.context.operation_id.as_ref().to_owned();
+                let turn_id = request.context.turn_id.as_ref().to_owned();
                 if input.0.get("component").is_some() {
                     let prepare_scope = scope.clone();
+                    let prepare_turn = turn_id.clone();
                     return effect_owner.invoke_prepared_managed_effect(
                         &request.context, binding, input,
-                        move || async move { prepare_scope.prepare_component(owner_input).await },
-                        move |prepared| async move { scope.invoke_prepared(prepared, &operation_id).await },
+                        move || async move { prepare_scope.prepare_component(owner_input,&prepare_turn).await },
+                        move |prepared| async move { scope.invoke_prepared_for_turn(prepared, &operation_id, Some(&turn_id)).await },
                     ).await;
                 }
                 return effect_owner
                     .invoke_managed_effect(&request.context, binding, input, move || async move {
-                        scope.invoke(owner_input, &operation_id).await
+                        scope.invoke_for_turn(owner_input, &operation_id, Some(&turn_id)).await
                     })
                     .await;
             }
@@ -1174,11 +1258,65 @@ impl nomifun_ai_agent::NomiPlatformBuiltinToolSchemaResolver
 }
 
 #[cfg(test)]
+#[path = "nomi_core_wave2_process_tests.rs"]
+mod process_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use nomifun_agent_contracts::ResourceId;
     use nomifun_file::WORKSPACE_READ_OPERATION;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_process_owner_without_a_runtime_is_reaped_by_delete_and_app_shutdown() {
+        for shutdown in [false,true] {
+            let root=tempfile::tempdir().unwrap();
+            let(journal,pool)=super::super::engine_journal::test_fixture().await;
+            let store=nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+            let host=NomiCoreWave2Host::default().with_effect_store(store.clone());
+            let owner="0190f5fe-7c00-7a00-8000-000000000001";
+            let session="0190f5fe-7c00-7a00-8000-000000000002";
+            let authority=super::super::engine_process_host::ProcessAuthority {
+                snapshot:nomifun_agent_contracts::ResolvedSnapshotRef {snapshot_id:"snapshot".into(),snapshot_digest:"b".repeat(64).into()},
+                actions:std::collections::BTreeSet::from(["workspace.process/start".into()]),resources:Vec::new(),
+            };
+            host.open_runtime_turn(owner,session,"turn",root.path().to_str().unwrap(),journal.clone(),authority.clone()).unwrap();
+            let scope=host.processes.lock().unwrap().get(&(owner.into(),session.into())).unwrap().clone();
+            let launched=scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"start","cmd":"IFS= read -r answer","wait_ms":0})),
+                "original-owned-start",Some("turn")).await.unwrap();
+            assert_eq!(launched.0["state"],"running");
+            host.finish_runtime_process_turn(owner,session,"turn").unwrap();
+            let retention=scope.retention().await.unwrap();
+            journal.append(serde_json::json!({"event":"host_cleanup_proven","session_process_retention":retention}).to_string(),None,
+                super::super::engine_journal::EngineJournalWrite::Cleanup).await.unwrap();
+            let principal=PrincipalRef {principal_kind:"user".into(),principal_id:owner.into()};
+            assert!(host.unavailable_process_owner(&principal,&session.into(),scope.owner_generation(),"workspace.process/start").await.unwrap().is_none());
+            // A replacement transport can open a plain Turn but cannot adopt
+            // or relaunch the original generation's unknown process.
+            let replacement=NomiCoreWave2Host::default().with_effect_store(store.clone());
+            replacement.open_runtime_turn(owner,session,"plain-successor",root.path().to_str().unwrap(),journal.clone(),authority.clone()).unwrap();
+            let empty=replacement.processes.lock().unwrap().get(&(owner.into(),session.into())).unwrap().clone();
+            let denied=replacement.unavailable_process_owner(&principal,&session.into(),empty.owner_generation(),"workspace.process/start").await.unwrap().unwrap();
+            assert_eq!(denied.0["state"],"not_started");assert_eq!(denied.0["code"],"OWNER_UNAVAILABLE");
+            let denied=replacement.unavailable_process_owner(&principal,&session.into(),empty.owner_generation(),"workspace.process/input").await.unwrap().unwrap();
+            assert_eq!(denied.0["control_applied"],false);
+            assert!(empty.retention().await.unwrap().processes.is_empty());
+            replacement.finish_runtime_process_turn(owner,session,"plain-successor").unwrap();
+            replacement.ensure_runtime_processes_retained(owner,session).await.unwrap();
+            replacement.cleanup_runtime_session(owner,session).await.unwrap();
+            drop(empty);drop(replacement);
+            if shutdown {host.shutdown_runtime_process_sessions().await.unwrap();}
+            else {host.cleanup_runtime_session(owner,session).await.unwrap();}
+            assert!(host.processes.lock().unwrap().is_empty());
+            assert!(scope.release_receipt().await.unwrap().reaped);
+            let facts=store.read_events(&session.into(),None,500).await.unwrap();
+            assert_eq!(facts.events.iter().filter(|event|event.kind.0==nomifun_agent_contracts::SESSION_PROCESS_OWNER_RELEASED).count(),1);
+            if shutdown {assert!(host.open_runtime_turn(owner,session,"successor",root.path().to_str().unwrap(),journal,authority).is_err());}
+            drop(scope);drop(host);pool.close().await;
+        }
+    }
 
     fn event_fixture() -> tempfile::TempDir {
         let mut builder = tempfile::Builder::new();

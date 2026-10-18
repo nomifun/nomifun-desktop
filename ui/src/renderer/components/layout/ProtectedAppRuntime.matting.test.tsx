@@ -30,7 +30,7 @@ test('prepares the optional cutout model after login without delaying or failing
   spyOn(configService, 'set').mockResolvedValue(undefined);
   let failPreparation!: (error: Error) => void;
   const prepare = spyOn(modelCache, 'ensureMattingModel').mockImplementation(() =>
-    new Promise<void>((_resolve, reject) => { failPreparation = reject; })
+    new Promise<Blob>((_resolve, reject) => { failPreparation = reject; })
   );
   const app = () => (
     <I18nextProvider i18n={i18n}>

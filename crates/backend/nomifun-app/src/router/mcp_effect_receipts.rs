@@ -2,7 +2,7 @@
 
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, CapabilityId, CorrelationId, DigestHex, EventId,
-    EventProducerId, IdempotencyKey, OperationId, PrincipalRef,
+    EventProducerId, IdempotencyKey, OperationId, PrincipalRef, ResolvedSnapshotRef,
     SessionEventPayloadRef, StrictJsonValue,
 };
 use nomifun_agent_session::{
@@ -68,6 +68,8 @@ impl McpEffectReceipts {
         session: &str,
         operation: &str,
         capability: &str,
+        turn_id: &OperationId,
+        snapshot: &ResolvedSnapshotRef,
     ) -> Result<McpEffectReceipt, AppError> {
         if [user, session, operation, capability]
             .iter()
@@ -78,42 +80,50 @@ impl McpEffectReceipts {
         }
         let store = self.store().await?;
         let session_id = self.owned_session(&store, user, session).await?;
-        let head = store.head(&session_id).await.map_err(|_| unavailable())?;
-        let turn_id = OperationId::from(head.active_turn_id.ok_or_else(unavailable)?);
         let facts = store
-            .chat_causality_facts(&session_id, &turn_id)
+            .chat_causality_facts(&session_id, turn_id)
             .await
             .map_err(|_| unavailable())?;
-        let (tool, action_id) = facts
+        if facts.head.active_turn_id.as_deref() != Some(turn_id.as_ref())
+            || &facts.session.agent_binding.resolved_snapshot_ref != snapshot
+        {
+            return Err(unavailable());
+        }
+        let calls = facts
             .events
             .iter()
             .filter(|event| event.kind.0 == "tool/call-started")
-            .find_map(|event| {
+            .filter_map(|event| {
                 let payload = facts.event_payloads.get(event.event_id.as_ref())?;
-                (payload.get("operation_id").and_then(Value::as_str) == Some(operation)
-                    && payload.get("capability_id").and_then(Value::as_str) == Some(capability))
-                    .then(|| {
-                        (
-                            event,
-                            payload
-                                .get("action_id")
-                                .and_then(Value::as_str)
-                                .unwrap_or("mcp/invoke")
-                                .to_owned(),
-                        )
-                    })
+                if payload.get("operation_id").and_then(Value::as_str) == Some(operation)
+                    && payload.get("capability_id").and_then(Value::as_str) == Some(capability)
+                {
+                    Some((event, payload.get("action_id").and_then(Value::as_str)?))
+                } else {
+                    None
+                }
             })
-            .ok_or_else(unavailable)?;
+            .collect::<Vec<_>>();
+        let [(tool, action_id)] = calls.as_slice() else {
+            return Err(unavailable());
+        };
+        let causation = store.native_tool_call_causation(
+            &facts.session.owner_ref, &session_id, turn_id, &operation.into(),
+            &capability.into(), &(*action_id).into(),
+        ).await.map_err(|_| unavailable())?;
+        if causation.tool_call.event_id != tool.event_id {
+            return Err(unavailable());
+        }
         let effect_id = format!("mcp:{}:{operation}", session_id.as_ref());
         let identity = format!("effect:{effect_id}");
         let request = EffectEventRequest {
             agent_session_id: session_id,
             effect_id: effect_id.clone(),
-            turn_id,
+            turn_id: turn_id.clone(),
             operation_id: OperationId::from(operation.to_owned()),
             owner_domain: "mcp".to_owned(),
             capability_module: CapabilityId::from(capability.to_owned()),
-            action_id: ActionId::from(action_id),
+            action_id: ActionId::from((*action_id).to_owned()),
             resource_binding_id: None,
             resource_key: None,
             input_digest: DigestHex::from(format!(
@@ -129,10 +139,14 @@ impl McpEffectReceipts {
             causation_event_id: Some(tool.event_id.clone()),
             payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
         };
-        store
+        let recorded = store
             .record_effect_started(request.clone())
             .await
             .map_err(|_| unavailable())?;
+        if recorded.duplicate || !recorded.persisted {
+            // A durable receipt never grants a second owner dispatch.
+            return Err(unavailable());
+        }
         Ok(McpEffectReceipt {
             request,
             capability: capability.to_owned(),
@@ -142,15 +156,21 @@ impl McpEffectReceipts {
     pub(crate) async fn settle(
         &self,
         receipt: McpEffectReceipt,
-        result: &Value,
+        outcome: &nomifun_mcp::McpInvocationOutcome<StrictJsonValue>,
     ) -> Result<(), AppError> {
-        let projected = if receipt.capability == MCP_SERVER_RESOURCE_EFFECT {
-            super::engine_mcp_media::text_projection(result)?
-        } else {
-            result.clone()
+        let result = outcome.result.as_ref().ok().map(|value| &value.0);
+        let mut observation = match result {
+            Some(result) => {
+                let projected = if receipt.capability == MCP_SERVER_RESOURCE_EFFECT {
+                    super::engine_mcp_media::text_projection(result)?
+                } else {
+                    result.clone()
+                };
+                bounded_observation(&projected, 4096)?
+            }
+            None => Value::Null,
         };
-        let mut observation = bounded_observation(&projected, 4096)?;
-        if receipt.capability == MCP_SERVER_RESOURCE_EFFECT {
+        if let Some(result) = result.filter(|_| receipt.capability == MCP_SERVER_RESOURCE_EFFECT) {
             let failure = result.get("failure").filter(|failure| !failure.is_null());
             if failure.is_some_and(|value| !value.is_object() || value.to_string().len() > 1024) {
                 return Err(unavailable());
@@ -163,7 +183,7 @@ impl McpEffectReceipts {
                 },
                 "observation": observation,
             });
-        } else {
+        } else if let Some(result) = result {
             if !result.is_object()
                 || result.get("isError").is_some_and(|value| !value.is_boolean())
             {
@@ -173,7 +193,34 @@ impl McpEffectReceipts {
                 result.get("isError").and_then(Value::as_bool).unwrap_or(false)
             );
         }
-        if serde_json::to_vec(&observation).map_err(|_| unavailable())?.len() > 8192 {
+        let cleanup_unproven = matches!(outcome.cleanup.local, nomifun_mcp::McpCleanupStatus::Unproven)
+            || matches!(outcome.cleanup.remote, nomifun_mcp::McpCleanupStatus::Unproven);
+        let terminal_state = if cleanup_unproven {
+            EffectTerminalState::Uncertain
+        } else if outcome.result.is_ok() {
+            EffectTerminalState::Succeeded
+        } else if !outcome.execution.request_dispatched && !outcome.execution.local_process_started {
+            EffectTerminalState::Failed
+        } else {
+            EffectTerminalState::Uncertain
+        };
+        let diagnostic = |error: &nomifun_mcp::McpOwnerError| json!({"code":error.code(),"message":error.message()});
+        let payload = json!({
+            "observation": observation,
+            "execution": {
+                "request_dispatched":outcome.execution.request_dispatched,
+                "local_process_started":outcome.execution.local_process_started,
+                "cancellation_requested":outcome.execution.cancellation_requested,
+                "returned":outcome.result.is_ok(),
+                "error":outcome.result.as_ref().err().map(diagnostic),
+            },
+            "cleanup": {
+                "local":cleanup_status(outcome.cleanup.local),
+                "remote":cleanup_status(outcome.cleanup.remote),
+                "error":outcome.cleanup.error.as_ref().map(diagnostic),
+            },
+        });
+        if serde_json::to_vec(&payload).map_err(|_| unavailable())?.len() > 8192 {
             return Err(unavailable());
         }
         let store = self.store().await?;
@@ -185,11 +232,9 @@ impl McpEffectReceipts {
             "effect-started:{}",
             terminal.effect_id,
         )));
-        terminal.payload = SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-            "observation": observation,
-        })));
+        terminal.payload = SessionEventPayloadRef::InlineJson(StrictJsonValue(payload));
         store
-            .record_effect_terminal(terminal, EffectTerminalState::Succeeded)
+            .record_effect_terminal(terminal, terminal_state)
             .await
             .map_err(|_| unavailable())?;
         Ok(())
@@ -217,6 +262,15 @@ fn bounded_observation(value: &Value, full_limit: usize) -> Result<Value, AppErr
         "sha256": format!("{:x}", Sha256::digest(raw.as_bytes())),
         "serialized_preview": raw.chars().take(512).collect::<String>(),
     }))
+}
+
+fn cleanup_status(status: nomifun_mcp::McpCleanupStatus) -> &'static str {
+    match status {
+        nomifun_mcp::McpCleanupStatus::NotRequired => "not_required",
+        nomifun_mcp::McpCleanupStatus::Confirmed => "confirmed",
+        nomifun_mcp::McpCleanupStatus::Unsupported => "unsupported",
+        nomifun_mcp::McpCleanupStatus::Unproven => "unproven",
+    }
 }
 
 fn valid_effect_identity(value: &str) -> bool {

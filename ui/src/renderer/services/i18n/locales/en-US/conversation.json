@@ -115,6 +115,11 @@
     "fallbackBody": "This request failed, and the specific cause is not yet known. Review the technical details; if the problem persists, send feedback with that information.",
     "details": {
       "rawDetail": "Original detail",
+      "nativeCode": "Native error code",
+      "nativeKind": "Native I/O kind",
+      "nativeOsError": "Native OS error",
+      "userCodeNotStarted": "User code not started",
+      "cleanupProven": "Cleanup proven",
       "agent": "Agent",
       "model": "Model",
       "timestamp": "Time",
@@ -200,6 +205,42 @@
       "send_feedback": "Send feedback with logs so the team can investigate."
     },
     "codes": {
+      "SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED": {
+        "title": "System authentication was cancelled",
+        "body": "The operating system did not complete authentication. The affected operation stopped; review the native execution details before continuing."
+      },
+      "SYSTEM_EXECUTION_AUTHENTICATION_DENIED": {
+        "title": "System authentication was denied",
+        "body": "The operating system refused authentication for this operation. Review the native error and the account requirements before continuing."
+      },
+      "SYSTEM_EXECUTION_AUTHENTICATION_TIMED_OUT": {
+        "title": "System authentication timed out",
+        "body": "System authentication did not finish within its time limit. The affected operation stopped."
+      },
+      "SYSTEM_EXECUTION_AUTHENTICATION_UNAVAILABLE": {
+        "title": "System authentication is unavailable",
+        "body": "The operating system could not provide authentication for this operation. Check the native system facilities shown in the details."
+      },
+      "SYSTEM_EXECUTION_APPROVAL_REQUIRED": {
+        "title": "System approval is required",
+        "body": "The native system execution component requires operating system approval before this operation can continue."
+      },
+      "SYSTEM_EXECUTION_NOT_AVAILABLE": {
+        "title": "Native system execution is unavailable",
+        "body": "The native execution facility could not start. Review its original OS error in the details."
+      },
+      "SYSTEM_EXECUTION_RESULT_UNKNOWN": {
+        "title": "Native execution result is unknown",
+        "body": "The original native owner did not provide a complete result. Check existing effects and cleanup; repeating the operation could duplicate effects."
+      },
+      "SYSTEM_READ_RESULT_UNKNOWN": {
+        "title": "Native read result is unknown",
+        "body": "The native readonly owner did not provide a complete result. Its original dispatch and cleanup facts remain in the details."
+      },
+      "SYSTEM_EXECUTION_FAILED": {
+        "title": "Native system execution failed",
+        "body": "The native owner reported a failure. Review its original error and execution state in the details."
+      },
       "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED": {
         "title": "Confirm this conversation’s Agent configuration",
         "body": "The upgrade changes permissions, tool sources, or execution requirements, so this conversation’s Agent configuration cannot be updated automatically. Confirm its configuration through the conversation’s Agent selector to continue. Existing records are preserved."
@@ -932,7 +973,6 @@
     "builtin": "Built in",
     "installed": "Installed",
     "available": "Available",
-    "disabled": "Disabled",
     "error": "Unavailable",
     "toolCount_one": "{{count}} tool",
     "toolCount_other": "{{count}} tools",
@@ -964,7 +1004,6 @@
   },
   "notFound": "Conversation not found or has been deleted",
   "steer": {
-    "button": "Send now (interject into the running reply)",
     "fallbackQueued": "Steering delivery was not confirmed. Text and attachments are saved for review; the queue will not run automatically. Check the conversation before editing to resend or removing this draft.",
     "reviewDelivery": "Review delivery"
   },
@@ -988,5 +1027,13 @@
     "title": "Waiting for your input",
     "remainingWork": "Remaining work",
     "addInput": "Add information"
+  },
+  "inputDelivery": {
+    "pending": "Saved, waiting to be processed",
+    "blocked": "This input was saved but not processed. Check the issue before sending it again.",
+    "attachment": "Check that the attachments are available.",
+    "skill": "Check that the selected skills are available.",
+    "budget": "Shorten the message or reduce the attachments.",
+    "discarded": "No longer pending after the context was cleared"
   }
 }

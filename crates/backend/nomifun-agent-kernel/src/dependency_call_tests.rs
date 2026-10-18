@@ -37,6 +37,11 @@ impl CapabilityHandler for Probe {
         let _drop = DropMark(Arc::clone(&self.dropped));
         self.contexts.lock().unwrap().push(context.clone());
         self.entered.send(context.capability_id.clone()).unwrap();
+        if input.0["wait_for_cancellation"] == true {
+            context.control.cancelled().await;
+            // Cleanup is still owned by this handler after cancellation.
+            self.resume.notified().await;
+        }
         if input.0["pause"] == true {
             self.resume.notified().await;
         }
@@ -332,6 +337,56 @@ impl Fixture {
 
 fn code(error: KernelError, expected: &str) {
     assert_eq!(error.canonical_code().as_ref(), expected, "{error:?}");
+}
+
+#[tokio::test]
+async fn invocation_control_reaches_dependencies_without_dropping_dispatched_cleanup() {
+    for role in [None, Some(false), Some(true)] {
+        let mut fixture = Fixture::new();
+        if let Some(mapped) = role {
+            fixture.use_role_parent(mapped);
+        }
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let control = crate::InvocationControl::new(cancellation.clone());
+        let request = fixture.request(json!({"next":CHILD,"input":{"wait_for_cancellation":true}}));
+        let kernel = fixture.kernel.clone();
+        let snapshot = fixture.snapshot.clone();
+        let active = fixture.active.clone();
+        let task = tokio::spawn(async move {
+            kernel.invoke_controlled(&snapshot, &active, request, control).await
+        });
+        fixture.entered(SAMPLE_CAPABILITY).await;
+        fixture.entered(CHILD).await;
+        cancellation.cancel();
+        tokio::task::yield_now().await;
+        assert!(fixture.probe.contexts.lock().unwrap().iter().all(|context| context.control.is_cancelled()));
+        assert!(!task.is_finished(), "cancellation must not discard dispatched handler cleanup");
+        fixture.probe.resume.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap().unwrap();
+        assert_eq!(result.0["reached"], CHILD);
+        assert_eq!(fixture.probe.dropped.load(Ordering::Acquire), 2);
+    }
+}
+
+#[tokio::test]
+async fn cancelled_parent_does_not_admit_another_dependency() {
+    let mut fixture = Fixture::new();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let control = crate::InvocationControl::new(cancellation.clone());
+    let request = fixture.request(json!({"pause":true}));
+    let kernel = fixture.kernel.clone();
+    let snapshot = fixture.snapshot.clone();
+    let active = fixture.active.clone();
+    let task = tokio::spawn(async move {
+        kernel.invoke_controlled(&snapshot, &active, request, control).await
+    });
+    fixture.entered(SAMPLE_CAPABILITY).await;
+    cancellation.cancel();
+    let error = fixture.caller(SAMPLE_CAPABILITY).invoke(call(CHILD, json!({}))).await.unwrap_err();
+    code(error, "INVOCATION_CANCELLED");
+    assert_eq!(fixture.probe.contexts.lock().unwrap().len(), 1);
+    fixture.probe.resume.notify_one();
+    task.await.unwrap().unwrap();
 }
 
 fn current_revision(

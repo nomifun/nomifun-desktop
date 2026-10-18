@@ -149,6 +149,13 @@ fn bundled_evolution_accepts_forward_schemas_but_rejects_authority_and_source_dr
             _ => unreachable!(),
         };
         refresh_snapshot(&mut invalid);
+        if case == 7 {
+            validate_bundled_contract_evolution(&revision, &source, &target_revision, &invalid).unwrap();
+            // A publisher can add an ungranted descriptor. Granting that new
+            // action to the frozen Session remains an authority change.
+            invalid.content.enabled_capabilities[0].action_allowlist.insert("another-action".into());
+            refresh_snapshot(&mut invalid);
+        }
         assert!(validate_bundled_contract_evolution(&revision, &source, &target_revision, &invalid).is_err(), "case {case}");
     }
 }
@@ -489,10 +496,20 @@ fn explicit_extension_derivation_protects_retained_infrastructure_and_global_fie
             compile_request(candidate_revision.clone(), principal("binding-owner"))).unwrap();
         let result = validate_session_extension_derivation(&revision, &source.envelope,
             &candidate_revision, &candidate.envelope, &roots, &roots);
-        if case == 0 {
+        if case == 0 || case == 3 {
             result.unwrap();
             assert_ne!(source.content().skill_locks, candidate.content().skill_locks);
             assert_ne!(source.content().enabled_capabilities[0].schema_digest, candidate.content().enabled_capabilities[0].schema_digest);
+            if case == 3 {
+                assert_eq!(source.content().enabled_capabilities[0].action_allowlist,
+                    candidate.content().enabled_capabilities[0].action_allowlist);
+                let mut granted = candidate.envelope.clone();
+                granted.content.enabled_capabilities[0].action_allowlist.insert("additional-core-action".into());
+                refresh_snapshot(&mut granted);
+                assert!(validate_session_extension_derivation(&revision, &source.envelope,
+                    &candidate_revision, &granted, &roots, &roots).is_err(),
+                    "new metadata must not grant a protected infrastructure action");
+            }
         } else {
             assert!(result.is_err(), "case {case}: explicitly mutable infrastructure remains protected");
         }

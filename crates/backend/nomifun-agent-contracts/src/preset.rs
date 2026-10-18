@@ -1188,7 +1188,7 @@ pub fn official_preset_seed_manifest_payload() -> OfficialPresetSeedManifestPayl
 /// authored selection; this is not a permission mode or a capability tier.
 pub fn default_local_os_capability_selections() -> Vec<CapabilitySelection> {
     [("workspace.files", &["read", "search", "write", "patch", "delete", "rename"][..]),
-     ("workspace.process", &["exec", "start", "poll", "input", "close_stdin", "resize", "cancel"][..])]
+     ("workspace.process", &["start", "poll", "input", "close_stdin", "resize", "cancel"][..])]
         .into_iter().map(|(id, actions)| CapabilitySelection {
             capability: CapabilityRef { id: id.into() },
             action_allowlist: actions.iter().map(|action| ActionId::from(format!("{id}/{action}"))).collect(),
@@ -2247,7 +2247,6 @@ mod tests {
                 "workspace.files/search",
                 "workspace.files/write",
                 "workspace.files/patch",
-                "workspace.process/exec",
                 "workspace.process/start",
                 "workspace.process/poll",
                 "workspace.process/input",
@@ -2350,7 +2349,7 @@ mod tests {
             "workspace.files/read",
             "workspace.files/write",
             "workspace.files/patch",
-            "workspace.process/exec",
+            "workspace.process/start",
             "workspace.vcs/push",
             "knowledge/search",
             "knowledge/read",
@@ -2379,7 +2378,7 @@ mod tests {
             "customer.service/handoff",
             "workspace.files/read",
             "workspace.files/write",
-            "workspace.process/exec",
+            "workspace.process/start",
             "workspace.artifacts/publish",
             "workspace.artifacts/read",
             "web.research/search",

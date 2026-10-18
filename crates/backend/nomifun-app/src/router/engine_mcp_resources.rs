@@ -37,6 +37,7 @@ impl EngineKernelSession {
         generation: u64,
         call_id: String,
         request: EngineResourceRead,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<nomifun_ai_agent::engine_sdk::EngineOwnedTask<Result<Value, AppError>>, AppError>
     {
         self.start_mcp_resource_projected(
@@ -45,6 +46,7 @@ impl EngineKernelSession {
             generation,
             call_id,
             request,
+            cancellation,
             false,
             json!({"format":"page"}),
             |value, request| async move { page(&value, &request) },
@@ -58,6 +60,7 @@ impl EngineKernelSession {
         generation: u64,
         call_id: String,
         request: EngineResourceImageRead,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<
         nomifun_ai_agent::engine_sdk::EngineOwnedTask<Result<EngineToolResult, AppError>>,
         AppError,
@@ -79,6 +82,7 @@ impl EngineKernelSession {
             generation,
             call_id,
             read,
+            cancellation,
             true,
             projection,
             move |value, read| async move {
@@ -108,6 +112,7 @@ impl EngineKernelSession {
         generation: u64,
         call_id: String,
         request: EngineResourceRead,
+        cancellation: tokio_util::sync::CancellationToken,
         image: bool,
         projection: Value,
         project: F,
@@ -118,6 +123,9 @@ impl EngineKernelSession {
         Fut: std::future::Future<Output = Result<T, AppError>> + Send + 'static,
     {
         validate_page(&request)?;
+        if cancellation.is_cancelled() {
+            return Err(failure("resource request cancelled before owner admission"));
+        }
         if image {
             self.admit_mcp_image(generation)?;
         }
@@ -197,7 +205,9 @@ impl EngineKernelSession {
                 }
                 let query = resource_operation(&request.query);
                 let result = owner.wave2.read_mcp_resource(owner.principal.clone(), owner.session_id.clone(),
-                    operation.clone().into(), resource, query).await;
+                    operation.clone().into(), resource, query,
+                    nomifun_agent_kernel::InvocationControl::new(cancellation),
+                    causality.turn_operation_id.clone(), causality.resolved_snapshot_ref.clone()).await;
                 if let Err(error) = journal.append(json!({"event":"host_resource_settled","operation_id":operation,
                     "owner_returned":result.is_ok()}).to_string(), None, super::super::engine_journal::EngineJournalWrite::Settlement).await {
                     owner.resource_settlement_failed.store(true, Ordering::Release);

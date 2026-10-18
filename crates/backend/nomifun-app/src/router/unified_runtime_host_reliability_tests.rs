@@ -16,6 +16,17 @@ mod companion_directed_flow_tests;
 #[path = "robot_authored_execution_tests.rs"]
 mod robot_authored_execution_tests;
 
+#[path = "unified_session_input_tests.rs"]
+mod unified_session_input_tests;
+
+type InputClaimBarrier=(Arc<tokio::sync::Notify>,Arc<tokio::sync::Notify>);
+static INPUT_CLAIM_BARRIERS:OnceLock<Mutex<BTreeMap<String,InputClaimBarrier>>>=OnceLock::new();
+
+pub(super) async fn session_input_claim_cutpoint(session:&str) {
+    let barrier=INPUT_CLAIM_BARRIERS.get_or_init(Default::default).lock().unwrap().remove(session);
+    if let Some((reached,release))=barrier {reached.notify_one();release.notified().await;}
+}
+
 type HostMap = BTreeMap<String, Weak<ConversationRuntimeHost>>;
 static HOSTS: OnceLock<Mutex<HostMap>> = OnceLock::new();
 
@@ -731,9 +742,9 @@ async fn steering_replay_recovers_the_commit_to_runtime_queue_gap_once() {
     };
     // The real canonical admission commits, then its sender disappears before
     // calling the native queue. A retry sees duplicate=true but must deliver.
-    let receipt = fixture.owner.canonical().steer_exact_turn(&PrincipalRef {
+    let receipt = fixture.owner.canonical().admit_exact_steer(&PrincipalRef {
         principal_kind:"user".into(),principal_id:fixture.services.authoritative_user_id.to_string(),
-    }, &session, "stable-steering-effect", &target, super::super::nomi_core_session::canonical_turn_input(&request())).await.unwrap();
+    }, &session, "stable-steering-effect", &target, super::super::nomi_core_session::canonical_turn_input(&request()),None).await.unwrap();
     assert!(!receipt.duplicate);
     assert!(host.active.lock().await.as_ref().unwrap().steering.pending_receipt_ids().is_empty());
     for _ in 0..2 {
@@ -754,6 +765,210 @@ async fn steering_replay_recovers_the_commit_to_runtime_queue_gap_once() {
     assert_eq!(segments.len(), 2, "real user input retains an independent reading boundary");
     runtime.kill_and_wait(None).await.unwrap();
     fixture.finish().await;
+}
+
+async fn prepare_live_steering(fixture:&Fixture)->(nomifun_agent_runtime::AgentTurnRequest,nomifun_ai_agent::AgentRuntimeHandle) {
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let generation=fixture.owner.canonical().store().native_execution_generation(&session,&"cleanup-retry-turn".into()).await.unwrap();
+    let runtime=fixture.services.agent_runtime_sessions.get_or_create_runtime_for_turn(session.as_ref(),generation,
+        CancellationToken::new(),fixture.registry_options()).await.unwrap();
+    let mut message=fixture.message.clone();message.msg_id=message.source_message_id.clone().unwrap();
+    let request=fixture.host.prepare_turn(&message,CancellationToken::new()).await.unwrap();
+    fixture.host.record_event(&message,&AgentEngineEvent::TurnStarted {binding:fixture.host.engine_binding.clone(),
+        turn_operation_id:request.model_request.causality.turn_operation_id.clone()}).await.unwrap();
+    (request,runtime)
+}
+
+#[tokio::test]
+async fn public_messages_and_renderer_history_publish_the_exact_question_before_turn_finish() {
+    let fixture=Fixture::new("public-question-before-finish").await;
+    let(_request,runtime)=prepare_live_steering(&fixture).await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let cursor=fixture.owner.canonical().store().current_cursor(&session).await.unwrap().seq;
+    let mut message=fixture.message.clone();message.msg_id=message.source_message_id.clone().unwrap();
+    let question=nomifun_agent_contracts::AgentUserInputRequest {request_id:"public-auth-question".into(),
+        question:"请打开 https://example.invalid/authorize 并完成授权".into(),remaining_work:"验证原进程结果".into()};
+    fixture.host.record_event(&message,&AgentEngineEvent::UserInputRequested {step:1,request:question.clone()}).await.unwrap();
+    let wait=fixture.host.record_event(&message,&AgentEngineEvent::TurnWaiting {model_steps:1,
+        request_id:Some(question.request_id.as_ref().to_owned()),reason:nomifun_agent_contracts::AgentWaitReason::UserInput})
+        .await.unwrap().expect("waiting must be durably public");
+    for after_plan_read in [false,true] {
+        let mut paths=vec![(format!("/api/agent-sessions/{}/messages?after_seq={cursor}&limit=1",session.as_ref()),"messages","projection"),
+            (format!("/api/agent-sessions/{}/message-history?page_size=100",session.as_ref()),"items","content")];
+        if after_plan_read {paths.insert(0,(format!("/api/agent-sessions/{}/task-plan",session.as_ref()),"",""));}
+        for (path,list,document) in paths {
+            let response=fixture._router.clone().oneshot(Request::builder().method("GET").uri(&path)
+                .header("x-nomi-local-trust","cleanup-fixture-local-trust").body(Body::empty()).unwrap()).await.unwrap();
+            let status=response.status();let body:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),4*1024*1024).await.unwrap()).unwrap();
+            assert!(status.is_success(),"{path}: {status}: {body}");
+            if list.is_empty() {continue;}
+            let entries=body["data"][list].as_array().unwrap();
+            let item=entries.iter().find(|entry|entry[document]["user_input_request"]["request_id"]==question.request_id.as_ref())
+                .expect("the open Turn question must be publicly readable before Finish");
+            assert_eq!(item[document]["user_input_request"]["question"],question.question);
+            assert_eq!(item[document]["turn_outcome"]["kind"],"waiting");
+            assert_eq!(item[document]["turn_outcome"]["wait_seq"],wait);
+            if list=="messages" {assert_eq!(body["data"]["next_cursor"]["seq"],wait);}
+        }
+    }
+    let receipt=fixture.owner.canonical().turn_receipt(&PrincipalRef {principal_kind:"user".into(),
+        principal_id:fixture.services.authoritative_user_id.to_string()},&session,&"cleanup-retry-turn".into()).await.unwrap();
+    assert_eq!(receipt.status,nomifun_agent_session::TurnReceiptStatus::Running);assert!(receipt.terminal_event.is_none());
+    runtime.kill_and_wait(None).await.unwrap();fixture.finish().await;
+}
+
+#[tokio::test]
+async fn lost_steering_ack_replays_original_receipt_before_current_domain_admission() {
+    let fixture=Fixture::new("steer-receipt-before-domain").await;
+    let (request,runtime)=prepare_live_steering(&fixture).await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let path=format!("/api/agent-sessions/{}/turns/steer",session.as_ref());
+    let body=json!({"idempotency_key":"domain-reply","expected_turn_id":fixture.message.source_message_id,
+        "input":{"content":"Keep this accepted original input"}});
+    let first=api(&fixture._router,&path,body.clone()).await;
+    // A later domain owner cannot retroactively turn this accepted input into
+    // a rejected submission. The later domain-link fence is policy evidence,
+    // not a second input or replay receipt.
+    sqlx::query("INSERT INTO conversation_execution_links(conversation_id,execution_id,relation,step_id,attempt_id,created_at,updated_at) VALUES(?,?,'attempt',?,?,1,1)")
+        .bind(session.as_ref()).bind(uuid::Uuid::now_v7().to_string()).bind(uuid::Uuid::now_v7().to_string())
+        .bind(uuid::Uuid::now_v7().to_string()).execute(fixture.pool()).await.unwrap();
+    let principal=PrincipalRef {principal_kind:"user".into(),principal_id:fixture.services.authoritative_user_id.to_string()};
+    assert!(fixture.owner.require_ordinary_owner_input(&principal,&session).await.is_err());
+    let before=fixture.owner.canonical().store().current_cursor(&session).await.unwrap();
+    let mut altered=body.clone();altered["input"]["content"]=json!("changed under the accepted key");
+    let mut fresh=body.clone();fresh["idempotency_key"]=json!("fresh-domain-blocked-input");
+    for (payload,not_accepted) in [(altered,false),(fresh,true)] {
+        let response=fixture._router.clone().oneshot(Request::builder().method("POST").uri(path.as_str())
+            .header("x-nomi-local-trust","cleanup-fixture-local-trust").header("content-type","application/json")
+            .body(Body::from(payload.to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(),axum::http::StatusCode::CONFLICT);
+        let error:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap()).unwrap();
+        assert_eq!(error["code"]=="INPUT_NOT_ACCEPTED",not_accepted,
+            "an existing receipt mismatch stays unknown; a confirmed absent fresh input may be rejected by domain policy");
+    }
+    let repeated=api(&fixture._router,&path,body.clone()).await;
+    assert_eq!(repeated["message_id"],first["message_id"]);assert_eq!(repeated["duplicate"],true);
+    assert_eq!(fixture.owner.canonical().store().current_cursor(&session).await.unwrap(),before);
+    assert_eq!(fixture.host.active.lock().await.as_ref().unwrap().steering.pending_receipt_ids(),vec![first["message_id"].as_str().unwrap().to_owned()]);
+    let input=request.input_port.unwrap();let causality=request.model_request.causality;
+    assert_eq!(input.take(&causality,false).await.unwrap().len(),1);
+    assert!(input.take(&causality,true).await.unwrap().is_empty());
+    let consumed_cursor=fixture.owner.canonical().store().current_cursor(&session).await.unwrap();
+    let after_consumed=api(&fixture._router,&path,body).await;
+    assert_eq!(after_consumed["message_id"],first["message_id"]);
+    assert_eq!(after_consumed["duplicate"],true);
+    assert_eq!(fixture.owner.canonical().store().current_cursor(&session).await.unwrap(),consumed_cursor);
+    assert!(fixture.host.active.lock().await.as_ref().unwrap().steering.pending_receipt_ids().is_empty());
+    runtime.kill_and_wait(None).await.unwrap();fixture.finish().await;
+}
+
+#[tokio::test]
+async fn closed_runtime_input_scope_rejects_fresh_steering_before_any_canonical_append() {
+    let fixture=Fixture::new("steer-after-input-close").await;
+    let (request,runtime)=prepare_live_steering(&fixture).await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    assert!(request.input_port.unwrap().take(&request.model_request.causality,true).await.unwrap().is_empty());
+    assert_eq!(fixture.owner.canonical().store().head(&session).await.unwrap().status,"running");
+    let before=fixture.owner.canonical().store().current_cursor(&session).await.unwrap();
+    let response=fixture._router.clone().oneshot(Request::builder().method("POST")
+        .uri(format!("/api/agent-sessions/{}/turns/steer",session.as_ref())).header("x-nomi-local-trust","cleanup-fixture-local-trust")
+        .header("content-type","application/json").body(Body::from(json!({"idempotency_key":"closed-scope-input",
+            "expected_turn_id":fixture.message.source_message_id,"input":{"content":"must not be committed"}}).to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(),axum::http::StatusCode::CONFLICT);
+    let body:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap()).unwrap();
+    assert_eq!(body["code"],"INPUT_NOT_ACCEPTED");
+    assert_eq!(fixture.owner.canonical().store().current_cursor(&session).await.unwrap(),before);
+    assert!(fixture.host.active.lock().await.as_ref().unwrap().steering.pending_receipt_ids().is_empty());
+    runtime.kill_and_wait(None).await.unwrap();fixture.finish().await;
+}
+
+#[tokio::test]
+async fn invalid_steering_content_is_rejected_before_its_canonical_input_is_committed() {
+    let fixture=Fixture::new("steer-precommit-content-validation").await;
+    let (_request,runtime)=prepare_live_steering(&fixture).await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let before=fixture.owner.canonical().store().current_cursor(&session).await.unwrap();
+    for (key,input) in [
+        ("unknown-skill",json!({"content":"cannot load an unselected Skill","inject_skills":["not-selected-in-this-snapshot"]})),
+        ("oversized-text",json!({"content":"x".repeat(16*1024+1)})),
+        ("invalid-attachment",json!({"content":"invalid reference","files":[""]})),
+    ] {
+        let response=fixture._router.clone().oneshot(Request::builder().method("POST")
+            .uri(format!("/api/agent-sessions/{}/turns/steer",session.as_ref())).header("x-nomi-local-trust","cleanup-fixture-local-trust")
+            .header("content-type","application/json").body(Body::from(json!({"idempotency_key":key,
+                "expected_turn_id":fixture.message.source_message_id,"input":input}).to_string())).unwrap()).await.unwrap();
+        assert!(response.status().is_client_error());
+        let error:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap()).unwrap();
+        assert_eq!(error["code"],"INPUT_NOT_ACCEPTED");
+        assert_eq!(fixture.owner.canonical().store().current_cursor(&session).await.unwrap(),before);
+        assert!(fixture.host.active.lock().await.as_ref().unwrap().steering.pending_receipt_ids().is_empty());
+    }
+    runtime.kill_and_wait(None).await.unwrap();fixture.finish().await;
+}
+
+#[tokio::test]
+async fn committed_steering_context_error_never_claims_input_not_accepted_or_creates_a_second_receipt() {
+    let fixture=Fixture::new("steer-postcommit-context-error").await;
+    let (_request,runtime)=prepare_live_steering(&fixture).await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let body=json!({"idempotency_key":"retained-context-error","expected_turn_id":fixture.message.source_message_id,
+        "input":{"content":"Keep the original receipt on a delivery error","inject_skills":["not-selected-in-this-snapshot"]}});
+    // An already committed historical receipt remains accepted even when a
+    // subsequent delivery cannot prepare its original context. Never relabel
+    // this replay as a fresh rejection or let the client replace its key.
+    fixture.owner.canonical().admit_exact_steer(&PrincipalRef {principal_kind:"user".into(),
+        principal_id:fixture.services.authoritative_user_id.to_string()},&session,"retained-context-error",
+        &"cleanup-retry-turn".into(),json!({"content":"Keep the original receipt on a delivery error",
+            "files":[],"inject_skills":["not-selected-in-this-snapshot"]}),None).await.unwrap();
+    let mut original_cursor=None;
+    for _ in 0..2 {
+        let response=fixture._router.clone().oneshot(Request::builder().method("POST")
+            .uri(format!("/api/agent-sessions/{}/turns/steer",session.as_ref())).header("x-nomi-local-trust","cleanup-fixture-local-trust")
+            .header("content-type","application/json").body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(),axum::http::StatusCode::CONFLICT);
+        let error:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap()).unwrap();
+        assert_ne!(error["code"],"INPUT_NOT_ACCEPTED","the canonical input already exists despite context preparation failing");
+        let cursor=fixture.owner.canonical().store().current_cursor(&session).await.unwrap();
+        if let Some(original)=&original_cursor {assert_eq!(&cursor,original);} else {original_cursor=Some(cursor);}
+    }
+    let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/steer-accepted'")
+        .bind(session.as_ref()).fetch_one(fixture.pool()).await.unwrap();assert_eq!(count,1);
+    assert!(fixture.host.active.lock().await.as_ref().unwrap().steering.pending_receipt_ids().is_empty());
+    runtime.kill_and_wait(None).await.unwrap();fixture.finish().await;
+}
+
+#[tokio::test]
+async fn dropping_steering_waiter_after_commit_cannot_cut_off_original_inbox_delivery() {
+    let fixture=Fixture::new("steer-owned-admission").await;
+    let (request,runtime)=prepare_live_steering(&fixture).await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let generation=fixture.host.active.lock().await.as_ref().unwrap().epoch as u64;
+    let canonical=fixture.owner.canonical().clone();
+    let principal=PrincipalRef {principal_kind:"user".into(),principal_id:fixture.services.authoritative_user_id.to_string()};
+    let wire=fixture.message.source_message_id.clone().unwrap();let delivery_wire=wire.clone();let id=session.clone();
+    let committed=Arc::new(tokio::sync::Notify::new());let release=Arc::new(tokio::sync::Notify::new());
+    let committed_task=committed.clone();let release_task=release.clone();
+    let admission=nomifun_ai_agent::RuntimeSteerAdmission {wire_turn_id:wire,turn_generation:generation,text:"retained after caller drop".into(),files:vec![],inject_skills:vec![],commit:Box::pin(async move {
+        let receipt=canonical.admit_exact_steer(&principal,&id,"owned-input",&"cleanup-retry-turn".into(),json!({"content":"retained after caller drop","files":[],"inject_skills":[]}),None).await?;
+        committed_task.notify_one();release_task.notified().await;
+        Ok(nomifun_ai_agent::RuntimeSteerCommitted {acknowledgement:nomifun_agent_contracts::SessionEventAck {
+            agent_session_id:id,event_id:receipt.event_id.clone(),seq:receipt.cursor.seq,cursor:receipt.cursor},duplicate:receipt.duplicate,
+            delivery:nomifun_ai_agent::RuntimeSteerDelivery {receipt_operation_id:receipt.event_id.as_ref().to_owned(),
+                wire_turn_id:delivery_wire,turn_generation:generation,text:"retained after caller drop".into(),files:vec![],inject_skills:vec![]}})
+    })};
+    let host=fixture.host.clone();let waiter=tokio::spawn(async move {host.admit_steer_atomic(admission).await});
+    tokio::time::timeout(Duration::from_secs(2),committed.notified()).await.unwrap();
+    waiter.abort();let _=waiter.await;
+    let input=request.input_port.unwrap();let causality=request.model_request.causality;
+    let take=tokio::spawn(async move {input.take(&causality,true).await});
+    tokio::task::yield_now().await;
+    assert!(!take.is_finished(),"the terminal input fence waits for the owned commit-to-inbox operation");
+    release.notify_one();
+    let accepted=tokio::time::timeout(Duration::from_secs(2),take).await.unwrap().unwrap().unwrap();
+    assert_eq!(accepted.len(),1);assert_eq!(accepted[0].text,"retained after caller drop");
+    let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/steer-accepted'")
+        .bind(session.as_ref()).fetch_one(fixture.pool()).await.unwrap();assert_eq!(count,1);
+    runtime.kill_and_wait(None).await.unwrap();fixture.finish().await;
 }
 
 #[tokio::test]
@@ -830,7 +1045,7 @@ async fn claimed_preparation_cannot_confirm_another_execution_owner() {
     store.cancel_active_turn(&fixture.host.options.conversation_id.clone().into(),
         "cancel-foreign-execution".into(), "session_api".into()).await.unwrap();
     let before = store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap();
-    assert!(fixture.host.cleanup_turn(&fixture.message).await.is_err());
+    assert!(fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.is_err());
     assert!(fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.is_err());
     assert!(fixture.host.active.lock().await.is_none());
     assert_eq!(store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap(), before);
@@ -864,7 +1079,7 @@ async fn claimed_preparation_scenario(canonical_cancel: bool) {
     cancellation.cancel();
     drop(preparation);
     println!("CLAIMED_PREPARATION canonical_cancel={canonical_cancel} generation={} active_at_claim={active_at_claim}", claimed.0);
-    fixture.host.cleanup_turn(&fixture.message).await
+    fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await
         .expect("the original claimed preparation must retain its cleanup owner");
     fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.unwrap();
     fixture.assert_settled().await;
@@ -877,7 +1092,7 @@ async fn claimed_preparation_scenario(canonical_cancel: bool) {
         .bind(&fixture.host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
     assert_eq!(claim_count, 1);
     let before_repeat = store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap();
-    fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+    fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
     assert_eq!(store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap(), before_repeat);
     fixture.finish().await;
 }
@@ -910,11 +1125,11 @@ async fn cancellation_identity_scenario(attachments: bool) {
     missing_origin.origin = None;
     let mut failures = Vec::new();
     for (field, candidate) in [("files", altered_files), ("inject_skills", altered_skills), ("origin", altered_origin)] {
-        let cleanup_rejected = fixture.host.cleanup_turn(&candidate).await.is_err();
+        let cleanup_rejected = fixture.host.cleanup_turn(&candidate,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.is_err();
         let terminal_rejected = fixture.host.record_event(&candidate, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.is_err();
         if !cleanup_rejected || !terminal_rejected { failures.push((field, cleanup_rejected, terminal_rejected)); }
     }
-    if attachments && fixture.host.cleanup_turn(&missing_origin).await.is_ok() {
+    if attachments && fixture.host.cleanup_turn(&missing_origin,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.is_ok() {
         failures.push(("missing_origin", false, false));
     }
     assert_eq!(store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap(), before);
@@ -944,14 +1159,14 @@ async fn cleanup_retry_keeps_half_committed_initialization_after_suspension_faul
         .execute(fixture.pool()).await.unwrap();
     sqlx::query("CREATE TRIGGER reject_cleanup_pause BEFORE INSERT ON agent_events WHEN NEW.kind='turn/paused' BEGIN SELECT RAISE(FAIL,'fixture pause write failure'); END")
         .execute(fixture.pool()).await.unwrap();
-    let failure = fixture.host.cleanup_turn(&fixture.message).await.unwrap_err();
+    let failure = fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap_err();
     assert!(failure.to_string().contains("fixture input scope write failure"));
     assert_eq!(fixture.host.active.lock().await.as_ref().unwrap().journal.sequence(), 1);
     assert!(fixture.host.suspend_after_cleanup_failure(&fixture.message).await.is_err());
     assert_eq!(fixture.state().await, "running");
     sqlx::query("DROP TRIGGER reject_input_scope").execute(fixture.pool()).await.unwrap();
     sqlx::query("DROP TRIGGER reject_cleanup_pause").execute(fixture.pool()).await.unwrap();
-    fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+    fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
     fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.unwrap();
     fixture.assert_settled().await;
     let events: Vec<String> = sqlx::query_scalar("SELECT json_extract(inline_json,'$.event.event') FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' ORDER BY seq")
@@ -968,7 +1183,7 @@ async fn cleanup_retry_rejects_unclaimed_turn_under_writer_lock_then_settles() {
         sqlx::sqlite::SqliteConnectOptions::new().filename(&fixture.database_path)
             .busy_timeout(Duration::from_secs(2))).await.unwrap();
     let writer = writer_pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(8), fixture.host.cleanup_turn(&fixture.message)).await
+    let result = tokio::time::timeout(Duration::from_secs(8), fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled)).await
         .expect("claim failure must be bounded");
     assert_eq!(fixture.state().await, "running");
     assert!(fixture.host.active.lock().await.is_none());
@@ -978,7 +1193,7 @@ async fn cleanup_retry_rejects_unclaimed_turn_under_writer_lock_then_settles() {
     assert!(!fixture.host.terminal_already_recorded(fixture.host.root(&fixture.message)).unwrap());
     writer.rollback().await.unwrap();
     writer_pool.close().await;
-    fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+    fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
     fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.unwrap();
     fixture.assert_settled().await;
     fixture.finish().await;
@@ -992,7 +1207,7 @@ async fn cleanup_retry_rejects_terminal_ack_without_admitted_turn() {
     assert_eq!(fixture.state().await, "running");
     assert!(result.is_err(), "missing host admission cannot acknowledge a canonical terminal");
     assert!(!fixture.host.terminal_already_recorded(fixture.host.root(&fixture.message)).unwrap());
-    fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+    fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
     fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.unwrap();
     fixture.assert_settled().await;
     fixture.finish().await;
@@ -1039,7 +1254,7 @@ async fn parked_host_receives_input_before_and_during_notification_registration_
                 turn_generation:generation,text:"Authorization completed".into(),files:vec![],inject_skills:vec![],
             }).await.unwrap());
         };
-        let wait_port=request.wait_port.unwrap();let wait_request=AgentWaitRequest {processes:vec![]};
+        let wait_port=request.wait_port.unwrap();let wait_request=AgentWaitRequest {wake_policy:nomifun_agent_runtime::AgentWaitWakePolicy::TerminalOnly,processes:vec![]};
         let wake=if before {
             queue.await;
             tokio::time::timeout(Duration::from_secs(2),wait_port.wait(&causality,&wait_request,cancellation.clone())).await.unwrap().unwrap()
@@ -1055,10 +1270,10 @@ async fn parked_host_receives_input_before_and_during_notification_registration_
         if before {
             fixture.host.record_event(&fixture.message,&AgentEngineEvent::TurnWaiting {model_steps:0,request_id:None,
                 reason:AgentWaitReason::ExternalResource}).await.unwrap();
-            let missing=AgentWaitRequest {processes:vec![AgentWaitProcess {process_id:"another-turn-process".into(),output_cursor:0}]};
+            let missing=AgentWaitRequest {wake_policy:nomifun_agent_runtime::AgentWaitWakePolicy::TerminalOnly,processes:vec![AgentWaitProcess {process_id:"another-turn-process".into(),output_cursor:0}]};
             let lost=tokio::time::timeout(Duration::from_secs(2),wait_port.wait(&causality,&missing,cancellation.clone())).await.unwrap();
             assert!(matches!(lost,Err(AgentEngineError::WaitOwnerUnavailable)));
-            fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+            fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
             fixture.host.record_event(&fixture.message,&AgentEngineEvent::TurnPaused {model_steps:0,
                 reason:"EXECUTION_WAIT_OWNER_UNAVAILABLE".into()}).await.unwrap();
             assert_eq!(fixture.state().await,"running");
@@ -1071,7 +1286,7 @@ async fn parked_host_receives_input_before_and_during_notification_registration_
             fixture.assert_settled().await;fixture.finish().await;continue;
         }
         fixture.host.record_event(&fixture.message,&AgentEngineEvent::TurnWaitResolved {model_steps:0}).await.unwrap();
-        fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+        fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
         fixture.host.record_event(&fixture.message,&AgentEngineEvent::TurnCancelled {model_steps:0}).await.unwrap();
         fixture.assert_settled().await;fixture.finish().await;
     }
@@ -1089,11 +1304,11 @@ async fn steering_cleanup_retry_acknowledges_exact_cancelled_root_before_first_p
     assert!(fixture.host.active.lock().await.is_none());
     let mut wrong_root = fixture.message.clone();
     wrong_root.source_message_id = Some(uuid::Uuid::now_v7().to_string());
-    assert!(fixture.host.cleanup_turn(&wrong_root).await.is_err());
+    assert!(fixture.host.cleanup_turn(&wrong_root,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.is_err());
     assert!(fixture.host.record_event(&wrong_root, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.is_err());
     let mut wrong_text = fixture.message.clone();
     wrong_text.content = "different accepted body".into();
-    assert!(fixture.host.cleanup_turn(&wrong_text).await.is_err());
+    assert!(fixture.host.cleanup_turn(&wrong_text,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.is_err());
     assert!(fixture.host.record_event(&wrong_text, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.is_err());
     assert!(fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:1}).await.is_err());
     assert!(fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCompleted {
@@ -1122,11 +1337,11 @@ async fn steering_cleanup_retry_acknowledges_exact_cancelled_root_before_first_p
     tokio::time::timeout(Duration::from_secs(8), fixture.runtime.cancel()).await
         .expect("cancel before first driver poll must remain bounded")
         .expect("a durable cancel before first driver poll must not strand teardown");
-    fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+    fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
     fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.unwrap();
-    fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+    fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
     // The special witness must not turn later altered messages into a match.
-    assert!(fixture.host.cleanup_turn(&wrong_text).await.is_err());
+    assert!(fixture.host.cleanup_turn(&wrong_text,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.is_err());
     assert!(fixture.host.record_event(&wrong_root, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.is_err());
     let receipt = store.read_turn_receipt(&fixture.host.options.conversation_id.clone().into(),
         &"cleanup-retry-turn".into()).await.unwrap();
@@ -1155,7 +1370,7 @@ async fn steering_cleanup_retry_cannot_acknowledge_completed_root_as_cancelled()
         },
     }, &"cleanup-retry-turn".into()).await.unwrap();
     let before = store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap();
-    assert!(fixture.host.cleanup_turn(&fixture.message).await.is_err());
+    assert!(fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.is_err());
     assert!(fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.is_err());
     assert_eq!(fixture.state().await, "completed");
     assert_eq!(store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap(), before);
@@ -1208,7 +1423,7 @@ async fn steering_cleanup_scenario(fault: SteeringCleanupFault) {
         .execute(fixture.pool()).await.unwrap();
     sqlx::query("CREATE TRIGGER reject_steering_cleanup_pause BEFORE INSERT ON agent_events WHEN NEW.kind='turn/paused' BEGIN SELECT RAISE(FAIL,'fixture steering pause write failure'); END")
         .execute(fixture.pool()).await.unwrap();
-    let failure = fixture.host.cleanup_turn(&fixture.message).await.unwrap_err();
+    let failure = fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap_err();
     assert!(failure.to_string().contains("fixture steering tail write failure"));
     assert!(!fixture.host.queue_steer(delivery).await.unwrap(), "cleanup must keep the inbox closed");
     let pause_failure = fixture.host.suspend_after_cleanup_failure(&fixture.message).await.unwrap_err();
@@ -1230,7 +1445,7 @@ async fn steering_cleanup_scenario(fault: SteeringCleanupFault) {
     assert_eq!(private_parts, 1 + i64::from(!matches!(fault, SteeringCleanupFault::PrivateRecord)));
     sqlx::query("DROP TRIGGER reject_steering_tail").execute(fixture.pool()).await.unwrap();
     sqlx::query("DROP TRIGGER reject_steering_cleanup_pause").execute(fixture.pool()).await.unwrap();
-    fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+    fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
     {
         let active = fixture.host.active.lock().await;
         let turn = active.as_ref().unwrap();
@@ -1262,7 +1477,7 @@ async fn steering_cleanup_scenario(fault: SteeringCleanupFault) {
     fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.unwrap();
     fixture.assert_settled().await;
     let before_repeat = store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap();
-    fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+    fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
     assert_eq!(store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap(), before_repeat);
     fixture.finish().await;
 }
@@ -1572,7 +1787,7 @@ async fn turn_file_api_discovers_command_binary_outputs_and_preserves_exact_turn
         .arg("turn-file-fixture").arg("build_docx.py").arg("骆驼祥子读后感.docx")
         .status().await.unwrap();
     assert!(command.success());
-    fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+    fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
     fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled { model_steps:0 }).await.unwrap();
     fixture.assert_settled().await;
     let (status, first) = file_api_get(&fixture._router, &path, true).await;
@@ -1608,7 +1823,7 @@ async fn turn_file_api_discovers_command_binary_outputs_and_preserves_exact_turn
     reopened_pool.close().await;
     let next = SendMessageData { source_message_id:Some(input.record.unwrap().event_id.as_ref().into()),
         msg_id:"file-successor-wire".into(), content:"later turn".into(), files:vec![], inject_skills:vec![], origin:None };
-    fixture.host.cleanup_turn(&next).await.unwrap();
+    fixture.host.cleanup_turn(&next,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
     fixture.host.record_event(&next, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.unwrap();
     fixture.finish().await;
 }
@@ -1645,7 +1860,7 @@ async fn turn_file_api_requires_owner_and_returns_no_final_list_for_paused_turns
         control_rejections:Default::default(), pending_user_input: None, completion_review:Default::default(),
     };
     fixture.host.save_execution_checkpoint(&fixture.message, &checkpoint).await.unwrap().unwrap();
-    fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+    fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
     fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnPaused {
         model_steps:0, reason:"EXECUTION_USER_REQUESTED".into(),
     }).await.unwrap();

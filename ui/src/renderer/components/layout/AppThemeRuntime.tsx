@@ -5,8 +5,6 @@
  */
 
 import { configService } from '@/common/config/configService';
-import type { ICssTheme } from '@/common/config/storage';
-import { DEFAULT_THEME_ID } from '@renderer/pages/settings/DisplaySettings/presets';
 import { processCustomCss } from '@renderer/utils/theme/customCssProcessor';
 import { broadcastCustomCssSync } from '@renderer/utils/theme/themeBroadcast';
 import {
@@ -14,7 +12,7 @@ import {
   removeThemeControlContract,
   THEME_CONTROL_CONTRACT_STYLE_ID,
 } from '@renderer/utils/theme/themeControlContract';
-import { computeCssSyncDecision, resolveCssByActiveTheme } from '@renderer/utils/theme/themeCssSync';
+import { computeCssSyncDecision, resolveCssThemeState } from '@renderer/utils/theme/themeCssSync';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 
@@ -34,19 +32,11 @@ const AppThemeRuntime: React.FC = () => {
 
   const loadAndHealCustomCss = useCallback(async () => {
     try {
-      const [savedCssRaw, savedActiveThemeId, savedThemes] = await Promise.all([
-        configService.get('customCss'),
-        configService.get('css.activeThemeId'),
-        configService.get('css.themes'),
-      ]);
-
-      // Fall back to the system default theme when none is selected, so fresh users apply it from first paint.
-      const activeThemeId = savedActiveThemeId || DEFAULT_THEME_ID;
-
+      await configService.whenReady();
       const decision = computeCssSyncDecision({
-        savedCss: savedCssRaw || '',
-        activeThemeId,
-        savedThemes: (savedThemes || []) as ICssTheme[],
+        savedCss: configService.get('customCss') || '',
+        activeThemeId: configService.get('css.activeThemeId') || '',
+        savedThemes: configService.get('css.themes') || [],
         currentUiCss: customCss,
         lastUiCssUpdateAt: lastUiCssUpdateAtRef.current,
       });
@@ -55,22 +45,18 @@ const AppThemeRuntime: React.FC = () => {
         return;
       }
 
-      let effectiveCss = decision.effectiveCss;
-
-      if (!effectiveCss && activeThemeId && activeThemeId !== DEFAULT_THEME_ID) {
-        const defaultCss = resolveCssByActiveTheme(DEFAULT_THEME_ID, (savedThemes || []) as ICssTheme[]);
-        effectiveCss = defaultCss;
-        await Promise.all([
-          configService.set('css.activeThemeId', DEFAULT_THEME_ID),
-          configService.set('customCss', effectiveCss),
-        ]).catch((error) => {
-          console.warn('Failed to persist theme fallback:', error);
-        });
-      } else if (decision.shouldHealStorage) {
-        await configService.set('customCss', effectiveCss).catch((error) => {
-          console.warn('Failed to heal custom CSS from active theme:', error);
+      const effectiveCss = decision.effectiveCss;
+      if (configService.isInitialized() && Object.keys(decision.configUpdates).length) {
+        await configService.setBatch(decision.configUpdates).catch((error) => {
+          console.warn('Failed to reconcile CSS theme settings:', error);
         });
       }
+
+      const { activeTheme } = resolveCssThemeState(
+        configService.get('css.activeThemeId') || '',
+        configService.get('css.themes') || []
+      );
+      if (activeTheme.id !== decision.activeThemeId || activeTheme.css !== effectiveCss) return;
 
       setCustomCss(effectiveCss);
       if (lastCssRef.current !== effectiveCss) {

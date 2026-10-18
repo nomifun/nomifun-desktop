@@ -54,11 +54,11 @@ mod fixture {
         ).to_string();
         if model_context {
             nomifun_agent_runtime::AgentEngineError::CapabilityKernel {
-                code: code.into(), message,
+                code: code.into(), message, details:None,
             }.to_string()
         } else {
             nomifun_engine_core::EngineToolError::CapabilityKernel {
-                code: code.into(), message,
+                code: code.into(), message, details:None,
             }.to_string()
         }
     }

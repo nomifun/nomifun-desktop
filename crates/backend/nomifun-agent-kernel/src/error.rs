@@ -11,11 +11,12 @@ use thiserror::Error;
 /// `code` is the stable, machine-readable contract. `message` is diagnostic
 /// text for the trusted host boundary and must never be parsed to recover the
 /// code. Provider/model adapters are responsible for exposing only a safe,
-/// redacted projection of the message.
+/// redacted projection of the message and optional structured owner details.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapabilityExecutionFailure {
     pub code: CanonicalErrorCode,
     pub message: String,
+    pub details: Option<serde_json::Value>,
 }
 
 impl CapabilityExecutionFailure {
@@ -26,7 +27,13 @@ impl CapabilityExecutionFailure {
         Self {
             code: code.into(),
             message: message.into(),
+            details: None,
         }
+    }
+
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
     }
 }
 
@@ -408,7 +415,25 @@ mod tests {
         let failure = error.capability_execution_failure().unwrap();
         assert_eq!(failure.code.as_ref(), "ROBOT_OFFLINE");
         assert!(failure.message.contains("sk-private"));
+        assert_eq!(failure.details, None);
         assert_eq!(error.to_string(), "capability handler failed with ROBOT_OFFLINE");
         assert!(!error.to_string().contains("sk-private"));
+    }
+
+    #[test]
+    fn typed_capability_failure_keeps_cloned_owner_details_out_of_display() {
+        let details = serde_json::json!({"native_file_error": {
+            "code": "SYSTEM_ACCESS_DENIED", "message": "private owner diagnostic",
+            "kind": "PermissionDenied", "raw_os_error": 5,
+        }});
+        let error = KernelError::CapabilityExecutionFailed {
+            failure: CapabilityExecutionFailure::new("INVALID_PAYLOAD", "outer failure")
+                .with_details(details.clone()),
+        };
+        let cloned = error.clone();
+        assert_eq!(cloned.canonical_code().as_ref(), "INVALID_PAYLOAD");
+        assert_eq!(cloned.capability_execution_failure().unwrap().details, Some(details));
+        assert_eq!(cloned.to_string(), "capability handler failed with INVALID_PAYLOAD");
+        assert!(!cloned.to_string().contains("private owner diagnostic"));
     }
 }

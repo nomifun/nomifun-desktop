@@ -57,8 +57,8 @@ type MarketSettingsPanelProps = {
   searchPlaceholder: string;
   emptyText: string;
   onAdd: (item: ISkillMarketItem) => void | Promise<void>;
-  /** Consumers may invalidate their display metadata after a ranking-cache write. */
-  onCacheUpdated?: () => void;
+  /** Latest rankings, including refreshes that could not persist to browser storage. */
+  onCacheUpdated?: (items: ISkillMarketItem[]) => void;
   /** Whether cards expose the market-provided command for manual copying. */
   showInstallCommand?: boolean;
   /** True when this market entry already has a live installed resource. */
@@ -126,9 +126,10 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
       setActiveSource((source) => selectMarketSourceWithItems(source, sources, cachedItems));
       setFetchedAt(typeof cache.fetched_at === 'number' ? cache.fetched_at : null);
       setErrors(normalizeSkillMarketErrors(cache.errors));
+      onCacheUpdated?.(cachedItems);
     } catch {
-      localStorage.removeItem(cacheKey);
-      onCacheUpdated?.();
+      try { localStorage.removeItem(cacheKey); } catch { /* Browser storage is optional. */ }
+      onCacheUpdated?.([]);
     }
   }, [cacheKey, onCacheUpdated, sources]);
 
@@ -146,15 +147,19 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
         setActiveSource((source) => selectMarketSourceWithItems(source, sources, nextItems));
         setFetchedAt(result.fetched_at);
         setErrors(normalizedErrors);
-        localStorage.setItem(
-          cacheKey,
-          JSON.stringify({
-            fetched_at: result.fetched_at,
-            items: nextItems,
-            errors: normalizedErrors,
-          })
-        );
-        onCacheUpdated?.();
+        try {
+          localStorage.setItem(
+            cacheKey,
+            JSON.stringify({
+              fetched_at: result.fetched_at,
+              items: nextItems,
+              errors: normalizedErrors,
+            })
+          );
+        } catch {
+          // A successful refresh still supplies the shared in-memory rankings.
+        }
+        onCacheUpdated?.(nextItems);
         if (showToast) {
           if (normalized.length > 0) {
             message.success(text?.syncSuccess ?? t('settings.market.syncSuccess', { defaultValue: '市场已更新' }));

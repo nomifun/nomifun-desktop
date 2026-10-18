@@ -223,6 +223,7 @@ impl EngineTurnJournal {
     }
 
     pub(super) fn turn_operation(&self) -> &OperationId { &self.0.operation }
+    pub(super) fn canonical_store(&self) -> AgentSessionStore { self.0.store.clone() }
     pub(super) async fn require_claimed_model(
         &self,
         causality: &ChatCausality,
@@ -446,7 +447,10 @@ impl EngineTurnJournal {
         let task = tokio::spawn(async move {
             let mut ticks = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
-                tokio::select! { biased; _ = cancellation.cancelled() => break, _ = ticks.tick() => {} }
+                // User cancellation stops admission, not the retained owner's
+                // settlement authority. Renew until the original Turn is
+                // terminal, fenced, or its journal is actually released.
+                ticks.tick().await;
                 let Some(journal) = weak.upgrade() else { break; };
                 if journal.cursor.lock().await.terminal { break; }
                 match journal.store.heartbeat_native_execution(&journal.lease).await {
@@ -1616,6 +1620,37 @@ mod history_display_tests {
         store.start_turn(&journal.0.session, "session_api".into(), "next-input".into(),
             "next-turn".into(), StrictJsonValue(json!({"content":"Continue from the completed work"}))).await
             .expect("the next user input needs no manual End Turn");
+    }
+
+    #[tokio::test]
+    async fn typed_system_authentication_failure_survives_canonical_terminal_and_cold_api_history() {
+        for (code, facts) in [
+            ("SYSTEM_EXECUTION_AUTHENTICATION_CANCELLED", json!({"raw_os_error":1223,"kind":"Uncategorized","user_code_not_started":true,"cleanup_proven":true})),
+            ("SYSTEM_READ_RESULT_UNKNOWN", json!({"user_code_not_started":false,"cleanup_proven":false})),
+        ] {
+            let (journal, pool) = test_fixture().await;
+            let diagnostic = nomifun_agent_contracts::SystemExecutionFailure::from_owner(code.into(), "original native readonly error".into(), &facts);
+            journal.append(json!({"event":"host_cleanup_proven"}).to_string(), None, EngineJournalWrite::Cleanup).await.unwrap();
+            let terminal = AgentEngineEvent::TurnFailed { model_steps:1, message:diagnostic.message.clone(),
+                failure:Some(nomifun_agent_runtime::AgentTurnFailure::SystemExecution { diagnostic:diagnostic.clone() }) };
+            journal.append(serde_json::to_string(&terminal).unwrap(), None, EngineJournalWrite::Terminal).await.unwrap();
+            // A fresh Store reconstructs the public error from the canonical
+            // terminal rather than the live Runtime or current selection.
+            let store = AgentSessionStore::from_pool(pool).await.unwrap();
+            assert_eq!(store.read_turn_receipt(&journal.0.session, &journal.0.operation).await.unwrap().status, TurnReceiptStatus::Failed);
+            let (history, _, _) = store.message_history_before(&journal.0.session, None, 50).await.unwrap();
+            let summary = history.iter().find(|row| row.presentation_intent == "turn_summary").unwrap();
+            assert_eq!(summary.projection["error"]["code"], code);
+            assert_eq!(summary.projection["error"]["systemExecutionError"], serde_json::to_value(&diagnostic).unwrap());
+            let api: nomifun_api_types::AgentStreamErrorData = serde_json::from_value(summary.projection["error"].clone()).unwrap();
+            assert_eq!(api.system_execution_error, Some(diagnostic));
+            assert_eq!(api.retryable, Some(false));
+            assert!(api.provider_diagnostic.is_none());
+            let facts = store.turn_output_facts(&journal.0.session, &journal.0.operation).await.unwrap();
+            assert!(facts.events.iter().filter(|event| event.kind.0 == "turn/failed").any(|event|
+                facts.event_payloads.get(event.event_id.as_ref()).is_some_and(|payload| payload["error"]["code"] == code)));
+            assert!(!facts.events.iter().any(|event| matches!(event.kind.0.as_str(), "turn/cancelled" | "effect/started")));
+        }
     }
 
     #[tokio::test]

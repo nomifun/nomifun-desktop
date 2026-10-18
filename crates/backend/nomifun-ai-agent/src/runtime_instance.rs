@@ -28,6 +28,31 @@ pub struct RuntimeSteerDelivery {
     pub inject_skills: Vec<String>,
 }
 
+/// A trusted owner supplies this future; it is polled only while the original
+/// host input mutex proves this exact scope open. It is never model/API JSON.
+pub struct RuntimeSteerAdmission {
+    pub wire_turn_id:String,
+    pub turn_generation:u64,
+    pub text:String,
+    pub files:Vec<String>,
+    pub inject_skills:Vec<String>,
+    pub commit:Pin<Box<dyn Future<Output=Result<RuntimeSteerCommitted,AppError>>+Send>>,
+}
+
+pub struct RuntimeSteerCommitted {
+    pub acknowledgement:nomifun_agent_contracts::SessionEventAck,
+    pub duplicate:bool,
+    pub delivery:RuntimeSteerDelivery,
+}
+
+/// Outer errors precede admission. Errors in delivery retain the committed ACK
+/// and original retry key; they never prove that the input was not accepted.
+pub struct RuntimeSteerAdmissionOutcome {
+    pub acknowledgement:nomifun_agent_contracts::SessionEventAck,
+    pub duplicate:bool,
+    pub delivery:Result<bool,AppError>,
+}
+
 /// A successful teardown is a proof of quiescence: all runtime tasks and owned
 /// child processes are stopped. It is deliberately required, with no default
 /// that silently treats a kill request as a completed cleanup.
@@ -53,6 +78,15 @@ pub trait OfficialAgentRuntime: AgentRuntimeControl {
             return Err(unsupported("steering attachments or Skill hints"));
         }
         self.steer(delivery.text)
+    }
+
+    /// Wake hint only: accepted content and execution authority stay canonical.
+    async fn validate_session_input(&self,_files:Vec<String>,_skills:Vec<String>)->Result<(),AppError> {Err(AppError::Conflict("Runtime does not support Session input preparation".into()))}
+
+    async fn session_input_changed(&self,_retry_input:Option<String>)->Result<(),AppError> {Ok(())}
+
+    async fn admit_steer(&self,_admission:RuntimeSteerAdmission)->Result<RuntimeSteerAdmissionOutcome,AppError> {
+        Err(unsupported("atomic steering admission"))
     }
 
     fn notify_system_resource(

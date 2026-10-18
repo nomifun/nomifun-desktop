@@ -109,10 +109,8 @@ impl HistoryPort {
             .get("content")
             .and_then(Value::as_str)
             .ok_or_else(invalid)?;
-        let receipt: Value =
-            serde_json::from_str(&turn.request_payload_json).map_err(|_| invalid())?;
         let files =
-            super::super::runtime_attachments::references(&receipt).map_err(|_| invalid())?;
+            super::super::runtime_attachments::references(&root).map_err(|_| invalid())?;
         let mut content = Vec::new();
         if !text.is_empty() {
             content.push(ChatContentPart::Text { text: text.into() });

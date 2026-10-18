@@ -8,7 +8,7 @@ use nomifun_common::AppError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::path_safety::{validate_path_authority, validate_path_for_write_authority};
+use crate::path_safety::{validate_native_read_path_authority, validate_path_for_write_authority};
 use crate::{AgentSessionWorkspaceBinding, FileService, WORKSPACE_READ_OPERATION};
 
 const MAX_FILE_BYTES: usize = nomi_native_files::MAX_SOURCE_BYTES;
@@ -235,7 +235,7 @@ pub(crate) fn read_source_bytes_with_hooks(
             "Source byte budget exceeds the owner limit".into(),
         ));
     }
-    let canonical = match validate_path_authority(&path.to_string_lossy(), authority) {
+    let canonical = match validate_native_read_path_authority(&path.to_string_lossy(), authority) {
         Ok(path) => path,
         Err(error) => {
             // Never turn an authority rejection or permission error
@@ -254,8 +254,12 @@ pub(crate) fn read_source_bytes_with_hooks(
     let open = || {
         #[cfg(windows)]
         if let Some(root) = &root { return root.open(&canonical); }
+        #[cfg(windows)]
+        { return nomi_native_files::windows::open_source(&canonical).map_err(crate::native_file_acquisition_error); }
         // Keep ambient special-file rejection on the existing fallback path;
         // opening a FIFO before checking its type could block indefinitely.
+        #[cfg(not(windows))]
+        {
         let before = std::fs::symlink_metadata(&canonical).map_err(io_error)?;
         if !before.is_file() || before.len() > max_bytes as u64 {
             return Err(AppError::BadRequest("Source is not a bounded regular file".into()));
@@ -267,18 +271,20 @@ pub(crate) fn read_source_bytes_with_hooks(
             options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
         }
         options.open(&canonical).map_err(io_error)
+        }
     };
     before_open();
     let (bytes, sha256) = nomi_native_files::acquire_source_with_adapter(
         max_bytes, charged_bytes, open, after_read,
-        || Ok(validate_path_authority(&path.to_string_lossy(), authority)? == canonical),
+        || Ok(validate_native_read_path_authority(&path.to_string_lossy(), authority)? == canonical),
         crate::native_file_acquisition_error,
     )?;
     Ok(Some((bytes, sha256, canonical)))
 }
 
+#[cfg(not(windows))]
 fn io_error(error: std::io::Error) -> AppError {
-    crate::path_safety::native_io_error("reading native file", error)
+    crate::native_acquisition::native_read_io_error("reading native file", error)
 }
 
 fn missing_path_is_confined(path: &std::path::Path, authority: &crate::PathAuthority) -> bool {
@@ -524,7 +530,9 @@ mod tests {
             if confined {
                 assert!(matches!(result, Err(AppError::Forbidden(_))), "{result:?}");
             } else {
-                assert!(matches!(result, Err(AppError::Conflict(message)) if message.contains("FILE_CHANGED_DURING_READ")));
+                assert!(matches!(result, Err(AppError::NativeFileAcquisition {
+                    code: "FILE_CHANGED_DURING_READ", kind: None, raw_os_error: None, ..
+                })));
             }
             assert_eq!(charged, 6, "bytes are charged even when final authority verification fails");
             assert_eq!(fs::read(&source).unwrap(), b"inside");
@@ -617,7 +625,9 @@ mod tests {
         });
         assert_eq!(fs::read(&path).unwrap(),b"newest");
         assert_eq!(fs::read(&retained).unwrap(),b"inside");
-        if !matches!(&result,Err(AppError::Conflict(message)) if message.contains("FILE_CHANGED_DURING_READ")) {
+        if !matches!(&result,Err(AppError::NativeFileAcquisition {
+            code: "FILE_CHANGED_DURING_READ", kind: None, raw_os_error: None, ..
+        })) {
             fs::write(fixture.path().join("observation.json"),format!("{result:?}")).unwrap();
             let location = fixture.keep();
             panic!("same-name replacement was not rejected; retained fixture: {}",location.display());

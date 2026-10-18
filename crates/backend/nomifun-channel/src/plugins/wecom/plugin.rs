@@ -205,9 +205,9 @@ impl ChannelPlugin for WecomPlugin {
             .await
             .map_err(|_| ChannelError::MessageSendFailed("WeCom socket loop is gone".into()))?;
 
-        // The push ack arrives asynchronously over the socket; use the generated
-        // request id as the logical message id (WeCom returns no id inline).
-        Ok(req_id)
+        // The request id correlates the wire frame. Its asynchronous provider
+        // acknowledgement has not arrived at this queue-admission boundary.
+        Ok(String::new())
     }
 
     async fn edit_message(
@@ -689,11 +689,12 @@ mod tests {
             silent: None,
         };
         let id = plugin.send_message("zhang", msg).await.unwrap();
-        assert!(id.starts_with("send-"));
+        assert!(id.is_empty(),"a local request counter is not a remote message acknowledgement");
 
         let frame = rx.try_recv().unwrap();
         let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(v["cmd"], "aibot_send_msg");
+        assert!(v["headers"]["req_id"].as_str().unwrap().starts_with("send-"));
         assert_eq!(v["body"]["chatid"], "zhang");
         assert_eq!(v["body"]["msgtype"], "markdown");
         assert_eq!(v["body"]["markdown"]["content"], "你好世界");

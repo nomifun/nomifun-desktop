@@ -87,7 +87,7 @@ pub(crate) fn failed_process_observation(
 /// establish this: a reaped process may already have modified the workspace.
 pub(crate) fn process_did_not_start(binding: &AgentToolBinding, result: &AgentToolResult) -> bool {
     binding.capability_id.as_ref() == "workspace.process"
-        && matches!(binding.action_id.as_ref(), "workspace.process/exec" | "workspace.process/start")
+        && binding.action_id.as_ref() == "workspace.process/start"
         && serde_json::from_str::<serde_json::Value>(&result.output_text()).is_ok_and(|value|
             value["schema"] == "nomifun.process-start-observation.v1"
                 && value["state"] == "not_started" && value["user_code_started"] == false
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn reportable_nonzero_excludes_lost_signalled_or_unreaped_processes() {
-        let process = binding("workspace.process", "workspace.process/exec");
+        let process = binding("workspace.process", "workspace.process/start");
         let known = serde_json::json!({"state":"exited","exit_code":1,"signal":null,
             "cleanup":{"reaped":true,"errors":[]},"success":false});
         let result = crate::AgentToolResult::text("diagnostic".into(), known.to_string(), true);
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn nonzero_process_exit_is_a_failed_observation_even_when_dispatch_succeeded() {
-        let process = binding("workspace.process", "workspace.process/exec");
+        let process = binding("workspace.process", "workspace.process/start");
         let failed = crate::AgentToolResult::text(
             "call-1".into(),
             serde_json::json!({"state":"exited","exit_code":1,"success":false}).to_string(),
@@ -420,11 +420,11 @@ mod tests {
 
     #[test]
     fn proven_nonstart_preserves_workspace_evidence_but_cleanup_does_not_prove_nonstart() {
-        let process = binding("workspace.process", "workspace.process/exec");
+        let process = binding("workspace.process", "workspace.process/start");
         let mut work = crate::AgentWorkStatus { workspace_observation_epoch:7,
             successful_commands:1, command_observed_after_latest_mutation:true, ..Default::default() };
         let mut commands = crate::workflow::CommandTracker::default();
-        let call = nomifun_chat_model_broker::ChatToolCall { call_id:"failed-spawn".into(), name:"exec_command".into(),
+        let call = nomifun_chat_model_broker::ChatToolCall { call_id:"failed-spawn".into(), name:"start_process".into(),
             arguments:StrictJsonValue(serde_json::json!({"command":"node --check game.js"})),provider_metadata:None };
         let result = crate::AgentToolResult::text(call.call_id.clone(),serde_json::json!({
             "schema":"nomifun.process-start-observation.v1","state":"not_started","user_code_started":false,"success":false
@@ -555,7 +555,7 @@ mod tests {
         uncertain["control_applied"] = serde_json::json!(true);
         let result = crate::AgentToolResult::text(call.call_id.clone(), uncertain.to_string(), true);
         assert!(!process_operation_not_applied(&input, &result));
-        assert!(!process_operation_not_applied(&binding("workspace.process", "workspace.process/exec"), &result));
+        assert!(!process_operation_not_applied(&binding("workspace.process", "workspace.process/start"), &result));
         work.observe(&input, &call, &result, &mut commands);
         assert_eq!(work.workspace_observation_epoch, 8);
     }

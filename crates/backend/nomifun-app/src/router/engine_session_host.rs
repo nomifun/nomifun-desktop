@@ -74,6 +74,22 @@ pub struct EngineTurnReceipt {
     request_payload: serde_json::Value,
 }
 
+/// Input acceptance stores content; only the exact Turn claim freezes execution
+/// admission. Old current-generation roots may also contain that same grant,
+/// which must agree rather than becoming a fallback source of authority.
+fn turn_admission_payload(source: &serde_json::Value, started: &serde_json::Value,
+    snapshot: &ResolvedSnapshotRef, route: &nomifun_agent_contracts::ChatRouteIdentity)
+    -> Result<serde_json::Value, String> {
+    let admission=started.get("admission").ok_or_else(||"Turn claim has no frozen admission scope".to_owned())?;
+    let snapshot=serde_json::to_value(snapshot).map_err(|error|error.to_string())?;
+    let route=serde_json::to_value(route).map_err(|error|error.to_string())?;
+    if admission.get("resolved_snapshot_ref")!=Some(&snapshot) || admission.get("route_identity")!=Some(&route)
+        || source.get("admission").is_some_and(|old|old!=admission) {
+        return Err("accepted root Snapshot or route differs from the frozen engine scope".into());
+    }
+    Ok(admission.clone())
+}
+
 impl EngineTurnReceipt {
     pub(super) fn belongs_to(&self, source: &Arc<()>) -> bool {
         Arc::ptr_eq(&self.source, source)
@@ -149,6 +165,10 @@ impl EngineSessionHost {
             .ok_or_else(|| AppError::Conflict("Session owner has shut down".into()))
     }
 
+    pub(super) fn session_owner(&self)->Result<Arc<NomiCoreSessionOwner>,AppError> {
+        self.owner.upgrade().ok_or_else(||AppError::Conflict("Session input owner has shut down".into()))
+    }
+
     /// Process-owned write-back receipts are reconciled before routes open.
     /// An orphan is observed as interrupted; its writes are never replayed.
     pub(super) async fn interrupt_stale_knowledge_writebacks(&self) -> Result<usize, AppError> {
@@ -193,6 +213,10 @@ impl EngineSessionHost {
             resources.cancel_and_join_knowledge_writebacks().await?;
         }
         Ok(())
+    }
+
+    pub(super) async fn cleanup_session_processes(&self,owner:&str,session:&AgentSessionId) ->Result<(),AppError> {
+        self.resources.wave2.cleanup_runtime_session(owner,session.as_ref()).await
     }
 
     /// Publish a fresh view of the original canonical summary without sending
@@ -736,6 +760,14 @@ impl EngineSessionHost {
             .ok_or_else(|| conflict("engine host has shut down"))?
             .provider()?
             .validate_session_extra(&session.response.extra)?;
+        let route=session.snapshot.content.chat_route_identity.as_ref()
+            .ok_or_else(||conflict("accepted Session has no exact route"))?;
+        let admission=turn_admission_payload(source_payload,started_payload,expected_snapshot,route)
+            .map_err(|reason|conflict(&reason))?;
+        // Read-time assembly of two exact typed facts, never a stored mirror.
+        let mut request_payload=source_payload.clone();
+        request_payload.as_object_mut().ok_or_else(||conflict("accepted input is not an object"))?
+            .insert("admission".into(),admission);
         Ok(EngineTurnReceipt {
             source: self.source.clone(),
             session,
@@ -744,7 +776,7 @@ impl EngineSessionHost {
             operation_id,
             admission_epoch: i64::try_from(if facts.execution_generation > 0 { facts.execution_generation } else { started.seq })
                 .map_err(|_| conflict("turn sequence exceeds runtime generation range"))?,
-            request_payload: source_payload.clone(),
+            request_payload,
         })
     }
 
@@ -815,14 +847,8 @@ impl EngineSessionHost {
         }
         let route = session.snapshot.content.chat_route_identity.as_ref()
             .ok_or_else(|| conflict("accepted Session has no exact route"))?;
-        let snapshot_value = serde_json::to_value(expected_snapshot).map_err(|error| conflict(&error.to_string()))?;
-        let route_value = serde_json::to_value(route).map_err(|error| conflict(&error.to_string()))?;
-        for payload in [source_payload, started_payload] {
-            let admission = payload.get("admission").ok_or_else(|| conflict("accepted root has no frozen admission scope"))?;
-            if admission.get("resolved_snapshot_ref") != Some(&snapshot_value) || admission.get("route_identity") != Some(&route_value) {
-                return Err(conflict("accepted root Snapshot or route differs from the frozen engine scope"));
-            }
-        }
+        turn_admission_payload(source_payload,started_payload,expected_snapshot,route)
+            .map_err(|reason|conflict(&reason))?;
         Ok(true)
     }
 
@@ -901,14 +927,8 @@ impl EngineSessionHost {
         }
         let route = session.snapshot.content.chat_route_identity.as_ref()
             .ok_or_else(|| conflict("accepted Session has no exact route"))?;
-        let snapshot_value = serde_json::to_value(expected_snapshot).map_err(|error| conflict(&error.to_string()))?;
-        let route_value = serde_json::to_value(route).map_err(|error| conflict(&error.to_string()))?;
-        for payload in [source_payload, started_payload] {
-            let admission = payload.get("admission").ok_or_else(|| conflict("accepted root has no frozen admission scope"))?;
-            if admission.get("resolved_snapshot_ref") != Some(&snapshot_value) || admission.get("route_identity") != Some(&route_value) {
-                return Err(conflict("accepted root Snapshot or route differs from the frozen engine scope"));
-            }
-        }
+        turn_admission_payload(source_payload,started_payload,expected_snapshot,route)
+            .map_err(|reason|conflict(&reason))?;
         let expected_event = serde_json::to_value(expected_event).map_err(|error| conflict(&error.to_string()))?;
         let matching = facts.events.iter().filter(|event| event.agent_session_id == session_id
             && event.kind.0 == "runtime/progress-recorded"
@@ -1050,5 +1070,22 @@ impl EngineSessionHost {
             active_set_generation: head.active_set_generation,
             active_capability_ids,
         })
+    }
+}
+
+#[cfg(test)]
+mod input_admission_tests {
+    use super::*;
+    #[test]
+    fn accepting_text_never_supplies_execution_admission_without_an_exact_turn_claim() {
+        let snapshot=ResolvedSnapshotRef {snapshot_id:"snapshot".into(),snapshot_digest:"a".repeat(64).into()};
+        let route=nomifun_agent_contracts::ChatRouteIdentity::new("preset@1","agent_chat","route".into(),1);
+        let admission=serde_json::json!({"resolved_snapshot_ref":snapshot,"route_identity":route});
+        let source=serde_json::json!({"content":"received before execution"});
+        assert_eq!(turn_admission_payload(&source,&serde_json::json!({"admission":admission}),&snapshot,&route).unwrap(),admission);
+        let old_source=serde_json::json!({"content":"old exact input","admission":admission});
+        assert!(turn_admission_payload(&old_source,&serde_json::json!({}),&snapshot,&route).is_err());
+        let mut changed=old_source.clone();changed["admission"]["resolved_snapshot_ref"]["snapshot_digest"]=serde_json::json!("b".repeat(64));
+        assert!(turn_admission_payload(&changed,&serde_json::json!({"admission":admission}),&snapshot,&route).is_err());
     }
 }

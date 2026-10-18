@@ -14,22 +14,10 @@ import * as themeContext from '@/renderer/hooks/context/ThemeContext';
 import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
 import McpPage from './index';
-import McpMarketSettings, {
-  attachMcpMarketOrigin,
-  getMcpMarketItemServers,
-  getMcpMarketOrigin,
-  isLocalMcpEndpoint,
-  isMcpMarketItemInstalled,
-} from './McpMarketSettings';
+import McpMarketSettings, { isLocalMcpEndpoint } from './McpMarketSettings';
+import { attachMcpMarketOrigin, getMcpMarketOrigin } from '@/renderer/services/mcp/mcpMarket';
 
-const marketItem = {
-  id: 'skillhub_mcp:playwright',
-  name: 'Playwright MCP',
-};
-
-const server = (name: string, original_json: string): IMcpServer => ({ name, original_json }) as IMcpServer;
-
-describe('MCP market installed state', () => {
+describe('MCP market endpoint review', () => {
   test('distinguishes local-service descriptors from remote MCP endpoints', () => {
     expect(
       isLocalMcpEndpoint({
@@ -53,26 +41,6 @@ describe('MCP market installed state', () => {
       })
     ).toBe(false);
     expect(isLocalMcpEndpoint({ type: 'stdio', command: 'npx', args: [], env: {} })).toBe(false);
-  });
-
-  test('persists exact market provenance inside the server original JSON', () => {
-    const original = JSON.stringify({
-      mcpServers: { browser: { command: 'npx' } },
-    });
-    const marked = attachMcpMarketOrigin(original, marketItem.id);
-    const installed = server('browser', marked);
-
-    expect(JSON.parse(marked).mcpServers.browser.command).toBe('npx');
-    expect(getMcpMarketOrigin(installed)).toBe(marketItem.id);
-    expect(isMcpMarketItemInstalled(marketItem, [installed])).toBe(true);
-    expect(getMcpMarketItemServers(marketItem, [installed])).toEqual([installed]);
-    expect(isMcpMarketItemInstalled(marketItem, [])).toBe(false);
-  });
-
-  test('recognizes legacy imports by server name or market slug', () => {
-    expect(isMcpMarketItemInstalled(marketItem, [server('playwright', '{}')])).toBe(true);
-    expect(isMcpMarketItemInstalled(marketItem, [server('another-server', '{}')])).toBe(false);
-    expect(getMcpMarketOrigin(server('broken', '{'))).toBeNull();
   });
 });
 
@@ -349,7 +317,7 @@ describe('MCP market request ownership with the real panel and CRUD hook', () =>
     const broken = {
       ...persistedServer('alpha'),
       last_test_status: 'error' as const,
-      original_json: attachMcpMarketOrigin('{}', 'mcpworld:alpha'),
+      original_json: attachMcpMarketOrigin('{}', { id: 'mcpworld:alpha', name: 'alpha' }),
     };
     const v = await f.mount(false, '/mcp?tab=market', [broken]);
 

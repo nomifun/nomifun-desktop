@@ -1,7 +1,7 @@
 //! Explicit legacy HTTP+SSE transport. No reconnect, Last-Event-ID replay,
 //! cross-origin endpoint routing, or synthetic remote shutdown acknowledgment.
 use super::{
-    JsonRpcResponse, MAX_RESPONSE_BYTES, McpOwnerError, McpSession, stream, validate_http_endpoint,
+    JsonRpcResponse, McpOwnerError, McpSession, PeerTraffic, stream, validate_http_endpoint,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 
@@ -12,7 +12,7 @@ pub(super) struct LegacyStream {
     decoder: stream::EventDecoder,
     pending: Vec<u8>,
     cursor: usize,
-    received: usize,
+    traffic: PeerTraffic,
 }
 
 impl LegacyStream {
@@ -82,7 +82,7 @@ impl LegacyStream {
             decoder: Default::default(),
             pending: Vec::new(),
             cursor: 0,
-            received: 0,
+            traffic: PeerTraffic::default(),
         };
         let event = stream.next().await?;
         if event.kind != "endpoint"
@@ -130,13 +130,9 @@ impl LegacyStream {
                         "MCP legacy event stream ended before the correlated response",
                     )
                 })?;
-            self.received = self.received.saturating_add(chunk.len());
-            if self.received > MAX_RESPONSE_BYTES {
-                return Err(McpOwnerError::protocol_failed(
-                    "MCP legacy stream exceeds the transaction byte limit",
-                ));
-            }
+            self.traffic.observe(chunk.len(), false)?;
             self.pending.extend_from_slice(&chunk);
+            tokio::task::yield_now().await;
         }
     }
 }

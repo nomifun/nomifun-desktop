@@ -19,6 +19,15 @@ import { MCP_MARKET_SOURCES } from '@/renderer/services/skills/skillMarket';
 import { useMcpServerCRUD } from '@/renderer/hooks/mcp';
 import { getMcpConfigurationFields } from '@/renderer/hooks/mcp/mcpAuthConfig';
 import {
+  attachMcpMarketOrigin,
+  getMcpMarketItemServers,
+  getMcpMarketOrigin,
+  MCP_MARKET_CACHE_KEY,
+  normalizeMcpMarketName,
+  notifyMcpMarketCacheChanged,
+} from '@/renderer/services/mcp/mcpMarket';
+import { useMcpDisplayName } from '@/renderer/services/mcp/useMcpDisplayName';
+import {
   toImportableMcpServersFromConfig,
   type ImportableMcpServer,
 } from '@/renderer/pages/settings/ToolsSettings/mcpImportUtils';
@@ -28,8 +37,6 @@ type McpMarketSettingsProps = {
   mcpServers: IMcpServer[];
   addedStateLoading?: boolean;
 };
-
-const MCP_MARKET_ORIGIN_KEY = '_nomifun_market';
 
 export const isLocalMcpEndpoint = (transport: IMcpServerTransport): boolean => {
   if (transport.type === 'stdio') return false;
@@ -45,64 +52,6 @@ export const isLocalMcpEndpoint = (transport: IMcpServerTransport): boolean => {
   } catch {
     return false;
   }
-};
-
-export const attachMcpMarketOrigin = (originalJson: string, marketItemId: string): string => {
-  let original: Record<string, unknown> = {};
-  try {
-    const parsed = JSON.parse(originalJson) as unknown;
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      original = parsed as Record<string, unknown>;
-    }
-  } catch {
-    // Importable market configs normally contain valid JSON. Keep provenance
-    // even if an upstream formatter produced malformed original_json.
-  }
-  return JSON.stringify(
-    {
-      ...original,
-      [MCP_MARKET_ORIGIN_KEY]: { version: 1, item_id: marketItemId },
-    },
-    null,
-    2
-  );
-};
-
-export const getMcpMarketOrigin = (server: Pick<IMcpServer, 'original_json'>): string | null => {
-  try {
-    const parsed = JSON.parse(server.original_json) as Record<string, unknown>;
-    const origin = parsed[MCP_MARKET_ORIGIN_KEY];
-    if (!origin || typeof origin !== 'object' || Array.isArray(origin)) return null;
-    const itemId = (origin as Record<string, unknown>).item_id;
-    return typeof itemId === 'string' && itemId.trim() ? itemId : null;
-  } catch {
-    return null;
-  }
-};
-
-const normalizeMcpMarketName = (value: string): string =>
-  value
-    .trim()
-    .toLocaleLowerCase()
-    .replace(/[\s_]+/g, '-');
-
-export const isMcpMarketItemInstalled = (
-  item: Pick<ISkillMarketItem, 'id' | 'name'>,
-  servers: readonly IMcpServer[]
-): boolean => {
-  return getMcpMarketItemServers(item, servers).length > 0;
-};
-
-export const getMcpMarketItemServers = (
-  item: Pick<ISkillMarketItem, 'id' | 'name'>,
-  servers: readonly IMcpServer[]
-): IMcpServer[] => {
-  const exact = servers.filter((server) => getMcpMarketOrigin(server) === item.id);
-  if (exact.length > 0) return exact;
-
-  const idSlug = item.id.split(':').slice(1).join(':').split('/').filter(Boolean).at(-1) ?? '';
-  const legacyNames = new Set([item.name, idSlug].map(normalizeMcpMarketName).filter(Boolean));
-  return servers.filter((server) => legacyNames.has(normalizeMcpMarketName(server.name)));
 };
 
 /** Read-only transport summary so the user can review exactly what would run or be contacted. */
@@ -179,6 +128,7 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
 }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const getDisplayName = useMcpDisplayName();
   const { handleBatchImportMcpServers, handleEditMcpServer } = useMcpServerCRUD(saveMcpServers);
 
   const [pendingServers, setPendingServers] = useState<ImportableMcpServer[] | null>(null);
@@ -221,7 +171,7 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
         const servers = toImportableMcpServersFromConfig(resolved.config_json, false).map((server) => ({
           ...server,
           enabled: false,
-          original_json: attachMcpMarketOrigin(server.original_json, item.id),
+          original_json: attachMcpMarketOrigin(server.original_json, item),
         }));
         if (servers.length === 0) {
           Message.error(
@@ -332,7 +282,7 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
 
   const hasStdioServer = (pendingServers ?? []).some((server) => server.transport.type === 'stdio');
   const hasLocalNetworkServer = (pendingServers ?? []).some((server) => isLocalMcpEndpoint(server.transport));
-  const isAdded = useCallback((item: ISkillMarketItem) => isMcpMarketItemInstalled(item, mcpServers), [mcpServers]);
+  const isAdded = useCallback((item: ISkillMarketItem) => getMcpMarketItemServers(item, mcpServers).length > 0, [mcpServers]);
   const canRepair = useCallback(
     (item: ISkillMarketItem) =>
       getMcpMarketItemServers(item, mcpServers).some(
@@ -350,7 +300,8 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
           defaultValue: 'Browse SkillHub MCP and MCP World popular servers, then import their MCP JSON directly.',
         })}
         sources={MCP_MARKET_SOURCES}
-        cacheKey='nomifun.mcpMarket.rankings.v1'
+        cacheKey={MCP_MARKET_CACHE_KEY}
+        onCacheUpdated={notifyMcpMarketCacheChanged}
         autoSyncKey='nomifun.mcpMarket.autoSynced.v1'
         defaultSource='mcpworld'
         searchPlaceholder={t('settings.mcpMarket.searchPlaceholder', {
@@ -433,7 +384,7 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
               className='rounded-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] p-12px'
             >
               <div className='flex items-center gap-8px min-w-0'>
-                <span className='truncate text-14px font-medium text-t-primary'>{server.name}</span>
+                <span className='truncate text-14px font-medium text-t-primary'>{getDisplayName(server)}</span>
                 <Tag size='small' bordered={false} className='!flex-shrink-0 !text-11px'>
                   {server.transport.type}
                 </Tag>

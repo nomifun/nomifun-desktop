@@ -389,10 +389,6 @@
   color: rgb(var(--danger-6));
 }
 
-.status.disabled {
-  color: var(--color-text-4);
-}
-
 .feedback {
   min-height: 92px;
   display: flex;

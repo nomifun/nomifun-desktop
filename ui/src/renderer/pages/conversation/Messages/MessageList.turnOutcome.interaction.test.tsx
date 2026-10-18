@@ -70,7 +70,7 @@ function fixture(scenario: typeof scenarios[number]) {
   return { session, root, summary, empty, row, user, handoff, thought, preamble, emptyText };
 }
 
-function setup(f: ReturnType<typeof fixture>, initial: TMessage[], readOnly = false) {
+function setup(f: ReturnType<typeof fixture>, initial: TMessage[], readOnly = false, waiting = false, firstRead?: TMessage[]) {
   let historyRows = initial;
   let historyCalls = 0;
   const completionListeners = new Set<(event: IConversationTurnCompletedEvent) => void>();
@@ -80,16 +80,22 @@ function setup(f: ReturnType<typeof fixture>, initial: TMessage[], readOnly = fa
     completionListeners.add(listener); return () => completionListeners.delete(listener);
   });
   const idle = { state: 'idle', can_send_message: true, is_processing: false } as const;
-  const authority = { id: f.session, type: 'nomi', status: 'finished', extra: { workspace: '' }, runtime: idle } as TChatConversation;
+  const runtime = waiting ? { state: 'waiting', can_send_message: false, is_processing: false,
+    active_turn_id: f.root,
+    turn_outcome: { kind: 'waiting', wait_seq: 41, request_id: question.request_id, reason: 'user_input' } } : idle;
+  const authority = { id: f.session, type: 'nomi', status: waiting ? 'running' : 'finished', extra: { workspace: '' }, runtime } as TChatConversation;
   spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(authority);
   spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockImplementation(async () => {
-    historyCalls++; return { items: [...historyRows].reverse(), total: historyRows.length, has_more: false };
+    historyCalls++;
+    const snapshot = historyCalls === 1 && firstRead ? firstRead : historyRows;
+    return { items: [...snapshot].reverse(), total: snapshot.length, has_more: false };
   });
   const Timeline = () => {
     const activity = useNomiMessage(f.session);
     const paging = useMessageLstCache(f.session);
     return <ConversationProvider value={{ conversation_id: f.session, type: 'nomi', readOnly,
-      isProcessing: activity.running, isTurnStateHydrated: activity.hasHydratedRunningState }}>
+      isProcessing: activity.executing, activeTurnId: activity.activeTurnId, executionWait: activity.waitingNotice,
+      isTurnStateHydrated: activity.hasHydratedRunningState }}>
       <MessageList hasMoreOlder={paging.hasMore} onLoadOlder={paging.loadOlder} />
     </ConversationProvider>;
   };
@@ -112,6 +118,27 @@ const assertPublicQuestion = async (page: ReturnType<typeof render>) => {
   expect(markdownText(note)).toContain(question.remaining_work);
   expect(page.getAllByTestId('user-input-request-note')).toHaveLength(1);
 };
+
+test('a live parked question remains visible when its ongoing process is collapsed', async () => {
+  const f = fixture(scenarios[0]);
+  if (f.handoff.type !== 'tips') throw new Error('input request fixture must be a typed tip');
+  const handoff = { ...f.handoff, content: { ...f.handoff.content, finished_at_ms: undefined,
+    turn_outcome: { kind: 'waiting' as const, wait_seq: 41, request_id: question.request_id, reason: 'user_input' as const } } };
+  const h = setup(f, [f.user, f.thought, handoff], false, true, [f.user, f.thought]);
+  const page = render(<h.App />);
+  await assertPublicQuestion(page);
+  expect(h.historyCalls()).toBeGreaterThan(1);
+  const toggle = page.container.querySelector<HTMLButtonElement>('.turn-process-disclosure__toggle')!;
+  if (toggle.getAttribute('aria-expanded') === 'true') fireEvent.click(toggle);
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  await assertPublicQuestion(page);
+  expect(page.getByRole('button', { name: conversation.userInputRequest.addInput })).toBeTruthy();
+  const duration = page.container.querySelector('.turn-process-disclosure__label')!;
+  const waitingDuration = duration.textContent;
+  spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000);
+  act(() => window.dispatchEvent(new Event('focus')));
+  expect(duration.textContent).toBe(waitingDuration);
+});
 
 test.each(scenarios)('canonical handoff survives completion refresh, expansion and reopening: $session', async scenario => {
   const f = fixture(scenario);

@@ -55,6 +55,9 @@ impl NomiCoreSessionOwner {
             .await.map_err(control_plane_error_to_app)?;
         let (_, _, candidate_snapshot) = control_plane.saved_binding_artifacts(&owner, &candidate)
             .await.map_err(control_plane_error_to_app)?;
+        let bounded_launch_replaced = source_snapshot.content.enabled_capabilities.iter().any(|capability|
+            capability.capability.id.as_ref() == "workspace.process"
+                && capability.action_allowlist.contains(&"workspace.process/exec".into()));
         let default_local_os_added = source_snapshot.content.enabled_capabilities.is_empty()
             && candidate_snapshot.content.capability_allowlist.contains(&CapabilityId::from("workspace.files"))
             && candidate_snapshot.content.capability_allowlist.contains(&CapabilityId::from("workspace.process"));
@@ -128,7 +131,7 @@ impl NomiCoreSessionOwner {
         self.settle_session_binding_runtime(owner_id, session_id).await?;
         let transition_id = Uuid::now_v7().to_string();
         let request_digest = digest_payload(&json!({
-            "kind": "bundled_contract_evolution",
+            "kind": if bounded_launch_replaced { "bounded_process_launch_evolution" } else { "bundled_contract_evolution" },
             "previous_binding": observation.session.agent_binding,
             "next_binding": replacement,
         })).map_err(|error| AppError::Internal(format!("digest contract transition: {error}")))?;
@@ -166,6 +169,9 @@ impl NomiCoreSessionOwner {
         self.runtime_sessions.terminate_and_wait_result(
             session_id.as_ref(), Some(AgentKillReason::ConfigurationChanged),
         ).await?;
+        if let Some(engines)=self.native_engines.get().and_then(std::sync::Weak::upgrade) {
+            engines.cleanup_session_processes(owner_id,session_id).await?;
+        }
         super::super::hosted_effect_receipts::HostedEffectReceipts::new(self.pool.clone())
             .ensure_settled(owner_id, session_id.as_ref()).await?;
         Ok(())

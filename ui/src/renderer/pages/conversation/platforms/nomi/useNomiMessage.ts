@@ -40,6 +40,7 @@ import {
   shouldApplyNomiStreamEventToTurn,
 } from './nomiLifecycleFence';
 import { initialNomiTurnState, isTurnRunning, nomiTurnReducer, type NomiTurnEvent } from './nomiTurnState';
+import { emitter } from '@/renderer/utils/emitter';
 
 type NomiToolGroupRuntimeTool = {
   status: ReturnType<typeof normalizeToolGroupStatus>;
@@ -109,6 +110,9 @@ export const useNomiMessage = (
   const [stopNotice, setStopNotice] = useState<{ stoppedAt: number } | null>(null);
   const [pauseNotice, setPauseNotice] = useState<ConversationPauseNotice | null>(null);
   const [waitingNotice, setWaitingNotice] = useState<ConversationWaitingNotice | null>(null);
+  useEffect(() => {
+    if (waitingNotice) emitter.emit('conversation.history.refresh', conversation_id);
+  }, [conversation_id, waitingNotice?.turnId, waitingNotice?.outcome.wait_seq]);
   // Current active message ID to filter out events from old requests (prevents aborted request events from interfering with new ones)
   const activeMsgIdRef = useRef<MessageId | null>(null);
   const rootTurnIdRef = useRef<MessageId | null>(null);
@@ -216,7 +220,7 @@ export const useNomiMessage = (
     dispatchTurn(event);
   }, []);
 
-  const settleCompletedTurn = useCallback(() => {
+  const settleCompletedTurn = useCallback((_conversation?: TChatConversation | null) => {
     setWaitingNotice(null);
     setPauseNotice(null);
     if (turnSettledRef.current && !rootTurnIdRef.current && !awaitingBackendTurnRef.current) {
@@ -334,6 +338,7 @@ export const useNomiMessage = (
     (completed: boolean) => {
       if (completed) {
         settleCompletedTurn();
+        startAuthoritativeRuntimeReconciliation({ immediate: true });
         return;
       }
 
@@ -368,7 +373,7 @@ export const useNomiMessage = (
         logLabel: 'accepted delivery replay',
       });
     },
-    [adoptAuthoritativePause, adoptAuthoritativeProcessing, conversation_id, setActiveMsgId, setRootTurnId, settleCompletedTurn]
+    [adoptAuthoritativePause, adoptAuthoritativeProcessing, conversation_id, setActiveMsgId, setRootTurnId, settleCompletedTurn, startAuthoritativeRuntimeReconciliation]
   );
 
   useEffect(() => {
@@ -694,7 +699,7 @@ export const useNomiMessage = (
           turnReconcileSequenceRef.current === sequence &&
           rootTurnIdRef.current === observedRootTurnId &&
           awaitingBackendTurnRef.current === observedAwaitingBackendTurn,
-        settleCompletedTurn
+        () => startAuthoritativeRuntimeReconciliation({ immediate: true })
       );
     });
 
@@ -702,7 +707,7 @@ export const useNomiMessage = (
       disposed = true;
       unsubscribe();
     };
-  }, [conversation_id, settleCompletedTurn]);
+  }, [conversation_id, settleCompletedTurn, startAuthoritativeRuntimeReconciliation]);
 
   useEffect(() => {
     let cancelled = false;
@@ -718,6 +723,7 @@ export const useNomiMessage = (
     setThought({ subject: '', description: '' });
     setStopNotice(null);
     setPauseNotice(null);
+    setWaitingNotice(null);
     setTokenUsage(null);
     setHasHydratedRunningState(false);
     setRootTurnId(null);
@@ -851,7 +857,8 @@ export const useNomiMessage = (
     rejectUnannouncedStartRef.current = false;
     turnSettledRef.current = true;
     dispatchTurn({ type: 'reset' });
-  }, [setRootTurnId]);
+    startAuthoritativeRuntimeReconciliation({ immediate: true });
+  }, [setRootTurnId, startAuthoritativeRuntimeReconciliation]);
 
   const getTurnStartGeneration = useCallback(() => turnStartGenerationRef.current, []);
   const getTurnCompletionGeneration = useCallback(() => turnCompletionGenerationRef.current, []);
@@ -860,6 +867,8 @@ export const useNomiMessage = (
     thought,
     setThought,
     running,
+    // Ownership stays live while waiting; only execution drives animation.
+    executing: running && waitingNotice === null,
     activeTurnId: running ? activeTurnId ?? undefined : undefined,
     activeTurnStartedAt: running ? activeTurnStartedAt : undefined,
     activeRequestMessageId: running ? activeRequestMessageId ?? undefined : undefined,
