@@ -69,7 +69,7 @@ pub use state::KnowledgeRouterState;
 pub use autogen::{KnowledgeWritebackCompletion, KnowledgeWritebackCompletionError, KnowledgeWritebackCompletionRequest, KnowledgeWritebackLimits};
 pub use turn_writeback::{TurnWritebackCandidate, TurnWritebackOutput};
 pub use workpath::{DEFAULT_WORKPATH_KEY, WORKPATH_BINDING_KIND, session_workpath_key, workpath_key};
-pub use workspace_binding::{WorkspaceBindingLease, canonical_unbound_workspace_path};
+pub use workspace_binding::{WorkspaceBindingLease, resolve_unbound_workspace_anchor};
 
 /// Workspace-relative directory where knowledge bases are mounted. Lives
 /// under the hidden `.nomi/` folder — the same agent-facing namespace as

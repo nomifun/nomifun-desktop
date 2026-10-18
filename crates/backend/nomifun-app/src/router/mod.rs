@@ -87,7 +87,7 @@ mod routes;
 mod state;
 mod trace;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "browser-use"))]
 pub(crate) use state::build_channel_state;
 
 pub use routes::{

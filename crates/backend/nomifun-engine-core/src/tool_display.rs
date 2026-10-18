@@ -264,7 +264,7 @@ pub fn tool_result_display(capability: Option<&str>, action: Option<&str>, resul
         let process_id = value.get("process_id").and_then(Value::as_str)
             .is_some_and(|id| !id.is_empty() && id.len() <= 128);
         let output = value.pointer("/output/text").is_some_and(Value::is_string);
-        if matches!(action, Some("workspace.process/exec" | "workspace.process/start" | "workspace.process/poll")) {
+        if matches!(action, Some("workspace.process/start" | "workspace.process/poll")) {
             let exited = value.get("state").and_then(Value::as_str) == Some("exited");
             let exit = value.get("exit_code").and_then(Value::as_i64).filter(|exit| *exit >= 0);
             if exited && process_id && output && value.get("signal") == Some(&Value::Null)
@@ -283,7 +283,7 @@ pub fn tool_result_display(capability: Option<&str>, action: Option<&str>, resul
                 facts.command_timed_out = Some(true);
             }
         }
-        if result.is_error && matches!(action, Some("workspace.process/exec" | "workspace.process/start"))
+        if result.is_error && action == Some("workspace.process/start")
             && value.get("schema").and_then(Value::as_str) == Some("nomifun.process-start-observation.v1")
             && value.get("state").and_then(Value::as_str) == Some("not_started")
             && value.get("code").and_then(Value::as_str) == Some("PROCESS_NOT_STARTED")
@@ -355,20 +355,20 @@ mod tests {
     fn targets_keep_paths_and_never_copy_file_or_shell_bodies() {
         let args = json!({"path":"src/app.rs", "content":"PRIVATE_FILE_BODY"});
         assert_eq!(tool_display_target(Some("workspace.files"), Some("workspace.files/write"), "write_file", &args).as_deref(), Some("src/app.rs"));
-        assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/exec"), "exec_command", &json!({"cmd":"head -n 5 file.txt"})).as_deref(), Some("head -n 5 file.txt"));
+        assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process", &json!({"cmd":"head -n 5 file.txt"})).as_deref(), Some("head -n 5 file.txt"));
         let quoted = "head -n 300 \"/Users/muri/Desktop/Nomifun 上架指南.html\"";
-        assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/exec"), "exec_command", &json!({"cmd":quoted})).as_deref(), Some(quoted));
+        assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process", &json!({"cmd":quoted})).as_deref(), Some(quoted));
         let windows = r#"head -n 2 "C:\Users\Muri\文件 a.md""#;
-        assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/exec"), "exec_command", &json!({"cmd":windows})).as_deref(), Some(windows));
+        assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process", &json!({"cmd":windows})).as_deref(), Some(windows));
         let path = format!("docs/{}  multiple spaces/文档.md", "long".repeat(50));
         assert_eq!(tool_display_target(Some("workspace.files"), Some("workspace.files/read"), "read_file", &json!({"path":path})), Some(path));
         for command in ["cat <<EOF\nPRIVATE_FILE_BODY\nEOF", "python -c 'PRIVATE_FILE_BODY'", "echo \"PRIVATE_FILE_BODY\" > file.txt"] {
-            assert!(!tool_display_target(Some("workspace.process"), Some("workspace.process/exec"), "exec_command", &json!({"cmd":command})).unwrap_or_default().contains("PRIVATE_FILE_BODY"));
+            assert!(!tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process", &json!({"cmd":command})).unwrap_or_default().contains("PRIVATE_FILE_BODY"));
         }
         for (command, expected) in [("sed -i 's/old/PRIVATE_FILE_BODY/' app.ts", "sed"),
             ("/usr/bin/printf 'PRIVATE_FILE_BODY' > app.ts", "/usr/bin/printf"),
             ("python3.12 -c 'PRIVATE_FILE_BODY'", "python3.12")] {
-            assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/exec"), "exec_command", &json!({"cmd":command})).as_deref(), Some(expected));
+            assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process", &json!({"cmd":command})).as_deref(), Some(expected));
         }
         for action in ["ssh/exec", "ssh/sudo"] {
             assert_eq!(tool_display_target(Some("ssh"), Some(action), "ssh_exec", &json!({"command":quoted})).as_deref(), Some(quoted));
@@ -387,11 +387,12 @@ mod tests {
             "process_id":"owned", "output":{"text":"PRIVATE_FILE_BODY"},
             "cleanup":{"reaped":true,"errors":[],"interrupt_attempted":false,"terminate_attempted":false,"force_kill_attempted":false}});
         let result = EngineToolResult::text("call".into(), output.to_string(), true);
-        let facts = tool_result_display(Some("workspace.process"), Some("workspace.process/exec"), &result);
+        let facts = tool_result_display(Some("workspace.process"), Some("workspace.process/start"), &result);
         assert_eq!(facts.command_exit_code, Some(2));
         assert_eq!(facts.non_fatal_failure, Some(true));
         assert!(!serde_json::to_string(&facts).unwrap().contains("PRIVATE_FILE_BODY"));
-        assert!(tool_result_display(Some("mcp.remote"), Some("workspace.process/exec"), &result).command_exit_code.is_none());
+        assert!(tool_result_display(Some("workspace.process"), Some("workspace.process/exec"), &result).command_exit_code.is_none());
+        assert!(tool_result_display(Some("mcp.remote"), Some("workspace.process/start"), &result).command_exit_code.is_none());
     }
 
     #[test]

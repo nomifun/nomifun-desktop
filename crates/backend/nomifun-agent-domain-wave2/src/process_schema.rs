@@ -11,8 +11,8 @@ fn object(properties: serde_json::Value, required: &[&str]) -> StrictJsonValue {
     }))
 }
 
-fn launch(include_wait: bool) -> StrictJsonValue {
-    let mut properties = json!({
+fn launch() -> StrictJsonValue {
+    let properties = json!({
         "cmd":{"type":"string","minLength":1,"maxLength":32768,
             "description":"Explicit shell command/script. Choose exactly one of cmd, command or component; never inferred from their contents."},
         "command":{"type":"string","minLength":1,"maxLength":32768,
@@ -27,14 +27,13 @@ fn launch(include_wait: bool) -> StrictJsonValue {
             "description":"Execution identity required for this operation. Ordinary operations use the real login user. Administrator operations use the platform native authentication and system execution path; independent privacy and desktop permissions still apply."},
         "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536},
             "description":"Optional string-valued environment overrides. Omit when empty; never send null."},
-        "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
+        "timeout_ms":{"type":"integer","minimum":1,
+            "description":"Optional explicit hard execution deadline. Omit for Session-owned work without a task deadline, including human authorization. Observation waits do not terminate or renew a process."},
         "tty":{"type":"boolean","default":false},
         "cols":{"type":"integer","minimum":1,"maximum":32767},
-        "rows":{"type":"integer","minimum":1,"maximum":32767}
+        "rows":{"type":"integer","minimum":1,"maximum":32767},
+        "wait_ms":{"type":"integer","minimum":0,"maximum":30000,"default":1000}
     });
-    if include_wait {
-        properties["wait_ms"] = json!({"type":"integer","minimum":0,"maximum":30000,"default":0});
-    }
     StrictJsonValue(json!({"type":"object","additionalProperties":false,"properties":properties,
         "oneOf":[{"required":["cmd"],"not":{"anyOf":[{"required":["command"]},{"required":["component"]}]},"properties":{"args":{"maxItems":0}}},
                  {"required":["command"],"not":{"anyOf":[{"required":["cmd"]},{"required":["component"]}]}},
@@ -45,8 +44,7 @@ fn launch(include_wait: bool) -> StrictJsonValue {
 /// than an untrusted payload discriminator, selects the operation.
 pub fn process_action_input_schema(action_id: &str) -> Option<StrictJsonValue> {
     Some(match action_id {
-        "workspace.process/exec" => launch(false),
-        "workspace.process/start" => launch(true),
+        "workspace.process/start" => launch(),
         "workspace.process/poll" => object(
             json!({
                 "process_id":{"type":"string","minLength":1,"maxLength":128},
@@ -86,8 +84,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn one_bounded_launch_surface_retires_synchronous_execution() {
+        assert!(process_action_input_schema("workspace.process/exec").is_none());
+        let schema = process_action_input_schema("workspace.process/start").unwrap();
+        assert_eq!(schema.0["properties"]["wait_ms"]["default"], 1000);
+        let validator = jsonschema::validator_for(&schema.0).unwrap();
+        assert!(validator.is_valid(&json!({"command":"program","wait_ms":0,"timeout_ms":600000})));
+        assert!(validator.is_valid(&json!({"command":"program","timeout_ms":3_600_000})));
+        assert!(!validator.is_valid(&json!({"command":"program","timeout_ms":0})));
+        assert!(schema.0["properties"]["timeout_ms"].get("default").is_none());
+        assert!(schema.0["properties"]["timeout_ms"].get("maximum").is_none());
+        assert!(!validator.is_valid(&json!({"command":"program","wait_ms":30001})));
+    }
+
+    #[test]
     fn local_directory_and_execution_identity_are_operation_context() {
-        for action in ["workspace.process/exec", "workspace.process/start"] {
+        for action in ["workspace.process/start"] {
             let schema = process_action_input_schema(action).unwrap();
             let validator = jsonschema::validator_for(&schema.0).unwrap();
             for cwd in ["../outside", "/Volumes/Test", r"C:\Users\Test User", r"\\server\share"] {
@@ -106,9 +118,9 @@ mod tests {
     fn action_identity_selects_each_closed_process_payload() {
         for (action, valid, invalid) in [
             (
-                "workspace.process/exec",
+                "workspace.process/start",
                 json!({"command":"git","args":["--version"]}),
-                json!({"operation":"exec","command":"git"}),
+                json!({"operation":"start","command":"git"}),
             ),
             (
                 "workspace.process/start",
@@ -146,7 +158,7 @@ mod tests {
 
     #[test]
     fn shell_scripts_are_explicit_and_cannot_be_mixed_with_literal_launch_arguments() {
-        let schema=process_action_input_schema("workspace.process/exec").unwrap();
+        let schema=process_action_input_schema("workspace.process/start").unwrap();
         let validator=jsonschema::validator_for(&schema.0).unwrap();
         for valid in [json!({"cmd":"printf '%s' ok"}),json!({"cmd":"ls -la","args":[]}),
             json!({"command":"program with spaces","args":["literal"]})] { assert!(validator.is_valid(&valid),"{valid}"); }
@@ -157,7 +169,7 @@ mod tests {
 
     #[test]
     fn launch_targets_are_exclusive_and_component_arguments_remain_literal() {
-        for action in ["workspace.process/exec", "workspace.process/start"] {
+        for action in ["workspace.process/start"] {
             let schema = process_action_input_schema(action).unwrap();
             let validator = jsonschema::validator_for(&schema.0).unwrap();
             for component in ["officecli", "bun", "node"] {

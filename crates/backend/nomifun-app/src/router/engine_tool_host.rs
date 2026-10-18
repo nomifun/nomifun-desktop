@@ -672,6 +672,7 @@ mod tests {
                 Err(EngineToolError::CapabilityKernel {
                     code:"CAPABILITY_UNAVAILABLE".to_owned(),
                     message:"The workspace owner reported success, but the canonical receipt was not stored. Do not retry automatically. Re-read the affected owner state and reconcile the pending effect.".to_owned(),
+                    details:None,
                 })
             }
         }
@@ -698,7 +699,7 @@ mod tests {
         );
         owner.bind_turn("turn".into(),journal).unwrap();
         let error = owner.invoke(invocation,CancellationToken::new()).await.unwrap_err();
-        let EngineToolError::CapabilityKernel { code,message } = error else {
+        let EngineToolError::CapabilityKernel { code,message, .. } = error else {
             panic!("settlement loss changed error class")
         };
         assert_eq!(code,"CAPABILITY_UNAVAILABLE");
@@ -744,6 +745,7 @@ mod tests {
                 Err(EngineToolError::CapabilityKernel {
                     code:"CAPABILITY_UNAVAILABLE".to_owned(),
                     message:"The owner outcome is unknown. Do not retry automatically. Reconcile the external owner.".to_owned(),
+                    details:None,
                 })
             }
         }
@@ -769,7 +771,7 @@ mod tests {
             })).unwrap(),
         };
         let error = owner.invoke(invocation,CancellationToken::new()).await.unwrap_err();
-        assert!(matches!(error,EngineToolError::CapabilityKernel { ref code,ref message }
+        assert!(matches!(error,EngineToolError::CapabilityKernel { ref code,ref message, .. }
             if code=="CAPABILITY_UNAVAILABLE" && message.contains("Reconcile")));
         owner.mark_observed("reopen-settlement-call").unwrap();
         owner.close_turn().unwrap();

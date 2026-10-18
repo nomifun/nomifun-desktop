@@ -396,6 +396,7 @@ impl ChannelMessageLoop {
                         &session_id,
                         conversation_id.as_deref(),
                         &text,
+                        msg.reply_to_message_id.as_deref(),
                         platform,
                         &plugin_id,
                         &chat_id,
@@ -426,6 +427,7 @@ impl ChannelMessageLoop {
                         &session_id,
                         conversation_id.as_deref(),
                         &synthesized,
+                        None,
                         platform,
                         &plugin_id,
                         &chat_id,
@@ -555,6 +557,7 @@ async fn handle_dispatched(
     session_id: &str,
     conversation_id: Option<&str>,
     text: &str,
+    reply_to_message_id: Option<&str>,
     platform: crate::types::PluginType,
     plugin_id: &str,
     chat_id: &str,
@@ -687,43 +690,33 @@ async fn handle_dispatched(
         return None;
     }
 
-    // Per-chat concurrency guard: when the bound conversation is already
-    // working on a turn, don't race a second prompt into it (turn admission
-    // would reject it with an opaque error anyway) — enqueue it instead
-    // (spec D1) and tell the user its FIFO position.
-    if let Some(cid) = conversation_id
-        && msg_svc.is_conversation_busy(cid).await
-    {
-        info!(conversation_id = %cid, chat_id = %chat_id, "conversation busy: queueing prompt");
-        let reply = queue_busy_prompt_reply(
-            msg_svc,
-            plugin_id,
-            chat_id,
-            session_id,
-            cid,
-            text,
-            idempotency_key,
-        )
-        .await;
-        let _ = sender
-            .send_message(plugin_id, chat_id, plain_text_message(reply))
-            .await;
+    let session = match session_mgr.get_session_by_id(session_id).await {
+        Ok(Some(session)) => session,
+        Ok(None) => { warn!(session_id, "session not found after dispatch"); return None; }
+        Err(error) => { error!(%error, "failed to get dispatched Channel session"); return None; }
+    };
+    let quoted = if let Some(cid) = conversation_id {
+        match msg_svc.try_reply_to_question(&session,cid,text,reply_to_message_id,platform,idempotency_key).await {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = sender.send_message(plugin_id,chat_id,plain_text_message(format!("❌ 消息未保存：{error}"))).await;
+                return None;
+            }
+        }
+    } else { None };
+    // Guest sessions keep their existing constrained domain dispatch. Approved
+    // ordinary messages are always saved by the canonical intake, even while
+    // execution is busy; no frontend busy FIFO chooses their next Turn.
+    let approved = match msg_svc.is_approved_session(&session).await {
+        Ok(approved) => approved,
+        Err(error) => { warn!(%error,"could not verify Channel input principal");return None; }
+    };
+    if !approved && let Some(cid)=conversation_id && msg_svc.is_conversation_busy(cid).await {
+        let reply=queue_busy_prompt_reply(msg_svc,plugin_id,chat_id,session_id,cid,text,idempotency_key).await;
+        let _=sender.send_message(plugin_id,chat_id,plain_text_message(reply)).await;
         return None;
     }
-
-    let session = match session_mgr.get_session_by_id(session_id).await {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            warn!(session_id = %session_id, "session not found after dispatch");
-            return None;
-        }
-        Err(e) => {
-            error!(error = %e, "failed to get session");
-            return None;
-        }
-    };
-
-    let mut send_result = match msg_svc
+    let mut send_result = if let Some(result)=quoted { result } else { match msg_svc
         .send_to_agent(&session, text, platform, idempotency_key)
         .await
     {
@@ -731,7 +724,7 @@ async fn handle_dispatched(
         // The (now shared) companion session is already running a turn — queue
         // the prompt against the RESOLVED conversation (spec D1). Covers the
         // first-turn race the guard above can't see (it checks the pre-bind id).
-        Err(ChannelError::ConversationBusy(cid)) => {
+        Err(ChannelError::ConversationBusy(cid)) if !approved => {
             info!(conversation_id = %cid, chat_id = %chat_id, "companion session busy: queueing prompt");
             let reply = queue_busy_prompt_reply(
                 msg_svc,
@@ -761,7 +754,7 @@ async fn handle_dispatched(
             let _ = sender.send_message(plugin_id, chat_id, err_msg).await;
             return None;
         }
-    };
+    }};
 
     // Bind the conversation to this per-chat session whenever the conversation
     // the turn actually ran on differs from the session's current binding: a
@@ -777,34 +770,20 @@ async fn handle_dispatched(
         warn!(error = %e, "failed to bind conversation to session");
     }
 
-    // Spawn stream relay if we got a subscription
-    if let Some(rx) = send_result.stream_rx.take() {
-        let relay_config = RelayConfig {
-            platform,
-            plugin_id: plugin_id.to_owned(),
-            chat_id: chat_id.to_owned(),
-            throttle_ms: 500,
-            conversation_id: send_result.conversation_id.clone(),
-        };
-        let relay = ChannelStreamRelay::new(
-            relay_config,
-            Arc::clone(sender),
-            msg_svc.stop_confirmations(),
-            msg_svc.asset_resolver(),
-        );
-        let shutdown = shutdown.clone();
-        track_child_task(child_tasks, tokio::spawn(async move {
-            tokio::select! {
-                _ = shutdown.cancelled() => {}
-                _ = relay.run(rx) => {}
-            }
-        }))
-        .await;
-    } else {
-        warn!(
-            conversation_id = %send_result.conversation_id,
-            "no Agent runtime for stream subscription"
-        );
+    let relay_config = RelayConfig {platform,plugin_id:plugin_id.into(),chat_id:chat_id.into(),
+        throttle_ms:500,conversation_id:send_result.conversation_id.clone()};
+    if let Some(key)=send_result.observer_input_id.as_deref() {
+        if let Some(task)=crate::input_observer::register_input_observer(msg_svc.clone(),relay_config,
+            sender.clone(),key.to_owned(),shutdown.clone()) {
+            track_child_task(child_tasks,task).await;
+        }
+    } else if let Some(rx)=send_result.stream_rx.take() {
+        let relay=ChannelStreamRelay::new(relay_config,sender.clone(),msg_svc.stop_confirmations(),msg_svc.asset_resolver())
+            .with_input_question_delivery(msg_svc.clone());
+        let shutdown=shutdown.clone();
+        track_child_task(child_tasks,tokio::spawn(async move {tokio::select! {
+            _=shutdown.cancelled()=>{},_=relay.run(rx)=>{},
+        }})).await;
     }
     Some(send_result)
 }
@@ -845,6 +824,7 @@ async fn handle_regenerate(
                 session_id,
                 Some(conversation_id),
                 &text,
+                None,
                 platform,
                 plugin_id,
                 chat_id,
@@ -949,6 +929,116 @@ fn parse_choice(text: &str, n: usize) -> Option<usize> {
         Some(choice - 1)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod input_ingress_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use nomifun_api_types::{AgentQuestionReplyTargetDto,ConversationResponse,CreateConversationRequest,ListMessagesQuery,MessageListResponse,SendMessageRequest};
+    use nomifun_common::AppError;
+    use nomifun_db::{IChannelRepository,SqliteChannelRepository,init_database_memory};
+    use nomifun_db::models::{NewChannelPluginRow,NewChannelUserRow,CHANNEL_USER_AUTHORIZATION_APPROVED,CHANNEL_USER_AUTHORIZATION_AUTO_GROUP};
+    use crate::session_port::{ChannelSessionPort,ChannelTurnDelivery,ChannelTurnDeliveryReceipt,ChannelTurnReceiptState,ChannelQuestionDelivery,ChannelInputObservation};
+
+    struct InputPort {
+        reject:bool,
+        replies:std::sync::Mutex<Vec<(String,String,AgentQuestionReplyTargetDto)>>,
+        inputs:std::sync::Mutex<Vec<(String,String)>>,
+        deliveries:std::sync::Mutex<Vec<ChannelQuestionDelivery>>,
+    }
+    fn accepted()->ChannelTurnDelivery {
+        ChannelTurnDelivery {delivery:ChannelTurnDeliveryReceipt {message_id:"0190f5fe-7c00-7a00-8000-000000000904".into(),
+            replayed:false,completed:false,turn_outcome:None,result_ok:None,result_text:None,result_error:None,result_error_code:None,result_error_retryable:None},events:None}
+    }
+    #[async_trait]
+    impl ChannelSessionPort for InputPort {
+        async fn accept_input(&self,owner:&str,session:&str,key:&str,request:SendMessageRequest,
+            _source:nomifun_agent_contracts::ChannelInputSource,reply:Option<AgentQuestionReplyTargetDto>)->Result<ChannelTurnDelivery,AppError> {
+            match reply {Some(target)=>self.reply_to_question(owner,session,key,request,target).await,None=>self.send_turn(owner,session,key,request).await}
+        }
+        async fn is_busy(&self,_:&str)->bool {true}
+        async fn turn_outcome(&self,_:&str,_:&str,_:&str)->Result<ChannelTurnReceiptState,AppError> {Ok(ChannelTurnReceiptState::Missing)}
+        async fn cancel(&self,_:&str,_:&str)->Result<(),AppError> {Ok(())}
+        async fn list_messages(&self,_:&str,_:&str,_:ListMessagesQuery)->Result<MessageListResponse,AppError> {panic!("input delivery must not infer a target from transcript")}
+        async fn send_turn(&self,_:&str,_:&str,key:&str,request:SendMessageRequest)->Result<ChannelTurnDelivery,AppError> {
+            self.inputs.lock().unwrap().push((key.into(),request.content));Ok(accepted())
+        }
+        async fn reply_to_question(&self,_:&str,_:&str,key:&str,request:SendMessageRequest,target:AgentQuestionReplyTargetDto)->Result<ChannelTurnDelivery,AppError> {
+            self.replies.lock().unwrap().push((key.into(),request.content,target));
+            if self.reject {Err(AppError::Conflict("original question association was refused".into()))} else {Ok(accepted())}
+        }
+        async fn observe_input(&self,_:&str,_:&str,_:&str)->Result<ChannelInputObservation,AppError> {Ok(ChannelInputObservation::Pending)}
+        async fn record_question_delivery(&self,_:&str,_:&str,delivery:ChannelQuestionDelivery)->Result<(),AppError> {
+            self.deliveries.lock().unwrap().push(delivery);Ok(())
+        }
+        async fn resolve_question_delivery(&self,_:&str,_:&str,platform:&str,plugin:&str,chat:&str,message:&str)->Result<Option<AgentQuestionReplyTargetDto>,AppError> {
+            Ok(self.deliveries.lock().unwrap().iter().find(|row|row.platform==platform && row.channel_plugin_id==plugin && row.chat_id==chat && row.provider_message_id==message)
+                .map(|row|row.target.clone()))
+        }
+        async fn get(&self,_:&str,session:&str)->Result<ConversationResponse,AppError> {
+            Ok(serde_json::from_value(serde_json::json!({"conversation_id":session,"name":"Original","type":"nomi","status":"running","pinned":false,
+                "delegation_policy":"automatic","decision_policy":"automatic","created_at":1,"modified_at":1,"extra":{}})).unwrap())
+        }
+        async fn create_idempotent(&self,_:&str,_:CreateConversationRequest,_:&str)->Result<ConversationResponse,AppError> {panic!("an existing input cannot create another Session")}
+    }
+    #[tokio::test]
+    async fn quoted_closed_question_preserves_its_source_while_ordinary_busy_input_bypasses_fifo() {
+        for(quoted,reject,guest)in [(true,false,false),(true,true,false),(false,false,false),(true,false,true)] {
+            let db=init_database_memory().await.unwrap();
+            let repo:Arc<dyn IChannelRepository>=Arc::new(SqliteChannelRepository::new(db.pool().clone()));
+            let plugin=repo.create_plugin(&NewChannelPluginRow {r#type:"telegram".into(),name:"Input test".into(),enabled:true,config:"{}".into(),status:None,
+                last_connected:None,companion_id:None,bot_key:None,owner_domain:"companion".into(),group_access_mode:"allowlist".into(),created_at:1,updated_at:1}).await.unwrap();
+            let row=NewChannelUserRow {platform_user_id:"human".into(),platform_type:"telegram".into(),channel_plugin_id:Some(plugin.channel_plugin_id.clone()),
+                display_name:None,authorization_kind:if guest {CHANNEL_USER_AUTHORIZATION_AUTO_GROUP}else{CHANNEL_USER_AUTHORIZATION_APPROVED}.into(),authorized_at:1,last_active:None};
+            let user=if guest {repo.ensure_auto_group_user(&row).await}else{repo.create_user(&row).await}.unwrap();
+            let manager=Arc::new(SessionManager::new(repo.clone()));
+            let session=manager.get_or_create_session_for_chat(&user.channel_user_id,"chat",&plugin.channel_plugin_id,"nomi",
+                if guest {crate::types::ChatKind::Group}else{crate::types::ChatKind::Direct},None).await.unwrap();
+            let conversation="0190f5fe-7c00-7a00-8000-000000000901";
+            let owner=nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+            nomifun_db::sqlx::query("INSERT INTO agent_sessions (agent_session_id,owner_ref_json,state,title,archived,pinned,agent_binding_json,next_seq,created_at) \
+                VALUES (?,json_object('principal_kind','user','principal_id',?),'live','Channel reference fixture',0,0,'{}',1,1)")
+                .bind(conversation).bind(&owner).execute(db.pool()).await.unwrap();
+            manager.bind_conversation(&session.channel_session_id,conversation).await.unwrap();
+            let original=AgentQuestionReplyTargetDto {turn_id:"0190f5fe-7c00-7a00-8000-000000000902".into(),question_seq:40};
+            let port=Arc::new(InputPort {reject,replies:Default::default(),inputs:Default::default(),deliveries:Default::default()});
+            let preferences:Arc<dyn nomifun_db::IClientPreferenceRepository>=Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(db.pool().clone()));
+            let service=Arc::new(ChannelMessageService::new(port.clone(),Arc::new(crate::channel_settings::ChannelSettingsService::new(preferences)),repo.clone(),owner));
+            let recorder=Arc::new(crate::stream_relay::MessageRecorder::new());let sender:Arc<dyn ChannelSender>=recorder.clone();
+            if quoted && !guest {
+                // A has already reached finite handoff. Its actual delivered
+                // provider identity remains usable even if another Turn owns B.
+                let relay=ChannelStreamRelay::new(RelayConfig {platform:crate::types::PluginType::Telegram,plugin_id:plugin.channel_plugin_id.clone(),
+                    chat_id:"chat".into(),throttle_ms:0,conversation_id:conversation.into()},sender.clone(),service.stop_confirmations(),None)
+                    .with_input_question_delivery(service.clone());
+                let(tx,rx)=tokio::sync::broadcast::channel(8);
+                tx.send(nomifun_ai_agent::AgentStreamEvent::InputQuestion(nomifun_ai_agent::protocol::events::InputQuestionEventData {
+                    request:nomifun_agent_contracts::AgentUserInputRequest {request_id:"question-a".into(),question:"Complete authorization.".into(),remaining_work:"Verify result.".into()},
+                    target:original.clone()})).unwrap();
+                tx.send(nomifun_ai_agent::AgentStreamEvent::Finish(nomifun_ai_agent::protocol::events::FinishEventData {
+                    stop_reason:Some(nomifun_ai_agent::protocol::events::TurnStopReason::InputRequired),..Default::default()})).unwrap();
+                drop(tx);relay.run(rx).await;
+                assert_eq!(port.deliveries.lock().unwrap()[0].provider_message_id,"msg-1");
+            }
+            let children=Arc::new(Mutex::new(Vec::new()));let shutdown=CancellationToken::new();
+            let result=handle_dispatched(&service,&manager,&sender,&shutdown,&children,&session.channel_session_id,Some(conversation),"Authorization complete",
+                quoted.then_some("msg-1"),crate::types::PluginType::Telegram,&plugin.channel_plugin_id,"chat","channel:original-inbound").await;
+            let replies=port.replies.lock().unwrap().clone();
+            if guest {
+                assert!(replies.is_empty());assert!(result.is_none());assert!(repo.peek_next_queued(conversation).await.unwrap().is_some());
+            } else if quoted {
+                assert_eq!(replies,vec![("channel:original-inbound".into(),"Authorization complete".into(),original)]);
+                assert!(port.inputs.lock().unwrap().is_empty(),"a rejected association never falls through to ordinary input");
+                assert_eq!(result.is_some(),!reject);
+            } else {
+                assert!(result.is_some());assert_eq!(port.inputs.lock().unwrap().as_slice(),&[("channel:original-inbound".into(),"Authorization complete".into())]);
+            }
+            if !guest {assert!(repo.peek_next_queued(conversation).await.unwrap().is_none(),"ordinary intake has no channel busy FIFO");}
+            shutdown.cancel();
+            for task in children.lock().await.drain(..) {task.await.unwrap();}
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 pub use nomifun_agent_contracts::{ModelFailureDiagnostic, ModelFailureReason};
+pub use nomifun_agent_contracts::SystemExecutionFailure;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +27,15 @@ pub enum AgentErrorCode {
     NomifunAgentSessionInconsistent,
     NomifunPermissionError,
     NomifunInternalError,
+    SystemExecutionAuthenticationCancelled,
+    SystemExecutionAuthenticationDenied,
+    SystemExecutionAuthenticationTimedOut,
+    SystemExecutionAuthenticationUnavailable,
+    SystemExecutionApprovalRequired,
+    SystemExecutionNotAvailable,
+    SystemExecutionResultUnknown,
+    SystemReadResultUnknown,
+    SystemExecutionFailed,
     /// The runtime safely stopped after an execution or completion guard was
     /// exhausted. Earlier tool effects may have succeeded and must be checked
     /// before the user continues the task.
@@ -173,6 +183,9 @@ pub struct AgentStreamErrorData {
     /// The original typed model/transport diagnosis, shared with the Broker.
     #[serde(default, rename = "providerDiagnostic", skip_serializing_if = "Option::is_none")]
     pub provider_diagnostic: Option<ModelFailureDiagnostic>,
+    /// Original native error; missing OS/dispatch/cleanup facts stay unknown.
+    #[serde(default, rename = "systemExecutionError", skip_serializing_if = "Option::is_none")]
+    pub system_execution_error: Option<SystemExecutionFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,6 +207,7 @@ impl AgentStreamErrorData {
             model_name: None,
             task_incomplete_reason: None,
             provider_diagnostic: None,
+            system_execution_error: None,
             retryable: None,
             feedback_recommended: None,
             resolution: None,
@@ -220,6 +234,7 @@ impl AgentStreamErrorData {
             model_name: None,
             task_incomplete_reason: None,
             provider_diagnostic: None,
+            system_execution_error: None,
             retryable: Some(retryable),
             feedback_recommended: Some(feedback_recommended),
             resolution,
@@ -401,6 +416,7 @@ mod tests {
             task_incomplete_reason: None,
             provider_diagnostic: None,
             retryable: Some(false),
+            system_execution_error: None,
             feedback_recommended: Some(false),
             resolution: None,
         };

@@ -268,7 +268,7 @@ pub struct FileService {
 // Different Sessions may address the same native file from different default
 // directories. Keep canonical file mutations coordinated across FileService
 // instances; this is an in-process operation lock, not a permission ledger.
-static NATIVE_FILE_MUTATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static NATIVE_FILE_MUTATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl FileService {
     pub fn new(user_events: Arc<dyn UserEventSink>, allowed_roots: Vec<std::path::PathBuf>) -> Self {
@@ -336,6 +336,7 @@ impl FileService {
             .await.map(|result| result.created)
     }
 
+    #[cfg(windows)]
     pub async fn write_file_with_observation_for_agent_session(
         &self,
         scope: &AgentSessionWorkspaceBinding,
@@ -346,27 +347,30 @@ impl FileService {
         if data.len() > MAX_AGENT_PATCH_FILE_BYTES {
             return Err(AppError::BadRequest("workspace write exceeds the 8 MiB byte limit".into()));
         }
-        let _mutation_guard = NATIVE_FILE_MUTATIONS.lock().await;
-        let path = scope.resolve_path(relative_path)?;
-        let prepared_parent = crate::workspace_write::prepare_global_parent(&path)?;
+        let prepared = self.prepare_native_mutation_for_agent_session(scope,
+            crate::NativeMutationRequest::Write { path: relative_path.into() }).await?;
+        self.write_file_with_native_mutation(scope, relative_path, data, prepared).await
+    }
+
+    #[cfg(windows)]
+    pub async fn write_file_with_native_mutation(
+        &self, scope: &AgentSessionWorkspaceBinding, relative_path: &str, data: &[u8],
+        mutation: crate::PreparedNativeMutation,
+    ) -> Result<AgentSessionWriteResult, AppError> {
+        mutation.require(scope, &crate::NativeMutationRequest::Write { path: relative_path.into() })?;
+        scope.require_operation(crate::resource::WRITE_OPERATION)?;
+        if data.len() > MAX_AGENT_PATCH_FILE_BYTES {
+            return Err(AppError::BadRequest("workspace write exceeds the 8 MiB byte limit".into()));
+        }
+        let prepared_parent = mutation.pins[0].prepare_parent()?;
         let path = prepared_parent.as_path().to_path_buf();
         let path_owned = path.clone();
         let data_owned = data.to_vec();
         let result = tokio::task::spawn_blocking(move || {
             // Keep the directory handles alive if this future is cancelled;
             // the blocking owner still must finish publication and cleanup.
-            let _native_guard = _mutation_guard;
+            let _native_guard = mutation;
             let parent_guard = prepared_parent;
-            #[cfg(unix)]
-            let existed = {
-                parent_guard.verify()?;
-                let name = path_owned.file_name().ok_or_else(|| AppError::BadRequest("write target has no filename".into()))?;
-                match parent_guard.directory().symlink_metadata(name) {
-                    Ok(_) => true,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                    Err(error) => return Err(AppError::Internal(format!("cannot inspect workspace write target: {error}")).into()),
-                }
-            };
             #[cfg(not(unix))]
             let existed = match std::fs::symlink_metadata(&path_owned) {
                 Ok(_) => true,
@@ -409,26 +413,40 @@ impl FileService {
         self.remove_entry_with_receipt_for_agent_session(scope, relative_path).await.map(|result| result.workspace_path)
     }
 
+    #[cfg(windows)]
     pub async fn remove_entry_with_receipt_for_agent_session(
         &self, scope: &AgentSessionWorkspaceBinding, relative_path: &str,
     ) -> Result<AgentSessionDeleteResult, AppError> {
+        let prepared = self.prepare_native_mutation_for_agent_session(scope,
+            crate::NativeMutationRequest::Delete { path: relative_path.into() }).await?;
+        self.remove_entry_with_native_mutation(scope, relative_path, prepared).await
+    }
+
+    #[cfg(windows)]
+    pub async fn remove_entry_with_native_mutation(
+        &self, scope: &AgentSessionWorkspaceBinding, relative_path: &str,
+        mut mutation: crate::PreparedNativeMutation,
+    ) -> Result<AgentSessionDeleteResult, AppError> {
+        mutation.require(scope, &crate::NativeMutationRequest::Delete { path: relative_path.into() })?;
         scope.require_operation(crate::resource::DELETE_OPERATION)?;
         if relative_path.is_empty() {
             return Err(AppError::BadRequest("deletion requires an explicit path".into()));
         }
-        let _mutation_guard = NATIVE_FILE_MUTATIONS.lock().await;
-        let path = scope.resolve_path(relative_path)?;
-        let canonical = crate::path_safety::canonical_entry(&path)?;
+        let canonical = mutation.pins[0].path.clone();
         let observation = crate::WorkspacePathObservation::from_canonical(scope.workspace_root(), &canonical);
-        let workspace = scope.workspace_root().to_string_lossy();
-        self.remove_entry_impl(
-            scope.owner_id(),
-            &canonical.to_string_lossy(),
-            &workspace,
-            &scope.authority(),
-            Some(_mutation_guard),
-        )
-        .await?;
+        #[cfg(windows)]
+        {
+            let file = mutation.pins[0].object.take().ok_or_else(|| AppError::Conflict("admitted delete target is missing".into()))?;
+            let path = canonical.clone();
+            let removed = tokio::task::spawn_blocking(move || {
+                let _native_guard = mutation;
+                crate::windows_delete::remove_pinned(&path, file, || {})
+            }).await.map_err(|error| AppError::Internal(format!("{FILE_DELETE_OUTCOME_UNKNOWN}; delete owner stopped: {error}")))
+                .and_then(|result| result);
+            self.invalidate_caches_for_path(&canonical);
+            removed?;
+            self.emit_content_delete(scope.owner_id(), &canonical, &scope.workspace_root().to_string_lossy());
+        }
         Ok(AgentSessionDeleteResult { native_path: canonical.to_string_lossy().into_owned(), workspace_path: observation })
     }
 
@@ -440,20 +458,35 @@ impl FileService {
         self.rename_entry_with_observation_for_agent_session(scope, path, destination).await.map(|result| result.destination)
     }
 
+    #[cfg(windows)]
     pub async fn rename_entry_with_observation_for_agent_session(
         &self, scope: &AgentSessionWorkspaceBinding, path: &str, destination: &str,
     ) -> Result<AgentSessionRenameResult, AppError> {
+        let prepared = self.prepare_native_mutation_for_agent_session(scope,
+            crate::NativeMutationRequest::Rename { path: path.into(), destination: destination.into() }).await?;
+        self.rename_entry_with_native_mutation(scope, path, destination, prepared).await
+    }
+
+    #[cfg(windows)]
+    pub async fn rename_entry_with_native_mutation(
+        &self, scope: &AgentSessionWorkspaceBinding, path: &str, destination: &str,
+        mutation: crate::PreparedNativeMutation,
+    ) -> Result<AgentSessionRenameResult, AppError> {
+        mutation.require(scope, &crate::NativeMutationRequest::Rename { path: path.into(), destination: destination.into() })?;
         scope.require_operation(crate::resource::WRITE_OPERATION)?;
         if path.is_empty() || destination.is_empty() { return Err(AppError::BadRequest("rename requires explicit source and destination paths".into())); }
-        let _mutation_guard = NATIVE_FILE_MUTATIONS.lock().await;
-        let source = crate::path_safety::canonical_entry(&scope.resolve_path(path)?)?;
-        let destination = validate_path_for_write_authority(&scope.resolve_path(destination)?.to_string_lossy(), &scope.authority())?;
+        let source = mutation.pins[0].path.clone();
+        let destination = mutation.pins[1].path.clone();
         let is_file = std::fs::symlink_metadata(&source).map_err(|error| crate::path_safety::native_io_error("inspecting native rename source", error))?.is_file();
         let old_path = source.clone();
         let new_path = destination.clone();
         let renamed = tokio::task::spawn_blocking(move || {
-            let _native_guard = _mutation_guard;
-            rename_path_sync(&source, &destination)
+            let mut native_guard = mutation;
+            #[cfg(windows)]
+            {
+                let source_file = native_guard.pins[0].object.take().ok_or_else(|| AppError::Conflict("admitted rename source is missing".into()))?;
+                rename_pinned_windows(&source, &destination, source_file, &native_guard.pins[1])
+            }
         })
             .await.map_err(|error| AppError::Internal(format!("{FILE_RENAME_OUTCOME_UNKNOWN}; rename task stopped: {error}; inspect both paths before retry")))?;
         self.invalidate_caches_for_path(&old_path);
@@ -492,12 +525,35 @@ impl FileService {
         self.apply_patch_with_publication_hook(scope, request, |_| {}).await
     }
 
+    #[cfg(windows)]
+    pub async fn apply_patch_with_native_mutation(
+        &self, scope: &AgentSessionWorkspaceBinding, request: AgentSessionPatchRequest,
+        mutation: crate::PreparedNativeMutation,
+    ) -> Result<AgentSessionPatchResult, AgentSessionPatchFailure> {
+        mutation.require(scope, &crate::NativeMutationRequest::Patch { paths: request.files.iter().map(|file| file.path.clone()).collect() })?;
+        self.apply_patch_with_publication_hook_impl(scope, request, mutation, |_| {}).await
+    }
+
+    #[cfg(windows)]
     async fn apply_patch_with_publication_hook(
         &self,
         scope: &AgentSessionWorkspaceBinding,
         request: AgentSessionPatchRequest,
+        after_publication: impl FnMut(usize),
+    ) -> Result<AgentSessionPatchResult, AgentSessionPatchFailure> {
+        scope.require_operation(crate::resource::WRITE_OPERATION)?;
+        validate_agent_patch_request_shape(&request)?;
+        let mutation = self.prepare_native_mutation_for_agent_session(scope,
+            crate::NativeMutationRequest::Patch { paths: request.files.iter().map(|file| file.path.clone()).collect() }).await?;
+        self.apply_patch_with_publication_hook_impl(scope, request, mutation, after_publication).await
+    }
+
+    async fn apply_patch_with_publication_hook_impl(
+        &self, scope: &AgentSessionWorkspaceBinding, request: AgentSessionPatchRequest,
+        #[cfg(windows)] mutation: crate::PreparedNativeMutation,
         mut after_publication: impl FnMut(usize),
     ) -> Result<AgentSessionPatchResult, AgentSessionPatchFailure> {
+        #[cfg(not(windows))]
         let _patch_guard = NATIVE_FILE_MUTATIONS.lock().await;
         scope.require_operation(crate::resource::WRITE_OPERATION)?;
         validate_agent_patch_request_shape(&request)?;
@@ -514,6 +570,10 @@ impl FileService {
 
         for (index, file_patch) in request.files.iter().enumerate() {
             let (path, existed) = validate_agent_patch_target(scope, &file_patch.path, &authority)?;
+            #[cfg(windows)]
+            if path != mutation.pins[index].path {
+                return Err(AppError::Conflict("patch target changed from its admitted native namespace".into()).into());
+            }
             for previous in &seen_paths {
                 if crate::path_safety::global_patch_targets_overlap(previous, &path)? {
                     return Err(AppError::BadRequest(format!(
@@ -609,12 +669,20 @@ impl FileService {
                 existed,
                 hunks_applied: file_patch.hunks.len(),
                 publication: OnceLock::new(),
+                native_parent: OnceLock::new(),
             });
         }
 
         // No write occurs above this point. If an I/O failure happens during
         // the commit phase, attempt to restore existing touched files and
         // retain new creations. Return every restoration/retention observation.
+        // Prepare every namespace from its admitted parent. Retain all guards
+        // across later publications and compensation, so rollback cannot
+        // resolve a replacement directory at the old ambient spelling.
+        #[cfg(windows)]
+        for (file, pin) in prepared.iter().zip(&mutation.pins) {
+            let _ = file.native_parent.set(pin.prepare_parent()?);
+        }
         let workspace = scope.workspace_root().to_string_lossy().into_owned();
         let mut applied = Vec::with_capacity(prepared.len());
         for (index, file) in prepared.iter().enumerate() {
@@ -637,7 +705,7 @@ impl FileService {
                 return Err(finish_agent_patch_failure(error, observation));
             }
             let write_result = self
-                .write_agent_patch_file(
+                .write_agent_patch_file_with_parent(
                     scope.owner_id(),
                     file,
                     &file.after,
@@ -645,6 +713,7 @@ impl FileService {
                     None,
                     &workspace,
                     &authority,
+                    None,
                 )
                 .await;
 
@@ -678,6 +747,121 @@ impl FileService {
         })
     }
 
+    #[cfg(not(windows))]
+    pub async fn write_file_with_observation_for_agent_session(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        relative_path: &str,
+        data: &[u8],
+    ) -> Result<AgentSessionWriteResult, AppError> {
+        scope.require_operation(crate::resource::WRITE_OPERATION)?;
+        if data.len() > MAX_AGENT_PATCH_FILE_BYTES {
+            return Err(AppError::BadRequest("workspace write exceeds the 8 MiB byte limit".into()));
+        }
+        let _mutation_guard = NATIVE_FILE_MUTATIONS.lock().await;
+        let path = scope.resolve_path(relative_path)?;
+        let prepared_parent = crate::workspace_write::prepare_global_parent(&path)?;
+        let path = prepared_parent.as_path().to_path_buf();
+        let path_owned = path.clone();
+        let data_owned = data.to_vec();
+        let result = tokio::task::spawn_blocking(move || {
+            // Keep the directory handles alive if this future is cancelled;
+            // the blocking owner still must finish publication and cleanup.
+            let _native_guard = _mutation_guard;
+            let parent_guard = prepared_parent;
+            #[cfg(unix)]
+            let existed = {
+                parent_guard.verify()?;
+                let name = path_owned.file_name().ok_or_else(|| AppError::BadRequest("write target has no filename".into()))?;
+                match parent_guard.directory().symlink_metadata(name) {
+                    Ok(_) => true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(error) => return Err(AppError::Internal(format!("cannot inspect workspace write target: {error}")).into()),
+                }
+            };
+            #[cfg(not(unix))]
+            let existed = match std::fs::symlink_metadata(&path_owned) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(AppError::Internal(format!("cannot inspect workspace write target: {error}")).into()),
+            };
+            let source = if existed { PublicationSource::Existing } else { PublicationSource::Absent };
+            #[cfg(unix)]
+            crate::unix_publication::publish(&parent_guard, &data_owned, source)?;
+            #[cfg(not(unix))]
+            {
+                let _parent_guard = parent_guard;
+                write_file_with_source_sync_atomic(&path_owned, &data_owned, source)?;
+            }
+            Ok(!existed)
+        }).await.map_err(|_| AppError::Internal(format!(
+            "{FILE_WRITE_OUTCOME_UNKNOWN}; publication task stopped; re-read the target before retry"
+        )))?;
+        self.observe_file_publication(scope.owner_id(), &path, data, &scope.workspace_root().to_string_lossy(), &result);
+        result.map(|created| AgentSessionWriteResult {
+            created,
+            native_path: path.to_string_lossy().into_owned(),
+            workspace_path: crate::WorkspacePathObservation::from_canonical(scope.workspace_root(), &path),
+        }).map_err(file_write_publication_error)
+    }
+
+    #[cfg(not(windows))]
+    pub async fn remove_entry_with_receipt_for_agent_session(
+        &self, scope: &AgentSessionWorkspaceBinding, relative_path: &str,
+    ) -> Result<AgentSessionDeleteResult, AppError> {
+        scope.require_operation(crate::resource::DELETE_OPERATION)?;
+        if relative_path.is_empty() {
+            return Err(AppError::BadRequest("deletion requires an explicit path".into()));
+        }
+        let _mutation_guard = NATIVE_FILE_MUTATIONS.lock().await;
+        let path = scope.resolve_path(relative_path)?;
+        let canonical = crate::path_safety::canonical_entry(&path)?;
+        let observation = crate::WorkspacePathObservation::from_canonical(scope.workspace_root(), &canonical);
+        let workspace = scope.workspace_root().to_string_lossy();
+        self.remove_entry_impl(
+            scope.owner_id(),
+            &canonical.to_string_lossy(),
+            &workspace,
+            &scope.authority(),
+            Some(_mutation_guard),
+        )
+        .await?;
+        Ok(AgentSessionDeleteResult { native_path: canonical.to_string_lossy().into_owned(), workspace_path: observation })
+    }
+
+    #[cfg(not(windows))]
+    pub async fn rename_entry_with_observation_for_agent_session(
+        &self, scope: &AgentSessionWorkspaceBinding, path: &str, destination: &str,
+    ) -> Result<AgentSessionRenameResult, AppError> {
+        scope.require_operation(crate::resource::WRITE_OPERATION)?;
+        if path.is_empty() || destination.is_empty() { return Err(AppError::BadRequest("rename requires explicit source and destination paths".into())); }
+        let _mutation_guard = NATIVE_FILE_MUTATIONS.lock().await;
+        let source = crate::path_safety::canonical_entry(&scope.resolve_path(path)?)?;
+        let destination = validate_path_for_write_authority(&scope.resolve_path(destination)?.to_string_lossy(), &scope.authority())?;
+        let is_file = std::fs::symlink_metadata(&source).map_err(|error| crate::path_safety::native_io_error("inspecting native rename source", error))?.is_file();
+        let old_path = source.clone();
+        let new_path = destination.clone();
+        let renamed = tokio::task::spawn_blocking(move || {
+            let _native_guard = _mutation_guard;
+            rename_path_sync(&source, &destination)
+        })
+            .await.map_err(|error| AppError::Internal(format!("{FILE_RENAME_OUTCOME_UNKNOWN}; rename task stopped: {error}; inspect both paths before retry")))?;
+        self.invalidate_caches_for_path(&old_path);
+        self.invalidate_caches_for_path(&new_path);
+        renamed.map(|path| AgentSessionRenameResult {
+            source: old_path.to_string_lossy().into_owned(), destination: path.to_string_lossy().into_owned(),
+            source_workspace_path: is_file.then(|| crate::WorkspacePathObservation::from_canonical(scope.workspace_root(), &old_path)).flatten(),
+            destination_workspace_path: is_file.then(|| crate::WorkspacePathObservation::from_canonical(scope.workspace_root(), &path)).flatten(),
+        })
+    }
+
+    #[cfg(not(windows))]
+    async fn apply_patch_with_publication_hook(
+        &self, scope: &AgentSessionWorkspaceBinding, request: AgentSessionPatchRequest,
+        after_publication: impl FnMut(usize),
+    ) -> Result<AgentSessionPatchResult, AgentSessionPatchFailure> {
+        self.apply_patch_with_publication_hook_impl(scope, request, after_publication).await
+    }
     async fn verify_agent_patch_precondition(
         &self,
         file: &PreparedAgentPatchFile,
@@ -810,6 +994,14 @@ impl FileService {
         workspace: &str,
         authority: &PathAuthority,
     ) -> Result<bool, PatchPublicationFailure> {
+        self.write_agent_patch_file_with_parent(owner_id, file, data, expected, identity, workspace, authority, None).await
+    }
+
+    async fn write_agent_patch_file_with_parent(
+        &self, owner_id: &str, file: &PreparedAgentPatchFile, data: &[u8], expected: Option<&[u8]>,
+        identity: Option<&PublicationIdentity>, workspace: &str, _authority: &PathAuthority,
+        retained_parent: Option<&crate::workspace_write::PreparedParent>,
+    ) -> Result<bool, PatchPublicationFailure> {
         let path = file.path.to_string_lossy();
         if has_traversal(&path) {
             return Err(AppError::BadRequest(format!(
@@ -817,11 +1009,12 @@ impl FileService {
                 path
             )).into());
         }
-        let prepared_parent = Some(crate::workspace_write::prepare_global_parent(&file.path)?);
-        let canonical = match &prepared_parent {
-            Some(parent) => parent.as_path().to_path_buf(),
-            None => validate_path_for_write_authority(&path, authority)?,
+        let fresh_parent;
+        let prepared_parent = match retained_parent.or(file.native_parent.get()) {
+            Some(parent) => parent,
+            None => { fresh_parent = crate::workspace_write::prepare_global_parent(&file.path)?; &fresh_parent },
         };
+        let canonical = prepared_parent.as_path().to_path_buf();
         if canonical != file.path {
             return Err(AppError::Conflict(format!(
                 "patch target '{}' changed identity before publication",
@@ -842,10 +1035,7 @@ impl FileService {
             (None, _) => PublicationSource::Absent,
         };
         #[cfg(unix)]
-        let result = match &prepared_parent {
-            Some(parent) => crate::unix_publication::publish(parent, data, source),
-            None => write_file_with_source_sync_atomic(&canonical, data, source),
-        };
+        let result = crate::unix_publication::publish(prepared_parent, data, source);
         #[cfg(not(unix))]
         let result = write_file_with_source_sync_atomic(&canonical, data, source);
         let published_identity = match &result {
@@ -887,17 +1077,8 @@ impl FileService {
     fn emit_content_observation(&self, owner_id: &str, canonical: &Path, content: Option<String>, workspace: &str) {
         self.invalidate_caches_for_path(canonical);
         let workspace_path = Path::new(workspace);
-        if !std::fs::canonicalize(workspace_path).is_ok_and(|root| canonical.starts_with(root)) {
-            return;
-        }
-        let relative_path = rel_to_api_string(
-            canonical
-                .strip_prefix(
-                    std::fs::canonicalize(workspace_path)
-                        .unwrap_or_else(|_| workspace_path.to_path_buf()),
-                )
-                .unwrap_or(canonical),
-        );
+        let Some(observation) = crate::WorkspacePathObservation::from_canonical(workspace_path, canonical) else { return; };
+        let relative_path = observation.path;
         let event = ContentUpdateEvent {
             file_path: canonical.to_string_lossy().into_owned(),
             content,
@@ -1192,15 +1373,14 @@ impl FileService {
 
         self.invalidate_caches_for_path(&canonical);
 
+        self.emit_content_delete(owner_id, &canonical, workspace);
+        Ok(())
+    }
+
+    fn emit_content_delete(&self, owner_id: &str, canonical: &Path, workspace: &str) {
         let workspace_path = Path::new(workspace);
-        if !std::fs::canonicalize(workspace_path).is_ok_and(|root| canonical.starts_with(root)) {
-            return Ok(());
-        }
-        let relative_path = rel_to_api_string(
-            canonical
-                .strip_prefix(std::fs::canonicalize(workspace_path).unwrap_or_else(|_| workspace_path.to_path_buf()))
-                .unwrap_or(&canonical),
-        );
+        let Some(observation) = crate::WorkspacePathObservation::from_canonical(workspace_path, canonical) else { return; };
+        let relative_path = observation.path;
 
         let event = ContentUpdateEvent {
             file_path: canonical.to_string_lossy().into_owned(),
@@ -1216,7 +1396,6 @@ impl FileService {
         }
         self.user_events.send_to_user(owner_id, msg);
 
-        Ok(())
     }
 
     async fn rename_entry_impl(
@@ -1273,6 +1452,7 @@ struct PreparedAgentPatchFile {
     existed: bool,
     hunks_applied: usize,
     publication: OnceLock<PublicationIdentity>,
+    native_parent: OnceLock<crate::workspace_write::PreparedParent>,
 }
 
 fn validate_agent_patch_request_shape(request: &AgentSessionPatchRequest) -> Result<(), AppError> {
@@ -1899,6 +2079,10 @@ fn publish_patch_file_with_cleanup_hook(
     ) -> std::io::Result<crate::windows_cleanup::FileIdentity>,
 ) -> Result<Option<PublicationIdentity>, PatchPublicationFailure> {
     #[cfg(windows)]
+    if crate::windows_stream::is_named_stream(path) {
+        return crate::windows_stream::publish(path, data, source, after_staging, after_publication).map(|()| None);
+    }
+    #[cfg(windows)]
     if matches!(source, PublicationSource::Absent) {
         return crate::windows_create::publish(path, data, temporary, after_staging, after_publication).map(|()| None);
     }
@@ -2291,8 +2475,9 @@ fn replace_file_windows_native(
     // guard cannot remain open. Record the exact object at the native-call
     // boundary; compensation later requires this identity to still own the
     // target name and never acts on a post-dispatch concurrent replacement.
-    let source_identity = crate::windows_cleanup::OwnedFile::capture_named_regular(source)?
-        .identity();
+    let source_owner = crate::windows_cleanup::OwnedFile::capture_named_regular(source)?;
+    let source_identity = source_owner.identity()?;
+    drop(source_owner);
     replace_file_windows_native_untracked(source, target, backup)?;
     Ok(source_identity)
 }
@@ -2384,8 +2569,15 @@ fn replace_file_path_windows_verified(
             return Err(AppError::Conflict("patch target changed before publication; re-read before retry".into()));
         }
     }
-    let original_owner = crate::windows_cleanup::OwnedFile::capture(&access)
-        .map_err(|error| AppError::Internal(format!("cannot retain replacement target identity: {error}")))?;
+    // Compensation already retains this object through a shared publication
+    // identity. Reuse its pin so successful deletion can close every clone's
+    // metadata handle, rather than leaving a second pin to a delete-pending
+    // backup alive in the prepared patch.
+    let original_owner = match expected_identity {
+        Some(identity) => identity.clone(),
+        None => std::sync::Arc::new(crate::windows_cleanup::OwnedFile::capture(&access)
+            .map_err(|error| AppError::Internal(format!("cannot retain replacement target identity: {error}")))?),
+    };
     let mut staged_file = staged.owner.open_for_verification(source)
         .map_err(|_| AppError::Conflict("staged publication source changed identity or is unreadable".into()))?;
     if !publication_bytes_match(&mut staged_file, staged.bytes)
@@ -2454,8 +2646,9 @@ fn replace_file_path_windows_verified(
             original_owner.verify_named_identity(&backup).map_err(|error| unverified(&error.to_string()))?;
             progress.publication_verified = true;
             drop(access);
-            return cleanup(&backup, &original_owner).map_err(|_| AppError::Internal(format!(
-                "{FILE_WRITE_OUTCOME_UNKNOWN}; original backup cleanup is unconfirmed; re-read the target before retry"
+            return cleanup(&backup, &original_owner).map_err(|error| AppError::Internal(format!(
+                "{FILE_WRITE_OUTCOME_UNKNOWN}; cleanup {}; original backup cleanup is unconfirmed; re-read the target before retry",
+                crate::windows_cleanup::error_summary(&error)
             )));
         }
         Err(error) => error,
@@ -2555,7 +2748,7 @@ fn recover_unverified_replacement(
     // The target can change again after ReplaceFile returns. Only undo the
     // object observed at dispatch; a different current target belongs to the
     // concurrent writer and remains available for reconciliation.
-    if !replacement_owner.matches_identity(dispatched_identity) {
+    if !matches!(replacement_owner.matches_identity(dispatched_identity), Ok(true)) {
         return recovery;
     }
     if replacement_owner.move_no_replace(target, source).is_err() {
@@ -2736,17 +2929,58 @@ fn rename_path_sync(path: &Path, new_path: &Path) -> Result<PathBuf, AppError> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt as _;
-        let source = path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
-        let destination = new_path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
-        // No MOVEFILE_REPLACE_EXISTING: a concurrent destination is retained
-        // by the native atomic rename rather than overwritten after our check.
-        // SAFETY: both NUL-terminated UTF-16 buffers remain live for this call.
-        let moved = unsafe { windows_sys::Win32::Storage::FileSystem::MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) };
-        if moved == 0 { return Err(crate::path_safety::native_io_error("renaming native entry", std::io::Error::last_os_error())); }
+        // A native DELETE handle retains the source itself, including a final
+        // reparse point. Its sharing contract pins its name and ancestors;
+        // destination preparation pins the actual parent before dispatch.
+        // Native RootDirectory-relative rename never copies volumes or
+        // creates extra guard children; only this entry's actual rights apply.
+        let source = crate::windows_directory::open_delete(None, path)
+            .map_err(|error| crate::path_safety::native_io_error("opening native rename source", error))?;
+        if crate::windows_read::final_path(&source)? != path {
+            return Err(AppError::Conflict("native rename source changed identity before open".into()));
+        }
+        let renamed = if crate::windows_stream::is_named_stream(path) || crate::windows_stream::is_named_stream(new_path) {
+            crate::windows_stream::rename_entry(&source, path, new_path)
+        } else {
+            use std::os::windows::fs::MetadataExt as _;
+            let source_is_directory = source.metadata().map_err(|error| crate::path_safety::native_io_error("inspecting native rename source", error))?
+                .file_attributes() & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY != 0;
+            let destination_parent = crate::workspace_write::prepare_global_rename_parent(new_path, source_is_directory)?;
+            crate::windows_cleanup::rename_relative_no_replace(&source, &destination_parent,
+                new_path.file_name().ok_or_else(|| AppError::BadRequest("rename requires a destination entry".into()))?)
+        };
+        renamed
+            .map_err(|error| crate::path_safety::native_io_error("renaming native entry", error))?;
+        if crate::windows_read::final_path(&source).ok().as_deref() != Some(new_path) {
+            return Err(AppError::Internal(format!("{FILE_RENAME_OUTCOME_UNKNOWN}; renamed entry identity could not be verified; inspect both paths before retry")));
+        }
     }
     #[cfg(all(not(unix), not(windows)))]
     return Err(AppError::Internal("atomic native rename is unavailable on this host".into()));
+    Ok(new_path.to_owned())
+}
+
+#[cfg(windows)]
+fn rename_pinned_windows(path: &Path, new_path: &Path, source: std::fs::File,
+    destination: &crate::native_mutation::NativeMutationPin) -> Result<PathBuf, AppError> {
+    if crate::windows_read::final_path(&source)? != path
+        || !crate::workspace_write::windows_parent_path_matches(&nomi_native_files::windows::final_path(&destination.parent)
+            .map_err(|error| crate::path_safety::native_io_error("verifying admitted rename parent", error))?, &destination.root) {
+        return Err(AppError::Conflict("admitted rename namespace changed before dispatch".into()));
+    }
+    if new_path.parent() != Some(destination.root.as_path()) {
+        return Err(AppError::BadRequest("native rename destination parent does not exist".into()));
+    }
+    let renamed = if crate::windows_stream::is_named_stream(path) || crate::windows_stream::is_named_stream(new_path) {
+        crate::windows_stream::rename_entry(&source, path, new_path)
+    } else {
+        crate::windows_cleanup::rename_relative_no_replace(&source, &destination.parent,
+            new_path.file_name().ok_or_else(|| AppError::BadRequest("rename requires a destination entry".into()))?)
+    };
+    renamed.map_err(|error| crate::path_safety::native_io_error("renaming admitted native entry", error))?;
+    if crate::windows_read::final_path(&source).ok().as_deref() != Some(new_path) {
+        return Err(AppError::Internal(format!("{FILE_RENAME_OUTCOME_UNKNOWN}; cannot verify admitted renamed object")));
+    }
     Ok(new_path.to_owned())
 }
 
@@ -3875,6 +4109,7 @@ mod tests {
                 path: path.clone(), relative_path: "parent/value.txt".into(),
                 before: b"source".to_vec(), after: b"patched".to_vec(), existed: true, hunks_applied: 1,
                 publication: OnceLock::new(),
+                native_parent: OnceLock::new(),
             };
             make_service().verify_agent_patch_precondition_with_hooks(&file, &authority, before_open, after_read).await.is_ok()
         } else {
@@ -4062,6 +4297,27 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn basic_backup_cleanup_closes_the_shared_identity_used_by_compensation() {
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("target.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        fs::write(&target, b"original").unwrap();
+        let published = crate::windows_cleanup::with_basic_disposition(|| {
+            publish_patch_file(&target, b"patched", &temporary, PublicationSource::Matching(b"original"))
+        }).unwrap().unwrap();
+        let clone = published.clone();
+        crate::windows_cleanup::with_basic_disposition(|| {
+            publish_patch_file(&target, b"original", &temporary,
+                PublicationSource::Restoring { bytes: b"patched", identity: &published })
+        }).unwrap();
+        assert!(published.identity().is_err());
+        assert!(clone.matches_handle(&std::fs::File::open(&target).unwrap()).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn replacement_cleanup_preserves_a_foreign_file_at_the_backup_name() {
         let fixture = cleanup_race_fixture();
         let target = fixture.path().join("target.txt");
@@ -4237,6 +4493,180 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[test]
+    fn prepared_follow_write_does_not_self_block_basic_backup_cleanup() {
+        let fixture = tempfile::tempdir().unwrap(); let root = fs::canonicalize(fixture.path()).unwrap();
+        let target = root.join("existing.txt"); fs::write(&target, b"before").unwrap();
+        let service = make_service(); let scope = patch_scope(&root);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let prepared = runtime.block_on(service.prepare_native_mutation_for_agent_session(&scope,
+            crate::NativeMutationRequest::Write { path: "existing.txt".into() })).unwrap();
+        assert!(prepared.pins[0].object.is_none(), "volume-covered Follow must not retain the old inode");
+        let _parent = prepared.pins[0].prepare_parent().unwrap();
+        // Exercise the actual publication and cleanup while all admission pins
+        // remain alive; the disposition flag runs on this exact native thread.
+        crate::windows_cleanup::with_basic_disposition(||
+            write_file_with_source_sync_atomic(&target, b"after", PublicationSource::Existing)).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"after");
+        drop(prepared);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepared_patch_does_not_self_block_basic_backup_cleanup() {
+        let fixture = tempfile::tempdir().unwrap(); let root = fs::canonicalize(fixture.path()).unwrap();
+        fs::write(root.join("existing.txt"), b"before\n").unwrap();
+        let service = make_service(); let scope = patch_scope(&root);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let prepared = runtime.block_on(service.prepare_native_mutation_for_agent_session(&scope,
+            crate::NativeMutationRequest::Patch { paths: vec!["existing.txt".into()] })).unwrap();
+        let request = AgentSessionPatchRequest { files: vec![AgentSessionFilePatch {
+            path: "existing.txt".into(), expected_source: Default::default(), hunks: vec![replace_hunk(1, 1, 1, 1, vec![
+                AgentSessionPatchLine::Remove { text: "before".into() }, AgentSessionPatchLine::Add { text: "after".into() },
+            ])],
+        }] };
+        crate::windows_cleanup::with_basic_disposition(|| runtime.block_on(
+            service.apply_patch_with_native_mutation(&scope, request, prepared))).unwrap();
+        assert_eq!(fs::read(root.join("existing.txt")).unwrap(), b"after\n");
+    }
+
+    /// The fixture is created by the normal administrator process owner after
+    /// Windows authentication. This test never launches runas or enables a
+    /// symbolic-link privilege. Its absolute link may target another volume.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires an explicit UAC-created absolute file-symlink fixture"]
+    fn replacement_external_interference_retains_uncertain_outcome() {
+        let link = PathBuf::from(std::env::var_os("NOMIFUN_REPLACEFILE_SYMLINK_FIXTURE")
+            .expect("set NOMIFUN_REPLACEFILE_SYMLINK_FIXTURE to the owned absolute file symlink"));
+        assert!(link.is_absolute());
+        let fixture_root = link.parent().unwrap();
+        assert_eq!(fs::read(fixture_root.join(".nomifun-native-replace-probe")).unwrap(),
+            b"file-symlink-replace-race-v1");
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(fs::read_link(&link).unwrap().is_absolute(), "relocation must preserve the link's target");
+        let external = fs::canonicalize(&link).unwrap();
+        assert!(fs::metadata(&external).unwrap().is_file());
+        assert!(fs::metadata(&external).unwrap().len() <= MAX_AGENT_PATCH_FILE_BYTES as u64);
+        let external_before = fs::read(&external).unwrap();
+        let metadata_before = native_probe_metadata(&external).unwrap();
+        let role = std::env::var("NOMIFUN_REPLACEFILE_SYMLINK_ROLE").unwrap_or_else(|_| "target".into());
+        assert!(matches!(role.as_str(), "target" | "source"));
+        let fixture = tempfile::Builder::new().prefix("replacefile-symlink-").tempdir_in(fixture_root).unwrap();
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        // Preserve even a native failure that removes/moves the external
+        // sentinel before a complete after-snapshot can be read.
+        let retained_fixture = fixture.keep();
+        let target = root.join("target.txt"); let stage = root.join("stage.tmp"); let retained = root.join("original.txt");
+        fs::write(&target, b"original").unwrap();
+        let _parent = crate::workspace_write::prepare_global_parent(&target).unwrap();
+        let result = publish_patch_file_with_prepublication_hook(&target, b"intended", &stage,
+            PublicationSource::Matching(b"original"), || {}, || {}, || Ok(()),
+            |source, target, backup| {
+                // Reproduce the real final source-name window too: the native
+                // helper captures this ID and drops its metadata handle before
+                // calling ReplaceFileW (which opens the staged name exclusively).
+                let dispatched_identity = if role == "source" {
+                    Some(crate::windows_cleanup::OwnedFile::capture_named_regular(source)?.identity()?)
+                } else { None };
+                let replaced_name = if role == "target" { target } else { source };
+                fs::rename(replaced_name, &retained)?;
+                fs::rename(&link, replaced_name)?;
+                if let Some(identity) = dispatched_identity {
+                    replace_file_windows_native_untracked(source, target, backup)?;
+                    Ok(identity)
+                } else { replace_file_windows_native(source, target, backup) }
+            });
+        let external_after = fs::read(&external);
+        let metadata_after = native_probe_metadata(&external);
+        let report = serde_json::json!({
+            "probe": "file-symlink-replace-race-v1", "role": role, "result": format!("{result:?}"),
+            "coverage": "external concurrent editing is user-coordinated; this probe checks honest uncertainty, not prevention of external changes",
+            "publication_failure": result.as_ref().err().map(|failure| serde_json::json!({
+                "published": failure.published,
+                "publication_verified": failure.publication_verified,
+                "temporary_cleanup_unconfirmed": failure.temporary_cleanup_unconfirmed,
+            })),
+            "external_unchanged": external_after.as_ref().is_ok_and(|after| &external_before == after),
+            "external_metadata_unchanged": metadata_after.as_ref().is_ok_and(|after| &metadata_before == after),
+            "external_metadata_before": metadata_before,
+            "external_metadata_after": metadata_after.as_ref().ok(),
+            "external_bytes_error": external_after.as_ref().err().map(|error| serde_json::json!({"kind": format!("{:?}",error.kind()), "raw_os_error":error.raw_os_error()})),
+            "external_metadata_error": metadata_after.as_ref().err().map(|error| serde_json::json!({"kind": format!("{:?}",error.kind()), "raw_os_error":error.raw_os_error()})),
+            "displaced_original_retained": fs::read(&retained).ok().as_deref()
+                == Some(if role == "target" { b"original".as_slice() } else { b"intended".as_slice() }),
+            "target_is_link": fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.file_type().is_symlink()),
+        });
+        fs::write(root.join("probe-result.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        eprintln!("ReplaceFile native symlink evidence: {}", retained_fixture.display());
+        assert_eq!(fs::read(&retained).unwrap(), if role == "target" { b"original" } else { b"intended" });
+        let failure = result.expect_err("external interference must not be verified as the admitted publication");
+        assert!(!failure.publication_verified);
+        if !external_after.as_ref().is_ok_and(|after| &external_before == after)
+            || !metadata_after.as_ref().is_ok_and(|after| &metadata_before == after)
+        {
+            assert!(failure.published || failure.temporary_cleanup_unconfirmed,
+                "observed external changes require an uncertain outcome; preserve fixture {}", retained_fixture.display());
+        }
+    }
+
+    #[cfg(windows)]
+    fn native_probe_metadata(path: &Path) -> std::io::Result<serde_json::Value> {
+        use std::os::windows::{ffi::{OsStrExt as _, OsStringExt as _}, fs::MetadataExt as _};
+        use windows_sys::Win32::{Foundation::{INVALID_HANDLE_VALUE, LocalFree},
+            Security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
+                Authorization::{GetNamedSecurityInfoW, ConvertSecurityDescriptorToStringSecurityDescriptorW, SE_FILE_OBJECT}},
+            Storage::FileSystem::{WIN32_FIND_STREAM_DATA, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, FindClose}};
+        let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidData, "native probe metadata exceeds its bound");
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let security_parts = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+        let mut descriptor = std::ptr::null_mut();
+        // SAFETY: this owned fixture path and all native result pointers remain
+        // live; the returned descriptor/string allocations are freed below.
+        let code = unsafe { GetNamedSecurityInfoW(name.as_ptr(), SE_FILE_OBJECT, security_parts,
+            std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), &mut descriptor) };
+        if code != 0 { return Err(std::io::Error::from_raw_os_error(code as i32)); }
+        let mut security = std::ptr::null_mut(); let mut security_length = 0;
+        let converted = unsafe { ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, security_parts,
+            &mut security, &mut security_length) };
+        let conversion_error = (converted == 0).then(std::io::Error::last_os_error);
+        unsafe { LocalFree(descriptor); }
+        if let Some(error) = conversion_error { return Err(error); }
+        if security_length == 0 || security_length > 65536 {
+            unsafe { LocalFree(security.cast()); } return Err(invalid());
+        }
+        let sddl = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(security, security_length as usize - 1) });
+        unsafe { LocalFree(security.cast()); }
+        let mut data = WIN32_FIND_STREAM_DATA::default();
+        let cursor = unsafe { FindFirstStreamW(name.as_ptr(), FindStreamInfoStandard, (&mut data as *mut WIN32_FIND_STREAM_DATA).cast(), 0) };
+        if cursor == INVALID_HANDLE_VALUE { return Err(std::io::Error::last_os_error()); }
+        struct Cursor(windows_sys::Win32::Foundation::HANDLE);
+        impl Drop for Cursor { fn drop(&mut self) { unsafe { FindClose(self.0); } } }
+        let _cursor = Cursor(cursor);
+        let mut streams: Vec<(Vec<u16>, usize, String)> = Vec::new(); let mut total = 0_usize;
+        loop {
+            let length = data.cStreamName.iter().position(|unit| *unit == 0).ok_or_else(invalid)?;
+            if length == 0 || data.StreamSize < 0 || data.StreamSize as u64 > MAX_AGENT_PATCH_FILE_BYTES as u64 || streams.len() >= 256 { return Err(invalid()); }
+            let stream = data.cStreamName[..length].to_vec();
+            let mut stream_path = path.as_os_str().to_owned(); stream_path.push(std::ffi::OsString::from_wide(&stream));
+            let mut reader = fs::File::open(PathBuf::from(stream_path))?; let mut bytes = Vec::new();
+            std::io::Read::by_ref(&mut reader).take(MAX_AGENT_PATCH_FILE_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+            total = total.checked_add(bytes.len()).ok_or_else(invalid)?;
+            if bytes.len() > MAX_AGENT_PATCH_FILE_BYTES || total > MAX_AGENT_PATCH_TOTAL_BYTES { return Err(invalid()); }
+            streams.push((stream, bytes.len(), format!("{:x}", Sha256::digest(&bytes))));
+            if unsafe { FindNextStreamW(cursor, (&mut data as *mut WIN32_FIND_STREAM_DATA).cast()) } == 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(38) { return Err(error); } break;
+            }
+        }
+        streams.sort_by(|left, right| left.0.cmp(&right.0));
+        let file = fs::File::open(path)?; let metadata = file.metadata()?;
+        Ok(serde_json::json!({ "object_id": crate::windows_cleanup::durable_identity_token(&file)?,
+            "creation_time": metadata.creation_time(), "last_write_time": metadata.last_write_time(),
+            "attributes": metadata.file_attributes(), "security_sddl": sddl, "streams": streams }))
+    }
+
+    #[cfg(windows)]
     #[tokio::test]
     async fn replacement_target_race_requests_reconciliation_without_automatic_rollback() {
         let (fixture, failure, backup) = replacement_target_name_race(b"concurrent target");
@@ -4249,6 +4679,7 @@ mod tests {
             path: target.clone(), relative_path: "target.txt".into(), before: b"original".to_vec(),
             after: b"intended".to_vec(), existed: true, hunks_applied: 1,
             publication: OnceLock::new(),
+                native_parent: OnceLock::new(),
         }];
         let mut eligible = Vec::new();
         let mut observation = AgentPatchFailureObservation::failed_publication(0, &mut eligible, &failure);
@@ -4373,7 +4804,7 @@ mod tests {
             Some(b"original"),
             |source, target, backup| {
                 let dispatched = crate::windows_cleanup::OwnedFile::capture_named_regular(source)?
-                    .identity();
+                    .identity()?;
                 fs::rename(source, &retained)?;
                 fs::write(source, b"intended")?;
                 backup_path = Some(backup.to_owned());
@@ -4543,6 +4974,7 @@ mod tests {
             path: root.join(name), relative_path: name.into(), before: b"before".to_vec(),
             after: b"after".to_vec(), existed: true, hunks_applied: 1,
             publication: OnceLock::new(),
+                native_parent: OnceLock::new(),
         });
         fs::write(&files[0].path, &files[0].before).unwrap();
         service.write_agent_patch_file(scope.owner_id(), &files[0], &files[0].after,
@@ -4575,6 +5007,7 @@ mod tests {
             path: target.clone(), relative_path: "first.txt".into(), before: b"before".to_vec(),
             after: b"after".to_vec(), existed: true, hunks_applied: 1,
             publication: OnceLock::new(),
+                native_parent: OnceLock::new(),
         }];
         service.write_agent_patch_file(scope.owner_id(), &files[0], &files[0].after,
             Some(&files[0].before), None, &root.to_string_lossy(), &scope.authority()).await.unwrap();
@@ -4909,6 +5342,10 @@ mod tests {
             }).unwrap_err();
         assert!(published);
         assert!(file_write_outcome_unknown(&error));
+        let AppError::Internal(message) = &error else { panic!("cleanup uncertainty must retain its typed marker") };
+        let bounded = message.chars().take(128).collect::<String>();
+        assert!(bounded.contains("raw_os_error=Some(32)"), "{bounded}");
+        assert!(bounded.contains("kind="), "{bounded}");
         assert_eq!(fs::read(&target).unwrap(), b"new");
         assert!(!temporary.exists());
         drop(locker);
@@ -5993,8 +6430,9 @@ mod tests {
         fs::create_dir(&foreign).unwrap();
         fs::write(target.join("old.txt"), b"original").unwrap();
         fs::write(foreign.join("keep.txt"), b"foreign").unwrap();
+        let canonical = fs::canonicalize(&target).unwrap();
         let mut swapped = false;
-        let result = remove_entry_sync_with_hook(&target, || {
+        let result = remove_entry_sync_with_hook(&canonical, || {
             let rename = if posix {
                 crate::windows_test_support::rename_with_posix_semantics(&target, &retained, false)
             } else { fs::rename(&target, &retained) };
@@ -6032,8 +6470,9 @@ mod tests {
         let foreign = fixture.path().join("foreign.txt");
         fs::write(&target, b"delete me").unwrap();
         fs::write(&foreign, b"keep me").unwrap();
+        let canonical = fs::canonicalize(&target).unwrap();
         let mut swapped = false;
-        let result = remove_entry_sync_with_hook(&target, || {
+        let result = remove_entry_sync_with_hook(&canonical, || {
             let rename = if posix {
                 crate::windows_test_support::rename_with_posix_semantics(&target, &original, false)
             } else {

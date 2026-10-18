@@ -7,7 +7,7 @@ examples, including help, create, render, edit, and close commands.
 
 ## Inside NomiFun
 
-Use an already-authorized `workspace.process/exec` or `workspace.process/start`
+Use an already-authorized `workspace.process/start`
 tool with `component=officecli` and literal `args`. The current tool catalogue
 provides its exact callable name. Choose exactly one of `component`, `command`
 or `cmd`; an Office component call uses neither `command` nor `cmd`.
@@ -43,7 +43,7 @@ checks. Release builds ignore this override.
 
 Inside NomiFun, every bare `officecli` example represents an argument list for
 `component=officecli`. Pass the tokens after `officecli` as separate literal
-`args` to the authorized `workspace.process/exec` tool:
+`args` to the authorized `workspace.process/start` tool:
 
 ```json
 {"component":"officecli","args":["help","docx","paragraph"]}

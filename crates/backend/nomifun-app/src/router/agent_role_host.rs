@@ -126,6 +126,8 @@ pub(crate) enum RoleHostError {
     ResourceIdentityMismatch,
     StaleObservationGeneration,
     UnsupportedInput(String),
+    #[cfg(windows)]
+    InputNotApplied(String),
     #[cfg(feature = "computer-use")]
     PermissionRequired(nomi_computer::permissions::MissingComputerPermissions),
     ProviderUnavailable,
@@ -146,6 +148,8 @@ impl RoleHostError {
             Self::ResourceIdentityMismatch => "ROLE_HOST_RESOURCE_IDENTITY_MISMATCH",
             Self::StaleObservationGeneration => "ROLE_HOST_STALE_OBSERVATION_GENERATION",
             Self::UnsupportedInput(_) => "ROLE_HOST_UNSUPPORTED_INPUT",
+            #[cfg(windows)]
+            Self::InputNotApplied(_) => "ROLE_HOST_INPUT_NOT_APPLIED",
             #[cfg(feature = "computer-use")]
             Self::PermissionRequired(_) => "SYSTEM_PERMISSION_REQUIRED",
             Self::ProviderUnavailable => "ROLE_HOST_PROVIDER_UNAVAILABLE",
@@ -191,6 +195,8 @@ impl fmt::Display for RoleHostError {
                     "computer input was rejected before native effects: {message}"
                 )
             }
+            #[cfg(windows)]
+            Self::InputNotApplied(message) => write!(formatter, "computer input was not executed: {message}"),
             #[cfg(feature = "computer-use")]
             Self::PermissionRequired(missing) => {
                 write!(formatter, "{}", serde_json::json!({
@@ -830,6 +836,8 @@ mod computer {
                             "unsupported computer/input native operation",
                         ));
                     }
+                    #[cfg(windows)]
+                    let focus_request = request.action == "focus_window";
                     input.insert(
                         "action".to_owned(),
                         serde_json::Value::String(request.action),
@@ -858,7 +866,15 @@ mod computer {
                         if nomi_computer::tool::is_proven_unsupported_input_rejection(&result) {
                             return Err(RoleHostError::UnsupportedInput(result.content));
                         }
+                        #[cfg(windows)]
+                        if focus_request && nomi_computer::tool::is_proven_not_applied_focus_rejection(&result) {
+                            return Err(RoleHostError::InputNotApplied(result.content));
+                        }
                         if nomi_computer::tool::is_proven_stale_input_rejection(&result) {
+                            return Err(RoleHostError::StaleObservationGeneration);
+                        }
+                        #[cfg(windows)]
+                        if crate::windows_computer::is_proven_observation_rejection(&result) {
                             return Err(RoleHostError::StaleObservationGeneration);
                         }
                         return Err(RoleHostError::ProviderFailure(result.content));
@@ -904,8 +920,8 @@ pub(crate) use computer::{
     ComputerInput, ComputerLaunch, ComputerObserve, ComputerRoleHost, ComputerRoleOperation,
 };
 
-#[cfg(all(test, feature = "computer-use"))]
-use computer::ComputerToolPort;
+#[cfg(all(feature = "computer-use", any(test, windows)))]
+pub(crate) use computer::ComputerToolPort;
 
 #[cfg(feature = "computer-use")]
 pub(crate) struct ComputerRoleInvoker {
@@ -920,6 +936,8 @@ impl ComputerRoleInvoker {
         tool: Arc<nomi_computer::tool::ComputerTool>,
         effect_store: nomifun_agent_session::AgentSessionStore,
     ) -> Self {
+        #[cfg(windows)]
+        let tool: Arc<dyn computer::ComputerToolPort> = Arc::new(crate::windows_computer::WindowsComputerPort::new(tool));
         Self {
             target: Arc::new(computer::ComputerTargetOwner::new(tool)),
             effect_store,
@@ -1194,12 +1212,19 @@ mod tests {
     #[cfg(feature = "computer-use")]
     const UNSUPPORTED_INPUT_FIXTURE_RESULT: &str = "COMPUTER_INPUT_UNSUPPORTED_NO_EFFECT: set_element_value was rejected before native mutation. No pointer or keyboard fallback was admitted.";
 
+    #[cfg(all(feature = "computer-use", windows))]
+    const FOCUS_NOT_APPLIED_FIXTURE_RESULT: &str = "COMPUTER_FOCUS_NOT_APPLIED: Windows denied SetForegroundWindow before any restore, show, UIA or synthetic input. The OS foreground lock requires a real activation condition, such as the user activating NomiFun. No native focus effect was applied; acquire a fresh observation before a new call.";
+
     #[cfg(feature = "computer-use")]
     #[derive(Clone, Copy)]
     enum InputEffectFixtureReply {
         UnsupportedBeforeEffect,
         BackendAfterEffect,
         UnsupportedHintAfterEffect,
+        #[cfg(windows)]
+        WindowsFocusNotApplied,
+        #[cfg(windows)]
+        WindowsFocusAcknowledgementUnknown,
     }
 
     #[cfg(feature = "computer-use")]
@@ -1222,7 +1247,8 @@ mod tests {
             _: serde_json::Value,
         ) -> nomi_types::tool::ToolResult {
             use std::sync::atomic::Ordering;
-            if action_id == nomi_computer::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID {
+            if action_id == nomi_computer::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID
+                || action_id == nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID {
                 return nomi_types::tool::ToolResult::text("fixture observation: [7] textfield");
             }
             assert_eq!(
@@ -1243,6 +1269,15 @@ mod tests {
                 InputEffectFixtureReply::UnsupportedHintAfterEffect => {
                     self.native_effects.fetch_add(1, Ordering::SeqCst);
                     nomi_types::tool::ToolResult::error(format!("native mutation already ran; backend hint: {UNSUPPORTED_INPUT_FIXTURE_RESULT}"))
+                }
+                #[cfg(windows)]
+                InputEffectFixtureReply::WindowsFocusNotApplied => {
+                    nomi_types::tool::ToolResult::error(FOCUS_NOT_APPLIED_FIXTURE_RESULT)
+                }
+                #[cfg(windows)]
+                InputEffectFixtureReply::WindowsFocusAcknowledgementUnknown => {
+                    self.native_effects.fetch_add(1, Ordering::SeqCst);
+                    nomi_types::tool::ToolResult::error("Windows accepted foreground activation but the bounded native acknowledgement failed; the effect may have occurred. Do not automatically retry.")
                 }
             }
         }
@@ -2022,8 +2057,14 @@ mod tests {
             let source = self.call(key, &operation).await;
             let typed = match operation {
                 ComputerRoleOperation::Observe(request) => {
-                    Wave2TypedCapabilityOperation::ComputerA11yObserve {
-                        input: StrictJsonValue(request.input),
+                    if request.action_id == nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID {
+                        Wave2TypedCapabilityOperation::ComputerObserve {
+                            input: StrictJsonValue(request.input),
+                        }
+                    } else {
+                        Wave2TypedCapabilityOperation::ComputerA11yObserve {
+                            input: StrictJsonValue(request.input),
+                        }
                     }
                 }
                 ComputerRoleOperation::Input(request) => {
@@ -2364,7 +2405,16 @@ mod tests {
                 InputEffectFixtureReply::UnsupportedHintAfterEffect,
                 false,
             ),
+            #[cfg(windows)]
+            ("windows-focus-not-applied", InputEffectFixtureReply::WindowsFocusNotApplied, true),
+            #[cfg(windows)]
+            ("windows-focus-unknown", InputEffectFixtureReply::WindowsFocusAcknowledgementUnknown, false),
         ] {
+            let focus_input = match reply {
+                #[cfg(windows)]
+                InputEffectFixtureReply::WindowsFocusNotApplied | InputEffectFixtureReply::WindowsFocusAcknowledgementUnknown => true,
+                _ => false,
+            };
             let fixture = CanonicalComputerFixture::new(key).await;
             let tool = Arc::new(InputEffectComputerPort {
                 reply,
@@ -2378,7 +2428,10 @@ mod tests {
                     &invoker,
                     state.clone(),
                     "observe-before-input",
-                    ComputerRoleOperation::Observe(computer_observe()),
+                    ComputerRoleOperation::Observe(if focus_input {
+                        ComputerObserve { action_id: nomi_computer::capability::COMPUTER_OBSERVE_ACTION_ID,
+                            input: serde_json::json!({"action":"list_windows"}) }
+                    } else { computer_observe() }),
                 )
                 .await
                 .unwrap();
@@ -2390,17 +2443,23 @@ mod tests {
                     state.clone(),
                     "input-once",
                     ComputerRoleOperation::Input(ComputerInput {
-                        action: "set_element_value".to_owned(),
-                        parameters: serde_json::json!({"ref":7,"text":"complete replacement"}),
+                        action: if focus_input { "focus_window" } else { "set_element_value" }.to_owned(),
+                        parameters: if focus_input { serde_json::json!({"window_id":42}) } else { serde_json::json!({"ref":7,"text":"complete replacement"}) },
                         expected_generation: generation,
                     }),
                 )
                 .await;
             if rejected_before_effect {
-                assert_eq!(
-                    input.unwrap_err(),
-                    RoleHostError::UnsupportedInput(UNSUPPORTED_INPUT_FIXTURE_RESULT.to_owned())
-                );
+                #[cfg(windows)]
+                if focus_input {
+                    assert_eq!(input.as_ref().unwrap_err(), &RoleHostError::InputNotApplied(FOCUS_NOT_APPLIED_FIXTURE_RESULT.into()));
+                }
+                if !focus_input {
+                    assert_eq!(
+                        input.unwrap_err(),
+                        RoleHostError::UnsupportedInput(UNSUPPORTED_INPUT_FIXTURE_RESULT.to_owned())
+                    );
+                }
                 assert_eq!(
                     tool.native_effects.load(Ordering::SeqCst),
                     0,
@@ -2491,7 +2550,7 @@ mod tests {
                     .any(|event| event.kind.0 == "effect/uncertain"));
                 assert_eq!(
                     effect.bounded_observation.as_ref().unwrap()["error"]["code"],
-                    "ROLE_HOST_UNSUPPORTED_INPUT"
+                    if focus_input { "ROLE_HOST_INPUT_NOT_APPLIED" } else { "ROLE_HOST_UNSUPPORTED_INPUT" }
                 );
             }
             // Any admitted input consumes the observation, including a proven
@@ -2503,8 +2562,8 @@ mod tests {
                         &host,
                         "old-token-after-refusal",
                         ComputerRoleOperation::Input(ComputerInput {
-                            action: "set_element_value".to_owned(),
-                            parameters: serde_json::json!({"ref":7,"text":"must not execute"}),
+                            action: if focus_input { "focus_window" } else { "set_element_value" }.to_owned(),
+                            parameters: if focus_input { serde_json::json!({"window_id":42}) } else { serde_json::json!({"ref":7,"text":"must not execute"}) },
                             expected_generation: generation,
                         }),
                     )

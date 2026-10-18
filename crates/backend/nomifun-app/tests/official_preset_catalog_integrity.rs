@@ -110,8 +110,8 @@ fn official_preset_action_safety_matrix_is_exact() {
     // Independent release expectations describe the complete supported tasks.
     // Reading the seed or production catalog to build this matrix would let a
     // missing default Action silently weaken both sides of the assertion.
-    const FILES: &[&str] = &["workspace.files/delete", "workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"];
-    const PROCESS: &[&str] = &["workspace.process/cancel", "workspace.process/close_stdin", "workspace.process/exec", "workspace.process/input", "workspace.process/poll", "workspace.process/resize", "workspace.process/start"];
+    const FILES: &[&str] = &["workspace.files/delete", "workspace.files/patch", "workspace.files/read", "workspace.files/rename", "workspace.files/search", "workspace.files/write"];
+    const PROCESS: &[&str] = &["workspace.process/cancel", "workspace.process/close_stdin", "workspace.process/input", "workspace.process/poll", "workspace.process/resize", "workspace.process/start"];
     const ARTIFACTS: &[&str] = &["workspace.artifacts/publish", "workspace.artifacts/read"];
     const VCS: &[&str] = &["workspace.vcs/commit", "workspace.vcs/diff", "workspace.vcs/push", "workspace.vcs/stage", "workspace.vcs/status"];
     const PROJECT_MEMORY: &[&str] = &["project.memory/read", "project.memory/write"];
@@ -137,7 +137,10 @@ fn official_preset_action_safety_matrix_is_exact() {
         "session.management/terminal_relaunch", "session.management/terminal_stop",
     ];
     let mut expected = BTreeMap::from([
-        (OfficialPresetKey::ChatMinimal, actions(&[])),
+        (OfficialPresetKey::ChatMinimal, actions(&[
+            ("workspace.files", FILES),
+            ("workspace.process", PROCESS),
+        ])),
         (OfficialPresetKey::AssistantGeneral, actions(&[
             ("model.management", &["model.management/add_model", "model.management/create_provider", "model.management/inspect"]),
             ("knowledge", KNOWLEDGE),
@@ -255,8 +258,17 @@ fn official_preset_action_safety_matrix_is_exact() {
     }
 
     let minimal = &manifest.templates[&OfficialPresetKey::ChatMinimal];
-    assert!(minimal.required_resource_kinds.is_empty());
+    assert_eq!(minimal.required_resource_kinds.iter().map(|kind| kind.as_ref()).collect::<BTreeSet<_>>(),
+        BTreeSet::from(["process_session", "workspace"]));
     assert!(minimal.required_runtime_features.is_empty());
+    let registration=nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
+    let process=registration.metadata.manifest.payload.contributions.capabilities.into_iter()
+        .find(|capability|capability.id.as_ref()=="workspace.process").unwrap();
+    let start=process.contributions.actions.iter().find(|action|action.action_id.as_ref()=="workspace.process/start").unwrap();
+    let launch=nomifun_agent_domain_wave2::resolve_action_schema("workspace.process",&start.input_schema).unwrap();
+    assert!(launch.0["properties"]["timeout_ms"].get("default").is_none(),"published launch has no implicit process deadline");
+    assert!(launch.0["properties"]["timeout_ms"].get("maximum").is_none(),"an explicit long workload deadline is not a human-wait budget");
+    assert_eq!(launch.0["properties"]["wait_ms"]["default"],1000);
     let coding = &manifest.templates[&OfficialPresetKey::CodingCodex];
     assert!(coding.enabled_capabilities.iter().all(|selection| {
         !matches!(selection.capability.id.as_ref(), "browser" | "computer")
@@ -778,7 +790,10 @@ fn official_session_resources(
 ) -> serde_json::Value {
     let resource = |kind: &str, id: &str| serde_json::json!({"resource_kind": kind, "resource_id": id});
     match template_key {
-        "chat.minimal" => serde_json::json!([]),
+        "chat.minimal" => serde_json::json!([
+            resource("process_session", "managed-process-session"),
+            resource("workspace", "default-workspace"),
+        ]),
         "assistant.general" => serde_json::json!([
             resource("asset_library", "creative-studio-assets"),
             resource("browser", "managed-browser"),

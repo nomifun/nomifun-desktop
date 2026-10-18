@@ -566,6 +566,45 @@ impl ProcessSupervisor {
             .map(|terminal| session.outcome(&terminal, cursor)))
     }
 
+    /// Subscribe before inspecting output. The exact owner's retained buffer
+    /// is observed without an API action, lease renewal or another stdout reader.
+    pub fn output_changes(
+        &self,
+        owner: &ProcessOwner,
+        session_id: &SessionId,
+    ) -> Result<tokio::sync::watch::Receiver<u64>, ProcessError> {
+        Ok(self.inspect_session(owner, session_id)?.output.subscribe_changes())
+    }
+
+    /// Read new retained output or a frozen terminal without renewing any
+    /// process deadline or idle lease. A still-draining exit is not a terminal.
+    pub fn observe_if_changed(
+        &self,
+        owner: &ProcessOwner,
+        session_id: &SessionId,
+        cursor: OutputCursor,
+        include_output: bool,
+    ) -> Result<Option<PollResult>, ProcessError> {
+        let session = self.inspect_session(owner, session_id)?;
+        if let Some(terminal) = session.terminal() {
+            return Ok(Some(PollResult::Finished(session.outcome(&terminal, cursor))));
+        }
+        if include_output && session.exit_observation().is_none() {
+            let output = session.output.snapshot_from(cursor);
+            if output.next_cursor > cursor {
+                return Ok(Some(PollResult::Running { snapshot: session.snapshot(), output }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn inspect_session(&self, owner: &ProcessOwner, session_id: &SessionId) -> Result<Arc<Session>, ProcessError> {
+        self.registry.inspect(session_id, owner).map_err(|error| match error {
+            LookupError::NotFound => ProcessError::SessionNotFound { session_id: *session_id },
+            LookupError::OwnerMismatch => ProcessError::OwnerMismatch { session_id: *session_id },
+        })
+    }
+
     pub async fn poll(
         &self,
         owner: &ProcessOwner,
@@ -3246,6 +3285,35 @@ mod tests {
         assert!(fake.writes().is_empty());
         assert_eq!(fake.close_call_count(), 0);
         assert!(fake.signal_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn owner_output_observation_replays_cursor_without_renewing_idle_lease() {
+        let lease = Duration::from_millis(20);
+        let (supervisor, handle, _, output) = register_fake_with_policy(
+            FakeOwner::reaps_on(FakeSignal::Interrupt, 0), ProcessPolicy { lease, ..Default::default() },
+        ).await;
+        let before = supervisor.inspect_session(&handle.owner, &handle.session_id).unwrap().snapshot().last_activity_at;
+        let mut changes = supervisor.output_changes(&handle.owner, &handle.session_id).unwrap();
+        output.push(OutputStream::Stdout, b"verification-link");
+        changes.changed().await.unwrap();
+        assert!(supervisor.observe_if_changed(&handle.owner, &handle.session_id, OutputCursor::START, false).unwrap().is_none(),
+            "a human wait must not wake for output alone");
+        for _ in 0..3 {
+            let Some(PollResult::Running { output, .. }) = supervisor.observe_if_changed(
+                &handle.owner, &handle.session_id, OutputCursor::START, true,
+            ).unwrap() else { panic!("new output must be visible to an output wait") };
+            assert_eq!(output.raw_bytes(), b"verification-link");
+            assert!(supervisor.observe_if_changed(&handle.owner, &handle.session_id, output.next_cursor, true).unwrap().is_none());
+        }
+        let foreign = ProcessOwner::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7());
+        assert!(supervisor.observe_if_changed(&foreign, &handle.session_id, OutputCursor::START, true).is_err());
+        assert!(supervisor.output_changes(&foreign, &handle.session_id).is_err());
+        let after = supervisor.inspect_session(&handle.owner, &handle.session_id).unwrap().snapshot().last_activity_at;
+        assert_eq!(before, after, "observations must not count as process activity");
+        assert_eq!(supervisor.registry.claim_expired(handle.started_at + lease).len(), 1,
+            "observations and subscriptions must not extend the idle lease");
+        supervisor.shutdown().await;
     }
 
     #[tokio::test(start_paused = true)]

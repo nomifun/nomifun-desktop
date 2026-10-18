@@ -34,6 +34,8 @@ pub enum SessionStoreError {
     InvalidSession(String),
     #[error("session conflict: {0}")]
     Conflict(String),
+    #[error("NATIVE_MUTATION_TARGET_UNSETTLED: native file target overlaps or cannot be proven disjoint from Effect {effect_id} ({state})")]
+    NativeMutationTargetUnsettled { effect_id: String, state: String },
     #[error("native checkpoint deferred until current effects are settled")]
     CheckpointNotQuiescent,
     #[error("native execution producer no longer owns this Turn")]
@@ -55,6 +57,7 @@ impl SessionStoreError {
             Self::InvalidEvent(_) => Some(INVALID_SESSION_EVENT),
             Self::InvalidPayload(_) => Some(INVALID_PAYLOAD),
             Self::InvalidSession(_) => Some(INVALID_SESSION),
+            Self::NativeMutationTargetUnsettled { .. } => Some("NATIVE_MUTATION_TARGET_UNSETTLED"),
             Self::Contract { code, .. } => Some(match code.as_ref() {
                 "SESSION_DELETED" => SESSION_DELETED,
                 "SNAPSHOT_EXECUTOR_UNAVAILABLE" => "SNAPSHOT_EXECUTOR_UNAVAILABLE",

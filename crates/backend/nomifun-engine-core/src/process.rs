@@ -2,7 +2,7 @@
 //!
 //! This module does not expose a model Tool and is not called directly by the
 //! engine turn loop. The application-owned Wave2/Kernel host adapter may use
-//! it to implement `workspace.process/exec` and interactive process-session actions
+//! it to implement bounded `workspace.process/start` and process-session actions
 //! without duplicating process ownership.
 
 use std::collections::{BTreeMap, HashMap};
@@ -23,8 +23,6 @@ use uuid::Uuid;
 
 use crate::error::EngineProcessError;
 
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-const MAX_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COMMAND_CHARS: usize = 32 * 1024;
@@ -67,8 +65,8 @@ pub struct EngineProcessRequest {
     pub cwd: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    #[serde(default = "default_timeout_ms")]
-    pub timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
     #[serde(default = "default_output_limit_bytes")]
     pub output_limit_bytes: usize,
     pub transport: EngineProcessTransport,
@@ -83,7 +81,7 @@ impl EngineProcessRequest {
             args: Vec::new(),
             cwd: None,
             env: BTreeMap::new(),
-            timeout_ms: DEFAULT_TIMEOUT_MS,
+            timeout_ms: None,
             output_limit_bytes: DEFAULT_OUTPUT_LIMIT_BYTES,
             transport: EngineProcessTransport::Pipe,
         }
@@ -130,10 +128,8 @@ impl EngineProcessRequest {
                 "process environment contains an invalid or oversized entry".to_owned(),
             ));
         }
-        if !(1..=MAX_TIMEOUT_MS).contains(&self.timeout_ms) {
-            return Err(EngineProcessError::Process(format!(
-                "timeout_ms must be between 1 and {MAX_TIMEOUT_MS}"
-            )));
+        if self.timeout_ms.is_some_and(|timeout| timeout==0 || Instant::now().checked_add(Duration::from_millis(timeout)).is_none()) {
+            return Err(EngineProcessError::Process("timeout_ms must be positive and fit the native monotonic clock".into()));
         }
         if self.output_limit_bytes == 0 || self.output_limit_bytes > MAX_OUTPUT_LIMIT_BYTES {
             return Err(EngineProcessError::Process(format!(
@@ -370,13 +366,14 @@ impl ManagedEngineProcessOwner {
         settle_pending_starts_from_fence(&mut tracked, &report) && system_proven.unwrap_or(true)
     }
 
-    pub async fn execute(
+    #[cfg(test)]
+    async fn run_to_terminal(
         &self,
         request: EngineProcessRequest,
         cancellation: CancellationToken,
     ) -> Result<EngineProcessPoll, EngineProcessError> {
         let mut session = self.start(request, cancellation.clone()).await?;
-        self.wait(&mut session, cancellation).await
+        self.await_terminal(&mut session, cancellation).await
     }
 
     pub async fn poll(
@@ -387,6 +384,22 @@ impl ManagedEngineProcessOwner {
     ) -> Result<EngineProcessPoll, EngineProcessError> {
         self.poll_from(session, session.cursor(), wait, cancellation)
             .await
+    }
+
+    /// The single launch observation is bounded independently of the process
+    /// lifetime. Short commands can finish; a live process always returns its handle.
+    pub async fn initial_observation(&self, session: &mut EngineProcessSession, wait: Duration,
+        cancellation: CancellationToken) -> Result<EngineProcessPoll, EngineProcessError> {
+        if session.system.is_some() {
+            return crate::system_process::initial_observation(session, wait.min(MAX_POLL_WAIT), cancellation).await;
+        }
+        if cancellation.is_cancelled() { return self.cancel(session).await; }
+        let poll = self.supervisor.poll(&session.owner, &session.session_id, OutputCursor::START, Instant::now() + wait.min(MAX_POLL_WAIT));
+        let result = tokio::select! {
+            _ = cancellation.cancelled() => return self.cancel(session).await,
+            result = poll => result.map_err(process_error)?,
+        };
+        Ok(self.convert_poll(session, result))
     }
 
     pub async fn poll_from(
@@ -416,7 +429,8 @@ impl ManagedEngineProcessOwner {
         Ok(self.convert_poll(session, result))
     }
 
-    pub async fn wait(
+    #[cfg(test)]
+    async fn await_terminal(
         &self,
         session: &mut EngineProcessSession,
         cancellation: CancellationToken,
@@ -508,6 +522,39 @@ impl ManagedEngineProcessOwner {
         self.terminal_if_ready(session)
     }
 
+    /// A read-only output subscription for this exact live owner. Remote
+    /// system execution uses its bounded native observation RPC instead.
+    pub fn output_changes(&self, session: &EngineProcessSession)
+        -> Result<Option<tokio::sync::watch::Receiver<u64>>, EngineProcessError> {
+        if session.system.is_some() { return Ok(None); }
+        let terminal_ready = || session.terminal.as_ref().and_then(|terminal| terminal.terminal(session.cursor)).is_some();
+        if terminal_ready() { return Ok(None); }
+        match self.supervisor.output_changes(&session.owner, &session.session_id) {
+            Ok(changes) => Ok(Some(changes)),
+            Err(_) if terminal_ready() => Ok(None),
+            Err(error) => Err(process_error(error)),
+        }
+    }
+
+    /// Observe the original cursor without consuming output, renewing a lease,
+    /// or authorizing I/O. Frozen terminals stay readable after registry eviction.
+    pub async fn observe_if_changed(&self, session: &mut EngineProcessSession, cursor: u64,
+        include_output: bool, cancellation: CancellationToken) -> Result<Option<EngineProcessPoll>, EngineProcessError> {
+        if cancellation.is_cancelled() { return Err(EngineProcessError::Cancelled); }
+        if session.system.is_some() {
+            return crate::system_process::observe_if_changed(session, cursor, include_output, cancellation).await;
+        }
+        let saved_cursor = session.cursor;
+        let result = if let Some(outcome) = session.terminal.as_ref().and_then(|terminal| terminal.terminal(OutputCursor::new(cursor))) {
+            Some(self.convert_outcome(session, outcome))
+        } else {
+            self.supervisor.observe_if_changed(&session.owner, &session.session_id, OutputCursor::new(cursor), include_output)
+                .map_err(process_error)?.map(|poll| self.convert_poll(session, poll))
+        };
+        session.cursor = saved_cursor;
+        Ok(result)
+    }
+
     pub async fn close_stdin(
         &self,
         session: &EngineProcessSession,
@@ -560,15 +607,16 @@ impl ManagedEngineProcessOwner {
         &self,
         request: EngineProcessRequest,
     ) -> Result<NormalizedProcessRequest, EngineProcessError> {
-        let timeout = Duration::from_millis(request.timeout_ms);
+        let timeout = request.timeout_ms.map(Duration::from_millis);
         let transport = match request.transport {
             EngineProcessTransport::Pipe => Transport::Pipe,
             EngineProcessTransport::Pty { cols, rows } => Transport::Pty { cols, rows },
         };
         let mut policy = ProcessPolicy::default();
         policy.output_limit_bytes = request.output_limit_bytes;
-        policy.lease = timeout.saturating_add(Duration::from_secs(60));
-        policy.deadline = Some(Instant::now() + timeout);
+        policy.expire_on_idle = false;
+        policy.deadline = timeout.map(|timeout| Instant::now().checked_add(timeout)
+            .ok_or_else(||EngineProcessError::Process("process deadline overflows the native monotonic clock".into()))).transpose()?;
         let request = ProcessRequest {
             owner: ProcessOwner::new(Uuid::now_v7(), Uuid::now_v7()),
             command: match request.shell_script {
@@ -715,10 +763,6 @@ fn process_error(error: ProcessError) -> EngineProcessError {
     EngineProcessError::Process(format!("{}: {error}", error.code()))
 }
 
-const fn default_timeout_ms() -> u64 {
-    DEFAULT_TIMEOUT_MS
-}
-
 const fn default_output_limit_bytes() -> usize {
     DEFAULT_OUTPUT_LIMIT_BYTES
 }
@@ -726,6 +770,49 @@ const fn default_output_limit_bytes() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_process_policy_has_no_implicit_deadline_or_idle_expiry() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = ManagedEngineProcessOwner::new(root.path(),SupervisorConfig::default()).unwrap();
+        for timeout_ms in [1,30_000,24*60*60*1000] {
+            let mut request = EngineProcessRequest::pipe(if cfg!(windows) {"cmd.exe"} else {"/bin/sh"});
+            request.timeout_ms = Some(timeout_ms);
+            let policy = owner.normalized_request(request).unwrap().policy;
+            assert!(!policy.expire_on_idle);
+            assert!(policy.deadline.is_some());
+        }
+        let request = EngineProcessRequest::pipe(if cfg!(windows) {"cmd.exe"} else {"/bin/sh"});
+        let policy = owner.normalized_request(request).unwrap().policy;
+        assert!(policy.deadline.is_none());
+        assert!(!policy.expire_on_idle, "Session ownership, not idle activity, retains background processes");
+        let mut request=EngineProcessRequest::pipe(if cfg!(windows) {"cmd.exe"} else {"/bin/sh"});
+        request.timeout_ms=Some(0);
+        assert!(request.validate().is_err());
+        request.timeout_ms=Some(u64::MAX);
+        let fits=Instant::now().checked_add(Duration::from_millis(u64::MAX)).is_some();
+        match owner.normalized_request(request) {
+            Ok(normalized)=>assert!(fits && normalized.policy.deadline.is_some(),"an explicit deadline cannot silently become infinite"),
+            Err(_)=>assert!(!fits,"only native clock overflow rejects a positive explicit lifetime"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_process_remains_live_through_idle_reaper_cycles_without_observation() {
+        let root=tempfile::tempdir().unwrap();
+        let owner=ManagedEngineProcessOwner::new(root.path(),SupervisorConfig {max_sessions:1,reaper_interval:Duration::from_millis(5)}).unwrap();
+        let mut native=owner.normalized_request(EngineProcessRequest::shell("IFS= read -r answer; printf 'ANSWER:%s' \"$answer\"")).unwrap();
+        native.policy.lease=Duration::from_millis(10);
+        let handle=owner.supervisor.start(native).await.unwrap();
+        let mut session=EngineProcessSession {terminal:Some(handle.terminal_witness()),system:None,owner:handle.owner,session_id:handle.session_id,pid:handle.pid,cursor:OutputCursor::START};
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let observed=owner.poll(&mut session,Duration::ZERO,CancellationToken::new()).await.unwrap();
+        assert!(matches!(observed,EngineProcessPoll::Running {..}));
+        owner.write_stdin(&session,b"retained\n",CancellationToken::new()).await.unwrap();
+        let terminal=owner.await_terminal(&mut session,CancellationToken::new()).await.unwrap();
+        assert!(matches!(terminal,EngineProcessPoll::Exited {exit_code:Some(0),output,cleanup,..} if output.text=="ANSWER:retained" && cleanup.reaped));
+    }
 
     #[tokio::test]
     async fn owned_terminal_witness_survives_idle_lease_retirement() {
@@ -742,9 +829,10 @@ mod tests {
             request.args = vec!["-c".into(), "printf LEASE_TERMINAL".into()];
             request
         };
-        request.timeout_ms = 5000;
+        request.timeout_ms = Some(5000);
         let mut native = owner.normalized_request(request).unwrap();
         native.policy.lease = Duration::from_secs(2);
+        native.policy.expire_on_idle = true;
         let handle = owner.supervisor.start(native).await.unwrap();
         let mut session = EngineProcessSession { terminal:Some(handle.terminal_witness()), system:None, owner:handle.owner, session_id:handle.session_id, pid:handle.pid, cursor:OutputCursor::START };
         let original = tokio::time::timeout(Duration::from_secs(1), async {
@@ -886,7 +974,7 @@ mod tests {
             args,
             cwd: None,
             env: BTreeMap::new(),
-            timeout_ms: 10_000,
+            timeout_ms: Some(10_000),
             output_limit_bytes: 64 * 1024,
             transport: EngineProcessTransport::Pipe,
         }
@@ -918,7 +1006,7 @@ mod tests {
             args,
             cwd: None,
             env: BTreeMap::new(),
-            timeout_ms: 10_000,
+            timeout_ms: Some(10_000),
             output_limit_bytes: 64 * 1024,
             transport: EngineProcessTransport::Pipe,
         }
@@ -946,7 +1034,7 @@ mod tests {
             args,
             cwd: None,
             env: BTreeMap::new(),
-            timeout_ms: 10_000,
+            timeout_ms: Some(10_000),
             output_limit_bytes: 64 * 1024,
             transport: EngineProcessTransport::Pipe,
         }
@@ -987,7 +1075,7 @@ mod tests {
             args,
             cwd: None,
             env: BTreeMap::new(),
-            timeout_ms: 60_000,
+            timeout_ms: Some(60_000),
             output_limit_bytes: 64 * 1024,
             transport: EngineProcessTransport::Pipe,
         }
@@ -1018,7 +1106,7 @@ mod tests {
             args,
             cwd: None,
             env: BTreeMap::new(),
-            timeout_ms: 10_000,
+            timeout_ms: Some(10_000),
             output_limit_bytes: 256,
             transport: EngineProcessTransport::Pipe,
         }
@@ -1034,7 +1122,7 @@ mod tests {
             .await
             .unwrap();
         let outcome = owner
-            .wait(&mut session, CancellationToken::new())
+            .await_terminal(&mut session, CancellationToken::new())
             .await
             .unwrap();
         let EngineProcessPoll::Exited {
@@ -1058,8 +1146,8 @@ mod tests {
         let owner = ManagedEngineProcessOwner::new(directory.path(), SupervisorConfig::default()).unwrap();
         let mut request = EngineProcessRequest::pipe("bun");
         request.args = vec!["--version".into()];
-        request.timeout_ms = 10_000;
-        let outcome = owner.execute(request, CancellationToken::new()).await.unwrap();
+        request.timeout_ms = Some(10_000);
+        let outcome = owner.run_to_terminal(request, CancellationToken::new()).await.unwrap();
         assert!(matches!(outcome, EngineProcessPoll::Exited { exit_code: Some(0), .. }));
     }
 
@@ -1091,7 +1179,7 @@ mod tests {
             let mut request = EngineProcessRequest::pipe("/usr/bin/touch");
             request.args = vec![marker.to_string_lossy().into_owned()];
             let outcome = owner
-                .execute(request, CancellationToken::new())
+                .run_to_terminal(request, CancellationToken::new())
                 .await
                 .unwrap();
             let EngineProcessPoll::Exited {
@@ -1130,7 +1218,7 @@ mod tests {
             .collect();
 
         let outcome = owner
-            .execute(request, CancellationToken::new())
+            .run_to_terminal(request, CancellationToken::new())
             .await
             .unwrap();
         let EngineProcessPoll::Exited {
@@ -1167,7 +1255,7 @@ mod tests {
             let mut request = EngineProcessRequest::pipe("/bin/pwd");
             request.cwd = Some(cwd);
             request.env.insert("TMPDIR".to_owned(), outside.to_string_lossy().into_owned());
-            let EngineProcessPoll::Exited { exit_code, output, cleanup, .. } = owner.execute(request, CancellationToken::new()).await.unwrap() else { panic!("pwd must exit"); };
+            let EngineProcessPoll::Exited { exit_code, output, cleanup, .. } = owner.run_to_terminal(request, CancellationToken::new()).await.unwrap() else { panic!("pwd must exit"); };
             assert_eq!(exit_code, Some(0));
             assert_eq!(std::path::Path::new(output.text.trim()), outside.canonicalize().unwrap());
             assert!(cleanup.reaped);
@@ -1250,7 +1338,7 @@ mod tests {
             ManagedEngineProcessOwner::new(workspace.path(), SupervisorConfig::default()).unwrap();
 
         let sh = owner
-            .execute(
+            .run_to_terminal(
                 EngineProcessRequest::shell("printf 'sh:%s' \"${ZSH_VERSION-unset}\""),
                 CancellationToken::new(),
             )
@@ -1275,7 +1363,7 @@ mod tests {
             "printf 'zsh:%s' \"$ZSH_VERSION\"".to_owned(),
         ];
         let zsh = owner
-            .execute(zsh, CancellationToken::new())
+            .run_to_terminal(zsh, CancellationToken::new())
             .await
             .unwrap();
         let EngineProcessPoll::Exited {
@@ -1307,7 +1395,7 @@ mod tests {
             .unwrap();
         owner.close_stdin(&session).await.unwrap();
         let outcome = owner
-            .wait(&mut session, CancellationToken::new())
+            .await_terminal(&mut session, CancellationToken::new())
             .await
             .unwrap();
         let EngineProcessPoll::Exited { output, .. } = outcome else {
@@ -1326,7 +1414,7 @@ mod tests {
             .await
             .unwrap();
         let first = owner
-            .wait(&mut session, CancellationToken::new())
+            .await_terminal(&mut session, CancellationToken::new())
             .await
             .unwrap();
         let EngineProcessPoll::Exited {
@@ -1382,7 +1470,7 @@ mod tests {
             .unwrap();
         owner.close_stdin(&session).await.unwrap();
         let outcome = owner
-            .wait(&mut session, CancellationToken::new())
+            .await_terminal(&mut session, CancellationToken::new())
             .await
             .unwrap();
         let EngineProcessPoll::Exited { output, .. } = outcome else {
@@ -1410,7 +1498,7 @@ mod tests {
             .unwrap();
         owner.close_stdin(&session).await.unwrap();
         let outcome = owner
-            .wait(&mut session, CancellationToken::new())
+            .await_terminal(&mut session, CancellationToken::new())
             .await
             .unwrap();
         let EngineProcessPoll::Exited { output, .. } = outcome else {
@@ -1429,7 +1517,7 @@ mod tests {
             .await
             .unwrap();
         let first = owner
-            .wait(&mut session, CancellationToken::new())
+            .await_terminal(&mut session, CancellationToken::new())
             .await
             .unwrap();
         let EngineProcessPoll::Exited {
@@ -1488,9 +1576,9 @@ mod tests {
         // Windows job adoption can take longer than 100 ms under a parallel
         // test load; the deadline must exercise the running child, not cancel
         // the start future before it has returned a session.
-        request.timeout_ms = 1_000;
+        request.timeout_ms = Some(1_000);
         let outcome = owner
-            .execute(request, CancellationToken::new())
+            .run_to_terminal(request, CancellationToken::new())
             .await
             .unwrap();
         let EngineProcessPoll::TimedOut { cleanup, .. } = outcome else {
@@ -1505,7 +1593,7 @@ mod tests {
         let owner =
             ManagedEngineProcessOwner::new(directory.path(), SupervisorConfig::default()).unwrap();
         let outcome = owner
-            .execute(long_output_request(), CancellationToken::new())
+            .run_to_terminal(long_output_request(), CancellationToken::new())
             .await
             .unwrap();
         let EngineProcessPoll::Exited { output, .. } = outcome else {
@@ -1523,7 +1611,7 @@ mod tests {
         let owner = ManagedEngineProcessOwner::new(directory.path().join("deleted-default"), Default::default()).unwrap();
         let mut request = EngineProcessRequest::pipe("/bin/pwd");
         request.cwd = Some(directory.path().display().to_string());
-        let outcome = owner.execute(request, CancellationToken::new()).await.unwrap();
+        let outcome = owner.run_to_terminal(request, CancellationToken::new()).await.unwrap();
         let EngineProcessPoll::Exited { exit_code, output, cleanup, .. } = outcome else { panic!("absolute cwd should run") };
         assert_eq!(exit_code, Some(0));
         assert!(cleanup.reaped);
@@ -1543,7 +1631,7 @@ mod tests {
             let program = directory.path().join(name);
             std::fs::write(&program, "#!/bin/sh\nprintf 'literal executable'\n").unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let outcome = owner.execute(EngineProcessRequest::pipe(program.display().to_string()), CancellationToken::new()).await.unwrap();
+            let outcome = owner.run_to_terminal(EngineProcessRequest::pipe(program.display().to_string()), CancellationToken::new()).await.unwrap();
             let EngineProcessPoll::Exited { exit_code, output, cleanup, .. } = outcome else { panic!("literal executable should run") };
             assert_eq!(exit_code, Some(0));
             assert_eq!(output.text, "literal executable");

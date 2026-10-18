@@ -164,6 +164,49 @@ async fn active_waiting_is_atomic_outside_the_event_page_and_survives_projection
 }
 
 #[tokio::test]
+async fn forward_public_waits_use_real_changed_sequences_without_raw_message_or_finish() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();
+    let(session,_)=create_ready(&store,"forward-wait").await;
+    let sid=&session.agent_session_id;let operation=OperationId::from("forward-wait-turn");
+    let(_,start)=store.start_turn(sid,"session_api".into(),"forward-start".into(),operation.clone(),
+        StrictJsonValue(json!({"content":"Authorize"}))).await.unwrap();
+    let start=start.ack.unwrap().event_id;
+    let before=store.current_cursor(sid).await.unwrap().seq;
+    let first=record_wait(&store,sid,&operation,&start,"forward-first",Some("authorization-a")).await;
+    assert!(store.messages_after(sid,before).await.unwrap().is_empty(),"typed waiting appends no raw message or Finish");
+    let first_page=store.messages_with_turns_after(sid,before).await.unwrap();
+    assert_eq!(first_page.len(),1);let first_summary=&first_page[0];
+    assert_eq!(first_summary.presentation_intent,"turn_summary");assert_eq!(first_summary.last_seq,first);
+    assert_eq!(first_summary.projection["turn_outcome"],json!({"kind":"waiting","wait_seq":first,
+        "request_id":"authorization-a","reason":"user_input"}));
+    assert_eq!(first_summary.projection["user_input_request"]["request_id"],"authorization-a");
+    assert_eq!(first_summary.projection["user_input_request"]["question"],"Complete the pending action");
+    assert_eq!(first_summary.projection["state"],"running");
+    assert!(store.messages_with_turns_after(sid,first).await.unwrap().is_empty());
+    let resolved=store.append_event(&append(sid,"forward-resolved","runtime_supervisor","forward-resolved",
+        "runtime/progress-recorded",operation.as_ref(),Some(start.clone()),
+        json!({"producer_seq":3,"event":{"event":"turn_wait_resolved","model_steps":1}}))).await.unwrap().cursor.seq;
+    let resolved_page=store.messages_with_turns_after(sid,first).await.unwrap();
+    assert_eq!(resolved_page.len(),1);assert_eq!(resolved_page[0].last_seq,resolved);
+    assert!(resolved_page[0].projection.get("user_input_request").is_none());
+    assert!(resolved_page[0].projection.get("turn_outcome").is_none());
+    let second=record_wait(&store,sid,&operation,&start,"forward-second",Some("authorization-b")).await;
+    let second_page=store.messages_with_turns_after(sid,resolved).await.unwrap();
+    assert_eq!(second_page.len(),1);assert_eq!(second_page[0].last_seq,second);
+    assert_eq!(second_page[0].projection["user_input_request"]["request_id"],"authorization-b");
+    let history=store.message_history_with_turns_before(sid,None,50).await.unwrap().0;
+    assert_eq!(history.iter().find(|row|row.presentation_intent=="turn_summary").unwrap().projection,second_page[0].projection);
+    let immutable=store.read_events(sid,None,500).await.unwrap();
+    store.rebuild_projections(sid).await.unwrap();
+    assert_eq!(store.messages_with_turns_after(sid,resolved).await.unwrap(),second_page);
+    assert_eq!(store.read_events(sid,None,500).await.unwrap(),immutable);
+    store.cancel_active_turn(sid,"forward-cancel".into(),"session_api".into()).await.unwrap();
+    let terminal_page=store.messages_with_turns_after(sid,second).await.unwrap();
+    assert_eq!(terminal_page.len(),1);assert_eq!(terminal_page[0].projection["turn_outcome"]["kind"],"cancelled");
+    assert!(terminal_page[0].projection.get("user_input_request").is_none());
+}
+
+#[tokio::test]
 async fn turn_outcome_history_attaches_exact_results_without_consuming_raw_page_cursors_or_mutating_facts() {
     let store=AgentSessionStore::open_in_memory().await.unwrap();
     let (session,_)=create_ready(&store,"outcome-page").await;
@@ -194,6 +237,10 @@ async fn turn_outcome_history_attaches_exact_results_without_consuming_raw_page_
     let expected=AgentTurnOutcome::Answered {message_ids:vec![ids[1].clone()]};
     let before=store.read_events(sid,None,500).await.unwrap();
     assert_eq!(store.turn_outcome(sid,&operation).await.unwrap(),Some(expected.clone()));
+    let forward=store.messages_with_turns_after(sid,0).await.unwrap();
+    assert_eq!(forward.iter().filter(|row|row.projection.get("content").and_then(Value::as_str)==Some("Here is the finished explanation.")).count(),1,
+        "derived Turn results do not copy completed assistant bodies");
+    assert_eq!(forward.iter().filter(|row|row.presentation_intent=="turn_summary").count(),1);
     let raw=store.message_history_before(sid,None,500).await.unwrap().0;
     let mut seen=BTreeSet::new();let mut cursor=None;
     loop {

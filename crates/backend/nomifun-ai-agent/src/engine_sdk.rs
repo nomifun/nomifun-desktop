@@ -48,6 +48,7 @@ pub enum EngineProgress {
     ToolCall(ToolCallEventData),
     CanonicalTimeline(Vec<nomifun_agent_contracts::MessageTimelineUpdate>),
     TaskPlanChanged,
+    InputQuestion(crate::protocol::events::InputQuestionEventData),
 }
 
 #[derive(Clone)]
@@ -88,6 +89,7 @@ impl EngineTurnOutput {
             EngineProgress::ToolCall(data) => AgentStreamEvent::ToolCall(data),
             EngineProgress::CanonicalTimeline(data) => AgentStreamEvent::CanonicalTimeline(data),
             EngineProgress::TaskPlanChanged => AgentStreamEvent::TaskPlanChanged,
+            EngineProgress::InputQuestion(request) => AgentStreamEvent::InputQuestion(request),
         };
         let published = self.state.emit_for_turn(self.turn, event);
         if published && !display_only {
@@ -166,8 +168,9 @@ pub trait EngineSessionDriver: Send + Sync {
     ) -> Result<EngineTurnOutcome, AppError>;
 
     /// Required after every exit, including failed/partially cancelled prepare.
-    /// Must join owned effects and prove resources quiescent, not just send kill.
-    async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError>;
+    /// Must join admitted calls and prove resource settlement or Session retention.
+    /// A native pause requires portable quiescence, never retained live handles.
+    async fn cleanup_turn(&self, message: &SendMessageData, terminal: &EngineTurnTerminal) -> Result<(), AppError>;
 
     /// Optional nonterminal quarantine after failed cleanup. True must mean
     /// the host persisted a fenced pause with cleanup explicitly UNPROVEN.
@@ -183,7 +186,7 @@ pub trait EngineSessionDriver: Send + Sync {
 
     /// Idempotent, result-bearing release of all Session-scoped resources.
     /// Failed attempts can be retried, but a dropped waiter is not a retry.
-    async fn cleanup_session(&self) -> Result<(), AppError>;
+    async fn cleanup_session(&self, reason: Option<AgentKillReason>) -> Result<(), AppError>;
 
     fn capability_activation_snapshot(
         &self,
@@ -199,6 +202,14 @@ pub trait EngineSessionDriver: Send + Sync {
         Err(AppError::BadRequest(
             "The selected engine does not support receipt-bound steering".into(),
         ))
+    }
+
+    async fn validate_session_input(&self,_files:Vec<String>,_skills:Vec<String>)->Result<(),AppError> {Err(AppError::Conflict("Runtime does not support Session input preparation".into()))}
+
+    async fn session_input_changed(&self,_retry_input:Option<String>)->Result<(),AppError> {Ok(())}
+
+    async fn admit_steer(&self,_admission:crate::RuntimeSteerAdmission)->Result<crate::RuntimeSteerAdmissionOutcome,AppError> {
+        Err(AppError::BadRequest("The selected engine has no atomic steering admission owner".into()))
     }
 }
 
@@ -359,7 +370,7 @@ impl AgentRuntimeControl for HostedAgentRuntime {
                 cancellation: requested_cancellation.clone(),
                 failure: None,
             });
-            let cleanup = AssertUnwindSafe(shared.driver.cleanup_turn(&message))
+            let cleanup = AssertUnwindSafe(shared.driver.cleanup_turn(&message,&outcome.terminal))
                 .catch_unwind()
                 .await
                 .unwrap_or_else(|_| Err(AppError::Internal("Engine turn cleanup panicked".into())));
@@ -518,7 +529,16 @@ impl OfficialAgentRuntime for HostedAgentRuntime {
         self.shared.driver.queue_steer(delivery).await
     }
 
-    fn kill_and_wait(&self, _reason: Option<AgentKillReason>) -> RuntimeTeardown {
+    async fn validate_session_input(&self,files:Vec<String>,skills:Vec<String>)->Result<(),AppError> {self.shared.driver.validate_session_input(files,skills).await}
+
+    async fn session_input_changed(&self,retry_input:Option<String>)->Result<(),AppError> {self.shared.driver.session_input_changed(retry_input).await}
+
+    async fn admit_steer(&self,admission:crate::RuntimeSteerAdmission)->Result<crate::RuntimeSteerAdmissionOutcome,AppError> {
+        if self.shared.closed.is_cancelled() {return Err(AppError::Conflict("the target Runtime is closed before input admission".into()));}
+        self.shared.driver.admit_steer(admission).await
+    }
+
+    fn kill_and_wait(&self, reason: Option<AgentKillReason>) -> RuntimeTeardown {
         self.shared.closed.cancel();
         let Ok(executor) = tokio::runtime::Handle::try_current() else {
             return Box::pin(async {
@@ -547,7 +567,7 @@ impl OfficialAgentRuntime for HostedAgentRuntime {
                     if let Err(join_error) = joined {
                         // Preserve the existing best-effort resource release
                         // after an abnormal task exit, while retaining failure.
-                        let cleanup = AssertUnwindSafe(driver.cleanup_session()).catch_unwind().await;
+                        let cleanup = AssertUnwindSafe(driver.cleanup_session(reason)).catch_unwind().await;
                         return Err(match cleanup {
                             Ok(Ok(())) => join_error,
                             Ok(Err(error)) => format!("{join_error}; Session cleanup failed: {error}"),
@@ -566,7 +586,7 @@ impl OfficialAgentRuntime for HostedAgentRuntime {
                         // A new explicit teardown flight retries only the retained
                         // cleanup/receipt. The driver is never asked to run_turn again.
                         if !pending.cleanup_proven {
-                            AssertUnwindSafe(driver.cleanup_turn(&pending.message)).catch_unwind().await
+                            AssertUnwindSafe(driver.cleanup_turn(&pending.message,&pending.outcome.terminal)).catch_unwind().await
                                 .map_err(|_|"Engine turn cleanup retry panicked".to_owned())?
                                 .map_err(|error|error.to_string())?;
                             pending.cleanup_proven = true;
@@ -578,7 +598,7 @@ impl OfficialAgentRuntime for HostedAgentRuntime {
                             .map_err(|error|error.to_string())?;
                         *settlement_owner.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = None;
                     }
-                    AssertUnwindSafe(driver.cleanup_session())
+                    AssertUnwindSafe(driver.cleanup_session(reason))
                         .catch_unwind()
                         .await
                         .map_err(|_| "Engine Session cleanup panicked".to_owned())?
@@ -645,7 +665,7 @@ mod tests {
                 } })
         }
 
-        async fn cleanup_turn(&self, _: &SendMessageData) -> Result<(), AppError> {
+        async fn cleanup_turn(&self, _: &SendMessageData, _: &EngineTurnTerminal) -> Result<(), AppError> {
             self.cleanup_entered.notify_one();
             self.cleanup_release.notified().await;
             if self.fail_cleanup { Err(AppError::Internal("controlled cleanup failure".into())) } else { Ok(()) }
@@ -657,7 +677,7 @@ mod tests {
             Ok(())
         }
 
-        async fn cleanup_session(&self) -> Result<(), AppError> { Ok(()) }
+        async fn cleanup_session(&self, _reason: Option<AgentKillReason>) -> Result<(), AppError> { Ok(()) }
     }
 
     fn model_failure_runtime(fail_cleanup: bool, fail_record: bool) -> (HostedAgentRuntime, Arc<ModelFailureDriver>) {

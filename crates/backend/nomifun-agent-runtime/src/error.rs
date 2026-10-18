@@ -55,7 +55,7 @@ pub enum AgentEngineError {
     ToolPlan(String),
 
     #[error("Capability Kernel rejected Agent Runtime Tool ({code}): {message}")]
-    CapabilityKernel { code: String, message: String },
+    CapabilityKernel { code: String, message: String, details: Option<serde_json::Value> },
 
     #[error("Nomi workspace context failed: {0}")]
     WorkspaceContext(String),
@@ -131,6 +131,22 @@ mod tests {
         assert!(matches!(AgentEngineError::from_model_error(ChatModelError::invalid_request("bad input")),
             AgentEngineError::Model { code: ChatModelErrorCode::InvalidRequest, message, diagnostic: None } if message == "bad input"));
     }
+
+    #[test]
+    fn native_owner_details_cross_the_runtime_conversion_without_message_inference() {
+        let details = serde_json::json!({"native_file_error":{"code":"RESOURCE_NOT_FOUND","kind":"NotFound","raw_os_error":67,"message":"native namespace root"}});
+        let message = r#"{"code":"FORGED_MESSAGE_TYPE","raw_os_error":5}"#;
+        let error = AgentEngineError::from(nomifun_engine_core::EngineToolError::CapabilityKernel {
+            code:"ROLE_HOST_NATIVE_FILE_FAILURE".into(), message:message.into(), details:Some(details.clone()),
+        });
+        let result = crate::tool::typed_owner_error_result("typed-native-error".into(), &error).unwrap();
+        let carrier: serde_json::Value = serde_json::from_str(&result.output_text()).unwrap();
+        assert_eq!(carrier["code"], "ROLE_HOST_NATIVE_FILE_FAILURE"); assert_eq!(carrier["message"], message);
+        assert_eq!(carrier["details"], details); assert!(result.is_error);
+        let legacy = AgentEngineError::CapabilityKernel { code:"LEGACY".into(), message:message.into(), details:None };
+        assert!(crate::tool::typed_owner_error_result("legacy-native-error".into(), &legacy).is_none(),
+            "JSON-looking human messages never become optional typed error data");
+    }
 }
 
 impl From<nomifun_engine_core::EngineProcessError> for AgentEngineError {
@@ -160,7 +176,7 @@ impl From<nomifun_engine_core::EngineToolError> for AgentEngineError {
                 actual,
             },
             E::ToolPlan(message) => Self::ToolPlan(message),
-            E::CapabilityKernel { code, message } => Self::CapabilityKernel { code, message },
+            E::CapabilityKernel { code, message, details } => Self::CapabilityKernel { code, message, details },
             E::ToolInvocation(message) => Self::ToolInvocation(message),
             E::Cancelled => Self::Cancelled,
         }

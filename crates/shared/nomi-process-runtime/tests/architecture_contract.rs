@@ -575,7 +575,7 @@ fn windows_conpty_global_state_tests_share_one_serial_group() {
     );
     assert_eq!(
         combined.matches("#[serial(windows_process_runtime)]").count(),
-        23,
+        24,
         "every current Windows process/ConPTY global-state test must remain in the one shared group"
     );
     assert!(
@@ -583,6 +583,12 @@ fn windows_conpty_global_state_tests_share_one_serial_group() {
             "#[serial(windows_process_runtime)]fnpartial_worker_start_failure_joins_started_workers_and_fails_before_admission"
         ),
         "partial close-worker startup mutates the same worker lifecycle and must not run beside ConPTY cleanup"
+    );
+    assert!(
+        without_whitespace(&windows).contains(
+            "#[serial(windows_process_runtime)]asyncfndeadline_elapsed_before_setup_never_creates_or_resumes_a_child"
+        ),
+        "the pre-create deadline test shares the Windows process lifecycle and must use its serial group"
     );
 }
 

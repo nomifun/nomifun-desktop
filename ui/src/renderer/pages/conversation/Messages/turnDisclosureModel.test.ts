@@ -36,6 +36,15 @@ const item = (
 });
 
 describe('buildTurnDisclosureItems', () => {
+  test('a live waiting question stays outside the process disclosure before its Turn ends', () => {
+    const question = item('waiting-question', 'assistant', { standalonePublic: false, userInputRequestId: 'authorize',
+      turnOutcome: { kind: 'waiting', wait_seq: 41, request_id: 'authorize', reason: 'user_input' } });
+    const result = buildTurnDisclosureItems([item('user', 'user'), item('process', 'process'), question],
+      { tailClosed: false, activeTurnId: TURN_1 });
+    expect(result.some(entry => entry.type === 'item' && entry.id === 'waiting-question')).toBe(true);
+    const disclosure = result.find(entry => entry.type === 'turn_disclosure');
+    expect(disclosure?.type === 'turn_disclosure' && disclosure.processItemIds.includes('waiting-question')).toBe(false);
+  });
   test('a closed canonical Turn without a result receipt does not elect any text by position or time', () => {
     const entries = [item('user', 'user'),
       item('first', 'assistant', { publicText: true, standalonePublic: false, createdAt: 2000 }),

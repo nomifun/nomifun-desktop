@@ -11,6 +11,7 @@ import { ipcBridge } from '@/common';
 import { appHosting } from '@/common/adapter/appHostingBridge';
 import { configService } from '@/common/config/configService';
 import type { TChatConversation, TProviderWithModel } from '@/common/config/storage';
+import { BackendHttpError } from '@/common/adapter/httpBridge';
 import { parseConversationId, parseExecutionId, parseExecutionTemplateId, parseMessageId, parseProviderId } from '@/common/types/ids';
 import { uuidv7 } from '@/common/utils';
 import { browserStorageKey, setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
@@ -24,6 +25,7 @@ import { PreviewProvider } from '../../Preview';
 import type { NomiMessageRuntime } from './useNomiMessage';
 import type { NomiModelSelection } from './useNomiModelSelection';
 import NomiSendBox from './NomiSendBox';
+import { inputDeliveryAttempt } from './inputDeliveryAttempt';
 import enCollaboration from '@/renderer/services/i18n/locales/en-US/collaboration.json';
 import { emitter } from '@/renderer/utils/emitter';
 
@@ -61,6 +63,7 @@ beforeEach(() => {
   spyOn(modelCatalog, 'useExecutionModelPool').mockReturnValue({ providers: [], getAvailableModels: () => [], formatModelLabel: (_provider, name) => name ?? '',
     isLoading: false, configuredPairs: [main, helper], allPairs: [main, helper], hasModels: true, buildModelPool: () => null });
   spyOn(executionContext, 'useExecutionSafe').mockReturnValue(null);
+  spyOn(ipcBridge.conversation.steer, 'invoke').mockRejectedValue(new Error('ordinary input must not choose a Turn'));
   spyOn(themeContext, 'useThemeContext').mockReturnValue({ theme: 'light', colorScheme: 'default', fontScale: 1,
     setTheme: async () => {}, setColorScheme: async () => {}, setFontScale: async () => {} });
   for (const event of [ipcBridge.mode.onProvidersChanged, ipcBridge.conversation.reconnected, ipcBridge.conversation.turnStarted,
@@ -74,6 +77,7 @@ beforeEach(() => {
   spyOn(ipcBridge.fs.listWorkspaceFiles, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.fs.getFileMetadata, 'invoke').mockResolvedValue({ name: 'brief.txt', path: '/project/brief.txt', size: 0,
     type: 'text/plain', lastModified: 1, isDirectory: false });
+  spyOn(ipcBridge.fs.getImageBase64, 'invoke').mockResolvedValue(null);
   spyOn(ipcBridge.mcpService.listServers, 'invoke').mockResolvedValue([]);
   spyOn(appHosting.mcpSources, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.agentExecutionTemplate.list, 'invoke').mockResolvedValue([]);
@@ -82,14 +86,14 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); mock.restore(); configService.reset(); sessionStorage.clear(); });
 
-function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolean; paused?: boolean; waiting?: boolean } = {}) {
+function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolean; paused?: boolean; waiting?: boolean;
+  pauseReason?: string } = {}) {
   const pausedTurnId = parseMessageId(uuidv7());
   const conversation = { id: parseConversationId(uuidv7()), name: 'General', type: 'nomi', session_purpose: 'conversation', status: 'finished',
     created_at: 1, modified_at: 1, model, extra: { workspace: '/project' } } as TChatConversation;
   spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(conversation);
   spyOn(ipcBridge.conversation.taskPlan, 'invoke').mockResolvedValue({ conversation_id: conversation.id, sequence: 0, turn_id: null, turn_status: null, plan: null });
-  const send = spyOn(ipcBridge.conversation.sendMessage, 'invoke').mockResolvedValue({ msg_id: parseMessageId(uuidv7()), replayed: false, completed: false,
-    result_ok: true, result_text: null, result_error: null, result_error_code: null, result_error_retryable: null });
+  const send = spyOn(ipcBridge.conversation.sendMessage, 'invoke').mockResolvedValue({ msg_id: parseMessageId(uuidv7()), replayed: false });
   const create = spyOn(ipcBridge.agentExecution.create, 'invoke').mockResolvedValue({ execution_id: parseExecutionId(uuidv7()) } as never);
   const fromTemplate = spyOn(ipcBridge.agentExecutionTemplate.createExecution, 'invoke').mockResolvedValue({ execution_id: parseExecutionId(uuidv7()) } as never);
   if (options.linkedBusy) {
@@ -100,10 +104,10 @@ function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolea
   const renderComposer = (busy = options.busy ?? options.waiting ?? false) => <MemoryRouter><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, shouldRetryOnError: false }}>
     <PreviewProvider persistNamespace={browserStorageKey('collaboration-test', 'conversation', conversation.id)} subscribeGlobalOpen={false}>
       <MessageListProvider><NomiSendBox conversation_id={conversation.id} modelSelection={modelSelection}
-        turnActivity={{ ...activity, running: busy, waitingNotice: options.waiting ? {
-          turnId: pausedTurnId, canSteer: true, outcome: { kind: 'waiting', wait_seq: 41, request_id: 'authorize', reason: 'user_input' },
+        turnActivity={{ ...activity, running: busy, executing: busy && !options.waiting, waitingNotice: options.waiting ? {
+          turnId: pausedTurnId, outcome: { kind: 'waiting', wait_seq: 41, request_id: 'authorize', reason: 'user_input' },
         } : null, pauseNotice: options.paused
-          ? { turnId: pausedTurnId, reason: 'EXECUTION_TOTAL_MODEL_BUDGET', cleanupProven: true, pausedAt: 123 } : null }}
+          ? { turnId: pausedTurnId, reason: options.pauseReason ?? 'EXECUTION_TOTAL_MODEL_BUDGET', cleanupProven: true, pausedAt: 123 } : null }}
         creationEnabled={false} collaborationEnabled compactProductComposer={options.compact} /></MessageListProvider>
     </PreviewProvider></SWRConfig></I18nextProvider></MemoryRouter>;
   const view = render(renderComposer());
@@ -162,15 +166,15 @@ test('a pending chat submission only shows stop until admission, then allows act
   act(() => composer.setBusy(true));
   expect(composer.view.queryByTestId('sendbox-steer-btn') === null).toBe(true);
   expect(composer.view.queryByTestId('sendbox-send-btn') === null).toBe(true);
-  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false, completed: false,
-    result_ok: true, result_text: null, result_error: null, result_error_code: null, result_error_retryable: null }));
+  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false }));
   await waitFor(() => expect(composer.input.value).toBe(''));
   expect(composer.view.getByTestId('sendbox-stop-btn')).toBeTruthy();
   expect(composer.view.queryByTestId('sendbox-steer-btn') === null).toBe(true);
   expect(composer.view.queryByTestId('sendbox-send-btn') === null).toBe(true);
 
   fireEvent.change(composer.input, { target: { value: 'A follow-up while the turn runs' } });
-  await waitFor(() => expect(composer.view.getByTestId('sendbox-steer-btn')).toBeTruthy());
+  await waitFor(() => expect(composer.view.getByTestId('sendbox-send-btn')).toBeTruthy());
+  expect(composer.view.queryByTestId('sendbox-steer-btn')).toBeNull();
   expect(composer.view.getByTestId('sendbox-stop-btn')).toBeTruthy();
   expect(composer.view.getByTestId('sendbox-send-btn')).toBeTruthy();
   expect(composer.send).toHaveBeenCalledTimes(1);
@@ -216,8 +220,7 @@ test.each([false, true])('repeated submit and steer shortcuts cannot resend or q
   expect(composer.input.value).toBe('Send this once');
   expect(composer.view.container.querySelector('[data-command-queue-list]') === null).toBe(true);
 
-  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false, completed: false,
-    result_ok: true, result_text: null, result_error: null, result_error_code: null, result_error_retryable: null }));
+  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false }));
 });
 
 test('the selected plan uses the same template creation route as the welcome composer', async () => {
@@ -243,7 +246,7 @@ test('an admission failure preserves the prompt and settings without a chat fall
   expect(composer.send).not.toHaveBeenCalled();
 });
 
-test('an active Turn retains the icon for inspection and cannot admit or queue a new collaboration', async () => {
+test('an active Turn accepts ordinary input into its existing owner instead of admitting or queueing collaboration', async () => {
   const composer = mount({ busy: true });
   const trigger = composer.view.getByTestId('guid-collaborator-selector') as HTMLButtonElement;
   expect(trigger.disabled).toBe(false);
@@ -251,10 +254,73 @@ test('an active Turn retains the icon for inspection and cannot admit or queue a
   const radio = await composer.view.findByRole('radio', { name: 'Prefer parallel' });
   expect((radio as HTMLButtonElement).disabled).toBe(true);
   await composer.submit();
-  await waitFor(() => expect(composer.input.value).toBe('Review this work'));
+  await waitFor(() => expect(composer.input.value).toBe(''));
+  expect(ipcBridge.conversation.steer.invoke).not.toHaveBeenCalled();
   expect(composer.create).not.toHaveBeenCalled();
-  expect(composer.send).not.toHaveBeenCalled();
+  expect(composer.send).toHaveBeenCalledTimes(1);
   expect(composer.view.queryByTestId('command-queue-panel')).toBeNull();
+});
+
+test('a technical pause accepts information through the same intake and retries a lost acknowledgement with its original payload and key', async () => {
+  const composer = mount({ paused: true, pauseReason: 'EXECUTION_DEPENDENCY_BLOCKED' });
+  composer.send.mockRejectedValueOnce(new Error('response lost')).mockResolvedValue({ msg_id: parseMessageId(uuidv7()), replayed: true });
+  await composer.submit('The required application is now configured');
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
+  expect(composer.input.value).toBe('The required application is now configured');
+  act(() => composer.setBusy(true));
+  await composer.submit('The required application is now configured');
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(2));
+  expect(composer.send.mock.calls[1][0]).toEqual(composer.send.mock.calls[0][0]);
+  expect(composer.send.mock.calls[0][0]).not.toHaveProperty('target');
+  expect(composer.send.mock.calls[0][0]).not.toHaveProperty('expected_wait');
+  expect(ipcBridge.conversation.steer.invoke).not.toHaveBeenCalled();
+  expect(composer.create).not.toHaveBeenCalled();
+  await waitFor(() => expect(composer.input.value).toBe(''));
+});
+
+test.each(['idle', 'running', 'paused'] as const)('a local image capability refusal keeps the %s draft and attachments without acknowledging delivery', async state => {
+  const composer = mount({ busy: state === 'running', paused: state === 'paused' });
+  await waitFor(() => expect(composer.input.disabled).toBe(false));
+  act(() => emitter.emit('nomi.selected.file', ['/project/photo.png']));
+  await composer.view.findByText('photo.png');
+  await composer.submit('Preserve this unsent explanation');
+  await waitFor(() => expect(warning).toHaveBeenCalled());
+  await act(async () => {});
+  expect(composer.input.value).toBe('Preserve this unsent explanation');
+  expect(composer.view.getByText('photo.png')).toBeTruthy();
+  expect(ipcBridge.conversation.steer.invoke).not.toHaveBeenCalled();
+  expect(composer.send).not.toHaveBeenCalled();
+  expect(composer.create).not.toHaveBeenCalled();
+});
+
+test('unconfirmed delivery capacity keeps a new draft while an original retry retains its original payload and key', async () => {
+  const composer = mount({ busy: true });
+  const attempts = Array.from({ length: 16 }, (_, index) => inputDeliveryAttempt(composer.conversation.id, `Original ${index}`, [], ['original-skill']));
+  await composer.submit('Another unsent explanation');
+  await composer.view.findByText(/Too many messages have unconfirmed delivery/);
+  expect(composer.input.value).toBe('Another unsent explanation');
+  expect(composer.send).not.toHaveBeenCalled();
+  act(() => composer.setBusy(false));
+  await composer.submit('Original 0');
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
+  const request = composer.send.mock.calls[0][0];
+  expect(request.idempotency_key).toBe(attempts[0].key);
+  expect(request.inject_skills).toEqual(['original-skill']);
+  expect(apply).not.toHaveBeenCalled();
+});
+
+test('an explicit non-admission receipt releases only that attempt and keeps the draft for a later manual send', async () => {
+  const composer = mount({ busy: true });
+  composer.send.mockRejectedValueOnce(new BackendHttpError({ method: 'POST', path: '/api/agent-sessions/session/messages', status: 409,
+    body: { code: 'INPUT_NOT_ACCEPTED', error: 'The message was not accepted' } }));
+  await composer.submit('Keep this exact draft');
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
+  expect(composer.input.value).toBe('Keep this exact draft');
+  await composer.submit('Keep this exact draft');
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(2));
+  expect(composer.send.mock.calls[1][0].idempotency_key).not.toBe(composer.send.mock.calls[0][0].idempotency_key);
+  expect(ipcBridge.conversation.steer.invoke).not.toHaveBeenCalled();
+  await waitFor(() => expect(composer.input.value).toBe(''));
 });
 
 test('product composers keep their existing ordinary input behavior even if their Agent has collaboration', async () => {
@@ -291,7 +357,7 @@ test('repeated send input while admission is awaiting its receipt creates one Ex
   expect(composer.send).not.toHaveBeenCalled();
 });
 
-test('a paused turn keeps its draft editable and a quiet cancellation action while blocking new admissions', async () => {
+test('a technical pause keeps its separate cancellation action while accepting ordinary messages', async () => {
   const composer = mount({ paused: true });
   const cancel = composer.view.getByTestId('sendbox-paused-cancel-btn');
   expect(cancel.classList.contains('bg-animate')).toBe(false);
@@ -300,25 +366,24 @@ test('a paused turn keeps its draft editable and a quiet cancellation action whi
   fireEvent.change(composer.input, { target: { value: 'Continue the unfinished work' } });
   await waitFor(() => expect(composer.input.value).toBe('Continue the unfinished work'));
   await act(async () => { fireEvent.keyDown(composer.input, { key: 'Enter' }); });
-  expect(composer.input.value).toBe('Continue the unfinished work');
-  expect(composer.send).not.toHaveBeenCalled();
+  await waitFor(() => expect(composer.input.value).toBe(''));
+  expect(composer.send).toHaveBeenCalledTimes(1);
   expect(composer.create).not.toHaveBeenCalled();
   const stop = spyOn(ipcBridge.conversation.stop, 'invoke').mockResolvedValue(undefined);
-  fireEvent.click(cancel);
+  fireEvent.click(composer.view.getByTestId('sendbox-paused-cancel-btn'));
   await waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
   expect(stop).toHaveBeenCalledWith({ conversation_id: composer.conversation.id, expected_turn_id: composer.pausedTurnId });
 });
 
-test('replying to parked work steers its current Turn without starting a collaboration or queueing a new Turn', async () => {
-  const steer = spyOn(ipcBridge.conversation.steer, 'invoke').mockResolvedValue({ msg_id: parseMessageId(uuidv7()),
-    replayed: false, completed: false, result_ok: null, result_text: null, result_error: null,
-    result_error_code: null, result_error_retryable: null });
+test('a normal input handoff has no End Turn button and sends nonempty input through ordinary intake', async () => {
   const composer = mount({ waiting: true });
+  expect(composer.view.queryByTestId('sendbox-stop-btn')).toBeNull();
+  expect(composer.view.queryByTestId('sendbox-paused-cancel-btn')).toBeNull();
   await composer.submit('The browser authorization is complete');
-  await waitFor(() => expect(steer).toHaveBeenCalledTimes(1));
-  expect(steer.mock.calls[0][0].conversation_id).toBe(composer.conversation.id);
-  expect(steer.mock.calls[0][0].expected_wait).toEqual({ turn_id: composer.pausedTurnId, wait_seq: 41 });
-  expect(composer.send).not.toHaveBeenCalled();
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
+  expect(composer.send.mock.calls[0][0].conversation_id).toBe(composer.conversation.id);
+  expect(composer.send.mock.calls[0][0]).not.toHaveProperty('expected_wait');
+  expect(ipcBridge.conversation.steer.invoke).not.toHaveBeenCalled();
   expect(composer.create).not.toHaveBeenCalled();
   expect(composer.fromTemplate).not.toHaveBeenCalled();
   await waitFor(() => expect(composer.input.value).toBe(''));
@@ -331,4 +396,21 @@ test('a linked active collaboration cannot be replaced by a new admission from a
   expect(composer.send).not.toHaveBeenCalled();
   expect(composer.input.value).toBe('Review this work');
   expect(warning).toHaveBeenCalledWith(i18n.t('collaboration.session.busy'));
+});
+
+test('an edited input acknowledgement preserves a newer draft typed while the original revision was saving', async () => {
+  draft.config = { execution_model_pool: { mode: 'single', model: main }, execution_template_id: null,
+    delegation_policy: 'automatic', decision_policy: 'automatic' };
+  const composer = mount();
+  let accept!: (value: Awaited<ReturnType<typeof ipcBridge.conversation.sendMessage.invoke>>) => void;
+  composer.send.mockImplementation(() => new Promise(resolve => { accept = resolve; }));
+  await waitFor(() => expect(composer.input.disabled).toBe(false));
+  act(() => emitter.emit('sendbox.edit', { msgId: parseMessageId(uuidv7()), createdAt: 1, content: 'Original revision' }));
+  await composer.submit('Save this revision');
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
+  fireEvent.change(composer.input, { target: { value: 'Keep this newer draft' } });
+  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false }));
+  await waitFor(() => expect(composer.input.value).toBe('Keep this newer draft'));
+  expect(composer.send.mock.calls[0][0].input).toBe('Save this revision');
+  expect(composer.send).toHaveBeenCalledTimes(1);
 });

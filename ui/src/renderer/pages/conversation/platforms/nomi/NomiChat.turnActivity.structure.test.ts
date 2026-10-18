@@ -13,7 +13,7 @@ const sendBoxSource = readFileSync(new URL('./NomiSendBox.tsx', import.meta.url)
 describe('NomiChat turn activity ownership', () => {
   test('shares the local stream lifecycle with the message list and send box', () => {
     expect(chatSource.includes('useNomiMessage(conversation_id')).toBe(true);
-    expect(chatSource.includes('turnActivity.running')).toBe(true);
+    expect(chatSource.includes('turnActivity.executing')).toBe(true);
     expect(chatSource.includes('turnActivity.hasHydratedRunningState')).toBe(true);
     expect(chatSource.includes('isProcessing: resolvedIsProcessing')).toBe(true);
     expect(chatSource.includes('activeTurnId: turnActivity.activeTurnId')).toBe(true);
@@ -23,7 +23,7 @@ describe('NomiChat turn activity ownership', () => {
 
   test('uses the initial processing snapshot only until live turn state is hydrated', () => {
     expect(
-      /const resolvedIsProcessing = !turnActivity\.waitingNotice && \(turnActivity\.hasHydratedRunningState\s+\? turnActivity\.running\s+: isProcessing === true \|\| turnActivity\.running\);/.test(
+      /const resolvedIsProcessing = turnActivity\.hasHydratedRunningState\s+\? turnActivity\.executing\s+: isProcessing === true \|\| turnActivity\.executing;/.test(
         chatSource
       )
     ).toBe(true);

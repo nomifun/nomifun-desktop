@@ -324,9 +324,7 @@ async fn send_via_open_api(api: &Arc<DingtalkApi>, chat_id: &str, text: &str) ->
     };
 
     let resp = api.send_robot_message(&req).await?;
-    let msg_id = resp
-        .process_query_key
-        .unwrap_or_else(|| format!("dt_msg_{}", chrono_now()));
+    let msg_id = resp.process_query_key.unwrap_or_default();
     Ok(msg_id)
 }
 

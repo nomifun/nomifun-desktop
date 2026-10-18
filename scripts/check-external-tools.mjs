@@ -70,13 +70,13 @@ export function validateExecutionOwners({ managed, hosting, environment }) {
 export function validateOfficeSkillGuidance({ instructions, body, component }) {
   const setup = body.match(/## Managed component setup\n([\s\S]*?)(?:\n## |$)/)?.[1] ?? '';
   if (![component.version, component.source, component.package, 'component=officecli',
-    'workspace.process/exec', 'workspace.process/start', 'literal', 'OFFICECLI_NO_AUTO_RESIDENT=1']
+    'workspace.process/start', 'literal', 'OFFICECLI_NO_AUTO_RESIDENT=1']
     .every(value => instructions.includes(value))
       || !['component=officecli', 'literal `args`', 'references/runtime.md']
         .every(value => setup.includes(value))) {
     throw new Error('Office Skill guidance must use the approved host component target and literal arguments');
   }
-  const retired = /Host-owned Office (?:execution )?component|ID appended to the compiled Skill body|nomifun_runtime::resolve_tool|OFFICECLI_EXE|OfficeCliExe|executable_path/;
+  const retired = /workspace\.process\/exec|Host-owned Office (?:execution )?component|ID appended to the compiled Skill body|nomifun_runtime::resolve_tool|OFFICECLI_EXE|OfficeCliExe|executable_path/;
   if (retired.test(instructions) || retired.test(setup)) {
     throw new Error('Office Skill guidance must not restore hidden component resources or copied executable paths');
   }

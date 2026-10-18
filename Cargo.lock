@@ -5642,6 +5642,7 @@ version = "0.8.12"
 dependencies = [
  "base64 0.22.1",
  "cap-std",
+ "junction",
  "libc",
  "same-file",
  "serde",
@@ -5649,6 +5650,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.19",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5656,6 +5658,7 @@ name = "nomi-process-runtime"
 version = "0.8.12"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "junction",
  "libc",
  "serde",
@@ -5736,6 +5739,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6199,6 +6203,8 @@ dependencies = [
  "futures-util",
  "junction",
  "libc",
+ "nomi-native-files",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6283,6 +6289,7 @@ dependencies = [
  "hmac 0.12.1",
  "libc",
  "nomi-types",
+ "nomifun-agent-contracts",
  "same-file",
  "serde",
  "serde_json",
@@ -6550,6 +6557,7 @@ dependencies = [
  "log",
  "mime_guess",
  "nomi-native-files",
+ "nomifun-agent-contracts",
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",
@@ -6648,6 +6656,7 @@ dependencies = [
  "http-body-util",
  "junction",
  "libc",
+ "nomi-native-files",
  "nomi-redact",
  "nomifun-agent-contracts",
  "nomifun-api-types",

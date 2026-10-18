@@ -362,7 +362,7 @@ async fn resolve_turn_inputs(
         };
         let steers: Vec<String> = sqlx::query_scalar(
             "SELECT event_id FROM agent_events WHERE session_id=? AND correlation_id=? \
-            AND kind='turn/steer-accepted' AND kind_version=1 AND seq<? ORDER BY seq LIMIT 18",
+            AND kind='turn/steer-accepted' AND kind_version IN (1,2) AND seq<? ORDER BY seq LIMIT 18",
         )
         .bind(session.as_ref())
         .bind(&operation)
@@ -410,14 +410,25 @@ async fn resolve_turn_inputs(
                     "memory steering source identity differs from its Turn",
                 ));
             }
-            let input: SteeredInput =
-                serde_json::from_value(event.value(session.as_ref())?).map_err(failure)?;
-            if input.target_operation_id != operation {
-                return Err(failure("memory steering payload targets another Turn"));
-            }
-            result.all_sources.insert(reference(steer.clone()));
-            if input.input.is_user_speech(&scope) {
-                result.human_sources.insert(reference(steer));
+            let claim = event.value(session.as_ref())?;
+            let original = if event.kind_version == 2 {
+                let input_id=claim.get("input_event_id").and_then(Value::as_str)
+                    .ok_or_else(||failure("steering claim has no original input reference"))?;
+                let Some(source)=read_accepted_source(pool,&session,input_id).await? else {return Ok(None);};
+                Some(source)
+            } else {None};
+            // The Store verifies the immutable claim and returns the original
+            // input, never a mirrored body or projection-derived provenance.
+            let (source, input)=store.steering_input_source(&session,&steer.clone().into()).await.map_err(failure)?;
+            if let Some(original)=original.as_ref() {
+                if original.event_id!=source.event_id.as_ref() || original.seq as u64!=source.seq
+                    || original.value(session.as_ref())?!=input.0 {return Err(failure("steering source changed during bounded read"));}
+            } else if source.event_id.as_ref()!=steer {return Err(failure("exact steering source changed"));}
+            let input:AcceptedInput=serde_json::from_value(input.0).map_err(failure)?;
+            let source_id=source.event_id.as_ref().to_owned();
+            result.all_sources.insert(reference(source_id.clone()));
+            if input.is_user_speech(&scope) {
+                result.human_sources.insert(reference(source_id));
             }
         }
         if result.all_sources.len() > 64 {
@@ -861,7 +872,7 @@ async fn read_turn_input_source(
          p.byte_len AS payload_byte_len \
          FROM agent_events e JOIN agent_sessions s ON s.agent_session_id=e.session_id \
          LEFT JOIN agent_payloads p ON p.payload_id=e.payload_id WHERE s.state='live' AND e.session_id=? AND e.event_id=? \
-         AND e.kind IN ('message/user-accepted','turn/steer-accepted') AND e.kind_version=1 \
+         AND ((e.kind='message/user-accepted' AND e.kind_version=1) OR (e.kind='turn/steer-accepted' AND e.kind_version IN (1,2))) \
          AND (e.inline_json IS NULL OR length(CAST(e.inline_json AS BLOB))<=?) AND (p.body IS NULL OR length(p.body)<=?)")
         .bind(session.as_ref()).bind(event_id).bind(MAX_SOURCE_PAYLOAD_BYTES).bind(MAX_SOURCE_PAYLOAD_BYTES)
         .fetch_optional(pool).await.map_err(failure)

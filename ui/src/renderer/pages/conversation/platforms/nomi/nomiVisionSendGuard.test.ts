@@ -190,42 +190,14 @@ describe('Nomi image-send capability guard', () => {
 describe('NomiSendBox blocking wiring', () => {
   const source = readFileSync(new URL('./NomiSendBox.tsx', import.meta.url), 'utf8');
 
-  test('gates normal, edit-resubmit, queued/initial, and steer sends before mutation or IPC', () => {
-    const normal = source.slice(
-      source.indexOf('const onSendHandler'),
-      source.indexOf('const handleEditResubmit')
-    );
-    expect(normal.indexOf('if (!canSendFiles(filesToSend)) return;')).toBeGreaterThan(-1);
-    expect(normal.indexOf('if (!canSendFiles(filesToSend)) return;')).toBeLessThan(
-      normal.indexOf('clearFiles()')
-    );
-
-    const execute = source.slice(
-      source.indexOf('const executeCommand'),
-      source.indexOf('const onSendHandler')
-    );
-    expect(execute.indexOf('if (!canSendFiles(files))')).toBeGreaterThan(-1);
-    expect(execute.indexOf('if (!canSendFiles(files))')).toBeLessThan(
-      execute.indexOf('ipcBridge.conversation.sendMessage.invoke')
-    );
-
-    const edit = source.slice(
-      source.indexOf('const handleEditResubmit'),
-      source.indexOf('const executeSteer')
-    );
-    expect(edit.indexOf('if (!canSendFiles(filesToSend)) return;')).toBeGreaterThan(-1);
-    expect(edit.indexOf('if (!canSendFiles(filesToSend)) return;')).toBeLessThan(
-      edit.indexOf('ipcBridge.conversation.sendMessage.invoke')
-    );
-
-    const steer = source.slice(
-      source.indexOf('const onSteerHandler'),
-      source.indexOf('const handleEditQueuedCommand')
-    );
-    expect(steer.indexOf('if (!canSendFiles(filesToSend)) return;')).toBeGreaterThan(-1);
-    expect(steer.indexOf('if (!canSendFiles(filesToSend)) return;')).toBeLessThan(
-      steer.indexOf('executeSteer')
-    );
+  test('checks new payload capability before intake and keeps unknown retries on their original payload', () => {
+    const normal = source.slice(source.indexOf('const onSendHandler'), source.indexOf('const handleEditResubmit'));
+    expect(normal.includes('if (!pending && !canSendFiles(filesToSend)) throw')).toBe(true);
+    const execute = source.slice(source.indexOf('const executeCommand'), source.indexOf('items: queuedCommands'));
+    expect(execute.indexOf('if (!pending && !canSendFiles(files)) throw')).toBeLessThan(execute.indexOf('ipcBridge.conversation.sendMessage.invoke'));
+    expect(execute.includes('input: attempt?.content ?? displayMessage')).toBe(true);
+    const edit = source.slice(source.indexOf('const handleEditResubmit'),source.indexOf('const handleEditQueuedCommand'));
+    expect(edit.includes('await onSendHandler(message)')).toBe(true);
   });
 
   test('reads the provider graph directly and has no platform/name inference fallback', () => {

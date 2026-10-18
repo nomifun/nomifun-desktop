@@ -3,9 +3,10 @@
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
-    path::PathBuf,
     time::{Duration, Instant},
 };
+#[cfg(not(windows))]
+use std::path::PathBuf;
 
 use nomi_native_files::{NativeReadAcquisition, NativeReadRequest};
 use nomi_process_runtime::{
@@ -65,7 +66,12 @@ impl SystemExecutionClient {
     ) -> Result<SystemReadReceipt, SystemExecutionError> {
         let reply = self
             .call(json!({"op":"acquire_read","request":request}))
-            .await?;
+            .await.map_err(|mut error| {
+                if matches!(error.code.as_str(), "SYSTEM_EXECUTION_RESULT_UNKNOWN" | "system_result_unknown") {
+                    error.code = "SYSTEM_READ_RESULT_UNKNOWN".into();
+                }
+                error
+            })?;
         let receipt: SystemReadReceipt =
             serde_json::from_value(reply).map_err(|error| SystemExecutionError {
                 code: "SYSTEM_READ_RESULT_UNKNOWN".into(),
@@ -159,16 +165,22 @@ impl Runner {
             expire_on_idle: false,
             ..Default::default()
         };
+        #[cfg(windows)]
+        let worker_cwd = std::env::current_exe()
+            .ok().and_then(|path| path.parent().map(std::path::Path::to_owned))
+            .ok_or_else(|| unknown("Cannot resolve native readonly worker directory", Value::Null))?;
+        #[cfg(not(windows))]
+        let worker_cwd = PathBuf::from("/");
         let normalized = normalize_request(
             ProcessRequest {
                 owner: owner.clone(),
                 command,
-                cwd: PathBuf::from("/"),
+                cwd: worker_cwd.clone(),
                 env: BTreeMap::new(),
                 transport: Transport::Pipe,
                 policy,
             },
-            std::path::Path::new("/"),
+            &worker_cwd,
         )
         .map_err(|error| {
             (

@@ -9,6 +9,18 @@ use nomifun_api_types::{
 use nomifun_common::AppError;
 use tokio::sync::broadcast;
 
+/// Acknowledged platform delivery of one original canonical live question.
+/// The Session writer verifies its provenance; this is never resume authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelQuestionDelivery {
+    pub target: nomifun_api_types::AgentQuestionReplyTargetDto,
+    pub request_id: String,
+    pub platform: String,
+    pub channel_plugin_id: String,
+    pub chat_id: String,
+    pub provider_message_id: String,
+}
+
 /// Channel-owned projection of one admitted turn and its optional live event
 /// stream. The host may use any runtime implementation; the Channel domain
 /// never receives a runtime registry or Conversation service.
@@ -29,6 +41,32 @@ pub struct ChannelTurnDelivery {
     pub delivery: ChannelTurnDeliveryReceipt,
     pub events: Option<broadcast::Receiver<AgentStreamEvent>>,
 }
+
+/// Read-only delivery observation for one canonical accepted input. It cannot
+/// claim, resume or execute work and must never retarget to the latest Turn.
+pub enum ChannelInputObservation {
+    Pending,
+    Blocked { reason: String },
+    Discarded { reason: String },
+    Claimed {
+        turn_id: String,
+        delivery: ChannelTurnDelivery,
+        question: Option<nomifun_ai_agent::protocol::events::InputQuestionEventData>,
+        /// Pure delivery projections from the original committed tool receipts.
+        /// These still require the ordinary relay's media/artifact validation.
+        terminal_events: Vec<AgentStreamEvent>,
+    },
+}
+
+#[derive(Clone,Debug)]
+pub struct RecoverableChannelInput {
+    pub session_id:String,
+    pub input_event_id:String,
+    pub source:nomifun_agent_contracts::ChannelInputSource,
+}
+
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum ChannelInputDeliveryDisposition { Ready, Confirmed, Unknown }
 
 /// Channel-owned read-only projection of one keyed turn receipt.
 ///
@@ -107,6 +145,45 @@ pub trait ChannelSessionPort: Send + Sync {
         idempotency_key: &str,
         request: SendMessageRequest,
     ) -> Result<ChannelTurnDelivery, AppError>;
+
+    /// Authenticated Channel ingress supplies this source; ordinary message
+    /// JSON cannot author it. Acceptance persists source and body together.
+    async fn accept_input(&self,_owner_id:&str,_session_id:&str,_idempotency_key:&str,_request:SendMessageRequest,
+        _source:nomifun_agent_contracts::ChannelInputSource,_reply_to:Option<nomifun_api_types::AgentQuestionReplyTargetDto>)
+        ->Result<ChannelTurnDelivery,AppError> {
+        Err(AppError::Conflict("trusted canonical Channel input intake is unavailable".into()))
+    }
+
+    async fn recover_inputs(&self,_owner_id:&str)->Result<Vec<RecoverableChannelInput>,AppError> {Ok(Vec::new())}
+
+    async fn begin_input_delivery(&self,_owner_id:&str,_session_id:&str,_input_id:&str,_turn_id:&str,
+        _subject:nomifun_agent_contracts::ChannelInputDeliverySubject)->Result<ChannelInputDeliveryDisposition,AppError> {
+        Err(AppError::Conflict("canonical Channel delivery observation is unavailable".into()))
+    }
+
+    async fn finish_input_delivery(&self,_owner_id:&str,_session_id:&str,_input_id:&str,_turn_id:&str,
+        _subject:nomifun_agent_contracts::ChannelInputDeliverySubject,_confirmed:bool,_provider_message_ids:Vec<String>)
+        ->Result<(),AppError> {Err(AppError::Conflict("canonical Channel delivery acknowledgement is unavailable".into()))}
+
+    /// Save ordinary input associated with the exact question the user quoted.
+    async fn reply_to_question(&self, _owner_id: &str, _session_id: &str, _idempotency_key: &str,
+        _request: SendMessageRequest, _target: nomifun_api_types::AgentQuestionReplyTargetDto) -> Result<ChannelTurnDelivery, AppError> {
+        Err(AppError::Conflict("Channel question replies are unavailable".into()))
+    }
+
+    async fn observe_input(&self, _owner_id: &str, _session_id: &str, _input_event_id: &str)
+        -> Result<ChannelInputObservation, AppError> {
+        Err(AppError::Conflict("canonical Channel input observation is unavailable".into()))
+    }
+
+    async fn record_question_delivery(&self, _owner_id: &str, _session_id: &str, _delivery: ChannelQuestionDelivery) -> Result<(), AppError> {
+        Err(AppError::Conflict("canonical Channel question delivery recording is unavailable".into()))
+    }
+
+    async fn resolve_question_delivery(&self, _owner_id: &str, _session_id: &str, _platform: &str,
+        _plugin_id: &str, _chat_id: &str, _provider_message_id: &str) -> Result<Option<nomifun_api_types::AgentQuestionReplyTargetDto>, AppError> {
+        Ok(None)
+    }
 
     async fn get(
         &self,

@@ -22,7 +22,8 @@ pub use snapshot_compatibility::evaluate_snapshot_compatibility;
 pub use context_snapshot::{CanonicalContextMessage, CanonicalContextRole, ForkContextSnapshot, canonical_context_messages};
 pub use error::SessionStoreError;
 pub use store::{
-    AgentSessionStore, MAX_EVENT_PAGE_SIZE, MAX_INLINE_JSON_BYTES, MAX_SESSION_PAYLOAD_BYTES,
+    ChannelInputDeliveryDisposition,RecoverableChannelInput,
+    AgentSessionStore, PendingSessionInput, SessionInputClaim, SessionInputBlockedReason, canonical_steering_input, is_session_input_event, session_input_namespace, MAX_EVENT_PAGE_SIZE, MAX_INLINE_JSON_BYTES, MAX_SESSION_PAYLOAD_BYTES,
     MAX_SINGLE_PAYLOAD_BYTES,
     NativeCheckpoint, NativeCheckpointWrite, MAX_NATIVE_CHECKPOINT_BYTES,
     RuntimeStateObservation,

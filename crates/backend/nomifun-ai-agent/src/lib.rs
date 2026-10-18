@@ -9,6 +9,8 @@ pub mod runtime_provider;
 pub mod runtime_admission;
 pub mod runtime_driver;
 pub mod unified_runtime;
+mod tool_delivery_projection;
+pub use tool_delivery_projection::project_canonical_tool_delivery;
 pub mod context_contributor;
 pub mod runtime_model_middleware_contract;
 pub mod runtime_tool_middleware_contract;
@@ -46,7 +48,7 @@ pub use nomi_config;
 pub use nomi_types;
 
 pub use runtime_state::AgentRuntimeState;
-pub use runtime_instance::{OfficialAgentRuntime, RuntimeSteerDelivery, RuntimeTeardown};
+pub use runtime_instance::{OfficialAgentRuntime, RuntimeSteerDelivery, RuntimeSteerAdmission, RuntimeSteerCommitted, RuntimeSteerAdmissionOutcome, RuntimeTeardown};
 pub use runtime_admission::{RuntimeAdmission, RuntimeSupport};
 pub use runtime_driver::{
     HostedNomiRuntime, NomiRuntimeDriver, NomiRuntimeDriverFactory,

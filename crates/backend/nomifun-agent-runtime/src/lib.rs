@@ -65,13 +65,13 @@ pub use planning::{AgentPlan, AgentPlanStatus, AgentPlanStep};
 mod test_support;
 mod stream_limits;
 mod wait;
-pub use wait::{AgentWaitPort, AgentWaitProcess, AgentWaitRequest, AgentWaitWake, AgentOwnedProcessObservation};
+pub use wait::{AgentWaitPort, AgentWaitProcess, AgentWaitRequest, AgentWaitWake, AgentWaitWakePolicy, AgentOwnedProcessObservation};
 mod stop_resolution;
 mod steering;
 pub use steering::{AgentInputPort, AgentSteeringInput};
 #[path = "user_input.rs"]
 mod user_input_request;
-pub use user_input_request::AgentUserInputRequestPort;
+pub use user_input_request::{AgentUserInputRequestPort,recorded_pending as recorded_pending_user_input};
 mod tool;
 mod tool_dispatch;
 mod tool_validation;

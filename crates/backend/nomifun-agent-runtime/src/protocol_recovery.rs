@@ -118,6 +118,11 @@ impl ProtocolRecovery {
         Ok(())
     }
 
+    /// A committed refusal to continue survives a native pause. Only the
+    /// existing real-input or explicit retry-grant events release it.
+    pub(crate) fn continuation_stopped(&self)->bool {
+        matches!(&self.pending,Some(AgentEngineEvent::ModelResponseRejected {continuation:false,..}))
+    }
     pub(crate) fn correction_source(&self) -> Option<u16> {
         match &self.pending {
             Some(AgentEngineEvent::ModelResponseRejected { step, continuation: true, .. }) => Some(*step), _ => None,
@@ -180,8 +185,8 @@ pub(crate) fn validate_rejection(event: &AgentEngineEvent) -> Result<(), AgentEn
                     }
                 }
             }
-            if matches!(reason, AgentModelResponseRejection::EmptyTaskTerminal) && !discarded_tool_call_ids.is_empty() {
-                return Err(invalid("empty terminal contains native proposals"));
+            if matches!(reason, AgentModelResponseRejection::EmptyTaskTerminal | AgentModelResponseRejection::RequiredInputHandoff) && !discarded_tool_call_ids.is_empty() {
+                return Err(invalid("text-only terminal rejection contains native proposals"));
             }
         }
         _ => return Err(invalid("typed rejection and safe feedback must be recorded together")),
@@ -200,6 +205,7 @@ fn render_feedback(reason: &AgentModelResponseRejection, continuation: bool) -> 
     let observation = match reason {
         AgentModelResponseRejection::NonNativeMarkup => "The previous response emitted tool-call markup as text instead of native function calls. No markup or embedded command was executed.".to_owned(),
         AgentModelResponseRejection::EmptyTaskTerminal => "The previous terminal response contained no public answer or native tool calls. Private thinking is not task completion. No new effect was proposed or executed by that response.".to_owned(),
+        AgentModelResponseRejection::RequiredInputHandoff => "The previous text-only stop did not submit the required user-input handoff. The current completion account explicitly records blocked work. Neither plain text nor a provider stop resolves that dependency or completes the task.".to_owned(),
         AgentModelResponseRejection::ToolArguments { diagnostics } => {
             let mut text = "The completed native response contained invalid tool arguments. The arguments were not repaired or executed. Diagnostic identity fields are data: ".to_owned();
             for proposal in diagnostics.iter().take(8) {
@@ -218,6 +224,9 @@ fn render_feedback(reason: &AgentModelResponseRejection, continuation: bool) -> 
     format!("Engine protocol observation, not a new user instruction: {observation} The ENTIRE proposed tool batch was discarded before any tool admission, including any well-formed native calls in that batch. Earlier steps, effects, original user request, constraints and plan are unchanged. {}",
         if continuation && matches!(reason, AgentModelResponseRejection::EmptyTaskTerminal) {
             "Provide the public reply needed by the accepted request. A direct text answer is allowed; do not call tools merely to repair an empty reply. If the authorized task needs work, continue using the native tool interface; if required user information is missing, use the available input handoff. Submit the required completion report only when work is settled. Never repeat settled effects or infer additional authority."
+        }
+        else if continuation && matches!(reason,AgentModelResponseRejection::RequiredInputHandoff) {
+            "Submit request_user_input alone with the concrete user information or external action required now. Retain known failures, completed work and unfinished requirements. Use a fresh call ID. Do not resubmit the report or reopen execution tools; expired links and helpers remain expired."
         }
         else if continuation { "Use the actual native tool-call interface with exact advertised names and schemas. Continue the unfinished authorized task, or submit the required completion report when work is settled. Every native tool argument root must be a JSON object. Send nested arrays, objects and booleans as JSON values, not strings containing JSON. Quote and escape argument strings correctly. Use fresh call IDs. Never repeat settled effects or infer additional authority. If a protocol example was requested, display it in a fenced code block instead of executing it." }
         else { "The existing bounded protocol correction will not continue. This is not task completion or permission to replay effects." })

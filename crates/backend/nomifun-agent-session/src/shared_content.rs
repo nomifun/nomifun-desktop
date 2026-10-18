@@ -4,6 +4,9 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
+#[path = "shared_input_content.rs"]
+mod input_content;
+
 const KEY: &str = "_canonical_shared_content";
 const MIN_BYTES: usize = 1024;
 const MAX_REFERENCES: usize = 4096;
@@ -40,7 +43,12 @@ struct ContentReference {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ContentReferences { version: u8, references: Vec<ContentReference> }
+struct ContentReferences {
+    version: u8,
+    references: Vec<ContentReference>,
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    input_sources: Vec<input_content::InputReference>,
+}
 
 pub(super) struct Prepared {
     pub append: SessionEventAppend,
@@ -121,7 +129,7 @@ fn slots(kind: &str, value: &Value) -> Vec<(String, ContentKind)> {
     slots
 }
 
-pub(super) fn prepare(append: &SessionEventAppend, supplied: Option<&SessionPayloadRecord>) -> Result<Prepared, SessionStoreError> {
+pub(super) async fn prepare(tx:&mut Transaction<'_,Sqlite>,append: &SessionEventAppend, supplied: Option<&SessionPayloadRecord>) -> Result<Prepared, SessionStoreError> {
     let mut prepared = Prepared { append: append.clone(), envelope: supplied.cloned(), contents: Vec::new() };
     if !supported(&append.semantic_event.kind.0) {
         return Ok(prepared);
@@ -133,6 +141,7 @@ pub(super) fn prepare(append: &SessionEventAppend, supplied: Option<&SessionPayl
         _ => return Ok(prepared),
     };
     if value.get(KEY).is_some() { return Err(invalid("shared content references are authored only by the Store")); }
+    let input_sources=input_content::prepare(tx,append,&mut value).await?;
     let mut references = Vec::new();
     for (pointer, kind) in slots(&append.semantic_event.kind.0, &value) {
         let Some(body) = value.pointer_mut(&pointer) else { continue; };
@@ -148,9 +157,9 @@ pub(super) fn prepare(append: &SessionEventAppend, supplied: Option<&SessionPayl
             byte_len: bytes.len() as u64, digest, body: SessionPayloadBody::Json(StrictJsonValue(body.take())),
         });
     }
-    if references.is_empty() { return Ok(prepared); }
+    if references.is_empty() && input_sources.is_empty() { return Ok(prepared); }
     value.as_object_mut().ok_or_else(|| invalid("shared content envelope must be an object"))?
-        .insert(KEY.into(), serde_json::to_value(ContentReferences { version: 1, references })?);
+        .insert(KEY.into(), serde_json::to_value(ContentReferences { version: 1, references, input_sources })?);
     let bytes = canonical_json_bytes(&value)?;
     if bytes.len() <= MAX_INLINE_JSON_BYTES {
         prepared.append.semantic_event.payload = SessionEventPayloadRef::InlineJson(StrictJsonValue(value));
@@ -172,7 +181,7 @@ pub(super) async fn hydrate(tx: &mut Transaction<'_, Sqlite>, event: &SessionEve
         return Err(invalid("shared content references require an exact supported event contract"));
     }
     let metadata: ContentReferences = serde_json::from_value(metadata.clone())?;
-    if metadata.version != 1 || metadata.references.is_empty() || metadata.references.len() > MAX_REFERENCES {
+    if metadata.version != 1 || (metadata.references.is_empty() && metadata.input_sources.is_empty()) || metadata.references.len() > MAX_REFERENCES {
         return Err(invalid("invalid shared content codec or reference count"));
     }
     let allowed = slots(&event.kind.0, &value);
@@ -204,6 +213,10 @@ pub(super) async fn hydrate(tx: &mut Transaction<'_, Sqlite>, event: &SessionEve
             return Err(invalid("shared tool content differs from its exact bytes or type"));
         }
         *slot = body.0;
+    }
+    input_content::hydrate(tx,event,&mut value,metadata.input_sources).await?;
+    if canonical_json_bytes(&value)?.len()>MAX_SINGLE_PAYLOAD_BYTES {
+        return Err(invalid("expanded input event exceeds its original payload bound"));
     }
     Ok(value)
 }

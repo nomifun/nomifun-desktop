@@ -81,7 +81,7 @@ async fn removed_selected_default_keeps_same_session_absolute_file_and_explicit_
             let steps = [
                 ("missing-default-scope", "read_file", json!({"path":provider_outside,"format":"instruction_scope"})),
                 ("missing-default-write", "write_file", json!({"path":provider_file,"content":CONTENT})),
-                ("missing-default-process", "exec_command", json!({"command":"/bin/pwd","args":[],"cwd":provider_outside,"timeout_ms":10000})),
+                ("missing-default-process", "start_process", json!({"command":"/bin/pwd","args":[],"cwd":provider_outside,"timeout_ms":10000})),
                 ("missing-default-read", "read_file", json!({"path":provider_file})),
             ];
             for (id, name, args) in steps {

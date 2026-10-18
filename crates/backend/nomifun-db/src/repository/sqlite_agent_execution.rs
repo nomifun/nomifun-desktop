@@ -4007,7 +4007,9 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                  WHERE link.conversation_id = ? AND link.execution_id = ? \
                    AND link.relation = 'lead' AND link.active = 1 \
                    AND execution.user_id = ? AND execution.deleted_at IS NULL \
-                   AND json_extract(execution.initial_plan_input, '$.mode') = 'automation'",
+                   AND json_extract(execution.initial_plan_input, '$.mode') = 'automation' \
+                   AND EXISTS(SELECT 1 FROM agent_session_heads head WHERE head.session_id=link.conversation_id \
+                              AND head.status='ready' AND head.active_turn_id IS NULL)",
             )
             .bind(conversation_id)
             .bind(execution_id)

@@ -19,7 +19,6 @@ import {
   type CommandQueueExecutionGate,
 } from './commandQueueExecutionGate';
 import { isAuthoritativeCompletionRuntimeIdle } from './authoritativeTurnLifecyclePolicy';
-import type { PublicMessageDeliveryDisposition } from './publicMessageDelivery';
 
 export {
   reduceCommandQueueExecutionGate,
@@ -359,7 +358,7 @@ type UseConversationCommandQueueOptions = {
   onExecute: (
     item: ConversationCommandQueueItem,
     execution?: ConversationCommandQueueExecution
-  ) => Promise<PublicMessageDeliveryDisposition | void>;
+  ) => Promise<void>;
 };
 
 export type ConversationCommandQueueExecution = {
@@ -915,7 +914,7 @@ export const useConversationCommandQueue = ({
         if (!isExecutionCurrent()) return;
         return onExecute(nextCommand, { isCurrent: isExecutionCurrent });
       })
-      .then(async (deliveryDisposition) => {
+      .then(async () => {
         if (!isExecutionCurrent()) return;
         // `onExecute` resolves only after the HTTP request is accepted. Remove
         // the persisted item at that point, and only from the generation that
@@ -929,14 +928,6 @@ export const useConversationCommandQueue = ({
             : state
         );
         if (!isExecutionCurrent()) return;
-        if (deliveryDisposition === 'replayed_completed') {
-          executionGateRef.current = IDLE_EXECUTION_GATE;
-          logCommandQueue(conversationKey, 'completed-replay-acknowledged', {
-            pendingItemCount: stateRef.current.items.length,
-          });
-          setExecutionGateVersion((version) => version + 1);
-          return;
-        }
         // turn.started normally moves the gate first. If that WS event was
         // missed, reconcile the accepted send against authoritative runtime so
         // the queue cannot remain in waiting_start forever. The same helper is

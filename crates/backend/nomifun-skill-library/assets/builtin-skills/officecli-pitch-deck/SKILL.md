@@ -12,7 +12,7 @@ When the pptx base rules cover it, the text here says `→ see pptx v2 §X`. Rea
 ## Managed component setup
 
 Use NomiFun's approved **iOfficeAI/OfficeCLI 1.0.156** through an already-authorized
-`workspace.process/exec` or `workspace.process/start` tool with `component=officecli`
+`workspace.process/start` tool with `component=officecli`
 and literal `args`. The Host verifies the executable and sets its required
 environment. Follow [the shared runtime instructions](references/runtime.md) before
 running any example. Every `officecli` example means this component target;

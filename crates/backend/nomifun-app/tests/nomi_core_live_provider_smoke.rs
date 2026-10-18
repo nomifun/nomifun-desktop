@@ -768,11 +768,14 @@ fn verify_resource_selections_in_workspace(binding: &Value, selections: &Value, 
     let resources = binding.get("typed_resource_bindings").and_then(Value::as_array).ok_or_else(|| {
         SmokeFailure::new("session.resources", "SESSION_RESOURCE_BINDINGS_MISSING", 502)
     })?;
-    if resources.len() != selections.len() || selections.iter().any(|selection| {
+    if resources.len() != selections.len() {
+        return Err(SmokeFailure::new("session.resources", format!("SESSION_RESOURCE_COUNT_MISMATCH_{}_{}", resources.len(), selections.len()), 409));
+    }
+    if let Some(selection) = selections.iter().find(|selection| {
         resources.iter().filter(|resource| {
             if resource.get("resource_kind") != selection.get("resource_kind") { return false; }
             let kind = resource.get("resource_kind").and_then(Value::as_str);
-            if let Some(expected) = workspace.filter(|_| matches!(kind, Some("workspace" | "process_session"))) {
+            if let Some(expected) = workspace.filter(|_| matches!(kind, Some("workspace" | "process_session" | "project_memory"))) {
                 let Some(root) = resource.pointer("/typed_parameters/workspace_root").and_then(Value::as_str) else { return false; };
                 if std::fs::canonicalize(root).ok().is_none_or(|actual|
                     std::fs::canonicalize(expected).ok().as_ref() != Some(&actual)) {
@@ -789,11 +792,26 @@ fn verify_resource_selections_in_workspace(binding: &Value, selections: &Value, 
                     let id = format!("selected-workspace-{:x}", Sha256::digest(root.as_bytes()));
                     return resource.get("resource_id").and_then(Value::as_str) == Some(id.as_str());
                 }
+                if kind == Some("project_memory") {
+                    use sha2::{Digest, Sha256};
+                    let Some(owner) = resource.get("owner_id").and_then(Value::as_str) else { return false; };
+                    let Ok(identity) = serde_json::to_vec(&(owner, root)) else { return false; };
+                    let id = format!("project-workspace-memory-{:x}", Sha256::digest(identity));
+                    return resource.get("resource_id").and_then(Value::as_str) == Some(id.as_str());
+                }
             }
             resource.get("resource_id") == selection.get("resource_id")
         }).count() != 1
     }) {
-        return Err(SmokeFailure::new("session.resources", "SESSION_RESOURCE_SELECTION_MISMATCH", 409));
+        // Only fixture-owned resource kind labels appear in diagnostics, never
+        // owner IDs, absolute paths, route records or provider credentials.
+        let kind = match selection.get("resource_kind").and_then(Value::as_str) {
+            Some("workspace") => "WORKSPACE", Some("process_session") => "PROCESS_SESSION",
+            Some("project_memory") => "PROJECT_MEMORY", Some("browser") => "BROWSER",
+            Some("computer") => "COMPUTER", Some("asset_library") => "ASSET_LIBRARY",
+            Some("scheduler") => "SCHEDULER", _ => "OTHER",
+        };
+        return Err(SmokeFailure::new("session.resources", format!("SESSION_RESOURCE_SELECTION_MISMATCH_{kind}"), 409));
     }
     Ok(())
 }
@@ -1069,8 +1087,8 @@ fn first_durable_error_code(messages: &[Value]) -> Option<String> {
         let tool_summary = projection.get("tool_summary");
         let is_error = projection.get("status").and_then(Value::as_str) == Some("error")
             || projection.get("type").and_then(Value::as_str) == Some("error")
-            || projection.get("error").is_some()
-            || tool_summary.and_then(|summary| summary.get("error")).is_some();
+            || projection.get("error").is_some_and(|error|!error.is_null())
+            || tool_summary.and_then(|summary| summary.get("error")).is_some_and(|error|!error.is_null());
         if !is_error {
             continue;
         }
@@ -1090,7 +1108,7 @@ fn first_durable_error_code(messages: &[Value]) -> Option<String> {
             .unwrap_or_default();
         let name = projection.get("name").and_then(Value::as_str)
             .or_else(|| tool_summary.and_then(|summary| summary.get("name")).and_then(Value::as_str));
-        if name == Some("exec_command")
+        if name == Some("start_process")
             && output.contains("Capability Kernel rejected Agent Runtime Tool (INVALID_PAYLOAD)")
         {
             let args = projection.get("args").or_else(|| tool_summary.and_then(|summary| summary.get("args")));
@@ -1144,7 +1162,7 @@ fn first_durable_error_code(messages: &[Value]) -> Option<String> {
                 Some("write_file") => "CODING_WRITE_REJECTED",
                 Some("read_file") => "CODING_READ_REJECTED",
                 Some("apply_patch") => "CODING_PATCH_REJECTED",
-                Some("exec_command") => "CODING_EXEC_REJECTED",
+                Some("start_process") => "CODING_EXEC_REJECTED",
                 Some("resume_task") => "CODING_RESUME_REJECTED",
                 _ => "TOOL_OR_TURN_FAILED",
             }
@@ -1402,7 +1420,7 @@ async fn emit_live_runtime_progress_trace(root: &Path) {
                 }
                 "tool_started" => match value.pointer("/event/action_id").and_then(Value::as_str) {
                     Some("workspace.files/read") => reads += 1,
-                    Some("workspace.process/exec") => execs += 1,
+                    Some("workspace.process/start") => execs += 1,
                     Some("workspace.files/write" | "workspace.files/patch") => writes += 1,
                     Some("agent/delegate" | "agent/fork") => delegations += 1,
                     _ => {}
@@ -1518,7 +1536,7 @@ fn emit_live_coding_trace(phase: &str, messages: &[Value], file: &Path) {
             Some("read_file") => read = read.saturating_add(1),
             Some("write_file") => write = write.saturating_add(1),
             Some("apply_patch") => patch = patch.saturating_add(1),
-            Some("exec_command") => exec = exec.saturating_add(1),
+            Some("start_process") => exec = exec.saturating_add(1),
             Some("update_plan") => plan = plan.saturating_add(1),
             Some("report_completion") => completion = completion.saturating_add(1),
             _ => {}
@@ -1528,7 +1546,7 @@ fn emit_live_coding_trace(phase: &str, messages: &[Value], file: &Path) {
                 Some("read_file") => 'R',
                 Some("write_file") => 'W',
                 Some("apply_patch") => 'P',
-                Some("exec_command") => 'E',
+                Some("start_process") => 'E',
                 Some("update_plan") => 'U',
                 Some("report_completion") => 'C',
                 _ => 'O',
@@ -1604,8 +1622,7 @@ async fn emit_live_coding_history_trace(
             errors = errors.saturating_add(1);
             if failure_names.len() < 12 {
                 let name = match name {
-                    "read_file" | "write_file" | "apply_patch" | "exec_command"
-                    | "start_process" | "poll_process" | "git_status" | "git_diff"
+                    "read_file" | "write_file" | "apply_patch" | "start_process" | "poll_process" | "git_status" | "git_diff"
                     | "search_files" | "update_plan" | "report_completion" => name,
                     _ => "other",
                 };
@@ -1638,7 +1655,7 @@ async fn emit_live_coding_history_trace(
             if output.contains("write_file") || output.contains("apply_patch") {
                 discovery_revealed_write = discovery_revealed_write.saturating_add(1);
             }
-        } else if !matches!(name, "read_file" | "write_file" | "apply_patch" | "exec_command" | "update_plan" | "report_completion") {
+        } else if !matches!(name, "read_file" | "write_file" | "apply_patch" | "start_process" | "update_plan" | "report_completion") {
             other_tools = other_tools.saturating_add(1);
         }
         if name == "read_file" {
@@ -1654,7 +1671,7 @@ async fn emit_live_coding_history_trace(
                 reads_other = reads_other.saturating_add(1);
             }
         }
-        if matches!(name, "exec_command" | "start_process") {
+        if matches!(name, "start_process") {
             let args = &content["args"];
             if matches!(args.get("command").and_then(Value::as_str), Some("bun" | "bun.exe"))
                 && args.get("args").and_then(Value::as_array)
@@ -1662,7 +1679,7 @@ async fn emit_live_coding_history_trace(
                 test_launches = test_launches.saturating_add(1);
             }
         }
-        if matches!(name, "exec_command" | "poll_process") {
+        if matches!(name, "start_process" | "poll_process") {
             let exit_code = serde_json::from_str::<Value>(output).ok()
                 .and_then(|value| value.get("exit_code").and_then(Value::as_i64));
             match exit_code {
@@ -2228,8 +2245,8 @@ fn managed_component_evidence(events: &[Value], operation: &str) -> Result<Value
     let starts = events.iter().filter(|event| event["kind"] == "tool/call-started"
         && event["causation_event_id"] == turn_start["event_id"]).collect::<Vec<_>>();
     let [start] = starts.as_slice() else { return Err(failure()); };
-    if start.pointer("/payload/value/action_id").and_then(Value::as_str) != Some("workspace.process/exec")
-        || start.pointer("/payload/value/name").and_then(Value::as_str) != Some("exec_command") {
+    if start.pointer("/payload/value/action_id").and_then(Value::as_str) != Some("workspace.process/start")
+        || start.pointer("/payload/value/name").and_then(Value::as_str) != Some("start_process") {
         return Err(failure());
     }
     let call_id = start.pointer("/payload/value/call_id").and_then(Value::as_str).ok_or_else(failure)?;
@@ -2267,7 +2284,7 @@ fn managed_component_evidence(events: &[Value], operation: &str) -> Result<Value
         return Err(failure());
     }
     Ok(json!({"schema_version":1,"provider":"stepfun-plan","model":"step-5-preview",
-        "component":"officecli","action_id":"workspace.process/exec","version":version,"digest":digest,
+        "component":"officecli","action_id":"workspace.process/start","version":version,"digest":digest,
         "source":"managed","canonical_component_argument":true,"exit_code":0,"cleanup_reaped":true,
         "call_started_seq":start["seq"],"result_seq":result["seq"]}))
 }
@@ -2280,17 +2297,17 @@ async fn run_live_managed_component_chain(
     }
     let provider_id = configure_stepfun(router, api_key, STEPFUN_PLAN_BASE_URL, model).await?;
     let (preset_id, _) = create_agent_preset(router, &provider_id, model,
-        &[("workspace.process", &["workspace.process/exec"], "process_session")]).await?;
+        &[("workspace.process", &["workspace.process/start"], "process_session")]).await?;
     let (session_id, binding) = create_session(router, &preset_id, &provider_id, model,
         json!([{"resource_kind":"process_session","resource_id":"managed-process-session"}])).await?;
     assert_session_runtime(router, &session_id).await?;
     let cursor = session_message_cursor(router, "component.cursor_before", &session_id).await?;
     let operation = start_session_turn(router, "component.turn", &session_id,
         &uuid::Uuid::now_v7().to_string(), format!(
-            "Call exec_command exactly once with this JSON object: {{\"component\":\"officecli\",\"args\":[\"--version\"]}}. Use the host-managed component target. Do not set command or cmd, do not use a shell or PATH executable, and do not call any other tool. After its actual successful exit, reply with exactly {COMPONENT_MARKER} and no other text."
+            "Call start_process exactly once with this JSON object: {{\"component\":\"officecli\",\"args\":[\"--version\"],\"wait_ms\":30000}}. Use the host-managed component target. Do not set command or cmd, do not use a shell or PATH executable, and do not call any other tool. After its actual successful exit, reply with exactly {COMPONENT_MARKER} and no other text."
         )).await?;
     wait_for_session_marker_with_tools(router, "component.reply", &session_id, cursor,
-        COMPONENT_MARKER, TURN_RESULT_DEADLINE, Some("workspace.process/exec")).await?;
+        COMPONENT_MARKER, TURN_RESULT_DEADLINE, Some("workspace.process/start")).await?;
     let mut evidence = managed_component_evidence(&session_events(router, &session_id).await?, &operation)?;
     let cursor = session_message_cursor(router, "component.continuation_cursor", &session_id).await?;
     let continuation = start_session_turn(router, "component.continuation_turn", &session_id,
@@ -3415,6 +3432,26 @@ mod evidence_tests {
     }
 
     #[test]
+    fn normal_derived_turn_summaries_with_null_error_are_not_failed_tools() {
+        for (state,outcome) in [("running",Value::Null),("running",json!({"kind":"waiting","request_id":"authorization"})),
+            ("completed",json!({"kind":"input_required","request_id":"next-decision"})),
+            ("completed",json!({"kind":"answered","message_ids":["answer"]}))] {
+            let summary=json!({"presentation_intent":"turn_summary","projection":{
+                "state":state,"error":null,"turn_outcome":outcome}});
+            assert_eq!(first_durable_error_code(&[summary]),None);
+        }
+        let settled=json!({"presentation_intent":"tool","projection":{"state":"recorded",
+            "tool_summary":{"name":"start_process","error":null}}});
+        assert_eq!(first_durable_error_code(&[settled]),None);
+        for projection in [json!({"state":"failed","error":{"code":"TURN_FAILED","message":"real failure"}}),
+            json!({"status":"error","error":null}),
+            json!({"tool_summary":{"name":"read_file","error":"real tool failure"}})] {
+            assert!(first_durable_error_code(&[json!({"projection":projection})]).is_some(),
+                "nullable normal metadata must not hide a real error");
+        }
+    }
+
+    #[test]
     fn admission_diagnostics_emit_only_static_codes_and_preserve_failure() {
         let projected_tool_failure = json!({"projection":{"state":"recorded",
             "tool_summary":{"name":"read_file","error":"RESOURCE_NOT_FOUND: omitted path"}}});
@@ -3486,12 +3523,14 @@ mod evidence_tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().to_string_lossy().into_owned();
         let id = format!("selected-workspace-{:x}", Sha256::digest(path.as_bytes()));
+        let memory_identity = serde_json::to_vec(&("live-smoke-owner", path.as_str())).unwrap();
+        let memory_id = format!("project-workspace-memory-{:x}", Sha256::digest(memory_identity));
         let mut binding = json!({"typed_resource_bindings":[
             {"binding_id":"pending","resource_kind":"workspace","resource_id":id,"owner_id":"live-smoke-owner","operations":["read"],"typed_parameters":{"workspace_root":path}},
-            {"binding_id":"pending","resource_kind":"process_session","resource_id":"managed-process-session","owner_id":"live-smoke-owner","operations":["exec"],"typed_parameters":{"workspace_root":path}},
-            {"resource_kind":"project_memory","resource_id":"default-project-memory"}
+            {"binding_id":"pending","resource_kind":"process_session","resource_id":"managed-process-session","owner_id":"live-smoke-owner","operations":["execute","observe"],"typed_parameters":{"workspace_root":path}},
+            {"binding_id":"pending","resource_kind":"project_memory","resource_id":memory_id,"owner_id":"live-smoke-owner","operations":["read","write"],"typed_parameters":{"workspace_root":path}}
         ]});
-        for index in 0..2 {
+        for index in 0..3 {
             let definition = serde_json::from_value::<nomifun_agent_contracts::TypedResourceBinding>(binding["typed_resource_bindings"][index].clone()).unwrap();
             binding["typed_resource_bindings"][index]["binding_id"] = json!(nomifun_agent_contracts::resource_definition_id(&definition).unwrap());
         }

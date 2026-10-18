@@ -239,8 +239,10 @@ impl ChannelPlugin for NostrPlugin {
             ));
         }
 
-        debug!(event_id = %event_id, sent_count, "Nostr DM published");
-        Ok(event_id)
+        debug!(event_id = %event_id, sent_count, "Nostr DM queued for relays");
+        // The signed event keeps its true identity on the wire. Queue
+        // admission does not prove any relay's asynchronous OK response.
+        Ok(String::new())
     }
 
     async fn edit_message(
@@ -604,6 +606,18 @@ fn build_ws_tls_connector() -> Result<tokio_tungstenite::Connector, ChannelError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn queued_signed_event_retains_wire_identity_without_claiming_a_relay_ack() {
+        let mut plugin=NostrPlugin::new();plugin.keys=Some(Keys::generate());
+        let recipient=Keys::generate().public_key().to_hex();let(tx,mut rx)=mpsc::channel(4);
+        plugin.relay_writers.lock().await.push(RelaySender {url:"wss://fixture.invalid".into(),tx});
+        let id=plugin.send_message(&recipient,crate::message_service::ChannelMessageService::build_final_message("Private fixture message")).await.unwrap();
+        assert!(id.is_empty(),"a queued event has not received the relay's OK");
+        let wire:serde_json::Value=serde_json::from_str(&rx.recv().await.unwrap()).unwrap();
+        assert_eq!(wire[0],"EVENT");assert_eq!(wire[1]["id"].as_str().unwrap().len(),64);
+        assert_eq!(wire[1]["kind"],4);assert!(wire[1]["sig"].as_str().is_some_and(|sig|!sig.is_empty()));
+    }
 
     const RECEIVER_SK_HEX: &str =
         "7b911fd37cdf5c81d4c0adb1ab7fa822ed253ab0ad9aa18d77257c88b29b718e";

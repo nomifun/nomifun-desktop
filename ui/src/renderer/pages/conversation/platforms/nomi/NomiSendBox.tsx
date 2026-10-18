@@ -7,7 +7,7 @@
 import { conversationTarget, type ConversationId, type MessageId } from '@/common/types/ids';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { ipcBridge } from '@/common';
-import { uuid, uuidv7 } from '@/common/utils';
+import { uuid } from '@/common/utils';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
 import contentStyles from '../../components/ConversationContentColumn.module.css';
 import SendBox from '@/renderer/components/chat/SendBox';
@@ -24,10 +24,8 @@ import { useLatestRef } from '@/renderer/hooks/ui/useLatestRef';
 import {
   useAddOrUpdateMessage,
   useMessageList,
-  useRemoveMessageByMsgId,
 } from '@/renderer/pages/conversation/Messages/hooks';
 import {
-  shouldEnqueueConversationCommand,
   useConversationCommandQueue,
   type ConversationCommandQueueExecution,
   type ConversationCommandQueueItem,
@@ -40,7 +38,8 @@ import {
   readInitialMessageDelivery,
   releaseInitialMessageDelivery,
 } from '@/renderer/pages/conversation/platforms/initialMessageDelivery';
-import { classifyPublicMessageDelivery } from '@/renderer/pages/conversation/platforms/publicMessageDelivery';
+import { settleInputDelivery, inputDeliveryAttempt, pendingInputDelivery } from './inputDeliveryAttempt';
+import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import {
   requestConversationStop,
   stopConversationAndConfirmRelease,
@@ -69,7 +68,6 @@ import { ContextUsageRing } from './ContextUsageRing';
 import type { NomiModelSelection } from './useNomiModelSelection';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { evaluateNomiVisionSend } from './nomiVisionSendGuard';
-import { steerOrQueue } from './steerOrQueue';
 import CreationControls, { CreationModelSelector } from '@/renderer/creation/CreationControls';
 import { ComposerSceneHeader } from '@/renderer/creation/ComposerSceneSelector';
 import { useCreationComposer } from '@/renderer/creation/CreationComposerContext';
@@ -241,15 +239,12 @@ const NomiSendBox: React.FC<{
 
   const {
     running,
+    executing = false,
     hasHydratedRunningState,
     pauseNotice,
     waitingNotice,
     tokenUsage,
-    setActiveMsgId,
-    markTurnAccepted,
-    reconcilePublicDeliveryReplay,
     reconcileAfterStreamTerminal,
-    setWaitingResponse,
     resetState,
     confirmStopped,
     getTurnStartGeneration,
@@ -326,6 +321,8 @@ const NomiSendBox: React.FC<{
 
   useEffect(() => {
     if (!conversation_id || isCreating) return;
+    // This owner prepares normal chat through canonical passive readiness. The
+    // shared composer must not add another POST when its input auto-focuses.
     let cancelled = false;
     const initialPresentationKey = initialMessageRef.current?.conversation_id === conversation_id
       ? initialMessageRef.current.idempotency_key : undefined;
@@ -353,7 +350,6 @@ const NomiSendBox: React.FC<{
   }, [sessionCapabilities.error, dismissInitialMessage]);
 
   const addOrUpdateMessage = useAddOrUpdateMessage();
-  const removeMessageByMsgId = useRemoveMessageByMsgId();
   const messageListRef = useLatestRef(messageList);
   const { setSendBoxHandler } = usePreviewContext();
   const [isStopping, setIsStopping] = useState(false);
@@ -398,135 +394,76 @@ const NomiSendBox: React.FC<{
   );
 
   // Shared file handling logic
-  const { handleFilesAdded, clearFiles } = useSendBoxFiles({
+  const { handleFilesAdded } = useSendBoxFiles({
     setAtPath,
     setUploadFile,
   });
 
   const executeCommand = useCallback(
     async (
-      {
-        id = uuidv7(),
-        input,
-        files,
-        initialOnly = false,
-      }: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
-        Partial<Pick<ConversationCommandQueueItem, 'id'>> & {
-          initialOnly?: boolean;
-        },
+      { id, input, files, initialOnly = false }: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
+        Partial<Pick<ConversationCommandQueueItem, 'id'>> & { initialOnly?: boolean },
       execution?: ConversationCommandQueueExecution,
-      deferLocalTurnUntilFresh = execution !== undefined,
       submission?: { isCurrent: () => boolean; onAdmissionStarted: () => void }
     ) => {
       const canSubmit = () => mountedRef.current && requestConversationIdRef.current === conversation_id
         && !submissionDisabledRef.current && (!submission || submission.isCurrent());
       if (!canSubmit()) throw new Error(t('common.processing'));
-      if (!current_model?.use_model) {
-        reportRequestFailure(new Error('No model selected'), 'PROVIDER_UNAVAILABLE');
-        throw new Error('No model selected');
-      }
-      if (!canSendFiles(files)) {
-        throw new Error('Image send blocked by the selected chat capability');
-      }
-
-      // Persisted deliveries open local turn UI only after a fresh receipt.
+      const pending = id ? undefined : pendingInputDelivery(conversation_id, input, files);
+      if (!pending && !canSendFiles(files)) throw new Error('Image send blocked by the selected chat capability');
       const displayMessage = buildDisplayMessage(input, files, workspacePath);
-      const previousMessageIds = new Set(messageListRef.current.flatMap(message => [message.message_id, message.msg_id, message.turn_id].filter((id): id is MessageId => Boolean(id))));
+      const previousMessageIds = new Set(messageListRef.current.flatMap(message => [message.message_id, message.msg_id, message.turn_id].filter((value): value is MessageId => Boolean(value))));
       setRequestFailure(null);
-      let msg_id: MessageId | null = null;
+      let attempt: ReturnType<typeof inputDeliveryAttempt> | undefined;
       let admissionStarted = false;
       try {
-        // Restored/queued keys and initial-message handoffs retain their
-        // existing reconciliation. Steers do not pass through this path.
-        if (!execution && !initialOnly) await prepareIdleSubmission();
-        if (!canSubmit()) throw new Error(t('common.processing'));
-        const selection = await sessionCapabilities.applyBeforeSend();
-        // Manual file work can begin while capability admission is awaiting a
-        // receipt. Read the live UI pause before sending an ordinary Turn.
-        if (!canSubmit()) throw new Error(t('common.processing'));
-        if (!deferLocalTurnUntilFresh) setWaitingResponse(true);
-        if (!deferLocalTurnUntilFresh) {
-          void checkAndUpdateTitle(conversation_id, input);
+        attempt = pending;
+        let skills = attempt?.injectSkills ?? [];
+        // Configuration is an idle authoring action, separate from accepting
+        // a message. Existing work and retries keep their frozen configuration.
+        if (!attempt && !running && !pauseNotice) {
+          if (!execution && !initialOnly) await prepareIdleSubmission();
+          if (!canSubmit()) throw new Error(t('common.processing'));
+          if (sessionCapabilities.state?.editable === true && !sessionCapabilities.loading && !sessionCapabilities.saving) {
+            skills = (await sessionCapabilities.applyBeforeSend()).skill_names;
+          }
         }
-        // Wait for the server-assigned msg_id before rendering the optimistic
-        // user bubble so the local row uses the same id as the DB row and
-        // subsequent WebSocket stream events — avoids duplicate bubbles when
-        // useMessageLstCache reloads.
+        if (!canSubmit()) throw new Error(t('common.processing'));
+        if (!id) attempt = inputDeliveryAttempt(conversation_id, input, files, skills, displayMessage);
         admissionStarted = true;
         submission?.onAdmissionStarted();
         const res = await ipcBridge.conversation.sendMessage.invoke({
-          input: displayMessage,
-          conversation_id,
-          files,
-          idempotency_key: id,
+          input: attempt?.content ?? displayMessage, conversation_id, files: attempt?.files ?? files,
+          idempotency_key: id ?? attempt!.key,
           initial_only: initialOnly,
-          inject_skills: selection.skill_names,
+          inject_skills: attempt?.injectSkills ?? skills,
         });
+        if (attempt) settleInputDelivery(conversation_id, attempt.key);
         if (execution && !execution.isCurrent()) return;
-        msg_id = res.msg_id;
-        const disposition = classifyPublicMessageDelivery(res);
-        if (disposition === 'fresh') {
-          if (deferLocalTurnUntilFresh) {
-            setWaitingResponse(true);
-            void checkAndUpdateTitle(conversation_id, input);
-          }
-          markTurnAccepted();
-          setActiveMsgId(msg_id);
-        // Use add=false (compose mode) so composeMessageWithIndex can de-dup
-        // by msg_id — this prevents a duplicate bubble if useMessageLstCache
-        // already inserted the DB row for this same msg_id.
-        addOrUpdateMessage({
-          id: uuid(),
-          msg_id,
-          type: 'text',
-          position: 'right',
-          conversation_id,
-          content: {
-            content: displayMessage,
-          },
-          created_at: Date.now(),
-        });
-        } else {
-          setActiveMsgId(null);
-          reconcilePublicDeliveryReplay(res.completed);
-        }
+        addOrUpdateMessage({ id: uuid(), msg_id: res.msg_id, type: 'text', position: 'right',
+          conversation_id, content: { content: attempt?.content ?? displayMessage, input_delivery: { state: 'pending' } }, created_at: Date.now() });
+        // Saving input is not proof of a new or resumed Turn. Lifecycle comes
+        // from canonical runtime snapshots and stream events only.
+        reconcileAfterStreamTerminal();
+        if (!res.replayed) void checkAndUpdateTitle(conversation_id, input);
         emitter.emit('chat.history.refresh');
-        if (files.length > 0) {
-          emitter.emit('nomi.workspace.refresh');
-        }
-        return disposition;
+        if (files.length > 0) emitter.emit('nomi.workspace.refresh');
       } catch (error) {
-        // A local pause before the POST leaves the composer/handoff untouched.
-        // Accepted or unknown backend admissions keep the existing reconciliation.
+        if (attempt && isBackendHttpError(error) && error.status === 409 && error.code === 'INPUT_NOT_ACCEPTED') {
+          settleInputDelivery(conversation_id, attempt.key);
+        }
         if (!admissionStarted && !canSubmit()) throw error;
         if (execution && !execution.isCurrent()) return;
-        if (msg_id) removeMessageByMsgId(msg_id);
-        setActiveMsgId(null);
-        setWaitingResponse(false);
+        reconcileAfterStreamTerminal();
         reportRequestFailure(error, 'CONVERSATION_SEND_FAILED', previousMessageIds, displayMessage);
         throw error;
       }
     },
-    [
-      addOrUpdateMessage,
-      reportRequestFailure,
-      messageListRef,
-      checkAndUpdateTitle,
-      canSendFiles,
-      conversation_id,
-      current_model?.use_model,
-      markTurnAccepted,
-      reconcilePublicDeliveryReplay,
-      setActiveMsgId,
-      removeMessageByMsgId,
-      setWaitingResponse,
-      t,
-      workspacePath,
-      sessionCapabilities.applyBeforeSend,
-      submissionDisabledRef,
-      requestConversationIdRef,
-      prepareIdleSubmission,
-    ]
+    [addOrUpdateMessage, reportRequestFailure, messageListRef, checkAndUpdateTitle,
+      canSendFiles, conversation_id, running, pauseNotice, reconcileAfterStreamTerminal,
+      t, workspacePath, sessionCapabilities.applyBeforeSend, sessionCapabilities.state?.editable,
+      sessionCapabilities.loading, sessionCapabilities.saving,
+      submissionDisabledRef, requestConversationIdRef, prepareIdleSubmission]
   );
 
   const {
@@ -534,7 +471,6 @@ const NomiSendBox: React.FC<{
     isPaused: isQueuePaused,
     isInteractionLocked: isQueueInteractionLocked,
     hasPendingCommands,
-    enqueue,
     remove,
     clear,
     reorder,
@@ -585,7 +521,6 @@ const NomiSendBox: React.FC<{
 
       let attemptedIdempotencyKey: string | null = null;
       let admissionStarted = false;
-      let waitsForAcceptedMessage = false;
       try {
         attemptedIdempotencyKey = readInitialMessageDelivery(sessionStorage, storageKey)?.idempotency_key ?? null;
         sessionStorage.removeItem(processedKey);
@@ -606,13 +541,11 @@ const NomiSendBox: React.FC<{
         }
         const { input, files, idempotency_key } = initialMessage;
         attemptedIdempotencyKey = idempotency_key;
-        const disposition = await executeCommand(
+        await executeCommand(
           { id: idempotency_key, input, files, initialOnly: true },
           undefined,
-          true,
           { isCurrent: () => !cancelled, onAdmissionStarted: () => { admissionStarted = true; } }
         );
-        waitsForAcceptedMessage = disposition === 'fresh';
         completeInitialMessageDelivery(sessionStorage, storageKey, idempotency_key);
       } catch (error) {
         handleInitialMessageDeliveryFailure(
@@ -630,7 +563,7 @@ const NomiSendBox: React.FC<{
           && !submissionDisabledRef.current && sessionStorage.getItem(storageKey)) {
           setInitialDeliveryRetry(attempt => attempt + 1);
         }
-        if (!cancelled && attemptedIdempotencyKey && !waitsForAcceptedMessage) endInitialMessage(conversation_id, attemptedIdempotencyKey);
+        if (!cancelled && attemptedIdempotencyKey) endInitialMessage(conversation_id, attemptedIdempotencyKey);
       }
     };
 
@@ -643,7 +576,15 @@ const NomiSendBox: React.FC<{
   const onSendHandler = async (message: string) => {
     if (submissionDisabledRef.current || preparingSubmissionRef.current || collaborationSubmittingRef.current) throw new Error(t('common.processing'));
     const filesToSend = collectSelectedFiles(uploadFile, atPath);
-    if (!canSendFiles(filesToSend)) return;
+    const pending = pendingInputDelivery(conversation_id, message, filesToSend);
+    if (!pending && !canSendFiles(filesToSend)) throw new Error('Image send blocked by the selected chat capability');
+    if (pending || isBusy || pauseNotice) {
+      await executeCommand({ input: message, files: filesToSend });
+      setUploadFile(previous => previous.filter(file => !filesToSend.includes(file)));
+      setAtPath(atPathRef.current.filter(item => !filesToSend.includes(typeof item === 'string' ? item : item.path)));
+      emitter.emit('nomi.selected.file.clear');
+      return;
+    }
     if (creation?.draft.mode) {
       if (creationSubmittingRef.current) throw new Error('任务正在提交');
       if (!generation.ready || creation.preparing) throw new Error('请先选择可用的生成模型');
@@ -672,13 +613,6 @@ const NomiSendBox: React.FC<{
         reportRequestFailure(error, 'CONVERSATION_CREATION_FAILED');
         throw error;
       } finally { creationSubmittingRef.current = false; setCreationSubmitting(false); }
-      return;
-    }
-    if (waitingNotice) {
-      if (!waitingNotice.canSteer) throw new Error(t('common.processing'));
-      await executeSteer({ input: message, files: filesToSend });
-      clearFiles();
-      emitter.emit('nomi.selected.file.clear');
       return;
     }
     const collaborationConfig = composerCollaborationEnabled ? collaboration.config : undefined;
@@ -716,18 +650,6 @@ const NomiSendBox: React.FC<{
       }
       return;
     }
-    if (
-      shouldEnqueueConversationCommand({
-        enabled: true,
-        isBusy,
-        hasPendingCommands,
-      })
-    ) {
-      enqueue({ input: message, files: filesToSend });
-      clearFiles();
-      emitter.emit('nomi.selected.file.clear');
-      return;
-    }
 
     await executeCommand({
       input: message,
@@ -738,167 +660,9 @@ const NomiSendBox: React.FC<{
     emitter.emit('nomi.selected.file.clear');
   };
 
-  // Canonical history is immutable. Editing a previous prompt explicitly
-  // submits the revised text as a new Turn; it never truncates or rewrites the
-  // accepted Session event chain.
-  const handleEditResubmit = useCallback(
-    async (_msgId: MessageId, _createdAt: number, message: string) => {
-      if (submissionDisabledRef.current) throw new Error(t('common.processing'));
-      const filesToSend = collectSelectedFiles(uploadFile, atPath);
-      if (!canSendFiles(filesToSend)) return;
-      setWaitingResponse(true);
-      const displayMessage = buildDisplayMessage(message, filesToSend, workspacePath);
-      const previousMessageIds = new Set(messageListRef.current.flatMap(message => [message.message_id, message.msg_id, message.turn_id].filter((id): id is MessageId => Boolean(id))));
-      setRequestFailure(null);
-      try {
-        await prepareIdleSubmission();
-        if (!mountedRef.current || requestConversationIdRef.current !== conversation_id || submissionDisabledRef.current) throw new Error(t('common.processing'));
-        const res = await ipcBridge.conversation.sendMessage.invoke({
-          conversation_id,
-          input: displayMessage,
-          files: filesToSend,
-          idempotency_key: uuidv7(),
-        });
-        clearFiles();
-        emitter.emit('nomi.selected.file.clear');
-        const disposition = classifyPublicMessageDelivery(res);
-        if (disposition === 'fresh') {
-          markTurnAccepted();
-          // 乐观插入新用户气泡（compose 模式按 msg_id 去重，避免 DB 行重复）。
-          addOrUpdateMessage({
-            id: uuid(),
-            msg_id: res.msg_id,
-            type: 'text',
-            position: 'right',
-            conversation_id,
-            content: {
-              content: displayMessage,
-            },
-            created_at: Date.now(),
-          });
-          setActiveMsgId(res.msg_id);
-        } else {
-          setActiveMsgId(null);
-          reconcilePublicDeliveryReplay(res.completed);
-        }
-        emitter.emit('chat.history.refresh');
-        if (filesToSend.length > 0) emitter.emit('nomi.workspace.refresh');
-      } catch (error) {
-        setWaitingResponse(false);
-        reportRequestFailure(error, 'CONVERSATION_SEND_FAILED', previousMessageIds, displayMessage);
-        throw error;
-      }
-    },
-    [
-      atPath,
-      submissionDisabledRef,
-      requestConversationIdRef,
-      prepareIdleSubmission,
-      conversation_id,
-      uploadFile,
-      workspacePath,
-      clearFiles,
-      markTurnAccepted,
-      canSendFiles,
-      reconcilePublicDeliveryReplay,
-      messageListRef,
-      addOrUpdateMessage,
-      reportRequestFailure,
-      setActiveMsgId,
-      setWaitingResponse,
-      t,
-    ]
-  );
-
-  // Steering injects into the turn that is ALREADY running — it does NOT start a
-  // new turn, so we deliberately skip setWaitingResponse(true) (unlike
-  // executeCommand). Renders the optimistic user bubble the same way so the
-  // interjection shows immediately.
-  const executeSteer = useCallback(
-    async ({ input, files }: Pick<ConversationCommandQueueItem, 'input' | 'files'>) => {
-      const displayMessage = buildDisplayMessage(input, files, workspacePath);
-      setRequestFailure(null);
-      let msg_id: MessageId | null = null;
-      try {
-        const res = await ipcBridge.conversation.steer.invoke({
-          input: displayMessage,
-          conversation_id,
-          files,
-          idempotency_key: uuidv7(),
-          ...(waitingNotice ? { expected_wait: { turn_id: waitingNotice.turnId,
-            wait_seq: waitingNotice.outcome.wait_seq } } : {}),
-        });
-        msg_id = res.msg_id;
-        const disposition = classifyPublicMessageDelivery(res);
-        if (disposition === 'fresh') {
-          setActiveMsgId(msg_id);
-          addOrUpdateMessage({
-            id: uuid(),
-            msg_id,
-            type: 'text',
-            position: 'right',
-            conversation_id,
-            content: {
-              content: displayMessage,
-            },
-            created_at: Date.now(),
-          });
-        } else if (disposition === 'replayed_in_flight') {
-          // The steer delivery itself never starts a turn. An ambiguous
-          // accepted replay may only learn whether its parent turn is still
-          // running from the authoritative runtime GET.
-          reconcilePublicDeliveryReplay(false);
-        } else {
-          // `completed` belongs to the steer receipt, not to the parent model
-          // turn. Keep the parent's existing lifecycle intact while closing
-          // this already-delivered interjection; only a Conversation GET (or
-          // a turn event) may later settle the parent.
-          setActiveMsgId(null);
-          reconcileAfterStreamTerminal();
-        }
-        emitter.emit('chat.history.refresh');
-        if (files.length > 0) {
-          emitter.emit('nomi.workspace.refresh');
-        }
-      } catch (error) {
-        if (msg_id) removeMessageByMsgId(msg_id);
-        // Retain a held draft for explicit review. This error may follow
-        // successful delivery, so it must never automatically start a turn.
-        reportRequestFailure(error, 'CONVERSATION_STEER_FAILED');
-        throw error;
-      }
-    },
-    [
-      addOrUpdateMessage,
-      reportRequestFailure,
-      conversation_id,
-      reconcileAfterStreamTerminal,
-      reconcilePublicDeliveryReplay,
-      removeMessageByMsgId,
-      setActiveMsgId,
-      t,
-      workspacePath,
-      waitingNotice,
-    ]
-  );
-
-  const onSteerHandler = async (message: string) => {
-    const filesToSend = collectSelectedFiles(uploadFile, atPath);
-    if (!canSendFiles(filesToSend)) return;
-    clearFiles();
-    emitter.emit('nomi.selected.file.clear');
-    if (
-      !(await steerOrQueue(
-        {
-          input: message,
-          files: filesToSend,
-        },
-        executeSteer,
-        enqueue
-      ))
-    ) {
-        Message.warning(t('conversation.steer.fallbackQueued'));
-    }
+  // Revising a historical prompt submits ordinary new input without mutating history.
+  const handleEditResubmit = async (_msgId: MessageId, _createdAt: number, message: string) => {
+    await onSendHandler(message);
   };
 
   const handleEditQueuedCommand = useCallback(
@@ -940,7 +704,7 @@ const NomiSendBox: React.FC<{
     pause();
     resetActiveExecution('stop');
 
-    const pausedTurnId = pauseNotice?.turnId;
+    const pausedTurnId = pauseNotice?.turnId ?? waitingNotice?.turnId;
     const result = await stopConversationAndConfirmRelease(conversation_id, pausedTurnId ? {
       requestStop: id => requestConversationStop(id, undefined, params =>
         ipcBridge.conversation.stop.invoke({ ...params, expected_turn_id: pausedTurnId })),
@@ -1060,12 +824,14 @@ const NomiSendBox: React.FC<{
           emitter.emit('nomi.selected.file', items);
           setAtPath(items);
         }}
-        loading={isCreating ? creationSubmitting : isBusy}
+        loading={isCreating ? creationSubmitting : executing || isStopping}
         paused={Boolean(pauseNotice)}
         disabled={submissionDisabled || preparingSubmission || collaborationSubmitting || initialSubmissionPending}
-        submitDisabled={Boolean(pauseNotice || waitingNotice && !waitingNotice.canSteer) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing || !sessionCapabilities.state || sessionCapabilities.saving || sessionCapabilities.loading || composerCollaborationEnabled && !collaboration.ready)}
+        submitDisabled={isCreating && !isBusy && !pauseNotice
+          ? !generation.ready || creation?.preparing
+          : false}
         preserveDraftUntilAccepted
-        skipChatWarmup={isCreating}
+        skipChatWarmup
         placeholder={
           compactProductComposer
             ? t('nomi.cohabit.composerPlaceholder', {
@@ -1088,7 +854,6 @@ const NomiSendBox: React.FC<{
         supportedExts={allSupportedExts}
         defaultMultiLine
         lockMultiLine
-        compactActions={compactProductComposer}
         compactStacked={compactProductComposer}
         tools={
           <FileAttachButton
@@ -1139,8 +904,6 @@ const NomiSendBox: React.FC<{
           onRemoveWorkspaceItem={onRemoveWorkspaceItem}
         />}
         onSend={onSendHandler}
-        onSteer={onSteerHandler}
-        steerAvailable={!isCreating && (!waitingNotice || waitingNotice.canSteer)}
         onEditResubmit={isCreating ? undefined : handleEditResubmit}
         allowSendWhileLoading={!isCreating}
       />

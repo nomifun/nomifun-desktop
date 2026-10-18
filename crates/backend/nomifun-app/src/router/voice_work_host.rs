@@ -300,6 +300,9 @@ fn public_messages(facts:&ChatCausalityFacts)->Result<Vec<PublicMessage>,VoiceEr
     let mut starts=BTreeMap::new();
     for event in ordered {
         if !matches!(event.kind.0.as_str(),"message/user-accepted"|"turn/steer-accepted"|"message/assistant-projected"|"message/content-part"|"message/completed"|"turn/started"|"turn/completed"|"turn/failed"|"turn/cancelled"){continue;}
+        // Version-two steering only claims an already displayed accepted
+        // message. It is not another body or another user utterance.
+        if event.kind.0=="turn/steer-accepted" && event.kind_version==2 {continue;}
         if event.kind_version!=1{return Err(work_error("unsupported public message event"));}
         let value=facts.event_payloads.get(event.event_id.as_ref()).ok_or_else(||work_error("missing canonical public payload"))?;
         match event.kind.0.as_str() {

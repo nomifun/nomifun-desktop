@@ -51,43 +51,6 @@
   border-color: color-mix(in srgb, var(--color-fill-4) 88%, var(--color-bg-2)) !important;
 }
 
-/* Secondary "steer now" action — same circle/size as the send button but a
- * softer, tonal fill so the pairing reads as primary (enqueue) + secondary
- * (interject) rather than two identical buttons. The lightning icon and a
- * subtle ring set it apart while keeping it visually on-brand. */
-.sendbox-steer-button:not(:disabled),
-.sendbox-steer-button.arco-btn:not(:disabled),
-.sendbox-steer-button.arco-btn-primary:not(:disabled) {
-  background-color: color-mix(in srgb, rgb(var(--primary-6)) 16%, var(--color-bg-1)) !important;
-  border-color: color-mix(in srgb, rgb(var(--primary-6)) 30%, transparent) !important;
-}
-
-.sendbox-steer-button:not(:disabled) .arco-icon,
-.sendbox-steer-button:not(:disabled) svg {
-  color: rgb(var(--primary-6)) !important;
-  fill: rgb(var(--primary-6)) !important;
-}
-
-.sendbox-steer-button:not(:disabled):hover,
-.sendbox-steer-button.arco-btn:not(:disabled):hover,
-.sendbox-steer-button.arco-btn-primary:not(:disabled):hover {
-  background-color: color-mix(in srgb, rgb(var(--primary-6)) 26%, var(--color-bg-1)) !important;
-  border-color: color-mix(in srgb, rgb(var(--primary-6)) 44%, transparent) !important;
-}
-
-[data-theme='dark'] .sendbox-steer-button:not(:disabled),
-[data-theme='dark'] .sendbox-steer-button.arco-btn:not(:disabled),
-[data-theme='dark'] .sendbox-steer-button.arco-btn-primary:not(:disabled) {
-  background-color: color-mix(in srgb, rgb(var(--primary-6)) 26%, var(--color-bg-2)) !important;
-  border-color: color-mix(in srgb, rgb(var(--primary-6)) 44%, transparent) !important;
-}
-
-[data-theme='dark'] .sendbox-steer-button:not(:disabled) .arco-icon,
-[data-theme='dark'] .sendbox-steer-button:not(:disabled) svg {
-  color: #fff !important;
-  fill: #fff !important;
-}
-
 .sendbox-stop-button,
 .sendbox-stop-button.arco-btn,
 .sendbox-stop-button.arco-btn-secondary {

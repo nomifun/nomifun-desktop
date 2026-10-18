@@ -107,60 +107,6 @@ pub(super) async fn native_budget_tx(tx: &mut Transaction<'_, Sqlite>, session: 
 }
 
 impl AgentSessionStore {
-    /// Queue owner input for an exact paused execution. Recovery consumes the
-    /// ordinary steer receipt; this neither starts a Turn nor authorizes resume.
-    pub async fn append_paused_native_input(
-        &self, owner: &PrincipalRef, session: &AgentSessionId, request: &NativeResumeRequest,
-        input: StrictJsonValue, permitted_reasons: &[&str],
-    ) -> Result<SessionEventAck, SessionStoreError> {
-        if canonical_json_bytes(&input)?.len() > MAX_INLINE_JSON_BYTES {
-            return Err(SessionStoreError::InvalidPayload("paused input exceeds the inline limit".into()));
-        }
-        let key = native_key("resume-input", session, &request.idempotency_key)?;
-        let digest = digest_payload(&json!({"resume":request,"input":input}))?;
-        let mut tx = self.begin_write_transaction().await?;
-        let live = live_session_by_id_tx(&mut tx, session.as_ref()).await?;
-        if &live.owner_ref != owner { return Err(SessionStoreError::ExecutionFenced); }
-        if let Some(row) = event_by_producer_key_tx(&mut tx, "session_api", &key).await? {
-            let event = event_from_row(row)?;
-            if event.agent_session_id != *session || event.kind.0 != "turn/steer-accepted"
-                || event.correlation_id.as_ref() != request.operation_id.as_ref()
-                || payload_value_for_event_tx(&mut tx, &event).await?.get("request_digest").and_then(Value::as_str) != Some(digest.as_ref()) {
-                return Err(SessionStoreError::IdempotencyConflict("paused input replay changed".into()));
-            }
-            tx.commit().await?;
-            return Ok(event_ack(&event));
-        }
-        let head = head_by_id_tx(&mut tx, session.as_ref()).await?;
-        if head.status != "paused" || head.active_turn_id.as_deref() != Some(request.operation_id.as_ref()) {
-            return Err(SessionStoreError::ExecutionFenced);
-        }
-        let row: (String, Option<String>, i64, Option<String>) = sqlx::query_as(
-            "SELECT started_event_id,native_pause_json,native_checkpoint_revision,native_checkpoint_digest FROM agent_turns WHERE session_id=? AND operation_id=? AND state='running' AND terminal_event_id IS NULL"
-        ).bind(session.as_ref()).bind(request.operation_id.as_ref()).fetch_one(&mut *tx).await?;
-        let pause: NativePauseState = serde_json::from_str(row.1.as_deref().ok_or(SessionStoreError::ExecutionFenced)?)?;
-        if pause.revision != request.expected_pause_revision || !pause.cleanup_proven
-            || !permitted_reasons.contains(&pause.reason.as_str())
-            || as_u64(row.2,"checkpoint revision")? != request.expected_checkpoint_revision
-            || row.3.as_deref() != Some(request.expected_checkpoint_digest.as_ref()) {
-            return Err(SessionStoreError::ExecutionFenced);
-        }
-        let event = SessionEventAppend {
-            agent_session_id: session.clone(), event_id: new_event_id(), producer_id: "session_api".into(),
-            idempotency_key: key.into(),
-            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
-                kind: SessionEventKind("turn/steer-accepted".into()), kind_version: 1,
-                correlation_id: request.operation_id.as_ref().into(), causation_event_id: Some(row.0.into()),
-                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                    "target_operation_id":request.operation_id,"input":input,"request_digest":digest,
-                }))),
-            },
-        };
-        let ack = required_ack(self.append_event_tx(&mut tx, &event, None).await?)?;
-        tx.commit().await?;
-        Ok(ack)
-    }
-
     /// Read the exact Turn's pause at an already-observed head boundary.
     /// Pause events are immutable; bounding by that cursor keeps a later resume
     /// or new pause from changing an earlier consumer snapshot. This lookup is
@@ -262,6 +208,13 @@ impl AgentSessionStore {
             "SELECT EXISTS(SELECT 1 FROM agent_effects WHERE session_id=? AND state IN ('pending','unknown'))")
             .bind(session.as_ref()).fetch_one(&mut *tx).await?;
         if !cleanup_proven || unsettled { return Ok(false); }
+        // A Turn cleanup can retain Session processes. Only their exact
+        // canonical owner-release receipt can turn that retention quiescent.
+        match storage_relocation::require_native_storage_quiescent_tx(&mut tx,Some(session)).await {
+            Ok(())=>{},
+            Err(SessionStoreError::Conflict(_))=>return Ok(false),
+            Err(error)=>return Err(error),
+        }
         self.append_event_tx(&mut tx, failure, None).await?;
         tx.commit().await?;
         Ok(true)
@@ -351,7 +304,8 @@ impl AgentSessionStore {
         if event.kind.0 != "turn/resume-authorized" || payload.get("request_digest").and_then(Value::as_str) != Some(digest_payload(request)?.as_ref()) {
             return Err(SessionStoreError::IdempotencyConflict("resume authorization changed".into()));
         }
-        Ok(Some(NativeResumeReceipt { operation_id: request.operation_id.clone(), authorization_event_id: event.event_id, seq: event.seq, duplicate: true }))
+        Ok(Some(NativeResumeReceipt { operation_id: request.operation_id.clone(), authorization_event_id: event.event_id,
+            seq: event.seq, duplicate: true }))
     }
 
     pub async fn commit_native_resume(&self, owner: &PrincipalRef, session: &AgentSessionId, request: &NativeResumeRequest,
@@ -367,7 +321,7 @@ impl AgentSessionStore {
             if event.kind.0 != "turn/resume-authorized" || payload_value_for_event_tx(&mut tx,&event).await?.get("request_digest").and_then(Value::as_str) != Some(digest_payload(request)?.as_ref()) {
                 return Err(SessionStoreError::IdempotencyConflict("concurrent resume authorization changed".into()));
             }
-            return Ok(NativeResumeReceipt { operation_id:request.operation_id.clone(),authorization_event_id:event.event_id,seq:event.seq,duplicate:true });
+            return Ok(NativeResumeReceipt { operation_id:request.operation_id.clone(),authorization_event_id:event.event_id.clone(),seq:event.seq,duplicate:true });
         }
         if &live.owner_ref != owner || live.agent_binding.resolved_snapshot_ref != prepared.snapshot
             || head.active_set_generation != prepared.active_set_generation || head.status != "paused"

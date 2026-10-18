@@ -8,7 +8,7 @@ description: "Use this skill any time a .docx file is involved -- as input, outp
 ## Managed component setup
 
 Use NomiFun's approved **iOfficeAI/OfficeCLI 1.0.156** through an already-authorized
-`workspace.process/exec` or `workspace.process/start` tool with `component=officecli`
+`workspace.process/start` tool with `component=officecli`
 and literal `args`. The Host verifies the executable and sets its required
 environment. Follow [the shared runtime instructions](references/runtime.md) before
 running any example. Every `officecli` example means this component target;

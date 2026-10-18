@@ -890,7 +890,8 @@ describe('Nomi adapter boundaries', () => {
     );
     const transport = readFileSync(new URL('./nomiTransport.ts', import.meta.url), 'utf8');
 
-    expect(transport.includes('conversation.sendMessage.invoke')).toBe(true);
+    expect(transport.includes('conversation.sendTurn.invoke')).toBe(true);
+    expect(transport.includes('conversation.sendMessage.invoke')).toBe(false);
     expect(transport.includes('conversation.responseStream.on')).toBe(true);
     expect(transport.includes('conversation.turnStarted.on')).toBe(true);
     expect(transport.includes('conversation.turnCompleted.on')).toBe(true);

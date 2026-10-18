@@ -150,7 +150,7 @@ export async function createLinuxDesktopScenario({ fixture, workspace, uid, nati
     return { x: Math.round((bounds.x + bounds.width / 2) * pixelScale), y: Math.round((bounds.y + bounds.height / 2) * pixelScale) };
   };
   const steps = [
-    { id: 'desktop-linux-launch', name: 'start_process', args: { command: '/usr/bin/python3', args: [source, '--root', root, '--token', token], cwd: workspace, env: { DISPLAY: session.display, XAUTHORITY: session.xauthority, GDK_BACKEND: 'x11' }, wait_ms: 0, timeout_ms: 120000 }, verify: async value => {
+    { id: 'desktop-linux-launch', name: 'start_process', awaitExit: false, args: { command: '/usr/bin/python3', args: [source, '--root', root, '--token', token], cwd: workspace, env: { DISPLAY: session.display, XAUTHORITY: session.xauthority, GDK_BACKEND: 'x11' }, wait_ms: 0, timeout_ms: 120000 }, verify: async value => {
       assert.equal(value.state, 'running'); assert(Number.isSafeInteger(value.pid) && value.pid > 1); resources.pid = value.pid; resources.process_id = value.process_id; resources.started_by_this_case = true; cursor = value.output.next_cursor;
       assert.equal((await lstat(`/proc/${value.pid}`)).uid, uid); assert(/^python3(?:\.\d+)?$/.test(basename(await readlink(`/proc/${value.pid}/exe`))));
       nativeEvidence.push({ step: 'desktop-linux-launch', kind: 'actual_managed_ordinary_user_fixture', pid: value.pid, uid });

@@ -605,11 +605,16 @@ impl AgentControlPlane {
         }
         let id = {
             let _guard = self.template_launch_lock.lock().await;
-            let preset = self.ensure_official_preset(owner, key).await?;
+            let mut preset = self.ensure_official_preset(owner, key).await?;
             let editor = self.editor(owner, preset.preset.preset_id.as_ref(), None).await?;
             if let Some(reference) = preset.preset.current_stable_revision.as_ref() {
                 let revision = self.store.get_revision(reference).await?.ok_or_else(|| not_found("AgentPresetRevision"))?;
-                self.refresh_session_configuration(owner, &preset, &revision, Some(key)).await?;
+                if nomifun_agent_contracts::bounded_process_launch_payload(&revision.payload) != revision.payload {
+                    let bounded = self.resolve_agent_session_binding_locked(owner, preset.preset.preset_id.as_ref()).await?;
+                    preset = self.owned_preset(owner, &bounded.preset_revision_ref.preset_id).await?;
+                } else {
+                    self.refresh_session_configuration(owner, &preset, &revision, Some(key)).await?;
+                }
             } else {
                 let mut draft = editor.draft;
                 if has_explicit_route {
@@ -1007,8 +1012,15 @@ impl AgentControlPlane {
             return self.resolve_agent_session_binding_locked(owner, preset_id).await;
         };
         let _guard = self.template_launch_lock.lock().await;
-        let source = self.owned_preset(owner, preset_id).await?;
-        let revision = self.current_revision(&source).await?.ok_or_else(|| not_found("AgentPresetRevision"))?;
+        let mut source = self.owned_preset(owner, preset_id).await?;
+        let mut revision = self.current_revision(&source).await?.ok_or_else(|| not_found("AgentPresetRevision"))?;
+        if nomifun_agent_contracts::bounded_process_launch_payload(&revision.payload) != revision.payload {
+            // Rebase the execution contract before deriving an explicitly
+            // selected model. The old authorial Agent is never rewritten.
+            let bounded = self.resolve_agent_session_binding_locked(owner, preset_id).await?;
+            source = self.owned_preset(owner, &bounded.preset_revision_ref.preset_id).await?;
+            revision = self.current_revision(&source).await?.ok_or_else(|| not_found("AgentPresetRevision"))?;
+        }
         // A media-only configuration may omit Chat, but an explicit language
         // model selection still creates a validated Session-local Chat route.
         let source_snapshot = self.current_snapshot(Some(&revision)).await?;
@@ -1328,6 +1340,16 @@ impl AgentControlPlane {
         current: &AgentBindingValueDto,
     ) -> Result<AgentBindingValueDto, ControlPlaneError> {
         let _guard = self.template_launch_lock.lock().await;
+        self.resolve_agent_session_contract_evolution_locked(owner, current).await
+    }
+
+    /// The caller owns template_launch_lock. New Session creation uses this
+    /// same proof before it has any live Session or resources to transition.
+    async fn resolve_agent_session_contract_evolution_locked(
+        &self,
+        owner: &UserId,
+        current: &AgentBindingValueDto,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
         let current: AgentBindingValue = wire_cast(current)?;
         let (source_revision, source_snapshot) = self.load_binding_artifacts(owner, &current).await?;
         let preset_id = AgentPresetId::from(Uuid::now_v7().to_string());
@@ -1919,6 +1941,16 @@ impl AgentControlPlane {
                 axum::http::StatusCode::FORBIDDEN,
                 "AgentPreset owner does not match the authenticated owner",
             ));
+        }
+        if let Some(revision) = self.current_revision(&stored).await?
+            && nomifun_agent_contracts::bounded_process_launch_payload(&revision.payload) != revision.payload {
+            let snapshot = self.current_snapshot(Some(&revision)).await?;
+            let source = session_binding_from_stable_artifacts(revision.reference.clone(), Some(revision), snapshot)?;
+            let mut bounded = self.resolve_agent_session_contract_evolution_locked(owner, &wire_cast(&source)?).await?;
+            // This is a new Session opening, not an in-place transition or a
+            // continuation of any historical native checkpoint.
+            bounded.binding_version = 1;
+            return Ok(bounded);
         }
         if stored.session_only || owned_official_key(&stored).is_some() {
             if let Some(revision) = self.current_revision(&stored).await? {
@@ -4298,7 +4330,7 @@ pub(crate) mod tests {
         let mut recommended = empty_document();
         recommended.enabled_capabilities = vec![
             selection("workspace.files", &["workspace.files/read", "workspace.files/write"]),
-            selection("workspace.process", &["workspace.process/exec"]),
+            selection("workspace.process", &["workspace.process/start"]),
         ];
         recommended.skill_bindings = vec![
             ExactCatalogRefDto { id: "chosen.skill".into(), version: "2.0.0".into() },
@@ -4307,7 +4339,7 @@ pub(crate) mod tests {
         let (added, added_skills) = add_recommended_capabilities(&mut document, &recommended);
         assert_eq!(added, vec![
             selection("workspace.files", &["workspace.files/write"]),
-            selection("workspace.process", &["workspace.process/exec"]),
+            selection("workspace.process", &["workspace.process/start"]),
         ]);
         assert_eq!(added_skills, vec![recommended.skill_bindings[1].clone()]);
         assert_eq!(document.skill_bindings[0], original.skill_bindings[0], "pinned Skill versions stay authored");
@@ -4697,6 +4729,136 @@ pub(crate) mod tests {
             let error = control.resolve_agent_session_contract_evolution(&owner, &current).await.unwrap_err();
             assert_eq!(error.code().as_ref(), "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED");
             assert_eq!(store.list_presets(&owner).await.unwrap().len(), 1, "rejected evolution must not persist candidate artifacts");
+        }
+    }
+
+    fn install_bounded_launch_catalog(control: &mut AgentControlPlane, catalog: CatalogSnapshot) {
+        let mut registry = MaterializedRegistry::empty();
+        for capability in &catalog.capabilities {
+            registry.capabilities.insert(capability.manifest.id.clone(), capability.clone());
+        }
+        control.catalog = Arc::new(StaticCatalogProvider::new(catalog));
+        control.compiler = test_compiler().with_materialized_registry(Arc::new(registry), CompilerEnvironment {
+            resolver_version: "1.0.0".into(), required_runtime_protocol_version: "1.0.0".into(),
+            required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+            runtime_feature_inventory_digest: "runtime-features".into(), available_runtime_features: BTreeSet::new(),
+            installation_role_bindings: BTreeMap::new(), canonical_schema_manifest_digest: "schema".into(),
+            target_contribution_manifest_digest: "contributions".into(), host_target: "test".into(),
+            host_surface: "desktop".into(), availability_evidence_revision: "fixture".into(),
+        });
+    }
+
+    async fn retired_official_launch_fixture(store: Arc<InMemoryControlPlaneStore>)
+        -> (AgentControlPlane, UserId, AgentPresetRevision, nomifun_agent_contracts::ResolvedSnapshotEnvelope) {
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let mut route_b = media_chat_route("model-b");
+        route_b.primary.model_route_id = "0190f5fe-7c00-7a00-8000-000000000012".into();
+        let mut control = test_control_plane(store.clone()).with_default_chat_route_resolver(
+            Arc::new(MediaChatRoutes(vec![media_chat_route("model-a"), route_b])));
+        let mut catalog = (*control.catalog.snapshot().unwrap()).clone();
+        let process = catalog.capabilities.iter_mut().find(|value| value.manifest.id.as_ref() == "workspace.process").unwrap();
+        process.manifest.package.id = "nomifun.workspace-execution".into();
+        process.source.source_identity = "nomifun.workspace-execution".into();
+        process.contribution_lock.source_identity = "nomifun.workspace-execution".into();
+        process.manifest.contributions.resource_kinds = BTreeSet::from(["process_session".into()]);
+        process.manifest.contributions.actions.iter_mut().find(|action| action.action_id.as_ref() == "workspace.process/start")
+            .unwrap().effect_class = EffectClass::ExecuteLocal;
+        let entry = republish_catalog_capability(process);
+        catalog.formal_capability_entries.insert(entry.capability.clone(), entry);
+        install_bounded_launch_catalog(&mut control, catalog);
+        let root = control.ensure_official_preset(&owner, OfficialPresetKey::ChatMinimal).await.unwrap();
+        let mut editor = control.editor(&owner, root.preset.preset_id.as_ref(), None).await.unwrap();
+        editor.draft.document.instructions = "Preserve the saved official instructions".into();
+        let route = media_chat_route("model-a");
+        editor.draft.document.model_route_refs.insert(CHAT_MODEL_TASK.into(), route.primary.model_route_id.as_ref().into());
+        editor.draft.document.chat_route_records.insert(CHAT_MODEL_TASK.into(), serde_json::to_value(route).unwrap());
+        control.save_revision(&owner, root.preset.preset_id.as_ref(), SaveAgentPresetRevisionRequest {
+            expected_current_revision: None, draft: editor.draft, reason: None,
+        }).await.unwrap();
+        let binding = control.resolve_agent_session_binding(&owner, root.preset.preset_id.as_ref()).await.unwrap();
+        let (_, mut revision, mut snapshot) = control.saved_binding_artifacts(&owner, &binding).await.unwrap();
+        let previous_ref = revision.reference.clone();
+        let process = snapshot.content.enabled_capabilities.iter_mut()
+            .find(|value| value.capability.id.as_ref() == "workspace.process").unwrap();
+        let mut retired = process.actions.iter().find(|action| action.action_id.as_ref() == "workspace.process/start").unwrap().clone();
+        retired.action_id = "workspace.process/exec".into();
+        process.actions.insert(0, retired);
+        process.action_allowlist = BTreeSet::from(["workspace.process/exec".into()]);
+        revision.payload.enabled_capabilities.iter_mut().find(|value| value.capability.id.as_ref() == "workspace.process")
+            .unwrap().action_allowlist = process.action_allowlist.clone();
+        revision.reference.revision += 1;
+        revision.reference.revision_digest = revision.revision_digest().unwrap();
+        snapshot.content.preset_revision_ref = revision.reference.clone();
+        snapshot.content.chat_route_identity = revision.chat_route_identity().unwrap();
+        snapshot.snapshot_ref.snapshot_digest = digest_payload(&snapshot.content).unwrap();
+        snapshot = nomifun_agent_kernel::AgentPresetCompiler::derive_model_snapshot(&revision, &snapshot,
+            nomifun_agent_kernel::CompileRequest {
+                revision: revision.clone(), principal: snapshot.actor.clone(), scene: snapshot.scene.clone(),
+                surface: snapshot.surface.clone(), audience: snapshot.audience.clone(),
+                created_at_ms: snapshot.created_at_ms, resolver_run_id: snapshot.resolver_run_id.clone(),
+            }).unwrap();
+        store.append_revision(Some(&previous_ref), revision.clone(), snapshot.clone(),
+            "Saved official Agent".into(), Some("Preserve my presentation".into())).await.unwrap();
+        (control, owner, revision, snapshot)
+    }
+
+    #[tokio::test]
+    async fn retired_official_launch_opens_new_sessions_without_rewriting_authored_history() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let (control, owner, source_revision, source_snapshot) = retired_official_launch_fixture(store.clone()).await;
+        let preset_id = source_revision.reference.preset_id.as_ref();
+        let opened = control.resolve_agent_session_binding(&owner, preset_id).await.unwrap();
+        assert_eq!(opened.binding_version, 1);
+        assert_ne!(opened.preset_revision_ref.preset_id, preset_id);
+        assert_eq!(control.resolve_agent_session_binding(&owner, preset_id).await.unwrap(), opened);
+        let (_, revision, snapshot) = control.saved_binding_artifacts(&owner, &opened).await.unwrap();
+        assert_eq!(revision.payload.instructions, source_revision.payload.instructions);
+        let process = snapshot.content.enabled_capabilities.iter().find(|value| value.capability.id.as_ref() == "workspace.process").unwrap();
+        assert_eq!(process.action_allowlist, BTreeSet::from(["workspace.process/start".into()]));
+        assert!(!process.actions.iter().any(|action| action.action_id.as_ref() == "workspace.process/exec"));
+
+        let selected = nomifun_api_types::AgentChatModelSelectionDto {
+            provider_id: media_chat_route("model-b").primary.provider_id, model: "model-b".into(),
+        };
+        let modeled = control.resolve_agent_session_binding_with_model(&owner, preset_id, Some(&selected)).await.unwrap();
+        let (_, modeled_revision, modeled_snapshot) = control.saved_binding_artifacts(&owner, &modeled).await.unwrap();
+        assert_eq!(modeled_revision.payload.chat_route_records[CHAT_MODEL_TASK].primary.model, "model-b");
+        assert_eq!(modeled_snapshot.content.enabled_capabilities, snapshot.content.enabled_capabilities);
+        assert_eq!(control.resolve_agent_session_binding_with_model(&owner, preset_id, Some(&selected)).await.unwrap(), modeled);
+        let prepared = control.create_from_template(&owner, "chat.minimal", CreateAgentPresetFromTemplateRequest {
+            model: Some(selected), ..official_launch_request(true)
+        }).await.unwrap();
+        assert_eq!(prepared.preset.preset_id, modeled.preset_revision_ref.preset_id);
+        let source = store.get_preset(&source_revision.reference.preset_id).await.unwrap().unwrap();
+        assert_eq!(source.preset.current_stable_revision, Some(source_revision.reference.clone()));
+        assert_eq!(source.preset.display_name, "Saved official Agent");
+        assert_eq!(store.get_revision(&source_revision.reference).await.unwrap().unwrap(), source_revision);
+        assert_eq!(store.get_snapshot(&source_revision.reference).await.unwrap().unwrap(), source_snapshot);
+    }
+
+    #[tokio::test]
+    async fn retired_official_launch_rejects_publisher_effect_and_resource_drift_before_persistence() {
+        for drift in ["publisher", "effect", "resource"] {
+            let store = Arc::new(InMemoryControlPlaneStore::new());
+            let (mut control, owner, source_revision, source_snapshot) = retired_official_launch_fixture(store.clone()).await;
+            let mut catalog = (*control.catalog.snapshot().unwrap()).clone();
+            let process = catalog.capabilities.iter_mut().find(|value| value.manifest.id.as_ref() == "workspace.process").unwrap();
+            match drift {
+                "publisher" => { process.manifest.package.id = "other.publisher".into(); process.source.source_identity = "other.publisher".into();
+                    process.contribution_lock.source_identity = "other.publisher".into(); }
+                "effect" => process.manifest.contributions.actions.iter_mut().find(|value| value.action_id.as_ref() == "workspace.process/start")
+                    .unwrap().effect_class = EffectClass::Destructive,
+                _ => { process.manifest.contributions.resource_kinds.insert("new-resource".into()); }
+            }
+            let entry = republish_catalog_capability(process);
+            catalog.formal_capability_entries.insert(entry.capability.clone(), entry);
+            install_bounded_launch_catalog(&mut control, catalog);
+            let count = store.list_presets(&owner).await.unwrap().len();
+            let error = control.resolve_agent_session_binding(&owner, source_revision.reference.preset_id.as_ref()).await.unwrap_err();
+            assert_eq!(error.code().as_ref(), "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED", "{drift}");
+            assert_eq!(store.list_presets(&owner).await.unwrap().len(), count);
+            assert_eq!(store.get_revision(&source_revision.reference).await.unwrap().unwrap(), source_revision);
+            assert_eq!(store.get_snapshot(&source_revision.reference).await.unwrap().unwrap(), source_snapshot);
         }
     }
 

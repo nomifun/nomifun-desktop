@@ -54,7 +54,7 @@ pub struct UpdateConversationRequest {
 /// Body for `POST /api/conversations/:id/messages`.
 ///
 /// `msg_id` is server-generated — clients must not provide one.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
     pub content: String,
@@ -134,9 +134,6 @@ pub enum ConversationRuntimeStateKind {
 pub struct ConversationRuntimeSummary {
     pub state: ConversationRuntimeStateKind,
     pub can_send_message: bool,
-    /// Steering continues the exact owner; it never admits another Turn.
-    #[serde(default)]
-    pub can_steer: bool,
     pub is_processing: bool,
     /// Public disposition of the exact active Turn. Waiting retains execution
     /// ownership; it does not authorize a new Turn or prove task completion.

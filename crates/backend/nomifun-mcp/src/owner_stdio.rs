@@ -142,7 +142,12 @@ impl StdioTransport {
                     std::io::ErrorKind::PermissionDenied => "MCP_COMMAND_PERMISSION_DENIED",
                     _ => "MCP_PROCESS_START_UNCERTAIN",
                 };
-                McpOwnerError::new(code, nomi_redact::redact_secrets_owned(format!("MCP configured stdio process could not be started: {error}")))
+                McpOwnerError::new(
+                    code,
+                    nomi_redact::redact_secrets_owned(format!(
+                        "MCP configured stdio process could not be started: {error}"
+                    )),
+                )
             })?;
             let mut process = accept_launched_process(process, &worker_cancellation, deadline)?;
             let stdin = process.child_mut().stdin.take().ok_or_else(uncertain_launch)?;
@@ -226,22 +231,10 @@ impl StdioTransport {
     }
 
     async fn closed_stdout_error(&mut self) -> McpOwnerError {
-        let mut exited = self
-            .process
-            .child_mut()
-            .try_wait()
-            .ok()
-            .flatten()
-            .is_some();
+        let mut exited = self.process.child_mut().try_wait().ok().flatten().is_some();
         if !exited {
             tokio::task::yield_now().await;
-            exited = self
-                .process
-                .child_mut()
-                .try_wait()
-                .ok()
-                .flatten()
-                .is_some();
+            exited = self.process.child_mut().try_wait().ok().flatten().is_some();
         }
         if exited
             && let Some(mut task) = self.stderr_task.take()
@@ -395,10 +388,7 @@ fn contains_any(text: &str, markers: &[&str]) -> bool {
     markers.iter().any(|marker| text.contains(marker))
 }
 
-async fn drain_stderr(
-    mut stderr: ChildStderr,
-    diagnostics: Arc<StdMutex<StdioDiagnostics>>,
-) {
+async fn drain_stderr(mut stderr: ChildStderr, diagnostics: Arc<StdMutex<StdioDiagnostics>>) {
     let mut buffer = [0_u8; 4096];
     loop {
         match stderr.read(&mut buffer).await {
@@ -509,8 +499,12 @@ fn validate_config(
 fn runtime_resolution_error(cause: &nomifun_runtime::ToolError) -> McpOwnerError {
     match cause {
         nomifun_runtime::ToolError::Shared(cause) => runtime_resolution_error(cause),
-        cause => McpOwnerError::new("MCP_RUNTIME_UNAVAILABLE",
-            nomi_redact::redact_secrets_owned(format!("MCP command environment could not be prepared: {cause}"))),
+        cause => McpOwnerError::new(
+            "MCP_RUNTIME_UNAVAILABLE",
+            nomi_redact::redact_secrets_owned(format!(
+                "MCP command environment could not be prepared: {cause}"
+            )),
+        ),
     }
 }
 
@@ -566,10 +560,14 @@ mod tests {
     async fn runtime_resolution_does_not_replace_explicit_user_stdio_paths() {
         let command = "/user/chosen/bun";
         let args = vec!["server.js".to_owned()];
-        let launch =
-            nomifun_runtime::prepare_process_launch(command, &args, Path::new("."), &HashMap::new())
-                .await
-                .unwrap();
+        let launch = nomifun_runtime::prepare_process_launch(
+            command,
+            &args,
+            Path::new("."),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(launch.program, command);
         assert_eq!(launch.args, args);
     }
@@ -578,23 +576,34 @@ mod tests {
     async fn configured_child_path_bun_precedes_runtime_supply_and_preserves_bunx() {
         let before = nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun);
         let root = tempfile::tempdir().unwrap();
-        let program = root.path().join(if cfg!(windows) { "bun.exe" } else { "bun" });
+        let program = root
+            .path()
+            .join(if cfg!(windows) { "bun.exe" } else { "bun" });
         std::fs::write(&program, b"#!/bin/sh\n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let env = HashMap::from([("PATH".to_owned(), root.path().to_string_lossy().into_owned())]);
+        let env = HashMap::from([(
+            "PATH".to_owned(),
+            root.path().to_string_lossy().into_owned(),
+        )]);
         let args = vec!["server.js".into()];
-        for (command, expected_args) in [("bun", args.clone()), ("bunx", vec!["x".into(), "server.js".into()])] {
-            let launch = nomifun_runtime::prepare_process_launch(
-                command, &args, root.path(), &env,
-            ).await.unwrap();
+        for (command, expected_args) in [
+            ("bun", args.clone()),
+            ("bunx", vec!["x".into(), "server.js".into()]),
+        ] {
+            let launch = nomifun_runtime::prepare_process_launch(command, &args, root.path(), &env)
+                .await
+                .unwrap();
             assert_eq!(Path::new(&launch.program), program);
             assert_eq!(launch.args, expected_args);
         }
-        assert_eq!(nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun), before);
+        assert_eq!(
+            nomifun_runtime::tool_preparation_snapshot(nomifun_runtime::ToolId::Bun),
+            before
+        );
     }
 
     #[cfg(unix)]
@@ -626,6 +635,69 @@ done
         assert!(!marker.exists(), "native argv must never become shell code");
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_stdio_script_preserves_literal_argv_and_json_rpc_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let program = root
+            .path()
+            .join(" leading MCP fixture 'quoted' & %literal%.ps1");
+        let proof = root.path().join("argv-proof.txt");
+        let marker = root.path().join("must-not-exist");
+        std::fs::write(&program,r#"$ProgressPreference = 'SilentlyContinue'
+[void](Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256)
+$expected = ConvertFrom-Json -InputObject $env:EXPECTED_ARGV
+if ($expected.Count -ne $args.Count) {exit 91}
+for ($i=0; $i -lt $args.Count; $i++) {
+  if (-not [String]::Equals([string]$args[$i],[string]$expected[$i],[StringComparison]::Ordinal)) {exit 92}
+}
+[IO.File]::WriteAllText($env:ARG_PROOF,'argv-validated')
+while ($null -ne ($line=[Console]::ReadLine())) {
+  $request=ConvertFrom-Json -InputObject $line
+  if ($request.id -eq 1) {
+    [Console]::WriteLine('{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"windows-argv-fixture","version":"1"}}}')
+  } elseif ($request.id -eq 2) {
+    [Console]::WriteLine('{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}')
+    exit 0
+  }
+}
+"#).unwrap();
+        let args = vec![
+            "".into(),
+            "中文 space".into(),
+            "quote'\"".into(),
+            format!("$(New-Item '{}'); & | > %PATH% !PATH!", marker.display()),
+            "line\nbreak".into(),
+        ];
+        let environment = HashMap::from([
+            (
+                "EXPECTED_ARGV".into(),
+                serde_json::to_string(&args).unwrap(),
+            ),
+            ("ARG_PROOF".into(), proof.to_string_lossy().into_owned()),
+            ("PATH".into(), root.path().to_string_lossy().into_owned()),
+        ]);
+        let catalog = discover(
+            program.to_str().unwrap(),
+            &args,
+            &environment,
+            &McpSetupPolicy::uniform(Duration::from_secs(15)),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "{error:?}; independent argv validation proof: {:?}",
+                std::fs::read_to_string(&proof)
+            )
+        });
+        assert_eq!(catalog["tools"], serde_json::json!([]));
+        assert_eq!(std::fs::read_to_string(proof).unwrap(), "argv-validated");
+        assert!(
+            !marker.exists(),
+            "MCP native argv must never become PowerShell syntax"
+        );
+    }
+
     #[test]
     fn native_executable_names_preserve_literal_whitespace_and_line_breaks() {
         for command in [" ", "  executable  ", "line\nbreak", "path/ trailing "] {
@@ -638,7 +710,8 @@ done
 
     #[test]
     fn runtime_preparation_failure_preserves_its_real_reason() {
-        let missing = nomifun_runtime::ToolError::Shared(Arc::new(nomifun_runtime::ToolError::NotPrepared));
+        let missing =
+            nomifun_runtime::ToolError::Shared(Arc::new(nomifun_runtime::ToolError::NotPrepared));
         let error = runtime_resolution_error(&missing);
         assert_eq!(error.code(), "MCP_RUNTIME_UNAVAILABLE");
         assert!(error.message().contains("could not be prepared"));
@@ -647,7 +720,8 @@ done
     #[test]
     fn stderr_is_reduced_to_non_secret_failure_categories() {
         let mut diagnostics = StdioDiagnostics::default();
-        diagnostics.observe(b"npm ERR! code ECONNRESET https://user:secret@example.test/pkg?token=x");
+        diagnostics
+            .observe(b"npm ERR! code ECONNRESET https://user:secret@example.test/pkg?token=x");
 
         assert_eq!(diagnostics.failure_kind(), Some(StdioFailureKind::Network));
         assert!(std::mem::size_of_val(&diagnostics) <= 16);
@@ -673,5 +747,4 @@ done
         assert_eq!(diagnostics.classified_bytes, MAX_STDERR_DIAGNOSTIC_BYTES);
         assert_eq!(diagnostics.failure_kind(), None);
     }
-
 }

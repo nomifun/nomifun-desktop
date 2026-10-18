@@ -88,7 +88,9 @@ pub use provider_usage::{ProviderInUseDetails, ProviderUsage, ProviderUsageFeatu
 pub use timestamp::{TimestampMs, now_ms};
 pub use types::{CommandSpec, EnvVar, ProviderWithModel};
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// Publish a file with the platform's atomic no-replace rename. An existing
+/// destination is always an error, including on Windows.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub fn publish_new_file_noreplace(
     source: &std::path::Path,
     target: &std::path::Path,

@@ -14,6 +14,7 @@ impl AgentToolInvoker for SilentRobotTools {
         if self.unknown_on == Some(id) {
             return Err(AgentEngineError::CapabilityKernel {
                 code:"CAPABILITY_UNAVAILABLE".into(), message:"The owner outcome is unknown; reconcile it before retrying.".into(),
+                details: None,
             });
         }
         Ok(AgentToolResult::text(invocation.call.call_id.clone(),

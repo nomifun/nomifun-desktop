@@ -209,4 +209,19 @@ mod tests {
         state.progress_fingerprints = vec!["a".repeat(64).into(), "a".repeat(64).into()];
         assert!(state.validate(1).is_err());
     }
+
+    #[test]
+    fn running_owner_output_cannot_reset_stall_guards_or_renew_model_allowance() {
+        let mut state=AgentExecutionSegmentState::new(2,AgentSegmentPolicy::default()).unwrap();
+        state.no_progress_segments=1;
+        let original=state.clone();
+        for cursor in [20,40,60] {
+            state.observe_owner(&crate::AgentOwnedProcessObservation {process_id:"authorization".into(),
+                poll:nomifun_engine_core::EngineProcessPoll::Running {pid:1,
+                    output:nomifun_engine_core::EngineProcessOutput {text:"waiting for user".into(),next_cursor:cursor,
+                        retained_bytes:cursor as usize,dropped_bytes:0,source_encoding:"utf-8".into(),decode_errors:0}}}).unwrap();
+        }
+        assert_eq!(state,original);
+        assert_eq!(state.renewed(2),Err(AgentExecutionStopReason::NoProgress));
+    }
 }

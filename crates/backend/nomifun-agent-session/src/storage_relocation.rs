@@ -710,18 +710,29 @@ pub(super) async fn require_native_storage_quiescent_tx(tx: &mut Transaction<'_,
     struct Scope {
         pending_operations: BTreeSet<(String, String)>,
         latest_process: Option<(String, u16)>,
+        retained_generation: Option<String>,
     }
     let turns: BTreeSet<(String, String)> = sqlx::query_as::<_, (String, String)>(
         "SELECT session_id,operation_id FROM agent_turns WHERE (? IS NULL OR session_id=?)")
         .bind(session.map(|id| id.as_ref())).bind(session.map(|id| id.as_ref()))
         .fetch_all(&mut **tx).await?.into_iter().collect();
-    let rows: Vec<StoredEventRow> = sqlx::query_as("SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events WHERE kind='runtime/progress-recorded' AND (? IS NULL OR session_id=?) ORDER BY session_id,seq")
+    let rows: Vec<StoredEventRow> = sqlx::query_as("SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events WHERE kind IN ('runtime/progress-recorded','session/process-owner-released') AND (? IS NULL OR session_id=?) ORDER BY session_id,seq")
         .bind(session.map(|id| id.as_ref())).bind(session.map(|id| id.as_ref()))
         .fetch_all(&mut **tx).await?;
     let mut scopes = BTreeMap::<(String, String), Scope>::new();
     for row in rows {
         let event = event_from_row(row)?;
         let payload = payload_value_for_event_tx(tx, &event).await?;
+        if event.kind.0==nomifun_agent_contracts::SESSION_PROCESS_OWNER_RELEASED {
+            let receipt:nomifun_agent_contracts::SessionProcessOwnerReleasedV1=serde_json::from_value(payload)?;
+            session_process_owner::validate_release_tx(tx,&event,&receipt).await?;
+            for ((session,_),scope) in scopes.iter_mut() {
+                if session==event.agent_session_id.as_ref() && scope.retained_generation.as_deref()==Some(receipt.retention.owner_generation.as_str()) {
+                    scope.latest_process=None;scope.retained_generation=None;
+                }
+            }
+            continue;
+        }
         let native = payload.get("event").ok_or_else(|| conflict("native progress has no typed event"))?;
         let Some(kind) = native.get("event").and_then(Value::as_str) else { continue; };
         if !matches!(kind, "host_tool_dispatch" | "host_resource_dispatch" | "host_tool_settled"
@@ -763,11 +774,31 @@ pub(super) async fn require_native_storage_quiescent_tx(tx: &mut Transaction<'_,
                     }
                 }
             }
-            "host_cleanup_proven" => { scope.pending_operations.clear(); scope.latest_process = None; }
+            "host_cleanup_proven" => {
+                let retention=native.get("session_process_retention").map(|value|
+                    serde_json::from_value::<nomifun_agent_contracts::NativeSessionProcessRetention>(value.clone())).transpose()?;
+                if let Some(retention)=retention {
+                    retention.validate().map_err(SessionStoreError::InvalidPayload)?;
+                    if retention.agent_session_id!=event.agent_session_id {return Err(SessionStoreError::ExecutionFenced);}
+                    if !retention.processes.is_empty() {
+                        scope.retained_generation=Some(retention.owner_generation);
+                        continue;
+                    }
+                }
+                scope.pending_operations.clear(); scope.latest_process = None;
+            }
             _ => unreachable!(),
         }
     }
-    if scopes.values().any(|scope| !scope.pending_operations.is_empty() || scope.latest_process.is_some()) {
+    // Later first-party terminal/reaped receipts can settle processes retained
+    // by an earlier Turn without tearing down this still-live Session owner.
+    for ((session,_),scope) in &mut scopes {
+        if let Some(generation)=scope.retained_generation.as_deref() {
+            let (retained,_)=session_process_owner::retained_tx(tx,&session.as_str().into(),generation,i64::MAX as u64).await?;
+            if retained.is_empty() {scope.retained_generation=None;scope.latest_process=None;}
+        }
+    }
+    if scopes.values().any(|scope| !scope.pending_operations.is_empty() || scope.latest_process.is_some() || scope.retained_generation.is_some()) {
         return Err(conflict("native owner cleanup is unproven; complete storage/process reconciliation at the original location"));
     }
     Ok(())

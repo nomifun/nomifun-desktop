@@ -102,6 +102,16 @@ async fn voice_immediate_writer_is_explicit_start_only_and_policy_replay_cannot_
     let SessionEventPayloadRef::InlineJson(payload)=started.record.unwrap().payload else{panic!("typed admission")};assert_eq!(payload.0.pointer("/admission/voice_input_context/supersede_model_step"),Some(&json!(true)));
     let(_,first)=store.steer_exact_native_immediate_turn(&session.agent_session_id,&"explicit-immediate-turn".into(),"explicit-correction".into(),"session_api".into(),input.clone(),&fence).await.unwrap();
     let SessionEventPayloadRef::InlineJson(payload)=first.record.unwrap().payload else{panic!("typed correction")};assert_eq!(payload.0["voice_model_step_supersede"],true);
+    let before=store.current_cursor(&session.agent_session_id).await.unwrap();
+    let receipt=store.read_steering_receipt(&session.owner_ref,&session.agent_session_id,Some(&"explicit-immediate-turn".into()),
+        &"session_api".into(),&"explicit-correction".into(),&input,None,Some((&fence,true))).await.unwrap().unwrap();
+    assert_eq!(receipt.0.as_ref(),"explicit-immediate-turn");
+    for policy in [None,Some((&fence,false))] {
+        assert!(store.read_steering_receipt(&session.owner_ref,&session.agent_session_id,Some(&"explicit-immediate-turn".into()),
+            &"session_api".into(),&"explicit-correction".into(),&input,None,policy).await.is_err(),
+            "an ordinary retry or changed native policy cannot take over this accepted receipt");
+    }
+    assert_eq!(store.current_cursor(&session.agent_session_id).await.unwrap(),before);
     assert!(matches!(store.steer_exact_native_turn(&session.agent_session_id,&"explicit-immediate-turn".into(),"explicit-correction".into(),"session_api".into(),input.clone(),&fence).await,Err(SessionStoreError::IdempotencyConflict(_))));
     assert!(store.steer_exact_native_immediate_turn(&session.agent_session_id,&"explicit-immediate-turn".into(),"explicit-correction".into(),"session_api".into(),input,&fence).await.unwrap().1.duplicate);
     assert_eq!(store.head(&session.agent_session_id).await.unwrap().active_turn_id.as_deref(),Some("explicit-immediate-turn"));

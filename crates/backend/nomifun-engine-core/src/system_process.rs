@@ -40,6 +40,29 @@ fn failure(error: impl std::fmt::Display) -> EngineProcessError {
     EngineProcessError::Process(error.to_string())
 }
 
+fn extend_login_environment(target: &mut BTreeMap<String,String>, values: impl IntoIterator<Item=(String,String)>) {
+    for (key,value) in values {
+        // Windows environment names are native case-insensitive. Leaving both
+        // inherited `Path` and explicit `PATH` in the BTree would let its later
+        // lexical entry overwrite the task's value in the native env block.
+        target.retain(|existing,_| !nomi_process_runtime::environment_key_eq(
+            std::ffi::OsStr::new(existing),std::ffi::OsStr::new(&key)));
+        target.insert(key,value);
+    }
+}
+
+fn inherited_login_environment_value(key: &std::ffi::OsStr, value: std::ffi::OsString,
+    windows_powershell: bool, explicit_module_path: bool) -> std::io::Result<std::ffi::OsString> {
+    #[cfg(windows)]
+    if windows_powershell && !explicit_module_path
+        && nomi_process_runtime::environment_key_eq(key, std::ffi::OsStr::new("PSModulePath")) {
+        return nomi_process_runtime::windows_powershell_module_path(&value);
+    }
+    #[cfg(not(windows))]
+    let _ = (key, windows_powershell, explicit_module_path);
+    Ok(value)
+}
+
 impl SystemEngineOwner {
     async fn client(&self, cancellation: &CancellationToken) -> Result<Arc<SystemExecutionClient>, EngineProcessError> {
         // Registering a daemon and approving it are separate OS facts. Recheck
@@ -78,14 +101,27 @@ impl SystemEngineOwner {
         let cwd = if cwd.is_absolute() { cwd.to_owned() } else { default_directory.join(cwd) };
         // Preserve the real login user's environment and HOME. The helper is
         // a system execution context, never a substitute login session.
-        let mut environment: BTreeMap<String, String> = std::env::vars_os()
+        let program = Path::new(&request.command);
+        let program = if program.is_absolute() { program.to_owned() } else { cwd.join(program) };
+        let windows_powershell = (cfg!(windows) && request.shell_script.is_some())
+            || nomi_process_runtime::program_uses_windows_powershell(program.as_os_str());
+        let explicit_module_path = request.env.keys().any(|key|
+            nomi_process_runtime::environment_key_eq(std::ffi::OsStr::new(key), std::ffi::OsStr::new("PSModulePath")));
+        let inherited: Vec<(String, String)> = std::env::vars_os()
             .filter(|(key, _)| !nomi_process_runtime::is_inherited_application_environment_key(key))
             .map(|(key, value)| {
+                // Add the target's native built-ins without discarding custom
+                // modules inherited from the login user's parent process.
+                // A prepared/explicit request value, including empty, wins.
+                let value = inherited_login_environment_value(&key, value, windows_powershell, explicit_module_path)
+                    .map_err(|error| before(failure(error)))?;
                 let key = key.into_string().map_err(|_| before(failure("Inherited environment name cannot be represented by the native execution protocol (non-UTF-8)")))?;
                 let value = value.into_string().map_err(|_| before(failure("Inherited environment value cannot be represented by the native execution protocol (non-UTF-8)")))?;
                 Ok((key,value))
             }).collect::<Result<_,EngineProcessStartError>>()?;
-        environment.extend(request.env);
+        let mut environment = BTreeMap::new();
+        extend_login_environment(&mut environment,inherited);
+        extend_login_environment(&mut environment,request.env);
         let command = match request.shell_script {
             Some(script) => json!({"kind":"shell", "script":script}),
             None => json!({"kind":"program", "program":request.command, "args":request.args}),
@@ -99,7 +135,7 @@ impl SystemEngineOwner {
         // The returned handle or the exact quiesce fence owns its settlement.
         let result = client.call(json!({"op":"start","invocation_id":invocation_id.to_string(),"call_id":call_id.to_string(),
             "command":command,"cwd":cwd,"env":environment,"transport":transport,
-            "timeout_ms":request.timeout_ms,"output_limit_bytes":request.output_limit_bytes})).await;
+            "timeout_ms":request.timeout_ms,"expire_on_idle":false,"output_limit_bytes":request.output_limit_bytes})).await;
         let value = result.map_err(|error| {
             let not_started = error.details.get("user_code_not_started").and_then(Value::as_bool) == Some(true);
             let cleanup = not_started || error.details.get("cleanup_proven").and_then(Value::as_bool) == Some(true);
@@ -157,9 +193,19 @@ impl SystemEngineSession {
 
 pub(crate) async fn poll(session:&mut EngineProcessSession, cursor:u64, wait:Duration,
     cancellation:CancellationToken) -> Result<EngineProcessPoll,EngineProcessError> {
+    poll_with_policy(session, cursor, wait, true, cancellation).await
+}
+
+pub(crate) async fn initial_observation(session: &mut EngineProcessSession, wait: Duration,
+    cancellation: CancellationToken) -> Result<EngineProcessPoll, EngineProcessError> {
+    poll_with_policy(session, 0, wait, false, cancellation).await
+}
+
+async fn poll_with_policy(session:&mut EngineProcessSession, cursor:u64, wait:Duration, break_on_output: bool,
+    cancellation:CancellationToken) -> Result<EngineProcessPoll,EngineProcessError> {
     if cancellation.is_cancelled() { return cancel(session).await; }
     let system=session.system.as_ref().expect("system session required");
-    let call=system.client.call(system.request("poll",json!({"cursor":cursor,"yield_ms":wait.as_millis().min(30000) as u64})));
+    let call=system.client.call(system.request("poll",json!({"cursor":cursor,"yield_ms":wait.as_millis().min(30000) as u64,"break_on_output":break_on_output})));
     let value=tokio::select! {
         _ = cancellation.cancelled() => return cancel(session).await,
         result=call => result.map_err(|error| failure(format!("{}: {}",error.code,error.message)))?,
@@ -189,6 +235,22 @@ pub(crate) async fn terminal_if_ready(session: &mut EngineProcessSession, cancel
     let result = convert(session,native.clone())?;
     session.cursor = saved_cursor;
     if !result.is_terminal() { return Err(failure("system runner returned running state as a terminal receipt")); }
+    Ok(Some(result))
+}
+
+pub(crate) async fn observe_if_changed(session: &mut EngineProcessSession, cursor: u64,
+    include_output: bool, cancellation: CancellationToken) -> Result<Option<EngineProcessPoll>, EngineProcessError> {
+    let system = session.system.as_ref().expect("system session required");
+    let call = system.client.call(system.request("observe", json!({"cursor":cursor,"include_output":include_output})));
+    let receipt = tokio::select! {
+        _ = cancellation.cancelled() => return Err(EngineProcessError::Cancelled),
+        result = call => result.map_err(|error| failure(format!("{}: {}",error.code,error.message)))?,
+    };
+    let value = receipt.get("observation").ok_or_else(|| failure("system runner omitted owner observation"))?;
+    if value.is_null() { return Ok(None); }
+    let saved_cursor = session.cursor;
+    let result = convert(session, value.clone())?;
+    session.cursor = saved_cursor;
     Ok(Some(result))
 }
 
@@ -231,6 +293,34 @@ fn parse_poll(value:Value,pid:u32) -> Result<(EngineProcessPoll,u64),EngineProce
 mod tests {
     use super::*;
     use crate::{EngineExecutionIdentity,ManagedEngineProcessOwner};
+
+    #[cfg(windows)]
+    #[test]
+    fn administrator_environment_preserves_explicit_windows_key_precedence() {
+        let mut environment=BTreeMap::from([("Path".into(),"inherited-tools".into()),("UserProfile".into(),"original-login-profile".into()),("Ä_CUSTOM".into(),"inherited".into())]);
+        extend_login_environment(&mut environment,[("PATH".into(),"explicit-task-tools".into()),("ä_custom".into(),"explicit".into())]);
+        assert_eq!(environment.len(),3);
+        assert_eq!(environment.get("PATH").map(String::as_str),Some("explicit-task-tools"));
+        assert_eq!(environment.get("UserProfile").map(String::as_str),Some("original-login-profile"));
+        assert_eq!(environment.get("ä_custom").map(String::as_str),Some("explicit"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn administrator_windows_powershell_preserves_custom_modules_and_explicit_overlays() {
+        use std::ffi::{OsStr, OsString};
+        let custom = OsString::from(r"C:\自有模块;D:\temporary-modules");
+        let compatible = inherited_login_environment_value(OsStr::new("psmodulepath"), custom.clone(), true, false).unwrap();
+        assert_ne!(compatible, custom);
+        assert!(compatible.to_string_lossy().ends_with(custom.to_str().unwrap()));
+        assert_eq!(inherited_login_environment_value(OsStr::new("PSModulePath"), custom.clone(), false, false).unwrap(), custom);
+        assert_eq!(inherited_login_environment_value(OsStr::new("PSModulePath"), custom.clone(), true, true).unwrap(), custom);
+        assert_eq!(inherited_login_environment_value(OsStr::new("PSModulePath"), OsString::new(), true, true).unwrap(), OsString::new());
+        let mut environment=BTreeMap::from([("USERPROFILE".into(),"original-login-profile".into())]);
+        extend_login_environment(&mut environment,[("PSModulePath".into(),String::new())]);
+        assert_eq!(environment.get("PSModulePath").map(String::as_str),Some(""));
+        assert_eq!(environment.get("USERPROFILE").map(String::as_str),Some("original-login-profile"));
+    }
 
     fn receipt() -> Value {
         json!({"state":"cancelled","output":{"chunks":[{"text":"已发生的输出\n"}],"next_cursor":25,

@@ -346,7 +346,7 @@ fn process_host_os_mapping_error(
     if !is_process
         || !matches!(
             action_id,
-            "workspace.process/exec" | "workspace.process/start"
+            "workspace.process/start"
         )
     {
         return None;
@@ -408,6 +408,7 @@ fn kernel_error(error: KernelError) -> EngineToolError {
     EngineToolError::CapabilityKernel {
         code,
         message,
+        details: error.capability_execution_failure().and_then(|failure| owner_failure_details(failure.details.as_ref())),
     }
 }
 
@@ -427,24 +428,28 @@ fn kernel_error_for_action(
         return EngineToolError::CapabilityKernel {
             code: error.canonical_code().0,
             message: message.to_owned(),
+            details: owner_failure_details(failure.details.as_ref()),
         };
     }
     if is_file_write && let Some(failure) = error.capability_execution_failure() {
         return EngineToolError::CapabilityKernel {
             code: error.canonical_code().0,
             message: workspace_write_feedback(&failure.message),
+            details: owner_failure_details(failure.details.as_ref()),
         };
     }
     if is_computer_launch && let Some(failure) = error.capability_execution_failure() {
         return EngineToolError::CapabilityKernel {
             code: error.canonical_code().0,
             message: format!("{}\n{}", owner_failure_detail(&failure.message, 2048), computer_launch_feedback(&failure.message)),
+            details: owner_failure_details(failure.details.as_ref()),
         };
     }
     if is_process && let Some(failure) = error.capability_execution_failure() {
         return EngineToolError::CapabilityKernel {
             code: error.canonical_code().0,
             message: owner_failure_detail(&failure.message, 4096),
+            details: owner_failure_details(failure.details.as_ref()),
         };
     }
     kernel_error(error)
@@ -457,6 +462,48 @@ fn owner_failure_detail(detail: &str, limit: usize) -> String {
     let mut boundary = limit.saturating_sub(suffix.len()).min(redacted.len());
     while !redacted.is_char_boundary(boundary) { boundary -= 1; }
     format!("{}{suffix}", &redacted[..boundary])
+}
+
+/// Project only the native acquisition diagnostic carried by the admitted
+/// owner. These fields are never inferred from the human-readable message.
+/// Unknown diagnostic shapes do not change the original failed invocation.
+fn owner_failure_details(details: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    const MAX_DETAILS_BYTES: usize = 8 * 1024;
+    let details = details?.as_object()?;
+    if let Some(system) = details.get("system_execution_error") {
+        let mut failure: nomifun_agent_contracts::SystemExecutionFailure = serde_json::from_value(system.clone()).ok()?;
+        failure.message = owner_failure_detail(&failure.message, 1024);
+        if !failure.validate() { return None; }
+        let projected = serde_json::json!({"system_execution_error": failure});
+        return (serde_json::to_vec(&projected).ok()?.len() <= MAX_DETAILS_BYTES).then_some(projected);
+    }
+    let native = details.get("native_file_error")?.as_object()?;
+    let code = native.get("code")?.as_str()?;
+    if !matches!(code, "INVALID_PAYLOAD" | "FILE_CHANGED_DURING_READ"
+        | "NATIVE_FILE_ACQUIRE_UNAVAILABLE" | "SYSTEM_ACCESS_DENIED"
+        | "RESOURCE_NOT_FOUND" | "NATIVE_FILE_READ_FAILED") { return None; }
+    let message = native.get("message")?.as_str()?;
+    let kind = native.get("kind")?;
+    if !kind.is_null() && !kind.as_str().is_some_and(|value|
+        !value.is_empty() && value.len() <= 64 && value.bytes().all(|byte| byte.is_ascii_alphabetic())) {
+        return None;
+    }
+    let raw_os_error = native.get("raw_os_error")?;
+    if !raw_os_error.is_null() && !raw_os_error.as_i64().is_some_and(|value| i32::try_from(value).is_ok()) {
+        return None;
+    }
+    let mut projected = serde_json::json!({"native_file_error": {
+        "code": code,
+        "message": owner_failure_detail(message, 2048),
+        "kind": kind,
+        "raw_os_error": raw_os_error,
+    }});
+    // JSON control-character escaping can expand a 2 KiB message sixfold.
+    // A 1 KiB UTF-8 message plus these fixed, bounded fields fits below 8 KiB.
+    if serde_json::to_vec(&projected).ok()?.len() > MAX_DETAILS_BYTES {
+        projected["native_file_error"]["message"] = owner_failure_detail(message, 1024).into();
+    }
+    (serde_json::to_vec(&projected).ok()?.len() <= MAX_DETAILS_BYTES).then_some(projected)
 }
 
 fn computer_launch_feedback(detail: &str) -> &'static str {

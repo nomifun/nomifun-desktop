@@ -221,11 +221,8 @@ impl ChannelPlugin for TwitchPlugin {
             })?;
         }
 
-        // Twitch IRC has no message IDs; return a synthetic one.
-        Ok(format!("twitch-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()))
+        // Queue admission provides no remote message identity or delivery ACK.
+        Ok(String::new())
     }
 
     async fn edit_message(
@@ -601,6 +598,16 @@ pub(crate) fn format_privmsgs(channel: &str, text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn queued_privmsgs_do_not_fabricate_a_remote_message_acknowledgement() {
+        let mut plugin=TwitchPlugin::new();let(tx,mut rx)=mpsc::channel(4);plugin.write_tx=Some(tx);
+        let id=plugin.send_message("#fixture",crate::message_service::ChannelMessageService::build_final_message("first\nsecond")).await.unwrap();
+        assert!(id.is_empty(),"local write-queue admission has no provider message id");
+        assert_eq!(rx.recv().await.unwrap(),"PRIVMSG #fixture :first");
+        assert_eq!(rx.recv().await.unwrap(),"PRIVMSG #fixture :second");
+        assert!(rx.try_recv().is_err());
+    }
 
     // ── Channel normalization ─────────────────────────────────────────────
 

@@ -36,6 +36,7 @@ beforeEach(() => {
   const agentChanged = spyOn(ipcBridge.agentPlatform.sessions.onAgentChanged, 'on').mockReturnValue(() => {});
   const turnFiles = spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([]);
   const completed = spyOn(ipcBridge.conversation.turnCompleted, 'on').mockReturnValue(() => {});
+  const paused = spyOn(ipcBridge.conversation.turnPaused, 'on').mockReturnValue(() => {});
   const reconnected = spyOn(ipcBridge.conversation.reconnected, 'on').mockReturnValue(() => {});
   const content = spyOn(ipcBridge.fileStream.contentUpdate, 'on').mockImplementation(() => () => {});
   const tree = spyOn(ipcBridge.knowledge.onTreeChanged, 'on').mockImplementation(() => () => {});
@@ -49,7 +50,7 @@ beforeEach(() => {
   const watchFiles = spyOn(ipcBridge.workspaceOfficeWatch.fileAdded, 'on').mockImplementation(() => () => {});
   const files = spyOn(ipcBridge.fs.listWorkspaceFiles, 'invoke').mockResolvedValue([]);
   restoreListeners = () => {
-    agentChanged.mockRestore(); turnFiles.mockRestore(); completed.mockRestore(); reconnected.mockRestore();
+    agentChanged.mockRestore(); turnFiles.mockRestore(); completed.mockRestore(); paused.mockRestore(); reconnected.mockRestore();
     content.mockRestore(); tree.mockRestore(); entry.mockRestore(); metadata.mockRestore(); image.mockRestore();
     watchStart.mockRestore(); watchStop.mockRestore(); watchFiles.mockRestore(); files.mockRestore();
   };

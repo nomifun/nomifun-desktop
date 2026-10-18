@@ -50,8 +50,12 @@ pub enum WorkspaceError {
     InvalidUrl,
     #[error("The browser zoom must be between 50% and 200%.")]
     InvalidZoom,
-    #[error("Upload files must be regular files inside the authorized workspace; links and special paths are not accepted.")]
+    #[error("The requested local regular file could not be acquired under the current OS identity. Use a native absolute path or a path relative to the Session default directory.")]
     UploadPathDenied,
+    #[error("The upload source changed while its snapshot was being prepared. Inspect the current source before proposing a fresh upload.")]
+    UploadSourceChanged,
+    #[error("The selected source name cannot be represented losslessly by this browser's native upload snapshot. Keep the original source and inspect this platform limitation before choosing a different upload name.")]
+    UploadSourceNameUnsupported,
     #[error("The browser upload file count or byte limit has been reached.")]
     UploadLimit,
     #[error("The browser download exceeds the task file or byte limit.")]
@@ -97,6 +101,8 @@ impl WorkspaceError {
             Self::InvalidUrl => "BROWSER_INVALID_URL",
             Self::InvalidZoom => "BROWSER_INVALID_ZOOM",
             Self::UploadPathDenied => "BROWSER_UPLOAD_PATH_DENIED",
+            Self::UploadSourceChanged => "BROWSER_UPLOAD_SOURCE_CHANGED",
+            Self::UploadSourceNameUnsupported => "BROWSER_UPLOAD_SOURCE_NAME_UNSUPPORTED",
             Self::UploadLimit => "BROWSER_UPLOAD_LIMIT",
             Self::DownloadLimit => "BROWSER_DOWNLOAD_LIMIT",
             Self::DownloadDenied => "BROWSER_DOWNLOAD_DENIED",

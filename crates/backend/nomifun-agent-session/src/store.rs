@@ -57,6 +57,8 @@ pub const MAX_EVENT_PAGE_SIZE: u32 = 500;
 mod shared_content;
 #[path = "terminal_content.rs"]
 mod terminal_content;
+#[path = "effect_native_targets.rs"]
+mod effect_native_targets;
 
 #[path = "native_checkpoint.rs"]
 mod native_checkpoint;
@@ -80,6 +82,9 @@ mod turn_files;
 mod history_transition_projection;
 #[path = "history_turn_outcome.rs"]
 mod history_turn_outcome;
+#[path = "session_input.rs"]
+mod session_input;
+pub use session_input::{PendingSessionInput,SessionInputClaim,SessionInputBlockedReason,canonical_steering_input,is_session_input_event,session_input_namespace};
 #[path = "history_standalone_projection.rs"]
 mod history_standalone_projection;
 #[path = "message_timeline.rs"]
@@ -102,6 +107,15 @@ pub use tool_call_causation::{
 
 #[path = "idmm_notice.rs"]
 mod idmm_notice;
+#[path = "channel_input_delivery.rs"]
+mod channel_input_delivery;
+#[path = "channel_input_observation.rs"]
+mod channel_input_observation;
+pub use channel_input_observation::{ChannelInputDeliveryDisposition,RecoverableChannelInput};
+#[path = "session_process_owner.rs"]
+mod session_process_owner;
+#[path = "session_process_retirement.rs"]
+mod session_process_retirement;
 
 #[path = "native_recovery.rs"]
 mod native_recovery;
@@ -319,6 +333,7 @@ enum AppendSessionStatePolicy {
     LiveOnly,
     EffectSettlement,
     KnowledgeWritebackSettlement,
+    ProcessOwnerRelease,
     DeleteCleanupUncertainty,
 }
 
@@ -534,6 +549,9 @@ impl AgentSessionStore {
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         let mut tx = self.begin_write_transaction().await?;
         if append.semantic_event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED
+            || append.semantic_event.kind.0 == nomifun_agent_contracts::CHANNEL_INPUT_QUESTION_DELIVERED
+            || append.semantic_event.kind.0 == nomifun_agent_contracts::CHANNEL_INPUT_DELIVERY_STATE
+            || append.semantic_event.kind.0 == nomifun_agent_contracts::SESSION_PROCESS_OWNER_RELEASED
             || append.semantic_event.kind.0 == "context/cleared"
             || knowledge_writeback::is_event(&append.semantic_event.kind.0) {
             return Err(SessionStoreError::ExecutionFenced);
@@ -1064,6 +1082,29 @@ impl AgentSessionStore {
         self.steer_selected_turn(session_id, None, idempotency_key, producer_id, input, None,false,None).await
     }
 
+    /// Read the original accepted input before applying today's domain/input
+    /// admission policy. A receipt is not an active-inbox or resume permit.
+    pub async fn read_steering_receipt(&self,owner:&PrincipalRef,session:&AgentSessionId,target:Option<&OperationId>,
+        producer:&EventProducerId,key:&IdempotencyKey,input:&StrictJsonValue,expected_wait:Option<(&str,u64)>,
+        native:Option<(&NativeTurnMutationFence,bool)>)
+        ->Result<Option<(OperationId,SessionEventAck)>,SessionStoreError> {
+        let mut tx=self.pool.begin().await?;
+        let live=live_session_by_id_tx(&mut tx,session.as_ref()).await?;
+        if &live.owner_ref!=owner {return Err(SessionStoreError::ExecutionFenced);}
+        let Some(row)=event_by_producer_key_tx(&mut tx,producer.as_ref(),key.as_ref()).await? else {
+            tx.commit().await?;return Ok(None);
+        };
+        let record=event_from_row(row)?;
+        let wait=expected_wait.map(|(source,seq)|json!({"turn_id":source,"wait_seq":seq}));
+        let target=validate_steering_replay(&record,session,target,input,wait.as_ref(),native.map(|(fence,_)|fence),native.is_some_and(|(_,immediate)|immediate))?;
+        let started:Option<String>=sqlx::query_scalar("SELECT started_event_id FROM agent_turns WHERE session_id=? AND operation_id=?")
+            .bind(session.as_ref()).bind(target.as_ref()).fetch_optional(&mut *tx).await?.flatten();
+        if started.as_deref()!=record.causation_event_id.as_ref().map(|id|id.as_ref()) || started.is_none() {
+            return Err(SessionStoreError::InvalidEvent("steering receipt lost its exact Turn start".into()));
+        }
+        let ack=event_ack(&record);tx.commit().await?;Ok(Some((target,ack)))
+    }
+
     /// Reply to an exact parked public input boundary. Target validation and
     /// acceptance share the canonical writer transaction with normal steering.
     pub async fn steer_active_turn_for_wait(&self, session_id: &AgentSessionId,
@@ -1090,6 +1131,14 @@ impl AgentSessionStore {
             return Err(SessionStoreError::InvalidEvent("exact steering requires a target Turn".into()));
         }
         self.steer_selected_turn(session_id, Some(target_operation_id), idempotency_key, producer_id, input, None,false,None).await
+    }
+
+    pub async fn steer_exact_turn_for_wait(&self,session:&AgentSessionId,target:&OperationId,key:IdempotencyKey,
+        producer:EventProducerId,input:StrictJsonValue,source:&str,wait_seq:u64)
+        ->Result<(OperationId,SessionEventAppendResult),SessionStoreError> {
+        validate_uuidv7(source,"expected waiting Turn source")?;
+        if wait_seq==0 || wait_seq>i64::MAX as u64 {return Err(SessionStoreError::InvalidEvent("waiting reply requires an exact canonical wait sequence".into()));}
+        self.steer_selected_turn(session,Some(target),key,producer,input,None,false,Some((source,wait_seq))).await
     }
 
     pub async fn steer_exact_native_turn(&self,session_id:&AgentSessionId,target_operation_id:&OperationId,
@@ -1127,38 +1176,8 @@ impl AgentSessionStore {
         .await?
         {
             let record = event_from_row(existing)?;
-            if record.agent_session_id != *session_id
-                || record.kind.0 != "turn/steer-accepted"
-            {
-                return Err(SessionStoreError::IdempotencyConflict(
-                    "steering idempotency key was already used for another event".to_owned(),
-                ));
-            }
-            let target = OperationId::from(record.correlation_id.as_ref().to_owned());
-            let replay_matches = match &record.payload {
-                SessionEventPayloadRef::InlineJson(value) => {
-                    value
-                        .0
-                        .get("target_operation_id")
-                        .and_then(Value::as_str)
-                        == Some(target.as_ref())
-                        && value.0.get("input") == Some(&input.0)
-                        && value.0.get("expected_wait") == expected_wait_value.as_ref()
-                }
-                SessionEventPayloadRef::Empty | SessionEventPayloadRef::Stored(_) => false,
-            };
-            if !replay_matches || requested_target.is_some_and(|requested| requested != &target) {
-                return Err(SessionStoreError::IdempotencyConflict(
-                    "steering idempotency key was replayed with different input or target".to_owned(),
-                ));
-            }
-            if let Some(fence)=expected_native {
-                native_mutation_fence::validate_replay(&record.payload,fence)?;
-                let SessionEventPayloadRef::InlineJson(payload)=&record.payload else{unreachable!()};
-                if payload.0.get("voice_model_step_supersede").and_then(Value::as_bool).unwrap_or(false)!=voice_immediate {
-                    return Err(SessionStoreError::IdempotencyConflict("voice steering replay changes its original model-step policy".into()));
-                }
-            }
+            let target=validate_steering_replay(&record,session_id,requested_target,&input,
+                expected_wait_value.as_ref(),expected_native,voice_immediate)?;
             let ack = event_ack(&record);
             tx.commit().await?;
             return Ok((
@@ -1177,6 +1196,11 @@ impl AgentSessionStore {
         if let Some(closed) = closed {
             tx.commit().await?;
             return Ok((target_operation_id, closed));
+        }
+        // A retained checkpoint is not a live inbox. Paused input is admitted
+        // only by the atomic native resume writer, never partially queued here.
+        if head_by_id_tx(&mut tx,session_id.as_ref()).await?.status != "running" {
+            return Err(SessionStoreError::Conflict("steering requires a live Turn input scope".into()));
         }
         let turn_event = sqlx::query_as::<_, StoredEventRow>(
             "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
@@ -2781,6 +2805,7 @@ impl AgentSessionStore {
         for row in rows {
             let event = event_from_row(row)?;
             let payload = payload_value_for_event_tx(&mut tx, &event).await?;
+            if session_input::is_session_input_event(&event,&session.owner_ref) && !session_input::input_claimed_tx(&mut tx,session_id,&event.event_id).await? {continue;}
             if event_belongs_to_turn(&event, &payload, turn_operation_id) {
                 collect_chat_fact_metadata(
                     &payload,
@@ -2793,6 +2818,16 @@ impl AgentSessionStore {
             event_payloads.insert(event.event_id.as_ref().to_owned(), payload);
             events.push(event);
         }
+        let referenced=events.iter().filter(|event|event.kind.0=="turn/steer-accepted"&&event.kind_version==2)
+            .map(|event|event_payloads.get(event.event_id.as_ref()).and_then(|payload|payload.get("input_event_id")).and_then(Value::as_str)
+                .map(str::to_owned).ok_or_else(||SessionStoreError::InvalidPayload("steering input reference is missing".into())))
+            .collect::<Result<BTreeSet<_>,_>>()?;
+        for id in referenced {
+            if event_payloads.contains_key(&id) {continue;}
+            let original=session_input::accepted_input_tx(&mut tx,session_id,&id.into()).await?;
+            event_payloads.insert(original.event.event_id.as_ref().to_owned(),original.input.0);events.push(original.event);
+        }
+        events.sort_by_key(|event|event.seq);
         let fork_context = if matches!(scope, CausalityFactScope::TurnOutput) { None } else { fork_context_tx(&mut tx, &session).await? };
         tx.commit().await?;
 
@@ -3017,6 +3052,24 @@ impl AgentSessionStore {
         Ok(messages)
     }
 
+    /// Public forward page with derived exact-Turn results. Runtime context
+    /// continues to consume typed facts, and raw projection reads keep their
+    /// existing message-only contract.
+    pub async fn messages_with_turns_after(&self,session_id:&AgentSessionId,after_seq:u64)
+        ->Result<Vec<MessageProjection>,SessionStoreError> {
+        let mut tx=self.pool.begin().await?;
+        require_live_session_tx(&mut tx,session_id.as_ref()).await?;
+        let head=head_by_id_tx(&mut tx,session_id.as_ref()).await?;
+        let mut messages=Self::messages_after_tx(&mut tx,session_id,after_seq,head.last_seq).await?;
+        session_input::attach_updates_after(&mut tx,session_id,after_seq,head.last_seq,&mut messages).await?;
+        history_turn_outcome::attach_after(&mut tx,session_id,after_seq,head.last_seq,&mut messages).await?;
+        history_turn_outcome::hydrate(&mut tx,session_id,&mut messages).await?;
+        knowledge_writeback::hydrate(&mut tx,session_id,&mut messages).await?;
+        messages.sort_by(|left,right|left.last_seq.cmp(&right.last_seq).then_with(||left.projection_id.cmp(&right.projection_id)));
+        tx.commit().await?;
+        Ok(messages)
+    }
+
     pub async fn messages_before(
         &self,
         session_id: &AgentSessionId,
@@ -3071,6 +3124,7 @@ impl AgentSessionStore {
             .collect::<Result<Vec<_>, _>>()?;
         history_transition_projection::hydrate(&mut tx, session_id, &mut messages).await?;
         if renderer_metadata {
+            session_input::hydrate(&mut tx,session_id,&mut messages).await?;
             history_standalone_projection::hydrate(&mut tx, session_id, &mut messages).await?;
             message_timeline::hydrate(&mut tx, session_id, head.last_seq, &mut messages).await?;
         }
@@ -4866,7 +4920,7 @@ impl AgentSessionStore {
         }
         let semantic_append = append;
         let semantic_payload = payload;
-        let prepared = shared_content::prepare(append, payload)?;
+        let prepared = shared_content::prepare(tx, append, payload).await?;
         let append = &prepared.append;
         let payload = prepared.envelope.as_ref();
         let registry_entry = self
@@ -4930,6 +4984,15 @@ impl AgentSessionStore {
                     other => return Err(SessionStoreError::InvalidSession(format!("unknown AgentSession state {other}"))),
                 }
                 &["live", "deleting"]
+            }
+            AppendSessionStatePolicy::ProcessOwnerRelease => {
+                if append.semantic_event.kind.0!=nomifun_agent_contracts::SESSION_PROCESS_OWNER_RELEASED {return Err(SessionStoreError::ExecutionFenced);}
+                match session_row.state.as_str() {
+                    "live" | "deleting"=>{},
+                    "deleted"=>return Err(SessionStoreError::Deleted(append.agent_session_id.0.clone())),
+                    other=>return Err(SessionStoreError::InvalidSession(format!("unknown AgentSession state {other}"))),
+                }
+                &["live","deleting"]
             }
             AppendSessionStatePolicy::DeleteCleanupUncertainty => {
                 if !matches!(
@@ -6099,6 +6162,23 @@ async fn validate_semantic_event_tx(
     payload: &Value,
 ) -> Result<(), SessionStoreError> {
     knowledge_writeback::validate_event_tx(tx, event, payload).await?;
+    if event.kind.0=="runtime/progress-recorded" && payload.pointer("/event/event").and_then(Value::as_str)==Some("host_cleanup_proven")
+        && let Some(value)=payload.pointer("/event/session_process_retention") {
+        let retention=serde_json::from_value::<nomifun_agent_contracts::NativeSessionProcessRetention>(value.clone())?;
+        session_process_owner::validate_retention_tx(tx,event,&retention).await?;
+    }
+    if event.kind.0 == nomifun_agent_contracts::SESSION_PROCESS_OWNER_RELEASED {
+        let receipt=serde_json::from_value::<nomifun_agent_contracts::SessionProcessOwnerReleasedV1>(payload.clone())?;
+        session_process_owner::validate_release_tx(tx,event,&receipt).await?;
+    }
+    if event.kind.0 == nomifun_agent_contracts::CHANNEL_INPUT_QUESTION_DELIVERED {
+        let delivery=serde_json::from_value::<nomifun_agent_contracts::ChannelInputQuestionDeliveredV1>(payload.clone())?;
+        channel_input_delivery::validate_event_tx(tx,event,&delivery).await?;
+    }
+    if event.kind.0 == nomifun_agent_contracts::CHANNEL_INPUT_DELIVERY_STATE {
+        let delivery=serde_json::from_value::<nomifun_agent_contracts::ChannelInputDeliveryStateV1>(payload.clone())?;
+        channel_input_observation::validate_event_tx(tx,event,&delivery).await?;
+    }
     if event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED {
         let observation: nomifun_agent_contracts::TurnWorkspaceFilesObservedV1 = serde_json::from_value(payload.clone())?;
         observation.validate().map_err(SessionStoreError::InvalidPayload)?;
@@ -6356,6 +6436,8 @@ async fn validate_effect_transition_tx(
                 ));
             }
             validate_effect_started_causation_tx(tx, append).await?;
+            #[cfg(windows)]
+            effect_native_targets::validate_admission_tx(tx, append).await?;
             Ok(())
         }
         "effect/succeeded" | "effect/failed" | "effect/uncertain" => {
@@ -6544,6 +6626,7 @@ fn validate_effect_identity_transition(
     }
     let started_payload = effect_payload_from_event(started)?;
     let next_payload = effect_payload_from_append(append)?;
+    effect_native_targets::validate_settlement(started_payload, next_payload)?;
     for field in [
         "effect_id",
         "turn_id",
@@ -7139,6 +7222,32 @@ async fn event_by_event_id_tx(
     .bind(event_id)
     .fetch_optional(&mut **tx)
     .await?)
+}
+
+/// Replays validate the complete original submission, independent of the
+/// current Turn, domain owner or Runtime inbox. This grants no fresh execution.
+fn validate_steering_replay(record:&SessionEventRecord,session:&AgentSessionId,target:Option<&OperationId>,
+    input:&StrictJsonValue,expected_wait:Option<&Value>,native:Option<&NativeTurnMutationFence>,voice_immediate:bool)
+    ->Result<OperationId,SessionStoreError> {
+    let original=OperationId::from(record.correlation_id.as_ref().to_owned());
+    let SessionEventPayloadRef::InlineJson(payload)=&record.payload else {
+        return Err(SessionStoreError::IdempotencyConflict("steering receipt has no original bounded input".into()));
+    };
+    if record.agent_session_id!=*session || record.kind.0!="turn/steer-accepted" || record.kind_version!=1
+        || payload.0.get("target_operation_id").and_then(Value::as_str)!=Some(original.as_ref())
+        || payload.0.get("input")!=Some(&input.0) || payload.0.get("expected_wait")!=expected_wait
+        || target.is_some_and(|target|target!=&original) {
+        return Err(SessionStoreError::IdempotencyConflict("steering idempotency key was replayed with different input or target".into()));
+    }
+    if let Some(native)=native {
+        native_mutation_fence::validate_replay(&record.payload,native)?;
+        if payload.0.get("voice_model_step_supersede").and_then(Value::as_bool).unwrap_or(false)!=voice_immediate {
+            return Err(SessionStoreError::IdempotencyConflict("voice steering replay changes its original model-step policy".into()));
+        }
+    } else if payload.0.get("native_target_fence").is_some() || payload.0.get("voice_model_step_supersede").is_some() {
+        return Err(SessionStoreError::IdempotencyConflict("ordinary steering cannot reuse a native mutation receipt".into()));
+    }
+    Ok(original)
 }
 
 /// Shared exact-target fence for durable cancel and steer commands. Returning

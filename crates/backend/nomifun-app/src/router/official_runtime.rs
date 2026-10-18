@@ -13,9 +13,21 @@ use sha2::{Digest, Sha256};
 #[derive(Default)]
 pub(crate) struct OfficialRuntimeHost {
     provider: OnceLock<Arc<OfficialRuntimeProvider>>,
+    process_owner: OnceLock<Arc<super::nomi_core_wave2::NomiCoreWave2Host>>,
 }
 
 impl OfficialRuntimeHost {
+    pub(crate) fn install_process_owner(&self,owner:Arc<super::nomi_core_wave2::NomiCoreWave2Host>) ->Result<(),AppError> {
+        if let Some(existing)=self.process_owner.get() {
+            return if Arc::ptr_eq(existing,&owner){Ok(())}else{Err(AppError::Conflict("official process owner differs from the installed factory".into()))};
+        }
+        self.process_owner.set(owner).map_err(|_|AppError::Conflict("official process owner installed twice".into()))
+    }
+
+    pub(crate) async fn shutdown_session_processes(&self) ->Result<(),AppError> {
+        match self.process_owner.get(){Some(owner)=>owner.shutdown_runtime_process_sessions().await,None=>Ok(())}
+    }
+
     pub(crate) fn install(
         &self,
         factory: OfficialRuntimeFactory,
@@ -117,6 +129,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn official_process_lifecycle_keeps_one_exact_shared_owner() {
+        let host=OfficialRuntimeHost::default();
+        let owner=Arc::new(super::super::nomi_core_wave2::NomiCoreWave2Host::default());
+        host.install_process_owner(owner.clone()).unwrap();
+        host.install_process_owner(owner).unwrap();
+        assert!(host.install_process_owner(Arc::new(super::super::nomi_core_wave2::NomiCoreWave2Host::default())).is_err());
+    }
 
     fn options() -> nomifun_ai_agent::types::AgentRuntimeBuildOptions {
         nomifun_ai_agent::types::AgentRuntimeBuildOptions {

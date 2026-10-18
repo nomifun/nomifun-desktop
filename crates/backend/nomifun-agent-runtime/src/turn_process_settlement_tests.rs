@@ -93,7 +93,6 @@ fn settlement_tool_plan() -> AgentToolPlan {
     AgentToolPlan::new([
         tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
         tool_binding("write_file", "workspace.files", "workspace.files/write", AgentEffectClass::ManagedEffect, false),
-        tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ManagedEffect, false),
         tool_binding("start_process", "workspace.process", "workspace.process/start", AgentEffectClass::ManagedEffect, false),
         tool_binding("write_process_stdin", "workspace.process", "workspace.process/input", AgentEffectClass::ManagedEffect, false),
         tool_binding("close_process_stdin", "workspace.process", "workspace.process/close_stdin", AgentEffectClass::ManagedEffect, false),
@@ -187,7 +186,7 @@ async fn process_boundary_holds_foreign_handles_and_new_work_as_one_unexecuted_b
     assert!(!journal.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::ToolStarted { call_id, .. }
         if matches!(call_id.as_ref(), "held-poll" | "held-write" | "foreign"))));
     assert!(model.requests.lock().unwrap()[2].input.tools.iter().all(|tool|
-        !matches!(tool.name.as_str(), "start_process" | "exec_command" | "write_file" | "report_completion")));
+        !matches!(tool.name.as_str(), "start_process" | "write_file" | "report_completion")));
 }
 
 #[tokio::test]
@@ -236,7 +235,6 @@ async fn process_boundary_without_authorized_controls_keeps_the_original_safe_pa
     request.tool_plan = AgentToolPlan::new([
         tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
         tool_binding("start_process", "workspace.process", "workspace.process/start", AgentEffectClass::ManagedEffect, false),
-        tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ManagedEffect, false),
     ]).unwrap();
     let result = run_turn(binding(), model.clone(), tools.clone(), Arc::new(SettlementJournal::default()), request,
         AgentContextBudget::default(), CancellationToken::new()).await.unwrap();

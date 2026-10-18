@@ -44,6 +44,7 @@ pub(super) async fn read(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessio
 
 pub(super) async fn hydrate(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId, projections: &mut [MessageProjection])
     -> Result<(), SessionStoreError> {
+    session_input::hydrate(tx,session,projections).await?;
     for projection in projections.iter_mut().filter(|row|row.presentation_intent=="turn_summary") {
         let operation=projection.projection.get("turn_operation_id").and_then(Value::as_str)
             .ok_or_else(||SessionStoreError::InvalidSession("Turn summary operation missing".into()))?;
@@ -85,5 +86,33 @@ pub(super) async fn attach_for_page(tx:&mut Transaction<'_,Sqlite>,session:&Agen
         if let Some(summary)=turn_history_projection_from_row(tx, row).await? && !existing.contains(&summary.projection_id) {history.push(summary);}
     }
     history.sort_by(|left,right|right.first_seq.cmp(&left.first_seq).then_with(||right.projection_id.cmp(&left.projection_id)));
+    Ok(())
+}
+
+/// Forward public metadata uses the same exact-Turn derivation as renderer
+/// history. Its cursor is an actual changed fact, including waits that do not
+/// append any assistant message. Nothing is persisted in agent_messages.
+pub(super) async fn attach_after(tx:&mut Transaction<'_,Sqlite>,session:&AgentSessionId,after:u64,head:u64,
+    messages:&mut Vec<MessageProjection>)->Result<(),SessionStoreError> {
+    #[derive(sqlx::FromRow)]
+    struct ChangedTurn {#[sqlx(flatten)] turn:StoredTurnHistoryRow,changed_seq:i64}
+    let rows=sqlx::query_as::<_,ChangedTurn>(
+        "SELECT t.session_id,t.turn_id,t.operation_id,t.source_message_id,t.state,t.terminal_event_id, \
+         t.started_event_id,t.accepted_at,t.started_at,t.finished_at,changed.changed_seq \
+         FROM agent_turns t JOIN (SELECT correlation_id,MAX(seq) AS changed_seq FROM agent_events \
+         WHERE session_id=? AND seq>? AND seq<=? GROUP BY correlation_id) changed \
+         ON changed.correlation_id=t.operation_id WHERE t.session_id=? AND t.source_message_id IS NOT NULL")
+        .bind(session.as_ref()).bind(as_i64(after,"forward Turn cursor")?).bind(as_i64(head,"forward Turn head")?)
+        .bind(session.as_ref()).fetch_all(&mut **tx).await?;
+    for row in rows {
+        let changed=as_u64(row.changed_seq,"forward Turn change")?;
+        if let Some(mut summary)=turn_history_projection_from_row(tx,row.turn).await? {
+            summary.last_seq=summary.last_seq.max(changed);
+            if summary.last_seq>head || summary.last_seq<=after {
+                return Err(SessionStoreError::InvalidSession("forward Turn summary differs from its fact cursor".into()));
+            }
+            messages.push(summary);
+        }
+    }
     Ok(())
 }

@@ -51,8 +51,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowTextLengthW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow,
-    ShowWindow,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible,
 };
 use windows::core::{BOOL, PWSTR};
 
@@ -1387,22 +1386,12 @@ fn do_focus(pid: i32) -> Result<Effect, A11yError> {
     let hwnd = main_window_hwnd(pid as u32).ok_or_else(|| {
         A11yError::NotFound(format!("no visible top-level window found for pid {pid}"))
     })?;
-    unsafe {
-        if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-        }
-        if SetForegroundWindow(hwnd).as_bool() {
-            Ok(Effect {
-                changed: true,
-                message: format!("brought pid {pid} to the front"),
-            })
-        } else {
-            Err(A11yError::Backend(format!(
-                "Windows refused to bring pid {pid} to the foreground (foreground-stealing is \
-                 restricted by the OS); click the window or use the pixel fallback to focus it"
-            )))
-        }
-    }
+    super::focus::focus_hwnd(hwnd).map_err(|error| match error {
+        super::focus::WindowsFocusError::TargetMissing => A11yError::NotFound(error.to_string()),
+        super::focus::WindowsFocusError::NotApplied => A11yError::Permission(error.to_string()),
+        super::focus::WindowsFocusError::Uncertain(message) => A11yError::Uncertain(message),
+    })?;
+    Ok(Effect { changed: true, message: format!("brought pid {pid} to the front and confirmed native activation") })
 }
 
 // ---- actor thread state + command plumbing ------------------------------

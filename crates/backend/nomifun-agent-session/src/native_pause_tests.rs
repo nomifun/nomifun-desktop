@@ -183,25 +183,20 @@ async fn failure_pause_settlement_and_explicit_resume_have_one_winner() {
 }
 
 #[tokio::test]
-async fn paused_input_is_fenced_idempotent_and_never_authorizes_execution() {
-    let store = AgentSessionStore::open_in_memory().await.unwrap();
-    let (f, _, request) = paused(&store, "paused-owner-input").await;
-    let session = &f.session.agent_session_id;
-    let input = StrictJsonValue(json!({"content":"Use uppercase text","files":[]}));
-    let ack = store.append_paused_native_input(&owner(),session,&request,input.clone(),&["OWNER_REQUESTED"]).await.unwrap();
+async fn technical_resume_rolls_back_checkpoint_when_authorization_fails() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();
+    let(f,_,request)=paused(&store,"technical-resume-rollback").await;
+    let session=&f.session.agent_session_id;
+    let prepared=prepare(&store,&f).await;
+    let before=store.current_cursor(session).await.unwrap();
+    let checkpoint=store.load_native_checkpoint(&owner(),session,&request.operation_id).await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_technical_resume BEFORE INSERT ON agent_events WHEN NEW.kind='turn/resume-authorized' BEGIN SELECT RAISE(FAIL,'fixture authorization failure'); END")
+        .execute(store.test_pool()).await.unwrap();
+    assert!(store.commit_native_resume(&owner(),session,&request,prepared).await.is_err());
+    assert_eq!(store.current_cursor(session).await.unwrap(),before);
     assert_eq!(store.head(session).await.unwrap().status,"paused");
-    assert_eq!(store.append_paused_native_input(&owner(),session,&request,input.clone(),&["OWNER_REQUESTED"]).await.unwrap(),ack);
-    assert!(store.append_paused_native_input(&owner(),session,&request,
-        StrictJsonValue(json!({"content":"Changed input"})),&["OWNER_REQUESTED"]).await.is_err());
-    let mut stale=request.clone();
-    stale.idempotency_key="stale-input".into(); stale.expected_checkpoint_revision+=1;
-    assert!(store.append_paused_native_input(&owner(),session,&stale,input.clone(),&["OWNER_REQUESTED"]).await.is_err());
-    assert!(store.append_paused_native_input(&PrincipalRef {principal_kind:"user".into(),principal_id:"foreign-owner".into()},
-        session,&request,input.clone(),&["OWNER_REQUESTED"]).await.is_err());
-    store.commit_native_resume(&owner(),session,&request,prepare(&store,&f).await).await.unwrap();
-    assert_eq!(store.append_paused_native_input(&owner(),session,&request,input,&["OWNER_REQUESTED"]).await.unwrap(),ack);
-    let facts=store.native_recovery_facts(session,&request.operation_id).await.unwrap();
-    assert_eq!(facts.events.iter().filter(|event|event.kind.0=="turn/steer-accepted").count(),1);
+    assert_eq!(store.load_native_checkpoint(&owner(),session,&request.operation_id).await.unwrap(),checkpoint);
+    assert!(store.native_resume_receipt(&owner(),session,&request).await.unwrap().is_none());
 }
 
 #[tokio::test]

@@ -840,7 +840,7 @@ impl SpokenReplyReducer {
                 }
                 Vec::new()
             }
-            AgentStreamEvent::CanonicalTimeline(_) => Vec::new(),
+            AgentStreamEvent::CanonicalTimeline(_) | AgentStreamEvent::InputQuestion(_) => Vec::new(),
             AgentStreamEvent::TaskPlanChanged
             | AgentStreamEvent::ToolCall(_)
             | AgentStreamEvent::ToolGroup(_) => {
@@ -1184,6 +1184,7 @@ mod tests {
         let error = |ownership, retryable| {
             AgentStreamEvent::Error(nomifun_api_types::AgentStreamErrorData {
                 provider_diagnostic: None,
+                system_execution_error: None,
                 message: "boom".to_owned(),
                 code: None,
                 ownership,

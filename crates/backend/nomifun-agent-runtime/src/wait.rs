@@ -17,6 +17,15 @@ pub struct AgentWaitProcess {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentWaitRequest {
     pub processes: Vec<AgentWaitProcess>,
+    pub wake_policy: AgentWaitWakePolicy,
+}
+
+/// Output can explain a newly started helper, but cannot repeatedly consume
+/// model budget after its question has already been handed to the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentWaitWakePolicy {
+    OutputOrTerminal,
+    TerminalOnly,
 }
 
 /// An exact owner's snapshot, not a model tool invocation or evidence ID.
@@ -40,6 +49,14 @@ impl AgentOwnedProcessObservation {
         match &self.poll {
             EngineProcessPoll::Exited { cleanup, .. } | EngineProcessPoll::Cancelled { cleanup, .. }
             | EngineProcessPoll::TimedOut { cleanup, .. } | EngineProcessPoll::Lost { cleanup, .. } => cleanup.reaped,
+            _ => false,
+        }
+    }
+    pub(crate) fn requires_reconciliation(&self) -> bool {
+        match &self.poll {
+            EngineProcessPoll::Lost { .. } => true,
+            EngineProcessPoll::Exited {cleanup,..}|EngineProcessPoll::Cancelled {cleanup,..}|EngineProcessPoll::TimedOut {cleanup,..} =>
+                !cleanup.reaped || !cleanup.errors.is_empty(),
             _ => false,
         }
     }

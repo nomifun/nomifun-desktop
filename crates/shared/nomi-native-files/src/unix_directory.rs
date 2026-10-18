@@ -67,6 +67,11 @@ fn kind(metadata: &cap_std::fs::Metadata) -> NativeEntryKind {
 }
 impl NativeDirectoryAccess for NativeUnixAccess {
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, NativeFileError> { std::fs::canonicalize(path).map_err(|error| NativeFileError::io("resolving native instruction path", error)) }
+    fn canonicalize_entry(&self, path: &Path) -> Result<PathBuf, NativeFileError> {
+        let Some(name) = path.file_name() else { return self.canonicalize(path); };
+        let parent = self.canonicalize(path.parent().ok_or_else(changed)?)?;
+        Ok(parent.join(name))
+    }
     fn metadata(&self, path: &Path) -> Result<Option<NativeEntryKind>, NativeFileError> {
         let root = ReadRoot::for_target(path)?;
         let (parent, name, parent_path) = match root.parent(path) {

@@ -112,6 +112,21 @@ pub fn validate_catalog_model_detachment(
     Ok(())
 }
 
+/// The sole current-generation process-launch transition. Replace only an
+/// explicitly granted retired synchronous launch; never infer control grants.
+/// Its publisher/effect/resource equivalence is proved against both Snapshots
+/// by `validate_bundled_contract_evolution` before any binding can be committed.
+pub fn bounded_process_launch_payload(source: &crate::AgentPresetRevisionPayload) -> crate::AgentPresetRevisionPayload {
+    let mut payload = source.clone();
+    for selection in &mut payload.enabled_capabilities {
+        if selection.capability.id.as_ref() == "workspace.process"
+            && selection.action_allowlist.remove(&crate::ActionId::from("workspace.process/exec")) {
+            selection.action_allowlist.insert("workspace.process/start".into());
+        }
+    }
+    payload
+}
+
 /// Admit a fresh forward execution contract from the same bundled publishers.
 /// Exact schemas and artifacts may change, but grants, effects, resources,
 /// dependency graph, provider mounts and runtime requirements may not. MCP,
@@ -126,7 +141,7 @@ pub fn validate_bundled_contract_evolution(
 ) -> Result<(), PresetContractViolation> {
     validate_artifacts(source_revision, source)?;
     validate_artifacts(target_revision, target)?;
-    if target_revision.payload != source_revision.payload || source_revision.created_by != target_revision.created_by {
+    if target_revision.payload != bounded_process_launch_payload(&source_revision.payload) || source_revision.created_by != target_revision.created_by {
         return Err(rejected("contract evolution must preserve the Session's authorial configuration"));
     }
     let left = &source.content;
@@ -460,6 +475,8 @@ fn validate_capability_evolution(
     {
         return Err(rejected("only bundled publishers can evolve a Session contract"));
     }
+    let bounded_source = bounded_process_predecessor(source, target)?;
+    let source = bounded_source.as_ref().unwrap_or(source);
     let mut normalized = target.clone();
     normalized.schema_digest = source.schema_digest.clone();
     normalized.target_artifact_digest = source.target_artifact_digest.clone();
@@ -504,6 +521,45 @@ fn validate_capability_evolution(
         return Err(rejected(format!("capability {} changed authority, effects, resources, dependencies or provenance", source.capability.id.as_ref())));
     }
     Ok(())
+}
+
+/// Compare a retired descriptor as immutable source data, not an executable
+/// alias. Both existing launch grants collapse to the same ExecuteLocal gate;
+/// poll/input/resize/cancel selections remain exact in the normal comparison.
+fn bounded_process_predecessor(source: &ResolvedCapability, target: &ResolvedCapability)
+    -> Result<Option<ResolvedCapability>, PresetContractViolation> {
+    let retired = crate::ActionId::from("workspace.process/exec");
+    if source.capability.id.as_ref() != "workspace.process"
+        || !source.actions.iter().any(|action| action.action_id == retired) { return Ok(None); }
+    if source.source_package.id.as_ref() != "nomifun.workspace-execution"
+        || source.resolved_source.source_identity != "nomifun.workspace-execution"
+        || source.contribution_lock.source_kind != ContributionSourceKind::PlatformBuiltin
+        || source.contribution_lock.source_identity.as_ref() != "nomifun.workspace-execution"
+        || source.required_resource_kinds != BTreeSet::from(["process_session".into()])
+        || target.actions.iter().any(|action| action.action_id == retired) {
+        return Err(rejected("bounded process launch requires the exact retired bundled publisher and resource contract"));
+    }
+    let retired_descriptor = source.actions.iter().find(|action| action.action_id == retired).expect("retired descriptor checked");
+    let start = crate::ActionId::from("workspace.process/start");
+    let original_start = source.actions.iter().find(|action| action.action_id == start);
+    let next_start = target.actions.iter().find(|action| action.action_id == start)
+        .ok_or_else(|| rejected("bounded process launch has no replacement descriptor"))?;
+    let execute_gate = BTreeMap::from([("process_session".into(),BTreeSet::from(["execute".to_owned()]))]);
+    for action in [Some(retired_descriptor), original_start, Some(next_start)].into_iter().flatten() {
+        if action.effect_class != crate::EffectClass::ExecuteLocal
+            || action.presentation != crate::ToolPresentationKind::FunctionTool
+            || action.required_resource_operations.as_ref().is_some_and(|operations| operations != &execute_gate) {
+            return Err(rejected("bounded launch changed execution effect or its exact resource operation"));
+        }
+    }
+    let mut equivalent = source.clone();
+    if original_start.is_some() {
+        equivalent.actions.retain(|action| action.action_id != retired);
+    } else {
+        equivalent.actions.iter_mut().find(|action|action.action_id==retired).expect("retired descriptor checked").action_id = start.clone();
+    }
+    if equivalent.action_allowlist.remove(&retired) { equivalent.action_allowlist.insert(start); }
+    Ok(Some(equivalent))
 }
 
 #[cfg(test)]
@@ -558,5 +614,57 @@ mod tests {
         target.actions[0].effect_class = EffectClass::Destructive;
         assert!(validate_capability_evolution(&source, &target).is_err(),
             "existing Action authority remains exact");
+    }
+
+    fn process_source(grants: &[&str]) -> ResolvedCapability {
+        let mut process = source();
+        process.capability.id = "workspace.process".into();
+        process.contribution_id = "capability:workspace.process".into();
+        process.contribution_lock.contribution_id = process.contribution_id.clone();
+        process.dependency_path = vec!["workspace.process".into()];
+        process.required_resource_kinds = BTreeSet::from(["process_session".into()]);
+        process.action_allowlist = grants.iter().map(|id|(*id).into()).collect();
+        process.actions = ["workspace.process/exec","workspace.process/start","workspace.process/poll","workspace.process/input"]
+            .into_iter().map(|id| {
+                let mut action = descriptor(id);
+                action.effect_class = if id.ends_with("/poll") {EffectClass::ReadLocal} else {EffectClass::ExecuteLocal};
+                action.required_resource_operations = Some(BTreeMap::from([
+                    ("process_session".into(),BTreeSet::from(["execute".to_owned()]))
+                ]));
+                action
+            }).collect();
+        process
+    }
+
+    #[test]
+    fn bounded_launch_replaces_only_the_explicit_launch_grant_and_retires_ungranted_descriptor() {
+        for grants in [vec!["workspace.process/exec"],vec!["workspace.process/exec","workspace.process/start"],
+            vec!["workspace.process/start"], vec!["workspace.process/exec","workspace.process/poll"]] {
+            let original = process_source(&grants);
+            let original_bytes = serde_json::to_vec(&original).unwrap();
+            let mut target = original.clone();
+            target.actions.retain(|action|action.action_id.as_ref()!="workspace.process/exec");
+            if target.action_allowlist.remove(&"workspace.process/exec".into()) {target.action_allowlist.insert("workspace.process/start".into());}
+            validate_capability_evolution(&original,&target).unwrap();
+            assert_eq!(serde_json::to_vec(&original).unwrap(),original_bytes,"source history stays immutable");
+            assert!(!target.action_allowlist.contains(&"workspace.process/input".into()),"no stdin authority can be inferred");
+            for forbidden in ["workspace.process/poll","workspace.process/input","workspace.process/cancel"] {
+                if original.action_allowlist.contains(&forbidden.into()) {continue;}
+                let mut widened = target.clone();
+                widened.action_allowlist.insert(forbidden.into());
+                assert!(validate_capability_evolution(&original,&widened).is_err(),"must not add {forbidden}");
+            }
+            for change in 0..4 {
+                let mut invalid = target.clone();
+                match change {
+                    0 => invalid.resolved_source.source_identity = "another-publisher".into(),
+                    1 => invalid.actions.iter_mut().find(|action|action.action_id.as_ref()=="workspace.process/start").unwrap().effect_class = EffectClass::Destructive,
+                    2 => invalid.actions.iter_mut().find(|action|action.action_id.as_ref()=="workspace.process/start").unwrap().required_resource_operations = Some(BTreeMap::new()),
+                    3 => { invalid.required_resource_kinds.insert("another-resource".into()); },
+                    _ => unreachable!(),
+                }
+                assert!(validate_capability_evolution(&original,&invalid).is_err(),"case {change}");
+            }
+        }
     }
 }

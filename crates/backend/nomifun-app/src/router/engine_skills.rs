@@ -136,7 +136,7 @@ pub(super) async fn compile_projection(snapshot:&CompiledSnapshot,registry:&Mate
 /// Skill name or body. Component readiness and executable identity belong to
 /// the process host at launch, never to immutable reference resources.
 pub(super) fn component_launch_instruction(plan: &EngineToolPlan) -> Option<String> {
-    let tools = ["workspace.process/exec", "workspace.process/start"].into_iter()
+    let tools = ["workspace.process/start"].into_iter()
         .filter_map(|action| {
             let name = plan.model_name_for_action("workspace.process", action)?;
             let binding = plan.binding(name)?;
@@ -251,7 +251,7 @@ mod tests {
     fn component_launch_guidance_uses_only_current_authorized_launch_schemas() {
         assert!(component_launch_instruction(&EngineToolPlan::default()).is_none());
         assert!(component_launch_instruction(&process_plan("workspace.process/poll", "read_process", true)).is_none());
-        assert!(component_launch_instruction(&process_plan("workspace.process/exec", "old_exec", false)).is_none());
+        assert!(component_launch_instruction(&process_plan("workspace.process/start", "old_launch", false)).is_none());
         let plan = process_plan("workspace.process/start", "current_launch", true);
         let instruction = component_launch_instruction(&plan).unwrap();
         assert!(instruction.contains("current_launch (workspace.process/start)"));
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn process_component_schema_matches_the_approved_supplier_catalog() {
-        let schema = canonical_process_schema("workspace.process/exec");
+        let schema = canonical_process_schema("workspace.process/start");
         let approved = schema.0["properties"]["component"]["enum"].as_array().unwrap().iter()
             .map(|value| value.as_str().unwrap().to_owned()).collect::<BTreeSet<_>>();
         let inventory = nomifun_runtime::component_inventory();
@@ -280,9 +280,9 @@ mod tests {
         assert!(selected[0].contains("read_context_resource"));
         assert!(!selected[0].contains("LAST_PAGE_REFERENCE"));
         assert_eq!(skills.bodies["officecli-docx"], body);
-        let plan = process_plan("workspace.process/exec", "managed_exec", true);
+        let plan = process_plan("workspace.process/start", "managed_launch", true);
         let instruction = component_launch_instruction(&plan).unwrap();
-        assert!(instruction.contains("managed_exec"));
+        assert!(instruction.contains("managed_launch"));
         assert!(instruction.contains("component=officecli"));
         assert!(!instruction.contains(&skills.body_resources["officecli-docx"]));
     }
