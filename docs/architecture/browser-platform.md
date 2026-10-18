@@ -12,7 +12,10 @@ button permits direct user browsing without a Browser Module grant, Provider sel
 Opening, retrying and user commands never create Agent authority or a second Session. Retired global management and
 browser Settings surfaces remain removed.
 
-The page is a native embedded WebView, not an iframe, screenshot stream, canvas viewer, or JPEG transport. The user and Agent operate the same page. After the Agent first uses this browser, native user input and page-changing chrome controls stay locked until that Turn ends and cleanup completes. A Turn that never uses it leaves it available to the user. There is no user takeover or hand-back mode.
+The page is a native embedded WebView, not an iframe, screenshot stream, canvas viewer, or JPEG transport. The user and Agent operate the same page. Native user input and page-changing chrome controls are locked only while the Agent owns active browser work and its native cleanup. Once that work settles and releases the gate, the user can browse, close tabs or close the browser runtime while the Agent continues thinking or using other tools. No manual takeover of active browser work is exposed.
+
+The menu's Close browser action destroys the runtime when browser input is available, then hides the panel after
+confirmation. The title-bar Hide browser action only hides the panel.
 
 Hiding the surface preserves its tabs. The Session has one managed runtime, profile and input coordinator.
 `BrowserResource` wraps exact frozen Agent authority over the same `BrowserWorkspace`; a different authorization
@@ -25,18 +28,22 @@ The shared desktop renderer supports an inner viewport of at least 880×600. Cha
 
 Only Browser registers the space reservation and its sidebar-expansion dismissal. Dismissal hides/detaches the Browser surface, retaining pages, runtime and input ownership; it does not destroy tabs or release an Agent's lock. Preview keeps its existing sidebar-collapse policy: layout callbacks never receive `closePreview`, which clears tabs and unsaved edits. Switching between Browser and Preview also transfers sidebar management. Layout, native input and active-Agent Stop require separate evidence; see [continuing validation](../validation/browser-platform.md).
 
-Turn preparation freezes Browser authority without acquiring the managed browser input gate. An actual authorized
-managed Browser invocation acquires its current Workspace and guard before native work. The first such invocation
-retains ownership for the entire remaining Turn; any native child first created under that ownership starts with user
-input disabled. A completed browser tool, ordinary tool failure, model thinking, unrelated tools and paused execution
-do not release the gate. Ordinary chat, file work, attached Chrome and background rendering do not lock the managed
-browser when the Turn never invokes it. Neither configured Browser permissions nor model prose predict ownership.
+Turn preparation freezes Browser authority without acquiring the managed browser input gate. Each actual authorized
+managed Browser invocation acquires its current Workspace and guard before native work; any native child first
+created under that ownership starts with user input disabled. The retained invocation owner drains native work and
+pressed input, records the operation's Effect result where applicable, then releases the browser gate. Model thinking,
+unrelated tools and the Session's running or paused status do not extend a completed browser operation's ownership.
+Ordinary chat, file work, attached Chrome and isolated background rendering do not acquire this gate. Neither
+configured Browser permissions nor model prose predict ownership.
 
-The retained owner settles native operations with input still locked. Only the exact durable Turn terminal followed by
-successful finish releases ownership. Pending navigation or dialogs, unsettled or unknown effects, receipt persistence
-failures and uncertain native cleanup remain protected by the original Turn's recovery. A failed acquisition that issued
-no guard retains the same drain/terminal/failed-start-recovery boundary. Completion of an individual tool or native
-operation never authorizes a mid-Turn unlock.
+A pending browser dialog or other retained native work keeps its owner until completion and safe cleanup. Failed
+acquisition, uncertain native cleanup and failure to persist an Effect result retain their original recovery owner;
+dropping an invocation future or requesting cancellation does not prove that work has ended. Turn settlement still
+drains any retained browser work, and terminal recovery can finish a failed release. A successful local browser
+release does not require the whole Agent Turn to end and does not change that Turn's canonical state or Effect facts.
+Later Browser calls bind the current Workspace generation under the same frozen grants. Safe input cleanup preserves
+observations needed by the next call; existing target, document and observation checks still reject stale references
+after page navigation, tab closure or runtime replacement.
 
 User APIs verify the authenticated owner and canonical Session, then admit commands through the Workspace coordinator.
 Session `running` or `paused` does not itself lock the browser. The Browser snapshot reports actual input ownership and
@@ -79,7 +86,7 @@ The conversation browser uses WebView2 on Windows and system WKWebView on macOS 
 
 Before compiling Agent configuration, a native host derives the Browser Role v2 default binding from its materialized bundled Provider. This is exact boot composition, not a user-facing Role setting or a migration of old installation bindings.
 
-The browser menu offers an explicitly confirmed Reopen browser action. It closes page tabs and loses unsaved page content, but does not clear conversation messages or project files. The backend holds the same Session operation fence, validates the exact runtime generation and closes through the coordinator's actual idle gate. A Turn that has never used this browser does not prevent this close. Once the Turn has acquired it, later unrelated work does not permit closing; the user cannot cancel or steal its guard through a browser command.
+The browser menu offers an explicitly confirmed Reopen browser action. It closes page tabs and loses unsaved page content, but does not clear conversation messages or project files. The backend holds the browser invocation fence, validates the authenticated Session owner and exact runtime generation, and closes through the coordinator's actual idle gate. A running Turn permits closing once its browser work has released ownership, including after earlier browser calls. A close request made during active browser work is rejected immediately and is never replayed after that work finishes; the user cannot cancel or steal its guard through a browser command.
 If the final unlock failed, closing still requires that exact Operation's canonical terminal, proven
 native settlement and matching old Workspace instance/generation. `turn/paused` retains the same active Operation and
 native checkpoint resume authority, so it cannot substitute for this final-terminal witness. If ownership remains held,
@@ -143,8 +150,8 @@ macOS conformance can select an immutable `NativeWebKit` comparison policy at En
 | Persistent sign-in, Session deletion/site-data clear | Separate macOS 14+ WKWebsiteDataStore | Directory Profile retained |
 
 `semantic_dom` never fabricates `isTrusted` or user activation. Successful DOM calls or event dispatch do not
-prove a site's business outcome; observe again. When a site requires manual interaction, let the Turn end or use Stop,
-then wait for cleanup and final release. Completing a browser tool alone does not restore manual input.
+prove a site's business outcome; observe again. When a site requires manual interaction, wait for the current browser
+operation and cleanup to release input. The whole Turn need not end; pending website dialogs or native work retain the gate.
 Observation and user snapshots report `interaction_capabilities`;
 the schema action union does not promise all actions on every runtime. Unsupported errors forbid repeating
 the same action without making ordinary browsing unavailable. The browser menu explains common limits.

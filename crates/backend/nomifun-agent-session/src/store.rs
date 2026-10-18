@@ -2601,6 +2601,25 @@ impl AgentSessionStore {
         Ok(unsettled != 0)
     }
 
+    /// A physical resource owner only waits for effects on its own binding;
+    /// unrelated work in the same Session must not extend its input ownership.
+    pub async fn has_unsettled_effects_for_binding(
+        &self,
+        session_id: &AgentSessionId,
+        binding_id: &ResourceBindingId,
+    ) -> Result<bool, SessionStoreError> {
+        require_live_session(&self.pool, session_id.as_ref()).await?;
+        let unsettled: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM agent_effects \
+             WHERE session_id = ? AND resource_binding_id = ? AND state IN ('pending', 'unknown'))",
+        )
+        .bind(session_id.as_ref())
+        .bind(binding_id.as_ref())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(unsettled != 0)
+    }
+
     pub async fn list_effects(
         &self,
         session_id: &AgentSessionId,

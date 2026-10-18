@@ -154,6 +154,17 @@ impl TabAutomation {
 
     pub async fn settle_agent(&mut self, view: &View) -> Result<(), WorkspaceError> {
         let input = self.release(view).await;
+        self.finish_agent_handoff(view, input).await
+    }
+
+    /// A completed tool call can hand input to the user without expiring the
+    /// observation needed by the Agent's next call on the same document.
+    pub async fn handoff_agent(&mut self, view: &View) -> Result<(), WorkspaceError> {
+        let input = self.release_input(view).await;
+        self.finish_agent_handoff(view, input).await
+    }
+
+    async fn finish_agent_handoff(&mut self, view: &View, input: Result<(), WorkspaceError>) -> Result<(), WorkspaceError> {
         let chooser=if let Some(frames)=self.frames.as_mut() {
             frames.set_file_chooser_interception(false).await.map_err(|_|WorkspaceError::NativeCommandFailed)
         } else {Ok(())};
@@ -533,6 +544,10 @@ impl TabAutomation {
         // Run admission and terminal cleanup both call release. Refs from a
         // prior turn cannot become valid merely because the document survived.
         self.observed_target = None;
+        self.release_input(view).await
+    }
+
+    async fn release_input(&mut self, view: &View) -> Result<(), WorkspaceError> {
         if self.dragging {
             // Releasing a button over a valid drop target can commit a native
             // HTML drag. Cancel that drag first on failure/Stop, then release

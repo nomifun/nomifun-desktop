@@ -598,16 +598,19 @@ Computer 的系统权限是执行环境前提，不能因为未授权而阻断�
 Agent Browser 工具仍只从当前冻结 Snapshot、exact Provider 与 typed Resource binding 获得权限；授权后的
 managed Agent wrapper 借用用户的同一真实页面，attached Chrome 工具继续独立指向已连接的 Chrome。
 
-Turn 预备只冻结 Browser 授权，不锁 managed 浏览器；首次真实调用才取得当前 Workspace 的原生输入锁与 guard，
-并持续占用至本 Turn 结束。单次工具完成、普通工具失败、模型思考及后续无关工具均不释放所有权。
-settle 在保留硬件输入锁的情况下排空原生操作；正常终态结算在 exact Turn 终态已持久化且 finish 成功后 final release。
-普通人工交接以 `InputRequired` 闭轮，沿同一终态结算释放 Browser，Session 后台进程继续保留。
-真实机器资源或介入等待仍可在同 Turn 交还 Browser：原 Store 在 settle 前后均复核 exact owner、
-活动 Operation、已提交 `waiting` 与无 pending/unknown Effect，只释放 Browser 控制权。
-后续 Browser 调用重新沿冻结授权取得 lazy admission 和新观察，旧观察不能复用；普通模型 stop 不授权释放锁。
-结算失败、原生清理不确定、终态写入或 finish 失败继续保留门禁，由原 Turn 恢复路径处理。
+Turn 预备只冻结 Browser 授权，不锁 managed 浏览器；每次实际浏览器调用才取得当前 Workspace 的原生输入锁与
+guard，拥有本次浏览器工作。原生工作、按下输入的清理及适用的 Effect 结果记录均结算后，本次调用释放所有权，
+同一 Turn 可以继续思考或使用无关工具。等待中的浏览器对话框或其他 retained 原生工作在安全完成前继续持锁。
+取得锁失败、原生清理不确定及 Effect 结果持久化失败保留原恢复 owner；请求取消或丢弃调用方不证明已经完成。
+正常局部 release 不要求 Turn 终态持久化，也不改变 canonical Turn 状态或 Effect 事实。
+普通人工交接以 `InputRequired` 闭轮，沿终态生命周期结算保留的 Browser 工作，Session 后台进程继续保留。
+真实机器资源或介入等待仍可在同 Turn 交还 Browser：原 Store 在 settle 前后均复核 exact owner、活动 Operation、
+已提交 `waiting` 与无 pending/unknown Effect，只释放 Browser 控制权；后续 Browser 调用沿冻结授权取得新的
+lazy admission 与新观察。正常单次调用释放则保留同 Turn 内仍可用的观察；原生 target、document 与 observation
+检查继续拒绝导航、标签关闭或 runtime 换代后的旧引用。终态清理仍须排空保留的工作并重试失败的 release。
 用户 API 按实际 coordinator 门禁准入，不从 Session 的 running/paused、模型正文或已配置的 Browser 权限推导占用。
-未真实调用 managed 浏览器的 Turn，包括普通聊天、文件任务、attached Chrome 及后台渲染，保持用户浏览器可用。
+普通聊天、文件任务、attached Chrome 及隔离后台渲染不会占用 managed 浏览器；没有活动浏览器 owner 时，
+用户可正常操作与关闭浏览器。
 用户 Profile 使用独立于授权定义的 owner/Session 身份：Windows 使用 `browser-v4/agent-sessions/<hash>/`，
 macOS 14+ 使用稳定派生标识的独立持久 WKWebsiteDataStore，不读取旧目录 Profile。
 Session 删除也关闭与清除此用户实体，即使当前 Agent binding 中没有 Browser 资源；不另建 Agent 活动授权账本。

@@ -492,20 +492,23 @@ requires no Agent Browser Module or resource binding. Opening and retrying never
 Authorized managed Agent wrappers borrow the user's real page while enforcing the frozen Snapshot, exact Provider,
 typed resource and BrowserRunGuard. Attached Chrome remains a separate connected resource.
 
-Turn preparation freezes Browser authority without locking the managed browser. The first actual managed browser
-invocation acquires the current Workspace's native input gate and guard for the remainder of that Turn. Tool completion,
-ordinary tool failure, model thinking and unrelated subsequent tools do not release ownership. Settlement drains native
-operations while retaining the hardware input gate; normal terminal settlement requires the exact durable Turn terminal
-followed by successful finish before final release. Ordinary human handoff closes with `InputRequired`
-and releases Browser through that same terminal settlement while preserving Session background processes.
-A real parked machine-resource or intervention wait may also yield Browser within the same Turn:
-the Store verifies the exact owner, active Operation, committed `waiting` outcome and absence of
-pending/unknown Effects before and after settlement. Only Browser ownership is released.
-The next Browser action obtains a fresh lazy admission and observation under the frozen grants. Earlier observations
-cannot be reused, and an ordinary model stop never grants a release. Failed settlement, uncertain native cleanup and terminal-write or finish failures retain the gate
-for the original Turn's recovery. User APIs use the actual coordinator gate, without deriving ownership from Session
-running or paused, model prose or configured Browser permissions. Turns that never invoke the managed browser,
-including chat, file work, attached Chrome and background rendering, leave it available to the user.
+Turn preparation freezes Browser authority without locking the managed browser. Each actual managed browser
+invocation acquires the current Workspace's native input gate and guard for its browser work. After native work,
+pressed-input cleanup and any applicable Effect result recording settle, the invocation releases ownership while
+the same Turn may continue thinking or using unrelated tools. A pending browser dialog or other retained native work
+keeps the gate until safe completion. Failed acquisition, uncertain cleanup and Effect-result persistence failure
+retain the original recovery owner; cancellation or a dropped caller is not completion proof. Normal local release
+does not require a durable Turn terminal and does not mutate canonical Turn state or Effect facts.
+Ordinary human handoff closes with `InputRequired`, settling any retained Browser work through the terminal lifecycle
+while preserving Session background processes. A real parked machine-resource or intervention wait may yield Browser
+within the same Turn: the Store verifies the exact owner, active Operation, committed `waiting` outcome and absence of
+pending/unknown Effects before and after settlement. Only Browser ownership is released; the next Browser action needs
+a fresh lazy admission and observation under the frozen grants. Normal per-call release instead preserves usable
+observations within the same Turn; native target, document and observation checks reject navigation, closed tabs and
+replaced runtime generations. Terminal cleanup still drains retained work and retries failed releases. User APIs use
+the actual coordinator gate, without deriving ownership from Session running or paused, model prose or configured
+Browser permissions. Chat, file work, attached Chrome and isolated background rendering leave the managed browser
+available whenever it has no active browser owner.
 User profiles use owner/Session identity independent of grant definitions: Windows uses
 `browser-v4/agent-sessions/<hash>/`; macOS 14+ uses a separate persistent
 WKWebsiteDataStore with a stable derived identifier and does not read former directory profiles. Session deletion includes this browser and its

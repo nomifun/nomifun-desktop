@@ -8,7 +8,7 @@
 | 变更 | 最小验证入口 |
 | --- | --- |
 | 共享浏览器状态与布局 | 受影响的 `ui/` 测试、`bun run check:browser-platform-boundary`；renderer 变更另跑 `bun run check:desktop-ui-boundary` |
-| 首次使用浏览器至回合结束的占用 | 受影响的 [Browser Role owner](../../crates/backend/nomifun-app/src/router/engine_browser_tools.rs)、[coordinator](../../crates/backend/nomifun-browser-platform/src/run_guard.rs)、HTTP 与 BrowserPanel 测试；原生和生产 GUI 证据单独取得 |
+| 实际浏览器操作期间的占用 | 受影响的 [Browser Role owner](../../crates/backend/nomifun-app/src/router/engine_browser_tools.rs)、[coordinator](../../crates/backend/nomifun-browser-platform/src/run_guard.rs)、原生输入适配器、HTTP 与 BrowserPanel 测试；原生和生产 GUI 证据单独取得 |
 | Rust 浏览器域与宿主接缝 | `bun run test:browser`，或按 [Rust 测试入口](../../scripts/test-rust.mjs) 选择受影响的 crate |
 | Windows 原生导航、Profile、输入与弹窗 | [browser_workspace_smoke.rs](../../apps/desktop/examples/browser_workspace_smoke.rs) 及其 [support 模块](../../apps/desktop/examples/support/) |
 | macOS 主线程与退出 | [macos_appkit_main_loop_smoke.rs](../../apps/desktop/examples/macos_appkit_main_loop_smoke.rs)、[macos_appkit_termination_probe.rs](../../apps/desktop/examples/macos_appkit_termination_probe.rs) |
@@ -29,7 +29,7 @@
 - 静态检查、unit、原生 smoke、生产 GUI、外部站点与签名发布各自报告。构建和签名成功不证明原生运行成功。
 - 同一页面的 target、navigation sequence、attempt、document 身份与服务端主文档请求计数配套记录；URL 变化、SPA、子资源、重定向与主文档重复请求分开。
 - Stop、Pause/Resume、queued/claimed popup、迟到 callback、失败后保留文档、同文档与跨文档 Back/Forward 按真实生命周期验证。Resume 不自动重放旧候选或导航。
-- 浏览器占用与 Session 状态分别验证：未真实调用 managed 浏览器的回合，包括聊天、文件任务、attached Chrome 和后台 render，保持用户浏览器可用。首次真实 managed 调用取得锁，之后工具完成、思考、无关工具、暂停及原生 settle 均保持占用；只有 exact Turn 终态已持久化且 finish 成功才解锁，取消请求、未知效果和不确定清理均不代替该证明。覆盖按钮/快捷键关闭、exact generation 重开、占用与关闭竞争、迟到 callback，不能重放用户命令。
+- 浏览器占用与 Session 状态分别验证：实际 managed 浏览器工作取得锁，原生操作、按下输入的清理及适用的 Effect 结果记录完成后才局部释放。同一 Turn 继续思考或使用其他工具时，用户可浏览和关闭 runtime。等待中的对话框或 retained 原生工作在安全完成前继续持锁；请求取消或清理不确定不证明已经释放。覆盖按钮/快捷键关闭、exact generation 重开、占用与关闭竞争、调用方丢弃及迟到 callback，不能重放用户命令。必须覆盖 observe → release → 新 guard 下 act，确保安全清理不会让全部观察立即失效；页面导航、标签关闭和 runtime 换代后仍须拒绝旧引用。
 - Cookie、localStorage、IndexedDB 覆盖关闭重开、进程重启、Session/store 隔离与临时 store 的原生清理完成；不能用导入日常浏览器 Cookie 代替。
 - 网站对照固定同机同网与受控初始状态，分别记录内嵌身份和系统浏览器，独立静置至少 60 秒。正常、验证码、版本拒绝、持续加载与循环分别报告；不为通过而解验证码或反复刷新。
 - 共享 renderer 仅验证桌面窗口，最低 880×600。组件模拟几何不能代替原生像素、输入或焦点证据。
@@ -40,10 +40,20 @@
 截至 2026-10-15，Windows 的导航、Profile、弹窗恢复、同文档 History 与最低桌面窗口已有
 历史定向实机记录；这些结果不扩大为所有平台或所有活动 Agent 场景的通过。
 
-首次使用取得浏览器所有权、持续至回合结束，以及 Agent Turn 活动期间关闭从未使用的浏览器，
-仍待两个平台的原生与生产 GUI 验收。历史输入锁记录和组件测试不证明这一完整合同。还须覆盖浏览器工具完成后
-继续思考或使用无关工具、等待的导航/对话框完成、结算或解锁失败与 exact terminal 恢复。
-首次使用前关闭或重开浏览器，再在同一 Turn 调用；旧代际及旧 owner 清理不能影响替代实体。
+2026-10-18，使用 `cargo build --profile test -p nomifun-desktop --example browser_workspace_smoke`
+构建后，隔离 Windows WebView2 的 `browser_workspace_smoke --interaction-only` 实际运行以 exit 0 通过。
+本地临时 fixture 覆盖 observe → release → 新 guard 下使用前次引用 act、单次可信原生点击、
+原生用户策略恢复和调用间用户命令。等待中的链式对话框保留原始 callback，并在最终回复解锁前拒绝
+用户关闭及销毁。用户关闭后，原生 controller 与可用协议端点均已销毁；只读 OS 句柄证明准确的浏览器
+主进程在关闭前存活，并在关闭后的五秒观察上限内退出。同一 Session 随后能够创建新 runtime generation，
+临时原生 profile 清理也已通过。进程见证不保留 COM environment，等待前释放测试 view 句柄，且不终止浏览器进程。
+
+两个平台的生产 GUI，以及 macOS 的本次原生交接，仍待验收。上述 Windows fixture 不证明安装包行为、
+外部站点兼容或每个子进程退出。完整生产覆盖仍须包含浏览器完成后继续思考或使用无关工具、
+释放后的人工输入及 runtime 关闭、等待的导航/对话框完成、结算或解锁失败与 exact terminal 恢复。
+在生产窗口重验 observe → release → act，再由用户导航或关闭浏览器后在同一 Turn 调用；
+安全清理须保留仍可用的观察，旧代际及旧 owner 清理不能影响替代实体。
+当前源码的后端/unit、真实原生输入及生产窗口证据分别记录。
 
 macOS 最新的 popup Pause、同文档 History 与启动回执修复已有源码、定向检查及构建记录，
 仍缺融合后 WK 原生运行和生产 GUI 的完整证明。后续需要：

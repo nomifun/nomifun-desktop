@@ -6,6 +6,8 @@
 //! rejected before browser input begins.
 //! --navigation-only exercises the production navigation owner with isolated
 //! HTTP request witnesses, page loops, pause/resume and external page identity.
+//! --interaction-only verifies per-call input handoff, retained observation
+//! references, pending-dialog ownership and user destruction/rebuild.
 
 #[cfg(windows)]
 #[path = "../src/browser_surface/automation.rs"]
@@ -109,6 +111,9 @@ mod dialog_navigation;
 #[cfg(windows)]
 #[path = "support/browser_dialog_close.rs"]
 mod dialog_close;
+#[cfg(windows)]
+#[path = "support/browser_interaction.rs"]
+mod interaction_checks;
 
 #[cfg(windows)]
 static DELAYED_NAVIGATION_STARTED: std::sync::atomic::AtomicBool =
@@ -291,6 +296,7 @@ fn main() {
     let diagnostics_only = std::env::args().any(|arg| arg == "--diagnostics-only");
     let close_all_only = std::env::args().any(|arg| arg == "--close-all-only");
     let dialog_close_only = std::env::args().any(|arg| arg == "--dialog-close-only");
+    let interaction_only = std::env::args().any(|arg| arg == "--interaction-only");
     let frame_input_only = std::env::args().any(|arg| arg == "--frame-input-only");
     let upload_frames_only = std::env::args().any(|arg| arg == "--upload-frames-only");
     let managed_popup_only = std::env::args().any(|arg| arg == "--managed-popup-only");
@@ -402,6 +408,11 @@ fn main() {
                 let result = match child {
                     Ok(Ok(view)) => {
                         let result = tokio::time::timeout(std::time::Duration::from_secs(if live_agent_only {330} else if user_file_selection_only || user_file_filter_only || user_download_selection_only || user_download_cancel_active_only {300} else if save_picker_selection_only {210} else if picker_selection_only { 180 } else if navigation_only {160} else if agent_only { 120 } else if popup_inflight_only {60} else { 45 }), async {
+                            if interaction_only {
+                                view.hide().map_err(|error|error.to_string())?;
+                                let result=interaction_checks::verify(&handle,&format!("http://{address}/")).await?;
+                                return Ok(serde_json::json!({"scope":"interaction-only","interaction":result}));
+                            }
                             if history_only {
                                 let result=history_conformance::verify(&handle).await?;
                                 return Ok(serde_json::json!({"scope":"history-only","history":result}));

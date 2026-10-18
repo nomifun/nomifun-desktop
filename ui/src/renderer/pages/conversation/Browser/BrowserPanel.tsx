@@ -14,7 +14,7 @@ import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermiss
 
 type Props = { agentSessionId: string; onClose: () => void; client?: BrowserClient; linkRequest?: BrowserLinkRequest; onLinkConsumed?: (id: number, handled: boolean) => void; onLinkAvailabilityChange?: (available: boolean) => void; hostSurfaceAvailable?: boolean; panelId?: string };
 type BrowserFailureKind = 'host' | 'initialization' | 'locked' | 'request' | 'clear';
-type BrowserFailure = { kind: BrowserFailureKind; message: 'browserWorkspace.hostUnavailableHint' | 'browserWorkspace.requestFailed' | 'browserWorkspace.clearSiteDataFailed' | 'browserWorkspace.initializationFailed' | 'browserWorkspace.stopHint'; retryable: boolean };
+type BrowserFailure = { kind: BrowserFailureKind; message: 'browserWorkspace.hostUnavailableHint' | 'browserWorkspace.requestFailed' | 'browserWorkspace.clearSiteDataFailed' | 'browserWorkspace.initializationFailed' | 'browserWorkspace.stopHint'; retryable: boolean; releaseAfter?: { scope: object; agentSessionId: string; browserId: string; runtimeGeneration: number | null; revision: number } };
 type CommandFlight = { scope: object; sequence: number; command?: BrowserCommand };
 const ZOOM_LEVELS = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200] as const;
 const navigationCommands = new Set(['create', 'navigate', 'reload', 'back', 'forward']);
@@ -125,8 +125,9 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
   const dialog = active?.script_dialog;
   const locked = snapshot?.run.input_state === 'agent_running';
   const inputDisabled = !hostSurfaceAvailable || !snapshot || locked || snapshot.run.input_gate_failed || Boolean(failure);
-  // The host retains ownership from first browser use through the Turn's final release.
+  // Browser ownership follows active browser operations, independently of the Agent Turn.
   const canIssueUserCommand = !inputDisabled && !busy && !interrupting;
+  const canCloseBrowser = hostSurfaceAvailable && Boolean(snapshot?.runtime) && !locked && !snapshot?.run.input_gate_failed && !busy && !interrupting;
   const canReload = canIssueUserCommand && Boolean(active) && navigationSequence !== undefined;
   const canResumeNavigation = canIssueUserCommand && navigationSequence !== undefined && Boolean(navigationControl?.paused);
   const canInterruptNavigation = !inputDisabled && !interrupting && !draftTab && Boolean(active) && navigationSequence !== undefined &&
@@ -134,6 +135,16 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
   const canStopLoading = canInterruptNavigation && pageLoading;
   const canPauseNavigation = canInterruptNavigation && Boolean(navigationControl) && !navigationControl?.paused;
   const canZoom = canIssueUserCommand && Boolean(active) && !draftTab;
+  useEffect(() => {
+    const rejected = failure?.kind === 'locked' ? failure.releaseAfter : undefined;
+    if (!rejected || !snapshot || rejected.scope !== commandScope.current ||
+      snapshot.agent_session_id !== rejected.agentSessionId || snapshot.browser_id !== rejected.browserId ||
+      (snapshot.runtime?.runtime_generation ?? null) !== rejected.runtimeGeneration ||
+      snapshot.run.revision <= rejected.revision || snapshot.run.input_state !== 'user_ready' || snapshot.run.input_gate_failed) return;
+    setFailure(null);
+    blocked.current = false;
+    requestLayout.current();
+  }, [failure, snapshot]);
   useEffect(() => {
     setSlowLoading(false);
     if (!pageLoading) return undefined;
@@ -326,7 +337,12 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
       const http = isBackendHttpError(reason) ? reason : null;
       const code = http?.code ?? '';
       const pageCommand = navigationCommands.has(command.command) || 'expected_navigation_sequence' in command;
-      if (code === 'BROWSER_NATIVE_INITIALIZATION_FAILED' || code === 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' || http?.status === 501 || http?.status === 401 || http?.status === 403) {
+      if (code === 'BROWSER_USER_INPUT_LOCKED') {
+        blocked.current = true; hide.current();
+        setFailure(existing => existing && existing.kind !== 'locked' ? existing : { ...browserFailure(reason), releaseAfter: before ? { scope: flight.scope,
+          agentSessionId: before.agent_session_id, browserId: before.browser_id,
+          runtimeGeneration: before.runtime?.runtime_generation ?? null, revision: before.run.revision } : undefined });
+      } else if (code === 'BROWSER_NATIVE_INITIALIZATION_FAILED' || code === 'BROWSER_NATIVE_SURFACE_UNAVAILABLE' || http?.status === 501 || http?.status === 401 || http?.status === 403) {
         blocked.current = true; hide.current(); setFailure(browserFailure(reason));
       } else if (pageCommand && pageFailurePhases.has(code)) {
         // CDP can report its error before the native completion callback. Read
@@ -428,6 +444,27 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     const generation = snapshot?.runtime?.runtime_generation;
     if (generation === undefined || busy || interrupting || commandFlight.current || interruptFlight.current || (locked && !snapshot?.run.input_gate_failed)) return;
     setConfirmation({ kind: 'rebuild', agentSessionId, generation });
+  };
+  const closeBrowser = async () => {
+    const generation = snapshot?.runtime?.runtime_generation;
+    if (!canCloseBrowser || generation === undefined) return;
+    const flight = beginFlight();
+    if (!flight) return;
+    setMenuOpen(false);
+    const current = () => {
+      const latest = currentSnapshot.current;
+      // Native closure can publish a missing runtime before the HTTP receipt.
+      // Accept that closure, while preserving a replacement session or runtime.
+      return ownsFlight(flight) && commandSequence.current === flight.sequence &&
+        latest?.agent_session_id === agentSessionId &&
+        (latest.runtime === null || latest.runtime.runtime_generation === generation);
+    };
+    try {
+      await client.closeResource(agentSessionId, generation);
+      if (current()) { blocked.current = true; hide.current(); onClose(); }
+    } catch {
+      if (current()) setNotice(t('browserWorkspace.closeBrowserFailed'));
+    } finally { finishFlight(flight); }
   };
   const copyAddress = async () => {
     if (!canIssueUserCommand || draftTab || !active?.url) return;
@@ -611,6 +648,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
           </div>
           <div className={styles.menuDivider} />
           <button type='button' role='menuitem' disabled={!canIssueUserCommand || tabs.length === 0} onClick={() => { setMenuOpen(false); if (snapshot?.runtime && tabs.length > 0) void run({ command: 'close_all', runtime_generation: snapshot.runtime.runtime_generation }); }}>{t('browserWorkspace.closeAllPages')}</button>
+          <button type='button' role='menuitem' disabled={!canCloseBrowser} onClick={() => void closeBrowser()}>{t('browserWorkspace.closeBrowser')}</button>
           <button type='button' role='menuitem' disabled={false} onClick={() => { setMenuOpen(false); rebuild(); }}>{t('browserWorkspace.rebuild')}</button>
         </div>}
       </div>

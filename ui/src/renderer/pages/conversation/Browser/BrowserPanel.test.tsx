@@ -235,12 +235,12 @@ test('native shortcut rejects other AgentSessions, stale documents and events re
   expect(screen.commands).toEqual([]);
 });
 
-test.each(['button', 'native shortcut'] as const)('tab close through %s stays locked after tool completion and settlement until the Turn finishes', async source => {
+test.each(['button', 'native shortcut'] as const)('tab close through %s unlocks after browser operations release ownership while the Agent Turn continues', async source => {
   const occupied: BrowserSnapshot = { ...initial, run: { ...initial.run, revision: 2, input_state: 'agent_running' } };
   const toolFinished: BrowserSnapshot = { ...occupied, runtime: { ...initial.runtime!, revision: 2 } };
-  const settled: BrowserSnapshot = { ...toolFinished, run: { ...occupied.run, revision: 3 } };
-  // Only the host's exact durable Turn terminal and successful finish produce user_ready.
-  const released: BrowserSnapshot = { ...toolFinished, run: { ...initial.run, revision: 4 } };
+  // The host releases browser ownership after its last operation settles; the
+  // same Agent Turn may still be thinking or using other tools.
+  const released: BrowserSnapshot = { ...toolFinished, run: { ...initial.run, revision: 3 } };
   const commands: BrowserCommand[] = [];
   const screen = fixture({
     async ensure() { return occupied; },
@@ -259,21 +259,19 @@ test.each(['button', 'native shortcut'] as const)('tab close through %s stays lo
   await requestClose();
   expect(commands).toEqual([]);
 
-  // A finished browser operation may be followed by thinking or other tools in the same Turn.
-  for (const snapshot of [toolFinished, settled]) {
-    await act(async () => screen.emit({ kind: 'snapshot', snapshot }));
-    expect(close.disabled).toBe(true);
-    expect(screen.getByText(words.stopHint)).toBeTruthy();
-    await requestClose();
-    expect(commands).toEqual([]);
-  }
+  // Page completion alone does not release an operation still settling.
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: toolFinished }));
+  expect(close.disabled).toBe(true);
+  expect(screen.getByText(words.stopHint)).toBeTruthy();
+  await requestClose();
+  expect(commands).toEqual([]);
 
   await act(async () => screen.emit({ kind: 'snapshot', snapshot: released }));
   expect(close.disabled).toBe(false);
   expect(commands).toEqual([]);
   expect(screen.queryByText(words.stopHint)).toBeNull();
   // A delayed ownership snapshot cannot lock the released browser again.
-  await act(async () => screen.emit({ kind: 'snapshot', snapshot: settled }));
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: toolFinished }));
   expect(close.disabled).toBe(false);
   await requestClose();
   expect(commands).toEqual([{ command: 'close', target }]);
@@ -770,6 +768,117 @@ test('a late close all response cannot clear tabs or a draft in a different Agen
   expect(screen.queryByText(words.unavailable)).toBeNull();
 });
 
+test('closing the browser stops its captured runtime and hides the panel only after acknowledgement without reopening it', async () => {
+  const closed: unknown[] = [];
+  let finish!: () => void;
+  let ensures = 0, panelsClosed = 0;
+  const screen = fixture({
+    async ensure() { ensures++; return initial; },
+    async closeResource(id, generation) { closed.push([id, generation]); return new Promise<void>(resolve => { finish = resolve; }); },
+  }, undefined, () => { panelsClosed++; });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  const close = await screen.findByRole('menuitem', { name: words.closeBrowser });
+  fireEvent.click(close);
+  fireEvent.click(close);
+  expect(closed).toEqual([['session-1', 1]]);
+  expect(panelsClosed).toBe(0);
+  expect((screen.getByRole('button', { name: words.menu }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => finish());
+  expect(panelsClosed).toBe(1);
+  expect(ensures).toBe(1);
+  expect(screen.commands).toEqual([]);
+});
+
+test.each(['agent_running', 'input_gate_failed'] as const)('closing the browser rejects %s ownership and is not replayed after release', async state => {
+  const closed: unknown[] = [];
+  const screen = fixture({ async closeResource(id, generation) { closed.push([id, generation]); } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  const close = await screen.findByRole('menuitem', { name: words.closeBrowser }) as HTMLButtonElement;
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...initial, run: { revision: 2,
+    input_state: state === 'agent_running' ? state : 'user_ready', input_gate_failed: state === 'input_gate_failed' } } }));
+  expect(close.disabled).toBe(true);
+  fireEvent.click(close);
+  expect(closed).toEqual([]);
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...initial, run: { ...initial.run, revision: 3 } } }));
+  expect(close.disabled).toBe(false);
+  expect(closed).toEqual([]);
+  fireEvent.click(close);
+  await waitFor(() => expect(closed).toEqual([['session-1', 1]]));
+});
+
+test.each(['success', 'failure'] as const)('a native runtime closure before its HTTP %s receipt waits for confirmation before hiding', async outcome => {
+  let finish!: () => void;
+  let fail!: (reason: unknown) => void;
+  let panelsClosed = 0, ensures = 0;
+  const screen = fixture({
+    async ensure() { ensures++; return initial; },
+    closeResource: () => new Promise<void>((resolve, reject) => { finish = resolve; fail = reject; }),
+  }, undefined, () => { panelsClosed++; });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  fireEvent.click(await screen.findByRole('menuitem', { name: words.closeBrowser }));
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...initial,
+    run: { ...initial.run, revision: initial.run.revision + 1 }, runtime: null } }));
+  expect(panelsClosed).toBe(0);
+  await act(async () => outcome === 'success' ? finish() : fail(new Error('closure receipt failed')));
+  expect(panelsClosed).toBe(outcome === 'success' ? 1 : 0);
+  if (outcome === 'failure') expect(await screen.findByText(words.closeBrowserFailed)).toBeTruthy();
+  expect(ensures).toBe(1);
+  expect(screen.commands).toEqual([]);
+});
+
+test('a browser closure rejected by newly acquired ownership preserves the panel and never silently retries', async () => {
+  let calls = 0, panelsClosed = 0;
+  const screen = fixture({ async closeResource() {
+    calls++;
+    throw new BackendHttpError({ method: 'DELETE', path: '/api/agent-sessions/session-1/browser', status: 409,
+      body: { code: 'BROWSER_USER_INPUT_LOCKED', error: 'private browser ownership' } });
+  } }, undefined, () => { panelsClosed++; });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  fireEvent.click(await screen.findByRole('menuitem', { name: words.closeBrowser }));
+  expect(await screen.findByText(words.closeBrowserFailed)).toBeTruthy();
+  expect(calls).toBe(1);
+  expect(panelsClosed).toBe(0);
+  expect(screen.getByRole('tab', { name: 'Fixture' })).toBeTruthy();
+  expect(screen.queryByText(/private browser ownership/)).toBeNull();
+});
+
+test('a failed browser command still permits closing an unoccupied browser runtime', async () => {
+  const closed: unknown[] = [];
+  let panelsClosed = 0;
+  const screen = fixture({ async command() { throw new Error('native command failed'); },
+    async closeResource(id, generation) { closed.push([id, generation]); },
+  }, undefined, () => { panelsClosed++; });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }));
+  expect(await screen.findByText(words.requestFailed)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  const close = await screen.findByRole('menuitem', { name: words.closeBrowser }) as HTMLButtonElement;
+  expect(close.disabled).toBe(false);
+  fireEvent.click(close);
+  await waitFor(() => expect(closed).toEqual([['session-1', 1]]));
+  expect(panelsClosed).toBe(1);
+});
+
+test.each(['session', 'runtime'] as const)('late browser closure cannot hide a replacement %s', async replacement => {
+  let finish!: () => void;
+  let panelsClosed = 0;
+  const screen = fixture({ closeResource: () => new Promise<void>(resolve => { finish = resolve; }) }, undefined, () => { panelsClosed++; });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  fireEvent.click(await screen.findByRole('menuitem', { name: words.closeBrowser }));
+  if (replacement === 'session') {
+    screen.rerender(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-2' onClose={() => { panelsClosed++; }} client={screen.client} /></I18nextProvider>);
+  } else {
+    await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...initial, runtime: { ...initial.runtime!, runtime_generation: 2 } } }));
+  }
+  await act(async () => finish());
+  expect(panelsClosed).toBe(0);
+});
+
 test('browser rebuild requires explicit confirmation and cancel leaves pages untouched', async () => {
   const closed: number[] = [];
   const screen = fixture({ async closeResource(_id, generation) { closed.push(generation); } }); await screen.ready();
@@ -1156,6 +1265,70 @@ test('a browser ownership lock explains browser use without opening a native sur
   expect(await screen.findByText(words.stopHint)).toBeTruthy();
   expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
   expect(attaches).toBe(0);
+});
+
+test('a browser command rejected during Agent acquisition automatically recovers after exact ownership release without replaying', async () => {
+  const commands: BrowserCommand[] = [], visibility: boolean[] = [];
+  const screen = fixture({
+    async command(_id, command) { commands.push(command); throw new BackendHttpError({ method: 'POST', path: '/api/browser/commands', status: 409,
+      body: { code: 'BROWSER_USER_INPUT_LOCKED', error: 'private ownership detail' } }); },
+    async update(_id, _sequence, _bounds, visible) { visibility.push(visible); },
+  });
+  await screen.ready();
+  await waitFor(() => expect(visibility.at(-1)).toBe(true));
+  fireEvent.click(screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }));
+  expect(await screen.findByText(words.stopHint)).toBeTruthy();
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
+  await waitFor(() => expect(visibility.at(-1)).toBe(false));
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...initial, run: { ...initial.run, revision: 2 } } }));
+  await waitFor(() => expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(false));
+  expect(screen.queryByText(words.stopHint)).toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
+  await waitFor(() => expect(visibility.at(-1)).toBe(true));
+  expect(commands).toEqual([{ command: 'close', target }]);
+});
+
+test.each(['same_revision', 'agent_running', 'input_gate_failed', 'session', 'browser', 'runtime'] as const)('a rejected browser command cannot recover from a %s snapshot', async mismatch => {
+  let commands = 0;
+  const screen = fixture({ async command() { commands++; throw new BackendHttpError({ method: 'POST', path: '/api/browser/commands', status: 409,
+    body: { code: 'BROWSER_USER_INPUT_LOCKED', error: 'private ownership detail' } }); } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }));
+  expect(await screen.findByText(words.stopHint)).toBeTruthy();
+  const next: BrowserSnapshot = { ...initial, run: { ...initial.run, revision: mismatch === 'same_revision' ? 1 : 2 } };
+  if (mismatch === 'agent_running') next.run.input_state = 'agent_running';
+  if (mismatch === 'input_gate_failed') next.run.input_gate_failed = true;
+  if (mismatch === 'session') next.agent_session_id = 'other-session';
+  if (mismatch === 'browser') next.browser_id = 'other-browser';
+  if (mismatch === 'runtime') next.runtime = { ...initial.runtime!, runtime_generation: 2 };
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: next }));
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
+  expect(screen.getAllByRole('alert').length).toBeGreaterThan(0);
+  expect(commands).toBe(1);
+});
+
+test('a release snapshot received before a delayed ownership rejection also restores controls without replaying', async () => {
+  let rejectCommand!: (reason: unknown) => void;
+  const commands: BrowserCommand[] = [];
+  const screen = fixture({ async command(_id, command) { commands.push(command); return new Promise<BrowserSnapshot>((_resolve, reject) => { rejectCommand = reject; }); } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }));
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...initial, run: { ...initial.run, revision: 2 } } }));
+  await act(async () => rejectCommand(new BackendHttpError({ method: 'POST', path: '/api/browser/commands', status: 409,
+    body: { code: 'BROWSER_USER_INPUT_LOCKED', error: 'private ownership detail' } })));
+  await waitFor(() => expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(false));
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(commands).toEqual([{ command: 'close', target }]);
+});
+
+test('an ownership release snapshot never clears an unrelated native command failure', async () => {
+  const screen = fixture({ async command() { throw new Error('native operation failure'); } });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }));
+  expect(await screen.findByText(words.requestFailed)).toBeTruthy();
+  await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...initial, run: { ...initial.run, revision: 2 } } }));
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(true);
+  expect(screen.getByText(words.requestFailed)).toBeTruthy();
 });
 
 function pageSnapshot(load: BrowserLoadSummary, lifecycle: 'loading' | 'ready' | 'stopped' | 'failed' | 'crashed', revision = 2): BrowserSnapshot {

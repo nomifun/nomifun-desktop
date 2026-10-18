@@ -10,6 +10,100 @@ struct Gate {
     unlocked: Notify,
 }
 
+#[derive(Default)]
+struct InteractionGate {
+    locked: AtomicBool,
+    waiting_for_dialog: AtomicBool,
+    fail_handoff: AtomicBool,
+    log: Mutex<Vec<&'static str>>,
+}
+
+#[async_trait]
+impl NativeInputGate for InteractionGate {
+    async fn lock_user_input(&self) -> Result<(), RunAdmissionError> {
+        self.locked.store(true, Ordering::SeqCst);
+        self.log.lock().await.push("lock");
+        Ok(())
+    }
+    async fn release_pressed_input(&self) -> Result<(), RunAdmissionError> {
+        self.log.lock().await.push("terminal");
+        Ok(())
+    }
+    async fn unlock_user_input(&self) -> Result<(), RunAdmissionError> {
+        self.locked.store(false, Ordering::SeqCst);
+        self.log.lock().await.push("unlock");
+        Ok(())
+    }
+    async fn prepare_agent_operation(&self) -> Result<(), RunAdmissionError> {
+        self.log.lock().await.push("prepare");
+        Ok(())
+    }
+    async fn try_release_for_user(&self) -> Result<bool, RunAdmissionError> {
+        self.log.lock().await.push("handoff");
+        if self.fail_handoff.load(Ordering::SeqCst) {
+            return Err(RunAdmissionError::InputGateFailed);
+        }
+        Ok(!self.waiting_for_dialog.load(Ordering::SeqCst))
+    }
+}
+
+#[tokio::test]
+async fn completed_interaction_releases_input_without_retiring_observation_state() {
+    let gate = Arc::new(InteractionGate::default());
+    let coordinator = BrowserRunCoordinator::new(gate.clone());
+    let first = coordinator.begin_interaction().await.unwrap();
+    assert!(gate.locked.load(Ordering::SeqCst));
+    coordinator.agent_operation(&first, |_| async { Ok(()) }).await.unwrap();
+    assert!(coordinator.finish_interaction(&first).await.unwrap());
+    assert_eq!(coordinator.snapshot().await.input_state, BrowserInputState::UserReady);
+    coordinator.user_operation(|| async { Ok(()) }).await.unwrap();
+    let next = coordinator.begin_interaction().await.unwrap();
+    assert_eq!(coordinator.finish_interaction(&first).await, Err(RunAdmissionError::StaleRun));
+    assert!(gate.locked.load(Ordering::SeqCst));
+    assert!(coordinator.finish_interaction(&next).await.unwrap());
+    assert_eq!(*gate.log.lock().await, vec!["lock", "prepare", "handoff", "unlock", "lock", "prepare", "handoff", "unlock"]);
+}
+
+#[tokio::test]
+async fn yielded_dialog_retains_the_same_uncancelled_browser_authority() {
+    let gate = Arc::new(InteractionGate::default());
+    let coordinator = BrowserRunCoordinator::new(gate.clone());
+    let run = coordinator.begin_interaction().await.unwrap();
+    gate.waiting_for_dialog.store(true, Ordering::SeqCst);
+    assert!(!coordinator.finish_interaction(&run).await.unwrap());
+    assert!(gate.locked.load(Ordering::SeqCst));
+    assert!(!coordinator.snapshot().await.input_gate_failed);
+    assert_eq!(coordinator.user_operation(|| async { Ok(()) }).await, Err(RunAdmissionError::UserInputLocked));
+    coordinator.agent_operation(&run, |cancel| async move {
+        assert!(!cancel.is_cancelled(), "dialog continuation must remain live");
+        Ok(())
+    }).await.unwrap();
+    gate.waiting_for_dialog.store(false, Ordering::SeqCst);
+    assert!(coordinator.finish_interaction(&run).await.unwrap());
+    assert!(!gate.locked.load(Ordering::SeqCst));
+    assert!(!gate.log.lock().await.contains(&"terminal"));
+}
+
+#[tokio::test]
+async fn failed_interaction_handoff_retains_input_until_successful_retry() {
+    let gate = Arc::new(InteractionGate::default());
+    let coordinator = BrowserRunCoordinator::new(gate.clone());
+    let run = coordinator.begin_interaction().await.unwrap();
+    gate.fail_handoff.store(true, Ordering::SeqCst);
+    assert_eq!(coordinator.finish_interaction(&run).await, Err(RunAdmissionError::InputGateFailed));
+    assert!(gate.locked.load(Ordering::SeqCst));
+    assert!(coordinator.snapshot().await.input_gate_failed);
+    assert_eq!(coordinator.agent_operation(&run, |_| async { Ok(()) }).await, Err(RunAdmissionError::InputGateFailed));
+    gate.fail_handoff.store(false, Ordering::SeqCst);
+    gate.waiting_for_dialog.store(true, Ordering::SeqCst);
+    assert!(!coordinator.finish_interaction(&run).await.unwrap());
+    assert!(gate.locked.load(Ordering::SeqCst));
+    assert!(coordinator.snapshot().await.input_gate_failed, "pending work must not clear an earlier failed cleanup");
+    assert_eq!(coordinator.agent_operation(&run, |_| async { Ok(()) }).await, Err(RunAdmissionError::InputGateFailed));
+    gate.waiting_for_dialog.store(false, Ordering::SeqCst);
+    assert!(coordinator.finish_interaction(&run).await.unwrap());
+    assert_eq!(coordinator.snapshot().await.input_state, BrowserInputState::UserReady);
+}
 #[tokio::test]
 async fn dropping_human_close_caller_does_not_release_its_transition() {
     let gate=Arc::new(Gate::default());
