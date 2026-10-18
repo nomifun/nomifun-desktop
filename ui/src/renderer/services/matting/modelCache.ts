@@ -4,144 +4,73 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * Main-thread acquisition of the MODNet matting model.
- *
- * Root-cause fix for the DIY figure "根本用不了" bug: the model used to be
- * lazy-downloaded from huggingface.co **inside the matting worker**, wrapped in
- * a 30 s timeout that also covered the 25 MB transfer — so the first attempt
- * always timed out, fell back to heuristic matting, and dead-ended real photos.
- *
- * Now the download happens here, on the main thread:
- *   - fetched from the **local backend proxy** (`/api/companion/matting-model`), which
- *     mirror-downloads + disk-caches it once (reachable even behind the GFW),
- *   - with progress + **no hard timeout** (a slow transfer is allowed to finish),
- *   - mirrored into Cache Storage so the worker reads a local copy (no auth, no
- *     network) and repeat sessions skip the localhost round-trip entirely.
- *
- * `ensureMattingModel` is single-flight: background preparation after entering
- * the authenticated app and the await before matting share one download.
- */
-
-import { buildBackendAuthHeaders, getBaseUrl } from '@/common/adapter/httpBridge';
-import { MODEL_CACHE_NAME, modelCacheKey } from './modelCacheKey';
+import { httpBlobRequest } from '@/common/adapter/httpBridge';
+import model from '../../../../../crates/backend/nomifun-companion/matting-model.json';
 
 export type ModelProgress = (loaded: number, total: number) => void;
 
-/** Sanity floor mirroring the backend — never treat an error page as the model. */
-const MIN_VALID_BYTES = 8 * 1024 * 1024;
-
-let inFlight: Promise<void> | null = null;
-const progressSubs = new Set<ModelProgress>();
-
-async function openCache(): Promise<Cache | undefined> {
-  if (typeof caches === 'undefined') return undefined;
-  try {
-    return await caches.open(MODEL_CACHE_NAME);
-  } catch {
-    return undefined;
+async function downloadModel(onProgress: ModelProgress): Promise<Blob> {
+  // The backend verifies the approved digest before serving these exact bytes.
+  // The requested identity rejects frontend/backend version drift. Browser
+  // storage and secure-context-only Web Crypto are not prerequisites for WebUI.
+  const blob = await httpBlobRequest(`/api/companion/matting-model?sha256=${model.sha256}`, {
+    maxBytes: model.size,
+    onProgress,
+  });
+  if (blob.size !== model.size) {
+    throw new Error(`Matting model ${model.id}: expected ${model.size} bytes, received ${blob.size}`);
   }
-}
-
-async function cachedModelOk(cache: Cache | undefined): Promise<boolean> {
-  if (!cache) return false;
-  try {
-    const hit = await cache.match(modelCacheKey());
-    if (!hit) return false;
-    const len = Number(hit.headers.get('content-length') ?? 0);
-    if (len && len >= MIN_VALID_BYTES) return true;
-    // No/!plausible length header — verify by reading the body size once.
-    const buf = await hit.arrayBuffer();
-    return buf.byteLength >= MIN_VALID_BYTES;
-  } catch {
-    return false;
-  }
-}
-
-async function downloadToCache(cache: Cache | undefined): Promise<void> {
-  const url = `${getBaseUrl()}/api/companion/matting-model`;
-  const res = await fetch(url, { headers: buildBackendAuthHeaders('GET'), credentials: 'include' });
-  if (!res.ok) throw new Error(`matting model fetch failed: HTTP ${res.status}`);
-  const total = Number(res.headers.get('content-length') ?? 0) || 0;
-
-  // Typed as ArrayBuffer-backed (both assignments below build it via
-  // `new Uint8Array(number | ArrayBuffer)`), so `bytes.buffer` is a concrete
-  // `ArrayBuffer` and a valid `BodyInit` — lib.es2024 rejects the generic
-  // `Uint8Array<ArrayBufferLike>` view.
-  let bytes: Uint8Array<ArrayBuffer>;
-  if (res.body) {
-    const reader = res.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let loaded = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      loaded += value.byteLength;
-      for (const sub of progressSubs) sub(loaded, total);
-    }
-    bytes = new Uint8Array(loaded);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-  } else {
-    const buf = await res.arrayBuffer();
-    bytes = new Uint8Array(buf);
-    for (const sub of progressSubs) sub(bytes.byteLength, total || bytes.byteLength);
-  }
-
-  if (bytes.byteLength < MIN_VALID_BYTES) {
-    throw new Error(`matting model too small (${bytes.byteLength} bytes)`);
-  }
-
-  if (cache) {
-    try {
-      await cache.put(
-        modelCacheKey(),
-        // `bytes` is freshly built via `new Uint8Array(...)` above (full-span,
-        // ArrayBuffer-backed), so `bytes.buffer` is the identical byte range —
-        // and is a concrete `ArrayBuffer` (a valid `BodyInit`), unlike the
-        // `Uint8Array<ArrayBufferLike>` view which lib.es2024 rejects.
-        new Response(bytes.buffer, {
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            'Content-Length': String(bytes.byteLength),
-          },
-        })
-      );
-    } catch {
-      // Quota/eviction — the worker can still fetch from the backend next time.
-    }
-  }
+  return blob;
 }
 
 /**
- * Resolve once the matting model is present in Cache Storage (downloading via
- * the backend proxy on first use). Rejects only if the model cannot be obtained
- * at all (offline + nothing cached) — callers degrade to heuristic matting.
- *
- * @param onProgress receives (loaded, total) bytes during an active download.
+ * One immutable, verified model per renderer lifetime. The backend owns the
+ * durable cache; callers receive actual bytes rather than a browser-cache
+ * readiness flag. A Blob can be cloned into a Worker without detaching this
+ * shared copy. Failed acquisition is retryable and never memoized as ready.
  */
-export function ensureMattingModel(onProgress?: ModelProgress): Promise<void> {
-  if (onProgress) progressSubs.add(onProgress);
-  if (!inFlight) {
-    inFlight = (async () => {
-      const cache = await openCache();
-      if (await cachedModelOk(cache)) return;
-      await downloadToCache(cache);
-    })();
-    // A failed attempt must be retryable (transient offline), so clear the
-    // memo on rejection; keep it on success so we never re-download.
-    inFlight.catch(() => {
-      inFlight = null;
+export function createMattingModelLoader(download = downloadModel) {
+  let flight: Promise<Blob> | undefined;
+  const subscribers = new Set<ModelProgress>();
+  const publish: ModelProgress = (loaded, total) => {
+    for (const subscriber of subscribers) {
+      try {
+        subscriber(loaded, total);
+      } catch {
+        // A disposed view must not fail a download shared with other callers.
+      }
+    }
+  };
+
+  return (onProgress?: ModelProgress, signal?: AbortSignal): Promise<Blob> => {
+    if (signal?.aborted) return Promise.reject(new DOMException('Request cancelled', 'AbortError'));
+    if (onProgress) subscribers.add(onProgress);
+    if (!flight) {
+      const pending = Promise.resolve().then(() => download(publish));
+      flight = pending;
+      void pending.catch(() => {
+        if (flight === pending) flight = undefined;
+      });
+    }
+    const current = flight;
+    // Cancellation belongs to this consumer. Background preparation and other
+    // windows/views can still finish the shared acquisition.
+    return new Promise<Blob>((resolve, reject) => {
+      const detach = () => {
+        if (onProgress) subscribers.delete(onProgress);
+        signal?.removeEventListener('abort', abort);
+      };
+      const abort = () => {
+        detach();
+        reject(new DOMException('Request cancelled', 'AbortError'));
+      };
+      signal?.addEventListener('abort', abort, { once: true });
+      void current.then(
+        blob => { detach(); resolve(blob); },
+        error => { detach(); reject(error); }
+      );
     });
-  }
-  const p = inFlight;
-  if (onProgress) {
-    const unsubscribe = () => progressSubs.delete(onProgress);
-    void p.then(unsubscribe, unsubscribe);
-  }
-  return p;
+  };
 }
+
+export const ensureMattingModel = createMattingModelLoader();

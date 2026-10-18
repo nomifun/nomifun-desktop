@@ -85,10 +85,9 @@ pub const COMPANION_SHARED_REL_DIR: &str = "companion/shared";
 /// `{COMPANION_COMPANIONS_REL_DIR}/{companion_id}/config.json` per companion.
 pub const COMPANION_COMPANIONS_REL_DIR: &str = "companion/companions";
 
-/// Cached ML assets shared across companions (under the backend data dir): the
-/// MODNet matting model is proxied here once and served from `127.0.0.1`
-/// (see [`matting_model`]) so the webview never hits a remote origin or the
-/// 30 s in-worker download timeout that made DIY figures unusable.
+/// Backend-owned persistent ML assets shared across companions. MODNet bytes
+/// are checked against the shared pinned manifest before serving; missing or
+/// corrupt cache entries are reacquired (see [`matting_model`]).
 pub const COMPANION_MODELS_REL_DIR: &str = "companion/models";
 
 /// Shared custom-figure library (under the backend data dir): reusable figures

@@ -36,7 +36,23 @@ Docker 构建镜像的标签与 digest 也在组件清单中固定。
 NomiRelay 的连接、重启与恢复在需要时自动准备批准的 nfagent，保留真实进度、取消、摘要校验与原子发布。
 DIY 抠图模型是已确认的产品例外：App 首次使用后，可由已认证的 App runtime
 在后台静默安装，不阻塞应用启动；模型缺失或安装失败时保留快速抠图后备。
-抠图模型继续使用自己的供应机制，不加入受管工具清单。
+抠图模型继续使用自己的供应机制，不加入受管工具清单。其批准身份由
+[`matting-model.json`](../../crates/backend/nomifun-companion/matting-model.json)
+统一固定来源 revision、文件长度和 SHA-256。后端是唯一持久缓存所有者，每次读取都
+校验并返回同一份字节；损坏缓存重新获取，下载按块限制长度、验证摘要并原子发布。
+连接、响应头和读空闲分别有期限，持续有进展的慢下载不会因总时限被截断。
+
+Renderer 经统一 HTTP 桥获取模型 Blob：桌面跨源使用 local-trust header，WebUI
+使用同源 Cookie，凭据模式统一为 `same-origin`。请求携带批准摘要，后端在版本不匹配时
+直接拒绝；响应禁用 HTTP 持久缓存。Renderer 仅复用当前进程中的 Blob，显式交给
+抠图 Worker，不依赖 Cache Storage 或安全上下文中的 Web Crypto。Worker 只负责推理，
+不下载模型。推理超时由主线程终止 Worker 后重新解码图片并执行快速抠图；失败可重试，
+录入页区分模型准备、推理失败、推理超时和图片主体识别失败，并始终保留使用原图的入口。
+
+真实浏览器验证入口是
+[`matting-browser.mjs`](../../scripts/validation/matting-browser.mjs)：通过环境变量提供
+批准模型与 Playwright，分别验证桌面跨源认证、WebUI 同源 Cookie、禁用 Cache Storage
+以及实际 MODNet/WASM 推理，不访问用户应用的数据或启动用户应用。
 用户配置的 MCP 与终端 CLI 保留用户选择，发现失败必须与成功的空配置区分。
 
 ## 供应、身份与执行环境

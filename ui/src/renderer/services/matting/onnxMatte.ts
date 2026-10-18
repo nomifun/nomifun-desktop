@@ -7,8 +7,8 @@
 /**
  * onnxruntime-web (WASM) ML 抠图：MODNet（Xenova/modnet ONNX 移植，Apache-2.0）。
  *
- * 模型分发：不打进安装包；首次使用从 MODEL_URL 懒下载（带进度），Cache Storage
- * 持久缓存（key 与 URL 解耦——换镜像源只改 MODEL_URL，缓存仍命中）。
+ * 模型由后端唯一持久缓存，主线程取得并验证后以 Blob 随请求交给 Worker。
+ * 本模块不访问网络或浏览器持久存储。
  *
  * 预处理（已按 Xenova/modnet preprocessor_config.json 核实）：
  *   shortest_edge=512、size_divisibility=32、bilinear、
@@ -28,39 +28,12 @@ import * as ort from 'onnxruntime-web/wasm';
 import ortWasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.wasm?url';
 
 import type { RawImage } from './heuristicMatte';
-import { MODEL_CACHE_NAME, modelCacheKey } from './modelCacheKey';
-
-/** Sentinel: the model isn't in Cache Storage yet (the main thread owns the
- *  download via `modelCache.ensureMattingModel`). Callers fall back to heuristic. */
-const MODEL_NOT_READY = 'MODEL_NOT_READY';
 
 /** MODNet 参考边（preprocessor: shortest_edge）。 */
 const REF_EDGE = 512;
 /** 极端长宽比时钳住长边，控制 wasm 推理成本（spec：1024 量级推理）。 */
 const MAX_LONG_EDGE = 1024;
 const SIZE_DIVISOR = 32;
-
-// ---------------------------------------------------------------------------
-// 模型读取（只读 Cache Storage）
-// ---------------------------------------------------------------------------
-
-/**
- * 取模型字节：**只**从 Cache Storage 读（主线程 `ensureMattingModel` 经后端代理
- * 预先写入）。命中直返；未命中抛 [`MODEL_NOT_READY`]——绝不在 worker 里直连远端
- * 下载（那正是 30s 超时死路的根因）。
- */
-async function fetchModel(): Promise<ArrayBuffer> {
-  if (typeof caches === 'undefined') throw new Error(MODEL_NOT_READY);
-  let cache: Cache;
-  try {
-    cache = await caches.open(MODEL_CACHE_NAME);
-  } catch {
-    throw new Error(MODEL_NOT_READY);
-  }
-  const hit = await cache.match(modelCacheKey());
-  if (!hit) throw new Error(MODEL_NOT_READY);
-  return await hit.arrayBuffer();
-}
 
 // ---------------------------------------------------------------------------
 // 预处理 / 后处理（纯函数，零 DOM 依赖）
@@ -197,12 +170,11 @@ function ensureOrtEnv(): void {
 
 /** 跨调用复用 session（"重抠"等场景免去重复初始化 25MB 模型）；失败则清缓存。 */
 let sessionPromise: Promise<ort.InferenceSession> | undefined;
-function getSession(): Promise<ort.InferenceSession> {
+function getSession(model: Blob): Promise<ort.InferenceSession> {
   if (!sessionPromise) {
     sessionPromise = (async () => {
       ensureOrtEnv();
-      // 只读 Cache Storage（主线程已预先写入）；未命中抛 MODEL_NOT_READY。
-      const modelBuf = await fetchModel();
+      const modelBuf = await model.arrayBuffer();
       return await ort.InferenceSession.create(modelBuf, { executionProviders: ['wasm'] });
     })();
     sessionPromise.catch(() => {
@@ -213,35 +185,47 @@ function getSession(): Promise<ort.InferenceSession> {
 }
 
 /**
- * MODNet ML 抠图：返回原尺寸 alpha 通道（width*height 字节）。模型只从 Cache
- * Storage 读取（主线程负责下载）；未就绪/推理失败直接抛出，由调用方决定降级。
+ * MODNet ML 抠图：返回原尺寸 alpha 通道（width*height 字节）。模型必须显式传入，
+ * 同一个 Worker 内复用解析后的 session；初始化或推理失败由调用方决定降级。
  */
 export async function mlMatte(
   img: RawImage,
+  model: Blob,
   onProgress?: (phase: 'infer') => void
 ): Promise<Uint8ClampedArray> {
-  const session = await getSession();
+  // Even a warm session does not grant an implicit model source to a new request.
+  if (!model?.size) throw new Error('matting model Blob unavailable');
+  const session = await getSession(model);
   onProgress?.('infer');
 
   const { width: iw, height: ih } = computeInferenceSize(img.width, img.height);
   const resized = iw === img.width && ih === img.height ? img : resizeRgba(img, iw, ih);
   const input = new ort.Tensor('float32', rgbaToNchwNormalized(resized), [1, 3, ih, iw]);
 
-  // run 抛错可能意味着 session 已毒化（wasm 状态损坏）——清缓存让下次重建（审查 M4）。
-  let results: Awaited<ReturnType<typeof session.run>>;
+  let results: Awaited<ReturnType<typeof session.run>> | undefined;
   try {
     results = await session.run({ [session.inputNames[0]]: input });
-  } catch (err) {
-    sessionPromise = undefined;
-    throw err;
-  }
-  const output = results[session.outputNames[0]];
-  if (!output) throw new Error('model returned no output');
-  const dims = output.dims;
-  const ow = dims.length >= 2 ? Number(dims[dims.length - 1]) : iw;
-  const oh = dims.length >= 2 ? Number(dims[dims.length - 2]) : ih;
-  const matte = output.data as Float32Array;
-  if (matte.length < ow * oh) throw new Error('unexpected matte tensor shape');
+    const output = results[session.outputNames[0]];
+    if (!output) throw new Error('model returned no output');
+    const dims = output.dims;
+    const ow = dims.length >= 2 ? Number(dims[dims.length - 1]) : iw;
+    const oh = dims.length >= 2 ? Number(dims[dims.length - 2]) : ih;
+    const matte = output.data;
+    if (
+      !(matte instanceof Float32Array) || !Number.isSafeInteger(ow) || !Number.isSafeInteger(oh) ||
+      ow <= 0 || oh <= 0 || matte.length < ow * oh
+    ) throw new Error('unexpected matte tensor shape');
 
-  return resizeMatteBilinear(matte, ow, oh, img.width, img.height);
+    return resizeMatteBilinear(matte, ow, oh, img.width, img.height);
+  } catch (err) {
+    // A failed session must not hold WASM allocations while its replacement is built.
+    sessionPromise = undefined;
+    await session.release().catch(() => {});
+    throw err;
+  } finally {
+    input.dispose();
+    if (results) {
+      for (const output of Object.values(results)) output.dispose();
+    }
+  }
 }

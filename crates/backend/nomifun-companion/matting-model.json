@@ -1,0 +1,10 @@
+{
+  "id": "modnet-fp32-07c308cf0fc7",
+  "filename": "modnet.onnx",
+  "size": 25888640,
+  "sha256": "07c308cf0fc7e6e8b2065a12ed7fc07e1de8febb7dc7839d7b7f15dd66584df9",
+  "urls": [
+    "https://hf-mirror.com/Xenova/modnet/resolve/fa2fa546052fba4c08921230a26cc69a333fca12/onnx/model.onnx",
+    "https://huggingface.co/Xenova/modnet/resolve/fa2fa546052fba4c08921230a26cc69a333fca12/onnx/model.onnx"
+  ]
+}
