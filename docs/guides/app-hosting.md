@@ -50,6 +50,10 @@ For example:
 
 Development uses the fixed built-in application Agent. The optional Agent called
 by a running application is a separate choice in advanced settings.
+Runtime settings offer official conversation Agents, such as Minimal and General,
+alongside personal Agents. Official choices use their saved Workbench configuration
+without requiring a personal copy. The platform still prepares the application's
+RemoteBinding and supplies that connection reference to its backend.
 
 ## Import existing code or an artifact
 
