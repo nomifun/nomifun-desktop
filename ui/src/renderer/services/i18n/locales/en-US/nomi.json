@@ -121,14 +121,14 @@
       "label": "Conversation robot",
       "none": "No robot control",
       "unavailable": "Selected robot is no longer paired",
-      "hint": "Device tools belong to Robot conversations. Select a paired device and apply it; movement still requires the device's Allow movement permission.",
+      "hint": "Sessions with robot capabilities can select an exact device. Select a paired device and apply it; actions still require the device control permission.",
       "apply": "Apply robot",
       "changed": "Conversation settings changed. Review the refreshed settings and apply again.",
       "saved": "Conversation robot updated"
     },
     "growth": "Growth",
     "modelRequired": "Configure the main chat model first",
-    "modelRequiredHint": "Set the Companion default model to start desktop conversations. Robot has independent settings.",
+    "modelRequiredHint": "Configure a default model to use the same companion Agent from every entrance. Each Session keeps its own context.",
     "configureModel": "Configure model",
     "sessionFailed": "The companion conversation cannot open right now",
     "sessionFailedHint": "Check the model and Agent configuration, then try again.",
@@ -136,18 +136,11 @@
     "quickModel": "Model",
     "quickModelPlaceholder": "Select model",
     "modelDefaultSaveFailed": "The conversation model changed, but saving the default model failed. Please retry.",
-    "roleCurrentHint": "Updates this conversation and future defaults for this role. Other conversations keep their settings.",
-    "roleDefaultHint": "Sets future defaults for this role. Existing conversations keep their settings.",
-    "robotRoleHint": "Available alongside Companion. Physical devices use Robot; computer work can be delegated to Companion.",
-    "robotModel": "Robot default model",
-    "robotInherited": "Future Robot conversations inherit the Companion model",
-    "robotIndependent": "Future Robot conversations use an independent model",
-    "inheritForFuture": "Use Companion model for future conversations",
     "sessions": {
       "label": "Select conversation",
       "current": "Current conversation",
-      "companion": "Companion",
-      "robot": "Robot",
+      "companion": "Window Sessions",
+      "robot": "Device Sessions",
       "untitled": "Untitled conversation",
       "create": "New conversation",
       "windowCurrent": "Active in desktop window",
@@ -174,7 +167,11 @@
       "saveFailed": "Saving failed. The previous value was kept.",
       "saved": "Saved",
       "expandNeedsRoom": "Enlarge the window to show companion info"
-    }
+    },
+    "agentSettings": "Companion Agent",
+    "sessionSettingsHint": "Updates this Session and future defaults for the companion. Other Sessions keep their settings.",
+    "defaultSettingsHint": "Sets future defaults for every companion entrance. Existing Sessions keep their settings.",
+    "extensionDefaultsHint": "New Sessions from every entrance share these additional MCP connections. Manage the Agent's own connections in the Agent editor, and adjust the current Session in the composer capability settings."
   },
   "remote": {
     "showAllPlatforms": "View all {{count}} channels"
@@ -523,7 +520,12 @@
       "disabled": "Disabled",
       "action": "Control category",
       "defaultAction": "Use default category",
-      "actions": { "vision": "Vision", "display": "Display and expressions", "motion": "Motion", "device": "Device extensions" },
+      "actions": {
+        "vision": "Vision",
+        "display": "Display and expressions",
+        "motion": "Motion",
+        "device": "Device extensions"
+      },
       "description": "Description and usage guidance (leave blank to use the device description)",
       "defaultArguments": "Default parameters",
       "defaultArgumentsHint": "Select parameters to set their defaults. Model calls can override defaults; saving validates them against the device schema.",

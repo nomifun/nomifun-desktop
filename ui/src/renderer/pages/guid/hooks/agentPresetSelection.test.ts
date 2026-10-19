@@ -60,9 +60,6 @@ describe('Guid Agent selection contract', () => {
     expect(
       normalizeGuidAgentSelection({ kind: 'template', templateKey: 'companion.default' })
     ).toEqual(DEFAULT_GUID_AGENT_SELECTION);
-    expect(
-      normalizeGuidAgentSelection({ kind: 'template', templateKey: 'companion.robot' })
-    ).toEqual(DEFAULT_GUID_AGENT_SELECTION);
   });
 
   test('loads saved user presets and filters draft-only rows', () => {

@@ -6,21 +6,42 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Host-authored provenance for one product-directed delegation. These are
-/// references to the original canonical facts, never another task ledger.
+/// Host-authored provenance for background or parallel work from any Agent
+/// entry. These reference the original canonical facts, never another ledger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DirectedDelegationSource {
+pub struct AgentExecutionSource {
     pub agent_session_id: String,
     pub turn_operation_id: String,
     pub tool_operation_id: String,
     pub effect_id: String,
 }
 
-/// Exact settled Attempt references carried with a directed execution report.
+/// Host-verified canonical human control input. The original typed event owns
+/// the utterance and its captured target; this reference never mirrors text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DirectedDelegationAttemptReport {
+pub struct AgentExecutionControlSource {
+    pub agent_session_id: String,
+    pub input_event_id: String,
+}
+
+/// The exact cancellation event acknowledged for one canonical control input.
+/// A replay refers to that original event, even if the aggregate later reopens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionControlReceipt {
+    pub source: AgentExecutionControlSource,
+    pub execution_id: String,
+    pub execution_event_sequence: i64,
+    pub status: nomifun_common::AgentExecutionStatus,
+    pub replayed: bool,
+}
+
+/// Exact settled Attempt references carried with an execution report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionAttemptReport {
     pub step_id: String,
     pub attempt_id: String,
     pub agent_session_id: String,
@@ -33,20 +54,20 @@ pub struct DirectedDelegationAttemptReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DirectedDelegationReport {
-    pub source: DirectedDelegationSource,
+pub struct AgentExecutionReport {
+    pub source: AgentExecutionSource,
     pub execution_id: String,
     pub execution_event_sequence: i64,
     pub status: String,
-    pub attempts: Vec<DirectedDelegationAttemptReport>,
+    pub attempts: Vec<AgentExecutionAttemptReport>,
 }
 
 /// An existing DecisionRequested event is the durable input-notice outbox.
 /// Question text and presentation versions are read from that exact owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DirectedDelegationInput {
-    pub source: DirectedDelegationSource,
+pub struct AgentExecutionInput {
+    pub source: AgentExecutionSource,
     pub execution_id: String,
     pub request_event_sequence: i64,
     pub step_id: String,

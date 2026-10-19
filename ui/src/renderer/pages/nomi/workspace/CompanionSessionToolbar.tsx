@@ -20,7 +20,7 @@ type Props = {
   selectedId: ConversationId | null;
   selectedName?: string;
   selectedLoaded: boolean;
-  role?: 'companion' | 'robot';
+  entryKind?: 'companion' | 'robot';
   activeDesktopId: ConversationId | null;
   creating: boolean;
   routing: boolean;
@@ -117,11 +117,11 @@ export default function CompanionSessionToolbar(props: Props) {
     <Button size='small' loading={props.creating} disabled={!props.canCreate || props.creating || props.managing} onClick={props.onCreate}>
       {t('nomi.cohabit.sessions.create')}
     </Button>
-    {props.selectedId && props.role === 'companion' && <Button size='small' type='text' loading={props.routing}
+    {props.selectedId && props.entryKind === 'companion' && <Button size='small' type='text' loading={props.routing}
       disabled={props.routing || props.managing || props.selectedId === props.activeDesktopId} onClick={props.onContinue}>
       {t(props.selectedId === props.activeDesktopId ? 'nomi.cohabit.sessions.windowCurrent' : 'nomi.cohabit.sessions.continueInWindow')}
     </Button>}
-    {props.role === 'robot' && <span className={styles.sessionRole}>{t('nomi.cohabit.sessions.robot')}</span>}
+    {props.entryKind === 'robot' && <span className={styles.sessionRole}>{t('nomi.cohabit.sessions.robot')}</span>}
     <Dropdown trigger='click' droplist={<Menu>
       <Menu.Item key='archive' disabled={!selected || props.managing || pending} onClick={() => void archive()}>{t(archived ? 'nomi.cohabit.sessions.restore' : 'nomi.cohabit.sessions.archive')}</Menu.Item>
       <Menu.Item key='clear' disabled={!selected || props.clearDisabled || props.managing || pending} onClick={() => openDialog('clear')}>{t('conversation.clearContext.description')}</Menu.Item>

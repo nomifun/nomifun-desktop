@@ -44,7 +44,7 @@ mod skill_io;
 
 pub use events::CompanionEventEmitter;
 pub use agent_memory_projection::{AgentMemoryProjection, AgentMemorySearchHit};
-pub use companion::CompanionRoleLaunchConfiguration;
+pub use companion::CompanionLaunchConfiguration;
 pub use agent_capability::{
     COMPANION_AGENT_ACTION_IDS, COMPANION_EVOLVE_ACTION_ID,
     COMPANION_LEARN_ACTION_ID, COMPANION_MEMORY_ACTION_IDS,
@@ -61,7 +61,7 @@ pub use memory_search::{
 pub use memory_context::CompanionMemoryContext;
 pub use learning_commit::{LearnedMemoryCandidate, LearnedMemoryReinforcement};
 pub use profile::{
-    CompanionEvolveConfig, CompanionLearnConfig, CompanionMood, CompanionProfileConfig, CompanionRobotConfig, CompanionSkillConfig,
+    CompanionEvolveConfig, CompanionLearnConfig, CompanionMood, CompanionProfileConfig, CompanionSkillConfig,
     CompanionWindowConfig, CustomFigureMeta, HeadBox, SharedArchiveConfig, SharedCompanionConfig,
 };
 pub use registry::CompanionRegistry;

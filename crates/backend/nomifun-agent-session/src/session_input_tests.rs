@@ -130,6 +130,41 @@ async fn input_preparation_block_is_visible_idempotent_and_does_not_block_later_
 }
 
 #[tokio::test]
+async fn cancelled_unclaimed_input_is_terminal_and_cannot_retry_or_steer_a_successor() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();
+    let(session,_)=create_ready(&store,"input-terminal-cancel").await;
+    let sid=&session.agent_session_id;
+    let input=accept(&store,sid,"cancelled","Do not execute this old instruction").await;
+    store.mark_session_input_blocked(sid,&input.event_id,SessionInputBlockedReason::CancelledByOwner).await.unwrap();
+    let cancelled_cursor=store.current_cursor(sid).await.unwrap();
+    let expected=json!({"state":"cancelled","reason":"CANCELLED_BY_OWNER","event_seq":cancelled_cursor.seq});
+    assert_eq!(store.session_input_delivery(sid,&input.event_id).await.unwrap(),expected);
+    assert!(store.pending_session_inputs(sid,None).await.unwrap().is_empty());
+    assert!(store.pending_session_inputs(sid,Some(&input.event_id)).await.unwrap().is_empty(),
+        "an explicit retry lookup cannot revive a terminal cancellation");
+    assert!(matches!(store.claim_session_input_as_turn(&owner(),sid,&input.event_id,&"cancelled-retry".into(),StrictJsonValue(json!({}))).await,
+        Err(SessionStoreError::ExecutionFenced)));
+    // Late preparation observations and exact-key transport redelivery keep
+    // the original accepted/cancellation facts instead of creating new work.
+    store.mark_session_input_blocked(sid,&input.event_id,SessionInputBlockedReason::SkillUnavailable).await.unwrap();
+    store.mark_session_input_blocked(sid,&input.event_id,SessionInputBlockedReason::CancelledByOwner).await.unwrap();
+    let replay=accept(&store,sid,"cancelled","Do not execute this old instruction").await;
+    assert_eq!(replay.event_id,input.event_id);
+    assert_eq!(store.current_cursor(sid).await.unwrap(),cancelled_cursor);
+    let later=accept(&store,sid,"later-new","Execute only this successor").await;
+    assert_eq!(store.pending_session_inputs(sid,Some(&input.event_id)).await.unwrap()[0].event.event_id,later.event_id);
+    store.claim_session_input_as_turn(&owner(),sid,&later.event_id,&"successor".into(),StrictJsonValue(json!({}))).await.unwrap();
+    assert!(matches!(store.claim_session_input_as_steering(&owner(),sid,&input.event_id,&"successor".into()).await,
+        Err(SessionStoreError::ExecutionFenced)));
+    assert!(store.session_input_claim(sid,&input.event_id).await.unwrap().is_none());
+    store.rebuild_projections(sid).await.unwrap();
+    assert_eq!(store.session_input_delivery(sid,&input.event_id).await.unwrap(),expected);
+    let history=store.messages_with_turns_after(sid,0).await.unwrap();
+    let original=history.iter().find(|message|message.projection_id==format!("message:{}",input.event_id.as_ref())).unwrap();
+    assert_eq!(original.projection["input_delivery"],expected);
+}
+
+#[tokio::test]
 async fn context_clear_discards_unclaimed_input_without_a_new_failure_or_replay_authority() {
     let store=AgentSessionStore::open_in_memory().await.unwrap();let(session,_)=create_ready(&store,"input-clear").await;
     let sid=&session.agent_session_id;let input=accept(&store,sid,"before-clear","Must not execute after clear").await;

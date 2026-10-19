@@ -79,6 +79,7 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
     if (conversationContext.isProcessing === true) return null;
     const lastRight = messageList.findLast((entry) => entry.type === 'text' && entry.position === 'right');
     if (!lastRight || lastRight.type !== 'text') return null;
+    if (lastRight.content.input_delivery?.state === 'cancelled') return null;
     if (lastRight.content.idmm_decision) return null;
     const retryMessageId = lastRight.message_id ?? lastRight.msg_id;
     const retryCreatedAt = lastRight.created_at;

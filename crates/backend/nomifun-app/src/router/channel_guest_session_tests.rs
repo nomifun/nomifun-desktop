@@ -25,6 +25,7 @@ struct Fixture {
     services: crate::services::AppServices,
     router: Router,
     owner: Arc<NomiCoreSessionOwner>,
+    api: NomiCoreAgentApiState,
     principal: PrincipalRef,
     model: nomifun_common::ProviderWithModel,
     private_model: nomifun_common::ProviderWithModel,
@@ -72,6 +73,7 @@ impl Fixture {
             .await
             .unwrap();
         let owner = states.nomi_core_agent_api.session_owner.clone();
+        let api = states.nomi_core_agent_api.clone();
         let router = super::super::super::create_router_with_states(&services, states);
         let principal = PrincipalRef {
             principal_kind: "user".into(),
@@ -143,6 +145,7 @@ impl Fixture {
             services,
             router,
             owner,
+            api,
             principal,
             model,
             private_model,
@@ -299,11 +302,15 @@ impl Fixture {
     }
 
     async fn accepted_origin(&self, session: &AgentSessionId, key: &str) -> Option<String> {
-        let operation = NomiCoreSessionOwner::turn_operation_id(
-            &self.principal.principal_id,
-            session.as_ref(),
-            key,
-        );
+        let operation = if let Some(input) = self.owner.canonical
+            .session_input_by_key(&self.principal, session, key).await.unwrap() {
+            self.owner.canonical.store().session_input_claim(session, &input.event.event_id)
+                .await.unwrap().expect("the admitted ordinary input must have its exact claim").operation_id
+        } else {
+            // Model-only guest ingress has its own current direct admission;
+            // approved ordinary input uses the SessionInput claim above.
+            NomiCoreSessionOwner::turn_operation_id(&self.principal.principal_id, session.as_ref(), key)
+        };
         self.owner
             .canonical
             .store()
@@ -977,6 +984,18 @@ async fn channel_guest_old_wide_idle_session_narrows_once_clears_context_and_pre
         replay.is_err(),
         "a broad completed result before the guest clear cannot be delivered to the group"
     );
+    let original_input=f.owner.canonical.session_input_by_key(&f.principal,&session,"approved-history").await.unwrap().unwrap();
+    assert!(ChannelSessionPort::observe_input(f.owner.as_ref(),&f.principal.principal_id,session.as_ref(),
+        original_input.event.event_id.as_ref()).await.is_err(),"input receipt hydration must enforce the same guest history boundary");
+    assert!(ChannelSessionPort::turn_outcome(f.owner.as_ref(),&f.principal.principal_id,session.as_ref(),
+        "approved-history").await.is_err(),"legacy receipt hydration cannot expose the original broad reply");
+    let owner_ack=ChannelSessionPort::send_turn(f.owner.as_ref(),&f.principal.principal_id,session.as_ref(),
+        "approved-history",message(PRIVATE_HISTORY)).await.unwrap();
+    assert_eq!(owner_ack.delivery.message_id,original_input.event.event_id.as_ref());
+    assert!(owner_ack.delivery.replayed&&!owner_ack.delivery.completed,
+        "the ordinary owner still receives the original acceptance without replaying work or returning its old result to a guest");
+    assert!(matches!(f.owner.session_turn_delivery_state(&f.principal.principal_id,session.as_ref(),"approved-history").await.unwrap(),
+        PublicTurnDeliveryState::Completed(_)),"owner-only history remains readable independently of channel delivery authority");
     assert_eq!(
         f.accepted_origin(&session, "approved-history").await,
         None,
@@ -1240,5 +1259,122 @@ async fn channel_guest_extra_flags_cannot_repurpose_an_ordinary_owner_session() 
         "neither the observer nor a rejected guest send may delete the ordinary owner's configuration"
     );
     assert!(f.upstream.received_requests().await.unwrap().is_empty());
+    f.finish().await;
+}
+
+
+#[tokio::test]
+async fn unavailable_unclaimed_input_ends_owner_channel_robot_and_remote_observation_without_a_turn() {
+    use nomifun_conversation::UnavailableInputCause;
+    use nomifun_agent_session::SessionInputBlockedReason;
+    let f=Fixture::new().await;
+    for (key,reason,expected) in [
+        ("blocked-before-claim",SessionInputBlockedReason::SkillUnavailable,
+            UnavailableInputCause::PreparationBlocked {reason:"SKILL_UNAVAILABLE".into()}),
+        ("cancel-before-claim",SessionInputBlockedReason::CancelledByOwner,UnavailableInputCause::CancelledByOwner),
+    ] {
+        let row=f.relationship("auto_group").await;
+        let created=ChannelSessionPort::create_group_guest_idempotent(f.owner.as_ref(),&f.principal.principal_id,
+            f.request(&f.model,json!({})),&f.opening(&row)).await.unwrap();
+        f.bind(&row,&created.conversation_id).await;
+        let session=AgentSessionId::from(created.conversation_id);
+        let body=json!({"content":"Original pending input","files":[],"inject_skills":[]});
+        let accepted=f.owner.canonical.accept_session_input(&f.principal,&session,key,body.clone()).await.unwrap().ack.unwrap();
+        f.owner.canonical.store().mark_session_input_blocked(&session,&accepted.event_id,reason).await.unwrap();
+        let cursor=f.owner.canonical.store().current_cursor(&session).await.unwrap();
+        assert_eq!(f.owner.session_turn_delivery_state(&f.principal.principal_id,session.as_ref(),key).await.unwrap(),
+            PublicTurnDeliveryState::InputUnavailable {message_id:accepted.event_id.as_ref().into(),cause:expected.clone(),event_seq:cursor.seq});
+        let observation=ChannelSessionPort::observe_input(f.owner.as_ref(),&f.principal.principal_id,session.as_ref(),accepted.event_id.as_ref()).await.unwrap();
+        match (&expected,observation) {
+            (UnavailableInputCause::CancelledByOwner,nomifun_channel::ChannelInputObservation::Discarded {reason})=>assert_eq!(reason,"CANCELLED_BY_OWNER"),
+            (UnavailableInputCause::PreparationBlocked {reason:expected},nomifun_channel::ChannelInputObservation::Blocked {reason})=>assert_eq!(&reason,expected),
+            _=>panic!("the exact unavailable input must finish observation for {expected:?}"),
+        }
+        assert!(tokio::time::timeout(Duration::from_millis(250),
+            f.owner.robot_output_wake(&f.principal.principal_id,session.as_ref(),key)).await.unwrap().unwrap().is_none(),
+            "no unclaimed terminal may wait for a nonexistent Runtime");
+        let replay=f.owner.canonical.accept_session_input(&f.principal,&session,key,body).await.unwrap();
+        assert!(replay.duplicate);assert_eq!(replay.ack.unwrap().event_id,accepted.event_id);
+        assert_eq!(f.owner.canonical.store().current_cursor(&session).await.unwrap(),cursor);
+        assert!(f.owner.canonical.store().session_input_claim(&session,&accepted.event_id).await.unwrap().is_none());
+        let turns:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_turns WHERE session_id=?")
+            .bind(session.as_ref()).fetch_one(&f.owner.pool).await.unwrap();
+        assert_eq!(turns,0,"an input observation is never a fabricated Turn terminal");
+        if matches!(expected,UnavailableInputCause::PreparationBlocked {..}) {
+            // A Remote cursor must observe the change after its original
+            // accepted event, while keeping the same canonical message ID.
+            let repository=&f.api.remote_repository;
+            let binding=f.owner.canonical.get(&f.principal,&session).await.unwrap().session.agent_binding;
+            let binding_id=Uuid::now_v7().to_string();
+            let digest=nomifun_agent_contracts::digest_payload(&binding).unwrap().as_ref().to_owned();
+            repository.create_binding(nomifun_db::CreateRemoteBindingParams {remote_binding_id:binding_id.clone(),
+                owner_user_id:f.principal.principal_id.clone(),name:"Unavailable input projection".into(),
+                agent_binding_json:serde_json::to_string(&binding).unwrap(),nomi_snapshot_json:"{}".into(),provenance_json:"{}".into(),
+                agent_binding_digest:digest.clone(),binding_version:binding.binding_version as i64}).await.unwrap();
+            repository.get_or_create_session(nomifun_db::GetOrCreateRemoteSessionParams {
+                owner_user_id:f.principal.principal_id.clone(),remote_binding_id:binding_id,
+                expected_binding_version:binding.binding_version as i64,expected_agent_binding_digest:digest,
+                open_idempotency_key:format!("open-{key}"),agent_session_id:session.as_ref().into(),initial_input_digest:None,
+            }).await.unwrap();
+            repository.set_session_state(&f.principal.principal_id,session.as_ref(),"ready").await.unwrap();
+            append_remote_event_once(repository,&f.principal.principal_id,session.as_ref(),"turn/accepted",Some(key),
+                json!({"message_id":accepted.event_id,"outcome":"accepted"})).await.unwrap();
+            let after=repository.read_events(&f.principal.principal_id,session.as_ref(),0,100).await.unwrap().next_cursor;
+            schedule_remote_turn_finalizer(&f.api,&f.principal.principal_id,&session,key).unwrap();
+            let events=tokio::time::timeout(Duration::from_secs(5),async {
+                loop {
+                    let page=repository.read_events(&f.principal.principal_id,session.as_ref(),after,100).await.unwrap();
+                    if !page.events.is_empty() {break page;}
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }).await.unwrap();
+            assert_eq!(events.events.len(),1);
+            assert_eq!(events.events[0].event_type,"session/state-changed");
+            let payload:Value=serde_json::from_str(&events.events[0].payload_json).unwrap();
+            assert_eq!(payload["message_id"],accepted.event_id.as_ref());
+            assert_eq!(payload["reason"],"SKILL_UNAVAILABLE");assert_eq!(payload["turn_admitted"],false);
+            assert_eq!(payload["source_operation_key_digest"],remote_operation_key_digest(key).unwrap());
+            assert_eq!(payload["input_event_seq"],cursor.seq);
+            assert_eq!(payload["operation_key_digest"],remote_operation_key_digest(&remote_input_change_key(key,accepted.event_id.as_ref(),cursor.seq).unwrap()).unwrap());
+            assert_eq!(repository.get_session(&f.principal.principal_id,session.as_ref()).await.unwrap().unwrap().state,"ready");
+            tokio::time::timeout(Duration::from_secs(5),async {
+                while !f.api.remote_runtime.is_empty() {tokio::time::sleep(Duration::from_millis(5)).await;}
+            }).await.unwrap();
+            schedule_remote_turn_finalizer(&f.api,&f.principal.principal_id,&session,key).unwrap();
+            tokio::time::timeout(Duration::from_secs(5),async {
+                while !f.api.remote_runtime.is_empty() {tokio::time::sleep(Duration::from_millis(5)).await;}
+            }).await.unwrap();
+            assert_eq!(repository.read_events(&f.principal.principal_id,session.as_ref(),after,100).await.unwrap().events,events.events,
+                "re-observing the original input must not add another Remote projection or retry its work");
+            assert_eq!(f.owner.canonical.store().current_cursor(&session).await.unwrap(),cursor);
+            f.owner.canonical.store().mark_session_input_blocked(&session,&accepted.event_id,SessionInputBlockedReason::CancelledByOwner).await.unwrap();
+            let cancelled=f.owner.canonical.store().current_cursor(&session).await.unwrap();
+            schedule_remote_turn_finalizer(&f.api,&f.principal.principal_id,&session,key).unwrap();
+            let changed=tokio::time::timeout(Duration::from_secs(5),async {
+                loop {
+                    let page=repository.read_events(&f.principal.principal_id,session.as_ref(),events.next_cursor,100).await.unwrap();
+                    if !page.events.is_empty() {break page;}
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }).await.unwrap();
+            assert_eq!(changed.events.len(),1);
+            assert_eq!(changed.events[0].event_type,"session/state-changed");
+            let changed_payload:Value=serde_json::from_str(&changed.events[0].payload_json).unwrap();
+            assert_eq!(changed_payload["message_id"],accepted.event_id.as_ref());
+            assert_eq!(changed_payload["reason"],"CANCELLED_BY_OWNER");
+            assert_eq!(changed_payload["source_operation_key_digest"],payload["source_operation_key_digest"]);
+            assert_eq!(changed_payload["input_event_seq"],cancelled.seq);
+            assert_ne!(changed_payload["operation_key_digest"],payload["operation_key_digest"]);
+            tokio::time::timeout(Duration::from_secs(5),async {
+                while !f.api.remote_runtime.is_empty() {tokio::time::sleep(Duration::from_millis(5)).await;}
+            }).await.unwrap();
+            schedule_remote_turn_finalizer(&f.api,&f.principal.principal_id,&session,key).unwrap();
+            tokio::time::timeout(Duration::from_secs(5),async {
+                while !f.api.remote_runtime.is_empty() {tokio::time::sleep(Duration::from_millis(5)).await;}
+            }).await.unwrap();
+            assert_eq!(repository.read_events(&f.principal.principal_id,session.as_ref(),events.next_cursor,100).await.unwrap().events,changed.events);
+            assert_eq!(f.owner.canonical.store().current_cursor(&session).await.unwrap(),cancelled);
+        }
+    }
     f.finish().await;
 }

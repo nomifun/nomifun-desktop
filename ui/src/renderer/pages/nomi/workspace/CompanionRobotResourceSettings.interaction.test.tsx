@@ -33,9 +33,10 @@ const conversationId = parseConversationId('019b0000-0000-7000-8000-000000000023
 const providerId = parseProviderId('019b0000-0000-7000-8000-000000000021');
 const idle = { id: conversationId, type: 'nomi', status: 'pending', extra: { workspace: '', companion_id: companionId, companion_role: 'robot' },
   model: { id: providerId, use_model: 'model-a' },
+  agent_snapshot: { enabled_capabilities: ['robot'] },
   runtime: { state: 'idle', is_processing: false, can_send_message: true, },
 } as TChatConversation;
-const options: ProductAgentOptions = { selection: { kind: 'template', template_key: 'companion.robot' }, needs_model: false, options: [] };
+const options: ProductAgentOptions = { selection: { kind: 'template', template_key: 'companion.default' }, needs_model: false, options: [] };
 const workspaceRoot = 'C:\\Companion\\existing-workspace';
 const resources = [
   { resource_kind: 'companion', resource_id: companionId },
@@ -93,7 +94,7 @@ const choose = async (view: ReturnType<typeof mount>, text: string) => {
 
 test('desktop companion Sessions without Robot authorization or an existing device do not load resources', async () => {
   const api = install();
-  const view = mount({ ...idle, extra: { ...idle.extra, companion_role: 'companion' } } as TChatConversation);
+  const view = mount(desktop(undefined, []));
   await act(async () => {});
   expect(view.container.textContent).toBe('');
   expect(api.get).not.toHaveBeenCalled();
@@ -101,7 +102,7 @@ test('desktop companion Sessions without Robot authorization or an existing devi
   expect(api.save).not.toHaveBeenCalled();
 });
 
-test.each(['robot', 'companion'] as const)('paired robots need an explicit apply and retain other resources through the actual %s endpoint', async (role) => {
+test.each(['robot', 'companion'] as const)('paired robots need an explicit apply and retain other resources for the %s input entrance', async (role) => {
   const { save, get, permissions } = install();
   let resolveSave!: () => void;
   save.mockImplementation(() => new Promise((resolve) => { resolveSave = () => resolve({ selection: options.selection!, needs_model: false }); }));
@@ -113,7 +114,7 @@ test.each(['robot', 'companion'] as const)('paired robots need an explicit apply
   fireEvent.click(view.getByRole('button', { name: 'Apply robot' }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   expect(get).toHaveBeenCalledTimes(2);
-  expect(save.mock.calls[0][0]).toEqual({ target_kind: role, target_id: companionId, request: {
+  expect(save.mock.calls[0][0]).toEqual({ target_kind: 'companion', target_id: companionId, request: {
     selection: options.selection, conversation_id: conversationId, model: { provider_id: providerId, model: 'model-a' },
     resource_selections: [...resources.map((resource) => resource.resource_kind === 'project_memory'
       ? { ...resource, resource_id: 'default-project-memory' }
@@ -150,16 +151,16 @@ test('desktop companion can remove its existing device resource even after Robot
   expect(save.mock.calls[0][0].request.resource_selections?.some((resource) => resource.resource_kind === 'robot')).toBe(false);
 });
 
-test('robot configuration reads the exact robot Session and never rewrites the companion role', async () => {
+test('device configuration reads the exact device Session through the unified companion target', async () => {
   const { save, getOptions } = install();
   const view = mount();
   await waitFor(() => expect(view.container.querySelector('.arco-select')).not.toBeNull());
-  expect(getOptions.mock.calls[0][0]).toEqual({ target_kind: 'robot', target_id: companionId, conversation_id: conversationId,
+  expect(getOptions.mock.calls[0][0]).toEqual({ target_kind: 'companion', target_id: companionId, conversation_id: conversationId,
     model: { provider_id: providerId, model: 'model-a' } });
   expect(save).not.toHaveBeenCalled();
 });
 
-test.each(['robot', 'companion'] as const)('a capability revision can be reapplied through the %s endpoint without changing the device', async (role) => {
+test.each(['robot', 'companion'] as const)('a capability revision can be reapplied for the %s input entrance without changing the device', async (role) => {
   const { save, setRobots } = install('robot-a');
   setRobots([robot('robot-a', 'Head A', companionId, 2)]);
   const view = mount(role === 'robot' ? idle : desktop('robot-a'));
@@ -168,7 +169,7 @@ test.each(['robot', 'companion'] as const)('a capability revision can be reappli
   expect(button.hasAttribute('disabled')).toBe(false);
   fireEvent.click(button);
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
-  expect(save.mock.calls[0][0].target_kind).toBe(role);
+  expect(save.mock.calls[0][0].target_kind).toBe('companion');
   expect(save.mock.calls[0][0].request.conversation_id).toBe(conversationId);
   expect(save.mock.calls[0][0].request.resource_selections?.find((item) => item.resource_kind === 'robot')?.resource_id).toBe('robot-a');
   await waitFor(() => expect(view.queryByRole('status')).toBeNull());

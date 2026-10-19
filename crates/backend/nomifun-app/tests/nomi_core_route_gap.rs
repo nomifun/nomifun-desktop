@@ -2692,8 +2692,35 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     services.database.close().await;
 }
 
+async fn wait_knowledge_turn_terminal_and_native_idle(services:&AppServices,session_id:&str,accepted_turn:&Value) {
+    let session=nomifun_agent_contracts::AgentSessionId::from(session_id.to_owned());
+    let operation=nomifun_agent_contracts::OperationId::from(accepted_turn["data"]["operation_id"]
+        .as_str().expect("the accepted Knowledge input returns its exact canonical operation").to_owned());
+    let store=nomifun_agent_session::AgentSessionStore::from_pool(services.database.pool().clone()).await.unwrap();
+    let settled=tokio::time::timeout(std::time::Duration::from_secs(15),async {loop {
+        let receipt=store.read_turn_receipt(&session,&operation).await.unwrap();
+        if receipt.terminal_event.is_some() {
+            assert_eq!(receipt.status,nomifun_agent_session::TurnReceiptStatus::Completed,
+                "the exact Knowledge Turn failed before its idle boundary: {receipt:?}");
+        }
+        let head=store.head(&session).await.unwrap();
+        let native_idle=services.agent_runtime_sessions.active_turn_generation(session_id).is_none()
+            &&match services.agent_runtime_sessions.get_runtime(session_id) {
+                Some(runtime)=>runtime.is_transport_healthy()&&matches!(runtime.status(),None|Some(
+                    nomifun_common::ConversationStatus::Pending|nomifun_common::ConversationStatus::Finished)),
+                None=>!services.agent_runtime_sessions.has_owned_runtime(session_id),
+            };
+        if receipt.terminal_event.is_some()&&head.status=="ready"&&head.active_turn_id.is_none()&&native_idle {break;}
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }}).await;
+    assert!(settled.is_ok(),"exact Knowledge Turn {operation:?} did not release its canonical/native owner: receipt={:?}, head={:?}, native_generation={:?}, runtime_status={:?}",
+        store.read_turn_receipt(&session,&operation).await.unwrap(),store.head(&session).await.unwrap(),
+        services.agent_runtime_sessions.active_turn_generation(session_id),
+        services.agent_runtime_sessions.get_runtime(session_id).and_then(|runtime|runtime.status()));
+}
+
 #[tokio::test]
-async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatically() {
+async fn canonical_session_updates_knowledge_retrieves_on_demand_and_writes_back_automatically() {
     let client = LocalJsonClient(TRUST);
     const TRUST: &str = "canonical-knowledge-tool";
     const QUERY: &str = "NOMIFUN_KNOWLEDGE_QUERY_9233";
@@ -3271,12 +3298,12 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     assert_eq!(requests.len(), 4, "search, read, final, and automatic write-back rounds are required");
     let first = &requests[0];
     let prompt = first["messages"].to_string();
-    assert!(prompt.contains("host performs one bounded search for every user turn"), "{first}");
+    assert!(prompt.contains("Use knowledge/search and knowledge/read when the current task needs facts"), "{first}");
     assert!(prompt.contains("write-back is enabled in automatic mode"), "{first}");
     assert!(prompt.contains("Python handbook"), "{first}");
     assert!(prompt.contains("Engineering notes"), "{first}");
-    assert!(prompt.contains("nomifun_knowledge_retrieval"), "{first}");
-    assert!(prompt.contains(RESULT_MARKER), "{first}");
+    assert!(!prompt.contains("nomifun_knowledge_retrieval"), "{first}");
+    assert!(!prompt.contains(RESULT_MARKER), "document bodies must wait for a real tool request: {first}");
     assert!(first["tools"].as_array().unwrap().iter().any(|tool| {
         tool["function"]["description"]
             .as_str()
@@ -3288,6 +3315,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
             .is_some_and(|description| description.contains("Action: knowledge/write"))
     }));
     assert!(requests[1].to_string().contains("knowledge-search-call"), "{}", requests[1]);
+    assert!(requests[1].to_string().contains(RESULT_MARKER), "actual search results must reach the model: {}", requests[1]);
     assert!(requests[2].to_string().contains(RESULT_MARKER), "{}", requests[2]);
     assert!(requests[3].to_string().contains(REPLY), "{}", requests[3]);
     drop(requests);
@@ -3321,6 +3349,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     .expect("automatic write-back must publish a durable Knowledge file");
     assert!(written.content.contains(WRITEBACK_MARKER));
 
+    wait_knowledge_turn_terminal_and_native_idle(&services,session_id,&turn).await;
     let (status, disabled_after_runtime) = client.call(
         router.clone(),
         "PUT",
@@ -3368,6 +3397,7 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     })
     .await
     .expect("Knowledge-disabled reply must become durable");
+    wait_knowledge_turn_terminal_and_native_idle(&services,session_id,&disabled_turn).await;
     let requests = model_requests.lock().unwrap();
     let disabled_request = requests.last().unwrap();
     assert!(!disabled_request.to_string().contains("nomifun_knowledge_retrieval"));
@@ -3426,9 +3456,10 @@ async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatic
     })
     .await
     .expect("read-only Knowledge reply must become durable");
+    wait_knowledge_turn_terminal_and_native_idle(&services,session_id,&read_only_turn).await;
     let requests = model_requests.lock().unwrap();
     let read_only_request = requests.last().unwrap();
-    assert!(read_only_request.to_string().contains("nomifun_knowledge_retrieval"));
+    assert!(!read_only_request.to_string().contains("nomifun_knowledge_retrieval"));
     let tools = read_only_request["tools"].as_array().unwrap();
     assert!(tools.iter().any(|tool| {
         tool["function"]["description"]
@@ -4802,6 +4833,62 @@ struct StartedCompanion {
     unchanged: Value,
 }
 
+async fn original_history_fact_fingerprints(services:&AppServices,session:&str,through:i64)->Vec<(i64,String,String)> {
+    let rows:Vec<(i64,String,String)>=sqlx::query_as(
+        "SELECT e.seq,e.event_id,json_object(\
+          'session_id',e.session_id,'producer_id',e.producer_id,'idempotency_key',e.idempotency_key,\
+          'kind',e.kind,'kind_version',e.kind_version,'correlation_id',e.correlation_id,\
+          'causation_event_id',e.causation_event_id,'inline_json',e.inline_json,'payload_id',e.payload_id,\
+          'payload_session_id',p.session_id,'media_type',p.media_type,'byte_len',p.byte_len,\
+          'digest',p.digest,'body_hex',hex(p.body)) \
+         FROM agent_events e LEFT JOIN agent_payloads p ON p.payload_id=e.payload_id \
+         WHERE e.session_id=? AND e.seq<=? ORDER BY e.seq")
+        .bind(session).bind(through).fetch_all(services.database.pool()).await.unwrap();
+    rows.into_iter().map(|(seq,id,raw)|(seq,id,format!("{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(raw.as_bytes())))).collect()
+}
+
+fn history_dto_changed_paths(before:&Value,after:&Value,prefix:&str,paths:&mut Vec<String>) {
+    if before==after {return;}
+    match(before,after) {
+        (Value::Object(left),Value::Object(right))=>{
+            let keys=left.keys().chain(right.keys()).collect::<std::collections::BTreeSet<_>>();
+            for key in keys {history_dto_changed_paths(left.get(key).unwrap_or(&Value::Null),
+                right.get(key).unwrap_or(&Value::Null),&format!("{prefix}/{key}"),paths);}
+        },
+        (Value::Array(left),Value::Array(right)) if left.len()==right.len()=>{
+            for(index,(left,right))in left.iter().zip(right).enumerate(){history_dto_changed_paths(left,right,&format!("{prefix}/{index}"),paths);}
+        },
+        _=>paths.push(prefix.to_owned()),
+    }
+}
+
+fn assert_history_identity_and_content_preserved(before:&Value,after:&Value) {
+    for original in before["data"]["items"].as_array().unwrap() {
+        let id=original["message_id"].as_str().unwrap();
+        let current=after["data"]["items"].as_array().unwrap().iter().find(|item|item["message_id"]==id)
+            .unwrap_or_else(||panic!("the original canonical message {id} disappeared from history"));
+        let mut changed=Vec::new();history_dto_changed_paths(original,current,"",&mut changed);
+        if !changed.is_empty() {
+            eprintln!("HISTORY_DTO_COMPARISON message={id} changed_paths={} prior_watermark={} current_watermark={}",
+                json!(changed),original.pointer("/content/timeline/through_seq").unwrap_or(&Value::Null),
+                current.pointer("/content/timeline/through_seq").unwrap_or(&Value::Null));
+        }
+        // A new binding event advances this read snapshot's observation bound.
+        // IDs, text, type, status and every timeline segment remain identical.
+        assert!(changed.iter().all(|path|path=="/content/timeline/through_seq"),
+            "history changed outside its observed timeline watermark: message={id}, paths={changed:?}");
+        if let Some(previous)=original.pointer("/content/timeline/through_seq").and_then(Value::as_u64) {
+            assert!(current.pointer("/content/timeline/through_seq").and_then(Value::as_u64).is_some_and(|seq|seq>=previous));
+        }
+        let(mut old,mut new)=(original.clone(),current.clone());
+        for value in [&mut old,&mut new] {
+            if let Some(timeline)=value.pointer_mut("/content/timeline").and_then(Value::as_object_mut){timeline.remove("through_seq");}
+        }
+        assert_eq!(old,new,"the original HTTP identity, content and timeline segments must remain exact");
+    }
+}
+
 /// Exercise real initial admission, concurrent ensure, failure cleanup and history
 /// once per isolated fixture; both Agent-edit paths begin from this same state.
 async fn started_companion_fixture() -> StartedCompanion {
@@ -5078,42 +5165,67 @@ async fn started_companion_fixture() -> StartedCompanion {
 }
 
 #[tokio::test]
-async fn robot_and_desktop_roles_coexist_with_independent_canonical_sessions() {
+async fn one_companion_agent_serves_independent_desktop_and_device_sessions() {
     let call = companion_agent_test_request;
     let fixture = started_companion_fixture().await;
     let router = fixture.router;
     let services = fixture.services;
     let companion_id = fixture.companion_id.as_str();
     let desktop_id = fixture.conversation_id.as_str();
+    let original_through:i64=sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=?")
+        .bind(desktop_id).fetch_one(services.database.pool()).await.unwrap();
+    assert!(original_through>0);
+    let original_facts=original_history_fact_fingerprints(&services,desktop_id,original_through).await;
     let model = json!({"provider_id":fixture.provider_id,"model":"step-3.7-flash"});
-    let desktop_path = format!("/api/product-agent-bindings/companion/{companion_id}");
-    let robot_path = format!("/api/product-agent-bindings/robot/{companion_id}");
+    let agent_path = format!("/api/product-agent-bindings/companion/{companion_id}");
     let desktop_projection = format!("/api/agent-sessions/{desktop_id}/projection");
     let memory = services.companion_service.add_memory("preference", "ROBOT_PROFILE_MEMORY_PRESERVED", &[], Some(companion_id))
         .await.unwrap();
-    let (status, robot_editor) = call(router.clone(), "POST", "/api/agent-presets/from-template/companion.robot", json!({
-        "display_name":"companion.robot", "reuse_existing":true, "model":model,
-    })).await;
-    assert_eq!(status, StatusCode::OK, "{robot_editor}");
-    assert_eq!(robot_editor["data"]["draft"]["source_template_key"], "companion.robot");
-    let capabilities = robot_editor["data"]["draft"]["document"]["enabled_capabilities"].as_array().unwrap();
-    assert_eq!(capabilities.iter().map(|capability| capability["capability"]["id"].as_str().unwrap())
-        .collect::<std::collections::BTreeSet<_>>(), std::collections::BTreeSet::from([
-            "agent.collaboration", "companion", "companion.memory", "robot", "session.management"]));
-    let robot_preset = robot_editor["data"]["preset"]["preset_id"].as_str().unwrap();
-    let mut detached = robot_editor["data"]["draft"].clone();
+    let (status, library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{library}");
+    let shared_preset = library["data"]["official_presets"]["companion.default"]["preset_id"].as_str().unwrap();
+    let (status, editor) = call(router.clone(), "GET",
+        &format!("/api/agent-presets/{shared_preset}/editor"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{editor}");
+    assert_eq!(editor["data"]["draft"]["source_template_key"], "companion.default");
+    let mut detached = editor["data"]["draft"].clone();
     detached["document"]["enabled_capabilities"].as_array_mut().unwrap()
         .retain(|capability| capability["capability"]["id"] != "companion.memory");
-    let (status, rejected) = call(router.clone(), "POST", &format!("/api/agent-presets/{robot_preset}/revisions"), json!({
-        "expected_current_revision":robot_editor["data"]["revision"]["reference"], "draft":detached,
+    let revision_path = format!("/api/agent-presets/{shared_preset}/revisions");
+    let (status, rejected) = call(router.clone(), "POST", &revision_path, json!({
+        "expected_current_revision":editor["data"]["revision"]["reference"], "draft":detached,
     })).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
     assert_eq!(rejected["code"], "PRESET_REVISION_SAVE_FAILED");
-    let selection = json!({"kind":"template", "template_key":"companion.robot"});
-    let (status, saved_robot) = call(router.clone(), "PUT", &robot_path, json!({
-        "selection":selection,"model":model,"resource_selections":[],
+    // One authored Agent grants both ordinary work and optional device Actions.
+    // Device identity is selected when the physical Session opens, never by a
+    // second weaker preset or an implicit desktop delegation.
+    let mut shared_draft = editor["data"]["draft"].clone();
+    shared_draft["document"]["enabled_capabilities"].as_array_mut().unwrap().extend([
+        json!({"capability":{"id":"robot"},"action_allowlist":["robot/device","robot/display","robot/motion","robot/vision"]}),
+        json!({"capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read"]}),
+    ]);
+    let (status, saved) = call(router.clone(), "POST", &revision_path, json!({
+        "expected_current_revision":editor["data"]["revision"]["reference"], "draft":shared_draft,
     })).await;
-    assert_eq!(status, StatusCode::OK, "{saved_robot}");
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let selection = json!({"kind":"template", "template_key":"companion.default"});
+    let (status, applied) = call(router.clone(), "PUT", &agent_path, json!({
+        "selection":selection,"model":model,"conversation_id":desktop_id,"update_default":true,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    let (status, desktop_before_device) = call(router.clone(), "GET", &desktop_projection, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{desktop_before_device}");
+    let (status,history_before_device)=call(router.clone(),"GET",
+        &format!("/api/agent-sessions/{desktop_id}/message-history?page_size=50"),json!({})).await;
+    assert_eq!(status,StatusCode::OK,"{history_before_device}");
+    assert_history_identity_and_content_preserved(&fixture.history,&history_before_device);
+    assert_eq!(original_history_fact_fingerprints(&services,desktop_id,original_through).await,original_facts,
+        "the explicit Agent transition never rewrites original Event metadata, payload references or payload bytes");
+    let (status, retired_target) = call(router.clone(), "GET",
+        &format!("/api/product-agent-bindings/robot/{companion_id}"), json!({})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{retired_target}");
+    assert_eq!(retired_target["code"], "CAPABILITY_UNAVAILABLE_ON_PLATFORM");
     let registry = &services.robot.as_ref().unwrap().registry;
     let (device, _) = registry.upsert_on_report(nomifun_robot::registry::RobotReport {
         robot_id:"coexisting-device".into(), client_id:"coexisting-client".into(),
@@ -5135,24 +5247,37 @@ async fn robot_and_desktop_roles_coexist_with_independent_canonical_sessions() {
     assert_eq!(status, StatusCode::OK, "{projected}");
     assert_eq!(projected["data"]["extra"]["companion_role"], "robot");
     assert_eq!(projected["data"]["extra"]["robot_id"], device.robot_id);
-    assert_eq!(projected["data"]["extra"]["official_template_key"], "companion.robot");
+    assert_eq!(projected["data"]["extra"]["official_template_key"], "companion.default");
+    assert_eq!(projected["data"]["extra"]["product_agent_target_kind"], "companion");
+    assert_eq!(projected["data"]["agent_snapshot"]["resolved_model"],
+        desktop_before_device["data"]["agent_snapshot"]["resolved_model"], "all entries share the selected main model");
+    assert_eq!(projected["data"]["agent_snapshot"]["enabled_capability_actions"],
+        desktop_before_device["data"]["agent_snapshot"]["enabled_capability_actions"],
+        "the device entry preserves the complete shared Agent capability selection");
+    assert_eq!(projected["data"]["agent_snapshot"]["enabled_capability_actions"]["workspace.files"],
+        json!(["workspace.files/read"]), "ordinary file authority survives the physical entry");
     let resources = projected["data"]["agent_snapshot"]["canonical_binding"]["typed_resource_bindings"].as_array().unwrap();
     assert!(resources.iter().any(|resource| resource["resource_kind"] == "robot" && resource["resource_id"] == device.robot_id));
     for kind in ["companion", "companion_memory"] {
         assert!(resources.iter().any(|resource| resource["resource_kind"] == kind && resource["resource_id"] == companion_id));
     }
+    assert!(resources.iter().any(|resource| resource["resource_kind"] == "workspace"
+        && resource["owner_id"] == services.authoritative_user_id.as_ref()),
+        "ordinary work retains its own real owner-bound resource");
     let (status, desktop_unchanged) = call(router.clone(), "GET", &desktop_projection, json!({})).await;
     assert_eq!(status, StatusCode::OK, "{desktop_unchanged}");
     assert_eq!(desktop_unchanged["data"]["agent_snapshot"]["canonical_binding"],
-        fixture.unchanged["data"]["agent_snapshot"]["canonical_binding"], "Robot defaults cannot alter the existing desktop Agent");
+        desktop_before_device["data"]["agent_snapshot"]["canonical_binding"], "opening a device Session cannot mutate an existing Session binding");
     let (status, history) = call(router.clone(), "GET",
         &format!("/api/agent-sessions/{desktop_id}/message-history?page_size=50"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{history}");
-    for item in fixture.history["data"]["items"].as_array().unwrap() {
-        assert!(history["data"]["items"].as_array().unwrap().contains(item), "role separation preserves all desktop history");
-    }
+    assert_eq!(history["data"]["items"],history_before_device["data"]["items"],
+        "opening another device Session does not advance or change the desktop history snapshot");
+    assert_history_identity_and_content_preserved(&fixture.history,&history);
+    assert_eq!(original_history_fact_fingerprints(&services,desktop_id,original_through).await,original_facts,
+        "independent entries preserve the complete original Event/Payload prefix byte for byte");
     assert_eq!(memory.companion_id.as_deref(), Some(companion_id));
-    assert_eq!(fixture.upstream.received_requests().await.unwrap().len(), 1, "role configuration performs no model call");
+    assert_eq!(fixture.upstream.received_requests().await.unwrap().len(), 1, "configuration and resource assembly perform no model call");
     let (status, turn) = call(router.clone(), "POST", &format!("/api/agent-sessions/{robot_id}/turns"), json!({
         "idempotency_key":uuid::Uuid::now_v7().to_string(),"input":{"content":"Say hello as this companion"},
     })).await;
@@ -5164,34 +5289,21 @@ async fn robot_and_desktop_roles_coexist_with_independent_canonical_sessions() {
             if completed == 1 { break; }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-    }).await.expect("the device role must complete its own ordinary conversation");
+    }).await.expect("the device entry must complete its own ordinary conversation");
     let requests = fixture.upstream.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);
     let actual = requests[1].body_json::<Value>().unwrap();
     let system = actual["messages"].as_array().unwrap().iter().filter(|message| message["role"] == "system")
         .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
-    assert!(system.contains("Agent-bound companion"), "the Robot role shares the exact Companion persona");
-    assert!(system.contains("当前物理机器人"), "the actual BeforeTurn Context resolves the canonical Robot role");
-    let desktop_request = requests[0].body_json::<Value>().unwrap();
-    let desktop_system = desktop_request["messages"].as_array().unwrap().iter()
-        .filter(|message| message["role"] == "system").map(|message| message["content"].to_string())
-        .collect::<Vec<_>>().join("\n");
-    for desktop_guidance in ["住在主人电脑", "知识沉淀技巧", "终端或应用", "Skill 与 MCP"] {
-        assert!(!system.contains(desktop_guidance), "Robot BeforeTurn must exclude desktop boilerplate: {desktop_guidance}");
-        assert!(desktop_system.contains(desktop_guidance), "the same host preserves desktop guidance for the desktop role: {desktop_guidance}");
-    }
-    assert!(system.contains("ROBOT_PROFILE_MEMORY_PRESERVED"), "the Robot role reads the same owner's durable memory");
+    assert!(system.contains("Agent-bound companion"), "the device entry shares the exact Companion persona");
+    assert!(system.contains("当前物理机器人"), "canonical entry identity supplies physical reply context");
+    assert!(system.contains("ROBOT_PROFILE_MEMORY_PRESERVED"), "the device entry reads the same owner's durable memory");
     assert!(system.contains("Current frozen physical Robot tool mapping (data, not additional authority): []"),
-        "the empty device catalog uses the lean profile with no callable physical tools");
-    assert!(!system.contains("Current admitted workspace data"), "Robot context does not inject desktop orientation");
+        "the selected device's empty catalog grants no invented hardware tools");
     let names = actual["tools"].as_array().into_iter().flatten().filter_map(|tool|
         tool["function"]["name"].as_str()).collect::<Vec<_>>();
-    assert!(names.iter().all(|name| !matches!(*name,
-        "read_file" | "write_file" | "apply_patch" | "list_directory" | "start_process" | "write_stdin")
-        && !name.starts_with("terminal_") && !name.starts_with("workspace_")),
-        "Robot does not inherit local desktop execution tools: {names:?}");
     assert!(names.iter().all(|name| !name.starts_with("robot_")), "the empty physical device catalog has no callable tool surface");
-    let (status, authorized) = call(router.clone(), "PUT", &desktop_path, json!({
+    let (status, authorized) = call(router.clone(), "PUT", &agent_path, json!({
         "selection":selection, "model":model, "conversation_id":desktop_id, "update_default":false,
         "resource_selections":[{"resource_kind":"robot", "resource_id":device.robot_id}],
     })).await;
@@ -5199,17 +5311,17 @@ async fn robot_and_desktop_roles_coexist_with_independent_canonical_sessions() {
     let (status, desktop_authorized) = call(router.clone(), "GET", &desktop_projection, json!({})).await;
     assert_eq!(status, StatusCode::OK, "{desktop_authorized}");
     assert_eq!(desktop_authorized["data"]["extra"]["companion_role"], "companion",
-        "explicit Robot authorization does not retarget the desktop input lane");
+        "explicit device authorization does not retarget the desktop input lane");
     assert!(desktop_authorized["data"]["agent_snapshot"]["enabled_capabilities"].as_array().unwrap().contains(&json!("robot")),
         "the explicitly selected Agent retains its Robot capability");
     let resources = desktop_authorized["data"]["agent_snapshot"]["canonical_binding"]["typed_resource_bindings"].as_array().unwrap();
     assert!(resources.iter().any(|resource| resource["resource_kind"] == "robot" && resource["resource_id"] == device.robot_id
         && resource["owner_id"] == services.authoritative_user_id.as_ref()),
         "desktop hardware access still requires the selected real owned device");
-    let (status, defaults) = call(router.clone(), "GET", &desktop_path, json!({})).await;
+    let (status, defaults) = call(router.clone(), "GET", &agent_path, json!({})).await;
     assert_eq!(status, StatusCode::OK, "{defaults}");
     assert_eq!(defaults["data"]["selection"], json!({"kind":"template", "template_key":"companion.default"}),
-        "applying an explicit Agent to this Session preserves future desktop defaults");
+        "explicit Session resource changes preserve the one shared Agent default");
     assert_eq!(fixture.upstream.received_requests().await.unwrap().len(), 2, "authorizing capabilities performs no model call");
     let thread_path = format!("/api/companion/companions/{companion_id}/companion/threads");
     let (status, extra) = call(router.clone(), "POST", &thread_path, json!({

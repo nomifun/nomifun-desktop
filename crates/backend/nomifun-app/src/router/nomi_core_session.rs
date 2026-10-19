@@ -27,6 +27,10 @@ mod channel_input_delivery;
 mod channel_input_observation;
 #[path = "session_input_intake.rs"]
 mod session_input_intake;
+#[path = "robot_public_output.rs"]
+mod robot_public_output;
+#[path = "robot_saved_response.rs"]
+mod robot_saved_response;
 #[path = "native_execution_control.rs"]
 pub(super) mod native_execution_control;
 
@@ -35,9 +39,18 @@ mod companion_sessions;
 pub(super) use companion_sessions::canonical_companion_origin;
 #[path = "companion_directed_reports.rs"]
 mod companion_directed_reports;
+#[path = "execution_source_context.rs"]
+mod execution_source_context;
+#[path = "companion_binding_evolution.rs"]
+mod companion_binding_evolution;
+#[path = "robot_background_control.rs"]
+mod robot_background_control;
+#[path = "session_admission.rs"]
+mod session_admission;
+pub(crate) use session_admission::canonical_admission_binding_ref;
 #[path = "companion_report_delivery.rs"]
 mod companion_report_delivery;
-pub(crate) use companion_report_delivery::DirectedReportDeliveryPort;
+pub(crate) use companion_report_delivery::ExecutionReportDeliveryPort;
 #[path = "companion_decision_delivery.rs"]
 mod companion_decision_delivery;
 
@@ -176,8 +189,9 @@ pub(crate) struct NomiCoreSessionOwner {
         std::sync::OnceLock<std::sync::Weak<NomiCoreProductAgentResolver>>,
     idmm: std::sync::OnceLock<std::sync::Weak<nomifun_idmm::IdmmService>>,
     companion_service: std::sync::OnceLock<std::sync::Weak<nomifun_companion::CompanionService>>,
-    directed_report_delivery: std::sync::OnceLock<std::sync::Weak<dyn DirectedReportDeliveryPort>>,
-    directed_voice_work: std::sync::OnceLock<std::sync::Weak<super::voice_work_host::AppVoiceWorkHost>>,
+    execution_report_delivery: std::sync::OnceLock<std::sync::Weak<dyn ExecutionReportDeliveryPort>>,
+    execution_voice_work: std::sync::OnceLock<std::sync::Weak<super::voice_work_host::AppVoiceWorkHost>>,
+    execution_progress: std::sync::OnceLock<std::sync::Weak<nomifun_agent_execution::AgentExecutionEngine>>,
     canonical: CanonicalAgentSessionOwner,
     runtime_sessions: Arc<dyn AgentRuntimeSessions>,
     user_events: Arc<dyn UserEventSink>,
@@ -417,7 +431,7 @@ fn product_agent_resource_selections(
             } else { resource.resource_id.clone() },
         }).collect());
     let exact_identity_kinds: &[&str] = match target.target_kind.as_str() {
-        "companion" | "robot" => &["companion", "companion_memory"],
+        "companion" => &["companion", "companion_memory"],
         "creative_studio_canvas" => &["canvas"],
         "customer" => &["customer"],
         _ => &[],
@@ -489,7 +503,7 @@ impl NomiCoreProductAgentResolver {
         Ok(())
     }
 
-    async fn materialize(&self, owner: &UserId, selection: &ProductAgentSelection, model: Option<&AgentChatModelSelectionDto>, robot_role: bool) -> Result<AgentBindingValueDto, AppError> {
+    async fn materialize(&self, owner: &UserId, selection: &ProductAgentSelection, model: Option<&AgentChatModelSelectionDto>, companion: bool) -> Result<AgentBindingValueDto, AppError> {
         self.control_plane.validate_product_selection(owner, selection.template_id(), selection.preset_id(), model).await.map_err(control_plane_error_to_app)?;
         let preset_id = match selection {
             ProductAgentSelection::Preset { preset_id } => preset_id.clone(),
@@ -499,8 +513,8 @@ impl NomiCoreProductAgentResolver {
                     model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
                 }).await.map_err(control_plane_error_to_app)?.preset.preset_id,
         };
-        if robot_role {
-            self.control_plane.resolve_companion_robot_session_binding_with_model(owner, &preset_id, model)
+        if companion {
+            self.control_plane.resolve_companion_session_binding_with_model(owner, &preset_id, model)
                 .await.map_err(control_plane_error_to_app)
         } else {
             self.control_plane.resolve_agent_session_binding_with_model(owner, &preset_id, model).await.map_err(control_plane_error_to_app)
@@ -528,7 +542,7 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             .await
             .map_err(control_plane_error_to_app)?;
         let mut selection = self.selection(&owner, &target.target_kind, &target.target_id).await?;
-        if matches!(target.target_kind.as_str(), "companion" | "robot") {
+        if target.target_kind == "companion" {
             if let Some(selection) = selection.as_ref() {
                 require_companion_agent_selection(&self.control_plane, &owner, selection).await
                     .map_err(|error| AppError::UnprocessableEntity(error.message.clone()))?;
@@ -544,7 +558,7 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
         }
         let binding = if let Some(selection) = selection {
             let model = requested_model.map(|model| AgentChatModelSelectionDto { provider_id: model.provider_id.clone(), model: model.model.clone() });
-            let mut binding = self.materialize(&owner, &selection, model.as_ref(), target.target_kind == "robot").await?;
+            let mut binding = self.materialize(&owner, &selection, model.as_ref(), target.target_kind == "companion").await?;
             let (_, _, next_snapshot) = self.control_plane
                 .saved_binding_artifacts(&owner, &binding)
                 .await
@@ -583,8 +597,8 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
         } else if let Some(existing) = existing {
             if let Some(model) = requested_model {
                 let model = AgentChatModelSelectionDto { provider_id: model.provider_id.clone(), model: model.model.clone() };
-                if target.target_kind == "robot" {
-                    self.control_plane.resolve_companion_robot_session_binding_with_model(
+                if target.target_kind == "companion" {
+                    self.control_plane.resolve_companion_session_binding_with_model(
                         &owner, &existing.agent_binding.preset_revision_ref.preset_id, Some(&model))
                         .await.map_err(control_plane_error_to_app)?
                 } else { self
@@ -619,8 +633,8 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
                 )
                 .await
                 .map_err(control_plane_error_to_app)?;
-            let binding = if target.target_kind == "robot" {
-                self.control_plane.resolve_companion_robot_session_binding_with_model(&owner, &editor.preset.preset_id, None)
+            let binding = if target.target_kind == "companion" {
+                self.control_plane.resolve_companion_session_binding_with_model(&owner, &editor.preset.preset_id, None)
                     .await.map_err(control_plane_error_to_app)?
             } else { self
                 .control_plane
@@ -750,6 +764,11 @@ impl nomifun_customer_service::CustomerServiceAgentPolicyResolver
 }
 
 impl NomiCoreSessionOwner {
+    pub(crate) fn install_execution_progress_owner(&self, execution: &Arc<nomifun_agent_execution::AgentExecutionEngine>) -> Result<(), String> {
+        self.execution_progress.set(Arc::downgrade(execution))
+            .map_err(|_| "Execution progress owner was already installed".into())
+    }
+
     pub(crate) fn new(
         canonical: CanonicalAgentSessionOwner,
         runtime_sessions: Arc<dyn AgentRuntimeSessions>,
@@ -767,8 +786,9 @@ impl NomiCoreSessionOwner {
             product_agent_resolver: std::sync::OnceLock::new(),
             idmm: std::sync::OnceLock::new(),
             companion_service: std::sync::OnceLock::new(),
-            directed_report_delivery: std::sync::OnceLock::new(),
-            directed_voice_work: std::sync::OnceLock::new(),
+            execution_report_delivery: std::sync::OnceLock::new(),
+            execution_voice_work: std::sync::OnceLock::new(),
+            execution_progress: std::sync::OnceLock::new(),
             runtime_sessions,
             user_events,
             background_tasks,
@@ -1029,7 +1049,7 @@ impl NomiCoreSessionOwner {
         companion_scope: Option<nomifun_agent_contracts::CompanionSessionOrigin>,
         source_session: Option<&AgentSessionId>,
     ) -> Result<ConversationResponse, AppError> {
-        if creation_key.starts_with("companion-directed:") && source_session.is_none() {
+        if creation_key.starts_with("execution-source:") && source_session.is_none() {
             return Err(AppError::Forbidden("Directed Companion creation identity is reserved for admitted delegation".into()));
         }
         let _companion_lifecycle = if let Some(scope) = companion_scope.as_ref() {
@@ -1637,6 +1657,7 @@ impl NomiCoreSessionOwner {
         input["admission"] = json!({
             "route_identity": route_identity,
             "resolved_snapshot_ref": snapshot.snapshot_ref,
+            "binding_ref":nomifun_agent_contracts::AgentHandoffBindingRefV1::from(&saved_binding),
         });
         Ok(input)
     }
@@ -2049,7 +2070,9 @@ impl NomiCoreSessionOwner {
         let relay_session_id = session_id.clone();
         let store = self.canonical.store().clone();
         let input_owner=self.native_engines.get().and_then(std::sync::Weak::upgrade).and_then(|host|host.session_owner().ok());
+        let execution_progress=self.execution_progress.get().and_then(std::sync::Weak::upgrade);
         let task = async move {
+            let mut committed_terminal = false;
             loop {
                 let mut event = tokio::select! {
                     _ = cancellation.cancelled() => break,
@@ -2075,6 +2098,7 @@ impl NomiCoreSessionOwner {
                     // producer owns the Turn. Only a matching canonical
                     // terminal may close the product stream.
                     if !Self::canonical_stream_terminal_agrees(&store, &session_id, &operation_id, turn_generation, &event).await { break; }
+                    committed_terminal = true;
                     // The SDK has already closed its execution progress port.
                     // Publish only read-only final references through this
                     // existing, receipt-verified terminal relay.
@@ -2156,7 +2180,12 @@ impl NomiCoreSessionOwner {
                     "canonical Runtime turn release failed"
                 );
             }
-            if let Some(owner)=input_owner {owner.schedule_session_input_drain(owner_id,session_id,None);}
+            if let Some(owner)=input_owner {owner.schedule_session_input_drain(owner_id.clone(),session_id.clone(),None);}
+            if committed_terminal && let Some(execution)=execution_progress {
+                if let Err(error)=execution.notify_source_turn_settled(&owner_id,session_id.as_ref(),operation_id.as_ref()).await {
+                    tracing::warn!(agent_session_id=session_id.as_ref(),%error,"source completion could not advance Execution delivery; durable recovery remains available");
+                }
+            }
         };
         if !self.background_tasks.spawn(Box::pin(task)) {
             tracing::warn!(
@@ -2309,6 +2338,7 @@ impl NomiCoreSessionOwner {
                     user_input_request: None,
                 }),
                 PublicTurnDeliveryState::Completed(delivery) => Ok(delivery),
+                PublicTurnDeliveryState::InputUnavailable {message_id,cause,..} => Err(session_input_intake::unavailable_input_error(&message_id,&cause)),
                 PublicTurnDeliveryState::Missing => Err(AppError::Conflict(
                     "canonical turn replay lost its durable receipt".to_owned(),
                 )),
@@ -2875,9 +2905,7 @@ impl NomiCoreSessionOwner {
         if let Some(decision) = &decision {
             decision.validate().map_err(|error| AppError::Conflict(error.into()))?;
         }
-        let input_source: Option<nomifun_agent_contracts::AgentInputSource> = input.get("input_source")
-            .filter(|value| !value.is_null()).cloned().map(serde_json::from_value).transpose()
-            .map_err(|error| AppError::Conflict(format!("accepted input source is invalid: {error}")))?;
+        let input_source = super::engine_session_host::historical_input_source_wire(input)?;
         Ok(WebSocketMessage::new("message.userCreated", json!({
             "conversation_id":session_id,"msg_id":event.event_id,
             "content":content,"idmm_decision":decision,"input_source":input_source,"input_delivery":input.get("input_delivery"),
@@ -2925,6 +2953,12 @@ impl NomiCoreSessionOwner {
         if let Some(input)=self.canonical.session_input_by_key(&principal,&session_id,idempotency_key).await? {
             if let Some(claim)=self.canonical.store().session_input_claim(&session_id,&input.event.event_id).await.map_err(agent_session_store_error)? {
                 return self.canonical_delivery_state_for_operation(owner_id,&session_id,&claim.operation_id,true).await;
+            }
+            let state=self.canonical.store().session_input_delivery(&session_id,&input.event.event_id).await.map_err(agent_session_store_error)?;
+            if let Some(cause)=session_input_intake::unclaimed_input_unavailability(&state)? {
+                let event_seq=state["event_seq"].as_u64().filter(|seq|*seq>0)
+                    .ok_or_else(||AppError::Internal("canonical unavailable input lost its event sequence".into()))?;
+                return Ok(PublicTurnDeliveryState::InputUnavailable {message_id:input.event.event_id.as_ref().into(),cause,event_seq});
             }
             return Ok(PublicTurnDeliveryState::Accepted {message_id:input.event.event_id.as_ref().into()});
         }
@@ -3530,7 +3564,6 @@ fn product_agent_target_from_request(extra: &Value) -> Option<ProductAgentTarget
     ) {
         let default_template_key = match target_kind {
             "companion" => "companion.default",
-            "robot" => "companion.robot",
             "customer" => "customer-service.default",
             "creative_studio_canvas" => "creative-studio.default",
             _ => return None,
@@ -3708,12 +3741,12 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                 // reads. Its committed terminal is irreversible: re-read the
                 // same operation instead of publishing stale Accepted as a
                 // resumed execution and spending a suspended wait's budget.
-                return Ok(cron_turn_state_from_conversation(self.session_turn_delivery_state(
+                return cron_turn_state_from_conversation(self.session_turn_delivery_state(
                     &query.owner_id, query.agent_session_id.as_ref(), &query.idempotency_key,
-                ).await?));
+                ).await?);
             }
         }
-        Ok(cron_turn_state_from_conversation(state))
+        cron_turn_state_from_conversation(state)
     }
 
     async fn reconcile_turn_receipt(
@@ -3731,6 +3764,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
             PublicTurnDeliveryState::Missing => Ok(
                 nomifun_cron::CronTurnReconciliation::StaleConflict,
             ),
+            PublicTurnDeliveryState::InputUnavailable {..} => Ok(nomifun_cron::CronTurnReconciliation::StaleConflict),
             PublicTurnDeliveryState::Completed(_) => Ok(
                 nomifun_cron::CronTurnReconciliation::ReconciledOrTerminalReRead,
             ),
@@ -3893,6 +3927,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
             .await?
         {
             PublicTurnDeliveryState::Missing => None,
+            PublicTurnDeliveryState::InputUnavailable {message_id,cause,..} => return Err(session_input_intake::unavailable_input_error(&message_id,&cause)),
             PublicTurnDeliveryState::Accepted { message_id } => {
                 Some(cron_delivery_from_conversation(IdempotentMessageDelivery {
                     turn_outcome: None,
@@ -4023,9 +4058,11 @@ impl nomifun_channel::ChannelSessionPort for NomiCoreSessionOwner {
         session_id: &str,
         idempotency_key: &str,
     ) -> Result<nomifun_channel::ChannelTurnReceiptState, AppError> {
+        let _observation=self.session_operation_lock(session_id).read_owned().await;
+        self.guard_channel_guest_key_read(owner_id,&AgentSessionId::from(session_id.to_owned()),idempotency_key).await?;
         self.session_turn_delivery_state(owner_id, session_id, idempotency_key)
             .await
-            .map(channel_turn_receipt_state_from_conversation)
+            .and_then(channel_turn_receipt_state_from_conversation)
     }
 
     async fn cancel(&self, owner_id: &str, session_id: &str) -> Result<(), AppError> {
@@ -4318,6 +4355,16 @@ impl nomifun_requirement::AutoWorkSessionConfigPort for NomiCoreSessionOwner {
 
 #[async_trait]
 impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
+    async fn prepare_companion_entry(&self,owner_id:&str,companion_id:&str,session_id:&str)->Result<(),AppError> {
+        let session_id=AgentSessionId::from(session_id);
+        let _fence=self.session_operation_lock(session_id.as_ref()).write_owned().await;
+        let observation=self.canonical.get(&PrincipalRef{principal_kind:"user".into(),principal_id:owner_id.into()},&session_id).await?;
+        if !canonical_companion_origin(owner_id,&observation)?.is_some_and(|scope|scope.companion_id==companion_id) {
+            return Err(AppError::Forbidden("Companion entry belongs to another canonical persona".into()));
+        }
+        self.prepare_retired_companion_device_binding_locked(owner_id,&session_id).await?;
+        Ok(())
+    }
     async fn context_role(
         &self,
         owner_id: &str,
@@ -4375,10 +4422,23 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
         let scope = nomifun_agent_contracts::CompanionSessionOrigin {
             companion_id: companion_id.clone(), role, robot_id: context.robot_id.clone(),
         };
+        let principal=PrincipalRef{principal_kind:"user".into(),principal_id:owner_id.into()};
+        let previous_key=format!("user:{owner_id}:open:{}",context.idempotency_key);
+        if let Some((previous,opening))=self.canonical.store().session_by_opening_key(&principal,&previous_key)
+            .await.map_err(agent_session_store_error)?
+            && !opening.idempotency_key.as_ref().starts_with(&format!("user:{owner_id}:open:unified-companion-entry:")) {
+            let previous_id=previous.agent_session_id;
+            let observed=self.canonical.get(&principal,&previous_id).await?;
+            if canonical_companion_origin(owner_id,&observed)?.as_ref()!=Some(&scope) {
+                return Err(AppError::Conflict("Companion creation retry belongs to another canonical entry".into()));
+            }
+            nomifun_companion::CompanionSessionPort::prepare_companion_entry(self,owner_id,&companion_id,previous_id.as_ref()).await?;
+            return self.get_session(owner_id,previous_id.as_ref()).await;
+        }
         let resolver = self.product_agent_resolver.get().and_then(std::sync::Weak::upgrade)
             .ok_or_else(|| AppError::Conflict("Companion Agent resolver is unavailable".into()))?;
         if role == nomifun_agent_contracts::CompanionSessionRole::Robot {
-            let robot_id = context.robot_id.as_deref().ok_or_else(|| AppError::BadRequest("Robot role requires an exact device".into()))?;
+            let robot_id = context.robot_id.as_deref().ok_or_else(|| AppError::BadRequest("Physical entry requires an exact device".into()))?;
             resolver.resource_bindings.validate_robot_companion_identity(owner_id, &companion_id, robot_id)
                 .await.map_err(|error| AppError::Conflict(format!("{}: {}", error.code(), error.message())))?;
         }
@@ -4391,33 +4451,26 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
             .ok_or_else(|| AppError::Conflict("Companion Agent has no canonical binding".into()))?;
         let (_, _, snapshot) = resolver.control_plane.saved_binding_artifacts(&owner, current).await.map_err(control_plane_error_to_app)?;
         let mut selection = session_capability_selection::selection(&snapshot);
-        if role == nomifun_agent_contracts::CompanionSessionRole::Robot {
-            selection.skill_names.extend(skill_names);
-            selection.skill_names.sort();
-            selection.skill_names.dedup();
-            if let Some(mcp_server_ids) = context.mcp_server_ids {
-                selection.mcp_server_ids.extend(mcp_server_ids);
-                selection.mcp_server_ids.sort();
-                selection.mcp_server_ids.dedup();
-            }
-        } else {
-            selection.skill_names = skill_names;
-            if let Some(mcp_server_ids) = context.mcp_server_ids { selection.mcp_server_ids = mcp_server_ids; }
+        // Profile launch additions apply equally at every entry. Empty new
+        // profile defaults cannot revoke the saved Agent author's explicit
+        // Skill or MCP selection.
+        selection.skill_names.extend(skill_names);
+        selection.skill_names.sort();
+        selection.skill_names.dedup();
+        if let Some(mcp_server_ids) = context.mcp_server_ids {
+            selection.mcp_server_ids.extend(mcp_server_ids);
+            selection.mcp_server_ids.sort();
+            selection.mcp_server_ids.dedup();
         }
-        let mut binding = if role == nomifun_agent_contracts::CompanionSessionRole::Robot {
-            resolver.control_plane.resolve_agent_session_capabilities_binding_selected_skills(
-                &owner, current, &selection).await.map_err(control_plane_error_to_app)?
-        } else {
-            resolver.control_plane.resolve_agent_session_capabilities_binding(&owner, current, Some(&selection))
-                .await.map_err(control_plane_error_to_app)?
-        };
+        let mut binding = resolver.control_plane.resolve_agent_session_capabilities_binding(
+            &owner, current, Some(&selection)).await.map_err(control_plane_error_to_app)?;
         let (_, _, role_snapshot) = resolver.control_plane.saved_binding_artifacts(&owner, &binding).await.map_err(control_plane_error_to_app)?;
         let required_kinds = role_snapshot.content.required_resource_kinds.iter()
             .map(|kind| kind.as_ref().to_owned()).collect::<BTreeSet<_>>();
         let mut selections = product_agent_resource_selections(&target, &required_kinds,
             &current.typed_resource_bindings, None);
         if role == nomifun_agent_contracts::CompanionSessionRole::Robot {
-            let robot_id = context.robot_id.as_ref().ok_or_else(|| AppError::BadRequest("Robot role requires an exact device".into()))?;
+            let robot_id = context.robot_id.as_ref().ok_or_else(|| AppError::BadRequest("Physical entry requires an exact device".into()))?;
             selections.retain(|resource| resource.resource_kind != "robot");
             if required_kinds.contains("robot") {
                 selections.push(AgentResourceSelectionDto { resource_kind: "robot".into(), resource_id: robot_id.clone() });
@@ -4431,11 +4484,12 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
         binding.typed_resource_bindings.extend(mcp);
         let binding: AgentBindingValue = serde_json::to_value(binding).and_then(serde_json::from_value).map_err(|error| AppError::Conflict(error.to_string()))?;
         attach_session_metadata(&mut request.extra, &binding, None).map_err(|error| AppError::Conflict(error.message))?;
+        let creation_key=format!("unified-companion-entry:{}",context.idempotency_key);
         self.create_session_idempotent_scoped(
             owner_id,
             request,
             None,
-            &context.idempotency_key,
+            &creation_key,
             Some(scope),
             None,
         )
@@ -4675,30 +4729,38 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         self.create_session_idempotent(owner_id, request, Some(snapshot), creation_key).await
     }
 
-    async fn create_directed_from_agent_snapshot_idempotent(&self, owner_id: &str,
+    async fn create_from_source_snapshot_idempotent(&self, owner_id: &str,
         request: CreateConversationRequest, snapshot: AgentResolvedSnapshot,
-        source: &nomifun_agent_execution::DirectedDelegationSource, creation_key: &str,
+        source: &nomifun_agent_execution::AgentExecutionSource, creation_key: &str,
     ) -> Result<ConversationResponse, AppError> {
         let source_session = AgentSessionId::from(source.agent_session_id.clone());
         let observation = self.canonical.get(&PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() }, &source_session).await?;
-        let origin = canonical_companion_origin(owner_id, &observation)?
-            .filter(|scope| scope.role == nomifun_agent_contracts::CompanionSessionRole::Robot)
-            .ok_or_else(|| AppError::Forbidden("Directed desktop work requires its canonical Robot source".into()))?;
-        let exact_effect: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_effects WHERE effect_id=? AND session_id=? AND turn_id=? AND operation_id=? AND capability_module='agent.collaboration' AND action_id='agent/delegate' AND state IN ('pending','returned'))")
-            .bind(&source.effect_id).bind(&source.agent_session_id).bind(&source.turn_operation_id).bind(&source.tool_operation_id)
-            .fetch_one(&self.pool).await.map_err(|error| AppError::Internal(error.to_string()))?;
-        if exact_effect == 0 { return Err(AppError::Forbidden("Directed child has no exact admitted delegation effect".into())); }
-        let binding = snapshot.canonical_binding.as_ref().ok_or_else(|| AppError::Conflict("Directed desktop target has no frozen binding".into()))?;
-        let binding: AgentBindingValue = serde_json::to_value(binding).and_then(serde_json::from_value).map_err(|error| AppError::Internal(error.to_string()))?;
-        if companion_id_from_binding(&binding)?.as_deref() != Some(origin.companion_id.as_str())
-            || snapshot.enabled_capabilities.iter().any(|capability| capability == "robot") {
-            return Err(AppError::Forbidden("Directed target differs from its Companion desktop role".into()));
+        let origin = canonical_companion_origin(owner_id, &observation)?;
+        let effect=self.canonical.store().read_effect(&source_session,&source.effect_id).await.map_err(agent_session_store_error)?
+            .ok_or_else(||AppError::Forbidden("Execution child has no exact admitted delegation Effect".into()))?;
+        if effect.turn_id.as_ref()!=source.turn_operation_id || effect.operation_id.as_ref()!=source.tool_operation_id
+            ||effect.owner_domain!="wave5.product" ||effect.capability_module.as_ref()!="agent.collaboration"
+            ||!matches!(effect.action_id.as_ref(),"agent/delegate"|"agent/fork")
+            ||!matches!(effect.state,nomifun_agent_session::AgentEffectState::Pending|nomifun_agent_session::AgentEffectState::Returned) {
+            return Err(AppError::Forbidden("Execution child differs from its exact admitted delegation Effect".into()));
         }
-        let scope = nomifun_agent_contracts::CompanionSessionOrigin { companion_id: origin.companion_id,
-            role: nomifun_agent_contracts::CompanionSessionRole::Companion, robot_id: None };
-        companion_sessions::validate_role_resources(&scope, snapshot.canonical_binding.as_ref().unwrap())?;
-        let directed_key = format!("companion-directed:{creation_key}");
-        self.create_session_idempotent_scoped(owner_id, request, Some(snapshot), &directed_key, Some(scope), Some(&source_session)).await
+        self.canonical.store().committed_tool_call_causation(&source_session,&effect.turn_id,&effect.operation_id,
+            &effect.capability_module,&effect.action_id).await.map_err(agent_session_store_error)?;
+        let source_receipt=self.canonical.store().read_turn_receipt(&source_session,&effect.turn_id).await.map_err(agent_session_store_error)?;
+        if !matches!(source_receipt.status,nomifun_agent_session::TurnReceiptStatus::Running|nomifun_agent_session::TurnReceiptStatus::Completed) {
+            return Err(AppError::Forbidden("Execution source request was cancelled or did not complete normally".into()));
+        }
+        let binding = snapshot.canonical_binding.as_ref().ok_or_else(|| AppError::Conflict("Execution target has no frozen binding".into()))?;
+        let binding: AgentBindingValue = serde_json::to_value(binding).and_then(serde_json::from_value).map_err(|error| AppError::Internal(error.to_string()))?;
+        let scope = if let Some(origin) = origin {
+            if companion_id_from_binding(&binding)?.as_deref() != Some(origin.companion_id.as_str()) {
+                return Err(AppError::Forbidden("Execution target belongs to another Companion".into()));
+            }
+            Some(nomifun_agent_contracts::CompanionSessionOrigin { companion_id: origin.companion_id,
+                role: nomifun_agent_contracts::CompanionSessionRole::Companion, robot_id: None })
+        } else { None };
+        let key = format!("execution-source:{creation_key}");
+        self.create_session_idempotent_scoped(owner_id, request, Some(snapshot), &key, scope, Some(&source_session)).await
     }
 
     async fn discard_unlinked_creation(
@@ -4707,7 +4769,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         creation_key: &str,
     ) -> Result<(), AppError> {
         let scoped = format!("user:{owner_id}:open:{creation_key}");
-        let directed = format!("user:{owner_id}:open:companion-directed:{creation_key}");
+        let directed = format!("user:{owner_id}:open:execution-source:{creation_key}");
         let session_id: Option<String> = sqlx::query_scalar(
             "SELECT session_id FROM agent_events \
              WHERE producer_id = 'session_api' AND idempotency_key IN (?, ?) \
@@ -4805,6 +4867,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
             .await?
         {
             PublicTurnDeliveryState::Missing => None,
+            PublicTurnDeliveryState::InputUnavailable {message_id,cause,..} => return Err(session_input_intake::unavailable_input_error(&message_id,&cause)),
             PublicTurnDeliveryState::Accepted { message_id } => {
                 let mut delivery = agent_execution_delivery_from_conversation(IdempotentMessageDelivery {
                     turn_outcome: None,
@@ -5090,19 +5153,19 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         Ok(message_id)
     }
 
-    async fn project_directed_execution_report_idempotent(&self, owner_id: &str,
+    async fn project_execution_report_idempotent(&self, owner_id: &str,
         conversation_id: &str, operation_id: &str, content: &str,
-        report: &nomifun_agent_execution::DirectedDelegationReport,
+        report: &nomifun_agent_execution::AgentExecutionReport,
     ) -> Result<String, AppError> {
-        let message_id = companion_directed_reports::project_directed_report(self, owner_id, conversation_id,
+        let message_id = companion_directed_reports::project_execution_report(self, owner_id, conversation_id,
             operation_id, content, report).await?;
-        self.deliver_committed_directed_report(owner_id, conversation_id, operation_id, &message_id).await?;
+        self.deliver_committed_execution_report(owner_id, conversation_id, operation_id, &message_id).await?;
         Ok(message_id)
     }
 
-    async fn notify_directed_input_required_idempotent(&self, owner_id: &str,
-        input: &nomifun_agent_execution::DirectedDelegationInput) -> Result<(), AppError> {
-        self.notify_directed_input_required(owner_id, input).await
+    async fn notify_execution_input_required_idempotent(&self, owner_id: &str,
+        input: &nomifun_agent_execution::AgentExecutionInput) -> Result<(), AppError> {
+        self.notify_execution_input_required(owner_id, input).await
     }
 }
 
@@ -5143,8 +5206,9 @@ fn channel_delivery_from_conversation(
 
 fn channel_turn_receipt_state_from_conversation(
     state: PublicTurnDeliveryState,
-) -> nomifun_channel::ChannelTurnReceiptState {
-    match state {
+) -> Result<nomifun_channel::ChannelTurnReceiptState,AppError> {
+    Ok(match state {
+        PublicTurnDeliveryState::InputUnavailable {message_id,cause,..} => return Err(session_input_intake::unavailable_input_error(&message_id,&cause)),
         PublicTurnDeliveryState::Missing => nomifun_channel::ChannelTurnReceiptState::Missing,
         PublicTurnDeliveryState::Accepted { message_id } => {
             nomifun_channel::ChannelTurnReceiptState::Accepted { message_id }
@@ -5165,7 +5229,7 @@ fn channel_turn_receipt_state_from_conversation(
                 },
             )
         }
-    }
+    })
 }
 
 fn cron_turn_message_to_request(
@@ -5200,8 +5264,9 @@ fn cron_delivery_from_conversation(
 
 fn cron_turn_state_from_conversation(
     state: PublicTurnDeliveryState,
-) -> nomifun_cron::CronTurnReceiptState {
-    match state {
+) -> Result<nomifun_cron::CronTurnReceiptState,AppError> {
+    Ok(match state {
+        PublicTurnDeliveryState::InputUnavailable {message_id,cause,..} => return Err(session_input_intake::unavailable_input_error(&message_id,&cause)),
         PublicTurnDeliveryState::Missing => nomifun_cron::CronTurnReceiptState::Missing,
         PublicTurnDeliveryState::Accepted { message_id } => {
             nomifun_cron::CronTurnReceiptState::Accepted { message_id }
@@ -5211,7 +5276,7 @@ fn cron_turn_state_from_conversation(
                 cron_delivery_from_conversation(delivery),
             )
         }
-    }
+    })
 }
 
 fn cron_session_handle_from_response(
@@ -5866,7 +5931,8 @@ fn canonical_conversation_response(
     let companion_creation_key = companion_origin.as_ref().and_then(|_| observed.events.iter()
         .find(|event| event.seq == 1 && event.kind.0 == "session/opening"
             && event.producer_id.as_ref() == "session_api")
-        .and_then(|event| event.idempotency_key.as_ref().strip_prefix(&creation_prefix)).map(str::to_owned));
+        .and_then(|event| event.idempotency_key.as_ref().strip_prefix(&creation_prefix))
+        .map(|key|key.strip_prefix("unified-companion-entry:").unwrap_or(key).to_owned()));
     let SessionObservation { session, head, events, active_turn_outcome, .. } = observed;
     let super::agent_binding_projection::SavedAgentBindingProjection {
         binding,
@@ -8550,6 +8616,7 @@ impl nomifun_gateway::ConversationCapabilityPort for GatewayAgentSessionCapabili
                 Ok(Some(gateway_delivery(delivery)))
             }
             PublicTurnDeliveryState::Missing | PublicTurnDeliveryState::Accepted { .. } => Ok(None),
+            PublicTurnDeliveryState::InputUnavailable {message_id,cause,..} => Err(session_input_intake::unavailable_input_error(&message_id,&cause)),
         }
     }
 
@@ -9164,7 +9231,7 @@ async fn product_agent_options(
     Query(query): Query<ProductAgentOptionsQuery>,
 ) -> Result<Json<ApiResponse<ProductAgentOptions>>, NomiCoreApiError> {
     let default = require_product_target(&state, &owner, &kind, &id)?;
-    if matches!(kind.as_str(), "companion" | "robot") {
+    if kind == "companion" {
         state.wave4_owners.companion.service().get_companion(&id).await?;
     }
     let model = match (query.provider_id, query.model) {
@@ -9187,7 +9254,7 @@ async fn product_agent_options(
             candidates.push((selection.clone(), String::new()));
         }
     }
-    let active_companion_selection = if matches!(kind.as_str(), "companion" | "robot") {
+    let active_companion_selection = if kind == "companion" {
         if let Some(session_id) = query.conversation_id {
             let _operation_fence = state.session_owner.session_operation_lock(&session_id).read_owned().await;
             let observation = require_companion_product_session(&state, &owner, &kind, &id, &session_id).await?;
@@ -9234,7 +9301,7 @@ async fn product_agent_options(
     }
     let mut options = Vec::new();
     for (selection, display_name) in candidates {
-        if matches!(kind.as_str(), "companion" | "robot") {
+        if kind == "companion" {
             if let Err(error) = require_companion_agent_selection(&state.control_plane, &owner, &selection).await {
                 let reason = if error.code == "COMPANION_AGENT_REQUIRED" { "companion" }
                     else if error.code == "AGENT_PRESET_NOT_FOUND" { "removed" } else { "capability" };
@@ -9337,7 +9404,7 @@ async fn require_companion_product_session(
     if !scope.is_some_and(|scope| scope.companion_id == companion_id
         && companion_sessions::role_target_kind(scope.role) == target_kind) {
         return Err(NomiCoreApiError::new(StatusCode::FORBIDDEN, "RESOURCE_OWNER_MISMATCH",
-            "Session belongs to another Companion role"));
+            "Session belongs to another Companion"));
     }
     Ok(observation)
 }
@@ -9345,7 +9412,6 @@ async fn require_companion_product_session(
 fn product_default_template(target_kind: &str) -> Option<&'static str> {
     match target_kind {
         "companion" => Some("companion.default"),
-        "robot" => Some("companion.robot"),
         "customer" => Some("customer-service.default"),
         "creative_studio_canvas" => Some("creative-studio.default"),
         _ => None,
@@ -9364,7 +9430,7 @@ async fn select_product_agent_binding(
         (None, Some(preset_id)) => ProductAgentSelection::Preset { preset_id },
         _ => return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST, "AGENT_PRESET_NOT_FOUND", "select exactly one Agent")),
     };
-    let is_companion_role = matches!(target_kind.as_str(), "companion" | "robot");
+    let is_companion_role = target_kind == "companion";
     if is_companion_role {
         state.wave4_owners.companion.service().get_companion(&target_id).await?;
         require_companion_agent_selection(&state.control_plane, &owner, &selection).await?;
@@ -9428,7 +9494,7 @@ async fn select_product_agent_binding(
     let mut response = json!({ "selection": selection, "needs_model": model.is_none() });
     let mut prepared_product_binding = None;
     if model.is_some() && update_default {
-        let mut binding = state.product_agent_resolver.materialize(&owner, &selection, model.as_ref(), target_kind == "robot").await?;
+        let mut binding = state.product_agent_resolver.materialize(&owner, &selection, model.as_ref(), target_kind == "companion").await?;
         let existing = state.control_plane
             .get_agent_binding(&owner, target_kind.clone(), target_id.clone())
             .await?;
@@ -10893,6 +10959,20 @@ async fn record_remote_turn_delivery(
     Ok((terminal, succeeded))
 }
 
+fn remote_unavailable_initial_input(message_id:&str,cause:&nomifun_conversation::UnavailableInputCause)->Value {
+    let state=match cause {
+        nomifun_conversation::UnavailableInputCause::CancelledByOwner=>"cancelled",
+        nomifun_conversation::UnavailableInputCause::ContextCleared=>"discarded",
+        nomifun_conversation::UnavailableInputCause::PreparationBlocked {..}=>"blocked",
+    };
+    json!({"outcome":"ready","message_id":message_id,"turn_admitted":false,
+        "initial_input":{"message_id":message_id,"state":state,"reason":cause.code()}})
+}
+
+fn remote_input_change_key(operation_key:&str,message_id:&str,event_seq:u64)->Result<String,NomiCoreApiError> {
+    Ok(format!("session-input-change:{}:{message_id}:{event_seq}",remote_operation_key_digest(operation_key)?))
+}
+
 /// Execute and durably settle the optional initial Remote turn. The complete
 /// workflow lives inside the coordinator task so an HTTP waiter timeout cannot
 /// strand a successful delivery without its Remote event/state projection.
@@ -10954,6 +11034,12 @@ async fn execute_initial_remote_turn(
                     )
                     .await?;
                     return Ok(current);
+                }
+                Ok(PublicTurnDeliveryState::InputUnavailable {message_id,cause,..}) => {
+                    // Only this accepted input ended. Opening the Session did
+                    // not fail, and no Turn terminal may be manufactured.
+                    return transition_remote_state(state,owner,session_id,current,"ready",
+                        &format!("open-ready:{open_key}"),remote_unavailable_initial_input(&message_id,&cause)).await;
                 }
                 Ok(PublicTurnDeliveryState::Missing) => {
                     return transition_remote_state(
@@ -11137,6 +11223,34 @@ fn schedule_remote_turn_finalizer(
                                     error = ?error,
                                     "Nomi-core Remote initial state transition failed"
                                 );
+                            }
+                        }
+                        return;
+                    }
+                    Ok(PublicTurnDeliveryState::InputUnavailable {message_id,cause,event_seq}) => {
+                        // Wake the existing Remote projection cursor so its
+                        // reader hydrates this original message's canonical
+                        // input state. This is not a Turn terminal receipt.
+                        let notification=async {
+                            let notice_key=remote_input_change_key(&operation_key,&message_id,event_seq)?;
+                            append_remote_event_once(&repository,&owner_id,session_id.as_ref(),
+                                "session/state-changed",Some(&notice_key),json!({"message_id":message_id,
+                                    "source_operation_key_digest":remote_operation_key_digest(&operation_key)?,
+                                    "input_event_seq":event_seq,"outcome":"input_unavailable","reason":cause.code(),"turn_admitted":false})).await
+                        }.await;
+                        if let Err(error)=notification {
+                            tracing::warn!(?error,"Remote original input state notification could not be saved");
+                        }
+                        if let Some(open_key)=operation_key.strip_prefix("remote-initial:") {
+                            match repository.get_session(&owner_id,session_id.as_ref()).await {
+                                Ok(Some(current)) if current.state=="opening"=>{
+                                    if let Err(error)=transition_remote_state_with_repository(&repository,&owner_id,&session_id,current,
+                                        "ready",&format!("open-ready:{open_key}"),remote_unavailable_initial_input(&message_id,&cause)).await {
+                                        tracing::warn!(?error,"Remote Session ready state could not record its unavailable original input");
+                                    }
+                                },
+                                Ok(Some(_))|Ok(None)=>{},
+                                Err(error)=>tracing::warn!(%error,"Remote original input owner could not be read"),
                             }
                         }
                         return;

@@ -195,12 +195,6 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("agent.collaboration", COLLABORATION),
             ("knowledge.management", KNOWLEDGE_MANAGEMENT),
             ("session.management", SESSION_MANAGEMENT),
-        ])),
-        (OfficialPresetKey::CompanionRobot, actions(&[
-            ("agent.collaboration", &["agent/delegate"]),
-            ("session.management", &["session.management/execution_answer_decision", "session.management/execution_cancel", "session.management/execution_status"]),
-            ("companion", &["companion/evolve", "companion/learn"]),
-            ("companion.memory", &["companion.memory/recall", "companion.memory/write"]),
             ("robot", &["robot/device", "robot/display", "robot/motion", "robot/vision"]),
         ])),
         (OfficialPresetKey::CustomerServiceDefault, actions(&[
@@ -227,11 +221,19 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("automation.schedule", SCHEDULE),
         ])),
     ]);
+    expected.get_mut(&OfficialPresetKey::CompanionDefault).unwrap()
+        .get_mut("session.management").unwrap()
+        .insert("session.management/execution_answer_decision".to_owned());
     let mut app_expected = expected[&OfficialPresetKey::CodingCodex].clone();
     app_expected.extend(actions(&[("app.hosting", &["app.hosting/guide", "app.hosting/current", "app.hosting/import", "app.hosting/list",
         "app.hosting/update", "app.hosting/preview", "app.hosting/rebuild", "app.hosting/start", "app.hosting/status", "app.hosting/stop"])]));
     expected.insert(OfficialPresetKey::AppDeveloper, app_expected);
     let manifest = official_preset_seed_manifest_payload();
+    assert_eq!(manifest.templates.keys().filter(|key|key.as_str().starts_with("companion.")).copied()
+        .collect::<BTreeSet<_>>(), BTreeSet::from([OfficialPresetKey::CompanionDefault]),
+        "all Companion entries use one official Agent definition");
+    assert!(manifest.templates[&OfficialPresetKey::CompanionDefault].required_resource_kinds.iter()
+        .any(|kind|kind.as_ref()=="robot"), "device Actions retain their explicit resource requirement");
     for key in OfficialPresetKey::ALL {
         let actual = manifest.templates[&key].enabled_capabilities.iter()
             .map(|selection| (
@@ -818,10 +820,6 @@ fn official_session_resources(
             resource("project_memory", "default-project-memory"),
             resource("scheduler", "installation-scheduler"),
             resource("workspace", "default-workspace"),
-        ]),
-        "companion.robot" => serde_json::json!([
-            resource("companion", companion_id),
-            resource("companion_memory", companion_id),
         ]),
         "customer-service.default" => serde_json::json!([
             resource("customer", customer_id),

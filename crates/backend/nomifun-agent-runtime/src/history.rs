@@ -280,7 +280,7 @@ fn replay_into(
                     batch.flush(history, false)?;
                     batch = ReplayBatch::default();
                 } else if *discard_last_model_step {
-                    if !batch.started.is_empty() || !batch.results.is_empty() || !retained_tool_call_ids.is_empty()
+                    if !batch.started.is_empty() || !batch.results.is_empty() || batch.public_committed || !retained_tool_call_ids.is_empty()
                         || batch.proposed != discarded_tool_call_ids.iter().cloned().collect() {
                         return Err(invalid("reconciliation discard would hide admitted work"));
                     }
@@ -334,6 +334,10 @@ fn replay_into(
                     return Err(invalid("response validation contradicts its unadmitted proposal batch"));
                 }
                 batch.format_validated = true;
+            }
+            AgentEngineEvent::PublicOutputCommitted {step,..}=>{
+                if batch.step!=Some(*step)||batch.discarded {return Err(invalid("public commitment has no live exact model source"));}
+                batch.public_committed=true;
             }
             AgentEngineEvent::ToolStarted {
                 step,
@@ -397,7 +401,7 @@ fn replay_into(
                     ||cleanup.task_id.is_empty()||steering_receipt_ids.is_empty()||steering_receipt_ids.len()>16
                     ||steering_receipt_ids.iter().any(|id|id.is_empty()||id.len()>1024)
                     ||steering_receipt_ids.iter().collect::<std::collections::BTreeSet<_>>().len()!=steering_receipt_ids.len()
-                    ||!batch.started.is_empty()||!batch.results.is_empty()||batch.discarded
+                    ||!batch.started.is_empty()||!batch.results.is_empty()||batch.discarded||batch.public_committed
                     ||batch.proposed!=discarded_tool_call_ids.iter().cloned().collect() {
                     return Err(invalid("voice supersede contradicts its exact closed unadmitted model attempt"));
                 }
@@ -422,7 +426,7 @@ fn replay_into(
                             .iter()
                             .cloned()
                             .collect::<std::collections::BTreeSet<_>>()
-                    || batch.discarded
+                    || batch.discarded || batch.public_committed
                 {
                     return Err(AgentEngineError::ReplayContract(
                         "model-response discard contradicts tool history".into(),
@@ -778,6 +782,7 @@ struct ReplayBatch {
     started: std::collections::BTreeSet<ToolCallId>,
     discarded: bool,
     format_validated: bool,
+    public_committed: bool,
     notices: Vec<ChatMessage>,
     content: Vec<ChatContentPart>,
     text_source: Option<nomifun_agent_contracts::ChatOutputTextSource>,
@@ -939,6 +944,7 @@ impl ReplayBatch {
         self.started.clear();
         self.discarded = false;
         self.format_validated = false;
+        self.public_committed = false;
         self.text_boundary = false;
         self.completion_report = None;
         Ok(())

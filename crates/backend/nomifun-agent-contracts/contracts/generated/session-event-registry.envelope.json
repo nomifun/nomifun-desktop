@@ -1260,7 +1260,8 @@
         "predecessor": {
           "mode": "any_of",
           "kinds": [
-            "message/assistant-projected"
+            "message/assistant-projected",
+            "runtime/progress-recorded"
           ]
         },
         "correlation": "message",
@@ -1341,5 +1342,5 @@
       }
     ]
   },
-  "payload_digest": "4783db28f8ab886eb8bd616bec7d65d8869a6984ccd97347313ee3c91903814c"
+  "payload_digest": "7b6d30242323ad73a2beba7ff9a231981b97d745f21ebc96687e11bed017854e"
 }

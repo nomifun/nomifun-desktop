@@ -29,13 +29,13 @@ test('Session list, explicit new conversation and desktop routing have distinct 
   expect(calls[2].body).toEqual({ conversation_id: conversationId });
 });
 
-test('robot Agent options read a selected Session through the robot role endpoint', async () => {
+test('device Session Agent options use the unified companion target', async () => {
   let requestUrl = '';
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     requestUrl = String(input);
     return new Response(JSON.stringify({ success: true, data: { selection: null, needs_model: true, options: [] } }),
       { headers: { 'Content-Type': 'application/json' } });
   }) as typeof fetch;
-  await agentPlatform.productBindingOptions.invoke({ target_kind: 'robot', target_id: companionId, conversation_id: conversationId });
-  expect(requestUrl).toContain(`/product-agent-bindings/robot/${companionId}?conversation_id=${conversationId}`);
+  await agentPlatform.productBindingOptions.invoke({ target_kind: 'companion', target_id: companionId, conversation_id: conversationId });
+  expect(requestUrl).toContain(`/product-agent-bindings/companion/${companionId}?conversation_id=${conversationId}`);
 });

@@ -228,6 +228,12 @@ impl ModelInvokeService {
     /// validates the resulting URL and auth material while keeping decrypted
     /// credentials inside the service boundary.
     pub async fn validate(&self, m: &ModelRef, task: ModelTask) -> Result<(), InvokeError> {
+        if task == ModelTask::SpeechRecognition {
+            let config = self.resolve_task_config(m, task).await?;
+            if crate::voice::speech::is_registered_session_protocol(&config.protocol) {
+                return crate::voice::speech::validate_transcription_configuration(&config);
+            }
+        }
         self.resolve_validated_call(m, task).await.map(|_| ())
     }
 
@@ -444,6 +450,29 @@ impl ModelInvokeService {
     /// and realtime health uses [`Self::probe_realtime`].
     pub async fn probe(&self, m: &ModelRef, task: ModelTask) -> Result<ProbeReport, InvokeError> {
         let started = Instant::now();
+        if task == ModelTask::SpeechRecognition {
+            let configuration = self.resolve_task_config(m, task).await;
+            if let Ok(config) = configuration
+                && crate::voice::speech::is_registered_session_protocol(&config.protocol)
+            {
+                let attempt = async {
+                    let mut session = crate::voice::speech::create_transcription_session(config, 16_000, None).await?;
+                    session.try_send(vec![0; 960])?;
+                    session.finish_result().await?;
+                    Ok::<(), InvokeError>(())
+                };
+                let result = tokio::time::timeout(PROBE_TIMEOUT, attempt).await;
+                return Ok(ProbeReport {
+                    status: if matches!(&result, Ok(Ok(()))) { HealthStatus::Unknown } else { HealthStatus::Unhealthy },
+                    latency_ms: started.elapsed().as_millis() as u64,
+                    message: Some(match result {
+                        Ok(Ok(())) => "Incremental ASR stream accepted and finalized; speech recognition quality has not been verified".into(),
+                        Ok(Err(error)) => error.to_string(),
+                        Err(_) => "Incremental ASR probe exceeded its response budget".into(),
+                    }),
+                });
+            }
+        }
         let attempt = async {
             // Two-phase build: resolve with a params-free placeholder, then
             // rebuild the minimal request from the resolved model_params so

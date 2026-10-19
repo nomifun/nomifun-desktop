@@ -114,8 +114,6 @@ pub enum OfficialPresetKeyDto {
     AppDeveloper,
     #[serde(rename = "companion.default")]
     CompanionDefault,
-    #[serde(rename = "companion.robot")]
-    CompanionRobot,
     #[serde(rename = "customer-service.default")]
     CustomerServiceDefault,
     #[serde(rename = "creative-studio.default")]

@@ -1,4 +1,4 @@
-//! Host-selected resource budgets for a narrowly scoped Robot Companion Agent.
+//! Host-selected presentation budgets for physical interaction entries.
 //! These helpers only bound a derived model projection; canonical history and
 //! device permissions remain owned by their existing contracts.
 
@@ -7,94 +7,25 @@ use nomifun_chat_model_broker::{ChatContentPart, ChatMessage, ChatRole};
 use nomifun_common::AppError;
 use std::collections::BTreeSet;
 
-/// A default optimization, never a ceiling on the user's frozen grants. An
-/// explicitly extended Robot uses the normal workspace, history and Skill
-/// discovery projections as soon as its admitted capability set is broader.
-pub(in crate::router) fn uses_lean_robot_context(robot_role:bool,snapshot:&nomifun_agent_contracts::ResolvedSnapshotContent)->bool{
-    robot_role && is_lean_robot_snapshot(snapshot)
+/// Entry policy never reads capability IDs or changes frozen authority. Search,
+/// files, knowledge, MCP and collaboration remain usable with this projection.
+pub(in crate::router) fn uses_compact_context(physical_entry: bool) -> bool {
+    physical_entry
 }
 
-/// Budget classification after the host has validated the complete compiled
-/// MCP catalog/resources. Exact frozen lock IDs may extend the physical role;
-/// arbitrary IDs or a name prefix cannot make a desktop capability lean.
-pub(super) fn is_lean_robot_snapshot(snapshot:&nomifun_agent_contracts::ResolvedSnapshotContent)->bool{
-    let mut base=Vec::new();
-    let mut extras=BTreeSet::new();
-    for selection in &snapshot.enabled_capabilities {
-        if selection.contribution_lock.source_kind==nomifun_agent_contracts::ContributionSourceKind::McpBinding {
-            if !snapshot.mcp_tool_locks.iter().any(|lock|lock.capability_id==selection.capability.id)
-                || !extras.insert(selection.capability.id.clone()) {return false;}
-        }else{base.push(selection.clone());}
-    }
-    extras.len()==snapshot.mcp_tool_locks.len()
-        && snapshot.mcp_tool_locks.iter().all(|lock|extras.contains(&lock.capability_id))
-        && is_lean_robot_profile(&base)
-}
+const COMPACT_HISTORY_MESSAGES: usize = 16;
 
-pub(super) fn is_lean_robot_profile(
-    capabilities: &[nomifun_agent_contracts::ResolvedCapability],
-) -> bool {
-    capabilities.iter().all(|selection| {
-        match selection.capability.id.as_ref() {
-            "agent.collaboration" => is_desktop_delegate_only(&selection.action_allowlist),
-            "session.management" => is_directed_task_control_only(&selection.action_allowlist),
-            _ => true,
-        }
-    }) && is_lean_robot_agent(capabilities.iter().map(|selection| selection.capability.id.as_ref()))
-}
-
-fn is_desktop_delegate_only(actions: &BTreeSet<nomifun_agent_contracts::ActionId>) -> bool {
-    actions.len() == 1 && actions.contains(&nomifun_agent_contracts::ActionId::from("agent/delegate"))
-}
-
-fn is_directed_task_control_only(actions: &BTreeSet<nomifun_agent_contracts::ActionId>) -> bool {
-    !actions.is_empty() && actions.iter().all(|action| matches!(action.as_ref(),
-        "session.management/execution_status" | "session.management/execution_cancel" | "session.management/execution_answer_decision"))
-}
-
-pub(super) const LEAN_MAX_MODEL_STEPS: u16 = 8;
-const LEAN_HISTORY_MESSAGES: usize = 16;
-
-pub(super) fn is_lean_robot_agent<'a>(
-    capabilities: impl IntoIterator<Item = &'a str>,
-) -> bool {
-    let (mut robot, mut companion, mut memory) = (false, false, false);
-    for capability in capabilities {
-        match capability {
-            "robot" => robot = true,
-            "companion" => companion = true,
-            "companion.memory" => memory = true,
-            "agent.tool-discovery" => {}
-            "agent.collaboration" => {}
-            "session.management" => {}
-            _ => return false,
-        }
-    }
-    robot && companion && memory
-}
-
-pub(super) fn context_budget(lean: bool) -> AgentContextBudget {
-    if lean {
-        AgentContextBudget {
-            max_context_bytes: 128 * 1024,
-            // The host already projects at most 16 historical messages. Leave
-            // room for the accepted input and this turn's tool exchange so
-            // ContextLifecycle does not first summarize that fitting history.
-            max_history_messages: 64,
-        }
-    } else {
-        AgentContextBudget {
-            max_context_bytes: 12 * 1024 * 1024,
-            ..Default::default()
-        }
-    }
+/// The execution ceiling is shared. Compact initial history is a projection,
+/// not a smaller ceiling that would reject a later file, research or tool result.
+pub(in crate::router) fn context_budget() -> AgentContextBudget {
+    AgentContextBudget { max_context_bytes: 12 * 1024 * 1024, ..Default::default() }
 }
 
 pub(super) fn history_turn_limit(lean: bool) -> usize {
     if lean { 4 } else { 32 }
 }
 
-pub(super) fn history_byte_limit(lean: bool) -> usize {
+pub(in crate::router) fn history_byte_limit(lean: bool) -> usize {
     if lean { 64 * 1024 } else { 8 * 1024 * 1024 }
 }
 
@@ -140,7 +71,7 @@ pub(super) fn bounded_history(
     }
     let first_turn = starts.len().saturating_sub(history_turn_limit(true));
     for &start in &starts[first_turn..] {
-        if history.len() - start > LEAN_HISTORY_MESSAGES {
+        if history.len() - start > COMPACT_HISTORY_MESSAGES {
             continue;
         }
         // Count serialized bytes without allocating another copy of possibly
@@ -244,107 +175,15 @@ mod tests {
     }
 
     #[test]
-    fn lean_classification_requires_the_full_narrow_capability_set() {
-        let required = ["robot", "companion", "companion.memory"];
-        assert!(is_lean_robot_agent(required));
-        assert!(is_lean_robot_agent(required.into_iter().chain(["agent.tool-discovery"])));
-        for missing in required {
-            assert!(!is_lean_robot_agent(required.into_iter().filter(|id| *id != missing)));
-        }
-        assert!(!is_lean_robot_agent(std::iter::empty()));
-        for extra in ["channel.messaging", "workspace.files", "robot.custom", "companion.context"] {
-            assert!(!is_lean_robot_agent(required.into_iter().chain([extra])), "{extra}");
-        }
-    }
-
-    #[test]
-    fn broad_companion_and_unknown_capabilities_keep_normal_budgets() {
-        let lean = is_lean_robot_agent([
-            "companion", "companion.memory", "robot", "agent.tool-discovery", "channel.messaging",
-        ]);
-        assert!(!lean);
-        assert_eq!(context_budget(lean).max_context_bytes, 12 * 1024 * 1024);
-        assert_eq!(context_budget(lean).max_history_messages, usize::MAX);
-        assert_eq!(history_turn_limit(lean), 32);
-        assert_eq!(history_byte_limit(lean), 8 * 1024 * 1024);
-        assert_eq!(LEAN_MAX_MODEL_STEPS, 8);
-    }
-
-    #[test]
-    fn targeted_delegation_preserves_lean_budget_but_broad_collaboration_does_not() {
-        use nomifun_agent_contracts::ActionId;
-        assert!(is_lean_robot_agent(["companion", "companion.memory", "robot", "agent.collaboration"]));
-        let mut actions = BTreeSet::from([ActionId::from("agent/delegate")]);
-        assert!(is_desktop_delegate_only(&actions));
-        actions.insert(ActionId::from("agent/fork"));
-        assert!(!is_desktop_delegate_only(&actions));
-        assert!(!is_desktop_delegate_only(&BTreeSet::new()));
-        assert!(is_directed_task_control_only(&BTreeSet::from([
-            ActionId::from("session.management/execution_status"), ActionId::from("session.management/execution_cancel"),
-        ])));
-        assert!(!is_directed_task_control_only(&BTreeSet::from([
-            ActionId::from("session.management/terminal_input"),
-        ])));
-        assert!(!is_directed_task_control_only(&BTreeSet::new()), "an empty Module allowlist means broad authority");
-    }
-
-    #[test]
-    fn lean_mcp_budget_requires_exact_frozen_lock_membership_not_an_id_prefix() {
-        use nomifun_agent_contracts::{ContributionSourceKind, ResolvedCapability, ResolvedSnapshotContent};
-        // This tests the budget classifier after catalog admission. Catalog
-        // provenance/schema/resource validation remains in open_kernel_session.
-        fn selection(id: &str, mcp: bool) -> ResolvedCapability {
-            serde_json::from_value(json!({
-                "capability":{"id":id}, "source_package":{"id":"test.package","version":"1.0.0"},
-                "contribution_id":format!("capability:{id}"),
-                "contribution_lock":{"source_kind":if mcp {"mcp_binding"} else {"platform_builtin"},
-                    "source_identity":"test.source", "mcp_binding_id":if mcp {Some("exact.binding")} else {None},
-                    "contribution_id":format!("capability:{id}"), "contract_digest":"a".repeat(64)},
-                "resolved_source":{"source_kind":"bundled","source_identity":"test.package"},
-                "target_artifact_digest":"b".repeat(64),"schema_digest":"c".repeat(64),
-                "dependency_path":[],"required_runtime_features":[],"action_allowlist":[format!("{id}/read")]
-            })).unwrap()
-        }
-        let mut snapshot: ResolvedSnapshotContent = serde_json::from_value(json!({
-            "schema_version":"1.0.0","resolver_version":"1.0.0",
-            "preset_revision_ref":{"preset_id":"test.preset","revision":1,"revision_digest":"a".repeat(64)},
-            "required_runtime_protocol_version":"1.0.0","required_runtime_profile":"managed_minimal",
-            "runtime_feature_inventory_digest":"a".repeat(64),"required_runtime_features":[],
-            "compiled_runtime_profile_digest":"a".repeat(64),"model_route_refs":{},
-            "enabled_capabilities":[],"capability_allowlist":[],"skill_locks":[],"mcp_tool_locks":[],
-            "canonical_schema_manifest_digest":"a".repeat(64),"target_contribution_manifest_digest":"a".repeat(64)
-        })).unwrap();
-        snapshot.enabled_capabilities = ["companion","companion.memory","robot"].into_iter().map(|id|selection(id,false)).collect();
-        assert!(is_lean_robot_snapshot(&snapshot), "optional task modules may be absent");
-        assert!(uses_lean_robot_context(true,&snapshot));
-        assert!(!uses_lean_robot_context(false,&snapshot), "the narrow shape alone is not a physical role");
-        for (explicit,action) in [("computer","computer/observe"),("workspace.files","workspace.files/read"),
-            ("agent.collaboration","agent/fork"),("session.management","session.management/create")] {
-            let mut expanded=snapshot.clone();
-            let mut grant=selection(explicit,false);
-            grant.action_allowlist=BTreeSet::from([action.into()]);
-            expanded.enabled_capabilities.push(grant);
-            assert!(!uses_lean_robot_context(true,&expanded),
-                "explicit {explicit} uses normal context and execution budgets; it must not be silently narrowed");
-        }
-        let mcp=selection("exact.non-prefix.tool",true);
-        let lock=nomifun_agent_contracts::ResolvedMcpToolLock {
-            server_id:"explicit.server".into(),canonical_tool_key:"exact.tool".into(),
-            capability_id:mcp.capability.id.clone(),schema_digest:"c".repeat(64).into(),materialization_revision:1,
-        };
-        snapshot.enabled_capabilities.push(mcp);
-        assert!(!is_lean_robot_snapshot(&snapshot), "source kind without its exact frozen lock is insufficient");
-        snapshot.mcp_tool_locks.push(lock.clone());
-        assert!(is_lean_robot_snapshot(&snapshot), "an admitted exact MCP tool keeps the physical budget");
-        let admitted=snapshot.clone();
-        snapshot.mcp_tool_locks.push(lock);
-        assert!(!is_lean_robot_snapshot(&snapshot), "duplicate or orphan MCP locks fail classification");
-        snapshot=admitted.clone();
-        snapshot.enabled_capabilities.last_mut().unwrap().contribution_lock.source_kind=ContributionSourceKind::PlatformBuiltin;
-        assert!(!is_lean_robot_snapshot(&snapshot), "a same-name builtin is not the mapped MCP source");
-        snapshot=admitted;
-        snapshot.enabled_capabilities.push(selection("nomi.mcp.v1.pretend",false));
-        assert!(!is_lean_robot_snapshot(&snapshot), "a name prefix never grants the MCP budget exception");
+    fn physical_entry_budget_is_independent_from_authorized_capabilities() {
+        assert!(uses_compact_context(true));
+        assert!(!uses_compact_context(false));
+        assert_eq!(context_budget().max_context_bytes, 12 * 1024 * 1024);
+        assert_eq!(history_byte_limit(true), 64 * 1024);
+        assert_eq!(history_byte_limit(false), 8 * 1024 * 1024);
+        // No Snapshot or module whitelist participates in this entry policy.
+        // Compiled grants, MCP provenance and resource validation remain owned
+        // by the Kernel and tool adapters rather than a budget classifier.
     }
 
     #[test]
@@ -355,13 +194,13 @@ mod tests {
         assert_eq!(source, original);
         assert_eq!(history, original[8..]);
         assert!(serde_json::to_vec(&history).unwrap().len() <= history_byte_limit(true));
-        assert_eq!(context_budget(true).max_context_bytes, 128 * 1024);
-        assert_eq!(context_budget(true).max_history_messages, 64);
-        assert_eq!(history.len(), LEAN_HISTORY_MESSAGES);
+        assert_eq!(context_budget().max_context_bytes, 12 * 1024 * 1024);
+        assert_eq!(context_budget().max_history_messages, usize::MAX);
+        assert_eq!(history.len(), COMPACT_HISTORY_MESSAGES);
 
         let current = text(ChatRole::User, "Follow the next instruction.");
         let (assembled, diagnostics) = AgentContextAssembler::assemble(
-            input(), history.clone(), current.clone(), &AgentsMdContext::default(), context_budget(true),
+            input(), history.clone(), current.clone(), &AgentsMdContext::default(), context_budget(),
         ).unwrap();
         assert_eq!(&assembled.messages[..history.len()], history.as_slice());
         assert_eq!(assembled.messages.last(), Some(&current));
@@ -522,7 +361,7 @@ mod tests {
     async fn run_robot_action_scenario(sequence: bool) {
         let engine = AgentEngine::new(AgentEngineBuild {
             build_id: "robot-budget-regression".into(), build_digest: "a".repeat(64).into(),
-        }).unwrap().with_context_budget(context_budget(true)).unwrap();
+        }).unwrap().with_context_budget(context_budget()).unwrap();
         let mut request = nomifun_chat_model_broker::recorded_conformance_fixtures().remove(0).request;
         let binding = engine.bind(request.causality.agent_session_id.clone(), "robot-binding".into(),
             request.causality.resolved_snapshot_ref.clone()).unwrap();
@@ -532,7 +371,7 @@ mod tests {
         request.input.messages = bounded_history(original.clone(), true).unwrap();
         assert_eq!(request.input.messages.len(), 16);
         let handoff = "large earlier cross-Agent handoff ".repeat(8192);
-        assert!(handoff.len() > context_budget(true).max_context_bytes);
+        assert!(handoff.len() > 16 * 1024);
         request.input.messages.push(text(ChatRole::Assistant, &bounded_handoff(handoff, true)));
         request.input.messages.push(text(ChatRole::User, if sequence { "Stand once, then turn." } else { "Stand once." }));
         let definition = ChatToolDefinition {
@@ -553,9 +392,11 @@ mod tests {
         let tool = Arc::new(RobotTool::default());
         let events = Arc::new(Events::default());
         let session = engine.open_session(binding, model.clone(), tool.clone(), Some(events.clone())).unwrap();
+        // This in-memory observation sink intentionally cannot acknowledge a
+        // durable checkpoint. These tests cover exact action/reply rounds;
+        // production Host tests exercise the persisted segmented policy.
         let result = session.run_turn(AgentTurnRequest::new(request, plan,
-            nomifun_agent_contracts::PrincipalRef { principal_kind:"user".into(), principal_id:"owner".into() }, 0)
-            .with_max_model_steps(LEAN_MAX_MODEL_STEPS)).await.unwrap();
+            nomifun_agent_contracts::PrincipalRef { principal_kind:"user".into(), principal_id:"owner".into() }, 0)).await.unwrap();
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
         let requests = model.0.lock().unwrap();
         assert_eq!(requests.len(), if sequence { 3 } else { 2 });

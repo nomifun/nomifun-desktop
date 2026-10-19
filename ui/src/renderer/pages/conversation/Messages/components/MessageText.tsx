@@ -166,6 +166,7 @@ const MessageText: React.FC<{
     conversationContext?.type === 'nomi' &&
     conversationContext.isProcessing !== true &&
     isUserMessage &&
+    inputDelivery?.state !== 'cancelled' &&
     !decision &&
     message.type === 'text' &&
     editableMessageId != null &&
@@ -314,10 +315,11 @@ const MessageText: React.FC<{
           </div>
         )}
         {presentation.hasToolPayload && <AssistantProtocolNotice />}
-        {(inputDelivery?.state === 'pending' || inputDelivery?.state === 'blocked' || inputDelivery?.state === 'discarded') && <div
+        {(inputDelivery?.state === 'pending' || inputDelivery?.state === 'blocked' || inputDelivery?.state === 'discarded' || inputDelivery?.state === 'cancelled') && <div
           role='status' data-testid='message-input-delivery' className='mt-4px text-12px text-t-secondary'>
           {inputDelivery.state === 'pending'
             ? t('conversation.inputDelivery.pending')
+            : inputDelivery.state === 'cancelled' ? t('conversation.inputDelivery.cancelled')
             : inputDelivery.state === 'discarded' ? t('conversation.inputDelivery.discarded')
             : <>{t('conversation.inputDelivery.blocked')}{deliveryReason ? ` ${t(`conversation.inputDelivery.${deliveryReason}`)}` : ''}</>}
         </div>}

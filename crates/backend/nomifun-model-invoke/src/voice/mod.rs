@@ -11,6 +11,7 @@ mod local_replay_contract_tests;
 mod native_contract_tests;
 mod openai_live_wire;
 mod resolve;
+pub mod speech;
 pub use resolve::VoiceConnectionLease;
 #[cfg(test)]
 mod speech_source_contract_tests;

@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use futures_util::StreamExt;
 
 use nomifun_api_types::{
     SpeechToTextConfig, TEXT_TO_SPEECH_PREFERENCE_KEY, TextToSpeechConfig,
@@ -21,7 +22,7 @@ use serde_json::Value;
 
 use crate::audio::{AudioBuffer, decode_container};
 use crate::protocol::DOWNLINK_SAMPLE_RATE;
-use crate::services::{SpeechContext, SpeechServices};
+use crate::services::{SpeechAudioStream, SpeechCapabilities, SpeechContext, SpeechDeliveryMode, SpeechServices, TranscriptionSession};
 
 /// Vision must answer well inside the firmware's fixed 30 s HTTP timeout,
 /// otherwise the device hangs up while we are still waiting. The
@@ -139,10 +140,65 @@ impl RobotSpeech {
             vision,
         }
     }
+
+    async fn asr_model(&self, companion_id: &str) -> Option<ModelRef> {
+        let global = self.prefs.get(SPEECH_TO_TEXT_PREFERENCE_KEY).await
+            .as_ref().and_then(parse_global_asr);
+        pick_model(self.slots.asr_slot(companion_id).await, global)
+            .map(|(provider_id, model)| ModelRef { provider_id, model })
+    }
+
+    async fn tts_model(&self, companion_id: &str) -> Option<(ModelRef, Option<String>)> {
+        let global = self.prefs.get(TEXT_TO_SPEECH_PREFERENCE_KEY).await
+            .as_ref().and_then(parse_global_tts);
+        self.slots.tts_slot(companion_id).await.or(global)
+            .map(|(provider_id, model, voice)| (ModelRef { provider_id, model }, voice))
+    }
 }
 
 #[async_trait::async_trait]
 impl SpeechServices for RobotSpeech {
+    async fn capabilities(&self, ctx: &SpeechContext) -> anyhow::Result<SpeechCapabilities> {
+        let incremental_asr = match self.asr_model(&ctx.companion_id).await {
+            Some(model) => self.invoke.speech_protocol_capabilities(&model, nomifun_api_types::ModelTask::SpeechRecognition).await?.incremental_asr,
+            None => false,
+        };
+        let streaming_tts = match self.tts_model(&ctx.companion_id).await {
+            Some((model, _)) => self.invoke.speech_protocol_capabilities(&model, nomifun_api_types::ModelTask::SpeechSynthesis).await?.streaming_tts,
+            None => false,
+        };
+        Ok(SpeechCapabilities { incremental_asr, streaming_tts })
+    }
+
+    async fn open_transcription(&self, ctx: &SpeechContext, sample_rate: u32) -> anyhow::Result<Option<TranscriptionSession>> {
+        let Some(model) = self.asr_model(&ctx.companion_id).await else { return Ok(None) };
+        Ok(self.invoke.open_streaming_transcription(&model, sample_rate, None).await?)
+    }
+
+    async fn synthesize_stream(&self, ctx: &SpeechContext, text: &str) -> anyhow::Result<SpeechAudioStream> {
+        let (model, voice) = self.tts_model(&ctx.companion_id).await
+            .ok_or_else(|| anyhow::anyhow!("no speech-synthesis model configured"))?;
+        let request = TtsRequest {
+            text: text.to_owned(), voice, format: Some("pcm".into()), extra: Value::Object(Default::default()),
+        };
+        if let Some(stream) = self.invoke.open_streaming_synthesis(&model, request).await? {
+            let sample_rate = stream.sample_rate;
+            return Ok(SpeechAudioStream {
+                mode: SpeechDeliveryMode::Streaming,
+                audio: stream.audio.map(move |result| result
+                    .map(|pcm| AudioBuffer { pcm, sample_rate })
+                    .map_err(anyhow::Error::from)).boxed(),
+            });
+        }
+        // Unsupported streaming remains explicitly batch. Provider failures
+        // after an admitted streaming request never invoke a second synthesis.
+        let audio = self.synthesize(ctx, text).await?;
+        Ok(SpeechAudioStream {
+            mode: SpeechDeliveryMode::Batch,
+            audio: Box::pin(futures_util::stream::once(async move { Ok(audio) })),
+        })
+    }
+
     async fn transcribe(&self, ctx: &SpeechContext, wav: Vec<u8>) -> anyhow::Result<String> {
         let global = self
             .prefs

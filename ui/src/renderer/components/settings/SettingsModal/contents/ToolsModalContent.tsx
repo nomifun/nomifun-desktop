@@ -13,11 +13,11 @@ import { mcpServerUiKey } from '@/renderer/hooks/mcp/mcpUiKey';
 import { supportsMcpOAuthLogin } from '@/renderer/hooks/mcp/mcpAuthConfig';
 import { resolveMcpDisplayName } from '@/renderer/services/mcp/mcpMarket';
 import AddMcpServerModal from '@/renderer/pages/settings/components/AddMcpServerModal';
-import { ENHANCED_TOOLS_SURFACE_CLASS } from '@/renderer/pages/settings/enhancedToolsLayout';
 import McpServerItem from '@/renderer/pages/settings/ToolsSettings/McpServerItem';
 import McpOAuthClientModal from '@/renderer/pages/settings/ToolsSettings/McpOAuthClientModal';
 import { validatedMcpAuthorizationUrl } from '@/renderer/hooks/mcp/useMcpOAuth';
 import { openExternalUrl } from '@/renderer/utils/platform';
+import mcpListStyles from '@/renderer/pages/settings/ToolsSettings/McpServerList.module.css';
 import NomiPagination from '@/renderer/components/base/NomiPagination';
 import { Button,Dropdown,Menu,Message,Modal } from '@arco-design/web-react';
 import { Down,Plus } from '@icon-park/react';
@@ -257,7 +257,7 @@ const ModalMcpManagementSection: React.FC<{
           </div>
         ) : (
           <NomiScrollArea className='max-h-360px max-h-none' disableOverflow>
-            <div className='space-y-10px'>
+            <div className={mcpListStyles.list}>
               {paginatedMcpServers.map((server) => {
                 const uiKey = mcpServerUiKey(server.mcp_server_id);
                 return (
@@ -287,7 +287,7 @@ const ModalMcpManagementSection: React.FC<{
           </NomiScrollArea>
         )}
         {visibleMcpServers.length > MCP_SERVER_PAGE_SIZE && (
-          <div data-testid='mcp-server-pagination' className='mt-12px flex justify-end'>
+          <div data-testid='mcp-server-pagination' className='mt-12px flex justify-end pb-16px'>
             <NomiPagination
               current={effectivePage}
               pageSize={MCP_SERVER_PAGE_SIZE}
@@ -357,7 +357,7 @@ export const ToolsModalContentWithState: React.FC<{
       <NomiScrollArea className='flex-1 min-h-0 pb-12px' disableOverflow>
         <div
           data-testid='mcp-installed-surface'
-          className={`${ENHANCED_TOOLS_SURFACE_CLASS} flex min-h-0 flex-col`}
+          className={`${mcpListStyles.surface} flex min-h-0 flex-col`}
         >
           <NomiScrollArea className='h-full overflow-visible' disableOverflow>
             <ModalMcpManagementSection

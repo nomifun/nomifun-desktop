@@ -431,7 +431,7 @@ impl Host {
                 if detail.execution.lead_conversation_id.as_deref() == Some(context.agent_session_id.as_ref())
                     && sessions.is_companion_robot_session(&self.owner_id, &context.agent_session_id)
                         .await.map_err(|error| error.to_string())? {
-                    result["pending_questions"] = sessions.directed_question_status(
+                    result["pending_questions"] = sessions.execution_question_status(
                         &self.owner_id, &context.agent_session_id, &detail.execution.execution_id,
                     ).await.map_err(|error| error.to_string())?;
                 }
@@ -439,8 +439,8 @@ impl Host {
             }
             "session.management/execution_answer_decision"=>{
                 if !sessions.is_companion_robot_session(&self.owner_id,&context.agent_session_id).await.map_err(|error|error.to_string())?{
-                    return Err("Answering a presented desktop question requires authenticated Robot ingress".into());}
-                let receipt=sessions.answer_directed_question(&self.owner_id,&context.agent_session_id,&context.turn_id,&key).await.map_err(|error|error.to_string())?;
+                    return Err("Answering a presented task question through this Action requires its authenticated device input".into());}
+                let receipt=sessions.answer_execution_question(&self.owner_id,&context.agent_session_id,&context.turn_id,&key).await.map_err(|error|error.to_string())?;
                 serde_json::to_value(receipt).map_err(|error|error.to_string())
             }
             "session.management/execution_retry_step"

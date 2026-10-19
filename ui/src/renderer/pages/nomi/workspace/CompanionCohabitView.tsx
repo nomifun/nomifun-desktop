@@ -117,7 +117,7 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
         <div className={styles.chatState}>
           <RobotOne theme='outline' size='30' fill='currentColor' />
           <strong>{t('nomi.cohabit.modelRequired', { defaultValue: '先为伙伴配置主对话模型' })}</strong>
-          <span>{t('nomi.cohabit.modelRequiredHint', { defaultValue: '配置伙伴默认模型后即可新建桌面会话；机器人使用独立设置。' })}</span>
+          <span>{t('nomi.cohabit.modelRequiredHint', { defaultValue: '配置伙伴默认模型后，各交互入口即可使用同一个伙伴 Agent；每段会话独立保留上下文。' })}</span>
           <Button type='primary' shape='round' onClick={() => onManage('overview')}>
             {t('nomi.cohabit.configureModel', { defaultValue: '配置模型' })}
           </Button>
@@ -157,7 +157,7 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
       <section className={styles.chatColumn}>
         <CompanionSessionToolbar items={sessions.items} selectedId={conversationId} selectedName={conversation?.name}
           selectedLoaded={Boolean(conversation)}
-          role={role} activeDesktopId={sessions.activeDesktopId} creating={sessions.creating} routing={sessions.routing}
+          entryKind={role} activeDesktopId={sessions.activeDesktopId} creating={sessions.creating} routing={sessions.routing}
           selectedArchived={conversation?.extra.canonical_archived} managing={sessions.managing}
           clearDisabled={!conversation || isConversationBindingBlocked(conversation)}
           canCreate={Boolean(profile?.model)} failed={sessions.actionError || sessions.listError}
@@ -181,19 +181,13 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
         </section>
 
         <section className={styles.infoGroup}>
-          <div className={styles.infoTitle}><RobotOne size='16' />{t('nomi.cohabit.sessions.companion')}</div>
-          <CompanionAgentModelQuickSettings key={`${companionId}/companion`} companion={companion} role='companion'
-            conversation={role === 'companion' ? conversation : undefined} disabled={quickSettingsSaving || Boolean(conversationError)} onChanged={refreshConversation} onSavingChange={onAgentModelSavingChange} />
+          <div className={styles.infoTitle}><RobotOne size='16' />{t('nomi.cohabit.agentSettings')}</div>
+          <CompanionAgentModelQuickSettings key={`${companionId}/${conversation?.id ?? 'defaults'}`} companion={companion}
+            conversation={conversation} disabled={quickSettingsSaving || Boolean(conversationError)} onChanged={refreshConversation} onSavingChange={onAgentModelSavingChange} />
           {conversationError && <span role='alert'>
             {t('agentSettings.productBinding.loadFailed')}
             <button type='button' onClick={refreshConversation}>{t('agentSettings.actions.retry')}</button>
           </span>}
-        </section>
-
-        <section className={styles.infoGroup}>
-          <div className={styles.infoTitle}><RobotOne size='16' />{t('nomi.cohabit.sessions.robot')}</div>
-          <CompanionAgentModelQuickSettings key={`${companionId}/robot`} companion={companion} role='robot'
-            conversation={role === 'robot' ? conversation : undefined} disabled={quickSettingsSaving || Boolean(conversationError)} onChanged={refreshConversation} onSavingChange={onAgentModelSavingChange} />
         </section>
 
         <section className={styles.infoGroup}>

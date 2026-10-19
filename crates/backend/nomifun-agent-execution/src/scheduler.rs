@@ -61,6 +61,9 @@ fn attempt_session_target(
     initial_plan_input: &str,
     lead_conversation_id: Option<&str>,
 ) -> Result<(AttemptSessionTarget, AgentExecutionAttemptSessionKind), AppError> {
+    if crate::engine::is_retired_directed_plan(initial_plan_input)? {
+        return Err(AppError::Conflict("retired product-directed execution cannot resume".into()));
+    }
     if is_automation_initial_plan(initial_plan_input)? {
         let conversation_id = lead_conversation_id.ok_or_else(|| {
             AppError::Internal("AutoWork AgentExecution has no bound lead AgentSession".to_owned())
@@ -71,8 +74,8 @@ fn attempt_session_target(
             },
             AgentExecutionAttemptSessionKind::AutomationLead,
         ))
-    } else if let Some(source) = crate::engine::directed_delegation_source(initial_plan_input)? {
-        Ok((AttemptSessionTarget::DirectedChildAttempt { source }, AgentExecutionAttemptSessionKind::ChildAttempt))
+    } else if let Some(source) = crate::engine::execution_source_from_initial_plan(initial_plan_input)? {
+        Ok((AttemptSessionTarget::SourceChildAttempt { source }, AgentExecutionAttemptSessionKind::ChildAttempt))
     } else {
         Ok((
             AttemptSessionTarget::ChildAttempt,
@@ -380,6 +383,19 @@ impl ExecutionScheduler {
         }
     }
 
+    pub(crate) fn generation(&self, execution_id: &str) -> Option<String> {
+        self.inner.active.get(execution_id).map(|handle|handle.generation.clone())
+    }
+
+    /// A committed cancellation cannot stop a replacement scheduler generation
+    /// that was admitted while the database receipt was returning to its caller.
+    pub(crate) fn stop_generation(&self, execution_id:&str, generation:&str) {
+        if let Some(handle)=self.inner.active.get(execution_id)
+            && handle.generation==generation {
+            let _=handle.cancel.send(true);
+        }
+    }
+
     /// Return the ownership proof held by this process's current generation.
     /// Out-of-band attempt callbacks use it to share the scheduler's DB fence.
     pub(crate) fn lease_token(&self, execution_id: &str) -> Option<AgentExecutionLeaseToken> {
@@ -629,20 +645,19 @@ impl ExecutionScheduler {
     }
 
     /// One post-commit path for every terminal transition. It publishes the
-    /// terminal outbox, drains inactive Attempt links as durable cleanup work,
-    /// then reloads canonical state and reconciles the idempotent lead report.
+    /// terminal outbox and reconciles the exact lead report immediately. Native
+    /// Attempt cleanup remains durable, independent work and does not postpone
+    /// an already verified result while an inactive Session is being stopped.
     pub async fn after_terminal_commit(&self, owner_id: &str, execution_id: &str) {
         self.publish().await;
+        if let Ok(detail) = self.detail(owner_id, execution_id).await {
+            if detail.execution.status.is_terminal() {
+                if let Err(error) = self.reconcile_lead_report(owner_id, &detail).await {
+                    tracing::warn!(%execution_id, %error, "failed to reconcile terminal lead report");
+                }
+            }
+        }
         self.reconcile_conversation_cleanup(Some(execution_id)).await;
-        let Ok(detail) = self.detail(owner_id, execution_id).await else {
-            return;
-        };
-        if !detail.execution.status.is_terminal() {
-            return;
-        }
-        if let Err(error) = self.reconcile_lead_report(owner_id, &detail).await {
-            tracing::warn!(%execution_id, %error, "failed to reconcile terminal lead report");
-        }
     }
 
     async fn reconcile_lead_report_once(
@@ -756,7 +771,7 @@ impl ExecutionScheduler {
     async fn reconcile_lead_input_notice_once(&self,owner_id:&str,detail:&AgentExecutionDetail)->Result<(),AppError> {
         let row=self.inner.deps.repository.get_execution(owner_id,&detail.execution.execution_id).await?
             .ok_or_else(||AppError::NotFound("input notice Execution is missing".into()))?;
-        if crate::engine::directed_delegation_source(&row.initial_plan_input)?.is_none() { return Ok(()); }
+        if crate::engine::execution_source_from_initial_plan(&row.initial_plan_input)?.is_none() { return Ok(()); }
         let mut requests=Vec::new();let mut reconciled=HashSet::new();let mut after=0;
         loop {
             let events=self.inner.deps.repository.list_events(owner_id,&detail.execution.execution_id,after,500).await?;
@@ -890,6 +905,12 @@ impl ExecutionScheduler {
         wake: Arc<Notify>,
     ) -> Result<(), AppError> {
         let repository = &self.inner.deps.repository;
+        let row = repository.get_execution(owner_id, execution_id).await?
+            .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
+        if crate::engine::is_retired_directed_plan(&row.initial_plan_input)? {
+            tracing::warn!(%execution_id, "retired product-directed execution cannot run");
+            return Ok(());
+        }
         let Some((lease, expiry)) = self
             .acquire_lease(owner_id, execution_id, generation, &mut cancelled)
             .await?
@@ -1106,7 +1127,7 @@ impl ExecutionScheduler {
                     attempt.status == ExecutionAttemptStatus::WaitingInput
                 }) {
                     if let Err(error)=self.reconcile_lead_report(owner_id,&detail).await {
-                        tracing::warn!(%execution_id,%error,"directed input notice remains in its existing outbox");
+                        tracing::warn!(%execution_id,%error,"execution input notice remains in its existing outbox");
                     }
                     // WaitingInput is an aggregate attention signal.  All
                     // independent runnable work above has been exhausted, so
@@ -2283,7 +2304,16 @@ impl ExecutionScheduler {
         }
         settled?;
         self.publish().await;
-        self.reconcile_conversation_cleanup(Some(execution_id)).await;
+        // The Attempt's canonical output is already settled. Native cleanup
+        // remains in its durable inactive-link outbox, while this job returns
+        // so the aggregate can finalize and deliver that verified result.
+        if !self.inner.deps.lifecycle.is_cancelled() {
+            let scheduler = self.clone();
+            let cleanup_execution_id = execution_id.to_owned();
+            self.inner.deps.lifecycle.spawn(async move {
+                scheduler.reconcile_conversation_cleanup(Some(&cleanup_execution_id)).await;
+            });
+        }
         Ok(())
     }
 
@@ -3391,14 +3421,21 @@ mod tests {
             should_project_lead_report(r#"{"mode":"explicit","plan":{"steps":[]}}"#)
                 .unwrap()
         );
-        let source = crate::DirectedDelegationSource {
+        let source = crate::AgentExecutionSource {
             agent_session_id: lead.into(), turn_operation_id:"source-turn".into(),
             tool_operation_id:"source-tool".into(), effect_id:"source-effect".into(),
         };
-        let directed = serde_json::json!({"mode":"directed","source":source,"plan":{"steps":[]}}).to_string();
-        assert_eq!(attempt_session_target(&directed, Some(lead)).unwrap(),
-            (AttemptSessionTarget::DirectedChildAttempt { source }, AgentExecutionAttemptSessionKind::ChildAttempt));
-        assert!(should_project_lead_report(&directed).unwrap());
+        for input in [
+            serde_json::json!({"mode":"automatic","source":source}),
+            serde_json::json!({"mode":"explicit","source":source,"plan":{"steps":[]}}),
+        ] {
+            let encoded = input.to_string();
+            assert_eq!(attempt_session_target(&encoded, Some(lead)).unwrap(),
+                (AttemptSessionTarget::SourceChildAttempt { source: source.clone() }, AgentExecutionAttemptSessionKind::ChildAttempt));
+            assert!(should_project_lead_report(&encoded).unwrap());
+        }
+        let retired = serde_json::json!({"mode":"directed","source":source,"plan":{"steps":[]}}).to_string();
+        assert!(attempt_session_target(&retired, Some(lead)).is_err());
     }
 
     #[derive(Debug)]
@@ -3995,6 +4032,9 @@ mod tests {
         fail_stop_once: AtomicBool,
         block_stop: AtomicBool,
         stop_started: AtomicBool,
+        block_cleanup: AtomicBool,
+        cleanup_started: AtomicBool,
+        cleanup_release: Notify,
         cancelled_conversations: Mutex<Vec<String>>,
         conversation_operations: Mutex<Vec<String>>,
     }
@@ -4007,6 +4047,10 @@ mod tests {
             conversation_id: &str,
         ) -> Result<(), AppError> {
             self.cancelled_conversations.lock().unwrap().push(conversation_id.to_owned());
+            self.cleanup_started.store(true, Ordering::SeqCst);
+            if self.block_cleanup.load(Ordering::SeqCst) {
+                self.cleanup_release.notified().await;
+            }
             Ok(())
         }
 
@@ -4273,7 +4317,7 @@ mod tests {
                 .expect("harness brief log is not poisoned")
                 .push((step_title.to_owned(), brief.to_owned()));
             let conversation_id = match session_target {
-                AttemptSessionTarget::ChildAttempt | AttemptSessionTarget::DirectedChildAttempt { .. } => {
+                AttemptSessionTarget::ChildAttempt | AttemptSessionTarget::SourceChildAttempt { .. } => {
                     nomifun_common::ConversationId::new().into_string()
                 }
                 AttemptSessionTarget::AutomationLead { conversation_id } => conversation_id,
@@ -4584,7 +4628,7 @@ mod tests {
                     max_parallel,
                     work_dir: work_dir.map(str::to_owned),
                     lead_conversation_id: None,
-                    initial_plan_input: r#"{"mode":"explicit"}"#.to_owned(),
+                    initial_plan_input: r#"{"mode":"explicit","plan":{"steps":[]}}"#.to_owned(),
                 },
                 &[harness_participant(participant_id.clone())],
                 &system_event(AgentExecutionEventKind::Created, None, None, json!({})),
@@ -4720,7 +4764,7 @@ mod tests {
                     goal: "report retry".into(), status: AgentExecutionStatus::Completed,
                     adaptation_policy: AdaptationPolicy::Fixed, decision_policy: DecisionPolicy::Automatic,
                     delegation_policy: DelegationPolicy::Automatic, max_parallel: 1,
-                    work_dir: None, lead_conversation_id: Some(lead), initial_plan_input: r#"{"mode":"explicit"}"#.into(),
+                    work_dir: None, lead_conversation_id: Some(lead), initial_plan_input: r#"{"mode":"explicit","plan":{"steps":[]}}"#.into(),
                 },
                 &[harness_participant(generate_id())],
                 &system_event(AgentExecutionEventKind::Created, None, None, json!({"lead_report_operation_id":"report-retry"})),
@@ -5213,6 +5257,97 @@ mod tests {
         let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_execution_links WHERE execution_id=? AND active=1")
             .bind(&execution_id).fetch_one(&pool).await.unwrap();
         assert_eq!(active, 0, "domain cancellation retires original links through its existing cleanup boundary");
+        scheduler.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn captured_stop_does_not_stop_a_successor_scheduler_generation() {
+        let runner=Arc::new(HarnessAttemptRunner::parallel());
+        let (scheduler,_,execution_id,_directory,_owner)=make_scheduler_harness(
+            runner,&["generation-fence"],&[],1,AdaptationPolicy::Fixed,None,
+        ).await;
+        let (old_cancel,_old_receiver)=watch::channel(false);
+        scheduler.inner.active.insert(execution_id.clone(),ActiveHandle {
+            generation:"captured-generation".into(),cancel:old_cancel,wake:Arc::new(Notify::new()),
+            restart_requested:false,lease:None,
+        });
+        let captured=scheduler.generation(&execution_id).unwrap();
+        let (successor_cancel,successor_receiver)=watch::channel(false);
+        scheduler.inner.active.insert(execution_id.clone(),ActiveHandle {
+            generation:"successor-generation".into(),cancel:successor_cancel,wake:Arc::new(Notify::new()),
+            restart_requested:false,lease:None,
+        });
+        scheduler.stop_generation(&execution_id,&captured);
+        assert!(!*successor_receiver.borrow(),"an earlier cancellation cannot signal the replacement scheduler");
+        scheduler.stop_generation(&execution_id,"successor-generation");
+        assert!(*successor_receiver.borrow());
+        scheduler.inner.active.remove(&execution_id);
+        scheduler.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_report_is_delivered_while_native_cleanup_remains_pending() {
+        let runner = Arc::new(HarnessAttemptRunner::parallel());
+        let (mut scheduler, repository, execution_id, _directory, owner) = make_scheduler_harness(
+            runner.clone(), &["ready-result"], &[], 1, AdaptationPolicy::Fixed, None,
+        ).await;
+        let effects = Arc::new(NoopConversationEffects::default());
+        effects.block_cleanup.store(true, Ordering::SeqCst);
+        Arc::get_mut(&mut scheduler.inner).unwrap().deps.conversation_effects = effects.clone();
+        let pool = runner.pool.lock().unwrap().clone().unwrap();
+        let lead = generate_id();
+        sqlx::query("INSERT INTO agent_sessions(agent_session_id,owner_ref_json,state,title,archived,pinned,agent_binding_json,next_seq,created_at) VALUES(?,?,'live','interactive lead',0,0,'{}',1,1)")
+            .bind(&lead).bind(json!({"principal_kind":"user","principal_id":owner}).to_string()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO conversation_execution_links(conversation_id,execution_id,relation,created_at,updated_at) VALUES(?,?,'lead',1,1)")
+            .bind(&lead).bind(&execution_id).execute(&pool).await.unwrap();
+        scheduler.start(owner.clone(), execution_id.clone());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !effects.cleanup_started.load(Ordering::SeqCst) {tokio::task::yield_now().await;}
+        }).await.expect("the old native owner reaches its independent cleanup");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while effects.report_operations.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("verified output must not wait for the two-second cleanup timeout");
+        let detail = scheduler.detail(&owner,&execution_id).await.unwrap();
+        assert_eq!(detail.execution.status,AgentExecutionStatus::Completed);
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_execution_links WHERE execution_id=? AND relation='attempt' AND active=0 AND cleanup_completed_at IS NULL")
+            .bind(&execution_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(pending,1,"result delivery does not manufacture native exit or retire its cleanup receipt");
+        effects.block_cleanup.store(false,Ordering::SeqCst);
+        effects.cleanup_release.notify_waiters();
+        scheduler.shutdown().await.unwrap();
+        assert_eq!(runner.call_count("ready-result"),1,"cleanup cannot replay completed work");
+        assert_eq!(effects.report_operations.lock().unwrap().len(),1);
+        assert_eq!(repository.get_execution(&owner,&execution_id).await.unwrap().unwrap().status,"completed");
+    }
+
+    #[tokio::test]
+    async fn retired_directed_work_is_preserved_without_starting_an_attempt() {
+        let runner = Arc::new(HarnessAttemptRunner::parallel());
+        let (scheduler, repository, execution_id, _directory, owner) = make_scheduler_harness(
+            runner.clone(), &["old-role-task"], &[], 1, AdaptationPolicy::Fixed, None,
+        ).await;
+        let pool = runner.pool.lock().unwrap().clone().unwrap();
+        let historical = json!({"mode":"directed","source":{
+            "agent_session_id":generate_id(), "turn_operation_id":"old-turn",
+            "tool_operation_id":"old-tool", "effect_id":"old-effect"
+        }, "plan":{"steps":[{"title":"old-role-task","spec":"retired routing"}]}}).to_string();
+        sqlx::query("UPDATE agent_executions SET initial_plan_input=? WHERE execution_id=?")
+            .bind(&historical).bind(&execution_id).execute(&pool).await.unwrap();
+        let before = repository.get_execution(&owner, &execution_id).await.unwrap().unwrap();
+        scheduler.start(owner.clone(), execution_id.clone());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while scheduler.inner.active.contains_key(&execution_id) {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("retired work stops before lease or dispatch");
+        let after = repository.get_execution(&owner, &execution_id).await.unwrap().unwrap();
+        assert_eq!(after.initial_plan_input, historical, "immutable source history is preserved");
+        assert_eq!(after.status, before.status, "retirement does not manufacture a terminal result");
+        assert_eq!(after.version, before.version, "read-only recognition does not rewrite the aggregate");
+        assert_eq!(runner.call_count("old-role-task"), 0);
+        assert!(scheduler.detail(&owner, &execution_id).await.unwrap().attempts.is_empty());
         scheduler.shutdown().await.unwrap();
     }
 

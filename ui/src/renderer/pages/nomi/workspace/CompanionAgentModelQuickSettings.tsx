@@ -25,16 +25,15 @@ type Props = {
   className?: string;
   onChanged?: () => void;
   onSavingChange?: (saving: boolean) => void;
-  role?: 'companion' | 'robot';
 };
 
 const valueFor = (model: CompanionChatModel) => JSON.stringify([model.provider_id, model.model]);
 
 /** Quick editing stays inside the docked partner sidebar and the existing Session. */
-const CompanionAgentModelQuickSettings: React.FC<Props> = ({ companion, conversation, role = 'companion', disabled = false, className, onChanged, onSavingChange }) => {
+const CompanionAgentModelQuickSettings: React.FC<Props> = ({ companion, conversation, disabled = false, className, onChanged, onSavingChange }) => {
   const { t } = useTranslation();
   const { profile, patchCompanion } = companion;
-  const profileModel = role === 'robot' ? profile?.robot?.model : profile?.model;
+  const profileModel = profile?.model;
   const { groups, isLoading, error: catalogError, refresh: refreshCatalog } = useModelsForTask('chat');
   const providerLabel = useModelSelectorProviderLabel();
   const [modelSaving, setModelSaving] = useState(false);
@@ -45,7 +44,7 @@ const CompanionAgentModelQuickSettings: React.FC<Props> = ({ companion, conversa
   const busyRef = useRef(false);
   const committedRef = useRef<CompanionChatModel | null>(null);
   const mounted = useRef(true);
-  const requestKey = `${profile?.companion_id ?? ''}/${role}/${conversation?.id ?? ''}`;
+  const requestKey = `${profile?.companion_id ?? ''}/${conversation?.id ?? ''}`;
   const activeRequest = useRef(requestKey);
   activeRequest.current = requestKey;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -60,7 +59,7 @@ const CompanionAgentModelQuickSettings: React.FC<Props> = ({ companion, conversa
   const sessionBlocked = Boolean(conversation && isConversationBindingBlocked(conversation));
   const controlsDisabled = disabled || busy || sessionBlocked;
   const model = committedModel ?? (conversation ? { provider_id: conversation.model.id, model: conversation.model.use_model }
-    : profileModel ?? (role === 'robot' ? profile?.model : null));
+    : profileModel);
   const eligibleGroups = groups.filter(({ provider }) => !provider.platform.toLowerCase().includes('gemini-with-google-auth'));
   const modelAvailable = Boolean(model && eligibleGroups.some((group) => group.provider.id === model.provider_id && group.models.includes(model.model)));
 
@@ -76,7 +75,6 @@ const CompanionAgentModelQuickSettings: React.FC<Props> = ({ companion, conversa
         conversation,
         sessionModel: committedRef.current ?? (conversation ? { provider_id: conversation.model.id, model: conversation.model.use_model } : undefined),
         profileModel,
-        role,
         next,
         patchCompanion,
         onSessionChanged: (selected) => {
@@ -109,39 +107,19 @@ const CompanionAgentModelQuickSettings: React.FC<Props> = ({ companion, conversa
     }
   };
 
-  const restoreInheritance = async () => {
-    if (busyRef.current || controlsDisabled) return;
-    busyRef.current = true;
-    setModelSaving(true);
-    onSavingChange?.(true);
-    try {
-      await patchCompanion({ robot: { model: null } }, { optimistic: false });
-      if (current()) { setSaveError(''); onChanged?.(); }
-    } catch {
-      if (current()) setSaveError(t('agentSettings.productBinding.saveFailed'));
-    } finally {
-      busyRef.current = false;
-      onSavingChange?.(false);
-      if (mounted.current) setModelSaving(false);
-    }
-  };
-
   if (!profile) return null;
   return <div className={[styles.fields, className].filter(Boolean).join(' ')}>
     <div className={styles.row}>
       <span className={styles.label}>{t('nomi.cohabit.quickAgent', { defaultValue: 'Agent' })}</span>
       <div className={styles.control}>
-        <ProductAgentBindingSelect targetKind={role} targetId={profile.companion_id} defaultTemplateKey={role === 'robot' ? 'companion.robot' : 'companion.default'}
+        <ProductAgentBindingSelect targetKind='companion' targetId={profile.companion_id} defaultTemplateKey='companion.default'
           model={model ? { id: model.provider_id, use_model: model.model } : undefined} conversationId={conversation?.id}
           updateDefault={Boolean(conversation)}
           layout='stacked' showManagementActions={false} disabled={controlsDisabled}
           onChanged={onChanged} onSavingChange={(saving) => { busyRef.current = saving; if (mounted.current) setAgentSaving(saving); onSavingChange?.(saving); }} />
       </div>
     </div>
-    {role === 'robot' && <p className={styles.hint}>{t(profile?.robot?.model ? 'nomi.cohabit.robotIndependent' : 'nomi.cohabit.robotInherited')}</p>}
-    {role === 'robot' && profile?.robot?.model && <Button size='mini' type='text' disabled={controlsDisabled}
-      onClick={() => void restoreInheritance()}>{t('nomi.cohabit.inheritForFuture')}</Button>}
-    <p className={styles.hint}>{t(conversation ? 'nomi.cohabit.roleCurrentHint' : 'nomi.cohabit.roleDefaultHint')}</p>
+    <p className={styles.hint}>{t(conversation ? 'nomi.cohabit.sessionSettingsHint' : 'nomi.cohabit.defaultSettingsHint')}</p>
     <div className={styles.row}>
       <span className={styles.label}>{t('nomi.cohabit.quickModel', { defaultValue: '模型' })}</span>
       <div className={styles.control}>

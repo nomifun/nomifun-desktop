@@ -6,6 +6,7 @@ import McpServerHeader from './McpServerHeader';
 import McpServerToolsList from './McpServerToolsList';
 import type { McpOAuthStatus } from '@/renderer/hooks/mcp/useMcpOAuth';
 import type { McpOAuthAttempt } from '@/common/types/mcpAuth';
+import styles from './McpServerList.module.css';
 
 interface McpServerItemProps {
   server: IMcpServer;
@@ -52,7 +53,7 @@ const McpServerItem: React.FC<McpServerItemProps> = ({
       key={server.mcp_server_id}
       activeKey={isCollapsed ? ['1'] : []}
       onChange={onToggleCollapse}
-      className='mb-4 [&_div.arco-collapse-item-header-title]:!block [&_div.arco-collapse-item-header-title]:!min-w-0 [&_div.arco-collapse-item-header-title]:!flex-1'
+      className={styles.item}
     >
       <Collapse.Item
         header={
@@ -75,7 +76,6 @@ const McpServerItem: React.FC<McpServerItemProps> = ({
           />
         }
         name='1'
-        className='[&_div.arco-collapse-item-content-box]:!py-6px'
       >
         {(diagnostic || oauthStatus?.error) && <div aria-live='polite' className='mb-8px break-words text-12px text-t-secondary'>
           <div>{diagnostic?.message ?? oauthStatus?.error}</div>

@@ -35,7 +35,7 @@ use crate::transport::{
     MAX_ARTIFACT_BYTES, error_from_response, post_json, post_multipart, read_body_capped,
     read_json_capped, response_secret_redactor,
 };
-use crate::types::{ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult};
+use crate::types::{ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult, TtsRequest};
 
 use super::{json_request_body, scalar_request_fields};
 use super::audio_payload::validate_audio_payload;
@@ -140,22 +140,7 @@ impl ProtocolAdapter for OpenAiAudioSpeechAdapter {
         };
         let url = call.endpoint_url()?;
 
-        let mut body = serde_json::json!({
-            "model": call.model,
-            "input": req.text,
-        });
-        if let Some(voice) = req.voice.as_deref() {
-            body["voice"] = Value::String(voice.to_owned());
-        }
-        if let Some(format) = req.format.as_deref() {
-            body["response_format"] = Value::String(format.to_owned());
-        }
-        let mut body = json_request_body(&call.model_params, &req.extra, body)?;
-        // A fallback must not replace a configured voice, including OpenAI's
-        // custom voice object. Explicit typed voice/format still win the merge.
-        if body.get("voice").is_none() {
-            body["voice"] = Value::String(DEFAULT_TTS_VOICE.to_owned());
-        }
+        let body = speech_body(call, req)?;
 
         let resp = post_json(http, &url, REQUEST_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
@@ -180,6 +165,23 @@ impl ProtocolAdapter for OpenAiAudioSpeechAdapter {
             mime: Some(mime),
         }])))
     }
+}
+
+/// Shared by complete-artifact and incremental PCM delivery. Typed fields and
+/// configured custom voices have identical precedence on both paths.
+pub(crate) fn speech_body(call: &ResolvedCall, req: &TtsRequest) -> Result<Value, InvokeError> {
+    let mut body = serde_json::json!({ "model": call.model, "input": req.text });
+    if let Some(voice) = req.voice.as_deref() {
+        body["voice"] = Value::String(voice.to_owned());
+    }
+    if let Some(format) = req.format.as_deref() {
+        body["response_format"] = Value::String(format.to_owned());
+    }
+    let mut body = json_request_body(&call.model_params, &req.extra, body)?;
+    if body.get("voice").is_none() {
+        body["voice"] = Value::String(DEFAULT_TTS_VOICE.to_owned());
+    }
+    Ok(body)
 }
 
 /// MIME type of a `/audio/speech` `response_format`. Unknown formats fall back

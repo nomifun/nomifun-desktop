@@ -1,4 +1,4 @@
-//! Independent Companion/Robot defaults, exact device Sessions and workspace ownership.
+//! One Companion Agent definition, independent entry Sessions and exact device ownership.
 mod common;
 use axum::http::StatusCode;
 use common::companion_agent::{COMPANION_AGENT_TEST_TRUST, companion_agent_test_request, save_companion_core_agent_for_fixture};
@@ -20,7 +20,7 @@ async fn fixture() -> Fixture {
     common::materialize_builtin_skills_for_fixture(&services).await;
     let upstream = wiremock::MockServer::start().await;
     let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
-        "platform":"stepfun-plan", "name":"Independent role configuration",
+        "platform":"stepfun-plan", "name":"Unified Companion configuration",
         "base_url":format!("{}/step_plan/v1", upstream.uri()),
         "auth_scheme":"bearer", "credentials":{"api_keys":["test-only"]}, "enabled":true,
         "initial_model":{"model":"step-3.7-flash", "enabled":true,
@@ -30,7 +30,7 @@ async fn fixture() -> Fixture {
     assert_eq!(status, StatusCode::CREATED, "{provider}");
     let model = json!({"provider_id":provider["data"]["provider_id"], "model":"step-3.7-flash"});
     let (status, companion) = call(router.clone(), "POST", "/api/companion/companions",
-        json!({"name":"Independent role companion", "character":"ink"})).await;
+        json!({"name":"Unified entry companion", "character":"ink"})).await;
     assert_eq!(status, StatusCode::CREATED, "{companion}");
     let companion_id = companion["data"]["companion_id"].as_str().unwrap().to_owned();
     let (status, patched) = call(router.clone(), "PATCH",
@@ -56,14 +56,14 @@ fn device(projection: &Value) -> &Value {
     devices[0]
 }
 
-async fn product_default(fixture: &Fixture, role: &str) -> String {
+async fn product_default(fixture: &Fixture, target_kind: &str) -> String {
     sqlx::query_scalar("SELECT agent_binding_json FROM agent_bindings WHERE target_kind=? AND target_id=?")
-        .bind(role).bind(&fixture.companion_id).fetch_one(fixture.services.database.pool()).await.unwrap()
+        .bind(target_kind).bind(&fixture.companion_id).fetch_one(fixture.services.database.pool()).await.unwrap()
 }
 
 fn assert_explicit_wide_actions(actual: &serde_json::Map<String, Value>, discovery: &Value) {
     assert_eq!(actual["workspace.files"], json!(["workspace.files/read", "workspace.files/write"]),
-        "a Robot Agent keeps its explicitly selected local computer capabilities");
+        "a physical entry keeps the shared Agent's explicitly selected local capabilities");
     assert!(actual["agent.collaboration"].as_array().unwrap().contains(&json!("agent/fork")),
         "the physical entry must not trim an explicitly selected collaboration action");
     if let Some(actions) = actual.get("agent.tool-discovery") {
@@ -74,31 +74,40 @@ fn assert_explicit_wide_actions(actual: &serde_json::Map<String, Value>, discove
     }
 }
 
-fn assert_explicit_role_binding(current: &Value, discovery: &Value, expected_skills: &[&str]) {
+fn assert_explicit_entry_binding(current: &Value, discovery: &Value, expected_skills: &[&str]) {
     assert_explicit_wide_actions(current["agent_snapshot"]["enabled_capability_actions"].as_object().unwrap(), discovery);
     assert_eq!(current["agent_snapshot"]["included_skills"], json!(expected_skills),
-        "Robot keeps the explicit source selection without selecting the global inventory");
+        "the physical entry keeps the explicit source selection without selecting the global inventory");
     assert!(binding(current)["typed_resource_bindings"].as_array().unwrap().iter().any(|resource|
         resource["resource_kind"] == "workspace" && !resource["operations"].as_array().unwrap().is_empty()),
         "explicit local computer actions retain their admitted workspace grant");
 }
 
-async fn assert_physical_skill_locks(fixture: &Fixture, current: &Value, expected_skills: &[&str]) {
+async fn assert_physical_skill_locks(fixture: &Fixture, current: &Value, expected_skills: &[&str],
+    expected_bodies:&std::collections::BTreeMap<String,String>) {
     let raw: String = sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
         .bind(binding(current)["resolved_snapshot_ref"]["snapshot_id"].as_str().unwrap())
         .fetch_one(fixture.services.database.pool()).await.unwrap();
     let snapshot: Value = serde_json::from_str(&raw).unwrap();
     let locks = snapshot["content"]["skill_locks"].as_array().unwrap();
-    assert_eq!(locks.len(), expected_skills.len(), "unselected library bodies are absent from the actual frozen Snapshot");
+    let selected=locks.iter().filter(|lock|lock["selected"]==true).map(|lock|
+        lock["skill"]["name"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(selected,expected_skills.iter().copied().collect(),
+        "the unified Snapshot keeps the explicit selected set without role-based inventory clipping");
     for lock in locks {
-        assert_eq!(lock["selected"], true);
-        assert!(expected_skills.contains(&lock["skill"]["name"].as_str().unwrap()));
-        assert!(lock["skill"]["body"].as_str().unwrap().contains("AUTHORED_ROBOT_SKILL_BODY"));
+        let name=lock["skill"]["name"].as_str().unwrap();
+        if expected_skills.contains(&name) {
+            assert_eq!(lock["selected"],true);
+            assert_eq!(lock["skill"]["body"].as_str().unwrap(),expected_bodies[name],
+                "launch and current-only transitions preserve the exact captured selected Skill body");
+        } else {
+            assert_eq!(lock["selected"],false,"unselected frozen inventory is data, never an implicit input selection");
+        }
     }
 }
 
 async fn assert_explicit_wide_default(fixture: &Fixture, discovery: &Value) {
-    let binding: Value = serde_json::from_str(&product_default(fixture, "robot").await).unwrap();
+    let binding: Value = serde_json::from_str(&product_default(fixture, "companion").await).unwrap();
     let raw: String = sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
         .bind(binding["resolved_snapshot_ref"]["snapshot_id"].as_str().unwrap())
         .fetch_one(fixture.services.database.pool()).await.unwrap();
@@ -109,22 +118,31 @@ async fn assert_explicit_wide_default(fixture: &Fixture, discovery: &Value) {
     assert_explicit_wide_actions(&actual, discovery);
     assert!(binding["typed_resource_bindings"].as_array().unwrap().iter().any(|resource|
         resource["resource_kind"] == "workspace" && !resource["operations"].as_array().unwrap().is_empty()),
-        "future Robot defaults retain explicitly authorized workspace operations");
+        "the shared future default retains explicitly authorized workspace operations");
 }
 
 #[tokio::test]
-async fn personal_robot_agent_keeps_explicit_capabilities_and_frozen_skills_across_create_switch_and_composer() {
+async fn unified_agent_keeps_explicit_capabilities_and_frozen_skills_across_device_create_switch_and_composer() {
     const AUTHORED_SKILL: &str = "physical-authored-guidance";
     const INVENTORY_SKILL: &str = "physical-unselected-inventory";
     let call = companion_agent_test_request;
     let f = fixture().await;
     let services = &f.services;
     let companion_id = &f.companion_id;
+    // All entries retain the shared profile's effective builtin defaults.
+    // This fixture explicitly opts out of those defaults so the exact lock
+    // assertions below isolate the saved Agent's one selected Library body.
+    let disabled_auto = nomifun_skill_library::list_builtin_auto_skills(&services.skill_paths)
+        .await.unwrap().into_iter().map(|skill| skill.name).collect::<Vec<_>>();
+    let (status, profile) = call(f.router.clone(), "PATCH",
+        &format!("/api/companion/companions/{companion_id}"),
+        json!({"skills":{"enabled":[], "disabled_auto":disabled_auto}})).await;
+    assert_eq!(status, StatusCode::OK, "{profile}");
     let (status, catalog) = call(f.router.clone(), "GET", "/api/agent-catalog", json!({})).await;
     assert_eq!(status, StatusCode::OK, "{catalog}");
     let discovery = catalog["data"]["modules"].as_array().unwrap().iter()
         .find(|module| module["module"]["id"] == "agent.tool-discovery").unwrap();
-    let robot_path = format!("/api/product-agent-bindings/robot/{companion_id}");
+    let agent_path = format!("/api/product-agent-bindings/companion/{companion_id}");
     let registry = &services.robot.as_ref().unwrap().registry;
     let (robot, _) = registry.upsert_on_report(nomifun_robot::registry::RobotReport {
         robot_id:"personal-wide-role-device".into(), client_id:"personal-wide-role-client".into(),
@@ -135,8 +153,8 @@ async fn personal_robot_agent_keeps_explicit_capabilities_and_frozen_skills_acro
     registry.connect(&robot.robot_id, companion_id, "personal-wide-role-connection").await.unwrap();
     services.robot.as_ref().unwrap().tools.attach(&robot.robot_id, std::sync::Arc::new(
         nomifun_robot::mcp_bridge::RobotMcpClient::new(device_tx, "personal-wide-role-connection".into())), Vec::new()).await;
-    let (status, official) = call(f.router.clone(), "POST", "/api/agent-presets/from-template/companion.robot", json!({
-        "display_name":"companion.robot", "reuse_existing":true, "model":f.model,
+    let (status, official) = call(f.router.clone(), "POST", "/api/agent-presets/from-template/companion.default", json!({
+        "display_name":"companion.default", "reuse_existing":true, "model":f.model,
     })).await;
     assert_eq!(status, StatusCode::OK, "{official}");
     let mut document = official["data"]["draft"]["document"].clone();
@@ -146,15 +164,18 @@ async fn personal_robot_agent_keeps_explicit_capabilities_and_frozen_skills_acro
         let directory = services.skill_paths.user_skills_dir.join(name);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("SKILL.md"), format!(
-            "---\nname: {name}\ndescription: Physical role fixture {name}\n---\nAUTHORED_ROBOT_SKILL_BODY {name}\n")).unwrap();
+            "---\nname: {name}\ndescription: Physical entry fixture {name}\n---\nAUTHORED_ROBOT_SKILL_BODY {name}\n")).unwrap();
     }
     let capabilities = document["enabled_capabilities"].as_array_mut().unwrap();
-    capabilities.iter_mut().find(|selection| selection["capability"]["id"] == "agent.collaboration").unwrap()
-        ["action_allowlist"] = json!(["agent/delegate", "agent/fork", "agent/request_user_decision"]);
+    capabilities.retain(|selection| matches!(selection["capability"]["id"].as_str(), Some("companion" | "companion.memory")));
+    capabilities.push(json!({"capability":{"id":"agent.collaboration"},
+        "action_allowlist":["agent/delegate", "agent/fork", "agent/request_user_decision"]}));
+    capabilities.push(json!({"capability":{"id":"robot"},
+        "action_allowlist":["robot/device", "robot/display", "robot/motion", "robot/vision"]}));
     capabilities.push(json!({"capability":{"id":"workspace.files"},
         "action_allowlist":["workspace.files/read", "workspace.files/write"]}));
     let (status, personal) = call(f.router.clone(), "POST", "/api/agent-presets", json!({
-        "display_name":"Wide authored physical Agent", "document":document,
+        "display_name":"Unified authored Companion Agent", "document":document,
     })).await;
     assert_eq!(status, StatusCode::OK, "{personal}");
     let personal_id = personal["data"]["preset"]["preset_id"].as_str().unwrap();
@@ -181,8 +202,11 @@ async fn personal_robot_agent_keeps_explicit_capabilities_and_frozen_skills_acro
     let source_skills = source_snapshot["content"]["skill_locks"].as_array().unwrap();
     assert!(source_skills.iter().any(|lock| lock["skill"]["name"] == AUTHORED_SKILL && lock["selected"] == true));
     assert!(source_skills.iter().any(|lock| lock["skill"]["name"] == INVENTORY_SKILL && lock["selected"] == false));
+    let expected_bodies=source_skills.iter().filter(|lock|lock["selected"]==true)
+        .map(|lock|(lock["skill"]["name"].as_str().unwrap().to_owned(),lock["skill"]["body"].as_str().unwrap().to_owned()))
+        .collect::<std::collections::BTreeMap<_,_>>();
     let source_selection = json!({"kind":"preset", "preset_id":source_binding["preset_revision_ref"]["preset_id"]});
-    let (status, configured) = call(f.router.clone(), "PUT", &robot_path, json!({
+    let (status, configured) = call(f.router.clone(), "PUT", &agent_path, json!({
         "selection":source_selection, "model":f.model,
         "resource_selections":[{"resource_kind":"robot", "resource_id":robot.robot_id}],
     })).await;
@@ -195,8 +219,8 @@ async fn personal_robot_agent_keeps_explicit_capabilities_and_frozen_skills_acro
         companion_id, nomifun_companion::CompanionRole::Robot, Some(&robot.robot_id)).await.unwrap();
     assert_explicit_wide_default(&f, discovery).await;
     let before = projection(&f.router, &physical.conversation_id).await;
-    assert_explicit_role_binding(&before, discovery, &[AUTHORED_SKILL]);
-    assert_physical_skill_locks(&f, &before, &[AUTHORED_SKILL]).await;
+    assert_explicit_entry_binding(&before, discovery, &[AUTHORED_SKILL]);
+    assert_physical_skill_locks(&f, &before, &[AUTHORED_SKILL],&expected_bodies).await;
     assert_eq!(device(&before)["resource_id"], robot.robot_id);
     assert_eq!(before["agent_snapshot"]["resolved_model"]["provider_id"], f.model["provider_id"]);
     for marker in ["PERSONAL_PHYSICAL_ROLE_PERSONA", "PERSONAL_PHYSICAL_ROLE_RULE_V1"] {
@@ -213,27 +237,27 @@ async fn personal_robot_agent_keeps_explicit_capabilities_and_frozen_skills_acro
     })).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     let selection = json!({"kind":"preset", "preset_id":personal_id});
-    let (status, future) = call(f.router.clone(), "PUT", &robot_path, json!({
+    let (status, future) = call(f.router.clone(), "PUT", &agent_path, json!({
         "selection":selection, "model":f.model,
         "resource_selections":[{"resource_kind":"robot", "resource_id":robot.robot_id}],
     })).await;
     assert_eq!(status, StatusCode::OK, "{future}");
     assert_explicit_wide_default(&f, discovery).await;
-    let default_before_apply = product_default(&f, "robot").await;
+    let default_before_apply = product_default(&f, "companion").await;
     assert_eq!(binding(&projection(&f.router, &physical.conversation_id).await), binding(&before),
         "future defaults cannot edit an existing physical Session");
-    let (status, applied) = call(f.router.clone(), "PUT", &robot_path, json!({
+    let (status, applied) = call(f.router.clone(), "PUT", &agent_path, json!({
         "selection":selection, "conversation_id":physical.conversation_id, "update_default":false,
         "resource_selections":[{"resource_kind":"robot", "resource_id":robot.robot_id}],
     })).await;
     assert_eq!(status, StatusCode::OK, "{applied}");
     let after = projection(&f.router, &physical.conversation_id).await;
-    assert_explicit_role_binding(&after, discovery, &[AUTHORED_SKILL]);
-    assert_physical_skill_locks(&f, &after, &[AUTHORED_SKILL]).await;
+    assert_explicit_entry_binding(&after, discovery, &[AUTHORED_SKILL]);
+    assert_physical_skill_locks(&f, &after, &[AUTHORED_SKILL],&expected_bodies).await;
     assert!(after["agent_snapshot"]["instructions"].as_str().unwrap().contains("PERSONAL_PHYSICAL_ROLE_RULE_V2"));
     assert_eq!(after["agent_snapshot"]["resolved_model"], before["agent_snapshot"]["resolved_model"]);
     assert_eq!(device(&after)["resource_id"], robot.robot_id);
-    assert_eq!(product_default(&f, "robot").await, default_before_apply, "current-only apply preserves the future default");
+    assert_eq!(product_default(&f, "companion").await, default_before_apply, "current-only apply preserves the future default");
     let (status, composed) = call(f.router.clone(), "PUT",
         &format!("/api/agent-sessions/{}/capability-selection", physical.conversation_id), json!({
             "expected_binding_version":binding(&after)["binding_version"],
@@ -241,23 +265,23 @@ async fn personal_robot_agent_keeps_explicit_capabilities_and_frozen_skills_acro
         })).await;
     assert_eq!(status, StatusCode::OK, "{composed}");
     let cleared = projection(&f.router, &physical.conversation_id).await;
-    assert_explicit_role_binding(&cleared, discovery, &[]);
-    assert_physical_skill_locks(&f, &cleared, &[]).await;
+    assert_explicit_entry_binding(&cleared, discovery, &[]);
+    assert_physical_skill_locks(&f, &cleared, &[],&expected_bodies).await;
     assert_eq!(binding(&cleared)["typed_resource_bindings"], binding(&after)["typed_resource_bindings"],
         "clearing a Skill keeps the exact Companion, memory, device and zero-operation workspace choices");
     assert_eq!(binding(&projection(&f.router, &desktop.conversation_id).await), binding(&desktop_before));
-    assert_eq!(product_default(&f, "robot").await, default_before_apply);
+    assert_eq!(product_default(&f, "companion").await, default_before_apply);
     let source_after: String = sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
         .bind(source_binding["resolved_snapshot_ref"]["snapshot_id"].as_str().unwrap())
         .fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(source_after, source_raw, "launching and editing another Session never rewrites the source variant's frozen Skill facts");
-    assert!(f.upstream.received_requests().await.unwrap().is_empty(), "role configuration performs no model call");
+    assert!(f.upstream.received_requests().await.unwrap().is_empty(), "Agent configuration performs no model call");
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
 
 #[tokio::test]
-async fn physical_role_without_robot_tools_keeps_verified_device_identity_and_rejects_foreign_device() {
+async fn physical_entry_without_robot_tools_keeps_verified_device_identity_and_rejects_foreign_device() {
     let call = companion_agent_test_request;
     let f = fixture().await;
     let services = &f.services;
@@ -274,8 +298,8 @@ async fn physical_role_without_robot_tools_keeps_verified_device_identity_and_re
         }, 1).await.unwrap();
         registry.claim(device.activation_code.as_deref().unwrap(), profile_id).await.unwrap();
     }
-    let (status, official) = call(f.router.clone(), "POST", "/api/agent-presets/from-template/companion.robot", json!({
-        "display_name":"companion.robot", "reuse_existing":true, "model":f.model,
+    let (status, official) = call(f.router.clone(), "POST", "/api/agent-presets/from-template/companion.default", json!({
+        "display_name":"companion.default", "reuse_existing":true, "model":f.model,
     })).await;
     assert_eq!(status, StatusCode::OK, "{official}");
     let mut document = official["data"]["draft"]["document"].clone();
@@ -288,7 +312,7 @@ async fn physical_role_without_robot_tools_keeps_verified_device_identity_and_re
     })).await;
     assert_eq!(status, StatusCode::OK, "{personal}");
     let (status, configured) = call(f.router.clone(), "PUT",
-        &format!("/api/product-agent-bindings/robot/{companion_id}"), json!({
+        &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({
             "selection":{"kind":"preset", "preset_id":personal["data"]["preset"]["preset_id"]},
             "model":f.model, "resource_selections":[],
         })).await;
@@ -323,110 +347,200 @@ async fn physical_role_without_robot_tools_keeps_verified_device_identity_and_re
 }
 
 #[tokio::test]
-async fn robot_role_configuration_preserves_desktop_and_each_exact_device_session() {
+async fn empty_profile_extensions_preserve_only_the_saved_agents_mcp_in_both_entry_snapshots() {
+    use wiremock::{Mock, ResponseTemplate, matchers::{method, path}};
+    let f = fixture().await;
+    let call = companion_agent_test_request;
+    let mcp = wiremock::MockServer::start().await;
+    Mock::given(method("POST")).and(path("/mcp")).respond_with(|request: &wiremock::Request| {
+        let body: Value = request.body_json().unwrap();
+        let result = match body["method"].as_str().unwrap() {
+            "notifications/initialized" => return ResponseTemplate::new(202),
+            "initialize" => json!({"protocolVersion":nomifun_mcp::owner::MCP_PROTOCOL_VERSION,
+                "capabilities":{}, "serverInfo":{"name":"unified-entry-extension", "version":"1.0.0"}}),
+            "tools/list" => json!({"tools":[{"name":"lookup", "description":"Saved Agent lookup",
+                "inputSchema":{"type":"object", "additionalProperties":false}}]}),
+            other => panic!("configuration must not execute MCP work: {other}"),
+        };
+        ResponseTemplate::new(200).set_body_json(json!({"jsonrpc":"2.0", "id":body["id"], "result":result}))
+    }).mount(&mcp).await;
+    let transport = json!({"type":"http", "url":format!("{}/mcp", mcp.uri())});
+    let mut ready_servers = Vec::new();
+    for name in ["selected-agent-extension", "unselected-ready-extension"] {
+        let (status, saved) = call(f.router.clone(), "POST", "/api/mcp/servers",
+            json!({"name":name, "transport":transport})).await;
+        assert_eq!(status, StatusCode::CREATED, "{saved}");
+        let id = saved["data"]["mcp_server_id"].as_str().unwrap().to_owned();
+        let (status, toggled) = call(f.router.clone(), "POST", &format!("/api/mcp/servers/{id}/toggle"), Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{toggled}");
+        let (status, connected) = call(f.router.clone(), "POST", "/api/mcp/test-connection",
+            json!({"mcp_server_id":id, "name":name, "transport":transport})).await;
+        assert_eq!(status, StatusCode::OK, "{connected}");
+        assert_eq!(connected["data"]["success"], true, "{connected}");
+        ready_servers.push(id);
+    }
+    let selected = &ready_servers[0];
+    let server_id = nomifun_api_types::McpServerId::parse(selected).unwrap();
+    let capability = nomifun_mcp::canonical_mcp_tool_capability_id(&server_id, "lookup").unwrap();
+    let action = nomifun_mcp::canonical_mcp_tool_action_id(&capability).unwrap();
+    let (status, official) = call(f.router.clone(), "POST", "/api/agent-presets/from-template/companion.default",
+        json!({"display_name":"companion.default", "reuse_existing":true, "model":f.model})).await;
+    assert_eq!(status, StatusCode::OK, "{official}");
+    let mut document = official["data"]["draft"]["document"].clone();
+    document["enabled_capabilities"].as_array_mut().unwrap().push(json!({
+        "capability":{"id":capability}, "action_allowlist":[action],
+    }));
+    let (status, authored) = call(f.router.clone(), "POST", "/api/agent-presets",
+        json!({"display_name":"Companion with one saved MCP source", "document":document})).await;
+    assert_eq!(status, StatusCode::OK, "{authored}");
+    let (status, configured) = call(f.router.clone(), "PUT",
+        &format!("/api/product-agent-bindings/companion/{}", f.companion_id), json!({
+            "selection":{"kind":"preset", "preset_id":authored["data"]["preset"]["preset_id"]},
+            "model":f.model, "resource_selections":[],
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{configured}");
+    assert!(f.services.companion_service.get_companion(&f.companion_id).await.unwrap().mcp_servers.is_empty(),
+        "the profile supplies no extra MCP grant or replacement selection");
+    let registry = &f.services.robot.as_ref().unwrap().registry;
+    let (device, _) = registry.upsert_on_report(nomifun_robot::registry::RobotReport {
+        robot_id:"saved-mcp-entry-device".into(), client_id:"saved-mcp-entry-client".into(),
+        board:"fixture-board".into(), firmware_version:"test".into(),
+    }, 1).await.unwrap();
+    registry.claim(device.activation_code.as_deref().unwrap(), &f.companion_id).await.unwrap();
+    for (entry, device_id) in [(nomifun_companion::CompanionRole::Companion, None),
+        (nomifun_companion::CompanionRole::Robot, Some(device.robot_id.as_str()))] {
+        let session = f.services.companion_service.ensure_session_for_role(&f.companion_id, entry, device_id).await.unwrap();
+        let current = projection(&f.router, &session.conversation_id).await;
+        let (status, selection) = call(f.router.clone(), "GET",
+            &format!("/api/agent-sessions/{}/capability-selection", session.conversation_id), Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{selection}");
+        assert_eq!(selection["data"]["selection"]["mcp_server_ids"], json!([selected]),
+            "each entry preserves the Agent's explicit source while excluding other ready servers");
+        assert!(current["agent_snapshot"]["enabled_capabilities"].as_array().unwrap().contains(&json!(capability)));
+        let resources = binding(&current)["typed_resource_bindings"].as_array().unwrap().iter()
+            .filter(|resource| resource["resource_kind"] == "mcp_server").collect::<Vec<_>>();
+        assert_eq!(resources.len(), 1); assert_eq!(resources[0]["resource_id"], *selected);
+        assert_eq!(resources[0]["owner_id"], f.services.authoritative_user_id.as_ref());
+        assert_eq!(resources[0]["operations"], json!(["connect", "invoke", "read"]));
+        let raw: String = sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?")
+            .bind(binding(&current)["resolved_snapshot_ref"]["snapshot_id"].as_str().unwrap())
+            .fetch_one(f.services.database.pool()).await.unwrap();
+        let snapshot: Value = serde_json::from_str(&raw).unwrap();
+        let locks = snapshot["content"]["mcp_tool_locks"].as_array().unwrap();
+        assert_eq!(locks.len(), 1); assert_eq!(locks[0]["server_id"], *selected);
+        assert_eq!(locks[0]["capability_id"], capability.as_str());
+    }
+    assert!(f.upstream.received_requests().await.unwrap().is_empty());
+    assert!(mcp.received_requests().await.unwrap().iter().all(|request|
+        request.body_json::<Value>().unwrap()["method"] != "tools/call"));
+    f.services.shutdown_browser_platform().await.unwrap();
+    f.services.database.close().await;
+}
+
+#[tokio::test]
+async fn one_companion_default_keeps_desktop_and_each_exact_device_session_independent() {
     let call = companion_agent_test_request;
     let f = fixture().await;
     let router = &f.router;
     let services = &f.services;
     let companion_id = &f.companion_id;
-    let desktop_path = format!("/api/product-agent-bindings/companion/{companion_id}");
-    let robot_path = format!("/api/product-agent-bindings/robot/{companion_id}");
-    let desktop_selection = json!({"kind":"template", "template_key":"companion.default"});
-    let robot_selection = json!({"kind":"template", "template_key":"companion.robot"});
-    let (status, saved) = call(router.clone(), "PUT", &desktop_path, json!({
-        "selection":desktop_selection, "model":f.model, "resource_selections":[],
+    let agent_path = format!("/api/product-agent-bindings/companion/{companion_id}");
+    let (status, official) = call(router.clone(), "POST", "/api/agent-presets/from-template/companion.default", json!({
+        "display_name":"companion.default", "reuse_existing":true, "model":f.model,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{official}");
+    let mut document = official["data"]["draft"]["document"].clone();
+    document["enabled_capabilities"].as_array_mut().unwrap().push(json!({
+        "capability":{"id":"robot"}, "action_allowlist":["robot/device", "robot/display", "robot/motion", "robot/vision"],
+    }));
+    let (status, personal) = call(router.clone(), "POST", "/api/agent-presets", json!({
+        "display_name":"One Agent for all Companion entries", "document":document,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{personal}");
+    let selection = json!({"kind":"preset", "preset_id":personal["data"]["preset"]["preset_id"]});
+    let (status, saved) = call(router.clone(), "PUT", &agent_path, json!({
+        "selection":selection, "model":f.model, "resource_selections":[],
     })).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     let desktop = services.companion_service.ensure_session_for_role(
         companion_id, nomifun_companion::CompanionRole::Companion, None).await.unwrap();
-    let desktop_default = product_default(&f, "companion").await;
-    let (status, robot_provider) = call(router.clone(), "POST", "/api/providers", json!({
-        "platform":"stepfun-plan", "name":"Robot-only model route",
-        "base_url":format!("{}/step_plan/v1", f.upstream.uri()),
-        "auth_scheme":"bearer", "credentials":{"api_keys":["test-only"]}, "enabled":true,
-        "initial_model":{"model":"step-3.7-flash", "enabled":true,
-            "capabilities":[{"task":"chat", "traits":[], "protocol":"openai.chat_text",
-                "connection_role":"default", "provider_params":{}}]},
-    })).await;
-    assert_eq!(status, StatusCode::CREATED, "{robot_provider}");
-    let robot_model = json!({"provider_id":robot_provider["data"]["provider_id"], "model":"step-3.7-flash"});
-    let (status, patched) = call(router.clone(), "PATCH",
-        &format!("/api/companion/companions/{companion_id}"), json!({"robot":{"model":robot_model}})).await;
-    assert_eq!(status, StatusCode::OK, "{patched}");
-    assert_eq!(patched["data"]["model"], f.model, "Robot defaults do not overwrite the desktop profile model");
+    let initial_default = product_default(&f, "companion").await;
+    let initial_desktop = projection(router, &desktop.conversation_id).await;
+    assert!(!binding(&initial_desktop)["typed_resource_bindings"].as_array().unwrap().iter().any(|resource|
+        resource["resource_kind"] == "robot"), "authorizing Robot actions does not invent a selected device");
     let registry = &services.robot.as_ref().expect("robot fixture service").registry;
-    for id in ["role-device-a", "role-device-b"] {
+    for id in ["entry-device-a", "entry-device-b"] {
         let (robot, _) = registry.upsert_on_report(nomifun_robot::registry::RobotReport {
             robot_id:id.into(), client_id:format!("client-{id}"), board:"fixture-board".into(),
             firmware_version:"test".into(),
         }, 1).await.unwrap();
         registry.claim(robot.activation_code.as_deref().unwrap(), companion_id).await.unwrap();
     }
-    let (status, saved) = call(router.clone(), "PUT", &robot_path, json!({
-        "selection":robot_selection, "model":robot_model,
-        "resource_selections":[{"resource_kind":"robot", "resource_id":"role-device-a"}],
-    })).await;
-    assert_eq!(status, StatusCode::OK, "{saved}");
     let a = services.companion_service.ensure_session_for_role(
-        companion_id, nomifun_companion::CompanionRole::Robot, Some("role-device-a")).await.unwrap();
+        companion_id, nomifun_companion::CompanionRole::Robot, Some("entry-device-a")).await.unwrap();
     let b = services.companion_service.ensure_session_for_role(
-        companion_id, nomifun_companion::CompanionRole::Robot, Some("role-device-b")).await.unwrap();
+        companion_id, nomifun_companion::CompanionRole::Robot, Some("entry-device-b")).await.unwrap();
     assert_ne!(desktop.conversation_id, a.conversation_id);
     assert_ne!(a.conversation_id, b.conversation_id);
     let a_before = projection(router, &a.conversation_id).await;
     let b_before = projection(router, &b.conversation_id).await;
-    for (current, id) in [(&a_before, "role-device-a"), (&b_before, "role-device-b")] {
-        assert_eq!(current["extra"]["companion_role"], "robot");
-        assert_eq!(current["extra"]["product_agent_target_kind"], "robot");
-        assert_eq!(current["agent_snapshot"]["resolved_model"]["provider_id"], robot_model["provider_id"]);
-        assert_eq!(device(current)["resource_id"], id, "exact device creation overrides the cached role device");
+    for (current, id) in [(&a_before, "entry-device-a"), (&b_before, "entry-device-b")] {
+        assert_eq!(current["extra"]["companion_role"], "robot", "the physical entry remains an exact routing fact");
+        assert_eq!(current["extra"]["product_agent_target_kind"], "companion");
+        assert_eq!(current["agent_snapshot"]["resolved_model"], initial_desktop["agent_snapshot"]["resolved_model"],
+            "all entries use the one saved primary model");
+        assert_eq!(current["agent_snapshot"]["enabled_capability_actions"], initial_desktop["agent_snapshot"]["enabled_capability_actions"],
+            "a physical input does not replace the shared authored Agent with a weaker role");
+        assert_eq!(device(current)["resource_id"], id);
         for kind in ["companion", "companion_memory"] {
             assert!(binding(current)["typed_resource_bindings"].as_array().unwrap().iter().any(|resource|
                 resource["resource_kind"] == kind && resource["resource_id"] == *companion_id));
         }
     }
+    let defaults: Vec<String> = sqlx::query_scalar("SELECT target_kind FROM agent_bindings WHERE target_id=?")
+        .bind(companion_id).fetch_all(services.database.pool()).await.unwrap();
+    assert_eq!(defaults, vec!["companion"], "device entries never create a second Agent default");
+    let (status, retired) = call(router.clone(), "GET",
+        &format!("/api/product-agent-bindings/robot/{companion_id}"), json!({})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "the retired second selection target must be rejected: {retired}");
     let store = AgentSessionStore::from_pool(services.database.pool().clone()).await.unwrap();
     let canonical = store.get_live_session(&AgentSessionId::from(a.conversation_id.clone())).await.unwrap();
     let scope = canonical.metadata.companion.unwrap();
     assert_eq!(scope.role, CompanionSessionRole::Robot);
-    assert_eq!(scope.robot_id.as_deref(), Some("role-device-a"));
+    assert_eq!(scope.robot_id.as_deref(), Some("entry-device-a"));
     let reopened = services.companion_service.ensure_session_for_role(
-        companion_id, nomifun_companion::CompanionRole::Robot, Some("role-device-a")).await.unwrap();
+        companion_id, nomifun_companion::CompanionRole::Robot, Some("entry-device-a")).await.unwrap();
     assert_eq!(reopened.conversation_id, a.conversation_id);
-    let (status, authorized) = call(router.clone(), "PUT", &desktop_path, json!({
-        "selection":robot_selection, "model":f.model, "conversation_id":desktop.conversation_id, "update_default":false,
-        "resource_selections":[{"resource_kind":"robot", "resource_id":"role-device-a"}],
+    let (status, authorized) = call(router.clone(), "PUT", &agent_path, json!({
+        "selection":selection, "conversation_id":desktop.conversation_id, "update_default":false,
+        "resource_selections":[{"resource_kind":"robot", "resource_id":"entry-device-a"}],
     })).await;
     assert_eq!(status, StatusCode::OK, "{authorized}");
     let desktop_before = projection(router, &desktop.conversation_id).await;
-    assert_eq!(desktop_before["extra"]["companion_role"], "companion", "selecting capabilities does not retarget the desktop receive lane");
-    assert_eq!(device(&desktop_before)["resource_id"], "role-device-a", "physical operations retain a specific owned device");
-    assert!(desktop_before["agent_snapshot"]["enabled_capabilities"].as_array().unwrap().contains(&json!("robot")),
-        "the desktop role may explicitly select physical capabilities or the Robot template");
-    assert_eq!(product_default(&f, "companion").await, desktop_default);
+    assert_eq!(desktop_before["extra"]["companion_role"], "companion", "adding device tools does not retarget the desktop input lane");
+    assert_eq!(device(&desktop_before)["resource_id"], "entry-device-a");
+    assert_eq!(product_default(&f, "companion").await, initial_default);
 
-    // Future defaults may change while existing Sessions retain their exact device.
-    let (status, saved) = call(router.clone(), "PUT", &robot_path, json!({
-        "selection":robot_selection, "model":robot_model,
-        "resource_selections":[{"resource_kind":"robot", "resource_id":"role-device-b"}],
+    let (status, saved) = call(router.clone(), "PUT", &agent_path, json!({
+        "selection":selection, "model":f.model,
+        "resource_selections":[{"resource_kind":"robot", "resource_id":"entry-device-b"}],
     })).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let robot_default = product_default(&f, "robot").await;
+    let future_default = product_default(&f, "companion").await;
     assert_eq!(binding(&projection(router, &a.conversation_id).await), binding(&a_before));
     assert_eq!(binding(&projection(router, &b.conversation_id).await), binding(&b_before));
-    let (status, retargeted) = call(router.clone(), "PUT", &robot_path, json!({
-        "selection":robot_selection, "model":robot_model, "conversation_id":a.conversation_id, "update_default":false,
-        "resource_selections":[{"resource_kind":"robot", "resource_id":"role-device-b"}],
+    let (status, retargeted) = call(router.clone(), "PUT", &agent_path, json!({
+        "selection":selection, "conversation_id":a.conversation_id, "update_default":false,
+        "resource_selections":[{"resource_kind":"robot", "resource_id":"entry-device-b"}],
     })).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{retargeted}");
     assert_eq!(binding(&projection(router, &a.conversation_id).await), binding(&a_before));
-    assert_eq!(product_default(&f, "robot").await, robot_default);
+    assert_eq!(product_default(&f, "companion").await, future_default);
 
-    // Device configuration changes remain frozen until an explicit same-device apply.
     let robot_services = services.robot.as_ref().unwrap();
     let (device_tx, _device_rx) = tokio::sync::mpsc::channel(4);
-    registry.connect("role-device-a", companion_id, "profile-connection").await.unwrap();
-    robot_services.tools.attach("role-device-a", std::sync::Arc::new(
+    registry.connect("entry-device-a", companion_id, "profile-connection").await.unwrap();
+    robot_services.tools.attach("entry-device-a", std::sync::Arc::new(
         nomifun_robot::mcp_bridge::RobotMcpClient::new(device_tx, "profile-connection".into())),
         vec![nomifun_robot::mcp_bridge::RobotToolDescriptor {
             device_name:"vendor.arm.pose".into(), exposed_name:"robot_vendor_arm_pose".into(),
@@ -436,17 +550,17 @@ async fn robot_role_configuration_preserves_desktop_and_each_exact_device_sessio
     profile.tool_overrides.insert("vendor.arm.pose".into(), nomifun_robot::capability_profile::RobotToolOverride {
         description:Some("A user-edited gesture description".into()), ..Default::default()
     });
-    registry.set_capability_profile("role-device-a", 0, profile, &robot_services.tools).await.unwrap();
+    registry.set_capability_profile("entry-device-a", 0, profile, &robot_services.tools).await.unwrap();
     assert_eq!(device(&projection(router, &a.conversation_id).await)["typed_parameters"]["capability_revision"], "0");
-    let apply = json!({"selection":robot_selection, "conversation_id":a.conversation_id,
-        "update_default":false, "resource_selections":[{"resource_kind":"robot", "resource_id":"role-device-a"}]});
-    let (status, refreshed) = call(router.clone(), "PUT", &robot_path, apply.clone()).await;
+    let apply = json!({"selection":selection, "conversation_id":a.conversation_id,
+        "update_default":false, "resource_selections":[{"resource_kind":"robot", "resource_id":"entry-device-a"}]});
+    let (status, refreshed) = call(router.clone(), "PUT", &agent_path, apply.clone()).await;
     assert_eq!(status, StatusCode::OK, "{refreshed}");
     let a_after = projection(router, &a.conversation_id).await;
     assert_eq!(device(&a_after)["typed_parameters"]["capability_revision"], "1");
     assert_eq!(a_after["agent_snapshot"]["resolved_model"], a_before["agent_snapshot"]["resolved_model"]);
-    assert_eq!(product_default(&f, "robot").await, robot_default, "current apply leaves future defaults alone");
-    let (status, noop) = call(router.clone(), "PUT", &robot_path, apply).await;
+    assert_eq!(product_default(&f, "companion").await, future_default);
+    let (status, noop) = call(router.clone(), "PUT", &agent_path, apply).await;
     assert_eq!(status, StatusCode::OK, "{noop}");
     assert_eq!(binding(&projection(router, &a.conversation_id).await), binding(&a_after));
     let transitions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='session/agent-binding-changed'")
@@ -535,7 +649,7 @@ async fn companion_deletion_waits_for_the_exact_terminal_report_before_deleting_
         preset_id:Some(snapshot["preset_id"].as_str().unwrap().into()),
         preset_revision:snapshot["preset_revision"].as_i64(), agent_snapshot:Some(snapshot.to_string()),
         provider_id:Some(f.model["provider_id"].as_str().unwrap().into()), model:Some("step-3.7-flash".into()),
-        role:Some("desktop_companion".into()), capability:None, constraints:None,
+        role:Some("companion_worker".into()), capability:None, constraints:None,
         description:Some("Paused before task work began".into()), system_prompt:None,
         enabled_skills:"[]".into(), disabled_builtin_skills:"[]".into(), sort_order:0,
     };

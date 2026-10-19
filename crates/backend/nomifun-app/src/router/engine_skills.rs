@@ -458,7 +458,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn old_frozen_lean_robot_inventory_projection_omits_unselected_directory_and_readable_bytes() {
+        async fn old_frozen_physical_entry_inventory_projection_omits_unselected_directory_and_readable_bytes() {
             let registry = MaterializedRegistry::empty();
             for chosen in [0, 2] {
                 let frozen = snapshot(locks(chosen), &registry);
@@ -602,7 +602,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn lean_robot_runtime_rejects_a_known_unselected_resource_id_while_ordinary_reader_can_read_it() {
+        async fn physical_entry_runtime_rejects_a_known_unselected_resource_id_while_ordinary_reader_can_read_it() {
             let registry = MaterializedRegistry::empty();
             let frozen = snapshot(locks(1), &registry);
             let ordinary = compile(&frozen, &registry).await.unwrap();
@@ -629,7 +629,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn explicitly_expanded_robot_uses_normal_skill_discovery_and_can_read_the_known_resource() {
+        async fn ordinary_capabilities_do_not_expand_physical_entry_skill_inventory() {
             use nomifun_agent_kernel::{InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy};
             let kernel = KernelRegistry::new(MaterializationPolicy::stable(nomifun_agent_domain_wave4::CONTRACT_VERSION),
                 Arc::new(InMemoryPluginStatePersistence::new())).unwrap();
@@ -649,8 +649,8 @@ mod tests {
                 .flat_map(|capability| capability.required_resource_kinds.iter().cloned()).collect();
             frozen.envelope.snapshot_ref.snapshot_digest = digest_payload(frozen.content()).unwrap();
             frozen.envelope.validate().unwrap();
-            assert!(crate::router::unified_runtime_host::robot_interaction::uses_lean_robot_context(true, frozen.content()),
-                "the default narrow physical profile qualifies for the lean projection");
+            assert!(crate::router::unified_runtime_host::robot_interaction::uses_compact_context(true),
+                "the physical entry uses a compact selected-Skill projection");
             frozen.envelope.content.enabled_capabilities.push(resolved_capability(&"workspace.files".into(), &registry));
             frozen.envelope.content.capability_allowlist = frozen.content().enabled_capabilities.iter()
                 .map(|capability| capability.capability.id.clone()).collect();
@@ -659,19 +659,18 @@ mod tests {
             frozen.envelope.snapshot_ref.snapshot_digest = digest_payload(frozen.content()).unwrap();
             frozen.envelope.validate().unwrap();
             let original = serde_json::to_vec(&frozen.envelope).unwrap();
-            let selected_only = crate::router::unified_runtime_host::robot_interaction::uses_lean_robot_context(true, frozen.content());
-            assert!(!selected_only, "an explicitly selected desktop capability is not a lean physical profile");
+            let selected_only = crate::router::unified_runtime_host::robot_interaction::uses_compact_context(true);
+            assert!(selected_only, "ordinary file grants do not expand the selected-Skill inventory");
             let expanded = compile_projection(&frozen, &registry, selected_only).await.unwrap();
             let ordinary = compile(&frozen, &registry).await.unwrap();
-            assert_eq!(budgets("explicitly expanded Robot", &expanded), budgets("ordinary", &ordinary));
-            assert_eq!(expanded.ids.len(), 12);
-            assert_eq!(expanded.resources.len(), 24);
+            assert!(budgets("physical entry with file authority", &expanded).0 < budgets("ordinary", &ordinary).0);
+            assert_eq!(expanded.ids.len(), 1);
+            assert_eq!(expanded.resources.len(), 2);
             let known_id = ordinary.body_resources["frozen-guide-11"].clone();
             let (model, read) = run_resource_probe(&expanded, &known_id).await;
-            assert!(!read.is_error);
-            assert!(read.output_text().contains(HIDDEN_BODY));
-            assert!(serde_json::to_string(&*model.requests.lock().unwrap()).unwrap().contains(HIDDEN_BODY),
-                "the Robot role does not permanently hide the normal directory or its readable resources");
+            assert!(read.is_error);
+            assert!(!serde_json::to_string(&*model.requests.lock().unwrap()).unwrap().contains(HIDDEN_BODY),
+                "additional tool authority does not load unselected Skill bodies");
             assert_eq!(serde_json::to_vec(&frozen.envelope).unwrap(), original);
         }
     }

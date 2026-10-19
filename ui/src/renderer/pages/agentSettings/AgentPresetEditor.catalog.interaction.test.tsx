@@ -123,7 +123,7 @@ function mount(source: AgentPresetEditorResponse['preset']['source'], templateKe
   };
 }
 
-test('the official desktop Companion can explicitly enable and customize Robot from the shared catalog', () => {
+test('the official Companion can explicitly enable and customize Robot from the shared catalog', () => {
   const view = mount('official', 'companion.default');
   expect(view.getByText(i18n.t('agentSettings.workbench.results', { count: modules.length })).textContent).toContain(String(modules.length));
   expect(view.card(robot).textContent).toContain(en.modules.robot.description);
@@ -138,8 +138,8 @@ test('the official desktop Companion can explicitly enable and customize Robot f
   expect(view.grant(robot)?.action_allowlist).toContain('robot/motion');
 });
 
-for (const source of ['official', 'user'] as const) test(`${source} Robot-derived Agent can edit Computer, fork and full session actions with catalog-wide search and counts`, () => {
-  const view = mount(source, 'companion.robot');
+for (const source of ['official', 'user'] as const) test(`${source} Companion Agent can edit Computer, fork and full session actions with catalog-wide search and counts`, () => {
+  const view = mount(source, 'companion.default');
   expect(view.getByText(i18n.t('agentSettings.workbench.results', { count: modules.length })).textContent).toContain(String(modules.length));
   for (const module of modules) {
     expect(view.card(module)).toBeTruthy();

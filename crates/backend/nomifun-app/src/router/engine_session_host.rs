@@ -24,6 +24,7 @@ mod recovery;
 mod companion_shared_context;
 pub(super) use companion_shared_context::compose_live_observation;
 pub(super) use companion_shared_context::resolve_companion_turn_human_sources;
+pub(super) use companion_shared_context::historical_input_source_wire;
 
 /// Constructed by application assembly only. The sole official Driver receives
 /// this typed port owner from the composition root; there is no runtime
@@ -81,6 +82,7 @@ fn turn_admission_payload(source: &serde_json::Value, started: &serde_json::Valu
     snapshot: &ResolvedSnapshotRef, route: &nomifun_agent_contracts::ChatRouteIdentity)
     -> Result<serde_json::Value, String> {
     let admission=started.get("admission").ok_or_else(||"Turn claim has no frozen admission scope".to_owned())?;
+    super::nomi_core_session::canonical_admission_binding_ref(started).map_err(|error|error.to_string())?;
     let snapshot=serde_json::to_value(snapshot).map_err(|error|error.to_string())?;
     let route=serde_json::to_value(route).map_err(|error|error.to_string())?;
     if admission.get("resolved_snapshot_ref")!=Some(&snapshot) || admission.get("route_identity")!=Some(&route)
@@ -235,10 +237,17 @@ impl EngineSessionHost {
     ) -> Result<super::engine_skills::SelectedSkills, AppError> {
         let context = self.open_kernel_session(session)?;
         let registry = context.registry_snapshot()?;
-        let selected_only=super::unified_runtime_host::robot_interaction::uses_lean_robot_context(
-            self.is_canonical_robot_session(session).await?,context.compiled().content());
+        let selected_only=super::unified_runtime_host::robot_interaction::uses_compact_context(
+            self.is_canonical_robot_session(session).await?);
         let skills = super::engine_skills::compile_projection(context.compiled(), &registry,selected_only).await?;
         Ok(skills)
+    }
+
+    /// Read original canonical task constraints for this exact execution
+    /// child. This is bounded reference data, never another permission ledger.
+    pub(super) async fn read_execution_source_context(&self, principal: &PrincipalRef,
+        session: &AgentSessionId) -> Result<Option<String>, AppError> {
+        self.session_owner()?.read_execution_source_context(&principal.principal_id, session).await
     }
 
     /// Compile against the production Kernel using the Conversation owner's

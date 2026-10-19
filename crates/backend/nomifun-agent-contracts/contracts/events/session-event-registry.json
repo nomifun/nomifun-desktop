@@ -1286,7 +1286,8 @@
       "predecessor": {
         "mode": "any_of",
         "kinds": [
-          "message/assistant-projected"
+          "message/assistant-projected",
+          "runtime/progress-recorded"
         ]
       },
       "correlation": "message",

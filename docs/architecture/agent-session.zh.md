@@ -2,7 +2,7 @@
 
 AgentSession 是 NomiFun 会话、回合、内容、效果和取消的唯一事实链。产品里的“对话”和 Conversation 接口投影同一个 `AgentSessionId`，不创建第二份会话。Chat 与 Coding 都由 `nomifun.nomi` 的同一个进程内 Runtime 执行。
 
-伙伴双角色、多会话和实时共享上下文的当前实施范围、接口边界及验收状态见
+统一伙伴 Agent、多入口、多会话和实时共享上下文的当前实施范围、接口边界及验收状态见
 [伙伴架构](companion.zh.md)。未验收项不得按已交付能力消费；本页的 canonical 执行边界始终适用。
 
 本页是当前开发入口。执行合同来自 Rust 类型、Session event registry 和 canonical schema；历史设计及施工说明只保存在 Git 历史中。修改实现时同时更新本页，不另建一份可长期使用的旧设计说明。
@@ -228,7 +228,7 @@ canonical context floor 读取上下文，不引入 Runtime 私有清空状态�
 清空命令的幂等身份保存在原 Event 链。伙伴自动摘要以窗口身份去重，Cron 以确切运行身份去重；
 Cron 在同一个 Session 操作围栏中先读取原 Turn receipt，已准入重投直接认原输入，禁止再次
 清空或停止后继 Runtime。只有尚未准入的新运行执行清空并提交输入，清空成功后准入失败的
-重试仍复用原事件，不重复移动 context floor。UI/API contract version 39 要求用户清空携带
+重试仍复用原事件，不重复移动 context floor。UI/API contract version 40 要求用户清空携带
 明确的幂等键，并拒绝仍依赖退役命令发现、旁路提问及命令消息类型的旧前端。
 快捷命令目录属于产品输入行为，不能从 Runtime 或 Skill 正文发现权限；Skill 继续使用冻结
 Snapshot 与 typed `inject_skills` 链路。同一目标中未修改命令草稿的失败重试沿用原动作键，
@@ -349,7 +349,7 @@ Event/Payload 只读派生，包含 `answered`、`input_required`、`waiting`、
 历史查询和终态后的实时投影共用同一结果 reducer、确切消息身份与 Turn 归属。界面按结果引用
 展示公共内容，过程折叠只处理过程条目，不再根据最后一条助手消息、到达顺序或显示时间猜最终
 回答。空消息封口不成为公开结果；请求用户信息必须在折叠过程外显示，并允许后续输入创建新
-Turn。UI/API contract version 39 阻止旧界面把结构化结果继续当成通用文字提示消费。
+Turn。UI/API contract version 40 阻止旧界面把结构化结果继续当成通用文字提示消费。
 
 部分历史页在同一数据库快照中附带其涉及 Turn 的结果摘要，不占原始分页窗口；下一页游标只由
 原始窗口决定，界面直接使用服务端 `next_cursor`。迟到的暂停快照不能覆盖已提交终态。正式领域
@@ -361,7 +361,7 @@ Turn。UI/API contract version 39 阻止旧界面把结构化结果继续当成�
 已证明的领域交付、取消、截断和完成审核继续使用各自现役边界。
 
 物理动作使用可选 Runtime `finish_without_reply` 明确声明整条请求无需公开回复；Host
-只为可信机器人角色启用，不扩展动作授权。所有动作真实成功受理、未结算事项及终态输入
+只为可信物理交互入口启用，不扩展动作授权。所有动作真实成功受理、未结算事项及终态输入
 围栏通过后，Runtime 记录 typed `silent_completion`（确切模型 step 和工具 call IDs），
 随后按原 cleanup 与 `turn/completed` 提交。reducer 校验可信 producer、因果、最终 step
 与确切空封口后派生 `silent`，`result_text` 为空；旧空回答仍不可用。该意图不是动作
@@ -371,6 +371,8 @@ Turn。UI/API contract version 39 阻止旧界面把结构化结果继续当成�
 Execution、Cron 和 IDMM 消费同一结果类别，再由领域自身判断任务交付或是否可以安全代答。
 未取得公开结果不授予重放效果的权限，个人资料问题不能由自动决策编造答案。回归需覆盖实时
 完成刷新、重开、分页、迟到事件、结构化提问和后续 Turn 的真实时间轴可见性。
+
+物理语音的提前公开使用正式 Runtime `PublicOutputCommitted` 及其 canonical 来源证明：确切模型步骤、公开内容范围、part 数与摘要。它发布已通过撤回和准入边界的不可撤回前缀，不提前封口仍可追加内容的聚合消息，也不把原始 token、推理、工具正文或 `OutputDiscarded` 变成可播文本。完整 Turn 最终结果仍由原 reducer 独立验证。媒体传输受理与用户实际听到分别计量，详见[语音架构](voice.zh.md)。
 
 ### 执行窗口与暂停
 
@@ -392,6 +394,9 @@ Host 从同一 canonical 事件链派生未消费输入；活动 Turn 在安全�
 尚未 claim 的输入不提前进入模型上下文。claim 本身不证明已投给 Runtime；只有与原 claim 和输入
 精确配对的 native delivery 才能确认消费，未交付即闭轮的输入保留可查询原因。活动 Turn 的输入
 容量耗尽时，未 claim 的合法输入留给后继 Turn，不标永久拒绝，也不使当前模型反复采样。
+用户取消尚未 claim 的确切输入时，原 accepted 事实保留，typed `CancelledByOwner` 形成终态取消；
+它不能被准备失败重试、后继 claim 或 steering 重新激活。相同幂等键只确认原回执，明确重做使用新输入。
+展示为 `cancelled` / `CANCELLED_BY_OWNER`，与可修复的附件或 Skill 准备阻塞分开，不提供重试原输入按钮。
 当前素材准备受阻以原输入关联的 typed 状态说明原因，不伪造成失败 Turn，不阻塞无关的有效新消息。
 未知 Effect、技术暂停及领域许可继续限制执行，普通消息不会增加预算、承认清理或隐式恢复 native 执行。
 
@@ -469,7 +474,7 @@ Store 在同一事务中更新当前 binding 并保留必要的历史引用；�
 
 ### 官方预设的能力与资源补齐
 
-官方 seed 按真实业务 Action 配置八种预设，不以人格文案或模块名称替代授权。各预设的职责保持明确：
+官方 seed 按真实业务 Action 配置七种预设，不以人格文案或模块名称替代授权。各预设的职责保持明确：
 
 | 预设 | 默认能力边界 |
 | --- | --- |
@@ -477,8 +482,7 @@ Store 在同一事务中更新当前 binding 并保留必要的历史引用；�
 | `assistant.general` | 通用文件、进程、版本管理、产物、项目记忆、网页研究、计划任务、浏览器、桌面操作、媒体、素材和 Office，以及 SSH、知识库和会话管理。 |
 | `coding.codex` | 文件、版本管理、进程、产物、项目记忆、研究、协作、SSH、知识库和会话管理；保留 headless Runtime 要求，不依赖浏览器或桌面控制。 |
 | `app.developer` | 完整 Coding 基线加应用托管十个动作；应用目录固定为工作区，普通多会话与运行设置共用原 owner。其他预设不默认选择应用托管。 |
-| `companion.default` | 伙伴桌面角色：人格、长期记忆、渠道、计划任务，以及文件、进程、产物、研究、浏览器、桌面、媒体、素材、Office、SSH、协作与管理；物理机器人授权属于独立角色。 |
-| `companion.robot` | 机器人角色：共享伙伴身份与记忆，使用独立设备 Session；直接执行明确的四类机器人 Action，通过定向桌面委派补足实时查询、研究、知识和电脑工作，以及深度动作设计；原来源任务控制与结果 Turn 保留，不直接获得桌面工具。 |
+| `companion.default` | 统一伙伴：人格、长期记忆、渠道、计划任务、文件、进程、产物、研究、浏览器、桌面、媒体、素材、Office、SSH、协作、管理和 Robot Action；物理工具只在确切授权资源下装配。 |
 | `customer-service.default` | 客服笔记读写与交接、知识检索、渠道发送和回复，以及文件、进程、产物、研究和计划任务；不默认授予全局知识库或跨会话、终端管理。 |
 | `creative-studio.default` | 媒体、Canvas、素材、模板、Office、文件、进程、产物、项目记忆、研究、浏览器、协作和计划任务；保留三个创作 Package Skill。 |
 
@@ -509,20 +513,11 @@ emoji、表情包/贴纸标记、装饰符号和动作、神态、舞台描写�
 及机器人语音消费处的过滤仅派生展示/播报文字，不改写 canonical Event/Payload、历史消息、
 模型上下文或 native checkpoint，也不改变普通 Agent 的通用内容路径。
 
-伙伴与机器人是同一 `companion_id` 的两个并存产品角色，分别选择 Agent 和模型，使用独立 Session。
-产品归属来自 typed canonical opening；明确的当前代旧伙伴 opening 仍按精确命令身份识别。
-每设备会话稳定跨重连，连接变更重新校验，不因页面浏览选择改变设备收件目标。
-角色只决定默认配置和输入路由；工作台提供完整能力目录，创建和显式应用均保留用户所选授权，按普通资源合同解析设备。
-精简运行策略按冻结能力及 Action 集合识别：必须具有 `companion`、`companion.memory`、`robot`，允许
-`agent.tool-discovery`，以及只有 `agent/delegate` 的协作和只有 `execution_status`/`execution_cancel`/`execution_answer_decision`
-的会话管理。增加其他职责恢复普通预算，不能按模板显示名静默裁掉扩展。
-精简模型上下文最多 128 KiB，历史投影保留最近最多四个完整用户回合、64 KiB 和 16 条消息；过大的历史
-回合整体省略，保留回合中的工具调用和结果配对，当前已接受输入不被裁切。canonical 历史和查询接口不变。
-跨 Agent 交接最多直接装载 16 KiB；更大的交接只在模型投影中用简短提示代替，原交接事实仍留在 canonical 历史，不能截断 JSON、推断或继承旧任务。
-每回合最多八个模型步骤，不续接执行窗口；用户显式推理强度保留，未选择时可按下述接待策略使用已知轻量档位。
-已授权工具按 24 KiB/初始定义预算先保留定向委派与原来源任务控制，再保留各设备 Action 的小型代表，
-最后展开其余富参数工具。首轮展示的定义保持 non-deferred，后续 ToolSearch 不会将它们挤出窗口。
-大定义仍可通过原检索获得；展示不改变 Schema、Action、资源、连接或每次派发权限检查。
+一个 `companion_id` 使用一套主要 Agent、默认主模型与 Skill/MCP；桌面、浮窗、已批准渠道和物理设备是交互入口，分别保留独立 canonical Session。设备重连复用该设备 Session，页面导航不改变收件目标。产品配置只使用 `companion/<companion_id>`，入口来源仍用于核验真实设备与连接，不构成第二个 Agent。
+
+能力授权、schema 展示、上下文预算和物理资源装配分离。紧凑交互投影取决于本轮可信入口，不再通过固定弱 Robot 模块集合分类；增加搜索、知识或文件不丢失简洁交互策略，也不撤下普通工具。延迟展示不改变完整冻结权限；未绑或离线设备不阻断普通工作。初始窗口保留常用普通工具及已绑设备 Action，大 schema、Skill 正文和历史结果按需展开。
+
+普通问题与工作直接在当前 Session 使用已授权工具。复杂任务按实际持久执行、隔离或并行收益使用通用 AgentExecution，保留必要用户约束和确切任务引用；不因物理入口或普通能力缺口强制转交另一个 Agent。结果沿原来源直接交付，不固定创建隐藏模型总结 Turn；正常成功事件推进，持久恢复不替代正常事件路径。
 
 Robot ASR 以现有受监管任务执行，每连接最多一个识别任务和两个待识别录音。设备收帧循环持续处理
 MCP 回执、abort、断连和 ping。abort 清除尚未提交的录音并等待识别任务退出；连接被替换或宿主关闭时，
@@ -626,10 +621,10 @@ Runtime SDK 对同一已发表终态的重试，只能在原 root、delivery、S
 
 Session 只持久化一个 native `reasoning_effort`，取值由共享 `ReasoningEffort` 合同定义。写入与读取使用同一字段，不维护有损镜像，不从旧字段回退。数据库 schema 更新不得从已退役的 Agent 字段重建会话内容。
 
-canonical 窄机器人且该字段未设置时，Host 可在现役 Turn 模型配置 pin 上附带临时
+canonical 物理交互入口且该字段未设置时，Host 可在现役 Turn 模型配置 pin 上附带临时
 `ResponsiveRobot` 接待策略。实际 attempt 只在确切供应商、模型、协议与文档支持档位
 匹配时选择轻量档位，不从 `Reasoning` feature、模型名前缀或网关上游名称猜测。
-显式 Session 选择与更轻配置保留；未知模型仍用原配置。桌面委派使用目标自身配置。
+显式 Session 选择与更轻配置保留；未知模型仍用原配置。后台任务保持自己的冻结执行配置。
 此策略不持久化、不增加 Session 字段或修改冻结授权，详见[伙伴响应边界](companion.zh.md#机器人响应与思考边界)。
 
 ### 全局扩展与输入框选择
@@ -736,7 +731,7 @@ Agent 工作台的默认模型是可空的预设配置。选择器读取已启�
 
 过程说明与最终回答共用 `ConversationProse` 和 Session 范围内的临时展示游标。消息仍按原零延时批次接收并保存完整正文，复制、结果归属、取消和 Runtime 忙碌状态不等待展示动画。实时入口显式标记可平滑呈现的来源，展示层按画面帧合并更新并沿同一 canonical source/range 共享进度；历史读取不创建新的实时资格，过程转为公共回答也不重播。每个正文阅读块使用一棵 Markdown 树，同一展示正文版本内复用，只揭示已到达的字符与完整语法范围，代码块和块级公式保持完整已接收内容的稳定展示，其他 Markdown 消费者保持默认渲染。游标不持久化、不追加另一份正文；替换、撤回、取消、暂停、会话切换及减少动态效果继续沿现有边界立即收敛。
 
-工具展示保留原 capability/action、调用名、已有路径、操作标签和真实状态。现有 ToolCall 产品投影只传递这些展示元数据及必要的 typed 结果状态，不携带文件正文、检索片段、写入内容、patch、stdin、内联脚本或原始工具输出；实时、历史和会话导出使用同一边界。处理区沿用原操作行，不新增路径汇总、文件卡或交互，也不为已无详情的行保留空展开。模型使用的 canonical 参数和结果不受产品投影裁剪影响。状态提取在正文裁剪前完成，进程退出、未启动、超时、检索受限、系统权限、知识写回及真实媒体结果继续使用原业务提示；不从任意原始 JSON 在前端补造状态。失效的 `content_mode` 不再是查询参数，知识写入不再接受业务忽略的 `title`。UI/API contract version 39 要求新旧前后端匹配，旧界面不能从已退役正文推断状态。
+工具展示保留原 capability/action、调用名、已有路径、操作标签和真实状态。现有 ToolCall 产品投影只传递这些展示元数据及必要的 typed 结果状态，不携带文件正文、检索片段、写入内容、patch、stdin、内联脚本或原始工具输出；实时、历史和会话导出使用同一边界。处理区沿用原操作行，不新增路径汇总、文件卡或交互，也不为已无详情的行保留空展开。模型使用的 canonical 参数和结果不受产品投影裁剪影响。状态提取在正文裁剪前完成，进程退出、未启动、超时、检索受限、系统权限、知识写回及真实媒体结果继续使用原业务提示；不从任意原始 JSON 在前端补造状态。失效的 `content_mode` 不再是查询参数，知识写入不再接受业务忽略的 `title`。UI/API contract version 40 要求新旧前后端匹配，旧界面不能从已退役正文推断状态。
 
 `ToolCompleted.runtime_hold` 只说明该调用在进入 owner 端口前被 Runtime 拦住及其有限原因；`ToolStarted` 仍只是 write-ahead 准入意图。查找能力、未执行、领域失败、用户取消和未知 Effect 不互换；旧结果缺少 typed 原因时保持未分类，不从英文文案或当前配置反推。取消后没有 Runtime 完成事件时仍读取原宿主结算。展示规则不参与授权、完成审核、计量或重放决策。新提交完成报告使用 v5 公共格式，不自动向交付正文追加失败次数汇总；实际计量和完成审核保持原值，当前代已保存的旧格式仍按原精确文本验证，不改写历史。
 
@@ -763,20 +758,13 @@ Context、资源、Skill 和 MCP 均为空；旧宽授权 guest 仅在 idle、CA
 
 Cron、Companion、Requirements、AutoWork、IDMM 和 AgentExecution 可以保留各自业务配置及监督状态，但会话输入、准入、取消与终态必须引用 canonical Turn receipt。Conversation 名称不代表另一个存储源。
 
-伙伴的两个产品角色分别选择官方“伙伴”/“机器人”模板或兼容的个人 Agent。兼容性要求保留伙伴身份与记忆核心及所需资源；资源解析始终以目标伙伴的精确身份为准，不能继承另一个伙伴的身份或记忆资源。两份模板的默认能力不同，但不构成编辑、保存或执行上限；用户显式选择的物理与本地工作能力沿普通授权和资源合同处理。伙伴产品会话由 owner-scoped canonical opening 事实确认，具体伙伴、角色与设备归属由 typed origin 和 binding 一起校验，与 Agent 模板无关；普通 Agent 会话仅挂载伙伴资源不会成为产品会话。桌面会话、渠道会话与机器人会话可以并存，当前浏览会话不授予更换收件目标的权力。
+伙伴统一选择官方 `companion.default` 或具备伙伴身份、记忆核心和所需资源的个人 Agent。完整能力目录与用户显式选择保留，资源解析使用确切目标伙伴，不能借另一伙伴的身份或记忆资源。产品 Session 由 owner-scoped canonical opening 识别；入口类型、设备和连接来自 typed origin 与 binding。普通 Agent 仅挂载伙伴资源不成为产品会话。各入口 Session 并存，当前浏览选择不改变输入目标。
 
 已绑定机器人的语音进入该设备的机器人 Session，不以摄像头或 `robot/vision` 授权为前提。宿主在当前设备连接围栏内校验 canonical 伙伴、角色与设备，正式输入保存 `AuthenticatedRobot` 来源；普通输入不能自行声明该来源或伪造 robot origin。语音输入不修改冻结授权；工具仍校验已选资源、当前 Turn、精确连接和设备许可。采集器区分真人设备输入和 Agent/系统内容，不能仅按 origin 是否非空判断是谁说话。
 
-定向桌面结果先提交携带原 Execution/Step/Attempt/Turn 引用的 canonical 报告，再以 typed
-`DirectedDelegationResult` 在原机器人 Session 的空闲边界开启幂等后续 Turn。普通问题通知引用
-原 `DecisionRequested` 与可验证 presentation；问题身份在真实录音/ASR 队列边界冻结，贯穿识别
-和输入准入，只绑定录音当时唯一且已在原 socket 接受播报的问题。慢识别不得晚绑新问题，
-新问题可以在旧录音等待 ASR 时播放，旧录音的 `None` 或旧 ID 不会因此变成新问题的答案；
-旧 source 重投只确认原播报，不回滚当前问题。回答读取该 accepted root，不接收模型生成的答案参数。后继问题、多 pending
-和要求点击的审批不借此获得授权。已完成父 Turn 的 accepted root 使用 Store 的精确只读
-`turn_accepted_input` 查询，不调用只允许活动回合的 native recovery 读取。
-结果后续 Turn 明确失败时，沿原报告与失败终态追加幂等固定 Host 提示并复用原 socket；
-已取消的结果 Turn 保持停止，不因自动回报再次播放或开启模型回合。
+后台结果提交携带原 Execution/Step/Attempt/Session/Turn 引用的 canonical 报告，沿原请求关系直接交付；不创建专属隐藏总结 Turn。问题通知引用原 `DecisionRequested` 与可验证 presentation。问题身份在真实录音/ASR 边界冻结并贯穿准入，只绑定当时已在原连接受理的问题。慢识别不晚绑新问题，旧 `None` 或旧 question ID 不升级为后继问题的答案；重复 source 不回滚当前问题。
+
+直接设备调用的普通 `request_user_input` 使用同一 typed canonical 交接，不能因物理入口禁用。回答读取确切 accepted root 与 question identity，不接收模型生成的真人答案。多 pending、后继问题、其他连接和要求点击的审批不借语音获得授权。已完成父 Turn 的来源查询使用原只读 accepted-input API，不借 native 活动回合权限。
 
 同伙伴共享事实在下一模型调用前读取，近期经历从 typed canonical 事件有界派生。删除或更正长期
 记忆使后续事实、可追溯共享与召回失效，保留的原 Session 对话、局部摘要和已发送请求不被抹除；
@@ -799,15 +787,15 @@ Session 列与 typed refs。领域幂等回执保持旧 fingerprint，并复用 
 记忆工具向模型统一投影为 `AgentMemoryProjection`，不装载两组完整来源 lineage 数组；
 存储、REST 和导出保留它们。默认、查询及新旧写回执的模型输出和预算使用同一投影。
 
-历史 Directed 依赖与已知回执重放核验使用 Store 只读 `committed_tool_call_causation`，
+Execution 历史依赖与已知回执核验使用 Store 只读 `committed_tool_call_causation`，
 可以读取 closed Turn 的确切 typed 工具事实；它不放宽 active/native 读者准入，不产生新执行权限。
 
 已有视觉观察是可选上下文。设备关闭视觉权限时省略该观察，也不读取先前缓存的视觉内容；这不会阻塞同一设备已授权的显示或其他设备工具。显式拍照调用仍在执行时校验视觉权限，关闭权限不会获得例外。机器人资源的操作集合只来自已冻结的精确 Action 选择，选择显示或设备动作不会补造视觉授权。
 
 已成功物化机器人工具目录的 Runtime，在完整关闭的 Turn 之后，通过现有 turn-boundary recycle 证明旧 Runtime 退出并结算效果，再为下一 Turn 重建本地资源，按当前设备连接重新冻结目录。尚未开始任何 Turn 的设备预热实例，也在首次输入准入时重新物化，避免预热后重连留下旧连接目录。空目录同样刷新；普通未物化设备目录的 Session 继续复用 Runtime。该过程保留同一 Session、canonical 历史、Agent、模型及资源授权；暂停回合不触发这条重建路径，未知效果或清理未完成仍阻断后继。当前实现为每个设备新 Turn 承担一次本地 Runtime 重建，不通过放宽旧连接调用或重放旧操作处理重连。
 
-产品 Agent 绑定入口中的显式 `conversation_id` 和资源选择只应用于该目标角色的确切 Session；
-同时设置 `update_default=true` 才保存后续默认，未指定会话时默认更新角色默认值。更新默认且
+产品 Agent 绑定入口中的显式 `conversation_id` 和资源选择只应用于该统一伙伴目标的确切 Session；
+同时设置 `update_default=true` 才保存后续默认，未指定会话时默认更新伙伴默认值。更新默认且
 请求带有 `model` 时才物化对应未来绑定；省略 `model` 保留 `needs_model` 合同。即使 Agent
 身份相同，也比较解析后的真实资源并沿用空闲边界的 ContextOnly / CAS 切换，保留 Session
 ID、当前模型和伙伴身份；完全相同的选择不追加转换事件。现役 Session 应用失败时，不先保存

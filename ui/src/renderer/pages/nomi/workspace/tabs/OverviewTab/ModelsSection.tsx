@@ -36,7 +36,6 @@ const ModelsSection: React.FC<ModelsSectionProps> = ({ companion, status, compan
   if (!profile) return null;
 
   const vad = profile.voice.vad;
-  const robotModel = profile.robot?.model ?? profile.model;
 
   return (
     <NomiSettingSection
@@ -45,8 +44,8 @@ const ModelsSection: React.FC<ModelsSectionProps> = ({ companion, status, compan
     >
       <NomiSettingList>
         <NomiSettingRow
-          title={t('nomi.cohabit.sessions.companion')}
-          description={t('nomi.cohabit.roleDefaultHint')}
+          title={t('nomi.cohabit.agentSettings')}
+          description={t('nomi.cohabit.defaultSettingsHint')}
           align='start'
           controls={<ProductAgentBindingSelect
             key={profile.companion_id}
@@ -66,14 +65,6 @@ const ModelsSection: React.FC<ModelsSectionProps> = ({ companion, status, compan
           style={status.model_configured ? undefined : { background: 'rgb(var(--warning-1))' }}
           controls={<CompanionModelControl companion={companion} showLabel={false} />}
         />
-
-        <NomiSettingRow title={t('nomi.cohabit.sessions.robot')} description={t('nomi.cohabit.robotRoleHint')} align='start'
-          controls={<ProductAgentBindingSelect key={`${profile.companion_id}/robot`}
-            targetKind='robot' targetId={profile.companion_id} defaultTemplateKey='companion.robot'
-            model={robotModel ? { id: robotModel.provider_id, use_model: robotModel.model } : undefined} />}
-        />
-        <NomiSettingRow title={t('nomi.cohabit.robotModel')} description={t('nomi.cohabit.roleDefaultHint')}
-          controls={<CompanionModelControl companion={companion} showLabel={false} role='robot' />} />
 
         <NomiSettingRow
           title={t('nomi.overview.fallbackChatModel')}

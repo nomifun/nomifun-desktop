@@ -60,7 +60,7 @@ impl FrozenTools {
         session: AgentSessionId,
         snapshot: &CompiledSnapshot,
         compile: impl FnOnce(Vec<EngineToolExposure>) -> Result<EngineToolPlan, AppError>,
-    ) -> Result<Self, AppError> {
+    ) -> Result<Option<Self>, AppError> {
         let resource = bound_robot_resource(
             snapshot.resource_bindings(),
             &principal.principal_id,
@@ -93,14 +93,16 @@ impl FrozenTools {
         }
 
         let resolved = owner
-            .resolve_session_tools(
+            .available_session_tools(
                 &principal,
                 &session,
-                resource,
+                Some(resource),
                 &policy.allowed_actions,
             )
-            .await
-            .map_err(failure)?;
+            .await.map_err(failure)?;
+        // No invoker is installed for an unavailable resource. A reopened
+        // Runtime rechecks the exact current binding/connection on assembly.
+        let Some(resolved) = resolved else { return Ok(None); };
         let mut provider_actions = BTreeMap::new();
         let exposures = resolved
             .descriptors
@@ -143,14 +145,14 @@ impl FrozenTools {
                 provider_actions: Arc::clone(&provider_actions),
                 delegate: Arc::clone(&resolved.invoker),
             });
-        Ok(Self {
+        Ok(Some(Self {
             plan: compile(exposures)?,
             resolved,
             delegate,
             principal,
             session,
             provider_actions,
-        })
+        }))
     }
 
     /// Revoke this Session's local authority. The shared physical connection

@@ -115,7 +115,7 @@ fn skill_bytes(snapshot: &ResolvedSnapshotEnvelope) -> usize {
 
 #[tokio::test]
 async fn selected_skills_only_empty_role_retires_prior_global_locks_and_bodies() {
-    let (control, store, current) = fixture(OfficialPresetKey::CompanionRobot).await;
+    let (control, store, current) = fixture(OfficialPresetKey::CompanionDefault).await;
     let (_, original_revision, original_snapshot) = control
         .saved_binding_artifacts(&owner(), &current)
         .await
@@ -166,7 +166,7 @@ async fn selected_skills_only_empty_role_retires_prior_global_locks_and_bodies()
 #[tokio::test]
 async fn selected_skills_only_role_freezes_exact_choice_and_supporting_resources_with_bounded_bytes()
  {
-    let (control, _, current) = fixture(OfficialPresetKey::CompanionRobot).await;
+    let (control, _, current) = fixture(OfficialPresetKey::CompanionDefault).await;
     let selection = SessionCapabilitySelectionDto {
         skill_names: vec![ROBOT_GUIDE.into()],
         mcp_server_ids: Vec::new(),
@@ -277,7 +277,7 @@ async fn selected_skills_only_rejects_a_resolver_that_adds_or_loses_the_explicit
         }
     }
     for missing in [false, true] {
-        let (mut control, store, current) = fixture(OfficialPresetKey::CompanionRobot).await;
+        let (mut control, store, current) = fixture(OfficialPresetKey::CompanionDefault).await;
         control.session_capabilities_resolver = Some(Arc::new(WrongSelection { missing }));
         let before = store.list_presets(&owner()).await.unwrap().len();
         let selection = SessionCapabilitySelectionDto {
@@ -302,9 +302,9 @@ async fn selected_skills_only_rejects_a_resolver_that_adds_or_loses_the_explicit
 }
 
 #[tokio::test]
-async fn robot_model_materialization_keeps_saved_explicit_skill_before_global_defaults_can_replace_it()
+async fn companion_materialization_keeps_saved_explicit_skill_before_global_defaults_can_replace_it()
  {
-    let (control, store, current) = fixture(OfficialPresetKey::CompanionRobot).await;
+    let (control, store, current) = fixture(OfficialPresetKey::CompanionDefault).await;
     let authored_choice = SessionCapabilitySelectionDto {
         skill_names: vec!["desktop-code-guide".into()],
         mcp_server_ids: Vec::new(),
@@ -326,7 +326,7 @@ async fn robot_model_materialization_keeps_saved_explicit_skill_before_global_de
         matches!(lock, ResolvedSkillLock::Library { skill, selected: true, .. } if skill.name == "desktop-code-guide")));
 
     let robot = control
-        .resolve_companion_robot_session_binding_with_model(
+        .resolve_companion_session_binding_with_model(
             &owner(),
             &authored.preset_revision_ref.preset_id,
             None,
@@ -345,7 +345,7 @@ async fn robot_model_materialization_keeps_saved_explicit_skill_before_global_de
         },
     ] = snapshot.content.skill_locks.as_slice()
     else {
-        panic!("physical-role materialization must preserve exactly the saved explicit choice");
+        panic!("Companion materialization must preserve exactly the saved explicit choice");
     };
     assert_eq!(skill.name, "desktop-code-guide");
     assert!(

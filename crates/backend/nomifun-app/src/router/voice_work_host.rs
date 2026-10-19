@@ -24,7 +24,7 @@ impl AppVoiceWorkHost {
     pub(crate) async fn current_decision_presentations(&self,owner:&str,session:&str,version:u64)
         ->Result<Vec<VoiceApprovalPresentation>,VoiceError> {
         if self.sessions.is_companion_robot_session(owner,&session.into()).await.map_err(work_error)? {
-            let ids=self.sessions.directed_decision_execution_ids(owner,&session.into()).await.map_err(work_error)?;
+            let ids=self.sessions.execution_decision_execution_ids(owner,&session.into()).await.map_err(work_error)?;
             self.approvals_for_executions(owner,session,version,ids).await
         }else{self.approvals(owner,session,version).await}
     }
@@ -547,7 +547,6 @@ impl AppVoiceWorkHost {
         let Some(engine)=&self.execution else{return Ok(vec![]);};let mut result=Vec::new();
         for execution in executions {
             let detail=engine.get(owner,&execution).await.map_err(work_error)?;
-            if detail.execution.decision_policy!=nomifun_common::DecisionPolicy::AskUser{continue;}
             let waiting=detail.attempts.iter().filter(|attempt|attempt.status==nomifun_common::ExecutionAttemptStatus::WaitingInput).collect::<Vec<_>>();
             if waiting.is_empty(){continue;}let mut events=Vec::new();let mut after=0;
             loop {let page=engine.events(owner,&execution,Some(after),Some(128)).await.map_err(work_error)?;let next=page.last().map_or(after,|event|event.sequence);
@@ -560,6 +559,7 @@ impl AppVoiceWorkHost {
                     &&event.payload.get("question").and_then(Value::as_str)==Some(question.as_str())) else{continue;};
                 let source=self.owned_facts(owner,&source_session.clone().into()).await?;
                 let operation=if let Some(stop_key)=request.payload.get("stop_turn_operation_id").and_then(Value::as_str) {
+                    if detail.execution.decision_policy!=nomifun_common::DecisionPolicy::AskUser{continue;}
                     let encoded=attempt.runtime_state.as_ref().map(Value::to_string);
                     let effects=nomifun_db::AttemptConversationEffects::decode(encoded.as_deref()).map_err(work_error)?;
                     let pending=effects.pending_conversation_effects.iter().find_map(|effect|match effect {
@@ -628,7 +628,7 @@ impl AppVoiceWorkHost {
         }Ok(None)
     }
 }
-fn approval_digest(target:&ApprovalTarget)->Result<DigestHex,VoiceError> {
+pub(in crate::router) fn approval_digest(target:&ApprovalTarget)->Result<DigestHex,VoiceError> {
     let mut value=serde_json::to_value(target).map_err(work_error)?;value.as_object_mut().ok_or_else(||work_error("invalid approval object"))?.remove("presentation_digest");
     digest_payload(&value).map_err(work_error)
 }

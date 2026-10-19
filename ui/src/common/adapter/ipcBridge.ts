@@ -4659,16 +4659,16 @@ export interface ICompanionHistoryDay {
   has_digest: boolean;
 }
 
-export type CompanionSessionRole = 'companion' | 'robot';
+export type CompanionSessionEntry = 'companion' | 'robot';
 
-/** A companion-owned canonical Session. Its role is supplied by the Host. */
+/** A companion-owned canonical Session. The wire role records its input entrance. */
 export interface ICompanionThread {
   conversation_id: ConversationId;
   companion_id: CompanionId;
   title: string;
   created_at: number;
   updated_at: number;
-  role: CompanionSessionRole;
+  role: CompanionSessionEntry;
   archived: boolean;
   robot_id?: string | null;
 }
@@ -4784,8 +4784,6 @@ export interface ICompanionProfile {
   mood_override: ICompanionMood | null;
   persona: ICompanionPersona;
   model: ICompanionModelRef | null;
-  /** Independent defaults for the physical robot role. */
-  robot?: { model: ICompanionModelRef | null; skills: ICompanionSkillConfig; mcp_servers: string[] };
   /** 备用对话模型: replayed once when the main model's turn fails. */
   fallback_model: ICompanionModelRef | null;
   /** 视觉大模型; null = use the main chat model when it can see images. */
@@ -4797,6 +4795,8 @@ export interface ICompanionProfile {
   /** This companion's own 技能进化 loop (install-wide until 2026-08). */
   evolve: ICompanionEvolveConfig;
   skills: ICompanionSkillConfig;
+  /** Shared MCP defaults for new Sessions through every companion entrance. */
+  mcp_servers: string[];
   appearance: ICompanionWindowConfig;
   /**
    * User-chosen sidebar position. Absent = never reordered; such companions sort
@@ -4880,7 +4880,7 @@ export type ICompanionProfilePatch = {
   mood_override?: ICompanionMood | null;
   persona?: Partial<ICompanionPersona>;
   model?: ICompanionModelRef | null;
-  robot?: { model?: ICompanionModelRef | null; skills?: Partial<ICompanionSkillConfig>; mcp_servers?: string[] };
+  mcp_servers?: string[];
   fallback_model?: ICompanionModelRef | null;
   vision_model?: ICompanionModelRef | null;
   voice?: {

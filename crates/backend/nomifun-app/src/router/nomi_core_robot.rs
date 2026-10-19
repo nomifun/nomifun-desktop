@@ -43,6 +43,7 @@ const ROBOT_EFFECT_RECEIPT_FAILED: &str = "ROBOT_EFFECT_RECEIPT_FAILED";
 const MAX_TOOL_RESULT_CHARS: usize = 65_536;
 const MAX_DEVICE_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_DEVICE_TOOL_DESCRIPTION_BYTES: usize = 4 * 1024;
+const MAX_CACHED_DEVICE_SCHEMAS: usize = 64;
 
 pub(crate) fn module_capability_id() -> CapabilityId {
     CapabilityId::from(ROBOT_MODULE_ID)
@@ -109,6 +110,15 @@ pub(crate) struct RobotSessionToolDescriptor {
     pub input_schema: StrictJsonValue,
 }
 
+/// Reusable data/validation only: never a resource, principal, connection,
+/// permission or revocation token. Every Session still obtains fresh authority.
+struct CachedDeviceSchema {
+    input_schema: StrictJsonValue,
+    description: String,
+    validator: Arc<jsonschema::Validator>,
+    raw_validator: Arc<jsonschema::Validator>,
+}
+
 pub(crate) struct ResolvedRobotSessionTools {
     pub descriptors: Vec<RobotSessionToolDescriptor>,
     pub invoker: Arc<dyn NomiHostDynamicToolInvoker>,
@@ -138,6 +148,7 @@ pub(crate) struct RobotModuleOwner {
     tools: Arc<RobotToolRegistry>,
     effects: Arc<RobotEffectLedger>,
     observations: Arc<RobotVisionObservationRegistry>,
+    schema_cache: std::sync::Mutex<BTreeMap<String, Arc<CachedDeviceSchema>>>,
 }
 
 impl RobotModuleOwner {
@@ -151,6 +162,7 @@ impl RobotModuleOwner {
             tools: Arc::clone(&robot.tools),
             effects: Arc::clone(&robot.effect_ledger),
             observations: Arc::clone(&robot.vision_observations),
+            schema_cache: Default::default(),
         }
     }
 
@@ -168,11 +180,52 @@ impl RobotModuleOwner {
             tools,
             effects,
             observations,
+            schema_cache: Default::default(),
         }
+    }
+
+    fn device_schema(&self, revision: u64, input: &serde_json::Value,
+        raw: &serde_json::Value, description: &str) -> Result<Arc<CachedDeviceSchema>, RobotModuleError> {
+        let key = digest_payload(&serde_json::json!({
+            "revision": revision, "input": input, "raw": raw, "description": description,
+        })).map_err(|error| RobotModuleError::invalid(error.to_string()))?;
+        let mut cache = self.schema_cache.lock()
+            .map_err(|_| RobotModuleError::invalid("Robot schema cache is unavailable"))?;
+        if let Some(cached) = cache.get(key.as_ref()) { return Ok(cached.clone()); }
+        let input_schema = strict_device_input_schema(input.clone())?;
+        let raw_schema = strict_device_input_schema(raw.clone())?;
+        let compile = |schema: &serde_json::Value| jsonschema::options()
+            .with_retriever(NoExternalDeviceSchema).build(schema)
+            .map(Arc::new).map_err(|_| RobotModuleError::invalid("Robot device schema is invalid"));
+        let cached = Arc::new(CachedDeviceSchema {
+            validator: compile(&input_schema.0)?, raw_validator: compile(&raw_schema.0)?,
+            input_schema, description: bounded_description(description),
+        });
+        if cache.len() >= MAX_CACHED_DEVICE_SCHEMAS {
+            // Deterministic bounded eviction; evicted artifacts remain alive
+            // only while an exact live Session still owns their validators.
+            cache.pop_first();
+        }
+        cache.insert(key.as_ref().to_owned(), cached.clone());
+        Ok(cached)
     }
 
     /// Freeze the exact live device tools permitted by one Module Action
     /// allowlist. No model-provided device identity or category is trusted.
+    pub(crate) async fn available_session_tools(
+        self: &Arc<Self>, principal: &PrincipalRef, agent_session_id: &AgentSessionId,
+        binding: Option<&TypedResourceBinding>, allowed_actions: &BTreeSet<ActionId>,
+    ) -> Result<Option<ResolvedRobotSessionTools>, RobotModuleError> {
+        let Some(binding) = binding else { return Ok(None); };
+        match self.resolve_session_tools(principal, agent_session_id, binding, allowed_actions).await {
+            Ok(tools) => Ok(Some(tools)),
+            Err(error) if error.code == ROBOT_OFFLINE => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// A missing connection is a normal resource availability result at the
+    /// assembly boundary; explicit dispatch still reports its real outcome.
     pub(crate) async fn resolve_session_tools(
         self: &Arc<Self>,
         principal: &PrincipalRef,
@@ -249,19 +302,8 @@ impl RobotModuleOwner {
                     "Robot Session tool surface exceeds 128 actions",
                 ));
             }
-            let input_schema = strict_device_input_schema(tool.input_schema.clone())?;
-            let validator = Arc::new(
-                jsonschema::options()
-                    .with_retriever(NoExternalDeviceSchema)
-                    .build(&input_schema.0)
-                    .map_err(|_| RobotModuleError::invalid("Robot device schema is invalid"))?,
-            );
-            let raw_schema = strict_device_input_schema(tool.raw_input_schema.clone())?;
-            let raw_validator = Arc::new(jsonschema::options()
-                .with_retriever(NoExternalDeviceSchema)
-                .build(&raw_schema.0)
-                .map_err(|_| RobotModuleError::invalid("Robot device schema is invalid"))?);
-            let description = bounded_description(&tool.description);
+            let schema = self.device_schema(robot.capability_revision, &tool.input_schema,
+                &tool.raw_input_schema, &tool.description)?;
             if frozen
                 .insert(
                     tool.provider_name.clone(),
@@ -270,8 +312,8 @@ impl RobotModuleOwner {
                         device_name: tool.device_name,
                         device_exposed_name: tool.device_exposed_name,
                         raw_input_schema: tool.raw_input_schema,
-                        validator,
-                        raw_validator,
+                        validator: schema.validator.clone(),
+                        raw_validator: schema.raw_validator.clone(),
                         default_arguments: tool.default_arguments,
                         fixed_arguments: tool.fixed_arguments,
                     },
@@ -286,8 +328,8 @@ impl RobotModuleOwner {
             descriptors.push(RobotSessionToolDescriptor {
                 action_id: action_id.clone(),
                 provider_name: tool.provider_name,
-                description,
-                input_schema,
+                description: schema.description.clone(),
+                input_schema: schema.input_schema.clone(),
             });
         }
         descriptors.sort_by(|left, right| {
@@ -1094,6 +1136,65 @@ mod tests {
             correlation_id: CorrelationId::from(format!("correlation-{key}")),
             arguments: StrictJsonValue(serde_json::json!({"direction":"left"})),
         }
+    }
+
+    #[tokio::test]
+    async fn compiled_device_schemas_are_reused_without_reusing_session_authority() {
+        let fixture = fixture(permissions()).await;
+        let owner = &fixture.owner;
+        let input = serde_json::json!({"type":"object","properties":{"angle":{"type":"integer"}}});
+        let first = owner.device_schema(0, &input, &input, "Move the joint").unwrap();
+        let second = owner.device_schema(0, &input, &input, "Move the joint").unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&first.validator, &second.validator));
+        let changed = owner.device_schema(1, &input, &input, "Move the joint").unwrap();
+        assert!(!Arc::ptr_eq(&first, &changed), "an explicit capability revision has a separate cache identity");
+        let description = owner.device_schema(0, &input, &input, "Read the joint").unwrap();
+        assert!(!Arc::ptr_eq(&first, &description));
+        for revision in 2..(MAX_CACHED_DEVICE_SCHEMAS as u64 + 5) {
+            owner.device_schema(revision, &input, &input, "Move the joint").unwrap();
+        }
+        assert_eq!(owner.schema_cache.lock().unwrap().len(), MAX_CACHED_DEVICE_SCHEMAS);
+        // Validators retained by a live Session survive cache eviction.
+        assert!(first.validator.is_valid(&serde_json::json!({"angle":10})));
+
+        let grants = BTreeSet::from([ActionId::from(RobotAction::Motion.id())]);
+        let session = owner.resolve_session_tools(&principal(), &"cache-owner-session".into(),
+            &fixture.binding, &grants).await.unwrap();
+        let _other = owner.resolve_session_tools(&principal(), &"other-cache-session".into(),
+            &fixture.binding, &grants).await.unwrap();
+        owner.registry.set_permissions("robot-1", RobotPermissions::default()).await.unwrap();
+        let error = session.invoker.invoke(invocation("robot_gimbal_look", "cache-revoked")).await.unwrap_err();
+        assert_eq!(error.code.as_ref(), ROBOT_PERMISSION_DENIED);
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn ordinary_capabilities_keep_the_same_entry_budget_without_a_device_and_while_offline() {
+        use crate::router::unified_runtime_host::robot_interaction;
+        let fixture = fixture(permissions()).await;
+        let owner = &fixture.owner;
+        let grants = action_ids();
+        let session = AgentSessionId::from("ordinary-work-with-device-availability");
+        let projection = || (robot_interaction::uses_compact_context(true),
+            robot_interaction::history_byte_limit(true), robot_interaction::context_budget().max_context_bytes);
+        let expected = projection();
+        assert_eq!(expected, (true, 64 * 1024, 12 * 1024 * 1024));
+        let unbound = owner.available_session_tools(&principal(), &session, None, &grants).await.unwrap();
+        assert!(unbound.is_none());
+        assert!(owner.schema_cache.lock().unwrap().is_empty(), "unbound work must not assemble device schemas");
+        assert_eq!(projection(), expected, "unbound ordinary search/file grants retain the same entry budget");
+
+        let online = owner.available_session_tools(&principal(), &session, Some(&fixture.binding), &grants)
+            .await.unwrap().unwrap();
+        assert!(!online.descriptors.is_empty());
+        assert_eq!(projection(), expected, "device tools do not select a broader or weaker Agent budget");
+        owner.tools.detach_connection("robot-1", "socket-1").await;
+        let offline = owner.available_session_tools(&principal(), &session, Some(&fixture.binding), &grants)
+            .await.unwrap();
+        assert!(offline.is_none());
+        assert_eq!(projection(), expected, "offline device work must not block ordinary response preparation");
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

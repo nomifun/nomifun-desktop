@@ -62,12 +62,12 @@ const transition: IMessageTips = {
   },
 };
 
-function mount(message = error, context: Partial<ConversationContextValue> = {}) {
+function mount(message = error, context: Partial<ConversationContextValue> = {}, source = request) {
   const result = render(
     <MemoryRouter><I18nextProvider i18n={testI18n}>
       <ThemeProvider>
         <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', ...context }}>
-          <MessageListProvider initialValue={[request, message]}>
+          <MessageListProvider initialValue={[source, message]}>
             <MessageTips message={message} />
           </MessageListProvider>
         </ConversationProvider>
@@ -80,6 +80,13 @@ function mount(message = error, context: Partial<ConversationContextValue> = {})
 afterEach(() => { cleanup(); mock.restore(); });
 
 describe('compact message errors', () => {
+  test('a settled error cannot offer a retry for a later owner-cancelled accepted input', () => {
+    const cancelled: IMessageText = { ...request, content: { ...request.content,
+      input_delivery: { state: 'cancelled', reason: 'CANCELLED_BY_OWNER', event_seq: 20 } } };
+    const { page } = mount(error, { isProcessing: false }, cancelled);
+    expect(page.queryByTestId('message-error-retry')).toBeNull();
+  });
+
   test.each(['en-US', 'zh-CN'])('a typed input handoff is a normal note with a focus-only action in %s', async language => {
     await act(async () => { await testI18n.changeLanguage(language); });
     try {
