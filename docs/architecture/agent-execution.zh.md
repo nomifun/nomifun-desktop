@@ -55,6 +55,8 @@ AutoWork 原 Requirement claim 的显式取消在原 writer 内围住 Execution 
 
 迟到回执不重开终态。只有带 expected version 并通过 Engine 校验的显式 retry/adopt/add 才可重开允许的已结算结果；`cancelled` 永不重开。显式 replan 也必须走同一版本及状态边界。启动恢复继续原租约、Attempt 与收据，不能重复派发或把未知结果当作可安全重试。
 
+已提交的问题回答、Steer 与 StopTurn 是 Attempt 的 write-ahead 效果，只由调度的原效果投递路径消费；中断对账不认领仍待投递的 Running Attempt。“无可调度步骤”的失败只按判定所用快照的 Execution 版本 CAS 提交；回答等并发写入在快照后提交时重新判定，不能把合法回答变成取消、失败或 review 阻塞。
+
 用户可通过 `POST /api/agent-executions/{execution_id}/steps/{step_id}/cancel` 停止确切 Step，
 命令固定 Step ID 与 expected Step version；`scope` 明确选择 `task`、`delegated_work` 或
 `task_and_delegated`。旧 `include_delegated` 仅在 HTTP 解码边界映射到同一范围，不参与领域裁决。

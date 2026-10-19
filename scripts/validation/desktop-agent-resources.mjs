@@ -9,6 +9,8 @@ import { constants } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, resolve, basename, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { sourceIdentity } from '../lib/source-identity.mjs';
 
 const option = (key) => { const index = process.argv.indexOf(key); return index < 0 ? undefined : process.argv[index + 1]; };
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -23,7 +25,7 @@ const rootArgument = option('--root');
 assert(rootArgument && isAbsolute(rootArgument), 'Pass the exact absolute --root of the isolated Desktop lifecycle fixture');
 const root = await realpath(rootArgument);
 const sentinel = (await readFile(join(root, 'fixture-sentinel'), 'utf8')).trim();
-assert.equal(basename(root), `nomifun-lifecycle-${sentinel}`);
+assert.equal(basename(root), process.platform === 'linux' ? `nomifun-global-os-owner-${sentinel}` : `nomifun-lifecycle-${sentinel}`);
 assert.equal(await physicalPath(dirname(root)), await physicalPath(tmpdir()));
 assert.match(sentinel, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 const ready = JSON.parse(await readFile(join(root, 'ready.json'), 'utf8'));
@@ -32,12 +34,16 @@ assert(Number.isSafeInteger(ready.host_pid) && ready.host_pid > 0);
 assert(Number.isSafeInteger(ready.backend_port) && ready.backend_port > 0 && ready.backend_port < 65536);
 assert.equal(ready.agent_resources, true, 'The original native fixture must opt into normal owner setup before readiness');
 assert.equal(await physicalPath(ready.data_root), await physicalPath(join(root, 'data')));
-assert(['win32', 'darwin'].includes(process.platform), 'This fixture exercises actual Desktop pipe/PTY owners on Windows or macOS');
+assert(['win32', 'darwin', 'linux'].includes(process.platform), 'This fixture exercises actual Desktop pipe/PTY owners on Windows, macOS or Linux');
 const base = `http://127.0.0.1:${ready.backend_port}`;
 const artifacts = join(root, 'agent-resource-fixtures');
 await mkdir(artifacts, { recursive: false });
+const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+let source;
+try { source = await sourceIdentity(repository); } catch (error) { source = { error: String(error?.message ?? error) }; }
 const evidence = { schema: 'nomifun.desktop-agent-resources.v1', token: sentinel, host_pid: ready.host_pid,
-  started_at: new Date().toISOString(), passed: false, stage: 'owner-auth', model_requests: [], api_calls: [] };
+  started_at: new Date().toISOString(), passed: false, stage: 'owner-auth', model_requests: [], api_calls: [],
+  source };
 let journalWrites = Promise.resolve();
 const journal = () => {
   const bytes = `${JSON.stringify(evidence, null, 2)}\n`;
@@ -301,7 +307,7 @@ for await(const line of createInterface({input:process.stdin,terminal:false})){
     assert.equal(nativeMarker.token, sentinel); assert.equal(nativeMarker.host_pid, ready.host_pid); assert.equal(nativeMarker.kind, kind);
     assert(Number.isSafeInteger(nativeMarker.pid) && nativeMarker.pid > 0);
     if (kind !== 'mcp') {
-      if (!windows && kind === 'pty') {
+      if (process.platform === 'darwin' && kind === 'pty') {
         const launcher = resources.get(kind).pid;
         assert.equal(nativeMarker.parent_pid, launcher, 'The actual macOS PTY payload must remain the exact original session launcher child');
         assert.notEqual(nativeMarker.pid, launcher, 'Darwin PTY ToolResult identifies its retained session launcher, not its forked payload');
@@ -318,7 +324,7 @@ for await(const line of createInterface({input:process.stdin,terminal:false})){
       call_id: `desktop-resource-${kind}`, ...(kind === 'mcp' ? { mcp_request_id: nativeMarker.request_id } : { process_id: resources.get(kind).process_id }),
       native_tool_result: kind === 'mcp' ? undefined : resources.get(kind) });
   }
-  assert.equal(new Set(processes.map((item) => item.pid)).size, windows ? 3 : 4);
+  assert.equal(new Set(processes.map((item) => item.pid)).size, process.platform === 'darwin' ? 4 : 3);
   const canonical = await api('GET', `/api/agent-sessions/${session}`);
   assert(canonical.head.active_turn_id, 'The real Agent and its original MCP call must still be inflight');
   const execution = await api('GET', `/api/agent-sessions/${session}/execution`);

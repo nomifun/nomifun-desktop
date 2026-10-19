@@ -66,6 +66,14 @@ Runtime 自然注销、原 Session 后台进程继续存活，再正常退出应
 MCP Unknown 与无自动重放的事实，`agent-stop-native-observation.json` 另记原 pipe/ConPTY 句柄仍存活。
 MCP 资源是否已经退出按实记录，业务 Unknown 保留；最后仍须检查最初捕获的全部退出句柄。
 
+Linux 使用同一资源侧车，由薄驱动 [linux-desktop-lifecycle.mjs](../../scripts/validation/linux-desktop-lifecycle.mjs)
+在隔离数据集中经现役私有 Xvfb/Openbox launcher 启动冻结 Desktop，完成正常 owner setup 与登录后执行
+`--mode sigterm|sigint|parent-death|stop`。[pidfd 观察器](../../scripts/validation/linux-process-exit-observer.py)
+先以 PID＋启动时间绑定 App、WebKit、Agent 子进程及各自 process-runtime watchdog，只向已核实的 App
+发信号；树外同镜像 sentinel 必须存活。证据经共享 [source-identity](../../scripts/lib/source-identity.mjs) 记录冻结二进制 SHA、HEAD 与未提交差异/未跟踪文件哈希，取不到时记为错误而不中断。
+当前 Linux Desktop 不注入 managed/Attached Browser，此入口只证明 Desktop、pipe/PTY 与 MCP owner 的退出、
+父死与直接 Stop，不证明 Browser、真实 Wayland 或托盘/重启等 GUI 入口；结果见生命周期方案第 10.6 节。
+
 2026-10-19，checkpoint `a9c41c38fa` 与 `origin/main@084c7dc8d0` 整合并冻结源码后，重新构建的隔离 Windows debug Desktop（SHA256
 `661681a63e3b15fa4190ebefcf78268940b533c4b4f69cd36809426193bdf84a`，
 构建输出修改时间 UTC `2026-10-19T06:14:41.4297828Z`，341702144 bytes）通过以下三个真实组合用例。
