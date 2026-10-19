@@ -111,10 +111,9 @@ const Layout: React.FC<{
   useEffect(() => {
     if (!isDesktopShell()) return;
     let cancelled = false;
-    const includePrerelease = localStorage.getItem('update.includePrerelease') === 'true';
     void (async () => {
       try {
-        const res = await ipcBridge.autoUpdate.check.invoke({ includePrerelease });
+        const res = await ipcBridge.autoUpdate.check.invoke();
         if (!cancelled && res?.success && res.data?.updateInfo) {
           reportUpdateAvailable(res.data.updateInfo.version);
           window.dispatchEvent(new CustomEvent('nomifun-open-update-modal', { detail: { source: 'startup' } }));

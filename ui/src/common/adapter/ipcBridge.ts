@@ -241,10 +241,10 @@ import type {
   TUpdateAgentExecutionTemplate,
 } from '../types/agentExecution/agentExecutionTemplateTypes';
 import type {
-  UpdateCheckRequest,
   UpdateCheckResult,
   UpdateReleaseInfo,
 } from '../update/updateTypes';
+import { DESKTOP_RELEASES_PAGE } from '../update/releaseSource';
 import { uuidv7 } from '../utils/uuidv7';
 import {
   fromApiConversation,
@@ -1336,12 +1336,9 @@ export const storageRelocation = {
 // for native verified-package download and installation. Both surfaces are
 // shell-gated; the WebUI receives only their safe fallbacks.
 
-/** Releases page shown in the modal's "go to release" affordance. */
-const GITHUB_RELEASES_PAGE = 'https://github.com/nomifun/nomifun-tauri/releases/latest';
-
 export const update = {
   open: noopEmitter<{ source?: 'menu' | 'about' }>(),
-  check: shellProvider<IBridgeResponse<UpdateCheckResult>, UpdateCheckRequest>(async () => {
+  check: shellProvider<IBridgeResponse<UpdateCheckResult>, void>(async () => {
     // Reuses the check started by autoUpdate.check (the modal calls that first),
     // so this is the SAME round-trip, not a second network call.
     const currentVersion = await tauriUpdateCurrentVersion();
@@ -1353,7 +1350,7 @@ export const update = {
       tagName: `v${info.version}`,
       version: info.version,
       body: info.releaseNotes,
-      htmlUrl: GITHUB_RELEASES_PAGE,
+      htmlUrl: DESKTOP_RELEASES_PAGE,
       prerelease: false,
       draft: false,
     };
@@ -1381,7 +1378,7 @@ export const autoUpdate = {
       /** Whether this process may replace its own bundle, and why not. */
       installContext?: import('./tauriUpdateInstall').UpdaterInstallContext | null;
     }>,
-    { includePrerelease?: boolean }
+    void
   >(async () => {
     // `force` so each modal open / retry performs a fresh check; update.check
     // (called right after) then reuses this same in-flight result.
