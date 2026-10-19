@@ -69,6 +69,18 @@ relay never creates a pairing code.
 
 **Paired phones** lists authorized devices and their last use. It is not a real-time online list.
 
+Desktop and Mobile must both support connection protocol 2. Mobile keeps a random installation key
+for each Desktop in secure storage, separate from its access credential. Connecting again, switching
+between LAN and relay, or pairing again with that key retains one device entry. Re-pairing or password
+login replaces its credential and closes connections using the previous credential. Phones with the
+same displayed name remain separate when they have different installation keys.
+
+For an older saved connection, Mobile can use its still-valid previous device credential to claim that
+exact entry during pairing or password login. Historical duplicate entries have no installation identity
+and cannot safely be merged by name or last-use time. Remove obsolete entries explicitly. Clearing
+Mobile's secure storage loses its installation key; without a valid previous credential, the next pairing
+creates a new entry, and any obsolete entry must also be removed explicitly.
+
 Select a phone's **Remove phone** action and confirm to revoke that phone's credential and current connections.
 Other phones remain authorized, and Desktop conversations, tasks, and files remain.
 The removed phone must pair again to restore access.

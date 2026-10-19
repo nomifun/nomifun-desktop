@@ -202,7 +202,7 @@ export async function run(config) {
     const info = unwrap(await publicRequest('/api/connections/info'));
     await check('strict_tls_and_real_agent_tunnel', async () => {
       await assert.rejects(request(`${tlsEntry.url}/api/connections/info`), 'Untrusted test CA must fail TLS');
-      assert.equal(info.protocol_version, 1); assert(info.desktop_id, 'Handshake Desktop identity missing');
+      assert.equal(info.protocol_version, 2); assert.equal(info.min_client_protocol, 2); assert(info.desktop_id, 'Handshake Desktop identity missing');
       const agents = unwrap(await relayAdmin('/api/agents'));
       assert(agents.some(agent => agent.online && agent.rung === 'L0/QUIC'), 'Real Relay must confirm QUIC carrier');
       return { tls_chain_verified_with_explicit_ca: true, untrusted_chain_rejected: true, desktop_id: info.desktop_id, protocol_version: info.protocol_version, relay_reported_carrier: 'L0/QUIC' };
@@ -210,11 +210,11 @@ export async function run(config) {
 
     const { transportModule, connectionModule, contractModule, pairingModule } = await importMobileModules(config.mobileRoot);
 
-    const pair = async name => {
+    const pair = async (name, installationKey) => {
       const ticket = unwrap(await ownerRequest('/api/connections/pairing', { method: 'POST', body: {} }), 'device ticket');
       assert(ticket.qr_token && ticket.ticket_id && ticket.expires_at_ms > Date.now());
       processes.secrets.add(ticket.qr_token);
-      const incompatible = await publicRequest('/api/auth/device-pair', { method: 'POST', body: { qr_token: ticket.qr_token, device_name: name, protocol_version: 999 } });
+      const incompatible = await publicRequest('/api/auth/device-pair', { method: 'POST', body: { qr_token: ticket.qr_token, device_name: name, installation_key: installationKey, protocol_version: 999 } });
       assert.equal(incompatible.status, 426);
       assert.equal(unwrap(await ownerRequest(`/api/connections/pairing/${ticket.ticket_id}`)).state, 'ready', 'Incompatible client must not consume ticket');
       const envelope = `nomifun://pair?v=1&url=${encodeURIComponent(`${tlsEntry.url}/device-pair?token=${ticket.qr_token}`)}`;
@@ -225,26 +225,51 @@ export async function run(config) {
       const receipt = await pairingModule.redeemConnectionPayload(envelope, pairingEpoch, { redeem: async (parsed, expectedEpoch) => {
         assert.equal(expectedEpoch, pairingEpoch); assert.equal(pairingStore.epoch(), expectedEpoch);
         assert.equal(parsed.credentialKind, 'device-pair'); assert.equal(parsed.baseUrl, tlsEntry.url); assert.equal(parsed.qrToken, ticket.qr_token);
-        redeemed = unwrap(await publicRequest('/api/auth/device-pair', { method: 'POST', body: { qr_token: parsed.qrToken, device_name: name, protocol_version: 1 } }), 'device pair');
+        redeemed = unwrap(await publicRequest('/api/auth/device-pair', { method: 'POST', body: { qr_token: parsed.qrToken, device_name: name, installation_key: installationKey, protocol_version: 2 } }), 'device pair');
         assert(await pairingStore.connect({ baseUrl: parsed.baseUrl, token: redeemed.token, user: redeemed.user, device: redeemed.device, desktop: info }, false, expectedEpoch));
         return { user: redeemed.user, epoch: pairingStore.epoch() };
       } });
       assert.equal(receipt.epoch, pairingStore.epoch()); assert.equal(receipt.user.user_id, redeemed.user.user_id);
       assert(redeemed.token && redeemed.device?.device_id); processes.secrets.add(redeemed.token);
-      const consumed = await publicRequest('/api/auth/device-pair', { method: 'POST', body: { qr_token: ticket.qr_token, device_name: `${name}-duplicate`, protocol_version: 1 } });
+      const consumed = await publicRequest('/api/auth/device-pair', { method: 'POST', body: { qr_token: ticket.qr_token, device_name: name, installation_key: installationKey, protocol_version: 2 } });
       assert(consumed.status >= 400, 'Pairing ticket must be one-shot');
       const status = unwrap(await ownerRequest(`/api/connections/pairing/${ticket.ticket_id}`));
       assert.equal(status.state, 'used');
       return { token: redeemed.token, device: redeemed.device, user: redeemed.user, ticket_id: ticket.ticket_id, expires_at_ms: ticket.expires_at_ms };
     };
-    const deviceA = await pair('local-device-a'), deviceB = await pair('local-device-b');
+    const installationA = randomId(), installationB = randomId();
+    let deviceA = await pair('local-phone', installationA);
+    const deviceB = await pair('local-phone', installationB);
     await check('two_independent_single_use_device_pairs', async () => {
       assert.notEqual(deviceA.device.device_id, deviceB.device.device_id);
-      return { distinct_devices: true, consumed_ticket_state: 'used', incompatible_protocol_preserves_ticket: true, mobile_pairing_envelope_used: true, expires_in_ms: deviceA.expires_at_ms - Date.now() };
+      assert.equal(deviceA.device.device_name, deviceB.device.device_name);
+      assert.equal(unwrap(await ownerRequest('/api/connections/devices')).length, 2);
+      return { distinct_devices: true, same_name_different_installations_are_independent: true, consumed_ticket_state: 'used', incompatible_protocol_preserves_ticket: true, mobile_pairing_envelope_used: true, expires_in_ms: deviceA.expires_at_ms - Date.now() };
+    });
+
+    await check('same_installation_repair_rotates_credential_without_duplicating_phone', async () => {
+      const previous = deviceA;
+      const previousSocket = await openSocket(tlsEntry.url, previous.token, { ca: tls.cert }); sockets.push(previousSocket);
+      const previousCookieSocket = await openSocket(tlsEntry.url, previous.token, { ca: tls.cert, cookie: ownerCookie, origin: tlsEntry.url }); sockets.push(previousCookieSocket);
+      deviceA = await pair('local-phone-renamed', installationA);
+      assert.equal(deviceA.device.device_id, previous.device.device_id);
+      assert.notEqual(deviceA.token, previous.token);
+      const devices = unwrap(await ownerRequest('/api/connections/devices'));
+      assert.equal(devices.length, 2);
+      assert.equal(devices.find(device => device.device_id === previous.device.device_id)?.device_name, 'local-phone-renamed');
+      await until('replaced native and owner-cookie device WSS close', () => previousSocket.closed && previousCookieSocket.closed, { timeoutMs: 10_000 });
+      const denied = await publicRequest('/api/system/info', { headers: bearer(previous.token) });
+      const deniedRefresh = await publicRequest('/api/auth/refresh', { method: 'POST', headers: bearer(previous.token), body: { token: previous.token } });
+      assert([401, 403].includes(denied.status)); assert([401, 403].includes(deniedRefresh.status));
+      await assertSocketAuthenticationRejected(tlsEntry.url, previous.token, { ca: tls.cert, cookie: ownerCookie, origin: tlsEntry.url });
+      unwrap(await publicRequest('/api/system/info', { headers: bearer(deviceA.token) }));
+      unwrap(await publicRequest('/api/system/info', { headers: bearer(deviceB.token) }));
+      return { stable_device_id: true, paired_phone_count: devices.length, renamed_phone_updated_in_place: true, previous_http_and_refresh_rejected: true, previous_websockets_closed: true, previous_websocket_reconnect_rejected: true, replacement_and_other_phone_authorized: true };
     });
 
     await check('manual_mobile_login_issues_individually_revocable_device', async () => {
-      const loggedIn = unwrap(await publicRequest('/api/auth/device-login', { method: 'POST', body: { username: 'connectivity-owner', password, device_name: 'local-password-device-c', protocol_version: 1 } }));
+      const installationKey = randomId();
+      const loggedIn = unwrap(await publicRequest('/api/auth/device-login', { method: 'POST', body: { username: 'connectivity-owner', password, device_name: 'local-password-device-c', installation_key: installationKey, protocol_version: 2 } }));
       assert(loggedIn.token && loggedIn.device?.device_id); processes.secrets.add(loggedIn.token);
       const denied = await publicRequest('/api/connections/devices', { headers: bearer(loggedIn.token) }); assert.equal(denied.status, 403);
       const deniedPair = await publicRequest('/api/connections/pairing', { method: 'POST', headers: bearer(loggedIn.token), body: {} }); assert.equal(deniedPair.status, 403);

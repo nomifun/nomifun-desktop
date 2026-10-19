@@ -239,8 +239,7 @@ async fn logout_handler(State(state): State<AuthRouterState>, headers: HeaderMap
         if let Ok(payload) = state.jwt_service.verify(&token)
             && let Some(device_id) = payload.device_id.as_deref()
         {
-            state.jwt_service.devices.revoke(device_id, payload.user_id.as_str()).await?;
-            state.jwt_service.notify_invalidated();
+            state.jwt_service.devices.revoke_credential(device_id, payload.user_id.as_str(), payload.device_credential_id.as_deref()).await?;
         } else {
             state.jwt_service.blacklist_token(&token);
         }
@@ -431,7 +430,6 @@ async fn change_password_handler(
 
     // Devices are revoked first so a later failure can only leave them revoked (fail closed).
     state.jwt_service.devices.revoke_all(current_user.id.as_str()).await?;
-    state.jwt_service.notify_invalidated();
 
     // Persist new password hash
     state

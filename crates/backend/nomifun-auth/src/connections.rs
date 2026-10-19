@@ -13,7 +13,7 @@ use crate::middleware::{AuthState, CurrentDevice, CurrentUser, auth_middleware};
 use crate::rate_limit::{RateLimiter, auth_rate_limit_middleware, api_rate_limit_middleware};
 use std::sync::Arc;
 
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
 
 pub(crate) fn connection_routes(state: AuthRouterState, pair_limiter: Arc<RateLimiter>) -> Router {
     let api_limiter = Arc::new(RateLimiter::api());
@@ -105,14 +105,12 @@ async fn devices(State(state): State<AuthRouterState>, Extension(user): Extensio
 
 async fn revoke_device(State(state): State<AuthRouterState>, Extension(user): Extension<CurrentUser>, Path(id): Path<String>) -> Result<Json<ApiResponse<ConnectedDevice>>, AppError> {
     let device = state.jwt_service.devices.revoke(&id, user.id.as_str()).await?;
-    state.jwt_service.notify_invalidated();
     Ok(Json(ApiResponse::ok(device)))
 }
 
 async fn revoke_self(State(state): State<AuthRouterState>, Extension(user): Extension<CurrentUser>, device: Option<Extension<CurrentDevice>>) -> Result<Json<ApiResponse<ConnectedDevice>>, AppError> {
-    let Some(Extension(CurrentDevice(id))) = device else { return Err(AppError::BadRequest("This session is not an individually paired device".into())); };
-    let device = state.jwt_service.devices.revoke(&id, user.id.as_str()).await?;
-    state.jwt_service.notify_invalidated();
+    let Some(Extension(device)) = device else { return Err(AppError::BadRequest("This session is not an individually paired device".into())); };
+    let device = state.jwt_service.devices.revoke_credential(&device.id, user.id.as_str(), device.credential_id.as_deref()).await?;
     Ok(Json(ApiResponse::ok(device)))
 }
 
@@ -149,12 +147,12 @@ impl<'a> Drop for TicketRedemption<'a> {
 }
 
 async fn pair_device(State(state): State<AuthRouterState>, Json(req): Json<DevicePairRequest>) -> Response {
-    if let Err(response) = validate_device_request(req.protocol_version, &req.device_name) { return response; }
+    if let Err(response) = validate_device_request(req.protocol_version, &req.device_name, &req.installation_key) { return response; }
     if let Err(error) = state.qr_token_store.consume_device_ticket(&req.qr_token) { return error.into_response(); }
     let redemption = TicketRedemption::armed(&state.qr_token_store, &req.qr_token);
     match async {
         let user = state.user_repo.get_primary_webui_user().await?.ok_or_else(|| AppError::Internal("Installation owner missing".into()))?;
-        Ok::<_, AppError>(issue_device_credential(&state, user, &req.device_name).await?)
+        issue_device_credential(&state, user, &req.device_name, &req.installation_key, req.previous_device_token.as_deref()).await
     }.await {
         Ok(response) => {
             redemption.complete(&response.device.device_id);
@@ -171,25 +169,39 @@ async fn pair_device(State(state): State<AuthRouterState>, Json(req): Json<Devic
 }
 
 async fn device_login(State(state): State<AuthRouterState>, Json(req): Json<DeviceLoginRequest>) -> Response {
-    if let Err(response) = validate_device_request(req.protocol_version, &req.device_name) { return response; }
+    if let Err(response) = validate_device_request(req.protocol_version, &req.device_name, &req.installation_key) { return response; }
     async {
         let login = LoginRequest { username: req.username, password: req.password };
         let user = crate::routes::authenticate_password(&state, &login).await?;
-        Ok::<_, AppError>(Json(issue_device_credential(&state, user, &req.device_name).await?))
+        Ok::<_, AppError>(Json(issue_device_credential(&state, user, &req.device_name, &req.installation_key, req.previous_device_token.as_deref()).await?))
     }.await.map(IntoResponse::into_response).unwrap_or_else(IntoResponse::into_response)
 }
 
 async fn device_setup(State(state): State<AuthRouterState>, Json(req): Json<DeviceLoginRequest>) -> Response {
-    if let Err(response) = validate_device_request(req.protocol_version, &req.device_name) { return response; }
+    if let Err(response) = validate_device_request(req.protocol_version, &req.device_name, &req.installation_key) { return response; }
     async {
         let user = crate::routes::initialize_owner(&state, Ok(LoginRequest { username: req.username, password: req.password })).await?;
-        Ok::<_, AppError>(Json(issue_device_credential(&state, user, &req.device_name).await?))
+        Ok::<_, AppError>(Json(issue_device_credential(&state, user, &req.device_name, &req.installation_key, req.previous_device_token.as_deref()).await?))
     }.await.map(IntoResponse::into_response).unwrap_or_else(IntoResponse::into_response)
 }
 
-async fn issue_device_credential(state: &AuthRouterState, user: nomifun_db::models::User, name: &str) -> Result<DevicePairResponse, AppError> {
-    let device = state.jwt_service.devices.register(user.user_id.as_str(), name).await?;
-    let token = state.jwt_service.sign_for_device(user.user_id.as_str(), &user.username, &device.device_id)?;
+async fn issue_device_credential(
+    state: &AuthRouterState,
+    user: nomifun_db::models::User,
+    name: &str,
+    installation_key: &str,
+    previous_token: Option<&str>,
+) -> Result<DevicePairResponse, AppError> {
+    // A saved token is only an optional claim for a pre-identity record. The
+    // fresh invitation/password remains the authority to issue a credential.
+    let previous = previous_token.and_then(|token| state.jwt_service.verify(token).ok())
+        .filter(|payload| payload.user_id == user.user_id)
+        .and_then(|payload| payload.device_id);
+    let registered = state.jwt_service.devices.register(user.user_id.as_str(), name, installation_key, previous.as_deref()).await?;
+    // Registration commits the replacement generation and notifies existing
+    // sockets even if signing or the client connection later fails.
+    let device = registered.device;
+    let token = state.jwt_service.sign_for_device(user.user_id.as_str(), &user.username, &device.device_id, Some(&registered.credential_id))?;
     if let Err(error) = state.user_repo.update_last_login(user.user_id.as_str()).await {
         tracing::debug!(%error, "device login activity update deferred");
     }
@@ -197,19 +209,11 @@ async fn issue_device_credential(state: &AuthRouterState, user: nomifun_db::mode
     Ok(DevicePairResponse { login: LoginResponse::new(PublicUser { user_id: user.user_id, username: user.username }, token), device })
 }
 
-fn validate_device_request(protocol: u32, name: &str) -> Result<(), Response> {
+fn validate_device_request(protocol: u32, name: &str, installation_key: &str) -> Result<(), Response> {
     if protocol != PROTOCOL_VERSION {
         return Err((StatusCode::UPGRADE_REQUIRED, Json(serde_json::json!({"success":false,"code":"CONNECTION_PROTOCOL_INCOMPATIBLE","error":"Update Mobile and Desktop to compatible versions before pairing.","details":{"protocol_version":PROTOCOL_VERSION,"min_client_protocol":PROTOCOL_VERSION}}))).into_response());
     }
-    validate_name(name).map_err(IntoResponse::into_response)
-}
-
-fn validate_name(name: &str) -> Result<(), AppError> {
-    let name = name.trim();
-    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
-        return Err(AppError::BadRequest("Device name must contain 1 to 80 visible characters".into()));
-    }
-    Ok(())
+    crate::DeviceStore::validate_registration(name, installation_key).map_err(IntoResponse::into_response)
 }
 
 #[cfg(test)]

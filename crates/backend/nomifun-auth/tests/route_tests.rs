@@ -16,7 +16,7 @@ use nomifun_auth::{
     AuthPolicy, AuthRouterState, CookieConfig, DeviceStore, JwtService, QrTokenStore, TrustState, auth_routes,
     hash_password, trust_resolve_middleware,
 };
-use nomifun_db::{IUserRepository, SqliteUserRepository, init_database_memory};
+use nomifun_db::{IClientPreferenceRepository, IUserRepository, SqliteClientPreferenceRepository, SqliteUserRepository, init_database_memory};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -31,6 +31,7 @@ async fn test_app_with_local(local: bool) -> (Router, TestContext) {
     test_app_with_policy(if local { AuthPolicy::NoAuth } else { AuthPolicy::Required }).await
 }
 
+const INSTALLATION_KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const LOCAL_SETUP_SECRET: &str = "isolated-first-run-local-trust";
 
 async fn test_app_with_policy(policy: AuthPolicy) -> (Router, TestContext) {
@@ -113,7 +114,8 @@ fn setup_request(path: &str, username: &str) -> Request<Body> {
     let mut body = serde_json::json!({"username":username,"password":"SecurePass123!"});
     if path.ends_with("device-setup") {
         body["device_name"] = serde_json::json!("Setup phone");
-        body["protocol_version"] = serde_json::json!(1);
+        body["protocol_version"] = serde_json::json!(2);
+        body["installation_key"] = serde_json::json!(INSTALLATION_KEY);
     }
     json_post(path, &body.to_string())
 }
@@ -164,8 +166,141 @@ async fn login(app: &mut Router, username: &str, password: &str) -> (String, Str
     (token, user_id)
 }
 
+async fn pair_phone(app: &Router, ctx: &TestContext, key: &str, name: &str) -> serde_json::Value {
+    let ticket = ctx.qr_token_store.generate_device_ticket();
+    let body = serde_json::json!({
+        "qr_token":ticket.qr_token,"device_name":name,
+        "protocol_version":2,"installation_key":key,
+    }).to_string();
+    let response = app.clone().oneshot(json_post("/api/auth/device-pair", &body)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    body_json(response).await
+}
+
 // ===========================================================================
 // T4. Login (POST /login)
+
+#[tokio::test]
+async fn same_phone_reauthorizes_one_device_across_pairing_and_password_login() {
+    let (app, ctx) = test_app().await;
+    create_test_user(&ctx, "admin", "secure_pass123").await;
+    let first = pair_phone(&app, &ctx, INSTALLATION_KEY, "Phone").await;
+    let first_token = first["token"].as_str().unwrap();
+    let original = ctx.jwt_service.verify(first_token).unwrap();
+    assert!(original.device_credential_id.is_some());
+    let mut invalidations = ctx.jwt_service.subscribe_invalidations();
+    invalidations.borrow_and_update();
+
+    // A later scan through another route uses the same persisted installation key.
+    let second = pair_phone(&app, &ctx, &INSTALLATION_KEY.to_ascii_uppercase(), "Renamed phone").await;
+    assert_eq!(second["device"]["device_id"], first["device"]["device_id"]);
+    assert_eq!(second["device"]["created_at_ms"], first["device"]["created_at_ms"]);
+    assert_eq!(second["device"]["device_name"], "Renamed phone");
+    assert!(invalidations.has_changed().unwrap(), "existing sockets must revalidate the replaced credential");
+    assert!(ctx.jwt_service.verify(first_token).is_err());
+    assert!(ctx.jwt_service.renew(&original, "admin").is_err());
+    let response = app.clone().oneshot(json_post("/api/auth/refresh", &serde_json::json!({"token":first_token}).to_string())).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(body_json(response).await["code"], "DEVICE_REVOKED");
+
+    let request = serde_json::json!({
+        "username":"admin","password":"secure_pass123","device_name":"Phone",
+        "protocol_version":2,"installation_key":INSTALLATION_KEY,
+    }).to_string();
+    let response = app.clone().oneshot(json_post("/api/auth/device-login", &request)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let third = body_json(response).await;
+    assert_eq!(third["device"]["device_id"], first["device"]["device_id"]);
+    assert!(ctx.jwt_service.verify(second["token"].as_str().unwrap()).is_err());
+    assert!(ctx.jwt_service.verify(third["token"].as_str().unwrap()).is_ok());
+    assert_eq!(ctx.devices.list(original.user_id.as_str()).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn same_name_different_installations_remain_independently_revocable() {
+    let (app, ctx) = test_app().await;
+    let first = pair_phone(&app, &ctx, INSTALLATION_KEY, "Realme GT NEO 3").await;
+    let second = pair_phone(&app, &ctx, &"b".repeat(64), "Realme GT NEO 3").await;
+    assert_ne!(first["device"]["device_id"], second["device"]["device_id"]);
+    let claims = ctx.jwt_service.verify(first["token"].as_str().unwrap()).unwrap();
+    assert_eq!(ctx.devices.list(claims.user_id.as_str()).unwrap().len(), 2);
+    ctx.devices.revoke(first["device"]["device_id"].as_str().unwrap(), claims.user_id.as_str()).await.unwrap();
+    let renewed = pair_phone(&app, &ctx, INSTALLATION_KEY, "Realme GT NEO 3").await;
+    assert_eq!(renewed["device"]["device_id"], first["device"]["device_id"]);
+    assert!(ctx.jwt_service.verify(first["token"].as_str().unwrap()).is_err());
+    assert!(ctx.jwt_service.verify(second["token"].as_str().unwrap()).is_ok());
+    assert!(ctx.jwt_service.verify(renewed["token"].as_str().unwrap()).is_ok());
+    assert_eq!(ctx.devices.list(claims.user_id.as_str()).unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn installation_key_is_required_before_consuming_a_ticket_or_initializing_owner() {
+    let (app, ctx) = test_app().await;
+    let ticket = ctx.qr_token_store.generate_device_ticket();
+    for key in [None, Some(""), Some("short"), Some("gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg")] {
+        let mut body = serde_json::json!({"qr_token":ticket.qr_token,"device_name":"Phone","protocol_version":2});
+        if let Some(key) = key { body["installation_key"] = serde_json::json!(key); }
+        let response = app.clone().oneshot(json_post("/api/auth/device-pair", &body.to_string())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(ctx.qr_token_store.device_ticket_status(&ticket.ticket_id).unwrap().state, "ready");
+    }
+    let old = serde_json::json!({"qr_token":ticket.qr_token,"device_name":"Phone","protocol_version":1});
+    let response = app.clone().oneshot(json_post("/api/auth/device-pair", &old.to_string())).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+    assert_eq!(ctx.qr_token_store.device_ticket_status(&ticket.ticket_id).unwrap().state, "ready");
+    let response = app.oneshot(json_post("/api/auth/device-setup", &serde_json::json!({
+        "username":"mobile_admin","password":"secure_pass123","device_name":"Phone","protocol_version":2,
+    }).to_string())).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!ctx.user_repo.has_users().await.unwrap());
+}
+
+#[tokio::test]
+async fn upgrade_claims_only_the_legacy_device_proven_by_the_saved_token() {
+    let (_, mut ctx) = test_app().await;
+    let owner = ctx.user_repo.get_system_user().await.unwrap().unwrap();
+    let legacy_id = "1".repeat(64);
+    let unrelated_id = "2".repeat(64);
+    let legacy = |id: &str| serde_json::json!({
+        "user_id":owner.user_id,"device_id":id,"device_name":"Same model",
+        "created_at_ms":1,"last_seen_at_ms":1,"revoked_at_ms":null,
+    });
+    let repo = Arc::new(SqliteClientPreferenceRepository::new(ctx._db.pool().clone()));
+    repo.upsert_batch(&[("auth.devices.v1", &serde_json::json!({
+        legacy_id.clone():legacy(&legacy_id),unrelated_id.clone():legacy(&unrelated_id),
+    }).to_string())]).await.unwrap();
+    ctx.devices = Arc::new(DeviceStore::load(repo).await.unwrap());
+    ctx.jwt_service = Arc::new(JwtService::with_devices("legacy-test-secret".into(), ctx.devices.clone()));
+    let previous_token = ctx.jwt_service.sign_for_device(owner.user_id.as_str(), "admin", &legacy_id, None).unwrap();
+    let unrelated_token = ctx.jwt_service.sign_for_device(owner.user_id.as_str(), "admin", &unrelated_id, None).unwrap();
+    let app = auth_routes(AuthRouterState {
+        auth_policy:AuthPolicy::Required,jwt_service:ctx.jwt_service.clone(),user_repo:ctx.user_repo.clone(),
+        cookie_config:Arc::new(CookieConfig { secure:false,same_site:"Lax" }),qr_token_store:ctx.qr_token_store.clone(),
+    });
+    let ticket = ctx.qr_token_store.generate_device_ticket();
+    let request = serde_json::json!({
+        "qr_token":ticket.qr_token,"device_name":"Renamed phone","protocol_version":2,
+        "installation_key":INSTALLATION_KEY,"previous_device_token":previous_token,
+    }).to_string();
+    let response = app.clone().oneshot(json_post("/api/auth/device-pair", &request)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let paired = body_json(response).await;
+    assert_eq!(paired["device"]["device_id"], legacy_id);
+    assert_eq!(paired["device"]["created_at_ms"], 1);
+    assert!(ctx.jwt_service.verify(&previous_token).is_err());
+    assert!(ctx.jwt_service.verify(&unrelated_token).is_ok(), "same name is never evidence to merge another device");
+    assert_eq!(ctx.devices.list(owner.user_id.as_str()).unwrap().len(), 2);
+
+    let ticket = ctx.qr_token_store.generate_device_ticket();
+    let foreign_key = serde_json::json!({
+        "qr_token":ticket.qr_token,"device_name":"Same model","protocol_version":2,
+        "installation_key":"b".repeat(64),"previous_device_token":paired["token"],
+    }).to_string();
+    let response = app.oneshot(json_post("/api/auth/device-pair", &foreign_key)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN, "an existing identity cannot be claimed with another installation key");
+    assert!(ctx.jwt_service.verify(paired["token"].as_str().unwrap()).is_ok());
+    assert_eq!(ctx.qr_token_store.device_ticket_status(&ticket.ticket_id).unwrap().state, "failed");
+}
 
 #[tokio::test]
 async fn mobile_pairing_is_distinct_one_time_and_individually_revocable() {
@@ -175,11 +310,11 @@ async fn mobile_pairing_is_distinct_one_time_and_individually_revocable() {
     let info = app.clone().oneshot(get_anonymous("/api/connections/info")).await.unwrap();
     assert_eq!(info.status(), StatusCode::OK);
     let info = body_json(info).await;
-    assert_eq!(info["data"]["protocol_version"], 1);
+    assert_eq!(info["data"]["protocol_version"], 2);
     assert_eq!(info["data"]["desktop_id"], ctx.user_repo.get_system_user().await.unwrap().unwrap().user_id.as_str());
 
     let browser_qr = ctx.qr_token_store.generate();
-    let response = app.clone().oneshot(json_post("/api/auth/device-pair", &serde_json::json!({"qr_token":browser_qr,"device_name":"Phone","protocol_version":1}).to_string())).await.unwrap();
+    let response = app.clone().oneshot(json_post("/api/auth/device-pair", &serde_json::json!({"qr_token":browser_qr,"device_name":"Phone","protocol_version":2,"installation_key":INSTALLATION_KEY}).to_string())).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(body_json(response).await["code"], "DEVICE_PAIRING_INVALID");
 
@@ -189,7 +324,7 @@ async fn mobile_pairing_is_distinct_one_time_and_individually_revocable() {
         assert_eq!(response.status(), StatusCode::OK);
         let ticket = body_json(response).await["data"].clone();
         let qr = ticket["qr_token"].as_str().unwrap();
-        let body = serde_json::json!({"qr_token":qr,"device_name":name,"protocol_version":1}).to_string();
+        let body = serde_json::json!({"qr_token":qr,"device_name":name,"protocol_version":2,"installation_key":format!("{:064x}", paired.len() + 1)}).to_string();
         let response = app.clone().oneshot(json_post("/api/auth/device-pair", &body)).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.headers().get(header::SET_COOKIE).is_none(), "pairing must not create a browser session");
@@ -237,12 +372,12 @@ async fn pair_device_failure_at_the_device_cap_reports_failed_not_used() {
     create_test_user(&ctx, "admin", "secure_pass123").await;
     let (owner, owner_id) = login(&mut app, "admin", "secure_pass123").await;
     for i in 0..128 {
-        ctx.devices.register(&owner_id, &format!("Phone {i}")).await.unwrap();
+        ctx.devices.register(&owner_id, &format!("Phone {i}"), &format!("{i:064x}"), None).await.unwrap();
     }
     let response = app.clone().oneshot(json_post_with_token("/api/connections/pairing", "{}", &owner)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let ticket = body_json(response).await["data"].clone();
-    let body = serde_json::json!({"qr_token":ticket["qr_token"],"device_name":"Phone 129","protocol_version":1}).to_string();
+    let body = serde_json::json!({"qr_token":ticket["qr_token"],"device_name":"Phone 129","protocol_version":2,"installation_key":INSTALLATION_KEY}).to_string();
     let response = app.clone().oneshot(json_post("/api/auth/device-pair", &body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let status = app.clone().oneshot(get_with_token(&format!("/api/connections/pairing/{}", ticket["ticket_id"].as_str().unwrap()), &owner)).await.unwrap();
@@ -260,7 +395,7 @@ async fn a_fresh_pairing_code_supersedes_an_unused_earlier_code() {
     let (owner, _) = login(&mut app, "admin", "secure_pass123").await;
     let ticket_a = body_json(app.clone().oneshot(json_post_with_token("/api/connections/pairing", "{}", &owner)).await.unwrap()).await["data"].clone();
     let ticket_b = body_json(app.clone().oneshot(json_post_with_token("/api/connections/pairing", "{}", &owner)).await.unwrap()).await["data"].clone();
-    let pair = |qr: &str| app.clone().oneshot(json_post("/api/auth/device-pair", &serde_json::json!({"qr_token":qr,"device_name":"Phone","protocol_version":1}).to_string()));
+    let pair = |qr: &str| app.clone().oneshot(json_post("/api/auth/device-pair", &serde_json::json!({"qr_token":qr,"device_name":"Phone","protocol_version":2,"installation_key":INSTALLATION_KEY}).to_string()));
     let response = pair(ticket_a["qr_token"].as_str().unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(body_json(response).await["code"], "DEVICE_PAIRING_INVALID");
@@ -276,7 +411,7 @@ async fn browser_password_change_signs_out_every_paired_phone() {
     create_test_user(&ctx, "admin", "secure_pass123").await;
     let (owner, _) = login(&mut app, "admin", "secure_pass123").await;
     let ticket = body_json(app.clone().oneshot(json_post_with_token("/api/connections/pairing", "{}", &owner)).await.unwrap()).await["data"].clone();
-    let pair = serde_json::json!({"qr_token":ticket["qr_token"],"device_name":"Phone","protocol_version":1}).to_string();
+    let pair = serde_json::json!({"qr_token":ticket["qr_token"],"device_name":"Phone","protocol_version":2,"installation_key":INSTALLATION_KEY}).to_string();
     let response = app.clone().oneshot(json_post("/api/auth/device-pair", &pair)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let device = body_json(response).await;
@@ -298,7 +433,7 @@ async fn browser_password_change_signs_out_every_paired_phone() {
     assert!(row["revoked_at_ms"].is_number(), "registry must match the dead token: {row}");
 
     let ticket = body_json(app.clone().oneshot(json_post_with_token("/api/connections/pairing", "{}", &owner)).await.unwrap()).await["data"].clone();
-    let pair = serde_json::json!({"qr_token":ticket["qr_token"],"device_name":"Phone again","protocol_version":1}).to_string();
+    let pair = serde_json::json!({"qr_token":ticket["qr_token"],"device_name":"Phone again","protocol_version":2,"installation_key":INSTALLATION_KEY}).to_string();
     let response = app.clone().oneshot(json_post("/api/auth/device-pair", &pair)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
@@ -309,7 +444,7 @@ async fn desktop_local_password_change_keeps_paired_phones() {
     let owner = ctx.user_repo.get_system_user().await.unwrap().unwrap().user_id;
     create_test_user(&ctx, "admin", "secure_pass123").await;
     let ticket = body_json(app.clone().oneshot(json_post("/api/connections/pairing", "{}")).await.unwrap()).await["data"].clone();
-    let pair = serde_json::json!({"qr_token":ticket["qr_token"],"device_name":"Phone","protocol_version":1}).to_string();
+    let pair = serde_json::json!({"qr_token":ticket["qr_token"],"device_name":"Phone","protocol_version":2,"installation_key":INSTALLATION_KEY}).to_string();
     let response = app.clone().oneshot(json_post("/api/auth/device-pair", &pair)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let device = body_json(response).await;
@@ -319,15 +454,16 @@ async fn desktop_local_password_change_keeps_paired_phones() {
     let response = app.clone().oneshot(json_post("/api/webui/change-password", r#"{"new_password":"NewP@ssword2"}"#)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert!(ctx.jwt_service.verify(&device_token).is_ok(), "Desktop-local password change must not sign out paired phones");
-    assert!(ctx.devices.is_active(device["device"]["device_id"].as_str().unwrap(), owner.as_str()));
+    let claims = ctx.jwt_service.verify(&device_token).unwrap();
+    assert!(ctx.devices.is_credential_active(device["device"]["device_id"].as_str().unwrap(), owner.as_str(), claims.device_credential_id.as_deref()));
 }
 
 #[tokio::test]
 async fn protocol_and_device_name_rejection_do_not_consume_invitation() {
     let (app, ctx) = test_app().await;
     let ticket = ctx.qr_token_store.generate_device_ticket();
-    for (name, protocol, expected) in [("Phone", 2, StatusCode::UPGRADE_REQUIRED), ("  ", 1, StatusCode::BAD_REQUEST)] {
-        let response = app.clone().oneshot(json_post("/api/auth/device-pair", &serde_json::json!({"qr_token":ticket.qr_token,"device_name":name,"protocol_version":protocol}).to_string())).await.unwrap();
+    for (name, protocol, expected) in [("Phone", 1, StatusCode::UPGRADE_REQUIRED), ("  ", 2, StatusCode::BAD_REQUEST)] {
+        let response = app.clone().oneshot(json_post("/api/auth/device-pair", &serde_json::json!({"qr_token":ticket.qr_token,"device_name":name,"protocol_version":protocol,"installation_key":INSTALLATION_KEY}).to_string())).await.unwrap();
         assert_eq!(response.status(), expected);
         assert_eq!(ctx.qr_token_store.device_ticket_status(&ticket.ticket_id).unwrap().state, "ready");
     }
@@ -337,7 +473,7 @@ async fn protocol_and_device_name_rejection_do_not_consume_invitation() {
 async fn mobile_password_login_issues_only_individually_revocable_credentials() {
     let (app, ctx) = test_app().await;
     create_test_user(&ctx, "admin", "secure_pass123").await;
-    let request = serde_json::json!({"username":"admin","password":"secure_pass123","device_name":"Manual phone","protocol_version":1}).to_string();
+    let request = serde_json::json!({"username":"admin","password":"secure_pass123","device_name":"Manual phone","protocol_version":2,"installation_key":INSTALLATION_KEY}).to_string();
     let response = app.clone().oneshot(json_post("/api/auth/device-login", &request)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response.headers().get(header::SET_COOKIE).is_none());
@@ -350,17 +486,17 @@ async fn mobile_password_login_issues_only_individually_revocable_credentials() 
     let response = app.clone().oneshot(Request::builder().method("DELETE").uri("/api/connections/device").header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert!(ctx.jwt_service.verify(token).is_err());
-    let wrong = serde_json::json!({"username":"admin","password":"wrong","device_name":"Manual phone","protocol_version":1}).to_string();
+    let wrong = serde_json::json!({"username":"admin","password":"wrong","device_name":"Manual phone","protocol_version":2,"installation_key":INSTALLATION_KEY}).to_string();
     assert_eq!(app.oneshot(json_post("/api/auth/device-login", &wrong)).await.unwrap().status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn mobile_first_setup_retains_the_atomic_single_claim_and_device_identity() {
     let (app, ctx) = test_app().await;
-    let wrong_version = serde_json::json!({"username":"mobile_admin","password":"secure_pass123","device_name":"First phone","protocol_version":2}).to_string();
+    let wrong_version = serde_json::json!({"username":"mobile_admin","password":"secure_pass123","device_name":"First phone","protocol_version":1,"installation_key":INSTALLATION_KEY}).to_string();
     assert_eq!(app.clone().oneshot(json_post("/api/auth/device-setup", &wrong_version)).await.unwrap().status(), StatusCode::UPGRADE_REQUIRED);
     assert!(!ctx.user_repo.has_users().await.unwrap());
-    let request = serde_json::json!({"username":"mobile_admin","password":"secure_pass123","device_name":"First phone","protocol_version":1}).to_string();
+    let request = serde_json::json!({"username":"mobile_admin","password":"secure_pass123","device_name":"First phone","protocol_version":2,"installation_key":INSTALLATION_KEY}).to_string();
     let (a, b) = tokio::join!(app.clone().oneshot(json_post("/api/auth/device-setup", &request)), app.clone().oneshot(json_post("/api/auth/device-setup", &request)));
     let a = a.unwrap(); let b = b.unwrap();
     let response = match (a.status(), b.status()) {
@@ -386,7 +522,7 @@ async fn desktop_setup_requires_local_trust_even_with_owner_or_device_credential
         ] {
             let (app, ctx) = test_app_with_policy(AuthPolicy::TrustLocalToken).await;
             let owner = ctx.user_repo.get_system_user().await.unwrap().unwrap();
-            let device = ctx.devices.register(owner.user_id.as_str(), "Existing phone").await.unwrap();
+            let device = ctx.devices.register(owner.user_id.as_str(), "Existing phone", INSTALLATION_KEY, None).await.unwrap();
             let original_devices = ctx.devices.list(owner.user_id.as_str()).unwrap();
             let mut request = setup_request(path, "claimed");
             if let Some(origin) = origin { request.headers_mut().insert(header::ORIGIN, origin.parse().unwrap()); }
@@ -396,7 +532,7 @@ async fn desktop_setup_requires_local_trust_even_with_owner_or_device_credential
                     let token = if credential == "owner" {
                         ctx.jwt_service.sign(owner.user_id.as_str(), &owner.username).unwrap()
                     } else {
-                        ctx.jwt_service.sign_for_device(owner.user_id.as_str(), &owner.username, &device.device_id).unwrap()
+                        ctx.jwt_service.sign_for_device(owner.user_id.as_str(), &owner.username, &device.device.device_id, Some(&device.credential_id)).unwrap()
                     };
                     request.headers_mut().insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
                 }

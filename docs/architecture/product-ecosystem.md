@@ -48,6 +48,26 @@ On a LAN, Mobile connects to the authenticated listener inside Desktop. Pairing
 uses a short-lived, one-time phone pairing code that issues an independent
 device credential for that phone. Expired or redeemed codes cannot be reused;
 these codes differ from one-time login codes for other computer browsers.
+
+Connection protocol 2 separates installation identity from authorization. Mobile
+persists a random 64-hex-character `installation_key` for each Desktop in secure
+storage and sends it to device pairing, login, and setup. Desktop retains one
+`device_id` for that installation while every authorization rotates its
+`credential_id`. HTTP, token refresh, and WebSocket authorization require the
+current credential; rotation also closes sockets holding the previous credential.
+One owned mutation completes persistence, in-memory publication, and socket
+invalidation even when the initiating request is cancelled.
+LAN and relay endpoints for the same Desktop share this identity. Device names
+are display metadata and never determine identity. Desktop and Mobile must be
+upgraded together to this protocol.
+
+An older device entry can be claimed only with its valid `previous_device_token`
+while granting new authorization. Other historical rows lack installation
+identity and require explicit owner revocation; name or timestamp matching cannot
+prove that two records belong to one phone. Clearing Mobile secure storage also
+removes the installation key, so a later pairing without a valid previous device
+credential is a new installation.
+
 After authentication, realtime interaction stays between
 the phone and the selected Desktop instance; it does not pass through a NomiFun
 cloud relay. The phone is therefore a control and presentation surface while

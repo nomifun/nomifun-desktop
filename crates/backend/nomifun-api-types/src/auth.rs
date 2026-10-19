@@ -79,6 +79,12 @@ pub struct DevicePairRequest {
     pub qr_token: String,
     pub device_name: String,
     pub protocol_version: u32,
+    /// A per-Desktop Mobile installation secret, persisted before registration.
+    /// Missing keys fail validation; defaulting only lets v1 receive an upgrade error.
+    #[serde(default)]
+    pub installation_key: String,
+    /// Optional proof to claim the exact pre-identity device record on upgrade.
+    pub previous_device_token: Option<String>,
 }
 
 /// Manual Mobile login and first-run setup issue a device credential directly.
@@ -89,6 +95,9 @@ pub struct DeviceLoginRequest {
     pub password: String,
     pub device_name: String,
     pub protocol_version: u32,
+    #[serde(default)]
+    pub installation_key: String,
+    pub previous_device_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

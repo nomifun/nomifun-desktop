@@ -34,7 +34,7 @@ function fixture(rows: ConnectionDevice[] = [], native = true, allowed = true) {
     running: native, starting: false, lifecycleSupported: native, initialPassword: null,
     accessUrls, start: async () => {}, stop: async () => {}, refresh: async () => {}, clearInitialPassword: () => {},
   });
-  spyOn(connections.info, 'invoke').mockResolvedValue({ desktop_id: 'desktop-A', desktop_name: 'Work Desktop', protocol_version: 1, min_client_protocol: 1, capabilities: ['device_pairing'] });
+  spyOn(connections.info, 'invoke').mockResolvedValue({ desktop_id: 'desktop-A', desktop_name: 'Work Desktop', protocol_version: 2, min_client_protocol: 2, capabilities: ['device_pairing'] });
   const devices = spyOn(connections.devices, 'invoke').mockResolvedValue(rows);
   if (!allowed) devices.mockRejectedValue(new BackendHttpError({ method: 'GET', path: '/api/connections/devices', status: 403, body: { error: 'installation owner required' } }));
   const pairing = spyOn(connections.pairing, 'invoke').mockResolvedValue({ ticket_id: 'ticket-1', qr_token: 'synthetic-1', expires_at_ms: Date.now() + 120_000 });

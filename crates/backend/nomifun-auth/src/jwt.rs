@@ -39,6 +39,9 @@ pub struct TokenPayload {
     /// Present only for individually registered Mobile credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
+    /// Exact authorization generation; absent only for existing legacy devices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_credential_id: Option<String>,
 }
 
 /// JWT service for signing, verification, and token blacklisting.
@@ -62,7 +65,7 @@ impl JwtService {
     }
 
     pub fn with_devices(secret: String, devices: Arc<crate::DeviceStore>) -> Self {
-        let (invalidations, _) = tokio::sync::watch::channel(0);
+        let invalidations = devices.invalidation_sender();
         Self {
             secret: RwLock::new(secret),
             blacklist: DashMap::new(),
@@ -80,19 +83,20 @@ impl JwtService {
         self.invalidations.send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
-    pub fn sign_for_device(&self, user_id: &str, username: &str, device_id: &str) -> Result<String, AuthError> {
-        if !self.devices.is_active(device_id, user_id) {
+    pub fn sign_for_device(&self, user_id: &str, username: &str, device_id: &str, device_credential_id: Option<&str>) -> Result<String, AuthError> {
+        if !self.devices.is_credential_active(device_id, user_id, device_credential_id) {
             return Err(AuthError::DeviceRevoked);
         }
         let now = now_secs()?;
-        self.sign_claims(user_id, username, now, now + TOKEN_EXPIRY.as_secs(), Some(device_id.to_owned()))
+        self.sign_claims(user_id, username, now, now + TOKEN_EXPIRY.as_secs(), Some(device_id.to_owned()), device_credential_id.map(str::to_owned))
     }
 
     /// Refresh keeps the original credential kind; it cannot drop device scope.
     pub fn renew(&self, payload: &TokenPayload, username: &str) -> Result<String, AuthError> {
         match payload.device_id.as_deref() {
-            Some(id) => self.sign_for_device(payload.user_id.as_str(), username, id),
-            None => self.sign(payload.user_id.as_str(), username),
+            Some(id) => self.sign_for_device(payload.user_id.as_str(), username, id, payload.device_credential_id.as_deref()),
+            None if payload.device_credential_id.is_none() => self.sign(payload.user_id.as_str(), username),
+            None => Err(AuthError::TokenInvalid("Device credential has no device identity".into())),
         }
     }
 
@@ -108,10 +112,10 @@ impl JwtService {
     /// tests can mint tokens at a chosen point in their life (e.g. "already
     /// past half-life") without waiting out real time.
     pub fn sign_with_window(&self, user_id: &str, username: &str, iat: u64, exp: u64) -> Result<String, AuthError> {
-        self.sign_claims(user_id, username, iat, exp, None)
+        self.sign_claims(user_id, username, iat, exp, None, None)
     }
 
-    fn sign_claims(&self, user_id: &str, username: &str, iat: u64, exp: u64, device_id: Option<String>) -> Result<String, AuthError> {
+    fn sign_claims(&self, user_id: &str, username: &str, iat: u64, exp: u64, device_id: Option<String>, device_credential_id: Option<String>) -> Result<String, AuthError> {
         let user_id = UserId::parse(user_id)
             .map_err(|error| AuthError::TokenInvalid(format!("invalid user id: {error}")))?;
         let claims = TokenPayload {
@@ -122,6 +126,7 @@ impl JwtService {
             iss: JWT_ISSUER.to_owned(),
             aud: JWT_AUDIENCE.to_owned(),
             device_id,
+            device_credential_id,
         };
 
         let secret = self
@@ -162,10 +167,14 @@ impl JwtService {
             })?;
 
         let payload = token_data.claims;
-        if let Some(device_id) = payload.device_id.as_deref()
-            && !self.devices.is_active(device_id, payload.user_id.as_str())
-        {
-            return Err(AuthError::DeviceRevoked);
+        match payload.device_id.as_deref() {
+            Some(device_id) if !self.devices.is_credential_active(device_id, payload.user_id.as_str(), payload.device_credential_id.as_deref()) => {
+                return Err(AuthError::DeviceRevoked);
+            }
+            None if payload.device_credential_id.is_some() => {
+                return Err(AuthError::TokenInvalid("Device credential has no device identity".into()));
+            }
+            _ => {}
         }
         Ok(payload)
     }
@@ -369,6 +378,20 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn device_claims_cannot_drop_generation_or_turn_into_browser_scope() {
+        let store = Arc::new(crate::DeviceStore::default());
+        let device = store.register(TEST_USER_ID, "Phone", &"a".repeat(64), None).await.unwrap();
+        let service = JwtService::with_devices("test-secret".into(), store);
+        let now = now_secs().unwrap();
+        let missing_generation = service.sign_claims(TEST_USER_ID, "admin", now, now + 100,
+            Some(device.device.device_id.clone()), None).unwrap();
+        assert!(matches!(service.verify(&missing_generation), Err(AuthError::DeviceRevoked)));
+        let missing_device = service.sign_claims(TEST_USER_ID, "admin", now, now + 100,
+            None, Some(device.credential_id)).unwrap();
+        assert!(matches!(service.verify(&missing_device), Err(AuthError::TokenInvalid(_))));
+    }
+
     #[test]
     fn verify_tampered_token_fails() {
         let service = test_service();
@@ -398,6 +421,7 @@ mod tests {
             iss: JWT_ISSUER.into(),
             aud: JWT_AUDIENCE.into(),
             device_id: None,
+            device_credential_id: None,
         };
         let token = encode(
             &Header::default(),
@@ -475,6 +499,7 @@ mod tests {
             iss: JWT_ISSUER.into(),
             aud: JWT_AUDIENCE.into(),
             device_id: None,
+            device_credential_id: None,
         };
         let token = encode(
             &Header::default(),

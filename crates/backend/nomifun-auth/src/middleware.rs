@@ -28,7 +28,10 @@ pub struct CurrentUser {
 
 /// Authenticated device identity, never synthesized from an ordinary user JWT.
 #[derive(Debug, Clone)]
-pub struct CurrentDevice(pub String);
+pub struct CurrentDevice {
+    pub id: String,
+    pub credential_id: Option<String>,
+}
 
 /// Shared state for the authentication middleware.
 #[derive(Clone)]
@@ -132,7 +135,7 @@ pub async fn auth_middleware(
     };
 
     if let Some(device_id) = payload.device_id.as_deref() {
-        if let Err(error) = state.jwt_service.devices.touch(device_id, user.user_id.as_str()).await {
+        if let Err(error) = state.jwt_service.devices.touch(device_id, user.user_id.as_str(), payload.device_credential_id.as_deref()).await {
             tracing::debug!(%error, "device activity persistence deferred");
         }
         // Recheck after await: a concurrently revoked device cannot be admitted.
@@ -141,7 +144,10 @@ pub async fn auth_middleware(
             Err(crate::AuthError::DeviceRevoked) => return Ok(crate::error::device_revoked_response(axum::http::StatusCode::FORBIDDEN)),
             Err(_) => return Err(AppError::Forbidden("Invalid or expired token".into())),
         }
-        request.extensions_mut().insert(CurrentDevice(device_id.to_owned()));
+        request.extensions_mut().insert(CurrentDevice {
+            id: device_id.to_owned(),
+            credential_id: payload.device_credential_id.clone(),
+        });
     }
 
     request.extensions_mut().insert(CurrentUser {

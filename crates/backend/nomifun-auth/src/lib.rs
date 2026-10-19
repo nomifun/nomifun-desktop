@@ -19,7 +19,7 @@ mod validation;
 
 // Error type
 pub use error::AuthError;
-pub use devices::DeviceStore;
+pub use devices::{DeviceStore, RegisteredDevice};
 
 // JWT service
 pub use jwt::{

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { delay, freePort, openSocket, request, startProxy, stdioRpc, until } from './connectivity-stack-helpers.mjs';
@@ -35,6 +35,8 @@ export async function nativeAcceptance({ config, root, fixture, processes, allCh
   if (config.managedAgentBin) pinned = preloadManagedAgent(root, directory, config.managedAgentBin);
   const spa = config.nativeSpaDir ?? join(root, 'ui/dist');
   assert(existsSync(join(spa, 'index.html')), 'Native harness needs actual --native-spa-dir with built UI index.html');
+  const bootstrapInstallationKey = randomBytes(32).toString('hex');
+  const phoneInstallationKey = randomBytes(32).toString('hex');
   let rpc, processOwner, nativePhoneToken, nativePhoneSocket;
   const start = async label => {
     processOwner = processes.start(label, config.nativeHarnessBin, ['--data-dir', directory, '--spa-dir', spa], {
@@ -74,7 +76,7 @@ export async function nativeAcceptance({ config, root, fixture, processes, allCh
     processes.secrets.add(password);
     for (const path of ['/api/auth/setup', '/api/auth/device-setup']) {
       const body = path.endsWith('device-setup')
-        ? { username: 'native-owner', password, device_name: 'native-bootstrap', protocol_version: 1 }
+        ? { username: 'native-owner', password, device_name: 'native-bootstrap', installation_key: bootstrapInstallationKey, protocol_version: 2 }
         : { username: 'native-owner', password };
       // Both cross-origin browser calls and native HTTP calls must prove the
       // local owner authority. CORS alone cannot authorize initialization.
@@ -89,16 +91,25 @@ export async function nativeAcceptance({ config, root, fixture, processes, allCh
     assert.equal(unchanged.json.needs_setup, true);
     assert.equal(unwrap(await request(`${firstBoot.backendUrl}/api/connections/devices`, { headers: nativeHeaders })).length, 0);
     const trusted = await request(`${firstBoot.backendUrl}/api/auth/device-setup`, { method: 'POST', headers: nativeHeaders,
-      body: { username: 'native-owner', password, device_name: 'native-bootstrap', protocol_version: 1 } });
+      body: { username: 'native-owner', password, device_name: 'native-bootstrap', installation_key: bootstrapInstallationKey, protocol_version: 2 } });
     assert.equal(trusted.status, 200);
     assert(trusted.json.token && trusted.json.device?.device_id);
     processes.secrets.add(trusted.json.token);
     assert.equal(trusted.headers['access-control-allow-origin'], nativeHeaders.Origin);
     assert.equal((await request(`${firstBoot.backendUrl}/api/auth/user`, { headers: bearer(trusted.json.token) })).status, 200);
     assert.equal((await request(`${firstBoot.backendUrl}/api/auth/status`)).json.needs_setup, false);
+    const loggedIn = unwrap(await request(`${firstBoot.backendUrl}/api/auth/device-login`, { method: 'POST',
+      body: { username: 'native-owner', password, device_name: 'native-bootstrap', installation_key: bootstrapInstallationKey, protocol_version: 2 } }));
+    processes.secrets.add(loggedIn.token);
+    assert.equal(loggedIn.device.device_id, trusted.json.device.device_id);
+    assert.notEqual(loggedIn.token, trusted.json.token);
+    assert.equal(unwrap(await request(`${firstBoot.backendUrl}/api/connections/devices`, { headers: nativeHeaders })).length, 1);
+    assert([401, 403].includes((await request(`${firstBoot.backendUrl}/api/auth/user`, { headers: bearer(trusted.json.token) })).status));
+    assert.equal((await request(`${firstBoot.backendUrl}/api/auth/user`, { headers: bearer(loggedIn.token) })).status, 200);
     return { arbitrary_origin_cors_denied: true, anonymous_http_setup_denied: true,
       both_setup_endpoints_denied: true, unauthorized_requests_preserve_owner_and_devices: true,
-      legitimate_native_trust_setup_succeeds: true, device_credential_works: true };
+      legitimate_native_trust_setup_succeeds: true, device_credential_works: true,
+      bootstrap_installation_reused_by_login: true, paired_phone_count: 1, superseded_credential_rejected: true };
   });
   const runtime = await check('native_shipped_runtime_is_sha_verified', async () => {
     const prepared = await rpc.call('prepare_runtime', {}, 320_000);
@@ -134,7 +145,7 @@ export async function nativeAcceptance({ config, root, fixture, processes, allCh
     assert.equal(ready.qrState, 'ready'); assert(ready.pairUrl);
     const appUrl = new URL(ready.pairUrl), nested = new URL(appUrl.searchParams.get('url'));
     const qrToken = nested.searchParams.get('token'); assert(qrToken); processes.secrets.add(qrToken);
-    const device = unwrap(await request(`${ready.businessUrl}/api/auth/device-pair`, { method: 'POST', body: { qr_token: qrToken, device_name: 'native-harness-phone', protocol_version: 1 } }));
+    const device = unwrap(await request(`${ready.businessUrl}/api/auth/device-pair`, { method: 'POST', body: { qr_token: qrToken, device_name: 'native-harness-phone', installation_key: phoneInstallationKey, protocol_version: 2 } }));
     assert(device.device?.device_id && device.token); processes.secrets.add(device.token);
     nativePhoneToken = device.token;
     nativePhoneSocket = await openSocket(ready.businessUrl, nativePhoneToken);
@@ -143,7 +154,19 @@ export async function nativeAcceptance({ config, root, fixture, processes, allCh
     const consumed = await rpc.call('status'); assert.equal(consumed.qrState, 'used'); assert.equal(consumed.pairUrl, null);
     const fresh = await rpc.call('refresh_qr'); assert.equal(fresh.qrState, 'ready'); assert(fresh.pairUrl && fresh.pairUrl !== ready.pairUrl);
     const nextToken = new URL(new URL(fresh.pairUrl).searchParams.get('url')).searchParams.get('token'); assert.notEqual(nextToken, qrToken); processes.secrets.add(nextToken);
-    return { device_credential_issued: true, actual_managed_agent_websocket_upgrade: true, consumed_qr_hidden: true, explicit_refresh_changes_ticket: true, no_code_without_explicit_request: true };
+    const pairedAgain = unwrap(await request(`${fresh.businessUrl}/api/auth/device-pair`, { method: 'POST', body: { qr_token: nextToken, device_name: 'native-harness-phone', installation_key: phoneInstallationKey, protocol_version: 2 } }));
+    processes.secrets.add(pairedAgain.token);
+    assert.equal(pairedAgain.device.device_id, device.device.device_id);
+    assert.notEqual(pairedAgain.token, device.token);
+    const nativeHeaders = { Origin: 'http://tauri.localhost', 'x-nomi-local-trust': firstBoot.nativeTrust };
+    const devices = unwrap(await request(`${firstBoot.backendUrl}/api/connections/devices`, { headers: nativeHeaders }));
+    assert.equal(devices.length, 2, 'Bootstrap and the separately installed phone each retain one row');
+    await until('native phone previous credential WSS closes after re-pairing', () => nativePhoneSocket.closed, { timeoutMs: 10_000 });
+    assert([401, 403].includes((await request(`${ready.businessUrl}/api/system/info`, { headers: bearer(device.token) })).status));
+    nativePhoneToken = pairedAgain.token;
+    nativePhoneSocket = await openSocket(fresh.businessUrl, nativePhoneToken);
+    return { device_credential_issued: true, actual_managed_agent_websocket_upgrade: true, consumed_qr_hidden: true, explicit_refresh_changes_ticket: true, no_code_without_explicit_request: true,
+      same_installation_reuses_device: true, paired_phone_count: devices.length, replaced_credential_and_websocket_invalidated: true };
   });
   await check('native_pause_survives_process_restart', async () => {
     const started = Date.now();

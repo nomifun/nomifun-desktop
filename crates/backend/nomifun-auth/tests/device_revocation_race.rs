@@ -40,17 +40,18 @@ impl IUserRepository for PausedUserLookup {
 }
 
 #[tokio::test]
-async fn revocation_during_async_lookup_has_typed_http_and_refresh_rejections() {
+async fn revocation_or_repair_during_lookup_rejects_old_http_and_refresh_credentials() {
+    for repair in [false,true] {
     for refresh in [false,true] {
         let database=nomifun_db::init_database_memory().await.unwrap();
         let real_repo=Arc::new(SqliteUserRepository::new(database.pool().clone()));
         let user=real_repo.get_system_user().await.unwrap().unwrap();
         let devices=Arc::new(DeviceStore::default());
-        let a=devices.register(user.user_id.as_str(),"Phone A").await.unwrap();
-        let b=devices.register(user.user_id.as_str(),"Phone B").await.unwrap();
+        let a=devices.register(user.user_id.as_str(),"Phone A",&"a".repeat(64),None).await.unwrap();
+        let b=devices.register(user.user_id.as_str(),"Phone B",&"b".repeat(64),None).await.unwrap();
         let jwt=Arc::new(JwtService::with_devices("test-race-secret".into(),devices.clone()));
-        let token=jwt.sign_for_device(user.user_id.as_str(),&user.username,&a.device_id).unwrap();
-        let b_token=jwt.sign_for_device(user.user_id.as_str(),&user.username,&b.device_id).unwrap();
+        let token=jwt.sign_for_device(user.user_id.as_str(),&user.username,&a.device.device_id,Some(&a.credential_id)).unwrap();
+        let b_token=jwt.sign_for_device(user.user_id.as_str(),&user.username,&b.device.device_id,Some(&b.credential_id)).unwrap();
         let entered=Arc::new(Semaphore::new(0));let release=Arc::new(Semaphore::new(0));
         let app=auth_routes(AuthRouterState{
             auth_policy:AuthPolicy::Required,
@@ -62,7 +63,12 @@ async fn revocation_during_async_lookup_has_typed_http_and_refresh_rejections() 
         }else{Request::get("/api/auth/user").header("authorization",format!("Bearer {token}")).body(Body::empty()).unwrap()};
         let waiting=tokio::spawn(app.clone().oneshot(request));
         tokio::time::timeout(std::time::Duration::from_secs(2),entered.acquire()).await.unwrap().unwrap().forget();
-        devices.revoke(&a.device_id,user.user_id.as_str()).await.unwrap();
+        let replacement = if repair {
+            Some(devices.register(user.user_id.as_str(),"Phone A",&"a".repeat(64),None).await.unwrap())
+        } else {
+            devices.revoke(&a.device.device_id,user.user_id.as_str()).await.unwrap();
+            None
+        };
         release.add_permits(1);
         let response=tokio::time::timeout(std::time::Duration::from_secs(2),waiting).await.unwrap().unwrap().unwrap();
         assert_eq!(response.status(),if refresh{StatusCode::UNAUTHORIZED}else{StatusCode::FORBIDDEN});
@@ -70,10 +76,16 @@ async fn revocation_during_async_lookup_has_typed_http_and_refresh_rejections() 
         assert_eq!(body["code"],"DEVICE_REVOKED");
         assert!(body.get("token").is_none());
         assert!(jwt.verify(&b_token).is_ok());
+        if let Some(replacement) = replacement {
+            assert_eq!(replacement.device.device_id, a.device.device_id);
+            let fresh = jwt.sign_for_device(user.user_id.as_str(), &user.username, &replacement.device.device_id, Some(&replacement.credential_id)).unwrap();
+            assert!(jwt.verify(&fresh).is_ok());
+        }
         let browser_failure=app.oneshot(Request::get("/api/auth/user").header("authorization","Bearer not-a-token").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(browser_failure.status(),StatusCode::FORBIDDEN);
         let body:serde_json::Value=serde_json::from_slice(&browser_failure.into_body().collect().await.unwrap().to_bytes()).unwrap();
         assert_eq!(body["code"],"FORBIDDEN");
+    }
     }
 }
 

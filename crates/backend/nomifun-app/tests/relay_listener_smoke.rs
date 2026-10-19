@@ -21,7 +21,8 @@ async fn relay_edge_preserves_lan_choice_and_never_accepts_webview_trust() {
     let local = format!("http://127.0.0.1:{}", server.loopback_port());
     let setup_body = serde_json::json!({
         "username": "smoke_owner", "password": "IsolatedPass123!",
-        "device_name": "Untrusted phone", "protocol_version": 1,
+        "device_name": "Untrusted phone", "protocol_version": 2,
+        "installation_key": "a".repeat(64),
     });
     for path in ["/api/auth/setup", "/api/auth/device-setup"] {
         let response = client.post(format!("{local}{path}"))
