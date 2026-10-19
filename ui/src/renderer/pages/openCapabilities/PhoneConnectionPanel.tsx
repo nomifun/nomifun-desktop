@@ -1,4 +1,4 @@
-import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Modal, Radio, Select, Spin, Tag } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
@@ -17,6 +17,7 @@ const DEVICE_LIST_POLL_MS = 15_000;
 const PhoneConnectionPanel: React.FC = () => {
   const { t } = useTranslation();
   const { status, running, starting, lifecycleSupported, accessUrls, start } = useWebuiServer();
+  const addressFieldId = useId();
   const [path, setPath] = useState<'lan' | 'relay'>('lan');
   const [info, setInfo] = useState<ConnectionInfo | null>(null);
   const [devices, setDevices] = useState<ConnectionDevice[]>([]);
@@ -200,11 +201,17 @@ const PhoneConnectionPanel: React.FC = () => {
             </> : path === 'lan' ? <>
               {!running && <Alert type='info' content={t('settings.deviceConnections.lanOff')} action={<Button type='primary' loading={starting} onClick={() => void start()}>{t('settings.deviceConnections.lanEnable')}</Button>} />}
               {running && urls.length === 0 && <Alert type='warning' content={t('settings.deviceConnections.noLanAddress')} />}
-              {running && urls.length > 0 && <label className='flex flex-col gap-6px text-13px text-t-secondary'>
-                {t('settings.deviceConnections.addressLabel')}
-                <Select value={baseUrl} onChange={(value) => { setBaseUrl(value); setPairing(null); setError(null); }} options={urls.map((url) => ({ value: url, label: url }))} />
-                <span className='text-12px text-t-tertiary'>{t('settings.deviceConnections.addressHint')}</span>
-              </label>}
+              {running && urls.length > 0 && <div className='flex flex-col gap-6px text-13px text-t-secondary'>
+                <span id={`${addressFieldId}-label`}>{t('settings.deviceConnections.addressLabel')}</span>
+                <Select
+                  aria-labelledby={`${addressFieldId}-label`}
+                  aria-describedby={`${addressFieldId}-hint`}
+                  value={baseUrl}
+                  onChange={(value) => { setBaseUrl(value); setPairing(null); setError(null); }}
+                  options={urls.map((url) => ({ value: url, label: url }))}
+                />
+                <span id={`${addressFieldId}-hint`} className='text-12px text-t-tertiary'>{t('settings.deviceConnections.addressHint')}</span>
+              </div>}
             </> : <RelayPairingPanel onStatusChange={setRelay} />}
           </div>
         </section>

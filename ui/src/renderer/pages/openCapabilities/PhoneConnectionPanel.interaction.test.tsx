@@ -28,10 +28,11 @@ function captureTicketPoll() {
 }
 
 function fixture(rows: ConnectionDevice[] = [], native = true, allowed = true) {
+  const accessUrls = ['http://192.168.1.50:25808', 'http://10.0.0.50:25808'];
   spyOn(webuiContext, 'useWebuiServer').mockReturnValue({
-    status: { running: true, port: 25808, allowRemote: true, localUrl: 'http://127.0.0.1:25808', networkUrls: ['http://192.168.1.50:25808'], adminUsername: 'admin' },
+    status: { running: true, port: 25808, allowRemote: true, localUrl: 'http://127.0.0.1:25808', networkUrls: accessUrls, adminUsername: 'admin' },
     running: native, starting: false, lifecycleSupported: native, initialPassword: null,
-    accessUrls: ['http://192.168.1.50:25808'], start: async () => {}, stop: async () => {}, refresh: async () => {}, clearInitialPassword: () => {},
+    accessUrls, start: async () => {}, stop: async () => {}, refresh: async () => {}, clearInitialPassword: () => {},
   });
   spyOn(connections.info, 'invoke').mockResolvedValue({ desktop_id: 'desktop-A', desktop_name: 'Work Desktop', protocol_version: 1, min_client_protocol: 1, capabilities: ['device_pairing'] });
   const devices = spyOn(connections.devices, 'invoke').mockResolvedValue(rows);
@@ -41,6 +42,56 @@ function fixture(rows: ConnectionDevice[] = [], native = true, allowed = true) {
   const view = render(<I18nextProvider i18n={i18n}><PhoneConnectionPanel /></I18nextProvider>);
   return { ...view, devices, pairing, status };
 }
+
+test('the LAN address value and arrow toggle the dropdown once per click', async () => {
+  const view = fixture();
+  await waitFor(() => expect(view.getByText('Work Desktop')).toBeTruthy());
+  const select = view.getByRole('combobox', { name: settings.deviceConnections.addressLabel });
+  const value = view.getByText('http://192.168.1.50:25808');
+  const arrow = select.querySelector('svg')!;
+
+  fireEvent.click(value);
+  expect(select.getAttribute('aria-expanded')).toBe('true');
+  expect(view.getByRole('option', { name: 'http://10.0.0.50:25808' })).toBeTruthy();
+  fireEvent.click(value);
+  expect(select.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(arrow);
+  expect(select.getAttribute('aria-expanded')).toBe('true');
+  fireEvent.click(arrow);
+  expect(select.getAttribute('aria-expanded')).toBe('false');
+});
+
+test('the LAN address caption, hint and surrounding content do not open the dropdown', async () => {
+  const view = fixture();
+  await waitFor(() => expect(view.getByText('Work Desktop')).toBeTruthy());
+  const select = view.getByRole('combobox', { name: settings.deviceConnections.addressLabel });
+  expect(document.getElementById(select.getAttribute('aria-describedby')!)?.textContent).toBe(settings.deviceConnections.addressHint);
+  for (const text of [settings.deviceConnections.addressLabel, settings.deviceConnections.addressHint, settings.deviceConnections.lanHint]) {
+    fireEvent.click(view.getByText(text));
+    expect(select.getAttribute('aria-expanded')).toBe('false');
+  }
+});
+
+test('selecting another LAN address clears the old code and generates pairing for that address', async () => {
+  const view = fixture();
+  await waitFor(() => expect(view.getByText('Work Desktop')).toBeTruthy());
+  fireEvent.click(view.getByTestId('generate-phone-pairing'));
+  await waitFor(() => expect(view.queryByTestId('phone-pairing-link')).toBeTruthy());
+
+  const select = view.getByRole('combobox', { name: settings.deviceConnections.addressLabel });
+  fireEvent.click(select);
+  fireEvent.click(view.getByRole('option', { name: 'http://10.0.0.50:25808' }));
+  await waitFor(() => expect(select.getAttribute('aria-expanded')).toBe('false'));
+  expect(select.textContent).toContain('http://10.0.0.50:25808');
+  expect(view.queryByTestId('phone-pairing-link')).toBeNull();
+  expect(view.queryByTestId('phone-pairing-qr')).toBeNull();
+
+  fireEvent.click(view.getByTestId('generate-phone-pairing'));
+  await waitFor(() => expect(view.queryByTestId('phone-pairing-link')).toBeTruthy());
+  const link = view.getByTestId('phone-pairing-link') as HTMLTextAreaElement;
+  const pairingUrl = new URL(new URL(link.value).searchParams.get('url')!);
+  expect(pairingUrl.origin).toBe('http://10.0.0.50:25808');
+});
 
 test('a generated ticket waits for backend redemption instead of claiming the phone is online', async () => {
   const view = fixture();
