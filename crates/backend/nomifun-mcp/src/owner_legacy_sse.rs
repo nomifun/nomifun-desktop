@@ -46,9 +46,7 @@ impl LegacyStream {
             .send()
             .await
             .map_err(|_| McpOwnerError::connection_failed("MCP legacy SSE connection failed"))?;
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(McpOwnerError::credential_required(response.headers()));
-        }
+        if let Some(error) = McpOwnerError::authentication_rejection(response.status(), response.headers()) { return Err(error); }
         if response.status() != reqwest::StatusCode::OK {
             let status = response.status();
             return Err(McpOwnerError::http_error(
@@ -163,9 +161,7 @@ pub(super) async fn read_response(
 /// Legacy POST acknowledgment is not the JSON-RPC result. Some servers send
 /// a short textual body (e.g. Accepted); consume it without interpreting it.
 pub(super) async fn accept_ack(mut response: reqwest::Response) -> Result<(), McpOwnerError> {
-    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(McpOwnerError::credential_required(response.headers()));
-    }
+    if let Some(error) = McpOwnerError::authentication_rejection(response.status(), response.headers()) { return Err(error); }
     if response.status() != reqwest::StatusCode::ACCEPTED {
         let status = response.status();
         return Err(McpOwnerError::http_error(

@@ -1,10 +1,10 @@
 //! Settings discovery shares the execution protocol, without tool-call
 //! authority. Caller-provided credentials are used only for this transaction.
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use super::{McpOwnerError, McpSession, McpSetupPolicy, McpInvocationControl, McpCleanupStatus, validate_http_endpoint};
 use super::control::controlled;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::HeaderMap;
 
 /// The client must have redirects disabled. A protocol deadline does not
 /// cancel the subsequent bounded cleanup of an already allocated HTTP session.
@@ -14,10 +14,15 @@ pub(crate) async fn discover_network(
     configured_headers: &HashMap<String, String>,
     legacy: bool,
     policy: &McpSetupPolicy,
+    credential: Option<super::McpCredential>,
 ) -> Result<serde_json::Value, McpOwnerError> {
     validate_http_endpoint(endpoint)?;
-    let headers = discovery_headers(configured_headers)?;
+    let headers = match credential.as_ref() {
+        Some(credential) => super::build_headers(configured_headers, Some(credential))?,
+        None => discovery_headers(configured_headers)?,
+    };
     let mut session = McpSession::new(client, endpoint.to_owned(), headers);
+    session.credential_lease = credential.as_ref().and_then(|credential| credential.lease.clone());
     session.legacy_mode = legacy;
     let setup = policy.start();
     let control = McpInvocationControl::default();
@@ -46,48 +51,10 @@ fn discovery_headers(configured: &HashMap<String, String>) -> Result<HeaderMap, 
             "MCP discovery headers exceed the configured limit",
         ));
     }
-    let mut headers = HeaderMap::new();
-    let mut names = BTreeSet::new();
-    for (key, value) in configured {
-        let name = HeaderName::from_bytes(key.as_bytes()).map_err(|_| {
-            McpOwnerError::invalid_binding("MCP discovery has an invalid header name")
-        })?;
-        if !names.insert(name.as_str().to_owned()) {
-            return Err(McpOwnerError::invalid_binding(
-                "MCP discovery has duplicate header names",
-            ));
-        }
-        if matches!(
-            name.as_str(),
-            "host"
-                | "content-length"
-                | "transfer-encoding"
-                | "connection"
-                | "upgrade"
-                | "trailer"
-                | "te"
-                | "proxy-connection"
-                | "proxy-authorization"
-                | "last-event-id"
-                | "mcp-session-id"
-                | "mcp-protocol-version"
-        ) {
-            return Err(McpOwnerError::invalid_binding(
-                "MCP discovery cannot override transport-owned headers",
-            ));
-        }
-        let mut value = HeaderValue::from_str(value).map_err(|_| {
-            McpOwnerError::invalid_binding("MCP discovery has an invalid header value")
-        })?;
-        // Settings may include existing OAuth or configured API-key headers.
-        // Even custom header values must not appear in HTTP diagnostics.
-        value.set_sensitive(true);
-        headers.insert(name, value);
-    }
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    headers.insert(
-        ACCEPT,
-        HeaderValue::from_static("application/json, text/event-stream"),
-    );
-    Ok(headers)
+    // Draft probes use only explicitly supplied credentials. They cannot look
+    // up a saved grant by URL. Saved connections use the shared authority.
+    let secrets = configured.iter().filter(|(key, _)| crate::auth_service::credential_header(key))
+        .map(|(key, value)| (key.clone(), value.clone())).collect();
+    let credential = super::McpCredential::configured(&secrets)?;
+    super::build_headers(configured, Some(&credential))
 }

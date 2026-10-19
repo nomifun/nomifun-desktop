@@ -1191,15 +1191,11 @@ pub fn build_mcp_state(services: &AppServices) -> McpRouterState {
         Arc::new(NomifunAdapter::new(repo.clone())),
     ];
 
-    let oauth_token_repo: Arc<dyn nomifun_db::IOAuthTokenRepository> = Arc::new(
-        nomifun_db::SqliteOAuthTokenRepository::new(services.database.pool().clone()),
-    );
-
     McpRouterState {
-        config_service: McpConfigService::new(repo.clone()),
+        config_service: McpConfigService::new(repo.clone()).with_auth_service(services.mcp_auth.clone()),
         sync_service: McpSyncService::new(adapters),
-        connection_test_service: McpConnectionTestService::new_dynamic(),
-        oauth_service: nomifun_mcp::McpOAuthService::new_dynamic(oauth_token_repo),
+        connection_test_service: McpConnectionTestService::new_dynamic().with_credentials(services.mcp_auth.clone()),
+        auth_service: services.mcp_auth.clone(),
     }
 }
 

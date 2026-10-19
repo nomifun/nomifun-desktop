@@ -68,6 +68,8 @@ const TABLES: &[(&str, &str, &str, SchemaResetScope)] = &[
     ("plugin_library_state", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
     ("installation_role_bindings", "platform.capability-registry", "fact", SchemaResetScope::Preserve),
     ("mcp_servers", "plugin.mcp-connectors", "fact", SchemaResetScope::Preserve),
+    ("mcp_oauth_clients", "plugin.mcp-connectors", "configuration", SchemaResetScope::Preserve),
+    ("mcp_oauth_grants", "plugin.mcp-connectors", "configuration", SchemaResetScope::Preserve),
     ("agent_preset_templates", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
     ("agent_presets", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
     ("agent_preset_revisions", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
@@ -143,6 +145,7 @@ mod tests {
         database
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
 
         let actual = database
             .prepare(
@@ -169,6 +172,7 @@ mod tests {
         database
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
 
         for (table, _, _, _) in TABLES {
             let quoted_table = table.replace('"', "\"\"");
@@ -213,6 +217,17 @@ mod tests {
     }
 
     #[test]
+    fn oauth_forward_migration_names_the_exact_preserved_manifest_transition() {
+        let migration = include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql");
+        let current = agent_store_schema_manifest_payload();
+        let digest = crate::digest_payload(&current).unwrap();
+        assert!(migration.contains(digest.as_ref()), "migration must install the current manifest digest");
+        let mut previous = current;
+        previous.tables.retain(|table| !matches!(table.table_name.as_str(), "mcp_oauth_clients" | "mcp_oauth_grants"));
+        assert!(migration.contains(crate::digest_payload(&previous).unwrap().as_ref()), "migration must recognize only the exact previous manifest");
+    }
+
+    #[test]
     fn reset_scope_is_total_and_preserves_only_non_agent_configuration() {
         let agent_tables = TABLES
             .iter()
@@ -236,6 +251,8 @@ mod tests {
         for preserved in [
             "plugins",
             "mcp_servers",
+            "mcp_oauth_clients",
+            "mcp_oauth_grants",
             "providers",
             "provider_models",
             "client_preferences",
@@ -253,6 +270,7 @@ mod tests {
         database
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
 
         let columns = database
             .prepare("PRAGMA table_info(agent_runtime_snapshots)")
@@ -278,6 +296,7 @@ mod tests {
         database
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/008_retire_payload_object_placeholder.sql"))
             .expect("current payload schema");
         database
@@ -353,6 +372,7 @@ mod tests {
         database
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
 
         let columns = database
             .prepare("PRAGMA table_info(installation_role_bindings)")

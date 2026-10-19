@@ -29,9 +29,9 @@ They are not interchangeable.
    id INTEGER PRIMARY KEY AUTOINCREMENT
    ```
 
-   The canonical Agent Store tables are the current
-   frozen exception group; they use TEXT/composite keys exactly as declared
-   in the baseline schema.
+   The canonical Agent Store uses TEXT/composite keys declared in the baseline.
+   The registered MCP OAuth authority tables use UUIDv7 TEXT primary keys from
+   migration 010; they do not add an unused integer identity.
 2. An entity that needs a stable product locator across databases, devices,
    files, APIs, events, or managed stores has a separately named, bare UUIDv7
    business field such as `user_id`, `conversation_id`, `message_id`,
@@ -41,7 +41,7 @@ They are not interchangeable.
    receive a UUID merely for uniformity, and that `id` never becomes a product
    wire locator.
 4. Relationships are logical references maintained by repositories and
-   services. Outside the Agent Store exception group, the product schema
+   services. Outside the canonical Agent Store and registered MCP OAuth groups, the product schema
    contains no physical foreign keys, `REFERENCES` clauses, or database
    cascades; only the baseline's registered guard/validator triggers exist.
 5. v3 is a new dataset lineage. Historical datasets are reset as a whole; rows
@@ -56,8 +56,10 @@ and dependent tables, must declare:
 id INTEGER PRIMARY KEY AUTOINCREMENT
 ```
 
-The canonical Agent Store tables use the
-TEXT/composite keys frozen in the baseline instead. SQLite internal tables,
+The canonical Agent Store uses the TEXT/composite keys frozen in the baseline.
+`mcp_oauth_clients.client_ref` and `mcp_oauth_grants.grant_id` use registered UUIDv7
+TEXT primary keys instead; their owner/server/client links use physical foreign
+keys and the existing orphan-audit registry. SQLite internal tables,
 migration metadata, and temporary tables are not product tables.
 
 The technical `id`:
@@ -164,10 +166,10 @@ boundary.
 
 ## Logical references
 
-v3 removes physical foreign keys from product schemas outside the frozen Agent Store
-exception group (canonical Agent Store tables,
-which keep the physical `FOREIGN KEY`/`ON DELETE` declarations written in the
-baseline). The baseline also ships registered guard/validator triggers in a
+v3 uses logical references outside its explicit schema-contract exceptions:
+canonical Agent Store tables keep the physical declarations in the baseline,
+and MCP OAuth tables enforce client/owner/issuer consistency and server-grant
+ownership through migration 010. The baseline also ships registered guard/validator triggers in a
 few domains; no new domain may add triggers or physical constraints without an
 explicit schema-contract update. All other product DDL must
 not contain:
@@ -333,7 +335,7 @@ because a complete SQLite snapshot preserves them.
 
 Before adding a table or entity:
 
-1. add `id INTEGER PRIMARY KEY AUTOINCREMENT` to the product table;
+1. add `id INTEGER PRIMARY KEY AUTOINCREMENT` unless an explicit schema-contract exception defines a canonical TEXT/composite identity;
 2. decide whether the entity truly needs cross-dataset identity;
 3. if yes, add one named, unique bare UUIDv7 business field and domain newtype;
 4. if no, keep `id` internal and identify the row by its owner plus a sequence,

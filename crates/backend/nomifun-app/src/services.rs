@@ -671,6 +671,8 @@ pub struct AppServices {
     /// Process-owned handle to the one immutable official Runtime provider.
     pub(crate) official_runtime: Arc<crate::router::official_runtime::OfficialRuntimeHost>,
     pub database: Database,
+    /// One installation-owned credential lifecycle for settings and execution.
+    pub(crate) mcp_auth: Arc<nomifun_mcp::McpAuthService>,
     host_shutdown_stage: tokio::sync::Mutex<HostShutdownStage>,
     /// Process-lifetime cancellation shared by background domain tasks that
     /// must stop before the database is closed.
@@ -1344,6 +1346,7 @@ impl AppServices {
         let mut errors = Vec::new();
 
         self.request_background_shutdown();
+        self.mcp_auth.shutdown().await;
         self.shutdown_cron_timers();
         // Fence runtime admission immediately, before awaiting any producer or
         // resource owner. Its owned flight runs while these owners wind down.
@@ -2159,6 +2162,17 @@ impl AppServices {
         let app_mcp_sources = crate::router::app_mcp_sources::AppMcpSources::new(
             app_hosting.clone(), Arc::new(nomifun_db::SqliteMcpServerRepository::new(database.pool().clone())),
         );
+        let mcp_auth = Arc::new(nomifun_mcp::McpAuthService::new_dynamic(
+            Arc::new(nomifun_db::SqliteMcpOAuthRepository::new(database.pool().clone())),
+            app_mcp_sources.clone(),
+            authoritative_user_id.clone(), encryption_key,
+            nomifun_mcp::McpAuthOptions {
+                callback_url: std::env::var("NOMIFUN_MCP_OAUTH_CALLBACK_URL").ok(),
+                cimd_client_id: std::env::var("NOMIFUN_MCP_OAUTH_CLIENT_METADATA_URL").ok(),
+                ..Default::default()
+            },
+        ));
+        app_mcp_sources.set_auth_service(&mcp_auth)?;
 
         // SSH remote sessions: ONE process-level connection pool, built here
         // because the agent factory below is its first consumer and the host-book
@@ -2226,6 +2240,7 @@ impl AppServices {
         let services = Self {
             official_runtime,
             database,
+            mcp_auth,
             host_shutdown_stage: Default::default(),
             background_shutdown,
             background_tasks,

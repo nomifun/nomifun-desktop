@@ -21,7 +21,7 @@ NomiFun 有两种容易混淆的扩展机制：
 
 ## MCP Server
 
-打开 `/mcp` 可以新增、导入、测试、启用/禁用和同步 MCP server。
+打开 `/mcp` 可以新增、导入、测试和启用/禁用 MCP server。
 
 ![MCP 页面](../images/mcp-01-capabilities.png)
 
@@ -42,12 +42,33 @@ NomiFun 有两种容易混淆的扩展机制：
 成功且发现工具前不能在会话中新增选择。检测不会自动启用服务，切换开关也不会启动检测。
 启停或检测完成后，已打开的会话 MCP 列表会重新读取后端目录，保留用户的会话选择草稿。
 
-需要 OAuth 的 HTTP/SSE server 走 `/api/mcp/oauth/*` 流程。
-
 当前 canonical owner 的协议边界是 Streamable HTTP/stdio `2025-03-26` 与显式 legacy SSE
 `2024-11-05`。它不会把新旧 transport 静默互转，也尚未宣称支持 `2026-07-28` 的
 `server/discover` / 无 initialize 生命周期；只支持该新生命周期的服务会返回明确的协议错误。
 这是一次独立的 owner/安全模型迁移，不属于市场配置导入。
+
+### OAuth 登录
+
+需要 OAuth 的 HTTP/SSE server 使用已保存的 server ID 发起登录。后端先读取服务端
+Bearer challenge 与 Protected Resource Metadata，再按声明的 issuer 发现授权服务器；
+客户端身份采用已注册客户端、服务器支持的 CIMD 或动态注册结果，不固定一个通用 client ID。
+设置页创建一次性 attempt 后在用户浏览器打开授权地址，并查询该 attempt 的结果；取消、超时、
+授权拒绝和 token 交换失败分别返回带阶段、错误码、重试建议与 trace ID 的安全诊断。
+
+桌面原生入口在后端机器的 `127.0.0.1` 建立临时 loopback callback。远端 WebUI 不使用用户
+浏览器机器的 loopback；运维需设置 `NOMIFUN_MCP_OAUTH_CALLBACK_URL` 为可从授权服务器
+重定向到的 HTTPS 地址，路径必须为 `/api/mcp/oauth/callback`，并将该地址注册到客户端。
+可选的产品控制 CIMD 地址使用 `NOMIFUN_MCP_OAUTH_CLIENT_METADATA_URL`，详见
+[配置参考](../reference/configuration.zh.md#mcp-oauth)。
+
+设置页的已保存连接测试与 Runtime 调用共享同一个安装级认证服务，登录后直接复用已保存的
+授权并按需刷新，不把 token 写入 MCP JSON。授权状态与连接测试结果分别展示。
+更换连接配置、注销或删除会取消该连接的待授权 attempt 并失效原 grant；描述修改、原样保存、
+启用切换和普通检测不会注销。OAuth token 刷新或重新登录不要求重建 Agent Session。
+
+升级时，旧的仅按 URL 保存、缺少 issuer/resource/client 归属证明的 OAuth 凭据会被清除，
+需要重新登录。MCP 连接配置、其他非 Agent 配置和当前 Session 历史保留。
+
 
 ### MCP 市场的边界
 
@@ -89,13 +110,11 @@ stdio 子进程通过统一代理策略只接入父进程代理变量或系统�
 Docker 容器。本地探测失败时会明确显示 host/port 并提示先启动前置服务，不再把运行时、前置服务
 或网络问题一律描述成“MCP JSON 配置错误”。
 
-## 导入和同步外部 Agent 配置
+## 导入外部 Agent 配置
 
-`GET /api/mcp/agent-configs` 会探测已支持本地 agent CLI 的 MCP 配置。UI 可把探测到
-的 server 导入 NomiFun，也可在 adapter 支持写入时把 NomiFun 的 MCP 列表同步回选中的
-agent 配置。
-
-这只是配置管理。某次会话最终能看到哪些 MCP server，仍由该会话的选择决定。
+`GET /api/mcp/agent-configs` 只读探测受支持的本地 agent CLI 与 NomiFun 的 MCP 配置。
+UI 可将探测到的 server 导入 NomiFun；此入口不会写回外部 CLI 配置。
+某次会话最终能看到哪些 MCP server，仍由该会话的选择决定。
 
 ## 全局能力与会话选择
 
@@ -119,7 +138,9 @@ MCP 只保留 Agent 已明确保存的选择，不自动加入其它已启用服
 工作区和其它已有资源授权不因扩展选择而改变。已有 accepted input 和 native checkpoint 不原地改写。
 
 MCP 调用继续校验服务器启停、连接配置和工具 schema。连接身份按实际 transport 配置计算，
-相同配置的重复测试、状态或描述修改不会使绑定变旧；配置、凭据或 schema 的实际变化仍需重新应用选择。
+相同配置的重复测试、状态或描述修改不会使绑定变旧；transport 配置或工具 schema 的实际变化
+仍需重新应用选择。OAuth grant 与 token 属于当前连接的凭据生命周期，不加入 Session Snapshot，
+普通刷新和重新登录不改变冻结的 Agent 权限与 MCP 选择。
 
 ## MCP API
 
@@ -131,7 +152,10 @@ MCP 调用继续校验服务器启停、连接配置和工具 schema。连接身
 | 启用切换 | `POST /api/mcp/servers/{id}/toggle` |
 | 连接测试 | `POST /api/mcp/test-connection` |
 | 探测 agent 配置 | `GET /api/mcp/agent-configs` |
-| OAuth | `POST /api/mcp/oauth/check-status`, `/login`, `/logout`; `GET /api/mcp/oauth/authenticated` |
+| 认证状态 / 注销 | `GET`, `DELETE /api/mcp/servers/{id}/auth` |
+| 创建 OAuth attempt | `POST /api/mcp/servers/{id}/auth/attempts` |
+| 查询 / 取消 attempt | `GET`, `DELETE /api/mcp/servers/{id}/auth/attempts/{attempt_id}` |
+| OAuth callback | `GET /api/mcp/oauth/callback`；由一次性 state 绑定原 attempt |
 
 ## 技能
 

@@ -82,11 +82,40 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `NOMIFUN_WORK_DIR` | `nomicore` | `--work-dir`（按会话区分的工作区根）的回退值。优先级低于 `dir-config.json` 中持久化的工作根绑定；若继承到的值指向默认数据根位置或已不存在的目录，会被忽略（防止自动更新重启时残留的自导出值）。 |
 | `JWT_SECRET` | `nomifun-app` | 用于签发会话 JWT 的密钥。解析顺序见 [鉴权密钥解析](#鉴权密钥解析)。 |
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | 取真值时，会话与 CSRF cookie 会带上 `Secure` 标记和 `SameSite=Strict`。当应用通过 HTTPS 暴露（TLS 反向代理等）时请打开。默认 `false` → 不带 `Secure` 标记，`SameSite=Lax`。 |
+| `NOMIFUN_MCP_OAUTH_CALLBACK_URL` | `nomifun-app::AppServices` / `nomifun-mcp::McpAuthService` | 可选，远端 WebUI 的可达 HTTPS OAuth 回调。路径必须为 `/api/mcp/oauth/callback`，不能含用户名密码、query 或 fragment。缺失或非法时登录返回明确配置提示；原生桌面入口使用自己的 loopback 回调。 |
+| `NOMIFUN_MCP_OAUTH_CLIENT_METADATA_URL` | `nomifun-app::AppServices` / `nomifun-mcp::oauth_protocol` | 可选，产品控制并公开提供真实客户端元数据的 HTTPS Client ID Metadata Document URL，仅在授权服务器声明 CIMD 支持时使用；没有内置通用 client ID。 |
 | `SHELL` | 智能体引擎（Linux/macOS） | 智能体引擎派生子进程时使用的 shell。在 systemd 下的 Linux 服务器上请显式设置（系统账户通常没有 `$SHELL`）。 |
 | `NOMIFUN_URL` | `nomicore remote` | 使用 canonical Remote 操作时的运行中实例 base URL。 |
 | `NOMIFUN_ACCESS_TOKEN` | 后端启动、`nomicore remote` | `/mcp` 与 `/api/remote/*` 使用的安装级令牌；启动值会播种/轮换持久 verifier，且不绑定伙伴。 |
 
 代码库不集成 `SENTRY_DSN`：这个环境变量并未被读取。
+
+## MCP OAuth
+
+来源：[服务组合](../../crates/backend/nomifun-app/src/services.rs)、
+[认证 authority](../../crates/backend/nomifun-mcp/src/auth_service.rs)与
+[OAuth 协议](../../crates/backend/nomifun-mcp/src/oauth_protocol.rs)。
+这两个变量在后端启动时读取，由各宿主共享；单次登录请求不提供任意 callback URL 覆盖。
+
+原生桌面入口在后端机器的 `127.0.0.1` 绑定临时 callback。远端 WebUI 必须配置由反向代理
+转发到同一后端实例的可达 HTTPS 地址，例如：
+
+```sh
+NOMIFUN_MCP_OAUTH_CALLBACK_URL=https://nomifun.example/api/mcp/oauth/callback
+```
+
+预注册客户端需登记此确切 redirect URI，反向代理需将其 GET 请求转给后端。
+配置值不含 query 或 fragment；授权服务器重定向时再带上一次性的 state 与 code。
+NomiFun 不从 `Host`/`Origin` 推导该地址，也不使用远端用户浏览器机器的 loopback。
+回调未配置或不可用时，WebUI 登录返回配置指引。
+
+仅在产品控制的 HTTPS URL 已公开提供对应 Client ID Metadata Document 时设置
+`NOMIFUN_MCP_OAUTH_CLIENT_METADATA_URL`。NomiFun 在服务器声明支持 CIMD 时使用该身份；
+否则使用服务器支持的动态注册，或提示填写已预注册的客户端。实际 client ID、redirect
+规则与接入批准由对应服务商管理。
+
+server-ID API 与 attempt 生命周期见[MCP OAuth 登录](../guides/mcp-and-skills.zh.md#oauth-登录)。
+普通 token 刷新和重新登录沿用当前连接，不改变 Agent Session 的选择与权限。
 
 ## 后端常量
 

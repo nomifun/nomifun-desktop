@@ -1,7 +1,7 @@
 //! Read-only projection of hosted applications into the existing MCP owner.
 //! App configuration owns the address; discovery is an in-memory observation.
 //! Neither discovery nor MCP invocation starts or stops an application.
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::{Arc, Weak}, time::Duration};
 
 use async_trait::async_trait;
 use axum::{extract::{Path, State}, routing::{get, post}, Json, Router};
@@ -68,6 +68,7 @@ pub(crate) struct AppMcpSources {
     observations: std::sync::Mutex<BTreeMap<String, Observation>>,
     probes: std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
     publisher: std::sync::OnceLock<Arc<dyn nomifun_mcp::service::McpCatalogPublisher>>,
+    auth: std::sync::OnceLock<Weak<nomifun_mcp::McpAuthService>>,
 }
 
 #[derive(Serialize)]
@@ -83,7 +84,13 @@ pub(crate) struct AppMcpSourceDto {
 
 impl AppMcpSources {
     pub(crate) fn new(hosting: Arc<HostingOwner>, ordinary: Arc<dyn IMcpServerRepository>) -> Arc<Self> {
-        Arc::new(Self { hosting, ordinary, observations: Default::default(), probes: Default::default(), publisher: Default::default() })
+        Arc::new(Self { hosting, ordinary, observations: Default::default(), probes: Default::default(), publisher: Default::default(), auth: Default::default() })
+    }
+
+    /// Authentication owns this combined source strongly. Keep the reverse
+    /// discovery link weak so application shutdown can release both owners.
+    pub(crate) fn set_auth_service(&self, auth: &Arc<nomifun_mcp::McpAuthService>) -> Result<(), AppError> {
+        self.auth.set(Arc::downgrade(auth)).map_err(|_| AppError::Conflict("Application MCP authentication is already installed".into()))
     }
 
     pub(crate) fn set_publisher(&self, publisher: Arc<dyn nomifun_mcp::service::McpCatalogPublisher>) -> Result<(), AppError> {
@@ -115,9 +122,16 @@ impl AppMcpSources {
             self.remove_observation(id)?;
             return Ok(self.dto(&app, &url));
         }
-        let result = nomifun_mcp::McpConnectionTestService::new_dynamic()
+        let auth = self.auth.get().and_then(Weak::upgrade)
+            .ok_or_else(|| AppError::Internal("Application MCP authentication is unavailable".into()))?;
+        let server_id = nomifun_api_types::McpServerId::parse(id)
+            .map_err(|_| AppError::BadRequest("Invalid application MCP source identity".into()))?;
+        let auth_revision = auth.binding_revision(id).await.map_err(|error| AppError::BadGateway(error.to_string()))?;
+        let result = nomifun_mcp::McpConnectionTestService::new_dynamic().with_credentials(auth.clone())
             .with_setup_policy(nomifun_mcp::McpSetupPolicy::uniform(Duration::from_secs(3)))
-            .test_connection(&app.name, &nomifun_mcp::McpServerTransport::Http { url: url.clone(), headers: Default::default() }).await;
+            .test_saved_connection(&server_id, &app.name, &nomifun_mcp::McpServerTransport::Http { url: url.clone(), headers: Default::default() }).await;
+        let _auth_guard = auth.acquire_observation_guard(id, &auth_revision).await
+            .map_err(|error| AppError::Conflict(error.to_string()))?;
         // A late probe must never publish a deleted, stopped, or edited source.
         let current = self.hosting.get(id).await.map_err(|error| AppError::NotFound(error.to_string()))?;
         if current.state != AppState::Running || current.pid != app.pid || current.settings.mcp_url.as_ref() != Some(&url) {
@@ -271,12 +285,12 @@ mod tests {
 
     fn successful_probe(tools: Vec<McpToolResponse>) -> McpConnectionTestResult {
         McpConnectionTestResult { success: true, tools: Some(tools), error: None, code: None,
-            details: None, needs_auth: None, auth_method: None, www_authenticate: None }
+            details: None, needs_auth: None, auth_method: None }
     }
 
     fn failed_probe(code: McpConnectionTestErrorCode) -> McpConnectionTestResult {
         McpConnectionTestResult { success: false, tools: None, error: Some("Fixture readiness failed".into()), code: Some(code),
-            details: None, needs_auth: None, auth_method: None, www_authenticate: None }
+            details: None, needs_auth: None, auth_method: None }
     }
 
     fn observed_row(app: &AppRecord, observation: &Observation) -> McpServerRow {
@@ -393,6 +407,11 @@ http.createServer((req,res)=>{
         let database = nomifun_db::init_database_memory().await.unwrap();
         let ordinary = Arc::new(nomifun_db::SqliteMcpServerRepository::new(database.pool().clone()));
         let sources = AppMcpSources::new(hosting.clone(), ordinary.clone());
+        let auth = Arc::new(nomifun_mcp::McpAuthService::new_dynamic(
+            Arc::new(nomifun_db::SqliteMcpOAuthRepository::new(database.pool().clone())),
+            sources.clone(), Arc::<str>::from("owner"), [17; 32], Default::default(),
+        ));
+        sources.set_auth_service(&auth).unwrap();
         assert_eq!(sources.sources().await.unwrap()[0].connection_status, "stopped");
         assert!(!sources.find_by_id(&app.id).await.unwrap().unwrap().enabled);
         hosting.operate(&app.id, AppOperation::Use).await.unwrap();
@@ -425,7 +444,7 @@ http.createServer((req,res)=>{
         let descriptor = super::super::nomi_core_mcp_catalog::server_tools(row.clone()).unwrap().remove(0);
         let transport = nomifun_mcp::McpServerTransport::from_db(&row.transport_type, &row.transport_config).unwrap();
         let connection = descriptor.connection_config_ref.as_ref().to_owned();
-        let result = nomifun_mcp::McpOwner::new_dynamic(Arc::new(nomifun_mcp::AnonymousMcpCredentialAuthority))
+        let result = nomifun_mcp::McpOwner::new_dynamic(auth.clone())
             .invoke(nomifun_mcp::McpToolInvocationRequest {
                 principal_kind: "user".into(), principal_id: "owner".into(), operation_id: "app-real-call".into(),
                 server: nomifun_mcp::McpServerBinding { server_id: app.id.clone(), server_owner_id: "owner".into(), enabled: true,
@@ -444,5 +463,9 @@ http.createServer((req,res)=>{
         assert!(sources.find_by_id(&app.id).await.unwrap().is_none());
         assert!(original.join("mcp.cjs").exists());
         hosting.shutdown().await.unwrap();
+        auth.shutdown().await;
+        let weak_auth = Arc::downgrade(&auth);
+        drop(auth);
+        assert!(weak_auth.upgrade().is_none(), "the combined source must not retain the authentication authority");
     }
 }

@@ -69,6 +69,10 @@ pub(crate) const CANONICAL_AGENT_STORE_TABLES: &[&str] = &[
 /// `CREATE INDEX` statements. FTS shadow tables are SQLite-owned and excluded.
 const MAX_INDEXES_PER_TABLE: usize = 5;
 
+/// OAuth authority rows use stable TEXT identities and physical ownership FKs.
+/// They are configuration, not canonical Agent facts or legacy row-id tables.
+pub(crate) const MCP_OAUTH_TABLES: &[&str] = &["mcp_oauth_clients", "mcp_oauth_grants"];
+
 pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "agent_execution_attempts",
     "agent_execution_events",
@@ -124,7 +128,6 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "nomi_wave1_memory_action_receipts",
     "nomi_wave4_action_receipts",
     "product_agent_selections",
-    "oauth_tokens",
     "provider_connections",
     "provider_model_capabilities",
     "provider_models",
@@ -187,6 +190,8 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_sources", "knowledge_source_id"),
     ("knowledge_tree_operations", "operation_id"),
     ("mcp_servers", "mcp_server_id"),
+    ("mcp_oauth_clients", "client_ref"),
+    ("mcp_oauth_grants", "grant_id"),
     ("nomi_remote_events", "event_id"),
     ("nomi_remote_sessions", "agent_session_id"),
     ("remote_bindings", "remote_binding_id"),
@@ -418,7 +423,9 @@ const UPSERT_CONFLICT_KEYS: &[UniqueKeyContract] = &[
         "knowledge_base_id",
         "request_id"
     ),
-    unique_key!("oauth_tokens", "server_url"),
+    unique_key!("mcp_oauth_clients", "client_ref"),
+    unique_key!("mcp_oauth_grants", "grant_id"),
+    unique_key!("mcp_oauth_grants", "owner_id", "server_id"),
     unique_key!(
         "product_agent_selections",
         "owner_user_id",
@@ -884,6 +891,11 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
         .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
     opaque_text_ref!("agent_preset_revisions", "created_by" => "users", "user_id", false, KeepHistory),
     text_ref!("product_agent_selections", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("mcp_oauth_clients", "owner_id" => "users", "user_id", false, Cascade),
+    text_ref!("mcp_oauth_grants", "owner_id" => "users", "user_id", false, Cascade),
+    text_ref!("mcp_oauth_grants", "server_id" => "mcp_servers", "mcp_server_id", false, Cascade),
+    text_ref!("mcp_oauth_grants", "client_ref" => "mcp_oauth_clients", "client_ref", false, Restrict)
+        .with_aggregate_scope("parent.owner_id = child.owner_id AND parent.issuer = child.issuer"),
 ];
 
 /// Stable JSON paths that carry Provider or business identifiers. The SQL for
@@ -1038,6 +1050,7 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
         .chain(std::iter::once(&CS_NOTES_FTS_TABLE))
         .chain(FTS_SHADOW_TABLES.iter())
         .chain(CANONICAL_AGENT_STORE_TABLES.iter())
+        .chain(MCP_OAUTH_TABLES.iter())
 
         .map(|value| (*value).to_owned())
         .collect();
@@ -1846,6 +1859,7 @@ async fn validate_index_budget(pool: &SqlitePool) -> Result<(), DbError> {
     for table in PRODUCT_TABLES
         .iter()
         .chain(CANONICAL_AGENT_STORE_TABLES.iter())
+        .chain(MCP_OAUTH_TABLES.iter())
 
     {
         let sql = format!("PRAGMA index_list({})", quote_sqlite_identifier(table));

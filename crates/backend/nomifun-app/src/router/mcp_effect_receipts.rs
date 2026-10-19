@@ -204,7 +204,6 @@ impl McpEffectReceipts {
         } else {
             EffectTerminalState::Uncertain
         };
-        let diagnostic = |error: &nomifun_mcp::McpOwnerError| json!({"code":error.code(),"message":error.message()});
         let payload = json!({
             "observation": observation,
             "execution": {
@@ -212,12 +211,12 @@ impl McpEffectReceipts {
                 "local_process_started":outcome.execution.local_process_started,
                 "cancellation_requested":outcome.execution.cancellation_requested,
                 "returned":outcome.result.is_ok(),
-                "error":outcome.result.as_ref().err().map(diagnostic),
+                "error":outcome.result.as_ref().err().map(owner_error_projection),
             },
             "cleanup": {
                 "local":cleanup_status(outcome.cleanup.local),
                 "remote":cleanup_status(outcome.cleanup.remote),
-                "error":outcome.cleanup.error.as_ref().map(diagnostic),
+                "error":outcome.cleanup.error.as_ref().map(owner_error_projection),
             },
         });
         if serde_json::to_vec(&payload).map_err(|_| unavailable())?.len() > 8192 {
@@ -252,6 +251,14 @@ impl McpEffectReceipts {
     }
 }
 
+fn owner_error_projection(error: &nomifun_mcp::McpOwnerError) -> Value {
+    let mut projected = json!({ "code": error.code(), "message": error.message() });
+    if let Some(diagnostic) = error.auth_diagnostic() {
+        projected["details"] = json!({ "auth_diagnostic": diagnostic });
+    }
+    projected
+}
+
 fn bounded_observation(value: &Value, full_limit: usize) -> Result<Value, AppError> {
     let raw = serde_json::to_string(value).map_err(|_| unavailable())?;
     if raw.len() <= full_limit {
@@ -280,6 +287,23 @@ fn valid_effect_identity(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_diagnostic_remains_in_the_original_effect_error_projection() {
+        let diagnostic = nomifun_api_types::McpAuthDiagnostic {
+            code: nomifun_api_types::McpAuthErrorCode::ReauthorizationRequired,
+            stage: nomifun_api_types::McpAuthStage::Refresh,
+            retryable: false, user_action: nomifun_api_types::McpAuthUserAction::Reauthorize,
+            trace_id: "effect-auth-trace".into(), message: "Sign in again".into(), details: None,
+        };
+        let error = nomifun_mcp::McpOwnerError::new("MCP_CREDENTIAL_EXPIRED", "Sign in again")
+            .with_auth_diagnostic(diagnostic);
+        let projection = owner_error_projection(&error);
+        assert_eq!(projection["code"], "MCP_CREDENTIAL_EXPIRED");
+        assert_eq!(projection["details"]["auth_diagnostic"]["stage"], "refresh");
+        assert_eq!(projection["details"]["auth_diagnostic"]["trace_id"], "effect-auth-trace");
+        assert!(projection.get("authentication_challenge").is_none());
+    }
 
     #[test]
     fn effect_receipts_accept_only_binding_resources_or_namespaced_tools() {

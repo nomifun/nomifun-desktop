@@ -121,14 +121,13 @@ from [`crates/backend/nomifun-db/src/lib.rs`](../../crates/backend/nomifun-db/sr
 Persisted identity follows the layered v3 contract in
 [`id-system.md`](id-system.md):
 
-- every product table has `id INTEGER PRIMARY KEY AUTOINCREMENT`, except the
-  frozen Agent Store exception group (TEXT/composite
-  keys);
+- legacy product tables have `id INTEGER PRIMARY KEY AUTOINCREMENT`; the
+  canonical Agent Store and MCP OAuth authority use named TEXT/composite keys;
 - stable cross-dataset entities add a named, bare canonical UUIDv7 field;
 - internal-only relation, singleton, cache, and event rows use the table `id`
   only inside the active dataset; product-addressable entities use named
   UUIDv7 business fields;
-- relationships are indexed logical references, not physical foreign keys.
+- legacy product relationships use indexed logical references; canonical Agent Store and MCP OAuth ownership use registered physical foreign keys.
 
 The local `id` is the table primary key but is not a portable business
 identity. It is never exported as a technical row key through APIs, events,
@@ -158,7 +157,7 @@ list (see the `pub use repository::{...}` block in `lib.rs` for all of them):
 | `IConversationRepository` | `SqliteConversationRepository` | Conversations + messages, with filters and full-text search rows |
 | `IAgentMetadataRepository` | `SqliteAgentMetadataRepository` | Available models and agent metadata |
 | `IMcpServerRepository` | `SqliteMcpServerRepository` | Configured MCP servers (CRUD) |
-| `IOAuthTokenRepository` | `SqliteOAuthTokenRepository` | Encrypted OAuth tokens for HTTP MCP servers |
+| `IMcpOAuthRepository` | `SqliteMcpOAuthRepository` | MCP client registrations and current server grants; secrets are encrypted by the authority |
 | `IProviderRepository` | `SqliteProviderRepository` | LLM provider credentials (encrypted) |
 | `IAgentExecutionRepository` | `SqliteAgentExecutionRepository` | AgentExecution, immutable Participants, revisioned Steps/Dependencies, Attempts, Conversation Links, and the Event outbox; see the [unified model](agent-execution.zh.md) |
 | `IRequirementRepository` | `SqliteRequirementRepository` | AutoWork requirements; owner links follow the same application-managed logical-reference policy as every other repository |
@@ -173,7 +172,7 @@ list (see the `pub use repository::{...}` block in `lib.rs` for all of them):
 
 A few row-update params types travel alongside (`ConversationFilters`,
 `ConversationRowUpdate`, `MessageRowUpdate`,
-`MessageSearchRow`, `UpdateCronJobParams`, `UpsertOAuthTokenParams`,
+`MessageSearchRow`, `UpdateCronJobParams`, `McpOAuthClientParams`, `McpOAuthGrantParams`, `McpOAuthGrantRefreshParams`,
 `CreateProviderParams`,
 `CreateAgentExecutionParams`, `ReconcileAgentExecutionPlanParams`,
 `SettleAgentExecutionAttemptParams`, etc.). Repository traits are the feature
@@ -202,11 +201,12 @@ the source and fail closed. More migration rows cannot identify a newer app. Bac
 
 The baseline contract is checked at runtime:
 
-- every product table has `id INTEGER PRIMARY KEY AUTOINCREMENT`, except the
-  Agent Store tables frozen with TEXT/composite keys;
+- legacy product tables have `id INTEGER PRIMARY KEY AUTOINCREMENT`; canonical
+  Agent Store and MCP OAuth tables use their registered TEXT/composite keys;
 - stable business-ID columns contain bare canonical UUIDv7 strings;
-- outside that exception group the schema has no physical `FOREIGN KEY`,
-  `REFERENCES`, database cascade, or `*_row_id`; the only triggers are the
+- outside the canonical Agent Store and MCP OAuth authority groups, the schema
+  has no physical `FOREIGN KEY`, `REFERENCES`, database cascade, or `*_row_id`;
+  the only triggers are the
   baseline's registered guard triggers;
 - every logical reference has its required index and registry entry.
 
@@ -261,6 +261,27 @@ database and managed side stores.
 application transaction, so the persistent AutoWork runner can survive
 without a database cascade.
 
+### MCP OAuth configuration
+
+`mcp_servers` remains the single source for connection configuration.
+`mcp_oauth_clients` keeps immutable registration identities under their owner,
+issuer, and client profile. A new registration does not overwrite one still
+referenced by a grant. `mcp_oauth_grants` has one current row per owner/server,
+with the exact connection reference, issuer, resource, client reference, scopes,
+expiry, and encrypted access/refresh-token envelope. Re-login replaces the grant
+ID; refresh changes only its CAS revision and token fields. Foreign keys enforce
+client/owner/issuer consistency. Server soft deletion removes its grant in the
+same transaction. Attempts, PKCE verifiers, authorization codes, and discovery
+caches do not create persistent tables.
+
+Migration `010_mcp_oauth_authority.sql` retires previous URL-only OAuth
+credentials without guessing their missing authorization identity. It requires
+re-login while preserving MCP configuration, other non-Agent configuration, and
+current Agent facts. It advances the known manifest through a forward migration;
+published baseline checksums are unchanged. Both new tables have `Preserve`
+reset scope, so Agent-only reset retains them. This does not grant backup or
+restore permission to rebuild an unsupported database.
+
 ## Encryption at rest — AES-GCM
 
 Sensitive strings (provider API keys, OAuth tokens, channel-bot tokens,
@@ -275,6 +296,11 @@ when the new dataset is initialized. Password changes and JWT rotation do not
 alter it. Historical ciphertext and keys are not imported during the v3 reset.
 Losing the active dataset's `encryption_key` renders its encrypted columns
 unreadable.
+
+MCP OAuth client secrets and access/refresh envelopes are encrypted by
+`McpAuthService` before repository writes. Backups containing either require the
+same dataset key. Configured HTTP headers and imported raw JSON still use the
+connection-configuration storage path; they are not OAuth grant records.
 
 The `aes-gcm` crate version pinned in the workspace is `0.10`.
 

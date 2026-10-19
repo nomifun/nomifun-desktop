@@ -85,11 +85,41 @@ const uploadForwardMigration = 'crates/backend/nomifun-db/migrations/006_retire_
 const terminalForwardMigration = 'crates/backend/nomifun-db/migrations/007_retire_terminal_content_mirrors.sql';
 const payloadForwardMigration = 'crates/backend/nomifun-db/migrations/008_retire_payload_object_placeholder.sql';
 const cronInputForwardMigration = 'crates/backend/nomifun-db/migrations/009_cron_input_handoff.sql';
-if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration].includes(path))) {
+const mcpOAuthForwardMigration = 'crates/backend/nomifun-db/migrations/010_mcp_oauth_authority.sql';
+if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration, mcpOAuthForwardMigration].includes(path))) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward migrations');
 }
 const migrationStatements = (path) => readFileSync(resolve(ROOT, path), 'utf8')
   .replace(/--[^\r\n]*/g, '').split(';').map((statement) => statement.replace(/\s+/g, ' ').trim()).filter(Boolean);
+if (migrations.includes(mcpOAuthForwardMigration)) {
+  const statements = migrationStatements(mcpOAuthForwardMigration);
+  const allowed = [
+    'CREATE TEMP TABLE mcp_oauth_metadata_guard ',
+    'INSERT INTO mcp_oauth_metadata_guard SELECT ',
+    'DROP TABLE mcp_oauth_metadata_guard',
+    'DROP TABLE oauth_tokens',
+    'CREATE TABLE mcp_oauth_clients ',
+    'CREATE INDEX idx_mcp_oauth_clients_profile ON mcp_oauth_clients(',
+    'CREATE TABLE mcp_oauth_grants ',
+    'CREATE INDEX idx_mcp_oauth_grants_client ON mcp_oauth_grants(',
+    'UPDATE schema_metadata SET canonical_schema_manifest_digest=',
+    'CREATE TEMP TABLE mcp_oauth_integrity ',
+    'INSERT INTO mcp_oauth_integrity SELECT ',
+    'DROP TABLE mcp_oauth_integrity',
+  ];
+  const manifest = JSON.parse(readFileSync(resolve(ROOT,
+    'crates/backend/nomifun-agent-contracts/contracts/generated/agent-store-migration-manifest.envelope.json'), 'utf8'));
+  const digestUpdate = statements[8] ?? '';
+  const exactDigestTransition = /^UPDATE schema_metadata SET canonical_schema_manifest_digest='[a-f0-9]{64}' WHERE singleton_key='canonical' AND data_generation=7 AND migration_head=1 AND projection_schema_version=1 AND canonical_schema_manifest_digest='[a-f0-9]{64}'$/;
+  if (statements.length !== allowed.length
+    || statements.some((statement, index) => !statement.startsWith(allowed[index]))
+    || !exactDigestTransition.test(digestUpdate)
+    || !digestUpdate.startsWith(`UPDATE schema_metadata SET canonical_schema_manifest_digest='${manifest.payload_digest}' `)
+    || !['mcp_oauth_clients', 'mcp_oauth_grants'].every(name => manifest.payload.tables.some(table =>
+      table.table_name === name && table.reset_scope === 'preserve'))) {
+    failures.push(`${mcpOAuthForwardMigration}: retire only unbound OAuth credentials, create the two preserved OAuth tables, and advance only the known non-Agent manifest digest; preserve Agent facts and other configuration`);
+  }
+}
 if (migrations.includes(cronInputForwardMigration)) {
   const original = migrationStatements(baseline);
   const tables = ['cron_job_runs', 'cron_jobs', 'cron_run_reservations'];

@@ -65,6 +65,27 @@ pub(crate) async fn ensure_schema_metadata(conn: &mut SqliteConnection) -> Resul
     Ok(())
 }
 
+/// The retired-plugin safety snapshot precedes all forward migrations. At that
+/// point migration 010 may not yet have extended the non-Agent manifest. Accept
+/// only that exact known predecessor for validation, without rewriting it.
+pub(crate) async fn validate_metadata_before_plugin_retirement(conn: &mut SqliteConnection) -> Result<(), DbError> {
+    let current = agent_store_schema_manifest_payload();
+    let current_digest = digest_payload(&current).map_err(|error| DbError::Init(error.to_string()))?;
+    let mut previous = current;
+    previous.tables.retain(|table| !matches!(table.table_name.as_str(), "mcp_oauth_clients" | "mcp_oauth_grants"));
+    let previous_digest = digest_payload(&previous).map_err(|error| DbError::Init(error.to_string()))?;
+    let row: (i64, i64, String, i64) = sqlx::query_as("SELECT data_generation,migration_head,canonical_schema_manifest_digest,projection_schema_version FROM schema_metadata WHERE singleton_key='canonical'")
+        .fetch_one(&mut *conn).await?;
+    if row.0 != i64::from(AGENT_STORE_DATA_GENERATION)
+        || row.1 != i64::from(AGENT_STORE_MIGRATION_HEAD)
+        || row.3 != i64::from(AGENT_STORE_PROJECTION_SCHEMA_VERSION)
+        || (row.2 != current_digest.0 && row.2 != previous_digest.0)
+    {
+        return Err(DbError::Init("canonical schema metadata is unknown before plugin retirement".into()));
+    }
+    Ok(())
+}
+
 pub(crate) async fn clean_cut_agent_store(conn: &mut SqliteConnection, migrator: &Migrator) -> Result<(), DbError> {
     let present: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='_sqlx_migrations'")
         .fetch_one(&mut *conn).await?;
