@@ -94,7 +94,7 @@ Debug 构建允许显式绝对路径覆盖：`NOMIFUN_BUN_PATH`、`NOMIFUN_NODE_
 应用托管仍保留各自的系统／自定义路径选择。
 开发覆盖属于单次启动环境，不能用来替换正式产品的供应策略。
 
-Agent 的 `workspace.process/exec` 与 `start` 使用显式 `component` 目标调用批准组件，
+Agent 的 `workspace.process/start` 使用显式 `component` 目标调用批准组件，
 与普通 `command`、Shell `cmd` 三选一。例如 `component=officecli` 与 literal `args`；
 宿主在本次调用中解析、验证程序并固定 `OFFICECLI_NO_AUTO_RESIDENT=1`，拒绝冲突的环境值。
 普通程序、Shell 与 Bun 命令发现保持原语义，不把同名全局工具静默改路由。

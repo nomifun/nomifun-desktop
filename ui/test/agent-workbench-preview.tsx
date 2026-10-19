@@ -26,7 +26,7 @@ import { DEFAULT_THEME_ID, PRESET_THEMES } from '../src/renderer/pages/settings/
 import { processCustomCss } from '../src/renderer/utils/theme/customCssProcessor';
 import { ensureThemeControlContract, THEME_CONTROL_CONTRACT_STYLE_ID } from '../src/renderer/utils/theme/themeControlContract';
 
-const PREVIEW_KEY = 'nomifun.agent-workbench.visual-preview.v4';
+const PREVIEW_KEY = 'nomifun.agent-workbench.visual-preview.v5';
 const OWNER = '0190f5fe-7c00-7a00-8000-000000000001';
 const theme = new URLSearchParams(location.search).get('theme') === 'dark' ? 'dark' : 'light';
 const providerId = '0190f5fe-7c00-7a00-8000-000000000003';
@@ -87,7 +87,7 @@ const initialEditors = () => [
   ] }, 1, '查阅资料、整理信息，形成有据可查的结论'),
   makeEditor('0190f5fe-7c00-7a00-8000-000000000102', '开发搭档', { enabled_capabilities: [
     selection('workspace.files', ['workspace.files/read', 'workspace.files/search', 'workspace.files/write', 'workspace.files/patch']),
-    selection('workspace.process', ['workspace.process/exec', 'workspace.process/poll']),
+    selection('workspace.process', ['workspace.process/start', 'workspace.process/poll']),
     selection('workspace.vcs', ['workspace.vcs/diff', 'workspace.vcs/status']),
   ] }, 1, '理解项目、修改代码，并检查改动结果'),
 ];

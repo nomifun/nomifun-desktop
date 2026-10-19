@@ -44,7 +44,7 @@ const summary = (revision?: number): AgentPresetSummary => ({
 });
 const editor = (preset: AgentPresetSummary, document: AgentPresetDocument): AgentPresetEditorResponse => ({
   preset,
-  draft: { preset_id: preset.preset_id, display_name: preset.display_name, document: createEmptyAgentPresetDocument() },
+  draft: { preset_id: preset.preset_id, display_name: preset.display_name, document: structuredClone(document) },
   ...(preset.current_stable_revision ? { revision: {
     reference: preset.current_stable_revision, document, created_by: 'owner', created_at_ms: 1,
   } } : { draft: { preset_id: preset.preset_id, display_name: preset.display_name, document } }),
@@ -168,22 +168,40 @@ test('saving extended official capabilities at the same ID refreshes resource an
   expect(hook.result.current.selection.selection).toEqual({ kind: 'template', templateKey: 'assistant.general' });
 });
 
-test('a saved personal Revision remains authoritative over transient editor draft changes', async () => {
+test('a saved personal Agent uses the host current contract while retaining its immutable Revision', async () => {
   const initial = summary(1);
   const preset = { ...initial, preset_id: personalId, source: 'user' as const,
     current_stable_revision: { ...initial.current_stable_revision!, preset_id: personalId },
   };
-  const response = editor(preset, setDefaultModel(createEmptyAgentPresetDocument(), 'saved-model'));
-  response.draft.document = setDefaultModel(extendedDocument(), 'unsaved-model');
+  const document = setDefaultModel(extendedDocument(), 'saved-model');
+  document.enabled_capabilities = [{
+    capability: { id: asCapabilityId('workspace.process') }, action_allowlist: ['workspace.process/exec'],
+  }];
+  const response = editor(preset, document);
+  response.draft.document.enabled_capabilities[0].action_allowlist = ['workspace.process/start'];
+  const originalResponse = structuredClone(response);
   spyOn(agentPlatform.getEditor, 'invoke').mockResolvedValue(response);
+  spyOn(agentPlatform.catalog, 'invoke').mockResolvedValue({
+    modules: [{ ...catalog[0], module: document.enabled_capabilities[0].capability,
+      required_resource_kinds: ['process_session'], actions: [{
+        action_id: 'workspace.process/start', effect_class: 'execute_local', presentation: 'function_tool',
+      }],
+    }], capabilities: [], skills: [], mcp_tools: [], roles: [],
+  });
+  const prepare = spyOn(agentPlatform.createFromTemplate, 'invoke');
+  const save = spyOn(agentPlatform.saveRevision, 'invoke');
   const hook = renderHook(() => useGuidPresetCapabilities(personalId, preset.current_stable_revision?.revision_digest));
   await waitFor(() => expect(hook.result.current.isLoading).toBe(false));
-  expect(hook.result.current.actionIds.size).toBe(0);
-  expect(hook.result.current.requiredResourceKinds.size).toBe(0);
-  expect(hook.result.current.idmm).toEqual(createDefaultIdmmConfig());
+  expect(hook.result.current.actionIds).toEqual(new Set(['workspace.process/start']));
+  expect(hook.result.current.requiredResourceKinds).toEqual(new Set(['process_session']));
+  expect(hook.result.current.idmm.mode).toBe('rule_only');
   expect(hook.result.current.defaultModel).toEqual({
     provider_id: '0190f5fe-7c00-7a00-8000-000000000201', model: 'saved-model',
   });
+  expect(response).toEqual(originalResponse);
+  expect(response.revision!.document.enabled_capabilities[0].action_allowlist).toEqual(['workspace.process/exec']);
+  expect(prepare).not.toHaveBeenCalled();
+  expect(save).not.toHaveBeenCalled();
 });
 
 test('late model defaults from another Agent or Revision cannot replace the currently selected document', async () => {
@@ -237,7 +255,7 @@ test.each([false, true])('compact editor wire defaults preserve capabilities wit
   expect(hook.result.current.capabilities.requiredResourceKinds).toEqual(new Set(['customer']));
   expect(hook.result.current.capabilities.idmm.mode).toBe('rule_only');
   expect(response).toEqual(originalResponse);
-  expect('chat_route_records' in (response.revision?.document ?? response.draft.document)).toBe(false);
+  expect('chat_route_records' in response.draft.document).toBe(false);
   expect(getEditor).toHaveBeenCalledTimes(1);
   expect(prepare).not.toHaveBeenCalled();
   expect(save).not.toHaveBeenCalled();
@@ -259,7 +277,7 @@ test('normalizing compact wire defaults preserves a configured model and the unt
   });
   expect(hook.result.current.capabilities.actionIds).toEqual(new Set(['platform.remote-review/read']));
   expect(response).toEqual(originalResponse);
-  expect('system_role_provider_overrides' in response.revision!.document).toBe(false);
+  expect('system_role_provider_overrides' in response.draft.document).toBe(false);
 });
 
 test.each(['preset editor', 'Agent catalog'] as const)('a failed %s read can be retried without saving or preparing an Agent', async source => {

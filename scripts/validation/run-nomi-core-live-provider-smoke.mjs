@@ -602,7 +602,7 @@ function managedComponentEvidence(stderr) {
   if (lines.length !== 1) throw new Error('component evidence missing or duplicated');
   const value = JSON.parse(lines[0].slice(COMPONENT_EVIDENCE.length));
   if (value.schema_version !== 1 || value.provider !== 'stepfun-plan' || value.model !== 'step-5-preview' ||
-      value.component !== 'officecli' || value.action_id !== 'workspace.process/exec' || value.source !== 'managed' ||
+      value.component !== 'officecli' || value.action_id !== 'workspace.process/start' || value.source !== 'managed' ||
       typeof value.version !== 'string' || value.version.length > 64 || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[+-][0-9A-Za-z.+-]+)?$/.test(value.version) ||
       !/^[a-f0-9]{64}$/.test(value.digest) || value.canonical_component_argument !== true || value.exit_code !== 0 ||
       value.cleanup_reaped !== true || value.completed_turns !== 2 || value.ordinary_continuation_no_tools !== true ||
@@ -611,7 +611,7 @@ function managedComponentEvidence(stderr) {
     throw new Error('component evidence invalid');
   }
   return {schema_version:1,provider:'stepfun-plan',model:'step-5-preview',component:'officecli',
-    action_id:'workspace.process/exec',version:value.version,digest:value.digest,source:'managed',
+    action_id:'workspace.process/start',version:value.version,digest:value.digest,source:'managed',
     canonical_component_argument:true,exit_code:0,cleanup_reaped:true,completed_turns:2,
     ordinary_continuation_no_tools:true,same_session_binding:true,
     call_started_seq:value.call_started_seq,result_seq:value.result_seq};
@@ -1102,16 +1102,21 @@ function navigationFixtureReady(line) {
 
 function runSelfTest() {
   const component = {schema_version:1,provider:'stepfun-plan',model:'step-5-preview',component:'officecli',
-    action_id:'workspace.process/exec',source:'managed',version:'1.0.156',digest:'a'.repeat(64),
+    action_id:'workspace.process/start',source:'managed',version:'1.0.156',digest:'a'.repeat(64),
     canonical_component_argument:true,exit_code:0,cleanup_reaped:true,completed_turns:2,
     ordinary_continuation_no_tools:true,same_session_binding:true,call_started_seq:5,result_seq:9,secret:'DO_NOT_EMIT'};
-  if (JSON.stringify(managedComponentEvidence(COMPONENT_EVIDENCE+JSON.stringify(component))).includes('DO_NOT_EMIT')) {
+  const componentEvidence = managedComponentEvidence(COMPONENT_EVIDENCE+JSON.stringify(component));
+  if (componentEvidence.action_id !== 'workspace.process/start') {
+    throw new Error('component evidence must preserve the current process Action');
+  }
+  if (JSON.stringify(componentEvidence).includes('DO_NOT_EMIT')) {
     throw new Error('component evidence projection exposed arbitrary data');
   }
   for (const invalid of [{...component,exit_code:1},{...component,canonical_component_argument:false},
-      {...component,ordinary_continuation_no_tools:false},{...component,result_seq:5}]) {
+      {...component,ordinary_continuation_no_tools:false},{...component,result_seq:5},
+      {...component,action_id:'workspace.process/exec'}]) {
     let rejected = false; try { managedComponentEvidence(COMPONENT_EVIDENCE+JSON.stringify(invalid)); } catch { rejected = true; }
-    if (!rejected) throw new Error('incomplete component evidence accepted');
+    if (!rejected) throw new Error('invalid component evidence accepted');
   }
   const hostingId = '0190f5fe-7c00-7a00-8abc-012345678911';
   const fixtureReady = APP_WORKSPACE_UI_READY + JSON.stringify({host_url:'http://127.0.0.1:43124',

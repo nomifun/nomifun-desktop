@@ -608,7 +608,7 @@ fn validate_catalog_availability(
         if !seen.insert(reference.id.clone()) {
             continue;
         }
-        if catalog.find_capability(reference).is_none() {
+        let Some(capability) = catalog.find_capability(reference) else {
             diagnostics.push(error_diagnostic(
                 CanonicalErrorCode::from("CAPABILITY_NOT_MATERIALIZED"),
                 format!(
@@ -618,6 +618,15 @@ fn validate_catalog_availability(
                 Some(reference.id.as_ref().to_owned()),
             ));
             continue;
+        };
+        for action_id in &selection.action_allowlist {
+            if !capability.contributions.actions.iter().any(|action| &action.action_id == action_id) {
+                diagnostics.push(error_diagnostic(
+                    CanonicalErrorCode::from("CAPABILITY_ACTION_NOT_MATERIALIZED"),
+                    format!("action {} is not declared by {}", action_id.as_ref(), reference.id.as_ref()),
+                    Some(action_id.as_ref().to_owned()),
+                ));
+            }
         }
         let unavailable_code = catalog
             .formal_capability_entries

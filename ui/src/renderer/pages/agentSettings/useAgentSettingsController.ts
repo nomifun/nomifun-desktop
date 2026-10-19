@@ -25,7 +25,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSWRConfig } from 'swr';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '@/renderer/hooks/context/AuthContext';
-import { AgentEditorDrafts } from './agentEditorDrafts';
+import { AgentEditorDrafts, rebaseEditorActionGrants } from './agentEditorDrafts';
 
 type Selection =
   | { kind: 'template'; template: OfficialPresetTemplate }
@@ -301,8 +301,10 @@ export function useAgentSettingsController() {
         returned ??= editingDrafts?.readPreset(preset.preset_id);
         if (returned?.preset_id === response.draft.preset_id &&
             JSON.stringify(returned.current_revision) === JSON.stringify(response.draft.current_revision)) {
+          const document = rebaseEditorActionGrants(returned.document,
+            response.revision?.document, responseDraft.document);
           setDraftState(cloneDraft({ ...responseDraft, ...returned, document: {
-            ...responseDraft.document, ...returned.document,
+            ...responseDraft.document, ...document,
             model_route_refs: responseDraft.document.model_route_refs,
             chat_route_records: responseDraft.document.chat_route_records,
           } }));

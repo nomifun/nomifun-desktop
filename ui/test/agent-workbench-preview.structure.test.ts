@@ -3,6 +3,10 @@ import { describe, expect, test } from 'bun:test';
 
 const preview = readFileSync(new URL('./agent-workbench-preview.tsx', import.meta.url), 'utf8');
 const fixture = readFileSync(new URL('./fixtures/agent-workbench-catalog.json', import.meta.url), 'utf8');
+const canonicalActions = JSON.parse(readFileSync(new URL('../../crates/backend/nomifun-agent-contracts/contracts/tool-presentation.json', import.meta.url), 'utf8')) as Array<{
+  action_id: string;
+  capability_id: string;
+}>;
 const selector = readFileSync(new URL('./GuidAgentSelectorPreview.tsx', import.meta.url), 'utf8');
 const workspaceCss = readFileSync(new URL('../src/renderer/pages/agentSettings/AgentCapabilityWorkspace.module.css', import.meta.url), 'utf8');
 
@@ -14,15 +18,16 @@ describe('Agent Workbench visual acceptance harness', () => {
     expect(Array.isArray(JSON.parse(fixture))).toBe(true);
   });
 
-  test('contains only current Module and slash Action identities', () => {
-    for (const retired of [
-      'fs.read', 'vcs.push', 'computer.observe', 'computer.input', 'a11y.observe',
-      'schedule.store', 'robot.link', 'robot.audio', 'robot.device_tools',
-    ]) {
-      expect(fixture).not.toContain(`"${retired}"`);
-    }
-    for (const current of ['"computer"', '"computer/input"', '"robot"', '"robot/device"']) {
-      expect(fixture).toContain(current);
+  test('uses canonical Module and Action identities for every preview grant', () => {
+    const modules = JSON.parse(fixture) as Array<{ id: string; actions: Array<[string, string]> }>;
+    for (const module of modules) {
+      const currentActions = canonicalActions
+        .filter((action) => action.capability_id === module.id)
+        .map((action) => action.action_id);
+      expect(currentActions.length).toBeGreaterThan(0);
+      for (const [actionId] of module.actions) {
+        expect(currentActions).toContain(actionId);
+      }
     }
   });
 

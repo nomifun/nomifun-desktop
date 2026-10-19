@@ -38,7 +38,7 @@ const emptyState = (): GuidPresetCapabilityState => ({
 });
 
 /**
- * Resolve target-resource requirements from the exact stable Revision
+ * Resolve target-resource requirements from the host's current authoring
  * action grants and the current Module catalog. Resource instances are never
  * read or persisted here; only the declared Action resource kinds are projected.
  */
@@ -86,10 +86,10 @@ export const useGuidPresetCapabilities = (
     ])
       .then(([editor, catalog]) => {
         if (cancelled) return;
-        // Saved official and personal Agents use the stable Revision. A newly
-        // initialized official configuration has only its baseline draft until
-        // its first launch or save; reading it must never prepare a Revision.
-        const document = cloneAgentPresetDocument(editor.revision?.document ?? editor.draft.document);
+        // The server draft is a read-only view of the saved intent under the
+        // current proved contract, including any retired-action replacement.
+        // It never contains browser-local unsaved edits or writes a Revision.
+        const document = cloneAgentPresetDocument(editor.draft.document);
         const defaultModel = document.chat_route_records[AGENT_CHAT_MODEL_TASK]?.primary;
         const capabilityIds = new Set(
           document.enabled_capabilities.map((selection) => selection.capability.id)

@@ -1521,6 +1521,26 @@ impl AgentControlPlane {
         Ok(document)
     }
 
+    /// Prepare today's editable contract without saving a Revision or opening
+    /// a Session. Reuse the execution evolution proof so a retired launch grant
+    /// cannot silently gain controls, resources or a different publisher.
+    async fn current_authoring_payload(
+        &self,
+        owner: &UserId,
+        revision: &AgentPresetRevision,
+        catalog: &CatalogSnapshot,
+    ) -> Result<nomifun_agent_contracts::AgentPresetRevisionPayload, ControlPlaneError> {
+        if nomifun_agent_contracts::bounded_process_launch_payload(&revision.payload) == revision.payload {
+            return Ok(revision.payload.clone());
+        }
+        let snapshot = self.current_snapshot(Some(revision)).await?
+            .ok_or_else(|| not_found("ResolvedSnapshot"))?;
+        let (candidate, _) = self.compiler.evolve_session_contract(
+            owner, Uuid::now_v7().to_string().into(), revision, &snapshot, catalog, false,
+        )?;
+        Ok(candidate.payload)
+    }
+
     pub async fn editor(
         &self,
         owner: &UserId,
@@ -1538,15 +1558,30 @@ impl AgentControlPlane {
             },
         };
         let template_key = owned_official_key(&stored);
-        let document = revision
-            .as_ref()
-            .map(|revision| payload_document(&revision.payload))
-            .transpose()?
-            .map(Ok)
-            .unwrap_or_else(|| match template_key {
-                Some(key) => self.official_seed_document(key, self.catalog.snapshot()?.as_ref()),
-                None => Ok(empty_document()),
-            })?;
+        let document = match revision.as_ref() {
+            Some(revision) if revision_number.is_none()
+                && nomifun_agent_contracts::bounded_process_launch_payload(&revision.payload) != revision.payload => {
+                let prepared = match self.catalog.snapshot() {
+                    Ok(catalog) => self.current_authoring_payload(owner, revision, &catalog).await,
+                    Err(error) => Err(error),
+                };
+                match prepared {
+                    Ok(payload) => payload_document(&payload)?,
+                    Err(error) => {
+                        // A broken contract must remain editable. Preserve its
+                        // exact selections and let the workbench highlight them;
+                        // selection admission still rejects the failed proof.
+                        tracing::warn!(preset_id, error = %error, "saved Agent contract could not be prepared for editing");
+                        payload_document(&revision.payload)?
+                    }
+                }
+            }
+            Some(revision) => payload_document(&revision.payload)?,
+            None => match template_key {
+                Some(key) => self.official_seed_document(key, self.catalog.snapshot()?.as_ref())?,
+                None => empty_document(),
+            },
+        };
         editor_response(stored, revision, document, template_key)
     }
 
@@ -1655,7 +1690,7 @@ impl AgentControlPlane {
                 match revision {
                     Some(revision) => {
                         let snapshot = self.current_snapshot(Some(&revision)).await?.ok_or_else(|| not_found("ResolvedSnapshot"))?;
-                        (payload_document(&revision.payload)?, Some(key), Some(snapshot))
+                        (payload_document(&self.current_authoring_payload(owner, &revision, &catalog).await?)?, Some(key), Some(snapshot))
                     }
                     None => (self.official_seed_document(key, &catalog)?, Some(key), None),
                 }
@@ -1669,7 +1704,7 @@ impl AgentControlPlane {
                     ControlPlaneError::canonical("CAPABILITY_NOT_MATERIALIZED",
                         axum::http::StatusCode::UNPROCESSABLE_ENTITY, "Agent has no compiled snapshot")
                 })?;
-                (payload_document(&revision.payload)?, None, Some(snapshot))
+                (payload_document(&self.current_authoring_payload(owner, &revision, &catalog).await?)?, None, Some(snapshot))
             }
             _ => return Err(ControlPlaneError::canonical("AGENT_PRESET_NOT_FOUND",
                 axum::http::StatusCode::BAD_REQUEST, "select exactly one Agent")),
@@ -3014,6 +3049,7 @@ fn not_found(subject: &str) -> ControlPlaneError {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    include!("authoring_contract_evolution_tests.rs");
     use crate::{
         CatalogSnapshot, InMemoryControlPlaneStore, OfficialTemplateCatalog,
         PresetRevisionCompiler, StaticCatalogProvider,

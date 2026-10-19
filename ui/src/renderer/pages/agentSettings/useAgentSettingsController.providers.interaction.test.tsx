@@ -7,7 +7,7 @@ import { SWRConfig } from 'swr';
 import type { ReactNode } from 'react';
 import { agentPlatform, mode, conversation } from '@/common/adapter/ipcBridge';
 import { parseProviderId } from '@/common/types/ids';
-import { AGENT_CHAT_MODEL_TASK, CHAT_ROUTE_RECORD_SCHEMA, asAgentPresetId, asDigestHex, asResolvedSnapshotId,
+import { AGENT_CHAT_MODEL_TASK, CHAT_ROUTE_RECORD_SCHEMA, asAgentPresetId, asCapabilityId, asDigestHex, asResolvedSnapshotId,
   cloneDraft, createEmptyAgentPresetDocument, type AgentPresetEditorResponse, type AgentPresetLibraryResponse,
   type ChatRouteRecord } from '@/common/types/agentPlatform';
 import * as auth from '@/renderer/hooks/context/AuthContext';
@@ -62,6 +62,46 @@ async function mount(){
 }
 
 describe('provider changes in the Agent workbench',()=>{
+  test.each(['stored', 'returned'] as const)('rebases %s local edits over the host current contract without changing saved history',async source=>{
+    const page=await mount();
+    const saved=editor();
+    saved.draft.document.enabled_capabilities=[{capability:{id:asCapabilityId('workspace.process')},action_allowlist:['workspace.process/exec']}];
+    saved.revision!.document=structuredClone(saved.draft.document);
+    page.editors.set(firstId,saved);
+    await act(async()=>{await page.result.current.openPreset(saved.preset);});
+    const local=cloneDraft(page.result.current.draft!);
+    local.display_name='My unsaved name';local.document.persona='My unsaved persona';
+    local.document.enabled_capabilities[0].action_allowlist!.push('workspace.process/unknown');
+    if(source==='stored')await act(async()=>{page.result.current.setDraft(local);});
+    const current=structuredClone(saved);
+    current.draft.document.enabled_capabilities[0].action_allowlist=['workspace.process/start'];
+    page.editors.set(firstId,current);
+    await act(async()=>{await page.result.current.openPreset(current.preset,source==='returned'?local:undefined);});
+    expect(page.result.current.draft?.document.enabled_capabilities[0].action_allowlist).toEqual(['workspace.process/start','workspace.process/unknown']);
+    expect(page.result.current.draft?.display_name).toBe('My unsaved name');
+    expect(page.result.current.draft?.document.persona).toBe('My unsaved persona');
+    expect(page.result.current.draft?.document.chat_route_records).toEqual(current.draft.document.chat_route_records);
+    expect(page.result.current.editor?.revision?.document.enabled_capabilities[0].action_allowlist).toEqual(['workspace.process/exec']);
+    expect(page.result.current.editor?.draft.document.enabled_capabilities[0].action_allowlist).toEqual(['workspace.process/start']);
+    expect(page.result.current.dirty).toBe(true);
+    expect(page.result.current.error).toBeNull();
+    page.noWrites();
+  });
+
+  test('the host current draft is a clean baseline while its immutable Revision retains retired grants',async()=>{
+    const page=await mount();
+    const current=editor();
+    current.revision!.document=structuredClone(current.draft.document);
+    current.revision!.document.enabled_capabilities=[{capability:{id:asCapabilityId('workspace.process')},action_allowlist:['workspace.process/exec']}];
+    current.draft.document.enabled_capabilities=[{capability:{id:asCapabilityId('workspace.process')},action_allowlist:['workspace.process/start']}];
+    page.editors.set(firstId,current);
+    await act(async()=>{await page.result.current.openPreset(current.preset);});
+    expect(page.result.current.draft?.document).toEqual(current.draft.document);
+    expect(page.result.current.editor?.revision?.document).toEqual(current.revision!.document);
+    expect(page.result.current.dirty).toBe(false);
+    page.noWrites();
+  });
+
   test('saving adopts and clones the canonical returned document instead of marking the submitted draft as saved',async()=>{
     const page=await mount();
     const submitted=cloneDraft(page.result.current.draft!);

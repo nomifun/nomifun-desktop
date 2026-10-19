@@ -1,7 +1,7 @@
 //! Deterministic acceptance through the real desktop, Runtime, tools and history.
 //! Modes include --creative-failure, --creative-submit-failure,
 //! --creative-retry-ack-loss, --shutdown-wait, --crash-tree, --lease-retirement
-//! --active-quit (one long owned exec, no pending model request), and
+//! --active-quit (one owned process launch with bounded wait, no pending model request), and
 //! --success-recovery (one completed write, held model-only tail, fresh read).
 //! Launch NomiFun with that NOMIFUN_DATA_DIR; send a normal request, inspect the
 //! live journal, POST /finish to release the final response, then reload. Send
@@ -190,7 +190,7 @@ async fn model(State(fixture): State<Arc<Fixture>>, Json(body): Json<Value>) -> 
     if active_quit && call >= 1 {
         return axum::response::Response::builder().status(400)
             .header("content-type", "application/json")
-            .body(axum::body::Body::from("{\"error\":{\"message\":\"ACTIVE_QUIT_SINGLE_EXEC_ONLY\"}}"))
+            .body(axum::body::Body::from("{\"error\":{\"message\":\"ACTIVE_QUIT_SINGLE_LAUNCH_ONLY\"}}"))
             .unwrap();
     }
     if fixture.crash_tree && call >= 2 {
@@ -290,12 +290,9 @@ async fn model(State(fixture): State<Arc<Fixture>>, Json(body): Json<Value>) -> 
         vec![
             frame(json!({"role":"assistant","content":"正在启动隔离守候进程。"}), None),
             frame(json!({"tool_calls":[{"index":0,"id":"crash-tree-start","type":"function","function":{
-                "name":if active_quit { "exec_command" } else { "start_process" },
-                "arguments":if active_quit {
-                    json!({"command":"bun","args":[fixture.tree_script.get().expect("prepared crash tree")],"tty":false,"timeout_ms":600000}).to_string()
-                } else {
-                    json!({"command":"bun","args":[fixture.tree_script.get().expect("prepared crash tree")],"tty":false,"wait_ms":500,"timeout_ms":fixture.process_timeout_ms}).to_string()
-                }
+                "name":"start_process",
+                "arguments":json!({"command":"bun","args":[fixture.tree_script.get().expect("prepared crash tree")],"tty":false,
+                    "wait_ms":if active_quit {30000} else {500},"timeout_ms":fixture.process_timeout_ms}).to_string()
             }}]}), None),
             frame(json!({}), Some("tool_calls")),
         ]
@@ -420,7 +417,7 @@ async fn main() -> anyhow::Result<()> {
             let mut draft = editor["draft"].clone();
             draft["document"]["enabled_capabilities"] = if crash_tree {
                 json!([
-                    {"capability":{"id":"workspace.process"},"action_allowlist":if active_quit {json!(["workspace.process/exec"])} else {json!(["workspace.process/start"])}},
+                    {"capability":{"id":"workspace.process"},"action_allowlist":["workspace.process/start"]},
                     {"capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read"]}
                 ])
             } else { json!([{"capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read","workspace.files/write"]}]) };
@@ -604,7 +601,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_quit_uses_one_owned_exec_without_a_waiting_model_stream() {
+    async fn active_quit_uses_one_owned_launch_with_bounded_wait_without_a_waiting_model_stream() {
         let fixture = Arc::new(Fixture {
             calls: AtomicUsize::new(0), creative_failure: false,
             creative_submit_failure: false, creative_retry_ack_loss: false,
@@ -622,14 +619,20 @@ mod tests {
             .filter_map(|line| serde_json::from_str(line).ok()).collect();
         let function = &frames.iter().find(|frame| frame["choices"][0]["delta"]["tool_calls"].is_array()).unwrap()
             ["choices"][0]["delta"]["tool_calls"][0]["function"];
-        assert_eq!(function["name"], "exec_command");
+        assert_eq!(function["name"], "start_process");
         let arguments: Value = serde_json::from_str(function["arguments"].as_str().unwrap()).unwrap();
         assert_eq!(arguments["timeout_ms"], 600000);
-        assert!(arguments.get("wait_ms").is_none());
+        assert_eq!(arguments["wait_ms"], 30000);
         assert!(text.contains("[DONE]"));
         assert_eq!(fixture.waiting_streams.load(Ordering::SeqCst), 0);
-        assert_eq!(model(State(fixture), Json(json!({"messages":[]}))).await.status(), 400,
-            "a completed exec must not be replaced or restarted by the fixture");
+        let rejected = model(State(fixture.clone()), Json(json!({"messages":[]}))).await;
+        assert_eq!(rejected.status(), 400,
+            "the initial launch must not be replaced or restarted by the fixture");
+        let rejection: Value = serde_json::from_slice(
+            &axum::body::to_bytes(rejected.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(rejection["error"]["message"], "ACTIVE_QUIT_SINGLE_LAUNCH_ONLY");
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.waiting_streams.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

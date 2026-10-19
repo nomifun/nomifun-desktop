@@ -231,7 +231,7 @@ mod live_budget_tests {
             "model_route_refs":{"chat":"exact-route"}, "enabled_capabilities":[
                 {"capability":{"id":"computer"},"action_allowlist":["computer/observe"]},
                 {"capability":{"id":"automation.schedule"},"action_allowlist":["automation.schedule/list"]},
-                {"capability":{"id":"workspace.process"},"action_allowlist":["workspace.process/exec"]}
+                {"capability":{"id":"workspace.process"},"action_allowlist":["workspace.process/start"]}
             ]});
         let scoped = command_general_document(original.clone(), false).unwrap();
         assert_eq!(scoped["enabled_capabilities"], json!([original["enabled_capabilities"][2]]));

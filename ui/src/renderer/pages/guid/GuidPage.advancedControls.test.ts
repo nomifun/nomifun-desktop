@@ -74,7 +74,7 @@ describe('GuidPage advanced controls', () => {
     expect(page.includes('resourceSelections: sessionResourceSelections')).toBe(true);
     expect(page.includes('knowledgePolicy')).toBe(true);
     expect(page.includes('resourceSelectionResolution.missingKinds.length === 0')).toBe(true);
-    expect(capabilityHook.includes('editor.revision?.document ?? editor.draft.document')).toBe(
+    expect(capabilityHook.includes('cloneAgentPresetDocument(editor.draft.document)')).toBe(
       true
     );
     expect(capabilityHook.includes('requiredResourceKindsForDocument')).toBe(true);

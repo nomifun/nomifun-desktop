@@ -1,6 +1,48 @@
-import type { AgentPresetDraft, ProductAgentSelection } from '@/common/types/agentPlatform';
+import type { AgentPresetDocument, AgentPresetDraft, ProductAgentSelection } from '@/common/types/agentPlatform';
 import { agentBrowserStorageGenerationKey, type BrowserStoragePersistence } from '@/common/utils/browserStorageKey';
 import { agentEditorReturn, editingDocument, type AgentEditorReturn } from './model';
+
+/** Rebase local grants only through unambiguous changes in the Host's current contract. */
+export function rebaseEditorActionGrants<T extends Pick<AgentPresetDocument, 'enabled_capabilities'>>(
+  document: T,
+  saved: AgentPresetDocument | undefined,
+  current: AgentPresetDocument,
+): T {
+  if (!saved) return document;
+  const currentById = new Map(current.enabled_capabilities.map(selection => [selection.capability.id, selection]));
+  const changes = new Map<string, { removed: string; added?: string; retained?: string[] }>();
+  for (const previous of saved.enabled_capabilities) {
+    const next = currentById.get(previous.capability.id);
+    if (!next) continue;
+    const before = new Set(previous.action_allowlist ?? []);
+    const after = new Set(next.action_allowlist ?? []);
+    const removed = [...before].filter(action => !after.has(action));
+    const added = [...after].filter(action => !before.has(action));
+    if (removed.length === 1 && added.length === 1) {
+      changes.set(previous.capability.id, { removed: removed[0], added: added[0] });
+    } else if (removed.length === 1 && added.length === 0 && after.size > 0) {
+      // A redundant grant may disappear only when every current baseline
+      // grant is still selected locally; trimmed drafts remain repairable.
+      changes.set(previous.capability.id, { removed: removed[0], retained: [...after] });
+    }
+  }
+  return {
+    ...document,
+    enabled_capabilities: document.enabled_capabilities.map(selection => {
+      const change = changes.get(selection.capability.id);
+      const actions = selection.action_allowlist ?? [];
+      if (!change || !actions.includes(change.removed)
+        || change.retained?.some(action => !actions.includes(action))) return selection;
+      return {
+        ...selection,
+        action_allowlist: [...new Set(actions.flatMap(action => {
+          if (action !== change.removed) return [action];
+          return change.added ? [change.added] : [];
+        }))],
+      };
+    }),
+  };
+}
 
 function browserStorage(): BrowserStoragePersistence | undefined {
   try { return typeof localStorage === 'undefined' ? undefined : localStorage; }

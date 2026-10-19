@@ -98,7 +98,7 @@ checks. Release ignores these development overrides for managed component
 admission. User command discovery and App Hosting retain their separate system
 and custom-path selection.
 
-Agent `workspace.process/exec` and `start` accept `component`, ordinary `command`
+Agent `workspace.process/start` accepts `component`, ordinary `command`
 or explicit shell `cmd`. A component is prepared inside the original invocation and
 verified again before start; OfficeCLI fixes `OFFICECLI_NO_AUTO_RESIDENT=1`.
 Skill compilation preserves its frozen source and points to the callable component
