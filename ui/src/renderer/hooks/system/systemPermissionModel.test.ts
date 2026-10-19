@@ -72,5 +72,6 @@ describe('system permission product model', () => {
     expect(capabilityPermissionsHref('voice-input')).toBe('#/settings/permissions?tab=voice-input');
     expect(capabilityPermissionsHref('computer-use')).toBe('#/settings/permissions?tab=computer-use');
     expect(capabilityPermissionsHref('browser-use')).toBe('#/settings/permissions?tab=browser-use');
+    expect(capabilityPermissionsHref('notifications')).toBe('#/settings/system?section=preferences&focus=notifications');
   });
 });

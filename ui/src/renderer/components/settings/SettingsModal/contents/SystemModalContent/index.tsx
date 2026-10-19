@@ -16,15 +16,17 @@ import { isDesktopShell } from '@/renderer/utils/platform';
 import { useKeepAwake } from '@renderer/hooks/ui/useKeepAwake';
 import { useThinkingDisplayPreferences } from '@renderer/hooks/config/useThinkingDisplayPreferences';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
-import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermissionModel';
+import { useNotificationPermission } from '@/renderer/hooks/system/useNotificationPermission';
 import { Alert, Button, Message } from '@arco-design/web-react';
-import { FolderOpen, FolderSearch, Search } from '@icon-park/react';
-import React, { useCallback, useEffect, useState } from 'react';
+import { Search } from '@icon-park/react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
-import { useSearchParams } from 'react-router-dom';
-import { VisualChoice, VisualEmpty, VisualListRow, VisualPanel, VisualRow, VisualSearch, VisualSwitch, VisualTabs } from '@/renderer/pages/settings/components/CodeVisualPrimitives';
+import { useLocation, useSearchParams } from 'react-router-dom';
+import { VisualChoice, VisualEmpty, VisualPanel, VisualRow, VisualSearch, VisualSwitch } from '@/renderer/pages/settings/components/CodeVisualPrimitives';
+import { generalSettingsHref, resolveGeneralSettingsFocus, resolveGeneralSettingsSection, type GeneralSettingsSection } from '@/renderer/pages/settings/components/generalSettingsNavigation';
 import PageHeader from '@/renderer/components/layout/PageHeader';
+import NotificationPermissionRow from '../NotificationPermissionRow';
 import FactoryResetModal from './FactoryResetModal';
 import StorageRelocationModal from './StorageRelocationModal';
 
@@ -35,7 +37,11 @@ import StorageRelocationModal from './StorageRelocationModal';
  */
 const SystemModalContent: React.FC = () => {
   const { t } = useTranslation();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const pageRef = useRef<HTMLDivElement>(null);
+  const groupRefs = useRef<Record<string, HTMLElement | null>>({});
+  const searchScrollPosition = useRef(0);
   const [query, setQuery] = useState('');
   const [relocationVisible, setRelocationVisible] = useState(false);
 
@@ -52,6 +58,7 @@ const SystemModalContent: React.FC = () => {
   const [factoryResetVisible, setFactoryResetVisible] = useState(false);
   const thinkingDisplay = useThinkingDisplayPreferences();
   const [showDecisionBasis, setShowDecisionBasis] = useConfig('chat.idmm.showDecisionBasis');
+  const notificationPermission = useNotificationPermission();
 
   useEffect(() => {
     // Start-on-boot is only meaningful in the Tauri desktop shell (backed by
@@ -102,27 +109,20 @@ const SystemModalContent: React.FC = () => {
   );
 
   const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
-    if (!isDesktopShell()) return true;
-    try {
-      let state = await ipcBridge.notification.permissionState.invoke();
-      if (state !== 'granted') state = await ipcBridge.notification.requestPermission.invoke();
-      if (state === 'granted') return true;
-    } catch {
-      // The permission page provides the durable recovery path below.
-    }
+    if (await notificationPermission.ensureGranted()) return true;
     Message.error({
       duration: 6000,
       content: (
         <span className='inline-flex items-center gap-8px'>
           <span>{t('settings.notificationPermissionDenied')}</span>
-          <a className='font-600 text-primary-6 no-underline' href={capabilityPermissionsHref('notifications')}>
+          <a className='font-600 text-primary-6 no-underline' href={'#' + generalSettingsHref('preferences', 'notifications')}>
             {t('settings.notificationPermissionManage')}
           </a>
         </span>
       ),
     });
     return false;
-  }, [t]);
+  }, [notificationPermission.ensureGranted, t]);
 
   const handleNotificationEnabledChange = useCallback(async (checked: boolean) => {
     if (checked && !(await ensureNotificationPermission())) return;
@@ -222,12 +222,13 @@ const SystemModalContent: React.FC = () => {
     <VisualSwitch label={label} checked={checked} onChange={onChange} disabled={disabled} />;
 
   const groups: Array<{
-    key: string; title: string; description: string;
-    rows: Array<{ key: string; label: string; description?: string; disabled?: boolean; control: React.ReactNode }>;
-    directories?: Array<{ key: string; label: string; path?: string; icon: React.ReactNode; action: React.ReactNode }>;
+    key: string; category: GeneralSettingsSection; title: string; description: string;
+    rows: Array<{ key: string; label: string; description?: string; disabled?: boolean; disabledHint?: string; control: React.ReactNode }>;
+    directories?: Array<{ key: string; label: string; path?: string; action: React.ReactNode }>;
+    permissionRow?: boolean;
   }> = [
     {
-      key: 'preferences', title: t('settings.workspace.preferences'), description: t('settings.workspace.preferencesDesc'),
+      key: 'preferences', category: 'preferences', title: t('settings.workspace.generalGroup'), description: t('settings.workspace.preferencesDesc'),
       rows: [
         { key: 'language', label: t('settings.language'), description: t('settings.languagePreferenceDesc'), control: <LanguageSwitcher /> },
         { key: 'startOnBoot', label: t('settings.startOnBoot'), description: startOnBoot.supported ? t('settings.startOnBootDesc') : t('settings.startOnBootUnsupported'), control: switchControl(t('settings.startOnBoot'), startOnBoot.enabled, handleStartOnBootChange, !startOnBoot.supported) },
@@ -235,18 +236,18 @@ const SystemModalContent: React.FC = () => {
       ],
     },
     {
-      key: 'conversation', title: t('settings.workspace.conversation'), description: t('settings.workspace.conversationDesc'),
+      key: 'conversation', category: 'preferences', title: t('settings.workspace.conversation'), description: t('settings.workspace.conversationDesc'),
       rows: [
         { key: 'sendKey', label: t('settings.sendKey'), description: t('settings.sendKeyDesc'), control:
           <VisualChoice label={t('settings.sendKey')} value={sendKey} onChange={handleSendKeyChange} options={[
             { value: 'enter', label: t('settings.sendKeyEnter') }, { value: 'mod-enter', label: t('settings.sendKeyModEnter') },
           ]} /> },
         { key: 'thinkingVisible', label: t('settings.thinkingProcessVisible'), description: t('settings.thinkingProcessVisibleDesc'), control: switchControl(t('settings.thinkingProcessVisible'), thinkingDisplay.visible, handleThinkingVisibleChange) },
-        { key: 'thinkingContentLength', label: t('settings.thinkingContentLength'), description: t('settings.thinkingContentLengthDesc'), disabled: !thinkingDisplay.visible, control:
+        { key: 'thinkingContentLength', label: t('settings.thinkingContentLength'), description: t('settings.thinkingContentLengthDesc'), disabled: !thinkingDisplay.visible, disabledHint: t('settings.workspace.enableThinkingFirst'), control:
           <VisualChoice<ThinkingContentDisplayLength> label={t('settings.thinkingContentLength')} value={thinkingDisplay.contentLength} disabled={!thinkingDisplay.visible} onChange={handleThinkingContentLengthChange} options={[
             { value: 'compact', label: t('settings.thinkingContentCompact') }, { value: 'full', label: t('settings.thinkingContentFull') },
           ]} /> },
-        { key: 'thinkingSummaryLength', label: t('settings.thinkingSummaryLength'), description: t('settings.thinkingSummaryLengthDesc'), disabled: !thinkingDisplay.visible, control:
+        { key: 'thinkingSummaryLength', label: t('settings.thinkingSummaryLength'), description: t('settings.thinkingSummaryLengthDesc'), disabled: !thinkingDisplay.visible, disabledHint: t('settings.workspace.enableThinkingFirst'), control:
           <VisualChoice<ThinkingSummaryDisplayLength> label={t('settings.thinkingSummaryLength')} value={thinkingDisplay.summaryLength} disabled={!thinkingDisplay.visible} onChange={handleThinkingSummaryLengthChange} options={[
             { value: 'hidden', label: t('settings.thinkingSummaryHidden') }, { value: 'shown', label: t('settings.thinkingSummaryShown') },
           ]} /> },
@@ -254,63 +255,86 @@ const SystemModalContent: React.FC = () => {
       ],
     },
     {
-      key: 'files', title: t('settings.workspace.files'), description: t('settings.workspace.filesDesc'),
+      key: 'notifications', category: 'preferences', title: t('settings.notification'),
+      description: t('settings.workspace.notificationsDesc') + ' ' + t('settings.capabilityPermissions.notifications.description'),
+      permissionRow: true,
+      rows: [
+        { key: 'notification', label: t('settings.receiveDesktopNotifications'), description: t('settings.receiveDesktopNotificationsDesc'), control: switchControl(t('settings.receiveDesktopNotifications'), notificationEnabled, handleNotificationEnabledChange) },
+        { key: 'cronNotificationEnabled', label: t('settings.cronNotificationEnabled'), description: t('settings.workspace.cronNotificationDesc'), disabled: !notificationEnabled, disabledHint: t('settings.workspace.enableNotificationsFirst'), control: switchControl(t('settings.cronNotificationEnabled'), cronNotificationEnabled, handleCronNotificationEnabledChange, !notificationEnabled) },
+      ],
+    },
+    {
+      key: 'files', category: 'data', title: t('settings.workspace.fileProcessing'), description: t('settings.workspace.files') + ' ' + t('settings.workspace.filesDesc'),
       rows: [
         { key: 'autoPreviewOfficeFiles', label: t('settings.autoPreviewOfficeFiles'), description: t('settings.autoPreviewOfficeFilesDesc'), control: switchControl(t('settings.autoPreviewOfficeFiles'), autoPreviewOfficeFiles, handleAutoPreviewOfficeFilesChange) },
       ],
+    },
+    {
+      key: 'storage', category: 'data', title: t('settings.workspace.storageAndLogs'), description: t('settings.workspace.filesDesc'),
+      rows: [],
       directories: [
-        { key: 'dataDir', label: t('settings.storageRelocation.location'), path: relocationStatus?.current_dir || systemInfo?.dataDir, icon: <FolderOpen theme='outline' size={17} />, action:
+        { key: 'dataDir', label: t('settings.storageRelocation.location'), path: relocationStatus?.current_dir || systemInfo?.dataDir, action:
           <Button size='small' disabled={!systemInfo} onClick={() => setRelocationVisible(true)}>{t('settings.workspace.changeDirectory')}</Button> },
-        { key: 'logDir', label: t('settings.logDir'), path: systemInfo?.logDir, icon: <FolderSearch theme='outline' size={17} />, action:
+        { key: 'logDir', label: t('settings.logDir'), path: systemInfo?.logDir, action:
           <Button size='small' disabled={!systemInfo?.logDir} onClick={handleOpenLogDir}>{t('settings.workspace.openDirectory')}</Button> },
       ],
     },
     {
-      key: 'notifications', title: t('settings.notification'), description: t('settings.workspace.notificationsDesc'),
-      rows: [
-        { key: 'notification', label: t('settings.notification'), control: switchControl(t('settings.notification'), notificationEnabled, handleNotificationEnabledChange) },
-        { key: 'cronNotificationEnabled', label: t('settings.cronNotificationEnabled'), description: t('settings.workspace.cronNotificationDesc'), disabled: !notificationEnabled, control: switchControl(t('settings.cronNotificationEnabled'), cronNotificationEnabled, handleCronNotificationEnabledChange, !notificationEnabled) },
-      ],
-    },
-    {
-      key: 'data', title: t('settings.workspace.data'), description: t('settings.workspace.dataDesc'),
-      rows: [{ key: 'factoryReset', label: t('settings.factoryReset.title'), description: t('settings.factoryReset.rowDesc'), control:
+      key: 'reset', category: 'data', title: t('settings.workspace.resetGroup'), description: t('settings.workspace.dataDesc'),
+      rows: [{ key: 'factoryReset', label: t('settings.factoryReset.button'), description: t('settings.factoryReset.rowDesc'), control:
         <Button status='danger' onClick={() => setFactoryResetVisible(true)}>{t('settings.factoryReset.button')}</Button> }],
     },
   ];
   const requestedSection = searchParams.get('section');
-  const activeSection = groups.some((group) => group.key === requestedSection) ? requestedSection! : 'preferences';
+  const activeSection = resolveGeneralSettingsSection(requestedSection);
+  const focusedGroup = resolveGeneralSettingsFocus(requestedSection, searchParams.get('focus'));
   const search = query.trim().toLocaleLowerCase();
   const matches = (label: string, description?: string) => !search || (label + ' ' + (description ?? '')).toLocaleLowerCase().includes(search);
-  const visibleGroups = groups.filter((group) => search || group.key === activeSection).map((group) => {
-    const groupMatches = Boolean(search && matches(group.title, group.description));
+  const visibleGroups = groups.filter((group) => search || group.category === activeSection).map((group) => {
+    const categoryTitle = group.category === 'data' ? t('settings.workspace.data') : t('settings.workspace.preferences');
+    const groupMatches = Boolean(search && matches(group.title + ' ' + categoryTitle, group.description));
     return { ...group, rows: group.rows.filter((row) => groupMatches || matches(row.label, row.description)),
       directories: group.directories?.filter((row) => groupMatches || matches(row.label, row.path)) };
   }).filter((group) => group.rows.length || group.directories?.length);
 
+  useEffect(() => {
+    searchScrollPosition.current = 0;
+    setQuery('');
+  }, [location.key]);
+  useEffect(() => {
+    if (search) return;
+    const wrapper = pageRef.current?.closest('.settings-page-wrapper');
+    const group = focusedGroup && groupRefs.current[focusedGroup];
+    if (group) group.scrollIntoView?.({ block: 'start' });
+    else if (wrapper) wrapper.scrollTop = searchScrollPosition.current;
+  }, [activeSection, focusedGroup, location.key, Boolean(search)]);
+
+  const handleSearch = (value: string) => {
+    const wrapper = pageRef.current?.closest('.settings-page-wrapper');
+    if (!search && value.trim()) searchScrollPosition.current = wrapper?.scrollTop ?? 0;
+    setQuery(value);
+  };
+
   return (
-    <div>
-      <PageHeader title={t('settings.workspace.generalTitle')} />
-      <div className='cv-toolbar'>
-        <VisualSearch value={query} onChange={setQuery} label={t('settings.workspace.search')} clearLabel={t('settings.workspace.clearSearch')} />
-        <span className='cv-toolbar__hint'>{t('settings.workspace.autoSave')}</span>
-      </div>
-      {!search && <VisualTabs id='general-settings' label={t('settings.workspace.generalTitle')}
-        items={groups.map((group) => ({ key: group.key, label: group.title }))} activeKey={activeSection}
-        onChange={(key) => setSearchParams((previous) => {
-          const next = new URLSearchParams(previous); next.set('section', key); return next;
-        }, { replace: true })} />}
-      <div className='cv-stack' id='general-settings-panel' role={search ? undefined : 'tabpanel'}
-        aria-labelledby={search ? undefined : 'general-settings-tab-' + activeSection}>
-        {visibleGroups.map((group) => <VisualPanel key={group.key} label={group.title}
-          title={search ? group.title : undefined} description={search ? group.description : undefined}
-          className={group.key === 'data' ? 'cv-danger' : undefined}>
-          {group.rows.map((row) => <VisualRow key={row.key} label={row.label} description={row.description} disabled={row.disabled}>{row.control}</VisualRow>)}
-          {group.directories?.map((directory) => <VisualListRow key={directory.key} icon={directory.icon} title={directory.label}
-            description={<span className='cv-directory-path'>{directory.path || t('settings.dirNotConfigured')}</span>} action={directory.action} />)}
-        </VisualPanel>)}
+    <div ref={pageRef} className='general-settings-page'>
+      <PageHeader title={search ? t('settings.workspace.searchResults') : t(activeSection === 'data' ? 'settings.workspace.data' : 'settings.workspace.preferences')}
+        actions={<VisualSearch value={query} onChange={handleSearch} label={t('settings.workspace.search')} clearLabel={t('settings.workspace.clearSearch')} />} />
+      <div className='cv-settings-groups'>
+        {visibleGroups.map((group) => <section key={group.key} className='cv-settings-group'
+          ref={(node) => { groupRefs.current[group.key] = node; }} aria-labelledby={'settings-group-' + group.key}>
+          {search && <p className='cv-settings-group__context'>{t(group.category === 'data' ? 'settings.workspace.data' : 'settings.workspace.preferences')}</p>}
+          <h2 id={'settings-group-' + group.key} className='cv-settings-group__title'>{group.title}</h2>
+          <VisualPanel label={group.title}>
+            {group.permissionRow && <NotificationPermissionRow permission={notificationPermission} />}
+            {group.rows.map((row) => <VisualRow key={row.key} label={row.label}
+              description={row.disabled && row.disabledHint ? <>{row.description}<span className='cv-row__note'>{row.disabledHint}</span></> : row.description}
+              disabled={row.disabled}>{row.control}</VisualRow>)}
+            {group.directories?.map((directory) => <VisualRow key={directory.key} label={directory.label}
+              description={<span className='cv-directory-path'>{directory.path || t('settings.dirNotConfigured')}</span>}>{directory.action}</VisualRow>)}
+          </VisualPanel>
+        </section>)}
         {!visibleGroups.length && <VisualEmpty icon={<Search theme='outline' size={22} />} title={t('settings.workspace.noResults')}
-          description={t('settings.workspace.noResultsDesc')} action={<Button onClick={() => setQuery('')}>{t('settings.workspace.clearSearch')}</Button>} />}
+          description={t('settings.workspace.noResultsDesc')} action={<Button onClick={() => handleSearch('')}>{t('settings.workspace.clearSearch')}</Button>} />}
         {relocationStatus?.restart_required && <Alert type='info' content={<div className='flex items-center justify-between gap-12px'>
           <span>{relocationStatus.cancellable
             ? t('settings.storageRelocation.pending', { path: relocationStatus.target_dir })

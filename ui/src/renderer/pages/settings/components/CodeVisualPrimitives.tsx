@@ -5,7 +5,7 @@
  * semantics and live data replace sample values, skeletons and looping effects.
  */
 import classNames from 'classnames';
-import { Check, Close, Right, Search } from '@icon-park/react';
+import { Close, Right, Search } from '@icon-park/react';
 import React, { useId, useRef, useState } from 'react';
 import './settings-workspace.css';
 
@@ -82,7 +82,7 @@ export function VisualChoice<T extends string>({ label, value, options, onChange
         else return;
         event.preventDefault(); onChange(options[next].value); refs.current[next]?.focus();
       }}>
-      <span className='cv-choice__check' aria-hidden='true'>{option.value === value && <Check theme='outline' size={12} />}</span><span>{option.label}</span>
+      <span>{option.label}</span>
     </button>)}
   </div>;
 }

@@ -1,11 +1,11 @@
 import '../../../../../../test/setup-dom.ts';
-import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { ipcBridge } from '@/common';
 import type { SystemPermissionStatus } from '@/common/adapter/ipcBridge';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
 import CapabilityPermissionsContent from './CapabilityPermissionsContent';
 
@@ -104,7 +104,7 @@ test('unprobeable file, automation and local-network access stays unknown and op
   await waitFor(() => expect(ipcBridge.systemPermissions.openSettings.invoke).toHaveBeenCalledWith({ kind: 'automation' }));
 });
 
-test('overview keeps Browser permissions on demand and surfaces notification denial', async () => {
+test('overview keeps Browser permissions on demand and notification preferences out of capabilities', async () => {
   const screen = render(
     <I18nextProvider i18n={i18n}>
       <MemoryRouter initialEntries={['/settings/permissions']}>
@@ -118,22 +118,9 @@ test('overview keeps Browser permissions on demand and surfaces notification den
   expect(screen.getByText(settings.capabilityPermissions.localNetwork.title)).toBeTruthy();
   expect(screen.getByText(settings.capabilityPermissions.files.title)).toBeTruthy();
   expect(screen.getAllByText(settings.capabilityPermissions.summaryStates.attention).length).toBeGreaterThan(0);
-});
-
-test('granted notifications still open the exact macOS notification settings', async () => {
-  const notification = spyOn(ipcBridge.notification.permissionState, 'invoke').mockResolvedValue('granted');
-  restores.push(() => notification.mockRestore());
-  const screen = render(
-    <I18nextProvider i18n={i18n}>
-      <MemoryRouter initialEntries={['/settings/permissions?tab=notifications']}>
-        <CapabilityPermissionsContent />
-      </MemoryRouter>
-    </I18nextProvider>
-  );
-  expect(await screen.findByText(settings.capabilityPermissions.states.granted)).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: settings.capabilityPermissions.openSystemSettings }));
-  await waitFor(() => expect(ipcBridge.systemPermissions.openSettings.invoke).toHaveBeenCalledWith({ kind: 'notifications' }));
-  expect(ipcBridge.systemPermissions.request.invoke).not.toHaveBeenCalled();
+  expect(screen.queryByRole('tab', { name: settings.capabilityPermissions.tabs.notifications })).toBeNull();
+  expect(screen.queryByText(settings.capabilityPermissions.notifications.title)).toBeNull();
+  expect(ipcBridge.notification.permissionState.invoke).not.toHaveBeenCalled();
 });
 
 test('the granted microphone retains its existing settings action behavior', async () => {
@@ -148,125 +135,21 @@ test('the granted microphone retains its existing settings action behavior', asy
   expect(screen.queryByRole('button', { name: settings.capabilityPermissions.openSystemSettings })).toBeNull();
 });
 
-test('a failed fresh notification query clears a stale grant and can recover on focus', async () => {
-  const notification = spyOn(ipcBridge.notification.permissionState, 'invoke')
-    .mockResolvedValueOnce('granted')
-    .mockRejectedValueOnce(new Error('Native permission query failed'))
-    .mockResolvedValue('denied');
-  restores.push(() => notification.mockRestore());
-  const screen = render(
-    <I18nextProvider i18n={i18n}>
-      <MemoryRouter initialEntries={['/settings/permissions?tab=notifications']}>
-        <CapabilityPermissionsContent />
-      </MemoryRouter>
-    </I18nextProvider>
-  );
-  expect(await screen.findByText(settings.capabilityPermissions.states.granted)).toBeTruthy();
-  fireEvent.focus(window);
-  expect(await screen.findByText(settings.capabilityPermissions.loadFailed)).toBeTruthy();
-  expect(screen.getByText(settings.capabilityPermissions.states.unknown)).toBeTruthy();
-  expect(screen.queryByText(settings.capabilityPermissions.states.granted)).toBeNull();
-  fireEvent.focus(window);
-  expect(await screen.findByText(settings.capabilityPermissions.states.denied)).toBeTruthy();
-  expect(screen.queryByText(settings.capabilityPermissions.loadFailed)).toBeNull();
-  expect(notification).toHaveBeenCalledTimes(3);
-});
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid='location'>{location.pathname + location.search}</output>;
+}
 
-test('a rejected notification permission request is visible and leaves no granted state', async () => {
-  const notification = spyOn(ipcBridge.notification.permissionState, 'invoke').mockResolvedValue('default');
-  const request = spyOn(ipcBridge.notification.requestPermission, 'invoke').mockRejectedValue(new Error('Native permission request failed'));
-  restores.push(() => notification.mockRestore(), () => request.mockRestore());
-  const screen = render(
-    <I18nextProvider i18n={i18n}>
-      <MemoryRouter initialEntries={['/settings/permissions?tab=notifications']}>
-        <CapabilityPermissionsContent />
-      </MemoryRouter>
-    </I18nextProvider>
-  );
-  expect(await screen.findByText(settings.capabilityPermissions.states.not_determined)).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: settings.capabilityPermissions.requestAccess }));
-  expect(await screen.findByText(settings.capabilityPermissions.loadFailed)).toBeTruthy();
-  expect(screen.getByText(settings.capabilityPermissions.states.unknown)).toBeTruthy();
-  expect(screen.queryByText(settings.capabilityPermissions.states.granted)).toBeNull();
-  expect(request).toHaveBeenCalledTimes(1);
-});
-
-const deferred = <T,>() => {
-  let resolve!: (value: T) => void;
-  let reject!: (reason: Error) => void;
-  const promise = new Promise<T>((onResolve, onReject) => {
-    resolve = onResolve;
-    reject = onReject;
-  });
-  return { promise, resolve, reject };
-};
-
-const renderNotifications = () => render(
-  <I18nextProvider i18n={i18n}>
+test('the old application notification tab redirects to the preferences notification card', async () => {
+  const screen = render(<I18nextProvider i18n={i18n}>
     <MemoryRouter initialEntries={['/settings/permissions?tab=notifications']}>
-      <CapabilityPermissionsContent />
+      <Routes>
+        <Route path='/settings/permissions' element={<CapabilityPermissionsContent />} />
+        <Route path='/settings/system' element={<LocationProbe />} />
+      </Routes>
     </MemoryRouter>
-  </I18nextProvider>
-);
-
-test.each(['granted', 'error'] as const)('an older %s query cannot overwrite a newer notification denial', async (lateResult) => {
-  const oldQuery = deferred<'granted'>();
-  const notification = spyOn(ipcBridge.notification.permissionState, 'invoke')
-    .mockImplementationOnce(() => oldQuery.promise)
-    .mockResolvedValue('denied');
-  restores.push(() => notification.mockRestore());
-  const screen = renderNotifications();
-  await waitFor(() => expect(notification).toHaveBeenCalledTimes(1));
-  fireEvent.focus(window);
-  expect(await screen.findByText(settings.capabilityPermissions.states.denied)).toBeTruthy();
-  await act(async () => {
-    if (lateResult === 'error') oldQuery.reject(new Error('Retired permission query failed'));
-    else oldQuery.resolve('granted');
-    await oldQuery.promise.catch(() => {});
-  });
-  expect(screen.getByText(settings.capabilityPermissions.states.denied)).toBeTruthy();
-  expect(screen.queryByText(settings.capabilityPermissions.states.granted)).toBeNull();
-  expect(screen.queryByText(settings.capabilityPermissions.loadFailed)).toBeNull();
-});
-
-test('an older query cannot restore a grant after a newer permission request denies it', async () => {
-  const oldQuery = deferred<'granted'>();
-  const notification = spyOn(ipcBridge.notification.permissionState, 'invoke')
-    .mockResolvedValueOnce('default')
-    .mockImplementationOnce(() => oldQuery.promise);
-  const request = spyOn(ipcBridge.notification.requestPermission, 'invoke').mockResolvedValue('denied');
-  restores.push(() => notification.mockRestore(), () => request.mockRestore());
-  const screen = renderNotifications();
-  expect(await screen.findByText(settings.capabilityPermissions.states.not_determined)).toBeTruthy();
-  fireEvent.focus(window);
-  await waitFor(() => expect(notification).toHaveBeenCalledTimes(2));
-  fireEvent.click(screen.getByRole('button', { name: settings.capabilityPermissions.requestAccess }));
-  expect(await screen.findByText(settings.capabilityPermissions.states.denied)).toBeTruthy();
-  await act(async () => {
-    oldQuery.resolve('granted');
-    await oldQuery.promise;
-  });
-  expect(screen.getByText(settings.capabilityPermissions.states.denied)).toBeTruthy();
-  expect(screen.queryByText(settings.capabilityPermissions.states.granted)).toBeNull();
-});
-
-test('an older permission request cannot replace a newer fresh notification denial', async () => {
-  const oldRequest = deferred<'granted'>();
-  const notification = spyOn(ipcBridge.notification.permissionState, 'invoke')
-    .mockResolvedValueOnce('default')
-    .mockResolvedValue('denied');
-  const request = spyOn(ipcBridge.notification.requestPermission, 'invoke').mockImplementationOnce(() => oldRequest.promise);
-  restores.push(() => notification.mockRestore(), () => request.mockRestore());
-  const screen = renderNotifications();
-  expect(await screen.findByText(settings.capabilityPermissions.states.not_determined)).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: settings.capabilityPermissions.requestAccess }));
-  await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
-  fireEvent.focus(window);
-  expect(await screen.findByText(settings.capabilityPermissions.states.denied)).toBeTruthy();
-  await act(async () => {
-    oldRequest.resolve('granted');
-    await oldRequest.promise;
-  });
-  expect(screen.getByText(settings.capabilityPermissions.states.denied)).toBeTruthy();
-  expect(screen.queryByText(settings.capabilityPermissions.states.granted)).toBeNull();
+  </I18nextProvider>);
+  await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/settings/system?section=preferences&focus=notifications'));
+  expect(ipcBridge.systemPermissions.get.invoke).not.toHaveBeenCalled();
+  expect(ipcBridge.notification.permissionState.invoke).not.toHaveBeenCalled();
 });

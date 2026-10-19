@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ipcBridge } from '@/common';
 import type {
   SystemPermissionEntry,
   SystemPermissionKind,
@@ -27,19 +26,17 @@ import {
   Earth,
   HeadsetOne,
   Refresh,
-  Remind,
   Shield,
 } from '@icon-park/react';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 
 const isCapabilityTab = (value: string | null): value is PermissionCapabilityTab =>
   value === 'overview' ||
   value === 'voice-input' ||
   value === 'computer-use' ||
-  value === 'browser-use' ||
-  value === 'notifications';
+  value === 'browser-use';
 
 const readyState = (state: SystemPermissionState): boolean =>
   state === 'granted' || state === 'not_required';
@@ -88,7 +85,7 @@ const PermissionRow: React.FC<PermissionRowProps> = ({
     {actionsEnabled && entry?.can_request && state !== 'denied' && state !== 'restricted' && (
       <Button size='small' type='primary' loading={busy} onClick={() => onRequest?.(kind)}>{t('settings.capabilityPermissions.requestAccess')}</Button>
     )}
-    {actionsEnabled && entry?.can_open_settings && (kind === 'notifications' || !readyState(state)) && (
+    {actionsEnabled && entry?.can_open_settings && !readyState(state) && (
       <Button size='small' onClick={() => onOpenSettings?.(kind)}>{t('settings.capabilityPermissions.openSystemSettings')}</Button>
     )}
   </VisualRow>;
@@ -100,11 +97,8 @@ const CapabilityPermissionsContent: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const desktopShell = isDesktopShell();
   const tab = isCapabilityTab(searchParams.get('tab')) ? searchParams.get('tab') as PermissionCapabilityTab : 'overview';
-  const { error, loading, openSettings, refresh, request, status } = useSystemPermissions(true);
-  const [notificationState, setNotificationState] = useState<SystemPermissionState>('unknown');
-  const [notificationError, setNotificationError] = useState(false);
-  const [notificationBusy, setNotificationBusy] = useState(false);
-  const notificationRevision = useRef(0);
+  const notificationRedirect = searchParams.get('tab') === 'notifications';
+  const { error, loading, openSettings, refresh, request, status } = useSystemPermissions(!notificationRedirect);
   const [microphoneBusy, setMicrophoneBusy] = useState(false);
 
   const microphone = systemPermissionEntry(status, 'microphone');
@@ -112,43 +106,6 @@ const CapabilityPermissionsContent: React.FC = () => {
   const screenRecording = systemPermissionEntry(status, 'screen_recording');
   const computerReady = computerPermissionsReady(status, []);
   const voiceReady = permissionEntryIsReady(microphone);
-
-  const refreshNotification = useCallback(async () => {
-    const revision = ++notificationRevision.current;
-    if (!desktopShell) {
-      setNotificationState('unknown');
-      setNotificationError(false);
-      return;
-    }
-    try {
-      const state = await ipcBridge.notification.permissionState.invoke();
-      if (revision !== notificationRevision.current) return;
-      setNotificationState(
-        state === 'granted'
-          ? 'granted'
-          : state === 'denied'
-            ? 'denied'
-            : state === 'default'
-              ? 'not_determined'
-              : 'unknown'
-      );
-      setNotificationError(false);
-    } catch {
-      if (revision !== notificationRevision.current) return;
-      setNotificationState('unknown');
-      setNotificationError(true);
-    }
-  }, [desktopShell]);
-
-  useEffect(() => {
-    void refreshNotification();
-    const onFocus = () => void refreshNotification();
-    window.addEventListener('focus', onFocus);
-    return () => {
-      notificationRevision.current += 1;
-      window.removeEventListener('focus', onFocus);
-    };
-  }, [refreshNotification]);
 
   const setTab = useCallback((next: PermissionCapabilityTab) => {
     setSearchParams((previous) => {
@@ -186,31 +143,6 @@ const CapabilityPermissionsContent: React.FC = () => {
     }
   }, [refresh, t]);
 
-  const requestNotifications = useCallback(async () => {
-    const revision = ++notificationRevision.current;
-    setNotificationBusy(true);
-    try {
-      const result = await ipcBridge.notification.requestPermission.invoke();
-      if (revision !== notificationRevision.current) return;
-      setNotificationState(
-        result === 'granted'
-          ? 'granted'
-          : result === 'denied'
-            ? 'denied'
-            : result === 'default'
-              ? 'not_determined'
-              : 'unknown'
-      );
-      setNotificationError(false);
-    } catch {
-      if (revision !== notificationRevision.current) return;
-      setNotificationState('unknown');
-      setNotificationError(true);
-    } finally {
-      setNotificationBusy(false);
-    }
-  }, []);
-
   const tabItems: VisualTabItem[] = useMemo(() => [
     {
       key: 'overview',
@@ -234,20 +166,7 @@ const CapabilityPermissionsContent: React.FC = () => {
       label: t('settings.capabilityPermissions.tabs.browser'),
       icon: <Earth theme='outline' size='15' strokeWidth={3} />,
     },
-    {
-      key: 'notifications',
-      label: t('settings.capabilityPermissions.tabs.notifications'),
-      icon: <Remind theme='outline' size='15' strokeWidth={3} />,
-      dot: notificationState === 'denied' || notificationState === 'restricted',
-    },
-  ], [computerReady, notificationState, status, t, voiceReady]);
-
-  const notificationEntry: Pick<SystemPermissionEntry, 'state' | 'can_request' | 'can_open_settings' | 'requires_restart_after_grant'> = {
-    state: notificationState,
-    can_request: desktopShell && notificationState === 'not_determined',
-    can_open_settings: desktopShell && status?.platform === 'macos',
-    requires_restart_after_grant: false,
-  };
+  ], [computerReady, status, t, voiceReady]);
 
   const overview = (
     <div className='cv-stack'>
@@ -256,7 +175,6 @@ const CapabilityPermissionsContent: React.FC = () => {
           { key: 'voice-input' as const, icon: <HeadsetOne theme='outline' size={18} />, title: t('settings.capabilityPermissions.voice.title'), description: t('settings.capabilityPermissions.voice.summary'), state: !microphone ? 'unknown' : voiceReady ? 'ready' : 'attention' },
           { key: 'computer-use' as const, icon: <Computer theme='outline' size={18} />, title: t('settings.capabilityPermissions.computer.title'), description: t('settings.capabilityPermissions.computer.summary'), state: !status ? 'unknown' : computerReady ? 'ready' : 'attention' },
           { key: 'browser-use' as const, icon: <Earth theme='outline' size={18} />, title: t('settings.capabilityPermissions.browser.title'), description: t('settings.capabilityPermissions.browser.summary'), state: 'onDemand' },
-          { key: 'notifications' as const, icon: <Remind theme='outline' size={18} />, title: t('settings.capabilityPermissions.notifications.title'), description: t('settings.capabilityPermissions.notifications.summary'), state: notificationState === 'unknown' ? 'unknown' : notificationState === 'granted' ? 'ready' : 'attention' },
         ].map((item) => <VisualListRow key={item.key} icon={item.icon} title={item.title} description={item.description} onClick={() => setTab(item.key)}
           action={<VisualStatus tone={item.state === 'ready' ? 'success' : item.state === 'attention' ? 'warning' : 'neutral'}>
             {item.state === 'unknown' ? t('settings.capabilityPermissions.states.unknown') : t(`settings.capabilityPermissions.summaryStates.${item.state}`)}
@@ -384,37 +302,19 @@ const CapabilityPermissionsContent: React.FC = () => {
     </div>
   );
 
-  const notifications = (
-    <div className='space-y-12px'>
-      <VisualPanel
-        label={t('settings.capabilityPermissions.notifications.title')}
-      >
-        <PermissionRow
-          entry={notificationEntry}
-          kind='notifications'
-          title={t('settings.capabilityPermissions.permissions.notifications')}
-          description={t('settings.capabilityPermissions.permissions.notificationsDesc')}
-          busy={notificationBusy}
-          actionsEnabled={desktopShell}
-          onRequest={() => void requestNotifications()}
-          onOpenSettings={openSettings}
-        />
-      </VisualPanel>
-      <Alert type='info' showIcon content={t('settings.capabilityPermissions.notifications.preferenceHint')} />
-    </div>
-  );
+  if (notificationRedirect) return <Navigate replace to='/settings/system?section=preferences&focus=notifications' />;
 
   return (
     <div>
       <PageHeader title={t('settings.capabilityPermissions.title')}
-        actions={<Button size='small' icon={<Refresh theme='outline' size={14} />} loading={loading} onClick={() => void Promise.all([refresh(), refreshNotification()]).catch(() => Message.error(t('settings.capabilityPermissions.loadFailed')))}>{t('settings.capabilityPermissions.refresh')}</Button>} />
+        actions={<Button size='small' icon={<Refresh theme='outline' size={14} />} loading={loading} onClick={() => void refresh().catch(() => Message.error(t('settings.capabilityPermissions.loadFailed')))}>{t('settings.capabilityPermissions.refresh')}</Button>} />
       {!desktopShell && <Alert className='mb-16px' type='info' showIcon content={t('settings.capabilityPermissions.desktopOnly')} />}
-      {(error || notificationError) && <Alert className='mb-16px' type='error' showIcon content={t('settings.capabilityPermissions.loadFailed')} />}
+      {error && <Alert className='mb-16px' type='error' showIcon content={t('settings.capabilityPermissions.loadFailed')} />}
       <VisualTabs id='permissions' label={t('settings.capabilityPermissions.title')} items={tabItems} activeKey={tab}
         onChange={(key) => setTab(isCapabilityTab(key) ? key : 'overview')} />
       <div id='permissions-panel' role='tabpanel' aria-labelledby={'permissions-tab-' + tab} aria-busy={loading}>
         {loading && !status ? <div className='flex min-h-180px items-center justify-center'><Spin /></div>
-          : tab === 'voice-input' ? voice : tab === 'computer-use' ? computer : tab === 'browser-use' ? browser : tab === 'notifications' ? notifications : overview}
+          : tab === 'voice-input' ? voice : tab === 'computer-use' ? computer : tab === 'browser-use' ? browser : overview}
       </div>
     </div>
   );
