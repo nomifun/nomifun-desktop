@@ -123,15 +123,7 @@ fn computer_states() -> (SystemPermissionState, SystemPermissionState) {
     }
     #[cfg(all(target_os = "linux", feature = "computer-use"))]
     {
-        // A Wayland portal grant belongs to an actual session and is not a
-        // process-wide Boolean. A working X11 connection has no such prompt.
-        match nomi_computer::linux_x11::desktop_state() {
-            nomi_computer::linux_x11::DesktopState::X11 { .. } => (
-                SystemPermissionState::NotRequired,
-                SystemPermissionState::NotRequired,
-            ),
-            _ => (SystemPermissionState::Unknown, SystemPermissionState::Unknown),
-        }
+        linux_computer_states(nomi_computer::linux_x11::desktop_state())
     }
     #[cfg(all(not(any(target_os = "macos", target_os = "windows", target_os = "linux")), feature = "computer-use"))]
     { (SystemPermissionState::Unknown, SystemPermissionState::Unknown) }
@@ -144,6 +136,19 @@ fn computer_states() -> (SystemPermissionState, SystemPermissionState) {
             SystemPermissionState::Unknown,
             SystemPermissionState::Unknown,
         )
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "computer-use"))]
+fn linux_computer_states(desktop_state: nomi_computer::linux_x11::DesktopState) -> (SystemPermissionState, SystemPermissionState) {
+    // A Wayland portal grant belongs to an actual session and is not a
+    // process-wide Boolean. A working X11 connection has no such prompt.
+    match desktop_state {
+        nomi_computer::linux_x11::DesktopState::X11 { .. } => (
+            SystemPermissionState::NotRequired,
+            SystemPermissionState::NotRequired,
+        ),
+        _ => (SystemPermissionState::Unknown, SystemPermissionState::Unknown),
     }
 }
 
@@ -509,12 +514,30 @@ mod tests {
         assert_eq!(binary_grant_state(None), SystemPermissionState::Unknown);
     }
 
-    #[cfg(all(not(target_os = "macos"), feature = "computer-use"))]
+    #[cfg(all(target_os = "windows", feature = "computer-use"))]
     #[test]
     fn non_macos_computer_permissions_do_not_block_launch() {
         let (accessibility, screen) = computer_states();
         assert_eq!(accessibility, SystemPermissionState::NotRequired);
         assert_eq!(screen, SystemPermissionState::NotRequired);
+    }
+
+    #[cfg(all(target_os = "linux", feature = "computer-use"))]
+    #[test]
+    fn linux_computer_permissions_follow_the_x11_desktop_state() {
+        let (accessibility, screen) = linux_computer_states(
+            nomi_computer::linux_x11::DesktopState::X11 { input: true, window_management: true },
+        );
+        assert_eq!(accessibility, SystemPermissionState::NotRequired);
+        assert_eq!(screen, SystemPermissionState::NotRequired);
+        for state in [
+            nomi_computer::linux_x11::DesktopState::Wayland,
+            nomi_computer::linux_x11::DesktopState::Unavailable("no display".to_owned()),
+        ] {
+            let (accessibility, screen) = linux_computer_states(state);
+            assert_eq!(accessibility, SystemPermissionState::Unknown);
+            assert_eq!(screen, SystemPermissionState::Unknown);
+        }
     }
 
     #[cfg(not(feature = "computer-use"))]

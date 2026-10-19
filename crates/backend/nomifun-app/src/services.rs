@@ -2861,7 +2861,7 @@ mod tests {
             .await
             .expect("default shutdown must await Gateway quiescence");
         assert!(
-            tokio::net::TcpListener::bind(address).await.is_ok(),
+            tokio::net::TcpStream::connect(address).await.is_err(),
             "Gateway listener must be closed before the shutdown barrier resolves"
         );
 
