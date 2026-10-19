@@ -188,14 +188,21 @@
         "task": "speech_recognition",
         "status": "supported",
         "protocols": [
-          "stepfun.asr_sse"
+          "stepfun.asr_sse",
+          "stepfun.asr_stream"
         ],
-        "notes": "HTTP+SSE：audio.data Base64、audio.input.transcription.model、format，与现codec一致；delta/done文本事件一致。双向ASR WebSocket不属于此能力。",
+        "notes": "文件模型使用HTTP+SSE；stepaudio-2.5-asr-stream使用独立双向WebSocket，录音期间增量PCM、累计text/stash候选和commit最终纠错，2026-10-19核对。Step Plan不继承该双向ASR协议。",
         "model_ids": [
+          "stepaudio-2.5-asr-stream",
           "stepaudio-3-asr-max",
           "stepaudio-2.5-asr",
           "stepaudio-2-asr-pro"
-        ]
+        ],
+        "protocol_model_ids": {
+          "stepfun.asr_sse": ["stepaudio-3-asr-max", "stepaudio-2.5-asr", "stepaudio-2-asr-pro"],
+          "stepfun.asr_stream": ["stepaudio-2.5-asr-stream"]
+        },
+        "sources": ["https://platform.stepfun.com/docs/zh/api-reference/audio/asr-sse.md", "https://platform.stepfun.com/docs/zh/api-reference/audio/asr-stream.md"]
       },
       {
         "task": "speech_synthesis",
@@ -2867,9 +2874,14 @@
         "task": "speech_recognition",
         "status": "supported",
         "protocols": [
-          "deepgram.listen"
+          "deepgram.listen",
+          "deepgram.listen_stream"
         ],
-        "notes": "官方/v1/listen原始音频+query模型/语言、results.channels[].alternatives[].transcript，与现codec一致。Flux ASR仅/v2/listen streaming，不可路由给此预录音REST任务。",
+        "notes": "文件协议使用POST /v1/listen；listen_stream使用同路径独立WebSocket握手，录音期间增量PCM、Results partial/final、CloseStream和Metadata完成回执（2026-10-19核对）。Flux ASR仅/v2/listen，不可路由给这两个Nova协议。",
+        "sources": [
+          "https://developers.deepgram.com/reference/speech-to-text/listen-streaming",
+          "https://developers.deepgram.com/docs/close-stream"
+        ],
         "model_ids": [
           "nova-3",
           "nova-3-general",

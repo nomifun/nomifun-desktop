@@ -1,0 +1,3 @@
+# Grant the active local graphical seat access, without a world-writable tty.
+# The native service separately verifies hardware identity and protocol support.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", TAG+="uaccess"

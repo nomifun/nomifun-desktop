@@ -30,6 +30,8 @@ pub mod materialize;
 pub mod resolve;
 pub mod routes_table;
 pub mod service;
+pub mod streaming_asr;
+pub mod text_transform;
 pub mod transport;
 pub mod types;
 pub mod url_algebra;
@@ -90,6 +92,7 @@ pub use types::{
     ModelRef, MusicGenRequest, ProducedAsset, ProducedData, RerankRequest, RerankResult, TaskOutcome, TaskRequest, TaskResult,
     TtsRequest, VideoGenRequest,
 };
+pub use text_transform::{TextTransformMetrics, TextTransformRequest, TextTransformResult};
 pub use url_algebra::{
     ROOT_VERSION_SUFFIXES, is_version_segment, join_endpoint, root_candidates,
     root_declares_version, root_matches_shape,

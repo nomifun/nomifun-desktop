@@ -1,0 +1,129 @@
+html.keyboard-subtitle-window,
+.keyboard-subtitle-window body,
+.keyboard-subtitle-window #root {
+  width: 100%; height: 100%; min-width: 0; min-height: 0; margin: 0;
+  background: transparent !important; overflow: hidden;
+}
+.keyboard-subtitle {
+  box-sizing: border-box; position: relative; width: 100%; height: 100%; min-height: 0;
+  display: flex; align-items: center; padding: 24px 6px 4px; border-radius: 4px;
+  color: #ffbfc4; background: transparent; overflow: hidden;
+  font-family: system-ui, sans-serif;
+}
+.keyboard-subtitle:hover, .keyboard-subtitle:focus-within { background: rgba(74, 74, 74, .55); }
+.keyboard-subtitle__content {
+  box-sizing: border-box; width: 100%; max-height: 100%; min-height: 0; padding: 8px 12px;
+  overflow: auto; scroll-padding-block: 8px; scrollbar-width: thin; scrollbar-color: transparent transparent;
+}
+.keyboard-subtitle--beautifying .keyboard-subtitle__content {
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 3px, #000 calc(100% - 3px), transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 3px, #000 calc(100% - 3px), transparent);
+}
+.keyboard-subtitle__content::-webkit-scrollbar { width: 4px; height: 4px; }
+.keyboard-subtitle__content::-webkit-scrollbar-track { background: transparent; }
+.keyboard-subtitle__content::-webkit-scrollbar-thumb { background: transparent; border-radius: 2px; }
+.keyboard-subtitle:hover .keyboard-subtitle__content,
+.keyboard-subtitle:focus-within .keyboard-subtitle__content { scrollbar-color: #ffffff70 transparent; }
+.keyboard-subtitle:hover .keyboard-subtitle__content::-webkit-scrollbar-thumb,
+.keyboard-subtitle:focus-within .keyboard-subtitle__content::-webkit-scrollbar-thumb { background: #ffffff70; }
+.keyboard-subtitle__text {
+  position: relative;
+  white-space: pre-wrap; overflow-wrap: anywhere; text-align: center; user-select: text;
+  font-size: 14px; font-weight: 500; line-height: 1.2; letter-spacing: 0;
+  color: #ffbfc4; -webkit-text-stroke: .8px #e77d87; paint-order: stroke fill;
+}
+.keyboard-subtitle__glyph {
+  display: block;
+  min-height: 1em; cursor: text;
+}
+.keyboard-subtitle__empty { font-size: inherit; -webkit-text-stroke-width: .55px; }
+.keyboard-subtitle__partial { opacity: .76; }
+.keyboard-subtitle__glyph:focus, .keyboard-subtitle__glyph:focus-visible { outline: none; }
+.keyboard-subtitle__caret {
+  position: absolute; width: 1px; background: #ffbfc4; box-shadow: 0 0 1px #682d48;
+  pointer-events: none; user-select: none; -webkit-text-stroke: 0;
+  animation: subtitle-caret-blink 1.05s steps(1, end) infinite;
+}
+@keyframes subtitle-caret-blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
+.keyboard-subtitle--beautifying .keyboard-subtitle__glyph {
+  color: #fff2f9; -webkit-text-stroke: .7px #c97596;
+  filter: drop-shadow(0 0 1px #fff9fff5) drop-shadow(0 0 4px #ed83bec4) drop-shadow(0 0 12px #b79aef52);
+  animation: subtitle-glyph-glow 2.9s ease-in-out infinite;
+}
+@keyframes subtitle-glyph-glow {
+  0%, 100% { filter: drop-shadow(0 0 1px #fff9fff5) drop-shadow(0 0 4px #ed83bec4) drop-shadow(0 0 12px #b79aef52); }
+  34% { filter: drop-shadow(0 0 1.2px #ffffff) drop-shadow(0 0 5px #b995f2d6) drop-shadow(0 0 14px #82cce944); }
+  68% { filter: drop-shadow(0 0 1px #f5fcfff5) drop-shadow(0 0 4.5px #a1c5e0c2) drop-shadow(0 0 13px #e390c250); }
+}
+.keyboard-subtitle__capture-status {
+  position: absolute; top: 4px; left: 50%; transform: translateX(-50%); z-index: 3;
+  height: 20px; display: flex; align-items: center; gap: 7px; white-space: nowrap;
+  color: var(--capture-color); font-size: 12px; font-weight: 600; line-height: 20px;
+  text-shadow: 0 1px 1px #182d3ad6, 0 0 1px #182d3a9c; -webkit-text-stroke: 0;
+  pointer-events: none; user-select: none;
+}
+.keyboard-subtitle__capture-status--preparing { --capture-color: #e7b04a; }
+.keyboard-subtitle__capture-status--listening { --capture-color: #25c1b1; }
+.keyboard-subtitle__capture-status--stopping { --capture-color: #c2a0ee; }
+.keyboard-subtitle__listen-bars { display: flex; align-items: center; gap: 2px; height: 18px; width: 23px; }
+.keyboard-subtitle__listen-bars i {
+  display: block; width: 3px; height: 12px; border-radius: 2px; background: linear-gradient(#9af0e4, var(--capture-color));
+  box-shadow: 0 0 .5px .5px #16484780, 0 0 2px #4ed3c34a;
+  transform-origin: center; animation: subtitle-listen-wave 950ms ease-in-out infinite;
+}
+.keyboard-subtitle__listen-bars i:nth-child(1) { height: 8px; animation-delay: -420ms; }
+.keyboard-subtitle__listen-bars i:nth-child(2) { height: 13px; animation-delay: -180ms; }
+.keyboard-subtitle__listen-bars i:nth-child(3) { height: 18px; animation-delay: -650ms; }
+.keyboard-subtitle__listen-bars i:nth-child(4) { height: 12px; animation-delay: -80ms; }
+.keyboard-subtitle__listen-bars i:nth-child(5) { height: 7px; animation-delay: -370ms; }
+@keyframes subtitle-listen-wave { 0%, 100% { transform: scaleY(.45); } 50% { transform: scaleY(1); } }
+.keyboard-subtitle__prepare-spinner {
+  box-sizing: border-box; width: 12px; height: 12px; border: 2px solid #e7b04a50; border-top-color: currentColor;
+  border-right-color: currentColor; border-radius: 50%; filter: drop-shadow(0 .5px .5px #3a2a1666);
+  animation: subtitle-prepare-spin 900ms linear infinite;
+}
+@keyframes subtitle-prepare-spin { to { transform: rotate(360deg); } }
+.keyboard-subtitle__stop-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 1px #30223b90; }
+.keyboard-subtitle__toolbar {
+  position: absolute; top: 2px; left: 50%; transform: translateX(-50%); z-index: 2;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  height: 24px; max-width: calc(100% - 12px); color: #fff; background: transparent;
+  opacity: 0; pointer-events: none; transition: opacity 120ms ease;
+}
+.keyboard-subtitle--capture-status .keyboard-subtitle__toolbar { left: 6px; right: 6px; transform: none; gap: 3px; }
+.keyboard-subtitle--capture-status .keyboard-subtitle__toolbar::before { content: ''; order: 1; flex: 1; min-width: 110px; }
+.keyboard-subtitle--capture-status .keyboard-subtitle__toolbar button { order: 0; width: 23px; }
+.keyboard-subtitle--capture-status .keyboard-subtitle__toolbar button:nth-child(n+5) { order: 2; }
+.keyboard-subtitle:hover .keyboard-subtitle__toolbar,
+.keyboard-subtitle:focus-within .keyboard-subtitle__toolbar { opacity: 1; pointer-events: auto; }
+.keyboard-subtitle__toolbar button {
+  appearance: none; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; border: 0; border-radius: 3px;
+  color: inherit; background: transparent; cursor: pointer;
+}
+.keyboard-subtitle__toolbar button:hover:not(:disabled) { background: #ffffff22; }
+.keyboard-subtitle__toolbar button:focus-visible { outline: 1px solid #fff; outline-offset: -1px; }
+.keyboard-subtitle__toolbar button:disabled { opacity: .35; cursor: default; }
+.keyboard-subtitle__toolbar button[aria-pressed='true'] { color: #ffd0d5; }
+.keyboard-subtitle__toolbar .keyboard-subtitle__drag { cursor: grab; }
+.keyboard-subtitle__toolbar svg { width: 16px; height: 16px; vertical-align: middle; pointer-events: none; }
+.keyboard-subtitle__issue {
+  position: absolute; top: 4px; left: 50%; transform: translateX(-50%); z-index: 4;
+  max-width: calc(100% - 36px); color: #f1ca87; font-size: 12px; line-height: 20px;
+  -webkit-text-stroke: 0; text-shadow: 0 1px 2px #372d22;
+}
+.keyboard-subtitle__issue summary { cursor: pointer; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.keyboard-subtitle__issue-detail {
+  box-sizing: border-box; position: absolute; top: 22px; left: 50%; transform: translateX(-50%);
+  width: min(480px, calc(100vw - 24px)); max-height: calc(100vh - 40px); padding: 7px 10px;
+  overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 5px;
+  color: #fff4e2; background: #332e29f5; text-shadow: none; user-select: text;
+}
+.keyboard-subtitle:has(.keyboard-subtitle__issue) .keyboard-subtitle__toolbar { top: auto; bottom: 2px; }
+.keyboard-subtitle__sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) {
+  .keyboard-subtitle__listen-bars i, .keyboard-subtitle__prepare-spinner { animation: none; }
+  .keyboard-subtitle__caret { animation: none; }
+  .keyboard-subtitle--beautifying .keyboard-subtitle__glyph { animation: none; }
+  .keyboard-subtitle__toolbar { transition: none; }
+}

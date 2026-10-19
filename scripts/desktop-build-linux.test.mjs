@@ -67,8 +67,8 @@ fi
 }
 
 describe('Linux Desktop build contract', () => {
-  for (const pkg of ['gstreamer-1.0', 'gstreamer-app-1.0', 'gstreamer-video-1.0']) {
-    test.skipIf(process.platform !== 'linux')(`rejects an unavailable GStreamer build dependency before building: ${pkg}`, () => {
+  for (const pkg of ['gstreamer-1.0', 'gstreamer-app-1.0', 'gstreamer-video-1.0', 'alsa']) {
+    test.skipIf(process.platform !== 'linux')(`rejects an unavailable native desktop build dependency before building: ${pkg}`, () => {
       const fixture = runBuildFixture(['x64'], '', pkg);
       try {
         expect(fixture.result.status).toBe(1);

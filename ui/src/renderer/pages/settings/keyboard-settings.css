@@ -1,0 +1,7 @@
+.keyboard-loading { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 32px; }
+.keyboard-model-select { width: 280px; max-width: 100%; }
+.keyboard-short-input { width: 180px; }
+.keyboard-font-select { width: 92px; }
+.keyboard-field { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; font-size: 13px; border-top: 1px solid var(--color-border-2); }
+.keyboard-field small { color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+.keyboard-form-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0; }

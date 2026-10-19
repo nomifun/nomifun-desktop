@@ -14,12 +14,12 @@ const ASSET_NAMES = ['com.nomifun.system-execution.policy', 'install.sh', 'READM
 // pipewiresrc -> videoconvert -> videoflip -> appsink. Plugins are runtime-loaded,
 // so ELF dependency scanning alone cannot discover their package dependencies.
 const DESKTOP_DEB_DEPENDENCIES = [
-  'pkexec | policykit-1', 'polkitd | policykit-1', 'xdg-desktop-portal',
+  'pkexec | policykit-1', 'polkitd | policykit-1', 'xdg-desktop-portal', 'util-linux', 'coreutils', 'libasound2t64 | libasound2', 'xwayland',
   'libgstreamer1.0-0 (>= 1.14)', 'libgstreamer-plugins-base1.0-0 (>= 1.14)',
   'gstreamer1.0-pipewire', 'gstreamer1.0-plugins-base', 'gstreamer1.0-plugins-good',
 ];
 const DESKTOP_RPM_DEPENDENCIES = [
-  'polkit', 'xdg-desktop-portal', 'gstreamer1', 'gstreamer1-plugins-base',
+  'polkit', 'xdg-desktop-portal', 'util-linux', 'coreutils', 'alsa-lib', 'xorg-x11-server-Xwayland', 'gstreamer1', 'gstreamer1-plugins-base',
   'gstreamer1-plugins-good', 'pipewire-gstreamer',
 ];
 

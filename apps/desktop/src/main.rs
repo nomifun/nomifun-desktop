@@ -51,6 +51,7 @@ mod native_api_plugins;
 #[cfg(any(windows, target_os = "macos"))]
 mod headless_browser_runtime;
 mod companion_pointer;
+mod keyboard;
 mod relay_pairing;
 mod updater_install_context;
 
@@ -668,6 +669,14 @@ impl<T> DownloadedUpdateCache<T> {
         }
     }
 
+    /// A failed native preflight has not handed the package to an installer.
+    fn restore_before_handoff(&self, version: &str, payload: T) {
+        let mut slot = self.slot.lock().unwrap_or_else(|poison| poison.into_inner());
+        if matches!(&*slot, DownloadedUpdateSlot::Installing { version: active } if active == version) {
+            *slot = DownloadedUpdateSlot::Ready { version: version.to_owned(), payload };
+        }
+    }
+
     /// Release the claim taken by [`Self::take_ready`] after the installer has
     /// accepted the package. Without this, `Installing` was a terminal state:
     /// on macOS/Linux `Update::install` RETURNS on success, so a completed
@@ -987,6 +996,11 @@ async fn install_update(
         Err(error) if error.handoff_may_have_started() => return Err(error.message()),
         Err(error) => return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: {}", error.message())),
     };
+
+    if let Err(error) = keyboard::prepare_update(&app).await {
+        downloaded.restore_before_handoff(&requested_version, package);
+        return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: 键盘服务停止预检失败，安装包仍保留：{error}"));
+    }
 
     #[cfg(target_os = "macos")]
     return install_macos_update_retained(app, package, requested_version).await;
@@ -2668,13 +2682,20 @@ fn complete_main_thread_setup(
         ));
     }
     let pairing_manager = Arc::new(
-        relay_pairing::RelayPairingManager::new(pairing_data_dir)
+        relay_pairing::RelayPairingManager::new(pairing_data_dir.clone())
             .context("failed to initialize Relay pairing state")?,
     );
     let relay_shutdown_owner = pairing_manager.clone();
+    let native_shutdown_app = app.clone();
     server.register_relay_shutdown(move || {
         let owner = relay_shutdown_owner.clone();
-        async move { owner.shutdown().await }
+        let native_app = native_shutdown_app.clone();
+        async move {
+            let keyboard = keyboard::shutdown_main(&native_app).await;
+            let relay = owner.shutdown().await;
+            keyboard.map_err(anyhow::Error::msg)?;
+            relay
+        }
     })?;
     if !app.manage(pairing_manager.clone()) {
         return Err(anyhow::anyhow!(
@@ -2777,6 +2798,7 @@ fn complete_main_thread_setup(
         ));
     }
     let main_window = win_builder.build()?;
+    keyboard::start(app.clone(), server.clone(), pairing_data_dir)?;
     #[cfg(target_os = "linux")]
     linux_media::install(&main_window)?;
     #[cfg(not(target_os = "linux"))]
@@ -3270,6 +3292,7 @@ fn reconcile_companion_windows(
 }
 
 fn main() -> std::process::ExitCode {
+    if let Some(code) = keyboard::early_entry() { return code; }
     #[cfg(windows)]
     if let Some(code) = nomifun_app::windows_system_execution_entry() { return code; }
     // Remove the native daemon registration from its own signed App identity
@@ -3294,6 +3317,11 @@ fn main() -> std::process::ExitCode {
     if let Some(code) = nomifun_app::commands::run_mcp_stdio_subcommand_if_present() {
         return code;
     }
+    // SAFETY: all headless modes returned and no worker/native GUI has started.
+    // Use the tested XWayland path on mixed Wayland/X11 sessions by default;
+    // an explicit user GDK_BACKEND remains authoritative.
+    #[cfg(target_os = "linux")]
+    unsafe { keyboard::configure_gui_backend(); }
 
     // LaunchServices development admission finishes before PATH discovery,
     // storage or worker creation. Ordinary production startup never accepts
@@ -3789,7 +3817,12 @@ fn main() -> std::process::ExitCode {
             relay_pairing_forget_local,
             relay_pairing_refresh_qr,
             set_keep_awake,
-            set_tray_labels
+            set_tray_labels,
+            keyboard::keyboard_get_state,
+            keyboard::keyboard_update_settings,
+            keyboard::keyboard_model_catalog,
+            keyboard::keyboard_audio_devices,
+            keyboard::keyboard_action
         ]))
         // Close-to-tray is now the DEFAULT (and only) close behavior. Closing the
         // main window (titlebar ×, OS close, Alt+F4) hides it to the tray instead
@@ -3799,6 +3832,7 @@ fn main() -> std::process::ExitCode {
         // the exit coordinator; window destruction cannot overwrite a restart
         // sentinel or bypass browser/backend cleanup.
         .on_window_event(|window, event| {
+            if keyboard::window_event(window, &event) { return; }
             if window.label() != "main" {
                 return;
             }

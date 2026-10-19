@@ -1,11 +1,11 @@
-import { Cpu, Info, Server, Shield, System } from '@icon-park/react';
+import { Cpu, Info, Keyboard, Server, Shield, System } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { getSiderTooltipProps } from '@/renderer/utils/ui/siderTooltip';
 import SiderNavItem from '@/renderer/components/layout/Sider/SiderNav/SiderNavItem';
 import SiderSectionHeader from '@/renderer/components/layout/Sider/SiderNav/SiderSectionHeader';
 
-export const BUILTIN_TAB_IDS = ['system', 'permissions', 'execution-engines', 'ssh-hosts', 'about'] as const;
+export const BUILTIN_TAB_IDS = ['system', 'permissions', 'keyboard', 'execution-engines', 'ssh-hosts', 'about'] as const;
 
 /** Settings destinations use the same rows and group labels as the app rail. */
 const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }> = ({ collapsed = false, tooltipEnabled = false }) => {
@@ -13,6 +13,7 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
   const items = [
     { id: 'system', label: t('settings.workspace.generalTitle'), icon: <System theme='outline' size={16} /> },
     { id: 'permissions', label: t('settings.capabilityPermissions.nav'), icon: <Shield theme='outline' size={16} /> },
+    { id: 'keyboard', label: t('settings.keyboard.title'), icon: <Keyboard theme='outline' size={16} /> },
     { id: 'execution-engines', label: t('settings.executionEngines.title'), icon: <Cpu theme='outline' size={16} /> },
     { id: 'ssh-hosts', label: t('ssh.title'), icon: <Server theme='outline' size={16} /> },
     { id: 'about', label: t('settings.about'), icon: <Info theme='outline' size={16} /> },

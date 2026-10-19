@@ -15,6 +15,13 @@ pub(crate) fn app_commands_only<R: tauri::Runtime>(
 ) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
     move |invoke| {
         let view = invoke.message.webview_ref();
+        if view.label() == "keyboard-subtitle" && view.window().label() == "keyboard-subtitle" {
+            if !matches!(invoke.message.command(), "keyboard_get_state" | "keyboard_action") {
+                invoke.resolver.reject("The subtitle window cannot invoke this desktop command.");
+                return true;
+            }
+            return dispatch(invoke);
+        }
         if !is_app_webview(view.label(), view.window().label()) {
             invoke
                 .resolver

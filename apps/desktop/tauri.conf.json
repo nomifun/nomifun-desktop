@@ -28,7 +28,8 @@
     "resources": {
       "../../LICENSE": "LICENSE",
       "../../NOTICE": "NOTICE",
-      "../../crates/backend/nomifun-runtime/notices/": "component-notices/"
+      "../../crates/backend/nomifun-runtime/notices/": "component-notices/",
+      "keyboard-packaging/": "keyboard-packaging/"
     },
     "icon": [
       "icons/32x32.png",
@@ -41,6 +42,28 @@
       "minimumSystemVersion": "14.0",
       "entitlements": "entitlements.plist"
     },
+    "linux": {
+      "deb": {
+        "preInstallScript": "keyboard-packaging/deb-preinstall.sh",
+        "preRemoveScript": "keyboard-packaging/deb-preremove.sh",
+        "postInstallScript": "keyboard-packaging/udev-refresh.sh",
+        "postRemoveScript": "keyboard-packaging/udev-refresh.sh",
+        "files": {
+          "/usr/lib/nomifun-keyboard/package-lifecycle.sh": "keyboard-packaging/package-lifecycle.sh",
+          "/usr/lib/udev/rules.d/70-nomifun-keyboard.rules": "keyboard-packaging/70-nomifun-keyboard.rules"
+        }
+      },
+      "rpm": {
+        "preInstallScript": "keyboard-packaging/rpm-preinstall.sh",
+        "preRemoveScript": "keyboard-packaging/rpm-preremove.sh",
+        "postInstallScript": "keyboard-packaging/udev-refresh.sh",
+        "postRemoveScript": "keyboard-packaging/udev-refresh.sh",
+        "files": {
+          "/usr/lib/nomifun-keyboard/package-lifecycle.sh": "keyboard-packaging/package-lifecycle.sh",
+          "/usr/lib/udev/rules.d/70-nomifun-keyboard.rules": "keyboard-packaging/70-nomifun-keyboard.rules"
+        }
+      }
+    },
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
@@ -48,7 +71,8 @@
       },
       "nsis": {
         "installMode": "currentUser",
-        "template": "nsis/installer.nsi"
+        "template": "nsis/installer.nsi",
+        "installerHooks": "nsis/keyboard-hooks.nsh"
       }
     }
   },

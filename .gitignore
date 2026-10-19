@@ -92,3 +92,7 @@ Thumbs.db
 # workflows when useful; add an intentional workflow explicitly with git add -f.
 /.github/workflows/*.yml
 /.github/workflows/*.yaml
+
+# Generated keyboard diagnostics: keep raw runs in a private validation profile.
+# Only product and technical documentation belongs under docs/.
+/docs/validation/evidence/native-keyboard-*

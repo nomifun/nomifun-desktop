@@ -27,6 +27,7 @@ const AppsPage = React.lazy(() => import('@renderer/pages/apps'));
 const AppWorkspaceRoute = React.lazy(() => import('@renderer/pages/apps/AppWorkspaceRoute'));
 const OpenCapabilitiesPage = React.lazy(() => import('@renderer/pages/openCapabilities'));
 const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemSettings'));
+const KeyboardSettings = React.lazy(() => import('@renderer/pages/settings/KeyboardSettings'));
 const ExecutionEngineSettings = React.lazy(() => import('@renderer/pages/settings/ExecutionEngines'));
 const SshHostSettings = React.lazy(() => import('@renderer/pages/settings/SshHostSettings'));
 const LoginPage = React.lazy(() => import('@renderer/pages/login'));
@@ -177,6 +178,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/settings/display' element={<Navigate to='/settings/system' replace />} />
             <Route path='/settings/webui' element={<Navigate to='/connections?task=browser' replace />} />
             <Route path='/settings/system' element={withRouteFallback(SystemSettings)} />
+            <Route path='/settings/keyboard' element={withRouteFallback(KeyboardSettings)} />
             <Route path='/settings/execution-engines' element={withRouteFallback(ExecutionEngineSettings)} />
             <Route path='/settings/ssh-hosts' element={withRouteFallback(SshHostSettings)} />
             <Route path='/settings/permissions' element={withRouteFallback(SystemSettings)} />

@@ -71,6 +71,7 @@ require_linux_build_deps() {
     pkg-config --exists webkit2gtk-4.1 || missing+=("libwebkit2gtk-4.1-dev (pkg-config: webkit2gtk-4.1)")
     pkg-config --exists gbm || missing+=("libgbm-dev (pkg-config: gbm)")
     pkg-config --exists librsvg-2.0 || missing+=("librsvg2-dev (pkg-config: librsvg-2.0)")
+    pkg-config --exists alsa || missing+=("libasound2-dev (pkg-config: alsa)")
     pkg-config --atleast-version=1.14 gstreamer-1.0 || missing+=("libgstreamer1.0-dev >= 1.14 (pkg-config: gstreamer-1.0)")
     pkg-config --atleast-version=1.14 gstreamer-app-1.0 || missing+=("libgstreamer-plugins-base1.0-dev >= 1.14 (pkg-config: gstreamer-app-1.0)")
     pkg-config --atleast-version=1.14 gstreamer-video-1.0 || missing+=("libgstreamer-plugins-base1.0-dev >= 1.14 (pkg-config: gstreamer-video-1.0)")
@@ -88,7 +89,7 @@ require_linux_build_deps() {
     cat >&2 <<'EOF'
 
 Debian/Ubuntu 可先安装:
-  sudo apt-get install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libgbm-dev libayatana-appindicator3-dev librsvg2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev patchelf
+  sudo apt-get install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libgbm-dev libayatana-appindicator3-dev librsvg2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libasound2-dev patchelf
 
 说明:
   - libgbm-dev 提供 -lgbm 链接名与 gbm.pc。

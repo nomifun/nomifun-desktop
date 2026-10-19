@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+native-keyboard-validation = []
+
+[[example]]
+name = "keyboard_native_validation"
+required-features = ["native-keyboard-validation"]
+
 # The Tauri desktop shell: links the unified backend (nomifun-app) in-process.
 # It is a member of the root workspace and inherits the workspace version
 # (`version.workspace = true` above) — so `bun run bump` / the workspace version
@@ -70,6 +77,10 @@ open.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+nomifun-keyboard = { path = "../../crates/backend/nomifun-keyboard" }
+nomifun-model-invoke.workspace = true
+nomifun-api-types.workspace = true
+cpal = "=0.16.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nomifun-browser-macos = { path = "../../crates/backend/nomifun-browser-macos" }
@@ -116,6 +127,7 @@ windows = { version = "0.61", features = [
     "Win32_System_Ole",
     "Win32_System_Registry",
     "Win32_System_Performance",
+    "Win32_System_RemoteDesktop",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
@@ -123,10 +135,14 @@ windows = { version = "0.61", features = [
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+futures-util.workspace = true
 gtk = { version = "0.18", features = ["v3_24"] }
+gdkx11 = "0.18"
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
+zbus = { version = "5.16", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
+nomifun-db.workspace = true
 sqlx.workspace = true
 zeroize.workspace = true
 tracing-subscriber.workspace = true

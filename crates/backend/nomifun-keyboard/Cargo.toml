@@ -1,0 +1,17 @@
+[package]
+name = "nomifun-keyboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+fs2.workspace = true
+getrandom.workspace = true
+serialport = { version = "4.8", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true

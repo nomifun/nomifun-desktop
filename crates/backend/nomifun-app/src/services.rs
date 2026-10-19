@@ -1733,7 +1733,7 @@ impl AppServices {
                 "Repaired misclassified provider model capabilities"
             );
         }
-        let model_invoke_http = nomifun_net::http_client();
+        let model_invoke_http = nomifun_net::http_client_no_redirect()?;
         let model_invoke_service = Arc::new(nomifun_model_invoke::ModelInvokeService::new(
             provider_repo.clone(),
             provider_model_repo.clone(),

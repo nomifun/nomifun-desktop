@@ -104,17 +104,24 @@
         "task": "speech_recognition",
         "status": "supported",
         "protocols": [
-          "openai.audio_transcriptions"
+          "openai.audio_transcriptions",
+          "openai.realtime_transcription"
         ],
-        "notes": "独立/audio/transcriptions文件接口；不把Realtime或需要专属分段参数的说话人分离模型冒充通用转写。",
+        "notes": "文件模型使用/audio/transcriptions；gpt-live-transcribe使用独立transcription WebSocket，在commit前持续发送PCM并接收partial，commit后等待final。两种任务行为使用不同的显式协议，不互相回退。流式协议核对日期2026-10-19。",
         "model_ids": [
+          "gpt-live-transcribe",
           "gpt-transcribe",
           "gpt-4o-transcribe",
           "gpt-4o-mini-transcribe",
           "whisper-1"
         ],
+        "protocol_model_ids": {
+          "openai.audio_transcriptions": ["gpt-transcribe", "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"],
+          "openai.realtime_transcription": ["gpt-live-transcribe"]
+        },
         "sources": [
-          "https://developers.openai.com/api/docs/guides/speech-to-text"
+          "https://developers.openai.com/api/docs/guides/speech-to-text",
+          "https://developers.openai.com/api/docs/guides/realtime-transcription"
         ]
       },
       {

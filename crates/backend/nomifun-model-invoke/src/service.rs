@@ -228,6 +228,12 @@ impl ModelInvokeService {
     /// validates the resulting URL and auth material while keeping decrypted
     /// credentials inside the service boundary.
     pub async fn validate(&self, m: &ModelRef, task: ModelTask) -> Result<(), InvokeError> {
+        if task == ModelTask::SpeechRecognition {
+            let config = self.resolve_task_config(m, task).await?;
+            if crate::streaming_asr::supports_protocol(&config.protocol) {
+                return crate::streaming_asr::validate_model(&config);
+            }
+        }
         self.resolve_validated_call(m, task).await.map(|_| ())
     }
 
@@ -297,6 +303,17 @@ impl ModelInvokeService {
     ) -> Result<TaskOutcome, InvokeError> {
         self.invoke_with_expected_configuration(m, req, None, Some(expected))
             .await.map(|(outcome, _context)| outcome)
+    }
+
+    /// The same exact-task fence with the opaque context retained for jobs
+    /// accepted by an asynchronous file protocol. No catalog/key copy escapes.
+    pub async fn invoke_with_context_at_task_configuration(
+        &self,
+        m: &ModelRef,
+        expected: &crate::ResolvedTaskConfig,
+        req: TaskRequest,
+    ) -> Result<(TaskOutcome, InvocationContext), InvokeError> {
+        self.invoke_with_expected_configuration(m, req, None, Some(expected)).await
     }
 
     async fn invoke_with_expected_configuration(
@@ -444,6 +461,21 @@ impl ModelInvokeService {
     /// and realtime health uses [`Self::probe_realtime`].
     pub async fn probe(&self, m: &ModelRef, task: ModelTask) -> Result<ProbeReport, InvokeError> {
         let started = Instant::now();
+        if task == ModelTask::SpeechRecognition {
+            if let Ok(config) = self.resolve_task_config(m, task).await {
+                if crate::streaming_asr::supports_protocol(&config.protocol) {
+                    let result = self.open_streaming_asr(m, crate::streaming_asr::StreamingAsrConfig::default()).await;
+                    let (status, message) = match result {
+                        Ok(session) => {
+                            session.close().await;
+                            (HealthStatus::Unknown, "Live transcription handshake accepted; use the keyboard real-time test to verify partial/final audio recognition".to_owned())
+                        },
+                        Err(error) => (HealthStatus::Unhealthy, error.to_string()),
+                    };
+                    return Ok(ProbeReport { status, latency_ms: started.elapsed().as_millis() as u64, message: Some(message) });
+                }
+            }
+        }
         let attempt = async {
             // Two-phase build: resolve with a params-free placeholder, then
             // rebuild the minimal request from the resolved model_params so

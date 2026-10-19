@@ -680,6 +680,12 @@ impl DesktopHostServices {
 }
 
 impl DesktopServer {
+    /// Native keyboard model operations share the existing catalog and
+    /// credential authority. No HTTP credential DTO or AgentSession is made.
+    pub fn keyboard_model_service(&self) -> Option<Arc<nomifun_model_invoke::ModelInvokeService>> {
+        self._keep_alive.services().map(|services| services.model_invoke_service.clone())
+    }
+
     /// Boot the embedded backend under `TrustLocalToken`, bind the permanent
     /// loopback listener, and spawn its serve task. Returns the shared handle
     /// plus a [`DesktopKeepAlive`] the caller MUST keep alive for the process

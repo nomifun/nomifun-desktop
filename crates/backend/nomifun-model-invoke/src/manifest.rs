@@ -471,7 +471,8 @@ fn allowed_auth_schemes(spec: ProtocolSpec) -> &'static [&'static str] {
         "bedrock.anthropic_messages" => &["bedrock"],
         // The persistent StepFun session performs the same strict check before
         // sending its Bearer header over the WebSocket handshake.
-        "stepfun.realtime_s2s" => &["bearer"],
+        "stepfun.realtime_s2s" | "stepfun.asr_stream" | "openai.realtime_transcription" => &["bearer"],
+        "deepgram.listen_stream" => &["token", "bearer"],
         // Volcengine voice uses three required X-Api-* headers populated from
         // its purpose-built credential object.
         "volc.asr_file" | "volc.tts_v3" => &["volc_voice"],
@@ -553,6 +554,9 @@ const PROTOCOL_SPECS: &[ProtocolSpec] = &[
     ] },
     ProtocolSpec { id: "gemini.interactions_tts", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["gemini"], connection_role: None, endpoints: &[origin_endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/v1beta/interactions")] },
     ProtocolSpec { id: "deepgram.listen", tasks: &[SpeechRecognition], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[origin_endpoint(SpeechRecognition, "endpoint", Submit, "POST", "/v1/listen")] },
+    ProtocolSpec { id: "deepgram.listen_stream", tasks: &[SpeechRecognition], executor: RealtimeSession, transport: Websocket, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[origin_endpoint(SpeechRecognition, "realtime_endpoint", Session, "GET", "/v1/listen")] },
+    ProtocolSpec { id: "openai.realtime_transcription", tasks: &[SpeechRecognition], executor: RealtimeSession, transport: Websocket, scopes: NATIVE_CUSTOM, platforms: &["openai"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "realtime_endpoint", Session, "GET", "/realtime?intent=transcription")] },
+    ProtocolSpec { id: "stepfun.asr_stream", tasks: &[SpeechRecognition], executor: RealtimeSession, transport: Websocket, scopes: NATIVE_CUSTOM, platforms: &["stepfun"], connection_role: None, endpoints: &[endpoint(SpeechRecognition, "realtime_endpoint", Session, "GET", "/realtime/asr/stream")] },
     ProtocolSpec { id: "deepgram.speak_rest", tasks: &[SpeechSynthesis], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["deepgram"], connection_role: None, endpoints: &[origin_endpoint(SpeechSynthesis, "endpoint", Submit, "POST", "/v1/speak")] },
     ProtocolSpec { id: "ark.images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["ark", "volcengine", "ark-agent-plan", "ctyun"], connection_role: None, endpoints: &[
         endpoint(ImageGeneration, "endpoint", Submit, "POST", "/images/generations"),
@@ -782,6 +786,7 @@ fn provider_params_encoding(
         | ("openai.videos", VideoGeneration)
         | ("openai.audio_transcriptions", SpeechRecognition)
         | ("deepgram.listen", SpeechRecognition)
+        | ("deepgram.listen_stream", SpeechRecognition)
         | ("deepgram.speak_rest", SpeechSynthesis)
         | ("stepfun.images", ImageEdit)
         | ("xai.stt", SpeechRecognition)
@@ -823,6 +828,8 @@ fn provider_params_encoding(
         | ("stepfun.asr_sse", SpeechRecognition)
         | ("stepfun.images", ImageGeneration)
         | ("stepfun.realtime_s2s", RealtimeConversation)
+        | ("openai.realtime_transcription", SpeechRecognition)
+        | ("stepfun.asr_stream", SpeechRecognition)
         | ("xai.images_json", ImageGeneration | ImageEdit)
         | ("xai.video_jobs", VideoGeneration)
         | ("xai.tts", SpeechSynthesis)
@@ -1271,7 +1278,8 @@ pub fn try_default_protocol_registry() -> Result<ProtocolManifestRegistry, Invok
             ProtocolExecutorKind::ModelInvoke | ProtocolExecutorKind::AsyncJob => {
                 request_registry.contains(&descriptor.protocol_id)
             }
-            ProtocolExecutorKind::RealtimeSession => realtime_registry.contains(&descriptor.protocol_id),
+            ProtocolExecutorKind::RealtimeSession => realtime_registry.contains(&descriptor.protocol_id)
+                || crate::streaming_asr::supports_protocol(&descriptor.protocol_id),
         };
         if !valid_executor {
             return Err(InvokeError::config(format!(
