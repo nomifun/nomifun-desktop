@@ -295,6 +295,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
           {t(server.enabled ? 'settings.mcpEnabled' : 'settings.mcpDisabled')}
         </span>
         <Switch
+          size='small'
           checked={server.enabled}
           loading={isTogglingEnabled}
           disabled={isTogglingEnabled || isTestingConnection || server.last_test_status === 'testing' || isLoggingIn}
