@@ -131,7 +131,7 @@ describe('standalone prompt-library source-parity appearance', () => {
     expect(html.includes('offline')).toBe(false);
   });
 
-  test('locks the 1440px visual measurements in page-local CSS', () => {
+  test('keeps the page layout and compact card measurements in page-local CSS', () => {
     const css = readFileSync(
       new URL('./StandalonePromptLibraryPage.module.css', import.meta.url),
       'utf8'
@@ -146,8 +146,9 @@ describe('standalone prompt-library source-parity appearance', () => {
     expect(css.includes('max-width: 1152px')).toBe(true);
     expect(css.includes('overflow-wrap: anywhere')).toBe(true);
     expect(css.includes('padding-top: 126px')).toBe(true);
-    expect(css.includes('aspect-ratio: 4 / 3')).toBe(true);
-    expect(css.includes('gap: 20px')).toBe(true);
+    expect(css.includes('repeat(auto-fill, minmax(min(250px, 100%), 1fr))')).toBe(true);
+    expect(css.includes('aspect-ratio: 3 / 2')).toBe(true);
+    expect(css.includes('gap: 12px')).toBe(true);
 
     const toolbarRule = css.slice(css.indexOf('.toolbar {'), css.indexOf('.searchField {'));
     expect(toolbarRule.includes('background:')).toBe(false);
