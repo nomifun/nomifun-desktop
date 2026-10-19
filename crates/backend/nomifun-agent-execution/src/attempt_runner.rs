@@ -10,7 +10,8 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use async_trait::async_trait;
 use nomifun_api_types::{
@@ -30,8 +31,6 @@ use serde_json::{Value, json};
 use crate::delivery::{AgentExecutionDelivery, AgentExecutionTurnOutput};
 
 const DELIVERY_RECEIPT_GRACE: Duration = Duration::from_secs(5);
-const DELIVERY_RECEIPT_WAIT_POLL: Duration = Duration::from_millis(500);
-const DELIVERY_RECEIPT_POLL: Duration = Duration::from_millis(100);
 pub(crate) const MISSING_DELIVERY_RECEIPT_CODE: &str = "agent_delivery_receipt_missing";
 
 /// Async callback invoked immediately after the Agent conversation is created
@@ -48,9 +47,9 @@ pub(crate) type AttemptStarted = Box<
 pub(crate) enum AttemptSessionTarget {
     /// Ordinary collaboration owns a separate immutable audit transcript.
     ChildAttempt,
-    /// Product-authored child keeps explicit canonical Companion affiliation;
-    /// merely carrying a companion resource never grants that affiliation.
-    DirectedChildAttempt { source: crate::DirectedDelegationSource },
+    /// Source-authored child preserves exact canonical request provenance and
+    /// any established Companion affiliation. Resources alone grant neither.
+    SourceChildAttempt { source: crate::AgentExecutionSource },
     /// AutoWork drives the exact AgentSession selected by the user. The
     /// Session is not created, renamed, or later cleaned up as an Attempt.
     AutomationLead { conversation_id: String },
@@ -71,7 +70,7 @@ fn attempt_turn_input(
     } else {
         step_spec.to_owned()
     };
-    Ok((content, "agent_execution", matches!(session_target,AttemptSessionTarget::DirectedChildAttempt { .. })))
+    Ok((content, "agent_execution", matches!(session_target,AttemptSessionTarget::SourceChildAttempt { .. })))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +153,17 @@ pub(crate) trait AttemptRunner: Send + Sync {
         Ok(None)
     }
 
+    /// Follow an already admitted Turn. This may read/wait only; it cannot
+    /// deliver the original input or admit a replacement Attempt.
+    async fn observe_existing_turn(
+        &self,
+        _owner_id: &str,
+        _conversation_id: &str,
+        _operation_id: &str,
+    ) -> Result<AttemptOutcome, AppError> {
+        Err(AppError::Conflict("existing canonical Turn observer is unavailable".into()))
+    }
+
     async fn read_adoptable_output(
         &self,
         _owner_id: &str,
@@ -187,15 +197,18 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         creation_key: &str,
     ) -> Result<ConversationResponse, AppError>;
 
-    async fn create_directed_from_agent_snapshot_idempotent(
+    /// Verify the source's exact admitted Tool/Effect and preserve its frozen
+    /// Snapshot and product affiliation. The input entry does not choose a
+    /// different Agent role or widen the child's resources.
+    async fn create_from_source_snapshot_idempotent(
         &self,
         _owner_id: &str,
         _request: CreateConversationRequest,
         _snapshot: AgentResolvedSnapshot,
-        _source: &crate::DirectedDelegationSource,
+        _source: &crate::AgentExecutionSource,
         _creation_key: &str,
     ) -> Result<ConversationResponse, AppError> {
-        Err(AppError::Conflict("canonical directed-child creator is unavailable".into()))
+        Err(AppError::Conflict("canonical source-child creator is unavailable".into()))
     }
 
     async fn discard_unlinked_creation(
@@ -220,6 +233,25 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         operation_id: &str,
     ) -> Result<Option<AgentExecutionDelivery>, AppError>;
 
+    /// Subscribe to the existing owner before re-reading its exact receipt.
+    /// Notifications are hints; a bounded fallback re-reads canonical progress
+    /// even when no Runtime is attached or the notification stream closes.
+    async fn observe_turn_progress(
+        &self, owner_id: &str, conversation_id: &str, operation_id: &str,
+        after_cursor: Option<u64>,
+    ) -> Result<crate::AgentExecutionTurnProgress, AppError> {
+        let delivery = self.delivery_result(owner_id, conversation_id, operation_id).await?;
+        let progress = crate::AgentExecutionTurnProgress {
+            found: delivery.is_some(), terminal: delivery.as_ref().is_some_and(|delivery| delivery.completed), cursor: 0,
+            suspended: delivery.as_ref().is_some_and(|delivery| matches!(delivery.turn_outcome,
+                Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { .. } | nomifun_agent_contracts::AgentTurnOutcome::Paused { .. }))),
+        };
+        if progress.found && !progress.terminal && after_cursor == Some(progress.cursor) {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Ok(progress)
+    }
+
     /// An exact public operation key, or the latest closed Turn for explicit
     /// adoption. Implementations authorize the Session before resolving its
     /// canonical operation and read only canonical events, payloads and effects.
@@ -238,10 +270,11 @@ pub trait AgentExecutionSessionPort: Send + Sync {
 
     fn take_turn_tokens(&self, conversation_id: &str) -> Option<i64>;
 
-    async fn cancel_for_execution(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
+    /// Cleanup remains bound to the original Attempt invocation even if a
+    /// successor has started in this Session. Never select the current Turn.
+    async fn cancel_attempt_for_execution(
+        &self, owner_id: &str, conversation_id: &str,
+        attempt_id: &str, target_operation_id: &str,
     ) -> Result<(), AppError>;
 
     /// Stop one persisted canonical Turn using the durable effect identity.
@@ -280,22 +313,24 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         origin: &str,
     ) -> Result<String, AppError>;
 
-    /// Directed reports must preserve the exact task/source references. A Host
+    /// Execution reports preserve the exact task/source references. A Host
     /// without that canonical writer must not silently degrade to plain text.
-    async fn project_directed_execution_report_idempotent(
+    async fn project_execution_report_idempotent(
         &self,
         _owner_id: &str,
         _conversation_id: &str,
         _operation_id: &str,
         _content: &str,
-        _report: &crate::DirectedDelegationReport,
+        _report: &crate::AgentExecutionReport,
     ) -> Result<String, AppError> {
-        Err(AppError::Conflict("canonical directed-report writer is unavailable".into()))
+        Err(AppError::Conflict("canonical execution-report writer is unavailable".into()))
     }
 
-    async fn notify_directed_input_required_idempotent(&self, _owner_id: &str,
-        _input: &crate::DirectedDelegationInput) -> Result<(),AppError> {
-        Err(AppError::Conflict("canonical directed-input notice writer is unavailable".into()))
+    /// Project the exact persisted DecisionRequested event to its original
+    /// request. Recovery repeats this identity, never a newly authored question.
+    async fn notify_execution_input_required_idempotent(&self, _owner_id: &str,
+        _input: &crate::AgentExecutionInput) -> Result<(),AppError> {
+        Err(AppError::Conflict("canonical execution-input notice writer is unavailable".into()))
     }
 }
 
@@ -320,36 +355,33 @@ impl AgentSessionAttemptRunner {
         conversation_id: &str,
         operation_id: &str,
         timeout: Duration,
-    ) -> Result<Option<AgentExecutionDelivery>, AppError> {
-        let mut deadline = Instant::now() + timeout;
-        let mut grace_deadline = deadline + DELIVERY_RECEIPT_GRACE;
+    ) -> Result<bool, AppError> {
+        let mut grace_deadline = Instant::now() + timeout + DELIVERY_RECEIPT_GRACE;
         let mut observed_at = Instant::now();
         let mut was_waiting = false;
+        let mut cursor = None;
         loop {
-            let receipt = self
-                .session
-                .delivery_result(owner_id, conversation_id, operation_id)
-                .await?;
+            let progress = self.session.observe_turn_progress(owner_id, conversation_id, operation_id, cursor).await?;
+            cursor = Some(progress.cursor);
             let now = Instant::now();
-            let waiting = receipt.as_ref().is_some_and(|receipt| matches!(receipt.turn_outcome,
-                Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { .. } | nomifun_agent_contracts::AgentTurnOutcome::Paused { .. })));
+            let waiting = progress.suspended;
             if was_waiting {
                 // Human/resource waiting consumes no execution budget. Keep
                 // observing this exact owner without replaying its tools.
                 let suspended_for = now.saturating_duration_since(observed_at);
-                deadline += suspended_for;
                 grace_deadline += suspended_for;
             }
             observed_at = now;
             was_waiting = waiting;
-            if let Some(receipt) = receipt.filter(|receipt| receipt.completed) {
-                return Ok(Some(receipt));
+            if !progress.found { return Ok(false); }
+            if progress.terminal {
+                return Ok(true);
             }
             if !waiting && now >= grace_deadline {
-                return Ok(None);
+                return Ok(false);
             }
-            let poll = if !waiting && now >= deadline { DELIVERY_RECEIPT_POLL } else { DELIVERY_RECEIPT_WAIT_POLL };
-            tokio::time::sleep(poll).await;
+            // The port waits on the existing owner and re-reads its receipt.
+            // No wait here hydrates transcript or resubmits business input.
         }
     }
 
@@ -383,18 +415,18 @@ impl AgentSessionAttemptRunner {
             )
             .await?;
         let boundary_message_id = delivery.message_id.clone();
-        let receipt = if delivery.completed {
-            Some(delivery)
+        let completed = if delivery.completed {
+            true
         } else {
             self.await_delivery_receipt(owner_id, conversation_id, operation_id, timeout)
                 .await?
         };
-        if let Some(receipt) = receipt {
+        if completed {
             let output = self.session.read_turn_output(
                 owner_id, conversation_id, Some(operation_id),
             ).await?;
             let Some(output) = output.filter(|output| {
-                output.delivery.completed && output.delivery.message_id == receipt.message_id
+                output.delivery.completed && output.delivery.message_id == boundary_message_id
             }) else {
                 return Ok(missing_delivery_receipt_outcome(
                     conversation_id, self.session.take_turn_tokens(conversation_id),
@@ -503,9 +535,9 @@ impl AttemptRunner for AgentSessionAttemptRunner {
         }
 
         let creates_child = matches!(&session_target, AttemptSessionTarget::ChildAttempt
-            | AttemptSessionTarget::DirectedChildAttempt { .. });
+            | AttemptSessionTarget::SourceChildAttempt { .. });
         let conversation = match &session_target {
-            AttemptSessionTarget::ChildAttempt | AttemptSessionTarget::DirectedChildAttempt { .. } => {
+            AttemptSessionTarget::ChildAttempt | AttemptSessionTarget::SourceChildAttempt { .. } => {
                 let request = CreateConversationRequest {
                     r#type: AgentType::Nomi,
                     name: Some(format!("协作 · {}", step_title.trim())),
@@ -525,10 +557,10 @@ impl AttemptRunner for AgentSessionAttemptRunner {
                     execution_template_id: None,
                     extra,
                 };
-                let created = if let AttemptSessionTarget::DirectedChildAttempt { source } = &session_target {
+                let created = if let AttemptSessionTarget::SourceChildAttempt { source } = &session_target {
                     let snapshot = participant.agent_snapshot.clone().ok_or_else(||
-                        AppError::Conflict("directed child has no frozen Agent snapshot".into()))?;
-                    self.session.create_directed_from_agent_snapshot_idempotent(
+                        AppError::Conflict("source child has no frozen Agent snapshot".into()))?;
+                    self.session.create_from_source_snapshot_idempotent(
                         owner_id, request, snapshot, source, attempt_creation_key,
                     ).await
                 } else if let Some(snapshot) = participant.agent_snapshot.clone() {
@@ -672,6 +704,24 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             terminal_event_id,
             outcome: completed_delivery_outcome(conversation_id, output, None),
         }))
+    }
+
+    async fn observe_existing_turn(
+        &self, owner_id: &str, conversation_id: &str, operation_id: &str,
+    ) -> Result<AttemptOutcome, AppError> {
+        let mut cursor = None;
+        loop {
+            let progress = self.session.observe_turn_progress(owner_id, conversation_id, operation_id, cursor).await?;
+            if !progress.found {
+                return Err(AppError::Conflict("original canonical Turn receipt is unavailable; automatic replay is blocked".into()));
+            }
+            cursor = Some(progress.cursor);
+            if !progress.terminal { continue; }
+            let output = self.session.read_turn_output(owner_id, conversation_id, Some(operation_id)).await?
+                .filter(|output| output.delivery.completed)
+                .ok_or_else(|| AppError::Conflict("original terminal Turn output is not yet verified".into()))?;
+            return Ok(completed_delivery_outcome(conversation_id, output, None));
+        }
     }
 
 }
@@ -862,9 +912,16 @@ mod tests {
         conversation: ConversationResponse,
         create_calls: AtomicUsize,
         created_request: Mutex<Option<CreateConversationRequest>>,
-        directed_source: Mutex<Option<crate::DirectedDelegationSource>>,
+        request_source: Mutex<Option<crate::AgentExecutionSource>>,
         delivered: Mutex<Option<(String, SendMessageRequest)>>,
+        delivery_calls: AtomicUsize,
         receipt: Mutex<Option<AgentExecutionDelivery>>,
+        output: Mutex<Option<AgentExecutionTurnOutput>>,
+        output_reads: AtomicUsize,
+        progress_reads: Mutex<Vec<(String, Option<u64>)>>,
+        progress_waiting: tokio::sync::Notify,
+        progress_release: tokio::sync::Notify,
+        progress_error: Mutex<Option<AppError>>,
     }
 
     #[async_trait]
@@ -891,12 +948,12 @@ mod tests {
             Err(AppError::Conflict("unexpected child Session creation".to_owned()))
         }
 
-        async fn create_directed_from_agent_snapshot_idempotent(
+        async fn create_from_source_snapshot_idempotent(
             &self, owner_id: &str, request: CreateConversationRequest,
-            snapshot: AgentResolvedSnapshot, source: &crate::DirectedDelegationSource,
+            snapshot: AgentResolvedSnapshot, source: &crate::AgentExecutionSource,
             creation_key: &str,
         ) -> Result<ConversationResponse, AppError> {
-            *self.directed_source.lock().unwrap() = Some(source.clone());
+            *self.request_source.lock().unwrap() = Some(source.clone());
             self.create_from_agent_snapshot_idempotent(owner_id, request, snapshot, creation_key).await
         }
 
@@ -916,8 +973,9 @@ mod tests {
             _authority: AgentExecutionTurnAuthority,
             request: SendMessageRequest,
         ) -> Result<AgentExecutionDelivery, AppError> {
+            self.delivery_calls.fetch_add(1, Ordering::SeqCst);
             *self.delivered.lock().unwrap() = Some((conversation_id.to_owned(), request));
-            Err(AppError::Conflict("captured AutoWork turn".to_owned()))
+            self.receipt.lock().unwrap().clone().ok_or_else(|| AppError::Conflict("captured AutoWork turn".to_owned()))
         }
 
         async fn delivery_result(
@@ -929,9 +987,30 @@ mod tests {
             Ok(self.receipt.lock().unwrap().clone())
         }
 
+        async fn observe_turn_progress(
+            &self, _owner_id: &str, _conversation_id: &str, operation_id: &str,
+            after_cursor: Option<u64>,
+        ) -> Result<crate::AgentExecutionTurnProgress, AppError> {
+            if let Some(error) = self.progress_error.lock().unwrap().take() { return Err(error); }
+            self.progress_reads.lock().unwrap().push((operation_id.to_owned(), after_cursor));
+            if after_cursor.is_some() && self.output.lock().unwrap().is_none() {
+                self.progress_waiting.notify_one();
+                self.progress_release.notified().await;
+            }
+            let receipt = self.receipt.lock().unwrap().clone();
+            Ok(crate::AgentExecutionTurnProgress { found: receipt.is_some(),
+                terminal: self.output.lock().unwrap().is_some() || receipt.as_ref().is_some_and(|receipt| receipt.completed), cursor: 1,
+                suspended: receipt.as_ref().is_some_and(|receipt| matches!(receipt.turn_outcome,
+                    Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { .. } | nomifun_agent_contracts::AgentTurnOutcome::Paused { .. }))),
+            })
+        }
+
         async fn read_turn_output(
             &self, _owner_id: &str, _conversation_id: &str, _operation_id: Option<&str>,
-        ) -> Result<Option<AgentExecutionTurnOutput>, AppError> { Ok(None) }
+        ) -> Result<Option<AgentExecutionTurnOutput>, AppError> {
+            self.output_reads.fetch_add(1, Ordering::SeqCst);
+            Ok(self.output.lock().unwrap().clone())
+        }
 
         async fn get(
             &self,
@@ -946,10 +1025,12 @@ mod tests {
             None
         }
 
-        async fn cancel_for_execution(
+        async fn cancel_attempt_for_execution(
             &self,
             _owner_id: &str,
             _conversation_id: &str,
+            _attempt_id: &str,
+            _target_operation_id: &str,
         ) -> Result<(), AppError> {
             Ok(())
         }
@@ -1019,10 +1100,10 @@ mod tests {
         assert!(content.contains("task_brief"));
         assert_eq!(origin, "agent_execution");
         assert!(!hidden);
-        let directed=AttemptSessionTarget::DirectedChildAttempt{source:crate::DirectedDelegationSource{
+        let sourced=AttemptSessionTarget::SourceChildAttempt{source:crate::AgentExecutionSource{
             agent_session_id:CONVERSATION_ID.into(),turn_operation_id:"source".into(),tool_operation_id:"tool".into(),effect_id:"effect".into()}};
-        let (_,origin,hidden)=attempt_turn_input(&directed,true,"host context","requested desktop task").unwrap();
-        assert_eq!(origin,"agent_execution");assert!(hidden,"a directed host task is not a second human utterance");
+        let (_,origin,hidden)=attempt_turn_input(&sourced,true,"host context","requested background task").unwrap();
+        assert_eq!(origin,"agent_execution");assert!(hidden,"a background host task is not a second human utterance");
     }
 
     fn recording_session(receipt: Option<AgentExecutionDelivery>) -> Arc<RecordingSessionPort> {
@@ -1057,11 +1138,120 @@ mod tests {
         Arc::new(RecordingSessionPort {
             conversation,
             created_request: Mutex::new(None),
-            directed_source: Mutex::new(None),
+            request_source: Mutex::new(None),
             create_calls: AtomicUsize::new(0),
             delivered: Mutex::new(None),
+            delivery_calls: AtomicUsize::new(0),
             receipt: Mutex::new(receipt),
+            output: Mutex::new(None),
+            output_reads: AtomicUsize::new(0),
+            progress_reads: Mutex::new(Vec::new()),
+            progress_waiting: tokio::sync::Notify::new(),
+            progress_release: tokio::sync::Notify::new(),
+            progress_error: Mutex::new(None),
         })
+    }
+
+    #[tokio::test]
+    async fn recovery_observer_follows_the_original_receipt_without_delivery_or_history_polling() {
+        let pending = AgentExecutionDelivery {
+            message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: false,
+            turn_outcome: None, user_input_request: None, result_ok: None, result_text: None,
+            result_error: None, result_error_code: None, result_error_retryable: None,
+        };
+        let session = recording_session(Some(pending.clone()));
+        let runner = AgentSessionAttemptRunner::new(session.clone());
+        let observer = runner.observe_existing_turn("owner", CONVERSATION_ID, "original-attempt:initial-turn");
+        tokio::pin!(observer);
+        tokio::select! {
+            result = &mut observer => panic!("pending original Turn cannot settle: {result:?}"),
+            _ = session.progress_waiting.notified() => {}
+        }
+        assert_eq!(session.output_reads.load(Ordering::SeqCst), 0, "pending observation does not hydrate canonical output");
+        assert_eq!(session.create_calls.load(Ordering::SeqCst), 0);
+        assert!(session.delivered.lock().unwrap().is_none());
+        let completed = AgentExecutionDelivery { completed: true, result_ok: Some(true), result_text: Some("original result".into()),
+            turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { message_ids: vec![CURRENT_USER_TURN_ID.into()] }), ..pending };
+        *session.output.lock().unwrap() = Some(AgentExecutionTurnOutput {
+            canonical_operation_id: "exact-original-operation".into(), terminal_event_id: Some("original-terminal".into()),
+            delivery: completed, output_files: Vec::new(), integrity_ok: true,
+        });
+        session.progress_release.notify_one();
+        let result = observer.await.unwrap();
+        assert_eq!(result.disposition, AttemptDisposition::Delivered);
+        assert_eq!(result.text.as_deref(), Some("original result"));
+        assert_eq!(result.canonical_terminal, Some(("exact-original-operation".into(), "original-terminal".into())));
+        assert_eq!(session.output_reads.load(Ordering::SeqCst), 1);
+        assert!(session.progress_reads.lock().unwrap().iter().all(|(operation, _)| operation == "original-attempt:initial-turn"));
+        assert_eq!(session.create_calls.load(Ordering::SeqCst), 0);
+        assert!(session.delivered.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn recovery_observer_missing_receipt_never_falls_back_to_delivery() {
+        let session = recording_session(None);
+        let runner = AgentSessionAttemptRunner::new(session.clone());
+        assert!(matches!(runner.observe_existing_turn("owner", CONVERSATION_ID, "missing-original").await,
+            Err(AppError::Conflict(_))));
+        assert_eq!(session.output_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(session.create_calls.load(Ordering::SeqCst), 0);
+        assert!(session.delivered.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn receipt_query_failure_after_delivery_cannot_resubmit_the_original_input() {
+        let session = recording_session(Some(AgentExecutionDelivery {
+            message_id: CURRENT_USER_TURN_ID.into(), replayed: false, completed: false,
+            turn_outcome: None, user_input_request: None, result_ok: None, result_text: None,
+            result_error: None, result_error_code: None, result_error_retryable: None,
+        }));
+        *session.progress_error.lock().unwrap() = Some(AppError::Timeout("canonical query unavailable".into()));
+        let runner = AgentSessionAttemptRunner::new(session.clone());
+        let result = runner.deliver_turn("owner", CONVERSATION_ID, "original-operation",
+            AgentExecutionTurnAuthority { execution_id: generate_id(), step_id: generate_id(), attempt_id: generate_id(),
+                expected_step_version: 1, expected_attempt_version: 1, lease_owner: "original-owner".into() },
+            "original accepted input", "agent_execution", false, Duration::from_secs(1)).await;
+        assert!(matches!(result, Err(AppError::Timeout(_))));
+        assert_eq!(session.delivery_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(session.output_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(session.create_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn receipt_observation_freezes_suspension_time_and_preserves_accumulated_running_budget() {
+        let pending = AgentExecutionDelivery {
+            message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: false,
+            turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Paused { message_ids: Vec::new() }),
+            user_input_request: None, result_ok: None, result_text: None, result_error: None,
+            result_error_code: None, result_error_retryable: None,
+        };
+        let session = recording_session(Some(pending.clone()));
+        let runner = AgentSessionAttemptRunner::new(session.clone());
+        let wait = runner.await_delivery_receipt("owner", CONVERSATION_ID, "budget-original", Duration::from_secs(2));
+        tokio::pin!(wait);
+        tokio::select! {
+            result = &mut wait => panic!("paused task cannot settle: {result:?}"),
+            _ = session.progress_waiting.notified() => {}
+        }
+        tokio::time::advance(Duration::from_secs(60)).await;
+        *session.receipt.lock().unwrap() = Some(AgentExecutionDelivery { turn_outcome: None, ..pending });
+        session.progress_release.notify_one();
+        tokio::select! {
+            result = &mut wait => panic!("suspension cannot consume the running budget: {result:?}"),
+            _ = session.progress_waiting.notified() => {}
+        }
+        tokio::time::advance(Duration::from_secs(4)).await;
+        session.progress_release.notify_one();
+        tokio::select! {
+            result = &mut wait => panic!("the original remaining grace has not elapsed: {result:?}"),
+            _ = session.progress_waiting.notified() => {}
+        }
+        tokio::time::advance(Duration::from_secs(4)).await;
+        session.progress_release.notify_one();
+        assert!(!wait.await.unwrap(), "repeated reads must not reset the original accumulated budget");
+        assert_eq!(session.output_reads.load(Ordering::SeqCst), 0);
+        assert!(session.delivered.lock().unwrap().is_none());
+        assert_eq!(session.create_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1081,8 +1271,9 @@ mod tests {
         let completed = AgentExecutionDelivery { completed: true, result_ok: Some(true),
             turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { message_ids: vec![CURRENT_USER_TURN_ID.into()] }), ..paused };
         *session.receipt.lock().unwrap() = Some(completed.clone());
-        let observed = tokio::time::timeout(Duration::from_secs(2), &mut wait).await.unwrap().unwrap().unwrap();
-        assert_eq!(observed, completed);
+        session.progress_release.notify_one();
+        let observed = tokio::time::timeout(Duration::from_secs(2), &mut wait).await.unwrap().unwrap();
+        assert!(observed);
     }
 
     #[tokio::test]
@@ -1176,44 +1367,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn directed_child_uses_its_saved_snapshot_and_cannot_delegate_at_depth_zero() {
+    async fn source_child_preserves_frozen_grants_and_user_policies() {
+        for (delegation_policy, decision_policy) in [
+            (DelegationPolicy::Disabled, DecisionPolicy::AskUser),
+            (DelegationPolicy::Automatic, DecisionPolicy::Automatic),
+        ] {
         let session = recording_session(None);
         let runner = AgentSessionAttemptRunner::new(session.clone());
         let preset = generate_id();
         let provider = generate_id();
         let snapshot: AgentResolvedSnapshot = serde_json::from_value(json!({
-            "preset_id":preset,"preset_revision":3,"preset_name":"Desktop",
+            "preset_id":preset,"preset_revision":3,"preset_name":"Companion",
             "canonical_binding":{
                 "preset_revision_ref":{"preset_id":preset,"revision":3,"revision_digest":"a".repeat(64)},
                 "resolved_snapshot_ref":{"snapshot_id":generate_id(),"snapshot_digest":"b".repeat(64)},
                 "typed_resource_bindings":[],"binding_version":1
             },
-            "resolved_model":{"provider_id":provider,"model":"desktop-model"},
-            "enabled_capabilities":["computer"],"instructions":"desktop rules"
+            "resolved_model":{"provider_id":provider,"model":"companion-model"},
+            "enabled_capabilities":["computer","robot"],"instructions":"companion rules"
         })).unwrap();
         let participant = ExecutionParticipant {
             participant_id:generate_id(), execution_id:generate_id(), source_agent_id:generate_id(),
             preset_id:Some(preset),preset_revision:Some(3),agent_snapshot:Some(snapshot.clone()),
-            provider_id:Some(provider),model:Some("desktop-model".into()),role:None,capability:None,
+            provider_id:Some(provider),model:Some("companion-model".into()),role:None,capability:None,
             constraints:None,description:None,system_prompt:None,enabled_skills:vec![],
             disabled_builtin_skills:vec![],sort_order:0,introduced_in_revision:0,
             retired_in_revision:None,created_at:1,
         };
-        let source = crate::DirectedDelegationSource { agent_session_id:CONVERSATION_ID.into(),
+        let source = crate::AgentExecutionSource { agent_session_id:CONVERSATION_ID.into(),
             turn_operation_id:"source-turn".into(),tool_operation_id:"source-tool".into(),effect_id:"source-effect".into() };
-        let result = runner.execute("owner",AttemptSessionTarget::DirectedChildAttempt { source:source.clone() },&participant,&[],None,
-            "Desktop task",AgentToolPolicy::Full,false,DelegationPolicy::Disabled,0,
-            DecisionPolicy::AskUser,&generate_id(),"task context","do the requested work",
+        let result = runner.execute("owner",AttemptSessionTarget::SourceChildAttempt { source:source.clone() },&participant,&[],None,
+            "Background task",AgentToolPolicy::Full,false,delegation_policy,0,
+            decision_policy,&generate_id(),"task context","do the requested work",
             Duration::from_secs(1),Box::new(|_|Box::pin(async { panic!("creation is deliberately intercepted") })),
         ).await;
         assert!(result.is_err());
         let request = session.created_request.lock().unwrap().take().unwrap();
-        assert_eq!(request.delegation_policy,DelegationPolicy::Disabled);
-        assert_eq!(request.extra[nomifun_api_types::EXECUTION_CONSTRAINTS_KEY]["exclude_delegation"],true);
+        assert_eq!(request.delegation_policy,delegation_policy);
+        assert_eq!(request.decision_policy,decision_policy);
+        assert_eq!(request.extra[nomifun_api_types::EXECUTION_CONSTRAINTS_KEY]["exclude_delegation"].as_bool().unwrap_or(false),
+            delegation_policy == DelegationPolicy::Disabled);
         assert_eq!(request.extra["agent_snapshot"],serde_json::to_value(snapshot).unwrap());
         assert_eq!(session.create_calls.load(Ordering::SeqCst),1);
-        assert_eq!(session.directed_source.lock().unwrap().as_ref(),Some(&source));
+        assert_eq!(session.request_source.lock().unwrap().as_ref(),Some(&source));
         assert!(session.delivered.lock().unwrap().is_none());
+        }
     }
 
     #[test]

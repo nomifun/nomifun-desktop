@@ -14,6 +14,7 @@ import { refreshOnVersionConflict } from './refreshOnVersionConflict';
 import { isTerminalExecutionStatus } from './executionStatusMeta';
 import ExecutionStopControl from './ExecutionStopControl';
 import type { ExecutionId } from '@/common/types/ids';
+import type { TExecutionAutomationControl } from '@/common/types/agentExecution/agentExecutionTypes';
 
 /** A single status-gated header control. Never a bare `<button>` — a
  * `role="button"` div, busy-aware (greyed + click-suppressed while in flight). */
@@ -73,7 +74,8 @@ export const ExecutionControls: React.FC<{
   resumeBlocked?: boolean;
   refetch: () => Promise<void>;
   onReplan: () => void;
-}> = ({ executionId, executionVersion, status, inFlightCount, resumeBlocked = false, refetch, onReplan }) => {
+  automationControl?: TExecutionAutomationControl | null;
+}> = ({ executionId, executionVersion, status, inFlightCount, resumeBlocked = false, refetch, onReplan, automationControl }) => {
   const { t } = useTranslation();
   const [message, msgCtx] = useArcoMessage();
   const [busy, setBusy] = useState(false);
@@ -127,7 +129,7 @@ export const ExecutionControls: React.FC<{
   return (
     <div className='flex shrink-0 items-center gap-8px'>
       {msgCtx}
-      {status !== '' && !isBusyPlaceholder && !isTerminal && (
+      {!automationControl && status !== '' && !isBusyPlaceholder && !isTerminal && (
         <HeaderControl label={t('agentExecution.controls.replan')} onClick={onReplan} busy={busy}>
           <Refresh theme='outline' size='14' strokeWidth={3} />
         </HeaderControl>
@@ -139,12 +141,12 @@ export const ExecutionControls: React.FC<{
           <Loading theme='outline' size='14' strokeWidth={3} className='animate-spin line-height-0' />
         </HeaderControl>
       )}
-      {(status === 'running' || status === 'waiting_input') && (
+      {!automationControl && (status === 'running' || status === 'waiting_input') && (
         <HeaderControl label={t('agentExecution.controls.pause')} onClick={onPause} busy={busy}>
           <PauseOne theme='outline' size='14' strokeWidth={3} />
         </HeaderControl>
       )}
-      {status === 'paused' && (
+      {!automationControl && status === 'paused' && (
         <HeaderControl label={t('agentExecution.controls.resume')} onClick={onResume} busy={busy || resumeBlocked}
           title={resumeBlocked ? t('agentExecution.recovery.description') : undefined}>
           <PlayOne theme='outline' size='14' strokeWidth={3} />
@@ -161,7 +163,7 @@ export const ExecutionControls: React.FC<{
         </span>
       )}
       <ExecutionStopControl key={executionId} executionId={executionId} executionVersion={executionVersion}
-        status={status} refetch={refetch} disabled={busy} onBusyChange={setBusy} />
+        status={status} refetch={refetch} disabled={busy} onBusyChange={setBusy} automationControl={automationControl} />
     </div>
   );
 };

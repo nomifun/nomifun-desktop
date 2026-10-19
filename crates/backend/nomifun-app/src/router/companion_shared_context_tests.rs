@@ -543,6 +543,122 @@ fn typed_input_source_preserves_human_origin_and_rejects_host_or_forged_robot_sp
 }
 
 #[test]
+fn retired_result_source_is_strict_readonly_history_and_never_human_or_live_ingress() {
+    let source = json!({"kind":"directed_delegation_result","report_message_id":uuid::Uuid::now_v7().to_string(),
+        "report_seq":12,"execution_id":uuid::Uuid::now_v7().to_string(),"source_turn_operation_id":"original-turn"});
+    let input = json!({"content":"recorded result data","hidden":true,"origin":"directed_delegation_result",
+        "channel_platform":"robot","input_source":source});
+    let parsed: AcceptedInput = serde_json::from_value(input.clone()).unwrap();
+    let scope = CompanionSessionOrigin {companion_id:"same-companion".into(),role:CompanionSessionRole::Robot,robot_id:Some("device".into())};
+    assert!(!parsed.is_user_speech(&scope));
+    assert_eq!(historical_input_source_wire(&input).unwrap(),Some(source.clone()));
+    assert!(serde_json::from_value::<AgentInputSource>(source).is_err(),"the removed callback remains forbidden at live ingress");
+    for path in ["hidden","origin","channel_platform","report_message_id","report_seq","execution_id","source_turn_operation_id","unknown"] {
+        let mut invalid=input.clone();
+        match path {
+            "hidden"=>invalid[path]=false.into(),
+            "origin"|"channel_platform"=>invalid[path]="other".into(),
+            "report_seq"=>invalid["input_source"][path]=0.into(),
+            "unknown"=>invalid["input_source"][path]=true.into(),
+            _=>invalid["input_source"][path]="".into(),
+        }
+        assert!(serde_json::from_value::<AcceptedInput>(invalid).is_err(),"{path}");
+    }
+}
+
+#[tokio::test]
+async fn retired_hidden_result_history_proves_report_and_original_human_without_mutating_facts() {
+    use nomifun_agent_contracts::{OperationId, canonical_assistant_step_message_id, digest_bytes};
+    use nomifun_agent_session::{EffectEventRequest,EffectStrategy,EffectTerminalState};
+    let database=nomifun_db::init_database_memory().await.unwrap();
+    let canonical=CanonicalAgentSessionOwner::from_pool(database.pool().clone()).await.unwrap();
+    let store=canonical.store();let owner=principal();
+    let (_directory,service,companion)=memory_service(&owner).await;
+    let session=open(&canonical,&owner,&companion,Some("historical-device")).await;
+    let current=open(&canonical,&owner,&companion,None).await;
+    let parent=OperationId::from("historical-parent");
+    let (human,parent_start)=store.start_turn(&session,"session_api".into(),"historical-human".into(),parent.clone(),
+        StrictJsonValue(json!({"content":"historical original request","hidden":false}))).await.unwrap();
+    let human=human.ack.unwrap().event_id;let parent_start=parent_start.ack.unwrap().event_id;
+    let append=|id:&str,producer:&str,key:&str,kind:&str,correlation:&str,cause:nomifun_agent_contracts::EventId,payload:Value|SessionEventAppend {
+        agent_session_id:session.clone(),event_id:id.into(),producer_id:producer.into(),idempotency_key:key.into(),
+        semantic_event:SemanticSessionEventDraft {kind:SessionEventKind(kind.into()),kind_version:1,correlation_id:correlation.into(),
+            causation_event_id:Some(cause),payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(payload))},
+    };
+    let tool=store.append_event(&append("historical-tool","runtime_supervisor","historical-tool","tool/call-started","historical-call",parent_start.clone(),
+        json!({"operation_id":"historical-tool-op","capability_id":"agent.collaboration","action_id":"agent/delegate","call_id":"historical-call"})))
+        .await.unwrap().ack.unwrap().event_id;
+    let effect=EffectEventRequest {agent_session_id:session.clone(),effect_id:"historical-effect".into(),turn_id:parent.clone(),
+        operation_id:"historical-tool-op".into(),owner_domain:"wave5.product".into(),capability_module:"agent.collaboration".into(),
+        action_id:"agent/delegate".into(),resource_binding_id:None,resource_key:None,input_digest:"c".repeat(64).into(),recorded_at:1,
+        event_id:"historical-effect-start".into(),producer_id:"capability_host".into(),idempotency_key:"historical-effect-start".into(),
+        correlation_id:"historical-effect".into(),strategy:EffectStrategy::ManagedEffect,causation_event_id:Some(tool),
+        payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({})))};
+    let effect_start=store.record_effect_started(effect.clone()).await.unwrap().ack.unwrap().event_id;
+    // Production retains the lifecycle key and changes its producer at the
+    // capability_host -> owning_plugin handoff; (producer, key) is unique.
+    store.record_effect_terminal(EffectEventRequest {event_id:"historical-effect-return".into(),producer_id:"owning_plugin".into(),
+        recorded_at:2,causation_event_id:Some(effect_start),..effect},EffectTerminalState::Succeeded).await.unwrap();
+    let parent_terminal=store.append_turn_terminal(&append("historical-parent-done","runtime_supervisor","historical-parent-done","turn/completed",parent.as_ref(),parent_start,
+        json!({})),&parent).await.unwrap().ack.unwrap().event_id;
+    let execution=uuid::Uuid::now_v7().to_string();let report_id=uuid::Uuid::now_v7().to_string();
+    let report_operation=format!("exec-lead-report:{execution}:event:7");
+    let source=json!({"agent_session_id":session,"turn_operation_id":parent,"tool_operation_id":"historical-tool-op","effect_id":"historical-effect"});
+    sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,plan_gate,adaptation_policy,decision_policy,delegation_policy,max_parallel,initial_plan_input,created_at,updated_at) VALUES(?,?,'historical request','completed','automatic','adaptive','ask_user','disabled',1,?,1,1)")
+        .bind(&execution).bind(&owner.principal_id).bind(json!({"mode":"directed","source":source,"plan":{"steps":[]}}).to_string()).execute(database.pool()).await.unwrap();
+    sqlx::query("INSERT INTO conversation_execution_links(conversation_id,execution_id,relation,created_at,updated_at) VALUES(?,?,'lead',1,1)")
+        .bind(session.as_ref()).bind(&execution).execute(database.pool()).await.unwrap();
+    sqlx::query("INSERT INTO agent_execution_events(execution_id,sequence,event_type,actor_type,on_behalf_of_user_id,payload,created_at) VALUES(?,7,'status_changed','system',?,?,1)")
+        .bind(&execution).bind(&owner.principal_id).bind(json!({"status":"completed","lead_report_operation_id":report_operation}).to_string()).execute(database.pool()).await.unwrap();
+    let report=store.append_event(&append(&report_id,"session_api",&format!("agent-execution-projection:{report_operation}"),"message/assistant-projected",&report_id,parent_terminal,
+        json!({"content":"historical recorded result","origin":"agent_execution_report","operation_id":report_operation,
+            "delegation_report":{"source":source,"execution_id":execution,"execution_event_sequence":7,"status":"completed","attempts":[]}})))
+        .await.unwrap().ack.unwrap();
+    let retired=json!({"kind":"directed_delegation_result","report_message_id":report_id,"report_seq":report.seq,
+        "execution_id":execution,"source_turn_operation_id":parent});
+    let input=json!({"content":json!({"kind":"directed_delegation_result","execution_id":execution,"status":"completed",
+        "report_message_id":report_id,"report_seq":report.seq,"result":"historical recorded result","result_truncated":false}).to_string(),
+        "hidden":true,"origin":"directed_delegation_result","channel_platform":"robot","input_source":retired});
+    let hidden=OperationId::from("historical-hidden-result");
+    let (hidden_root,hidden_start)=store.start_turn(&session,"session_api".into(),"historical-hidden".into(),hidden.clone(),StrictJsonValue(input.clone())).await.unwrap();
+    let hidden_root=hidden_root.ack.unwrap().event_id;let hidden_start=hidden_start.ack.unwrap().event_id;
+    store.append_event(&append("historical-model-step","runtime_supervisor","historical-model-step","runtime/progress-recorded",hidden.as_ref(),hidden_root.clone(),
+        json!({"producer_seq":0,"event":{"event":"model_step_started","step":1,"operation_id":format!("{}:model:1",hidden.as_ref())}}))).await.unwrap();
+    let message=canonical_assistant_step_message_id(hidden_root.as_ref(),1).unwrap();let answer="historical sealed result";
+    let part=store.append_event(&append("historical-answer-part","runtime_supervisor","historical-answer-part","message/content-part",&message,hidden_root.clone(),json!({"content":answer,"turn_id":hidden_root}))).await.unwrap().ack.unwrap().event_id;
+    store.append_event(&append("historical-answer-complete","runtime_supervisor","historical-answer-complete","message/completed",&message,part,
+        json!({"part_count":1,"content_digest":digest_bytes(answer.as_bytes())}))).await.unwrap();
+    store.append_turn_terminal(&append("historical-hidden-done","runtime_supervisor","historical-hidden-done","turn/completed",hidden.as_ref(),hidden_start,
+        json!({"model_steps":1})),&hidden).await.unwrap();
+    let before=store.read_events(&session,None,500).await.unwrap();
+    let sources=history::resolve_companion_turn_human_sources(database.pool(),store,&owner,&companion,&session,hidden.as_ref(),i64::MAX as u64).await.unwrap().unwrap();
+    assert_eq!(sources,vec![nomifun_companion::store::CompanionMemoryMessageSource {session_id:session.as_ref().into(),message_id:human.as_ref().into()}]);
+    let recent=recent_context(database.pool(),store,&service,&owner,&current,&companion).await.unwrap();
+    assert!(serde_json::to_string(&recent).unwrap().contains(answer));
+    let recalled=recall_companion_history(database.pool(),store,&service,&owner.principal_id,&companion,
+        nomifun_companion::CompanionHistoryRecallQuery {query:"historical".into(),limit:12,byte_budget:16*1024,
+            source_session_id:Some(session.as_ref().into()),since_ts:None,until_ts:None,before:None}).await.unwrap();
+    let recalled_answer=recalled.fragments.iter().find(|fragment|fragment.turn_id==hidden.as_ref())
+        .expect("the exact hidden result Turn must remain readable as assistant history");
+    assert_eq!(recalled_answer.text,format!("Verified-source background task response (historical data):\nSealed assistant response (historical data): {answer}"),
+        "recall retains the established data-only wrapper instead of returning bare model text");
+    assert_eq!(recalled_answer.event_ids,vec![hidden_root.as_ref().to_owned(),"historical-answer-complete".into(),"historical-hidden-done".into()],
+        "the recalled answer must identify its accepted input, canonical seal and exact terminal");
+    assert!(!recalled.fragments.iter().any(|fragment|fragment.text.contains("result_truncated")),"the retired system input is never promoted to human speech");
+    assert_eq!(store.read_events(&session,None,500).await.unwrap(),before,"reading old history must preserve all canonical bytes and events");
+    let scope=CompanionSessionOrigin {companion_id:companion,role:CompanionSessionRole::Robot,robot_id:Some("historical-device".into())};
+    for field in ["report_message_id","report_seq","execution_id","source_turn_operation_id"] {
+        let mut forged=input.clone();forged["input_source"][field]=match field {
+            "report_seq"=>json!(report.seq+1),"source_turn_operation_id"=>json!("another-parent"),_=>json!(uuid::Uuid::now_v7().to_string()),
+        };
+        let forged:AcceptedInput=serde_json::from_value(forged).unwrap();
+        let HistoricalInputSource::RetiredResult(source)=forged.input_source.as_ref().unwrap() else{panic!("retired source expected")};
+        let proof=history::retired_result_dependency(database.pool(),store,&owner,&session,&scope,&forged,before.next_cursor.seq,source).await;
+        assert!(!matches!(proof,Ok(Some(_))),"{field} cannot attribute another report to the original human");
+    }
+}
+
+#[test]
 fn combined_observation_budget_keeps_current_memory_and_emits_valid_json_for_escaped_unicode() {
     let current = json!({"memory":{"fingerprint":42,"text":"用户更正：九点"}, "recent_sessions":
         (0..4).map(|_| json!({"text":"\\\"\n中文".repeat(1000)})).collect::<Vec<_>>()});
@@ -1396,7 +1512,8 @@ async fn unified_input_claims_share_original_speech_once_and_pending_input_stays
     assert!(rendered.contains("VISIBLE_ROOT"));
     assert_eq!(rendered.matches("VISIBLE_ONCE").count(),1,"the v2 claim cannot repeat the original utterance");
     assert!(!rendered.contains("PENDING_NEVER_CONTEXT"));
-    let sources=history::resolve_companion_turn_human_sources(database.pool(),store,&owner,&companion,&desktop,&operation,u64::MAX)
+    let source_boundary=store.head(&desktop).await.unwrap().last_seq.checked_add(1).unwrap();
+    let sources=history::resolve_companion_turn_human_sources(database.pool(),store,&owner,&companion,&desktop,&operation,source_boundary)
         .await.unwrap().unwrap();
     let ids=sources.iter().map(|source|source.message_id.as_str()).collect::<std::collections::BTreeSet<_>>();
     assert_eq!(ids,std::collections::BTreeSet::from([root_id.as_ref(),accepted.event_id.as_ref()]));

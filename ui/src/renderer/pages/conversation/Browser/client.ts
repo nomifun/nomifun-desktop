@@ -15,6 +15,7 @@ export type BrowserNavigationCommand = { command: 'reload' | 'stop_loading' | 'p
 export type BrowserCommand = BrowserNavigationCommand | { command: 'create'; url: string } | { command: 'close_all' | 'open_downloads' | 'clear_site_data'; runtime_generation: number } | { command: 'activate' | 'close' | 'back' | 'forward' | 'open_external'; target: BrowserTarget } | { command: 'navigate'; target: BrowserTarget; url: string } | { command: 'set_zoom'; target: BrowserTarget; percent: number } | { command: 'permission'; target: BrowserTarget; request_id: string; allow: boolean } | { command: 'dialog'; target: BrowserTarget; request_id: string; accept: boolean; text?: string } | { command: 'cancel_download'; target: BrowserTarget; download_id: string };
 
 export type SurfaceBounds = { x: number; y: number; width: number; height: number };
+export type BrowserSurfaceSource = 'user' | 'agent_auto';
 export type BrowserShortcutAction = 'address' | 'new_tab' | 'close_tab' | 'reload' | 'back' | 'forward';
 export type BrowserShortcut = { agent_session_id: string; target: BrowserTarget; action: BrowserShortcutAction; expected_navigation_sequence: number };
 export type BrowserViewEvent = { kind: 'snapshot'; snapshot: BrowserSnapshot } | { kind: 'unavailable'; code: string };
@@ -34,8 +35,8 @@ export interface BrowserClient {
   ensure(agentSessionId: string): Promise<BrowserSnapshot>;
   command(agentSessionId: string, command: BrowserCommand): Promise<BrowserSnapshot>;
   diagnostics(agentSessionId: string, target: BrowserTarget): Promise<unknown>;
-  attach(agentSessionId: string, bounds: SurfaceBounds, onEvent: (event: BrowserViewEvent) => void): Promise<number>;
-  update(id: number, sequence: number, bounds: SurfaceBounds, visible: boolean): Promise<void>;
+  attach(agentSessionId: string, bounds: SurfaceBounds, onEvent: (event: BrowserViewEvent) => void, surfaceSource?: BrowserSurfaceSource): Promise<number>;
+  update(id: number, sequence: number, bounds: SurfaceBounds, visible: boolean, surfaceSource?: BrowserSurfaceSource): Promise<void>;
   detach(id: number): Promise<void>;
   scaleFactor(): Promise<number>;
 }
@@ -50,15 +51,15 @@ export const browserClient: BrowserClient = {
   ensure: id => httpRequest('POST', `/api/agent-sessions/${encodeURIComponent(id)}/browser`, {}),
   command: (id, command) => httpRequest('POST', `/api/agent-sessions/${encodeURIComponent(id)}/browser/commands`, command),
   diagnostics: (id, target) => httpRequest('GET', `/api/agent-sessions/${encodeURIComponent(id)}/browser/diagnostics?${new URLSearchParams({ tab_id: target.tab_id, runtime_generation: String(target.runtime_generation), document_generation: String(target.document_generation) })}`),
-  async attach(id, bounds, onEvent) {
+  async attach(id, bounds, onEvent, surfaceSource = 'user') {
     const { invoke, Channel } = await import('@tauri-apps/api/core');
     const events = new Channel<BrowserViewEvent>();
     events.onmessage = onEvent;
-    return invoke<number>('browser_surface_attach', { agentSessionId: id, bounds, events });
+    return invoke<number>('browser_surface_attach', { agentSessionId: id, bounds, events, surfaceSource });
   },
-  async update(id, sequence, bounds, visible) {
+  async update(id, sequence, bounds, visible, surfaceSource = 'user') {
     const { invoke } = await import('@tauri-apps/api/core');
-    await invoke('browser_surface_update', { attachmentId: id, sequence, bounds, visible });
+    await invoke('browser_surface_update', { attachmentId: id, sequence, bounds, visible, surfaceSource });
   },
   async detach(id) {
     const { invoke } = await import('@tauri-apps/api/core');

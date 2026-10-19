@@ -5,7 +5,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
-import { executionId, makeDetail } from '../../../../../test/fixtures/conversationDelegation';
+import { executionId, leadConversationId, makeDetail, makeStep } from '../../../../../test/fixtures/conversationDelegation';
 import agentExecution from '@/renderer/services/i18n/locales/en-US/agentExecution.json';
 import ExecutionStopControl from './ExecutionStopControl';
 import { ExecutionControls } from './ExecutionControls';
@@ -99,10 +99,29 @@ test('a paused review barrier cannot resume but remains cancellable', () => {
   restores.push(() => resume.mockRestore());
   const view = render(<I18nextProvider i18n={i18n}><ExecutionControls executionId={executionId} executionVersion={41}
     status='paused' resumeBlocked refetch={async () => {}} onReplan={() => {}} /></I18nextProvider>);
-  const resumeButton = view.getByRole('button', { name: 'Resume' });
+  const resumeButton = view.getByRole('button', { name: 'Resume scheduling' });
   expect(resumeButton.getAttribute('aria-disabled')).toBe('true');
   fireEvent.click(resumeButton);
   fireEvent.keyDown(resumeButton, { key: 'Enter' });
   expect(resume).not.toHaveBeenCalled();
   expect(view.getByRole('button', { name: 'Stop collaboration' }).getAttribute('aria-disabled')).toBe('false');
+});
+
+test('AutoWork whole controls use the original run owner and omit unsupported business controls', async () => {
+  notices();
+  const cancel = spyOn(ipcBridge.agentExecution.cancel, 'invoke');
+  const stop = spyOn(ipcBridge.agentActivities.stop, 'invoke').mockResolvedValue({ accepted: true, execution_stopped: false, resources: [] });
+  restores.push(() => cancel.mockRestore(), () => stop.mockRestore());
+  const automationControl = { root_step_id: makeStep(0).step_id, lead_conversation_id: leadConversationId,
+    requirement_id: 'original-requirement', claim_generation: 7 };
+  const view = render(<I18nextProvider i18n={i18n}><ExecutionControls executionId={executionId} executionVersion={41}
+    status='running' automationControl={automationControl} refetch={async () => {}} onReplan={() => {}} /></I18nextProvider>);
+  expect(view.queryByRole('button', { name: 'Replan' })).toBeNull();
+  expect(view.queryByRole('button', { name: 'Pause scheduling' })).toBeNull();
+  expect(view.queryByRole('button', { name: 'Stop collaboration' })).toBeNull();
+  fireEvent.click(view.getByRole('button', { name: 'Stop current automatic run' }));
+  await waitFor(() => expect(view.getByRole('status').textContent).toContain('resource release is not yet confirmed'));
+  expect(stop.mock.calls[0][0]?.target).toEqual({ kind: 'auto_work_run', target_kind: 'conversation',
+    target_id: leadConversationId, requirement_id: 'original-requirement', claim_generation: 7 });
+  expect(cancel).not.toHaveBeenCalled();
 });

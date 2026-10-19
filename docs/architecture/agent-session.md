@@ -3,7 +3,7 @@
 AgentSession is the sole fact chain for sessions, turns, content, effects and cancellation. User-facing Conversation APIs project the same `AgentSessionId`. Chat and Coding run through one in-process `nomifun.nomi` Runtime.
 
 The [Companion implementation plan and acceptance status](companion.zh.md) covers
-concurrent desktop/Robot roles, multiple Sessions and bounded live shared memory.
+one Companion Agent, independent entry-point Sessions and bounded live shared memory.
 Pending acceptance must not be presented as verified physical-device behavior.
 
 This is the current development entry point. Rust types, the Session event registry and the canonical schema own executable contracts. Superseded designs and implementation instructions remain only in Git history.
@@ -181,9 +181,29 @@ workspace relocation and restart retain their owner fences.
 The 64-process Session limit covers active handles and handles lacking proven cleanup. Only an
 original first-party launch plus its committed terminal owner result and real reap receipt retires
 a native handle from that quota. Historical results remain; old handles are never recreated.
+Before a live Turn commits retention, the original typed `host_process_dispatch.process_owner`
+can bind its frozen owner generation and resource digest. Reaping requires the exact original
+returned start ToolResult, Effect, creator, Turn Snapshot and native FrozenOutput. Older dispatches
+without that binding still require original retention or a terminal ToolResult; current bindings,
+PIDs and timestamps cannot supply missing authority. The original Event/Payload chain archives
+output before releasing the final handle, without creating another execution or output ledger.
 Session deletion and application shutdown drain the shared resource owner even without a Runtime.
 After restart, unproven old ownership fences new process operations while ordinary chat remains
 available; neither PID adoption nor automatic command restart is permitted.
+
+MCP business uncertainty and native resource closure are separate facts. After the original task
+joins and its owner has no active work, the exact canonical MCP cleanup receipt may prove resource
+closure while the external business result remains Unknown. Turn and Runtime teardown may consume
+that proof; `host_cleanup_proven` never reconciles the business result or proves rollback. Dispatch,
+context and checkpoint resume still reject Unknown, and retirement cannot replay work. Missing,
+malformed or pending cleanup and another domain's unknown effects cannot borrow this MCP proof.
+Native cancellation uses a dedicated settlement entry: one writer transaction checks the original
+holder, fence, generation, Turn start and current-generation `host_cleanup_proven`. The exact active
+Turn can then settle from reconciliation to cancelled without granting new work or widening generic
+event/observation writes. Unknown stays unchanged, and the original journal retries the same terminal
+after a failed write. Host activity controls preserve the original Operation's exact identity, including
+valid Unicode, within its 1024 UTF-8 byte contract; the control request's 128-byte idempotency-key limit
+cannot be applied to that target or used to truncate it.
 
 Human replies have no application timeout. Background output, exit, deadline or external link
 expiry never answers a question, reopens model execution or authorizes a fresh launch. The next
@@ -272,6 +292,10 @@ its visible reason. Exhausting an active Turn's input capacity leaves legal uncl
 later Turn instead of permanently rejecting them or keeping the model sampling. Permanent input
 shape errors fail before acceptance; accepted input that cannot currently be prepared retains a
 visible typed status without creating a failed Turn or blocking unrelated valid messages.
+Cancelling an exact unclaimed input retains its accepted fact and records terminal `CancelledByOwner`.
+Preparation retry, later Turn claim and steering cannot revive it. Replaying the original key only
+acknowledges that original input; an explicit redo is a new input. Its `cancelled` /
+`CANCELLED_BY_OWNER` projection has no edit or retry action and is separate from repairable preparation blocks.
 Unknown Effects and technical pauses still fence execution; accepting
 text never grants budget increases, cleanup attestations or native resume authority.
 
@@ -336,8 +360,7 @@ Official seeds grant concrete business Actions rather than deriving authority fr
 | `assistant.general` | Files, processes, version control, artifacts, project memory, research, schedules, browser and computer operations, media, assets, Office, SSH, knowledge and Session management. |
 | `coding.codex` | Files, version control, processes, artifacts, project memory, research, collaboration, SSH, knowledge and Session management; retains headless Runtime requirements without browser or desktop-control dependencies. |
 | `app.developer` | Complete Coding baseline plus ten application-hosting actions; its independent project uses ordinary Sessions and the same application owner. Other presets keep application hosting optional. |
-| `companion.default` | Desktop Companion: persona, shared memory, channels, schedules and everyday files, processes, artifacts, research, browser, computer, media, assets, Office, SSH, collaboration and management. Physical Robot tools are omitted by default and can be explicitly selected. |
-| `companion.robot` | Robot defaults: the same Companion identity and memory, independent device Sessions and four explicit Robot Actions; directed desktop delegation supplies real-time queries, research, knowledge, computer work and elaborate motion planning. Source-scoped task controls and result Turns remain available. Users can explicitly add capabilities. |
+| `companion.default` | One Companion Agent with persona, shared memory, channels, schedules, ordinary work tools and Robot Actions. Physical tools require exact authorized device resources. |
 | `customer-service.default` | Customer notes, handoff, knowledge retrieval, channel replies and sends, files, processes, artifacts, research and schedules; no default global knowledge-registry, cross-Session or terminal management. |
 | `creative-studio.default` | Media, Canvas, assets, templates, Office, files, processes, artifacts, project memory, research, browser, collaboration and schedules; retains its three creative Package Skills. |
 
@@ -356,48 +379,26 @@ Canonical Runtime persona/instructions come from this admission's exact frozen R
 payload. Product persona Context and current facts are assembled separately; old extra
 memory snapshots are not restored as static model instructions.
 
-Desktop Companion and Robot are concurrent roles of one Companion identity, with independent
-Agent/model defaults and canonical Sessions. Device reconnects keep the device Session; browser navigation
-does not change its receive route. The lean policy requires `companion`, `companion.memory` and `robot`,
-optionally with discovery, delegate-only collaboration, and only source-scoped execution status,
-cancellation and question-answer management Actions.
-Adding other business capabilities restores ordinary budgets; display names cannot silently narrow an extended Agent.
-The derived model context is bounded to 128 KiB, with at most four complete historical user turns, 64 KiB and
-16 historical messages. Oversized historical turns are omitted whole, retaining tool call/result pairs in kept
-turns; the accepted current input is never truncated. Canonical history and history APIs remain complete.
-Cross-Agent handoffs are loaded verbatim up to 16 KiB; larger handoffs receive a short model-projection notice while their canonical facts remain intact. JSON is not truncated and old tasks are not inferred or inherited.
-Each turn permits eight model steps without execution-window renewal. Explicit Session reasoning choices remain unchanged.
-With no explicit choice, a canonical lean Robot can attach a transient `ResponsiveRobot` preference to its existing
-Turn model-configuration pin. Only exact documented provider/model/protocol effort support permits `minimal` or `low`
-on that actual attempt. Unknown models, gateways, native thinking controls and lighter settings retain their configuration;
-desktop workers use their own model settings. No Session field, saved model setting or frozen authority is rewritten.
-Within the existing 24 KiB/initial-definition budget, retain directed delegation and source-task controls first,
-then small representatives of granted Robot Actions before richer definitions. Initially visible definitions remain
-non-deferred and cannot be evicted by later ToolSearch windows. Oversized definitions remain discoverable;
-schemas, resource authority, connection leases and dispatch-time permission checks are unchanged.
+One Companion identity selects one primary Agent, default chat model and Skill/MCP setup. Desktop, quick-window, approved channels and physical devices use independent canonical Sessions. Reconnection preserves the device Session; navigation does not redirect input. Product Agent configuration uses only `companion/<companion_id>`; typed physical origin remains a source and authorization boundary.
 
-Clear physical commands use their matching device tools directly and default to no public reply once every requested
-action has a successful receipt. Questions, explicitly requested receipts, failures, uncertainty and necessary clarification
-still get a reply. Ordinary companionship follows the requested depth. Missing platform work, including
-a short real-time weather query, uses the same Companion's saved desktop Agent through
-`strategy=planned,target_role=desktop`; this single-target path skips the planning model. Deep research and elaborate
-motion design can use that worker's reasoning, returning a concise answer or a plan for the original Robot to execute
-within the original user request and its own device grants. Parent Turns end after acceptance without polling;
-typed result Turns return to the original valid device connection. Current live Persona and Runtime guidance apply to
-already-authorized device Sessions; seed instructions do not overwrite saved authorship or widen existing Snapshots.
+Authorization, schema display, context projection and device assembly are separate. Compact physical interaction does not depend on a fixed narrow capability set. Adding research, files or knowledge retains ordinary authorized tools and the same interaction policy. Deferred descriptions do not change authority. Unbound or offline devices do not block unrelated work; large schemas, Skill bodies and historical results expand on demand.
+
+Ordinary queries and operations execute directly in the receiving Session. AgentExecution remains available for durable, isolated or parallel work with canonical task references and user constraints. It is selected for actual task benefit, not an entry-point capability gap. Results commit to the source canonical chain and deliver directly without a mandatory hidden summarization Turn. Success events advance normal delivery; the durable outbox serves recovery.
+
+Explicit Session reasoning settings remain. A transient responsive preference only uses exact documented provider/model/protocol support and never rewrites saved models or frozen grants.
 
 The optional `finish_without_reply` Runtime control declares that the entire physical interaction needs no public answer.
 It can follow the final motion/display batch, with real execution still serialized. Host settlement, cancellation and the
 atomic terminal-input fence must pass before the typed `silent_completion` observation is committed. An exact completed
 Turn with that intent and its empty closing seal derives `AgentTurnOutcome::Silent`; old empty answers remain unavailable.
 This is reply intent, never evidence that physical movement or delegated work finished. UI history retains tool activity
-without a manufactured answer, while Robot receives only `Done` and does not start TTS. UI/API contract version 39 requires
+without a manufactured answer, while Robot receives only `Done` and does not start TTS. UI/API contract version 40 requires
 matching frontend and backend builds. Other Agent empty-answer and delivery guarantees stay unchanged.
 
 Robot ASR runs as an owned task, with at most one recognition in flight and two queued recordings per connection.
 The device reader continues handling MCP replies, abort, disconnect and ping. Abort clears unsubmitted audio
 and joins recognition cleanup. Replaced connections and host shutdown cannot submit late transcripts as new
-Companion inputs. Independent recognition scheduling retains the existing final-public-answer speech contract.
+Companion inputs. Independent recognition scheduling retains exact source and generation fences; committed public prefixes can be delivered before the whole work Turn ends.
 
 The conversation list's `archived` field is a canonical metadata annotation. It preserves
 history, working context, active tasks and ingress routes. It is separate from automatic
@@ -566,7 +567,7 @@ Each text source and reasoning activity commits its first real fragment before l
 
 Process narration and public answers share `ConversationProse` and a Session-scoped ephemeral display cursor. Messages retain their original zero-delay ingress batches and complete received text; copying, result membership, cancellation and Runtime busy state never wait for animation. Live ingress explicitly admits sources for frame-paced presentation, sharing progress across exact canonical source/ranges; history reads do not grant live eligibility or replay a process-to-answer handoff. Each narration block uses one Markdown tree, reused within its presented source revision, revealing only arrived characters and complete syntax ranges. Code blocks and display math keep stable widgets containing their actual received content; other Markdown consumers keep their default renderer. Cursors are neither persisted nor another appended body. Replacement, withdrawal, cancellation, pause, Session changes and reduced-motion settings retain their immediate boundaries.
 
-The existing ToolCall product projection retains capability/action identity, call names, existing path/operation labels and actual status. Live history and conversation exports exclude file bodies, search snippets, write content, patches, stdin, inline scripts and raw tool output. Existing operation rows remain unchanged; no replacement file list, card or interaction is introduced, and a row with no remaining detail has no empty disclosure. Canonical model arguments and observations are unaffected. Typed process outcomes, permission requirements, bounded-search results, knowledge-write notices and produced media are extracted before product-body removal and continue through their existing product paths. The renderer does not reconstruct these states from arbitrary output JSON. The unused `content_mode` query option and business-ignored knowledge-write `title` are retired. UI/API contract version 39 requires matching frontend/backend builds instead of allowing an old renderer to infer status from retired bodies.
+The existing ToolCall product projection retains capability/action identity, call names, existing path/operation labels and actual status. Live history and conversation exports exclude file bodies, search snippets, write content, patches, stdin, inline scripts and raw tool output. Existing operation rows remain unchanged; no replacement file list, card or interaction is introduced, and a row with no remaining detail has no empty disclosure. Canonical model arguments and observations are unaffected. Typed process outcomes, permission requirements, bounded-search results, knowledge-write notices and produced media are extracted before product-body removal and continue through their existing product paths. The renderer does not reconstruct these states from arbitrary output JSON. The unused `content_mode` query option and business-ignored knowledge-write `title` are retired. UI/API contract version 40 requires matching frontend/backend builds instead of allowing an old renderer to infer status from retired bodies.
 
 `ToolCompleted.runtime_hold` records only a bounded Runtime reason why one proposal did not reach its owner port. `ToolStarted` remains write-ahead admission intent. Discovery, held proposals, owner failures, cancellation and unknown Effects keep distinct semantics. Missing historical reasons remain unclassified rather than guessed from English output. Host settlement remains readable when cancellation prevents a Runtime completion. Display metadata never changes authority, work accounting, delivery review or replay decisions. New reports use the v5 public format without automatically appended aggregate failure counts. Work accounting and delivery gates retain their original values; saved current-generation older deliveries keep exact text validation without rewriting history.
 
@@ -581,6 +582,14 @@ One `ModelFailureDiagnostic` carries model-request refinements and evidence from
 Failures, current pauses and rejected requests share one error presentation. Model or provider failures automatically unlock the composer after the existing owner proves cleanup and native resource release and commits canonical `turn/failed`; the user does not need to end the Turn again. The same owner may settle an already-saved current-generation typed model failure pause during startup, Session reads or the next admission. Its transaction rechecks the exact pause revision, execution fence, Snapshot, current-generation cleanup receipt and absence of pending/unknown effects. It never runs a model, replays a tool, or changes failure into success or cancellation. Unproven cleanup, unknown effects, manual pauses and other recovery pauses retain their native fences and explicit recovery authority. Genuine pause notes derive only from verified current state and never enter Message history or invent failed terminals. Rejected requests remain transient within their originating Session, and an admitted request's canonical error replaces its HTTP fallback.
 
 Cron, Companion, Requirements, AutoWork, IDMM and AgentExecution retain their own business configuration and supervision state. Session input, admission, cancellation and completion use canonical Turn receipts.
+
+Cron's private dispatcher records its server-validated job/run/Session reference as typed
+`cron_runtime_overlay` on the original `message/user-accepted` input. Ordinary message requests
+cannot supply it; text, colliding operation keys, mutable job settings and message projections do
+not establish source ownership. Existing inputs are not rewritten. This changes neither
+AgentInputSource, Robot delivery nor model grants. Resource retirement for a new per-run Session
+retains its original creation and finalized receipt even after legitimate job/history deletion,
+without adding a persistent ledger alongside the original Session and domain facts.
 
 An `auto_group` channel guest enters a dedicated model-only Session through the
 trusted Channel port and repository relationships. A caller-supplied
@@ -603,19 +612,7 @@ rejected and recorded by the existing exposure guard, without a second correctiv
 model call or adaptive ToolHistory LOAD/SEARCH/READ. Approved channels and ordinary
 minimal Agents keep their existing contracts.
 
-The two Companion product roles select the official Companion/Robot templates or
-compatible personal Agents. Compatibility requires the Companion identity and memory
-core and the necessary resources. The templates have different defaults, while the
-workbench exposes the full capability catalog for both. Explicitly selected physical
-and local-work capabilities follow normal authorization and resource contracts without
-role-based clipping during save, creation or application. Resource resolution uses the exact target
-companion and cannot inherit another companion's identity or memory resources.
-The owner-scoped canonical opening fact identifies the Companion product
-Session; typed origin and binding together establish companion, role and device ownership regardless
-of whether the selected Agent is an official template. A regular Agent Session
-that mounts a Companion resource does not become that companion's product
-Session. Desktop, Channel and Robot may use independent canonical Sessions; viewing
-a Session never changes an ingress receive target.
+The Companion selects `companion.default` or a personal Agent with the identity and memory core. The complete capability catalog remains editable. Resource resolution uses the exact target companion; another companion's identity or memory cannot be inherited. The owner-scoped canonical opening, typed origin and frozen binding establish product and device ownership. Mounting a Companion resource in an ordinary Session does not create product membership. Independent entry-point Sessions retain their own input routes.
 
 Voice from a paired robot enters its dedicated Robot Session. Admission holds the
 current connection fence and verifies the exact canonical Companion, role and
@@ -624,23 +621,9 @@ cannot invent it through an origin string. Camera permission and robot vision ar
 independent. Voice input does not alter frozen grants; tools retain resource,
 Turn, connection and device-permission checks.
 
-Directed desktop results first commit a canonical report with the original
-Execution/Step/Attempt/Turn references, then admit an idempotent follow-up Turn at
-the original Robot Session's idle boundary using typed `DirectedDelegationResult`.
-Ordinary question notices reference the original `DecisionRequested` and verified
-presentation. Physical audio captures the unique already-presented question at the
-recording/ASR queue boundary and carries it through recognition and input admission.
-A new question may play while older audio awaits ASR, but that transcript retains
-its original `None` or older question ID and cannot acquire the newer question.
-Replaying an accepted old speech source only acknowledges it without rolling back
-the current question cut. The answer Action reads the accepted root rather than
-model-authored answer parameters. Successor questions, multiple pending questions and
-click-required approvals cannot gain authority through that Action. Completed parent
-Turns use the Store's exact read-only `turn_accepted_input` query, not native recovery
-reads restricted to an active Turn.
-An explicitly failed result Turn produces one idempotent fixed Host notice tied to
-its original report and failed terminal, on the original socket. A cancelled result
-Turn stays stopped without automatic failure playback or another model Turn.
+Background results commit a canonical report with exact Execution/Step/Attempt/Session/Turn references and deliver along the original request relation without a hidden result-model Turn. Questions reference their committed request and verified presentation. Physical audio freezes its presented question identity at the recording/ASR boundary; slow recognition cannot acquire a later question or another connection's authority. Replayed sources do not roll back the question cut.
+
+Direct device requests use the ordinary typed `request_user_input` path. Answers retain the original question identity and accepted human root; model-authored answer parameters cannot substitute for user input. Multiple pending questions, successor questions and click-required approvals do not gain permission through speech. Closed parent inputs are read through the exact read-only accepted-input API without borrowing active native admission.
 
 Same-companion facts refresh before subsequent model calls, and bounded recent context
 comes from typed canonical events. Deleting or correcting long-term memory invalidates
@@ -674,7 +657,7 @@ Memory tools use one `AgentMemoryProjection` for model output and budgeting, omi
 the two full source-lineage arrays while storage, REST and exports retain them. Default
 recall, queries, and fresh or historical write receipts use that same projection.
 
-Historical Directed dependencies and known-receipt replay use the Store's read-only
+Historical Execution dependencies and known-receipt verification use the Store's read-only
 `committed_tool_call_causation` to verify exact typed tool facts on closed Turns. This
 does not widen active/native admission or grant new execution authority.
 

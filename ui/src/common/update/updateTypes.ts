@@ -21,12 +21,6 @@ export interface UpdateCheckResult {
   latest?: UpdateReleaseInfo;
 }
 
-export interface UpdateCheckRequest {
-  includePrerelease?: boolean;
-  /** Defaults to nomifun/nomifun-app when omitted */
-  repo?: string;
-}
-
 // Shared status payloads emitted by the Tauri updater adapter.
 type AutoUpdateStatusType =
   | 'checking'

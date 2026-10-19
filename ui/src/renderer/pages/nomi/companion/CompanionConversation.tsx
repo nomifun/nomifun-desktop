@@ -34,8 +34,7 @@ interface Props {
 const CompanionConversation: React.FC<Props> = ({ conversation, companion, compact = false }) => {
   const { t } = useTranslation();
   const { profile, patchCompanion } = companion;
-  const role = conversation.extra?.companion_role === 'robot' ? 'robot' : 'companion';
-  const profileModel = role === 'robot' ? profile?.robot?.model : profile?.model;
+  const profileModel = profile?.model;
   const { groups } = useModelsForTask('chat');
   const [modelSaving, setModelSaving] = useState(false);
   const [agentSaving, setAgentSaving] = useState(false);
@@ -66,7 +65,6 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
         conversation,
         sessionModel: sessionModelRef.current,
         profileModel,
-        role,
         next: { provider_id: provider.id, model: modelName },
         patchCompanion,
         onSessionChanged: (model) => { sessionModelRef.current = model; refreshSession(); },
@@ -86,7 +84,7 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
       savingRef.current = false;
       setModelSaving(false);
     }
-  }, [conversation, profileModel, role, sessionBlocked, patchCompanion, refreshSession, t]);
+  }, [conversation, profileModel, sessionBlocked, patchCompanion, refreshSession, t]);
   const modelSelection = useNomiModelSelection({
     initialModel,
     onSelectModel,
@@ -122,9 +120,9 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion, compa
           : undefined}
       agentSelectorNode={compact || !profile ? undefined : <ProductAgentBindingSelect
         compact
-        targetKind={role}
+        targetKind='companion'
         targetId={profile.companion_id}
-        defaultTemplateKey={role === 'robot' ? 'companion.robot' : 'companion.default'}
+        defaultTemplateKey='companion.default'
         model={conversation.model}
         conversationId={conversation.id}
         updateDefault

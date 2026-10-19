@@ -54,6 +54,15 @@ mod companion_pointer;
 mod keyboard;
 mod relay_pairing;
 mod updater_install_context;
+#[cfg(all(windows,debug_assertions))]
+mod lifecycle_quit_fixture;
+
+fn lifecycle_quit_fixture_active()->bool {
+    #[cfg(all(windows,debug_assertions))]
+    { return lifecycle_quit_fixture::active(); }
+    #[cfg(not(all(windows,debug_assertions)))]
+    { false }
+}
 
 /// Build the webview initialization script. Injects the loopback backend port
 /// (`window.__backendPort`), the OS tag, and the per-boot local-trust secret
@@ -2750,6 +2759,10 @@ fn complete_main_thread_setup(
             .inner_size(1280.0, 832.0)
             .min_inner_size(880.0, 600.0)
             .initialization_script(&init_script);
+    #[cfg(all(windows,debug_assertions))]
+    let win_builder=if let Some(profile)=lifecycle_quit_fixture::shell_profile() {
+        win_builder.title("NomiFun Lifecycle Fixture").data_directory(profile)
+    } else {win_builder};
     #[cfg(target_os = "macos")]
     let win_builder = match app.state::<MacosWebviewDataStore>().0 {
         Some(identifier) => win_builder.data_store_identifier(identifier),
@@ -2865,11 +2878,13 @@ fn complete_main_thread_setup(
     // `listen()` to. `register_all()` is best-effort (some platforms / dev
     // contexts need it; ignore the error if it fails).
     let handle = app.clone();
-    let _ = app.deep_link().register_all();
+    if !lifecycle_quit_fixture_active() { let _ = app.deep_link().register_all(); }
     app.deep_link().on_open_url(move |event| {
         let urls: Vec<String> = event.urls().iter().map(|u| u.to_string()).collect();
         let _ = handle.emit("deep-link://received", urls);
     });
+    #[cfg(all(windows,debug_assertions))]
+    lifecycle_quit_fixture::start(&app,server)?;
     Ok(())
 }
 
@@ -3309,6 +3324,11 @@ fn main() -> std::process::ExitCode {
     }
     #[cfg(windows)]
     if let Some(code)=browser_surface::windows::user_file_picker::helper_entry() {return code;}
+    #[cfg(all(windows,debug_assertions))]
+    if let Err(error)=lifecycle_quit_fixture::prepare_launch() {
+        eprintln!("LIFECYCLE_FIXTURE_REFUSED: {error}");
+        return std::process::ExitCode::FAILURE;
+    }
     // If a terminal agent CLI spawned this shell as an MCP stdio bridge
     // (`current_exe() mcp-requirement-stdio` etc.), run that helper and exit
     // BEFORE any runtime init, single-instance handling, or window creation.
@@ -3389,7 +3409,10 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    let tauri_context = generated_tauri_context();
+    #[allow(unused_mut)]
+    let mut tauri_context = generated_tauri_context();
+    #[cfg(all(windows,debug_assertions))]
+    if let Some(identifier)=lifecycle_quit_fixture::identifier() {tauri_context.config_mut().identifier=identifier;}
 
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
@@ -3868,6 +3891,8 @@ fn main() -> std::process::ExitCode {
     // process::exit also retains the existing no-destructor exit semantics.
     let runtime_code = app.run_return(handle_run_event);
     let exit_code = exit_coordinator.process_exit_code(runtime_code);
+    #[cfg(all(windows,debug_assertions))]
+    let exit_code=lifecycle_quit_fixture::after_run(exit_code,&exit_coordinator);
     #[cfg(target_os = "macos")]
     {
         let cleanup_verified = exit_coordinator.cleanup_verified.load(Ordering::Acquire);

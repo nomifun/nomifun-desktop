@@ -1,18 +1,80 @@
 //! Backend-owned persistent MODNet supply. The shared manifest pins the exact
 //! artifact; bytes are verified before serving or atomically publishing them.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use nomifun_common::AppError;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncReadExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock, watch};
 
-#[derive(Debug, Deserialize)]
+/// Host-owned admission and join boundary for this model supply only. The
+/// existing model lock still serializes acquisition; this guard also covers
+/// callers waiting for that lock and the original cache readers/publisher.
+pub(crate) struct ModelLifecycle {
+    closing: watch::Sender<bool>,
+    active: Arc<RwLock<()>>,
+}
+
+type ModelActivity = Arc<OwnedRwLockReadGuard<()>>;
+
+impl Default for ModelLifecycle {
+    fn default() -> Self {
+        Self { closing: watch::channel(false).0, active: Arc::new(RwLock::new(())) }
+    }
+}
+
+fn shutdown_error() -> AppError {
+    AppError::Conflict("Companion matting model supply is shutting down".into())
+}
+
+impl ModelLifecycle {
+    pub(crate) fn request_shutdown(&self) {
+        self.closing.send_replace(true);
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.request_shutdown();
+        let _quiescent = self.active.write().await;
+    }
+
+    fn ensure_open(&self) -> Result<(), AppError> {
+        if *self.closing.borrow() { Err(shutdown_error()) } else { Ok(()) }
+    }
+
+    async fn cancelled(&self) {
+        let mut closing = self.closing.subscribe();
+        while !*closing.borrow_and_update() {
+            if closing.changed().await.is_err() { break; }
+        }
+    }
+
+    async fn admit(&self) -> Result<ModelActivity, AppError> {
+        self.ensure_open()?;
+        let active = tokio::select! {
+            biased;
+            _ = self.cancelled() => return Err(shutdown_error()),
+            active = self.active.clone().read_owned() => active,
+        };
+        self.ensure_open()?;
+        Ok(Arc::new(active))
+    }
+
+    async fn acquisition_lock<'a>(&self, lock: &'a Mutex<()>) -> Result<tokio::sync::MutexGuard<'a, ()>, AppError> {
+        let guard = tokio::select! {
+            biased;
+            _ = self.cancelled() => return Err(shutdown_error()),
+            guard = lock.lock() => guard,
+        };
+        self.ensure_open()?;
+        Ok(guard)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
 struct ModelManifest {
     id: String,
     filename: String,
@@ -52,36 +114,48 @@ const DOWNLOAD_TIMEOUTS: DownloadTimeouts = DownloadTimeouts {
 /// and SHA256 verification. The returned buffer is the one that was verified,
 /// avoiding a second file read racing a replacement. Concurrent callers share
 /// one successful acquisition through the lock and subsequent cache recheck.
-pub async fn model_bytes(models_dir: &Path, lock: &Mutex<()>) -> Result<Vec<u8>, AppError> {
+pub(crate) async fn model_bytes(
+    models_dir: &Path, lock: &Mutex<()>, lifecycle: &ModelLifecycle,
+) -> Result<Vec<u8>, AppError> {
     model_bytes_from_upstreams(
-        models_dir, lock, manifest(), reqwest::Client::builder(), DOWNLOAD_TIMEOUTS,
+        models_dir, lock, lifecycle, manifest(), reqwest::Client::builder(), DOWNLOAD_TIMEOUTS,
     ).await
 }
 
 async fn model_bytes_from_upstreams(
     models_dir: &Path,
     lock: &Mutex<()>,
+    lifecycle: &ModelLifecycle,
     model: &ModelManifest,
     client_builder: reqwest::ClientBuilder,
     timeouts: DownloadTimeouts,
 ) -> Result<Vec<u8>, AppError> {
+    let activity = lifecycle.admit().await?;
     let path = models_dir.join(&model.filename);
-    if let Some(bytes) = read_verified_cache(&path, model).await? {
+    if let Some(bytes) = read_verified_cache(&path, model, lifecycle, activity.clone()).await? {
+        lifecycle.ensure_open()?;
         return Ok(bytes);
     }
-    let _guard = lock.lock().await;
-    if let Some(bytes) = read_verified_cache(&path, model).await? {
+    let _guard = lifecycle.acquisition_lock(lock).await?;
+    if let Some(bytes) = read_verified_cache(&path, model, lifecycle, activity.clone()).await? {
+        lifecycle.ensure_open()?;
         return Ok(bytes);
     }
-    tokio::fs::create_dir_all(models_dir).await
-        .map_err(|error| AppError::Internal(format!("create models dir: {error}")))?;
     let client = client_builder.connect_timeout(timeouts.connect).build()
         .map_err(|error| AppError::Internal(format!("build model http client: {error}")))?;
     let mut errors = Vec::new();
     for url in &model.urls {
-        match download_one(&client, url, model, timeouts).await {
+        let downloaded = tokio::select! {
+            biased;
+            _ = lifecycle.cancelled() => return Err(shutdown_error()),
+            result = download_one(&client, url, model, timeouts) => result,
+        };
+        // Shutdown is a host cancellation, never an upstream failure authorizing
+        // fallback. A verified acquisition may enter publication only while open.
+        lifecycle.ensure_open()?;
+        match downloaded {
             Ok(bytes) => {
-                write_atomic(&path, &bytes).await?;
+                write_atomic(&path, &bytes, lifecycle, activity.clone()).await?;
                 tracing::info!(model = %model.id, url, bytes = bytes.len(), "verified matting model cached");
                 return Ok(bytes);
             }
@@ -96,20 +170,30 @@ async fn model_bytes_from_upstreams(
     )))
 }
 
-async fn read_verified_cache(path: &Path, model: &ModelManifest) -> Result<Option<Vec<u8>>, AppError> {
-    let file = match tokio::fs::File::open(path).await {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(AppError::Internal(format!("open matting model cache: {error}"))),
-    };
-    let meta = file.metadata().await
+async fn read_verified_cache(
+    path: &Path, model: &ModelManifest, lifecycle: &ModelLifecycle, activity: ModelActivity,
+) -> Result<Option<Vec<u8>>, AppError> {
+    let path = path.to_path_buf();
+    let model = model.clone();
+    join_owned_io(lifecycle, activity, move || {
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(AppError::Internal(format!("open matting model cache: {error}"))),
+        };
+        read_open_verified_cache(file, &model)
+    }).await
+}
+
+fn read_open_verified_cache(file: std::fs::File, model: &ModelManifest) -> Result<Option<Vec<u8>>, AppError> {
+    let meta = file.metadata()
         .map_err(|error| AppError::Internal(format!("stat matting model cache: {error}")))?;
     if !meta.is_file() || meta.len() != model.size {
         return Ok(None);
     }
     let mut bytes = Vec::with_capacity(model.size as usize);
     // Bound the read even if another process appends to the opened file.
-    file.take(model.size + 1).read_to_end(&mut bytes).await
+    file.take(model.size + 1).read_to_end(&mut bytes)
         .map_err(|error| AppError::Internal(format!("read matting model cache: {error}")))?;
     if bytes.len() as u64 != model.size || hex::encode(Sha256::digest(&bytes)) != model.sha256 {
         tracing::warn!(model = %model.id, "matting model cache failed integrity verification; reacquiring");
@@ -160,21 +244,48 @@ async fn download_one(
 }
 
 /// Invalid downloads cannot replace the old cache or expose partial bytes.
-async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+async fn write_atomic(
+    path: &Path, bytes: &[u8], lifecycle: &ModelLifecycle, activity: ModelActivity,
+) -> Result<(), AppError> {
     let path = path.to_path_buf();
     let bytes = bytes.to_vec();
-    tokio::task::spawn_blocking(move || {
-        let parent = path.parent()
-            .ok_or_else(|| AppError::Internal("matting model path has no parent".into()))?;
-        let mut temp = tempfile::Builder::new().prefix(".modnet.onnx.tmp.").tempfile_in(parent)
-            .map_err(|error| AppError::Internal(format!("create model tempfile: {error}")))?;
-        temp.write_all(&bytes).and_then(|_| temp.as_file_mut().sync_all())
-            .map_err(|error| AppError::Internal(format!("write model tempfile: {error}")))?;
-        temp.persist(&path)
-            .map_err(|error| AppError::Internal(format!("commit model: {}", error.error)))?;
-        crate::fsio::sync_dir(parent)
-            .map_err(|error| AppError::Internal(format!("fsync models dir: {error}")))
-    }).await.map_err(|error| AppError::Internal(format!("model write task failed: {error}")))?
+    join_owned_io(lifecycle, activity, move || publish_atomic(&path, &bytes)).await
+}
+
+async fn join_owned_io<T: Send + 'static>(
+    lifecycle: &ModelLifecycle,
+    activity: ModelActivity,
+    operation: impl FnOnce() -> Result<T, AppError> + Send + 'static,
+) -> Result<T, AppError> {
+    let task = {
+        // This brief token read serializes cache I/O registration with the
+        // synchronous shutdown fence; it never spans an await or native I/O.
+        let closing = lifecycle.closing.borrow();
+        if *closing { return Err(shutdown_error()); }
+        tokio::task::spawn_blocking(move || {
+            // Keep the original activity guard in the native operation as well as
+            // its async caller. Losing an HTTP waiter cannot release the join
+            // boundary while this reader/writer still owns its original file.
+            let _activity = activity;
+            operation()
+        })
+    };
+    task.await.map_err(|error| AppError::Internal(format!("model cache I/O task failed: {error}")))?
+}
+
+fn publish_atomic(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    let parent = path.parent()
+        .ok_or_else(|| AppError::Internal("matting model path has no parent".into()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| AppError::Internal(format!("create models dir: {error}")))?;
+    let mut temp = tempfile::Builder::new().prefix(".modnet.onnx.tmp.").tempfile_in(parent)
+        .map_err(|error| AppError::Internal(format!("create model tempfile: {error}")))?;
+    temp.write_all(bytes).and_then(|_| temp.as_file_mut().sync_all())
+        .map_err(|error| AppError::Internal(format!("write model tempfile: {error}")))?;
+    temp.persist(path)
+        .map_err(|error| AppError::Internal(format!("commit model: {}", error.error)))?;
+    crate::fsio::sync_dir(parent)
+        .map_err(|error| AppError::Internal(format!("fsync models dir: {error}")))
 }
 
 #[cfg(test)]
@@ -182,7 +293,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     const TEST_TIMEOUTS: DownloadTimeouts = DownloadTimeouts {
         connect: Duration::from_secs(1),
@@ -253,7 +364,7 @@ mod tests {
 
     async fn acquire(dir: &Path, lock: &Mutex<()>, model: &ModelManifest) -> Result<Vec<u8>, AppError> {
         tokio::time::timeout(Duration::from_secs(5), model_bytes_from_upstreams(
-            dir, lock, model, reqwest::Client::builder().no_proxy(), TEST_TIMEOUTS,
+            dir, lock, &ModelLifecycle::default(), model, reqwest::Client::builder().no_proxy(), TEST_TIMEOUTS,
         )).await.expect("model acquisition must settle")
     }
 
@@ -410,5 +521,219 @@ mod tests {
         assert_eq!(acquire(dir.path(), &lock, &model).await.unwrap(), bytes);
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         finished(server).await;
+    }
+
+    async fn blocked_upstream(
+        body_started: bool, size: usize,
+    ) -> (Vec<String>, tokio::sync::oneshot::Receiver<()>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let urls = vec![format!("http://{address}/primary"), format!("http://{address}/fallback")];
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert_eq!(line.trim_end(), "GET /primary HTTP/1.1");
+            loop {
+                line.clear();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                if line == "\r\n" { break; }
+            }
+            if body_started {
+                reader.get_mut().write_all(format!(
+                    "HTTP/1.1 200 fixture\r\nContent-Length: {size}\r\nConnection: close\r\n\r\na"
+                ).as_bytes()).await.unwrap();
+            }
+            entered.send(()).unwrap();
+            // Cancelling the original request must release its transport; the
+            // server never sends the missing headers/body or an idle timeout.
+            let mut rest = Vec::new();
+            let eof = tokio::time::timeout(Duration::from_secs(3), reader.read_to_end(&mut rest)).await
+                .expect("cancelled model request must close the original connection");
+            if let Err(error) = eof {
+                assert!(matches!(error.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted));
+            }
+            assert!(rest.is_empty(), "shutdown must not send a fallback request on the original connection");
+            let listener = listener.into_std().unwrap();
+            assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                "shutdown must not open the fallback upstream");
+        });
+        (urls, observed, server)
+    }
+
+    async fn cancels_blocked_download_without_fallback(body_started: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"approved model fixture";
+        let (urls, observed, server) = blocked_upstream(body_started, bytes.len()).await;
+        let model = Arc::new(fixture(bytes, urls));
+        let lifecycle = Arc::new(ModelLifecycle::default());
+        let lock = Arc::new(Mutex::new(()));
+        let request_dir = dir.path().to_path_buf();
+        let request_lifecycle = lifecycle.clone();
+        let request_model = model.clone();
+        let request = tokio::spawn(async move {
+            model_bytes_from_upstreams(&request_dir, &lock, &request_lifecycle, &request_model,
+                reqwest::Client::builder().no_proxy(), DOWNLOAD_TIMEOUTS).await
+        });
+        tokio::time::timeout(Duration::from_secs(3), observed).await.unwrap().unwrap();
+        lifecycle.request_shutdown();
+        let error = tokio::time::timeout(Duration::from_secs(3), request).await.unwrap().unwrap().unwrap_err();
+        assert!(matches!(error, AppError::Conflict(ref detail) if detail.contains("shutting down")));
+        tokio::time::timeout(Duration::from_secs(3), lifecycle.shutdown()).await.unwrap();
+        finished(server).await;
+        assert!(!dir.path().join(&model.filename).exists(), "cancelled acquisition cannot publish partial cache");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_response_headers_without_fallback() {
+        cancels_blocked_download_without_fallback(false).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_body_without_fallback() {
+        cancels_blocked_download_without_fallback(true).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_withdraws_model_lock_waiter_before_current_acquisition_finishes() {
+        let lifecycle = ModelLifecycle::default();
+        let lock = Mutex::new(());
+        let current = lock.lock().await;
+        let activity = lifecycle.admit().await.unwrap();
+        let mut queued = Box::pin(lifecycle.acquisition_lock(&lock));
+        assert!(std::future::poll_fn(|context| std::task::Poll::Ready(
+            std::future::Future::poll(queued.as_mut(), context).is_pending(),
+        )).await);
+        lifecycle.request_shutdown();
+        let error = tokio::time::timeout(Duration::from_secs(1), queued).await.unwrap().unwrap_err();
+        assert!(matches!(error, AppError::Conflict(ref detail) if detail.contains("shutting down")));
+        assert!(lock.try_lock().is_err(), "the first acquisition is still owned, not forcibly unlocked");
+        drop(activity);
+        tokio::time::timeout(Duration::from_secs(1), lifecycle.shutdown()).await.unwrap();
+        drop(current);
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_even_verified_cache_and_repeated_shutdown_is_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"approved model fixture";
+        let model = fixture(bytes, Vec::new());
+        let path = dir.path().join(&model.filename);
+        std::fs::write(&path, bytes).unwrap();
+        let lifecycle = ModelLifecycle::default();
+        lifecycle.request_shutdown();
+        lifecycle.shutdown().await;
+        lifecycle.shutdown().await;
+        let error = model_bytes_from_upstreams(dir.path(), &Mutex::new(()), &lifecycle, &model,
+            reqwest::Client::builder().no_proxy(), TEST_TIMEOUTS).await.unwrap_err();
+        assert!(matches!(error, AppError::Conflict(ref detail) if detail.contains("shutting down")));
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_original_atomic_publication_after_its_waiter_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modnet.onnx");
+        std::fs::write(&path, b"previous cache").unwrap();
+        let lifecycle = Arc::new(ModelLifecycle::default());
+        let activity = lifecycle.admit().await.unwrap();
+        let (started, observed) = tokio::sync::oneshot::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let publish_path = path.clone();
+        let publishing_lifecycle = lifecycle.clone();
+        let publisher = tokio::spawn(async move {
+            join_owned_io(&publishing_lifecycle, activity, move || {
+                started.send(()).unwrap();
+                gate.recv().unwrap();
+                publish_atomic(&publish_path, b"verified replacement")
+            }).await
+        });
+        tokio::time::timeout(Duration::from_secs(3), observed).await.unwrap().unwrap();
+        lifecycle.request_shutdown();
+        let mut shutdown = Box::pin(lifecycle.shutdown());
+        assert!(std::future::poll_fn(|context| std::task::Poll::Ready(
+            std::future::Future::poll(shutdown.as_mut(), context).is_pending(),
+        )).await);
+        publisher.abort();
+        assert!(publisher.await.unwrap_err().is_cancelled());
+        assert!(std::future::poll_fn(|context| std::task::Poll::Ready(
+            std::future::Future::poll(shutdown.as_mut(), context).is_pending(),
+        )).await, "dropping the HTTP waiter cannot release the native writer's activity guard");
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous cache");
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), shutdown).await.unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"verified replacement");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "publication leaves no temporary cache");
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_open_cache_reader_after_its_waiter_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"approved model fixture";
+        let model = fixture(bytes, Vec::new());
+        let path = dir.path().join(&model.filename);
+        std::fs::write(&path, bytes).unwrap();
+        let lifecycle = Arc::new(ModelLifecycle::default());
+        let activity = lifecycle.admit().await.unwrap();
+        let (started, observed) = tokio::sync::oneshot::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let (completed, result) = tokio::sync::oneshot::channel();
+        let reading_lifecycle = lifecycle.clone();
+        let reader = tokio::spawn(async move {
+            join_owned_io(&reading_lifecycle, activity, move || {
+                // Capture the real opened object before the barrier. Metadata,
+                // bounded reading, digest verification and FD release remain
+                // this same owned operation even if its HTTP waiter disappears.
+                let file = std::fs::File::open(&path).unwrap();
+                assert_eq!(file.metadata().unwrap().len(), model.size);
+                started.send(()).unwrap();
+                gate.recv().unwrap();
+                let read = read_open_verified_cache(file, &model);
+                completed.send(read.as_ref().unwrap().as_ref().unwrap().clone()).unwrap();
+                read
+            }).await
+        });
+        tokio::time::timeout(Duration::from_secs(3), observed).await.unwrap().unwrap();
+        lifecycle.request_shutdown();
+        let mut shutdown = Box::pin(lifecycle.shutdown());
+        assert!(std::future::poll_fn(|context| std::task::Poll::Ready(
+            std::future::Future::poll(shutdown.as_mut(), context).is_pending(),
+        )).await);
+        reader.abort();
+        assert!(reader.await.unwrap_err().is_cancelled());
+        assert!(std::future::poll_fn(|context| std::task::Poll::Ready(
+            std::future::Future::poll(shutdown.as_mut(), context).is_pending(),
+        )).await, "dropping the HTTP waiter cannot release the open cache reader's activity guard");
+        release.send(()).unwrap();
+        assert_eq!(tokio::time::timeout(Duration::from_secs(3), result).await.unwrap().unwrap(), bytes);
+        tokio::time::timeout(Duration::from_secs(3), shutdown).await.unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_new_cache_io_even_with_an_old_activity_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"approved model fixture";
+        let model = fixture(bytes, Vec::new());
+        let path = dir.path().join(&model.filename);
+        std::fs::write(&path, bytes).unwrap();
+        let lifecycle = ModelLifecycle::default();
+        let activity = lifecycle.admit().await.unwrap();
+        lifecycle.request_shutdown();
+        let error = read_verified_cache(&path, &model, &lifecycle, activity.clone()).await.unwrap_err();
+        assert!(matches!(error, AppError::Conflict(ref detail) if detail.contains("shutting down")));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        let error = join_owned_io(&lifecycle, activity, move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            let file = std::fs::File::open(&path).unwrap();
+            read_open_verified_cache(file, &model)
+        }).await.unwrap_err();
+        assert!(matches!(error, AppError::Conflict(ref detail) if detail.contains("shutting down")));
+        assert_eq!(attempts.load(Ordering::SeqCst), 0, "the closed owner cannot register another cache read");
+        tokio::time::timeout(Duration::from_secs(1), lifecycle.shutdown()).await.unwrap();
     }
 }

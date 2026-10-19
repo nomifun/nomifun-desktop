@@ -14,7 +14,7 @@ import useSWR from 'swr';
 import styles from './ProductAgentBindingSelect.module.css';
 
 type Props = {
-  targetKind: 'companion' | 'robot' | 'customer' | 'creative_studio_canvas';
+  targetKind: 'companion' | 'customer' | 'creative_studio_canvas';
   targetId: string;
   defaultTemplateKey: OfficialPresetKey;
   model?: Pick<TProviderWithModel, 'id' | 'use_model'>;
@@ -121,7 +121,7 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
     ? nameFor(selected)
     : t(selection ? 'agentSettings.productBinding.unavailableAgent' : 'agentSettings.productBinding.selectionNeeded');
   const selectionNeededHint = !selection ? t('agentSettings.productBinding.selectionNeededHint') : undefined;
-  const companionRole = targetKind === 'companion' || targetKind === 'robot';
+  const companionRole = targetKind === 'companion';
   const canApplyLatest = companionRole && Boolean(selection);
   const editPath = selection?.kind === 'template'
     ? `/agent?template=${encodeURIComponent(selection.template_key)}`

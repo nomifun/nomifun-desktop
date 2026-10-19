@@ -322,7 +322,7 @@ pub(crate) async fn try_build_module_states(
     let voice_work=Arc::new(super::voice_work_host::AppVoiceWorkHost::new(
         conversation_owner.clone(),voice_journal.clone(),nomi_core_agent_api.control_plane.clone(),Some(agent_execution.clone())
     ).with_shutdown_token(services.background_shutdown.child_token()));
-    conversation_owner.install_directed_voice_work(&voice_work)
+    conversation_owner.install_execution_voice_work(&voice_work)
         .map_err(anyhow::Error::msg)?;
     let mobile_voice=match super::mobile_voice_registry::AppVoiceRegistry::new(services.model_invoke_service.clone(),services.database.pool().clone(),services.authoritative_user_id.clone()){
     Ok(voice_registry)=>{
@@ -1124,6 +1124,9 @@ fn build_system_state_with_agent_cleanup(
 }
 
 impl nomifun_cron::CronBackgroundTaskRegistrar for BackgroundTaskRegistry {
+    fn shutdown_signal(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        nomifun_conversation::BackgroundTaskRegistrar::shutdown_signal(self)
+    }
     fn register(&self, task: tokio::task::JoinHandle<()>) {
         BackgroundTaskRegistry::register(self, task);
     }
@@ -1191,15 +1194,11 @@ pub fn build_mcp_state(services: &AppServices) -> McpRouterState {
         Arc::new(NomifunAdapter::new(repo.clone())),
     ];
 
-    let oauth_token_repo: Arc<dyn nomifun_db::IOAuthTokenRepository> = Arc::new(
-        nomifun_db::SqliteOAuthTokenRepository::new(services.database.pool().clone()),
-    );
-
     McpRouterState {
-        config_service: McpConfigService::new(repo.clone()),
+        config_service: McpConfigService::new(repo.clone()).with_auth_service(services.mcp_auth.clone()),
         sync_service: McpSyncService::new(adapters),
-        connection_test_service: McpConnectionTestService::new_dynamic(),
-        oauth_service: nomifun_mcp::McpOAuthService::new_dynamic(oauth_token_repo),
+        connection_test_service: McpConnectionTestService::new_dynamic().with_credentials(services.mcp_auth.clone()),
+        auth_service: services.mcp_auth.clone(),
     }
 }
 

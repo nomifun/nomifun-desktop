@@ -311,6 +311,12 @@ impl BackgroundTaskRegistry {
     }
 
     #[cfg(test)]
+    pub(crate) fn lifecycle_test_counts(&self)->(usize,usize) {
+        let state=self.state.lock().unwrap_or_else(|poisoned|poisoned.into_inner());
+        (state.tasks.iter().filter(|task|!task.is_finished()).count(),state.tasks.len())
+    }
+
+    #[cfg(test)]
     fn snapshot(&self) -> (BackgroundTaskRegistryPhase, usize) {
         let state = self
             .state
@@ -340,6 +346,11 @@ impl Drop for BackgroundTaskRegistry {
 }
 
 impl nomifun_conversation::BackgroundTaskRegistrar for BackgroundTaskRegistry {
+    fn shutdown_signal(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        let shutdown = self.shutdown.clone();
+        Box::pin(async move { shutdown.cancelled().await })
+    }
+
     fn spawn(
         &self,
         task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
@@ -661,16 +672,101 @@ async fn await_browser_shutdown_step(step: Option<BrowserShutdownStep>) -> Resul
 
 #[derive(Default)]
 struct HostShutdownStage {
+    resources_closed: bool,
+    mcp_auth_task: Option<JoinHandle<()>>,
+    mcp_auth_closed: bool,
+    mcp_auth_failure: Option<String>,
+    terminal_task: Option<JoinHandle<Result<u64, String>>>,
+    terminal_closed: bool,
+    terminal_unreported_failure: Option<String>,
     storage_task: Option<JoinHandle<()>>,
     storage_closed: bool,
     storage_failure: Option<String>,
     complete: bool,
 }
 
+impl HostShutdownStage {
+    async fn start_mcp_auth_cleanup(&mut self, auth: Arc<nomifun_mcp::McpAuthService>) {
+        if self.mcp_auth_closed || self.mcp_auth_task.is_some() || self.mcp_auth_failure.is_some() { return; }
+        let mut cleanup = Box::pin(async move { auth.shutdown().await });
+        // Fence the shared credential authority before any producer drain,
+        // then retain the exact shutdown future while its active owners join.
+        let initial = std::future::poll_fn(|context| std::task::Poll::Ready(
+            std::future::Future::poll(cleanup.as_mut(), context),
+        )).await;
+        self.mcp_auth_task = Some(tokio::spawn(async move {
+            if initial.is_pending() { cleanup.await; }
+        }));
+    }
+
+    async fn wait_mcp_auth_cleanup(&mut self) -> Result<(), String> {
+        if self.mcp_auth_closed { return Ok(()); }
+        if let Some(error) = &self.mcp_auth_failure { return Err(error.clone()); }
+        let task = self.mcp_auth_task.as_mut()
+            .ok_or_else(|| "MCP authentication cleanup has no retained owner".to_owned())?;
+        let result = match tokio::time::timeout(Duration::from_secs(5), task).await {
+            Ok(result) => result,
+            Err(_) => return Err("MCP authentication cleanup timed out after 5 seconds; the original worker is retained for retry".into()),
+        };
+        self.mcp_auth_task = None;
+        match result {
+            Ok(()) => { self.mcp_auth_closed = true; Ok(()) }
+            Err(error) => {
+                let error = format!("MCP authentication cleanup worker failed: {error}");
+                self.mcp_auth_failure = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    async fn start_terminal_cleanup(&mut self, terminal: Arc<TerminalService>) {
+        if self.terminal_closed || self.terminal_task.is_some() || self.terminal_unreported_failure.is_some() { return; }
+        let mut cleanup = Box::pin(async move {
+            terminal.shutdown_cleanup().await.map_err(|error| error.to_string())
+        });
+        // The original Terminal future publishes its admission fence before
+        // its first await. Poll that prefix before starting other drains, then
+        // transfer this same pinned future to the retained shutdown owner.
+        let initial = std::future::poll_fn(|context| std::task::Poll::Ready(
+            std::future::Future::poll(cleanup.as_mut(), context),
+        )).await;
+        self.terminal_task = Some(tokio::spawn(async move {
+            match initial {
+                std::task::Poll::Ready(result) => result,
+                std::task::Poll::Pending => cleanup.await,
+            }
+        }));
+    }
+
+    async fn wait_terminal_cleanup(&mut self) -> Result<(), String> {
+        if self.terminal_closed { return Ok(()); }
+        if let Some(error) = &self.terminal_unreported_failure { return Err(error.clone()); }
+        let task = self.terminal_task.as_mut()
+            .ok_or_else(|| "terminal cleanup has no retained owner".to_owned())?;
+        let result = match tokio::time::timeout(Duration::from_secs(5), task).await {
+            Ok(result) => result,
+            Err(_) => return Err("terminal cleanup timed out after 5 seconds; the original worker is retained for retry".into()),
+        };
+        self.terminal_task = None;
+        let error = match result {
+            Ok(Ok(_)) => { self.terminal_closed = true; return Ok(()); }
+            Ok(Err(error)) => format!("terminal cleanup failed: {error}"),
+            Err(error) => format!("terminal cleanup worker failed: {error}"),
+        };
+        // A blocked producer can keep the enclosing join pending after this
+        // owner failed. Losing that outer waiter must not erase its DB/native
+        // cause before a later shutdown caller receives the aggregate result.
+        self.terminal_unreported_failure = Some(error.clone());
+        Err(error)
+    }
+}
+
 pub struct AppServices {
     /// Process-owned handle to the one immutable official Runtime provider.
     pub(crate) official_runtime: Arc<crate::router::official_runtime::OfficialRuntimeHost>,
     pub database: Database,
+    /// One installation-owned credential lifecycle for settings and execution.
+    pub(crate) mcp_auth: Arc<nomifun_mcp::McpAuthService>,
     host_shutdown_stage: tokio::sync::Mutex<HostShutdownStage>,
     /// Process-lifetime cancellation shared by background domain tasks that
     /// must stop before the database is closed.
@@ -821,6 +917,10 @@ pub struct AppServices {
     pub attached_chrome: Option<Arc<crate::AttachedChromeProviderService>>,
     #[cfg(feature = "browser-use")]
     pub local_web_search: Option<Arc<nomifun_ai_agent::local_web_search::BrowserSearchProvider>>,
+    /// Controlled host port for installed-Runtime unit fixtures. Production
+    /// builds select the real desktop BrowserSearchProvider above.
+    #[cfg(test)]
+    pub(crate) test_wave1_search: Option<Arc<dyn nomifun_ai_agent::web_search::SearchProvider>>,
     #[cfg(feature="browser-use")]
     pub headless_render: Option<Arc<crate::headless_render::HeadlessRenderRuntime>>,
     /// Ordered, cloneable Gateway/Browser shutdown authority used by every
@@ -1214,25 +1314,52 @@ impl AppServices {
     }
 
     async fn shutdown_browser_resources(&self) -> anyhow::Result<()> {
-        #[cfg(feature = "browser-use")]
-        let attached_chrome = match &self.attached_chrome {
-            Some(service) => service.shutdown().await,
-            None => Ok(()),
-        };
-        #[cfg(feature="browser-use")]
-        let render=match &self.headless_render {Some(runtime)=>runtime.shutdown().await,None=>Ok(())};
-        let platform = self.browser_platform_shutdown.shutdown().await;
-        #[cfg(feature = "browser-use")]
-        if let Some(resources) = &self.browser_resources {
-            if let Err(error) = resources.close_resources().await {
-                return Err(anyhow::anyhow!("managed Browser Resource shutdown failed: {error}; browser platform: {platform:?}"));
+        let attached_chrome = async {
+            #[cfg(feature = "browser-use")]
+            if let Some(service) = &self.attached_chrome {
+                service.shutdown().await.map_err(|error| {
+                    anyhow::anyhow!("attached Chrome Provider disconnect failed: {error}")
+                })?;
             }
+            Ok::<(), anyhow::Error>(())
+        };
+        let render = async {
+            #[cfg(feature = "browser-use")]
+            if let Some(runtime) = &self.headless_render {
+                runtime.shutdown().await.map_err(|error| {
+                    anyhow::anyhow!("headless render shutdown failed: {error}")
+                })?;
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        let managed = async {
+            #[cfg(feature = "browser-use")]
+            if let Some(resources) = &self.browser_resources {
+                resources.close_resources().await.map_err(|error| {
+                    anyhow::anyhow!("managed Browser Resource shutdown failed: {error}")
+                })?;
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        // Each owner fences its own admission and retains unsettled work.
+        // Poll all of them even when another owner fails or is still joining;
+        // process-wide native destruction remains a separate prerequisite.
+        let (attached_chrome, render, platform, managed) = tokio::join!(
+            attached_chrome,
+            render,
+            self.browser_platform_shutdown.shutdown(),
+            managed,
+        );
+        let errors = [attached_chrome, render, platform, managed]
+            .into_iter()
+            .filter_map(Result::err)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(errors.join("; ")))
         }
-        #[cfg(feature="browser-use")]
-        render.map_err(|error|anyhow::anyhow!("headless render shutdown failed: {error}"))?;
-        #[cfg(feature = "browser-use")]
-        attached_chrome.map_err(|error|anyhow::anyhow!("attached Chrome Provider disconnect failed: {error}"))?;
-        platform
     }
 
     async fn shutdown_browser_native_runtime(&self) -> anyhow::Result<()> {
@@ -1334,103 +1461,145 @@ impl AppServices {
     /// terminal, channel, Agent Execution, Browser/Gateway, robot, or SSH
     /// resources are still active.
     pub(crate) async fn shutdown_nomi_core_host(&self) -> anyhow::Result<()> {
+        self.quiesce_nomi_core_host().await?;
         let mut stage=self.host_shutdown_stage.lock().await;
         if stage.complete {return Ok(());}
-        // A cancelled storage waiter cannot re-run producers
-        // against SQLite that the retained storage worker has already closed.
+        // A cancelled observer resumes the original storage worker. It must
+        // never re-enter producers against a pool that worker may have closed.
         if stage.storage_task.is_some() || stage.storage_closed || stage.storage_failure.is_some() {
             return self.finish_host_storage_shutdown(&mut stage).await;
         }
-        let mut errors = Vec::new();
+        // Desktop reaches this only after its original HTTP listeners drain.
+        // Catch a late defensive registration from an already accepted request
+        // before publishing the final storage closure.
+        let errors=self.shutdown_background_tasks(Duration::from_secs(1)).await;
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!("Nomi-core final background cleanup failed: {}",errors.join("; ")));
+        }
+        let companion=self.companion_service.clone();let database=self.database.clone();
+        stage.storage_task=Some(tokio::spawn(async move {
+            companion.close_storage().await;
+            database.close().await;
+        }));
+        self.finish_host_storage_shutdown(&mut stage).await
+    }
 
+    /// Close resource admission and join original producers without closing
+    /// storage. HTTP hosts invoke this before graceful drain: accepted requests
+    /// can depend on these same owners receiving cancellation.
+    pub(crate) async fn quiesce_nomi_core_host(&self) -> anyhow::Result<()> {
+        self.companion_service.request_matting_model_shutdown();
+        let mut stage=self.host_shutdown_stage.lock().await;
+        if stage.resources_closed || stage.complete {return Ok(());}
+        // Startup/error cleanup can already have an original storage worker.
+        // That authority is joined only by the complete shutdown entry point.
+        if stage.storage_task.is_some() || stage.storage_closed || stage.storage_failure.is_some() {
+            return Ok(());
+        }
         self.request_background_shutdown();
         self.shutdown_cron_timers();
         // Fence runtime admission immediately, before awaiting any producer or
         // resource owner. Its owned flight runs while these owners wind down.
         let engine_shutdown = self.agent_runtime_sessions.shutdown_and_wait();
-        // Gateway MCP is separate ingress. Fence it even if a later producer
-        // cleanup fails and native Browser authority must remain retained.
-        if let Err(error)=self.browser_platform_shutdown.shutdown().await {
-            errors.push(format!("Gateway ingress cleanup failed: {error:#}"));
-        }
-        if let Err(error) = self.app_hosting.shutdown().await {
-            errors.push(format!("Hosted application cleanup failed: {error}"));
-        }
-        if let Err(error) = self.quiesce_auto_work_runner().await {
-            errors.push(format!("AutoWork quiesce failed: {error:#}"));
-        }
-        if !self.nomi_core_remote_runtime.shutdown().await {
-            errors.push(
-                "Nomi-core Remote tasks remained active after the shutdown abort deadline"
-                    .to_owned(),
-            );
-        }
-        let background_errors = self
-            .shutdown_background_tasks(Duration::from_secs(15))
-            .await;
-        if !background_errors.is_empty() {
-            errors.extend(
-                background_errors
-                    .into_iter()
-                    .map(|error| format!("background task cleanup failed: {error}")),
-            );
-        }
-        if let Err(error) = self.shutdown_channel_manager().await {
-            errors.push(format!("channel plugin cleanup failed: {error:#}"));
-        }
-        if let Err(error) = self.agent_execution_lifecycle.shutdown().await {
-            errors.push(format!("Agent Execution cleanup failed: {error}"));
-        }
-        let runtimes_stopped = match tokio::time::timeout(Duration::from_secs(15), engine_shutdown).await {
-            Ok(Ok(())) => true,
-            Ok(Err(error)) => { errors.push(format!("Agent runtime cleanup failed: {error}")); false }
-            Err(_) => { errors.push("Agent runtime cleanup timed out".into()); false }
-        };
-        if let Err(error)=self.official_runtime.shutdown_session_processes().await {
-            errors.push(format!("Session background process cleanup failed: {error}"));
-        }
-        match tokio::time::timeout(
-            Duration::from_secs(5),
-            self.terminal_service.shutdown_cleanup(),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => errors.push(format!("terminal cleanup failed: {error}")),
-            Err(_) => errors.push("terminal cleanup timed out after 5 seconds".to_owned()),
-        }
-
-        // Join non-Browser producers before native platform teardown.
-        // Unknown producer cleanup cannot authorize physical teardown.
-        let mut producers_stopped = true;
-        if let Some(robot) = &self.robot {
-            if let Err(error) = robot.shutdown_and_wait().await {
-                errors.push(format!("Robot task cleanup failed: {error:#}"));
-                producers_stopped = false;
+        stage.start_mcp_auth_cleanup(self.mcp_auth.clone()).await;
+        stage.start_terminal_cleanup(self.terminal_service.clone()).await;
+        // Resource owners close admission while producers drain. A failed
+        // producer may retain native infrastructure and storage, but must not
+        // skip cancellation and exact view/connection cleanup in other domains.
+        let ((mut errors, runtimes_stopped, producers_stopped), browser_resources, (mut terminal_resources, mut mcp_auth_resources), ()) = tokio::join!(async {
+            let mut errors = Vec::new();
+            if let Err(error) = self.app_hosting.shutdown().await {
+                errors.push(format!("Hosted application cleanup failed: {error}"));
             }
-        }
-        match tokio::time::timeout(Duration::from_secs(5), self.ssh_pool.shutdown_all()).await {
-            Ok(report) if report.lost == 0 => {}
-            Ok(report) => {
-                producers_stopped = false;
-                errors.push(format!("{} SSH link(s) were released without proof the remote shell stopped",report.lost));
+            if let Err(error) = self.quiesce_auto_work_runner().await {
+                errors.push(format!("AutoWork quiesce failed: {error:#}"));
             }
-            Err(_) => {
-                producers_stopped = false;
-                errors.push("SSH cleanup timed out after 5 seconds".to_owned());
+            if !self.nomi_core_remote_runtime.shutdown().await {
+                errors.push(
+                    "Nomi-core Remote tasks remained active after the shutdown abort deadline"
+                        .to_owned(),
+                );
             }
+            let background_errors = self
+                .shutdown_background_tasks(Duration::from_secs(15))
+                .await;
+            if !background_errors.is_empty() {
+                errors.extend(
+                    background_errors
+                        .into_iter()
+                        .map(|error| format!("background task cleanup failed: {error}")),
+                );
+            }
+            if let Err(error) = self.shutdown_channel_manager().await {
+                errors.push(format!("channel plugin cleanup failed: {error:#}"));
+            }
+            if let Err(error) = self.agent_execution_lifecycle.shutdown().await {
+                errors.push(format!("Agent Execution cleanup failed: {error}"));
+            }
+            let runtimes_stopped = match tokio::time::timeout(Duration::from_secs(15), engine_shutdown).await {
+                Ok(Ok(())) => true,
+                Ok(Err(error)) => { errors.push(format!("Agent runtime cleanup failed: {error}")); false }
+                Err(_) => { errors.push("Agent runtime cleanup timed out".into()); false }
+            };
+            if let Err(error)=self.official_runtime.shutdown_session_processes().await {
+                errors.push(format!("Session background process cleanup failed: {error}"));
+            }
+            // Join non-Browser producers before native platform teardown.
+            // Unknown producer cleanup cannot authorize physical teardown.
+            let mut producers_stopped = true;
+            if let Some(robot) = &self.robot {
+                if let Err(error) = robot.shutdown_and_wait().await {
+                    errors.push(format!("Robot task cleanup failed: {error:#}"));
+                    producers_stopped = false;
+                }
+            }
+            match tokio::time::timeout(Duration::from_secs(5), self.ssh_pool.shutdown_all()).await {
+                Ok(report) if report.lost == 0 => {}
+                Ok(report) => {
+                    producers_stopped = false;
+                    errors.push(format!("{} SSH link(s) were released without proof the remote shell stopped",report.lost));
+                }
+                Err(_) => {
+                    producers_stopped = false;
+                    errors.push("SSH cleanup timed out after 5 seconds".to_owned());
+                }
+            }
+            // Gateway source jobs can outlive the HTTP request. Their own retained
+            // task authority, not an empty HTTP listener, proves no late DB publish.
+            if let Err(error)=self.knowledge_service.quiesce_background_tasks(Duration::from_secs(5)).await {
+                producers_stopped=false;
+                errors.push(format!("Knowledge source cleanup failed: {error}"));
+            }
+            (errors, runtimes_stopped, producers_stopped)
+        }, self.shutdown_browser_resources(), async {
+            let terminal = stage.wait_terminal_cleanup().await;
+            let mcp_auth = stage.wait_mcp_auth_cleanup().await;
+            (terminal, mcp_auth)
+        }, self.companion_service.shutdown_matting_model());
+        // The five-second observer may have finished before another domain.
+        // Consume this exact worker's now-settled result before reporting an
+        // old timeout or deciding whether native infrastructure can close.
+        if stage.terminal_task.as_ref().is_some_and(JoinHandle::is_finished) {
+            terminal_resources = stage.wait_terminal_cleanup().await;
         }
-        // Gateway source jobs can outlive the HTTP request. Their own retained
-        // task authority, not an empty HTTP listener, proves no late DB publish.
-        if let Err(error)=self.knowledge_service.quiesce_background_tasks(Duration::from_secs(5)).await {
-            producers_stopped=false;
-            errors.push(format!("Knowledge source cleanup failed: {error}"));
+        if stage.mcp_auth_task.as_ref().is_some_and(JoinHandle::is_finished) {
+            mcp_auth_resources = stage.wait_mcp_auth_cleanup().await;
         }
-        // Retain native cleanup authority when an Agent or producer may still
-        // submit work. A later shutdown joins the same quarantined owners.
+        if let Err(error) = terminal_resources {
+            errors.push(error);
+        }
+        if let Err(error) = mcp_auth_resources {
+            errors.push(error);
+        }
+        if let Err(error) = browser_resources {
+            errors.push(format!("browser/gateway resource cleanup failed: {error:#}"));
+        }
+        // All domain-owned resources were asked to close above. Retain shared
+        // native infrastructure when an Agent or producer remains unproven;
+        // a retry joins the same owners before entering the final native gate.
         if runtimes_stopped && producers_stopped && errors.is_empty() {
-            if let Err(error) = self.shutdown_browser_platform().await {
-                errors.push(format!("browser/gateway cleanup failed: {error:#}"));
+            if let Err(error) = self.shutdown_browser_native_runtime().await {
+                errors.push(format!("browser native cleanup failed: {error:#}"));
             }
         }
 
@@ -1462,13 +1631,18 @@ impl AppServices {
             }
         }
         if errors.is_empty() {
-            let companion=self.companion_service.clone();let database=self.database.clone();
-            stage.storage_task=Some(tokio::spawn(async move {
-                companion.close_storage().await;
-                database.close().await;
-            }));
-            self.finish_host_storage_shutdown(&mut stage).await
+            stage.resources_closed=true;
+            Ok(())
         } else {
+            // A worker can settle during the remaining independent drains.
+            // Deliver its actual failure in this aggregate when it is known;
+            // a genuinely pending worker remains owned for the next caller.
+            if stage.terminal_task.as_ref().is_some_and(JoinHandle::is_finished) {
+                if let Err(error) = stage.wait_terminal_cleanup().await {
+                    if !errors.contains(&error) { errors.push(error); }
+                }
+            }
+            stage.terminal_unreported_failure = None;
             Err(anyhow::anyhow!(
                 "Nomi-core cleanup failed: {}",
                 errors.join("; ")
@@ -2159,6 +2333,17 @@ impl AppServices {
         let app_mcp_sources = crate::router::app_mcp_sources::AppMcpSources::new(
             app_hosting.clone(), Arc::new(nomifun_db::SqliteMcpServerRepository::new(database.pool().clone())),
         );
+        let mcp_auth = Arc::new(nomifun_mcp::McpAuthService::new_dynamic(
+            Arc::new(nomifun_db::SqliteMcpOAuthRepository::new(database.pool().clone())),
+            app_mcp_sources.clone(),
+            authoritative_user_id.clone(), encryption_key,
+            nomifun_mcp::McpAuthOptions {
+                callback_url: std::env::var("NOMIFUN_MCP_OAUTH_CALLBACK_URL").ok(),
+                cimd_client_id: std::env::var("NOMIFUN_MCP_OAUTH_CLIENT_METADATA_URL").ok(),
+                ..Default::default()
+            },
+        ));
+        app_mcp_sources.set_auth_service(&mcp_auth)?;
 
         // SSH remote sessions: ONE process-level connection pool, built here
         // because the agent factory below is its first consumer and the host-book
@@ -2226,6 +2411,7 @@ impl AppServices {
         let services = Self {
             official_runtime,
             database,
+            mcp_auth,
             host_shutdown_stage: Default::default(),
             background_shutdown,
             background_tasks,
@@ -2284,6 +2470,8 @@ impl AppServices {
             attached_chrome: host_services.attached_chrome,
             #[cfg(feature = "browser-use")]
             local_web_search: host_services.local_web_search,
+            #[cfg(test)]
+            test_wave1_search: None,
             #[cfg(feature="browser-use")]
             headless_render: host_services.headless_render,
             browser_platform_shutdown,
@@ -2317,6 +2505,13 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex as StdMutex};
+
+    #[cfg(feature="browser-conformance")]
+    include!("services_attached_chrome_native_tests.rs");
+
+    mod terminal_shutdown_tests {
+        include!("services_terminal_shutdown_tests.rs");
+    }
 
     struct BackgroundTaskDropProbe {
         dropped: Arc<AtomicUsize>,
@@ -2817,6 +3012,170 @@ mod tests {
         async fn shutdown(&self)->Result<(),nomifun_browser_platform::runtime::WorkspaceError> {
             self.0.fetch_add(1,Ordering::AcqRel);Ok(())
         }
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[derive(Default)]
+    struct BrowserResourceShutdownProbe {
+        creates: AtomicUsize,
+        closes: AtomicUsize,
+        native_shutdowns: AtomicUsize,
+        allow_close: AtomicBool,
+        close_entered: tokio::sync::Notify,
+    }
+
+    #[cfg(feature = "browser-use")]
+    struct ShutdownBrowserRuntime {
+        generation: u64,
+        probe: Arc<BrowserResourceShutdownProbe>,
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[async_trait::async_trait]
+    impl nomifun_browser_platform::run_guard::NativeInputGate for ShutdownBrowserRuntime {
+        async fn lock_user_input(&self) -> Result<(), nomifun_browser_platform::run_guard::RunAdmissionError> { Ok(()) }
+        async fn release_pressed_input(&self) -> Result<(), nomifun_browser_platform::run_guard::RunAdmissionError> { Ok(()) }
+        async fn unlock_user_input(&self) -> Result<(), nomifun_browser_platform::run_guard::RunAdmissionError> { Ok(()) }
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[async_trait::async_trait]
+    impl nomifun_browser_platform::runtime::BrowserRuntime for ShutdownBrowserRuntime {
+        fn surface(&self) -> Option<&dyn nomifun_browser_platform::runtime::BrowserNativeSurfacePort> { None }
+        fn changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+            Some(tokio::sync::watch::channel(0).1)
+        }
+        async fn snapshot(&self) -> Result<nomifun_browser_platform::runtime::BrowserRuntimeSnapshot, nomifun_browser_platform::runtime::WorkspaceError> {
+            Ok(nomifun_browser_platform::runtime::BrowserRuntimeSnapshot {
+                runtime_generation: self.generation, revision: 0, active_tab_id: None,
+                tabs: Vec::new(), downloads: Vec::new(),
+            })
+        }
+        async fn execute(&self, _: nomifun_browser_platform::runtime::BrowserTabCommand, _: CancellationToken)
+            -> Result<nomifun_browser_platform::runtime::BrowserRuntimeSnapshot, nomifun_browser_platform::runtime::WorkspaceError> {
+            panic!("shutdown fixture must not execute browser commands")
+        }
+        async fn close(&self) -> Result<(), nomifun_browser_platform::runtime::WorkspaceError> {
+            self.probe.closes.fetch_add(1, Ordering::AcqRel);
+            self.probe.close_entered.notify_one();
+            if self.probe.allow_close.load(Ordering::Acquire) { Ok(()) }
+            else { Err(nomifun_browser_platform::runtime::WorkspaceError::NativeCommandFailed) }
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    struct ShutdownBrowserFactory(Arc<BrowserResourceShutdownProbe>);
+
+    #[cfg(feature = "browser-use")]
+    #[async_trait::async_trait]
+    impl nomifun_browser_platform::runtime::BrowserRuntimeFactory for ShutdownBrowserFactory {
+        async fn create(&self, request: nomifun_browser_platform::runtime::CreateBrowserRuntime)
+            -> Result<Arc<dyn nomifun_browser_platform::runtime::BrowserRuntime>, nomifun_browser_platform::runtime::WorkspaceError> {
+            self.0.creates.fetch_add(1, Ordering::AcqRel);
+            Ok(Arc::new(ShutdownBrowserRuntime { generation: request.runtime_generation, probe: self.0.clone() }))
+        }
+        async fn shutdown(&self) -> Result<(), nomifun_browser_platform::runtime::WorkspaceError> {
+            self.0.native_shutdowns.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    async fn install_shutdown_browser(services: &mut AppServices, probe: Arc<BrowserResourceShutdownProbe>)
+        -> Arc<nomifun_browser_platform::workspace::BrowserWorkspace> {
+        let resources = Arc::new(nomifun_browser_platform::workspace::BrowserResourceService::new(
+            Arc::new(ShutdownBrowserFactory(probe)),
+        ));
+        let workspace = resources.ensure_user("shutdown-owner", "shutdown-session",
+            nomifun_browser_platform::runtime::BrowserProfile::Ephemeral).await.unwrap();
+        let _changes = workspace.runtime_changes().await.unwrap();
+        services.browser_resources = Some(resources);
+        workspace
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn stalled_gateway_cleanup_does_not_delay_managed_resource_close() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut services = AppServices::from_config(db, &test_config(root.path())).await.unwrap();
+        let probe = Arc::new(BrowserResourceShutdownProbe::default());
+        probe.allow_close.store(true, Ordering::Release);
+        let workspace = install_shutdown_browser(&mut services, probe.clone()).await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let allow = Arc::new(AtomicBool::new(false));
+        let original = services.browser_platform_shutdown.clone();
+        services.browser_platform_shutdown = BrowserPlatformShutdown::from_steps(Some(BrowserShutdownStep::new(
+            "controlled Gateway ingress", {
+                let entered = entered.clone(); let release = release.clone(); let allow = allow.clone();
+                move || {
+                    let entered = entered.clone(); let release = release.clone();
+                    let allow = allow.clone(); let original = original.clone();
+                    async move {
+                        entered.notify_one();
+                        release.acquire().await.unwrap().forget();
+                        original.shutdown().await.map_err(|error| error.to_string())?;
+                        if allow.load(Ordering::Acquire) { Ok(()) }
+                        else { Err("fixture: Gateway closure is not proven".into()) }
+                    }
+                }
+            },
+        )));
+        let services = Arc::new(services);
+        let closing = services.clone();
+        let shutdown = tokio::spawn(async move { closing.shutdown_nomi_core_host().await });
+        entered.notified().await;
+        tokio::time::timeout(Duration::from_secs(5), probe.close_entered.notified()).await
+            .expect("an unrelated stalled ingress must not block native view cleanup");
+        assert!(!shutdown.is_finished());
+        assert_eq!(probe.closes.load(Ordering::Acquire), 1);
+        assert_eq!(probe.native_shutdowns.load(Ordering::Acquire), 0,
+            "shared native infrastructure retains its producer prerequisites");
+        assert!(workspace.begin_run().await.is_err(), "the old Workspace must reject new runs");
+        assert!(services.browser_resources.as_ref().unwrap().ensure_user("shutdown-owner", "new-session",
+            nomifun_browser_platform::runtime::BrowserProfile::Ephemeral).await.is_err(),
+            "the resource owner must fence new Workspaces while Gateway is still joining");
+        assert!(!services.database.pool().is_closed());
+        release.add_permits(1);
+        let failure = shutdown.await.unwrap().unwrap_err().to_string();
+        assert!(failure.contains("Gateway closure is not proven"), "{failure}");
+        assert!(!services.database.pool().is_closed());
+        allow.store(true, Ordering::Release);
+        release.add_permits(1);
+        services.shutdown_nomi_core_host().await.unwrap();
+        assert_eq!(probe.creates.load(Ordering::Acquire), 1);
+        assert_eq!(probe.closes.load(Ordering::Acquire), 1, "retry must preserve the native close receipt");
+        assert_eq!(probe.native_shutdowns.load(Ordering::Acquire), 1);
+        assert!(services.database.pool().is_closed());
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn failed_producer_and_resource_cleanup_retain_both_causes_and_retry_exact_owner() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut services = AppServices::from_config(db, &test_config(root.path())).await.unwrap();
+        let allow = Arc::new(AtomicBool::new(false));
+        services.agent_runtime_sessions = Arc::new(ShutdownRegistryProbe {
+            inner: services.agent_runtime_sessions.clone(), allow: allow.clone(),
+        });
+        let probe = Arc::new(BrowserResourceShutdownProbe::default());
+        let workspace = install_shutdown_browser(&mut services, probe.clone()).await;
+        let failure = services.shutdown_nomi_core_host().await.unwrap_err().to_string();
+        assert!(failure.contains("Agent runtime cleanup failed"), "{failure}");
+        assert!(failure.contains("managed Browser Resource shutdown failed"), "{failure}");
+        assert_eq!(probe.closes.load(Ordering::Acquire), 1, "producer failure must not skip view cleanup");
+        assert_eq!(probe.native_shutdowns.load(Ordering::Acquire), 0);
+        assert!(workspace.begin_run().await.is_err());
+        assert!(!services.database.pool().is_closed());
+        allow.store(true, Ordering::Release);
+        probe.allow_close.store(true, Ordering::Release);
+        services.shutdown_nomi_core_host().await.unwrap();
+        assert_eq!(probe.creates.load(Ordering::Acquire), 1, "failed cleanup must retain the original native owner");
+        assert_eq!(probe.closes.load(Ordering::Acquire), 2, "retry must rejoin the failed original view");
+        assert_eq!(probe.native_shutdowns.load(Ordering::Acquire), 1);
+        assert!(services.database.pool().is_closed());
     }
 
     #[tokio::test]

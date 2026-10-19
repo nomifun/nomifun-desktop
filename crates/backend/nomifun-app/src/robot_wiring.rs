@@ -10,10 +10,6 @@ use std::sync::{Arc, Mutex};
 use base64::Engine as _;
 use futures_util::{FutureExt, future::{BoxFuture, Shared}};
 use nomifun_api_types::SendMessageRequest;
-#[cfg(test)]
-use nomifun_api_types::AgentErrorOwnership;
-#[cfg(test)]
-use nomifun_ai_agent::protocol::events::{AgentStreamEvent, TurnStopReason};
 use nomifun_db::IClientPreferenceRepository;
 use nomifun_robot::endpoint::{EndpointAdvertiser, LanAdvertiser, LanEndpointSnapshot};
 use nomifun_robot::effect_ledger::RobotEffectLedger;
@@ -32,9 +28,7 @@ use nomifun_robot::wiring::{
 mod robot_report_delivery;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, watch};
-#[cfg(test)]
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, watch};
 
 /// Production bridge from the robot's one-shot image request to the shared
 /// Agent Chat resolver. Protocol, endpoint and auth come exclusively from the
@@ -189,6 +183,10 @@ fn reap_bridge_workers(state: &mut BridgeState) {
 }
 
 impl RobotServices {
+    #[cfg(test)]
+    pub(crate) fn conversation_backend_for_test(&self)->Arc<dyn nomifun_robot::wiring::RobotConversationBackend> {
+        self.backend.get().expect("Robot backend is installed with the App router").clone()
+    }
     /// Build everything that does not need the canonical Session owner.
     ///
     /// A failure to load the registry is fatal for the domain, not for the app:
@@ -447,7 +445,7 @@ fn snapshot_authorizes_companion_voice_input(
             .is_some_and(|companion| companion == &request.companion_id)
 }
 
-fn robot_turn_idempotency_key(request: &nomifun_robot::services::RobotTurnRequest) -> String {
+pub(crate) fn robot_turn_idempotency_key(request: &nomifun_robot::services::RobotTurnRequest) -> String {
     let identity = serde_json::json!([
         request.companion_id,
         request.robot_id,
@@ -482,7 +480,7 @@ impl AppRobotBackend {
         let queued_at = tokio::time::Instant::now();
         loop {
             if cancelled.is_cancelled() { return Ok(()); }
-            if queued_at.elapsed() > std::time::Duration::from_secs(300) {
+            if queued_at.elapsed() > std::time::Duration::from_secs(15) {
                 anyhow::bail!("伙伴仍在处理其他消息，本次排队已超时，请重试");
             }
             if !self.registry.connection_matches(&request.robot_id, &request.connection_id).await {
@@ -549,19 +547,31 @@ impl AppRobotBackend {
                     &self.owner_user_id, request, &key, message,
                 ) => result,
             };
-            let mut delivery = match delivery {
+            let _delivery = match delivery {
                 Ok(delivery) => delivery,
-                Err(nomifun_common::AppError::Conflict(_)) => continue,
                 Err(error) => return Err(error.into()),
             };
             drop(connection_lease);
-            if delivery.completed {
-                for event in completed_robot_delivery_events(&delivery) {
-                    if tx.send(event).await.is_err() { break; }
-                }
-                return Ok(());
-            }
+            // Subscribe before the first durable read so even a very fast
+            // response is found without relying on a timed terminal poll.
+            let mut wake=tokio::select! {
+                _=cancelled.cancelled()=>{self.sessions.cancel_robot_session_request(&self.owner_user_id,request,&key).await?;return Ok(());},
+                wake=self.sessions.robot_output_wake(&self.owner_user_id,&request.conversation_id,&key)=>wake?,
+            };
+            let mut after_seq=0;
+            let mut delivered_bytes=std::collections::BTreeMap::new();
             loop {
+                if !self.registry.connection_matches(&request.robot_id,&request.connection_id).await
+                    || !self.registry.get(&request.robot_id).await.is_some_and(|record|record.companion_id.as_deref()==Some(request.companion_id.as_str())) {
+                    anyhow::bail!("robot output connection or binding was replaced");
+                }
+                let public=self.sessions.robot_public_output(&self.owner_user_id,&request.conversation_id,&key,after_seq,&mut delivered_bytes).await?;
+                after_seq=public.through_seq;
+                for (source,text) in public.segments {
+                    tracing::info!(agent_session_id=%request.conversation_id,request_id=%request.request_id,
+                        source_event_id=%source.message_id,through_seq=source.through_seq,"robot: canonical public source queued for delivery");
+                    if tx.send(TurnEvent::PublicSpeech {source,text}).await.is_err() {return Ok(());}
+                }
                 match self
                     .sessions
                     .session_turn_delivery_state(
@@ -572,26 +582,33 @@ impl AppRobotBackend {
                     .await?
                 {
                     nomifun_conversation::PublicTurnDeliveryState::Completed(receipt) => {
-                        delivery = receipt;
-                        for event in completed_robot_delivery_events(&delivery) {
+                        let events=completed_robot_public_delivery_events(&self.sessions,&self.owner_user_id,request,&key,
+                            &receipt,after_seq,&mut delivered_bytes).await?;
+                        for event in events {
                             if tx.send(event).await.is_err() { break; }
                         }
                         return Ok(());
                     }
                     nomifun_conversation::PublicTurnDeliveryState::Accepted { .. } => {}
+                    nomifun_conversation::PublicTurnDeliveryState::InputUnavailable {cause,..} => {
+                        let _=tx.send(unavailable_robot_input_event(&cause)).await;
+                        return Ok(());
+                    }
                     nomifun_conversation::PublicTurnDeliveryState::Missing => {
                         anyhow::bail!("canonical robot Turn receipt disappeared");
                     }
-                }
-                if queued_at.elapsed() > std::time::Duration::from_secs(300) {
-                    anyhow::bail!("robot AgentSession turn timed out");
                 }
                 tokio::select! {
                     _ = cancelled.cancelled() => {
                         self.sessions.cancel_robot_session_request(&self.owner_user_id, request, &key).await?;
                         return Ok(());
                     }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(30)) => {},
+                    event=async {match wake.as_mut() {Some(receiver)=>receiver.recv().await.map(|_|()),None=>std::future::pending().await}}=>{
+                        if matches!(event,Err(broadcast::error::RecvError::Closed)) {wake=None;}
+                    },
+                    // Recovery safety net only: successful canonical output
+                    // and terminal events normally wake the exact reader.
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
                 }
             }
         }
@@ -600,38 +617,72 @@ impl AppRobotBackend {
 
 #[async_trait::async_trait]
 impl nomifun_robot::services::RobotPlaybackSource for AppRobotBackend {
-    async fn response_text(&self, robot_id: &str, conversation_id: &str) -> Result<String, String> {
+    async fn response_source(&self, robot_id: &str, conversation_id: &str)
+        -> Result<nomifun_robot::services::RobotSavedResponse, String> {
         let device = self.registry.get(robot_id).await.ok_or("device not found")?;
-        let conversation = self.sessions.get_session(&self.owner_user_id, conversation_id).await.map_err(|e| e.to_string())?;
-        if device.companion_id.is_none() || conversation.extra.get("companion_id").and_then(Value::as_str) != device.companion_id.as_deref() {
-            return Err("conversation belongs to another Companion".to_owned());
-        }
-        if conversation.runtime.as_ref().is_some_and(|runtime| runtime.is_processing) {
-            return Err("wait for the current reply to finish".to_owned());
-        }
-        let messages = nomifun_channel::ChannelSessionPort::list_messages(
-            self.sessions.as_ref(),
-            &self.owner_user_id,
-            conversation_id,
-            serde_json::from_value(serde_json::json!({"page":1,"page_size":50,"order":"desc"})).map_err(|e| e.to_string())?,
-        ).await.map_err(|e| e.to_string())?;
-        messages.items.iter().filter(|message| !message.hidden
-            && message.position == Some(nomifun_common::MessagePosition::Left)
-            && message.r#type == nomifun_common::MessageType::Text)
-            .filter_map(|message| message.content.get("content").and_then(Value::as_str))
-            .find(|text| !text.trim().is_empty()).map(str::to_owned)
-            .ok_or_else(|| "no reply is available to play".to_owned())
+        let companion = device.companion_id.as_deref().ok_or("device is not paired")?;
+        self.sessions.robot_saved_response(&self.owner_user_id, companion, robot_id, conversation_id)
+            .await.map_err(|error|error.to_string())
     }
 }
 
 #[async_trait::async_trait]
 impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
+    async fn capture_input_context(&self,companion:&str,robot:&str,session:&str,connection:&str,question:Option<String>)->anyhow::Result<Option<nomifun_robot::services::RobotInputContext>> {
+        let _connection=self.registry.hold_action_connection(robot,connection).await.ok_or_else(||anyhow::anyhow!("Robot input connection was replaced"))?;
+        if !self.registry.get(robot).await.is_some_and(|record|record.companion_id.as_deref()==Some(companion)) {anyhow::bail!("Robot input binding was replaced");}
+        let request=nomifun_robot::services::RobotTurnRequest {robot_id:robot.into(),companion_id:companion.into(),conversation_id:session.into(),connection_id:connection.into(),
+            request_id:"capture-input-context".into(),text:String::new(),presented_question_id:question,captured_context:None};
+        Ok(Some(self.sessions.capture_robot_input_context(&self.owner_user_id,&request).await?))
+    }
+    async fn input_context_matches(&self,request:&nomifun_robot::services::RobotTurnRequest)->anyhow::Result<bool> {Ok(self.sessions.robot_output_context_matches(&self.owner_user_id,request).await?)}
+    async fn acquire_output_context(&self,request:&nomifun_robot::services::RobotTurnRequest,expected_proactive_revision:Option<u64>,question:Option<&nomifun_robot::services::RobotQuestionPlaybackAuthority>)->anyhow::Result<Option<nomifun_robot::services::RobotOutputLease>> {
+        if request.captured_context.is_none() {return Ok(None);}
+        let Some(connection)=self.registry.hold_action_connection(&request.robot_id,&request.connection_id).await else{return Ok(None);};
+        if !self.registry.get(&request.robot_id).await.is_some_and(|record|record.companion_id.as_deref()==Some(request.companion_id.as_str())
+            &&expected_proactive_revision.is_none_or(|revision|record.permissions.proactive_speech&&record.authorization_revision==revision)) {return Ok(None);}
+        let Some(context)=self.sessions.hold_robot_output_context(&self.owner_user_id,request).await? else{return Ok(None);};
+        let question=match question {
+            Some(authority)=>match self.sessions.hold_execution_question_playback(&self.owner_user_id,request,authority).await? {
+                Some(guard)=>Some(guard),None=>return Ok(None),
+            },None=>match self.sessions.hold_robot_request_playback(&self.owner_user_id,request).await? {
+                Some(guard)=>Some(guard),None=>return Ok(None),
+            },
+        };
+        Ok(Some(nomifun_robot::services::RobotOutputLease::new((connection,context,question))))
+    }
+    async fn question_presented(&self,request:&nomifun_robot::services::RobotTurnRequest,source:&nomifun_voice_contracts::VoiceSpeechSourceRef,presentation_id:&str)->anyhow::Result<()> {
+        let _connection=self.registry.hold_action_connection(&request.robot_id,&request.connection_id).await.ok_or_else(||anyhow::anyhow!("Robot question connection was replaced"))?;
+        if presentation_id.starts_with("robot-question:") {
+            self.sessions.record_robot_question_presented(&self.owner_user_id,request,source,presentation_id).await?;
+        }else {
+            self.sessions.record_execution_question_presented(&self.owner_user_id,request,
+                &nomifun_robot::services::RobotQuestionPlaybackAuthority {source:source.clone(),presentation_id:presentation_id.into()}).await?;
+        }
+        Ok(())
+    }
+    async fn supplement(&self,request:&nomifun_robot::services::RobotTurnRequest,text:&str,correction:bool,input_id:&str)->anyhow::Result<()> {
+        let _connection=self.registry.hold_action_connection(&request.robot_id,&request.connection_id).await.ok_or_else(||anyhow::anyhow!("Robot supplement connection was replaced"))?;
+        if !self.registry.get(&request.robot_id).await.is_some_and(|record|record.companion_id.as_deref()==Some(request.companion_id.as_str())) {anyhow::bail!("Robot supplement binding was replaced");}
+        self.sessions.supplement_robot_session_request(&self.owner_user_id,request,&robot_turn_idempotency_key(request),text,correction,input_id).await?;Ok(())
+    }
+    async fn cancel_background_work(&self,request:&nomifun_robot::services::RobotTurnRequest)->anyhow::Result<()> {
+        let _connection=self.registry.hold_action_connection(&request.robot_id,&request.connection_id).await.ok_or_else(||anyhow::anyhow!("Robot cancellation connection was replaced"))?;
+        if !self.registry.get(&request.robot_id).await.is_some_and(|record|record.companion_id.as_deref()==Some(request.companion_id.as_str())) {anyhow::bail!("Robot cancellation binding was replaced");}
+        self.sessions.cancel_robot_background_work(&self.owner_user_id,request,&robot_turn_idempotency_key(request)).await?;Ok(())
+    }
+    async fn supplement_background_work(&self,request:&nomifun_robot::services::RobotTurnRequest,text:&str,correction:bool,input_id:&str)->anyhow::Result<()> {
+        let _connection=self.registry.hold_action_connection(&request.robot_id,&request.connection_id).await.ok_or_else(||anyhow::anyhow!("Robot supplement connection was replaced"))?;
+        if !self.registry.get(&request.robot_id).await.is_some_and(|record|record.companion_id.as_deref()==Some(request.companion_id.as_str())) {anyhow::bail!("Robot supplement binding was replaced");}
+        self.sessions.supplement_robot_background_work(&self.owner_user_id,request,&robot_turn_idempotency_key(request),text,correction,input_id).await?;Ok(())
+    }
     async fn ensure_companion_session(&self, companion_id: &str, robot_id: &str) -> anyhow::Result<String> {
         Ok(self.companions.ensure_session_for_role(companion_id,
             nomifun_companion::CompanionRole::Robot, Some(robot_id)).await?.conversation_id)
     }
 
     async fn dispatch(&self, request: nomifun_robot::services::RobotTurnRequest) -> anyhow::Result<mpsc::Receiver<TurnEvent>> {
+        if request.captured_context.is_none() {anyhow::bail!("Physical Robot input is missing its recording-time canonical context");}
         let key = robot_turn_idempotency_key(&request);
         let (tx, rx) = mpsc::channel(64);
         let backend = self.clone();
@@ -673,11 +724,43 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
 }
 
 
+/// The earlier output snapshot may precede the terminal commit observed by
+/// the delivery reader. Refresh only this original key/cursor before deciding
+/// that a completed answer lacks a source. The reader validates canonical
+/// parts and Host terminal proof; neither a receipt's text nor a new model
+/// invocation can fill missing output. Delivered prefixes remain deduplicated.
+pub(crate) async fn completed_robot_public_delivery_events(
+    sessions:&crate::router::nomi_core_session::NomiCoreSessionOwner,owner:&str,
+    request:&nomifun_robot::services::RobotTurnRequest,key:&str,
+    receipt:&nomifun_conversation::IdempotentMessageDelivery,after_seq:u64,
+    delivered_bytes:&mut std::collections::BTreeMap<String,usize>,
+) -> anyhow::Result<Vec<TurnEvent>> {
+    let public=sessions.robot_public_output(owner,&request.conversation_id,key,after_seq,delivered_bytes).await?;
+    let mut events=Vec::new();
+    for (source,text) in public.segments {
+        tracing::info!(agent_session_id=%request.conversation_id,request_id=%request.request_id,
+            source_event_id=%source.message_id,through_seq=source.through_seq,"robot: canonical public source queued for delivery");
+        events.push(TurnEvent::PublicSpeech {source,text});
+    }
+    // A terminal question is a formal public interaction even without an
+    // answer. Its existing exact presentation-source checks remain required.
+    if let Some(question)=receipt.user_input_request.as_ref() {
+        if let Some((source,presentation_id,text))=sessions.robot_question_output(owner,&request.conversation_id,key,question).await? {
+            events.push(TurnEvent::Question {source,text,presentation_id});
+        }
+        events.push(TurnEvent::Done);return Ok(events);
+    }
+    events.extend(if delivered_bytes.is_empty() {completed_robot_delivery_events(receipt)}
+        else if receipt.result_ok==Some(true) {vec![TurnEvent::Done]}
+        else {vec![robot_stream_failure(receipt.result_error.as_deref().unwrap_or("The robot Turn failed"))]});
+    Ok(events)
+}
+
 fn completed_robot_delivery_events(
     delivery: &nomifun_conversation::IdempotentMessageDelivery,
 ) -> Vec<TurnEvent> {
     if delivery.user_input_request.is_some() {
-        return vec![robot_stream_failure("The non-interactive robot invocation requires user input")];
+        return vec![robot_stream_failure("Robot questions require their exact canonical presentation source")];
     }
     // A typed canonical silent delivery proves that this Turn intentionally
     // has no public reply. Device receipts remain in the canonical tool/effect
@@ -692,18 +775,7 @@ fn completed_robot_delivery_events(
         return vec![robot_stream_failure("The canonical robot turn has no public answer")];
     }
     match delivery.result_ok {
-        Some(true) => {
-            let mut events = Vec::with_capacity(2);
-            if let Some(text) = delivery
-                .result_text
-                .as_deref()
-                .filter(|text| !text.trim().is_empty())
-            {
-                events.push(TurnEvent::Text(text.to_owned()));
-            }
-            events.push(TurnEvent::Done);
-            events
-        }
+        Some(true) => vec![robot_stream_failure("The answered robot Turn has no irrevocable public source")],
         Some(false) => vec![robot_stream_failure(
             delivery
                 .result_error
@@ -725,186 +797,12 @@ fn robot_stream_failure(message: impl Into<String>) -> TurnEvent {
     }
 }
 
-#[cfg(test)]
-async fn relay_optional_robot_turn_stream(
-    stream: Option<broadcast::Receiver<AgentStreamEvent>>,
-    tx: mpsc::Sender<TurnEvent>,
-) {
-    let Some(stream) = stream else {
-        let _ = tx
-            .send(robot_stream_failure(
-                "Robot could not attach to the admitted agent turn",
-            ))
-            .await;
-        return;
-    };
-    relay_robot_turn_stream(stream, tx).await;
-}
-
-#[cfg(test)]
-async fn relay_robot_turn_stream(
-    mut stream: broadcast::Receiver<AgentStreamEvent>,
-    tx: mpsc::Sender<TurnEvent>,
-) {
-    let mut reducer = SpokenReplyReducer::default();
-    'stream: loop {
-        match stream.recv().await {
-            Ok(event) => {
-                for reduced in reducer.push(event) {
-                    let terminal = matches!(reduced, TurnEvent::Done | TurnEvent::Failed { .. });
-                    if tx.send(reduced).await.is_err() || terminal {
-                        break 'stream;
-                    }
-                }
-            }
-            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                let _ = tx
-                    .send(robot_stream_failure(format!(
-                        "Robot missed {skipped} agent stream event(s)"
-                    )))
-                    .await;
-                break;
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                let _ = tx
-                    .send(robot_stream_failure(
-                        "Agent stream closed without a terminal event",
-                    ))
-                    .await;
-                break;
-            }
-        }
-    }
-}
-
-/// Reduce the agent's rich event stream to the final spoken reply.
-///
-/// Nomi can emit visible narration before each tool call ("let me check"), as
-/// well as typed `Thinking` events. Both are execution progress, not the answer
-/// the robot should speak. A tool/thinking boundary invalidates text collected
-/// before it; only text produced after the last such boundary is released when
-/// the whole turn finishes.
-#[cfg(test)]
-#[derive(Default)]
-struct SpokenReplyReducer {
-    candidate: String,
-    output_checkpoint: Option<usize>,
-}
-
-#[cfg(test)]
-impl SpokenReplyReducer {
-    fn push(&mut self, event: AgentStreamEvent) -> Vec<TurnEvent> {
-        match event {
-            AgentStreamEvent::Start(_) => {
-                self.output_checkpoint = Some(self.candidate.len());
-                Vec::new()
-            }
-            AgentStreamEvent::OutputDiscarded(data) => {
-                let Some(checkpoint) = self.output_checkpoint else {
-                    self.candidate.clear();
-                    return vec![TurnEvent::Failed {
-                        message: format!(
-                            "Attempt {} discarded output without a robot stream checkpoint",
-                            data.restart_attempt
-                        ),
-                        provider_fault: false,
-                    }];
-                };
-                if checkpoint > self.candidate.len()
-                    || !self.candidate.is_char_boundary(checkpoint)
-                {
-                    self.candidate.clear();
-                    self.output_checkpoint = None;
-                    return vec![TurnEvent::Failed {
-                        message: "Discarded output checkpoint no longer matched the robot reply"
-                            .to_owned(),
-                        provider_fault: false,
-                    }];
-                }
-                self.candidate.truncate(checkpoint);
-                self.output_checkpoint = Some(self.candidate.len());
-                Vec::new()
-            }
-            AgentStreamEvent::Text(data) => {
-                self.candidate.push_str(&data.content);
-                Vec::new()
-            }
-            AgentStreamEvent::Thinking(data) => {
-                // A completion marker only closes the existing thinking card;
-                // it is not the start of a new model pass.
-                if data.status.as_deref() != Some("done") {
-                    self.candidate.clear();
-                    if self.output_checkpoint.is_some() {
-                        self.output_checkpoint = Some(0);
-                    }
-                }
-                Vec::new()
-            }
-            AgentStreamEvent::CanonicalTimeline(_) | AgentStreamEvent::InputQuestion(_) => Vec::new(),
-            AgentStreamEvent::TaskPlanChanged
-            | AgentStreamEvent::ToolCall(_)
-            | AgentStreamEvent::ToolGroup(_) => {
-                self.candidate.clear();
-                if self.output_checkpoint.is_some() {
-                    self.output_checkpoint = Some(0);
-                }
-                Vec::new()
-            }
-            AgentStreamEvent::Finish(data)
-                if matches!(data.stop_reason, None | Some(TurnStopReason::EndTurn)) =>
-            {
-                let answer = std::mem::take(&mut self.candidate);
-                self.output_checkpoint = None;
-                let mut reduced = Vec::with_capacity(2);
-                if !answer.trim().is_empty() {
-                    reduced.push(TurnEvent::Text(answer));
-                }
-                reduced.push(TurnEvent::Done);
-                reduced
-            }
-            AgentStreamEvent::Finish(data) => {
-                self.candidate.clear();
-                self.output_checkpoint = None;
-                let reason = match data.stop_reason {
-                    Some(TurnStopReason::MaxTokens) => "maximum output tokens reached",
-                    Some(TurnStopReason::MaxTurnRequests) => "maximum tool requests reached",
-                    Some(TurnStopReason::Refusal) => "the model refused the request",
-                    Some(TurnStopReason::Cancelled) => "the turn was cancelled",
-                    Some(TurnStopReason::Paused) => "execution is paused pending owner authorization",
-                    Some(TurnStopReason::InputRequired) => "the invocation requires user input",
-                    Some(TurnStopReason::EndTurn) | None => {
-                        unreachable!("normal finish was handled above")
-                    }
-                };
-                vec![TurnEvent::Failed {
-                    message: format!(
-                        "The turn ended before its requested output was completed: {reason}"
-                    ),
-                    provider_fault: false,
-                }]
-            }
-            AgentStreamEvent::Error(data) => {
-                self.candidate.clear();
-                self.output_checkpoint = None;
-                // `provider_fault` decides whether a fallback-model retry makes
-                // sense. A replay is permitted only when the platform proved
-                // retryability and classified the failure as provider-owned or
-                // explicitly unknown-upstream. Non-retryable provider-quality
-                // failures must not duplicate a possibly side-effecting turn.
-                let provider_fault = matches!(
-                    data.ownership,
-                    Some(AgentErrorOwnership::UserLlmProvider)
-                        | Some(AgentErrorOwnership::UnknownUpstream)
-                ) && data.retryable == Some(true);
-                vec![TurnEvent::Failed {
-                    message: data.message,
-                    provider_fault,
-                }]
-            }
-            // Metrics, status and UI-only metadata do not invalidate an answer
-            // that has already been produced immediately before Finish.
-            _ => Vec::new(),
-        }
+fn unavailable_robot_input_event(cause:&nomifun_conversation::UnavailableInputCause)->TurnEvent {
+    match cause {
+        nomifun_conversation::UnavailableInputCause::CancelledByOwner
+        |nomifun_conversation::UnavailableInputCause::ContextCleared=>TurnEvent::Done,
+        nomifun_conversation::UnavailableInputCause::PreparationBlocked {reason}=>
+            robot_stream_failure(format!("Robot input preparation is blocked: {reason}")),
     }
 }
 
@@ -941,8 +839,8 @@ pub(crate) fn mount(
         bridge_workers: robot.bridge_workers.clone(),
         queues: Arc::new(Mutex::new(HashMap::new())),
     });
-    let delivery: Arc<dyn crate::router::nomi_core_session::DirectedReportDeliveryPort> = backend.clone();
-    backend.sessions.install_directed_report_delivery(&delivery)
+    let delivery: Arc<dyn crate::router::nomi_core_session::ExecutionReportDeliveryPort> = backend.clone();
+    backend.sessions.install_execution_report_delivery(&delivery)
         .expect("install Robot directed-report delivery owner");
     #[cfg(test)]
     let _ = robot.backend.set(backend.clone());
@@ -1002,12 +900,26 @@ mod tests {
     }
 
     #[test]
+    fn unclaimed_input_lifecycle_ends_robot_observation_without_provider_retry() {
+        use nomifun_conversation::UnavailableInputCause;
+        for cause in [UnavailableInputCause::CancelledByOwner,UnavailableInputCause::ContextCleared] {
+            assert_eq!(unavailable_robot_input_event(&cause),TurnEvent::Done);
+        }
+        assert_eq!(unavailable_robot_input_event(&UnavailableInputCause::PreparationBlocked {
+            reason:"COMPONENT_PREPARATION_REQUIRED: speech binding unavailable".into(),
+        }),TurnEvent::Failed {
+            message:"Robot input preparation is blocked: COMPONENT_PREPARATION_REQUIRED: speech binding unavailable".into(),
+            provider_fault:false,
+        });
+    }
+
+    #[test]
     fn robot_delivery_keeps_questions_answers_and_failures_distinct_from_silence() {
         let mut delivery = robot_delivery(nomifun_agent_contracts::AgentTurnOutcome::Answered {
             message_ids: vec!["answer".into()],
         });
         delivery.result_text = Some("北京今天有小雨。".into());
-        assert_eq!(completed_robot_delivery_events(&delivery), vec![TurnEvent::Text("北京今天有小雨。".into()), TurnEvent::Done]);
+        assert!(matches!(completed_robot_delivery_events(&delivery).as_slice(),[TurnEvent::Failed {provider_fault:false,..}]),"an aggregate text receipt cannot authorize playback without its committed source");
         delivery.turn_outcome = Some(nomifun_agent_contracts::AgentTurnOutcome::Unavailable);
         assert!(matches!(completed_robot_delivery_events(&delivery).as_slice(), [TurnEvent::Failed { provider_fault: false, .. }]));
         delivery.turn_outcome = Some(nomifun_agent_contracts::AgentTurnOutcome::Silent {});
@@ -1027,6 +939,7 @@ mod tests {
             request_id: "utterance-1".into(),
             text: "你好".into(),
             presented_question_id: None,
+            captured_context:None,
         }
     }
 
@@ -1160,302 +1073,4 @@ mod tests {
     use super::*;
 
 
-    fn running_tool_call() -> AgentStreamEvent {
-        use nomifun_ai_agent::protocol::events::tool_call::{
-            ToolCallEventData, ToolCallStatus,
-        };
-
-        AgentStreamEvent::ToolCall(ToolCallEventData {
-            identity: Default::default(),
-            call_id: "tool-1".to_owned(),
-            name: "Browser".to_owned(),
-            status: ToolCallStatus::Running,
-            description: None,
-            artifacts: Vec::new(),
-        })
-    }
-
-
-
-
-
-    #[test]
-    fn only_explicitly_retryable_upstream_faults_are_worth_a_fallback_retry() {
-        let error = |ownership, retryable| {
-            AgentStreamEvent::Error(nomifun_api_types::AgentStreamErrorData {
-                provider_diagnostic: None,
-                system_execution_error: None,
-                message: "boom".to_owned(),
-                code: None,
-                ownership,
-                detail: None,
-                workspace_path: None,
-                agent_label: None,
-                agent_template_key: None,
-                model_name: None,
-                task_incomplete_reason: None,
-                retryable,
-                feedback_recommended: None,
-                resolution: None,
-            })
-        };
-        assert_eq!(
-            SpokenReplyReducer::default()
-                .push(error(
-                    Some(AgentErrorOwnership::UserLlmProvider),
-                    Some(true),
-                )),
-            vec![TurnEvent::Failed {
-                message: "boom".to_owned(),
-                provider_fault: true
-            }]
-        );
-        for (ownership, retryable) in [
-            (Some(AgentErrorOwnership::UserLlmProvider), Some(false)),
-            (Some(AgentErrorOwnership::UserLlmProvider), None),
-            (Some(AgentErrorOwnership::Nomifun), Some(true)),
-            (Some(AgentErrorOwnership::UserAgent), Some(true)),
-            (None, Some(true)),
-        ] {
-            assert_eq!(
-                SpokenReplyReducer::default().push(error(ownership, retryable)),
-                vec![TurnEvent::Failed {
-                    message: "boom".to_owned(),
-                    provider_fault: false
-                }],
-                "{ownership:?} with retryable={retryable:?} must not replay on the fallback model"
-            );
-        }
-        assert_eq!(
-            SpokenReplyReducer::default().push(error(
-                Some(AgentErrorOwnership::UnknownUpstream),
-                Some(true),
-            )),
-            vec![TurnEvent::Failed {
-                message: "boom".to_owned(),
-                provider_fault: true,
-            }],
-            "an explicitly retryable unknown-upstream failure keeps its existing fallback path"
-        );
-    }
-
-    #[test]
-    fn non_success_finish_never_releases_a_truncated_spoken_reply() {
-        use nomifun_ai_agent::protocol::events::{FinishEventData, TextEventData};
-
-        for stop_reason in [
-            TurnStopReason::MaxTokens,
-            TurnStopReason::MaxTurnRequests,
-            TurnStopReason::Refusal,
-            TurnStopReason::Cancelled,
-            TurnStopReason::Paused,
-            TurnStopReason::InputRequired,
-        ] {
-            let mut reducer = SpokenReplyReducer::default();
-            assert!(
-                reducer
-                    .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "unfinished draft".to_owned(),
-                    }))
-                    .is_empty()
-            );
-
-            let reduced = reducer.push(AgentStreamEvent::Finish(FinishEventData { turn_outcome: None,
-                session_id: None,
-                stop_reason: Some(stop_reason),
-            }));
-            assert!(
-                matches!(
-                    reduced.as_slice(),
-                    [TurnEvent::Failed {
-                        provider_fault: false,
-                        ..
-                    }]
-                ),
-                "{stop_reason:?} must not be spoken or reported as Done: {reduced:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn missing_robot_stream_fails_closed_instead_of_reporting_done() {
-        let (tx, mut rx) = mpsc::channel(1);
-        relay_optional_robot_turn_stream(None, tx).await;
-
-        assert!(matches!(
-            rx.recv().await,
-            Some(TurnEvent::Failed {
-                provider_fault: false,
-                ..
-            })
-        ));
-        assert!(rx.recv().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn lagged_robot_stream_fails_closed_instead_of_reporting_done() {
-        use nomifun_ai_agent::protocol::events::StartEventData;
-
-        let (source, stream) = broadcast::channel(1);
-        source
-            .send(AgentStreamEvent::Start(StartEventData::default()))
-            .unwrap();
-        source
-            .send(AgentStreamEvent::Start(StartEventData::default()))
-            .unwrap();
-        let (tx, mut rx) = mpsc::channel(1);
-        relay_robot_turn_stream(stream, tx).await;
-
-        assert!(matches!(
-            rx.recv().await,
-            Some(TurnEvent::Failed {
-                provider_fault: false,
-                ..
-            })
-        ));
-        assert!(rx.recv().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn closed_robot_stream_without_terminal_fails_closed() {
-        let (source, stream) = broadcast::channel(1);
-        drop(source);
-        let (tx, mut rx) = mpsc::channel(1);
-        relay_robot_turn_stream(stream, tx).await;
-
-        assert!(matches!(
-            rx.recv().await,
-            Some(TurnEvent::Failed {
-                provider_fault: false,
-                ..
-            })
-        ));
-        assert!(rx.recv().await.is_none());
-    }
-
-    #[test]
-    fn thinking_is_never_spoken_and_text_waits_for_finish() {
-        use nomifun_ai_agent::protocol::events::{TextEventData, ThinkingEventData};
-
-        let mut reducer = SpokenReplyReducer::default();
-        assert_eq!(
-            reducer.push(AgentStreamEvent::Thinking(ThinkingEventData {
-                step: None,
-                content: "internal reasoning".to_owned(),
-                subject: None,
-                duration: None,
-                status: None,
-            })),
-            vec![]
-        );
-        assert_eq!(
-            reducer.push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "在".to_owned(),
-            })),
-            vec![],
-            "an unconfirmed text delta must not reach TTS"
-        );
-        assert_eq!(
-            reducer.push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "呢".to_owned(),
-            })),
-            vec![]
-        );
-        assert_eq!(
-            reducer.push(AgentStreamEvent::Finish(Default::default())),
-            vec![TurnEvent::Text("在呢".to_owned()), TurnEvent::Done]
-        );
-    }
-
-    #[test]
-    fn discarded_attempt_keeps_the_latest_start_prefix_out_of_tts_until_finish() {
-        use nomifun_ai_agent::protocol::events::{
-            OutputDiscardedEventData, StartEventData, TextEventData,
-        };
-
-        let mut reducer = SpokenReplyReducer::default();
-        assert!(
-            reducer
-                .push(AgentStreamEvent::Start(StartEventData::default()))
-                .is_empty()
-        );
-        assert!(
-            reducer
-                .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "前缀".to_owned(),
-                }))
-                .is_empty()
-        );
-        assert!(
-            reducer
-                .push(AgentStreamEvent::Start(StartEventData::default()))
-                .is_empty()
-        );
-        assert!(
-            reducer
-                .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "废弃草稿".to_owned(),
-                }))
-                .is_empty()
-        );
-        assert!(
-            reducer
-                .push(AgentStreamEvent::OutputDiscarded(
-                    OutputDiscardedEventData { restart_attempt: 2 },
-                ))
-                .is_empty()
-        );
-        assert!(
-            reducer
-                .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "答案".to_owned(),
-                }))
-                .is_empty()
-        );
-        assert_eq!(
-            reducer.push(AgentStreamEvent::Finish(Default::default())),
-            vec![TurnEvent::Text("前缀答案".to_owned()), TurnEvent::Done]
-        );
-    }
-
-    #[test]
-    fn tool_progress_text_is_discarded_and_only_the_final_answer_is_spoken() {
-        use nomifun_ai_agent::protocol::events::TextEventData;
-
-        let mut reducer = SpokenReplyReducer::default();
-        assert!(
-            reducer
-                .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "我先搜索一下。".to_owned(),
-                }))
-                .is_empty()
-        );
-        assert!(reducer.push(running_tool_call()).is_empty());
-        assert!(
-            reducer
-                .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "已经为你打开视频。".to_owned(),
-                }))
-                .is_empty()
-        );
-        assert_eq!(
-            reducer.push(AgentStreamEvent::Finish(Default::default())),
-            vec![
-                TurnEvent::Text("已经为你打开视频。".to_owned()),
-                TurnEvent::Done
-            ],
-            "the narration before the tool call must never become TTS input"
-        );
-    }
-
-    #[test]
-    fn tool_progress_without_a_final_answer_stays_silent() {
-        use nomifun_ai_agent::protocol::events::TextEventData;
-
-        let mut reducer = SpokenReplyReducer::default();
-        assert!(
-            reducer
-                .push(AgentStreamEvent::Text(TextEventData { timeline: None, step: None, content: "我正在处理。".to_owned(),
-                }))
-                .is_empty()
-        );
-        assert!(reducer.push(running_tool_call()).is_empty());
-        assert_eq!(
-            reducer.push(AgentStreamEvent::Finish(Default::default())),
-            vec![TurnEvent::Done],
-            "stale progress narration must not be spoken when no final text follows the tool"
-        );
-    }
 }

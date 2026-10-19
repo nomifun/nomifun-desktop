@@ -184,6 +184,11 @@ fn is_url(target: &str) -> bool {
 /// URLs are rejected) reliably via the OS shell, optionally opening it WITH a
 /// specific `app`. Detached. Returns a human-readable success message.
 pub async fn launch(target: &str, app: Option<&str>) -> Result<String, String> {
+    launch_controlled(&tokio_util::sync::CancellationToken::new(), target, app).await
+}
+
+pub(crate) async fn launch_controlled(cancellation: &tokio_util::sync::CancellationToken, target: &str, app: Option<&str>) -> Result<String, String> {
+    crate::native_control::require_open(cancellation)?;
     let target = target.trim();
     let app = app.map(str::trim);
     validate_launch_target(target)?;
@@ -196,7 +201,8 @@ pub async fn launch(target: &str, app: Option<&str>) -> Result<String, String> {
     }
     let target = target.to_string();
     let app = app.map(|s| s.to_string());
-    tokio::task::spawn_blocking(move || launch_blocking(&target, app.as_deref()))
+    let cancellation = cancellation.clone();
+    tokio::task::spawn_blocking(move || launch_blocking(&cancellation, &target, app.as_deref()))
         .await
         .unwrap_or_else(|e| Err(format!("launch task failed: {e}")))
 }
@@ -221,11 +227,12 @@ fn macos_open_command(target: &str, app: Option<&str>) -> std::process::Command 
 }
 
 #[cfg(target_os = "macos")]
-fn launch_blocking(target: &str, app: Option<&str>) -> Result<String, String> {
+fn launch_blocking(cancellation: &tokio_util::sync::CancellationToken, target: &str, app: Option<&str>) -> Result<String, String> {
     // `open` exits after submitting the LaunchServices request, without
     // waiting for the launched app to quit. Waiting for this short-lived
     // command is necessary: a successful spawn alone does not prove that an
     // application exists or that macOS accepted the launch.
+    crate::native_control::require_open(cancellation)?;
     let output = macos_open_command(target, app)
         .output()
         .map_err(|error| format!("failed to submit {target:?} to macOS LaunchServices: {error}"))?;
@@ -250,7 +257,8 @@ fn launch_blocking(target: &str, app: Option<&str>) -> Result<String, String> {
 /// Blocking launch (runs on a `spawn_blocking` thread): resolve the target if it
 /// is a bare Windows app name, then ShellExecute it.
 #[cfg(not(target_os = "macos"))]
-fn launch_blocking(target: &str, app: Option<&str>) -> Result<String, String> {
+fn launch_blocking(cancellation: &tokio_util::sync::CancellationToken, target: &str, app: Option<&str>) -> Result<String, String> {
+    crate::native_control::require_open(cancellation)?;
     // Opening a target WITH a specific app (e.g. a URL in a chosen browser):
     // the app handler resolves it; no Start-Menu lookup.
     if let Some(a) = app {
@@ -266,6 +274,7 @@ fn launch_blocking(target: &str, app: Option<&str>) -> Result<String, String> {
     {
         if !is_url(target) && !std::path::Path::new(target).exists() {
             if let Some(resolved) = resolve_start_app(target) {
+                crate::native_control::require_open(cancellation)?;
                 return open::that_detached(&resolved)
                     .map(|()| format!("Launched {target:?} (resolved via the Start Menu to {resolved:?})."))
                     .map_err(|e| {
@@ -275,6 +284,7 @@ fn launch_blocking(target: &str, app: Option<&str>) -> Result<String, String> {
             // Not in the Start Menu — best-effort raw open, with a clear error so
             // the model knows to use the exact name / a full path instead of
             // retrying the same string.
+            crate::native_control::require_open(cancellation)?;
             return open::that_detached(target)
                 .map(|()| format!("Opened {target:?}."))
                 .map_err(|e| {
@@ -606,7 +616,7 @@ mod tests {
     #[test]
     fn macos_missing_application_is_an_error_without_claiming_a_launch() {
         let unique = format!("NomiDefinitelyMissingApplication-{}", std::process::id());
-        let error = launch_blocking(&unique, None).unwrap_err();
+        let error = launch_blocking(&tokio_util::sync::CancellationToken::new(), &unique, None).unwrap_err();
         assert!(error.contains("macOS could not open"), "{error}");
         assert!(error.contains(&unique), "{error}");
     }

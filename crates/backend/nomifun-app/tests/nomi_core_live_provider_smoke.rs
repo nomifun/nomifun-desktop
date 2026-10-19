@@ -2900,7 +2900,7 @@ async fn run_live_companion_chain(
     let provider_id = configure_stepfun(router, api_key, STEPFUN_PLAN_BASE_URL, model).await?;
     let companion = successful_json(router, "companion.create", Method::POST,
         "/api/companion/companions".to_owned(),
-        Some(json!({"name":"Live Companion smoke","character":"ink"})),
+        Some(json!({"name":"Live Companion smoke","character":"mochi"})),
         LOCAL_API_DEADLINE, &[StatusCode::CREATED]).await?;
     let companion = envelope_data("companion.create", companion)?;
     let companion_id = required_string("companion.create", &companion,

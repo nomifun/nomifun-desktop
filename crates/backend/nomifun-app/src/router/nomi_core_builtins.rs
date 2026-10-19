@@ -55,6 +55,8 @@ pub(crate) async fn build(
     });
     #[cfg(not(feature = "browser-use"))]
     let wave1_search = None;
+    #[cfg(test)]
+    let wave1_search = services.test_wave1_search.clone().or(wave1_search);
     let wave1 = super::agent_wave1_host::wave1_registrations_for_nomi_core(
         Arc::clone(&services.knowledge_service),
         wave1_search,
@@ -88,6 +90,10 @@ pub(crate) async fn build(
         services.headless_render.clone(),
         effect_store.clone(),
     );
+    #[cfg(feature = "browser-use")]
+    browser_owner.install_task_repository(Arc::new(nomifun_db::SqliteAgentExecutionRepository::new(
+        services.database.pool().clone(),
+    )))?;
     #[cfg(feature = "browser-use")]
     let wave2_ports = {
         let mut wave2_ports = wave2_ports;

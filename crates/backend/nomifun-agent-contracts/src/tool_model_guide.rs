@@ -268,7 +268,19 @@ mod tests {
 
     #[test]
     fn data_is_complete_and_preserves_registered_names_without_a_second_schema() {
-        assert_eq!(tool_model_guides().len(), 22);
+        // Coverage is about published identities, not a frozen catalogue size:
+        // adding another valid guide must not break the contract.
+        for (capability, action) in [
+            ("browser", "browser/upload"),
+            ("workspace.files", "workspace.files/read"),
+            ("workspace.files", "workspace.files/write"),
+            ("workspace.process", "workspace.process/start"),
+            ("session.management", "session.management/execution_answer_decision"),
+            ("companion.memory", "companion.memory/recall"),
+            ("companion.memory", "companion.memory/write"),
+        ] {
+            assert!(tool_model_guide(capability, action).is_some(), "missing {action} guide");
+        }
         for guide in tool_model_guides() {
             assert!(tool_presentation(&guide.capability_id, &guide.action_id).is_some());
             assert!(guide.examples.iter().all(|example| example.label.starts_with("Syntax only;")));

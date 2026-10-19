@@ -7,6 +7,7 @@ input, select, button { font: inherit; padding:8px 12px; }
 button, a { margin:4px 8px 4px 0; } .manual { border-top:1px solid #bcc9cf; margin-top:20px; padding-top:12px; }
 #scroll { height:100px; width:400px; overflow:auto; border:1px solid #81929c; margin:14px 0; }
 #scroll p { height:600px; padding:10px; } output { display:block; margin:14px 0; }
+#count { display:inline; margin:0; }
 </style>
 <h1>实际 App WKWebView 验收</h1>
 <p>Agent 与用户使用同一原生页面。自动化使用 DOM 语义操作，事件保持真实的 isTrusted 值。</p>
@@ -15,10 +16,10 @@ button, a { margin:4px 8px 4px 0; } .manual { border-top:1px solid #bcc9cf; marg
 <label for="choice">验收选项</label><select id="choice"><option>Alpha</option><option>Café 中文</option><option>Omega</option></select>
 <div id="scroll" role="region" aria-label="验收滚动区域" tabindex="0"><p>滚动内容起点</p><p>滚动内容终点</p></div>
 <button id="submit" type="submit">提交验收</button>
+<button id="user" type="button">用户计数</button><output id="count">0</output>
 </form>
 <output id="result">等待 Agent 表单操作</output>
 <output id="profile"></output>
-<button id="user" type="button">用户计数</button><output id="count">0</output>
 <section class="manual"><h2>普通用户操作</h2>
 <button id="popup" type="button">打开普通弹窗</button>
 <button id="alert" type="button">显示 Alert</button>

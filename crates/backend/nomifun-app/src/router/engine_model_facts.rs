@@ -25,6 +25,7 @@ impl EngineRouteModelFacts {
     pub(super) fn from_candidates(candidates: Vec<EngineRouteCandidateFacts>) -> Self {
         Self { candidates }
     }
+    #[cfg(test)]
     pub fn candidates(&self) -> &[EngineRouteCandidateFacts] {
         &self.candidates
     }

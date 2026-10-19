@@ -3,6 +3,8 @@ mod agent_build_extra;
 mod agent_discovery;
 mod agent_error;
 mod agent_execution;
+mod agent_activity;
+pub use agent_activity::*;
 mod execution_constraints;
 pub use execution_constraints::*;
 mod agent_execution_template;
@@ -63,8 +65,8 @@ pub use agent_error::{
 };
 pub use agent_execution::{
     AddExecutionStepsRequest, AdjustAgentExecutionRequest, AdoptExecutionStepOutputRequest,
-    AgentExecution, AgentExecutionChangedEvent, AgentExecutionDetail, AgentExecutionEvent,
-    AgentExecutionEventsQuery, AnswerExecutionDecisionRequest, ConfigureExecutionStepRequest,
+    AgentExecution, AgentExecutionChangedEvent, AgentExecutionDetail, AgentExecutionEvent,AutomationExecutionControl,
+    AgentExecutionEventsQuery, AnswerExecutionDecisionRequest, CancelExecutionStepRequest, ConfigureExecutionStepRequest,
     CreateAgentExecutionRequest, ExecutionAttempt, ExecutionModelPool, ExecutionModelRef,
     ExecutionParticipant, ExecutionStep, ExecutionStepDependency, ExecutionStepProfile,
     JudgeAggregation, LoopStopPolicy, ParticipantCapability, ParticipantConstraints,
@@ -150,8 +152,9 @@ pub use mcp::{
     BatchImportMcpServersRequest, CreateMcpServerRequest, DetectedMcpServerEntry,
     DetectedMcpServerResponse, ImportMcpServerRequest, McpAuthMethod, McpConnectionTestErrorCode,
     McpConnectionTestResult, McpServerId, McpServerResponse, McpToolResponse, McpTransport,
-    OAuthCheckStatusRequest, OAuthLoginRequest, OAuthLoginResponse, OAuthLogoutRequest,
-    OAuthStatusResponse, TestMcpConnectionRequest, UpdateMcpServerRequest,
+    McpAuthDiagnostic, McpAuthErrorCode, McpAuthStage, McpAuthState, McpAuthStatus, McpAuthUserAction,
+    McpOAuthAttempt, McpOAuthAttemptStatus, McpOAuthClientConfig, McpOAuthStartRequest,
+    TestMcpConnectionRequest, UpdateMcpServerRequest,
 };
 pub use mcp_bridge::{
     GATEWAY_CALL_TOOL_OPERATION, GATEWAY_CAPABILITY_DOMAIN, GATEWAY_CREATE_CONVERSATION_TOOL,

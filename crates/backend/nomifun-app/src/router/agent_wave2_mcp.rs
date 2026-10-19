@@ -435,15 +435,39 @@ fn mcp_adapter_error(
 /// this adapter does not replace those codes with a generic success or
 /// fallback result.
 pub(crate) fn map_mcp_owner_error(error: McpOwnerError) -> Wave2HostPortError {
-    Wave2HostPortError::new(
+    let failure = Wave2HostPortError::new(
         error.code().to_owned(),
         format!("canonical MCP owner failed: {}", error.message()),
-    )
+    );
+    match error.auth_diagnostic() {
+        Some(diagnostic) => failure.with_details(serde_json::json!({
+            "owner_code": error.code(), "auth_diagnostic": diagnostic,
+        })),
+        None => failure,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_diagnostic_crosses_the_mcp_runtime_adapter_without_message_parsing() {
+        let diagnostic = nomifun_api_types::McpAuthDiagnostic {
+            code: nomifun_api_types::McpAuthErrorCode::ReauthorizationRequired,
+            stage: nomifun_api_types::McpAuthStage::Refresh,
+            retryable: false, user_action: nomifun_api_types::McpAuthUserAction::Reauthorize,
+            trace_id: "runtime-auth-trace".into(), message: "Sign in again".into(), details: None,
+        };
+        let error = map_mcp_owner_error(McpOwnerError::new("MCP_CREDENTIAL_EXPIRED", "An unrelated outer message")
+            .with_auth_diagnostic(diagnostic));
+        assert_eq!(error.code, "MCP_CREDENTIAL_EXPIRED");
+        let details = error.details.unwrap();
+        assert_eq!(details["owner_code"], "MCP_CREDENTIAL_EXPIRED");
+        assert_eq!(details["auth_diagnostic"]["code"], "REAUTHORIZATION_REQUIRED");
+        assert_eq!(details["auth_diagnostic"]["trace_id"], "runtime-auth-trace");
+        assert_eq!(details["auth_diagnostic"]["user_action"], "reauthorize");
+    }
 
     use std::collections::{BTreeSet, HashMap};
 

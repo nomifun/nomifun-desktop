@@ -39,13 +39,14 @@ beforeEach(() => {
   const boot = spyOn(ipcBridge.application.getStartOnBootStatus, 'invoke').mockResolvedValue({ success: true, data: { supported: true, enabled: false, isPackaged: true, platform: 'windows' } });
   const permission = spyOn(ipcBridge.notification.permissionState, 'invoke').mockResolvedValue('granted');
   const request = spyOn(ipcBridge.notification.requestPermission, 'invoke').mockResolvedValue('granted');
+  const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue({ platform: 'windows', app_label: 'NomiFun', permissions: [] });
   const pick = spyOn(ipcBridge.dialog.showOpen, 'invoke').mockResolvedValue(['D:\\selected']);
   const status = spyOn(ipcBridge.storageRelocation.status, 'invoke').mockResolvedValue(relocation());
   const prepare = spyOn(ipcBridge.storageRelocation.prepare, 'invoke').mockResolvedValue(prepared());
   const start = spyOn(ipcBridge.storageRelocation.start, 'invoke').mockResolvedValue(scheduled());
   const cancel = spyOn(ipcBridge.storageRelocation.cancel, 'invoke').mockResolvedValue(relocation({ phase: 'canceled' }));
   const restart = spyOn(ipcBridge.application.restart, 'invoke').mockResolvedValue(undefined);
-  restores.push(() => set.mockRestore(), () => info.mockRestore(), () => boot.mockRestore(), () => permission.mockRestore(), () => request.mockRestore(), () => pick.mockRestore(), () => status.mockRestore(), () => prepare.mockRestore(), () => start.mockRestore(), () => cancel.mockRestore(), () => restart.mockRestore());
+  restores.push(() => set.mockRestore(), () => info.mockRestore(), () => boot.mockRestore(), () => permission.mockRestore(), () => request.mockRestore(), () => permissions.mockRestore(), () => pick.mockRestore(), () => status.mockRestore(), () => prepare.mockRestore(), () => start.mockRestore(), () => cancel.mockRestore(), () => restart.mockRestore());
 });
 afterEach(() => { cleanup(); restores.splice(0).forEach((restore) => restore()); configService.reset(); delete window.__backendPort; });
 
@@ -63,13 +64,16 @@ test('search finds controls across groups, saves the canonical preference and Es
   fireEvent.click(await screen.findByRole('switch', { name: settings.autoPreviewOfficeFiles }));
   await waitFor(() => expect(configService.set).toHaveBeenCalledWith('system.autoPreviewOfficeFiles', false));
   fireEvent.keyDown(search, { key: 'Escape' });
-  expect(screen.getByRole('tab', { name: settings.workspace.preferences }).getAttribute('aria-selected')).toBe('true');
+  expect(screen.getByRole('heading', { name: settings.workspace.preferences })).toBeTruthy();
+  expect(screen.getByRole('switch', { name: settings.thinkingProcessVisible })).toBeTruthy();
+  expect(screen.getByRole('switch', { name: settings.receiveDesktopNotifications })).toBeTruthy();
+  expect(screen.queryByRole('tablist')).toBeNull();
   expect(screen.queryByRole('switch', { name: settings.autoPreviewOfficeFiles })).toBeNull();
   await act(async () => { fireEvent.input(search, { target: { value: 'does-not-exist' } }); });
   expect(screen.getByRole('heading', { name: settings.workspace.noResults })).toBeTruthy();
 });
 
-test('keyboard tabs preserve route parameters and hidden reasoning disables dependent choices', async () => {
+test('legacy conversation links show daily preferences and hidden reasoning disables dependent choices', async () => {
   const screen = renderPage('conversation');
   const thinking = screen.getByRole('switch', { name: settings.thinkingProcessVisible });
   fireEvent.click(thinking);
@@ -77,8 +81,9 @@ test('keyboard tabs preserve route parameters and hidden reasoning disables depe
   expect((screen.getByRole('radio', { name: settings.thinkingContentFull }) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(screen.getByRole('radio', { name: settings.sendKeyModEnter }));
   expect(configService.set).toHaveBeenCalledWith('chat.sendKey', 'mod-enter');
-  fireEvent.keyDown(screen.getByRole('tab', { name: settings.workspace.conversation }), { key: 'End' });
-  expect(screen.getByRole('tab', { name: settings.workspace.data }).getAttribute('aria-selected')).toBe('true');
+  expect(screen.getByRole('heading', { name: settings.workspace.preferences })).toBeTruthy();
+  expect(screen.getByRole('switch', { name: settings.receiveDesktopNotifications })).toBeTruthy();
+  expect(screen.queryByRole('tablist')).toBeNull();
   expect(screen.getByTestId('location').textContent).toContain('from=test');
 });
 
@@ -89,7 +94,7 @@ test('disabled notifications retain the scheduled preference and re-enable its c
   const scheduled = screen.getByRole('switch', { name: settings.cronNotificationEnabled }) as HTMLButtonElement;
   expect(scheduled.disabled).toBe(true);
   expect(scheduled.getAttribute('aria-checked')).toBe('true');
-  fireEvent.click(screen.getByRole('switch', { name: settings.notification }));
+  fireEvent.click(screen.getByRole('switch', { name: settings.receiveDesktopNotifications }));
   await waitFor(() => expect(scheduled.disabled).toBe(false));
   fireEvent.click(scheduled);
   await waitFor(() => expect(configService.set).toHaveBeenCalledWith('system.cronNotificationEnabled', false));
@@ -118,12 +123,23 @@ test('denied notification access leaves notifications off and does not persist a
   const request = spyOn(ipcBridge.notification.requestPermission, 'invoke').mockResolvedValue('denied');
   restores.push(() => permission.mockRestore(), () => request.mockRestore());
   const screen = renderPage('notifications');
-  const notification = screen.getByRole('switch', { name: settings.notification });
+  const notification = screen.getByRole('switch', { name: settings.receiveDesktopNotifications });
   fireEvent.click(notification);
   await waitFor(() => expect(ipcBridge.notification.requestPermission.invoke).toHaveBeenCalled());
   await waitFor(() => expect(notification.getAttribute('aria-busy')).toBe('false'));
   expect(notification.getAttribute('aria-checked')).toBe('false');
   expect(configService.set).not.toHaveBeenCalled();
+});
+
+test('data management groups file handling, storage and reset without exposing preference controls', async () => {
+  const screen = renderPage('data');
+  expect(screen.getByRole('heading', { name: settings.workspace.data })).toBeTruthy();
+  expect(screen.getByRole('switch', { name: settings.autoPreviewOfficeFiles })).toBeTruthy();
+  expect(screen.getByRole('button', { name: settings.factoryReset.button })).toBeTruthy();
+  expect(await screen.findByText(systemInfo.dataDir)).toBeTruthy();
+  expect(screen.getByText(systemInfo.logDir)).toBeTruthy();
+  expect(screen.queryByRole('switch', { name: settings.receiveDesktopNotifications })).toBeNull();
+  expect(screen.queryByRole('switch', { name: settings.thinkingProcessVisible })).toBeNull();
 });
 
 const openStorageMigration = async () => {

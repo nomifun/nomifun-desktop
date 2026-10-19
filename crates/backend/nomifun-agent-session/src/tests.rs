@@ -36,6 +36,8 @@ mod native_execution_tests;
 mod runtime_state_tests;
 #[path = "native_mutation_fence_tests.rs"]
 mod native_mutation_fence_tests;
+#[path = "cron_cancellation_tests.rs"]
+mod cron_cancellation_tests;
 #[path = "effect_native_targets_tests.rs"]
 #[cfg(windows)]
 mod effect_native_targets_tests;
@@ -51,6 +53,8 @@ mod companion_scope_tests;
 mod knowledge_writeback_tests;
 #[path = "turn_outcome_history_tests.rs"]
 mod turn_outcome_history_tests;
+#[path = "turn_progress_tests.rs"]
+mod turn_progress_tests;
 #[path = "channel_input_delivery_tests.rs"]
 mod channel_input_delivery_tests;
 #[path = "channel_input_observation_tests.rs"]
@@ -69,6 +73,8 @@ mod context_clear_tests;
 mod shared_content_tests;
 #[path = "terminal_content_tests.rs"]
 mod terminal_content_tests;
+#[path = "robot_question_transaction_tests.rs"]
+mod robot_question_transaction_tests;
 
 async fn clear_context(store: &AgentSessionStore, session: &AgentSessionId, key: &str) -> crate::SessionEventAppendResult {
     let request = crate::ClearSessionContext { idempotency_key: key.into(), reason: "user_requested".into() };

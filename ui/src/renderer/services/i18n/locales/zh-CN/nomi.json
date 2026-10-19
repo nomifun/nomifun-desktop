@@ -121,14 +121,14 @@
       "label": "当前会话机器人",
       "none": "不控制机器人",
       "unavailable": "所选机器人已不再绑定",
-      "hint": "设备工具仅用于机器人的会话。选择已绑定设备后点击「应用机器人」；动作仍需设备的「允许控制动作」权限。",
+      "hint": "具备机器人能力的会话可选择确切设备。选择已绑定设备后点击「应用机器人」；动作仍需设备的「允许控制动作」权限。",
       "apply": "应用机器人",
       "changed": "会话设定已变更，请核对刷新后的设定并再次应用。",
       "saved": "当前会话机器人已更新"
     },
     "growth": "成长",
     "modelRequired": "先为伙伴配置主对话模型",
-    "modelRequiredHint": "配置伙伴默认模型后即可新建桌面会话；机器人使用独立设置。",
+    "modelRequiredHint": "配置伙伴默认模型后，各交互入口即可使用同一个伙伴 Agent；每段会话独立保留上下文。",
     "configureModel": "配置模型",
     "sessionFailed": "伙伴会话暂时无法打开",
     "sessionFailedHint": "检查模型与 Agent 配置后再试一次。",
@@ -136,18 +136,11 @@
     "quickModel": "模型",
     "quickModelPlaceholder": "选择模型",
     "modelDefaultSaveFailed": "当前会话模型已切换，默认模型保存失败，请重试。",
-    "roleCurrentHint": "更新当前会话，并保存为此角色的后续默认；其他会话保留原设定。",
-    "roleDefaultHint": "仅设置此角色的后续默认；已有会话保留原设定。",
-    "robotRoleHint": "与伙伴同时可用。物理设备使用机器人 Agent，电脑工作可委派给伙伴。",
-    "robotModel": "机器人默认模型",
-    "robotInherited": "后续机器人会话继承伙伴模型",
-    "robotIndependent": "后续机器人会话使用独立模型",
-    "inheritForFuture": "后续默认改为继承伙伴模型",
     "sessions": {
       "label": "选择会话",
       "current": "当前会话",
-      "companion": "伙伴",
-      "robot": "机器人",
+      "companion": "窗口会话",
+      "robot": "设备会话",
       "untitled": "未命名会话",
       "create": "新会话",
       "windowCurrent": "浮窗正在此会话",
@@ -174,7 +167,11 @@
       "saveFailed": "保存失败，已保留原值。",
       "saved": "已保存",
       "expandNeedsRoom": "增大窗口后显示伙伴信息"
-    }
+    },
+    "agentSettings": "伙伴 Agent",
+    "sessionSettingsHint": "更新当前会话，并保存为伙伴的后续默认；其他会话保留原设定。",
+    "defaultSettingsHint": "设置伙伴所有交互入口的后续默认；已有会话保留原设定。",
+    "extensionDefaultsHint": "所有入口的新会话共用这些附加 MCP。Agent 本身已配置的 MCP 在 Agent 编辑器中管理；当前会话在输入框的能力设置中单独调整。"
   },
   "remote": {
     "showAllPlatforms": "查看全部 {{count}} 个渠道"
@@ -523,7 +520,12 @@
       "disabled": "已停用",
       "action": "控制类别",
       "defaultAction": "使用默认类别",
-      "actions": { "vision": "视觉", "display": "屏幕与表情", "motion": "动作", "device": "设备扩展" },
+      "actions": {
+        "vision": "视觉",
+        "display": "屏幕与表情",
+        "motion": "动作",
+        "device": "设备扩展"
+      },
       "description": "能力说明与使用提示（留空使用设备说明）",
       "defaultArguments": "默认参数",
       "defaultArgumentsHint": "勾选要设置的默认参数。模型调用时可以覆盖默认值；保存时会按设备 Schema 校验。",
@@ -729,10 +731,6 @@
     "mochi": {
       "name": "团子 Mochi",
       "style": "软糯日系 · 麻薯兔"
-    },
-    "ink": {
-      "name": "墨墨 Ink",
-      "style": "东方水墨 · 琥珀眼黑猫"
     },
     "bolt": {
       "name": "波特 Bolt",

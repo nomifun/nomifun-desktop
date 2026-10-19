@@ -95,8 +95,8 @@ pub async fn run_nomi_core_server(
     let serve_result = axum::serve(listener, application.router())
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
-            if let Err(error) = shutdown_application.stop_hosted_applications_for_shutdown().await {
-                tracing::error!(%error, "Hosted application cleanup before HTTP drain failed; final shutdown will retry");
+            if let Err(error) = shutdown_application.quiesce_for_shutdown().await {
+                tracing::error!(%error, "Host resource cleanup before HTTP drain failed; final shutdown will retry");
             }
         })
         .await;

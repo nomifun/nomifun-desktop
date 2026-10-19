@@ -156,12 +156,10 @@ impl NomiCoreApplication {
         );
     }
 
-    /// Cancel hosted preparation and stop its trees before HTTP graceful drain.
-    /// Otherwise an active install request can keep the server waiting before
-    /// `close` ever gets a chance to cancel that same install.
-    pub async fn stop_hosted_applications_for_shutdown(&self) -> Result<()> {
-        self.services.app_hosting.shutdown().await?;
-        Ok(())
+    /// Stop resource admission and join original owners before HTTP graceful
+    /// drain. Storage stays open for the accepted requests still returning.
+    pub async fn quiesce_for_shutdown(&self) -> Result<()> {
+        self.services.quiesce_nomi_core_host().await
     }
 
     pub async fn close(self) -> Result<()> {

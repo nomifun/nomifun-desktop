@@ -296,7 +296,7 @@ async fn app_project_scope_desktop_webui_fixture() {
     use std::io::Write as _;
     std::io::stderr().flush().unwrap();
     let explicit_finish = tokio::time::timeout(Duration::from_secs(1800), finished_rx.changed()).await;
-    fixture.application.stop_hosted_applications_for_shutdown().await.unwrap();
+    fixture.application.quiesce_for_shutdown().await.unwrap();
     stopping.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(30), server).await.unwrap().unwrap().unwrap();
     fixture.close().await;

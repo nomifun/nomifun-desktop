@@ -45,3 +45,17 @@ test('context-clear notification retires an old pending hint without reporting e
   expect(updated.content.input_delivery).toEqual({ state: 'discarded', reason: 'CONTEXT_CLEARED', event_seq: 30 });
   expect(updated.status).toBe('finish');
 });
+
+for (const [name, merge] of [['indexed Messages hook', composeMessageForTest], ['shared composer', composeMessage]] as const) {
+  test(`${name} keeps owner cancellation on its exact accepted row across stale echoes and history`, () => {
+    const delivery = { state: 'cancelled' as const, reason: 'CANCELLED_BY_OWNER', event_seq: 30 };
+    const event = transformUserCreatedEvent({ conversation_id: conversation, msg_id: message,
+      content: base.content.content, input_delivery: delivery, position: 'right', status: 'finish', created_at: 1 }, conversation)!;
+    let rows = merge(event, [base, later]) as IMessageText[];
+    rows = merge({ ...base, id: 'late-local-echo', content: { ...base.content, input_delivery: { state: 'pending' } } }, rows) as IMessageText[];
+    rows = mergeFetchedMessagesForConversation(rows, [normalizeDbMessage(base)], conversation) as IMessageText[];
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ id: base.id, msg_id: message, content: { content: base.content.content, input_delivery: delivery } });
+    expect(rows[1]).toEqual(later);
+  });
+}

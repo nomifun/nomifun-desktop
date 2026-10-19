@@ -97,7 +97,7 @@ fn serve(mut stream: TcpStream, receipts: Arc<Mutex<Vec<Receipt>>>, stop: Arc<At
         key.eq_ignore_ascii_case("user-agent").then(|| value.trim().to_owned())
     }).unwrap_or_default();
     let path = url.path();
-    let document_nonce = matches!(path, "/spa-history" | "/popup-pause-parent" | "/popup-pause-child")
+    let document_nonce = matches!(path, "/spa-history" | "/popup-pause-parent" | "/popup-pause-child" | "/lifecycle")
         .then(|| uuid::Uuid::now_v7().to_string());
     {
         let mut receipts = receipts.lock().unwrap();
@@ -126,6 +126,16 @@ fn serve(mut stream: TcpStream, receipts: Arc<Mutex<Vec<Receipt>>>, stop: Arc<At
             }
         }
         "/disconnect" => {}, // Drop the connection before any response exists.
+        "/lifecycle" => html(&mut stream, 200, &format!(r#"<!doctype html><html><meta charset="utf-8"><title>Lifecycle native fixture</title><body>
+            <p>Lifecycle document nonce: {}</p>
+            <label>Retained draft<textarea aria-label="Retained draft" id="draft"></textarea></label>
+            <p id="draft-result">Draft empty</p>
+            <button type="button" id="confirm">Retained Confirm</button><p id="dialog-result">Confirm untouched</p>
+            <script>
+              let calls=0;
+              document.getElementById('draft').oninput=event=>document.getElementById('draft-result').textContent='Draft: '+event.target.value;
+              document.getElementById('confirm').onclick=()=>{{calls++;const accepted=confirm('Retained lifecycle Confirm');document.getElementById('dialog-result').textContent=accepted?'Confirm accepted once:'+calls:'Confirm cancelled once:'+calls}};
+            </script></body></html>"#, document_nonce.as_deref().unwrap())),
         "/attachment" => reply(&mut stream, 200, "application/octet-stream", b"Compatibility attachment fixture bytes", "Content-Disposition: attachment; filename=\"compatibility-fixture.txt\"\r\n"),
         "/redirect-a" => redirect(&mut stream, "/redirect-b?token=redirect-secret"),
         "/redirect-b" => redirect(&mut stream, "/redirect-final?token=redirect-secret"),

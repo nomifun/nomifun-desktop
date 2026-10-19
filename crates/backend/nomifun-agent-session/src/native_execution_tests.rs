@@ -7,6 +7,8 @@ mod native_pause_tests;
 
 #[path = "workspace_file_observation_tests.rs"]
 mod workspace_file_observation_tests;
+#[path = "native_cancellation_cleanup_tests.rs"]
+mod native_cancellation_cleanup_tests;
 
 #[path = "tool_call_causation_tests.rs"]
 mod tool_call_causation_tests;

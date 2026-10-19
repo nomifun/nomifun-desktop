@@ -50,7 +50,7 @@ const APP_DEVELOPMENT_INSTRUCTIONS: &str = "You are NomiFun's built-in applicati
 fn official_template_instructions(key: OfficialPresetKey) -> &'static str {
     match key {
         OfficialPresetKey::AppDeveloper => APP_DEVELOPMENT_INSTRUCTIONS,
-        OfficialPresetKey::CompanionRobot => "Prioritize responsive physical interaction while keeping the selected Companion's identity and memories. For a clear supported device request, call the already available authorized device tool immediately; do not search unrelated capabilities, perform preliminary narration or invent a planning step. Discover a device tool only when the needed operation is not already visible. For a device-action-only request, finish silently after every requested action has a successful receipt, without greetings, acknowledgments or recaps. Use only an actually advertised silent-finish control under its declared contract and never stop before all requested actions. Speak for a question, an explicitly requested verbal receipt, a real failure, blocker, uncertain result or necessary clarification. Ask one short clarification only when necessary. Respond naturally to ordinary companionship and answer directly when the available facts suffice; reason carefully for substantive questions and use deeper planning when asked to invent or coordinate autonomous physical behavior, checking the actual device capabilities and execution boundaries before acting. For research, current information, knowledge retrieval or computer work that needs tools, use the tools the owner explicitly enabled when available; otherwise call agent/delegate with strategy=planned, target_role=desktop and the complete user goal. This same Companion's saved desktop Agent supplies its own authorized platform capabilities, including short queries such as '北京今天的天气怎么样'; being in a physical robot is not a reason to refuse. Preserve the user's location, date and other necessary context, and request a concise factual answer. This directed delegation needs no extra planning Agent. Once accepted, end this Turn without narration or acknowledgment; the runtime handles this handoff without requiring a public reply. Do not poll or block the conversation waiting for it. The platform returns the actual result to the original device while its source connection remains valid. Acceptance is not completion; report progress or results only from actual linked Execution receipts. Keep spoken replies brief and natural, with detail when the user asks for it. Report an action only from the device tool's actual result, distinguishing acceptance from completion; never claim physical success from your own text. Do not repeat a device action after an uncertain result without resolving its status. Neither delegation nor shared identity grants additional tools or device authority.",
+        OfficialPresetKey::CompanionDefault => "You are one Companion Agent across desktop, approved channels and authenticated devices, with independent Sessions. Handle ordinary chat, current information, research, knowledge, files, office, computer and device requests directly with the tools authorized in this Session. A physical device entry does not require another Agent. Preserve the user's location, date and constraints. Use background or parallel execution only when it benefits durable, long or independent work; respect an explicit request to avoid multiple Agents. For a clear supported device request, call the already available authorized device tool immediately. Discover a device tool only when the needed operation is not visible. For a device-action-only request, finish silently after every requested action has a successful receipt under an actually advertised silent-finish control; never stop before all requested actions. Speak for a question, an explicitly requested verbal receipt, a real failure, blocker, uncertain result or necessary clarification. Report an action from the device tool's actual result, distinguishing acceptance, execution completion and physical completion. Do not repeat a device action after an uncertain result without resolving its status. Shared identity does not grant additional tools or device authority. Keep physical spoken replies concise and natural, with detail when requested.",
         _ => "",
     }
 }
@@ -711,10 +711,10 @@ impl AgentControlPlane {
         self.resolve_agent_session_binding_with_capabilities(owner, preset_id, model, None).await
     }
 
-    /// Resolve a trusted physical-role launch before global defaults can replace
-    /// its authored Skill choices. Ordinary Agent launches retain their existing
-    /// installation-wide Skill discovery and default-selection behavior.
-    pub async fn resolve_companion_robot_session_binding_with_model(
+    /// Resolve the shared Companion definition while preserving its authored
+    /// Skill choices before global defaults are applied. All entry surfaces
+    /// consume this same definition; resources remain local to each Session.
+    pub async fn resolve_companion_session_binding_with_model(
         &self,
         owner: &UserId,
         preset_id: &str,
@@ -757,10 +757,9 @@ impl AgentControlPlane {
         self.resolve_session_capabilities_binding(owner, current, selection, false).await
     }
 
-    /// Freeze only the explicitly selected Skill data for a product role whose
-    /// host does not expose the installation's general-purpose Skill library.
-    /// The caller supplies its trusted role's selection; model input and host
-    /// extras do not choose this policy. Unselected frozen library locks from a
+    /// Freeze only explicitly selected Skill data for a product configuration.
+    /// All Companion entries share this policy and their author-selected data;
+    /// model input and host extras cannot choose another authority ceiling. Unselected frozen library locks from a
     /// previous binding are retired through the same canonical compilation.
     pub async fn resolve_agent_session_capabilities_binding_selected_skills(
         &self,
@@ -817,11 +816,11 @@ impl AgentControlPlane {
         }
         if selected_skills_only {
             // Global discovery normally freezes every installed Skill, even
-            // when none is selected. A physical role must not receive that
-            // directory or its readable bodies through context resources.
+            // when none is selected. This selected-data compilation does not
+            // freeze unrelated Skill bodies into the product configuration.
             let expected = requested_library.as_ref().ok_or_else(|| ControlPlaneError::canonical(
                 "SESSION_CAPABILITIES_INVALID", axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                "the product role requires an explicit Skill selection"))?
+                "the product configuration requires an explicit Skill selection"))?
                 .skill_names.iter().cloned().collect::<BTreeSet<_>>();
             if resolved.selected_skill_names != expected || expected.iter().any(|name|
                 !resolved.skills.iter().any(|skill| &skill.name == name)) {
@@ -1013,6 +1012,7 @@ impl AgentControlPlane {
         };
         let _guard = self.template_launch_lock.lock().await;
         let mut source = self.owned_preset(owner, preset_id).await?;
+        require_current_preset_admission(&source, owner)?;
         let mut revision = self.current_revision(&source).await?.ok_or_else(|| not_found("AgentPresetRevision"))?;
         if nomifun_agent_contracts::bounded_process_launch_payload(&revision.payload) != revision.payload {
             // Rebase the execution contract before deriving an explicitly
@@ -1606,6 +1606,22 @@ impl AgentControlPlane {
         Ok((name, key))
     }
 
+    /// Read-only recognition of the retired current-generation device Agent.
+    /// Only the roster's formal idle transition may consume this result. It
+    /// never changes a Revision, Snapshot, binding or author-selected grant.
+    pub async fn is_retired_companion_device_binding(
+        &self, owner: &UserId, binding: &AgentBindingValueDto,
+    ) -> Result<bool, ControlPlaneError> {
+        let binding: AgentBindingValue = wire_cast(binding)?;
+        let _ = self.load_binding_artifacts(owner, &binding).await?;
+        let stored = self.store.get_bound_preset(&binding.preset_revision_ref.preset_id).await?
+            .ok_or_else(|| not_found("AgentPreset"))?;
+        if stored.preset.owner_user_id.as_ref() != Some(owner) {
+            return Err(not_found("AgentPreset"));
+        }
+        Ok(retired_companion_device_configuration(&stored, owner))
+    }
+
     fn official_template_for_revision(
         &self, stored: &StoredPreset, _revision: &AgentPresetRevision,
     ) -> Result<Option<OfficialPresetKey>, ControlPlaneError> {
@@ -1646,6 +1662,7 @@ impl AgentControlPlane {
             }
             (None, Some(id)) => {
                 let preset = self.owned_preset(owner, id).await?;
+                require_current_preset_admission(&preset, owner)?;
                 let revision = self.current_revision(&preset).await?
                     .ok_or_else(|| not_found("AgentPresetRevision"))?;
                 let snapshot = self.current_snapshot(Some(&revision)).await?.ok_or_else(|| {
@@ -1705,7 +1722,7 @@ impl AgentControlPlane {
             // Internal variants retain their host-assigned official lineage.
             request.draft.display_name = stored.preset.display_name.clone();
         }
-        if matches!(owned_official_key(&stored), Some(OfficialPresetKey::CompanionDefault | OfficialPresetKey::CompanionRobot)) {
+        if matches!(owned_official_key(&stored), Some(OfficialPresetKey::CompanionDefault)) {
             let missing = ["companion", "companion.memory"].into_iter().filter(|required|
                 !request.draft.document.enabled_capabilities.iter().any(|selection| selection.capability.id == *required))
                 .collect::<Vec<_>>();
@@ -1942,6 +1959,7 @@ impl AgentControlPlane {
                 "AgentPreset owner does not match the authenticated owner",
             ));
         }
+        require_current_preset_admission(&stored, owner)?;
         if let Some(revision) = self.current_revision(&stored).await?
             && nomifun_agent_contracts::bounded_process_launch_payload(&revision.payload) != revision.payload {
             let snapshot = self.current_snapshot(Some(&revision)).await?;
@@ -2918,8 +2936,12 @@ fn parse_official_key(value: &str) -> Option<OfficialPresetKey> {
 /// Stable, owner-scoped UUIDv7 derived from a namespaced canonical identity.
 /// Authored fields and the bundled seed cannot change this identity.
 fn official_preset_id(owner: &UserId, key: OfficialPresetKey) -> AgentPresetId {
+    official_preset_id_for_key(owner, key.as_str())
+}
+
+fn official_preset_id_for_key(owner: &UserId, key: &str) -> AgentPresetId {
     let digest = nomifun_agent_contracts::digest_payload(&(
-        "nomifun.official-agent-preset.v1", owner.as_ref(), key.as_str(),
+        "nomifun.official-agent-preset.v1", owner.as_ref(), key,
     )).expect("official Agent identity is serializable");
     let mut bytes = *Uuid::parse_str(&digest.as_ref()[..32])
         .expect("canonical digest is hexadecimal").as_bytes();
@@ -2936,6 +2958,23 @@ fn official_preset_id(owner: &UserId, key: OfficialPresetKey) -> AgentPresetId {
     bytes[6] = (bytes[6] & 0x0f) | 0x70;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     AgentPresetId::from(Uuid::from_bytes(bytes).to_string())
+}
+
+fn retired_companion_device_configuration(preset: &StoredPreset, owner: &UserId) -> bool {
+    preset.preset.source == AgentPresetSource::Official
+        && preset.preset.owner_user_id.as_ref() == Some(owner)
+        && (preset.preset.preset_id == official_preset_id_for_key(owner, "companion.robot")
+            // Internal variants were authored only by this Control Plane with
+            // the exact official source key; user labels cannot create them.
+            || preset.session_only && preset.preset.display_name == "companion.robot")
+}
+
+fn require_current_preset_admission(preset: &StoredPreset, owner: &UserId) -> Result<(), ControlPlaneError> {
+    if retired_companion_device_configuration(preset, owner) {
+        return Err(ControlPlaneError::canonical("AGENT_PRESET_NOT_FOUND", axum::http::StatusCode::NOT_FOUND,
+            "The independent device Agent is retired; select this Companion's shared Agent"));
+    }
+    Ok(())
 }
 
 fn owned_official_key(preset: &StoredPreset) -> Option<OfficialPresetKey> {
@@ -3324,6 +3363,31 @@ pub(crate) mod tests {
         assert!(parse_official_key("research").is_none());
         assert!(parse_official_key("autowork.executor").is_none());
         assert!(parse_official_key("robot.default").is_none());
+    }
+
+    #[tokio::test]
+    async fn retired_device_source_recognition_requires_the_exact_official_owner_identity() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control = template_control_plane(store.clone(), OfficialPresetKey::CompanionDefault, false);
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let created = publish_official_fixture(&control, &owner, OfficialPresetKey::CompanionDefault, None).await;
+        let binding = control.resolve_agent_session_binding(&owner, &created.preset.preset_id).await.unwrap();
+        assert!(!control.is_retired_companion_device_binding(&owner, &binding).await.unwrap());
+        let id = AgentPresetId::from(created.preset.preset_id);
+        let mut stored = store.get_preset(&id).await.unwrap().unwrap();
+        // Renaming a current main configuration is not a retired-source proof.
+        stored.preset.display_name = "companion.robot".into();
+        assert!(!retired_companion_device_configuration(&stored, &owner));
+        stored.preset.preset_id = official_preset_id_for_key(&owner, "companion.robot");
+        assert!(retired_companion_device_configuration(&stored, &owner));
+        assert_eq!(require_current_preset_admission(&stored, &owner).unwrap_err().code().as_ref(), "AGENT_PRESET_NOT_FOUND");
+        assert!(!retired_companion_device_configuration(&stored, &UserId::from("other-owner")));
+        stored.preset.preset_id = AgentPresetId::from(Uuid::now_v7().to_string());
+        stored.session_only = true;
+        assert!(retired_companion_device_configuration(&stored, &owner), "host-authored frozen variants retain the exact source key");
+        stored.preset.source = AgentPresetSource::User;
+        assert!(!retired_companion_device_configuration(&stored, &owner), "user labels and caches cannot impersonate an official source");
+        require_current_preset_admission(&stored, &owner).unwrap();
     }
 
     #[test]
@@ -3890,70 +3954,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn robot_seed_prefers_silent_success_with_explicit_spoken_exceptions() {
-        let instructions = official_template_instructions(OfficialPresetKey::CompanionRobot);
-        assert!(instructions.contains("device-action-only request, finish silently after every requested action has a successful receipt"));
+    fn companion_seed_directly_handles_work_and_device_requests() {
+        let instructions = official_template_instructions(OfficialPresetKey::CompanionDefault);
+        assert!(instructions.contains("Handle ordinary chat, current information"));
+        assert!(instructions.contains("finish silently after every requested action"));
         assert!(instructions.contains("never stop before all requested actions"));
-        assert!(instructions.contains("a question, an explicitly requested verbal receipt, a real failure, blocker, uncertain result or necessary clarification"));
-        assert!(!instructions.contains("at most one short useful confirmation"));
-        assert!(instructions.contains("end this Turn without narration or acknowledgment"));
-        assert!(!instructions.contains("briefly acknowledge"));
-        assert!(!instructions.contains("finish_without_reply"), "the seed cannot assume that a Runtime control is exposed");
-        assert!(!official_template_instructions(OfficialPresetKey::CompanionDefault).contains("silent-finish"));
-    }
-
-    #[tokio::test]
-    async fn robot_companion_official_configuration_is_seeded_once_and_keeps_its_core_identity() {
-        let store = Arc::new(InMemoryControlPlaneStore::new());
-        let control = template_control_plane(store, OfficialPresetKey::CompanionRobot, false);
-        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
-        let created = publish_official_fixture(&control, &owner, OfficialPresetKey::CompanionRobot, None).await;
-        assert_eq!(created.draft.source_template_key, Some(nomifun_api_types::OfficialPresetKeyDto::CompanionRobot));
-        assert_eq!(created.draft.document.instructions, official_template_instructions(OfficialPresetKey::CompanionRobot));
-        assert!(!created.draft.document.instructions.is_empty());
-        for boundary in [
-            "call the already available authorized device tool immediately",
-            "finish silently after every requested action has a successful receipt",
-            "explicitly requested verbal receipt",
-            "real failure, blocker, uncertain result or necessary clarification",
-            "ordinary companionship",
-            "deeper planning",
-            "use the tools the owner explicitly enabled when available; otherwise call agent/delegate",
-            "target_role=desktop",
-            "北京今天的天气怎么样",
-            "Do not poll or block the conversation",
-            "original device while its source connection remains valid",
-            "Do not repeat a device action after an uncertain result",
-        ] {
-            assert!(created.draft.document.instructions.contains(boundary), "Robot instructions retain {boundary}");
-        }
-        assert_eq!(created.draft.document.enabled_capabilities.iter().map(|selection| selection.capability.id.as_str())
-            .collect::<BTreeSet<_>>(), BTreeSet::from(["agent.collaboration", "companion", "companion.memory", "robot", "session.management"]));
-        let mut draft = created.draft.clone();
-        draft.document.instructions = "My authored physical interaction rules".into();
-        let saved = control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
-            expected_current_revision: draft.current_revision.clone(), draft, reason: None,
-        }).await.unwrap();
-        let reopened = control.create_from_template(&owner, "companion.robot", official_launch_request(true)).await.unwrap();
-        assert_eq!(reopened.preset.preset_id, created.preset.preset_id);
-        assert_eq!(reopened.draft.document.instructions, "My authored physical interaction rules",
-            "launching an official robot Agent must preserve authored instructions");
-        assert_eq!(reopened.revision.unwrap().reference, saved.revision.reference);
-        for required in ["companion", "companion.memory"] {
-            let mut detached = reopened.draft.clone();
-            detached.document.enabled_capabilities.retain(|selection| selection.capability.id != required);
-            let error = control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
-                expected_current_revision: detached.current_revision.clone(), draft: detached, reason: None,
-            }).await.unwrap_err();
-            assert_eq!(error.code().as_ref(), "PRESET_REVISION_SAVE_FAILED");
-        }
+        assert!(!instructions.contains("target_role"));
+        assert!(parse_official_key("companion.robot").is_none());
     }
 
     #[tokio::test]
     async fn companion_official_presets_preserve_explicit_capabilities_and_immutable_history() {
         let templates = OfficialTemplateCatalog::load().unwrap();
-        for (key, extra_key) in [(OfficialPresetKey::CompanionDefault, OfficialPresetKey::CompanionRobot),
-            (OfficialPresetKey::CompanionRobot, OfficialPresetKey::CompanionDefault)] {
+        for (key, extra_key) in [(OfficialPresetKey::CompanionDefault, OfficialPresetKey::AssistantGeneral)] {
             let store = Arc::new(InMemoryControlPlaneStore::new());
             let extras = &templates.seed(extra_key).unwrap().enabled_capabilities;
             let control = template_control_plane_with_extra_capabilities(store.clone(), key, false, false, extras);
@@ -4303,7 +4316,8 @@ pub(crate) mod tests {
         assert_eq!(refreshed.retire_preset(&owner, id).await.unwrap_err().code().as_ref(), "AGENT_PRESET_NOT_FOUND");
         let copy = refreshed.create_from_template(&owner, "companion.default", official_launch_request(false)).await.unwrap();
         assert_ne!(copy.preset.preset_id, *id);
-        assert!(copy.draft.document.instructions.is_empty());
+        assert_eq!(copy.draft.document.instructions, official_template_instructions(OfficialPresetKey::CompanionDefault),
+            "a new copy starts from the shared shipped guidance without inheriting another Agent's authored override");
         assert!(!copy.draft.document.enabled_capabilities.iter().any(|selection| selection.capability.id == ORDER_TEST_MIDDLEWARE_ID));
     }
 
@@ -4353,11 +4367,11 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn companion_robot_recommendations_do_not_widen_saved_or_frozen_bindings() {
+    async fn companion_device_recommendations_do_not_widen_saved_or_frozen_bindings() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
-        let control = template_control_plane(store.clone(), OfficialPresetKey::CompanionRobot, false);
-        let created = publish_official_fixture(&control, &owner, OfficialPresetKey::CompanionRobot, None).await;
+        let control = template_control_plane(store.clone(), OfficialPresetKey::CompanionDefault, false);
+        let created = publish_official_fixture(&control, &owner, OfficialPresetKey::CompanionDefault, None).await;
         let id = &created.preset.preset_id;
         // An existing authored configuration can intentionally retain only
         // vision. Publishing broader recommendations must not overwrite it.
@@ -4373,8 +4387,8 @@ pub(crate) mod tests {
         let (_, old_revision, old_snapshot) = control.saved_binding_artifacts(&owner, &frozen).await.unwrap();
         let before = control.editor(&owner, id, None).await.unwrap();
 
-        let restarted = template_control_plane(store.clone(), OfficialPresetKey::CompanionRobot, false);
-        let reopened = restarted.create_from_template(&owner, "companion.robot", official_launch_request(true)).await.unwrap();
+        let restarted = template_control_plane(store.clone(), OfficialPresetKey::CompanionDefault, false);
+        let reopened = restarted.create_from_template(&owner, "companion.default", official_launch_request(true)).await.unwrap();
         assert_eq!(reopened.draft.document, before.draft.document, "ordinary launch preserves the saved action subset");
         assert_eq!(reopened.preset.current_stable_revision, before.preset.current_stable_revision);
         let proposal = restarted.recommended_capabilities(&owner, id).await.unwrap();

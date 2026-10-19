@@ -89,8 +89,8 @@ const NomiChat: React.FC<{
     : undefined, [agentInfo]);
   // Windowed history: load only the newest page on mount + lazily prepend older
   // pages on scroll-up. The nomi surface backs both work conversations and the
-  // companion's single session (which also absorbs every IM-channel turn and can
-  // grow without bound), so a one-shot 10k fetch would crush the API/DOM.
+  // companion's independent Sessions, so a one-shot 10k fetch would overload
+  // the API/DOM as any individual conversation grows.
   const historyPaging = useMessageLstCache(conversation_id);
   const turnActivity = useNomiMessage(conversation_id);
   const { pending, end: endInitialMessage } = useInitialMessage();

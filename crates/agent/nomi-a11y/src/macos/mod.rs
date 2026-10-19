@@ -34,6 +34,11 @@ impl MacEngine {
     ) -> Result<Effect, A11yError> {
         self.inner.focus_named_window(pid, expected_bounds, expected_title)
     }
+
+    pub fn focus_named_window_controlled(&self, pid: i32, expected_bounds: Rect, expected_title: Option<String>,
+        cancellation: &tokio_util::sync::CancellationToken) -> Result<Effect, A11yError> {
+        self.inner.focus_named_window_controlled(pid, expected_bounds, expected_title, cancellation.clone())
+    }
 }
 
 impl A11yEngine for MacEngine {
@@ -67,6 +72,11 @@ impl A11yEngine for MacEngine {
         action: ElementAction,
     ) -> Result<Effect, A11yError> {
         self.inner.invoke(target.clone(), generation, action)
+    }
+
+    fn invoke_controlled(&self, target: &Target, generation: SnapshotGen, action: ElementAction,
+        cancellation: &tokio_util::sync::CancellationToken) -> Result<Effect, A11yError> {
+        self.inner.invoke_controlled(target.clone(), generation, action, cancellation.clone())
     }
 
     fn focus_window(&self, pid: i32) -> Result<Effect, A11yError> {

@@ -43,6 +43,19 @@ write/patch 会发布新对象，目录内容也可在捕获后变化；在未�
 
 Agent 的 `exec_command`、`start_process` 和后续输入、轮询、调整 PTY、取消复用 `ManagedEngineProcessOwner`。`nomi-process-runtime::ProcessSupervisor` 负责 Pipe/PTY、输出、超时、租约、watchdog、后代清理及真实终态。旧 `CapabilityPolicy`、`SandboxPolicy`、`cwd_roots`、MacSeatbelt、sandbox-exec profile 和无用途的 `bash_sandbox` 配置已经退役。不能把根目录加入允许列表来恢复旧策略。
 
+宿主精确资源 Stop 使用原 spawn 捕获的不可变取消 capability，包含原 Supervisor owner／session，
+管理员分支仍绑定原签名 transport 与 client 身份；不从 PID 或当前 Session 反查替代目标。
+自然 terminal 通知由 Session process owner 在 Runtime 之外持有，合法长进程不阻塞主 Turn 收尾。
+真实 reap 后的 `FrozenOutput` 是带版本的只读原字节／decoder 状态，不含 native handle、输入或执行能力；
+归档与 exact reap receipt 复用 canonical Event/Payload：原始字节按原单 Payload 上限分块，根回执
+只保存原终态元数据及完整摘要／有序引用；合法大输出不会因重复文本或 JSON 字节数组超过模型 allowance 而滞留 native owner。
+这类原 owner 专用归档不消费模型／上下文预算，普通 Payload 无法伪造分类；后继只按原 cursor 解码输出。未知退出、
+unsupported archive／decoder 或归档失败继续保留责任，不能用 flattened text 切片伪造原字节游标。
+管理员进程的后台终态沿原 authenticated RPC 订阅原 witness 的 native watch，先订阅再读终态；
+观察轮次只受现有 transport 回复预算限制，超时重挂纯监听，不查询轮询、不续租或终止实际任务。
+这些已识别的纯观察不占用业务 RPC 并发槽，避免全部合法后台进程正在监听时挡住用户 Stop。
+宿主退出取消监听不构成 native 释放，原 process cleanup 继续保存最后输出与真实 reap 回执。
+
 Windows 在同一共享进程准备入口为 canonical Disk/UNC 路径选择兼容 Win32 拼写，避免 PowerShell 5.1 在 extended UNC cwd 下把 provider 位置落到其他目录。候选从原 UTF-16 构造，不 trim、折叠大小写或损失编码；只有长度、组件语义均适用，且两份真实 metadata 句柄的磁盘类型、卷与 128 位 FileID、目录类型相同时才选择兼容拼写。特殊组件、ADS、长路径或任何证明失败均保留原 canonical 路径，不拒绝原本合法的路径，不用 Set-Location、映射盘或 shell 改写伪造 cwd。这是选择时的身份核对，不宣称提供跨 CreateProcessW 的原子目录 pin；Pipe、ConPTY、Terminal 和管理员进程复用该入口。
 
 每次操作的 `execution_identity` 缺省为 `current_user`；明确需要系统身份时选择 `administrator`。这是执行该操作的身份参数，用户不切换权限模式。文件或安装失败后，Agent 按原任务意图选择现役系统执行路径；先核对已发生效果，再继续受阻步骤，不自动重放未知部分写入或安装。
@@ -102,6 +115,14 @@ CLI 附带 Skill 必须进入现役技能库导入与发现路径，写到第三
 ## 桌面、媒体、网络与真实边界
 
 Computer 普通操作在登录桌面的 App 进程执行，每次操作按实际需要检测原生许可。Windows 高完整性目标使用同登录 Session、经现役 UAC runner 认证的独立 Computer adapter，保留同一物理目标 owner、generation 与 Effect；切换后先返回确定未执行，再要求新观察，旧 ref、截图或未知输入不重放。安全桌面和锁屏按真实系统限制拒绝，不切换或自动输入。Browser 保持 Windows WebView2、macOS WKWebView 的已定结构；网站媒体许可仍由实际宿主与 OS 隐私许可决定。
+
+Kernel 原调用的 `InvocationControl` 经 Wave2 执行上下文传入 Computer 物理 owner；它不是冻结授权或观察身份的一部分。等待物理锁、Windows 路由锁和纯计时等待可以直接响应取消，设备尚未派发时以确切 typed 拒绝结算原 Effect。同一个 token 继续进入低层输入、无障碍 mutator 的原 actor command、macOS 主队列 slot 以及 Wayland 已有取消标志。只读窗口枚举或 Start Menu 解析结束后，新的 focus／launch 派发再次检查原 token；进入 native worker 的队列不表示已经执行 OS 输入。
+
+原 actor command 的 queued slot 可撤回；开始 native 调用后仍保留原 receiver 和实际结果。macOS 主队列同样撤回尚未取出的闭包，已经取出并开始的调用继续 join。已经开始原生设备调用的操作继续由原 owner 等到真实结果及适用的输入释放，不丢弃 Future、不把请求取消说成无效果，也不自动重发或转用备用输入。取消后未派发的新调用及语义操作之后的像素 fallback 均不再准入。原生系统认证或设备 API 本身不能即时中断时，保留原 worker 与实际收束责任；不关闭其他 Session 共用的 runner 来制造局部停止。
+
+Windows 桥接 RPC 到达不等于 OS 输入已经执行。每次原调用持有绑定 connection 与 request nonce 的独占 manual-reset Event，创建碰撞拒绝；GUI 只向原持有的 set handle 发 Stop，helper 在认证后只取得 SYNCHRONIZE handle，先于原 64 个 business slots 的等待打开并检查，同一信号在取得 slot 后和原 Computer handler 内继续复核并转发到工具 token。取消先于 helper 登记也保持有效，不另存取消墓碑、不绕过并发槽或关闭共享 runner。排队取消通过原请求的完整回复和 ACK 确认；GUI waiter 离开仍由原 RPC blocking owner 保留 Event、client、准入与 ACK 责任。信号发送失败仍 join 原结果并保留独立投递诊断，不把实际结果或 unknown 改写成取消／释放成功；错误打开或读取 Event 不降级为无控制派发。
+
+Wayland 取消只转发到本次 capture／input 原 worker，等待其真实结算。尚未发布的本次 portal 授权请求由原 creation owner 关闭并确认；已经建立的共享桌面 grant 不因一个 capture 取消而撤销。输入取消仍释放本次确切已提交的按键／按钮，真实释放确认后保留共享 grant；typed 排队拒绝证明 press 未派发时不制造 release。原生结果未知或释放失败仍沿原 Session 失效／Close 合同处理，不能用局部 Stop 隐藏未确认输入，也不能关闭共享 runner。
 
 权限库存包含实际 PID 和可解析的真实 App bundle 身份。AX/CG 返回 false 只证明 `not_granted`；FDA、Automation 和局域网没有适用于所有目标的全局可靠探针，保留 unknown，实际目标操作再给真实结果。Camera/Microphone 使用原生状态；使用说明与 Apple Events automation entitlement 随 App 打包。详见[系统许可](system-permissions.zh.md)。
 

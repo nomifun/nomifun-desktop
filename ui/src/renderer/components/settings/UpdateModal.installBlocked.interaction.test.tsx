@@ -195,9 +195,9 @@ test('a refused install context names the cause and path and offers manual downl
   fireEvent.click(page.getByRole('button', { name: update.goToRelease }));
   await waitFor(() => expect(ipcBridge.shell.openExternal.invoke).toHaveBeenCalledWith(RELEASE_URL));
 
-  fireEvent.click(page.getByRole('button', { name: settings.baiduManualDownload }));
+  fireEvent.click(page.getByRole('button', { name: settings.officialDownload }));
   await waitFor(() =>
-    expect(ipcBridge.shell.openExternal.invoke).toHaveBeenCalledWith(expect.stringContaining('pan.baidu.com'))
+    expect(ipcBridge.shell.openExternal.invoke).toHaveBeenCalledWith('https://www.nomifun.com/download')
   );
 });
 

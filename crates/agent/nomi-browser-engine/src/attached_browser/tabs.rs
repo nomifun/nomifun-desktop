@@ -76,7 +76,8 @@ impl AttachedBrowser {
     /// Canonical Browser Module and Resource authority is still checked by the
     /// application host before this method is reachable.
     pub async fn tabs_for_provider(&self) -> Result<Vec<AttachedProviderTab>, AttachError> {
-        let _operation = self.operations.lock().await;
+        self.current_connection()?;
+        let _operation = self.operations.read().await;
         let connection = self.current_connection()?;
         let value = connection
             .send(ROOT_SESSION, &GetTargetsParams::default())

@@ -241,7 +241,7 @@ async fn provider_inventory_filters_privileged_targets_and_is_bounded() {
 async fn disconnect_waits_for_operations_and_blocks_queued_provider_inventory() {
     let (browser, _peer) = peer().await;
     let browser = Arc::new(browser);
-    let operation = browser.operations.lock().await;
+    let operation = browser.operations.read().await;
     let in_flight = browser.current_connection().unwrap();
     let closing = browser.clone();
     let mut close = tokio::spawn(async move { closing.disconnect().await });

@@ -167,10 +167,30 @@ pub(super) async fn verify(
                 cross_click(&view).await.map_err(|error|format!("{action}/input_complete: {error}"))?;
                 phase(action,"input_complete",trace.snapshot());
                 phase(action,"chooser_wait",trace.snapshot());
-                let choice=witness.next(&Default::default()).await.map_err(|error|format!("{action}/chooser_wait: {error}; controlled_chooser={}",trace.snapshot()))?;
+                let choice=match witness.next(&Default::default()).await {
+                    Ok(choice)=>choice,
+                    Err(error)=>{
+                        let child_click=super::evaluate(&view,"({click:window.crossClick,child:window.crossInputs,root:window.rootInputs,point:window.crossPoint,focused:document.hasFocus(),visible:document.visibilityState,ready:window.crossReady,frame:document.getElementById('cross').getBoundingClientRect().toJSON()})").await?;
+                        let native_visible=super::native_visible(&view).await?;
+                        let native_bounds=super::native_bounds(&view).await?;
+                        return Err(format!("{action}/chooser_wait: {error}; controlled_chooser={}; controlled_child_click={child_click}; native_visible={native_visible}; native_bounds={native_bounds:?}",trace.snapshot()));
+                    },
+                };
+                // Protocol events and window.postMessage use independent
+                // delivery queues. Await only the passive click witness.
+                let deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(3);
+                let child_click=loop {
+                    let child_click=super::evaluate(&view,"window.crossClick").await?;
+                    if !child_click.is_null() {break child_click;}
+                    if tokio::time::Instant::now()>=deadline {return Err(format!("{action}/chooser_received: Native child click witness was not delivered"));}
+                    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+                };
+                if child_click["trusted"]!=true || child_click["activation"]!=true {
+                    return Err(format!("{action}/chooser_received: Native child click lacked trusted user activation: {child_click}"));
+                }
                 phase(action,"chooser_received",json!({"nonempty_choice_session":!choice.session.is_empty(),
                     "choice_has_frame":!choice.frame.is_empty(),"choice_has_input_target":choice.backend_node>0,
-                    "controlled_chooser":trace.snapshot()}));
+                    "controlled_chooser":trace.snapshot(),"controlled_child_click":child_click}));
                 if choice.session.is_empty() {return Err(format!("{action}/chooser_received: Managed user chooser did not use an OOPIF session"));}
             } else {
                 super::native_fixture_click(&view,"#file").await.map_err(|error|format!("{action}/input_complete: {error}"))?;
@@ -304,17 +324,27 @@ async fn select_files(view: &tauri::Webview) -> Result<Value, String> {
 
 async fn cross_click(view: &tauri::Webview) -> Result<(), String> {
     // Root load completion does not prove that the child's load message (and
-    // its click geometry) has reached the parent after a document replacement.
-    // Wait before input; never retry a click after it may have opened a chooser.
+    // its click geometry) remains current after a document replacement/reflow.
+    // Observe this exact request's current child geometry before input; never
+    // retry a click after it may have opened a chooser.
     let deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(5);
+    while super::evaluate(view,"window.crossReady===true").await?!=true {
+        if tokio::time::Instant::now()>=deadline {return Err("OOPIF file picker document was not ready before observation".into());}
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
+    let request=uuid::Uuid::now_v7().to_string();
+    super::evaluate(view,&format!("(()=>{{window.crossPointRequest={request:?};window.crossPointReceipt=null;const frame=document.getElementById('cross');frame.contentWindow.postMessage({{kind:'picker-point-request',request:window.crossPointRequest}},new URL(frame.src).origin);return true}})()")).await?;
     let point=loop {
-        let point=super::evaluate(view,"(()=>{if(!window.crossReady||!window.crossPoint)return null;const f=document.getElementById('cross');const r=f.getBoundingClientRect();const x=r.x+f.clientLeft+crossPoint.x,y=r.y+f.clientTop+crossPoint.y;return Number.isFinite(x)&&Number.isFinite(y)&&document.elementFromPoint(x,y)===f?{x,y}:null})()").await?;
+        let point=super::evaluate(view,"(()=>{const receipt=window.crossPointReceipt;if(!window.crossReady||!receipt||receipt.request!==window.crossPointRequest)return null;const f=document.getElementById('cross');const r=f.getBoundingClientRect();const x=r.x+f.clientLeft+receipt.pickPoint.x,y=r.y+f.clientTop+receipt.pickPoint.y;return Number.isFinite(x)&&Number.isFinite(y)&&document.elementFromPoint(x,y)===f?{x,y}:null})()").await?;
         if !point.is_null() {break point;}
         if tokio::time::Instant::now()>=deadline {return Err("OOPIF file picker button was not ready and hittable before input".into());}
         tokio::time::sleep(std::time::Duration::from_millis(15)).await;
     };
-    for event in ["mousePressed", "mouseReleased"] {
-        super::windows::protocol_call(view,"Input.dispatchMouseEvent",json!({"type":event,"x":point["x"],"y":point["y"],"button":"left","buttons":if event=="mousePressed"{1}else{0},"clickCount":1})).await?;
+    // Mirror the native click path: move to the current hit target before the
+    // single press/release. Chromium routes OOPIF input through a separate
+    // widget; the previous root-file click is not a pointer move into it.
+    for event in ["mouseMoved", "mousePressed", "mouseReleased"] {
+        super::windows::protocol_call(view,"Input.dispatchMouseEvent",json!({"type":event,"x":point["x"],"y":point["y"],"button":if event=="mouseMoved"{"none"}else{"left"},"buttons":if event=="mousePressed"{1}else{0},"clickCount":1})).await?;
     }
     Ok(())
 }

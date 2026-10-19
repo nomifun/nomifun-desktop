@@ -37,7 +37,7 @@
   <a href="#-快速开始">🚀 快速开始</a>&nbsp;·&nbsp;
   <a href="https://github.com/nomifun/nomifun-desktop/releases">📦 下载</a>&nbsp;·&nbsp;
   <a href="https://gitee.com/nomifun/nomifun-desktop">🇨🇳 Gitee 源码</a>&nbsp;·&nbsp;
-  <a href="https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA">百度网盘</a>&nbsp;·&nbsp;
+  <a href="https://www.nomifun.com/download">官网下载</a>&nbsp;·&nbsp;
   <a href="#-联系我们--社区">💬 社区</a>
 </p>
 
@@ -96,7 +96,7 @@ renderer 支持桌面浏览器和 Tauri 窗口，最小视口为 **880×600**。
 ## 🚀 快速开始
 
 从 [GitHub Releases](https://github.com/nomifun/nomifun-desktop/releases) 下载安装包。
-国内用户也可使用[百度网盘镜像](https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA)（分享名 `nomifun`）。
+也可从[官网下载](https://www.nomifun.com/download)获取安装包。
 先阅读[安装](docs/getting-started/installation.zh.md)，再按[快速开始](docs/getting-started/quick-start.zh.md) 配置。
 
 从源码开发需要 Rust 工具链、Bun 与对应平台的 Tauri 依赖，前提见[开发指南](docs/contributing/development.zh.md)：

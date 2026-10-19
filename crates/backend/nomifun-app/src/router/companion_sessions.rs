@@ -1,4 +1,4 @@
-//! Canonical Companion role affiliation and host-only product entry points.
+//! Canonical Companion entry affiliation and host-only product entry points.
 
 use super::*;
 use nomifun_agent_contracts::{CompanionSessionOrigin, CompanionSessionRole};
@@ -9,10 +9,19 @@ pub(crate) fn canonical_companion_origin(
     owner_id: &str,
     observation: &SessionObservation,
 ) -> Result<Option<CompanionSessionOrigin>, AppError> {
-    if let Some(scope) = declared_companion_origin(owner_id, &observation.session)? { return Ok(Some(scope)); }
-    let Some(companion_id) = companion_id_from_binding(&observation.session.agent_binding)? else { return Ok(None); };
+    canonical_companion_origin_from_opening(owner_id, &observation.session, &observation.events)
+}
+
+/// Source and media guards need only immutable product affiliation; never
+/// load message projections or a history page to prove this ownership.
+pub(super) fn canonical_companion_origin_from_opening(owner_id: &str,
+    session: &nomifun_agent_contracts::AgentSessionLiveRecord,
+    opening: &[nomifun_agent_contracts::SessionEventRecord],
+) -> Result<Option<CompanionSessionOrigin>, AppError> {
+    if let Some(scope) = declared_companion_origin(owner_id, session)? { return Ok(Some(scope)); }
+    let Some(companion_id) = companion_id_from_binding(&session.agent_binding)? else { return Ok(None); };
     let key = format!("user:{owner_id}:open:companion-session:{companion_id}");
-    if observation.events.iter().any(|event| event.kind.0 == "session/opening"
+    if opening.iter().any(|event| event.kind.0 == "session/opening"
         && event.seq == 1 && event.kind_version == 1 && event.producer_id.as_ref() == "session_api"
         && event.idempotency_key.as_ref() == key
         && event.event_id.as_ref() == format!("opening:{key}")
@@ -136,8 +145,8 @@ mod tests {
     }
 }
 
-pub(super) fn role_target_kind(role: CompanionSessionRole) -> &'static str {
-    match role { CompanionSessionRole::Companion => "companion", CompanionSessionRole::Robot => "robot" }
+pub(super) fn role_target_kind(_entry: CompanionSessionRole) -> &'static str {
+    "companion"
 }
 
 pub(super) fn validate_role_resources(scope: &CompanionSessionOrigin, binding: &AgentBindingValueDto) -> Result<(), AppError> {
@@ -152,7 +161,7 @@ pub(super) fn validate_role_resources(scope: &CompanionSessionOrigin, binding: &
 
 impl NomiCoreSessionOwner {
     pub(super) async fn companion_execution_delivery_pending(&self, owner_id: &str, session_id: &str) -> Result<bool, AppError> {
-        sqlx::query_scalar("WITH linked AS (SELECT DISTINCT execution.execution_id,execution.initial_plan_input FROM conversation_execution_links link JOIN agent_executions execution ON execution.execution_id=link.execution_id WHERE link.conversation_id=? AND execution.user_id=? AND execution.deleted_at IS NULL), reports AS (SELECT linked.execution_id,(SELECT json_extract(event.payload,'$.lead_report_operation_id') FROM agent_execution_events event WHERE event.execution_id=linked.execution_id AND json_type(event.payload,'$.lead_report_operation_id')='text' ORDER BY event.sequence DESC LIMIT 1) operation_id FROM linked) SELECT EXISTS(SELECT 1 FROM reports WHERE reports.operation_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_execution_events delivered WHERE delivered.execution_id=reports.execution_id AND json_extract(delivered.payload,'$.change')='lead_report_delivered' AND json_extract(delivered.payload,'$.operation_id')=reports.operation_id)) OR EXISTS(SELECT 1 FROM linked JOIN agent_execution_attempts attempt ON attempt.execution_id=linked.execution_id JOIN agent_execution_events request ON request.execution_id=attempt.execution_id AND request.step_id=attempt.step_id AND request.attempt_id=attempt.attempt_id AND request.event_type='decision_requested' WHERE json_extract(linked.initial_plan_input,'$.mode')='directed' AND attempt.status='waiting_input' AND json_extract(request.payload,'$.question')=attempt.question AND request.sequence=(SELECT MAX(latest.sequence) FROM agent_execution_events latest WHERE latest.execution_id=attempt.execution_id AND latest.step_id=attempt.step_id AND latest.attempt_id=attempt.attempt_id AND latest.event_type='decision_requested' AND json_extract(latest.payload,'$.question')=attempt.question) AND NOT EXISTS(SELECT 1 FROM agent_execution_events reconciled WHERE reconciled.execution_id=request.execution_id AND json_extract(reconciled.payload,'$.change')='lead_input_notice_reconciled' AND json_extract(reconciled.payload,'$.request_event_sequence')=request.sequence))")
+        sqlx::query_scalar("WITH linked AS (SELECT DISTINCT execution.execution_id,execution.initial_plan_input FROM conversation_execution_links link JOIN agent_executions execution ON execution.execution_id=link.execution_id WHERE link.conversation_id=? AND execution.user_id=? AND execution.deleted_at IS NULL), reports AS (SELECT linked.execution_id,(SELECT json_extract(event.payload,'$.lead_report_operation_id') FROM agent_execution_events event WHERE event.execution_id=linked.execution_id AND json_type(event.payload,'$.lead_report_operation_id')='text' ORDER BY event.sequence DESC LIMIT 1) operation_id FROM linked) SELECT EXISTS(SELECT 1 FROM reports WHERE reports.operation_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_execution_events delivered WHERE delivered.execution_id=reports.execution_id AND json_extract(delivered.payload,'$.change')='lead_report_delivered' AND json_extract(delivered.payload,'$.operation_id')=reports.operation_id)) OR EXISTS(SELECT 1 FROM linked JOIN agent_execution_attempts attempt ON attempt.execution_id=linked.execution_id JOIN agent_execution_events request ON request.execution_id=attempt.execution_id AND request.step_id=attempt.step_id AND request.attempt_id=attempt.attempt_id AND request.event_type='decision_requested' WHERE json_type(linked.initial_plan_input,'$.source')='object' AND attempt.status='waiting_input' AND json_extract(request.payload,'$.question')=attempt.question AND request.sequence=(SELECT MAX(latest.sequence) FROM agent_execution_events latest WHERE latest.execution_id=attempt.execution_id AND latest.step_id=attempt.step_id AND latest.attempt_id=attempt.attempt_id AND latest.event_type='decision_requested' AND json_extract(latest.payload,'$.question')=attempt.question) AND NOT EXISTS(SELECT 1 FROM agent_execution_events reconciled WHERE reconciled.execution_id=request.execution_id AND json_extract(reconciled.payload,'$.change')='lead_input_notice_reconciled' AND json_extract(reconciled.payload,'$.request_event_sequence')=request.sequence))")
             .bind(session_id).bind(owner_id).fetch_one(&self.pool).await.map_err(|error| AppError::Internal(error.to_string()))
     }
 
@@ -236,25 +245,44 @@ impl NomiCoreSessionOwner {
     }
 
     pub(super) async fn is_companion_associated_task(&self, owner_id: &str, session_id: &AgentSessionId) -> Result<bool, AppError> {
-        sqlx::query_scalar("WITH RECURSIVE ancestry(id,depth) AS (SELECT ?,0 UNION ALL SELECT parent.parent_agent_session_id,ancestry.depth+1 FROM agent_sessions parent JOIN ancestry ON parent.agent_session_id=ancestry.id WHERE parent.parent_agent_session_id IS NOT NULL AND ancestry.depth<64) SELECT EXISTS(SELECT 1 FROM ancestry JOIN agent_events opening ON opening.session_id=ancestry.id AND opening.seq=1 WHERE opening.kind='session/opening' AND opening.producer_id='session_api' AND opening.idempotency_key LIKE ?) OR EXISTS(SELECT 1 FROM ancestry WHERE depth=64)")
-            .bind(session_id.as_ref()).bind(format!("user:{owner_id}:open:companion-directed:%"))
+        sqlx::query_scalar("WITH RECURSIVE ancestry(id,depth) AS (SELECT ?,0 UNION ALL SELECT parent.parent_agent_session_id,ancestry.depth+1 FROM agent_sessions parent JOIN ancestry ON parent.agent_session_id=ancestry.id WHERE parent.parent_agent_session_id IS NOT NULL AND ancestry.depth<64) SELECT EXISTS(SELECT 1 FROM ancestry JOIN agent_events opening ON opening.session_id=ancestry.id AND opening.seq=1 WHERE opening.kind='session/opening' AND opening.producer_id='session_api' AND (opening.idempotency_key LIKE ? OR opening.idempotency_key LIKE ?)) OR EXISTS(SELECT 1 FROM ancestry WHERE depth=64)")
+            .bind(session_id.as_ref()).bind(format!("user:{owner_id}:open:companion-directed:%")).bind(format!("user:{owner_id}:open:execution-source:%"))
             .fetch_one(&self.pool).await.map_err(|error| AppError::Internal(error.to_string()))
     }
 
     pub(crate) async fn cancel_robot_session_request(&self, owner_id: &str,
         request: &nomifun_robot::services::RobotTurnRequest, key: &str) -> Result<(), AppError> {
         let session = AgentSessionId::from(request.conversation_id.clone());
-        let operation = Self::turn_operation_id(owner_id, session.as_ref(), key);
-        let receipt = self.canonical.turn_receipt(&PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() }, &session, &operation).await?;
+        let principal=PrincipalRef { principal_kind:"user".into(),principal_id:owner_id.into() };
+        let mut operation = Self::turn_operation_id(owner_id, session.as_ref(), key);
+        if let Some(input)=self.canonical.session_input_by_key(&principal,&session,key).await? {
+            if let Some(claim)=self.canonical.store().session_input_claim(&session,&input.event.event_id).await.map_err(agent_session_store_error)? {
+                operation=claim.operation_id;
+            } else {
+                let _fence=self.session_operation_lock(session.as_ref()).write_owned().await;
+                if let Some(claim)=self.canonical.store().session_input_claim(&session,&input.event.event_id).await.map_err(agent_session_store_error)? {operation=claim.operation_id;}
+                else {
+                    self.canonical.store().mark_session_input_blocked(&session,&input.event.event_id,nomifun_agent_session::SessionInputBlockedReason::CancelledByOwner).await.map_err(agent_session_store_error)?;
+                    return Ok(());
+                }
+            }
+        }
+        let receipt = self.canonical.turn_receipt(&principal, &session, &operation).await?;
         if receipt.status == nomifun_agent_session::TurnReceiptStatus::NotFound { return Ok(()); }
+        if let Some(context)=request.captured_context.as_ref() {
+            let generation=self.canonical.store().native_execution_generation(&session,&operation).await.map_err(agent_session_store_error)?;
+            if context.work_operation_id.as_deref().is_some_and(|target|target!=operation.as_ref())
+                ||context.execution_generation.is_some_and(|captured|captured!=generation) {
+                return Err(AppError::Conflict("The recorded Robot work generation changed; cancellation was not retargeted".into()));
+            }
+        }
         self.cancel_exact_turn(owner_id, &session, &format!("robot-cancel:{key}"), &operation,
             nomifun_common::AgentKillReason::UserCancelled).await?;
         Ok(())
     }
 
     pub(super) fn companion_lifecycle_lock(&self, companion_id: &str) -> Arc<tokio::sync::RwLock<()>> {
-        self.companion_lifecycle_locks.entry(companion_id.to_owned())
-            .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(()))).clone()
+        self.companion_lifecycle_locks.get(companion_id)
     }
 
     pub(super) async fn canonical_companion_session_ids(&self, owner_id: &str, companion_id: &str,
@@ -306,22 +334,61 @@ impl NomiCoreSessionOwner {
         message: SendMessageRequest) -> Result<IdempotentMessageDelivery, AppError> {
         let session = AgentSessionId::from(request.conversation_id.clone());
         let _fence = self.session_operation_lock(session.as_ref()).write_owned().await;
+        let principal=PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.into()};
+        if let Some(original)=self.canonical.session_input_by_key(&principal,&session,key).await? {
+            let mut body=original.input.0.clone();
+            let source:nomifun_agent_contracts::AgentInputSource=serde_json::from_value(body.get("input_source").cloned()
+                .ok_or_else(||AppError::Conflict("Original Robot input has no authenticated source".into()))?).map_err(|error|AppError::Conflict(error.to_string()))?;
+            if !matches!(source,nomifun_agent_contracts::AgentInputSource::AuthenticatedRobot {companion_id,robot_id,connection_id,..}
+                if companion_id==request.companion_id&&robot_id==request.robot_id&&connection_id==request.connection_id) {
+                return Err(AppError::Conflict("Robot input key was reused with another original source".into()));
+            }
+            if let Some(body)=body.as_object_mut(){body.remove("input_source");body.remove("reply_to");}
+            if body!=super::canonical_turn_input(&message){return Err(AppError::Conflict("Robot input key was reused with different content".into()));}
+            if let nomifun_conversation::PublicTurnDeliveryState::Completed(mut delivery)=self.session_turn_delivery_state(owner_id,session.as_ref(),key).await? {
+                delivery.replayed=true;return Ok(delivery);
+            }
+            return Ok(IdempotentMessageDelivery {message_id:original.event.event_id.as_ref().into(),replayed:true,completed:false,
+                result_ok:None,result_text:None,result_error:None,result_error_code:None,result_error_retryable:None,user_input_request:None,turn_outcome:None});
+        }
         let observation = self.canonical.get(&PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() }, &session).await?;
+        if !self.robot_input_context_matches(owner_id,request).await? {return Err(AppError::Conflict("Robot input belongs to a superseded binding or cleared context".into()));}
         let scope = canonical_companion_origin(owner_id, &observation)?
             .ok_or_else(|| AppError::Forbidden("Authenticated Robot input requires a product Session".into()))?;
         if scope.role != CompanionSessionRole::Robot || scope.companion_id != request.companion_id
             || scope.robot_id.as_deref() != Some(request.robot_id.as_str()) {
             return Err(AppError::Forbidden("Robot input differs from its canonical device Session".into()));
         }
-        let presented_question_id = self.capture_directed_question(owner_id, &session, &request.connection_id,
-            key, request.presented_question_id.as_deref()).await?;
+        // The recording cut is authoritative. An unbound old utterance
+        // cannot borrow a later presentation, and a proven old question
+        // cannot become ordinary successor input after cancellation.
+        let mut recording=request.clone();
+        if request.presented_question_id.is_some() && let Some(context)=request.captured_context.as_ref() {
+            recording.presented_question_id=context.presented_question_id.clone();
+        }
+        let reply=self.direct_robot_question_reply(owner_id,&session,&recording).await?;
+        let presented_question_id = if reply.is_some() {recording.presented_question_id.clone()} else {
+            self.capture_execution_question(owner_id, &session, &request.connection_id,
+                key, recording.presented_question_id.as_deref()).await?};
+        if request.captured_context.as_ref().is_some_and(|context|context.presented_question_id.is_some())
+            &&recording.presented_question_id.is_some()&&presented_question_id!=recording.presented_question_id {
+            return Err(AppError::Conflict("The question proven at recording onset was replaced or closed; the input was not retargeted".into()));
+        }
         let source = nomifun_agent_contracts::AgentInputSource::AuthenticatedRobot {
             companion_id: request.companion_id.clone(), robot_id: request.robot_id.clone(),
             connection_id: request.connection_id.clone(),
             presented_question_id,
         };
-        self.dispatch_canonical_turn_locked(owner_id, &session, key, message, false,
-            None, None, None, false, None, Some(source)).await
+        let mut input=super::canonical_turn_input(&message);
+        input["input_source"]=serde_json::to_value(source).map_err(|error|AppError::Internal(error.to_string()))?;
+        if let Some(reply)=reply {input["reply_to"]=serde_json::to_value(reply).map_err(|error|AppError::Internal(error.to_string()))?;}
+        let principal=PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.into()};
+        let saved=self.canonical.accept_session_input(&principal,&session,key,input).await?;
+        let ack=saved.ack.ok_or_else(||AppError::Internal("Robot input has no canonical acknowledgement".into()))?;
+        if !saved.duplicate {self.publish_session_input_delivery(owner_id,&session,&ack.event_id).await?;}
+        self.schedule_session_input_drain(owner_id.into(),session,None);
+        Ok(IdempotentMessageDelivery {message_id:ack.event_id.as_ref().into(),replayed:saved.duplicate,completed:false,
+            result_ok:None,result_text:None,result_error:None,result_error_code:None,result_error_retryable:None,user_input_request:None,turn_outcome:None})
     }
 
     pub(crate) async fn is_companion_robot_session(&self, owner_id: &str, session_id: &AgentSessionId) -> Result<bool, AppError> {
@@ -329,37 +396,5 @@ impl NomiCoreSessionOwner {
         Ok(canonical_companion_origin(owner_id, &observation)?.is_some_and(|origin| origin.role == CompanionSessionRole::Robot))
     }
 
-    pub(crate) async fn resolve_companion_desktop_delegate_snapshot(&self, owner_id: &str, source_session_id: &AgentSessionId) -> Result<AgentResolvedSnapshot, AppError> {
-        let observation = self.canonical.get(&PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() }, source_session_id).await?;
-        let origin = canonical_companion_origin(owner_id, &observation)?
-            .filter(|origin| origin.role == CompanionSessionRole::Robot)
-            .ok_or_else(|| AppError::Forbidden("Desktop delegation requires a canonical Robot Session".into()))?;
-        let is_attempt: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_execution_links WHERE conversation_id = ? AND relation = 'attempt')")
-            .bind(source_session_id.as_ref()).fetch_one(&self.pool).await.map_err(|error| AppError::Internal(error.to_string()))?;
-        if is_attempt != 0 { return Err(AppError::Forbidden("An execution Attempt cannot recursively delegate".into())); }
-        let resolver = self.product_agent_resolver.get().and_then(std::sync::Weak::upgrade)
-            .ok_or_else(|| AppError::Conflict("Companion Agent resolver is unavailable".into()))?;
-        let companions = self.companion_service.get().and_then(std::sync::Weak::upgrade)
-            .ok_or_else(|| AppError::Conflict("Companion role configuration is unavailable".into()))?;
-        let launch = companions.desktop_role_launch_configuration(&origin.companion_id).await?;
-        let target = ProductAgentTarget { target_kind: "companion".into(), target_id: origin.companion_id,
-            default_template_key: "companion.default".into() };
-        let resolution = resolver.resolve(owner_id, &target, Some(&launch.model)).await?;
-        let owner = UserId::from(owner_id.to_owned());
-        let current = resolution.snapshot.canonical_binding.as_ref().ok_or_else(|| AppError::Conflict("Desktop role has no frozen binding".into()))?;
-        let (_, _, frozen) = resolver.control_plane.saved_binding_artifacts(&owner, current).await.map_err(control_plane_error_to_app)?;
-        let mut selection = session_capability_selection::selection(&frozen);
-        selection.skill_names = launch.skill_names;
-        let mut binding = resolver.control_plane.resolve_agent_session_capabilities_binding(&owner, current, Some(&selection)).await.map_err(control_plane_error_to_app)?;
-        binding.typed_resource_bindings = current.typed_resource_bindings.iter()
-            .filter(|resource| resource.resource_kind != "mcp_server").cloned().collect();
-        freeze_selected_workspace(&mut binding, owner_id, &launch.workspace, WorkspaceDirectoryCheck::Create)?;
-        let mcp = resolver.resource_bindings.resolve_mcp_for_saved_binding(&resolver.control_plane, &owner, &binding).await
-            .map_err(|error| AppError::Conflict(format!("{}: {}", error.code(), error.message())))?;
-        binding.typed_resource_bindings.retain(|resource| resource.resource_kind != "mcp_server");
-        binding.typed_resource_bindings.extend(mcp);
-        let (binding, revision, frozen) = resolver.control_plane.saved_binding_artifacts(&owner, &binding).await.map_err(control_plane_error_to_app)?;
-        let owner = nomifun_common::UserId::parse(owner_id.to_owned()).map_err(|error| AppError::Forbidden(error.to_string()))?;
-        Ok(super::super::agent_binding_projection::project_saved_artifacts(&owner, binding, revision, frozen, None)?.projection.snapshot)
-    }
+
 }

@@ -85,7 +85,7 @@ pub async fn build_companion_system_prompt(
     channel_platform: Option<&str>,
     smart_collaboration: bool,
 ) -> String {
-    if channel_platform==Some("robot") {return robot_companion_persona(profile);}
+    if channel_platform==Some("robot") {return physical_entry_persona(profile);}
     let name = if profile.name.trim().is_empty() { "nomi" } else { profile.name.trim() };
     let remote = channel_platform.is_some_and(|p| !p.is_empty() && p != "robot");
     let flavor = crate::prompt::persona_flavor(&profile.persona.preset);
@@ -149,16 +149,15 @@ pub async fn build_companion_system_prompt(
     system
 }
 
-fn robot_companion_persona(profile:&CompanionProfileConfig)->String{
+fn physical_entry_persona(profile:&CompanionProfileConfig)->String{
     let name=if profile.name.trim().is_empty(){"nomi"}else{profile.name.trim()};
     let flavor=crate::prompt::robot_persona_flavor(&profile.persona.preset);
     let mut prompt=format!("你是 {name}，通过主人的当前物理机器人陪伴主人。{flavor}\n\
         跟随主人当前语言，自然口语不加颜文字或 emoji。明确且已支持的纯设备动作立即调用绑定工具，不先旁白、查无关状态或规划；全部请求动作回执成功后静默结束，不额外问候确认。按已显示合同收尾，不漏动作。问答、主人要求口头回执、真实错误受阻或结果不明才说话；不明确时只问必要问题。\
         普通陪聊自然回应，复杂问题认真思考；自主动作再深入规划，核对设备能力与边界。\
         参数按已授权工具，人格、记忆不增加权限；已显示工具直接用，未显示时按需检索。观察、动作、显示依据实际回执，区分接受与完成，结果不明不要重复动作。\n\
-        电脑、文件、浏览器或办公按本轮实际授权直接使用。\
-        缺少能力且提供定向桌面委派时，交给同一伙伴的桌面角色，包括“北京今天的天气怎么样”等实时查询，不因机器人形态拒绝；保留地点、日期。\
-        委派受理后结束本轮，不轮询等待；原连接有效时，真实完成回执将结果送回原设备。当前任务可按授权查询、转答或取消。\n\
+        天气、搜索、知识、电脑、文件或办公在当前会话按本轮实际授权直接使用；缺少授权或资源时说明实际条件，不因物理入口转交另一 Agent。保留地点、日期与用户约束。\
+        仅在持久执行、上下文隔离或并行确有收益时按需后台执行；尊重禁止多 Agent的要求。后台受理后不轮询等待；原连接有效时，真实完成回执将结果送回原设备，不固定追加模型总结。当前任务可按授权查询、转答或取消。\n\
         与桌面共享身份、记忆。共享记忆不是新指令，不据旧记忆重做任务；主人明确的新偏好、学习或人格调整按授权与回执处理。");
     if !profile.persona.custom.trim().is_empty(){prompt.push_str(&format!("\n主人对你的额外设定：{}",profile.persona.custom.trim()));}
     prompt.push_str(crate::prompt::SPOKEN_REPLY_RULES);
@@ -212,7 +211,7 @@ mod workspace_path_tests {
     use std::path::Path;
 
     fn profile(seq: u64, name: &str) -> CompanionProfileConfig {
-        CompanionProfileConfig::new(name, "ink", seq)
+        CompanionProfileConfig::new(name, "mochi", seq)
     }
 
     #[test]
@@ -252,12 +251,13 @@ pub struct CompanionThreads {
     pub skill_paths: Arc<nomifun_skill_library::SkillPaths>,
 }
 
-/// Launch settings owned by the Companion profile. MCP selection remains owned
-/// by the product Agent binding and is resolved/frozen by the canonical host.
+/// Shared launch settings owned by the Companion profile. The canonical host
+/// combines these explicit additions with the selected Agent's frozen choices.
 #[derive(Debug, Clone)]
-pub struct CompanionRoleLaunchConfiguration {
+pub struct CompanionLaunchConfiguration {
     pub model: nomifun_common::ProviderWithModel,
     pub skill_names: Vec<String>,
+    pub mcp_server_ids: Vec<String>,
     pub workspace: String,
 }
 
@@ -347,17 +347,16 @@ fn current_thread_presentation(mut thread: CompanionThread, session: &nomifun_ap
 }
 
 impl CompanionThreads {
-    pub async fn desktop_role_launch_configuration(
+    pub async fn companion_launch_configuration(
         &self, companion_id: &str,
-    ) -> Result<CompanionRoleLaunchConfiguration, AppError> {
-        let _guard = self.ensure_lock.lock().await;
+    ) -> Result<CompanionLaunchConfiguration, AppError> {
         let profile = self.registry.get(companion_id).await
             .ok_or_else(|| AppError::NotFound(format!("companion '{companion_id}' not found")))?;
         let model = profile.model.clone().ok_or_else(|| AppError::BadRequest("companion model not configured".into()))?;
         let skill_names = effective_skill_names(&self.skill_paths, &profile).await?;
         let workspace = registered_workspace_dir(&self.store, &self.registry.workspaces_dir(), &profile).await?
             .to_string_lossy().into_owned();
-        Ok(CompanionRoleLaunchConfiguration { model, skill_names, workspace })
+        Ok(CompanionLaunchConfiguration { model, skill_names, mcp_server_ids: profile.mcp_servers.clone(), workspace })
     }
     /// `NotFound` unless `conversation_id` is a registered thread owned by
     /// `companion_id`.
@@ -409,6 +408,13 @@ impl CompanionThreads {
                     {
                         return Err(AppError::Conflict(format!("canonical companion receive scope does not match '{session_id}'")));
                     }
+                    self.sessions.prepare_companion_entry(
+                        self.authoritative_user_id.as_ref(), companion_id, &session_id,
+                    ).await?;
+                    let canonical = self.sessions.get(self.authoritative_user_id.as_ref(), &session_id).await?;
+                    if !canonical_thread_matches(&thread, &canonical) {
+                        return Err(AppError::Conflict(format!("canonical companion scope changed while preparing '{session_id}'")));
+                    }
                     if had_registration { return Ok(current_thread_presentation(thread, &canonical)); }
                     let recovered = self.store.insert_companion_thread_for_role(&session_id, companion_id, &thread.title,
                         role, robot_id, thread.creation_key.as_deref()).await?;
@@ -426,8 +432,15 @@ impl CompanionThreads {
         if let Some(thread) = self.list(companion_id).await?.into_iter()
             .find(|thread| thread.role == role && thread.robot_id.as_deref() == robot_id)
         {
+            self.sessions.prepare_companion_entry(
+                self.authoritative_user_id.as_ref(), companion_id, &thread.conversation_id,
+            ).await?;
+            let canonical = self.sessions.get(self.authoritative_user_id.as_ref(), &thread.conversation_id).await?;
+            if !canonical_thread_matches(&thread, &canonical) {
+                return Err(AppError::Conflict("canonical companion receive scope changed while preparing entry".into()));
+            }
             self.store.set_companion_state(companion_id, &pointer_key, &thread.conversation_id).await?;
-            return Ok(thread);
+            return Ok(current_thread_presentation(thread, &canonical));
         }
         // Persist the product command identity before invoking the Session
         // owner, so a crash between canonical creation and registry insertion
@@ -479,10 +492,7 @@ impl CompanionThreads {
             .get(companion_id)
             .await
             .ok_or_else(|| AppError::NotFound(format!("companion '{companion_id}' not found")))?;
-        let model = match role {
-            CompanionRole::Companion => profile.model.as_ref(),
-            CompanionRole::Robot => profile.robot.model.as_ref().or(profile.model.as_ref()),
-        };
+        let model = profile.model.as_ref();
         let Some(model) = model else {
             return Err(AppError::BadRequest(format!("{} model not configured", role.as_str())));
         };
@@ -504,22 +514,7 @@ impl CompanionThreads {
         let workspace = workspace_dir.to_string_lossy().into_owned();
         // A profile selection must be resolved before the host can freeze its
         // canonical Session. Resolver failure is not an empty selection.
-        let effective_skill_names = match role {
-            CompanionRole::Companion => effective_skill_names(&self.skill_paths, &profile).await?,
-            CompanionRole::Robot => {
-                let mut robot_profile = profile.clone();
-                robot_profile.skills = profile.robot.skills.clone();
-                // Robot defaults remain empty; desktop auto-skills are not
-                // inherited by the latency-sensitive device role.
-                let configured = normalized_effective_skill_names(Vec::new(), &robot_profile.skills);
-                let resolved: Vec<String> = nomifun_skill_library::resolve_skill_sources(&self.skill_paths, companion_id, &configured)
-                    .await?.into_iter().map(|skill| skill.name).collect();
-                if !configured.is_empty() && resolved.is_empty() {
-                    return Err(AppError::Internal("none of the configured robot skills resolved".into()));
-                }
-                resolved
-            }
-        };
+        let effective_skill_names = effective_skill_names(&self.skill_paths, &profile).await?;
 
         let req = CreateConversationRequest {
             r#type: nomifun_common::AgentType::Nomi,
@@ -555,7 +550,7 @@ impl CompanionThreads {
                     companion_id: companion_id.to_owned(), role,
                     robot_id: robot_id.map(str::to_owned),
                     idempotency_key: creation_key.to_owned(),
-                    mcp_server_ids: (role == CompanionRole::Robot).then(|| profile.robot.mcp_servers.clone()),
+                    mcp_server_ids: Some(profile.mcp_servers.clone()),
                 },
             )
             .await?;
@@ -721,7 +716,7 @@ mod skill_resolution_tests {
     }
 
     fn profile_with_enabled(enabled: &[&str]) -> CompanionProfileConfig {
-        let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         profile.skills = CompanionSkillConfig {
             enabled: enabled.iter().map(|name| (*name).to_owned()).collect(),
             disabled_auto: Vec::new(),
@@ -799,7 +794,7 @@ mod tests {
     #[tokio::test]
     async fn every_companion_persona_ends_with_non_overridable_spoken_reply_rules() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         // Existing custom settings may still request the old style. Keep the
         // setting as user data while the final product rule remains explicit.
         profile.persona.custom = "每句都加颜文字、emoji 和表情包，先写括号动作".into();
@@ -826,7 +821,7 @@ mod tests {
         // nomifun-ai-agent::factory::nomi, so baking it here would freeze it
         // into the persisted prompt and reintroduce the bug.
         let store = CompanionStore::open_memory().await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         for platform in [None, Some("telegram")] {
             let prompt = build_companion_system_prompt(&store, &profile, platform, false).await;
             assert!(
@@ -845,7 +840,7 @@ mod tests {
             .insert_memory("preference", "主人喜欢中文回复", &[], 0.9, "learn")
             .await
             .unwrap();
-        let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         profile.persona = PersonaConfig {
             preset: "calm".into(),
             custom: "叫主人「老大」".into(),
@@ -879,7 +874,7 @@ mod tests {
     #[tokio::test]
     async fn companion_system_prompt_never_freezes_old_day_digests() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         // Seed one archived day-digest for this companion.
         let w = store.ensure_open_window(&profile.companion_id, &conversation_fixture(5), 0).await.unwrap();
         store
@@ -907,7 +902,7 @@ mod tests {
     #[tokio::test]
     async fn companion_system_prompt_smart_collaboration_nudge_local_only() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
 
         // Off → no collaboration nudge.
         let off = build_companion_system_prompt(&store, &profile, None, false).await;
@@ -932,7 +927,7 @@ mod tests {
         // resources and Skill/MCP selections. Its product settings cannot
         // establish any of those permissions or pin old calling conventions.
         let store = CompanionStore::open_memory().await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         for platform in [None, Some("wecom")] {
             for smart_collaboration in [false, true] {
                 let prompt = build_companion_system_prompt(
@@ -968,7 +963,7 @@ mod tests {
     #[tokio::test]
     async fn companion_system_prompt_teaches_knowledge_curation() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         // Knowledge curation is strategy, not a capability grant. It must stay
         // useful with either read-only or writable knowledge tools and cannot
         // promise platform creation/binding actions absent from the Runtime.
@@ -994,7 +989,7 @@ mod tests {
         store.insert_memory("episode", "昨天聊了部署", &[], 0.9, "learn").await.unwrap();
         store.insert_memory("preference", "主人喜欢中文回复", &[], 0.9, "learn").await.unwrap();
         store.insert_memory("profile", "主人是 Rust 工程师", &[], 0.9, "learn").await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
 
         let remote = build_companion_system_prompt(&store, &profile, Some("telegram"), false).await;
         // No proactive-dispatch framing.
@@ -1017,19 +1012,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn robot_persona_is_physically_present_and_can_delegate_without_im_rules() {
+    async fn physical_persona_uses_ordinary_tools_and_optional_background_work_without_role_handoffs() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         let prompt = build_companion_system_prompt(&store, &profile, Some("robot"), true).await;
         assert!(prompt.contains("物理机器人"));
-        assert!(prompt.contains("定向桌面委派"));
+        assert!(prompt.contains("在当前会话按本轮实际授权直接使用"));
+        assert!(prompt.contains("按需后台执行"));
+        assert!(!prompt.contains("定向桌面委派"));
+        assert!(!prompt.contains("桌面角色"));
         assert!(prompt.contains("真实完成回执"));
         assert!(prompt.contains("按本轮实际授权直接使用"));
         for boundary in ["立即调用绑定工具", "全部请求动作回执成功后静默结束", "主人要求口头回执", "真实错误受阻", "普通陪聊", "深入规划", "未显示时按需检索",
-            "北京今天的天气怎么样", "不轮询等待", "原连接有效时", "送回原设备", "结果不明不要重复动作"] {
+            "天气、搜索、知识", "不轮询等待", "原连接有效时", "送回原设备", "结果不明不要重复动作"] {
             assert!(prompt.contains(boundary), "Robot persona retains {boundary}");
         }
-        assert!(!prompt.contains("仅在当前提供定向桌面委派工具时"));
         assert!(!prompt.contains("通过 IM"));
         assert!(!prompt.contains("禁止创建会话、向其他会话派发任务"));
         assert!(!prompt.contains("finish_without_reply"), "only the Runtime can describe a control that it actually exposes");
@@ -1038,7 +1035,7 @@ mod tests {
     #[tokio::test]
     async fn robot_persona_preserves_shared_spoken_rules_and_authored_settings() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         for preset in ["lively", "calm", "sassy", "unrecognized"] {
             profile.persona.preset = preset.into();
             let robot = build_companion_system_prompt(&store, &profile, Some("robot"), false).await;
@@ -1055,9 +1052,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn robot_persona_omits_desktop_catalogues_and_bounds_its_byte_cost() {
+    async fn physical_persona_preserves_identity_with_a_bounded_host_contribution() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         profile.persona.preset = "calm".into();
         let desktop = build_companion_system_prompt(&store, &profile, None, true).await;
         let robot = build_companion_system_prompt(&store, &profile, Some("robot"), true).await;
@@ -1070,12 +1067,11 @@ mod tests {
         }
         // Shared product rules are identical on both channels, so compare the
         // persona boilerplate separately while proving that each retains them.
-        let desktop_persona = desktop.strip_suffix(crate::prompt::SPOKEN_REPLY_RULES).expect("desktop reply rules");
+        desktop.strip_suffix(crate::prompt::SPOKEN_REPLY_RULES).expect("desktop reply rules");
         let robot_persona = robot.strip_suffix(crate::prompt::SPOKEN_REPLY_RULES).expect("Robot reply rules");
         assert!(robot_persona.len() <= 1600, "bounded host text, excluding shared rules and explicit custom persona: {}", robot_persona.len());
-        assert!(robot_persona.len() * 100 < desktop_persona.len() * 45, "Robot persona must remove more than half of desktop boilerplate");
-        println!("persona UTF-8 bytes: desktop={}, robot={}, reduction={:.2}%", desktop.len(), robot.len(),
-            100.0 * (desktop.len() - robot.len()) as f64 / desktop.len() as f64);
+        println!("persona UTF-8 bytes: desktop={}, physical={}, physical_host={}",
+            desktop.len(), robot.len(), robot_persona.len());
         profile.persona.custom = "叫主人「老大」".into();
         let robot_custom = build_companion_system_prompt(&store, &profile, Some("robot"), false).await;
         assert!(robot_custom.contains("主人对你的额外设定：叫主人「老大」"));
@@ -1282,7 +1278,7 @@ pub(crate) mod thread_management_tests {
         async fn new() -> Self {
             let root = tempfile::tempdir().unwrap();
             let registry = Arc::new(CompanionRegistry::scan(root.path().join("companions"), root.path().join("shared")).unwrap());
-            let companion_id = registry.create("毛球", "ink").await.unwrap().companion_id;
+            let companion_id = registry.create("毛球", "mochi").await.unwrap().companion_id;
             let model = ProviderWithModel { provider_id: ProviderId::new().into_string(), model: "desktop-model".into(), use_model: None };
             registry.patch(&companion_id, serde_json::json!({ "model": model })).await.unwrap();
             let skill_paths = nomifun_skill_library::SkillPaths {
@@ -1511,24 +1507,24 @@ pub(crate) mod thread_management_tests {
     }
 
     #[tokio::test]
-    async fn robot_inherits_the_model_but_never_desktop_skills_or_mcp_selection() {
+    async fn device_and_desktop_sessions_share_model_and_extension_defaults() {
         let fixture = Fixture::new().await;
         let desktop_skill = fixture.threads.skill_paths.user_skills_dir.join("desktop-only");
         std::fs::create_dir_all(&desktop_skill).unwrap();
         std::fs::write(desktop_skill.join("SKILL.md"), "---\nname: desktop-only\ndescription: Desktop fixture skill.\n---\nUse the desktop fixture.").unwrap();
-        fixture.threads.registry.patch(&fixture.companion_id, serde_json::json!({ "skills": { "enabled": ["desktop-only"] } })).await.unwrap();
+        fixture.threads.registry.patch(&fixture.companion_id, serde_json::json!({ "skills": { "enabled": ["desktop-only"] }, "mcp_servers": ["shared-mcp"] })).await.unwrap();
         fixture.threads.create(&fixture.companion_id, None).await.unwrap();
         fixture.threads.ensure_for_role(&fixture.companion_id, CompanionRole::Robot, Some("robot-a"), None).await.unwrap();
         let calls = fixture.create_calls();
         let desktop = calls.iter().find(|call| call.context.role == CompanionRole::Companion).unwrap();
         let robot = calls.iter().find(|call| call.context.role == CompanionRole::Robot).unwrap();
         assert_eq!(desktop.skill_names, vec!["desktop-only"]);
-        assert!(robot.skill_names.is_empty());
+        assert_eq!(robot.skill_names, desktop.skill_names);
         assert_eq!(desktop.model.as_ref(), Some(&fixture.model));
         assert_eq!(robot.model.as_ref(), Some(&fixture.model));
-        assert_eq!(desktop.context.mcp_server_ids, None);
-        assert_eq!(robot.context.mcp_server_ids, Some(vec![]));
+        assert_eq!(desktop.context.mcp_server_ids, Some(vec!["shared-mcp".into()]));
+        assert_eq!(robot.context.mcp_server_ids, desktop.context.mcp_server_ids);
         assert_eq!(robot.context.robot_id.as_deref(), Some("robot-a"));
-        assert!(fixture.threads.registry.get(&fixture.companion_id).await.unwrap().robot.model.is_none());
+        assert_eq!(fixture.threads.registry.get(&fixture.companion_id).await.unwrap().model.as_ref(), Some(&fixture.model));
     }
 }

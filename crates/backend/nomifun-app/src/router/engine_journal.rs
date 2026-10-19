@@ -59,6 +59,9 @@ struct Cursor {
     uncertain: bool,
     pending_cleanup_write: Option<(String, Option<String>, EngineJournalWrite)>,
     assistant_step: Option<AssistantStepCursor>,
+    public_committed_steps: std::collections::BTreeSet<u16>,
+    current_model_step: Option<u16>,
+    withdrawn_model_steps: std::collections::BTreeSet<u16>,
     last_assistant_event_id: Option<EventId>,
     assistant_message_id: Option<String>,
     thinking_messages: BTreeMap<u16, (String, u64)>,
@@ -368,7 +371,15 @@ impl EngineTurnJournal {
         let mut open = BTreeMap::<String, AssistantStepCursor>::new();
         let mut last_event = None;
         let mut bytes = 0usize;
+        let mut committed=std::collections::BTreeSet::new();
         for event in &facts.events {
+            if event.kind.0=="runtime/progress-recorded"&&event.producer_id.as_ref()=="runtime_supervisor"
+                &&event.correlation_id.as_ref()==journal.operation.as_ref()
+                &&let Some(value)=facts.event_payloads.get(event.event_id.as_ref()).and_then(|payload|payload.get("event"))
+                &&value.get("event").and_then(Value::as_str)==Some("public_output_committed")
+                &&let AgentEngineEvent::PublicOutputCommitted {step,..}=serde_json::from_value(value.clone()).map_err(failure)? {
+                committed.insert(step);
+            }
             let Some(step) = identities.get(event.correlation_id.as_ref()) else { continue; };
             match event.kind.0.as_str() {
                 "message/content-part" => {
@@ -395,7 +406,9 @@ impl EngineTurnJournal {
             journal.append_projection(&completed).await.map_err(failure)?;
             last_event = Some(completed.event_id);
         }
-        journal.cursor.lock().await.last_assistant_event_id = last_event;
+        let mut cursor=journal.cursor.lock().await;
+        cursor.last_assistant_event_id = last_event;
+        cursor.public_committed_steps=committed;
         Ok(())
     }
 
@@ -563,6 +576,14 @@ impl EngineTurnJournal {
                     cursor.uncertain = false;
                     return Ok(None);
                 }
+                Err(error @ nomifun_agent_session::SessionStoreError::ExecutionFenced) => {
+                    // The Store rejects the exact fence inside its transaction
+                    // before commit. Stop winning this race is known rejection,
+                    // not an ambiguous checkpoint write. Preserve cleanup's
+                    // authority without admitting/replaying any model work.
+                    cursor.uncertain = false;
+                    return Err(failure(error));
+                }
                 Err(error) => return Err(failure(error)),
             };
             cursor.sequence = next;
@@ -587,13 +608,14 @@ impl EngineTurnJournal {
         cursor: &Cursor,
         event: &Value,
         kind: EngineJournalWrite,
-    ) -> Result<Option<u64>, AppError> {
+    ) -> Result<Option<u64>, nomifun_agent_session::SessionStoreError> {
         let next = cursor.sequence.saturating_add(1);
         let value = json!({
             "producer_seq": next,
             "event": event,
         });
-        let (payload_ref, payload) = canonical_event_payload(&journal.session, value)?;
+        let (payload_ref, payload) = canonical_event_payload(&journal.session, value)
+            .map_err(|error|nomifun_agent_session::SessionStoreError::InvalidPayload(error.to_string()))?;
         let identity = format!(
             "runtime-progress:{}:{}:{next}",
             journal.session.as_ref(),
@@ -613,9 +635,9 @@ impl EngineTurnJournal {
             },
         };
         let appended = if kind == EngineJournalWrite::Progress {
-            journal.store.append_native_event(&journal.lease, &append, payload.as_ref()).await.map_err(failure)?
+            journal.store.append_native_event(&journal.lease, &append, payload.as_ref()).await?
         } else {
-            journal.store.append_native_observation(&journal.lease, &append, payload.as_ref()).await.map_err(failure)?
+            journal.store.append_native_observation(&journal.lease, &append, payload.as_ref()).await?
         };
         Ok(appended.ack.map(|ack| ack.seq))
     }
@@ -984,7 +1006,7 @@ impl EngineTurnJournal {
                     .map_err(failure)?;
                 if receipt.status != TurnReceiptStatus::Cancelled {
                     let identity = format!("runtime-cancel:{}:{}", journal.session.as_ref(), journal.operation.as_ref());
-                    journal.store.append_native_event(&journal.lease, &SessionEventAppend {
+                    journal.store.append_native_cancellation_after_cleanup(&journal.lease, &SessionEventAppend {
                         agent_session_id: journal.session.clone(), event_id: identity.clone().into(),
                         producer_id: "runtime_supervisor".into(), idempotency_key: identity.into(),
 
@@ -993,7 +1015,7 @@ impl EngineTurnJournal {
                             correlation_id: journal.operation.as_ref().into(), causation_event_id: Some(journal.turn_started.clone()),
                             payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"operation_id":journal.operation}))),
                         },
-                    }, None).await.map_err(failure)?;
+                    }).await.map_err(failure)?;
                 }
                 Ok(())
             }
@@ -1110,7 +1132,7 @@ impl EngineTurnJournal {
         {
             return Err(failure("invalid model-operation admission"));
         }
-        let event_value: Value = serde_json::from_str(&payload).map_err(failure)?;
+        let mut event_value: Value = serde_json::from_str(&payload).map_err(failure)?;
         let runtime_event = serde_json::from_value::<AgentEngineEvent>(event_value.clone()).ok();
         if kind == EngineJournalWrite::Terminal && runtime_event.is_none() {
             return Err(failure("terminal write did not contain a terminal Runtime event"));
@@ -1132,6 +1154,25 @@ impl EngineTurnJournal {
             let _permit = permit;
             let _byte_permit = byte_permit;
             let mut cursor = journal.cursor.lock().await;
+            if let Some(AgentEngineEvent::PublicOutputCommitted {step,source})=&runtime_event {
+                if *step==0||cursor.current_model_step!=Some(*step)||cursor.withdrawn_model_steps.contains(step) {return Err(failure("public commitment differs from its current exact model source"));}
+                if source.is_some() {return Err(failure("Runtime cannot author its own canonical public proof"));}
+                if let Some(current)=cursor.assistant_step.as_ref().filter(|current|current.step==*step&&current.parts>0) {
+                    let live=journal.store.get_live_session(&journal.session).await.map_err(failure)?;
+                    if live.agent_binding.resolved_snapshot_ref!=journal.snapshot {return Err(failure("public source Snapshot was replaced"));}
+                    let source=nomifun_agent_runtime::AgentPublicOutputSource {message_id:current.message_id.clone(),part_count:current.parts,
+                        content_digest:digest_bytes(&current.text),through_event_id:current.last_event_id.clone().ok_or_else(||failure("public source has no final part"))?,
+                        binding_version:live.agent_binding.binding_version};
+                    event_value=serde_json::to_value(AgentEngineEvent::PublicOutputCommitted {step:*step,source:Some(source)}).map_err(failure)?;
+                }
+            }
+            if let Some(AgentEngineEvent::VoiceModelStepSuperseded {step,model_operation_id,cleanup,..})=&runtime_event {
+                if cursor.public_committed_steps.contains(step) {return Err(failure("an irrevocable public source cannot be withdrawn"));}
+                if model_operation_id.as_ref()!=format!("{}:model:{step}",journal.operation.as_ref())||cleanup.operation_id!=*model_operation_id||cleanup.task_id.is_empty()
+                    ||cursor.assistant_step.as_ref().is_some_and(|current|current.step>*step) {return Err(failure("voice source withdrawal differs from the exact owned model step"));}
+            }
+            if let Some(AgentEngineEvent::ModelResponseRejected {step,..}|AgentEngineEvent::ModelOutputTruncated {step,..}|AgentEngineEvent::DeliveryReviewSuperseded {step,..})=&runtime_event
+                &&cursor.public_committed_steps.contains(step) {return Err(failure("an irrevocable public source cannot be discarded"));}
             let retry_cleanup = cursor.uncertain && cursor.pending_cleanup_write.as_ref()
                 .is_some_and(|pending|pending.0==payload && pending.1==model_operation && pending.2==kind);
             if (cursor.uncertain && !retry_cleanup) || cursor.terminal {
@@ -1153,7 +1194,7 @@ impl EngineTurnJournal {
             } else {
                 (3200_u64, nomifun_agent_contracts::MAX_NATIVE_JOURNAL_WINDOW_BYTES)
             };
-            let accounted_bytes = payload.len().saturating_add(256);
+            let accounted_bytes = canonical_json_bytes(&event_value).map_err(failure)?.len().saturating_add(256);
             let next_bytes = cursor.bytes.saturating_add(accounted_bytes);
             let next_total_bytes = cursor.total_bytes.saturating_add(accounted_bytes);
             let total_limit = cursor.budget.journal_bytes.saturating_add(if reserved { 4 * 1024 * 1024 } else { 0 });
@@ -1164,16 +1205,36 @@ impl EngineTurnJournal {
             if matches!(kind,EngineJournalWrite::Cleanup | EngineJournalWrite::Terminal) {
                 cursor.pending_cleanup_write = Some((payload.clone(),model_operation.clone(),kind));
             }
+            let was_uncertain=cursor.uncertain;
             cursor.uncertain = true;
-            let event_seq = Self::append_progress(&journal, &cursor, &event_value, kind).await?;
+            let event_seq = match Self::append_progress(&journal, &cursor, &event_value, kind).await {
+                Ok(receipt)=>receipt,
+                Err(error)=> {
+                    if !was_uncertain && matches!(&error,nomifun_agent_session::SessionStoreError::ExecutionFenced) {
+                        // No progress row committed in this rejected Store
+                        // transaction. Do not poison a fresh journal when Stop
+                        // beat a late callback to the writer. An earlier unknown
+                        // or partially committed projection remains uncertain.
+                        cursor.uncertain=false;
+                        cursor.pending_cleanup_write=None;
+                    }
+                    return Err(failure(error));
+                }
+            };
             Self::append_tool_projection(&journal, &mut cursor, &event_value).await?;
+            if let Some(AgentEngineEvent::ModelStepStarted {step,..})=&runtime_event {cursor.current_model_step=Some(*step);}
+            if let Some(AgentEngineEvent::ModelResponseRejected {step,..}|AgentEngineEvent::ModelOutputTruncated {step,..}|AgentEngineEvent::DeliveryReviewSuperseded {step,..}|AgentEngineEvent::VoiceModelStepSuperseded {step,..})=&runtime_event {
+                cursor.withdrawn_model_steps.insert(*step);
+            }
             if let Some(AgentEngineEvent::VoiceModelStepSuperseded {step,model_operation_id,cleanup,..})=&runtime_event {
-                if model_operation_id.as_ref()!=format!("{}:model:{step}",journal.operation.as_ref())||cleanup.operation_id!=*model_operation_id||cleanup.task_id.is_empty()
-                    ||cursor.assistant_step.as_ref().is_some_and(|current|current.step>*step) {return Err(failure("voice source withdrawal differs from the exact owned model step"));}
+                let _=(model_operation_id,cleanup);
                 // Keep immutable partial parts for audit. This obsolete source
                 // never receives a completed-message publication or flows into
                 // the next response cursor. Ordinary journal events are unchanged.
                 if cursor.assistant_step.as_ref().is_some_and(|current|current.step==*step){cursor.assistant_step=None;}
+            }
+            if let Some(AgentEngineEvent::PublicOutputCommitted {step,..})=&runtime_event {
+                cursor.public_committed_steps.insert(*step);
             }
             if let Some(AgentEngineEvent::OutputTextDelta { step, text, source }) = &runtime_event {
                 Self::append_assistant_part(&journal, &mut cursor, *step, text, source.as_ref()).await?;
@@ -1274,6 +1335,13 @@ pub(super) async fn test_fixture_at(
 async fn test_fixture_from_pool(
     pool:nomifun_db::SqlitePool,
 ) -> (EngineTurnJournal,nomifun_db::SqlitePool) {
+    test_fixture_for_operation(pool,"turn","turn-key").await
+}
+
+#[cfg(test)]
+pub(super) async fn test_fixture_for_operation(
+    pool:nomifun_db::SqlitePool,operation:&str,turn_key:&str,
+) -> (EngineTurnJournal,nomifun_db::SqlitePool) {
     use nomifun_agent_contracts::{
         AgentBindingValue, AgentPresetId, AgentSessionLiveRecord, AgentSessionMetadata,
         DigestHex, PresetRevisionRef, PrincipalRef, ResolvedSnapshotId,
@@ -1346,14 +1414,15 @@ async fn test_fixture_from_pool(
         "admission": {
             "route_identity": ChatRouteIdentity::new("preset@1", "agent_chat", "fixture-route".into(), 1),
             "resolved_snapshot_ref": binding.resolved_snapshot_ref,
+            "binding_ref": nomifun_agent_contracts::AgentHandoffBindingRefV1::from(&binding),
         }
     }));
     let (message, turn) = store
         .start_turn(
             &session_id,
             EventProducerId::from("session_api"),
-            IdempotencyKey::from("turn-key"),
-            OperationId::from("turn"),
+            IdempotencyKey::from(turn_key),
+            OperationId::from(operation),
             input,
         )
         .await
@@ -1361,7 +1430,7 @@ async fn test_fixture_from_pool(
     let root = message.record.unwrap().event_id;
     let turn_started = turn.record.as_ref().unwrap().event_id.clone();
     let lease = store.claim_native_execution(nomifun_agent_session::NativeExecutionClaim {
-        owner: owner.clone(), agent_session_id: session_id.clone(), operation_id: "turn".into(),
+        owner: owner.clone(), agent_session_id: session_id.clone(), operation_id: operation.into(),
         snapshot: binding.resolved_snapshot_ref.clone(), active_set_generation: 0,
         holder: Uuid::now_v7().to_string(), expected_fence: 0, checkpoint: None,
     }).await.unwrap();
@@ -1370,7 +1439,7 @@ async fn test_fixture_from_pool(
         attachment: AtomicU8::new(0), attached_notify: Default::default(), recovery: None,
         user: owner.principal_id,
         session: session_id,
-        operation: OperationId::from("turn"),
+        operation: OperationId::from(operation),
         root,
         turn_started,
         generation: turn.cursor.seq as i64,

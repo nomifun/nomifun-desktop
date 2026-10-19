@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "decoder_scheme": "utf8_v1",
+  "state": {
+    "next_seq": 3,
+    "next_offset": 6,
+    "base_offset": 3,
+    "retained": 3,
+    "dropped_bytes": 3,
+    "chunks": [
+      { "seq": 1, "start": 3, "stream": "stderr", "bytes": [97] },
+      { "seq": 2, "start": 4, "stream": "pty", "bytes": [240,159] }
+    ],
+    "decoders": {
+      "stdout": { "utf8_pending": [], "decode_errors": 0, "source_encoding": "utf-8", "observed_bytes": true, "saw_non_ascii_utf8": true },
+      "stderr": { "utf8_pending": [], "decode_errors": 0, "source_encoding": "utf-8", "observed_bytes": true, "saw_non_ascii_utf8": false },
+      "pty": { "utf8_pending": [], "decode_errors": 1, "source_encoding": "utf-8", "observed_bytes": true, "saw_non_ascii_utf8": false }
+    },
+    "base_decoders": {
+      "stdout": { "utf8_pending": [], "decode_errors": 0, "source_encoding": "utf-8", "observed_bytes": true, "saw_non_ascii_utf8": true },
+      "stderr": { "utf8_pending": [], "decode_errors": 0, "source_encoding": "utf-8", "observed_bytes": false, "saw_non_ascii_utf8": false },
+      "pty": { "utf8_pending": [], "decode_errors": 0, "source_encoding": "utf-8", "observed_bytes": false, "saw_non_ascii_utf8": false }
+    },
+    "finalized": true
+  }
+}

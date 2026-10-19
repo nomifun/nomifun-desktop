@@ -475,12 +475,16 @@ impl BrowserRuntime for DesktopBrowserRuntime {
     }
     async fn execute(&self, command: BrowserTabCommand, cancel: CancellationToken) -> Result<BrowserRuntimeSnapshot, WorkspaceError> { self.execute_owned(command, cancel).await }
     async fn close(&self) -> Result<(), WorkspaceError> {
-        self.closing.cancel(); self.cancel_pending_for_close().await;
+        self.closing.cancel();
+        let dialog_settlement = self.cancel_pending_for_close().await;
         { let mut state = self.state.lock().await; state.closed = true; state.surface_cancel.cancel(); }
         let _creation = self.creating.lock().await;
         let tabs: Vec<_> = self.state.lock().await.tabs.values().cloned().collect();
         for tab in tabs { self.retire_native_tab(&tab).await?; }
-        self.retire_pending_after_close().await?;
+        let remaining_settlement = self.retire_pending_after_close().await;
+        // A failed pre-close dialog settlement must not skip destruction of
+        // independent views. Preserve either original unconfirmed result.
+        dialog_settlement.and(remaining_settlement)?;
         self.context.close().await.map_err(native_error)?;
         Ok(())
     }

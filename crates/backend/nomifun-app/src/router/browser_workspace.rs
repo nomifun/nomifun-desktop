@@ -31,7 +31,7 @@ pub(crate) struct BrowserResourceApiState {
     pub attached_chrome: Option<Arc<crate::AttachedChromeProviderService>>,
     pub sessions: CanonicalAgentSessionOwner,
     pub data_dir: PathBuf,
-    pub operation_locks: Arc<dashmap::DashMap<String, Arc<tokio::sync::RwLock<()>>>>,
+    pub operation_locks: Arc<super::operation_gates::OperationGateCache>,
     pub close_owner: Arc<dyn crate::browser_workspace_provider::BrowserUserClosePort>,
 }
 
@@ -167,8 +167,7 @@ async fn close(
     Json(request): Json<CloseRequest>,
 ) -> Result<Json<ApiResponse<()>>, Response> {
     state.require_user_session(&user, &agent_session_id).await?;
-    let operation_lock = state.operation_locks.entry(agent_session_id.clone())
-        .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(()))).clone();
+    let operation_lock = state.operation_locks.get(&agent_session_id);
     let fence = operation_lock.write_owned().await;
     tokio::spawn(async move {
         let _fence = fence;

@@ -33,6 +33,7 @@ enum Cmd {
         Target,
         SnapshotGen,
         ElementAction,
+        crate::controlled::MutationAdmission,
         Sender<Result<Effect, A11yError>>,
     ),
     Focus(i32, Sender<Result<Effect, A11yError>>),
@@ -746,14 +747,10 @@ impl ActorHandle {
                                 &state,
                             )));
                         }
-                        Cmd::Invoke(target, generation, action, reply) => {
-                            let _ = reply.send(rt.block_on(do_invoke(
-                                &conn,
-                                &target,
-                                generation,
-                                &action,
-                                &state,
-                            )));
+                        Cmd::Invoke(target, generation, action, admission, reply) => {
+                            let result = if !admission.begin() { Err(A11yError::CancelledBeforeDispatch) }
+                                else { rt.block_on(do_invoke(&conn, &target, generation, &action, &state)) };
+                            let _ = reply.send(result);
                         }
                         Cmd::Focus(pid, reply) => {
                             let _ = reply.send(do_focus(pid));
@@ -806,12 +803,17 @@ impl ActorHandle {
         generation: SnapshotGen,
         action: ElementAction,
     ) -> Result<Effect, A11yError> {
+        self.invoke_controlled(target, generation, action, tokio_util::sync::CancellationToken::new())
+    }
+
+    pub fn invoke_controlled(&self, target: Target, generation: SnapshotGen, action: ElementAction,
+        cancellation: tokio_util::sync::CancellationToken) -> Result<Effect, A11yError> {
+        if cancellation.is_cancelled() { return Err(A11yError::CancelledBeforeDispatch); }
         let (tx, rx) = channel();
-        self.send(Cmd::Invoke(target, generation, action, tx))?;
-        rx.recv()
-            .map_err(|_| A11yError::Uncertain(
-                "AT-SPI actor dropped the reply after accepting the mutating command; the action may have executed. Observe again without retrying or pixel fallback".to_string(),
-            ))?
+        let admission = crate::controlled::MutationAdmission::new(cancellation);
+        self.send(Cmd::Invoke(target, generation, action, admission.clone(), tx))?;
+        admission.receive(rx, || A11yError::Uncertain(
+            "AT-SPI actor dropped the original mutating reply; observe again without retrying or pixel fallback".into()))
     }
 
     pub fn resolve_pixel_target(
@@ -879,7 +881,7 @@ mod tests {
         // Consume and drop only the in-memory command reply. No actor runtime,
         // D-Bus connection or native accessibility operation is constructed.
         let responder = std::thread::spawn(move || match rx.recv() {
-            Ok(Cmd::Invoke(_, _, _, reply)) => drop(reply),
+            Ok(Cmd::Invoke(_, _, _, _, reply)) => drop(reply),
             Ok(_) => panic!("unexpected actor command"),
             Err(_) => panic!("mutating command was not accepted"),
         });

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use nomi_a11y::{
     A11yEngine, A11yError, ElementAction, ElementEntry, ObserveOpts, SnapshotGen, Target,
@@ -23,6 +24,13 @@ use crate::fallback_backend;
 
 const MAX_WAIT_SECONDS: f64 = 5.0;
 const DEFAULT_SCROLL_AMOUNT: i64 = 3;
+use crate::native_control::CANCELLED_BEFORE_DISPATCH;
+
+pub fn cancelled_before_dispatch_result() -> ToolResult { ToolResult::error(CANCELLED_BEFORE_DISPATCH) }
+
+pub fn is_proven_cancelled_before_dispatch(result: &ToolResult) -> bool {
+    result.is_error && result.images.is_empty() && result.content == CANCELLED_BEFORE_DISPATCH
+}
 
 type GestureFuture<'a> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>,
@@ -32,14 +40,14 @@ type GestureFuture<'a> = std::pin::Pin<
 /// forwards native clicks unchanged; tests substitute a recorder so even a
 /// failed safety counterexample cannot send native input.
 trait GesturePort: Send + Sync {
-    fn click(&self, x: i32, y: i32, button: enigo::Button, count: u32) -> GestureFuture<'_>;
+    fn click(&self, x: i32, y: i32, button: enigo::Button, count: u32, cancellation: CancellationToken) -> GestureFuture<'_>;
 }
 
 struct NativeGesturePort;
 
 impl GesturePort for NativeGesturePort {
-    fn click(&self, x: i32, y: i32, button: enigo::Button, count: u32) -> GestureFuture<'_> {
-        Box::pin(input::click(x, y, button, count))
+    fn click(&self, x: i32, y: i32, button: enigo::Button, count: u32, cancellation: CancellationToken) -> GestureFuture<'_> {
+        Box::pin(async move { input::click_controlled(&cancellation, x, y, button, count).await })
     }
 
 }
@@ -151,6 +159,12 @@ impl ComputerTool {
     /// snapshot; a mismatched native operation is rejected before any OS API
     /// is touched.
     pub async fn execute_authorized(&self, action_id: &str, input: Value) -> ToolResult {
+        self.execute_authorized_controlled(action_id, input, &CancellationToken::new()).await
+    }
+
+    pub async fn execute_authorized_controlled(&self, action_id: &str, input: Value,
+        cancellation: &CancellationToken) -> ToolResult {
+        if cancellation.is_cancelled() { return cancelled_before_dispatch_result(); }
         let Some(granted_action) = crate::capability::ComputerAction::parse(action_id) else {
             return ToolResult::error(format!(
                 "COMPUTER_ACTION_NOT_DECLARED: {action_id:?} is not an action declared by the computer module"
@@ -195,38 +209,49 @@ impl ComputerTool {
             // restores a typed image part. Bound the PNG before that envelope
             // so high-entropy screens cannot be truncated into invalid JSON.
             return self
-                .do_screenshot(&input)
+                .do_screenshot(&input, cancellation)
                 .await;
         }
-        self.execute_native(input, &native_operation).await
+        if cancellation.is_cancelled() { return cancelled_before_dispatch_result(); }
+        if native_operation == "wait" {
+            return tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => cancelled_before_dispatch_result(),
+                result = self.do_wait(&input) => result,
+            };
+        }
+        // Native device operations keep their original future until actual
+        // completion. Cancellation never proves that an admitted effect did
+        // not occur, and must not detach a pressed-input cleanup obligation.
+        self.execute_native(input, &native_operation, cancellation).await
     }
 
-    async fn execute_native(&self, input: Value, action: &str) -> ToolResult {
+    async fn execute_native(&self, input: Value, action: &str, cancellation: &CancellationToken) -> ToolResult {
         tracing::debug!(action = %action, "ComputerTool executing");
 
         match action {
-            "click_element" => self.do_click_element(&input).await,
-            "set_element_value" => self.do_set_element_value(&input).await,
+            "click_element" => self.do_click_element(&input, cancellation).await,
+            "set_element_value" => self.do_set_element_value(&input, cancellation).await,
             "right_click_element" => {
-                self.do_element_gesture(&input, enigo::Button::Right, 1, "right-click").await
+                self.do_element_gesture(&input, enigo::Button::Right, 1, "right-click", cancellation).await
             }
             "double_click_element" => {
-                self.do_element_gesture(&input, enigo::Button::Left, 2, "double-click").await
+                self.do_element_gesture(&input, enigo::Button::Left, 2, "double-click", cancellation).await
             }
-            "launch" => self.do_launch(&input).await,
+            "launch" => self.do_launch(&input, cancellation).await,
             "cursor_position" => self.do_cursor_position().await,
             "list_windows" => self.do_list_windows().await,
-            "left_click" => self.do_click(&input, enigo::Button::Left, 1).await,
-            "right_click" => self.do_click(&input, enigo::Button::Right, 1).await,
-            "middle_click" => self.do_click(&input, enigo::Button::Middle, 1).await,
-            "double_click" => self.do_click(&input, enigo::Button::Left, 2).await,
-            "triple_click" => self.do_click(&input, enigo::Button::Left, 3).await,
-            "mouse_move" => self.do_mouse_move(&input).await,
-            "left_click_drag" => self.do_drag(&input).await,
-            "type" => self.do_type(&input).await,
-            "key" => self.do_key(&input).await,
-            "scroll" => self.do_scroll(&input).await,
-            "focus_window" => self.do_focus_window(&input).await,
+            "left_click" => self.do_click(&input, enigo::Button::Left, 1, cancellation).await,
+            "right_click" => self.do_click(&input, enigo::Button::Right, 1, cancellation).await,
+            "middle_click" => self.do_click(&input, enigo::Button::Middle, 1, cancellation).await,
+            "double_click" => self.do_click(&input, enigo::Button::Left, 2, cancellation).await,
+            "triple_click" => self.do_click(&input, enigo::Button::Left, 3, cancellation).await,
+            "mouse_move" => self.do_mouse_move(&input, cancellation).await,
+            "left_click_drag" => self.do_drag(&input, cancellation).await,
+            "type" => self.do_type(&input, cancellation).await,
+            "key" => self.do_key(&input, cancellation).await,
+            "scroll" => self.do_scroll(&input, cancellation).await,
+            "focus_window" => self.do_focus_window(&input, cancellation).await,
             "wait" => self.do_wait(&input).await,
             other => ToolResult::error(format!("Unknown Computer operation {other:?}.")),
         }
@@ -304,6 +329,7 @@ impl ComputerTool {
 
     /// Share semantic invocation and its fallback gate. Lost targets, denied
     /// permission, or a failed task are not permission to click cached pixels.
+    #[cfg(test)]
     async fn act_on_ax<F, Fut>(
         &self,
         r: u32,
@@ -315,19 +341,29 @@ impl ComputerTool {
         F: FnOnce(A11yError) -> Fut,
         Fut: std::future::Future<Output = ToolResult>,
     {
+        self.act_on_ax_controlled(r, generation, action, fallback, &CancellationToken::new()).await
+    }
+
+    async fn act_on_ax_controlled<F, Fut>(&self, r: u32, generation: SnapshotGen,
+        action: ElementAction, fallback: F, cancellation: &CancellationToken) -> ToolResult
+    where F: FnOnce(A11yError) -> Fut, Fut: std::future::Future<Output = ToolResult> {
+        if cancellation.is_cancelled() { return cancelled_before_dispatch_result(); }
         let engine = match self.engine() {
             Ok(engine) => engine,
             Err(msg) => return ToolResult::error(format!("Accessibility engine unavailable: {msg}")),
         };
+        let native_cancellation = cancellation.clone();
         let result = tokio::task::spawn_blocking(move || {
-            engine.invoke(&Target::Ref(r), generation, action)
+            engine.invoke_controlled(&Target::Ref(r), generation, action, &native_cancellation)
         })
         .await;
         let error = match result {
+            Ok(Err(A11yError::CancelledBeforeDispatch)) => return cancelled_before_dispatch_result(),
             Ok(Ok(effect)) => return ToolResult::text(format!(
                 "{}. Run `observe` to verify the result.", effect.message
             )),
             Ok(Err(e @ A11yError::Unsupported { .. })) => {
+                if cancellation.is_cancelled() { return cancelled_before_dispatch_result(); }
                 return fallback(e).await;
             }
             Ok(Err(e)) => e.to_string(),
@@ -342,7 +378,7 @@ impl ComputerTool {
 
     /// Act on an element by its `[ref]` from the latest `observe` snapshot.
     /// Accessibility elements use AXPress with a gated pixel-click fallback.
-    async fn do_click_element(&self, input: &Value) -> ToolResult {
+    async fn do_click_element(&self, input: &Value, cancellation: &CancellationToken) -> ToolResult {
         let r = match require_u32(input, "ref") {
             Ok(r) => r,
             Err(e) => return ToolResult::error(e),
@@ -352,7 +388,7 @@ impl ComputerTool {
             Err(msg) => return ToolResult::error(msg),
         };
 
-        self.act_on_ax(
+        self.act_on_ax_controlled(
             entry.engine_ref,
             generation,
             ElementAction::LeftClick,
@@ -363,7 +399,8 @@ impl ComputerTool {
                     Ok(center) => center,
                     Err(error) => return ToolResult::error(error),
                 };
-                match self.gesture.click(sx, sy, enigo::Button::Left, 1).await {
+                if cancellation.is_cancelled() { return cancelled_before_dispatch_result(); }
+                match self.gesture.click(sx, sy, enigo::Button::Left, 1, cancellation.clone()).await {
                     Ok(()) => ToolResult::text(format!(
                         "The accessibility action on [{r}] did not succeed ({e}); fell \
                          back to a pixel click at the element center. Run `observe` to verify."
@@ -374,12 +411,13 @@ impl ComputerTool {
                     )),
                 }
             },
+            cancellation,
         ).await
     }
 
     /// Set the complete value of an element by `[ref]`. Only native whole-value
     /// setters implement this operation; typing at a caret is not equivalent.
-    async fn do_set_element_value(&self, input: &Value) -> ToolResult {
+    async fn do_set_element_value(&self, input: &Value, cancellation: &CancellationToken) -> ToolResult {
         let r = match require_u32(input, "ref") {
             Ok(r) => r,
             Err(e) => return ToolResult::error(e),
@@ -393,7 +431,7 @@ impl ComputerTool {
             Err(msg) => return ToolResult::error(msg),
         };
 
-        self.act_on_ax(
+        self.act_on_ax_controlled(
             entry.engine_ref,
             generation,
             ElementAction::SetValue(text),
@@ -401,6 +439,7 @@ impl ComputerTool {
                 self.clear_cached_observation();
                 ToolResult::error(UNSUPPORTED_VALUE_INPUT_REJECTION)
             },
+            cancellation,
         ).await
     }
 
@@ -462,6 +501,7 @@ impl ComputerTool {
         button: enigo::Button,
         count: u32,
         verb: &str,
+        cancellation: &CancellationToken,
     ) -> ToolResult {
         let r = match require_u32(input, "ref") {
             Ok(r) => r,
@@ -471,7 +511,8 @@ impl ComputerTool {
             Ok(v) => v,
             Err(msg) => return ToolResult::error(msg),
         };
-        match self.gesture.click(sx, sy, button, count).await {
+        if cancellation.is_cancelled() { return cancelled_before_dispatch_result(); }
+        match self.gesture.click(sx, sy, button, count, cancellation.clone()).await {
             Ok(()) => ToolResult::text(format!(
                 "Performed {verb} on element [{r}] at its center. Run `observe` (or take a \
                  screenshot) to verify the result."
@@ -485,7 +526,7 @@ impl ComputerTool {
     /// shell out to `cmd /c start` / `Start-Process`, which fail and pop a
     /// "Windows cannot find" dialog on this host. Web URLs fail closed toward
     /// the managed Browser tool (see `launch::validate_agent_web_target`).
-    async fn do_launch(&self, input: &Value) -> ToolResult {
+    async fn do_launch(&self, input: &Value, cancellation: &CancellationToken) -> ToolResult {
         let Some(target) = input.get("target").and_then(|v| v.as_str()) else {
             return ToolResult::error(
                 "Missing required parameter `target` for launch (a file/folder path, or an \
@@ -498,7 +539,7 @@ impl ComputerTool {
             Some(Value::String(app)) => Some(app.as_str()),
             Some(_) => return ToolResult::error("Parameter `app` must be a string."),
         };
-        match crate::launch::launch(target, app).await {
+        match crate::launch::launch_controlled(cancellation, target, app).await {
             Ok(msg) => ToolResult::text(format!(
                 "{msg} Take a screenshot or run `observe` to see the result."
             )),
@@ -537,7 +578,8 @@ impl ComputerTool {
         }
     }
 
-    async fn do_screenshot(&self, input: &Value) -> ToolResult {
+    async fn do_screenshot(&self, input: &Value, cancellation: &CancellationToken) -> ToolResult {
+        if cancellation.is_cancelled() { return cancelled_before_dispatch_result(); }
         // A failed refresh must not leave earlier display geometry available
         // to direct native callers. The canonical role owner has the same
         // observation boundary, and this keeps the library path consistent.
@@ -559,23 +601,30 @@ impl ComputerTool {
 
         let max_edge = self.max_screenshot_edge;
         #[cfg(target_os = "linux")]
-        let (cancellation, completed, mut cancel_guard) = {
-            let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (native_cancel, completed, mut cancel_guard) = {
+            let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(cancellation.is_cancelled()));
             let (completed, completion) = std::sync::mpsc::sync_channel(1);
             let guard = crate::linux_native_worker::CancelAndJoin::new(cancellation.clone(), completion);
             (cancellation, completed, guard)
         };
+        #[cfg(target_os = "linux")]
+        let worker_cancel = native_cancel.clone();
+        #[cfg(not(target_os = "linux"))]
+        let worker_cancellation = cancellation.clone();
         let captured = tokio::task::spawn_blocking(move || {
             #[cfg(target_os = "linux")]
             {
                 let _completion = crate::linux_native_worker::Completion(completed);
-                return crate::screen::capture_screen_cancellable(display, max_edge, cancellation);
+                return crate::screen::capture_screen_cancellable(display, max_edge, worker_cancel);
             }
             #[cfg(not(target_os = "linux"))]
-            crate::screen::capture_screen(display, max_edge)
-        })
-            .await
-            .unwrap_or_else(|e| Err(format!("Screenshot task failed: {e}")));
+            crate::screen::capture_screen_controlled(&worker_cancellation, display, max_edge)
+        });
+        #[cfg(target_os = "linux")]
+        let captured = crate::native_control::join_with_cancellation(cancellation, &native_cancel, captured).await;
+        #[cfg(not(target_os = "linux"))]
+        let captured = captured.await;
+        let captured = captured.unwrap_or_else(|e| Err(format!("Screenshot task failed: {e}")));
         #[cfg(target_os = "linux")]
         cancel_guard.disarm();
 
@@ -648,13 +697,13 @@ impl ComputerTool {
         }
     }
 
-    async fn do_click(&self, input: &Value, button: enigo::Button, count: u32) -> ToolResult {
+    async fn do_click(&self, input: &Value, button: enigo::Button, count: u32, cancellation: &CancellationToken) -> ToolResult {
         let (x, y) = match require_xy(input, "x", "y") {
             Ok(xy) => xy,
             Err(e) => return ToolResult::error(e),
         };
         let (sx, sy) = self.to_screen(x, y);
-        match input::click(sx, sy, button, count).await {
+        match input::click_controlled(cancellation, sx, sy, button, count).await {
             Ok(()) => ToolResult::text(format!(
                 "Clicked at ({x}, {y}) (screen ({sx}, {sy})). Take a screenshot to verify the \
                  result."
@@ -663,19 +712,19 @@ impl ComputerTool {
         }
     }
 
-    async fn do_mouse_move(&self, input: &Value) -> ToolResult {
+    async fn do_mouse_move(&self, input: &Value, cancellation: &CancellationToken) -> ToolResult {
         let (x, y) = match require_xy(input, "x", "y") {
             Ok(xy) => xy,
             Err(e) => return ToolResult::error(e),
         };
         let (sx, sy) = self.to_screen(x, y);
-        match input::mouse_move(sx, sy).await {
+        match input::mouse_move_controlled(cancellation, sx, sy).await {
             Ok(()) => ToolResult::text(format!("Moved cursor to ({x}, {y}) (screen ({sx}, {sy}))." )),
             Err(e) => ToolResult::error(e),
         }
     }
 
-    async fn do_drag(&self, input: &Value) -> ToolResult {
+    async fn do_drag(&self, input: &Value, cancellation: &CancellationToken) -> ToolResult {
         let (start_x, start_y) = match require_xy(input, "start_x", "start_y") {
             Ok(xy) => xy,
             Err(e) => return ToolResult::error(e),
@@ -686,7 +735,7 @@ impl ComputerTool {
         };
         let (sx, sy) = self.to_screen(start_x, start_y);
         let (ex, ey) = self.to_screen(end_x, end_y);
-        match input::drag(sx, sy, ex, ey).await {
+        match input::drag_controlled(cancellation, sx, sy, ex, ey).await {
             Ok(()) => ToolResult::text(format!(
                 "Dragged from ({start_x}, {start_y}) to ({end_x}, {end_y}). Take a screenshot \
                  to verify the result."
@@ -695,20 +744,20 @@ impl ComputerTool {
         }
     }
 
-    async fn do_type(&self, input: &Value) -> ToolResult {
+    async fn do_type(&self, input: &Value, cancellation: &CancellationToken) -> ToolResult {
         let Some(text) = input.get("text").and_then(|v| v.as_str()) else {
             return ToolResult::error(
                 "Missing required parameter `text` for the type action.",
             );
         };
         let char_count = text.chars().count();
-        match input::type_text(text.to_string()).await {
+        match input::type_text_controlled(cancellation, text.to_string()).await {
             Ok(()) => ToolResult::text(format!("Typed {char_count} character(s).")),
             Err(e) => ToolResult::error(e),
         }
     }
 
-    async fn do_key(&self, input: &Value) -> ToolResult {
+    async fn do_key(&self, input: &Value, cancellation: &CancellationToken) -> ToolResult {
         let Some(combo) = input.get("key").and_then(|v| v.as_str()) else {
             return ToolResult::error(format!(
                 "Missing required parameter `key` for the key action, e.g. \"enter\" or \
@@ -719,13 +768,13 @@ impl ComputerTool {
             Ok(keys) => keys,
             Err(e) => return ToolResult::error(e),
         };
-        match input::key_combo(keys).await {
+        match input::key_combo_controlled(cancellation, keys).await {
             Ok(()) => ToolResult::text(format!("Pressed {combo:?}.")),
             Err(e) => ToolResult::error(e),
         }
     }
 
-    async fn do_scroll(&self, input: &Value) -> ToolResult {
+    async fn do_scroll(&self, input: &Value, cancellation: &CancellationToken) -> ToolResult {
         let Some(direction_str) = input.get("direction").and_then(|v| v.as_str()) else {
             return ToolResult::error(
                 "Missing required parameter `direction` for the scroll action \
@@ -747,7 +796,7 @@ impl ComputerTool {
             Ok(at) => at.map(|(x, y)| self.to_screen(x, y)),
             Err(e) => return ToolResult::error(e),
         };
-        match input::scroll(at, direction, amount).await {
+        match input::scroll_controlled(cancellation, at, direction, amount).await {
             Ok(()) => ToolResult::text(format!(
                 "Scrolled {direction_str} by {amount}. Take a screenshot to see the result."
             )),
@@ -755,12 +804,12 @@ impl ComputerTool {
         }
     }
 
-    async fn do_focus_window(&self, input: &Value) -> ToolResult {
+    async fn do_focus_window(&self, input: &Value, cancellation: &CancellationToken) -> ToolResult {
         let window_id = match require_u32(input, "window_id") {
             Ok(id) => id,
             Err(e) => return ToolResult::error(e),
         };
-        match fallback_backend::focus_window(window_id).await {
+        match fallback_backend::focus_window_controlled(cancellation, window_id).await {
             Ok(msg) => ToolResult::text(msg),
             Err(e) => ToolResult::error(e),
         }
@@ -984,7 +1033,7 @@ mod tests {
     }
 
     impl GesturePort for FakeGesturePort {
-        fn click(&self, x: i32, y: i32, button: enigo::Button, count: u32) -> GestureFuture<'_> {
+        fn click(&self, x: i32, y: i32, button: enigo::Button, count: u32, _cancellation: CancellationToken) -> GestureFuture<'_> {
             self.calls.lock().unwrap().push((x, y, button, count));
             Box::pin(std::future::ready(Ok(())))
         }
@@ -1856,6 +1905,36 @@ mod tests {
     }
 
     // --- wait ---
+
+    #[tokio::test]
+    async fn controlled_wait_observes_cancellation_without_waiting_for_the_timer() {
+        let t = tool();
+        let stop = CancellationToken::new();
+        let waiting = t.execute_authorized_controlled(crate::capability::ComputerAction::Observe.id(),
+            json!({"action":"wait","seconds":5}), &stop);
+        tokio::pin!(waiting);
+        tokio::select! {
+            biased;
+            _ = &mut waiting => panic!("the original wait must remain pending before cancellation"),
+            _ = tokio::task::yield_now() => {},
+        }
+        stop.cancel();
+        let result = tokio::time::timeout(Duration::from_millis(100), waiting).await
+            .expect("a pure wait has no native owner to delay cancellation");
+        assert!(is_proven_cancelled_before_dispatch(&result));
+    }
+
+    #[tokio::test]
+    async fn controlled_input_cancelled_before_dispatch_never_initializes_a_native_backend() {
+        let t = tool();
+        let stop = CancellationToken::new();
+        stop.cancel();
+        let result = t.execute_authorized_controlled(crate::capability::ComputerAction::Input.id(),
+            json!({"action":"left_click","x":10,"y":10}), &stop).await;
+        assert!(is_proven_cancelled_before_dispatch(&result));
+        assert!(t.a11y.lock().unwrap().is_none());
+        assert!(t.last_capture.lock().unwrap().is_none());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn wait_clamps_to_five_seconds() {

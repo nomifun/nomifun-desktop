@@ -216,10 +216,10 @@ async fn speak_response(State(state): State<RobotAdminState>, Path(robot_id): Pa
     let Some(connection_id) = state.registry.current_connection(&robot_id).await else {
         return (StatusCode::CONFLICT, Json(json!({"message":"设备离线"}))).into_response();
     };
-    match source.response_text(&robot_id, &body.conversation_id).await {
-        Ok(text) => match state.registry.speak(&robot_id, &connection_id, text).await {
+    match source.response_source(&robot_id, &body.conversation_id).await {
+        Ok(response) => match state.registry.replay_saved_response(&robot_id, &connection_id, response).await {
             Ok(()) => Json(json!({"accepted":true})).into_response(),
-            Err(error) => (StatusCode::CONFLICT, Json(json!({"message":error}))).into_response(),
+            Err(error) => (StatusCode::CONFLICT, Json(json!({"message":error.to_string()}))).into_response(),
         },
         Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"message":error}))).into_response(),
     }

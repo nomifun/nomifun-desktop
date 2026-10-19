@@ -834,6 +834,7 @@
             "session.management/cancel_turn",
             "session.management/create",
             "session.management/execution_adjust",
+            "session.management/execution_answer_decision",
             "session.management/execution_cancel",
             "session.management/execution_list",
             "session.management/execution_retry_step",
@@ -848,6 +849,17 @@
             "session.management/terminal_relaunch",
             "session.management/terminal_stop"
           ]
+        },
+        {
+          "capability": {
+            "id": "robot"
+          },
+          "action_allowlist": [
+            "robot/device",
+            "robot/display",
+            "robot/motion",
+            "robot/vision"
+          ]
         }
       ],
       "skill_bindings": [],
@@ -861,67 +873,10 @@
         "knowledge_base",
         "process_session",
         "project_memory",
+        "robot",
         "scheduler",
         "ssh_host",
         "workspace"
-      ],
-      "required_runtime_features": []
-    },
-    "companion.robot": {
-      "enabled_capabilities": [
-        {
-          "capability": {
-            "id": "agent.collaboration"
-          },
-          "action_allowlist": [
-            "agent/delegate"
-          ]
-        },
-        {
-          "capability": {
-            "id": "companion"
-          },
-          "action_allowlist": [
-            "companion/evolve",
-            "companion/learn"
-          ]
-        },
-        {
-          "capability": {
-            "id": "companion.memory"
-          },
-          "action_allowlist": [
-            "companion.memory/recall",
-            "companion.memory/write"
-          ]
-        },
-        {
-          "capability": {
-            "id": "robot"
-          },
-          "action_allowlist": [
-            "robot/device",
-            "robot/display",
-            "robot/motion",
-            "robot/vision"
-          ]
-        },
-        {
-          "capability": {
-            "id": "session.management"
-          },
-          "action_allowlist": [
-            "session.management/execution_answer_decision",
-            "session.management/execution_cancel",
-            "session.management/execution_status"
-          ]
-        }
-      ],
-      "skill_bindings": [],
-      "required_resource_kinds": [
-        "companion",
-        "companion_memory",
-        "robot"
       ],
       "required_runtime_features": []
     },
@@ -1410,6 +1365,7 @@
         "knowledge.management",
         "office",
         "project.memory",
+        "robot",
         "session.management",
         "ssh",
         "web.research",
@@ -1428,29 +1384,10 @@
         "knowledge_base",
         "process_session",
         "project_memory",
+        "robot",
         "scheduler",
         "ssh_host",
         "workspace"
-      ]
-    },
-    "companion.robot": {
-      "required_capability_categories": [
-        "companion_memory",
-        "learning_evolution",
-        "persona"
-      ],
-      "required_capability_ids": [
-        "agent.collaboration",
-        "companion",
-        "companion.memory",
-        "robot",
-        "session.management"
-      ],
-      "required_runtime_features": [],
-      "required_resource_kinds": [
-        "companion",
-        "companion_memory",
-        "robot"
       ]
     },
     "customer-service.default": {
@@ -1531,6 +1468,7 @@
   ],
   "forbidden_official_keys": [
     "autowork.executor",
+    "companion.robot",
     "requirements.analyst",
     "research",
     "research.web"

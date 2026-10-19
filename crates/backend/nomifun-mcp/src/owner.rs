@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::{Instant, timeout};
 
-use crate::oauth_service::McpOAuthService;
 use crate::types::McpServerTransport;
 
 pub const MCP_SERVER_RESOURCE_KIND: &str = "mcp_server";
@@ -64,13 +63,27 @@ pub(crate) use stdio::is_package_runner;
 ///
 /// The message never contains credential material. The code is stable enough
 /// for the central host to map it into its canonical host-port error.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct McpOwnerError {
     code: String,
     message: String,
     authentication_challenge: Option<String>,
     http_status: Option<u16>,
     setup_timeout: Option<(&'static str, Duration)>,
+    auth_diagnostic: Option<Value>,
+}
+
+impl fmt::Debug for McpOwnerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("McpOwnerError")
+            .field("code", &self.code)
+            .field("message", &self.message)
+            .field("authentication_challenge", &self.authentication_challenge.as_ref().map(|_| "[REDACTED]"))
+            .field("http_status", &self.http_status)
+            .field("setup_timeout", &self.setup_timeout)
+            .field("auth_diagnostic", &self.auth_diagnostic)
+            .finish()
+    }
 }
 
 impl McpOwnerError {
@@ -82,6 +95,7 @@ impl McpOwnerError {
             authentication_challenge: None,
             http_status: None,
             setup_timeout: None,
+            auth_diagnostic: None,
         }
     }
 
@@ -91,6 +105,17 @@ impl McpOwnerError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// Only the auth service's authored, safe diagnostic contract enters the
+    /// generic error details chain. Raw protocol challenges remain private.
+    pub fn with_auth_diagnostic(mut self, diagnostic: nomifun_api_types::McpAuthDiagnostic) -> Self {
+        self.auth_diagnostic = serde_json::to_value(diagnostic).ok();
+        self
+    }
+
+    pub fn auth_diagnostic(&self) -> Option<&Value> {
+        self.auth_diagnostic.as_ref()
     }
 
     pub(crate) fn authentication_challenge(&self) -> Option<&str> {
@@ -107,11 +132,25 @@ impl McpOwnerError {
 
     fn credential_required(headers: &reqwest::header::HeaderMap) -> Self {
         let mut error = Self::new("MCP_CREDENTIAL_REQUIRED", "MCP server rejected the canonical credential authority");
-        error.authentication_challenge = headers.get("www-authenticate")
-            .and_then(|value| value.to_str().ok())
+        error.authentication_challenge = Some(headers.get_all("www-authenticate").iter()
+            .filter_map(|value| value.to_str().ok()).collect::<Vec<_>>().join(", "))
+            .as_deref()
             .filter(|value| value.len() <= 4096 && !value.chars().any(char::is_control))
-            .map(sanitize_diagnostic);
+            .map(str::to_owned);
         error
+    }
+
+    fn authentication_rejection(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> Option<Self> {
+        if status == reqwest::StatusCode::UNAUTHORIZED { return Some(Self::credential_required(headers)); }
+        if status == reqwest::StatusCode::FORBIDDEN
+            && crate::oauth_protocol::parse_www_authenticate(headers).iter().any(|challenge|
+                challenge.scheme.eq_ignore_ascii_case("bearer") && challenge.parameters.get("error").is_some_and(|value| value == "insufficient_scope")) {
+            let mut error = Self::credential_required(headers);
+            error.code = "MCP_INSUFFICIENT_SCOPE".into();
+            error.message = "The MCP operation requires additional authorization scope".into();
+            return Some(error);
+        }
+        None
     }
 
     fn invalid_binding(message: impl Into<String>) -> Self {
@@ -232,6 +271,8 @@ pub struct McpCredentialLookup {
 pub struct McpCredential {
     token_type: String,
     secret: Vec<u8>,
+    configured: reqwest::header::HeaderMap,
+    lease: Option<Arc<dyn McpCredentialLease>>,
 }
 
 impl fmt::Debug for McpCredential {
@@ -274,12 +315,43 @@ impl McpCredential {
         Ok(Self {
             token_type,
             secret: secret.into_bytes(),
+            configured: Default::default(),
+            lease: None,
         })
     }
 
     pub fn bearer(secret: impl Into<String>) -> Result<Self, McpOwnerError> {
         Self::new("Bearer", secret)
     }
+
+    pub(crate) fn configured(values: &HashMap<String, String>) -> Result<Self, McpOwnerError> {
+        let mut configured = reqwest::header::HeaderMap::new();
+        for (key, value) in values {
+            if !crate::auth_service::credential_header(key) {
+                return Err(McpOwnerError::invalid_binding("Invalid credential header"));
+            }
+            let key = reqwest::header::HeaderName::from_bytes(key.as_bytes())
+                .map_err(|_| McpOwnerError::invalid_binding("Invalid credential header"))?;
+            let mut value = reqwest::header::HeaderValue::from_str(value)
+                .map_err(|_| McpOwnerError::invalid_binding("Invalid credential value"))?;
+            value.set_sensitive(true);
+            configured.insert(key, value);
+        }
+        Ok(Self { token_type: String::new(), secret: Vec::new(), configured, lease: None })
+    }
+
+    pub(crate) fn set_lease(&mut self, lease: Arc<dyn McpCredentialLease>) { self.lease = Some(lease); }
+}
+
+/// A connection-scoped admission lease. It never grants tool authority and
+/// never enters a Snapshot. Already dispatched requests retain their original
+/// headers/session for truthful settlement and cleanup.
+#[async_trait]
+pub trait McpCredentialLease: Send + Sync {
+    async fn acquire(&self) -> Result<tokio::sync::OwnedMutexGuard<()>, McpOwnerError>;
+    async fn rejected(&self, _code: nomifun_api_types::McpAuthErrorCode, _scopes: Vec<String>)
+        -> Result<Option<nomifun_api_types::McpAuthDiagnostic>, McpOwnerError> { Ok(None) }
+    async fn renew(&self) -> Result<Option<McpCredential>, McpOwnerError> { Ok(None) }
 }
 
 /// The sole credential resolution boundary for an MCP call.
@@ -302,55 +374,6 @@ impl McpCredentialAuthority for AnonymousMcpCredentialAuthority {
         _lookup: McpCredentialLookup,
     ) -> Result<Option<McpCredential>, McpOwnerError> {
         Ok(None)
-    }
-}
-
-/// Adapter over the existing MCP OAuth authority. It resolves by the exact
-/// endpoint URL and never reads the token repository directly.
-#[derive(Clone)]
-pub struct OAuthMcpCredentialAuthority {
-    oauth: Arc<McpOAuthService>,
-}
-
-impl OAuthMcpCredentialAuthority {
-    pub fn new(oauth: Arc<McpOAuthService>) -> Self {
-        Self { oauth }
-    }
-}
-
-#[async_trait]
-impl McpCredentialAuthority for OAuthMcpCredentialAuthority {
-    async fn resolve(
-        &self,
-        lookup: McpCredentialLookup,
-    ) -> Result<Option<McpCredential>, McpOwnerError> {
-        let token = self.oauth.get_token(&lookup.endpoint).await.map_err(|_| {
-            McpOwnerError::new(
-                "MCP_CREDENTIAL_AUTHORITY_FAILED",
-                "credential authority failed for the bound MCP endpoint",
-            )
-        })?;
-        if token.is_some()
-            && !self
-                .oauth
-                .check_oauth_status(&lookup.endpoint)
-                .await
-                .map_err(|_| {
-                    McpOwnerError::new(
-                        "MCP_CREDENTIAL_AUTHORITY_FAILED",
-                        "credential authority could not verify the bound MCP credential",
-                    )
-                })?
-                .authenticated
-        {
-            return Err(McpOwnerError::new(
-                "MCP_CREDENTIAL_EXPIRED",
-                "the bound MCP credential is expired and could not be refreshed",
-            ));
-        }
-        token
-            .map(McpCredential::bearer)
-            .transpose()
     }
 }
 
@@ -452,6 +475,7 @@ impl McpOwner {
                     connection_config_ref: server.connection_config_ref.clone(), endpoint: url.clone(),
                 }), control, Some(phase.deadline), || phase.error()).await?;
                 let mut session = McpSession::new(client, url.clone(), build_headers(headers, credential.as_ref())?);
+                session.credential_lease = credential.as_ref().and_then(|value| value.lease.clone());
                 session.legacy_mode = matches!(server.transport, McpServerTransport::Sse { .. });
                 Ok(session)
             }
@@ -722,6 +746,10 @@ fn build_headers(
                 "MCP transport contains duplicate header names",
             ));
         }
+        if crate::auth_service::credential_header(&lower)
+            && credential.is_some_and(|credential| credential.configured.contains_key(lower.as_str())) {
+            continue;
+        }
         if matches!(
             lower.as_str(),
             "authorization"
@@ -759,6 +787,8 @@ fn build_headers(
         headers.insert(header_name, header_value);
     }
     if let Some(credential) = credential {
+        headers.extend(credential.configured.clone());
+        if !credential.secret.is_empty() {
         let secret = std::str::from_utf8(&credential.secret).map_err(|_| {
             McpOwnerError::new(
                 "MCP_CREDENTIAL_INVALID",
@@ -774,6 +804,7 @@ fn build_headers(
         })?;
         value.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, value);
+        }
     }
     headers.insert(
         reqwest::header::CONTENT_TYPE,
@@ -786,7 +817,7 @@ fn build_headers(
     Ok(headers)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct JsonRpcRequest {
     jsonrpc: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -825,6 +856,7 @@ struct McpSession {
     client: Option<reqwest::Client>,
     endpoint: String,
     headers: reqwest::header::HeaderMap,
+    credential_lease: Option<Arc<dyn McpCredentialLease>>,
     session_id: Option<String>,
     // One bounded request namespace across initialize, catalog pages and call.
     server_request_ids: BTreeSet<String>,
@@ -872,11 +904,6 @@ fn next_connection_epoch() -> u64 {
 
 impl McpSession {
     async fn initialize(&mut self) -> Result<(), McpOwnerError> {
-        if self.legacy_mode {
-            let (stream, endpoint) = legacy_sse::LegacyStream::connect(self.http_client()?, &self.endpoint, &self.headers).await?;
-            self.endpoint = endpoint;
-            self.legacy = Some(stream);
-        }
         let mut initialization = initialize_request();
         if self.legacy_mode {
             if let Some(params) = initialization.params.as_mut() {
@@ -968,6 +995,7 @@ impl McpSession {
             client: Some(client),
             endpoint,
             headers,
+            credential_lease: None,
             session_id: None,
             server_request_ids: BTreeSet::new(),
             legacy_mode: false,
@@ -984,6 +1012,7 @@ impl McpSession {
             client: None,
             endpoint: String::new(),
             headers: reqwest::header::HeaderMap::new(),
+            credential_lease: None,
             session_id: None,
             server_request_ids: BTreeSet::new(),
             legacy_mode: false,
@@ -1003,12 +1032,49 @@ impl McpSession {
         &mut self,
         request: JsonRpcRequest,
     ) -> Result<JsonRpcResponse, McpOwnerError> {
+        let lease = self.credential_lease.clone();
+        let admission = match lease { Some(lease) => Some(lease.acquire().await?), None => None };
         let id = request.id.ok_or_else(|| McpOwnerError::protocol_failed("MCP request has no correlation ID"))?;
         self.active_request = Some(ActiveRequest {
             epoch: self.epoch, id, initializing: request.method == "initialize",
         });
         if self.execution_phase { self.request_dispatched = true; }
-        let result = self.request_inner(request).await;
+        // This is the dispatch admission boundary shared with revoke/rebind.
+        // Never hold a credential gate or database transaction over network IO.
+        drop(admission);
+        let initializing = request.method == "initialize" && !self.execution_phase;
+        let mut result = self.request_inner(request.clone()).await;
+        if result.as_ref().is_err_and(|error| matches!(error.code(), "MCP_CREDENTIAL_REQUIRED" | "MCP_INSUFFICIENT_SCOPE"))
+            && let Some(lease) = self.credential_lease.clone() {
+            let insufficient = result.as_ref().is_err_and(|error| error.code() == "MCP_INSUFFICIENT_SCOPE");
+            let scopes = result.as_ref().err().and_then(|error| error.authentication_challenge())
+                .map(crate::oauth_protocol::parse_challenges).unwrap_or_default().into_iter()
+                .filter(|challenge| challenge.scheme.eq_ignore_ascii_case("bearer"))
+                .filter_map(|challenge| challenge.parameters.get("scope").cloned())
+                .flat_map(|scope| scope.split_whitespace().map(str::to_owned).collect::<Vec<_>>()).collect();
+            let diagnostic = lease.rejected(if insufficient { nomifun_api_types::McpAuthErrorCode::InsufficientScope }
+                else { nomifun_api_types::McpAuthErrorCode::ReauthorizationRequired }, scopes).await?;
+            if let (Some(diagnostic), Err(error)) = (diagnostic, &mut result) {
+                *error = error.clone().with_auth_diagnostic(diagnostic);
+            }
+            // A 401 initialize rejection precedes every tool effect. It may
+            // renew the SAME grant once. Other requests are never replayed.
+            if initializing && !insufficient && let Some(credential) = lease.renew().await? {
+                self.headers.extend(build_headers(&HashMap::new(), Some(&credential))?);
+                self.credential_lease = credential.lease.clone();
+                let admission = match self.credential_lease.clone() {
+                    Some(current) => Some(current.acquire().await?), None => None,
+                };
+                drop(admission);
+                result = self.request_inner(request).await;
+                if let Err(error) = &mut result
+                    && error.code() == "MCP_CREDENTIAL_REQUIRED"
+                    && let Some(current) = &self.credential_lease
+                    && let Some(diagnostic) = current.rejected(nomifun_api_types::McpAuthErrorCode::ReauthorizationRequired, Vec::new()).await? {
+                    *error = error.clone().with_auth_diagnostic(diagnostic);
+                }
+            }
+        }
         self.active_request = None;
         result
     }
@@ -1023,6 +1089,11 @@ impl McpSession {
             return Ok(result);
         }
         if self.legacy_mode {
+            if self.legacy.is_none() {
+                let (stream, endpoint) = legacy_sse::LegacyStream::connect(self.http_client()?, &self.endpoint, &self.headers).await?;
+                self.endpoint = endpoint;
+                self.legacy = Some(stream);
+            }
             // Read the event stream while waiting for POST acknowledgment.
             // Otherwise a large response can backpressure the server before
             // it sends its 202, deadlocking the two HTTP connections.
@@ -1061,9 +1132,7 @@ impl McpSession {
         if let Some(error) = session_id_error {
             return Err(error);
         }
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(McpOwnerError::credential_required(response.headers()));
-        }
+        if let Some(error) = McpOwnerError::authentication_rejection(status, response.headers()) { return Err(error); }
         if status != reqwest::StatusCode::ACCEPTED {
             return Err(McpOwnerError::http_error(
                 status,
@@ -1283,10 +1352,10 @@ async fn parse_response(
     session: &mut McpSession,
 ) -> Result<JsonRpcResponse, McpOwnerError> {
     let status = response.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED {
+    if let Some(error) = McpOwnerError::authentication_rejection(status, response.headers()) {
         // Keep the bounded challenge even if an error body would never end.
         // Dropping that body closes it; the known session is cleaned separately.
-        return Err(McpOwnerError::credential_required(response.headers()));
+        return Err(error);
     }
     if !status.is_success() {
         // The HTTP rejection is already known. An untrusted error body must
@@ -1535,6 +1604,17 @@ fn tool_call_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_diagnostic_debug_keeps_the_protocol_challenge_private() {
+        let mut error = McpOwnerError::new("MCP_CREDENTIAL_REQUIRED", "Authorization is required");
+        error.authentication_challenge = Some("Bearer resource_metadata=\"https://provider.test/meta?token=fixture-private-secret\"".into());
+        assert!(error.authentication_challenge().unwrap().contains("fixture-private-secret"));
+        let debug = format!("{error:?}");
+        assert!(!debug.contains("fixture-private-secret"));
+        assert!(!debug.contains("provider.test"));
+        assert!(debug.contains("[REDACTED]"));
+    }
     use axum::extract::State;
     use axum::http::header::{HeaderValue, LOCATION};
     use axum::http::{HeaderMap, StatusCode};

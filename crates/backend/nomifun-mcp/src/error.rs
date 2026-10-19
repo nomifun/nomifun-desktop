@@ -1,4 +1,5 @@
 use nomifun_common::AppError;
+use axum::response::{IntoResponse, Response};
 
 /// MCP crate-level errors.
 ///
@@ -33,8 +34,8 @@ pub enum McpError {
     #[error("Connection test failed: {0}")]
     ConnectionFailed(String),
 
-    #[error("OAuth error: {0}")]
-    OAuth(String),
+    #[error("{0}")]
+    Auth(#[from] crate::oauth_failure::McpAuthFailure),
 
     #[error("{0}")]
     Database(#[from] nomifun_db::DbError),
@@ -59,9 +60,18 @@ impl From<McpError> for AppError {
             McpError::AgentNotInstalled(msg) => AppError::BadRequest(msg),
             McpError::AgentOperationFailed(msg) => AppError::Internal(msg),
             McpError::ConnectionFailed(msg) => AppError::BadGateway(msg),
-            McpError::OAuth(msg) => AppError::Internal(format!("OAuth error: {msg}")),
+            McpError::Auth(error) => AppError::Internal(error.to_string()),
             McpError::Database(db_err) => AppError::from(db_err),
             McpError::Json(e) => AppError::Internal(format!("JSON error: {e}")),
+        }
+    }
+}
+
+impl IntoResponse for McpError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Auth(failure) => failure.into_response(),
+            other => AppError::from(other).into_response(),
         }
     }
 }
@@ -113,8 +123,10 @@ mod tests {
     }
 
     #[test]
-    fn oauth_maps_to_internal() {
-        let err: AppError = McpError::OAuth("discovery failed".into()).into();
+    fn credential_storage_failure_maps_to_internal() {
+        let err: AppError = McpError::Auth(crate::oauth_failure::McpAuthFailure::new(
+            nomifun_api_types::McpAuthErrorCode::SecretStorageFailed,
+            nomifun_api_types::McpAuthStage::Storage, "Credential storage is unavailable")).into();
         assert!(matches!(err, AppError::Internal(_)));
     }
 

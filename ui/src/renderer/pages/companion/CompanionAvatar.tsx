@@ -13,7 +13,7 @@ import type { CustomFigureMeta, CompanionActivity, CompanionMood } from './chara
 import type { CompanionId } from '@/common/types/ids';
 
 interface CompanionAvatarProps {
-  /** Character id from companion config (appearance.character); falls back to default. */
+  /** Character id from companion config; unavailable IDs use the default. */
   character?: string | null;
   mood: CompanionMood;
   activity: CompanionActivity;

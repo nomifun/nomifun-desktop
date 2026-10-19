@@ -1,16 +1,16 @@
-//! Typed, exact-source delivery of a settled desktop delegation into its Robot
-//! Session. This appends one existing assistant projection, never another Turn.
+//! Typed, exact-source delivery of a settled background execution into its
+//! requesting Session. This appends a public projection, never a model Turn.
 
 use super::{
-    NomiCoreSessionOwner, agent_session_store_error, canonical_companion_origin,
+    NomiCoreSessionOwner, agent_session_store_error,
     frozen_workspace_root,
 };
 use nomifun_agent_contracts::{
-    AgentSessionId, CompanionSessionRole, CorrelationId, EventId, EventProducerId, IdempotencyKey,
+    AgentSessionId, CorrelationId, EventId, EventProducerId, IdempotencyKey,
     OperationId, PrincipalRef, SemanticSessionEventDraft, SessionEventAppend, SessionEventKind,
     SessionEventPayloadRef, StrictJsonValue,
 };
-use nomifun_agent_execution::{DirectedDelegationReport, DirectedDelegationSource};
+use nomifun_agent_execution::AgentExecutionReport;
 use nomifun_agent_session::{AgentEffectState, SessionStoreError};
 use nomifun_common::AppError;
 use nomifun_db::sqlx;
@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 const REPORT_ORIGIN: &str = "agent_execution_report";
 
 fn invalid(detail: impl std::fmt::Display) -> AppError {
-    AppError::Conflict(format!("directed delegation report: {detail}"))
+    AppError::Conflict(format!("Execution report: {detail}"))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -30,7 +30,7 @@ struct ProjectedReport {
     content: String,
     origin: String,
     operation_id: String,
-    delegation_report: DirectedDelegationReport,
+    delegation_report: AgentExecutionReport,
 }
 
 #[derive(sqlx::FromRow)]
@@ -47,7 +47,7 @@ struct ExistingProjection {
 
 /// File verification is an observation made at first delivery. Later retries
 /// retain that original observation even when files have subsequently changed.
-fn same_report_identity(left: &DirectedDelegationReport, right: &DirectedDelegationReport) -> bool {
+fn same_report_identity(left: &AgentExecutionReport, right: &AgentExecutionReport) -> bool {
     if left.attempts.len() != right.attempts.len() {
         return false;
     }
@@ -109,7 +109,7 @@ async fn validate_execution(
     owner: &NomiCoreSessionOwner,
     owner_id: &str,
     operation_id: &str,
-    report: &DirectedDelegationReport,
+    report: &AgentExecutionReport,
 ) -> Result<(), AppError> {
     let initial: Option<String> = sqlx::query_scalar(
         "SELECT initial_plan_input FROM agent_executions \
@@ -120,19 +120,9 @@ async fn validate_execution(
     .fetch_optional(&owner.pool)
     .await
     .map_err(|error| AppError::Internal(error.to_string()))?;
-    let initial: Value =
-        serde_json::from_str(&initial.ok_or_else(|| invalid("owned Execution is missing"))?)
-            .map_err(invalid)?;
-    if initial.get("mode").and_then(Value::as_str) != Some("directed") {
-        return Err(invalid("Execution was not created by directed delegation"));
-    }
-    let source: DirectedDelegationSource = serde_json::from_value(
-        initial
-            .get("source")
-            .cloned()
-            .ok_or_else(|| invalid("Execution source is missing"))?,
-    )
-    .map_err(invalid)?;
+    let source = nomifun_agent_execution::execution_source_from_initial_plan(
+        &initial.ok_or_else(|| invalid("owned Execution is missing"))?
+    )?.ok_or_else(|| invalid("Execution has no exact input source"))?;
     if source != report.source {
         return Err(invalid(
             "Execution source differs from the exact original tool Effect",
@@ -180,7 +170,7 @@ async fn validate_execution(
 async fn validate_attempts(
     owner: &NomiCoreSessionOwner,
     principal: &PrincipalRef,
-    report: &DirectedDelegationReport,
+    report: &AgentExecutionReport,
     verify_files: bool,
 ) -> Result<(), AppError> {
     let mut seen = BTreeSet::new();
@@ -258,7 +248,7 @@ async fn validate_attempts(
             })
             .await
             .map_err(|error| {
-                AppError::Internal(format!("verify directed report output: {error}"))
+                AppError::Internal(format!("verify Execution report output: {error}"))
             })?;
             let (files, integrity) = match verified {
                 Ok(files) => (files, true),
@@ -284,17 +274,17 @@ async fn validate_attempts(
     Ok(())
 }
 
-pub(super) async fn project_directed_report(
+pub(super) async fn project_execution_report(
     owner: &NomiCoreSessionOwner,
     owner_id: &str,
     conversation_id: &str,
     operation_id: &str,
     content: &str,
-    report: &DirectedDelegationReport,
+    report: &AgentExecutionReport,
 ) -> Result<String, AppError> {
     if content.trim().is_empty() || content.len() > 1024 * 1024 {
         return Err(AppError::BadRequest(
-            "directed report content must be non-empty and bounded".into(),
+            "Execution report content must be non-empty and bounded".into(),
         ));
     }
     if conversation_id != report.source.agent_session_id
@@ -318,14 +308,7 @@ pub(super) async fn project_directed_report(
         principal_kind: "user".into(),
         principal_id: owner_id.into(),
     };
-    let observation = owner.canonical.get(&principal, &session_id).await?;
-    if !canonical_companion_origin(owner_id, &observation)?
-        .is_some_and(|origin| origin.role == CompanionSessionRole::Robot)
-    {
-        return Err(invalid(
-            "source Session is not the owner's canonical Robot role",
-        ));
-    }
+    owner.canonical.get(&principal, &session_id).await?;
     let effect = owner
         .canonical
         .store()
@@ -337,7 +320,7 @@ pub(super) async fn project_directed_report(
         || effect.operation_id.as_ref() != report.source.tool_operation_id
         || effect.owner_domain != "wave5.product"
         || effect.capability_module.as_ref() != "agent.collaboration"
-        || effect.action_id.as_ref() != "agent/delegate"
+        || !matches!(effect.action_id.as_ref(), "agent/delegate" | "agent/fork")
         || effect.state != AgentEffectState::Returned
     {
         return Err(invalid(
@@ -370,7 +353,7 @@ pub(super) async fn project_directed_report(
          AND tool.kind='tool/call-started' AND tool.kind_version=1 AND tool.causation_event_id=? \
          AND json_extract(tool.inline_json,'$.operation_id')=? \
          AND json_extract(tool.inline_json,'$.capability_id')='agent.collaboration' \
-         AND json_extract(tool.inline_json,'$.action_id')='agent/delegate')",
+         AND json_extract(tool.inline_json,'$.action_id') IN ('agent/delegate','agent/fork'))",
     )
     .bind(conversation_id).bind(effect.started_event_id.as_ref()).bind(&report.source.effect_id)
     .bind(&report.source.turn_operation_id).bind(&report.source.tool_operation_id)
@@ -391,20 +374,13 @@ pub(super) async fn project_directed_report(
     let key = format!("agent-execution-projection:{operation_id}");
     let cause = source_terminal.event_id.as_ref();
     let existing = existing_projection(owner, &key, conversation_id, cause, &expected).await?;
-    // Desktop file hashing must not occupy the Robot's input/metadata fence.
+    // Output file hashing must not occupy the requesting Session input/metadata fence.
     validate_attempts(owner, &principal, report, existing.is_none()).await?;
     let _fence = owner
         .session_operation_lock(conversation_id)
         .write_owned()
         .await;
-    let current = owner.canonical.get(&principal, &session_id).await?;
-    if !canonical_companion_origin(owner_id, &current)?
-        .is_some_and(|origin| origin.role == CompanionSessionRole::Robot)
-    {
-        return Err(invalid(
-            "source Session no longer has its canonical Robot role",
-        ));
-    }
+    owner.canonical.get(&principal, &session_id).await?;
     validate_execution(owner, owner_id, operation_id, report).await?;
     if let Some(existing) =
         existing_projection(owner, &key, conversation_id, cause, &expected).await?
@@ -419,7 +395,7 @@ pub(super) async fn project_directed_report(
         > nomifun_agent_session::MAX_INLINE_JSON_BYTES
     {
         return Err(AppError::BadRequest(
-            "directed report exceeds the canonical inline payload budget".into(),
+            "Execution report exceeds the canonical inline payload budget".into(),
         ));
     }
     let message_id = uuid::Uuid::now_v7().to_string();

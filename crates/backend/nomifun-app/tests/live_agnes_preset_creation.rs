@@ -333,7 +333,7 @@ async fn official_presets_chat_and_general_agent_auto_routes_image_without_defau
         &router,
         Method::POST,
         "/api/companion/companions",
-        Some(json!({"name": "Agnes test companion", "character": "ink"})),
+        Some(json!({"name": "Agnes test companion", "character": "mochi"})),
     )
     .await;
     let companion_id = companion["companion_id"].as_str().expect("test companion ID");

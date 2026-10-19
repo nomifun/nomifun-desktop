@@ -9,6 +9,9 @@
 //! After that owned GUI dataset's desktop has normally exited, append a second
 //! empty Session with: <existing-data-dir> --append-user-browser-session <first-session-id>.
 //! The append mode uses only the normal owner-scoped API and starts no model server.
+//! The two --computer-*-denied modes retain the original provider response after
+//! one typed not_executed permission refusal. Use the real App's Stop; /finish
+//! is only an explicit fixture release. Neither mode requests native permission.
 //! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--user-browser-only|--native-actions|--native-pause|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-click-variants <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-unicode-input <target-app> <target-status>|--computer-large-a11y <target-app> <target-status>|--computer-soak <target-app> <target-status>|--computer-launch-missing]
 //! Launch the real desktop EXE with NOMIFUN_DATA_DIR set to the printed path.
 use axum::{
@@ -394,6 +397,86 @@ mod tests {
         assert_eq!(std::fs::read_to_string(source).unwrap(),BROKEN_JS);
         assert!(!work.join("app.js").exists());
     }
+
+    fn computer_permission_body(accessibility: bool) -> Value {
+        let (call, action, operation, permission) = if accessibility {
+            ("gui-computer-a11y-denied", "computer/a11y.observe", "observe", "accessibility")
+        } else {
+            ("gui-computer-screen-denied", "computer/observe", "screenshot", "screen_recording")
+        };
+        let refusal = json!({"schema":"system-permission-required.v1","capability":"computer",
+            "action_id":action,"operation":operation,"permissions":[permission],"execution":"not_executed"});
+        let carrier = nomifun_engine_core::system_permission_error_carrier(
+            "SYSTEM_PERMISSION_REQUIRED", &refusal.to_string()).unwrap();
+        json!({"messages":[{"role":"tool","tool_call_id":call,"content":format!("[tool error]\n{carrier}")}]})
+    }
+
+    #[test]
+    fn computer_permission_denial_accepts_only_the_current_exact_typed_action() {
+        for accessibility in [true, false] {
+            let mut body = computer_permission_body(accessibility);
+            assert!(computer_single_denied_result(&body, accessibility).unwrap());
+            let text = body["messages"][0]["content"].as_str().unwrap().to_owned();
+            body["messages"][0]["content"] = json!([{"type":"text","text":text}]);
+            assert!(computer_single_denied_result(&body, accessibility).unwrap());
+            assert!(!computer_single_denied_result(&body, !accessibility).unwrap(), "a foreign original call cannot establish this refusal");
+        }
+    }
+
+    #[test]
+    fn computer_permission_denial_rejects_old_generic_errors_crossed_actions_and_unknown() {
+        let body = computer_permission_body(true);
+        let typed: Value = serde_json::from_str(body["messages"][0]["content"].as_str().unwrap()
+            .strip_prefix("[tool error]\n").unwrap()).unwrap();
+        let mut bad = vec![Value::String("Capability Kernel rejected Agent Runtime Tool (ROLE_HOST_PROVIDER_FAILURE)".into()),
+            typed["permission_required"].clone()];
+        for (field, value) in [("execution", json!("unknown")), ("action_id", json!("computer/observe")),
+            ("permissions", json!(["screen_recording"]))] {
+            let mut changed = typed.clone();
+            changed["permission_required"][field] = value;
+            bad.push(changed);
+        }
+        for rejected in bad {
+            let mut changed = body.clone();
+            let text = if let Some(text) = rejected.as_str() {
+                text.to_owned()
+            } else { rejected.to_string() };
+            changed["messages"][0]["content"] = json!(format!("[tool error]\n{text}"));
+            assert!(computer_single_denied_result(&changed, true).is_err());
+        }
+    }
+
+    #[test]
+    fn computer_permission_denial_waits_for_its_original_tool_result() {
+        for changed in [json!({"messages":[]}), json!({"messages":[{"role":"user",
+            "tool_call_id":"gui-computer-a11y-denied","content":"not a tool result"}]})] {
+            assert!(!computer_single_denied_result(&changed, true).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn computer_permission_provider_hold_waits_for_original_fixture_release_or_shutdown() {
+        for shutdown in [false, true] {
+            let stop = CancellationToken::new();
+            let finish = Arc::new(Semaphore::new(0));
+            let waiting = Arc::new(AtomicBool::new(false));
+            let holds = Arc::new(AtomicUsize::new(0));
+            let held = tokio::spawn({
+                let stop = stop.clone(); let finish = finish.clone();
+                let waiting = waiting.clone(); let holds = holds.clone();
+                async move { hold_computer_permission_response(&stop, &finish, &waiting, &holds).await }
+            });
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !waiting.load(Ordering::SeqCst) { tokio::task::yield_now().await; }
+            }).await.unwrap();
+            assert!(!held.is_finished(), "readiness must not fabricate a final provider response");
+            assert_eq!(holds.load(Ordering::SeqCst), 1);
+            if shutdown { stop.cancel(); } else { finish.add_permits(1); }
+            tokio::time::timeout(Duration::from_secs(1), held).await.unwrap().unwrap();
+            assert!(!waiting.load(Ordering::SeqCst));
+            assert_eq!(holds.load(Ordering::SeqCst), 1);
+        }
+    }
 }
 
 const FRONTEND_PAGE: &str = r#"<!doctype html><meta charset=utf-8><title>Counter app</title>
@@ -432,6 +515,8 @@ struct Fixture {
     a11y_denied: AtomicBool,
     screen_denied: AtomicBool,
     screen_observed: AtomicBool,
+    computer_denial_waiting: AtomicBool,
+    computer_denial_holds: AtomicUsize,
     input_verified: AtomicBool,
     input_initial_plan_unavailable: AtomicBool,
     stale_observed: AtomicBool,
@@ -825,14 +910,7 @@ fn computer_single_denied_operation(
     } else {
         "gui-computer-screen-denied"
     };
-    if computer_tool_result(body, call_id).is_some() {
-        let result = computer_result_text(body, call_id)?;
-        anyhow::ensure!(
-            result.starts_with(
-                "Capability Kernel rejected Agent Runtime Tool (ROLE_HOST_PROVIDER_FAILURE)"
-            ),
-            "Computer permission denial was not projected through ROLE_HOST_PROVIDER_FAILURE"
-        );
+    if computer_single_denied_result(body, accessibility)? {
         if accessibility {
             fixture.a11y_denied.store(true, Ordering::SeqCst);
         } else {
@@ -851,6 +929,38 @@ fn computer_single_denied_operation(
         browser_tool(body, action)?,
         json!({"action":native}),
     )))
+}
+
+fn computer_single_denied_result(body: &Value, accessibility: bool) -> anyhow::Result<bool> {
+    let call_id = if accessibility { "gui-computer-a11y-denied" } else { "gui-computer-screen-denied" };
+    if computer_tool_result(body, call_id).is_none() { return Ok(false); }
+    let action_id = if accessibility { "computer/a11y.observe" } else { "computer/observe" };
+    let result = computer_result_text(body, call_id)?;
+    let result = result.strip_prefix("[tool error]\n").or_else(|| result.strip_prefix("[tool error]\r\n"))
+        .ok_or_else(|| anyhow::anyhow!("Computer refusal must retain the broker's original tool-error marker"))?;
+    anyhow::ensure!(nomifun_engine_core::project_system_permission_required(
+        Some("computer"), Some(action_id), true, result).is_some(),
+        "Computer refusal lacks the exact canonical SYSTEM_PERMISSION_REQUIRED not_executed carrier");
+    Ok(true)
+}
+
+async fn hold_computer_permission_response(
+    stop: &CancellationToken,
+    finish: &Semaphore,
+    waiting: &AtomicBool,
+    holds: &AtomicUsize,
+) {
+    struct Held<'a>(&'a AtomicBool);
+    impl Drop for Held<'_> {
+        fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
+    }
+    waiting.store(true, Ordering::SeqCst);
+    holds.fetch_add(1, Ordering::SeqCst);
+    let _owned_response = Held(waiting);
+    tokio::select! {
+        _ = stop.cancelled() => {},
+        permit = finish.acquire() => { if let Ok(permit) = permit { permit.forget(); } },
+    }
 }
 
 fn computer_tool_result<'a>(body: &'a Value, call_id: &str) -> Option<&'a Value> {
@@ -2720,7 +2830,10 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
     let (delta, reason) = if let Some((call_id, tool, operation)) = operation {
         (json!({"role":"assistant","tool_calls":[{"index":0,"id":call_id,"type":"function","function":{"name":tool,"arguments":operation.to_string()}}]}), "tool_calls")
     } else {
-        if !fixture.computer_denied
+        if fixture.computer_a11y_denied || fixture.computer_screen_denied {
+            hold_computer_permission_response(&fixture.stop, &fixture.finish,
+                &fixture.computer_denial_waiting, &fixture.computer_denial_holds).await;
+        } else if !fixture.computer_denied
             && !fixture.computer_granted
             && !fixture.computer_a11y_denied
             && !fixture.computer_screen_denied
@@ -2746,9 +2859,9 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
         } else if fixture.computer_granted {
             "Accessibility 与 Screen Recording 均已通过签名产品的正式 Computer Actions 验证。"
         } else if fixture.computer_a11y_denied {
-            "Accessibility 未授权，computer/a11y.observe 已通过 canonical ROLE_HOST_PROVIDER_FAILURE 明确拒绝。"
+            "Accessibility 未获权，computer/a11y.observe 已通过 canonical SYSTEM_PERMISSION_REQUIRED 在 native observe 前拒绝，execution=not_executed。"
         } else if fixture.computer_screen_denied {
-            "Screen Recording 未授权，computer/observe 已通过 canonical ROLE_HOST_PROVIDER_FAILURE 明确拒绝。"
+            "Screen Recording 未获权，computer/observe 已通过 canonical SYSTEM_PERMISSION_REQUIRED 在 capture 前拒绝，execution=not_executed。"
         } else if fixture.computer_concurrent_user {
             "检测到用户在 observation 后修改了目标；旧 ref 已被拒绝，USER_OWNED 内容保持。"
         } else if fixture.computer_stale_focus {
@@ -3076,6 +3189,8 @@ async fn main() -> anyhow::Result<()> {
     let computer_granted = mode.as_deref() == Some("--computer-granted");
     let computer_a11y_denied = mode.as_deref() == Some("--computer-a11y-denied");
     let computer_screen_denied = mode.as_deref() == Some("--computer-screen-denied");
+    anyhow::ensure!(!(computer_a11y_denied || computer_screen_denied) || cfg!(feature = "computer-use"),
+        "single Computer denial fixtures require the real computer-use provider feature");
     let computer_input = mode.as_deref() == Some("--computer-input");
     let computer_stale_focus = mode.as_deref() == Some("--computer-stale-focus");
     let computer_concurrent_user = mode.as_deref() == Some("--computer-concurrent-user");
@@ -3192,6 +3307,8 @@ async fn main() -> anyhow::Result<()> {
         a11y_denied: AtomicBool::new(false),
         screen_denied: AtomicBool::new(false),
         screen_observed: AtomicBool::new(false),
+        computer_denial_waiting: AtomicBool::new(false),
+        computer_denial_holds: AtomicUsize::new(0),
         input_verified: AtomicBool::new(false),
         input_initial_plan_unavailable: AtomicBool::new(false),
         stale_observed: AtomicBool::new(false),
@@ -3273,6 +3390,8 @@ async fn main() -> anyhow::Result<()> {
                         "computer_pointer_status":f.computer_pointer_status.as_ref(),"computer_missing_target":f.computer_missing_target.as_ref(),
                         "a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"a11y_denied":f.a11y_denied.load(Ordering::SeqCst),
                         "screen_denied":f.screen_denied.load(Ordering::SeqCst),"screen_observed":f.screen_observed.load(Ordering::SeqCst),
+                        "computer_denial_waiting":f.computer_denial_waiting.load(Ordering::SeqCst),
+                        "computer_denial_holds":f.computer_denial_holds.load(Ordering::SeqCst),
                         "input_verified":f.input_verified.load(Ordering::SeqCst),"input_initial_plan_unavailable":f.input_initial_plan_unavailable.load(Ordering::SeqCst),
                         "stale_observed":f.stale_observed.load(Ordering::SeqCst),"stale_input_rejected":f.stale_input_rejected.load(Ordering::SeqCst),
                         "concurrent_user_preserved":f.concurrent_user_preserved.load(Ordering::SeqCst),"pointer_verified":f.pointer_verified.load(Ordering::SeqCst),
@@ -3358,10 +3477,10 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     let prepared = async {
-        if wk_actions {
+        if wk_actions || computer_a11y_denied || computer_screen_denied {
             // This file exists only inside the newly created disposable root.
             // The driver logs in normally; no desktop trust secret is exported.
-            let credentials = json!({"username":"wkfixture","password":uuid::Uuid::new_v4().to_string()});
+            let credentials = json!({"username":if wk_actions {"wkfixture"} else {"computerfixture"},"password":uuid::Uuid::new_v4().to_string()});
             api(&app,"/api/auth/setup",credentials.clone()).await?;
             let mut options=std::fs::OpenOptions::new();
             options.write(true).create_new(true);
@@ -3370,7 +3489,7 @@ async fn main() -> anyhow::Result<()> {
                 options.mode(0o600);
             }
             use std::io::Write;
-            let mut file=options.open(root.join("wk-acceptance-auth.json"))?;
+            let mut file=options.open(root.join(if wk_actions {"wk-acceptance-auth.json"} else {"computer-denial-auth.json"}))?;
             file.write_all(&serde_json::to_vec(&credentials)?)?;
         }
         let local_key=fixture.live.as_ref().map(|live|live.local_token.strip_prefix("Bearer ").unwrap()).unwrap_or("local-fixture-not-a-secret");
@@ -3524,6 +3643,17 @@ async fn main() -> anyhow::Result<()> {
         };
         let session = api(&app,"/api/agent-sessions",json!({"preset_id":preset,"title":display_name,"resource_selections":resources,"model":{"provider_id":provider,"model":"browser-gui-fixture"}})).await?;
         let session_id=session["agent_session_id"].as_str().ok_or_else(||anyhow::anyhow!("session id missing"))?.to_owned();
+        if computer_a11y_denied || computer_screen_denied {
+            std::fs::write(root.join("computer-denial.json"), serde_json::to_vec_pretty(&json!({
+                "mode":if computer_a11y_denied {"computer-a11y-denied"} else {"computer-screen-denied"},
+                "data_dir":root,"control":format!("http://{address}"),"session_id":session_id,
+                "action_id":if computer_a11y_denied {"computer/a11y.observe"} else {"computer/observe"},
+                "call_id":if computer_a11y_denied {"gui-computer-a11y-denied"} else {"gui-computer-screen-denied"},
+                "permission":if computer_a11y_denied {"accessibility"} else {"screen_recording"},
+                "prompt":"Attempt the single declared Computer observation once. If the host reports missing permission, wait without retrying; the user will Stop this original task.",
+                "real_provider":false,"permission_requests":0,"input_actions_declared":false
+            }))?)?;
+        }
         if wk_actions {
             let secondary=api(&app,"/api/agent-sessions",json!({"preset_id":preset,"title":"WK 隔离对照会话","resource_selections":resources,"model":{"provider_id":provider,"model":"browser-gui-fixture"}})).await?;
             api(&app,&format!("/api/agent-sessions/{session_id}/turns"),json!({"input":{"content":"WK_UPGRADE_PRESERVATION_SEED"},"idempotency_key":uuid::Uuid::now_v7().to_string()})).await?;

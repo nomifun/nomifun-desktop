@@ -124,12 +124,12 @@ export type TChatConversation = IChatConversation<
     maxTurns?: number;
     /** Last token usage stats */
     last_token_usage?: TokenUsageData;
-    /** Marks the companion's single session. Written by the backend at creation
-     * and used to keep it out of the ordinary work-conversation list. */
+    /** Read-only historical marker; canonical companion ownership comes from
+     * the Host's exact companion_id and Session entrance projection. */
     companion_session?: boolean;
-    /** The companion this session belongs to when `companion_session` is set. */
+    /** Canonical companion ownership, independent of the historical marker. */
     companion_id?: CompanionId;
-    /** Canonical product role projected by the Host, independent of Agent identity. */
+    /** Immutable input entrance projected by the Host; never an Agent selection. */
     companion_role?: 'companion' | 'robot';
     /** Canonical archive annotation projected by the Host. */
     canonical_archived?: boolean;

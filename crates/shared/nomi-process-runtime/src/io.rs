@@ -3,6 +3,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use serde::{Deserialize, Serialize};
+
+mod frozen_output;
+pub use frozen_output::FrozenOutputError;
+
 #[cfg(windows)]
 use windows_sys::Win32::Globalization::{
     GetACP, IsDBCSLeadByteEx, MB_ERR_INVALID_CHARS, MultiByteToWideChar,
@@ -24,6 +29,11 @@ const DECODE_SCRATCH_BYTES: usize = 4 * 1024;
 // Retained text may use UTF-8's fixed maximum of four bytes per decoded scalar. The raw
 // cap plus bounded decoder carry keeps that representation cap-proportional without loss.
 
+// These serialized fields are part of FrozenOutput V1, including raw chunk
+// sequence/start identity. Internal changes must preserve the V1 reader and
+// its checked-in golden receipts; do not silently redefine version 1.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredChunk {
     seq: u64,
     start: u64,
@@ -39,6 +49,10 @@ pub struct OutputBuffer {
     changed: tokio::sync::watch::Sender<u64>,
 }
 
+// Persisted FrozenOutput V1 state, not a serialized live OutputBuffer. Future
+// in-memory refactors must keep the existing receipt fields readable.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OutputState {
     next_seq: u64,
     next_offset: u64,
@@ -57,8 +71,10 @@ enum OutputBufferState {
     Transition,
 }
 
+/// Versioned, read-only retained transport output. Deserializing it never
+/// creates a process, input capability, lease, reader or background task.
 #[derive(Clone)]
-pub(crate) struct FrozenOutput {
+pub struct FrozenOutput {
     state: Arc<OutputState>,
 }
 
@@ -202,7 +218,7 @@ impl OutputBuffer {
 }
 
 impl FrozenOutput {
-    pub(crate) fn snapshot_from(&self, cursor: OutputCursor) -> OutputSnapshot {
+    pub fn snapshot_from(&self, cursor: OutputCursor) -> OutputSnapshot {
         snapshot_from_state(&self.state, cursor)
     }
 }
@@ -412,7 +428,9 @@ fn byte_count(count: usize) -> u64 {
     u64::try_from(count).expect("process output byte count does not fit in u64")
 }
 
-#[derive(Clone)]
+// The three original stream decoders are stable FrozenOutput V1 wire fields.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StreamDecoders {
     stdout: IncrementalDecoder,
     stderr: IncrementalDecoder,
@@ -466,7 +484,10 @@ impl StreamDecoders {
     }
 }
 
-#[derive(Clone)]
+// FrozenOutput V1 includes original decoder history, carry and (on Windows)
+// ACP identity. Never reconstruct this state from today's machine settings.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IncrementalDecoder {
     utf8_pending: Vec<u8>,
     decode_errors: u64,
@@ -620,7 +641,10 @@ impl IncrementalDecoder {
 }
 
 #[cfg(windows)]
-#[derive(Clone)]
+// Stable V1 decoder state; this can be the only retained DBCS prefix after raw
+// ring eviction. A flattened text snapshot cannot replace these wire fields.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WindowsDecoder {
     code_page: u32,
     pending: Vec<u8>,

@@ -69,12 +69,13 @@ pub fn canonical_steering_input(facts:&ChatCausalityFacts,event:&SessionEventRec
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq,serde::Serialize,serde::Deserialize)]
 #[serde(rename_all="SCREAMING_SNAKE_CASE")]
-pub enum SessionInputBlockedReason { AttachmentPreparationFailed,SkillUnavailable,InputBudgetExceeded,ContextPreparationFailed }
+pub enum SessionInputBlockedReason { AttachmentPreparationFailed,SkillUnavailable,InputBudgetExceeded,ContextPreparationFailed,CancelledByOwner }
 
 impl SessionInputBlockedReason {
     fn identity(self)->&'static str {match self {
         Self::AttachmentPreparationFailed=>"attachment_preparation_failed",
         Self::SkillUnavailable=>"skill_unavailable",Self::InputBudgetExceeded=>"input_budget_exceeded",Self::ContextPreparationFailed=>"context_preparation_failed",
+        Self::CancelledByOwner=>"cancelled_by_owner",
     }}
 }
 
@@ -88,6 +89,28 @@ pub(super) async fn accepted_input_tx(tx:&mut Transaction<'_,Sqlite>,session:&Ag
     }
     let input=StrictJsonValue(payload_value_for_event_tx(tx,&event).await?);
     Ok(PendingSessionInput {event,input})
+}
+
+/// Cancellation terminates this accepted input, unlike a repairable preparation
+/// failure. Read its exact original fact; a later retry cannot revive it.
+async fn cancelled_input_tx(tx:&mut Transaction<'_,Sqlite>,accepted:&SessionEventRecord)
+    ->Result<Option<SessionEventRecord>,SessionStoreError> {
+    let identity=format!("session-input-blocked:{}:cancelled_by_owner",accepted.event_id.as_ref());
+    let Some(row)=event_by_event_id_tx(tx,&identity).await? else {return Ok(None);};
+    let event=event_from_row(row)?;
+    let payload=payload_value_for_event_tx(tx,&event).await?;
+    let reason:SessionInputBlockedReason=serde_json::from_value(payload.get("reason").cloned()
+        .ok_or_else(||SessionStoreError::InvalidPayload("cancelled input reason is missing".into()))?)?;
+    if event.agent_session_id!=accepted.agent_session_id || event.seq<=accepted.seq
+        || event.kind.0!="message/input-blocked" || event.kind_version!=1
+        || event.producer_id.as_ref()!="runtime_supervisor" || event.idempotency_key.as_ref()!=identity
+        || event.causation_event_id.as_ref()!=Some(&accepted.event_id)
+        || event.correlation_id.as_ref()!=accepted.event_id.as_ref()
+        || payload.get("input_event_id").and_then(Value::as_str)!=Some(accepted.event_id.as_ref())
+        || reason!=SessionInputBlockedReason::CancelledByOwner {
+        return Err(SessionStoreError::InvalidEvent("input cancellation lost its exact accepted source".into()));
+    }
+    Ok(Some(event))
 }
 
 pub(super) async fn input_claimed_tx(tx:&mut Transaction<'_,Sqlite>,session:&AgentSessionId,input:&EventId)->Result<bool,SessionStoreError> {
@@ -177,6 +200,9 @@ async fn delivery_state_facts_tx(tx:&mut Transaction<'_,Sqlite>,session:&AgentSe
         .bind(session.as_ref()).fetch_one(&mut **tx).await?;
     if accepted.event.seq<=as_u64(floor,"input context floor")? {
         return Ok((json!({"state":"discarded","reason":"CONTEXT_CLEARED"}),as_u64(floor,"input context floor")?));
+    }
+    if let Some(cancelled)=cancelled_input_tx(tx,&accepted.event).await? {
+        return Ok((json!({"state":"cancelled","reason":SessionInputBlockedReason::CancelledByOwner}),cancelled.seq));
     }
     let blocked=sqlx::query_as::<_,StoredEventRow>("SELECT e.session_id,e.seq,e.event_id,e.producer_id,e.idempotency_key,e.kind,e.kind_version,e.correlation_id,e.causation_event_id,e.inline_json,e.payload_id \
         FROM agent_events e LEFT JOIN agent_payloads p ON p.payload_id=e.payload_id AND p.session_id=e.session_id \
@@ -397,7 +423,10 @@ impl AgentSessionStore {
             AND (input.event_id=? OR NOT EXISTS(SELECT 1 FROM agent_events blocked LEFT JOIN agent_payloads bp ON bp.payload_id=blocked.payload_id AND bp.session_id=blocked.session_id WHERE blocked.session_id=input.session_id AND blocked.kind='message/input-blocked' \
                 AND COALESCE(json_extract(blocked.inline_json,'$.input_event_id'),json_extract(CAST(bp.body AS TEXT),'$.value.input_event_id'))=input.event_id)) ORDER BY input.seq LIMIT 64")
             .bind(session.as_ref()).bind(&prefix).bind(&prefix).bind(include_blocked.map(|id|id.as_ref())).fetch_all(&mut *tx).await?;
-        let mut inputs=Vec::new();for id in ids {inputs.push(accepted_input_tx(&mut tx,session,&id.into()).await?);}
+        let mut inputs=Vec::new();for id in ids {
+            let accepted=accepted_input_tx(&mut tx,session,&id.into()).await?;
+            if cancelled_input_tx(&mut tx,&accepted.event).await?.is_none() {inputs.push(accepted);}
+        }
         tx.commit().await?;Ok(inputs)
     }
 
@@ -406,6 +435,7 @@ impl AgentSessionStore {
         let mut tx=self.begin_write_transaction().await?;
         if live_session_by_id_tx(&mut tx,session.as_ref()).await?.owner_ref!=*owner {return Err(SessionStoreError::ExecutionFenced);}
         let accepted=accepted_input_tx(&mut tx,session,input).await?;
+        if cancelled_input_tx(&mut tx,&accepted.event).await?.is_some() {return Err(SessionStoreError::ExecutionFenced);}
         let floor:i64=sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=? AND kind='context/cleared'")
             .bind(session.as_ref()).fetch_one(&mut *tx).await?;
         if accepted.event.seq<=as_u64(floor,"input context floor")? {return Err(SessionStoreError::ExecutionFenced);}
@@ -429,6 +459,7 @@ impl AgentSessionStore {
         let mut tx=self.begin_write_transaction().await?;
         if live_session_by_id_tx(&mut tx,session.as_ref()).await?.owner_ref!=*owner {return Err(SessionStoreError::ExecutionFenced);}
         let accepted=accepted_input_tx(&mut tx,session,input).await?;
+        if cancelled_input_tx(&mut tx,&accepted.event).await?.is_some() {return Err(SessionStoreError::ExecutionFenced);}
         if accepted.input.0.get("reply_to").is_some() {return Err(SessionStoreError::ExecutionFenced);}
         let floor:i64=sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=? AND kind='context/cleared'")
             .bind(session.as_ref()).fetch_one(&mut *tx).await?;
@@ -452,7 +483,9 @@ impl AgentSessionStore {
 
     pub async fn mark_session_input_blocked(&self,session:&AgentSessionId,input:&EventId,reason:SessionInputBlockedReason)
         ->Result<(),SessionStoreError> {
-        let mut tx=self.begin_write_transaction().await?;accepted_input_tx(&mut tx,session,input).await?;
+        let mut tx=self.begin_write_transaction().await?;
+        let accepted=accepted_input_tx(&mut tx,session,input).await?;
+        if cancelled_input_tx(&mut tx,&accepted.event).await?.is_some() {tx.commit().await?;return Ok(());}
         if input_claimed_tx(&mut tx,session,input).await? {tx.commit().await?;return Ok(());}
         let identity=format!("session-input-blocked:{}:{}",input.as_ref(),reason.identity());
         let event=SessionEventAppend {agent_session_id:session.clone(),event_id:identity.clone().into(),producer_id:"runtime_supervisor".into(),idempotency_key:identity.into(),

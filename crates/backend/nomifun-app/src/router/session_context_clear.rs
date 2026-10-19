@@ -69,6 +69,56 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
 
     const TRUST: &str = "canonical-context-clear";
+    const REPLY: &str = concat!(
+        "data: {\"id\":\"clear-fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Fixture reply\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"clear-fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n");
+
+    #[derive(Clone)]
+    struct LiveModelState {
+        requests: Arc<std::sync::Mutex<Vec<Value>>>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    struct LiveModel {
+        url: String,
+        state: LiveModelState,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl LiveModel {
+        async fn new() -> Self {
+            let state = LiveModelState { requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+                entered: Arc::new(tokio::sync::Notify::new()), release: Arc::new(tokio::sync::Semaphore::new(0)) };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let router = Router::new().route("/v1/chat/completions", axum::routing::post(
+                |axum::extract::State(state): axum::extract::State<LiveModelState>, axum::Json(body): axum::Json<Value>| async move {
+                    state.requests.lock().unwrap().push(body.clone());
+                    let input = body["messages"].as_array().unwrap().iter().rev()
+                        .find(|message| message["role"] == "user").map(|message| message["content"].as_str()
+                            .map(str::to_owned).unwrap_or_else(||message["content"].to_string())).unwrap_or_default();
+                    if input.starts_with("CONTEXT_CLEAR_LIVE_SUCCESSOR ") {
+                        state.entered.notify_one();
+                        state.release.acquire().await.unwrap().forget();
+                    }
+                    ([(axum::http::header::CONTENT_TYPE,"text/event-stream")], REPLY)
+                })).with_state(state.clone());
+            let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+            Self { url, state, task }
+        }
+
+        async fn entered(&self) {
+            tokio::time::timeout(Duration::from_secs(15), self.state.entered.notified()).await.unwrap();
+        }
+
+        fn calls(&self) -> usize { self.state.requests.lock().unwrap().len() }
+    }
+
+    impl Drop for LiveModel {
+        fn drop(&mut self) { self.task.abort(); }
+    }
 
     struct Fixture {
         _root: tempfile::TempDir,
@@ -82,13 +132,14 @@ mod tests {
 
     impl Fixture {
         async fn new() -> Self {
+            Self::with_model_url(None).await
+        }
+
+        async fn with_model_url(model_url: Option<&str>) -> Self {
             let upstream = MockServer::start().await;
             Mock::given(method("POST")).and(path("/v1/chat/completions"))
                 .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
-                    .set_body_string(concat!(
-                        "data: {\"id\":\"clear-fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Fixture reply\"},\"finish_reason\":null}]}\n\n",
-                        "data: {\"id\":\"clear-fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-                        "data: [DONE]\n\n")))
+                    .set_body_string(REPLY))
                 .mount(&upstream).await;
             let root = tempfile::tempdir().unwrap();
             let fixture_root = std::fs::canonicalize(root.path()).unwrap();
@@ -105,7 +156,7 @@ mod tests {
             let router = super::super::super::create_router_with_states(&services, states);
             let principal = PrincipalRef { principal_kind: "user".into(), principal_id: services.authoritative_user_id.as_ref().into() };
             let provider = call(&router, "/api/providers", json!({
-                "platform":"custom", "name":"isolated clear fixture", "base_url":format!("{}/v1",upstream.uri()),
+                "platform":"custom", "name":"isolated clear fixture", "base_url":format!("{}/v1",model_url.map(str::to_owned).unwrap_or_else(||upstream.uri())),
                 "auth_scheme":"bearer", "credentials":{"api_keys":["fixture-only"]}, "enabled":true,
                 "initial_model":{"model":"clear-fixture", "enabled":true, "capabilities":[{
                     "task":"chat", "traits":[], "protocol":"openai.chat_text", "connection_role":"default"
@@ -136,6 +187,26 @@ mod tests {
         async fn warm(&self) {
             call(&self.router, &format!("/api/agent-sessions/{}/warmup", self.session.as_ref()), json!({})).await;
             assert!(self.owner.runtime_sessions.get_runtime(self.session.as_ref()).is_some());
+        }
+
+        async fn wait_completed(&self, key: &str) {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if matches!(self.owner.session_turn_delivery_state(&self.principal.principal_id,self.session.as_ref(),key)
+                        .await.unwrap(),PublicTurnDeliveryState::Completed(_)) { break; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+        }
+
+        async fn live_successor(&self, model: &LiveModel, key: &str) -> OperationId {
+            let accepted = call(&self.router, &format!("/api/agent-sessions/{}/turns",self.session.as_ref()),
+                json!({"idempotency_key":key,"input":{"content":format!("CONTEXT_CLEAR_LIVE_SUCCESSOR {key}")}})).await;
+            model.entered().await;
+            let operation = OperationId::from(accepted["operation_id"].as_str().unwrap().to_owned());
+            assert_eq!(self.owner.canonical.store().head(&self.session).await.unwrap().active_turn_id.as_deref(),Some(operation.as_ref()));
+            assert!(self.owner.runtime_sessions.observe_runtime_carrier(self.session.as_ref()).active_generation.is_some());
+            operation
         }
 
         async fn finish(self) {
@@ -197,7 +268,8 @@ mod tests {
 
     #[tokio::test]
     async fn cron_run_clears_once_before_input_and_redelivery_preserves_later_runtime() {
-        let f = Fixture::new().await;
+        let model = LiveModel::new().await;
+        let f = Fixture::with_model_url(Some(&model.url)).await;
         f.seed_prior_turn("prior").await;
         let job = Uuid::now_v7().to_string();
         let run = Uuid::now_v7().to_string();
@@ -217,19 +289,33 @@ mod tests {
         f.warm().await;
         let delivered=f.owner.prepare_runtime_and_send(request.clone()).await.unwrap();
         assert!(!delivered.delivery.replayed);
-        tokio::time::timeout(Duration::from_secs(10),async { loop {
-            if matches!(f.owner.session_turn_delivery_state(&f.principal.principal_id,f.session.as_ref(),"cron-turn").await.unwrap(),PublicTurnDeliveryState::Completed(_)) { break; }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }}).await.unwrap();
+        f.wait_completed("cron-turn").await;
         assert_eq!(f.clear_count().await,1);
-        let requests=f.upstream.received_requests().await.unwrap();
+        let requests=model.state.requests.lock().unwrap().clone();
         assert!(!requests.is_empty());
-        for request in requests { assert!(!String::from_utf8_lossy(&request.body).contains("PRIVATE_PRE_CLEAR_CONTEXT")); }
-        f.warm().await;
+        for request in requests { assert!(!request.to_string().contains("PRIVATE_PRE_CLEAR_CONTEXT")); }
+        // A pure warmup can legitimately reuse the closed Cron carrier until
+        // automatic retirement runs. Admit a real later Turn and hold its
+        // original model request instead of assuming an idle cache stays live.
+        let later_operation=f.live_successor(&model,"live-after-cron").await;
+        let later=f.owner.runtime_sessions.get_runtime(f.session.as_ref()).unwrap();
+        let later_carrier=f.owner.runtime_sessions.observe_runtime_carrier(f.session.as_ref());
+        let model_calls=model.calls();
         let replay=f.owner.prepare_runtime_and_send(request.clone()).await.unwrap();
         assert!(replay.delivery.replayed);
         assert!(f.owner.runtime_sessions.has_owned_runtime(f.session.as_ref()));
+        let preserved=f.owner.runtime_sessions.get_runtime(f.session.as_ref()).unwrap();
+        assert!(std::ptr::eq(later.as_runtime(),preserved.as_runtime()),"a Cron replay cannot retire or rebind the actual live successor");
+        let observed=f.owner.runtime_sessions.observe_runtime_carrier(f.session.as_ref());
+        assert_eq!(observed.instance_id,later_carrier.instance_id);
+        assert_eq!(observed.active_generation,later_carrier.active_generation);
+        assert!(!observed.stop_requested&&!observed.teardown_pending);
+        assert_eq!(f.owner.canonical.store().head(&f.session).await.unwrap().active_turn_id.as_deref(),Some(later_operation.as_ref()));
+        assert_eq!(model.calls(),model_calls,"exact redelivery does not invoke the model again");
         assert_eq!(f.clear_count().await,1);
+        model.state.release.add_permits(1);
+        f.wait_completed("live-after-cron").await;
+        drop(preserved);drop(later);
         // Simulate a crash after clear but before admission, followed by a
         // different user request. Retrying that unaccepted run must preserve it.
         let mut interrupted=request;
@@ -240,11 +326,26 @@ mod tests {
             .bind(&run).bind(&interrupted.turn.runtime.overlay.cron_job_id).bind(&run)
             .bind(f.session.as_ref()).execute(&f.owner.pool).await.unwrap();
         f.owner.clear_session_context(&f.principal.principal_id,&f.session,&format!("cron-context-clear:{run}"),"cron_run").await.unwrap();
-        f.seed_prior_turn("intervening-input").await;
-        f.warm().await;
+        let intervening_operation=f.live_successor(&model,"live-after-interrupted-clear").await;
+        let intervening=f.owner.runtime_sessions.get_runtime(f.session.as_ref()).unwrap();
+        let intervening_carrier=f.owner.runtime_sessions.observe_runtime_carrier(f.session.as_ref());
+        let before_rejection=model.calls();
         assert!(f.owner.prepare_runtime_and_send(interrupted).await.is_err());
         assert_eq!(f.clear_count().await,2);
         assert!(f.owner.runtime_sessions.has_owned_runtime(f.session.as_ref()));
+        let preserved=f.owner.runtime_sessions.get_runtime(f.session.as_ref()).unwrap();
+        assert!(std::ptr::eq(intervening.as_runtime(),preserved.as_runtime()),"an old clear boundary cannot stop the live intervening input");
+        let observed=f.owner.runtime_sessions.observe_runtime_carrier(f.session.as_ref());
+        assert_eq!(observed.instance_id,intervening_carrier.instance_id);
+        assert_eq!(observed.active_generation,intervening_carrier.active_generation);
+        assert!(!observed.stop_requested&&!observed.teardown_pending);
+        assert_eq!(f.owner.canonical.store().head(&f.session).await.unwrap().active_turn_id.as_deref(),Some(intervening_operation.as_ref()));
+        assert_eq!(model.calls(),before_rejection,"a rejected interrupted run neither replays itself nor the live successor");
+        let missing=NomiCoreSessionOwner::turn_operation_id(&f.principal.principal_id,f.session.as_ref(),"interrupted-run");
+        assert_eq!(f.owner.canonical.store().read_turn_receipt(&f.session,&missing).await.unwrap().status,nomifun_agent_session::TurnReceiptStatus::NotFound);
+        model.state.release.add_permits(1);
+        f.wait_completed("live-after-interrupted-clear").await;
+        drop(preserved);drop(intervening);
         f.finish().await;
     }
 
@@ -292,7 +393,7 @@ mod tests {
         let f=Fixture::new().await;
         f.seed_prior_turn("original-window").await;
         let registry=Arc::new(CompanionRegistry::scan(f._root.path().join("companions"),f._root.path().join("shared")).unwrap());
-        let companion=registry.create("Archive fixture","ink").await.unwrap();
+        let companion=registry.create("Archive fixture","mochi").await.unwrap();
         let store=CompanionStore::open_memory().await.unwrap();
         store.insert_companion_thread(f.session.as_ref(),&companion.companion_id,"Archive fixture").await.unwrap();
         let started=Arc::new(tokio::sync::Notify::new());

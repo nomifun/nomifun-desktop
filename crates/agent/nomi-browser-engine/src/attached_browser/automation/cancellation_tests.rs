@@ -116,7 +116,9 @@ async fn stop_at(cut: Cut) -> (Vec<String>, bool) {
             )]
             .into(),
         })),
-        operations: Arc::new(tokio::sync::Mutex::new(())),
+        operations: Arc::new(tokio::sync::RwLock::new(())),
+        targets: Mutex::new(Default::default()),
+        inputs: Arc::new(tokio::sync::Mutex::new(())),
         incarnation: "fixture-incarnation".into(),
         browser_identity: [0; 32],
         chromium_major: 144,

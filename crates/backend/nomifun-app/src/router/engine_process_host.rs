@@ -24,6 +24,10 @@ use tokio_util::sync::CancellationToken;
 const MAX_STDIN_WRITE_BYTES: usize = 1024 * 1024;
 const COMPONENT_PREPARATION_WAIT: Duration = Duration::from_secs(11 * 60);
 
+#[cfg(test)]
+#[path="engine_process_resource_tests.rs"]
+mod resource_tests;
+
 fn error(value: impl std::fmt::Display) -> Wave2HostPortError {
     Wave2HostPortError::new("CAPABILITY_UNAVAILABLE", value.to_string())
 }
@@ -168,7 +172,40 @@ pub(crate) struct EngineProcessScope {
     owner_id: String,
     owner_generation: String,
     canonical: std::sync::OnceLock<nomifun_agent_session::AgentSessionStore>,
+    controls: std::sync::Mutex<BTreeMap<String,Arc<ProcessControl>>>,
+    tasks: Option<Arc<dyn nomifun_conversation::BackgroundTaskRegistrar>>,
+    weak:std::sync::OnceLock<std::sync::Weak<EngineProcessScope>>,
+    registry:std::sync::OnceLock<std::sync::Weak<ProcessScopeRegistry>>,
+    cache_retirement:std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
+
+pub(crate) type ProcessScopeRegistry=std::sync::Mutex<HashMap<(String,String),Arc<EngineProcessScope>>>;
+
+#[derive(Clone,Debug)]
+pub(crate) struct ProcessInstanceObservation {
+    pub owner_generation:String,pub process_id:String,pub creator_turn_id:String,pub creator_call_id:String,
+    pub stop_requested:bool,pub stop_in_flight:bool,pub execution_stopped:bool,pub cleanup_unconfirmed:bool,pub display_name:Option<String>,
+}
+
+#[derive(Clone,Copy,Debug)]
+pub(crate) struct ProcessStopReceipt {pub accepted:bool,pub execution_stopped:bool}
+
+struct ProcessControl {
+    native:nomifun_engine_core::EngineProcessCancellation,
+    creator_turn_id:String,creator_call_id:String,display_name:Option<String>,
+    stop_requested:AtomicBool,reaped:AtomicBool,failed:AtomicBool,
+    worker:std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    process:Option<nomifun_agent_contracts::NativeRetainedProcess>,
+    pending_terminal:std::sync::Mutex<Option<EngineProcessPoll>>,
+    receipt_committed:AtomicBool,
+    changes:tokio::sync::watch::Sender<u64>,
+    component_identity:Option<StrictJsonValue>,
+}
+
+/// A pure in-process owner peek. It never polls, retires, renews a process
+/// lease, or converts a missing native result into cleanup proof.
+#[derive(Clone,Copy,Debug)]
+pub(crate) struct ProcessResourceObservation {pub busy:bool,pub cleanup_unconfirmed:bool,pub active:bool,pub reaped:bool}
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ProcessAuthority {
@@ -244,6 +281,182 @@ async fn prepare_while_turn_open<T>(session:&CancellationToken,turn:&Cancellatio
 }
 
 impl EngineProcessScope {
+    pub(crate) fn instance_observations(&self)->Result<Vec<ProcessInstanceObservation>,Wave2HostPortError> {
+        Ok(self.controls.lock().map_err(error)?.iter().map(|(id,control)|ProcessInstanceObservation {
+            owner_generation:self.owner_generation.clone(),process_id:id.clone(),creator_turn_id:control.creator_turn_id.clone(),
+            creator_call_id:control.creator_call_id.clone(),stop_requested:control.stop_requested.load(Ordering::Acquire),
+            stop_in_flight:control.worker.lock().map(|worker|worker.as_ref().is_some_and(|worker|!worker.is_finished())).unwrap_or(false),
+            execution_stopped:control.reaped.load(Ordering::Acquire),cleanup_unconfirmed:control.failed.load(Ordering::Acquire)
+                ||(control.stop_requested.load(Ordering::Acquire)&&!control.reaped.load(Ordering::Acquire))
+                ||(control.reaped.load(Ordering::Acquire)&&!control.receipt_committed.load(Ordering::Acquire)),
+            display_name:control.display_name.clone(),
+        }).collect())
+    }
+
+    pub(crate) fn stop_instance(&self,generation:&str,process:&str,creator_turn:&str,creator_call:&str)
+        ->Result<ProcessStopReceipt,Wave2HostPortError> {
+        if generation!=self.owner_generation {return Err(error("process resource owner generation changed"));}
+        let control=self.controls.lock().map_err(error)?.get(process).cloned()
+            .ok_or_else(||error("the original process resource is not registered"))?;
+        if control.creator_turn_id!=creator_turn||control.creator_call_id!=creator_call {return Err(error("process resource creator changed"));}
+        control.changes.send_modify(|revision|*revision=revision.wrapping_add(1));
+        let mut worker=control.worker.lock().map_err(error)?;
+        if !control.reaped.load(Ordering::Acquire)&&worker.as_ref().is_none_or(|worker|worker.is_finished()) {
+            control.stop_requested.store(true,Ordering::Release);
+            let original=control.clone();
+            let (finished,completion)=tokio::sync::oneshot::channel();
+            // Only the capability captured from this native owner is used;
+            // no scope state lock, new Turn, PID lookup or Session teardown.
+            let task=tokio::spawn(async move {
+                match original.native.cancel().await {
+                    Ok(receipt)=>{
+                        original.reaped.store(receipt.reaped,Ordering::Release);original.failed.store(!receipt.cleanup_confirmed,Ordering::Release);
+                        *original.pending_terminal.lock().unwrap_or_else(std::sync::PoisonError::into_inner)=receipt.terminal;
+                    }
+                    Err(_)=>{original.failed.store(true,Ordering::Release);}
+                }
+                original.changes.send_modify(|revision|*revision=revision.wrapping_add(1));
+                let _=finished.send(());
+            });
+            if let Some(tasks)=&self.tasks {
+                // The registry owns its waiter while the original control
+                // retains the native task if that waiter is cancelled at Quit.
+                let _=tasks.spawn(Box::pin(async move {let _=completion.await;}));
+            }
+            *worker=Some(task);
+        }
+        Ok(ProcessStopReceipt {accepted:true,execution_stopped:control.reaped.load(Ordering::Acquire)})
+    }
+
+    pub(crate) fn with_task_registrar(mut self,tasks:Option<Arc<dyn nomifun_conversation::BackgroundTaskRegistrar>>)->Self {self.tasks=tasks;self}
+    pub(crate) fn bind_owner(self:&Arc<Self>,registry:&Arc<ProcessScopeRegistry>) {
+        let _=self.weak.set(Arc::downgrade(self));let _=self.registry.set(Arc::downgrade(registry));
+    }
+
+    fn observe_native_terminal(&self,id:String,control:Arc<ProcessControl>) {
+        let Some(weak)=self.weak.get().cloned() else {return;};
+        let mut changes=control.changes.subscribe();
+        let shutdown=self.tasks.as_ref().map(|tasks|tasks.shutdown_signal());
+        let task=async move {
+            let mut shutdown=shutdown;
+            let mut retry=Duration::from_secs(1);
+            let terminal_wait=control.native.wait_for_terminal();
+            tokio::pin!(terminal_wait);
+            let mut waiting=true;
+            loop {
+                let inspect_native=control.pending_terminal.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_none();
+                if inspect_native
+                    && let Some(receipt)=control.native.terminal_if_ready() {
+                    control.reaped.store(receipt.reaped,Ordering::Release);control.failed.store(!receipt.cleanup_confirmed,Ordering::Release);
+                    let mut pending=control.pending_terminal.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if pending.is_none() {*pending=receipt.terminal;}
+                }
+                let known=control.reaped.load(Ordering::Acquire)&&!control.failed.load(Ordering::Acquire);
+                if known {
+                    let Some(scope)=weak.upgrade() else {return;};
+                    match scope.settle_reaped_instance(&id,&control).await {
+                        Ok(true)=>{scope.retire_empty_scope();return;},
+                        Ok(false)=>{},
+                        Err(error)=>tracing::warn!(agent_session_id=%scope.session_id,process_id=%id,%error,"original process terminal receipt remains pending"),
+                    }
+                } else if weak.upgrade().is_none() {return;}
+                // Only a measured terminal waiting on its original receipt has
+                // retry backoff. Live processes wait on their native watch;
+                // this never polls models, starts work or imposes a task TTL.
+                tokio::select! {
+                    _=async {if let Some(signal)=&mut shutdown {signal.await}else {std::future::pending::<()>().await}}=>return,
+                    terminal=&mut terminal_wait,if waiting=>{
+                        waiting=false;
+                        match terminal {
+                            Ok(receipt)=>{
+                                control.reaped.store(receipt.reaped,Ordering::Release);control.failed.store(!receipt.cleanup_confirmed,Ordering::Release);
+                                *control.pending_terminal.lock().unwrap_or_else(std::sync::PoisonError::into_inner)=receipt.terminal;
+                            },
+                            Err(error)=>{
+                                control.failed.store(true,Ordering::Release);
+                                tracing::warn!(process_id=%id,%error,"original native terminal subscription unavailable; resource retained");
+                            },
+                        }
+                        retry=Duration::from_secs(1);
+                    },
+                    changed=changes.changed()=>{if changed.is_err(){return;}retry=Duration::from_secs(1);},
+                    _=async {if known {tokio::time::sleep(retry).await}else {std::future::pending::<()>().await}}=>{
+                        retry=(retry*2).min(Duration::from_secs(30));
+                    },
+                }
+            }
+        };
+        if let Some(tasks)=&self.tasks {let _=tasks.spawn(Box::pin(task));} else {tokio::spawn(task);}
+    }
+
+    async fn settle_reaped_instance(&self,id:&str,control:&Arc<ProcessControl>)->Result<bool,Wave2HostPortError> {
+        if !self.archive_terminal(control).await? {return Ok(false);}
+        let Some(process)=control.process.as_ref() else {return Ok(false);};
+        let Ok(mut state)=self.state.try_lock() else {return Ok(false);};
+        if let Some(entry)=state.sessions.get(id) {
+            if entry.creator_operation!=process.creator_turn_id.as_ref()||entry.creator_call!=process.creator_call_id.as_ref()
+                ||entry.session.pid()!=process.pid {return Err(outcome_unknown("process terminal no longer matches its original creator"));}
+        }
+        state.sessions.remove(id);
+        let mut controls=self.controls.lock().map_err(error)?;
+        if controls.get(id).is_some_and(|current|Arc::ptr_eq(current,control)) {controls.remove(id);}
+        Ok(true)
+    }
+
+    /// Persist the original terminal and cursor replay before releasing even
+    /// the last handle. Quit calls this too after background watches stopped.
+    async fn archive_terminal(&self,control:&Arc<ProcessControl>)->Result<bool,Wave2HostPortError> {
+        if control.receipt_committed.load(Ordering::Acquire) {return Ok(true);}
+        let Some(process)=control.process.clone() else {return Ok(false);};
+        let Some(store)=self.canonical.get() else {return Ok(false);};
+        let Some(replay)=control.native.frozen_output() else {return Ok(false);};
+        let terminal=control.native.terminal_if_ready().and_then(|receipt|receipt.terminal)
+            .or_else(||control.pending_terminal.lock().ok().and_then(|terminal|terminal.clone()))
+            .ok_or_else(||outcome_unknown("native terminal observation missing"))?;
+        let terminal=terminal.replay_output(&replay,0).map_err(error)?;
+        let retention=nomifun_agent_contracts::NativeSessionProcessRetention {agent_session_id:self.session_id.as_str().into(),
+            owner_ref:nomifun_agent_contracts::PrincipalRef {principal_kind:"user".into(),principal_id:self.owner_id.clone()},
+            owner_generation:self.owner_generation.clone(),processes:vec![process.clone()]};
+        let owner=retention.owner_ref.clone();
+        store.record_session_process_reaped_with_output(&owner,nomifun_agent_contracts::SessionProcessReapedV1 {
+            retention,terminal:Some(StrictJsonValue(serde_json::to_value(terminal).map_err(error)?)),terminal_ref:None,
+            output_replay:None,output_archive:None,component_identity:control.component_identity.clone(),
+        },&replay).await.map_err(error)?;
+        if !control.native.release_terminal().await.map_err(error)? {return Ok(false);}
+        control.receipt_committed.store(true,Ordering::Release);
+        Ok(true)
+    }
+
+    pub(crate) fn retire_empty_scope(self:&Arc<Self>) {
+        let Some(registry)=self.registry.get().and_then(std::sync::Weak::upgrade) else {return;};
+        let mut worker=self.cache_retirement.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if worker.as_ref().is_some_and(|worker|!worker.is_finished()) {return;}
+        let scope=self.clone();
+        let (finished,completion)=tokio::sync::oneshot::channel();
+        *worker=Some(tokio::spawn(async move {
+            // A transient activity peek or the tail of the original invocation
+            // cannot lose the only cache-retirement notification. No new work
+            // or native cleanup is admitted by this retained owner task.
+            let state=scope.state.lock().await;
+            let mut registry=registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let turn=scope.turn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let key=(scope.owner_id.clone(),scope.session_id.clone());
+            if registry.get(&key).is_some_and(|current|Arc::ptr_eq(current,&scope))
+                &&state.sessions.is_empty()&&!state.unregistered_start&&!state.cleanup_panicked&&turn.is_none() {
+                scope.closed.store(true,Ordering::Release);scope.cancellation.cancel();registry.remove(&key);
+            }
+            let _=finished.send(());
+        }));
+        if let Some(tasks)=&self.tasks {let _=tasks.spawn(Box::pin(async move {let _=completion.await;}));}
+    }
+    pub(crate) fn observe_resources(&self)->ProcessResourceObservation {
+        match self.state.try_lock() {
+            Ok(state)=>ProcessResourceObservation {busy:false,cleanup_unconfirmed:state.unregistered_start||state.cleanup_panicked,
+                active:state.sessions.values().any(|entry|entry.terminal.is_none()),reaped:state.is_quiescent()},
+            Err(_)=>ProcessResourceObservation {busy:true,cleanup_unconfirmed:true,active:false,reaped:false},
+        }
+    }
+
     /// Wait on retained owner output/terminals. No tool admission, stdout reader,
     /// process lease renewal or change to the original deadline occurs here.
     pub(crate) async fn wait_for_changes(&self, processes: &[nomifun_agent_runtime::AgentWaitProcess],
@@ -326,6 +539,7 @@ impl EngineProcessScope {
             closed: false.into(),
             session_id: session_id.into(), owner_id: owner_id.into(), owner_generation: uuid::Uuid::now_v7().to_string(),
             canonical: std::sync::OnceLock::new(),
+            controls:Default::default(),tasks:None,weak:Default::default(),registry:Default::default(),cache_retirement:Default::default(),
         })
     }
 
@@ -345,6 +559,7 @@ impl EngineProcessScope {
         if current.operation != operation { return Err(error("process Turn closure targets a different owner")); }
         current.closed.store(true, Ordering::Release);
         current.cancellation.cancel();
+        for control in self.controls.lock().map_err(error)?.values() {control.changes.send_modify(|revision|*revision=revision.wrapping_add(1));}
         *turn = None;
         Ok(())
     }
@@ -403,7 +618,15 @@ impl EngineProcessScope {
             owner_ref: nomifun_agent_contracts::PrincipalRef { principal_kind: "user".into(), principal_id: self.owner_id.clone() },
             owner_generation: self.owner_generation.clone(), processes };
         let confirmed = store.confirmed_reaped_session_processes(&retention).await.map_err(error)?;
-        state.sessions.retain(|id, _| !confirmed.contains(id));
+        for id in confirmed {
+            let control=self.controls.lock().map_err(error)?.get(&id).cloned();
+            if let Some(control)=control {
+                if self.archive_terminal(&control).await? {
+                    state.sessions.remove(&id);
+                    self.controls.lock().map_err(error)?.remove(&id);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -601,6 +824,12 @@ impl EngineProcessScope {
         let intent = serde_json::to_string(&ProcessWitness::Dispatch {
             operation_id: operation_id.to_owned(),
             ordinal,
+            process_owner: turn.authority.as_ref().map(|authority| {
+                Ok::<_,Wave2HostPortError>(nomifun_agent_contracts::NativeProcessOwnerIdentity {
+                    owner_generation: self.owner_generation.clone(),
+                    resource_binding_digest: nomifun_agent_contracts::digest_payload(&authority.resources).map_err(error)?,
+                })
+            }).transpose()?,
         })
         .map_err(error)?;
         // Hold the same scope lock through effect and barrier. A later spawn
@@ -705,6 +934,10 @@ impl EngineProcessScope {
             // window. Errors returned by the owner may still require repair.
             request.validate().map_err(error)?;
             resolve_managed_program(&mut request, &turn.cancellation, self.workspace_root()).await?;
+            let display_name=if request.shell_script.is_some() {Some("Shell process".into())} else {
+                Path::new(&request.command).file_name().and_then(|name|name.to_str())
+                    .filter(|name|!name.is_empty()&&name.len()<=128&&!name.chars().any(char::is_control)).map(str::to_owned)
+            };
             state.unregistered_start = true;
             let session = match self
                 .owner
@@ -715,6 +948,18 @@ impl EngineProcessScope {
                 Err(failure) => return process_start_failure(&mut state.unregistered_start, failure),
             };
             let id = session.session_id();
+            let process=turn.authority.as_ref().map(|authority|Ok::<_,Wave2HostPortError>(nomifun_agent_contracts::NativeRetainedProcess {
+                process_id:id.clone(),pid:session.pid(),creator_turn_id:turn.operation.as_str().into(),creator_call_id:operation_id.into(),
+                resolved_snapshot_ref:authority.snapshot.clone(),resource_binding_digest:nomifun_agent_contracts::digest_payload(&authority.resources).map_err(error)?,
+            })).transpose()?;
+            let control=Arc::new(ProcessControl {
+                native:self.owner.cancellation_handle(&session),creator_turn_id:turn.operation.clone(),creator_call_id:operation_id.into(),
+                display_name,stop_requested:false.into(),reaped:false.into(),failed:false.into(),worker:Default::default(),
+                process,pending_terminal:Default::default(),receipt_committed:false.into(),changes:tokio::sync::watch::channel(0).0,
+                component_identity:identity.clone(),
+            });
+            self.controls.lock().map_err(error)?.insert(id.clone(),control.clone());
+            self.observe_native_terminal(id.clone(),control);
             // No await between owned spawn and registration in the scope.
             sessions.insert(
                 id.clone(),
@@ -747,12 +992,24 @@ impl EngineProcessScope {
         };
         let entry = match sessions.get_mut(&id) {
             Some(entry) => entry,
-            None if !launch => return Ok(StrictJsonValue(serde_json::json!({
+            None if !launch => {
+                if let (Some(store),Some(authority))=(self.canonical.get(),turn.authority.as_ref()) {
+                    let owner=nomifun_agent_contracts::PrincipalRef {principal_kind:"user".into(),principal_id:self.owner_id.clone()};
+                    let resources=nomifun_agent_contracts::digest_payload(&authority.resources).map_err(error)?;
+                    if let Some((poll,component_identity))=store.session_process_terminal(&owner,&self.session_id.as_str().into(),&id,
+                        &authority.snapshot,&resources,&params.operation.action_id(),params.cursor.unwrap_or(0)).await.map_err(error)? {
+                        let result=if matches!(params.operation,Operation::Poll|Operation::Cancel) {process_output(&id,&poll,params.operation)}
+                            else {rejected_terminal_control(&id,&poll,params.operation)};
+                        return with_component_identity(result,component_identity.as_ref());
+                    }
+                }
+                return Ok(StrictJsonValue(serde_json::json!({
                 "schema":"nomifun.process-control-observation.v1",
                 "state":"not_executed", "success":false, "control_applied":false,
                 "operation":params.operation, "code":"PROCESS_REFERENCE_INVALID",
                 "message":"The process_id is not available in this exact Session. No process control was applied. Copy the exact process_id from start_process or its later receipt, then correct this call. Process capability remains available. Do not start a replacement merely to recover a mistyped reference; the original process may still be running."
-            }))),
+            })));
+            },
             None => return Err(error("process_id is not owned by this exact Session")),
         };
         let input_control = matches!(params.operation, Operation::Stdin | Operation::CloseStdin | Operation::Resize);
@@ -877,6 +1134,9 @@ impl EngineProcessScope {
         } = &mut *state;
         for (id, entry) in sessions.iter_mut() {
             if entry.terminal.as_ref().is_some_and(cleanup_is_proven) {
+                if let Some(control)=self.controls.lock().map_err(error)?.get(id) {
+                    *control.pending_terminal.lock().map_err(error)?=entry.terminal.clone();
+                }
                 continue;
             }
             let outcome = AssertUnwindSafe(async { self.owner.cancel(&mut entry.session).await })
@@ -884,6 +1144,9 @@ impl EngineProcessScope {
                 .await;
             match outcome {
                 Ok(Ok(poll)) if cleanup_is_proven(&poll) => {
+                    if let Some(control)=self.controls.lock().map_err(error)?.get(id) {
+                        *control.pending_terminal.lock().map_err(error)?=Some(poll.clone());
+                    }
                     entry.terminal = Some(poll);
                 }
                 Ok(Ok(_)) => failures.push(format!("{id}: cleanup not proven")),
@@ -893,6 +1156,19 @@ impl EngineProcessScope {
                     // waiter is dropped while another handle is settling.
                     *cleanup_panicked = true;
                     failures.push(format!("{id}: cleanup panicked; settlement unknown"));
+                }
+            }
+        }
+        // TaskTracker shutdown can already have stopped the natural terminal
+        // watcher. Preserve every original bounded terminal/decoder receipt
+        // here before the caller writes whole-owner release or drops handles.
+        let controls=self.controls.lock().map_err(error)?.values().cloned().collect::<Vec<_>>();
+        for control in controls {
+            if control.process.is_some()&&(control.native.terminal_if_ready().is_some()||control.pending_terminal.lock().map_err(error)?.is_some()) {
+                match self.archive_terminal(&control).await {
+                    Ok(true)=>{},
+                    Ok(false)=>failures.push("original terminal output or exact native registry release remains pending".into()),
+                    Err(cause)=>failures.push(cause.to_string()),
                 }
             }
         }
@@ -1109,7 +1385,8 @@ mod tests {
         assert!(scope.retention().await.unwrap().processes.is_empty());
         let retired = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"poll", "process_id":last})),
             "observe-retired-command", Some("turn")).await.unwrap();
-        assert_eq!(retired.0["code"], "PROCESS_REFERENCE_INVALID");
+        assert_eq!(retired.0["state"], "exited");
+        assert_eq!(retired.0["output"]["text"], "short-result");
         assert!(scope.state.lock().await.sessions.is_empty(), "a retired reference cannot start or recreate a process");
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='host_tool_settled'")
             .fetch_one(&pool).await.unwrap();

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use nomifun_common::{
-    AdaptationPolicy, AgentExecutionActor, AgentExecutionEventKind, AgentExecutionStatus,
+    AdaptationPolicy, AgentExecutionActor, AgentExecutionCancellationScope, AgentExecutionEventKind, AgentExecutionStatus,
     AgentStepMode, AgentToolPolicy, DecisionPolicy, DelegationPolicy, ExecutionAttemptStatus,
     ExecutionStepKind,
     ExecutionStepStatus, ParticipantAssignmentSource, StepFailurePolicy,
@@ -147,6 +147,9 @@ impl std::fmt::Debug for AgentExecutionTurnAuthority {
 pub enum AgentExecutionAttemptRecoveryDisposition {
     /// A queued reservation had not started and was safely returned to Pending.
     QueuedRescheduled,
+    /// The original canonical Turn still owns its live Session. Follow its
+    /// receipt without retiring its link or admitting another invocation.
+    OngoingTurnObserved,
     /// The exact initial-turn receipt was already terminal and was adopted.
     CompletedReceiptAdopted,
     /// The exact canonical Turn was cancelled; no retry or failure is inferred.
@@ -349,6 +352,46 @@ pub struct PendingConversationCleanup {
     pub step_id: String,
     pub attempt_id: String,
     pub conversation_id: String,
+    /// Derived from this exact Attempt's original effect/event facts. It is a
+    /// read projection, including for a soft-deleted Execution, never a target
+    /// selected from the Session's latest Turn.
+    pub target: ConversationCleanupTurnTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationCleanupTurnTarget {
+    Exact { operation_id: String },
+    Unconfirmed { reason: String },
+}
+
+/// One read snapshot of an exact inactive task's original retirement facts.
+/// This is observation only, including after soft deletion of the Execution;
+/// it grants no work, cancellation, replay or native cleanup authority.
+#[derive(Debug, Clone)]
+pub struct AgentExecutionTaskRetirementFacts {
+    pub execution: AgentExecutionRow,
+    /// The exact historical owner requested for cleanup, never a successor.
+    pub original_attempt: AgentExecutionAttemptDetailRow,
+    /// Current Step state and its real latest Attempt. Historical ownership
+    /// above must not be substituted into this ordinary current projection.
+    pub detail: AgentExecutionStepDetailRow,
+    pub target: ConversationCleanupTurnTarget,
+    pub events: Vec<AgentExecutionEventRow>,
+}
+
+/// Read-only position in one finite cleanup sweep. Link IDs never change;
+/// the high watermark excludes arrivals until the next sweep so failed older
+/// work is retried even while new links are continuously retired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConversationCleanupCursor {
+    pub after_link_id: i64,
+    pub through_link_id: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingConversationCleanupPage {
+    pub cleanups: Vec<PendingConversationCleanup>,
+    pub next_cursor: Option<ConversationCleanupCursor>,
 }
 
 /// Atomic reset requested when a Loop controller settles one iteration and
@@ -462,6 +505,13 @@ pub trait IAgentExecutionRepository: Send + Sync {
         &self,
         statuses: &[AgentExecutionStatus],
     ) -> Result<Vec<AgentExecutionRow>, DbError>;
+    /// A restart may observe the original source Stop before its downstream
+    /// aggregate cancellation. Only that exact claim generation is evidence.
+    async fn automation_source_cancelled(&self,user_id:&str,execution_id:&str)->Result<bool,DbError>;
+    /// Cleanup-only lookup. A soft-deleted source cannot be admitted again or
+    /// disappear as evidence that its exact native owner has stopped.
+    async fn automation_source_cleanup_execution(&self,user_id:&str,requirement_id:&str,claim_generation:i64,
+        source_operation_id:&str)->Result<Option<String>,DbError>;
 
     /// General aggregate mutation. It never reopens a terminal execution;
     /// settled-result reopening is intentionally confined to the versioned
@@ -475,15 +525,14 @@ pub trait IAgentExecutionRepository: Send + Sync {
         params: &UpdateAgentExecutionParams,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionRow, DbError>;
-    /// Pause revokes the scheduler lease atomically. Already closed Turns are
-    /// settled only from exact typed canonical outputs; ambiguous running
-    /// effects are review blocked instead of being returned to Pending.
+    /// Pause scheduling atomically. Already admitted invocations keep their
+    /// exact owner, link and lease until settlement; this does not freeze a
+    /// native Turn or authorize cancellation/replay of its effects.
     async fn pause_execution(
         &self,
         user_id: &str,
         execution_id: &str,
         expected_version: i64,
-        recovered_outputs: &[RecoveredAgentExecutionAttemptOutput],
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionRow, DbError>;
     /// Resume from Paused to WaitingInput when any durable question remains,
@@ -500,6 +549,19 @@ pub trait IAgentExecutionRepository: Send + Sync {
         user_id: &str,
         execution_id: &str,
         expected_version: i64,
+        event: &NewAgentExecutionEvent,
+    ) -> Result<AgentExecutionDetailRows, DbError>;
+    /// Persist a user stop for the exact Step, its delegated work, or both.
+    /// Dependency edges are never ownership. The writer lock also fences
+    /// concurrent delegation; delegation-only preserves parent business work.
+    async fn cancel_step(
+        &self,
+        user_id: &str,
+        execution_id: &str,
+        expected_execution_version: i64,
+        step_id: &str,
+        expected_step_version: i64,
+        scope: AgentExecutionCancellationScope,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionDetailRows, DbError>;
     /// Scheduler-only fatal aggregate transition. Under the same lease-fenced
@@ -646,6 +708,18 @@ pub trait IAgentExecutionRepository: Send + Sync {
         event: &NewAgentExecutionEvent,
     ) -> Result<AttemptConversationEffectResult, DbError>;
 
+    /// Admit a previously accepted decision from its original outbox only
+    /// when the user's existing reservations permit it. None means queued;
+    /// it is neither a failure nor permission to create another Attempt.
+    async fn admit_waiting_attempt_input(
+        &self, user_id: &str, execution_id: &str, step_id: &str, attempt_id: &str,
+        lease: &AgentExecutionLeaseToken, event: &NewAgentExecutionEvent,
+    ) -> Result<Option<AgentExecutionStepDetailRow>, DbError>;
+
+    /// A read-only projection of exact native owner handoffs. Workspace
+    /// responsibility is retained separately from yielded model capacity.
+    async fn attempt_reservations(&self, execution_id: &str) -> Result<Vec<crate::AgentExecutionReservation>, DbError>;
+
     /// Persist a conversation side effect and its audit event before any
     /// external delivery.  The exact active attempt link is resolved in the
     /// same transaction and returned to the caller.
@@ -762,6 +836,16 @@ pub trait IAgentExecutionRepository: Send + Sync {
         user_id: &str,
         conversation_id: &str,
     ) -> Result<Vec<ConversationExecutionLinkRow>, DbError>;
+
+    /// Read the exact original Attempt alongside the real current task state.
+    /// Ordinary get/list visibility stays unchanged for soft-deleted rows.
+    /// Implementations without this exact evidence remain fail-closed.
+    async fn read_task_retirement_facts(
+        &self, _user_id: &str, _conversation_id: &str, _execution_id: &str,
+        _step_id: &str, _attempt_id: &str,
+    ) -> Result<Option<AgentExecutionTaskRetirementFacts>, DbError> {
+        Ok(None)
+    }
     /// Returns whether the conversation is an execution-attempt transcript
     /// owned by `user_id`. Unlike the runtime relation read-side, this audit
     /// guard deliberately includes inactive links and soft-deleted executions.
@@ -777,8 +861,9 @@ pub trait IAgentExecutionRepository: Send + Sync {
     async fn list_pending_conversation_cleanups(
         &self,
         execution_id: Option<&str>,
+        cursor: Option<ConversationCleanupCursor>,
         limit: i64,
-    ) -> Result<Vec<PendingConversationCleanup>, DbError>;
+    ) -> Result<PendingConversationCleanupPage, DbError>;
     /// Atomically prove that the exact retired link generation is still
     /// pending and that no active Attempt link has replaced it for the same
     /// Conversation. This is the final fence immediately before cancel.

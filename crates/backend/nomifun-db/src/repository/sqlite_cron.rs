@@ -1074,6 +1074,9 @@ impl ICronRepository for SqliteCronRepository {
                 "settled cron run cannot acquire a conversation".to_owned(),
             ));
         }
+        if current.cancel_requested_at_ms.is_some() && current.conversation_id.is_none() {
+            return Err(DbError::Conflict("cancelled cron run cannot acquire a conversation".into()));
+        }
 
         sqlx::query(
             "UPDATE cron_run_reservations \
@@ -1093,6 +1096,56 @@ impl ICronRepository for SqliteCronRepository {
         .await?;
         tx.commit().await?;
         Ok(row)
+    }
+
+    async fn get_run_reservation(&self, user_id: &str, cron_job_id: &str, cron_job_run_id: &str)
+        -> Result<Option<CronRunReservationRow>, DbError> {
+        UserId::parse(user_id).map_err(|error| DbError::Conflict(format!("invalid cron owner id: {error}")))?;
+        CronJobId::parse(cron_job_id).map_err(|error| DbError::Conflict(format!("invalid cron job id: {error}")))?;
+        CronJobRunId::parse(cron_job_run_id).map_err(|error| DbError::Conflict(format!("invalid cron run id: {error}")))?;
+        Ok(sqlx::query_as::<_, CronRunReservationRow>(
+            "SELECT reservation.* FROM cron_run_reservations reservation \
+             LEFT JOIN cron_jobs job ON job.cron_job_id=reservation.cron_job_id \
+             LEFT JOIN agent_sessions session ON session.agent_session_id=reservation.conversation_id \
+             WHERE (job.user_id=? OR (job.cron_job_id IS NULL AND json_extract(session.owner_ref_json,'$.principal_kind')='user' \
+               AND json_extract(session.owner_ref_json,'$.principal_id')=?)) AND reservation.cron_job_id=? AND reservation.cron_job_run_id=?")
+            .bind(user_id).bind(user_id).bind(cron_job_id).bind(cron_job_run_id).fetch_optional(&self.pool).await?)
+    }
+
+    async fn request_run_cancellation(&self, user_id: &str, cron_job_id: &str, cron_job_run_id: &str, now: i64)
+        -> Result<CronRunReservationRow, DbError> {
+        UserId::parse(user_id).map_err(|error| DbError::Conflict(format!("invalid cron owner id: {error}")))?;
+        CronJobId::parse(cron_job_id).map_err(|error| DbError::Conflict(format!("invalid cron job id: {error}")))?;
+        CronJobRunId::parse(cron_job_run_id).map_err(|error| DbError::Conflict(format!("invalid cron run id: {error}")))?;
+        let mut tx = self.pool.begin().await?;
+        // Acquire the writer before reading: attachment/terminalization and
+        // cancellation must have one SQLite winner even across processes.
+        sqlx::query("UPDATE cron_run_reservations SET cancel_requested_at_ms=COALESCE(cancel_requested_at_ms,?),updated_at_ms=? \
+            WHERE cron_job_run_id=? AND cron_job_id=? AND status='reserved' \
+              AND (EXISTS(SELECT 1 FROM cron_jobs job WHERE job.cron_job_id=cron_run_reservations.cron_job_id AND job.user_id=?) \
+                OR (NOT EXISTS(SELECT 1 FROM cron_jobs job WHERE job.cron_job_id=cron_run_reservations.cron_job_id) \
+                  AND EXISTS(SELECT 1 FROM agent_sessions session WHERE session.agent_session_id=cron_run_reservations.conversation_id \
+                    AND json_extract(session.owner_ref_json,'$.principal_kind')='user' AND json_extract(session.owner_ref_json,'$.principal_id')=?)))")
+            .bind(now).bind(now).bind(cron_job_run_id).bind(cron_job_id).bind(user_id).bind(user_id).execute(&mut *tx).await?;
+        let row = sqlx::query_as::<_, CronRunReservationRow>(
+            "SELECT reservation.* FROM cron_run_reservations reservation \
+             LEFT JOIN cron_jobs job ON job.cron_job_id=reservation.cron_job_id \
+             LEFT JOIN agent_sessions session ON session.agent_session_id=reservation.conversation_id \
+             WHERE (job.user_id=? OR (job.cron_job_id IS NULL AND json_extract(session.owner_ref_json,'$.principal_kind')='user' \
+               AND json_extract(session.owner_ref_json,'$.principal_id')=?)) AND reservation.cron_job_id=? AND reservation.cron_job_run_id=?")
+            .bind(user_id).bind(user_id).bind(cron_job_id).bind(cron_job_run_id).fetch_optional(&mut *tx).await?
+            .ok_or_else(|| DbError::NotFound(format!("cron run '{cron_job_run_id}'")))?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    async fn attached_run_owner_for_scheduler(&self, cron_job_run_id:&str)->Result<Option<String>,DbError> {
+        let owner:Option<Option<String>>=sqlx::query_scalar("SELECT CASE WHEN job.cron_job_id IS NOT NULL THEN job.user_id \
+            WHEN json_extract(session.owner_ref_json,'$.principal_kind')='user' THEN json_extract(session.owner_ref_json,'$.principal_id') ELSE NULL END \
+            FROM cron_run_reservations reservation LEFT JOIN cron_jobs job ON job.cron_job_id=reservation.cron_job_id \
+            JOIN agent_sessions session ON session.agent_session_id=reservation.conversation_id WHERE reservation.cron_job_run_id=?")
+            .bind(cron_job_run_id).fetch_optional(&self.pool).await?;
+        Ok(owner.flatten())
     }
 
     async fn finalize_run_with_job_projection(
@@ -1130,10 +1183,13 @@ impl ICronRepository for SqliteCronRepository {
         let mut tx = self.pool.begin().await?;
         let current = sqlx::query_as::<_, CronRunReservationRow>(
             "SELECT reservation.* FROM cron_run_reservations reservation \
-             JOIN cron_jobs job ON job.cron_job_id = reservation.cron_job_id \
-             WHERE reservation.cron_job_run_id = ? AND job.user_id = ?",
+             LEFT JOIN cron_jobs job ON job.cron_job_id = reservation.cron_job_id \
+             LEFT JOIN agent_sessions session ON session.agent_session_id=reservation.conversation_id \
+             WHERE reservation.cron_job_run_id = ? AND (job.user_id = ? OR (job.cron_job_id IS NULL \
+               AND json_extract(session.owner_ref_json,'$.principal_kind')='user' AND json_extract(session.owner_ref_json,'$.principal_id')=?))",
         )
         .bind(&params.cron_job_run_id)
+        .bind(user_id)
         .bind(user_id)
         .fetch_optional(&mut *tx)
         .await?
@@ -1159,6 +1215,16 @@ impl ICronRepository for SqliteCronRepository {
         if current.job_projection_state != "pending" {
             tx.commit().await?;
             return Ok(FinalizeCronRunOutcome::LegacyProjectionUnknown);
+        }
+        if current.cancel_requested_at_ms.is_some() && params.status != "cancelled" {
+            // An old preparation callback cannot turn a user-cancelled,
+            // not-yet-claimed invocation into a scheduler failure or retry.
+            let terminal: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_turns turn WHERE turn.session_id=? \
+                  AND turn.operation_id='turn:user:'||?||':'||turn.session_id||':cron:'||?||':turn' \
+                  AND turn.state IN ('completed','failed','cancelled'))")
+                .bind(&current.conversation_id).bind(user_id)
+                .bind(&current.cron_job_run_id).fetch_one(&mut *tx).await?;
+            if !terminal { return Err(DbError::Conflict("cancelled Cron admission awaits its exact cancellation settlement".into())); }
         }
         if let (Some(existing), Some(requested)) = (
             current.conversation_id.as_deref(),
@@ -1223,6 +1289,14 @@ impl ICronRepository for SqliteCronRepository {
         if !settled {
             tx.rollback().await?;
             return Ok(FinalizeCronRunOutcome::AlreadyApplied);
+        }
+        let job_exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cron_jobs WHERE cron_job_id=?)")
+            .bind(&current.cron_job_id).fetch_one(&mut *tx).await?;
+        if !job_exists {
+            // Only the exact attached Session supplied ownership above. No
+            // deleted job is recreated and no later schedule is projected.
+            tx.commit().await?;
+            return Ok(FinalizeCronRunOutcome::Applied);
         }
 
         let project_last_run_at = params.last_run_at.is_some();
@@ -1375,7 +1449,7 @@ impl ICronRepository for SqliteCronRepository {
     ) -> Result<Vec<CronRunReservationRow>, DbError> {
         Ok(sqlx::query_as::<_, CronRunReservationRow>(
             "SELECT reservation.* FROM cron_run_reservations reservation \
-             JOIN cron_jobs job ON job.cron_job_id = reservation.cron_job_id \
+             LEFT JOIN cron_jobs job ON job.cron_job_id = reservation.cron_job_id \
              WHERE reservation.status = 'reserved' \
              ORDER BY reservation.created_at_ms, reservation.id",
         )
@@ -1804,6 +1878,58 @@ mod tests {
             assert!(repo.list_reserved_runs_for_scheduler().await.unwrap().is_empty());
             repo.delete(&owner, &job.cron_job_id).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn exact_run_cancellation_preserves_source_and_fences_attachment_claim_resume_and_old_callbacks() {
+        let (repo, db, owner) = setup().await;
+        let job = make_row(&owner);
+        repo.insert(&job).await.unwrap();
+        let other = make_row(&owner);
+        repo.insert(&other).await.unwrap();
+        let run = CronJobRunId::new().into_string();
+        let original = ReserveCronRunParams { cron_job_run_id: run.clone(), cron_job_id: job.cron_job_id.clone(),
+            trigger_kind: "run_now".into(), operation_key: format!("cancel-source:{run}"), request_fingerprint: "immutable-source".into(),
+            schedule_revision: None, planned_at_ms: None, now: 1_000 };
+        repo.reserve_run(&owner, &original).await.unwrap();
+        let foreign = CronJobRunId::new().into_string();
+        assert!(repo.request_run_cancellation(&foreign, &job.cron_job_id, &run, 1_001).await.is_err());
+        assert!(repo.request_run_cancellation(&owner, &other.cron_job_id, &run, 1_001).await.is_err());
+        assert_eq!(repo.get_run_reservation(&owner, &job.cron_job_id, &run).await.unwrap().unwrap().cancel_requested_at_ms, None);
+        let stopped = repo.request_run_cancellation(&owner, &job.cron_job_id, &run, 1_002).await.unwrap();
+        assert_eq!(stopped.cancel_requested_at_ms, Some(1_002));
+        assert_eq!(stopped.request_fingerprint, original.request_fingerprint);
+        assert_eq!(stopped.operation_key, original.operation_key);
+        assert_eq!(repo.request_run_cancellation(&owner, &job.cron_job_id, &run, 1_003).await.unwrap().cancel_requested_at_ms, Some(1_002));
+        assert!(repo.attach_run_conversation(&owner, &run, CONVERSATION_ID, 1_004).await.is_err());
+        let error = FinalizeCronRunParams { cron_job_run_id: run.clone(), status: "error".into(), conversation_id: None,
+            result_error: Some("late old preparation error".into()), now: 1_005, last_run_at: Some(1_005), last_status: Some("error".into()),
+            last_error: Some(Some("late old preparation error".into())), increment_run_count: true, reset_retry_count: false,
+            bind_job_conversation_if_unbound: false };
+        assert!(repo.finalize_run_with_job_projection(&owner, &error).await.is_err());
+        // An already-attached sibling proves the last native writer, not just
+        // a Cron preflight read, consumes the same durable cancellation fact.
+        let sibling = CronJobRunId::new().into_string();
+        let original_sibling = ReserveCronRunParams { cron_job_run_id: sibling.clone(), operation_key: format!("cancel-source:{sibling}"), ..original.clone() };
+        repo.reserve_run(&owner, &original_sibling).await.unwrap();
+        repo.attach_run_conversation(&owner, &sibling, CONVERSATION_ID, 1_006).await.unwrap();
+        let operation = format!("turn:user:{owner}:{CONVERSATION_ID}:cron:{sibling}:turn");
+        let mut tx = db.pool().begin().await.unwrap();
+        assert!(crate::native_execution_claim_admitted_tx(&mut tx,&owner,CONVERSATION_ID,&operation).await.unwrap());
+        tx.commit().await.unwrap();
+        repo.request_run_cancellation(&owner, &job.cron_job_id, &sibling, 1_007).await.unwrap();
+        let restarted = SqliteCronRepository::new(db.pool().clone());
+        assert_eq!(restarted.get_run_reservation(&owner, &job.cron_job_id, &sibling).await.unwrap().unwrap().cancel_requested_at_ms, Some(1_007));
+        let mut tx = db.pool().begin().await.unwrap();
+        assert!(crate::native_execution_claim_admitted_tx(&mut tx,&owner,CONVERSATION_ID,&operation).await.is_err());
+        assert!(crate::native_resume_capacity_available_tx(&mut tx,&owner,CONVERSATION_ID,&operation).await.is_err());
+        assert!(!crate::native_resume_target_eligible_tx(&mut tx,&owner,CONVERSATION_ID,&operation).await.unwrap());
+        assert!(crate::native_execution_claim_admitted_tx(&mut tx,&owner,CONVERSATION_ID,"ordinary-turn").await.unwrap());
+        tx.commit().await.unwrap();
+        let saved = repo.get_by_cron_job_id(&owner, &job.cron_job_id).await.unwrap().unwrap();
+        assert!(saved.enabled);
+        assert_eq!((saved.schedule_revision,saved.next_run_at,saved.run_count,saved.retry_count),
+            (job.schedule_revision,job.next_run_at,job.run_count,job.retry_count));
     }
 
     #[tokio::test]

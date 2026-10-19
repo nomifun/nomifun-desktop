@@ -115,6 +115,9 @@ pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<Value, S
         workspace.user_command(BrowserTabCommand::Activate {target:target.clone()})
             .await.map_err(|error| error.to_string())?;
 
+
+        verify_retirement_preserves_user_editor(app, &service, &workspace, &view, url).await?;
+
         // The production automation owns this view's sole frame subscription.
         // A direct read-only protocol request observes native liveness without
         // trying to become a second auto-attach owner.
@@ -177,6 +180,8 @@ pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<Value, S
             "isolated_browser_process_exited_after_user_close":browser_process_exited,
             "browser_process_exit_observation_deadline_ms":5000,
             "same_session_agent_recreates_browser":true,
+            "trusted_user_edit_survives_hidden_completed_and_successor_turns":true,
+            "unrelated_task_only_native_carrier_automatically_retired":true,
         }))
     }.await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -188,4 +193,65 @@ pub(super) async fn verify(app: &tauri::AppHandle, url: &str) -> Result<Value, S
         }
     };
     result.and_then(|value| closed.map(|_| value))
+}
+
+/// Exercise actual native DOM/input and carrier destruction together. The
+/// Browser owner's explicit task references stand in for its already-tested
+/// canonical completion caller; no model or Session history is replayed.
+async fn verify_retirement_preserves_user_editor(
+    app: &tauri::AppHandle, service: &Arc<BrowserResourceService>,
+    retained: &Arc<nomifun_browser_platform::workspace::BrowserResource>,
+    view: &tauri::Webview, url: &str,
+) -> Result<(), String> {
+    super::evaluate(view, "window.lifecycleEditTrusted=false;const e=document.createElement('textarea');e.id='lifecycle-retained-editor';e.oninput=event=>window.lifecycleEditTrusted=event.isTrusted;document.body.prepend(e);true").await?;
+    super::native_fixture_click(view, "#lifecycle-retained-editor").await?;
+    super::windows::protocol_call(view, "Input.insertText", json!({"text":"retain unsaved 用户编辑"})).await?;
+    let unchanged = "document.getElementById('lifecycle-retained-editor').value==='retain unsaved 用户编辑' && lifecycleEditTrusted";
+    if super::evaluate(view, unchanged).await? != true { return Err("Native editor fixture did not receive trusted input".into()); }
+    let original = retained.snapshot().await.map_err(|error|error.to_string())?.runtime.ok_or("Missing retained native runtime")?;
+    retained.workspace().retain_task("native-retention-turn-one").await.map_err(|error|error.to_string())?;
+    retained.set_surface(BrowserSurfaceBounds{x:20.,y:60.,width:1000.,height:600.}, false, Default::default())
+        .await.map_err(|error|error.to_string())?;
+    if retained.workspace().try_retire_after_task("native-retention-turn-one").await.map_err(|error|error.to_string())? {
+        return Err("A completed task discarded a hidden user editor".into());
+    }
+    retained.workspace().retain_task("native-retention-turn-two").await.map_err(|error|error.to_string())?;
+    let run = retained.begin_interaction().await.map_err(|error|error.to_string())?;
+    retained.observe(&run, None).await.map_err(|error|error.to_string())?;
+    retained.finish_interaction(&run).await.map_err(|error|error.to_string())?;
+    retained.workspace().request_retirement_after_turn("native-retention-turn-two", false).await.map_err(|error|error.to_string())?;
+
+    let task = service.ensure(super::browser_resource_fixture::authority(
+        "interaction-user", "completed-task-only-session", "native-interaction-fixture"), BrowserProfile::Ephemeral)
+        .await.map_err(|error|error.to_string())?;
+    task.workspace().retain_task("native-task-only-completed").await.map_err(|error|error.to_string())?;
+    let task_run = task.begin_interaction().await.map_err(|error|error.to_string())?;
+    task.agent_command(&task_run, BrowserTabCommand::Create {url:url.into()}).await.map_err(|error|error.to_string())?;
+    let task_target = tokio::time::timeout(Duration::from_secs(5), super::wait_workspace_page(&task,url))
+        .await.map_err(|_|"Task-only native page did not load")??;
+    let task_view = app.get_webview(&task_target.tab_id).ok_or("Missing task-only native controller")?;
+    let task_process = browser_process::Witness::observe(&task_view).await?;
+    if !task.finish_interaction(&task_run).await.map_err(|error|error.to_string())? {
+        return Err("Task-only native interaction did not settle".into());
+    }
+    task.workspace().request_retirement_after_turn("native-task-only-completed", true).await.map_err(|error|error.to_string())?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if service.get_for_agent_session("interaction-user", "completed-task-only-session").await.map_err(|error|error.to_string())?.is_none() {
+                return Ok::<_,String>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.map_err(|_|"Completed task-only native carrier did not automatically retire")??;
+    if app.get_webview(&task_target.tab_id).is_some() { return Err("Automatic retirement retained the task-only controller".into()); }
+    drop(task_view);
+    if !task_process.wait_for_exit(Duration::from_secs(5)).await? { return Err("Task-only Browser process stayed alive after automatic retirement".into()); }
+    let after = retained.snapshot().await.map_err(|error|error.to_string())?.runtime.ok_or("Completed sibling destroyed the user editor")?;
+    if after.runtime_generation != original.runtime_generation || after.tabs != original.tabs
+        || super::evaluate(view, unchanged).await? != true {
+        return Err("Cross-Turn/sibling retirement changed the original unsaved user editor".into());
+    }
+    retained.set_surface(BrowserSurfaceBounds{x:20.,y:60.,width:1000.,height:600.}, true, Default::default())
+        .await.map_err(|error|error.to_string())?;
+    Ok(())
 }

@@ -8,7 +8,7 @@ use nomifun_agent_contracts::{
 use nomifun_agent_session::{AgentSessionStore, SessionObservation, SessionStoreError};
 use nomifun_common::AppError;
 use nomifun_db::sqlx;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::EngineSessionHost;
@@ -122,9 +122,33 @@ struct SourceEvent {
     payload_byte_len: Option<i64>,
 }
 
+/// Read-only decoding of already committed current-generation provenance.
+/// Retired result inputs are historical DATA, never an ingress source or a
+/// request to resume the removed callback protocol.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum HistoricalInputSource {
+    Current(AgentInputSource),
+    RetiredResult(RetiredResultSource),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RetiredResultKind { DirectedDelegationResult }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetiredResultSource {
+    kind: RetiredResultKind,
+    report_message_id: String,
+    report_seq: u64,
+    execution_id: String,
+    source_turn_operation_id: nomifun_agent_contracts::OperationId,
+}
+
 struct AcceptedInput {
     request: nomifun_api_types::SendMessageRequest,
-    input_source: Option<AgentInputSource>,
+    input_source: Option<HistoricalInputSource>,
 }
 
 impl<'de> Deserialize<'de> for AcceptedInput {
@@ -162,14 +186,32 @@ impl<'de> Deserialize<'de> for AcceptedInput {
         let input_source = object
             .get("input_source")
             .filter(|value| !value.is_null())
-            .map(|value| serde_json::from_value::<AgentInputSource>(value.clone()))
+            .map(|value| serde_json::from_value::<HistoricalInputSource>(value.clone()))
             .transpose()
             .map_err(D::Error::custom)?;
+        if let Some(HistoricalInputSource::RetiredResult(source)) = &input_source {
+            if !request.hidden || request.origin.as_deref() != Some("directed_delegation_result")
+                || request.channel_platform.as_deref() != Some("robot")
+                || source.report_seq == 0 || source.report_seq > i64::MAX as u64
+                || nomifun_common::validate_uuidv7(&source.report_message_id).is_err()
+                || nomifun_common::validate_uuidv7(&source.execution_id).is_err()
+                || source.source_turn_operation_id.as_ref().trim().is_empty()
+                || source.source_turn_operation_id.as_ref().len() > 1024 {
+                return Err(D::Error::custom("invalid retired result history provenance"));
+            }
+        }
         Ok(Self {
             request,
             input_source,
         })
     }
+}
+
+/// Wire presentation of immutable accepted history uses the same strict
+/// read-only decoder. This value cannot enter the public input DTO or Runtime.
+pub(in crate::router) fn historical_input_source_wire(input: &Value) -> Result<Option<Value>, AppError> {
+    let input: AcceptedInput = serde_json::from_value(input.clone()).map_err(failure)?;
+    input.input_source.map(serde_json::to_value).transpose().map_err(failure)
 }
 
 #[derive(Deserialize)]
@@ -184,7 +226,7 @@ struct ProjectedAssistant {
     origin: String,
     operation_id: String,
     #[serde(default)]
-    delegation_report: Option<nomifun_agent_execution::DirectedDelegationReport>,
+    delegation_report: Option<nomifun_agent_execution::AgentExecutionReport>,
 }
 
 #[derive(Deserialize)]
@@ -213,12 +255,12 @@ impl AcceptedInput {
             (None, None) => true,
             (
                 Some("robot"),
-                Some(AgentInputSource::AuthenticatedRobot {
+                Some(HistoricalInputSource::Current(AgentInputSource::AuthenticatedRobot {
                     companion_id,
                     robot_id,
                     connection_id,
                     ..
-                }),
+                })),
             ) => {
                 *companion_id == origin.companion_id
                     && origin.robot_id.as_deref() == Some(robot_id.as_str())

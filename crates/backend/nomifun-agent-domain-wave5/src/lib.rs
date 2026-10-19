@@ -1893,19 +1893,15 @@ pub fn action_input_schema_for(action_id: &str) -> Result<StrictJsonValue, Strin
                         "strategy": {
                             "type":"string",
                             "const":"planned",
-                            "description":"Use planned for a goal. With target_role=desktop, the host delegates directly to this Companion's desktop role without a planning model."
+                            "description":"Use planned when a durable task benefits from a dependency graph or isolated context. Ordinary questions and available tools execute directly in the requesting Session."
                         },
                         "goal": {
                             "type":"string",
                             "minLength":1,
                             "maxLength":65536,
-                            "description":"Complete objective for the execution planner or the explicitly selected desktop Companion."
-                        },
-                        "target_role": {
-                            "type":"string",
-                            "const":"desktop",
-                            "description":"For a physical Robot Companion, delegate computer work to this same Companion's saved desktop Agent. The host freezes that Agent and model. This never grants desktop tools to the caller. Omit for ordinary collaboration."
+                            "description":"Complete objective and necessary user constraints for the execution planner. The host retains the exact requesting Session, Turn and delegation Effect references."
                         }
+
                     },
                     "required": ["strategy", "goal"]
                 },
@@ -2453,12 +2449,6 @@ mod tests {
             "goal": "plan a dependency graph"
         })));
         assert!(validator.is_valid(&serde_json::json!({
-            "strategy": "planned", "goal": "organize the requested local files", "target_role": "desktop"
-        })));
-        assert!(validator.is_valid(&serde_json::json!({
-            "strategy": "planned", "goal": "北京今天的天气怎么样？查询当前天气并简短回答。", "target_role": "desktop"
-        })), "a short current-information query can use the same directed Agent path");
-        assert!(validator.is_valid(&serde_json::json!({
             "strategy": "parallel",
             "tasks": [{"name":"marker","prompt":"Reply with the exact marker"}],
             "synthesize": false
@@ -2477,6 +2467,7 @@ mod tests {
             "synthesize": true
         })));
         for invalid in [
+            serde_json::json!({"strategy":"planned","goal":"work","target_role":"desktop"}),
             serde_json::json!({"strategy":"planned","goal":"work","target_role":"robot"}),
             serde_json::json!({"strategy":"parallel","tasks":[{"name":"a","prompt":"work"}],"target_role":"desktop"}),
             serde_json::json!({"goal":"new Snapshots require an explicit strategy"}),

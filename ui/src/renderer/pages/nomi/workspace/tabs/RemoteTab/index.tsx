@@ -63,7 +63,7 @@ const RemoteTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
         companionName={profile.name}
         onAttentionChange={setRobotAttention}
       />
-      <CompanionMcpSettings companionId={profile.companion_id} />
+      <CompanionMcpSettings companion={companion} />
     </div>
   );
 };

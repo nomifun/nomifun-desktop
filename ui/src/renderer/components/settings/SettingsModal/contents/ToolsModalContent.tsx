@@ -5,6 +5,7 @@
  */
 
 import type { IMcpServer } from '@/common/config/storage';
+import type { McpOAuthClientConfig } from '@/common/types/mcpAuth';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import { getAgents } from '@/renderer/hooks/agent/useAgents';
 import { useMcpConnection,useMcpModal,useMcpOAuth,useMcpServerCRUD } from '@/renderer/hooks/mcp';
@@ -12,8 +13,11 @@ import { mcpServerUiKey } from '@/renderer/hooks/mcp/mcpUiKey';
 import { supportsMcpOAuthLogin } from '@/renderer/hooks/mcp/mcpAuthConfig';
 import { resolveMcpDisplayName } from '@/renderer/services/mcp/mcpMarket';
 import AddMcpServerModal from '@/renderer/pages/settings/components/AddMcpServerModal';
-import { ENHANCED_TOOLS_SURFACE_CLASS } from '@/renderer/pages/settings/enhancedToolsLayout';
 import McpServerItem from '@/renderer/pages/settings/ToolsSettings/McpServerItem';
+import McpOAuthClientModal from '@/renderer/pages/settings/ToolsSettings/McpOAuthClientModal';
+import { validatedMcpAuthorizationUrl } from '@/renderer/hooks/mcp/useMcpOAuth';
+import { openExternalUrl } from '@/renderer/utils/platform';
+import mcpListStyles from '@/renderer/pages/settings/ToolsSettings/McpServerList.module.css';
 import NomiPagination from '@/renderer/components/base/NomiPagination';
 import { Button,Dropdown,Menu,Message,Modal } from '@arco-design/web-react';
 import { Down,Plus } from '@icon-park/react';
@@ -31,7 +35,8 @@ const ModalMcpManagementSection: React.FC<{
   headerActionHost: HTMLDivElement | null;
 }> = ({ message, mcpServers, saveMcpServers, headerActionHost }) => {
   const { t } = useTranslation();
-  const { oauthStatus, loggingIn, checkOAuthStatus, markLoginRequired, clearLoginRequired, login } = useMcpOAuth();
+  const { oauthStatus, attempts, loggingIn, checkOAuthStatus, login, cancelLogin, logout } = useMcpOAuth();
+  const [configuringOAuthServer, setConfiguringOAuthServer] = useState<IMcpServer>();
   const visibleMcpServers = useMemo(() => mcpServers, [mcpServers]);
   const [currentPage, setCurrentPage] = useState(1);
   const previousServerCount = useRef(visibleMcpServers.length);
@@ -51,16 +56,16 @@ const ModalMcpManagementSection: React.FC<{
   const handleAuthRequired = useCallback(
     (server: IMcpServer) => {
       if (supportsMcpOAuthLogin(server.transport)) {
-        markLoginRequired(server.mcp_server_id);
+        void checkOAuthStatus(server);
       }
     },
-    [markLoginRequired]
+    [checkOAuthStatus]
   );
   const handleAuthResolved = useCallback(
     (server: IMcpServer) => {
-      clearLoginRequired(server.mcp_server_id);
+      void checkOAuthStatus(server);
     },
-    [clearLoginRequired]
+    [checkOAuthStatus]
   );
 
   const { testingServers, handleTestMcpConnection, handleTestMcpConnections } = useMcpConnection(
@@ -90,19 +95,38 @@ const ModalMcpManagementSection: React.FC<{
   } = useMcpServerCRUD(saveMcpServers);
 
   const handleOAuthLogin = useCallback(
-    async (server: IMcpServer) => {
+    async (server: IMcpServer, client?: McpOAuthClientConfig) => {
       const displayName = resolveMcpDisplayName(server);
-      const result = await login(server);
+      const result = await login(server, client);
 
       if (result.success) {
         message.success(`${displayName}: ${t('settings.mcpOAuthLoginSuccess') || 'Login successful'}`);
         void handleTestMcpConnection(server);
-      } else {
+      } else if (!result.cancelled) {
         message.error(`${displayName}: ${result.error || t('settings.mcpOAuthLoginFailed') || 'Login failed'}`);
+        if (result.diagnostic?.user_action === 'configure_client') setConfiguringOAuthServer(server);
       }
     },
     [login, message, t, handleTestMcpConnection]
   );
+
+  const handleOAuthCancel = useCallback(async (server: IMcpServer) => {
+    const result = await cancelLogin(server);
+    if (!result.success) message.error(result.error ?? t('settings.mcpOAuthLoginFailed'));
+  }, [cancelLogin, message, t]);
+
+  const handleOAuthLogout = useCallback(async (server: IMcpServer) => {
+    const result = await logout(server);
+    if (!result.success) message.error(result.error ?? t('settings.mcpOAuthLoginFailed'));
+  }, [logout, message, t]);
+
+  const handleOAuthContinue = useCallback((server: IMcpServer) => {
+    const url = attempts[server.mcp_server_id]?.authorization_url;
+    if (!url) return;
+    try {
+      void openExternalUrl(validatedMcpAuthorizationUrl(url)).catch(() => message.error(t('settings.mcpOAuthOpenFailed')));
+    } catch { message.error(t('settings.mcpOAuthOpenFailed')); }
+  }, [attempts, message, t]);
 
   const wrappedHandleAddMcpServer = useCallback(
     async (serverData: Omit<IMcpServer, 'mcp_server_id' | 'created_at' | 'updated_at'>) => {
@@ -233,7 +257,7 @@ const ModalMcpManagementSection: React.FC<{
           </div>
         ) : (
           <NomiScrollArea className='max-h-360px max-h-none' disableOverflow>
-            <div className='space-y-10px'>
+            <div className={mcpListStyles.list}>
               {paginatedMcpServers.map((server) => {
                 const uiKey = mcpServerUiKey(server.mcp_server_id);
                 return (
@@ -243,6 +267,7 @@ const ModalMcpManagementSection: React.FC<{
                     isCollapsed={mcpCollapseKey[uiKey] || false}
                     isTestingConnection={testingServers[server.mcp_server_id] || false}
                     oauthStatus={oauthStatus[server.mcp_server_id]}
+                    oauthAttempt={attempts[server.mcp_server_id]}
                     isLoggingIn={loggingIn[server.mcp_server_id]}
                     isTogglingEnabled={togglingServers[server.mcp_server_id] || false}
                     onToggleCollapse={() => toggleServerCollapse(uiKey)}
@@ -250,6 +275,10 @@ const ModalMcpManagementSection: React.FC<{
                     onEditServer={showEditMcpModal}
                     onDeleteServer={showDeleteConfirm}
                     onOAuthLogin={handleOAuthLogin}
+                    onOAuthCancel={handleOAuthCancel}
+                    onOAuthLogout={handleOAuthLogout}
+                    onOAuthContinue={handleOAuthContinue}
+                    onOAuthConfigure={setConfiguringOAuthServer}
                     onToggleEnabled={handleToggleMcpServer}
                   />
                 );
@@ -258,7 +287,7 @@ const ModalMcpManagementSection: React.FC<{
           </NomiScrollArea>
         )}
         {visibleMcpServers.length > MCP_SERVER_PAGE_SIZE && (
-          <div data-testid='mcp-server-pagination' className='mt-12px flex justify-end'>
+          <div data-testid='mcp-server-pagination' className='mt-12px flex justify-end pb-16px'>
             <NomiPagination
               current={effectivePage}
               pageSize={MCP_SERVER_PAGE_SIZE}
@@ -283,6 +312,16 @@ const ModalMcpManagementSection: React.FC<{
         onBatchImport={wrappedHandleBatchImportMcpServers}
         importMode={importMode}
       />
+
+      {configuringOAuthServer && <McpOAuthClientModal
+        serverName={resolveMcpDisplayName(configuringOAuthServer)}
+        onCancel={() => setConfiguringOAuthServer(undefined)}
+        onSubmit={(client) => {
+          const server = configuringOAuthServer;
+          setConfiguringOAuthServer(undefined);
+          void handleOAuthLogin(server, client);
+        }}
+      />}
 
       <Modal
         title={t('settings.mcpDeleteServer')}
@@ -318,7 +357,7 @@ export const ToolsModalContentWithState: React.FC<{
       <NomiScrollArea className='flex-1 min-h-0 pb-12px' disableOverflow>
         <div
           data-testid='mcp-installed-surface'
-          className={`${ENHANCED_TOOLS_SURFACE_CLASS} flex min-h-0 flex-col`}
+          className={`${mcpListStyles.surface} flex min-h-0 flex-col`}
         >
           <NomiScrollArea className='h-full overflow-visible' disableOverflow>
             <ModalMcpManagementSection

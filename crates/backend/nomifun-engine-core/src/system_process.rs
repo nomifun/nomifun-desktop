@@ -5,8 +5,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nomi_process_runtime::{OutputCursor, ProcessOwner, SessionId};
+use nomi_process_runtime::{FrozenOutput, OutputCursor, ProcessOwner, SessionId};
 use nomi_system_execution::SystemExecutionClient;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -27,7 +28,98 @@ pub(crate) struct SystemEngineSession {
     invocation_id: Uuid,
     call_id: Uuid,
     session_id: String,
-    pub(crate) terminal: Option<EngineProcessPoll>,
+    terminal: Arc<SystemTerminalCache>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SystemProcessCancellation { client:Arc<SystemExecutionClient>, request:Value, pid:u32,
+    terminal:Arc<SystemTerminalCache> }
+impl SystemProcessCancellation {
+    pub(crate) async fn release_terminal(&self)->Result<bool,EngineProcessError> {
+        let mut request=self.request.clone();request["op"]=json!("release_terminal");
+        let response=self.client.call(request).await.map_err(|error|failure(format!("{}: {}",error.code,error.message)))?;
+        response["released"].as_bool().ok_or_else(||failure("system runner omitted exact native registry release observation"))
+    }
+    pub(crate) async fn wait_for_terminal(&self)->Result<crate::process::EngineProcessCancellationReceipt,EngineProcessError> {
+        loop {
+            if let Some(receipt)=self.terminal_if_ready() {return Ok(receipt);}
+            let mut request=self.request.clone();
+            request["op"]=json!("wait_terminal");request["observation_ms"]=json!(30_000);request["include_output_replay"]=json!(true);
+            let value=self.client.call(request).await.map_err(|error|failure(format!("{}: {}",error.code,error.message)))?;
+            let terminal=value.get("terminal").ok_or_else(||failure("system runner omitted original terminal subscription result"))?;
+            if terminal.is_null() {continue;}
+            let (poll,_)=parse_poll(terminal,self.pid)?;
+            if !poll.is_terminal() {return Err(failure("system terminal subscription returned a running process"));}
+            self.terminal.record(terminal,&poll)?;
+            return Ok(crate::process::cancellation_receipt(poll));
+        }
+    }
+    pub(crate) fn frozen_output(&self)->Option<FrozenOutput> { self.terminal.frozen_output() }
+    pub(crate) fn terminal_changes(&self)->tokio::sync::watch::Receiver<u64> { self.terminal.changes.subscribe() }
+    pub(crate) fn terminal_if_ready(&self)->Option<crate::process::EngineProcessCancellationReceipt> {
+        self.terminal.terminal().map(crate::process::cancellation_receipt)
+    }
+    pub(crate) async fn cancel(&self)->Result<crate::process::EngineProcessCancellationReceipt,EngineProcessError> {
+        let value=self.client.call(self.request.clone()).await.map_err(|error|failure(format!("{}: {}",error.code,error.message)))?;
+        let (poll,_)=parse_poll(&value,self.pid)?;
+        self.terminal.record(&value,&poll)?;
+        Ok(crate::process::cancellation_receipt(poll))
+    }
+}
+
+#[derive(Default)]
+struct SystemTerminalState {
+    terminal:Option<EngineProcessPoll>,
+    output:Option<FrozenOutput>,
+}
+
+/// Only the original authenticated Session's observed terminal bytes. Sharing
+/// this cache lets its cancellation capability retain a received archive after
+/// the ordinary Session interaction future returns. It creates no native task.
+struct SystemTerminalCache {
+    state:Mutex<SystemTerminalState>,
+    changes:tokio::sync::watch::Sender<u64>,
+}
+
+impl SystemTerminalCache {
+    fn new()->Self {
+        let (changes,_)=tokio::sync::watch::channel(0);
+        Self {state:Mutex::new(Default::default()),changes}
+    }
+    fn terminal(&self)->Option<EngineProcessPoll> {
+        self.state.lock().expect("system terminal cache is poisoned").terminal.clone()
+    }
+    fn frozen_output(&self)->Option<FrozenOutput> {
+        self.state.lock().expect("system terminal cache is poisoned").output.clone()
+    }
+    fn record(&self,value:&Value,poll:&EngineProcessPoll)->Result<(),EngineProcessError> {
+        let output:Option<FrozenOutput>=value.get("output_replay").filter(|value|!value.is_null())
+            .map(FrozenOutput::deserialize).transpose().map_err(failure)?;
+        if !poll.is_terminal() {
+            if output.is_some() {return Err(failure("system runner attached frozen output to a running process"));}
+            return Ok(());
+        }
+        if let Some(replay)=&output {
+            let snapshot=replay.snapshot_from(OutputCursor::START);
+            let measured=match poll {EngineProcessPoll::Exited {output,..}|EngineProcessPoll::Cancelled {output,..}
+                |EngineProcessPoll::TimedOut {output,..}|EngineProcessPoll::Lost {output,..}=>output,
+                _=>return Err(failure("system archive requires measured terminal output"))};
+            if snapshot.next_cursor.offset()!=measured.next_cursor || snapshot.retained_bytes!=measured.retained_bytes
+                || snapshot.dropped_bytes!=measured.dropped_bytes || snapshot.encoding.source_encoding!=measured.source_encoding
+                || snapshot.encoding.decode_errors!=measured.decode_errors {
+                return Err(failure("system archive differs from its original terminal measurements"));
+            }
+        }
+        let mut state=self.state.lock().expect("system terminal cache is poisoned");
+        let replay=output.as_ref().or(state.output.as_ref());
+        let full=match replay {Some(replay)=>poll.replay_output(replay,0)?,None=>poll.clone()};
+        let changed=state.terminal.as_ref()!=Some(&full) || (state.output.is_none()&&output.is_some());
+        state.terminal=Some(full);
+        if output.is_some() {state.output=output;}
+        drop(state);
+        if changed {self.changes.send_modify(|generation|*generation=generation.wrapping_add(1));}
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for SystemEngineSession {
@@ -150,7 +242,7 @@ impl SystemEngineOwner {
             .ok_or_else(|| malformed(failure("system runner omitted process identity")))?;
         self.pending.lock().expect("system starts mutex poisoned").remove(&call_id);
         Ok(EngineProcessSession { terminal:None, system:Some(SystemEngineSession {
-            client, invocation_id, call_id, session_id:native_id.to_owned(), terminal:None,
+            client, invocation_id, call_id, session_id:native_id.to_owned(), terminal:Arc::new(SystemTerminalCache::new()),
         }), owner:ProcessOwner::new(invocation_id,call_id), session_id, pid, cursor:OutputCursor::START })
     }
 
@@ -172,11 +264,25 @@ impl SystemEngineOwner {
 }
 
 impl SystemEngineSession {
+    fn archived_terminal(&self,cursor:u64)->Result<Option<EngineProcessPoll>,EngineProcessError> {
+        let state=self.terminal.state.lock().expect("system terminal cache is poisoned");
+        match (&state.terminal,&state.output) {(Some(terminal),Some(output))=>terminal.replay_output(output,cursor).map(Some),_=>Ok(None)}
+    }
+    pub(crate) fn cancellation_handle(&self,pid:u32)->SystemProcessCancellation {
+        SystemProcessCancellation {client:self.client.clone(),request:self.request("cancel",json!({"cursor":0})),pid,terminal:self.terminal.clone()}
+    }
+    pub(crate) fn terminal(&self,cursor:u64)->Result<Option<EngineProcessPoll>,EngineProcessError> {
+        let state=self.terminal.state.lock().expect("system terminal cache is poisoned");
+        state.terminal.as_ref().map(|poll|match &state.output {Some(output)=>poll.replay_output(output,cursor),None=>Ok(poll.clone())}).transpose()
+    }
     fn request(&self, operation: &str, mut fields: Value) -> Value {
         fields["op"] = json!(operation);
         fields["session_id"] = json!(self.session_id);
         fields["invocation_id"] = json!(self.invocation_id.to_string());
         fields["call_id"] = json!(self.call_id.to_string());
+        if matches!(operation,"poll"|"terminal"|"observe"|"cancel"|"terminate"|"timeout") {
+            fields["include_output_replay"]=json!(true);
+        }
         fields
     }
 
@@ -203,6 +309,9 @@ pub(crate) async fn initial_observation(session: &mut EngineProcessSession, wait
 
 async fn poll_with_policy(session:&mut EngineProcessSession, cursor:u64, wait:Duration, break_on_output: bool,
     cancellation:CancellationToken) -> Result<EngineProcessPoll,EngineProcessError> {
+    if let Some(terminal)=session.system.as_ref().expect("system session required").archived_terminal(cursor)? {
+        return cached_observation(session,terminal);
+    }
     if cancellation.is_cancelled() { return cancel(session).await; }
     let system=session.system.as_ref().expect("system session required");
     let call=system.client.call(system.request("poll",json!({"cursor":cursor,"yield_ms":wait.as_millis().min(30000) as u64,"break_on_output":break_on_output})));
@@ -214,6 +323,9 @@ async fn poll_with_policy(session:&mut EngineProcessSession, cursor:u64, wait:Du
 }
 
 pub(crate) async fn cancel(session:&mut EngineProcessSession) -> Result<EngineProcessPoll,EngineProcessError> {
+    if let Some(terminal)=session.system.as_ref().expect("system session required").archived_terminal(session.cursor.offset())? {
+        return cached_observation(session,terminal);
+    }
     let system=session.system.as_ref().expect("system session required");
     let value=system.client.call(system.request("cancel",json!({"cursor":session.cursor.offset()})))
         .await.map_err(|error| failure(format!("{}: {}",error.code,error.message)))?;
@@ -223,6 +335,7 @@ pub(crate) async fn cancel(session:&mut EngineProcessSession) -> Result<EnginePr
 pub(crate) async fn terminal_if_ready(session: &mut EngineProcessSession, cancellation: CancellationToken)
     -> Result<Option<EngineProcessPoll>, EngineProcessError> {
     let system = session.system.as_ref().expect("system session required");
+    if let Some(terminal)=system.archived_terminal(session.cursor.offset())? {return Ok(Some(terminal));}
     let request = system.request("terminal", json!({"cursor":session.cursor.offset()}));
     let call = system.client.call(request);
     let receipt = tokio::select! {
@@ -241,6 +354,7 @@ pub(crate) async fn terminal_if_ready(session: &mut EngineProcessSession, cancel
 pub(crate) async fn observe_if_changed(session: &mut EngineProcessSession, cursor: u64,
     include_output: bool, cancellation: CancellationToken) -> Result<Option<EngineProcessPoll>, EngineProcessError> {
     let system = session.system.as_ref().expect("system session required");
+    if let Some(terminal)=system.archived_terminal(cursor)? {return Ok(Some(terminal));}
     let call = system.client.call(system.request("observe", json!({"cursor":cursor,"include_output":include_output})));
     let receipt = tokio::select! {
         _ = cancellation.cancelled() => return Err(EngineProcessError::Cancelled),
@@ -254,14 +368,20 @@ pub(crate) async fn observe_if_changed(session: &mut EngineProcessSession, curso
     Ok(Some(result))
 }
 
+fn cached_observation(session:&mut EngineProcessSession,terminal:EngineProcessPoll)->Result<EngineProcessPoll,EngineProcessError> {
+    match &terminal {EngineProcessPoll::Exited {output,..}|EngineProcessPoll::Cancelled {output,..}|EngineProcessPoll::TimedOut {output,..}
+        |EngineProcessPoll::Lost {output,..}=>session.cursor=OutputCursor::new(output.next_cursor),_=>{}}
+    Ok(terminal)
+}
+
 fn convert(session:&mut EngineProcessSession,value:Value) -> Result<EngineProcessPoll,EngineProcessError> {
-    let (result,next_cursor)=parse_poll(value,session.pid)?;
+    let (result,next_cursor)=parse_poll(&value,session.pid)?;
+    session.system.as_ref().expect("system session required").terminal.record(&value,&result)?;
     session.cursor=OutputCursor::new(next_cursor);
-    if result.is_terminal() { session.system.as_mut().expect("system session required").terminal=Some(result.clone()); }
     Ok(result)
 }
 
-fn parse_poll(value:Value,pid:u32) -> Result<(EngineProcessPoll,u64),EngineProcessError> {
+fn parse_poll(value:&Value,pid:u32) -> Result<(EngineProcessPoll,u64),EngineProcessError> {
     let output=value.get("output").ok_or_else(|| failure("system runner omitted output receipt"))?;
     let chunks=output.get("chunks").and_then(Value::as_array).ok_or_else(|| failure("system runner omitted output chunks"))?;
     let text=chunks.iter().map(|chunk| chunk.get("text").and_then(Value::as_str)
@@ -334,7 +454,7 @@ mod tests {
         let mut value=receipt();
         value["cleanup"]["reaped"]=json!(false);
         value["cleanup"]["errors"]=json!(["original cleanup failure"]);
-        let (poll,cursor)=parse_poll(value,123).unwrap();
+        let (poll,cursor)=parse_poll(&value,123).unwrap();
         assert_eq!(cursor,25);
         let EngineProcessPoll::Cancelled{output,cleanup}=poll else {panic!("wrong native state")};
         assert_eq!(output.text,"已发生的输出\n");
@@ -346,12 +466,12 @@ mod tests {
     fn missing_native_measurement_or_cleanup_is_not_synthesized_as_success() {
         for field in ["cleanup","output"] {
             let mut value=receipt();value.as_object_mut().unwrap().remove(field);
-            assert!(parse_poll(value,123).is_err());
+            assert!(parse_poll(&value,123).is_err());
         }
         let mut value=receipt();value["output"]["encoding"].as_object_mut().unwrap().remove("decode_errors");
-        assert!(parse_poll(value,123).is_err());
+        assert!(parse_poll(&value,123).is_err());
         let mut value=receipt();value["state"]=json!("authentication_approved");
-        assert!(parse_poll(value,123).is_err());
+        assert!(parse_poll(&value,123).is_err());
     }
 
     #[tokio::test]
@@ -380,3 +500,6 @@ mod tests {
         assert!(!marker.exists());
     }
 }
+
+#[cfg(test)]
+mod archive_tests;

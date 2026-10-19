@@ -14,7 +14,7 @@ use crate::archiver::ArchiveConversationPort;
 
 use crate::evolution::TranscriptSource;
 
-/// The two concurrent execution roles of one Companion identity.
+/// Independent desktop and physical-device entry points of one Companion Agent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompanionRole {
@@ -49,8 +49,8 @@ pub struct CompanionSessionCreateContext {
     pub role: CompanionRole,
     pub robot_id: Option<String>,
     pub idempotency_key: String,
-    /// None preserves the desktop role's saved product selection. The robot
-    /// role supplies its independent explicit selection, including empty.
+    /// Additional defaults shared by every entry. The Session owner retains
+    /// the selected Agent's authored MCP grants and adds these exact sources.
     pub mcp_server_ids: Option<Vec<String>>,
 }
 
@@ -127,6 +127,17 @@ pub trait CompanionSessionPort: Send + Sync {
         &self, owner_id: &str, companion_id: &str,
     ) -> Result<(), AppError>;
 
+    /// Prepare a reused entry through the canonical owner. Production performs
+    /// any exact current-generation retired-Agent transition at the original
+    /// idle/CAS/effect/native-cleanup boundary, without changing Session identity
+    /// or historical bindings. In-memory domain-only ports have no artifacts
+    /// to evolve; the production owner must provide the actual implementation.
+    async fn prepare_companion_entry(
+        &self, _owner_id: &str, _companion_id: &str, _session_id: &str,
+    ) -> Result<(), AppError> {
+        Ok(())
+    }
+
     async fn get(
         &self,
         owner_id: &str,
@@ -157,7 +168,7 @@ pub trait CompanionSessionPort: Send + Sync {
     ) -> Result<Vec<ConversationResponse>, AppError>;
 
     /// Required lifecycle fence: close admission and settle/delete every
-    /// canonically affiliated Session and directed execution before the domain
+    /// canonically affiliated Session and linked execution before the domain
     /// removes the shared Companion workspace or identity.
     async fn delete_companion_sessions(
         &self, owner_id: &str, companion_id: &str, workspace: Option<&str>,

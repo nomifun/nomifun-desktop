@@ -24,6 +24,7 @@ use crate::audio::{AudioBuffer, OpusStreamEncoder, resample_linear};
 use crate::link::Frame;
 use crate::protocol::binary::encode_binary_v1;
 use crate::protocol::{DOWNLINK_SAMPLE_RATE, FRAME_DURATION_MS};
+use crate::services::RobotOutputGuard;
 
 /// Frames allowed out back-to-back before pacing engages. Fills the device's
 /// jitter buffer so the first syllable is not choppy, while staying far below
@@ -35,21 +36,27 @@ pub const PRIME_FRAMES: u64 = 3;
 struct PacedItem {
     generation: u64,
     frame: Frame,
+    delivered:Option<tokio::sync::oneshot::Sender<()>>,
+    guard:Option<RobotOutputGuard>,
 }
 
 /// Hands Opus packets to the device on a real-time cadence.
 pub struct DownlinkPacer {
     tx: mpsc::Sender<PacedItem>,
     generation: Arc<AtomicU64>,
+    generation_changed: Arc<tokio::sync::Notify>,
 }
 
 impl DownlinkPacer {
     /// Start the pacing task. `out` is the session's writer channel.
     pub fn spawn(out: mpsc::Sender<Frame>) -> (Self, JoinHandle<()>) {
-        // Deep enough to hold a long sentence without blocking the encoder.
-        let (tx, mut rx) = mpsc::channel::<PacedItem>(512);
+        // At most 1.92 seconds of 60ms audio. Pull-based provider streaming
+        // stops here while the real-time consumer catches up.
+        let (tx, mut rx) = mpsc::channel::<PacedItem>(32);
         let generation = Arc::new(AtomicU64::new(0));
         let task_generation = generation.clone();
+        let generation_changed=Arc::new(tokio::sync::Notify::new());
+        let task_changed=generation_changed.clone();
 
         let handle = tokio::spawn(async move {
             let frame_gap = Duration::from_millis(FRAME_DURATION_MS as u64);
@@ -107,9 +114,32 @@ impl DownlinkPacer {
                     current = None;
                     continue;
                 }
-                if out.send(item.frame).await.is_err() {
-                    break;
-                }
+                let changed=task_changed.notified();tokio::pin!(changed);changed.as_mut().enable();
+                if task_generation.load(Ordering::SeqCst)!=item.generation {current=None;continue;}
+                // Reserve capacity before acquiring canonical read authority.
+                // Backpressure must never hold up a clear/rebind write lease.
+                let permit=tokio::select! {biased;
+                    _=changed.as_mut()=>{current=None;continue;},
+                    permit=out.reserve()=>match permit {Ok(permit)=>permit,Err(_)=>break},
+                };
+                let lease=if let Some(guard)=item.guard {
+                    match tokio::select! {biased;
+                        _=changed.as_mut()=>{current=None;continue;},
+                        lease=guard.acquire()=>lease,
+                    } {
+                        Ok(Some(lease))=>Some(lease),
+                        Ok(None)|Err(_)=>{
+                            if task_generation.compare_exchange(item.generation,item.generation.wrapping_add(1),Ordering::SeqCst,Ordering::SeqCst).is_ok() {
+                                task_changed.notify_waiters();
+                            }
+                            current=None;continue;
+                        }
+                    }
+                }else{None};
+                if task_generation.load(Ordering::SeqCst)!=item.generation {current=None;continue;}
+                permit.send(item.frame);
+                drop(lease);
+                if let Some(delivered)=item.delivered {let _=delivered.send(());}
                 current = Some((
                     item.generation,
                     start,
@@ -118,17 +148,28 @@ impl DownlinkPacer {
             }
         });
 
-        (Self { tx, generation }, handle)
+        (Self { tx, generation, generation_changed }, handle)
     }
 
     /// The generation a new reply should be tagged with.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
+    pub async fn generation_cancelled(&self,generation:u64) {
+        loop {
+            let changed=self.generation_changed.notified();tokio::pin!(changed);changed.as_mut().enable();
+            if self.generation()!=generation{return;}
+            changed.await;
+        }
+    }
 
     /// Queue one sentence's packets. Stale generations are dropped here so a
     /// cancelled turn cannot even occupy queue space.
     pub async fn enqueue(&self, generation: u64, packets: Vec<Vec<u8>>) {
+        self.enqueue_guarded(generation,packets,None).await;
+    }
+
+    pub async fn enqueue_guarded(&self,generation:u64,packets:Vec<Vec<u8>>,guard:Option<RobotOutputGuard>) {
         if generation != self.generation() {
             return;
         }
@@ -141,6 +182,8 @@ impl DownlinkPacer {
                 .send(PacedItem {
                     generation,
                     frame: Frame::Binary(encode_binary_v1(&packet)),
+                    delivered:None,
+                    guard:guard.clone(),
                 })
                 .await
                 .is_err()
@@ -162,14 +205,37 @@ impl DownlinkPacer {
             .send(PacedItem {
                 generation,
                 frame: Frame::Text(text),
+                delivered:None,
+                guard:None,
             })
             .await
             .is_ok()
     }
+    /// Await transport enqueue of the final stop behind all prior audio.
+    /// This is writer acceptance, never a claim that the device played it.
+    /// A generation flush releases the waiter immediately.
+    pub async fn enqueue_text_and_wait(&self,generation:u64,text:String)->bool {
+        if self.generation()!=generation{return false;}
+        let (delivered,received)=tokio::sync::oneshot::channel();
+        tokio::select! {biased;
+            _=self.generation_cancelled(generation)=>return false,
+            sent=self.tx.send(PacedItem {generation,frame:Frame::Text(text),delivered:Some(delivered),guard:None})=>if sent.is_err(){return false;},
+        }
+        tokio::select! {biased;
+            _=self.generation_cancelled(generation)=>false,
+            result=received=>result.is_ok()&&self.generation()==generation,
+        }
+    }
 
     /// Cancel everything queued and return the new generation.
     pub fn flush(&self) -> u64 {
-        self.generation.fetch_add(1, Ordering::SeqCst) + 1
+        let generation=self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.generation_changed.notify_waiters();generation
+    }
+    pub fn flush_if_current(&self,generation:u64)->bool {
+        if self.generation.compare_exchange(generation,generation.wrapping_add(1),Ordering::SeqCst,Ordering::SeqCst).is_ok() {
+            self.generation_changed.notify_waiters();true
+        }else{false}
     }
 }
 
@@ -199,6 +265,73 @@ mod tests {
     use crate::audio::{AudioBuffer, OpusStreamEncoder};
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    struct GuardDispatcher {
+        owner:Arc<tokio::sync::RwLock<()>>,
+        allowed:std::sync::atomic::AtomicBool,
+        acquired:std::sync::atomic::AtomicUsize,
+        entered:tokio::sync::Notify,
+        gate:Option<Arc<tokio::sync::Semaphore>>,
+    }
+    #[async_trait::async_trait]
+    impl crate::services::CompanionTurnDispatcher for GuardDispatcher {
+        async fn acquire_output_context(&self,_:&crate::services::RobotTurnRequest,_:Option<u64>,_:Option<&crate::services::RobotQuestionPlaybackAuthority>)->anyhow::Result<Option<crate::services::RobotOutputLease>> {
+            let owner=self.owner.clone().read_owned().await;
+            if !self.allowed.load(Ordering::SeqCst) {return Ok(None);}
+            self.acquired.fetch_add(1,Ordering::SeqCst);self.entered.notify_one();
+            if let Some(gate)=&self.gate {gate.acquire().await.unwrap().forget();}
+            Ok(Some(crate::services::RobotOutputLease::new(owner)))
+        }
+        async fn ensure_companion_session(&self,_:&str,_:&str)->anyhow::Result<String> {anyhow::bail!("unused fixture")}
+        async fn dispatch(&self,_:crate::services::RobotTurnRequest)->anyhow::Result<mpsc::Receiver<crate::services::TurnEvent>> {anyhow::bail!("unused fixture")}
+        async fn cancel(&self,_:&crate::services::RobotTurnRequest)->anyhow::Result<()> {Ok(())}
+        async fn vad_tuning(&self,_:&str)->crate::vad::VadTuning {Default::default()}
+        async fn vad_engine(&self,_:&str)->String {"energy".into()}
+    }
+    fn output_guard(dispatcher:Arc<GuardDispatcher>)->RobotOutputGuard {
+        RobotOutputGuard::new(dispatcher,crate::services::RobotTurnRequest {
+            robot_id:"robot".into(),companion_id:"companion".into(),conversation_id:"session".into(),connection_id:"connection".into(),
+            request_id:"request".into(),text:"public answer".into(),presented_question_id:None,captured_context:None,
+        })
+    }
+    fn guard_dispatcher(gate:Option<Arc<tokio::sync::Semaphore>>)->Arc<GuardDispatcher> {
+        Arc::new(GuardDispatcher {owner:Arc::new(tokio::sync::RwLock::new(())),allowed:std::sync::atomic::AtomicBool::new(true),
+            acquired:std::sync::atomic::AtomicUsize::new(0),entered:tokio::sync::Notify::new(),gate})
+    }
+
+    #[tokio::test(start_paused=true)]
+    async fn canonical_guard_acquires_after_backpressure_and_revocation_fences_the_entire_generation() {
+        let (out,mut received)=mpsc::channel(1);
+        out.send(Frame::Text("occupied".into())).await.unwrap();
+        let (pacer,task)=DownlinkPacer::spawn(out);
+        let owner=guard_dispatcher(None);
+        let generation=pacer.generation();
+        pacer.enqueue_guarded(generation,packets(3),Some(output_guard(owner.clone()))).await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        assert_eq!(owner.acquired.load(Ordering::SeqCst),0,"writer backpressure must not hold canonical read authority");
+        let exclusive=tokio::time::timeout(Duration::from_secs(1),owner.owner.clone().write_owned()).await.unwrap();
+        owner.allowed.store(false,Ordering::SeqCst);drop(exclusive);
+        assert!(matches!(received.recv().await,Some(Frame::Text(_))));
+        tokio::time::timeout(Duration::from_secs(1),pacer.generation_cancelled(generation)).await.unwrap();
+        assert!(received.try_recv().is_err(),"no stale audio may enter the writer after canonical revocation");
+        task.abort();let _=task.await;
+    }
+
+    #[tokio::test]
+    async fn generation_flush_cancels_a_pending_guard_acquisition_and_releases_its_owner_lease() {
+        let (out,mut received)=mpsc::channel(1);
+        let (pacer,task)=DownlinkPacer::spawn(out);
+        let owner=guard_dispatcher(Some(Arc::new(tokio::sync::Semaphore::new(0))));
+        let generation=pacer.generation();
+        pacer.enqueue_guarded(generation,packets(1),Some(output_guard(owner.clone()))).await;
+        tokio::time::timeout(Duration::from_secs(1),owner.entered.notified()).await.unwrap();
+        pacer.flush();
+        let exclusive=tokio::time::timeout(Duration::from_secs(1),owner.owner.clone().write_owned()).await
+            .expect("cancelling guard acquisition must release the exact read owner");
+        drop(exclusive);
+        assert!(received.try_recv().is_err());
+        task.abort();let _=task.await;
+    }
 
     fn packets(n: usize) -> Vec<Vec<u8>> {
         (0..n).map(|i| vec![0xfc, i as u8]).collect()
@@ -318,7 +451,7 @@ mod tests {
         let (pacer, _task) = DownlinkPacer::spawn(out_tx);
         let generation = pacer.generation();
 
-        pacer.enqueue(generation, packets(200)).await;
+        pacer.enqueue(generation, packets(20)).await;
         let bumped = pacer.flush();
         assert_eq!(bumped, generation + 1, "flush advances the generation");
 
@@ -403,6 +536,29 @@ mod tests {
         pacer.flush();
         assert!(!pacer.enqueue_text(stale, "stop".to_owned()).await);
     }
+
+    #[tokio::test(start_paused=true)]
+    async fn flush_releases_a_pending_stop_barrier_without_waiting_for_audio_time() {
+        let (out,_receiver)=mpsc::channel(1);
+        let (pacer,_task)=DownlinkPacer::spawn(out);let pacer=Arc::new(pacer);
+        let generation=pacer.generation();pacer.enqueue(generation,packets(12)).await;
+        let pending={let pacer=pacer.clone();tokio::spawn(async move {pacer.enqueue_text_and_wait(generation,"stop".into()).await})};
+        tokio::task::yield_now().await;assert!(!pending.is_finished());
+        pacer.flush();assert!(!pending.await.unwrap());
+    }
+
+    #[tokio::test(start_paused=true)]
+    async fn flush_cancels_the_old_frame_waiting_for_writer_capacity() {
+        let (out,mut receiver)=mpsc::channel(1);
+        let (pacer,_task)=DownlinkPacer::spawn(out);
+        let generation=pacer.generation();pacer.enqueue(generation,packets(5)).await;
+        tokio::task::yield_now().await; // One accepted frame; a second send is blocked.
+        pacer.flush();
+        assert!(receiver.recv().await.is_some(),"writer acceptance before flush remains an uncertain sent tail");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(receiver.try_recv().is_err(),"a formerly blocked old frame cannot enter the writer after flush");
+    }
+
 
     #[test]
     fn encode_for_downlink_resamples_to_24k_and_frames_at_60ms() {

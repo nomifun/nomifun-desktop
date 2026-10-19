@@ -28,7 +28,7 @@ pub(crate) async fn verify(app: &tauri::AppHandle, fixture: &Fixture) -> Result<
     });
     let mut pages = Vec::new();
     let result = async {
-        for cancellation in ["native_cancel_download", "actual_panel_hide", "input_ownership_switch"] {
+        for cancellation in ["native_cancel_download", "actual_panel_hide", "input_ownership_switch", "exact_page_close"] {
             let page = engine.create_page(parent.clone(), context.clone()).await?;
             pages.push(page.clone());
             page.set_input_locked(false).await?;
@@ -51,7 +51,8 @@ pub(crate) async fn verify(app: &tauri::AppHandle, fixture: &Fixture) -> Result<
             match cancellation {
                 "native_cancel_download" => page.cancel_user_download(download.id.clone()).await?,
                 "actual_panel_hide" => page.set_surface(bounds(), false, CancellationToken::new()).await?,
-                _ => page.set_input_locked(true).await?,
+                "input_ownership_switch" => page.set_input_locked(true).await?,
+                _ => page.force_close().await?,
             }
             wait_cancelled(&page, &download.id).await?;
             wait_save_panel(app, false).await?;
@@ -60,7 +61,7 @@ pub(crate) async fn verify(app: &tauri::AppHandle, fixture: &Fixture) -> Result<
         Ok(json!({"scope":"native_page_destination_picker","ephemeral_profile":true,
             "first_attachment_without_html_commit":true,"content_mask_preserves_choosing_panel":true,
             "native_cancel_download":true,"actual_panel_hide_cancels_picker":true,
-            "input_ownership_switch_cancels_picker":true,"file_destination_selected":false,
+            "input_ownership_switch_cancels_picker":true,"exact_page_close_drains_picker":true,"file_destination_selected":false,
             "user_downloads_directory_used":false,"completed_file_download":"not_covered"}))
     }.await;
     let mut cleanup_error = None;

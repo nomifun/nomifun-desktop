@@ -20,7 +20,7 @@ use crate::prompt::{
     build_new_conversation_with_skill_prompt,
 };
 use crate::session_port::{
-    CronRuntimePreparationRequest, CronScheduledSessionLookup, CronSessionAgentBinding,
+    CronRunResourceRetirement, CronRuntimePreparationRequest, CronScheduledSessionLookup, CronSessionAgentBinding,
     CronSessionCronBindingRequest, CronSessionHandle, CronSessionLookup, CronSessionPort,
     CronSessionProjection, CronTurnDelivery, CronTurnDeliveryQuery, CronTurnMessage,
     CronTurnReceiptQuery, CronTurnReceiptState, CronTurnReconciliation,
@@ -77,6 +77,7 @@ pub enum ExecutionResult {
 #[derive(Debug)]
 pub(crate) struct PreparedExecution {
     pub conversation_id: String,
+    pub resource_retirement: Option<CronRunResourceRetirement>,
     run_id: String,
     saved_skill: Option<SavedSkillContext>,
 }
@@ -89,6 +90,18 @@ pub struct JobExecutor {
 }
 
 impl JobExecutor {
+    pub(crate) async fn retire_new_conversation_run_resources(&self, request: &CronRunResourceRetirement)
+        -> Result<(), AppError> {
+        self.sessions.retire_new_conversation_run_resources(request).await
+    }
+
+    pub(crate) async fn cancel_reserved_turn(&self, owner_id: &str, job_id: &str, run_id: &str, session_id: &str)
+        -> Result<crate::session_port::CronTurnCancellationReceipt, AppError> {
+        self.sessions.cancel_reserved_turn(&crate::session_port::CronTurnCancellationRequest {
+            owner_id: owner_id.to_owned(), agent_session_id: session_id.into(),
+            cron_job_id: job_id.to_owned(), cron_job_run_id: run_id.to_owned(),
+        }).await
+    }
     pub fn new(
         authoritative_user_id: Arc<str>,
         sessions: Arc<dyn CronSessionPort>,
@@ -184,6 +197,13 @@ impl JobExecutor {
             .await?;
 
         Ok(PreparedExecution {
+            // Only this branch actually used create_new_conversation with
+            // this run's creation key. A later job edit cannot change the
+            // lifetime of the Session this invocation created. Existing's
+            // lazy first Session remains a continuing workspace.
+            resource_retirement: matches!(job.execution_mode, ExecutionMode::NewConversation)
+                .then(|| CronRunResourceRetirement::capture(job.user_id.clone(), job.cron_job_id.clone(),
+                    run_id.to_owned(), conversation_id.as_str().into())),
             conversation_id,
             run_id: run_id.to_owned(),
             saved_skill,
@@ -199,6 +219,7 @@ impl JobExecutor {
             conversation_id,
             run_id,
             saved_skill,
+            resource_retirement: _,
         } = prepared;
         let Some(_busy) = self.busy_guard.try_acquire(&conversation_id) else {
             return self.handle_busy(job);

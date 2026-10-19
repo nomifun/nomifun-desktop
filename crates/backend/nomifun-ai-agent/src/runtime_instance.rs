@@ -60,6 +60,11 @@ pub struct RuntimeSteerAdmissionOutcome {
 pub trait OfficialAgentRuntime: AgentRuntimeControl {
     fn kill_and_wait(&self, reason: Option<AgentKillReason>) -> RuntimeTeardown;
 
+    /// Observe success of this exact instance's retained full teardown flight.
+    /// Absence, pending cleanup and failures never prove resource release.
+    /// This read cannot initiate cleanup or authorize another business Turn.
+    fn teardown_proven(&self) -> bool { false }
+
     fn requires_turn_boundary_recycle(&self) -> bool {
         false
     }

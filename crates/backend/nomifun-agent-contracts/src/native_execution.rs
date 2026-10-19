@@ -2,6 +2,20 @@
 //! do not grant capabilities, effect replay, or a change of accepted scope.
 use serde::{Deserialize, Serialize};
 
+/// Canonical native owner evidence for a nonterminal pause. A checkpoint by
+/// itself grants no capacity release or resume authority.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativePauseState {
+    pub revision: u64,
+    pub reason: String,
+    pub checkpoint_revision: u64,
+    pub checkpoint_digest: Option<crate::DigestHex>,
+    pub execution_fence: u64,
+    pub cleanup_proven: bool,
+    pub paused_at_ms: i64,
+}
+
 pub const MAX_NATIVE_APPROVED_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_NATIVE_APPROVED_JOURNAL_RECORDS: u64 = 240_000;
 pub const MAX_NATIVE_APPROVED_PAYLOAD_BYTES: u64 = 128 * 1024 * 1024;
@@ -13,15 +27,40 @@ pub const MAX_NATIVE_APPROVED_REPLAY_BYTES: usize = 80 * 1024 * 1024;
 #[serde(tag = "event", deny_unknown_fields)]
 pub enum NativeProcessWitness {
     #[serde(rename = "host_process_dispatch")]
-    Dispatch { operation_id: String, ordinal: u16 },
+    Dispatch {
+        operation_id: String,
+        ordinal: u16,
+        /// The original Session process scope, captured before native dispatch.
+        /// Older barriers without this binding never authorize a new reap path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        process_owner: Option<NativeProcessOwnerIdentity>,
+    },
     #[serde(rename = "host_process_quiescent")]
     Quiescent { operation_id: String, ordinal: u16, process_count: usize },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeProcessOwnerIdentity {
+    pub owner_generation: String,
+    pub resource_binding_digest: crate::DigestHex,
 }
 
 impl NativeProcessWitness {
     pub fn validate(&self) -> Result<(), &'static str> {
         let (operation, ordinal) = match self {
-            Self::Dispatch { operation_id, ordinal } => (operation_id, *ordinal),
+            Self::Dispatch { operation_id, ordinal, process_owner } => {
+                if let Some(owner) = process_owner {
+                    if !uuid::Uuid::parse_str(&owner.owner_generation).is_ok_and(|id|
+                        id.get_version_num() == 7 && id.to_string() == owner.owner_generation)
+                        || owner.resource_binding_digest.as_ref().len() != 64
+                        || !owner.resource_binding_digest.as_ref().bytes().all(|byte|
+                            byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) {
+                        return Err("invalid original native process owner binding");
+                    }
+                }
+                (operation_id, *ordinal)
+            },
             Self::Quiescent { operation_id, ordinal, process_count } => {
                 if *process_count > 512 { return Err("native process barrier exceeds the scope budget"); }
                 (operation_id, *ordinal)

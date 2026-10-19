@@ -70,11 +70,11 @@ Snapshot 保持不可变。默认工作区采用 `managed-session` 逻辑引用�
 
 持久化身份遵循 [id-system.md](id-system.zh.md) 中的 v3 分层契约：
 
-- 每张产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`，Agent Store 冻结例外使用 TEXT/复合主键；
+- 旧产品表使用 `id INTEGER PRIMARY KEY AUTOINCREMENT`，canonical Agent Store 与 MCP OAuth authority 使用具名 TEXT/复合主键；
 - 需要跨数据集的稳定实体增加具名、裸标准 UUIDv7 字段；
 - 仅内部关系、单例、缓存和事件行在当前数据集内部使用表 `id`；
   需要产品定位的实体使用具名 UUIDv7 业务字段；
-- 关系是带索引的逻辑关联，不是物理外键。
+- 旧产品关系使用带索引的逻辑关联；canonical Agent Store 与 MCP OAuth 所有权使用已登记的物理外键。
 
 本地 `id` 是表主键，但不是可移植的业务身份，绝不以技术行主键的身份跨越 API、
 事件、受管文件或备份图。需要产品定位的实体使用具名 UUIDv7；产品 wire 契约
@@ -101,7 +101,7 @@ IDMM Intervention。
 | `IConversationRepository` | `SqliteConversationRepository` | 会话 + 消息，含过滤与全文搜索行 |
 | `IAgentMetadataRepository` | `SqliteAgentMetadataRepository` | 可用模型与 agent 元数据 |
 | `IMcpServerRepository` | `SqliteMcpServerRepository` | 已配置的 MCP 服务器（CRUD） |
-| `IOAuthTokenRepository` | `SqliteOAuthTokenRepository` | HTTP MCP 服务器的加密 OAuth token |
+| `IMcpOAuthRepository` | `SqliteMcpOAuthRepository` | MCP 客户端注册和当前服务授权；secret 由 authority 加密 |
 | `IProviderRepository` | `SqliteProviderRepository` | LLM provider 凭证（加密） |
 | `IAgentExecutionRepository` | `SqliteAgentExecutionRepository` | AgentExecution、不可变 Participant、按 revision 演进的 Step/Dependency、Attempt、Conversation Link 与 Event outbox；详见[统一模型](agent-execution.zh.md) |
 | `IRequirementRepository` | `SqliteRequirementRepository` | AutoWork requirements；所有 owner 关联都遵循 Repository/Service 管理的逻辑关联策略 |
@@ -114,7 +114,7 @@ IDMM Intervention。
 | `ISettingsRepository` | `SqliteSettingsRepository` | 杂项应用设置 |
 | `IWebhookRepository` | `SqliteWebhookRepository` | 出站 webhook 目的地（飞书 Lark） |
 
-伴随其行的若干参数类型包括 `ConversationFilters`、`ConversationRowUpdate`、`MessageRowUpdate`、`MessageSearchRow`、`UpdateCronJobParams`、`UpsertOAuthTokenParams`、`CreateProviderParams`、`CreateAgentExecutionParams`、`ReconcileAgentExecutionPlanParams` 和 `SettleAgentExecutionAttemptParams` 等。Repository trait 是功能域契约；领域服务通过它们访问数据，只有范围明确的 bootstrap/schema 维护是直接使用 pool 的已记录例外。
+伴随其行的若干参数类型包括 `ConversationFilters`、`ConversationRowUpdate`、`MessageRowUpdate`、`MessageSearchRow`、`UpdateCronJobParams`、`McpOAuthClientParams`、`McpOAuthGrantParams`、`McpOAuthGrantRefreshParams`、`CreateProviderParams`、`CreateAgentExecutionParams`、`ReconcileAgentExecutionPlanParams` 和 `SettleAgentExecutionAttemptParams` 等。Repository trait 是功能域契约；领域服务通过它们访问数据，只有范围明确的 bootstrap/schema 维护是直接使用 pool 的已记录例外。
 
 ### v3 baseline 与数据集 reset
 
@@ -135,9 +135,9 @@ IDMM Intervention。
 
 运行时 baseline 校验至少确认：
 
-- 每张产品表都有 `id INTEGER PRIMARY KEY AUTOINCREMENT`，Agent Store 表按基线冻结使用 TEXT/复合主键；
+- 旧产品表使用 `id INTEGER PRIMARY KEY AUTOINCREMENT`；canonical Agent Store 与 MCP OAuth 表使用已登记的 TEXT/复合主键；
 - 稳定业务 ID 是裸标准 UUIDv7；
-- Agent Store 例外之外的 schema 没有物理 `FOREIGN KEY`、`REFERENCES`、数据库
+- canonical Agent Store 与 MCP OAuth authority 例外之外的 schema 没有物理 `FOREIGN KEY`、`REFERENCES`、数据库
   cascade 或 `*_row_id`；唯一的 trigger 是基线已注册的 guard trigger；
 - 每个逻辑关联都有必需索引和 registry 登记。
 
@@ -177,6 +177,21 @@ SQLite cascade 或 trigger。例外表使用基线中冻结的物理 `FOREIGN KE
 删除会话时由应用事务清空绑定，因此持久化 AutoWork runner 仍可继续运行，
 不依赖数据库级 cascade。
 
+### MCP OAuth 配置
+
+`mcp_servers` 继续作为连接配置的唯一来源。`mcp_oauth_clients` 按 owner、issuer 与
+client profile 保存不可变注册身份；新注册不会覆盖仍被原 grant 引用的客户端。
+`mcp_oauth_grants` 为每个 owner/server 保存一条当前授权，包含确切连接引用、issuer、
+resource、client 引用、scopes、有效期与加密的 access/refresh token envelope。
+重新登录替换 grant ID；刷新只通过 CAS 推进该 grant 的 revision 和凭据字段。
+外键校验 client/owner/issuer 一致性，server soft delete 在同一事务清除 grant。
+Attempt、PKCE verifier、授权码与发现缓存不建立持久化表。
+
+前向迁移 `010_mcp_oauth_authority.sql` 清除缺少授权身份归属证明的旧 URL-only OAuth 凭据，
+不猜测导入新授权，因此升级后需要重新登录；MCP 配置、其他非 Agent 配置和当前 Agent 事实保留。
+迁移只推进已知 manifest，已发布 baseline checksum 不变。两张新表的 reset scope 均为
+`Preserve`，Agent-only reset 不清除它们；这不授予备份或恢复重建不支持数据库的权限。
+
 ## 静态加密 —— AES-GCM
 
 敏感字符串（provider API key、OAuth token、渠道 bot token 等）在写入前用 AES-256-GCM 加密，由 `nomifun_common::crypto::{encrypt_string, decrypt_string}` 与 `nomifun_app::load_or_create_data_encryption_key` 加载的数据加密密钥承担。
@@ -184,6 +199,10 @@ SQLite cascade 或 trigger。例外表使用基线中冻结的物理 `FOREIGN KE
 主密钥是每个 v3 数据集独有的 `<data_dir>/encryption_key` 文件，在新数据集
 初始化时创建。密码修改或 JWT 轮换不会改变它；v3 reset 不导入历史密文或旧
 密钥。丢失 active dataset 的 `encryption_key` 会使该数据集的加密列无法解读。
+
+MCP OAuth client secret 和 access/refresh envelope 在 `McpAuthService` 写仓库前加密。
+包含这两类数据的备份必须同时保存原数据集密钥。手工 HTTP headers 与导入 raw JSON 仍沿用
+连接配置存储路径，不是 OAuth grant 记录。
 
 工作区中锁定的 `aes-gcm` crate 版本是 `0.10`。
 

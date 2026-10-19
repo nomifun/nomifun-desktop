@@ -56,6 +56,18 @@
         "reset_scope": "preserve"
       },
       {
+        "table_name": "mcp_oauth_clients",
+        "owner": "plugin.mcp-connectors",
+        "fact_class": "configuration",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "mcp_oauth_grants",
+        "owner": "plugin.mcp-connectors",
+        "fact_class": "configuration",
+        "reset_scope": "preserve"
+      },
+      {
         "table_name": "agent_preset_templates",
         "owner": "platform.agent-preset",
         "fact_class": "configuration",
@@ -225,5 +237,5 @@
       "agent_preset_audit_events"
     ]
   },
-  "payload_digest": "181fba4223793ec7cfd298a8a3d026925c54b622172d1c962d5bf70816e1a019"
+  "payload_digest": "ce5cb186b9ba1a44c7c4699f4e1932542068537149c2a76ec880e2b8cc0bf8d9"
 }

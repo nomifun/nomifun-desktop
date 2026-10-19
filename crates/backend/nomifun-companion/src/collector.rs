@@ -556,7 +556,6 @@ impl Collector {
                     return None;
                 }
             }
-            AgentInputSource::DirectedDelegationResult { .. } => return None,
         }
         Some(source)
     }
@@ -665,7 +664,6 @@ impl Collector {
                     if collect.companion_dialogues {
                         let companion_id = match &robot_source {
                             Some(AgentInputSource::AuthenticatedRobot { companion_id, .. }) => Some(companion_id.clone()),
-                            Some(AgentInputSource::DirectedDelegationResult { .. }) => return,
                             None => self.resolve_companion_id(&msg.data).await,
                         };
                         let mut data = serde_json::json!({
@@ -2077,7 +2075,7 @@ mod tests {
     }
 
     fn profile_fixture(name: &str) -> CompanionProfileConfig {
-        CompanionProfileConfig::new(name, "ink", 1)
+        CompanionProfileConfig::new(name, "mochi", 1)
     }
 
     #[tokio::test]

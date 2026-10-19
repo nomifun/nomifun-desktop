@@ -21,6 +21,23 @@ pub(crate) fn is_local_runtime_failure(result: &McpConnectionTestResult) -> bool
         && details.get("phase").and_then(serde_json::Value::as_str) == Some("runtime_resolution"))
 }
 
+fn credential_failure_result(error: &crate::owner::McpOwnerError) -> McpConnectionTestResult {
+    let mut details = serde_json::json!({ "owner_code": error.code() });
+    if let Some(diagnostic) = error.auth_diagnostic() {
+        details["auth_diagnostic"] = diagnostic.clone();
+    }
+    let mut result = error_result(McpConnectionTestErrorCode::ConnectionFailed,
+        error.message().to_owned(), Some(details));
+    let reauthorization_required = error.code() == "MCP_CREDENTIAL_EXPIRED"
+        || error.auth_diagnostic().and_then(|diagnostic| diagnostic.get("code")).and_then(serde_json::Value::as_str)
+            == Some("REAUTHORIZATION_REQUIRED");
+    if reauthorization_required {
+        result.needs_auth = Some(true);
+        result.auth_method = Some(nomifun_api_types::McpAuthMethod::Oauth);
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // McpConnectionTestService
 // ---------------------------------------------------------------------------
@@ -34,6 +51,7 @@ pub(crate) fn is_local_runtime_failure(result: &McpConnectionTestResult) -> bool
 pub struct McpConnectionTestService {
     http_client: HttpClientFactory,
     setup_policy: McpSetupPolicy,
+    credentials: Option<Arc<dyn crate::owner::McpCredentialAuthority>>,
 }
 
 type HttpClientFactory =
@@ -45,6 +63,7 @@ impl McpConnectionTestService {
         Self {
             http_client: Arc::new(move || Ok(http_client.clone())),
             setup_policy: McpSetupPolicy::default(),
+            credentials: None,
         }
     }
 
@@ -61,6 +80,7 @@ impl McpConnectionTestService {
                 })
             }),
             setup_policy: McpSetupPolicy::default(),
+            credentials: None,
         }
     }
 
@@ -72,6 +92,40 @@ impl McpConnectionTestService {
     /// tool execution timeout.
     pub fn with_setup_policy(self, setup_policy: McpSetupPolicy) -> Self {
         Self { setup_policy, ..self }
+    }
+
+    pub fn with_credentials(mut self, credentials: Arc<dyn crate::owner::McpCredentialAuthority>) -> Self {
+        self.credentials = Some(credentials); self
+    }
+
+    pub async fn test_saved_connection(
+        &self, server_id: &nomifun_api_types::McpServerId, name: &str, transport: &McpServerTransport,
+    ) -> McpConnectionTestResult {
+        let url = match transport {
+            McpServerTransport::Http { url, .. } | McpServerTransport::Sse { url, .. } => url,
+            _ => return self.test_connection(name, transport).await,
+        };
+        let credential = match &self.credentials {
+            Some(authority) => {
+                let config_ref = match crate::canonical_mcp_connection_config_ref(server_id, transport) {
+                    Ok(value) => value,
+                    Err(_) => return error_result(McpConnectionTestErrorCode::ProtocolError, "Invalid saved MCP connection".into(), None),
+                };
+                match authority.resolve(crate::owner::McpCredentialLookup {
+                    server_id: server_id.to_string(), resource_id: server_id.to_string(),
+                    connection_config_ref: config_ref, endpoint: url.clone(),
+                }).await {
+                    Ok(value) => value,
+                    Err(error) => return credential_failure_result(&error),
+                }
+            }
+            None => None,
+        };
+        match transport {
+            McpServerTransport::Http { url, headers } => self.test_network_credential(url, headers, false, credential).await,
+            McpServerTransport::Sse { url, headers } => self.test_network_credential(url, headers, true, credential).await,
+            _ => unreachable!(),
+        }
     }
 
     /// Test connectivity to an MCP server.
@@ -209,13 +263,25 @@ impl McpConnectionTestService {
         headers: &HashMap<String, String>,
         legacy: bool,
     ) -> McpConnectionTestResult {
+        self.test_network_credential(url, headers, legacy, None).await
+    }
+
+    async fn test_network_credential(
+        &self, url: &str, headers: &HashMap<String, String>, legacy: bool,
+        credential: Option<crate::owner::McpCredential>,
+    ) -> McpConnectionTestResult {
         let client = match self.http_client() {
             Ok(client) => client,
             Err(result) => return result,
         };
-        match crate::owner::discover_network(client, url, headers, legacy, &self.setup_policy).await {
+        match crate::owner::discover_network(client, url, headers, legacy, &self.setup_policy, credential).await {
             Ok(catalog) => success_result(Some(catalog)),
             Err(error) => {
+                if error.auth_diagnostic().is_some() {
+                    let mut result = credential_failure_result(&error);
+                    add_endpoint_details(&mut result, url);
+                    return result;
+                }
                 if error.code() == "MCP_CREDENTIAL_REQUIRED" {
                     let mut challenge_headers = reqwest::header::HeaderMap::new();
                     if let Some(challenge) = error.authentication_challenge() {
@@ -286,6 +352,39 @@ fn add_endpoint_detail_fields(details: &mut serde_json::Value, url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ExpiredCredential;
+
+    #[async_trait::async_trait]
+    impl crate::owner::McpCredentialAuthority for ExpiredCredential {
+        async fn resolve(&self, _: crate::owner::McpCredentialLookup) -> Result<Option<crate::owner::McpCredential>, crate::owner::McpOwnerError> {
+            Err(crate::owner::McpOwnerError::new("MCP_CREDENTIAL_EXPIRED", "Sign in again")
+                .with_auth_diagnostic(nomifun_api_types::McpAuthDiagnostic {
+                    code: nomifun_api_types::McpAuthErrorCode::ReauthorizationRequired,
+                    stage: nomifun_api_types::McpAuthStage::Refresh,
+                    retryable: false,
+                    user_action: nomifun_api_types::McpAuthUserAction::Reauthorize,
+                    trace_id: "fixture-auth-trace".into(), message: "Sign in again".into(), details: None,
+                }))
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_diagnostic_preserves_refresh_failure_and_login_action_without_network_io() {
+        let service = McpConnectionTestService::new(reqwest::Client::new()).with_credentials(Arc::new(ExpiredCredential));
+        let id = nomifun_api_types::McpServerId::parse("0190f5fe-7c00-7a00-8000-000000000501").unwrap();
+        let result = service.test_saved_connection(&id, "expired", &McpServerTransport::Http {
+            url: "https://uncontacted.example.test/mcp".into(), headers: Default::default(),
+        }).await;
+        assert_eq!(result.needs_auth, Some(true));
+        assert!(matches!(result.auth_method, Some(nomifun_api_types::McpAuthMethod::Oauth)));
+        let details = result.details.unwrap();
+        assert_eq!(details["owner_code"], "MCP_CREDENTIAL_EXPIRED");
+        assert_eq!(details["auth_diagnostic"]["code"], "REAUTHORIZATION_REQUIRED");
+        assert_eq!(details["auth_diagnostic"]["stage"], "refresh");
+        assert_eq!(details["auth_diagnostic"]["trace_id"], "fixture-auth-trace");
+        assert_eq!(details["auth_diagnostic"]["user_action"], "reauthorize");
+    }
 
     #[test]
     fn service_clone() {

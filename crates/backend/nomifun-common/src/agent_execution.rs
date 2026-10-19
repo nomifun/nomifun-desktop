@@ -103,6 +103,16 @@ macro_rules! string_enum {
 }
 
 string_enum! {
+    /// User-selected ownership range for a local Step stop. DAG dependencies
+    /// never enlarge this range.
+    pub enum AgentExecutionCancellationScope {
+        Task => "task",
+        DelegatedWork => "delegated_work",
+        TaskAndDelegated => "task_and_delegated",
+    }
+}
+
+string_enum! {
     /// Principal type responsible for an execution-domain command.
     ///
     /// The concrete identity and optional Agent conversation/attempt context

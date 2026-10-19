@@ -535,6 +535,8 @@ impl AgentRuntimeControl for UnifiedAgentRuntime {
 
 #[async_trait]
 impl OfficialAgentRuntime for UnifiedAgentRuntime {
+    fn teardown_proven(&self) -> bool { self.runtime.teardown_proven() }
+
     fn requires_turn_boundary_recycle(&self) -> bool {
         let replaceable = match self.runtime.status() {
             None => !self.driver.started_turn.load(std::sync::atomic::Ordering::Acquire),

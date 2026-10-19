@@ -18,6 +18,39 @@ fn owner(journal:&EngineTurnJournal) -> nomifun_agent_contracts::PrincipalRef {
 }
 
 #[tokio::test]
+async fn fenced_progress_before_runtime_signal_does_not_poison_original_cleanup() {
+    let(journal,pool)=test_fixture().await;
+    journal.0.store.cancel_active_turn(&journal.0.session,"original-user-stop".into(),"session_api".into()).await.unwrap();
+    assert!(!journal.0.cancellation.is_cancelled(),"hold the real durable-commit to native-signal boundary");
+    let before=journal.0.store.current_cursor(&journal.0.session).await.unwrap();
+    let late=AgentEngineEvent::ModelStepStarted {step:1,operation_id:"late-original-model-prefix".into(),correction_source:None};
+    assert!(journal.append(serde_json::to_string(&late).unwrap(),None,EngineJournalWrite::Progress).await.is_err());
+    assert_eq!(journal.sequence(),0);
+    assert_eq!(journal.0.store.current_cursor(&journal.0.session).await.unwrap(),before,"fence rejection committed no progress");
+    journal.append(json!({"event":"host_cleanup_proven"}).to_string(),None,EngineJournalWrite::Cleanup).await
+        .expect("a known rejected prefix cannot make exact original native cleanup permanently uncertain");
+    let receipt=journal.0.store.read_turn_receipt(&journal.0.session,&journal.0.operation).await.unwrap();
+    assert_eq!(receipt.status,TurnReceiptStatus::Cancelled);
+    let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='model_step_started'")
+        .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    assert_eq!(count,0,"cleanup never re-admits or retries the rejected model work");
+}
+
+#[tokio::test]
+async fn fenced_checkpoint_before_runtime_signal_keeps_original_cleanup_writable() {
+    let(journal,_pool)=test_fixture().await;
+    journal.0.store.cancel_active_turn(&journal.0.session,"original-checkpoint-stop".into(),"session_api".into()).await.unwrap();
+    assert!(!journal.0.cancellation.is_cancelled());
+    let before=journal.0.store.current_cursor(&journal.0.session).await.unwrap();
+    assert!(journal.save_execution_checkpoint(checkpoint(&journal,false),owner(&journal)).await.is_err());
+    assert_eq!(journal.sequence(),0);
+    assert_eq!(journal.0.store.current_cursor(&journal.0.session).await.unwrap(),before);
+    journal.append(json!({"event":"host_cleanup_proven"}).to_string(),None,EngineJournalWrite::Cleanup).await
+        .expect("transactionally rejected checkpoint is not an unknown native outcome");
+    assert!(journal.0.store.load_native_checkpoint(&owner(&journal),&journal.0.session,&journal.0.operation).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn cancellation_keeps_original_execution_lease_alive_for_retained_settlement() {
     let (journal, pool) = test_fixture().await;
     sqlx::query("UPDATE agent_turns SET execution_lease_until=0 WHERE session_id=? AND operation_id=?")
@@ -294,8 +327,7 @@ async fn validation_observation_after_cancellation_cannot_open_a_model_or_cross_
     assert_eq!(journal.0.store.current_cursor(&journal.0.session).await.unwrap(), before);
 }
 
-#[tokio::test]
-async fn correction_observations_do_not_settle_an_unknown_effect_or_admit_a_successor_model() {
+async fn journal_with_original_unknown_effect() -> (EngineTurnJournal, nomifun_db::SqlitePool, ChatRouteIdentity) {
     use nomifun_agent_session::{EffectEventRequest, EffectStrategy, EffectTerminalState};
     let (mut journal, pool) = test_fixture().await;
     let route = enable_fixture_route(&mut journal);
@@ -327,18 +359,33 @@ async fn correction_observations_do_not_settle_an_unknown_effect_or_admit_a_succ
         event_id: "effect-write-unknown".into(), producer_id: "workspace-owner".into(),
         causation_event_id: Some(started.event_id), ..effect
     }, EffectTerminalState::Uncertain).await.unwrap();
+    (journal, pool, route)
+}
+
+#[tokio::test]
+async fn correction_observations_do_not_settle_an_unknown_effect_or_admit_a_successor_model() {
+    let (journal, pool, route) = journal_with_original_unknown_effect().await;
     // Unknown effects move the Session out of running admission. Late model
     // observations can still close, using the settlement-only write path.
     for event in [rejected_arguments(2), AgentEngineEvent::ModelResponseValidated { step: 3 }] {
         journal.append(serde_json::to_string(&event).unwrap(), None, EngineJournalWrite::Settlement).await.unwrap();
     }
-    assert!(journal.authorize(&model_causality(&journal, route, 4)).await.is_err());
+    assert!(journal.authorize(&model_causality(&journal, route.clone(), 4)).await.is_err());
     let retained: (String, String) = sqlx::query_as("SELECT state,terminal_event_id FROM agent_effects WHERE effect_id='unknown-write'")
         .fetch_one(&pool).await.unwrap();
     assert_eq!(retained, ("unknown".into(), "effect-write-unknown".into()));
     let claims: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='context/model-visible-applied'")
         .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
     assert_eq!(claims, 0);
+    assert_eq!(journal.0.store.head(&journal.0.session).await.unwrap().status, "reconciliation");
+    let original_effect = journal.0.store.read_effect(&journal.0.session, "unknown-write").await.unwrap().unwrap();
+    journal.append(json!({"event":"host_cleanup_proven"}).to_string(), None, EngineJournalWrite::Cleanup).await.unwrap();
+    journal.append(serde_json::to_string(&AgentEngineEvent::TurnCancelled {model_steps:3}).unwrap(), None,
+        EngineJournalWrite::Terminal).await.expect("the same original owner may close its cancelled Turn after actual resource proof");
+    assert_eq!(journal.0.store.read_turn_receipt(&journal.0.session,&journal.0.operation).await.unwrap().status, TurnReceiptStatus::Cancelled);
+    assert_eq!(journal.0.store.read_effect(&journal.0.session,"unknown-write").await.unwrap().unwrap(), original_effect,
+        "cancel terminal is not business reconciliation or replay authority");
+    assert!(journal.authorize(&model_causality(&journal, route, 5)).await.is_err());
 }
 
 #[tokio::test]
@@ -404,12 +451,17 @@ async fn failed_cleanup_write_allows_only_its_exact_receipt_retry() {
 
 #[tokio::test]
 async fn partially_committed_terminal_retries_without_a_new_journal_record() {
-    let (journal,pool)=test_fixture().await;
+    let (journal,pool,route)=journal_with_original_unknown_effect().await;
+    let original_effect = journal.0.store.read_effect(&journal.0.session,"unknown-write").await.unwrap().unwrap();
     journal.append(json!({"event":"host_cleanup_proven"}).to_string(),None,EngineJournalWrite::Cleanup).await.unwrap();
     sqlx::query("CREATE TRIGGER reject_turn_cancelled BEFORE INSERT ON agent_events WHEN NEW.kind='turn/cancelled' BEGIN SELECT RAISE(FAIL,'fixture terminal commit failure'); END")
         .execute(&pool).await.unwrap();
     let terminal=serde_json::to_string(&AgentEngineEvent::TurnCancelled {model_steps:2}).unwrap();
-    assert!(journal.append(terminal.clone(),None,EngineJournalWrite::Terminal).await.is_err());
+    let failed = journal.append(terminal.clone(),None,EngineJournalWrite::Terminal).await.unwrap_err();
+    assert!(failed.to_string().contains("fixture terminal commit failure"));
+    assert!(journal.0.cursor.lock().await.uncertain, "a failed cancellation transaction retains its exact pending terminal witness");
+    assert!(journal.authorize(&model_causality(&journal, route, 4)).await.is_err());
+    assert_eq!(journal.0.store.head(&journal.0.session).await.unwrap().status, "reconciliation");
     let before=journal.0.store.current_cursor(&journal.0.session).await.unwrap();
     assert!(journal.append(serde_json::to_string(&AgentEngineEvent::TurnCancelled {model_steps:3}).unwrap(),None,
         EngineJournalWrite::Terminal).await.is_err());
@@ -423,6 +475,11 @@ async fn partially_committed_terminal_retries_without_a_new_journal_record() {
     assert_eq!(journal_records,2);
     assert_eq!(terminals,1);
     assert_eq!(journal.sequence(),2);
+    assert_eq!(journal.0.store.read_turn_receipt(&journal.0.session,&journal.0.operation).await.unwrap().status, TurnReceiptStatus::Cancelled);
+    assert_eq!(journal.0.store.read_effect(&journal.0.session,"unknown-write").await.unwrap().unwrap(), original_effect);
+    let work:(i64,i64)=sqlx::query_as("SELECT (SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='context/model-visible-applied'),(SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='tool/call-started')")
+        .bind(journal.0.session.as_ref()).bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    assert_eq!(work,(0,1),"only the originally admitted tool exists; a terminal retry never dispatches model/tool work");
 }
 
 #[tokio::test]

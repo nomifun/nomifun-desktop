@@ -19,7 +19,7 @@ export interface CharacterProps {
   size?: number;
 }
 
-/** Per-character desktop window/render spec. Characters without one use DEFAULT_DESK. */
+/** Desktop-companion window and figure dimensions. */
 export interface CharacterDeskSpec {
   /** Companion window logical size (px). */
   windowWidth: number;
@@ -48,13 +48,9 @@ export interface CustomFigureMeta {
 }
 
 export interface CharacterMeta {
-  /** Stable id persisted in companion config (appearance.character). */
+  /** Stable id persisted in companion config (character). */
   id: string;
-  /** i18n key suffix: nomi.characters.<id>.name / .style */
-  nameKey: string;
   /** Two swatch colors shown in the picker chip. */
   palette: [string, string];
-  /** Optional desktop spec — full-figure characters need a taller window. */
-  desk?: CharacterDeskSpec;
   Component: React.FC<CharacterProps>;
 }

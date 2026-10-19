@@ -1,34 +1,40 @@
 import type { McpServerId } from '@/common/types/ids';
 import type { IMcpServer } from '@/common/config/storage';
 import { Button, Dropdown, Menu, Popover, Switch, Tooltip } from '@arco-design/web-react';
-import { Check, CloseSmall, Info, LoadingOne, Refresh, Write, DeleteFour, SettingOne, Login } from '@icon-park/react';
+import { Check, CloseSmall, Info, LoadingOne, Refresh, Write, DeleteFour, Setting, Login } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { McpOAuthStatus } from '@/renderer/hooks/mcp/useMcpOAuth';
+import type { McpOAuthAttempt } from '@/common/types/mcpAuth';
 import FeedbackButton from '@/renderer/components/base/FeedbackButton';
 import { iconColors } from '@/renderer/styles/colors';
 import { getMcpConfigurationFields, supportsMcpOAuthLogin } from '@/renderer/hooks/mcp/mcpAuthConfig';
 import { useMcpDisplayName } from '@/renderer/services/mcp/useMcpDisplayName';
+import styles from './McpServerList.module.css';
 
 interface McpServerHeaderProps {
   server: IMcpServer;
   isTestingConnection: boolean;
   oauthStatus?: McpOAuthStatus;
+  oauthAttempt?: McpOAuthAttempt;
   isLoggingIn?: boolean;
   isTogglingEnabled?: boolean;
   onTestConnection: (server: IMcpServer) => void;
   onEditServer: (server: IMcpServer) => void;
   onDeleteServer: (serverId: McpServerId) => void;
   onOAuthLogin?: (server: IMcpServer) => void;
+  onOAuthCancel?: (server: IMcpServer) => void;
+  onOAuthLogout?: (server: IMcpServer) => void;
+  onOAuthConfigure?: (server: IMcpServer) => void;
+  onOAuthContinue?: (server: IMcpServer) => void;
   onToggleEnabled: (server: IMcpServer) => void;
 }
 
 const getStatusIcon = (
   last_test_status?: IMcpServer['last_test_status'],
-  oauthStatus?: McpOAuthStatus,
   isTestingConnection?: boolean
 ) => {
-  if (isTestingConnection || last_test_status === 'testing' || oauthStatus?.isChecking) {
+  if (isTestingConnection || last_test_status === 'testing') {
     return <LoadingOne size='18' fill={iconColors.primary} />;
   }
 
@@ -36,15 +42,7 @@ const getStatusIcon = (
     return <CloseSmall size='18' fill={iconColors.danger} />;
   }
 
-  if (oauthStatus?.needsLogin) {
-    return <span className='text-16px font-bold leading-none text-orange-500'>△</span>;
-  }
-
   if (last_test_status === 'connected') {
-    return <Check size='18' fill={iconColors.success} />;
-  }
-
-  if (oauthStatus?.isAuthenticated) {
     return <Check size='18' fill={iconColors.success} />;
   }
 
@@ -104,11 +102,10 @@ const getStatusPopoverContent = (
 
 const getStatusText = (
   last_test_status?: IMcpServer['last_test_status'],
-  oauthStatus?: McpOAuthStatus,
   isTestingConnection?: boolean,
   t?: (key: string, options?: Record<string, unknown>) => string
 ) => {
-  if (isTestingConnection || last_test_status === 'testing' || oauthStatus?.isChecking) {
+  if (isTestingConnection || last_test_status === 'testing') {
     return t?.('settings.mcpTesting') || 'testing';
   }
 
@@ -116,16 +113,8 @@ const getStatusText = (
     return t?.('settings.mcpCheckFailedSimple') || 'Failed';
   }
 
-  if (oauthStatus?.needsLogin) {
-    return t?.('settings.mcpNeedsLogin') || 'Login required';
-  }
-
   if (last_test_status === 'connected') {
     return t?.('settings.mcpCheckPassedSimple') || 'Manual check passed';
-  }
-
-  if (oauthStatus?.isAuthenticated) {
-    return t?.('settings.mcpAuthenticated') || 'Authenticated';
   }
 
   return t?.('settings.mcpDisconnected') || 'Not tested';
@@ -135,12 +124,17 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
   server,
   isTestingConnection,
   oauthStatus,
+  oauthAttempt,
   isLoggingIn,
   isTogglingEnabled,
   onTestConnection,
   onEditServer,
   onDeleteServer,
   onOAuthLogin,
+  onOAuthCancel,
+  onOAuthLogout,
+  onOAuthConfigure,
+  onOAuthContinue,
   onToggleEnabled,
 }) => {
   const { t } = useTranslation();
@@ -150,16 +144,18 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
   const configurationFields = getMcpConfigurationFields(server.transport);
   const needsConfiguration = configurationFields.length > 0;
   const oauthCapable = supportsMcpOAuthLogin(server.transport);
-  const needsLogin = oauthCapable && oauthStatus?.needsLogin;
+  const auth = oauthStatus?.auth;
+  const clientRequired = auth?.state === 'configuration_required';
+  const needsLogin = oauthCapable && auth && ['required', 'reauthorization_required', 'configuration_required', 'failed'].includes(auth.state);
   const statusText = needsConfiguration
     ? t('settings.mcpConfigurationRequiredShort', {
         defaultValue: 'Configuration required',
       })
-    : getStatusText(server.last_test_status, oauthStatus, isTestingConnection, t);
+    : getStatusText(server.last_test_status, isTestingConnection, t);
   const statusIcon = needsConfiguration ? (
     <span className='text-16px font-bold leading-none text-orange-500'>!</span>
   ) : (
-    getStatusIcon(server.last_test_status, oauthStatus, isTestingConnection)
+    getStatusIcon(server.last_test_status, isTestingConnection)
   );
   const statusPopoverContent = needsConfiguration ? (
     <div className='max-w-300px space-y-2 text-13px leading-20px'>
@@ -182,55 +178,77 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
   const isError = !needsConfiguration && server.last_test_status === 'error';
 
   return (
-    <div className='group flex min-w-0 w-full items-center justify-between gap-8px'>
-      <div className='flex min-w-0 flex-1 items-center gap-8px'>
-        <span className='min-w-0 truncate text-14px leading-24px' title={displayName}>{displayName}</span>
+    <div className={styles.header}>
+      <div className={styles.summary}>
+        <span className={styles.name} title={displayName}>{displayName}</span>
         {statusPopoverContent ? (
           <Popover content={statusPopoverContent} trigger='hover' position='top'>
-            <span className='inline-flex size-24px flex-none cursor-default items-center justify-center line-height-0'>
+            <span role='img' aria-label={statusText} className={styles.status}>
               {statusIcon}
             </span>
           </Popover>
         ) : (
           <Tooltip content={statusText} position='top'>
-            <span className='inline-flex size-24px flex-none cursor-default items-center justify-center line-height-0'>
+            <span role='img' aria-label={statusText} className={styles.status}>
               {statusIcon}
             </span>
           </Tooltip>
         )}
         {isError && <FeedbackButton className='!h-24px !px-6px !py-0 [&_svg]:!pt-0' />}
+        {oauthCapable && auth?.state === 'authorized' && !isLoggingIn && (
+          <span data-testid='mcp-auth-authorized' className='flex-none text-12px text-t-secondary'>
+            {t('settings.mcpAuthenticated')}
+          </span>
+        )}
+        {isLoggingIn && (
+          <span className='flex-none text-12px text-t-secondary'>
+            {t(oauthAttempt?.status === 'exchanging' ? 'settings.mcpOAuthExchanging' : 'settings.mcpOAuthWaiting')}
+          </span>
+        )}
         {needsConfiguration && !server.builtin && (
           <Button
             size='mini'
             type='outline'
             status='warning'
             icon={<Write size={'14'} />}
-            className='!h-24px [&_.arco-btn-icon]:inline-flex [&_.arco-btn-icon]:items-center'
+            className={styles.stateAction}
             title={statusText}
             onClick={() => onEditServer(server)}
           >
             {t('settings.mcpConfigure', { defaultValue: 'Configure' })}
           </Button>
         )}
-        {!needsConfiguration && needsLogin && onOAuthLogin && (
+        {!needsConfiguration && needsLogin && !isLoggingIn && onOAuthLogin && (
           <Button
             size='mini'
             type='primary'
             icon={<Login size={'14'} />}
-            className='!h-24px [&_.arco-btn-icon]:inline-flex [&_.arco-btn-icon]:items-center'
-            title={t('settings.mcpLogin') || 'Login'}
-            loading={isLoggingIn}
+            className={styles.stateAction}
+            title={t(clientRequired ? 'settings.mcpOAuthConfigureClient' : 'settings.mcpLogin')}
             disabled={isTogglingEnabled}
-            onClick={() => onOAuthLogin(server)}
+            onClick={() => clientRequired && onOAuthConfigure ? onOAuthConfigure(server) : onOAuthLogin(server)}
           >
-            {t('settings.mcpLogin') || 'Login'}
+            {t(clientRequired ? 'settings.mcpOAuthConfigureClient' : 'settings.mcpLogin')}
           </Button>
         )}
-        {!needsConfiguration && !needsLogin && (
+        {isLoggingIn && oauthAttempt?.authorization_url && onOAuthContinue && (
+          <Button size='mini' type='text' className={styles.stateAction} onClick={() => onOAuthContinue(server)}>{t('settings.mcpOAuthContinue')}</Button>
+        )}
+        {isLoggingIn && onOAuthCancel && (
+          <Button size='mini' type='text' className={styles.stateAction} onClick={() => onOAuthCancel(server)}>{t('common.cancel')}</Button>
+        )}
+      </div>
+      <div
+        className={styles.controls}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => e.stopPropagation()}
+      >
+        {!needsConfiguration && !isLoggingIn && (
           <Button
             size='mini'
-            icon={<Refresh size={'14'} />}
-            className='!size-24px !p-0 [&_.arco-btn-icon]:inline-flex [&_.arco-btn-icon]:items-center'
+            type='text'
+            icon={<Refresh size={'16'} />}
+            className={styles.iconButton}
             title={t('settings.mcpTestConnection')}
             aria-label={t('settings.mcpTestConnection')}
             loading={isTestingConnection}
@@ -238,13 +256,42 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
             onClick={() => onTestConnection(server)}
           />
         )}
-      </div>
-      <div
-        className='flex flex-none items-center gap-8px'
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => e.stopPropagation()}
-      >
-        <span className='text-12px text-t-secondary'>
+        {(!server.builtin || oauthCapable) && (
+          <Dropdown
+            trigger='hover'
+            droplist={
+              <Menu>
+                {oauthCapable && onOAuthConfigure && <Menu.Item key='oauth-config' disabled={isLoggingIn} onClick={() => onOAuthConfigure(server)}>
+                  {t('settings.mcpOAuthConfigureClient')}
+                </Menu.Item>}
+                {oauthCapable && onOAuthLogout && <Menu.Item key='oauth-logout' disabled={isLoggingIn} onClick={() => onOAuthLogout(server)}>
+                  {t('settings.mcpOAuthLogout')}
+                </Menu.Item>}
+                {!server.builtin && <Menu.Item key='edit' onClick={() => onEditServer(server)}>
+                  <div className='flex items-center gap-2'>
+                    <Write size={'14'} />
+                    {t('settings.mcpEditServer')}
+                  </div>
+                </Menu.Item>}
+                {!server.builtin && <Menu.Item key='delete' onClick={() => onDeleteServer(server.mcp_server_id)}>
+                  <div className='flex items-center gap-2 text-red-500'>
+                    <DeleteFour size={'14'} />
+                    {t('settings.mcpDeleteServer')}
+                  </div>
+                </Menu.Item>}
+              </Menu>
+            }
+          >
+            <Button
+              size='mini'
+              type='text'
+              icon={<Setting size={'18'} />}
+              className={styles.iconButton}
+              aria-label={t('settings.mcpEditServer')}
+            />
+          </Dropdown>
+        )}
+        <span className='sr-only'>
           {t(server.enabled ? 'settings.mcpEnabled' : 'settings.mcpDisabled')}
         </span>
         <Switch
@@ -256,34 +303,6 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
           aria-label={t(server.enabled ? 'settings.mcpDisableServer' : 'settings.mcpEnableServer', { name: displayName })}
           onChange={() => onToggleEnabled(server)}
         />
-        {!server.builtin && (
-          <Dropdown
-            trigger='hover'
-            droplist={
-              <Menu>
-                <Menu.Item key='edit' onClick={() => onEditServer(server)}>
-                  <div className='flex items-center gap-2'>
-                    <Write size={'14'} />
-                    {t('settings.mcpEditServer')}
-                  </div>
-                </Menu.Item>
-                <Menu.Item key='delete' onClick={() => onDeleteServer(server.mcp_server_id)}>
-                  <div className='flex items-center gap-2 text-red-500'>
-                    <DeleteFour size={'14'} />
-                    {t('settings.mcpDeleteServer')}
-                  </div>
-                </Menu.Item>
-              </Menu>
-            }
-          >
-            <Button
-              size='mini'
-              icon={<SettingOne size={'14'} />}
-              className='!size-24px !p-0 [&_.arco-btn-icon]:inline-flex [&_.arco-btn-icon]:items-center'
-              aria-label={t('settings.mcpEditServer')}
-            />
-          </Dropdown>
-        )}
       </div>
     </div>
   );

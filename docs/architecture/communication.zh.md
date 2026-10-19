@@ -164,7 +164,27 @@ MCP 服务器对外暴露引擎可调用的工具与资源。当前 `nomifun-app
 始终留在父进程内，不序列化进运行时 DTO、数据库行或子进程配置。公开能力入口使用
 独立的安装令牌边界，不继承内部宿主能力声明。
 
-针对 HTTP MCP 服务器的 OAuth 流程由 `nomifun-mcp::oauth_service` 处理（PKCE、回调 URI、token 存储）。加密后的 token 通过 AES-GCM 落入 SQLite 的 `oauth_tokens` 仓库（参见 `nomifun-common::crypto::{encrypt_string, decrypt_string}`）。
+HTTP/SSE MCP 的认证由 `AppServices` 持有的唯一 `nomifun-mcp::McpAuthService` 管理。
+设置页连接测试与 Runtime `McpOwner` 共用该 authority，按 server ID、安装 owner 与确切连接配置
+解析凭据；手工 headers 沿同一派发边界使用，OAuth token 不复制到 headers 配置或 Session。
+发现顺序为实际 Bearer challenge、资源元数据、声明的授权服务器 metadata；已验证的
+issuer/resource/client 上下文约束后续授权与刷新，不能由一个 MCP URL 猜测 token 目的地。
+
+创建、查询、取消 attempt 与认证状态/注销使用 `/api/mcp/servers/{id}/auth` 及其
+`/attempts` 子资源。一次性 state、PKCE、待授权状态、回调 listener 和取消归属于同一个有界
+进程内 attempt；前端负责在用户浏览器打开返回的授权地址，不等待一个长时间阻塞的登录 POST。
+桌面原生入口使用临时 loopback callback；远端 WebUI 使用运维明确配置的 HTTPS
+`NOMIFUN_MCP_OAUTH_CALLBACK_URL`，路径固定 `/api/mcp/oauth/callback`。
+公开 callback 只通过原 attempt 的 state 接收结果，不能从请求选择 owner、server、issuer 或
+token endpoint，也不从 `Host`/`Origin` 推导重定向地址。CIMD 产品元数据 URL 可通过
+`NOMIFUN_MCP_OAUTH_CLIENT_METADATA_URL` 配置，见[配置参考](../reference/configuration.zh.md#mcp-oauth)。
+
+`mcp_oauth_clients` 保存真实注册身份及加密 client secret；`mcp_oauth_grants` 保存每个
+server 的当前授权及 AES-GCM token envelope。两表由 `IMcpOAuthRepository` 管理；
+加密复用数据集密钥，不新增 OAuth Session 或会话日志。刷新仅 CAS 更新当前 grant；
+重登、注销、删除与配置替换共享同一 authority 的每服务准入围栏，迟到 callback 不能复活授权。
+连接测试保存目录时在同一围栏内核对认证观察，普通 token 轮换不改变 Agent Snapshot。
+认证失败返回带阶段与用户动作的安全诊断；密码、token、授权码和上游响应正文不进入诊断。
 
 ## Canonical Remote 入口
 

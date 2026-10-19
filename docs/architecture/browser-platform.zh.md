@@ -50,6 +50,64 @@ paused 本身不构成浏览器输入锁。Browser snapshot 只报告实际输�
 完整 Runtime teardown 成功后，Kernel 资源上下文只按对应实例的 Arc 身份退出 Weak cache；即使旧 handle 仍被持有，
 后继 Runtime 也不能复用已关闭上下文，迟到的旧 cleanup 不能驱逐新的实例。
 
+真正应用退出时，HTTP host 先关闭新准入，不在发出资源停止前等待所有已接受请求返回。原 AppServices
+在关闭 Agent 准入后并行推进 producer 收束与 Browser 各 owner 的资源关闭。资源关闭证明与 listener、
+storage 关闭仍由同一 HostShutdownStage 分别持有；原 HTTP 请求尚未结束时数据库保持打开，只有原资源
+和各 listener 都已实际收束后才关闭 storage。长请求不再延误向 Agent 或其他独立资源发出关闭。
+Gateway、Attached Chrome、headless 和 managed Workspace 各自封住准入并等待原生操作／精确载体清理；
+某个 producer 或资源 owner 失败、仍在等待，不能跳过其他 owner 的关闭请求。managed Workspace 的 view
+关闭与进程级 native infrastructure 释放分开：后者仍须取得原有 producer 与资源收束证明，数据库也继续
+保持打开直到全部适用清理成功。失败原因合并报告，失败的原 owner 与未完成 worker 继续保留供重试，已经
+确认的 view 关闭不重复执行。关闭载体不删除 Session 历史、Profile 或登录资料；Attached Chrome 只释放本应用
+连接与控制归属，不关闭用户浏览器。这一退出合同不把 Turn 结束或面板隐藏解释为用户工作区可销毁。
+
+自动退休由同一个 BrowserWorkspace 持有用途与原 native close，不建立另一份任务账本。普通已回答／失败的
+Turn 只结束该回合责任，不能证明非空网页的使命完成。非空的 task-only 回收还须匹配原 Execution owner、
+inactive attempt／automation link、精确原 Attempt 的终态及其 Step 用途正式结束的事实和 exact Turn。
+AutoWork 根任务读取自己的 automation link；失败使用原 System settlement，取消核对原 canonical terminal
+及领域取消事实，软删除也只从原 repository 的受限清理读取取得证明，不改变普通查询的可见性。
+同 Session 仍有活动任务、后继、重试、review、无原资源关闭证明的未知 Effect、等待或暂停时不能取得这份证明。
+委派子任务使用自己的 Session 和 BrowserWorkspace，未结算的聚合 lead 记录本身不持有根任务的浏览器用途；
+根任务正式结算后可退休自己的独占载体，其他 Session 的合法委派及其浏览器继续运行。
+MCP 的原物理清理证明仅用于资源退休，业务 Unknown 与恢复围栏继续保留。只有原生载体确由 Agent 创建、
+从未具有人工可操作或明确人工保留用途，且任务及后置责任已经结算时，才进入该自动退休子集。Agent 仅在
+原生输入已确认禁用期间的自动展示，不自行产生人工用途；这不允许凭 Session 状态、UI 来源标签或锁定意图
+推断安全，也不放宽正式使命与原生操作的结算要求。
+
+合法重试仍等待时保留用途；正式 Stop 或 Step 最终结算结束这份责任后，原 writer 重新唤醒该 Step
+已确认清理的旧终态 Attempt，仍使用各自原 invocation，不能选择后继 Turn。旧失败结果及 retry 元数据
+保留为审计，不再阻止已持久停止的任务退休。读取明确区分原 Attempt 与实际 current Attempt，
+旧对象的资源退出不取消后继。若原 workspace 仍由活动后继保护而未接受退休，原清理项保留等待再次核验；
+Runtime transport 可独立退休，无原 workspace 或已由其他确切用途接手时不制造额外清理责任。
+
+Cron 每次新建独立会话的 Run，在本次实际创建路径捕获不可变来源，正式终结后由原 owner
+交付结束用途；不使用当前可变的任务 mode 补造该权限。Cron Existing 和等待用户输入继续保留用途。
+Remote 的普通 Ready 会话同样持续保留，只有原取消 owner 持久确认 Session 已取消、原 native 已结束，
+才可结束该 Remote 来源的浏览器用途。来源回调由原 TaskTracker 保留至 Browser 接责或真正退出的
+原 owner 接管，不重建 Runtime，不发送输入或重跑任务；接责不冒称物理关闭已经完成。
+
+当前 presentation 与原生 Attachment 是独立的使用责任。人工或来源不明的 visible=true 派发先单调保留
+用户页面用途；明确的人工打开、链接或页面命令，即使发生在 Agent 锁内也保留这一用途。macOS 自动打开的
+Attachment 只提供来源候选，仍由原 Workspace 在真实 coordinator 门禁及 native lock ACK 下判断；旧来源
+不能把人工用途降级。输入交还在任何 native enable 前，先保留仍可能可见或仍有 Attachment 的页面；原生
+锁定、展示或交接结果不确定时同样保守保留，不把锁延长到模型思考阶段。缺省来源和 Windows surface 路径
+保持原人工保守语义。只有同一最新 epoch 的 visible=false 原生确认才结束此次展示；菜单／模态的临时遮挡
+仍由原 Attachment 持有。
+真正 detach 在 hide 确认后释放准确 attachment ID，迟到 hide／detach、请求取消及历史 user_command 都不能
+冒充当前使用结束。正在使用的
+空浏览器保持 close-all 后在同一 runtime 创建新标签的能力；已确认收起、无剩余标签／传输／任务责任的空载体
+可自动关闭，不要求用户删除 Session。没有真实 presentation 生命周期的 API-only 使用保持 unknown，不能从请求
+返回或断开猜测未来使用已经结束。曾可供人工操作或明确由用户打开保留的非空网页仍可能有未保存编辑或页面服务，当前原生接口不能为任意
+JS 提供可无损销毁的负面证明；该范围继续保留并可由用户显式关闭，不宣称已经完成全部非空旧网页自动回收。
+
+正式任务结束只登记退休责任并唤醒原 worker，不能让后台原生 close 占住 Session 后继输入的门禁。worker 订阅
+原用途／原生变化后复读；正在选择或传输的下载保留，完成通知再次检查，取消／失败清理由原 native owner 收束。
+精确后继任务和用户用途在短锁内与退休准入竞争，native close 在锁外持续取得真实结果；调用方离开不丢弃原操作。
+失败保留同代载体及重试责任，成功注销只在 close 确认后发生，历史和 Profile 保留。只读活动投影使用
+`BrowserWorkspaceObservation` 的用途、关闭阶段与可选证明；未注册对象、Arc 数量或句柄存在都不能替代原生退出证明。
+活动资源关闭还绑定原 BrowserResourceService 的随机 instance UUID 与 runtime generation；应用重启后
+代际数字即使重复，旧页面按钮也不能关闭本次新建的载体。
+
 正式内置浏览器 Profile 固定按认证 owner 与 Session 隔离。Windows 保留目录
 `browser-v4/agent-sessions/<identity-hash>/`，namespace 为 `nomifun.browser.session-managed-profile.v2`。
 macOS 14+ 使用公开 `WKWebsiteDataStore.dataStoreForIdentifier` 的独立持久 store：
@@ -69,6 +127,10 @@ WK 不继承 Safari 或旧 CEF Cookie；切换后允许首次重新登录。旧 
 独立原生 conformance fixture 可以使用 Ephemeral Profile，不改变正式用户侧栏的策略。
 canonical Session 删除先关闭真实 runtime，再安全删除该 Session 的精确用户 Profile，即使它从未拥有 Agent Browser binding；
 重启后也按同一身份计算，无第二份 Profile/授权账本。已结算效果引用的 Agent 资源定义仍按 canonical 契约保留。
+Session 删除在短 service lifecycle 临界区登记原 owner、永久封住该 Session 的准入，并捕获精确载体与 Profile 职责；
+原生 close 和 Profile 删除由保留的该 Session worker 在全局锁外完成，慢或失败的 A 不阻挡 B 的新建与使用。
+调用方离开不撤销原清理；载体注销后的 Profile 失败仍保留原职责，重试不能把库存为空误报为删除成功。
+应用关闭及离线 dataset 清理仍须 join 已登记的 Session 清理 owner，未确认或失败阻挡共享 native shutdown。
 
 内嵌浏览器不提供 F12、Inspect 或用户可见 DevTools 窗口。普通页、popup 与宿主维护 view 都显式
 禁用该入口，边界扫描防止重新开启。底层 WebView2 协议调用仍用于 Agent 观察、原生输入、
@@ -193,6 +255,18 @@ Knowledge 冻结 exact Provider/source，通过 Kernel 非 Agent operation 和�
 ## 系统浏览器与退役边界
 
 Attached Chrome 使用显式授权连接，不取得 managed 浏览器输入锁。非观察动作期间的临时 debugger 绘制 override 持续到 run settle 后撤销；不能在单次 wheel ACK 后立即释放。启停不确定时关闭自己的连接，不关闭用户浏览器或页面，不修改 Profile、启动参数或 OS 窗口。
+
+Provider 在短状态锁内原子校验 connection incarnation、关闭准入与登记原 Run／target claim，锁外执行原生调用。
+尚在读取标签库存的 Run 也先登记，disconnect、Session 删除和 app shutdown 先封住适用准入并向这些原 owner
+发送取消，再等待其库存读取、输入及 settle／finish 真正结束。同一 Run 的业务调用保序且一个在途；调用者离开只
+放弃等待，原操作与生命周期 worker 保留真实原生收束责任。物理连接的创建／销毁仍串行，但其长锁不承载业务调用
+或阻挡取消围栏。底层引擎及实际平台的跨 target 并行能力仍须独立验证，不能从 Provider mock 的并行通过推断。
+
+Attached 引擎分别保留连接关闭读写屏障和每个真实 target 的原生操作门禁。库存读取与不同 target 的准备、
+观察及清理可独立推进；pending 原操作继续持有该 target 和连接屏障，Automation 状态先归还再释放门禁。
+正在准备的 target 仍占原 Automation 容量，不因状态暂时取出而绕过既有边界。真实 BringToFront／键鼠序列
+继续使用浏览器焦点互斥；观察只在切换焦点时短暂取得它，不能把所有原生输入宣称为可同时执行。未确认释放的
+按键／鼠标责任由原 target 连同输入门禁保留到 exact release；disconnect 等待原操作、对话框回执和连接销毁。
 
 宿主通过明确 `BrowserRuntimeTarget` 及持久 owner/source/cron/execution 归属分类，不从缺少 Workspace 猜 Headless。普通聊天可不选 Browser；选择后缺少原生宿主明确失败。渠道、定时和执行步骤的后台自动化仍无现役 v2 owner，不能恢复旧 Hub/Lane、租约、私有引擎、共享 vault 或旧 Profile 导入。独立搜索与 Knowledge render 具有自己的 owner，不受此限制替代。
 

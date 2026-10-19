@@ -1241,7 +1241,7 @@ describe('normalizeDbMessage', () => {
     });
   });
 
-  test.each(['companion.default', 'companion.robot', 'customer-service.default'])('retains verified %s presentation on both sides of an old boundary', (key) => {
+  test.each(['companion.default', 'customer-service.default'])('retains verified %s presentation on both sides of an old boundary', (key) => {
     const normalized = normalizeDbMessage(baseMessage({
       type: 'tips', position: 'center', content: { type: 'success', content: '',
         agent_transition: {

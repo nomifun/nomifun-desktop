@@ -599,6 +599,8 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<AgentBindingChangedPayloadV1>(&mut schemas, "agent_binding_changed_payload")?;
     add_schema::<ContextClearedPayloadV1>(&mut schemas, "context_cleared_payload")?;
     add_schema::<RemoteBinding>(&mut schemas, "remote_binding")?;
+    add_schema::<nomifun_agent_contracts::CronRunRuntimeSource>(&mut schemas, "cron_run_runtime_source")?;
+    add_schema::<nomifun_agent_contracts::RemoteBindingVersionRef>(&mut schemas, "remote_turn_runtime_source")?;
     add_schema::<AgentSessionAggregate>(&mut schemas, "agent_session")?;
     add_schema::<IdmmDecisionExplanation>(&mut schemas, "idmm_decision_explanation")?;
     add_schema::<IdmmDecisionNotice>(&mut schemas, "idmm_decision_notice")?;
@@ -609,6 +611,9 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<nomifun_agent_contracts::ChannelInputQuestionDeliveredV1>(&mut schemas, "channel_input_question_delivered")?;
     add_schema::<nomifun_agent_contracts::ChannelInputDeliveryStateV1>(&mut schemas, "channel_input_delivery_state")?;
     add_schema::<nomifun_agent_contracts::SessionProcessOwnerReleasedV1>(&mut schemas, "session_process_owner_released")?;
+    add_schema::<nomifun_agent_contracts::SessionProcessReapedV1>(&mut schemas, "session_process_reaped")?;
+    add_schema::<nomifun_agent_contracts::SessionSshLinkCloseV1>(&mut schemas, "session_ssh_link_close_requested")?;
+    add_schema::<nomifun_agent_contracts::SessionSshLinkClosedV1>(&mut schemas, "session_ssh_link_closed")?;
     add_schema::<KnowledgeWritebackStartedV1>(&mut schemas, "turn_knowledge_writeback_started")?;
     add_schema::<KnowledgeWritebackSettledV1>(&mut schemas, "turn_knowledge_writeback_settled")?;
     add_schema::<CanonicalErrorRegistryPayload>(&mut schemas, "canonical_error_registry")?;

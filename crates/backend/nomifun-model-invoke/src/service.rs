@@ -230,6 +230,9 @@ impl ModelInvokeService {
     pub async fn validate(&self, m: &ModelRef, task: ModelTask) -> Result<(), InvokeError> {
         if task == ModelTask::SpeechRecognition {
             let config = self.resolve_task_config(m, task).await?;
+            if crate::voice::speech::is_registered_session_protocol(&config.protocol) {
+                return crate::voice::speech::validate_transcription_configuration(&config);
+            }
             if crate::streaming_asr::supports_protocol(&config.protocol) {
                 return crate::streaming_asr::validate_model(&config);
             }
@@ -463,6 +466,24 @@ impl ModelInvokeService {
         let started = Instant::now();
         if task == ModelTask::SpeechRecognition {
             if let Ok(config) = self.resolve_task_config(m, task).await {
+                if crate::voice::speech::is_registered_session_protocol(&config.protocol) {
+                    let attempt = async {
+                        let mut session = crate::voice::speech::create_transcription_session(config, 16_000, None).await?;
+                        session.try_send(vec![0; 960])?;
+                        session.finish_result().await?;
+                        Ok::<(), InvokeError>(())
+                    };
+                    let result = tokio::time::timeout(PROBE_TIMEOUT, attempt).await;
+                    return Ok(ProbeReport {
+                        status: if matches!(&result, Ok(Ok(()))) { HealthStatus::Unknown } else { HealthStatus::Unhealthy },
+                        latency_ms: started.elapsed().as_millis() as u64,
+                        message: Some(match result {
+                            Ok(Ok(())) => "Incremental ASR stream accepted and finalized; speech recognition quality has not been verified".into(),
+                            Ok(Err(error)) => error.to_string(),
+                            Err(_) => "Incremental ASR probe exceeded its response budget".into(),
+                        }),
+                    });
+                }
                 if crate::streaming_asr::supports_protocol(&config.protocol) {
                     let result = self.open_streaming_asr(m, crate::streaming_asr::StreamingAsrConfig::default()).await;
                     let (status, message) = match result {

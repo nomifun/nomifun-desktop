@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Modal } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { Add, ArrowLeft, ArrowRight, Close, Earth, Lock, Refresh } from '@icon-park/react';
-import { browserClient, navigationUrl, newerSnapshot, type BrowserClient, type BrowserCommand, type BrowserNavigationCommand, type BrowserSnapshot, type SurfaceBounds, type BrowserShortcut, type BrowserShortcutAction } from './client';
+import { browserClient, navigationUrl, newerSnapshot, type BrowserClient, type BrowserCommand, type BrowserNavigationCommand, type BrowserSnapshot, type SurfaceBounds, type BrowserShortcut, type BrowserShortcutAction, type BrowserSurfaceSource } from './client';
 import { browserShortcut } from './keyboardShortcuts';
 import styles from './BrowserPanel.module.css';
 import type { BrowserLinkRequest } from './BrowserLinkContext';
@@ -12,7 +12,7 @@ import { copyText } from '@/renderer/utils/ui/clipboard';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermissionModel';
 
-type Props = { agentSessionId: string; onClose: () => void; client?: BrowserClient; linkRequest?: BrowserLinkRequest; onLinkConsumed?: (id: number, handled: boolean) => void; onLinkAvailabilityChange?: (available: boolean) => void; hostSurfaceAvailable?: boolean; panelId?: string };
+type Props = { agentSessionId: string; onClose: () => void; client?: BrowserClient; linkRequest?: BrowserLinkRequest; onLinkConsumed?: (id: number, handled: boolean) => void; onLinkAvailabilityChange?: (available: boolean) => void; hostSurfaceAvailable?: boolean; panelId?: string; surfaceSource?: BrowserSurfaceSource; onUserSurfaceUse?: () => void };
 type BrowserFailureKind = 'host' | 'initialization' | 'locked' | 'request' | 'clear';
 type BrowserFailure = { kind: BrowserFailureKind; message: 'browserWorkspace.hostUnavailableHint' | 'browserWorkspace.requestFailed' | 'browserWorkspace.clearSiteDataFailed' | 'browserWorkspace.initializationFailed' | 'browserWorkspace.stopHint'; retryable: boolean; releaseAfter?: { scope: object; agentSessionId: string; browserId: string; runtimeGeneration: number | null; revision: number } };
 type CommandFlight = { scope: object; sequence: number; command?: BrowserCommand };
@@ -53,7 +53,7 @@ export function browserFailure(reason: unknown): BrowserFailure {
   return { kind: 'request', message: 'browserWorkspace.requestFailed', retryable: http?.status !== 403 };
 }
 
-export default function BrowserPanel({ agentSessionId, onClose, client = browserClient, linkRequest, onLinkConsumed, onLinkAvailabilityChange, hostSurfaceAvailable = true, panelId }: Props) {
+export default function BrowserPanel({ agentSessionId, onClose, client = browserClient, linkRequest, onLinkConsumed, onLinkAvailabilityChange, hostSurfaceAvailable = true, panelId, surfaceSource = 'user', onUserSurfaceUse }: Props) {
   const { t } = useTranslation();
   const [snapshot, setSnapshot] = useState<BrowserSnapshot | null>(null);
   const [address, setAddress] = useState('');
@@ -76,6 +76,17 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
   const menu = useRef<HTMLDivElement>(null);
   const hide = useRef<() => void>(() => {});
   const requestLayout = useRef<() => void>(() => {});
+  const updateSurfaceSource = useRef<() => void>(() => {});
+  const surfaceUse = useRef({ agentSessionId, source: surfaceSource });
+  if (surfaceUse.current.agentSessionId !== agentSessionId) {
+    surfaceUse.current = { agentSessionId, source: surfaceSource };
+  } else if (surfaceSource === 'user') surfaceUse.current.source = 'user';
+  const claimUserSurface = useCallback(() => {
+    const promoted = surfaceUse.current.source !== 'user';
+    surfaceUse.current.source = 'user';
+    updateSurfaceSource.current();
+    if (promoted) onUserSurfaceUse?.();
+  }, [onUserSurfaceUse]);
   const blocked = useRef(false);
   const draft = useRef(false);
   const currentSnapshot = useRef(snapshot);
@@ -189,7 +200,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
       setSnapshot(null); setAddress(''); setBusy(false); setNotice(''); setClearFailed(false);
       blocked.current = true;
       setFailure({ kind: 'host', message: 'browserWorkspace.hostUnavailableHint', retryable: false });
-      return () => { invalidateCommands(); requestLayout.current = () => {}; hide.current = () => {}; };
+      return () => { invalidateCommands(); requestLayout.current = () => {}; updateSurfaceSource.current = () => {}; hide.current = () => {}; };
     }
     let disposed = false;
     let attachment: number | undefined;
@@ -199,6 +210,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     let sequence = 0;
     let measurement = 0;
     let lastLayout = '';
+    let lastVisible = false;
     let lastBounds: SurfaceBounds = { x: 0, y: 0, width: 1, height: 1 };
     const measure = async () => {
       const element = slot.current;
@@ -224,12 +236,14 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
       });
     };
     const send = (bounds: SurfaceBounds, visible: boolean) => {
-      if (attachment === undefined || disposed) return;
-      const layout = JSON.stringify({ bounds, visible });
+      if (attachment === undefined || disposed || surfaceUse.current.agentSessionId !== agentSessionId) return;
+      const source = surfaceUse.current.source;
+      const layout = JSON.stringify({ bounds, visible, source });
       if (layout === lastLayout) return;
       lastLayout = layout;
+      lastVisible = visible;
       const issued = ++sequence;
-      void client.update(attachment, issued, bounds, visible).catch(reason => {
+      void client.update(attachment, issued, bounds, visible, source).catch(reason => {
         if (!disposed && issued === sequence) {
           blocked.current = true; hide.current(); setFailure(browserFailure(reason));
         }
@@ -249,9 +263,12 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
             if (disposed) return;
             if (event.kind === 'snapshot') setSnapshot(current => newerSnapshot(current, event.snapshot));
             else { blocked.current = true; setFailure(browserFailure(event.code)); hide.current(); }
-          });
+          }, surfaceUse.current.source);
           if (disposed) { await client.detach(id); return; }
           attachment = id;
+          // A user can take over while attach is pending. Pin the original
+          // attachment before another asynchronous measurement can delay it.
+          send(lastBounds, false);
           schedule();
           return;
         }
@@ -267,6 +284,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
       cancelAnimationFrame(frame); frame = requestAnimationFrame(() => void refresh());
     };
     requestLayout.current = schedule;
+    updateSurfaceSource.current = () => send(lastBounds, lastVisible && !blocked.current && !draft.current && document.visibilityState !== 'hidden' && !obscured());
     hide.current = () => { ++measurement; send(lastBounds, false); };
     const resized = new ResizeObserver(schedule);
     if (slot.current) resized.observe(slot.current);
@@ -298,8 +316,10 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
       if (attachment !== undefined) void client.detach(attachment).catch(() => {});
       hide.current = () => {};
       requestLayout.current = () => {};
+      updateSurfaceSource.current = () => {};
     };
   }, [agentSessionId, client, hostSurfaceAvailable, retry]);
+  useEffect(() => { updateSurfaceSource.current(); }, [agentSessionId, client, hostSurfaceAvailable, surfaceSource]);
 
   // React state updates are batched. Claim the operation synchronously so a
   // second submit/shortcut cannot dispatch before the Busy render commits.
@@ -324,6 +344,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     if (command.command === 'stop_loading' ? !canStopLoading : command.command === 'pause_navigation' ? !canPauseNavigation : !canIssueUserCommand) return;
     const flight = beginFlight(command);
     if (!flight) return;
+    claimUserSurface();
     const before = currentSnapshot.current;
     if (['navigate', 'reload', 'back', 'forward'].includes(command.command)) addressEdited.current = false;
     const current = () => ownsFlight(flight) && commandSequence.current === flight.sequence;
@@ -385,7 +406,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
       else { blocked.current = true; hide.current(); setFailure(browserFailure(reason)); }
     } }
     finally { finishFlight(flight); }
-  }, [client, agentSessionId, canIssueUserCommand, canStopLoading, canPauseNavigation, beginFlight, ownsFlight, finishFlight, t]);
+  }, [client, agentSessionId, canIssueUserCommand, canStopLoading, canPauseNavigation, beginFlight, ownsFlight, finishFlight, claimUserSurface, t]);
   const controlNavigation = (command: BrowserNavigationCommand['command']) => {
     if (active && navigationSequence !== undefined) void run({ command, target: active.target, expected_navigation_sequence: navigationSequence });
   };
@@ -394,6 +415,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     if (source && (draftTab || source.agent_session_id !== agentSessionId || !active ||
         source.target.tab_id !== active.target.tab_id || source.target.runtime_generation !== active.target.runtime_generation ||
         source.target.document_generation !== active.target.document_generation || navigationSequence === undefined || source.expected_navigation_sequence !== navigationSequence)) return;
+    claimUserSurface();
     if (action === 'address') { input.current?.focus(); input.current?.select(); return; }
     if (action === 'new_tab') { setDraftTab(true); setAddress(''); input.current?.focus(); return; }
     if (action === 'close_tab' && draftTab) { setDraftTab(false); return; }
@@ -574,7 +596,13 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     items[index]?.focus();
   };
 
-  return <section id={panelId} className={styles.panel} aria-label={browserTitle} tabIndex={-1} onKeyDown={event => {
+  const claimChromeUse = (event: React.SyntheticEvent<HTMLElement>) => {
+    if (event.target instanceof Element && event.target.closest('[data-browser-dismiss]')) return;
+    claimUserSurface();
+  };
+  return <section id={panelId} className={styles.panel} aria-label={browserTitle} tabIndex={-1} onPointerDownCapture={claimChromeUse} onClickCapture={claimChromeUse} onKeyDownCapture={event => {
+    if (event.key !== 'Escape') claimChromeUse(event);
+  }} onKeyDown={event => {
     if (event.key === 'Escape' && !confirmation && !dialog && !permission && !menuOpen) {
       event.preventDefault(); event.stopPropagation(); onClose(); return;
     }
@@ -597,7 +625,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
         <button type='button' disabled={!canIssueUserCommand} aria-label={t('browserWorkspace.closePage', { title: tab.title || t('browserWorkspace.newTab') })} onClick={() => void run({ command: 'close', target: tab.target })}><Close size={11} /></button>
       </div>)}
       <button type='button' className={styles.icon} disabled={!canIssueUserCommand} aria-label={t('browserWorkspace.newTab')} onClick={() => { setDraftTab(true); setAddress(''); input.current?.focus(); }}><Add size={16} /></button>
-      <button type='button' className={`${styles.icon} ${styles.close}`} aria-label={t('browserWorkspace.closePanel')} onClick={onClose}><Close size={15} /></button>
+      <button type='button' className={`${styles.icon} ${styles.close}`} data-browser-dismiss aria-label={t('browserWorkspace.closePanel')} onClick={onClose}><Close size={15} /></button>
     </div>
     <form className={styles.navigation} onSubmit={navigate}>
       <button className={styles.icon} type='button' disabled={!canIssueUserCommand || !active?.can_go_back} aria-label={t('browserWorkspace.back')} onClick={() => active && void run({ command: 'back', target: active.target })}><ArrowLeft size={16} /></button>

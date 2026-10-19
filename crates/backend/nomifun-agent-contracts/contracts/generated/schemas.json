@@ -4707,6 +4707,29 @@
     "title": "ContributionLock",
     "type": "object"
   },
+  "cron_run_runtime_source": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Server-authored source of one scheduled invocation. It is carried by the\noriginal canonical accepted input after the host validated the exact run\nreservation; user message fields and operation spellings cannot mint it.",
+    "properties": {
+      "agent_session_id": {
+        "type": "string"
+      },
+      "cron_job_id": {
+        "type": "string"
+      },
+      "cron_job_run_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "cron_job_id",
+      "cron_job_run_id",
+      "agent_session_id"
+    ],
+    "title": "CronRunRuntimeSource",
+    "type": "object"
+  },
   "idmm_decision_explanation": {
     "$defs": {
       "IdmmDecisionModel": {
@@ -5092,9 +5115,6 @@
           "companion.default": {
             "$ref": "#/$defs/OfficialPresetRoleCoverage"
           },
-          "companion.robot": {
-            "$ref": "#/$defs/OfficialPresetRoleCoverage"
-          },
           "creative-studio.default": {
             "$ref": "#/$defs/OfficialPresetRoleCoverage"
           },
@@ -5126,9 +5146,6 @@
             "$ref": "#/$defs/OfficialPresetSeed"
           },
           "companion.default": {
-            "$ref": "#/$defs/OfficialPresetSeed"
-          },
-          "companion.robot": {
             "$ref": "#/$defs/OfficialPresetSeed"
           },
           "creative-studio.default": {
@@ -7751,6 +7768,26 @@
     "title": "RemoteBinding",
     "type": "object"
   },
+  "remote_turn_runtime_source": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "binding_version": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "remote_binding_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "remote_binding_id",
+      "binding_version"
+    ],
+    "title": "RemoteBindingVersionRef",
+    "type": "object"
+  },
   "runtime_feature_inventory": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
@@ -8067,6 +8104,341 @@
       "reaped"
     ],
     "title": "SessionProcessOwnerReleasedV1",
+    "type": "object"
+  },
+  "session_process_reaped": {
+    "$defs": {
+      "NativeRetainedProcess": {
+        "additionalProperties": false,
+        "properties": {
+          "creator_call_id": {
+            "type": "string"
+          },
+          "creator_turn_id": {
+            "type": "string"
+          },
+          "pid": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "process_id": {
+            "type": "string"
+          },
+          "resolved_snapshot_ref": {
+            "$ref": "#/$defs/ResolvedSnapshotRef"
+          },
+          "resource_binding_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "process_id",
+          "pid",
+          "creator_turn_id",
+          "creator_call_id",
+          "resolved_snapshot_ref",
+          "resource_binding_digest"
+        ],
+        "type": "object"
+      },
+      "NativeSessionProcessRetention": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "owner_generation": {
+            "type": "string"
+          },
+          "owner_ref": {
+            "$ref": "#/$defs/PrincipalRef"
+          },
+          "processes": {
+            "items": {
+              "$ref": "#/$defs/NativeRetainedProcess"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "agent_session_id",
+          "owner_ref",
+          "owner_generation",
+          "processes"
+        ],
+        "type": "object"
+      },
+      "PrincipalRef": {
+        "additionalProperties": false,
+        "properties": {
+          "principal_id": {
+            "type": "string"
+          },
+          "principal_kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal_kind",
+          "principal_id"
+        ],
+        "type": "object"
+      },
+      "ResolvedSnapshotRef": {
+        "additionalProperties": false,
+        "properties": {
+          "snapshot_digest": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "snapshot_digest"
+        ],
+        "type": "object"
+      },
+      "SessionProcessOutputArchiveV1": {
+        "additionalProperties": false,
+        "properties": {
+          "byte_len": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "chunks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "terminal": {
+            "description": "Exact first-party terminal metadata, with its original cleanup report.\nThe Store validates the stable native type without loading output."
+          }
+        },
+        "required": [
+          "terminal",
+          "byte_len",
+          "digest",
+          "chunks"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "The original native owner's complete terminal observation for one retained\nprocess. It is neither a second ToolResult nor a whole-owner release.",
+    "properties": {
+      "component_identity": true,
+      "output_archive": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/SessionProcessOutputArchiveV1"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Store-authored original frozen bytes in Session Payload chunks. Native\noutput is observation data, never model/context budget or execution."
+      },
+      "output_replay": {
+        "description": "Original bounded raw output and decoder state. This has no native\nprocess handle, input capability, or execution/replay authority."
+      },
+      "retention": {
+        "$ref": "#/$defs/NativeSessionProcessRetention"
+      },
+      "terminal": {
+        "description": "The stable first-party process terminal wire value, validated by its\noriginal process type at the Store boundary. Bounded output is retained."
+      },
+      "terminal_ref": {
+        "description": "An existing first-party process terminal is referenced, never copied\ninto a second business ToolResult.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "retention"
+    ],
+    "title": "SessionProcessReapedV1",
+    "type": "object"
+  },
+  "session_ssh_link_close_requested": {
+    "$defs": {
+      "PrincipalRef": {
+        "additionalProperties": false,
+        "properties": {
+          "principal_id": {
+            "type": "string"
+          },
+          "principal_kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal_kind",
+          "principal_id"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "agent_session_id": {
+        "type": "string"
+      },
+      "instance_id": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "owner_ref": {
+        "$ref": "#/$defs/PrincipalRef"
+      },
+      "pool_instance_id": {
+        "type": "string"
+      },
+      "ssh_host_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_session_id",
+      "owner_ref",
+      "ssh_host_id",
+      "pool_instance_id",
+      "instance_id"
+    ],
+    "title": "SessionSshLinkCloseV1",
+    "type": "object"
+  },
+  "session_ssh_link_closed": {
+    "$defs": {
+      "PrincipalRef": {
+        "additionalProperties": false,
+        "properties": {
+          "principal_id": {
+            "type": "string"
+          },
+          "principal_kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal_kind",
+          "principal_id"
+        ],
+        "type": "object"
+      },
+      "SessionSshLinkCloseResult": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "state": {
+                "const": "reaped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "state": {
+                "const": "lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "state": {
+                "const": "already_down",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SessionSshLinkCloseV1": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_session_id": {
+            "type": "string"
+          },
+          "instance_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "owner_ref": {
+            "$ref": "#/$defs/PrincipalRef"
+          },
+          "pool_instance_id": {
+            "type": "string"
+          },
+          "ssh_host_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_session_id",
+          "owner_ref",
+          "ssh_host_id",
+          "pool_instance_id",
+          "instance_id"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "close": {
+        "$ref": "#/$defs/SessionSshLinkCloseV1"
+      },
+      "result": {
+        "$ref": "#/$defs/SessionSshLinkCloseResult"
+      }
+    },
+    "required": [
+      "close",
+      "result"
+    ],
+    "title": "SessionSshLinkClosedV1",
     "type": "object"
   },
   "target_package_inventory": {

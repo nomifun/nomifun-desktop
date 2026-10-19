@@ -42,6 +42,8 @@ pub enum SessionStoreError {
     ExecutionFenced,
     #[error("native execution is owned by a live producer")]
     ExecutionLeaseActive,
+    #[error("native continuation is waiting for its existing Execution reservation")]
+    ExecutionCapacityPending,
     #[error("native recovery requires reconciliation of activity after the checkpoint")]
     RecoveryRequiresReconciliation,
     #[error("event registry error: {0}")]
@@ -58,6 +60,7 @@ impl SessionStoreError {
             Self::InvalidPayload(_) => Some(INVALID_PAYLOAD),
             Self::InvalidSession(_) => Some(INVALID_SESSION),
             Self::NativeMutationTargetUnsettled { .. } => Some("NATIVE_MUTATION_TARGET_UNSETTLED"),
+            Self::ExecutionCapacityPending => Some("AGENT_EXECUTION_ADMISSION_PENDING"),
             Self::Contract { code, .. } => Some(match code.as_ref() {
                 "SESSION_DELETED" => SESSION_DELETED,
                 "SNAPSHOT_EXECUTOR_UNAVAILABLE" => "SNAPSHOT_EXECUTOR_UNAVAILABLE",

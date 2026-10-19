@@ -208,8 +208,7 @@ async fn http_401_returns_needs_auth() {
 
     assert!(!result.success);
     assert_eq!(result.needs_auth, Some(true));
-    assert!(result.auth_method.is_some());
-    assert!(result.www_authenticate.is_some());
+    assert!(result.auth_method.is_none(), "Bearer without discovery metadata does not establish an OAuth login flow");
     assert!(result.error.is_none());
 
     server_handle.abort();
@@ -245,7 +244,6 @@ async fn sse_401_returns_needs_auth() {
 
     assert!(!result.success);
     assert_eq!(result.needs_auth, Some(true));
-    assert!(result.www_authenticate.is_some());
 
     server_handle.abort();
 }

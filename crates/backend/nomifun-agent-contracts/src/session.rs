@@ -411,12 +411,18 @@ pub enum AgentInputSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         presented_question_id: Option<String>,
     },
-    DirectedDelegationResult {
-        report_message_id: String,
-        report_seq: u64,
-        execution_id: String,
-        source_turn_operation_id: OperationId,
-    },
+
+}
+
+/// Server-authored source of one scheduled invocation. It is carried by the
+/// original canonical accepted input after the host validated the exact run
+/// reservation; user message fields and operation spellings cannot mint it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CronRunRuntimeSource {
+    pub cron_job_id: String,
+    pub cron_job_run_id: String,
+    pub agent_session_id: AgentSessionId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

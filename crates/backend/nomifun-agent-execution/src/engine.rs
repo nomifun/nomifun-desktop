@@ -14,7 +14,7 @@ use nomifun_api_types::{
     AgentExecution, AgentExecutionDetail, AgentExecutionEvent, AgentExecutionTemplate,
     AgentExecutionTemplateDetail, AgentExecutionTemplateParticipant,
     AgentExecutionTemplateParticipantInput, AnswerExecutionDecisionRequest,
-    ConfigureExecutionStepRequest, ConversationResponse, CreateAgentExecutionRequest,
+    CancelExecutionStepRequest, ConfigureExecutionStepRequest, ConversationResponse, CreateAgentExecutionRequest,
     CreateAgentExecutionTemplateRequest, CreateExecutionFromTemplateRequest, ExecutionModelPool,
     ExecutionParticipant, ExecutionStep, ExecutionStepProfile, PlannedExecution,
     PlannedExecutionStep,
@@ -24,7 +24,7 @@ use nomifun_api_types::{
     UpdateAgentExecutionTemplateRequest, WorkspaceEntry,
 };
 use nomifun_common::{
-    AgentExecutionActor, AgentExecutionEventKind, AgentExecutionId, AgentExecutionStatus,
+    AgentExecutionActor, AgentExecutionEventKind, AgentExecutionId, AgentExecutionStatus, AgentExecutionStepId,
     AgentExecutionTemplateId, AgentId, AppError, ConversationId, DecisionPolicy, EntityId,
     ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus, MAX_AGENT_EXECUTION_MODELS,
     MAX_AGENT_EXECUTION_PARALLELISM, MAX_AGENT_EXECUTION_PARTICIPANTS,
@@ -57,11 +57,12 @@ use crate::automation::{
 };
 use crate::conversation_effect::AttemptConversationEffects;
 use crate::domain_mapper;
-use crate::delivery::DirectedDelegationSource;
+use crate::delivery::AgentExecutionSource;
 use crate::event_publisher::{
     AgentExecutionEventPublisher, LeadThinkingKind, LeadThinkingPhase,
 };
 use crate::lifecycle::AgentExecutionLifecycle;
+use crate::planning_controls::{PlanningControls, PlanningGuard, PlanningTarget};
 use crate::participant_resolver::ParticipantResolver;
 use crate::participant_router::score_participant;
 use crate::plan_materializer::{self, MaterializedPlan};
@@ -129,15 +130,24 @@ fn attempt_delegation_operation_id(
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 enum InitialPlanningCommand {
     Automatic {
+        /// Exact original tool Effect, independent of the chosen planning mode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<AgentExecutionSource>,
         /// Immutable supplemental planner input copied from an authoring
         /// template. It is persisted with the initial command so recovery
         /// never re-reads mutable template state.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supplemental_context: Option<serde_json::Value>,
     },
-    Explicit { plan: PlannedExecution },
+    Explicit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<AgentExecutionSource>,
+        plan: PlannedExecution,
+    },
+    /// Read-only recognition of already persisted product-directed history.
+    /// No new command constructs this mode and active work cannot resume it.
     Directed {
-        source: DirectedDelegationSource,
+        source: AgentExecutionSource,
         plan: PlannedExecution,
     },
     Automation {
@@ -159,23 +169,57 @@ pub(crate) fn is_automation_initial_plan(input: &str) -> Result<bool, AppError> 
     }
 }
 
-pub(crate) fn directed_delegation_source(input: &str) -> Result<Option<DirectedDelegationSource>, AppError> {
-    let value: serde_json::Value = serde_json::from_str(input)
+pub fn execution_source_from_initial_plan(input: &str) -> Result<Option<AgentExecutionSource>, AppError> {
+    let command: InitialPlanningCommand = serde_json::from_str(input)
         .map_err(|error| AppError::Internal(format!("invalid persisted planning input: {error}")))?;
-    if value.get("mode").and_then(serde_json::Value::as_str) != Some("directed") { return Ok(None); }
-    let command: InitialPlanningCommand = serde_json::from_value(value)
-        .map_err(|error| AppError::Internal(format!("invalid directed planning input: {error}")))?;
-    Ok(match command { InitialPlanningCommand::Directed { source, .. } => Some(source), _ => None })
+    Ok(match command {
+        InitialPlanningCommand::Automatic { source, .. }
+        | InitialPlanningCommand::Explicit { source, .. } => source,
+        InitialPlanningCommand::Directed { source, .. } => Some(source),
+        InitialPlanningCommand::Automation { .. } => None,
+    })
 }
 
-fn directed_target_model(owner_id: &str, target: &AgentResolvedSnapshot) -> Result<nomifun_api_types::ExecutionModelRef, AppError> {
-    let binding = target.canonical_binding.as_ref().ok_or_else(||
-        AppError::Conflict("directed target requires a saved canonical Agent binding".into()))?;
-    if binding.typed_resource_bindings.iter().any(|resource| resource.owner_id != owner_id) {
-        return Err(AppError::Forbidden("directed desktop target has a foreign resource".into()));
+/// Read-only control identity from existing owner-scoped rows. This grants no
+/// mutation or new work; the original command owners still revalidate targets.
+pub fn automation_control_from_rows(rows:&nomifun_db::AgentExecutionDetailRows)
+    ->Result<Option<nomifun_api_types::AutomationExecutionControl>,AppError> {
+    let value:serde_json::Value=serde_json::from_str(&rows.execution.initial_plan_input)
+        .map_err(|error|AppError::Internal(format!("invalid persisted initial planning input: {error}")))?;
+    if value.get("mode").and_then(serde_json::Value::as_str)!=Some("automation") {return Ok(None);}
+    let InitialPlanningCommand::Automation {source,..}=serde_json::from_value(value)
+        .map_err(|error|AppError::Internal(format!("invalid persisted automation input: {error}")))? else {unreachable!();};
+    validate_automation_source(&source)?;
+    let lead=rows.lead_conversation_id.clone().ok_or_else(||AppError::Internal("automation has no original lead Session".into()))?;
+    // The immutable first materialized revision identifies the sole original
+    // root. Delegation appends a later revision; title/role and current Attempt
+    // Session are mutable presentation and cannot identify its Requirement.
+    let first_revision=rows.steps.iter().map(|step|step.introduced_in_revision).min();
+    let roots=rows.steps.iter().filter(|step|Some(step.introduced_in_revision)==first_revision).collect::<Vec<_>>();
+    let root_step_id=match roots.as_slice() {
+        []=>None,
+        [root]=>Some(root.step_id.clone()),
+        _=>return Err(AppError::Internal("automation has ambiguous original root Steps".into())),
+    };
+    Ok(Some(nomifun_api_types::AutomationExecutionControl {root_step_id,lead_conversation_id:lead,
+        requirement_id:source.requirement_id,claim_generation:source.claim_generation}))
+}
+
+pub(crate) fn is_retired_directed_plan(input: &str) -> Result<bool, AppError> {
+    let command: InitialPlanningCommand = serde_json::from_str(input)
+        .map_err(|error| AppError::Internal(format!("invalid persisted planning input: {error}")))?;
+    Ok(matches!(command, InitialPlanningCommand::Directed { .. }))
+}
+
+fn validate_execution_source(source: &AgentExecutionSource) -> Result<(), AppError> {
+    canonical_id::<ConversationId>("source.agent_session_id", &source.agent_session_id)?;
+    for (name, value) in [("turn", &source.turn_operation_id),
+        ("tool", &source.tool_operation_id), ("effect", &source.effect_id)] {
+        if value.trim().is_empty() || value.len() > 1024 {
+            return Err(AppError::BadRequest(format!("execution source {name} identity is invalid")));
+        }
     }
-    target.resolved_model.clone().ok_or_else(||
-        AppError::Conflict("directed target has no frozen model".into()))
+    Ok(())
 }
 
 pub(crate) struct AgentExecutionEngineDeps {
@@ -243,6 +287,7 @@ pub struct AgentExecutionEngine {
     session: Arc<dyn AgentExecutionSessionPort>,
     managed_workspace_root: PathBuf,
     automation_transition: Arc<tokio::sync::Mutex<()>>,
+    planning_controls: PlanningControls,
 }
 
 impl AgentExecutionEngine {
@@ -273,12 +318,20 @@ impl AgentExecutionEngine {
             session: deps.session,
             managed_workspace_root,
             automation_transition: Arc::new(tokio::sync::Mutex::new(())),
+            planning_controls: PlanningControls::default(),
         }
     }
 
     /// Stop and join every background task owned by this engine composition.
     pub async fn shutdown(&self) -> Result<(), AppError> {
         self.scheduler.shutdown().await
+    }
+
+    /// Host-only observations of original local planning request owners.
+    /// Callers authorize each Execution in its canonical repository before
+    /// projecting it. A cancellation signal is not a request-join receipt.
+    pub fn planning_operations(&self) -> Vec<(String, i64, bool)> {
+        self.planning_controls.observations()
     }
 
     /// Start boot recovery under the same lifecycle tracker as scheduler and
@@ -552,7 +605,7 @@ impl AgentExecutionEngine {
         participants: Vec<NewAgentExecutionParticipant>,
         supplemental_context: Option<serde_json::Value>,
         automation_source: Option<AutomationExecutionSource>,
-        directed_source: Option<DirectedDelegationSource>,
+        execution_source: Option<AgentExecutionSource>,
     ) -> Result<AgentExecution, AppError> {
         if let Some(conversation_id) = request.lead_conversation_id.as_deref() {
             canonical_id::<ConversationId>("lead_conversation_id", conversation_id)?;
@@ -569,27 +622,29 @@ impl AgentExecutionEngine {
                 "explicit execution steps must not be empty".to_owned(),
             ));
         }
-        if directed_source.is_some() && automation_source.is_some() {
-            return Err(AppError::Internal("directed and automation sources cannot share an execution".into()));
+        if execution_source.is_some() && automation_source.is_some() {
+            return Err(AppError::Internal("tool and automation sources cannot share an execution".into()));
         }
-        let initial_plan = match (request.steps, automation_source, directed_source) {
+        if execution_source.as_ref().is_some_and(|source|
+            request.lead_conversation_id.as_deref() != Some(source.agent_session_id.as_str())) {
+            return Err(AppError::Forbidden("execution source differs from its lead Session".into()));
+        }
+        let initial_plan = match (request.steps, automation_source, execution_source) {
             (Some(steps), Some(source), None) => InitialPlanningCommand::Automation {
                 source,
                 plan: PlannedExecution { steps },
             },
-            (Some(steps), None, Some(source)) => InitialPlanningCommand::Directed {
+            (Some(steps), None, source) => InitialPlanningCommand::Explicit {
                 source,
                 plan: PlannedExecution { steps },
             },
-            (Some(steps), None, None) => InitialPlanningCommand::Explicit {
-                plan: PlannedExecution { steps },
-            },
-            (None, Some(_), _) | (None, _, Some(_)) => {
+            (None, Some(_), _) => {
                 return Err(AppError::Internal(
                     "automation execution requires one explicit durable plan".to_owned(),
                 ));
             }
-            (None, None, None) => InitialPlanningCommand::Automatic {
+            (None, None, source) => InitialPlanningCommand::Automatic {
+                source,
                 supplemental_context,
             },
             (Some(_), Some(_), Some(_)) => unreachable!("sources checked above"),
@@ -597,8 +652,7 @@ impl AgentExecutionEngine {
         // Do not create an aggregate that can never leave Planning. The
         // original declarative plan remains the persisted recovery input;
         // generated step IDs are intentionally materialized only at commit.
-        if let InitialPlanningCommand::Explicit { plan }
-        | InitialPlanningCommand::Directed { plan, .. }
+        if let InitialPlanningCommand::Explicit { plan, .. }
         | InitialPlanningCommand::Automation { plan, .. } = &initial_plan
         {
             let resolved = participants_from_new("preflight", 0, &participants)?;
@@ -1041,6 +1095,7 @@ impl AgentExecutionEngine {
         let caller_attempt_id = link.attempt_id.ok_or_else(|| {
             AppError::Internal("active Attempt link has no Attempt id".to_owned())
         })?;
+        self.reject_retired_execution_command(owner_id, &link.execution_id, "delegate from").await?;
         if actor_attempt_id != caller_attempt_id {
             return Err(AppError::NotFound(
                 "execution Attempt for Agent caller".to_owned(),
@@ -1125,6 +1180,7 @@ impl AgentExecutionEngine {
                 self.produce_plan(
                     owner_id,
                     &detail.execution.execution_id,
+                    PlanningTarget { version: detail.execution.version, delegation: Some((&caller_step_id, &caller_attempt_id)) },
                     &planner_goal,
                     &planning_participants,
                 )
@@ -1396,21 +1452,12 @@ impl AgentExecutionEngine {
                 AgentExecutionStatus::WaitingInput,
             ],
         )?;
-        let mut recovered_outputs = Vec::new();
-        for attempt in current.attempts.iter().filter(|attempt| {
-            attempt.status == ExecutionAttemptStatus::Running
-        }) {
-            if let Some(output) = self.scheduler.recover_attempt_output(owner_id, attempt).await? {
-                recovered_outputs.push(output);
-            }
-        }
         let row = self
             .repository
             .pause_execution(
                 owner_id,
                 execution_id,
                 command.expected_version,
-                &recovered_outputs,
                 &actor_event(
                     actor,
                     AgentExecutionEventKind::StatusChanged,
@@ -1420,10 +1467,9 @@ impl AgentExecutionEngine {
                 ),
             )
             .await?;
-        self.scheduler.stop(execution_id);
-        self.scheduler
-            .reconcile_conversation_cleanup(Some(execution_id))
-            .await;
+        // Already admitted Turns stay with their existing owner. Wake the
+        // scheduler to observe the dispatch fence without dropping its jobs.
+        self.scheduler.start(owner_id.to_owned(), execution_id.to_owned());
         self.publish().await;
         domain_mapper::execution(row, current.execution.lead_conversation_id)
     }
@@ -1487,6 +1533,90 @@ impl AgentExecutionEngine {
         Ok(execution)
     }
 
+    /// Persist a stop for one task and, when explicitly selected, its own
+    /// delegated work. The repository fences dispatch and delegation in the
+    /// same transaction; native stopping and resource cleanup remain owned by
+    /// the exact original Attempt after this acceptance receipt.
+    pub async fn cancel_step(
+        &self,
+        owner_id: &str,
+        actor: &AgentExecutionActor,
+        execution_id: &str,
+        step_id: &str,
+        request: CancelExecutionStepRequest,
+    ) -> Result<AgentExecutionDetail, AppError> {
+        // The original lifecycle owns the mutation and exact post-commit
+        // signals together. Losing an HTTP/tool waiter cannot detach either
+        // half of an already-authorized Stop from its cleanup responsibility.
+        let engine=self.clone();let owner_id=owner_id.to_owned();let actor=actor.clone();
+        let execution_id=execution_id.to_owned();let step_id=step_id.to_owned();
+        self.lifecycle.spawn(async move {
+            engine.cancel_step_inner(&owner_id,&actor,&execution_id,&step_id,request).await
+        }).await.map_err(|error|AppError::Internal(format!("task cancellation owner did not finish: {error}")))?
+    }
+
+    async fn cancel_step_inner(
+        &self,owner_id:&str,actor:&AgentExecutionActor,execution_id:&str,step_id:&str,
+        request:CancelExecutionStepRequest,
+    )->Result<AgentExecutionDetail,AppError> {
+        canonical_id::<AgentExecutionId>("execution_id", execution_id)?;
+        canonical_id::<AgentExecutionStepId>("step_id", step_id)?;
+        if let AgentExecutionActor::User {user_id}=actor {
+            let original=self.repository.get_execution_detail(owner_id,execution_id).await?
+                .ok_or_else(||AppError::NotFound(format!("Agent Execution {execution_id}")))?;
+            if let Some(automation)=automation_control_from_rows(&original)? {
+                if user_id!=owner_id {
+                    return Err(AppError::Forbidden("local AutoWork task Stop requires its authenticated owner".into()));
+                }
+                if automation.root_step_id.as_deref()==Some(step_id)
+                    &&request.scope!=nomifun_common::AgentExecutionCancellationScope::DelegatedWork {
+                    return Err(AppError::Conflict("stop the original AutoWork run through its Requirement owner; the root's local scope can stop delegated work only".into()));
+                }
+            } else {
+                self.reject_automation_external_command(owner_id, execution_id, actor, "cancel a task in").await?;
+            }
+        } else {
+            // The new human-local scope does not redefine existing internal
+            // System authority or grant Agent callers automation control.
+            // Preserve their original Engine and repository guards.
+            self.reject_automation_external_command(owner_id, execution_id, actor, "cancel a task in").await?;
+        }
+        let rows = self.repository.cancel_step(
+            owner_id,
+            execution_id,
+            request.expected_execution_version,
+            step_id,
+            request.expected_step_version,
+            request.scope,
+            &actor_event(
+                actor,
+                AgentExecutionEventKind::StepChanged,
+                Some(step_id),
+                None,
+                json!({"action":"cancel_step","scope":request.scope}),
+            ),
+        ).await?;
+        let stopped_steps: Vec<_> = rows.steps.iter().filter(|step| step.status == "cancelled")
+            .map(|step| step.step_id.clone()).chain(std::iter::once(step_id.to_owned())).collect();
+        self.planning_controls.stop_through(execution_id, rows.execution.version, Some(&stopped_steps));
+        self.scheduler.request_conversation_cleanup(execution_id.to_owned());
+        self.scheduler.start(owner_id.to_owned(), execution_id.to_owned());
+        self.publish().await;
+        domain_mapper::detail(rows)
+    }
+
+    /// Retry only the original resource-cleanup outbox. This never admits,
+    /// resumes, or retries an Agent task.
+    pub async fn retry_task_cleanup(&self, owner_id:&str, execution_id:&str, step_id:&str, attempt_id:&str)
+        ->Result<(),AppError> {
+        let detail=self.get(owner_id,execution_id).await?;
+        if !detail.attempts.iter().any(|attempt|attempt.attempt_id==attempt_id&&attempt.step_id==step_id) {
+            return Err(AppError::Conflict("cleanup target is not the original task Attempt".into()));
+        }
+        self.scheduler.request_conversation_cleanup(execution_id.to_owned());
+        Ok(())
+    }
+
     pub async fn cancel(
         &self,
         owner_id: &str,
@@ -1494,6 +1624,15 @@ impl AgentExecutionEngine {
         execution_id: &str,
         command: VersionedAgentExecutionCommand,
     ) -> Result<AgentExecutionDetail, AppError> {
+        let engine=self.clone();let owner_id=owner_id.to_owned();let actor=actor.clone();let execution_id=execution_id.to_owned();
+        self.lifecycle.spawn(async move {
+            engine.cancel_inner(&owner_id,&actor,&execution_id,command).await
+        }).await.map_err(|error|AppError::Internal(format!("execution cancellation owner did not finish: {error}")))?
+    }
+
+    async fn cancel_inner(
+        &self,owner_id:&str,actor:&AgentExecutionActor,execution_id:&str,command:VersionedAgentExecutionCommand,
+    )->Result<AgentExecutionDetail,AppError> {
         self.reject_automation_external_command(owner_id, execution_id, actor, "cancel")
             .await?;
         let before = self.detail(owner_id, execution_id).await?;
@@ -1502,6 +1641,7 @@ impl AgentExecutionEngine {
                 "a settled execution cannot be cancelled".to_owned(),
             ));
         }
+        let scheduler_generation = self.scheduler.generation(execution_id);
         let rows = self
             .repository
             .cancel_execution(
@@ -1517,7 +1657,10 @@ impl AgentExecutionEngine {
                 ),
             )
             .await?;
-        self.scheduler.stop(execution_id);
+        self.planning_controls.stop_through(execution_id, rows.execution.version, None);
+        if let Some(generation)=scheduler_generation {
+            self.scheduler.stop_generation(execution_id,&generation);
+        }
         self.scheduler.reconcile_conversation_cleanup(Some(execution_id)).await;
         // An explicit cancel is already part of the caller's synchronous turn.
         // Publishing its durable state is required, but projecting another
@@ -1528,6 +1671,76 @@ impl AgentExecutionEngine {
         domain_mapper::detail(rows)
     }
 
+    /// Read only the cancellation already committed for this exact canonical
+    /// control. `None` requires the Host to revalidate the original capture's
+    /// binding, context and connection before admitting any new cancellation.
+    pub async fn lookup_canonical_control_receipt(
+        &self,
+        owner_id:&str,
+        actor:&AgentExecutionActor,
+        execution_id:&str,
+        command:VersionedAgentExecutionCommand,
+        control:crate::AgentExecutionControlSource,
+    )->Result<Option<crate::AgentExecutionControlReceipt>,AppError> {
+        crate::control::lookup_receipt(
+            self.repository.as_ref(),owner_id,actor,execution_id,command,&control,
+        ).await
+    }
+
+    /// Cancel the captured aggregate version from a Host-verified canonical
+    /// human control event. Replays acknowledge their original cancellation;
+    /// they never select a successor epoch or cancel its native producer.
+    pub async fn cancel_from_canonical_control(
+        &self,
+        owner_id: &str,
+        actor: &AgentExecutionActor,
+        execution_id: &str,
+        command: VersionedAgentExecutionCommand,
+        control: crate::AgentExecutionControlSource,
+    ) -> Result<crate::AgentExecutionControlReceipt, AppError> {
+        if self.lifecycle.is_cancelled() {
+            return Err(AppError::Conflict("canonical control owner is shutting down".into()));
+        }
+        // A socket/ASR waiter leaving cannot discard a cancellation already
+        // admitted by its canonical human input. The existing task owner keeps
+        // the commit and its exact post-commit stop alive until completion.
+        let engine=self.clone();
+        let owner_id=owner_id.to_owned();
+        let actor=actor.clone();
+        let execution_id=execution_id.to_owned();
+        self.lifecycle.spawn(async move {
+            engine.cancel_from_canonical_control_inner(&owner_id,&actor,&execution_id,command,control).await
+        }).await.map_err(|error|AppError::Internal(format!("canonical control cancellation owner did not finish: {error}")))?
+    }
+
+    async fn cancel_from_canonical_control_inner(
+        &self,owner_id:&str,actor:&AgentExecutionActor,execution_id:&str,
+        command:VersionedAgentExecutionCommand,control:crate::AgentExecutionControlSource,
+    )->Result<crate::AgentExecutionControlReceipt,AppError> {
+        let scheduler_generation = self.scheduler.generation(execution_id);
+        let stopped_version = command.expected_version.saturating_add(1);
+        let cancellation = crate::control::cancel_from_source(
+            self.repository.as_ref(), owner_id, actor, execution_id, command, control,
+        ).await?;
+        if cancellation.committed {
+            self.planning_controls.stop_through(execution_id, stopped_version, None);
+            if let Some(generation)=scheduler_generation {
+                self.scheduler.stop_generation(execution_id,&generation);
+            }
+            // Cancellation is committed, while native exit remains separately
+            // verified through the existing durable cleanup outbox.
+            if !self.lifecycle.is_cancelled() {
+                let scheduler = self.scheduler.clone();
+                let cleanup_execution_id = execution_id.to_owned();
+                self.lifecycle.spawn(async move {
+                    scheduler.reconcile_conversation_cleanup(Some(&cleanup_execution_id)).await;
+                });
+            }
+            self.publish().await;
+        }
+        Ok(cancellation.receipt)
+    }
+
     pub async fn delete(
         &self,
         owner_id: &str,
@@ -1535,6 +1748,15 @@ impl AgentExecutionEngine {
         execution_id: &str,
         command: VersionedAgentExecutionCommand,
     ) -> Result<(), AppError> {
+        let engine=self.clone();let owner_id=owner_id.to_owned();let actor=actor.clone();let execution_id=execution_id.to_owned();
+        self.lifecycle.spawn(async move {
+            engine.delete_inner(&owner_id,&actor,&execution_id,command).await
+        }).await.map_err(|error|AppError::Internal(format!("execution deletion owner did not finish: {error}")))?
+    }
+
+    async fn delete_inner(
+        &self,owner_id:&str,actor:&AgentExecutionActor,execution_id:&str,command:VersionedAgentExecutionCommand,
+    )->Result<(),AppError> {
         let before = self.detail(owner_id, execution_id).await?;
         let row = self
             .repository
@@ -1579,6 +1801,7 @@ impl AgentExecutionEngine {
             )));
         }
         self.scheduler.stop(execution_id);
+        self.planning_controls.stop_through(execution_id, command.expected_version + 1, None);
         self.scheduler
             .reconcile_conversation_cleanup(Some(execution_id))
             .await;
@@ -1658,7 +1881,8 @@ impl AgentExecutionEngine {
             )?
         };
         let plan = self
-            .produce_plan(owner_id, execution_id, &goal, &planning_participants)
+            .produce_plan(owner_id, execution_id,
+                PlanningTarget { version: request.expected_version, delegation: None }, &goal, &planning_participants)
             .await?;
         let materialized = plan_materializer::materialize(plan, &planning_participants)?;
         let retire_participant_ids = if new_participants.is_empty() {
@@ -2346,7 +2570,7 @@ impl AgentExecutionEngine {
             .map(|output| output.canonical_operation_id)
             .ok_or_else(|| AppError::Conflict("the Attempt has no exact canonical Turn to steer".to_owned()))?;
         effects.push_steer(operation_id.clone(), target_operation_id.clone(), text.clone())?;
-        let persisted = self
+        self
             .repository
             .enqueue_attempt_conversation_effect(
                 owner_id,
@@ -2374,52 +2598,8 @@ impl AgentExecutionEngine {
             .await?;
         self.publish().await;
 
-        // Delivery is attempted immediately for interactive latency, but the
-        // committed runtime_state remains authoritative until acknowledgement.
-        // Any crash or transport race is retried by scheduler recovery with the
-        // same stable operation identity.
-        let delivery = self
-            .scheduler
-            .steer_conversation(
-                owner_id,
-                &persisted.conversation_id,
-                &operation_id,
-                &target_operation_id,
-                &text,
-            )
-            .await;
-        if delivery.is_ok() {
-            if let Some(persisted_attempt) = persisted.detail.current_attempt.as_ref() {
-                if let Err(error) = self
-                    .repository
-                    .acknowledge_attempt_conversation_effect(
-                        owner_id,
-                        execution_id,
-                        step_id,
-                        &attempt.attempt_id,
-                        persisted_attempt.attempt.version,
-                        &AttemptConversationEffectParams { runtime_state: None },
-                        &actor_event(
-                            actor,
-                            AgentExecutionEventKind::StepChanged,
-                            Some(step_id),
-                            Some(&attempt.attempt_id),
-                            json!({
-                                "change":"conversation_effect_delivered",
-                                "effect":"steer",
-                                "operation_id":operation_id,
-                            }),
-                        ),
-                    )
-                    .await
-                {
-                    tracing::warn!(%execution_id, %step_id, %error, "steer delivered; durable acknowledgement will be retried");
-                }
-            }
-        } else if let Err(error) = delivery {
-            tracing::warn!(%execution_id, %step_id, %error, "durable steer remains pending");
-        }
-        self.publish().await;
+        // One tracked owner delivers this durable FIFO. The HTTP/model caller
+        // never races the scheduler with a second copy of the same command.
         self.scheduler
             .start(owner_id.to_owned(), execution_id.to_owned());
         Ok(())
@@ -2451,6 +2631,7 @@ impl AgentExecutionEngine {
                 "conversation has multiple active execution attempts".to_owned(),
             ));
         }
+        self.reject_retired_execution_command(owner_id, &link.execution_id, "request input for").await?;
         let detail = self.detail(owner_id, &link.execution_id).await?;
         if detail.execution.decision_policy != DecisionPolicy::AskUser {
             return Err(AppError::Conflict(
@@ -2498,9 +2679,11 @@ impl AgentExecutionEngine {
         if target_operation_id.trim().is_empty() {
             return Err(AppError::Conflict("Native Agent decision requires its exact source Turn".into()));
         }
-        let mut effects = AttemptConversationEffects::default();
+        let mut effects = attempt.runtime_state.clone().map(serde_json::from_value::<AttemptConversationEffects>)
+            .transpose().map_err(|error| AppError::Internal(format!("invalid persisted attempt controls: {error}")))?
+            .unwrap_or_default();
         effects.push_stop_turn(operation_id.clone(), target_operation_id.clone())?;
-        let persisted = self.repository
+        self.repository
             .settle_attempt(
                 owner_id,
                 &detail.execution.execution_id,
@@ -2542,54 +2725,8 @@ impl AgentExecutionEngine {
             )
             .await?;
         self.publish().await;
-        // WaitingInput is committed before we request runtime stop. The
-        // durable StopTurn effect survives transport failure/crash and is
-        // retried under the same identity before any DecisionInput continuation.
-        let delivery = self
-            .scheduler
-            .stop_attempt_turn(owner_id, conversation_id, &operation_id, &target_operation_id)
-            .await;
-        if delivery.is_ok() {
-            if let Some(persisted_attempt) = persisted.current_attempt.as_ref()
-                && let Err(error) = self
-                    .repository
-                    .acknowledge_attempt_conversation_effect(
-                        owner_id,
-                        &detail.execution.execution_id,
-                        &step.step_id,
-                        &attempt.attempt_id,
-                        persisted_attempt.attempt.version,
-                        &AttemptConversationEffectParams { runtime_state: None },
-                        &actor_event(
-                            actor,
-                            AgentExecutionEventKind::StepChanged,
-                            Some(&step.step_id),
-                            Some(&attempt.attempt_id),
-                            json!({
-                                "change":"conversation_effect_delivered",
-                                "effect":"stop_turn",
-                                "operation_id":operation_id,
-                            }),
-                        ),
-                    )
-                    .await
-            {
-                tracing::warn!(
-                    execution_id = %detail.execution.execution_id,
-                    step_id = %step.step_id,
-                    %error,
-                    "turn stop delivered; durable acknowledgement will be retried"
-                );
-            }
-        } else if let Err(error) = delivery {
-            tracing::warn!(
-                execution_id = %detail.execution.execution_id,
-                step_id = %step.step_id,
-                %error,
-                "durable turn stop remains pending"
-            );
-        }
-        self.publish().await;
+        // The exact StopTurn stays ahead of any decision continuation in the
+        // same tracked FIFO and survives caller/transport interruption.
         self.scheduler
             .start(owner_id.to_owned(), detail.execution.execution_id.clone());
         self.detail(owner_id, &detail.execution.execution_id).await
@@ -2642,6 +2779,7 @@ impl AgentExecutionEngine {
     async fn answer_decision_inner(&self,owner_id:&str,actor:&AgentExecutionActor,execution_id:&str,step_id:&str,attempt_id:&str,
         request:AnswerExecutionDecisionRequest,voice_proof:Option<serde_json::Value>)->Result<AgentExecutionDetail,AppError> {
         canonical_id::<AgentExecutionId>("execution_id", execution_id)?;
+        self.reject_retired_execution_command(owner_id, execution_id, "answer").await?;
         canonical_uuidv7("step_id", step_id)?;
         canonical_uuidv7("attempt_id", attempt_id)?;
         let answer = non_empty("answer", request.answer)?;
@@ -2722,21 +2860,47 @@ impl AgentExecutionEngine {
             AgentExecutionStatus::Planning,
             AgentExecutionStatus::Running,
             AgentExecutionStatus::WaitingInput,
+            AgentExecutionStatus::Paused,
             AgentExecutionStatus::Completed,
             AgentExecutionStatus::CompletedWithFailures,
             AgentExecutionStatus::Failed,
             AgentExecutionStatus::Cancelled,
         ];
-        for row in self
+        'executions: for mut row in self
             .repository
             .list_recoverable_executions(&statuses)
             .await?
         {
+            while !row.status.parse::<AgentExecutionStatus>().is_ok_and(|status|status.is_terminal())
+                && self.repository.automation_source_cancelled(&row.user_id,&row.execution_id).await? {
+                match self.repository.cancel_execution(&row.user_id,&row.execution_id,row.version,
+                    &actor_event(&AgentExecutionActor::system(),AgentExecutionEventKind::StatusChanged,None,None,
+                        json!({"reason":"original_automation_source_stopped"}))).await {
+                    Ok(cancelled)=>{
+                        self.planning_controls.stop_through(&row.execution_id, cancelled.execution.version, None);
+                        self.scheduler.stop(&row.execution_id);
+                        row=cancelled.execution;
+                    }
+                    Err(error @ nomifun_db::DbError::Conflict(_))=>{
+                        let Some(current)=self.repository.get_execution(&row.user_id,&row.execution_id).await? else {continue 'executions;};
+                        if current.version==row.version && current.status==row.status {return Err(error.into());}
+                        row=current;
+                    }
+                    Err(error)=>return Err(error.into()),
+                }
+            }
+            if is_retired_directed_plan(&row.initial_plan_input)?
+                && !row.status.parse::<AgentExecutionStatus>().is_ok_and(|status| status.is_terminal())
+            {
+                tracing::warn!(execution_id = %row.execution_id,
+                    "retired product-directed execution remains stopped for explicit review");
+                continue;
+            }
             match row.status.parse::<AgentExecutionStatus>() {
                 Ok(AgentExecutionStatus::Planning) => {
                     self.spawn_initial_plan(row.user_id, row.execution_id);
                 }
-                Ok(AgentExecutionStatus::Running | AgentExecutionStatus::WaitingInput) => {
+                Ok(AgentExecutionStatus::Running | AgentExecutionStatus::WaitingInput | AgentExecutionStatus::Paused) => {
                     self.scheduler.start(row.user_id, row.execution_id);
                 }
                 Ok(
@@ -2755,6 +2919,36 @@ impl AgentExecutionEngine {
         self.scheduler.reconcile_conversation_cleanup(None).await;
         self.publish().await;
         Ok(())
+    }
+
+    /// A source Turn can finish after a fast background Attempt. Wake only the
+    /// outboxes tied to that exact original request when its canonical terminal
+    /// event commits; successful delivery does not wait for a retry timer.
+    pub async fn notify_source_turn_settled(
+        &self, owner_id: &str, agent_session_id: &str, turn_operation_id: &str,
+    ) -> Result<(), AppError> {
+        canonical_id::<ConversationId>("agent_session_id", agent_session_id)?;
+        let links = self.repository.resolve_conversation_link(owner_id, agent_session_id).await?;
+        let mut reconciled = HashSet::new();
+        let mut delivery_error = None;
+        for link in links.into_iter().filter(|link| link.relation == "lead") {
+            if !reconciled.insert(link.execution_id.clone()) { continue; }
+            let Some(row) = self.repository.get_execution(owner_id, &link.execution_id).await? else { continue; };
+            let Some(source) = execution_source_from_initial_plan(&row.initial_plan_input)? else { continue; };
+            if source.agent_session_id != agent_session_id || source.turn_operation_id != turn_operation_id {
+                continue;
+            }
+            let detail = self.detail(owner_id, &link.execution_id).await?;
+            if is_retired_directed_plan(&row.initial_plan_input)? && !detail.execution.status.is_terminal() {
+                continue;
+            }
+            if detail.execution.status.is_terminal() || detail.execution.status == AgentExecutionStatus::WaitingInput {
+                if let Err(error) = self.scheduler.reconcile_lead_report(owner_id, &detail).await {
+                    delivery_error = Some(error);
+                }
+            }
+        }
+        delivery_error.map_or(Ok(()), Err)
     }
 
     fn spawn_initial_plan(&self, owner_id: String, execution_id: String) {
@@ -2794,8 +2988,11 @@ impl AgentExecutionEngine {
                     "invalid persisted initial planning input for {execution_id}: {error}"
                 ))
             })?;
+        let Some(initial_owner) = self.planning_controls.register(execution_id, row.version, None, true,
+            self.lifecycle.cancellation_child())? else { return Ok(()); };
         let mut automatic_plan: Option<(String, String, PlannedExecution)> = None;
         loop {
+            if initial_owner.is_cancelled() { return Ok(()); }
             let detail = self.detail(owner_id, execution_id).await?;
             if detail.execution.status != AgentExecutionStatus::Planning {
                 // A concurrent cancel, delete, or explicit replan won the CAS.
@@ -2809,11 +3006,14 @@ impl AgentExecutionEngine {
                 ))
             })?;
             let plan = match &command {
-                InitialPlanningCommand::Explicit { plan }
-                | InitialPlanningCommand::Directed { plan, .. }
+                InitialPlanningCommand::Explicit { plan, .. }
                 | InitialPlanningCommand::Automation { plan, .. } => plan.clone(),
+                InitialPlanningCommand::Directed { .. } => {
+                    return Err(AppError::Conflict("retired product-directed execution cannot resume".into()));
+                }
                 InitialPlanningCommand::Automatic {
                     supplemental_context,
+                    ..
                 } => {
                     let planner_goal = planner_goal(
                         &detail.execution.goal,
@@ -2830,6 +3030,7 @@ impl AgentExecutionEngine {
                             .produce_plan(
                                 owner_id,
                                 execution_id,
+                                PlanningTarget { version: detail.execution.version, delegation: None },
                                 &planner_goal,
                                 &participants,
                             )
@@ -2896,9 +3097,11 @@ impl AgentExecutionEngine {
         &self,
         owner_id: &str,
         execution_id: &str,
+        target: PlanningTarget<'_>,
         goal: &str,
         participants: &[ExecutionParticipant],
     ) -> Result<PlannedExecution, AppError> {
+        let control = self.admit_planning(owner_id, execution_id, target).await?;
         let throttle = LeadThinkingThrottle::new(
             self.publisher.clone(),
             owner_id,
@@ -2906,12 +3109,14 @@ impl AgentExecutionEngine {
             LeadThinkingPhase::Planning,
         );
         let sink = throttle.sink();
-        let result = tokio::time::timeout(
+        let result = tokio::select! {
+            biased;
+            _ = control.cancelled() => return Err(AppError::Conflict("the original planning operation was stopped".into())),
+            result = tokio::time::timeout(
             PLAN_TIMEOUT,
             self.planner.produce(goal, participants, Some(&sink)),
-        )
-        .await
-        .map_err(|_| AppError::Timeout("Agent Execution planning timed out".to_owned()))?;
+            ) => result.map_err(|_| AppError::Timeout("Agent Execution planning timed out".to_owned()))?,
+        };
         throttle.flush();
         self.publisher.publish_lead_thinking(
             owner_id,
@@ -2932,6 +3137,8 @@ impl AgentExecutionEngine {
         intent: &str,
         detail: &AgentExecutionDetail,
     ) -> Result<AdjustedExecutionPlan, AppError> {
+        let control = self.admit_planning(owner_id, execution_id,
+            PlanningTarget { version: detail.execution.version, delegation: None }).await?;
         let throttle = LeadThinkingThrottle::new(
             self.publisher.clone(),
             owner_id,
@@ -2939,12 +3146,14 @@ impl AgentExecutionEngine {
             LeadThinkingPhase::Adjust,
         );
         let sink = throttle.sink();
-        let result = tokio::time::timeout(
+        let result = tokio::select! {
+            biased;
+            _ = control.cancelled() => return Err(AppError::Conflict("the original planning operation was stopped".into())),
+            result = tokio::time::timeout(
             PLAN_TIMEOUT,
             self.planner.adjust(intent, detail, Some(&sink)),
-        )
-        .await
-        .map_err(|_| AppError::Timeout("Agent Execution adjustment timed out".to_owned()))?;
+            ) => result.map_err(|_| AppError::Timeout("Agent Execution adjustment timed out".to_owned()))?,
+        };
         throttle.flush();
         self.publisher.publish_lead_thinking(
             owner_id,
@@ -2956,6 +3165,43 @@ impl AgentExecutionEngine {
             true,
         );
         result
+    }
+
+    async fn admit_planning(&self, owner_id: &str, execution_id: &str, target: PlanningTarget<'_>) -> Result<PlanningGuard, AppError> {
+        // Publish the exact ephemeral signal before re-reading durable source
+        // admission. Stop racing either side of registration is therefore
+        // consumed, without serializing an unrelated model/tool/native owner.
+        let control = self.planning_controls.register(execution_id, target.version,
+            target.delegation.map(|(step, _)| step), false, self.lifecycle.cancellation_child())?
+            .expect("model planning registrations are not singleflight");
+        let detail = self.detail(owner_id, execution_id).await?;
+        if control.is_cancelled() || detail.execution.status.is_terminal() || detail.execution.version < target.version {
+            return Err(AppError::Conflict("planning source is stopped or superseded".into()));
+        }
+        if let Some((step, attempt)) = target.delegation {
+            if !detail.steps.iter().any(|row| row.step_id == step && row.status == ExecutionStepStatus::Running)
+                || !detail.attempts.iter().any(|row| row.step_id == step && row.attempt_id == attempt && row.status == ExecutionAttemptStatus::Running) {
+                return Err(AppError::Conflict("delegation planning requires its original running Attempt".into()));
+            }
+            let mut cursor = 0;
+            loop {
+                let events = self.repository.list_events(owner_id, execution_id, cursor, 200).await?;
+                for event in &events {
+                    if event.event_type != AgentExecutionEventKind::StepChanged.as_str() { continue; }
+                    let payload: serde_json::Value = serde_json::from_str(&event.payload)
+                        .map_err(|error| AppError::Internal(format!("invalid planning source event: {error}")))?;
+                    if payload.get("action").and_then(serde_json::Value::as_str) != Some("cancel_step") { continue; }
+                    if event.step_id.as_deref() == Some(step)
+                        || payload.get("cancelled_step_ids").and_then(serde_json::Value::as_array)
+                            .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(step))) {
+                        return Err(AppError::Conflict("delegation planning source was persistently stopped".into()));
+                    }
+                }
+                let Some(last) = events.last() else { break; }; cursor = last.sequence;
+                if events.len() < 200 { break; }
+            }
+        }
+        Ok(control)
     }
 
     async fn fail_planning(&self, owner_id: &str, execution_id: &str, reason: &str) {
@@ -3099,16 +3345,16 @@ impl AgentExecutionEngine {
     /// Create one aggregate from a native parallel delegation request. This
     /// is the in-process Agent Capability path corresponding to the Gateway's
     /// `nomi_delegate(strategy=parallel)` contract.
-    pub async fn collaborate_parallel_from_session(
+    pub async fn collaborate_parallel_from_exact_source(
         &self,
         owner_id: &str,
-        agent_session_id: &str,
+        source: AgentExecutionSource,
         request: ParallelDelegationRequest,
     ) -> Result<AgentExecution, AppError> {
         let (goal, steps) = Self::materialize_parallel_delegation(request)?;
-        self.collaborate_with_plan_from_session(
+        self.collaborate_with_plan_from_exact_source(
             owner_id,
-            agent_session_id,
+            source,
             goal,
             Some(steps),
             None,
@@ -3120,19 +3366,19 @@ impl AgentExecutionEngine {
     /// to its exact aggregate; an ordinary AgentSession creates one aggregate
     /// whose lead keeps the frozen Session Snapshot and exact resolved model.
     ///
-    /// A directed product delegation uses `delegate_to_frozen_agent` instead:
-    /// the target owns its permissions and does not inherit the caller grant.
-    pub async fn collaborate_from_session(
+    /// The source comes from the admitted tool Effect. It remains attached to
+    /// automatic plans, explicit single work and parallel DAGs alike.
+    pub async fn collaborate_from_exact_source(
         &self,
         owner_id: &str,
-        agent_session_id: &str,
+        source: AgentExecutionSource,
         goal: String,
         single_step: bool,
     ) -> Result<AgentExecution, AppError> {
         let steps = single_step.then(|| vec![collaboration_step(&goal)]);
-        self.collaborate_with_plan_from_session(
+        self.collaborate_with_plan_from_exact_source(
             owner_id,
-            agent_session_id,
+            source,
             goal,
             steps,
             single_step.then_some(1),
@@ -3140,64 +3386,16 @@ impl AgentExecutionEngine {
         .await
     }
 
-    /// Delegate one product task to an already owner-resolved immutable Agent.
-    /// The product Host resolves the permitted role; no public/model API can
-    /// supply this Snapshot or use it to widen the calling Session's grants.
-    /// A single explicit Step avoids an extra planner/model round trip.
-    pub async fn delegate_to_frozen_agent(
+    async fn collaborate_with_plan_from_exact_source(
         &self,
         owner_id: &str,
-        source: DirectedDelegationSource,
-        target: AgentResolvedSnapshot,
-        goal: String,
-    ) -> Result<AgentExecution, AppError> {
-        canonical_id::<ConversationId>("source.agent_session_id", &source.agent_session_id)?;
-        for (name, value) in [("turn", &source.turn_operation_id), ("tool", &source.tool_operation_id), ("effect", &source.effect_id)] {
-            if value.is_empty() || value.len() > 1024 {
-                return Err(AppError::BadRequest(format!("directed source {name} identity is invalid")));
-            }
-        }
-        let goal = non_empty("goal", goal)?;
-        // This command cannot turn an Attempt into another product controller.
-        let links = self.repository.resolve_conversation_link(owner_id, &source.agent_session_id).await?;
-        if links.iter().any(|link| matches!(link.relation.as_str(), "attempt" | "automation")) {
-            return Err(AppError::Forbidden("an execution Attempt cannot direct another product Agent".into()));
-        }
-        self.session.get(owner_id, &source.agent_session_id).await?;
-        let model = directed_target_model(owner_id, &target)?;
-        let model_pool = ExecutionModelPool::Single { model: model.clone() };
-        let mut participants = self.resolver.resolve(&model_pool, Some(&model)).await?;
-        ParticipantResolver::prepend_frozen_snapshot(&mut participants, &target, Some(&model))?;
-        let workspace = collaboration_workspace(owner_id, &source.agent_session_id, &target, &self.managed_workspace_root)?;
-        let mut step = collaboration_step(&goal);
-        step.title = "桌面伙伴任务".into();
-        step.role = Some("desktop_companion".into());
-        step.assignment_rationale = Some("Exact product-selected desktop Agent snapshot".into());
-        let actor = AgentExecutionActor::agent(&source.agent_session_id, None);
-        let source_session = source.agent_session_id.clone();
-        self.persist_execution_with_source(owner_id, &actor, CreateAgentExecutionRequest {
-            goal,
-            work_dir: workspace,
-            model_pool,
-            delegation_policy: nomifun_common::DelegationPolicy::Disabled,
-            adaptation_policy: nomifun_common::AdaptationPolicy::Adaptive,
-            decision_policy: DecisionPolicy::AskUser,
-            max_parallel: Some(1),
-            lead_conversation_id: Some(source_session),
-            lead_model: Some(model),
-            steps: Some(vec![step]),
-        }, participants, None, None, Some(source)).await
-    }
-
-    async fn collaborate_with_plan_from_session(
-        &self,
-        owner_id: &str,
-        agent_session_id: &str,
+        source: AgentExecutionSource,
         goal: String,
         steps: Option<Vec<PlannedExecutionStep>>,
         max_parallel: Option<i64>,
     ) -> Result<AgentExecution, AppError> {
-        canonical_id::<ConversationId>("agent_session_id", agent_session_id)?;
+        validate_execution_source(&source)?;
+        let agent_session_id = source.agent_session_id.as_str();
         let goal = non_empty("goal", goal)?;
         let links = self
             .repository
@@ -3269,16 +3467,16 @@ impl AgentExecutionEngine {
             Some(&lead_model),
         )?;
         let actor = AgentExecutionActor::agent(agent_session_id, None);
-        self.persist_execution(
+        self.persist_execution_with_source(
                 owner_id,
                 &actor,
                 CreateAgentExecutionRequest {
                     goal: goal.clone(),
                     work_dir,
                     model_pool,
-                    delegation_policy: nomifun_common::DelegationPolicy::Automatic,
+                    delegation_policy: session.delegation_policy,
                     adaptation_policy: nomifun_common::AdaptationPolicy::Adaptive,
-                    decision_policy: DecisionPolicy::Automatic,
+                    decision_policy: session.decision_policy,
                     max_parallel,
                     lead_conversation_id: Some(agent_session_id.to_owned()),
                     lead_model: Some(lead_model),
@@ -3287,6 +3485,7 @@ impl AgentExecutionEngine {
                 participants,
                 None,
                 None,
+                Some(source),
             )
             .await
     }
@@ -3349,9 +3548,6 @@ impl AgentExecutionEngine {
         actor: &AgentExecutionActor,
         operation: &str,
     ) -> Result<(), AppError> {
-        if matches!(actor, AgentExecutionActor::System) {
-            return Ok(());
-        }
         let row = self
             .repository
             .get_execution(owner_id, execution_id)
@@ -3364,6 +3560,19 @@ impl AgentExecutionEngine {
                 ))
             })?;
         reject_automation_external_command(&command, actor, operation)
+    }
+
+    async fn reject_retired_execution_command(
+        &self, owner_id: &str, execution_id: &str, operation: &str,
+    ) -> Result<(), AppError> {
+        let row = self.repository.get_execution(owner_id, execution_id).await?
+            .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
+        if is_retired_directed_plan(&row.initial_plan_input)? {
+            return Err(AppError::Conflict(format!(
+                "cannot {operation} a retired product-directed execution; cancel it or start current work"
+            )));
+        }
+        Ok(())
     }
 
     /// AutoWork recovery is owned by the exact Requirement claim generation.
@@ -3542,6 +3751,71 @@ impl AgentExecutionEngine {
         Ok(())
     }
 
+    async fn cancel_automation_inner(
+        &self,
+        owner_id: &str,
+        source: &AutomationExecutionSource,
+    ) -> Result<Option<AutomationExecutionReceipt>, AppError> {
+        let Some(original) = self.repository.automation_source_cleanup_execution(
+            owner_id, &source.requirement_id, source.claim_generation, &source.operation_id,
+        ).await? else { return Ok(None); };
+        let Some(rows) = self.repository.get_execution_detail(owner_id, &original).await? else {
+            self.scheduler.reconcile_conversation_cleanup_strict(&original).await?;
+            return Ok(None);
+        };
+        self.cancel_original_automation_execution(owner_id, domain_mapper::detail(rows)?).await
+    }
+
+    async fn cancel_original_automation_execution(
+        &self,
+        owner_id: &str,
+        mut detail: AgentExecutionDetail,
+    ) -> Result<Option<AutomationExecutionReceipt>, AppError> {
+        // The source selected this immutable Execution once. A concurrent
+        // recovery/settlement may advance its version, but cannot select a new
+        // claim, Execution, Attempt, or business invocation for this Stop.
+        let original = detail.execution.execution_id.clone();
+        let mut backoff = Duration::from_millis(1);
+        loop {
+            if detail.execution.status.is_terminal() {
+                self.scheduler.reconcile_conversation_cleanup_strict(&original).await?;
+                return self.automation_receipt(owner_id, &original).await;
+            }
+            let expected_version = detail.execution.version;
+            match self.cancel_inner(
+                owner_id,
+                &AgentExecutionActor::system(),
+                &original,
+                VersionedAgentExecutionCommand { expected_version },
+            ).await {
+                Ok(_) => {
+                    self.scheduler.reconcile_conversation_cleanup_strict(&original).await?;
+                    return self.automation_receipt(owner_id, &original).await;
+                }
+                Err(error) if is_automation_cancel_cas_conflict(&error) => {
+                    let Some(rows) = self.repository.get_execution_detail(owner_id, &original).await? else {
+                        return Err(error);
+                    };
+                    let latest = domain_mapper::detail(rows)?;
+                    if latest.execution.status.is_terminal() {
+                        detail = latest;
+                        continue;
+                    }
+                    // The repository's CAS error also covers missing/invalid
+                    // targets. Only a proved forward version transition of
+                    // this exact live Execution authorizes another CAS.
+                    if latest.execution.version <= expected_version {
+                        return Err(error);
+                    }
+                    detail = latest;
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_millis(50));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     async fn automation_receipt(
         &self,
         owner_id: &str,
@@ -3643,60 +3917,17 @@ impl AgentExecutionAutomationPort for AgentExecutionEngine {
         owner_id: &str,
         source: &AutomationExecutionSource,
     ) -> Result<Option<AutomationExecutionReceipt>, AppError> {
-        let Some(detail) = self.find_automation_execution(owner_id, source).await? else {
-            return Ok(None);
-        };
-        if detail.execution.status.is_terminal() {
-            self.scheduler
-                .reconcile_conversation_cleanup_strict(
-                    &detail.execution.execution_id,
-                )
-                .await?;
-            return self
-                .automation_receipt(owner_id, &detail.execution.execution_id)
-                .await;
-        }
-        let cancelled = self.cancel(
-            owner_id,
-            &AgentExecutionActor::system(),
-            &detail.execution.execution_id,
-            VersionedAgentExecutionCommand {
-                expected_version: detail.execution.version,
-            },
-        )
-        .await;
-        match cancelled {
-            Ok(cancelled) => {
-                self.scheduler
-                    .reconcile_conversation_cleanup_strict(
-                        &cancelled.execution.execution_id,
-                    )
-                    .await?;
-                self.automation_receipt(owner_id, &cancelled.execution.execution_id)
-                    .await
-            }
-            Err(error) if is_automation_cancel_cas_conflict(&error) => {
-                // Cancellation is a CAS. A terminal transition may win after
-                // the source lookup but before that CAS. Re-read by the exact
-                // immutable automation source and return its winner rather
-                // than manufacturing cancellation or leaking a stale race.
-                let Some(latest) = self.find_automation_execution(owner_id, source).await? else {
-                    return Err(error);
-                };
-                if latest.execution.status.is_terminal() {
-                    self.scheduler
-                        .reconcile_conversation_cleanup_strict(
-                            &latest.execution.execution_id,
-                        )
-                        .await?;
-                    self.automation_receipt(owner_id, &latest.execution.execution_id)
-                        .await
-                } else {
-                    Err(error)
-                }
-            }
-            Err(error) => Err(error),
-        }
+        validate_automation_source(source)?;
+        let engine = self.clone();
+        let owner_id = owner_id.to_owned();
+        let source = source.clone();
+        // Retain the original control through CAS re-reads and resource
+        // confirmation even if its HTTP/AutoWork observer is dropped.
+        self.lifecycle.spawn(async move {
+            engine.cancel_automation_inner(&owner_id, &source).await
+        }).await.map_err(|error| AppError::Internal(format!(
+            "automation cancellation owner did not finish: {error}"
+        )))?
     }
 }
 
@@ -3704,6 +3935,9 @@ fn reject_automation_manual_recovery_command(
     command: &InitialPlanningCommand,
     operation: &str,
 ) -> Result<(), AppError> {
+    if matches!(command, InitialPlanningCommand::Directed { .. }) {
+        return Err(AppError::Conflict(format!("cannot {operation} a retired product-directed execution")));
+    }
     if matches!(command, InitialPlanningCommand::Automation { .. }) {
         return Err(AppError::Conflict(format!(
             "cannot {operation} an AutoWork AgentExecution without the exact atomic Requirement observer"
@@ -3717,6 +3951,11 @@ fn reject_automation_external_command(
     actor: &AgentExecutionActor,
     operation: &str,
 ) -> Result<(), AppError> {
+    if matches!(command, InitialPlanningCommand::Directed { .. })
+        && !matches!(operation, "cancel" | "rename" | "pause")
+    {
+        return Err(AppError::Conflict(format!("cannot {operation} a retired product-directed execution")));
+    }
     if !matches!(actor, AgentExecutionActor::System)
         && matches!(command, InitialPlanningCommand::Automation { .. })
     {
@@ -4564,7 +4803,7 @@ fn system_event(
     actor_event(&AgentExecutionActor::system(), kind, step_id, attempt_id, payload)
 }
 
-fn explicit_cancel_payload() -> serde_json::Value {
+pub(crate) fn explicit_cancel_payload() -> serde_json::Value {
     json!({
         "status": AgentExecutionStatus::Cancelled,
         "reason": "cancelled_by_caller"
@@ -4572,12 +4811,16 @@ fn explicit_cancel_payload() -> serde_json::Value {
 }
 
 #[cfg(test)]
+#[path = "planning_stop_tests.rs"]
+mod planning_stop_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
         AgentExecutionEngine, AutomationExecutionSource, InitialPlanningCommand,
         attempt_delegation_operation_id, automation_cancellation_replay_safe,
         collaboration_workspace, explicit_cancel_payload, is_automation_cancel_cas_conflict,
-        directed_delegation_source, directed_target_model,
+        execution_source_from_initial_plan, is_retired_directed_plan, validate_execution_source,
         is_automation_outcome_unknown_error, reject_automation_external_command,
         reject_automation_manual_recovery_command, runtime_model_pair,
         validate_automation_source, validate_max_parallel,
@@ -4599,49 +4842,66 @@ mod tests {
     const PROVIDER_OVERRIDE: &str = "0190f5fe-7c00-7a00-8000-000000000002";
 
     #[test]
-    fn directed_restart_input_retains_the_exact_source_and_skips_automatic_planning() {
+    fn retired_directed_history_is_readable_without_authorizing_execution() {
         let raw = serde_json::json!({
             "mode":"directed",
             "source":{"agent_session_id":"source-session","turn_operation_id":"original-turn",
                 "tool_operation_id":"original-tool","effect_id":"original-effect"},
-            "plan":{"steps":[{"title":"Desktop task","spec":"write the requested file"}]}
+            "plan":{"steps":[{"title":"Historical task","spec":"write the requested file"}]}
         });
         let command: InitialPlanningCommand = serde_json::from_value(raw).unwrap();
         let encoded = serde_json::to_string(&command).unwrap();
-        let source = directed_delegation_source(&encoded).unwrap().unwrap();
+        let source = execution_source_from_initial_plan(&encoded).unwrap().unwrap();
         assert_eq!(source.turn_operation_id, "original-turn");
         assert_eq!(source.tool_operation_id, "original-tool");
         assert_eq!(source.effect_id, "original-effect");
         assert!(!super::is_automation_initial_plan(&encoded).unwrap());
+        assert!(is_retired_directed_plan(&encoded).unwrap());
         assert!(matches!(command, InitialPlanningCommand::Directed { ref plan, .. }
             if plan.steps.len() == 1 && plan.steps[0].spec == "write the requested file"));
-        assert!(directed_delegation_source(r#"{"mode":"explicit"}"#).unwrap().is_none());
+        for operation in ["resume", "replan", "adjust", "configure", "steer"] {
+            assert!(reject_automation_external_command(&command, &AgentExecutionActor::system(), operation).is_err());
+        }
+        assert!(reject_automation_external_command(&command, &AgentExecutionActor::system(), "cancel").is_ok());
+        assert!(reject_automation_manual_recovery_command(&command, "retry").is_err());
+        assert!(execution_source_from_initial_plan(r#"{"mode":"explicit"}"#).is_err(),
+            "a malformed persisted plan must not silently lose provenance");
     }
 
     #[test]
-    fn directed_target_requires_saved_owner_resources_and_uses_its_own_model() {
-        let preset = nomifun_common::generate_id();
-        let mut target: AgentResolvedSnapshot = serde_json::from_value(serde_json::json!({
-            "preset_id":preset,"preset_revision":1,"preset_name":"Desktop companion",
-            "canonical_binding":{
-                "preset_revision_ref":{"preset_id":preset,"revision":1,"revision_digest":"a".repeat(64)},
-                "resolved_snapshot_ref":{"snapshot_id":nomifun_common::generate_id(),"snapshot_digest":"b".repeat(64)},
-                "typed_resource_bindings":[{"binding_id":"computer","resource_kind":"computer",
-                    "resource_id":"local-computer","owner_id":"owner","operations":["observe","input"]}],
-                "binding_version":1
-            },
-            "resolved_model":{"provider_id":PROVIDER_A,"model":"desktop-model"},
-            "enabled_capabilities":["computer"]
-        })).unwrap();
-        let model = directed_target_model("owner", &target).unwrap();
-        assert_eq!(model.model, "desktop-model");
-        assert_eq!(target.enabled_capabilities, vec!["computer"]);
-        assert!(directed_target_model("another-owner", &target).is_err());
-        target.canonical_binding.as_mut().unwrap().typed_resource_bindings[0].resource_kind = "robot".into();
-        assert_eq!(directed_target_model("owner", &target).unwrap().model, "desktop-model");
-        assert!(directed_target_model("another-owner", &target).is_err());
-        target.canonical_binding = None;
-        assert!(directed_target_model("owner", &target).is_err());
+    fn automatic_and_explicit_plans_preserve_the_same_exact_request_source() {
+        let source = crate::AgentExecutionSource {
+            agent_session_id: nomifun_common::generate_id(),
+            turn_operation_id: "original-turn".into(),
+            tool_operation_id: "original-tool".into(),
+            effect_id: "original-effect".into(),
+        };
+        validate_execution_source(&source).unwrap();
+        for raw in [
+            serde_json::json!({"mode":"automatic","source":source,
+                "supplemental_context":{"user_constraint":"single Agent only"}}),
+            serde_json::json!({"mode":"explicit","source":source,
+                "plan":{"steps":[{"title":"work","spec":"use the frozen caller grants"}]}}),
+        ] {
+            let command: InitialPlanningCommand = serde_json::from_value(raw.clone()).unwrap();
+            let encoded = serde_json::to_string(&command).unwrap();
+            assert_eq!(execution_source_from_initial_plan(&encoded).unwrap(), Some(source.clone()));
+            let canonical = serde_json::to_value(&command).unwrap();
+            assert_eq!(canonical["source"], raw["source"]);
+            assert_eq!(canonical["mode"], raw["mode"]);
+            assert_eq!(canonical["supplemental_context"], raw["supplemental_context"]);
+            let recovered: InitialPlanningCommand = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(serde_json::to_value(recovered).unwrap(), canonical,
+                "recovery retains the same typed plan, including its materialized defaults");
+            assert!(!is_retired_directed_plan(&encoded).unwrap());
+            assert!(!super::is_automation_initial_plan(&encoded).unwrap());
+        }
+        for field in ["turn_operation_id", "tool_operation_id", "effect_id"] {
+            let mut invalid = serde_json::to_value(&source).unwrap();
+            invalid[field] = serde_json::json!(" ");
+            let invalid = serde_json::from_value(invalid).unwrap();
+            assert!(validate_execution_source(&invalid).is_err());
+        }
     }
 
     #[test]
@@ -4660,7 +4920,7 @@ mod tests {
             }
         });
         let explicit: InitialPlanningCommand = serde_json::from_value(raw.clone()).unwrap();
-        let InitialPlanningCommand::Explicit { plan } = &explicit else {
+        let InitialPlanningCommand::Explicit { plan, .. } = &explicit else {
             panic!("explicit planning input changed mode");
         };
         assert_eq!(plan.steps.len(), 1);

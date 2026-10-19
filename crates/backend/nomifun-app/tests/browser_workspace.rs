@@ -6,6 +6,8 @@ use browser_workspace_provider as browser_provider;
 pub use browser_workspace_provider::attached_provider::AttachedChromeProviderService;
 #[path = "../src/router/browser_workspace.rs"]
 mod browser_routes;
+#[path = "../src/router/operation_gates.rs"]
+mod operation_gates;
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding};
@@ -350,7 +352,7 @@ async fn user_api_authorizes_sessions_and_locks_only_for_active_browser_runs() {
         nomifun_browser_platform::runtime::BrowserProfileStore::new(root.path()).unwrap()));
     let router = browser_routes::routes(browser_routes::BrowserResourceApiState {
         resources: Some(resources.clone()), attached_chrome: None, sessions: sessions.clone(), data_dir: root.path().to_path_buf(),
-        operation_locks: Arc::new(dashmap::DashMap::new()), close_owner: Arc::new(IdleUserClose(resources.clone())),
+        operation_locks: Arc::new(operation_gates::OperationGateCache::default()), close_owner: Arc::new(IdleUserClose(resources.clone())),
     });
     let base = format!("/api/agent-sessions/{}/browser", session.as_ref());
     let request = |id: &str, method: &str, path: String, body: &str| {

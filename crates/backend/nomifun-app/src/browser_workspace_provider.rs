@@ -26,6 +26,10 @@ pub mod attached_provider;
 /// and hold the existing Session operation fence before entering this port.
 #[async_trait::async_trait]
 pub trait BrowserUserClosePort: Send + Sync {
+    async fn close_user_workspace_instance(&self, _principal_id: &str, _agent_session_id: &str, _service_instance_id: &str, _runtime_generation: u64)
+        -> Result<(), nomifun_browser_platform::runtime::WorkspaceError> {
+        Err(nomifun_browser_platform::runtime::WorkspaceError::StaleTarget)
+    }
     async fn close_user_workspace(&self, principal_id: &str, agent_session_id: &str, runtime_generation: u64)
         -> Result<(), nomifun_browser_platform::runtime::WorkspaceError>;
 }

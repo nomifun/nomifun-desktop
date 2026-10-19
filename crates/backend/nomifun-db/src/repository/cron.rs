@@ -239,6 +239,30 @@ pub trait ICronRepository: Send + Sync {
         ))
     }
 
+    /// Owner-scoped read of the immutable original occurrence. Never reserve,
+    /// attach, execute, or select a newer run from the job's mutable summary.
+    async fn get_run_reservation(&self, user_id: &str, cron_job_id: &str, cron_job_run_id: &str)
+        -> Result<Option<CronRunReservationRow>, DbError> {
+        let _ = (user_id, cron_job_id, cron_job_run_id);
+        Err(DbError::Init("Cron repository does not implement exact run lookup".into()))
+    }
+
+    /// Persist exact-run cancellation before any Session/native signal. The
+    /// returned original reservation fixes its immutable source coordinates;
+    /// terminal runs absorb replay without changing the job or their outcome.
+    async fn request_run_cancellation(&self, user_id: &str, cron_job_id: &str, cron_job_run_id: &str, now: TimestampMs)
+        -> Result<CronRunReservationRow, DbError> {
+        let _ = (user_id, cron_job_id, cron_job_run_id, now);
+        Err(DbError::Init("Cron repository does not implement exact run cancellation".into()))
+    }
+
+    /// Startup-only owner metadata for an already attached immutable source.
+    /// Missing job configuration never grants attachment or execution.
+    async fn attached_run_owner_for_scheduler(&self, cron_job_run_id:&str)->Result<Option<String>,DbError> {
+        let _=cron_job_run_id;
+        Err(DbError::Init("Cron repository does not implement attached run owner lookup".into()))
+    }
+
     /// Atomically settle one current-protocol reservation and project its job
     /// summary exactly once.
     async fn finalize_run_with_job_projection(

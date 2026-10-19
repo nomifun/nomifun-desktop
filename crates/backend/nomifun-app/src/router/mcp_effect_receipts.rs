@@ -6,7 +6,7 @@ use nomifun_agent_contracts::{
     SessionEventPayloadRef, StrictJsonValue,
 };
 use nomifun_agent_session::{
-    AgentSessionStore, EffectEventRequest, EffectStrategy, EffectTerminalState,
+    AgentEffectRecord, AgentEffectState, AgentSessionStore, EffectEventRequest, EffectStrategy, EffectTerminalState,
 };
 use nomifun_common::AppError;
 use nomifun_db::SqlitePool;
@@ -204,7 +204,6 @@ impl McpEffectReceipts {
         } else {
             EffectTerminalState::Uncertain
         };
-        let diagnostic = |error: &nomifun_mcp::McpOwnerError| json!({"code":error.code(),"message":error.message()});
         let payload = json!({
             "observation": observation,
             "execution": {
@@ -212,12 +211,12 @@ impl McpEffectReceipts {
                 "local_process_started":outcome.execution.local_process_started,
                 "cancellation_requested":outcome.execution.cancellation_requested,
                 "returned":outcome.result.is_ok(),
-                "error":outcome.result.as_ref().err().map(diagnostic),
+                "error":outcome.result.as_ref().err().map(owner_error_projection),
             },
             "cleanup": {
                 "local":cleanup_status(outcome.cleanup.local),
                 "remote":cleanup_status(outcome.cleanup.remote),
-                "error":outcome.cleanup.error.as_ref().map(diagnostic),
+                "error":outcome.cleanup.error.as_ref().map(owner_error_projection),
             },
         });
         if serde_json::to_vec(&payload).map_err(|_| unavailable())?.len() > 8192 {
@@ -250,6 +249,95 @@ impl McpEffectReceipts {
         }
         Ok(())
     }
+
+    /// Resource-owner teardown only. A returned original cleanup receipt
+    /// may prove resource closure while its external business result stays
+    /// unknown. The original task must have joined; this never grants another
+    /// dispatch, authorizes a checkpoint resume or reconciles the Effect.
+    pub(crate) async fn ensure_shutdown_resources_closed(&self, user: &str, session: &str) -> Result<(), AppError> {
+        let store = self.store().await?;
+        let session_id = self.owned_session(&store, user, session).await?;
+        // Preserve the ordinary settlement fast path. Hydrate original
+        // receipts only when an unsettled Effect actually needs proof.
+        if !store.has_unsettled_effects(&session_id).await.map_err(|_| unavailable())? {
+            return Ok(());
+        }
+        for effect in store.list_effects(&session_id).await.map_err(|_| unavailable())? {
+            if effect.owner_domain == "mcp" && matches!(effect.state, AgentEffectState::Pending | AgentEffectState::Unknown)
+                && !original_mcp_resources_closed(&effect)? {
+                return Err(unavailable());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The caller must use Store::list_effects/read_effect: those readers resolve
+/// the exact canonical terminal and validate its identity, kind and lifecycle
+/// index in one transaction. An empty process map is never this evidence.
+pub(super) fn original_mcp_resources_closed(effect: &AgentEffectRecord) -> Result<bool, AppError> {
+    if effect.state != AgentEffectState::Unknown || effect.owner_domain != "mcp"
+        || effect.strategy != EffectStrategy::ExternalUncertainEffect
+        || effect.effect_id != format!("mcp:{}:{}", effect.agent_session_id.as_ref(), effect.operation_id.as_ref())
+        || effect.started_event_id.as_ref() != format!("effect-started:{}", effect.effect_id)
+        || effect.terminal_event_id.as_ref().map(|id| id.as_ref()) != Some(format!("effect-terminal:{}", effect.effect_id).as_str())
+        || effect.resource_binding_id.is_some() || effect.resource_key.is_some() {
+        return Ok(false);
+    }
+    let capability = effect.capability_module.as_ref();
+    let action = effect.action_id.as_ref();
+    if !((capability == MCP_SERVER_RESOURCE_EFFECT && action == "mcp.resource/read")
+        || nomifun_mcp::canonical_mcp_tool_action_id(capability).is_ok_and(|expected| expected == action)) {
+        return Ok(false);
+    }
+    let payload = effect.bounded_observation.as_ref().ok_or_else(unavailable)?;
+    let execution = payload.get("execution").and_then(Value::as_object).ok_or_else(unavailable)?;
+    if execution.len() != 5 || execution.keys().any(|key| !matches!(key.as_str(),
+        "request_dispatched" | "local_process_started" | "cancellation_requested" | "returned" | "error")) {
+        return Err(unavailable());
+    }
+    let boolean = |key| execution.get(key).and_then(Value::as_bool).ok_or_else(unavailable);
+    let dispatched = boolean("request_dispatched")?;
+    let local_started = boolean("local_process_started")?;
+    boolean("cancellation_requested")?;
+    // A current owner Unknown with known cleanup follows a business failure,
+    // never a fabricated successful business return or pre-dispatch rejection.
+    if boolean("returned")? || (!dispatched && !local_started) { return Ok(false); }
+    let error = execution.get("error").and_then(Value::as_object).ok_or_else(unavailable)?;
+    if !matches!(error.len(), 2 | 3) || error.keys().any(|key| !matches!(key.as_str(), "code" | "message" | "details"))
+        || !error.get("code").is_some_and(Value::is_string)
+        || !error.get("message").is_some_and(Value::is_string) { return Err(unavailable()); }
+    if let Some(details) = error.get("details") {
+        let details = details.as_object().ok_or_else(unavailable)?;
+        if details.len() != 1 { return Err(unavailable()); }
+        let diagnostic = details.get("auth_diagnostic").ok_or_else(unavailable)?;
+        let typed: nomifun_api_types::McpAuthDiagnostic = serde_json::from_value(diagnostic.clone()).map_err(|_| unavailable())?;
+        // The formal projection is the only additional shape. Round-trip
+        // equality rejects foreign keys the public DTO would otherwise ignore.
+        if serde_json::to_value(typed).map_err(|_| unavailable())? != *diagnostic {
+            return Err(unavailable());
+        }
+    }
+    let cleanup = payload.get("cleanup").and_then(Value::as_object).ok_or_else(unavailable)?;
+    if cleanup.len() != 3 || cleanup.keys().any(|key| !matches!(key.as_str(), "local" | "remote" | "error"))
+        || !cleanup.get("error").is_some_and(Value::is_null) { return Err(unavailable()); }
+    let local = cleanup.get("local").and_then(Value::as_str).ok_or_else(unavailable)?;
+    let remote = cleanup.get("remote").and_then(Value::as_str).ok_or_else(unavailable)?;
+    if !matches!(local, "not_required" | "confirmed" | "unsupported" | "unproven")
+        || !matches!(remote, "not_required" | "confirmed" | "unsupported" | "unproven") {
+        return Err(unavailable());
+    }
+    // Unsupported remote protocol close remains unsupported in the original
+    // receipt. It owns no local process and is not business rollback proof.
+    Ok((local == "confirmed" || (!local_started && local == "not_required")) && remote != "unproven")
+}
+
+fn owner_error_projection(error: &nomifun_mcp::McpOwnerError) -> Value {
+    let mut projected = json!({ "code": error.code(), "message": error.message() });
+    if let Some(diagnostic) = error.auth_diagnostic() {
+        projected["details"] = json!({ "auth_diagnostic": diagnostic });
+    }
+    projected
 }
 
 fn bounded_observation(value: &Value, full_limit: usize) -> Result<Value, AppError> {
@@ -280,6 +368,23 @@ fn valid_effect_identity(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_diagnostic_remains_in_the_original_effect_error_projection() {
+        let diagnostic = nomifun_api_types::McpAuthDiagnostic {
+            code: nomifun_api_types::McpAuthErrorCode::ReauthorizationRequired,
+            stage: nomifun_api_types::McpAuthStage::Refresh,
+            retryable: false, user_action: nomifun_api_types::McpAuthUserAction::Reauthorize,
+            trace_id: "effect-auth-trace".into(), message: "Sign in again".into(), details: None,
+        };
+        let error = nomifun_mcp::McpOwnerError::new("MCP_CREDENTIAL_EXPIRED", "Sign in again")
+            .with_auth_diagnostic(diagnostic);
+        let projection = owner_error_projection(&error);
+        assert_eq!(projection["code"], "MCP_CREDENTIAL_EXPIRED");
+        assert_eq!(projection["details"]["auth_diagnostic"]["stage"], "refresh");
+        assert_eq!(projection["details"]["auth_diagnostic"]["trace_id"], "effect-auth-trace");
+        assert!(projection.get("authentication_challenge").is_none());
+    }
 
     #[test]
     fn effect_receipts_accept_only_binding_resources_or_namespaced_tools() {

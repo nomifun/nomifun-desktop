@@ -57,10 +57,10 @@ describe('ordinary conversation list ownership', () => {
     expect(isOrdinaryWorkConversation(companionSession as never)).toBe(true);
   });
 
-  test('a robot Agent remains ordinary without host-resolved companion ownership', () => {
+  test('a companion template name remains ordinary without host-resolved product ownership', () => {
     expect(isOrdinaryWorkConversation({
       extra: {},
-      agent_snapshot: { preset_name: 'companion.robot', enabled_capabilities: [] },
+      agent_snapshot: { preset_name: 'companion.default', enabled_capabilities: [] },
     } as never)).toBe(true);
   });
 

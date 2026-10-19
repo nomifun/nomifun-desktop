@@ -24,6 +24,15 @@ mod recovery;
 mod companion_shared_context;
 pub(super) use companion_shared_context::compose_live_observation;
 pub(super) use companion_shared_context::resolve_companion_turn_human_sources;
+pub(super) use companion_shared_context::historical_input_source_wire;
+
+/// Created only by the original source's durable finalizer, never an Agent
+/// input or admission setting. The Browser owner still proves native release.
+#[derive(Clone, Copy)]
+pub(crate) enum EndedBrowserTaskSource {
+    CronNewConversation,
+    CancelledRemoteSession,
+}
 
 /// Constructed by application assembly only. The sole official Driver receives
 /// this typed port owner from the composition root; there is no runtime
@@ -81,6 +90,7 @@ fn turn_admission_payload(source: &serde_json::Value, started: &serde_json::Valu
     snapshot: &ResolvedSnapshotRef, route: &nomifun_agent_contracts::ChatRouteIdentity)
     -> Result<serde_json::Value, String> {
     let admission=started.get("admission").ok_or_else(||"Turn claim has no frozen admission scope".to_owned())?;
+    super::nomi_core_session::canonical_admission_binding_ref(started).map_err(|error|error.to_string())?;
     let snapshot=serde_json::to_value(snapshot).map_err(|error|error.to_string())?;
     let route=serde_json::to_value(route).map_err(|error|error.to_string())?;
     if admission.get("resolved_snapshot_ref")!=Some(&snapshot) || admission.get("route_identity")!=Some(&route)
@@ -195,6 +205,79 @@ impl EngineSessionHost {
         Ok(sessions.get(session.as_ref()).and_then(Weak::upgrade))
     }
 
+    /// Wait outside the Session admission gate for legitimate post-answer
+    /// responsibilities. No cancellation, new input or Runtime acquisition.
+    pub(super) async fn join_completed_runtime_background(&self, session: &AgentSessionId)
+        -> Result<(), AppError> {
+        if let Some(resources) = self.existing_kernel_session(session)? {
+            resources.join_knowledge_writebacks().await?;
+        }
+        Ok(())
+    }
+
+    /// Read only the original owner and canonical cleanup receipts. This
+    /// cannot reconstruct a Runtime or reconcile an unknown business result.
+    pub(super) async fn ensure_completed_effect_resources_closed(&self, session: &AgentSessionId)
+        -> Result<(), AppError> {
+        let resources = self.existing_kernel_session(session)?.ok_or_else(||
+            AppError::Conflict("Original effect resource cleanup owner is unavailable".into()))?;
+        resources.ensure_effect_resources_closed().await
+    }
+
+    pub(super) async fn retire_completed_browser_resources(&self, principal_id: &str,
+        session: &AgentSessionId, operation: &OperationId) -> Result<bool, AppError> {
+        #[cfg(feature = "browser-use")]
+        { self.resources.browser.retire_completed_task_resources(principal_id, session, operation).await }
+        #[cfg(not(feature = "browser-use"))]
+        { let _ = (principal_id, session, operation); Ok(true) }
+    }
+
+    /// Domain cleanup carries the original Attempt scope. Its last Turn may
+    /// not have used Browser; only formally bound earlier phases may retire.
+    pub(super) async fn retire_completed_attempt_browser_resources(&self, principal_id: &str,
+        session: &AgentSessionId, attempt_id: &str, operation: &OperationId) -> Result<bool, AppError> {
+        #[cfg(feature = "browser-use")]
+        { self.resources.browser.retire_completed_attempt_resources(principal_id, session, attempt_id, operation).await }
+        #[cfg(not(feature = "browser-use"))]
+        { let _ = (principal_id, session, attempt_id, operation); Ok(true) }
+    }
+
+    pub(super) async fn retire_ended_source_task_resources(&self, principal_id: &str,
+        session: &AgentSessionId, purpose: &OperationId, source: EndedBrowserTaskSource) -> Result<bool, AppError> {
+        #[cfg(feature = "browser-use")]
+        { self.resources.browser.retire_ended_source_task_resources(principal_id, session, purpose, source).await }
+        #[cfg(not(feature = "browser-use"))]
+        { let _ = (principal_id, session, purpose, source); Ok(true) }
+    }
+
+    /// Peek at the original Browser owner only. Source finalizers must still
+    /// prove this exact purpose belongs to their durably ended source.
+    pub(super) async fn source_browser_task_purpose(&self, principal_id: &str,
+        session: &AgentSessionId) -> Result<Option<OperationId>, AppError> {
+        #[cfg(feature = "browser-use")]
+        {
+            let observed = self.resources.browser.observe_workspace(principal_id, session).await?;
+            if observed.retention == nomifun_browser_platform::workspace::BrowserRetentionReason::ObservationBusy {
+                return Err(AppError::Conflict("Original Browser task purpose is not currently observable".into()));
+            }
+            if !observed.registered { return Ok(None); }
+            Ok(observed.task_operation_id.map(OperationId::from))
+        }
+        #[cfg(not(feature = "browser-use"))]
+        { let _ = (principal_id, session); Ok(None) }
+    }
+
+    #[cfg(feature = "browser-use")]
+    pub(super) async fn observe_browser_workspace(&self, principal_id: &str, session: &AgentSessionId)
+        -> Result<nomifun_browser_platform::workspace::BrowserWorkspaceObservation, AppError> {
+        self.resources.browser.observe_workspace(principal_id, session).await
+    }
+
+    #[cfg(feature = "browser-use")]
+    pub(super) async fn registered_browser_workspace_sessions(&self, principal_id: &str) -> Result<Vec<String>, AppError> {
+        self.resources.browser.registered_workspace_sessions(principal_id).await
+    }
+
     /// The canonical cancellation receipt, not whichever Turn is now active,
     /// supplies the immutable operation that owns this write-back.
     pub(super) fn cancel_knowledge_writeback(&self, session: &AgentSessionId, operation: &OperationId)
@@ -203,6 +286,16 @@ impl EngineSessionHost {
             Some(resources) => resources.cancel_knowledge_writeback(operation.as_ref()),
             None => Ok(false),
         }
+    }
+
+    pub(super) fn running_knowledge_operations(&self, session: &AgentSessionId) -> Result<Vec<OperationId>,AppError> {
+        match self.existing_kernel_session(session)? {
+            Some(resources) => resources.running_knowledge_operations(),
+            None => Ok(Vec::new()),
+        }
+    }
+    pub(super) fn knowledge_stop_requested(&self,session:&AgentSessionId,operation:&OperationId)->Result<bool,AppError> {
+        self.existing_kernel_session(session)?.map(|resources|resources.knowledge_stop_requested(operation)).transpose().map(|value|value.unwrap_or(false))
     }
 
     /// Join background writes before the Session owner tears down Runtime and
@@ -217,6 +310,38 @@ impl EngineSessionHost {
 
     pub(super) async fn cleanup_session_processes(&self,owner:&str,session:&AgentSessionId) ->Result<(),AppError> {
         self.resources.wave2.cleanup_runtime_session(owner,session.as_ref()).await
+    }
+
+    pub(super) fn registered_process_resource_sessions(&self,owner:&str)->Result<Vec<String>,AppError> {
+        self.resources.wave2.registered_runtime_process_sessions(owner)
+    }
+
+    pub(super) fn registered_knowledge_resource_sessions(&self)->Result<Vec<String>,AppError> {
+        let sessions=self.kernel_sessions.lock().map_err(|_|AppError::Conflict("Engine resource handles poisoned".into()))?;
+        let mut retained=Vec::new();
+        for (id,session) in sessions.iter() {
+            if let Some(session)=session.upgrade() {if session.has_unsettled_knowledge_work()? {retained.push(id.clone());}}
+        }
+        Ok(retained)
+    }
+
+    pub(super) fn observe_process_resources(&self,owner:&str,session:&AgentSessionId)
+        ->Result<Option<super::engine_process_host::ProcessResourceObservation>,AppError> {
+        self.resources.wave2.observe_runtime_process_resources(owner,session.as_ref())
+    }
+
+    pub(super) fn process_resource_instances(&self,owner:&str,session:&AgentSessionId)
+        ->Result<Vec<super::engine_process_host::ProcessInstanceObservation>,AppError> {
+        self.resources.wave2.process_resource_instances(owner,session.as_ref())
+    }
+
+    pub(super) async fn stop_process_resource(&self,owner:&str,session:&AgentSessionId,generation:&str,process:&str,creator_turn:&str,creator_call:&str)
+        ->Result<super::engine_process_host::ProcessStopReceipt,AppError> {
+        self.resources.wave2.stop_process_resource(owner,session.as_ref(),generation,process,creator_turn,creator_call).await
+    }
+
+    pub(super) fn observe_knowledge_resources(&self,session:&AgentSessionId)->Result<Option<bool>,AppError> {
+        self.existing_kernel_session(session)?.map(|session|session.has_unsettled_knowledge_work()).transpose()
     }
 
     /// Publish a fresh view of the original canonical summary without sending
@@ -235,10 +360,17 @@ impl EngineSessionHost {
     ) -> Result<super::engine_skills::SelectedSkills, AppError> {
         let context = self.open_kernel_session(session)?;
         let registry = context.registry_snapshot()?;
-        let selected_only=super::unified_runtime_host::robot_interaction::uses_lean_robot_context(
-            self.is_canonical_robot_session(session).await?,context.compiled().content());
+        let selected_only=super::unified_runtime_host::robot_interaction::uses_compact_context(
+            self.is_canonical_robot_session(session).await?);
         let skills = super::engine_skills::compile_projection(context.compiled(), &registry,selected_only).await?;
         Ok(skills)
+    }
+
+    /// Read original canonical task constraints for this exact execution
+    /// child. This is bounded reference data, never another permission ledger.
+    pub(super) async fn read_execution_source_context(&self, principal: &PrincipalRef,
+        session: &AgentSessionId) -> Result<Option<String>, AppError> {
+        self.session_owner()?.read_execution_source_context(&principal.principal_id, session).await
     }
 
     /// Compile against the production Kernel using the Conversation owner's
@@ -313,6 +445,49 @@ impl EngineSessionHost {
             }
         }
         self.resources.wave2.release_idle_workspace_host(root)
+    }
+
+    pub(super) fn capture_completed_workspace_retirement(&self,session:&AgentSessionId)
+        ->Result<Option<super::nomi_core_wave2::WorkspaceHostRetirementTicket>,AppError> {
+        self.existing_kernel_session(session)?.map(|context|context.capture_workspace_host_retirement()).transpose().map(Option::flatten)
+    }
+
+    pub(super) fn retire_captured_workspace_host(&self,ticket:&super::nomi_core_wave2::WorkspaceHostRetirementTicket)->Result<(),AppError> {
+        self.resources.wave2.retire_captured_workspace_host(ticket)
+    }
+
+    pub(super) fn schedule_workspace_host_retirement(&self,ticket:super::nomi_core_wave2::WorkspaceHostRetirementTicket,
+        tasks:&Arc<dyn nomifun_conversation::BackgroundTaskRegistrar>)->Result<(),AppError> {
+        let Some(flight)=ticket.begin_retry() else {return Ok(());};
+        let cache=Arc::downgrade(&self.resources.wave2);
+        let shutdown=tasks.shutdown_signal();
+        if !tasks.spawn(Box::pin(async move {
+            tokio::pin!(shutdown);
+            let mut retry=std::time::Duration::from_secs(1);
+            loop {
+                let Some(cache)=cache.upgrade() else {return;};
+                let result=cache.retire_captured_workspace_host(flight.ticket());
+                drop(cache);
+                match result {Ok(())=>return,Err(error)=>tracing::debug!(%error,"original workspace cache retirement retains shared responsibility")}
+                tokio::select! {_=&mut shutdown=>return,_=tokio::time::sleep(retry)=>{}}
+                retry=(retry*2).min(std::time::Duration::from_secs(60));
+            }
+        })) {return Err(AppError::Conflict("Workspace cache retirement owner is shutting down".into()));}
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn cached_workspace_host_count(&self)->usize {self.resources.wave2.cached_root_count()}
+
+    #[cfg(test)]
+    pub(super) fn fail_workspace_cache_for_test(&self,root:&std::path::Path)
+        ->Result<super::nomi_core_wave2::WorkspaceCacheFailureGuard,AppError> {
+        self.resources.wave2.fail_workspace_cache_for_test(root)
+    }
+
+    #[cfg(test)]
+    pub(super) fn probe_workspace_cache_for_test(&self,root:&std::path::Path)->Result<(),AppError> {
+        self.resources.wave2.probe_workspace_cache_for_test(root)
     }
 
     /// Read the latest canonical cross-Agent handoff for the exact current
@@ -659,6 +834,7 @@ impl EngineSessionHost {
             holder: self.execution_instance_id.clone(), expected_fence: 0, checkpoint: None,
         }).await;
         let journal = match lease {
+            Err(nomifun_agent_session::SessionStoreError::ExecutionCapacityPending) => return Err(AppError::ExecutionAdmissionPending),
             Ok(lease) => match EngineTurnJournal::new(store.clone(), receipt, cancellation, lease.clone()) {
                 Ok(journal) => journal,
                 Err(error) => { let _ = store.release_unattached_native_claim(&lease).await; return Err(error); }

@@ -368,3 +368,69 @@ test('an interrupted older task can be stopped from its projection without answe
   expect(input.value).toBe('Preserve my next request');
   expect(lifecycle).toEqual({ mounted: 1, unmounted: 0 });
 });
+
+for (const selection of ['root', 'completed_root', 'child'] as const) test(`an older AutoWork ${selection} projection keeps local and current-run Stop with their original owners`, async () => {
+  const root = makeStep(0, { title: 'Original automatic root', status: selection === 'completed_root' ? 'completed' : 'running' });
+  const childStep = makeStep(1, { title: 'Original automatic child' });
+  const selected = selection === 'child' ? childStep : root;
+  const rootAttempt = makeAttempt(root, { status: root.status === 'completed' ? 'completed' : 'running' });
+  const childAttempt = makeAttempt(childStep, { attempt_id: parseExecutionAttemptId('00000000-09c4-7000-8000-000000000031') });
+  const older = makeDetail({ steps: [root, childStep], attempts: [rootAttempt, childAttempt],
+    automation_control: { root_step_id: root.step_id, lead_conversation_id: leadConversation.id,
+      requirement_id: 'original-requirement', claim_generation: 7 } });
+  const newerId = parseExecutionId('00000000-07d0-7000-8000-000000000390');
+  const newer = makeDetail({ execution: { ...older.execution, execution_id: newerId, version: 99 }, steps: [] });
+  const refreshNewer = mock(async () => {});
+  const state = spyOn(executionState, 'useConversationExecution').mockReturnValue({
+    executionId: newerId, detail: newer, refetch: refreshNewer, loading: false,
+    leadThinking: { phase: null, reasoning: '', active: false, textHeartbeat: false },
+  });
+  const getExecution = spyOn(ipcBridge.agentExecution.get, 'invoke').mockImplementation(async ({ execution_id }) => {
+    if (execution_id !== executionId) throw new Error('Fetched the unrelated newer execution');
+    return older;
+  });
+  const selectedAttempt = selection === 'child' ? childAttempt : rootAttempt;
+  const getChild = spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ ...leadConversation,
+    id: childConversationId, execution_step_id: selected.step_id, execution_attempt_id: selectedAttempt.attempt_id, linked_execution_id: undefined });
+  const transcript = spyOn(readonlyTranscript, 'default').mockImplementation(() => <section aria-label='Original task record' />);
+  const cancelStep = spyOn(ipcBridge.agentExecution.cancelStep, 'invoke').mockResolvedValue(older);
+  const cancelAll = spyOn(ipcBridge.agentExecution.cancel, 'invoke');
+  const stopRun = spyOn(ipcBridge.agentActivities.stop, 'invoke').mockResolvedValue({ accepted: true, execution_stopped: false, resources: [] });
+  const changed = spyOn(ipcBridge.agentExecution.events.changed, 'on').mockReturnValue(() => {});
+  const reconnect = spyOn(ipcBridge.conversation.reconnected, 'on').mockReturnValue(() => {});
+  const success = mock(() => () => {}), error = mock(() => () => {}), warning = mock(() => () => {});
+  const notices = spyOn(Message, 'useMessage').mockReturnValue([{ success, error, warning }, <></>]);
+  for (const spy of [state, getExecution, getChild, transcript, cancelStep, cancelAll, stopRun, changed, reconnect, notices]) restores.push(() => spy.mockRestore());
+  const lifecycle: MountCounter = { mounted: 0, unmounted: 0 };
+  const view = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+    <ExecutionProvider conversation={{ ...leadConversation, linked_execution_id: newerId }}>
+      <ExecutionContentSwitcher><CompanionMainConversation lifecycle={lifecycle} cardDetail={older} /></ExecutionContentSwitcher>
+    </ExecutionProvider>
+  </I18nextProvider></MemoryRouter>);
+  expect(view.queryByRole('button', { name: 'Stop collaboration' })).toBeNull();
+  expect(view.getByRole('button', { name: 'Stop current automatic run' })).toBeTruthy();
+  fireEvent.click(view.getByRole('button', { name: `View subtask: ${selected.title}` }));
+  await view.findByRole('region', { name: 'Original task record' });
+  expect(view.queryByRole('button', { name: 'Retry' })).toBeNull();
+  expect(view.queryByRole('button', { name: 'Adopt current result' })).toBeNull();
+  if (selection === 'child') {
+    expect(view.getByRole('button', { name: 'Stop task' })).toBeTruthy();
+    fireEvent.click(view.getByRole('button', { name: 'Choose task stop scope' }));
+    expect(await view.findByText('Stop task and its delegated work')).toBeTruthy();
+    fireEvent.click(view.getByText('Stop only its delegated work'));
+  } else {
+    expect(view.queryByRole('button', { name: 'Stop task' })).toBeNull();
+    expect(view.queryByRole('button', { name: 'Choose task stop scope' })).toBeNull();
+    fireEvent.click(view.getByRole('button', { name: 'Stop only its delegated work' }));
+  }
+  await waitFor(() => expect(cancelStep).toHaveBeenCalledTimes(1));
+  expect(cancelStep.mock.calls[0][0]).toEqual({ execution_id: executionId, step_id: selected.step_id,
+    updates: { expected_execution_version: older.execution.version, expected_step_version: selected.version, scope: 'delegated_work' } });
+  fireEvent.click(view.getByRole('button', { name: 'Stop current automatic run' }));
+  await waitFor(() => expect(stopRun).toHaveBeenCalledTimes(1));
+  expect(stopRun.mock.calls[0][0]?.target).toEqual({ kind: 'auto_work_run', target_kind: 'conversation',
+    target_id: leadConversation.id, requirement_id: 'original-requirement', claim_generation: 7 });
+  expect(cancelAll).not.toHaveBeenCalled();
+  expect(refreshNewer).not.toHaveBeenCalled();
+  expect(error).not.toHaveBeenCalled();
+});

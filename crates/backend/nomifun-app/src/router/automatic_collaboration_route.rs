@@ -1,11 +1,8 @@
 //! Policy-aware routing for explicit Agent collaboration requests.
 //!
-//! The retired Runtime appended persistent delegation guidance to every
-//! eligible desktop Session. During the unified Runtime cutover that guidance
-//! was deleted while the typed `delegation_policy` kept flowing unused into
-//! [`AgentRuntimeBuildOptions`](nomifun_ai_agent::types::AgentRuntimeBuildOptions).
-//! This module restores that contract against the canonical Capability Action
-//! instead of a legacy MCP tool name.
+//! Every interaction entry uses the same frozen Action grants and typed
+//! delegation policy. Ordinary work stays in the receiving Session; durable
+//! collaboration is selected for an explicit request or actual task benefit.
 //!
 //! Explicit routing is deliberately conservative. A positive match requires
 //! both collaboration vocabulary and a current execution verb. Explanations,
@@ -17,7 +14,6 @@ use nomifun_common::DelegationPolicy;
 
 pub(super) const COLLABORATION_CAPABILITY_ID: &str = "agent.collaboration";
 pub(super) const DELEGATE_ACTION_ID: &str = "agent/delegate";
-const ROBOT_INTERACTION_GUIDANCE: &str = "Physical Companion interaction policy: use visible device tools immediately for a clear supported movement; do not plan, narrate, probe unrelated state, or delegate that simple action. For a device-action-only request, finish silently after every requested action has a successful receipt; do not add greetings, acknowledgments, recaps, praise, follow-up questions or unrelated suggestions. Use only an actually advertised silent-finish control under its declared contract, and never stop before all requested actions. Speak for a question, an explicitly requested verbal receipt, a real failure, blocker, uncertain result or necessary clarification. Accepted dispatch does not prove completed movement. Ordinary companionship stays conversational and follows the user's requested depth. A delivered desktop-task result needs only a concise answer to the original question, without repeating the task process.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExplicitCollaborationIntent {
@@ -260,43 +256,6 @@ pub(super) fn route(
     }
 }
 
-/// The physical receptionist fills capability gaps through its own Companion's
-/// frozen desktop role. A one-question lookup is a valid directed task; the
-/// generic fan-out/complexity advice would incorrectly discourage it here.
-/// The caller has already proved the canonical physical role and narrow grants.
-pub(super) fn route_robot(
-    input: &str,
-    policy: DelegationPolicy,
-    tool_plan: AgentToolPlan,
-) -> CollaborationTurnRoute {
-    if policy == DelegationPolicy::Disabled {
-        let mut result = route(input, policy, tool_plan);
-        result.instructions.insert(0, ROBOT_INTERACTION_GUIDANCE.into());
-        return result;
-    }
-    let Some(tool_name) = tool_plan
-        .model_name_for_action(COLLABORATION_CAPABILITY_ID, DELEGATE_ACTION_ID)
-        .map(str::to_owned)
-    else {
-        return CollaborationTurnRoute {
-            tool_plan, tool_choice: ChatToolChoice::Auto,
-            instructions: vec![ROBOT_INTERACTION_GUIDANCE.into()], forced: false,
-        };
-    };
-    let forced = classify(input).is_some();
-    let instruction = format!(
-        "For live information (including today's weather in Beijing), research, files, applications or any platform task missing from this Agent, invoke `{tool_name}` with `strategy=planned`, `target_role=desktop` and the complete `goal`, even for a short indivisible question, unless the current user forbids delegation. Respect the user's explicit limits on using subagents; if no permitted local tool can complete the task, state that concrete limitation briefly. This creates a real subtask for the SAME Companion's saved desktop Agent/model/authority, without a planning-model round. Do not refuse just because this physical role lacks the local tool, and do not invent current facts. Use authorized ToolSearch for a deferred schema. Deep research, elaborate creative motion design and autonomous multi-step planning belong in that desktop task; include the user's goal, known device abilities and constraints, and request a concise result or motion plan. The worker cannot move this robot through delegation; apply any returned plan only within the original accepted request and current device grants. On a successful delegation receipt, end this turn without narration or acknowledgment: never poll or claim the work has finished. The runtime handles this accepted handoff without requiring a public reply. The host returns the recorded result asynchronously to this source; summarize the answer concisely. Report actual unavailability or a failed handoff briefly, rather than promising a result.{}",
-        if forced { " The current user explicitly requested collaboration: invoke this directed task now, preserving the requested deliverable. Use the directed parameters above rather than generic parallel tasks." } else { "" },
-    );
-    CollaborationTurnRoute {
-        tool_plan: if forced {
-            tool_plan.for_action(COLLABORATION_CAPABILITY_ID, DELEGATE_ACTION_ID)
-        } else { tool_plan },
-        tool_choice: if forced { ChatToolChoice::Specific { name: tool_name } } else { ChatToolChoice::Auto },
-        instructions: vec![ROBOT_INTERACTION_GUIDANCE.into(), instruction],
-        forced,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -357,51 +316,15 @@ mod tests {
     }
 
     #[test]
-    fn robot_capability_gaps_use_directed_tasks_even_for_one_short_question() {
+    fn physical_guidance_keeps_actions_and_results_under_the_shared_agent() {
         for input in ["北京今天的天气怎么样", "站起来再转身", "陪我聊聊今天的心情", "设计一段有创意的舞蹈"] {
             let original = plan();
-            let result = route_robot(input, DelegationPolicy::Automatic, original.clone());
-            assert_eq!(result.tool_plan, original, "semantic choice must retain every granted tool");
-            assert_eq!(result.tool_choice, ChatToolChoice::Auto, "no keyword dispatch or fabricated movement");
+            let result = route(input, DelegationPolicy::Automatic, original.clone());
+            assert_eq!(result.tool_plan, original);
+            assert_eq!(result.tool_choice, ChatToolChoice::Auto);
             assert!(!result.forced);
-            let guidance = result.instructions.join("\n");
-            assert!(guidance.contains("`plugin_delegate_hash`"));
-            assert!(guidance.contains("target_role=desktop") && guidance.contains("short indivisible question"));
-            assert!(guidance.contains("without a planning-model round") && guidance.contains("never poll"));
-            assert!(guidance.contains("end this turn without narration or acknowledgment"));
-            assert!(!guidance.contains("at most a brief acknowledgment"));
-            assert!(guidance.contains("finish silently after every requested action has a successful receipt"));
-            assert!(guidance.contains("explicitly requested verbal receipt") && guidance.contains("necessary clarification"));
-            assert!(!guidance.contains("finish_without_reply"), "the Runtime describes a control only while it is actually exposed");
-            assert!(!guidance.contains("strategy=parallel"));
+            assert!(result.instructions.join("\n").contains("ordinary short or indivisible request, answer directly"));
         }
-    }
-
-    #[test]
-    fn robot_explicit_subagent_request_uses_the_directed_contract() {
-        let result = route_robot("请使用 subagent 查询北京今天的天气", DelegationPolicy::Automatic, plan());
-        assert!(result.forced);
-        assert_eq!(result.tool_choice, ChatToolChoice::Specific { name: "plugin_delegate_hash".into() });
-        assert_eq!(result.tool_plan.len(), 1);
-        let guidance = result.instructions.join("\n");
-        assert!(guidance.contains("strategy=planned") && guidance.contains("target_role=desktop"));
-        assert!(!guidance.contains("strategy=parallel"));
-    }
-
-    #[test]
-    fn robot_guidance_never_resurrects_a_missing_or_disabled_delegate() {
-        let result = route_robot("北京今天的天气怎么样", DelegationPolicy::Disabled, plan());
-        assert!(!result.tool_plan.contains_capability(COLLABORATION_CAPABILITY_ID));
-        assert!(!result.instructions.join("\n").contains("target_role=desktop"));
-        assert!(result.instructions.join("\n").contains("collaboration is disabled"));
-        let empty = route_robot("继续播报结果", DelegationPolicy::Automatic, AgentToolPlan::default());
-        assert!(empty.tool_plan.is_empty());
-        assert_eq!(empty.instructions, vec![ROBOT_INTERACTION_GUIDANCE]);
-        assert!(!empty.instructions.join("\n").contains("plugin_delegate_hash"));
-        let declined = route_robot("不要使用 subagent 查询天气", DelegationPolicy::Automatic, plan());
-        assert!(!declined.forced);
-        assert_eq!(declined.tool_choice, ChatToolChoice::Auto);
-        assert!(declined.instructions.join("\n").contains("unless the current user forbids delegation"));
     }
 
     #[test]

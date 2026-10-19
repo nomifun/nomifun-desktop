@@ -80,13 +80,14 @@ async fn read_root(conn: &Connection, session: &str, script: &str) -> Value {
 }
 
 async fn wait_root(conn: &Connection, session: &str, script: &str) {
-    tokio::time::timeout(Duration::from_secs(8), async {
+    let settled = tokio::time::timeout(Duration::from_secs(8), async {
         while read_root(conn, session, script).await != true {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
-    .await
-    .expect("real fixture document/event witness did not arrive");
+    .await;
+    assert!(settled.is_ok(), "real fixture document/event witness did not arrive: {script}; receipts={}",
+        read_root(conn, session, "window.receipts||null").await);
 }
 
 async fn observe_all(
@@ -160,7 +161,7 @@ async fn repeated_observe_keeps_worlds_and_window_listeners_stable(
 ) {
     observe_all(browser, grant, cancel).await;
     let (sessions, connection) = {
-        let _operation = browser.operations.lock().await;
+        let _operation = browser.operations.write().await;
         let connection = browser.current_connection().unwrap();
         let state = browser.state.lock().unwrap();
         let automation = &state.automation[&grant.target_id];
@@ -303,7 +304,7 @@ async fn window_listener_counts(
 async fn real_granted_frames_have_trusted_input_and_reject_occluded_or_replaced_refs() {
     let directory = tempfile::tempdir().unwrap();
     let profile = directory.path().join("frame-profile");
-    let launched = crate::launch::launch_chrome(
+    let launched = crate::launch::launch_attached_chrome_fixture(
         &crate::launch::LaunchConfig {
             chrome_path: std::env::var_os("NOMIFUN_CHROME_BINARY")
                 .expect("explicit fixture Chrome")
@@ -311,7 +312,6 @@ async fn real_granted_frames_have_trusted_input_and_reject_occluded_or_replaced_
             user_data_dir: profile.clone(),
             headful: true,
         },
-        false,
     )
     .await
     .unwrap();
@@ -348,7 +348,22 @@ async fn real_granted_frames_have_trusted_input_and_reject_occluded_or_replaced_
                 assert_eq!(read_root(&diagnostics,&session,&format!("(()=>{{const host=document.getElementById('same-host');const same=host.shadowRoot.getElementById('same');return document.activeElement===host && host.shadowRoot.activeElement===same && ({focused})}})()")).await,true,"native focus did not traverse the shadow-root iframe chain");
             }
             browser.execute_granted(grant,Command::Press {tab_id:grant.id().into(),observation_id:observation_id.clone(),keys:"End".into()},&cancel).await.unwrap();
-            browser.execute_granted(grant,Command::Click {tab_id:grant.id().into(),observation_id:observation_id.clone(),ref_id:reference(&observation,&format!("{label} action"))},&cancel).await.unwrap();
+            #[cfg(target_os = "macos")]
+            {
+                // End scrolls the focused document on macOS. Restore its real
+                // viewport with native Home before the strictly visible click;
+                // neither key changes the original document or reference grant.
+                // Observe End's actual scroll first: Home sent while the old
+                // position is still zero can bubble to an ancestor instead.
+                wait_root(&diagnostics,&session,&format!("receipts.{scope}.scroll>0 && receipts.{scope}.events.some(e=>e.type==='keyup'&&e.key==='End')")).await;
+                browser.execute_granted(grant,Command::Press {tab_id:grant.id().into(),observation_id:observation_id.clone(),keys:"Home".into()},&cancel).await.unwrap();
+                wait_root(&diagnostics,&session,&format!("receipts.{scope}.scroll===0 && receipts.{scope}.events.some(e=>e.type==='keyup'&&e.key==='Home')")).await;
+            }
+            let clicked=browser.execute_granted(grant,Command::Click {tab_id:grant.id().into(),observation_id:observation_id.clone(),ref_id:reference(&observation,&format!("{label} action"))},&cancel).await;
+            if let Err(error)=clicked {
+                let geometry=read_root(&diagnostics,&session,r#"(()=>{const same=document.getElementById('same-host').shadowRoot.getElementById('same');const parent=same.contentDocument;const nested=parent.getElementById('nested');const describe=d=>({scroll:d.defaultView.scrollY,viewport:[d.defaultView.innerWidth,d.defaultView.innerHeight],active:d.activeElement?.id,field:d.getElementById('field')?.getBoundingClientRect().toJSON(),action:d.getElementById('action')?.getBoundingClientRect().toJSON(),nested:d.getElementById('nested')?.getBoundingClientRect().toJSON()});return {root:describe(document),same:describe(parent),nested:describe(nested.contentDocument),sameRect:same.getBoundingClientRect().toJSON()}})()"#).await;
+                panic!("native frame {scope} click after editing keys failed: {error:?}; geometry={geometry}; receipts={}",read_root(&diagnostics,&session,"receipts").await);
+            }
             wait_root(&diagnostics,&session,&format!("receipts.{scope}.clicks===1 && receipts.{scope}.value==={}",serde_json::to_string(&text).unwrap())).await;
             if scope!="same" {
                 browser.execute_granted(grant,Command::Scroll {tab_id:grant.id().into(),observation_id:observation_id.clone(),delta_x:0.0,delta_y:320.0},&cancel).await.unwrap();
@@ -363,6 +378,8 @@ async fn real_granted_frames_have_trusted_input_and_reject_occluded_or_replaced_
                 assert!(events.iter().any(|event|event["type"]==kind),"missing {kind} in {scope}: {proof}");
             }
             assert!(events.iter().any(|event|event["type"]=="keydown"&&event["key"]=="End"));
+            #[cfg(target_os = "macos")]
+            assert!(events.iter().any(|event|event["type"]=="keydown"&&event["key"]=="Home"));
         }
         let observation=observe_all(browser,grant,&cancel).await;
         let observation_id=observation["observation_id"].as_str().unwrap().to_owned();
@@ -414,5 +431,97 @@ async fn real_granted_frames_have_trusted_input_and_reject_occluded_or_replaced_
         detached.is_ok() && closed.is_ok() && removed.is_ok(),
         "fixture cleanup: disconnect={detached:?}; browser={closed:?}; profile={removed:?}"
     );
+    result.unwrap();
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=4)]
+#[ignore="explicit NOMIFUN_CHROME_BINARY; disposable Chrome with a native pending semantic read"]
+async fn real_chrome_pending_read_keeps_other_target_live_and_disconnect_joins_its_original_owner() {
+    let directory=tempfile::tempdir().unwrap();let profile=directory.path().join("concurrent-profile");
+    let launched=crate::launch::launch_attached_chrome_fixture(&crate::launch::LaunchConfig {
+        chrome_path:std::env::var_os("NOMIFUN_CHROME_BINARY").expect("explicit fixture Chrome").into(),
+        user_data_dir:profile.clone(),headful:true,
+    }).await.unwrap();
+    let (mut owner,diagnostics)=launched.connect().await.unwrap();let(url,server)=frame_fixture().await;
+    let mut attached=None;
+    let result=std::panic::AssertUnwindSafe(async {
+        let first_url=url.replace("/root","/private?concurrent=first");
+        let second_url=url.replace("/root","/private?concurrent=second");
+        let mut targets=Vec::new();let mut witnesses=Vec::new();
+        for address in [&first_url,&second_url] {
+            let target=diagnostics.send(ROOT_SESSION,&CreateTargetParams::new(address.clone())).await.unwrap()["targetId"].as_str().unwrap().to_owned();
+            let mut params=AttachToTargetParams::new(target.clone());params.flatten=Some(true);
+            let session=diagnostics.send(ROOT_SESSION,&params).await.unwrap()["sessionId"].as_str().unwrap().to_owned();
+            diagnostics.registry().register_session(session.clone(),"page");
+            wait_root(&diagnostics,&session,"document.readyState==='complete' && !!document.querySelector('button')").await;
+            let nonce=read_root(&diagnostics,&session,"window.fixtureNonce=crypto.randomUUID();window.fixtureDraft='preserve';fixtureNonce").await;
+            targets.push(target);witnesses.push((session,nonce));
+        }
+        let browser=Arc::new(AttachedBrowser::connect_port_file(&profile.join("DevToolsActivePort")).await.unwrap());
+        attached=Some(browser.clone());
+        let tabs=browser.tabs_for_provider().await.unwrap();
+        let first=tabs.iter().find(|tab|tab.info.url==first_url).unwrap().grant.clone();
+        let second=tabs.iter().find(|tab|tab.info.url==second_url).unwrap().grant.clone();
+        for grant in [&first,&second] {
+            browser.execute_granted(grant,Command::Observe {tab_id:grant.id().into()},&CancellationToken::new()).await.unwrap();
+        }
+        let(conn,session,object)={
+            let state=browser.state.lock().unwrap();let automation=&state.automation[&first.target_id];
+            (state.connection.as_ref().unwrap().clone(),automation.session.clone(),automation.object.clone())
+        };
+        // A fault in this disposable semantic world makes the *actual* CDP
+        // CallFunctionOn await a Promise. No protocol response, input event or
+        // user page is mocked. Restore the prototype before disconnect; the
+        // unresolved read itself remains owned by its original native call.
+        let mut install=CallFunctionOnParams::new(r#"function(){
+            const core=this, original=Function.prototype.apply;
+            Function.prototype.apply=function(receiver,args){
+                if(Reflect.apply(Function.prototype.toString,this,[]).includes('const result = this.incrementalAriaSnapshot(document.body')){
+                    core.__fixtureReadEntered=true;
+                    return new Promise(resolve=>{core.__fixtureReleaseRead=()=>resolve(Reflect.apply(this,receiver,args));});
+                }
+                return Reflect.apply(this,receiver,args);
+            };
+            core.__fixtureRestore=()=>{Function.prototype.apply=original;};return true;
+        }"#);
+        install.object_id=Some(RemoteObjectId::new(object.clone()));install.return_by_value=Some(true);
+        let installed=conn.send(&session,&install).await.unwrap();assert!(installed.get("exceptionDetails").is_none(),"{installed}");
+        let worker=browser.clone();let target=first.clone();
+        let read=tokio::spawn(async move {worker.execute_granted(&target,Command::Observe {tab_id:target.id().into()},&CancellationToken::new()).await});
+        tokio::time::timeout(Duration::from_secs(5),async {
+            loop {
+                let mut entered=CallFunctionOnParams::new("function(){return this.__fixtureReadEntered===true;}");
+                entered.object_id=Some(RemoteObjectId::new(object.clone()));entered.return_by_value=Some(true);
+                if conn.send(&session,&entered).await.unwrap()["result"]["value"]==true {break;}
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("the first original CDP call must actually be pending in Chrome");
+        assert!(!read.is_finished());
+        let observed=tokio::time::timeout(Duration::from_secs(3),browser.execute_granted(&second,
+            Command::Observe {tab_id:second.id().into()},&CancellationToken::new())).await
+            .expect("a native pending read on the first target cannot block the second target").unwrap();
+        assert_eq!(observed["tab_id"],second.id());
+        tokio::time::timeout(Duration::from_secs(3),browser.tabs_for_provider()).await.expect("native inventory is independent").unwrap();
+        tokio::time::timeout(Duration::from_secs(3),browser.release_granted(&second)).await.expect("other-target release is independent").unwrap();
+        assert!(!read.is_finished(),"the second result must precede the original read's settlement");
+        let mut restore=CallFunctionOnParams::new("function(){this.__fixtureRestore();return true;}");
+        restore.object_id=Some(RemoteObjectId::new(object));restore.return_by_value=Some(true);
+        let restored=conn.send(&session,&restore).await.unwrap();assert!(restored.get("exceptionDetails").is_none(),"{restored}");
+        tokio::time::timeout(Duration::from_secs(5),browser.disconnect()).await.expect("disconnect must close admission before joining the original read").unwrap();
+        let outcome=tokio::time::timeout(Duration::from_secs(5),read).await.expect("the original native call must settle").unwrap();
+        assert!(outcome.is_err(),"disconnect cannot turn the unresolved read into success: {outcome:?}");
+        assert!(browser.execute_granted(&first,Command::Observe {tab_id:first.id().into()},&CancellationToken::new()).await.is_err());
+        assert!(owner.child_mut().try_wait().unwrap().is_none(),"borrowed Chrome must survive disconnect");
+        for (index,(session,nonce)) in witnesses.iter().enumerate() {
+            assert_eq!(read_root(&diagnostics,session,"fixtureNonce").await,*nonce);
+            assert_eq!(read_root(&diagnostics,session,"fixtureDraft").await,"preserve");
+            assert_eq!(diagnostics.send(ROOT_SESSION,&GetTargetInfoParams::builder().target_id(targets[index].clone()).build()).await.unwrap()["targetInfo"]["targetId"],targets[index]);
+        }
+        println!("ATTACHED_NATIVE_CONCURRENCY second_target=true inventory=true independent_release=true original_read_joined=true chrome_and_pages_preserved=true");
+    }).catch_unwind().await;
+    if let Some(browser)=attached.as_ref(){let _=browser.disconnect().await;}
+    diagnostics.shutdown().await;let closed=owner.shutdown().await;
+    drop(attached);drop(diagnostics);drop(owner);drop(server);let removed=directory.close();
+    assert!(closed.is_ok()&&removed.is_ok(),"fixture cleanup: browser={closed:?}; profile={removed:?}");
     result.unwrap();
 }

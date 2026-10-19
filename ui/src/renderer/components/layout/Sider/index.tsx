@@ -51,7 +51,7 @@ interface SiderProps {
  * reached via the "会话" entry. The rail holds top-level destinations grouped
  * by small-text section headers (`SiderSectionHeader`): 常用 (会话 / 桌面伙伴),
  * 数据空间 (知识库), 自动化 (定时任务 / 需求平台),
- * 增强工具 (设定 / Skill / MCP), 服务 (客服), and a bottom-pinned 设置 group
+ * 增强工具 (设定 / Skill / MCP), 服务 (应用 / 客服), and a bottom-pinned 设置 group
  * (模型管理 + the footer). Execution engines live as an
  * independent tab inside Settings rather than being mixed into model
  * management.
@@ -268,12 +268,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleSkillsClick}
             />
-            <SiderAppEntry
-              isActive={pathname.startsWith('/apps')}
-              collapsed={collapsed}
-              siderTooltipProps={siderTooltipProps}
-              onClick={handleAppClick}
-            />
             {/* MCP — MCP tool server configuration */}
             <SiderMcpEntry
               isActive={pathname.startsWith('/mcp')}
@@ -281,9 +275,14 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleMcpClick}
             />
-            {/* 服务 — public-facing services (客服), a domain fully separate
-                from the desktop-companion group above. */}
+            {/* 服务 — hosted applications and public-facing customer service. */}
             <SiderSectionHeader label={t('common.siderSection.services')} collapsed={collapsed} />
+            <SiderAppEntry
+              isActive={pathname.startsWith('/apps')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleAppClick}
+            />
             <SiderCustomerServiceEntry
               isActive={pathname.startsWith('/customer-service')}
               collapsed={collapsed}

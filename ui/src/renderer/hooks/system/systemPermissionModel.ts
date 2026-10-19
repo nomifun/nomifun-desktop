@@ -10,8 +10,7 @@ export type PermissionCapabilityTab =
   | 'overview'
   | 'voice-input'
   | 'computer-use'
-  | 'browser-use'
-  | 'notifications';
+  | 'browser-use';
 
 export type PermissionCapabilityId =
   | 'voice_input'
@@ -114,5 +113,7 @@ export const missingComputerPermissionKinds = (
     (kind) => !permissionEntryIsReady(systemPermissionEntry(status, kind))
   );
 
-export const capabilityPermissionsHref = (tab: Exclude<PermissionCapabilityTab, 'overview'>): string =>
-  `#/settings/permissions?tab=${tab}`;
+export const capabilityPermissionsHref = (tab: Exclude<PermissionCapabilityTab, 'overview'> | 'notifications'): string =>
+  tab === 'notifications'
+    ? '#/settings/system?section=preferences&focus=notifications'
+    : `#/settings/permissions?tab=${tab}`;

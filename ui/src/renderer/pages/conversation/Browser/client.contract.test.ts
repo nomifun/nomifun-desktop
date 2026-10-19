@@ -5,7 +5,7 @@ describe('User side browser client contract', () => {
   test('scopes the domain browser to the current canonical Session', () => {
     expect(source).toContain('/api/agent-sessions/${encodeURIComponent(id)}/browser');
     expect(source).toContain('agent_session_id: string');
-    expect(source).toContain('{ agentSessionId: id, bounds, events }');
+    expect(source).toContain('{ agentSessionId: id, bounds, events, surfaceSource }');
     expect(source).not.toContain('/api/conversations/');
   });
   test('does not import Agent grants, resource bindings or attached Chrome state', () => {

@@ -32,7 +32,8 @@ const DelegationProgress: React.FC<{
         {t('agentExecution.progress.summary', { done: completed, total: steps.length })}
       </span>}
       {detail && <ExecutionStopControl key={delegation.executionId} executionId={delegation.executionId}
-        executionVersion={detail.execution.version} status={detail.execution.status} refetch={refetch} />}
+        executionVersion={detail.execution.version} status={detail.execution.status} refetch={refetch}
+        automationControl={detail.automation_control} />}
     </div>
     {!steps.length && <div className='conversation-delegation__empty' role='status'>
       {delegation.unfinished && <Spin size={12} />}

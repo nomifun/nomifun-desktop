@@ -97,7 +97,7 @@ pub use context::{
 };
 pub use context_lifecycle::AgentModelBudget;
 pub use error::AgentEngineError;
-pub use events::{AgentEngineEvent, AgentEventSink, AgentModelResponseRejection, AgentRejectedToolProposal, AgentTurnFailure, NoopAgentEventSink};
+pub use events::{AgentEngineEvent, AgentEventSink, AgentModelResponseRejection, AgentPublicOutputSource, AgentRejectedToolProposal, AgentTurnFailure, NoopAgentEventSink};
 pub use kernel::{
     compile_agent_tool_plan, AgentToolExposure, KernelAgentToolInvoker,
 };

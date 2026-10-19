@@ -6,6 +6,58 @@ use serde::{Deserialize, Serialize};
 use crate::{AgentSessionId, DigestHex, OperationId, PrincipalRef, ResolvedSnapshotRef};
 
 pub const SESSION_PROCESS_OWNER_RELEASED: &str = "session/process-owner-released";
+pub const SESSION_PROCESS_REAPED: &str = "session/process-reaped";
+
+/// The original native owner's complete terminal observation for one retained
+/// process. It is neither a second ToolResult nor a whole-owner release.
+#[derive(Clone,Debug,PartialEq,Serialize,Deserialize,JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionProcessReapedV1 {
+    pub retention:NativeSessionProcessRetention,
+    /// The stable first-party process terminal wire value, validated by its
+    /// original process type at the Store boundary. Bounded output is retained.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub terminal:Option<crate::StrictJsonValue>,
+    /// An existing first-party process terminal is referenced, never copied
+    /// into a second business ToolResult.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub terminal_ref:Option<crate::EventId>,
+    /// Original bounded raw output and decoder state. This has no native
+    /// process handle, input capability, or execution/replay authority.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub output_replay:Option<crate::StrictJsonValue>,
+    /// Store-authored original frozen bytes in Session Payload chunks. Native
+    /// output is observation data, never model/context budget or execution.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub output_archive:Option<SessionProcessOutputArchiveV1>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub component_identity:Option<crate::StrictJsonValue>,
+}
+
+impl SessionProcessReapedV1 {
+    pub fn validate(&self)->Result<(),String> {
+        self.retention.validate()?;
+        if self.retention.processes.len()!=1 {return Err("process reap must identify exactly one original process".into());}
+        if let Some(archive)=&self.output_archive {
+            if self.terminal.is_some()||self.output_replay.is_some()||archive.chunks.is_empty()||archive.byte_len==0
+                ||archive.chunks.iter().any(|id|id.as_ref().is_empty()) {
+                return Err("process archive requires native terminal metadata and original Payload chunks".into());
+            }
+        } else if self.terminal.is_some()==self.terminal_ref.is_some() {return Err("process reap requires exactly one original terminal or terminal reference".into());}
+        Ok(())
+    }
+}
+
+#[derive(Clone,Debug,PartialEq,Serialize,Deserialize,JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionProcessOutputArchiveV1 {
+    /// Exact first-party terminal metadata, with its original cleanup report.
+    /// The Store validates the stable native type without loading output.
+    pub terminal:crate::StrictJsonValue,
+    pub byte_len:u64,
+    pub digest:DigestHex,
+    pub chunks:Vec<crate::SessionPayloadId>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

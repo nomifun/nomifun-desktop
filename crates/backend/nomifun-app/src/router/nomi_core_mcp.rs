@@ -14,7 +14,7 @@ use nomifun_agent_contracts::{
 use nomifun_agent_domain_wave2::Wave2HostPortError;
 use nomifun_common::AppError;
 use nomifun_db::IMcpServerRepository;
-use nomifun_mcp::{McpOwner, McpServer, OAuthMcpCredentialAuthority};
+use nomifun_mcp::{McpOwner, McpServer};
 
 use super::agent_wave2_mcp::{
     McpOwnerAdapter, McpOwnerInvocationInput, McpRemoteToolFacts, McpRuntimeBindingSource,
@@ -434,18 +434,13 @@ impl NomiCoreMcpHost {
 
     pub(crate) fn for_services(services: &crate::services::AppServices) -> Self {
         let pool = services.database.pool().clone();
-        let oauth = Arc::new(nomifun_mcp::McpOAuthService::new_dynamic(Arc::new(
-            nomifun_db::SqliteOAuthTokenRepository::new(pool.clone()),
-        )));
         Self {
             receipts: super::mcp_effect_receipts::McpEffectReceipts::new(pool.clone()),
             source: NomiCoreMcpRuntimeBindingSource {
                 repository: services.app_mcp_sources.clone(),
                 installation_owner: services.authoritative_user_id.clone(),
             },
-            owner: McpOwnerAdapter::new(Arc::new(McpOwner::new_dynamic(Arc::new(
-                OAuthMcpCredentialAuthority::new(oauth),
-            )))),
+            owner: McpOwnerAdapter::new(Arc::new(McpOwner::new_dynamic(services.mcp_auth.clone()))),
             sessions: Mutex::new(BTreeMap::new()),
         }
     }
@@ -552,6 +547,13 @@ impl NomiCoreMcpHost {
     pub(crate) async fn ensure_settled(&self, owner: &str, session: &str) -> Result<(), AppError> {
         self.ensure_memory_settled(owner, session)?;
         self.receipts.ensure_settled(owner, session).await
+    }
+
+    /// The resource teardown path joins the original tool task before calling
+    /// this. Business uncertainty remains a strict gate for every new call.
+    pub(crate) async fn ensure_shutdown_resources_closed(&self, owner: &str, session: &str) -> Result<(), AppError> {
+        self.ensure_memory_settled(owner, session)?;
+        self.receipts.ensure_shutdown_resources_closed(owner, session).await
     }
 
     fn ensure_memory_settled(&self, owner: &str, session: &str) -> Result<(), AppError> {

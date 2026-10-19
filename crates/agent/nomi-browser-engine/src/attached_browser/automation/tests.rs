@@ -9,6 +9,9 @@ mod cancellation;
 #[path = "initialization_tests.rs"]
 mod initialization;
 
+#[path = "concurrency_tests.rs"]
+mod concurrency;
+
 #[path = "dialog_tests.rs"]
 mod dialogs;
 #[path = "frame_live_tests.rs"]
@@ -37,12 +40,12 @@ async fn fixture() -> (String, Server) {
                 let body = r#"<!doctype html><html><body style="height:4000px;margin:20px">
                 <button id="counter">Increment</button><input id="nameInput" aria-label="Name"><div role="status" id="status">0</div>
                 <button id="hoverTrap">Hover trap</button><input id="other" aria-label="Other"><input type="password" role="textbox" aria-label="Password" value="shortFixtureSecret">
-                <script>window.trustedEvents=[];window.count=0;window.trapCount=0;window.armHoverTrap=false;window.armFocusTrap=false;
+                <script>window.trustedEvents=[];window.count=0;window.trapCount=0;window.focusTrapCount=0;window.armHoverTrap=false;window.armFocusTrap=false;
                 for(const type of ['pointerdown','pointerup','mousedown','mouseup','click','input','keydown','keyup','wheel'])
                     document.addEventListener(type,e=>trustedEvents.push({type:e.type,trusted:e.isTrusted,key:e.key||'',value:e.target.value||''}),true);
                 counter.onclick=()=>{status.textContent=String(++count);document.querySelector('[role=status]').textContent=String(count)};
                 hoverTrap.onmousemove=()=>{if(armHoverTrap){const replacement=hoverTrap.cloneNode(true);replacement.id='replacedTrap';replacement.onclick=()=>trapCount++;hoverTrap.replaceWith(replacement);}};
-                nameInput.onkeydown=e=>{if(armFocusTrap&&e.ctrlKey&&e.key.toLowerCase()==='a')other.focus()};
+                nameInput.onkeydown=e=>{if(armFocusTrap&&(e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='a'){focusTrapCount++;other.focus()}};
                 </script></body></html>"#;
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -57,12 +60,12 @@ async fn fixture() -> (String, Server) {
 }
 
 async fn inspect(browser: &AttachedBrowser, grant: &GrantedTab) -> Value {
-    let value=fixture_eval(browser,grant,"JSON.stringify({count:window.count,value:nameInput.value,other:other.value,trap:window.trapCount,replaced:!!document.getElementById('replacedTrap'),scroll:scrollY,events:window.trustedEvents})").await;
+    let value=fixture_eval(browser,grant,"JSON.stringify({count:window.count,value:nameInput.value,other:other.value,trap:window.trapCount,focusTrapCount:window.focusTrapCount,focused:document.activeElement.id,replaced:!!document.getElementById('replacedTrap'),scroll:scrollY,events:window.trustedEvents})").await;
     serde_json::from_str(value.as_str().unwrap()).unwrap()
 }
 
 async fn fixture_eval(browser: &AttachedBrowser, grant: &GrantedTab, script: &str) -> Value {
-    let _operation = browser.operations.lock().await;
+    let _operation = browser.operations.write().await;
     let connection = browser.current_connection().unwrap();
     let session = browser.state.lock().unwrap().automation[&grant.target_id]
         .session
@@ -94,13 +97,12 @@ async fn real_attached_tab_uses_trusted_input_and_disconnect_preserves_the_brows
         std::env::var_os("NOMIFUN_CHROME_BINARY").expect("explicit fixture browser executable");
     let directory = tempfile::tempdir().unwrap();
     let profile = directory.path().join("fixture-profile");
-    let launched = crate::launch::launch_chrome(
+    let launched = crate::launch::launch_attached_chrome_fixture(
         &crate::launch::LaunchConfig {
             chrome_path: executable.into(),
             user_data_dir: profile.clone(),
             headful: true,
         },
-        false,
     )
     .await
     .unwrap();
@@ -233,7 +235,11 @@ async fn real_attached_tab_uses_trusted_input_and_disconnect_preserves_the_brows
                 .err(),
             Some(Error::InvalidInput)
         );
-        assert_eq!(inspect(&browser, &grant).await["other"], "");
+        let guarded = inspect(&browser, &grant).await;
+        assert_eq!(guarded["focusTrapCount"], 1, "the actual select-all shortcut must trigger the focus trap once");
+        assert_eq!(guarded["focused"], "other");
+        assert_eq!(guarded["value"], "真实输入");
+        assert_eq!(guarded["other"], "");
         fixture_eval(&browser, &grant, "window.armFocusTrap=false").await;
         assert_eq!(
             browser

@@ -18,8 +18,10 @@ import type { IApiSshConfigScan } from '../src/common/adapter/ipcBridge';
 
 const config: Record<string, unknown> = { language: 'zh-CN', languageMode: 'manual', 'system.keepAwake': true, 'chat.thinking.visible': true };
 const response = (data: unknown, status = 200) => new Response(JSON.stringify({ success: status < 400, data }), { status, headers: { 'Content-Type': 'application/json' } });
+const previewPlatform = new URLSearchParams(location.search).get('__previewPlatform') === 'macos' ? 'macos' : 'windows';
+const previewDataDir = previewPlatform === 'macos' ? '/Users/nomi/Library/Application Support/NomiFun' : 'D:\\NomiFun';
 const permissions = {
-  platform: 'windows', app_label: 'NomiFun', permissions: [
+  platform: previewPlatform, app_label: 'NomiFun', permissions: [
     { kind: 'microphone', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['voice_input'] },
     { kind: 'accessibility', state: 'not_required', can_request: false, can_open_settings: false, requires_restart_after_grant: false, capabilities: ['computer_use'] },
     { kind: 'screen_recording', state: 'not_required', can_request: false, can_open_settings: false, requires_restart_after_grant: false, capabilities: ['computer_use'] },
@@ -37,7 +39,8 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.method === 'PUT') Object.assign(config, body);
     return response(config);
   }
-  if (path === '/api/system/info') return response({ work_dir: 'D:\\NomiFun\\workspace', cache_dir: 'D:\\NomiFun\\cache', log_dir: 'D:\\NomiFun\\logs', storage_generation: 'preview', agent_data_generation: 1, platform: 'windows', arch: 'x86_64' });
+  if (path === '/api/system/info') return response({ data_dir: previewDataDir, work_dir: 'D:\\NomiFun\\workspace', cache_dir: 'D:\\NomiFun\\cache', log_dir: previewDataDir + (previewPlatform === 'macos' ? '/logs' : '\\logs'), storage_generation: 'preview', agent_data_generation: 1, platform: previewPlatform, arch: 'x86_64' });
+  if (path === '/api/system/storage-relocation/status') return response({ operation_id: null, phase: 'idle', current_dir: previewDataDir, target_dir: null, total_bytes: 0, file_count: 0, blockers: [], warnings: [], restart_required: false, cancellable: false, error: null });
   if (path === '/api/system/permissions') return response(permissions);
   if (path === '/api/system/permissions/request') return response(permissions);
   if (path === '/api/system/permissions/open-settings' || path === '/api/system/keep-awake') return response(null);
@@ -55,8 +58,8 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 const { ipcBridge } = await import('../src/common');
 const { configService } = await import('../src/common/config/configService');
 // Native providers are replaced only here; the product's desktop checks stay intact.
-ipcBridge.application.getStartOnBootStatus.invoke = async () => ({ success: true, data: { supported: true, enabled: false, isPackaged: true, platform: 'windows' } });
-ipcBridge.application.setStartOnBoot.invoke = async ({ enabled }) => ({ success: true, data: { supported: true, enabled, isPackaged: true, platform: 'windows' } });
+ipcBridge.application.getStartOnBootStatus.invoke = async () => ({ success: true, data: { supported: true, enabled: false, isPackaged: true, platform: previewPlatform } });
+ipcBridge.application.setStartOnBoot.invoke = async ({ enabled }) => ({ success: true, data: { supported: true, enabled, isPackaged: true, platform: previewPlatform } });
 ipcBridge.application.applyKeepAwake.invoke = async () => {};
 ipcBridge.application.setZoomFactor.invoke = async ({ factor }) => factor;
 ipcBridge.notification.permissionState.invoke = async () => 'granted';

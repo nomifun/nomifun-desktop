@@ -115,6 +115,8 @@ pub trait AgentRuntimeControl: Send + Sync {
 #[cfg(any(test, feature = "test-support"))]
 #[async_trait::async_trait]
 pub trait MockAgentRuntime: AgentRuntimeControl {
+    fn teardown_proven(&self) -> bool { false }
+
     fn kill_and_wait(
         &self,
         reason: Option<AgentKillReason>,
@@ -267,6 +269,16 @@ impl AgentRuntimeHandle {
             Self::Official(m) => m.kill_and_wait(reason),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.kill_and_wait(reason),
+        }
+    }
+
+    /// Read only the exact instance's retained successful teardown result.
+    /// A missing registry/cache entry is deliberately not this proof.
+    pub fn teardown_proven(&self) -> bool {
+        match self {
+            Self::Official(runtime) => runtime.teardown_proven(),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mock(runtime) => runtime.teardown_proven(),
         }
     }
 

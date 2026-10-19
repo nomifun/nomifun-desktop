@@ -1034,6 +1034,7 @@
     "attachment": "Check that the attachments are available.",
     "skill": "Check that the selected skills are available.",
     "budget": "Shorten the message or reduce the attachments.",
-    "discarded": "No longer pending after the context was cleared"
+    "discarded": "No longer pending after the context was cleared",
+    "cancelled": "This message was cancelled before processing. Send a new message to start again."
   }
 }

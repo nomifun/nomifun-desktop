@@ -1109,8 +1109,6 @@ pub enum OfficialPresetKey {
     AppDeveloper,
     #[serde(rename = "companion.default")]
     CompanionDefault,
-    #[serde(rename = "companion.robot")]
-    CompanionRobot,
     #[serde(rename = "customer-service.default")]
     CustomerServiceDefault,
     #[serde(rename = "creative-studio.default")]
@@ -1118,13 +1116,12 @@ pub enum OfficialPresetKey {
 }
 
 impl OfficialPresetKey {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::ChatMinimal,
         Self::AssistantGeneral,
         Self::CodingCodex,
         Self::AppDeveloper,
         Self::CompanionDefault,
-        Self::CompanionRobot,
         Self::CustomerServiceDefault,
         Self::CreativeStudioDefault,
     ];
@@ -1136,7 +1133,6 @@ impl OfficialPresetKey {
             Self::CodingCodex => "coding.codex",
             Self::AppDeveloper => "app.developer",
             Self::CompanionDefault => "companion.default",
-            Self::CompanionRobot => "companion.robot",
             Self::CustomerServiceDefault => "customer-service.default",
             Self::CreativeStudioDefault => "creative-studio.default",
         }
@@ -1321,48 +1317,21 @@ impl OfficialPresetSeedManifestPayload {
         let robot_actions = BTreeSet::from([
             "robot/vision", "robot/display", "robot/motion", "robot/device",
         ].map(crate::ActionId::from));
-        if companion_union.contains("robot")
-            || companion.required_resource_kinds.contains(&ResourceKind::from("robot"))
+        if companion.enabled_capabilities.iter().find(|selection| selection.capability.id.as_ref() == "robot")
+            .is_none_or(|selection| selection.action_allowlist != robot_actions)
+            || !companion.required_resource_kinds.contains(&ResourceKind::from("robot"))
         {
             return Err(PresetContractViolation {
                 code: CanonicalErrorCode::from(ROLE_COVERAGE_INCOMPLETE),
-                message: "companion.default owns desktop work; physical Robot authority belongs to the independent Robot role".into(),
+                message: "companion.default must authorize device capabilities; only exact Session device resources expose them".into(),
             });
         }
-
-        // The physical interaction template shares Companion identity and
-        // memory without importing the general-purpose workspace tool catalog.
-        // These are seed expectations only; saved user Revisions stay editable.
-        let robot = &self.templates[&OfficialPresetKey::CompanionRobot];
-        let robot_capabilities = robot.enabled_capabilities.iter()
-            .map(|selection| (selection.capability.id.as_ref(), &selection.action_allowlist))
-            .collect::<BTreeMap<_, _>>();
-        let expected_capabilities = ["agent.collaboration", "companion", "companion.memory", "robot", "session.management"]
-            .into_iter().collect::<BTreeSet<_>>();
-        let expected_resources = ["companion", "companion_memory", "robot"]
-            .into_iter().map(ResourceKind::from).collect::<BTreeSet<_>>();
-        if robot_capabilities.keys().copied().collect::<BTreeSet<_>>() != expected_capabilities
-            || robot_capabilities.get("robot").is_none_or(|actions| **actions != robot_actions)
-            || robot_capabilities.get("agent.collaboration").is_none_or(|actions| {
-                **actions != BTreeSet::from([crate::ActionId::from("agent/delegate")])
-            })
-            || robot_capabilities.get("session.management").is_none_or(|actions| {
-                **actions != ["session.management/execution_answer_decision", "session.management/execution_cancel", "session.management/execution_status"]
-                    .into_iter().map(crate::ActionId::from).collect()
-            })
-            || ["companion", "companion.memory"].into_iter().any(|id| {
-                let general_actions = companion.enabled_capabilities.iter()
-                    .find(|selection| selection.capability.id.as_ref() == id)
-                    .map(|selection| &selection.action_allowlist);
-                robot_capabilities.get(id).copied() != general_actions
-            })
-            || robot.required_resource_kinds != expected_resources
-            || !robot.skill_bindings.is_empty()
-            || !robot.required_runtime_features.is_empty()
+        if companion.enabled_capabilities.iter().find(|selection| selection.capability.id.as_ref() == "session.management")
+            .is_none_or(|selection| !selection.action_allowlist.contains(&crate::ActionId::from("session.management/execution_answer_decision")))
         {
             return Err(PresetContractViolation {
                 code: CanonicalErrorCode::from(ROLE_COVERAGE_INCOMPLETE),
-                message: "companion.robot preserves identity, memory, device authority and only the targeted desktop delegation Action".into(),
+                message: "companion.default must preserve exact-source answers to optional background execution questions".into(),
             });
         }
 
@@ -2120,7 +2089,6 @@ mod tests {
                 "chat.minimal",
                 "coding.codex",
                 "companion.default",
-                "companion.robot",
                 "creative-studio.default",
                 "customer-service.default",
             ])
@@ -2129,32 +2097,16 @@ mod tests {
     }
 
     #[test]
-    fn robot_companion_seed_keeps_identity_memory_and_device_authority_separate() {
+    fn companion_seed_unifies_work_and_device_authority_without_a_second_agent() {
         let manifest = official_preset_seed_manifest_payload();
         manifest.validate().unwrap();
-        let seed = &manifest.templates[&OfficialPresetKey::CompanionRobot];
-        assert_eq!(seed.enabled_capabilities.iter()
-            .map(|selection| selection.capability.id.as_ref()).collect::<BTreeSet<_>>(),
-            BTreeSet::from(["agent.collaboration", "companion", "companion.memory", "robot", "session.management"]));
-        assert_eq!(seed.required_resource_kinds, ["companion", "companion_memory", "robot"]
-            .into_iter().map(ResourceKind::from).collect());
-        assert_eq!(official_actions(&manifest, OfficialPresetKey::CompanionRobot), BTreeSet::from([
-            "companion/evolve", "companion/learn", "companion.memory/recall", "companion.memory/write",
-            "agent/delegate",
-            "session.management/execution_answer_decision", "session.management/execution_cancel", "session.management/execution_status",
-            "robot/device", "robot/display", "robot/motion", "robot/vision",
-        ]));
-
-        let mut expanded = manifest.clone();
-        expanded.templates.get_mut(&OfficialPresetKey::CompanionRobot).unwrap()
-            .enabled_capabilities.push(manifest.templates[&OfficialPresetKey::CompanionDefault]
-                .enabled_capabilities.iter().find(|selection| selection.capability.id.as_ref() == "workspace.files")
-                .unwrap().clone());
-        assert!(expanded.validate().is_err(), "the shipped low-latency seed must stay lean");
-        let mut detached = manifest;
-        detached.templates.get_mut(&OfficialPresetKey::CompanionRobot).unwrap()
-            .required_resource_kinds.remove(&ResourceKind::from("companion_memory"));
-        assert!(detached.validate().is_err(), "the shipped robot profile must retain the Companion's memory resource");
+        let seed = &manifest.templates[&OfficialPresetKey::CompanionDefault];
+        for capability in ["companion", "companion.memory", "robot", "web.research", "workspace.files", "computer"] {
+            assert!(seed.enabled_capabilities.iter().any(|selection| selection.capability.id.as_ref() == capability));
+        }
+        assert!(official_actions(&manifest, OfficialPresetKey::CompanionDefault)
+            .contains("session.management/execution_answer_decision"));
+        assert!(manifest.forbidden_official_keys.contains("companion.robot"));
     }
 
     #[test]
@@ -2486,19 +2438,17 @@ mod tests {
     }
 
     #[test]
-    fn physical_actions_belong_only_to_the_robot_role() {
+    fn unified_companion_keeps_complete_device_action_authority() {
         let manifest = official_preset_seed_manifest_payload();
         let expected = BTreeSet::from([
             "robot/vision", "robot/display", "robot/motion", "robot/device",
         ].map(crate::ActionId::from));
-        assert!(!manifest.templates[&OfficialPresetKey::CompanionDefault].enabled_capabilities.iter()
-            .any(|selection| selection.capability.id.as_ref() == "robot"));
-        let robot = manifest.templates[&OfficialPresetKey::CompanionRobot].enabled_capabilities.iter()
+        let robot = manifest.templates[&OfficialPresetKey::CompanionDefault].enabled_capabilities.iter()
             .find(|selection| selection.capability.id.as_ref() == "robot").unwrap();
         assert_eq!(robot.action_allowlist, expected);
         for action in &expected {
             let mut incomplete = manifest.clone();
-            incomplete.templates.get_mut(&OfficialPresetKey::CompanionRobot).unwrap()
+            incomplete.templates.get_mut(&OfficialPresetKey::CompanionDefault).unwrap()
                 .enabled_capabilities.iter_mut().find(|selection| selection.capability.id.as_ref() == "robot")
                 .unwrap().action_allowlist.remove(action);
             assert_eq!(incomplete.validate().unwrap_err().code.as_ref(), ROLE_COVERAGE_INCOMPLETE);

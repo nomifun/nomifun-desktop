@@ -78,7 +78,7 @@ fn validate_requirement_id(id: &str) -> Result<&str, AppError> {
         .map_err(|error| AppError::BadRequest(format!("invalid requirement id: {error}")))
 }
 
-fn validate_claim_token(token: &str) -> Result<&str, AppError> {
+pub(crate) fn validate_claim_token(token: &str) -> Result<&str, AppError> {
     if token.len() == 64
         && token
             .bytes()
@@ -811,6 +811,40 @@ impl RequirementService {
             && row.claim_token.as_deref() == Some(expected_claim_token)
             && row.owner_conversation_id.as_deref() == owners.0
             && row.owner_terminal_id.as_deref() == owners.1)
+    }
+
+    /// Cancel this accepted generation, retaining its original capability for
+    /// exact cleanup and idempotent retries. Queue configuration and tag policy
+    /// are deliberately independent of this command.
+    pub(crate) async fn cancel_current_claim_exact(
+        &self,
+        requirement_id: &str,
+        session_id: &str,
+        generation: i64,
+    ) -> Result<AutoWorkExecutionSource, AppError> {
+        let requirement_id = validate_requirement_id(requirement_id)?;
+        let session_id = parse_conversation_id(session_id)?;
+        if generation <= 0 { return Err(AppError::BadRequest("claim_generation must be positive".into())); }
+        let row = self.repo.get_by_requirement_id(requirement_id).await?
+            .ok_or_else(|| AppError::NotFound(format!("requirement {requirement_id}")))?;
+        if row.claim_generation != generation || row.owner_conversation_id.as_deref() != Some(session_id)
+            || row.owner_terminal_id.is_some() {
+            return Err(AppError::Conflict("AutoWork current claim changed before Stop".into()));
+        }
+        let token = row.claim_token.as_deref().ok_or_else(|| AppError::Conflict("AutoWork claim has no exact capability".into()))?;
+        validate_claim_token(token)?;
+        // The exact CAS is the durable fence. A completion that committed
+        // first keeps its verdict; neither a late Stop nor a late loop result
+        // can rewrite it or allocate a successor generation.
+        let updated = self.resolve_claim_verdict_exact(requirement_id, generation, token,
+            session_id, AutoWorkTargetKind::Conversation, RequirementStatus::Cancelled,
+            Some("The user stopped this AutoWork run. Future queue work remains enabled.".into())).await?;
+        if updated.is_none() && !self.confirm_claim_verdict_exact(requirement_id, generation, token,
+            session_id, AutoWorkTargetKind::Conversation, RequirementStatus::Cancelled).await? {
+            return Err(AppError::Conflict("AutoWork claim settled or changed before Stop".into()));
+        }
+        Ok(AutoWorkExecutionSource { requirement_id: requirement_id.into(), claim_generation: generation,
+            operation_id: autowork_execution_operation_id(requirement_id, generation, token) })
     }
 
     /// The user manually cancelled an AutoWork-driven turn —treat it as an
@@ -1733,6 +1767,51 @@ mod tests {
         let final_requirement = service.get(&requirement.requirement_id).await.unwrap();
         assert_eq!(final_requirement.status, RequirementStatus::Failed);
         assert_eq!(final_requirement.attempt_count, 1);
+    }
+
+    #[tokio::test]
+    async fn current_run_stop_is_durable_exact_and_keeps_the_next_queue_item_claimable() {
+        let (service, session_id) = service_with_session().await;
+        let first = pending_requirement(&service,"current-stop").await;
+        let second = pending_requirement(&service,"current-stop").await;
+        let claim = service.claim_next_for_runner("current-stop",&session_id,
+            AutoWorkTargetKind::Conversation,DEFAULT_LEASE_MS).await.unwrap().unwrap();
+        assert_eq!(claim.requirement.requirement_id,first.requirement_id);
+        let before_attempts = claim.requirement.attempt_count;
+        assert!(service.cancel_current_claim_exact(&first.requirement_id,&session_id,claim.claim_generation+1).await.is_err());
+        assert!(service.cancel_current_claim_exact(&first.requirement_id,&ConversationId::new().into_string(),claim.claim_generation).await.is_err());
+        let source = service.cancel_current_claim_exact(&first.requirement_id,&session_id,claim.claim_generation).await.unwrap();
+        // Reconstruct the service using the same original repository, as on a
+        // restart. No live handle or in-memory cancellation bit is consulted.
+        let restarted = RequirementService::new(service.repo.clone(),service.emitter.clone());
+        assert_eq!(source,restarted.cancel_current_claim_exact(&first.requirement_id,&session_id,claim.claim_generation).await.unwrap());
+        let cancelled = restarted.get(&first.requirement_id).await.unwrap();
+        assert_eq!(cancelled.status,RequirementStatus::Cancelled);
+        assert_eq!(cancelled.attempt_count,before_attempts,"Stop does not consume failure attempts");
+        assert_eq!(restarted.tag_pause_state("current-stop").await.unwrap(),(false,None));
+        assert!(restarted.resolve_claim_verdict_exact(&first.requirement_id,claim.claim_generation,&claim.claim_token,
+            &session_id,AutoWorkTargetKind::Conversation,RequirementStatus::Done,None).await.unwrap().is_none(),
+            "a late completion must not reopen or rewrite the cancelled claim");
+        let next = restarted.claim_next_for_runner("current-stop",&session_id,
+            AutoWorkTargetKind::Conversation,DEFAULT_LEASE_MS).await.unwrap().unwrap();
+        assert_eq!(next.requirement.requirement_id,second.requirement_id);
+        assert!(restarted.verify_active_claim_exact(&second.requirement_id,next.claim_generation,&next.claim_token,
+            Some(&session_id),None).await.unwrap(),"retrying the old Stop cannot revoke its successor");
+    }
+
+    #[tokio::test]
+    async fn current_run_stop_preserves_a_completion_that_won_first() {
+        let (service, session_id) = service_with_session().await;
+        let requirement = pending_requirement(&service,"completed-stop").await;
+        let claim = service.claim_next_for_runner("completed-stop",&session_id,
+            AutoWorkTargetKind::Conversation,DEFAULT_LEASE_MS).await.unwrap().unwrap();
+        service.resolve_claim_verdict_exact(&requirement.requirement_id,claim.claim_generation,&claim.claim_token,
+            &session_id,AutoWorkTargetKind::Conversation,RequirementStatus::Done,Some("original result".into())).await.unwrap().unwrap();
+        assert!(service.cancel_current_claim_exact(&requirement.requirement_id,&session_id,claim.claim_generation).await.is_err());
+        let completed = service.get(&requirement.requirement_id).await.unwrap();
+        assert_eq!(completed.status,RequirementStatus::Done);
+        assert_eq!(completed.completion_note.as_deref(),Some("original result"));
+        assert_eq!(service.tag_pause_state("completed-stop").await.unwrap(),(false,None));
     }
 
     #[tokio::test]

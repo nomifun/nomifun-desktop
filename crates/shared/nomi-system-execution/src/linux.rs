@@ -6,7 +6,7 @@ use std::{
     io::{self, Read, Write},
     os::{fd::AsRawFd, unix::{fs::MetadataExt, process::ExitStatusExt}},
     process::{Child, ChildStdin, Command, ExitStatus, Stdio},
-    sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}},
+    sync::{Arc, Condvar, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}},
     time::{Duration, Instant},
 };
 
@@ -25,6 +25,54 @@ const PROTOCOL: u64 = 1;
 const AUTHENTICATION_REAP_GRACE: Duration = Duration::from_millis(250);
 const PUBLIC_DIAGNOSTIC_BYTES: usize = 2048;
 const RETAINED_DIAGNOSTIC_BYTES: usize = 64 * 1024;
+const BUSINESS_RPC_SLOTS: usize = 128;
+
+/// Bound only ordinary native dispatch, after the inherited-pipe reader has
+/// retained the complete request. Exact Stop and original-owner observation
+/// remain receivable while those calls wait for their real results.
+struct RpcDispatchSlots {
+    active: Mutex<usize>,
+    available: Condvar,
+}
+struct RpcDispatchPermit<'a>(&'a RpcDispatchSlots);
+impl RpcDispatchSlots {
+    fn new() -> Self { Self { active: Mutex::new(0), available: Condvar::new() } }
+
+    fn admit(&self, op: &str, interrupted: impl Fn() -> bool) -> io::Result<Option<RpcDispatchPermit<'_>>> {
+        if matches!(op, "cancel" | "terminate" | "timeout" | "interrupt" | "quiesce" | "shutdown"
+            | "release" | "stop_facility" | "observe" | "terminal" | "wait_terminal"
+            | "output_archive" | "release_terminal") { return Ok(None); }
+        let mut active = self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if interrupted() { return Err(io::Error::new(io::ErrorKind::Interrupted, "original native RPC admission closed before dispatch")); }
+            if *active < BUSINESS_RPC_SLOTS {
+                *active += 1;
+                return Ok(Some(RpcDispatchPermit(self)));
+            }
+            active = self.available.wait_timeout(active, Duration::from_millis(25))
+                .unwrap_or_else(std::sync::PoisonError::into_inner).0;
+        }
+    }
+}
+impl Drop for RpcDispatchPermit<'_> {
+    fn drop(&mut self) {
+        let mut active = self.0.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = active.checked_sub(1).expect("native business dispatch permit returned once");
+        self.0.available.notify_one();
+    }
+}
+
+fn dispatch_received_rpc(runner: &Runner, admission_lock: Arc<tokio::sync::RwLock<()>>,
+    slots: &RpcDispatchSlots, closing: &AtomicBool, request: Value) -> io::Result<Value> {
+    let _slot = slots.admit(request["op"].as_str().unwrap_or(""), || closing.load(Ordering::Acquire))?;
+    // Do not wait for a start/whole-client fence on the frame reader. A user
+    // cancel behind that fence must still reach its exact native process.
+    let _guard = runner.runtime.block_on(admission(admission_lock, &request));
+    if closing.load(Ordering::Acquire) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "original native pipe closed before dispatch"));
+    }
+    Ok(runner.call(request.to_string().as_bytes()))
+}
 
 fn unknown(message: impl Into<String>) -> SystemExecutionError {
     SystemExecutionError {
@@ -419,13 +467,15 @@ pub fn run_stdio_helper() -> io::Result<()> {
     let (uid, home, name) = caller_identity()?;
     let runner = Arc::new(Runner::new());
     let admission_lock = Arc::new(tokio::sync::RwLock::new(()));
+    let slots = Arc::new(RpcDispatchSlots::new());
+    let closing = Arc::new(AtomicBool::new(false));
     let writer = Arc::new(Mutex::new(io::stdout()));
     write_frame(&mut *writer.lock().expect("runner stdout mutex"), &json!({
         "protocol_version":PROTOCOL,"effective_uid":effective_uid(),"caller_uid":uid,
         "build_identity":option_env!("NOMIFUN_SYSTEM_EXECUTION_BUILD_ID").unwrap_or("unbuilt")
     }), MAX_REQUEST)?;
     let mut reader = io::stdin().lock();
-    let mut workers = Vec::new();
+    let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let result = loop {
         let frame = match read_frame(&mut reader, MAX_REQUEST) {
             Ok(Some(frame)) => frame,
@@ -441,21 +491,20 @@ pub fn run_stdio_helper() -> io::Result<()> {
             env.entry("USER").or_insert_with(|| json!(name));
             env.entry("LOGNAME").or_insert_with(|| json!(name));
         }
-        let guard = runner.runtime.block_on(admission(admission_lock.clone(), &request));
         // Bound retained finished thread handles; no detached request may race
         // the EOF shutdown fence or keep a supervisor alive invisibly.
         let mut active = Vec::new();
         for worker in workers.drain(..) {
-            let worker: std::thread::JoinHandle<()> = worker;
             if worker.is_finished() { let _ = worker.join(); } else { active.push(worker); }
         }
         workers = active;
-        if workers.len() >= 128 { break Err(io::Error::other("System runner RPC capacity exhausted")); }
         let runner = runner.clone();
         let writer = writer.clone();
+        let admission_lock = admission_lock.clone();
+        let slots = slots.clone();
+        let closing = closing.clone();
         workers.push(std::thread::spawn(move || {
-            let _guard = guard;
-            let reply = runner.call(request.to_string().as_bytes());
+            let Ok(reply) = dispatch_received_rpc(&runner, admission_lock, &slots, &closing, request) else { return; };
             if write_frame(&mut *writer.lock().expect("runner stdout mutex"), &json!({"id":id,"reply":reply}), MAX_FRAME).is_err() {
                 let _ = runner.runtime.block_on(runner.supervisor.shutdown());
                 // Never leave an omitted response on a live connection: its
@@ -465,8 +514,12 @@ pub fn run_stdio_helper() -> io::Result<()> {
             }
         }));
     };
+    closing.store(true, Ordering::Release);
     let _fence = runner.runtime.block_on(admission_lock.write_owned());
     let report = runner.runtime.block_on(runner.supervisor.shutdown());
+    // Native admission is now irreversibly closed. Release the transport fence
+    // so queued original requests can observe EOF and finish without executing.
+    drop(_fence);
     for worker in workers { let _ = worker.join(); }
     if !report.is_exact() { return Err(io::Error::other("System runner could not prove exact shutdown cleanup")); }
     result
@@ -485,6 +538,58 @@ mod tests {
         assert!(read_frame(&mut &bytes[..bytes.len()-1], MAX_REQUEST).is_err());
         assert!(read_frame(&mut &(u32::MAX.to_be_bytes())[..], MAX_REQUEST).is_err());
         assert!(read_frame(&mut &[0, 0, 0, 1, b'x'][..], MAX_REQUEST).is_err());
+    }
+
+    #[test]
+    fn full_business_dispatch_still_accepts_exact_stop_and_preserves_the_sibling() {
+        let slots = RpcDispatchSlots::new();
+        let permits = (0..BUSINESS_RPC_SLOTS).map(|_| slots.admit("poll", || false).unwrap().unwrap()).collect::<Vec<_>>();
+        let runner = Runner::new(); let root = tempfile::tempdir().unwrap();
+        let owner = |op: &str| json!({"op":op,"invocation_id":uuid::Uuid::nil().to_string(),"call_id":uuid::Uuid::nil().to_string()});
+        let mut start = owner("start"); start["cwd"] = json!(root.path());
+        start["command"] = json!({"kind":"program","program":"/bin/sh","args":["-c","IFS= read -r fixture"]});
+        let a = runner.call(&serde_json::to_vec(&start).unwrap()); let b = runner.call(&serde_json::to_vec(&start).unwrap());
+        assert_eq!(a["ok"], true, "{a}"); assert_eq!(b["ok"], true, "{b}");
+        let mut cancel = owner("cancel"); cancel["session_id"] = a["result"]["session_id"].clone();
+        // The same complete frame parser and dispatch owner used by the
+        // inherited transport; no polkit, installed helper or user data.
+        let mut frame = Vec::new(); write_frame(&mut frame, &json!({"id":1,"request":cancel}), MAX_REQUEST).unwrap();
+        let received = read_frame(&mut frame.as_slice(), MAX_REQUEST).unwrap().unwrap();
+        let closing = AtomicBool::new(false);
+        let stopped = dispatch_received_rpc(&runner, Arc::new(tokio::sync::RwLock::new(())), &slots, &closing, received["request"].clone()).unwrap();
+        assert_eq!(stopped["result"]["cleanup"]["reaped"], true, "{stopped}");
+        assert!(!closing.load(Ordering::Acquire), "one exact Stop cannot close the original pipe");
+        assert_eq!(*slots.active.lock().unwrap(), BUSINESS_RPC_SLOTS);
+        let mut sibling = owner("poll"); sibling["session_id"] = b["result"]["session_id"].clone();
+        assert_eq!(runner.call(&serde_json::to_vec(&sibling).unwrap())["result"]["state"], "running");
+        drop(permits);
+        assert_eq!(runner.call(br#"{"op":"shutdown"}"#)["result"]["exact"], true);
+    }
+
+    #[test]
+    fn full_business_dispatch_keeps_queued_original_requests_and_eof_prevents_new_dispatch() {
+        let slots = Arc::new(RpcDispatchSlots::new());
+        let mut permits = (0..BUSINESS_RPC_SLOTS).map(|_| slots.admit("poll", || false).unwrap().unwrap()).collect::<Vec<_>>();
+        let dispatch = slots.clone(); let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _permit = dispatch.admit("write", || false).unwrap().unwrap(); sent.send(()).unwrap();
+        });
+        assert!(received.recv_timeout(Duration::from_millis(50)).is_err());
+        for op in ["cancel", "terminate", "timeout", "quiesce", "shutdown", "release", "stop_facility",
+            "observe", "terminal", "wait_terminal", "output_archive", "release_terminal"] {
+            assert!(slots.admit(op, || false).unwrap().is_none(), "{op} retains an independent ingress");
+        }
+        drop(permits.pop()); received.recv_timeout(Duration::from_secs(2)).unwrap(); worker.join().unwrap();
+        permits.push(slots.admit("poll", || false).unwrap().unwrap());
+        let closing = Arc::new(AtomicBool::new(false)); let eof = closing.clone(); let dispatch = slots.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = dispatch.admit("start", || eof.load(Ordering::Acquire));
+            sent.send(result.err().map(|error|error.kind())).unwrap();
+        });
+        closing.store(true, Ordering::Release);
+        assert_eq!(received.recv_timeout(Duration::from_secs(2)).unwrap(), Some(io::ErrorKind::Interrupted)); worker.join().unwrap();
+        assert_eq!(*slots.active.lock().unwrap(), BUSINESS_RPC_SLOTS, "EOF does not invent another original request's completion");
     }
 
     #[test]

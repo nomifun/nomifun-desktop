@@ -92,6 +92,9 @@ enum PressedInput { Button(i32), Keysym(u32) }
 
 trait InputSink {
     fn send(&self, input: PressedInput, pressed: bool) -> Result<(), String>;
+    fn press(&self, input: PressedInput) -> Result<(), PressFailure> {
+        self.send(input, true).map_err(PressFailure::Unknown)
+    }
     fn move_absolute(&self, node_id: u32, x: f64, y: f64) -> Result<(), String>;
     fn scroll(&self, axis: u32, steps: i32) -> Result<(), String>;
     fn close(&self) -> Result<(), String>;
@@ -99,9 +102,11 @@ trait InputSink {
 
 struct NativeSink { session: Arc<PortalSession>, cancel: Arc<AtomicBool> }
 
-impl InputSink for NativeSink {
-    fn send(&self, input: PressedInput, pressed: bool) -> Result<(), String> {
-        if pressed { check_cancelled(&self.cancel)?; }
+enum PressFailure { NotDispatched(String), Unknown(String) }
+
+impl NativeSink {
+    fn send_native(&self, input: PressedInput, pressed: bool) -> Result<(), linux_wayland::WaylandError> {
+        if pressed && self.cancel.load(Ordering::Acquire) { return Err(cancelled_portal_error()); }
         let session = self.session.clone();
         let cancel = self.cancel.clone();
         linux_wayland::run_blocking(async move {
@@ -112,7 +117,20 @@ impl InputSink for NativeSink {
                 PressedInput::Keysym(keysym) if pressed => session.keyboard_keysym_cancellable(cancel, keysym, true).await,
                 PressedInput::Keysym(keysym) => session.keyboard_keysym(keysym, false).await,
             }
-        }).map_err(|error| error.to_string())
+        })
+    }
+}
+
+impl InputSink for NativeSink {
+    fn send(&self, input: PressedInput, pressed: bool) -> Result<(), String> {
+        self.send_native(input, pressed).map_err(|error| error.to_string())
+    }
+
+    fn press(&self, input: PressedInput) -> Result<(), PressFailure> {
+        self.send_native(input, true).map_err(|error| {
+            if error.code() == "WAYLAND_INPUT_CANCELLED" { PressFailure::NotDispatched(error.to_string()) }
+            else { PressFailure::Unknown(error.to_string()) }
+        })
     }
 
     fn move_absolute(&self, node_id: u32, x: f64, y: f64) -> Result<(), String> {
@@ -152,7 +170,11 @@ impl<S: InputSink> PressedInputGuard<S> {
 
     fn press(&mut self, input: PressedInput) -> Result<(), String> {
         self.pressed.push(input);
-        self.sink.send(input, true)
+        match self.sink.press(input) {
+            Ok(()) => Ok(()),
+            Err(PressFailure::NotDispatched(error)) => { self.pressed.pop(); Err(error) },
+            Err(PressFailure::Unknown(error)) => Err(error),
+        }
     }
 
     fn release_all(&mut self) -> Result<(), String> {
@@ -270,6 +292,11 @@ fn settle_input<S: InputSink>(guard: &mut PressedInputGuard<S>, result: Result<(
     let result = result.and_then(|()| check_cancelled(cancel));
     match (result, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) if error.starts_with("WAYLAND_INPUT_CANCELLED:") => {
+            // This invocation's exact releases are acknowledged. Its Stop
+            // cannot revoke the established grant shared by other borrowers.
+            Err(format!("{error} Every recorded input release was acknowledged; the shared native session was retained."))
+        }
         (result, cleanup) => {
             let close = guard.sink.close();
             if close.is_ok() { guard.pressed.clear(); }
@@ -489,13 +516,20 @@ mod tests {
         fail_press: bool,
         fail_release: bool,
         fail_close: bool,
+        reject_before_press: bool,
+        release_delay: Duration,
         close_delay: Duration,
         close_count: RefCell<usize>,
     }
     impl InputSink for &MockSink {
         fn send(&self, input: PressedInput, pressed: bool) -> Result<(), String> {
+            if !pressed { std::thread::sleep(self.release_delay); }
             self.calls.borrow_mut().push((input, pressed));
             if (pressed && self.fail_press) || (!pressed && self.fail_release) { Err("injected native error".to_owned()) } else { Ok(()) }
+        }
+        fn press(&self, input: PressedInput) -> Result<(), PressFailure> {
+            if self.reject_before_press { return Err(PressFailure::NotDispatched(cancelled_portal_error().to_string())); }
+            self.send(input, true).map_err(PressFailure::Unknown)
         }
         fn move_absolute(&self, node_id: u32, x: f64, y: f64) -> Result<(), String> { self.moves.borrow_mut().push((node_id, x, y)); Ok(()) }
         fn scroll(&self, _axis: u32, _steps: i32) -> Result<(), String> { Ok(()) }
@@ -562,10 +596,10 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_while_pressed_stops_next_move_and_waits_for_release_and_close() {
+    fn cancellation_while_pressed_joins_exact_release_without_revoking_shared_grant() {
         let cancel = Arc::new(AtomicBool::new(false));
         let control = OperationControl { cancel: cancel.clone(), deadline: Instant::now() + INPUT_TIMEOUT };
-        let sink = MockSink { close_delay: Duration::from_millis(25), ..MockSink::default() };
+        let sink = MockSink { release_delay: Duration::from_millis(25), ..MockSink::default() };
         let mut operation = Operation { guard: PressedInputGuard::new(&sink), capture: capture(), control };
         operation.press(PressedInput::Button(272)).unwrap();
         operation.move_absolute(-1910, 40).unwrap();
@@ -578,10 +612,21 @@ mod tests {
         assert!(result.unwrap_err().contains("INPUT_CANCELLED"));
         assert_eq!(*sink.moves.borrow(), vec![(41, 10.0, 10.0)]);
         assert!(started.elapsed() >= Duration::from_millis(25));
-        assert_eq!(*sink.close_count.borrow(), 1);
+        assert_eq!(*sink.close_count.borrow(), 0);
         assert!(operation.guard.pressed.is_empty());
         assert_eq!(*sink.calls.borrow(), vec![(PressedInput::Button(272), true), (PressedInput::Button(272), false)]);
         assert!(operation.control.sleep(Duration::from_secs(1)).unwrap_err().contains("INPUT_CANCELLED"));
+    }
+    #[test]
+    fn cancelled_native_press_queue_does_not_release_unpressed_user_input_or_close_shared_grant() {
+        let sink = MockSink { reject_before_press: true, ..MockSink::default() };
+        let mut guard = PressedInputGuard::new(&sink);
+        let rejected = guard.press(PressedInput::Keysym(0xffe3));
+        assert!(guard.pressed.is_empty(), "known queue rejection created no key-release obligation");
+        let error = settle_input(&mut guard, rejected, &AtomicBool::new(true)).unwrap_err();
+        assert!(error.contains("shared native session was retained"));
+        assert!(sink.calls.borrow().is_empty());
+        assert_eq!(*sink.close_count.borrow(), 0);
     }
     #[test]
     fn unwind_releases_exact_obligation_before_worker_returns() {

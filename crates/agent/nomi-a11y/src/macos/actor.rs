@@ -930,9 +930,13 @@ fn invocation_may_have_effect(result: &Result<Effect, A11yError>) -> bool {
 }
 
 fn receive_mutating_reply(receiver: std::sync::mpsc::Receiver<Result<Effect, A11yError>>) -> Result<Effect, A11yError> {
-    receiver.recv().map_err(|_| A11yError::Uncertain(
+    receiver.recv().map_err(|_| lost_mutating_reply())?
+}
+
+fn lost_mutating_reply() -> A11yError {
+    A11yError::Uncertain(
         "the AX actor accepted the mutating request but its reply was lost; the effect may have occurred. Re-run observe and do not retry automatically".into(),
-    ))?
+    )
 }
 
 fn do_invoke(
@@ -1349,10 +1353,11 @@ enum Cmd {
         Target,
         SnapshotGen,
         ElementAction,
+        crate::controlled::MutationAdmission,
         Sender<Result<Effect, A11yError>>,
     ),
     Focus(i32, Sender<Result<Effect, A11yError>>),
-    FocusNamed(i32, Rect, Option<String>, Sender<Result<Effect, A11yError>>),
+    FocusNamed(i32, Rect, Option<String>, crate::controlled::MutationAdmission, Sender<Result<Effect, A11yError>>),
 }
 
 pub struct ActorHandle {
@@ -1399,8 +1404,9 @@ impl ActorHandle {
                                 Cmd::ResolvePixel(target, generation, reply) => {
                                     let _ = reply.send(do_resolve_pixel_target(&target, generation, &state));
                                 }
-                                Cmd::Invoke(target, generation, action, reply) => {
-                                    let r = do_invoke(&target, generation, &action, &state);
+                                Cmd::Invoke(target, generation, action, admission, reply) => {
+                                    let r = if !admission.begin() { Err(A11yError::CancelledBeforeDispatch) }
+                                        else { do_invoke(&target, generation, &action, &state) };
                                     // A mutating action invalidates the cache even
                                     // before the observer notification arrives.
                                     if invocation_may_have_effect(&r) { state.dirty.store(true, Ordering::Relaxed); }
@@ -1411,9 +1417,10 @@ impl ActorHandle {
                                     state.dirty.store(true, Ordering::Relaxed);
                                     let _ = reply.send(r);
                                 }
-                                Cmd::FocusNamed(pid, bounds, title, reply) => {
-                                    let r = do_focus_named(pid, &bounds, title.as_deref());
-                                    state.dirty.store(true, Ordering::Relaxed);
+                                Cmd::FocusNamed(pid, bounds, title, admission, reply) => {
+                                    let r = if admission.begin() { do_focus_named(pid, &bounds, title.as_deref()) }
+                                        else { Err(A11yError::CancelledBeforeDispatch) };
+                                    if !matches!(&r, Err(A11yError::CancelledBeforeDispatch)) { state.dirty.store(true, Ordering::Relaxed); }
                                     let _ = reply.send(r);
                                 }
                             }
@@ -1465,9 +1472,16 @@ impl ActorHandle {
         generation: SnapshotGen,
         action: ElementAction,
     ) -> Result<Effect, A11yError> {
+        self.invoke_controlled(target, generation, action, tokio_util::sync::CancellationToken::new())
+    }
+
+    pub fn invoke_controlled(&self, target: Target, generation: SnapshotGen, action: ElementAction,
+        cancellation: tokio_util::sync::CancellationToken) -> Result<Effect, A11yError> {
+        if cancellation.is_cancelled() { return Err(A11yError::CancelledBeforeDispatch); }
         let (tx, rx) = channel();
-        self.send(Cmd::Invoke(target, generation, action, tx))?;
-        receive_mutating_reply(rx)
+        let admission = crate::controlled::MutationAdmission::new(cancellation);
+        self.send(Cmd::Invoke(target, generation, action, admission.clone(), tx))?;
+        admission.receive(rx, lost_mutating_reply)
     }
 
     pub fn focus_window(&self, pid: i32) -> Result<Effect, A11yError> {
@@ -1482,9 +1496,16 @@ impl ActorHandle {
         expected_bounds: Rect,
         expected_title: Option<String>,
     ) -> Result<Effect, A11yError> {
+        self.focus_named_window_controlled(pid, expected_bounds, expected_title, tokio_util::sync::CancellationToken::new())
+    }
+
+    pub fn focus_named_window_controlled(&self, pid: i32, expected_bounds: Rect, expected_title: Option<String>,
+        cancellation: tokio_util::sync::CancellationToken) -> Result<Effect, A11yError> {
+        if cancellation.is_cancelled() { return Err(A11yError::CancelledBeforeDispatch); }
         let (tx, rx) = channel();
-        self.send(Cmd::FocusNamed(pid, expected_bounds, expected_title, tx))?;
-        receive_mutating_reply(rx)
+        let admission = crate::controlled::MutationAdmission::new(cancellation);
+        self.send(Cmd::FocusNamed(pid, expected_bounds, expected_title, admission.clone(), tx))?;
+        admission.receive(rx, lost_mutating_reply)
     }
 }
 
@@ -1730,7 +1751,7 @@ mod tests {
             let handle = ActorHandle { tx: Mutex::new(sender) };
             let peer = std::thread::spawn(move || {
                 let command = commands.recv().unwrap();
-                assert!(matches!(command, Cmd::Invoke(_, _, _, _) | Cmd::Focus(_, _) | Cmd::FocusNamed(_, _, _, _)));
+                assert!(matches!(command, Cmd::Invoke(_, _, _, _, _) | Cmd::Focus(_, _) | Cmd::FocusNamed(_, _, _, _, _)));
                 // Drop the accepted command and its reply sender. No native AX
                 // implementation or run loop is created by this fake peer.
             });

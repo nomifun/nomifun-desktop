@@ -97,6 +97,20 @@ pub(crate) trait AttachedProviderConnectionFactory: Send + Sync {
 
 struct RunningChromeFactory;
 
+#[cfg(all(test,feature="browser-conformance"))]
+struct ConformancePortFileFactory(std::path::PathBuf);
+
+#[cfg(all(test,feature="browser-conformance"))]
+#[async_trait]
+impl AttachedProviderConnectionFactory for ConformancePortFileFactory {
+    async fn connect(&self)->Result<Arc<dyn AttachedProviderConnection>,AttachError> {
+        Ok(Arc::new(RunningChromeConnection {
+            browser:AttachedBrowser::connect_for_conformance(&self.0).await?,
+            grants:Mutex::new(BTreeMap::new()),
+        }))
+    }
+}
+
 struct RunningChromeConnection {
     browser: AttachedBrowser,
     grants: Mutex<BTreeMap<String, GrantedTab>>,
@@ -258,7 +272,9 @@ struct ProviderRuntime {
 pub struct AttachedChromeProviderService {
     factory: Arc<dyn AttachedProviderConnectionFactory>,
     state: Mutex<ServiceState>,
-    operation: tokio::sync::Mutex<()>,
+    // Serialize physical connect/disconnect only. Admission and cancellation
+    // use the short state lock and never wait behind this native lifecycle.
+    lifecycle: tokio::sync::Mutex<()>,
     verifier: OnceLock<Arc<dyn AttachedBrowserSessionVerifier>>,
     runtime: Arc<ProviderRuntime>,
     weak: Weak<Self>,
@@ -269,11 +285,24 @@ impl AttachedChromeProviderService {
         Self::with_factory(Arc::new(RunningChromeFactory))
     }
 
+    /// Opt-in native fixture only: the ordinary connection implementation,
+    /// pointed at the separately launched disposable browser's own port file.
+    #[cfg(all(test,feature="browser-conformance"))]
+    pub(crate) fn with_conformance_port_file(port_file:std::path::PathBuf)->Arc<Self> {
+        Self::with_factory(Arc::new(ConformancePortFileFactory(port_file)))
+    }
+
+    #[cfg(all(test,feature="browser-conformance"))]
+    pub(crate) fn conformance_claim_counts(&self)->(usize,usize) {
+        let state=self.runtime.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        (state.runs.len(),state.claims.len())
+    }
+
     pub(crate) fn with_factory(factory: Arc<dyn AttachedProviderConnectionFactory>) -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
             factory,
             state: Mutex::new(ServiceState::default()),
-            operation: tokio::sync::Mutex::new(()),
+            lifecycle: tokio::sync::Mutex::new(()),
             verifier: OnceLock::new(),
             runtime: Arc::new(ProviderRuntime::default()),
             weak: weak.clone(),
@@ -317,7 +346,17 @@ impl AttachedChromeProviderService {
         {
             return Err(AttachedProviderError::OwnerMismatch);
         }
-        let _operation = self.operation.lock().await;
+        if self.state.lock().unwrap_or_else(|error| error.into_inner()).closed {
+            return Err(AttachedProviderError::Closed);
+        }
+        let service = self.clone();
+        let owner_id = owner_id.to_owned();
+        tokio::spawn(async move { service.connect_owned(owner_id).await })
+            .await.map_err(|_| AttachedProviderError::CleanupFailed)?
+    }
+
+    async fn connect_owned(&self, owner_id: String) -> Result<AttachedProviderSnapshot, AttachedProviderError> {
+        let _lifecycle = self.lifecycle.lock().await;
         {
             let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.closed {
@@ -333,7 +372,7 @@ impl AttachedChromeProviderService {
             return Err(AttachedProviderError::Connection(AttachError::ConnectionFailed));
         }
         let entry = ConnectionEntry {
-            owner_id: owner_id.to_owned(),
+            owner_id,
             incarnation: nomifun_common::generate_id(),
             connection,
             state: AttachedProviderState::Connected,
@@ -343,12 +382,17 @@ impl AttachedChromeProviderService {
             state: entry.state,
             chromium_major: entry.connection.chromium_major(),
         };
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .connection = Some(entry);
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        // Shutdown can fence admission while the constructor holds the
+        // lifecycle gate. Publish its exact connection for that waiting owner
+        // to dispose, never an unregistered late successful connection.
+        let closed = state.closed;
+        state.connection = Some(ConnectionEntry {
+            state: if closed { AttachedProviderState::Disconnecting } else { entry.state },
+            ..entry
+        });
         unpublished.0 = None;
-        Ok(snapshot)
+        if closed { Err(AttachedProviderError::Closed) } else { Ok(snapshot) }
     }
 
     pub async fn disconnect(
@@ -356,7 +400,6 @@ impl AttachedChromeProviderService {
         owner_id: &str,
         incarnation: &str,
     ) -> Result<(), AttachedProviderError> {
-        let _operation = self.operation.lock().await;
         let connection = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             let entry = state
@@ -372,6 +415,25 @@ impl AttachedChromeProviderService {
             entry.state = AttachedProviderState::Disconnecting;
             entry.connection.clone()
         };
+        // Fence admission and signal every registered run before waiting on
+        // either native work or another lifecycle caller.
+        self.runtime.cancel_runs();
+        let service = self.weak.upgrade().ok_or(AttachedProviderError::Closed)?;
+        let incarnation = incarnation.to_owned();
+        tokio::spawn(async move { service.disconnect_owned(&incarnation, connection).await })
+            .await.map_err(|_| AttachedProviderError::CleanupFailed)?
+    }
+
+    async fn disconnect_owned(&self, incarnation: &str, connection: Arc<dyn AttachedProviderConnection>)
+        -> Result<(), AttachedProviderError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(entry) = state.connection.as_ref() else { return Ok(()); };
+            if entry.incarnation != incarnation || !Arc::ptr_eq(&entry.connection, &connection) {
+                return Err(AttachedProviderError::StaleIncarnation);
+            }
+        }
         self.runtime.drain_runs().await?;
         connection.request_disconnect();
         let result = connection.disconnect().await;
@@ -398,42 +460,12 @@ impl AttachedChromeProviderService {
             .await
     }
 
-    /// Freeze one Connected incarnation and its tab inventory while the caller
-    /// owns `operation`. Disconnect uses that same barrier, so the inventory
-    /// and subsequent run publication belong to one provider epoch.
-    async fn frozen_connection(
-        &self,
-        principal_id: &str,
-    ) -> Result<(String, Arc<dyn AttachedProviderConnection>, BTreeMap<String, AttachedTab>), Error> {
-        let connection = {
-            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            let entry = state.connection.as_ref().ok_or(Error::Unavailable)?;
-            if entry.owner_id != principal_id
-                || entry.state != AttachedProviderState::Connected
-                || !entry.connection.is_connected()
-            {
-                return Err(Error::Unavailable);
-            }
-            (entry.incarnation.clone(), entry.connection.clone())
-        };
-        let tabs = connection
-            .1
-            .tabs()
-            .await
-            .map_err(|_| Error::Disconnected)?
-            .into_iter()
-            .map(|tab| (tab.tab_id.clone(), tab))
-            .collect();
-        Ok((connection.0, connection.1, tabs))
-    }
-
     pub async fn close_agent_session(
         &self,
         principal_id: &str,
         agent_session_id: &str,
     ) -> Result<(), AttachedProviderError> {
         let owner = (principal_id.to_owned(), agent_session_id.to_owned());
-        let _operation = self.operation.lock().await;
         let run = {
             let mut state = self
                 .runtime
@@ -445,18 +477,15 @@ impl AttachedChromeProviderService {
         };
         if let Some(run) = run {
             run.cancel.cancel();
-            run.settle()
-                .await
-                .map_err(|_| AttachedProviderError::CleanupFailed)?;
-            run.finish()
-                .await
-                .map_err(|_| AttachedProviderError::CleanupFailed)?;
+            tokio::spawn(async move {
+                run.settle().await.map_err(|_| AttachedProviderError::CleanupFailed)?;
+                run.finish().await.map_err(|_| AttachedProviderError::CleanupFailed)
+            }).await.map_err(|_| AttachedProviderError::CleanupFailed)??;
         }
         Ok(())
     }
 
     pub async fn shutdown(&self) -> Result<(), AttachedProviderError> {
-        let _operation = self.operation.lock().await;
         {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.closed = true;
@@ -464,7 +493,18 @@ impl AttachedChromeProviderService {
                 entry.state = AttachedProviderState::Disconnecting;
             }
         }
-        self.runtime.shutdown().await?;
+        {
+            self.runtime.state.lock().unwrap_or_else(|error| error.into_inner()).closed = true;
+        }
+        self.runtime.cancel_runs();
+        let service = self.weak.upgrade().ok_or(AttachedProviderError::Closed)?;
+        tokio::spawn(async move { service.shutdown_owned().await })
+            .await.map_err(|_| AttachedProviderError::CleanupFailed)?
+    }
+
+    async fn shutdown_owned(&self) -> Result<(), AttachedProviderError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.runtime.drain_runs().await?;
         let connection = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.connection.as_mut().map(|entry| {
@@ -506,16 +546,26 @@ struct Run {
     runtime: Weak<ProviderRuntime>,
     incarnation: String,
     connection: Arc<dyn AttachedProviderConnection>,
-    tabs: BTreeMap<String, AttachedTab>,
+    tabs: OnceLock<BTreeMap<String, AttachedTab>>,
     phase: AtomicU8,
     cancel: CancellationToken,
-    operation: tokio::sync::Mutex<()>,
+    operation: Arc<tokio::sync::Mutex<()>>,
     touched: Mutex<BTreeSet<String>>,
     orphaned: AtomicBool,
     wake: tokio::sync::Notify,
 }
 
 struct Turn(Arc<Run>);
+
+/// The native inventory owner is retained even if its begin_run waiter leaves.
+/// Mark the same registered Run for cleanup instead of dropping native work.
+struct PendingRun(Option<Arc<Run>>);
+
+impl Drop for PendingRun {
+    fn drop(&mut self) {
+        if let Some(run) = &self.0 { run.abandon(); }
+    }
+}
 
 #[async_trait]
 impl AttachedBrowserProviderHost for AttachedChromeProviderService {
@@ -554,29 +604,19 @@ impl AttachedBrowserProviderHost for AttachedChromeProviderService {
 impl AttachedBrowserResource for Resource {
     async fn begin_run(&self) -> Result<Arc<dyn AttachedBrowserTurn>, Error> {
         self.service.verify_session(&self.owner).await?;
-        // Admission, inventory and run publication share the same epoch as
-        // disconnect. Revalidate after acquiring it: canonical deletion can
-        // retire this Session while a caller is waiting here.
-        let _provider_operation = self.service.operation.lock().await;
-        self.service.verify_session(&self.owner).await?;
-        if self
-            .service
-            .runtime
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .retired_sessions
-            .contains(&self.owner)
-        {
-            return Err(Error::StaleRun);
-        }
-        let (incarnation, connection, tabs) = self
-            .service
-            .frozen_connection(&self.owner.0)
-            .await?;
         let runtime = self.service.runtime.clone();
         let run = {
+            // Connection epoch, admission and Run registration are atomic.
+            // The registered Run also owns a still-pending inventory read, so
+            // disconnect cannot miss an operation not yet visible to callers.
+            let service = self.service.state.lock().unwrap_or_else(|error| error.into_inner());
+            let entry = service.connection.as_ref().ok_or(Error::Unavailable)?;
+            if service.closed || entry.owner_id != self.owner.0
+                || entry.state != AttachedProviderState::Connected || !entry.connection.is_connected() {
+                return Err(Error::Unavailable);
+            }
             let mut state = runtime.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.retired_sessions.contains(&self.owner) { return Err(Error::StaleRun); }
             if state.closed
                 || state.runs.contains_key(&self.owner)
                 || state.runs.len() >= MAX_ACTIVE_RUNS
@@ -588,12 +628,12 @@ impl AttachedBrowserResource for Resource {
                 owner: self.owner.clone(),
                 service: Arc::downgrade(&self.service),
                 runtime: Arc::downgrade(&runtime),
-                incarnation,
-                connection,
-                tabs,
+                incarnation: entry.incarnation.clone(),
+                connection: entry.connection.clone(),
+                tabs: OnceLock::new(),
                 phase: AtomicU8::new(ACTIVE),
                 cancel: CancellationToken::new(),
-                operation: tokio::sync::Mutex::new(()),
+                operation: Arc::new(tokio::sync::Mutex::new(())),
                 touched: Mutex::new(BTreeSet::new()),
                 orphaned: AtomicBool::new(false),
                 wake: tokio::sync::Notify::new(),
@@ -601,12 +641,43 @@ impl AttachedBrowserResource for Resource {
             state.runs.insert(self.owner.clone(), run.clone());
             run
         };
+        let mut pending = PendingRun(Some(run.clone()));
         tokio::spawn(custodian(run.clone(), runtime));
-        Ok(Arc::new(Turn(run)))
+        let result = tokio::spawn(async move { run.initialize().await }).await
+            .map_err(|_| Error::ExecutionFailed)?;
+        if result.is_ok() { pending.0 = None; }
+        result
     }
 }
 
 impl Run {
+    fn abandon(&self) {
+        if self.phase.load(Ordering::Acquire) != FINISHED {
+            self.orphaned.store(true, Ordering::Release);
+            self.cancel.cancel();
+            self.wake.notify_one();
+        }
+    }
+
+    async fn initialize(self: Arc<Self>) -> Result<Arc<dyn AttachedBrowserTurn>, Error> {
+        let _operation = self.operation.lock().await;
+        if self.cancel.is_cancelled() { return Err(Error::Cancelled); }
+        self.current_runtime()?;
+        self.current_connection()?;
+        let tabs = self.connection.tabs().await.map_err(|_| Error::Disconnected)?
+            .into_iter().map(|tab| (tab.tab_id.clone(), tab)).collect();
+        let service = self.service.upgrade().ok_or(Error::Disconnected)?;
+        service.verify_session(&self.owner).await?;
+        let state = service.state.lock().unwrap_or_else(|error| error.into_inner());
+        self.require_connection(&state)?;
+        self.current_runtime()?;
+        if self.phase.load(Ordering::Acquire) != ACTIVE || self.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        self.tabs.set(tabs).map_err(|_| Error::StaleRun)?;
+        Ok(Arc::new(Turn(self.clone())))
+    }
+
     fn current_runtime(&self) -> Result<Arc<ProviderRuntime>, Error> {
         let runtime = self.runtime.upgrade().ok_or(Error::StaleRun)?;
         let valid = runtime
@@ -622,8 +693,12 @@ impl Run {
     fn current_connection(&self) -> Result<(), Error> {
         let service = self.service.upgrade().ok_or(Error::Disconnected)?;
         let state = service.state.lock().unwrap_or_else(|error| error.into_inner());
+        self.require_connection(&state)
+    }
+
+    fn require_connection(&self, state: &ServiceState) -> Result<(), Error> {
         let entry = state.connection.as_ref().ok_or(Error::Disconnected)?;
-        if entry.state != AttachedProviderState::Connected
+        if state.closed || entry.state != AttachedProviderState::Connected
             || entry.incarnation != self.incarnation
             || !Arc::ptr_eq(&entry.connection, &self.connection)
             || !entry.connection.is_connected()
@@ -631,6 +706,53 @@ impl Run {
             return Err(Error::Disconnected);
         }
         Ok(())
+    }
+
+    async fn invoke_owned(&self, command: AttachedBrowserCommand, _operation: tokio::sync::OwnedMutexGuard<()>) -> Result<Value, Error> {
+        // Keep causal order within this Run, without blocking another Run or
+        // the provider's synchronous disconnect/cancellation fence.
+        let runtime = self.current_runtime()?;
+        if self.phase.load(Ordering::Acquire) != ACTIVE || self.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let service = self.service.upgrade().ok_or(Error::Disconnected)?;
+        let tab_id = {
+            // This short lock is the shared linearization point with closing.
+            // Register the exact claim and cleanup responsibility before
+            // releasing it and entering any native call.
+            let state = service.state.lock().unwrap_or_else(|error| error.into_inner());
+            self.require_connection(&state)?;
+            let tabs = self.tabs.get().ok_or(Error::StaleRun)?;
+            let tab_id = match &command {
+                AttachedBrowserCommand::Tabs {} => {
+                    let tabs = tabs.values().map(|tab| json!({
+                        "tab_id": tab.tab_id,
+                        "title": tab.title,
+                        "url": nomifun_browser_platform::url_projection::project_metadata_url(&tab.url),
+                    })).collect::<Vec<_>>();
+                    return Ok(json!({"tabs": tabs, "untrusted_page_content": true}));
+                }
+                AttachedBrowserCommand::Observe { tab_id }
+                | AttachedBrowserCommand::Navigate { tab_id, .. }
+                | AttachedBrowserCommand::Dialog { tab_id, .. }
+                | AttachedBrowserCommand::Click { tab_id, .. }
+                | AttachedBrowserCommand::Type { tab_id, .. }
+                | AttachedBrowserCommand::Press { tab_id, .. }
+                | AttachedBrowserCommand::Scroll { tab_id, .. } => tab_id.clone(),
+            };
+            if !tabs.contains_key(&tab_id) { return Err(Error::TabDenied); }
+            let target_key = self.connection.target_key(&tab_id)?;
+            {
+                let mut runtime = runtime.state.lock().unwrap_or_else(|error| error.into_inner());
+                if runtime.claims.get(&target_key).is_some_and(|run_id| run_id != &self.id) {
+                    return Err(Error::Busy);
+                }
+                runtime.claims.insert(target_key, self.id.clone());
+            }
+            self.touched.lock().unwrap_or_else(|error| error.into_inner()).insert(tab_id.clone());
+            tab_id
+        };
+        self.connection.invoke(&tab_id, command, &self.cancel).await
     }
 
     async fn settle(&self) -> Result<(), Error> {
@@ -686,80 +808,36 @@ impl AttachedBrowserTurn for Turn {
     }
 
     async fn invoke(&self, command: AttachedBrowserCommand) -> Result<Value, Error> {
-        let run = &self.0;
-        // Take the provider epoch before the per-run operation lock. Disconnect
-        // takes the same order before draining runs, avoiding both an admission
-        // gap and a lock inversion. Once Disconnecting is published, no later
-        // operation or target claim can enter.
-        let service = run.service.upgrade().ok_or(Error::Disconnected)?;
-        let _provider_operation = service.operation.lock().await;
-        let _operation = run.operation.lock().await;
-        let runtime = run.current_runtime()?;
-        if run.phase.load(Ordering::Acquire) != ACTIVE || run.cancel.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        run.current_connection()?;
-        let tab_id = match &command {
-            AttachedBrowserCommand::Tabs {} => {
-                let tabs = run
-                    .tabs
-                    .values()
-                    .map(|tab| {
-                        json!({
-                            "tab_id": tab.tab_id,
-                            "title": tab.title,
-                            "url": nomifun_browser_platform::url_projection::project_metadata_url(&tab.url),
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                return Ok(json!({"tabs": tabs, "untrusted_page_content": true}));
-            }
-            AttachedBrowserCommand::Observe { tab_id }
-            | AttachedBrowserCommand::Navigate { tab_id, .. }
-            | AttachedBrowserCommand::Dialog { tab_id, .. }
-            | AttachedBrowserCommand::Click { tab_id, .. }
-            | AttachedBrowserCommand::Type { tab_id, .. }
-            | AttachedBrowserCommand::Press { tab_id, .. }
-            | AttachedBrowserCommand::Scroll { tab_id, .. } => tab_id.clone(),
+        let run = self.0.clone();
+        run.current_runtime()?;
+        let operation = tokio::select! {
+            biased;
+            _ = run.cancel.cancelled() => return Err(Error::Cancelled),
+            operation = run.operation.clone().lock_owned() => operation,
         };
-        if !run.tabs.contains_key(&tab_id) {
-            return Err(Error::TabDenied);
-        }
-        let target_key = run.connection.target_key(&tab_id)?;
-        {
-            let mut state = runtime.state.lock().unwrap_or_else(|error| error.into_inner());
-            if state
-                .claims
-                .get(&target_key)
-                .is_some_and(|run_id| run_id != &run.id)
-            {
-                return Err(Error::Busy);
-            }
-            state.claims.insert(target_key, run.id.clone());
-        }
-        run.touched
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(tab_id.clone());
-        run.connection.invoke(&tab_id, command, &run.cancel).await
+        // Dropping the caller only detaches its wait. The original operation
+        // keeps its Run lock and cleanup responsibility through native return.
+        tokio::spawn(async move { run.invoke_owned(command, operation).await }).await
+            .map_err(|_| Error::ExecutionFailed)?
     }
 
     async fn settle(&self) -> Result<(), Error> {
-        self.0.settle().await
+        self.0.cancel.cancel();
+        let run = self.0.clone();
+        tokio::spawn(async move { run.settle().await }).await
+            .map_err(|_| Error::ExecutionFailed)?
     }
 
     async fn finish(&self) -> Result<(), Error> {
-        self.0.finish().await
+        let run = self.0.clone();
+        tokio::spawn(async move { run.finish().await }).await
+            .map_err(|_| Error::ExecutionFailed)?
     }
 }
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        if self.0.phase.load(Ordering::Acquire) != FINISHED {
-            self.0.orphaned.store(true, Ordering::Release);
-            self.0.cancel.cancel();
-            self.0.wake.notify_one();
-        }
+        self.0.abandon();
     }
 }
 
@@ -785,6 +863,12 @@ async fn custodian(run: Arc<Run>, _runtime: Arc<ProviderRuntime>) {
 }
 
 impl ProviderRuntime {
+    fn cancel_runs(&self) {
+        for run in self.state.lock().unwrap_or_else(|error| error.into_inner()).runs.values() {
+            run.cancel.cancel();
+        }
+    }
+
     async fn drain_runs(&self) -> Result<(), AttachedProviderError> {
         let runs = {
             let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -804,13 +888,6 @@ impl ProviderRuntime {
         Ok(())
     }
 
-    async fn shutdown(&self) -> Result<(), AttachedProviderError> {
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .closed = true;
-        self.drain_runs().await
-    }
 }
 
 #[cfg(test)]
@@ -822,6 +899,9 @@ mod tests {
     struct Factory {
         calls: AtomicUsize,
         connection: Arc<Connection>,
+        block_connect: AtomicBool,
+        connect_started: tokio::sync::Notify,
+        connect_release: tokio::sync::Notify,
     }
 
     struct Connection {
@@ -829,7 +909,14 @@ mod tests {
         block_tabs: AtomicBool,
         tabs_started: tokio::sync::Notify,
         tabs_release: tokio::sync::Notify,
+        block_invokes: AtomicBool,
+        invoke_started: tokio::sync::Notify,
+        invoke_cancelled: tokio::sync::Notify,
+        invoke_release: tokio::sync::Semaphore,
         invokes: AtomicUsize,
+        active_invokes: AtomicUsize,
+        completed_invokes: AtomicUsize,
+        invoke_order: Mutex<Vec<String>>,
         settles: AtomicUsize,
         disconnects: AtomicUsize,
     }
@@ -838,6 +925,10 @@ mod tests {
     impl AttachedProviderConnectionFactory for Factory {
         async fn connect(&self) -> Result<Arc<dyn AttachedProviderConnection>, AttachError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.block_connect.load(Ordering::Acquire) {
+                self.connect_started.notify_one();
+                self.connect_release.notified().await;
+            }
             Ok(self.connection.clone())
         }
     }
@@ -858,20 +949,20 @@ mod tests {
                 self.tabs_started.notify_one();
                 self.tabs_release.notified().await;
             }
-            Ok(vec![AttachedTab {
-                tab_id: "tab".into(),
-                title: "Installed tab".into(),
-                url: "https://example.test".into(),
-            }])
+            Ok(["tab", "other-tab"].into_iter().map(|tab_id| AttachedTab {
+                tab_id: tab_id.into(), title: "Installed tab".into(), url: "https://example.test".into(),
+            }).collect())
         }
         fn target_key(&self, tab_id: &str) -> Result<String, Error> {
-            (tab_id == "tab")
-                .then(|| "a".repeat(64))
-                .ok_or(Error::TabDenied)
+            match tab_id {
+                "tab" => Ok("a".repeat(64)),
+                "other-tab" => Ok("b".repeat(64)),
+                _ => Err(Error::TabDenied),
+            }
         }
         async fn invoke(
             &self,
-            _: &str,
+            tab_id: &str,
             _: AttachedBrowserCommand,
             cancel: &CancellationToken,
         ) -> Result<Value, Error> {
@@ -879,7 +970,27 @@ mod tests {
                 return Err(Error::Cancelled);
             }
             self.invokes.fetch_add(1, Ordering::SeqCst);
-            Ok(json!({"observed": true}))
+            self.invoke_order.lock().unwrap().push(tab_id.to_owned());
+            self.active_invokes.fetch_add(1, Ordering::SeqCst);
+            struct Active<'a>(&'a AtomicUsize);
+            impl Drop for Active<'_> {
+                fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); }
+            }
+            let _active = Active(&self.active_invokes);
+            if tab_id == "tab" && self.block_invokes.load(Ordering::Acquire) {
+                self.invoke_started.notify_one();
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        self.invoke_cancelled.notify_one();
+                        self.invoke_release.acquire().await.unwrap().forget();
+                    },
+                    permit = self.invoke_release.acquire() => permit.unwrap().forget(),
+                }
+            }
+            self.completed_invokes.fetch_add(1, Ordering::SeqCst);
+            if cancel.is_cancelled() { Err(Error::Cancelled) }
+            else { Ok(json!({"observed": true})) }
         }
         async fn settle(&self, _: &str) -> Result<(), Error> {
             self.settles.fetch_add(1, Ordering::SeqCst);
@@ -919,13 +1030,23 @@ mod tests {
             block_tabs: AtomicBool::new(false),
             tabs_started: tokio::sync::Notify::new(),
             tabs_release: tokio::sync::Notify::new(),
+            block_invokes: AtomicBool::new(false),
+            invoke_started: tokio::sync::Notify::new(),
+            invoke_cancelled: tokio::sync::Notify::new(),
+            invoke_release: tokio::sync::Semaphore::new(0),
             invokes: AtomicUsize::new(0),
+            active_invokes: AtomicUsize::new(0),
+            completed_invokes: AtomicUsize::new(0),
+            invoke_order: Mutex::new(Vec::new()),
             settles: AtomicUsize::new(0),
             disconnects: AtomicUsize::new(0),
         });
         let factory = Arc::new(Factory {
             calls: AtomicUsize::new(0),
             connection: connection.clone(),
+            block_connect: AtomicBool::new(false),
+            connect_started: tokio::sync::Notify::new(),
+            connect_release: tokio::sync::Notify::new(),
         });
         let service = AttachedChromeProviderService::with_factory(factory.clone());
         service
@@ -1026,7 +1147,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnect_cannot_pass_a_frozen_inventory_before_run_publication() {
+    async fn disconnect_fences_pending_inventory_and_waits_its_registered_owner() {
         let (service, _, connection) = fixture();
         let connected = service.connect("alice").await.unwrap();
         let resource = service.resource("alice", "session-race").await.unwrap();
@@ -1034,6 +1155,7 @@ mod tests {
 
         let begin = tokio::spawn(async move { resource.begin_run().await });
         connection.tabs_started.notified().await;
+        let pending = service.runtime.state.lock().unwrap().runs.values().next().unwrap().clone();
         let disconnect = {
             let service = service.clone();
             tokio::spawn(async move {
@@ -1042,19 +1164,104 @@ mod tests {
                     .await
             })
         };
-        tokio::task::yield_now().await;
-        assert!(!disconnect.is_finished(), "disconnect must wait for admission publication");
+        tokio::time::timeout(std::time::Duration::from_secs(3), pending.cancel.cancelled()).await.unwrap();
+        assert_eq!(service.snapshot("alice").unwrap().unwrap().state, AttachedProviderState::Disconnecting);
+        assert!(!disconnect.is_finished(), "pending native inventory must retain its original owner");
+        let late = service.resource("alice", "session-late").await.unwrap();
+        assert!(matches!(late.begin_run().await, Err(Error::Unavailable)));
 
         connection.tabs_release.notify_one();
-        let turn = begin.await.unwrap().unwrap();
+        assert!(matches!(begin.await.unwrap(), Err(Error::Disconnected | Error::Cancelled | Error::StaleRun)));
         disconnect.await.unwrap().unwrap();
         assert!(service.runtime.state.lock().unwrap().runs.is_empty());
         assert!(service.runtime.state.lock().unwrap().claims.is_empty());
         assert_eq!(service.snapshot("alice").unwrap(), None);
-        assert!(matches!(
-            turn.invoke(AttachedBrowserCommand::Tabs {}).await,
-            Err(Error::StaleRun | Error::Disconnected | Error::Cancelled)
-        ));
+    }
+
+    #[tokio::test]
+    async fn independent_targets_progress_while_same_run_operations_keep_order_and_claims() {
+        let (service, _, connection) = fixture();
+        service.connect("alice").await.unwrap();
+        let first = service.resource("alice", "session-first").await.unwrap().begin_run().await.unwrap();
+        let second = service.resource("alice", "session-second").await.unwrap().begin_run().await.unwrap();
+        connection.block_invokes.store(true, Ordering::Release);
+        let busy = first.clone();
+        let native = tokio::spawn(async move { busy.invoke(AttachedBrowserCommand::Observe { tab_id: "tab".into() }).await });
+        connection.invoke_started.notified().await;
+        let mut queued = Box::pin(first.invoke(AttachedBrowserCommand::Observe { tab_id: "tab".into() }));
+        assert!(futures_util::poll!(&mut queued).is_pending());
+        tokio::time::timeout(std::time::Duration::from_secs(3), second.invoke(
+            AttachedBrowserCommand::Observe { tab_id: "other-tab".into() },
+        )).await.expect("an unrelated target must not wait on the first Run").unwrap();
+        assert_eq!(second.invoke(AttachedBrowserCommand::Observe { tab_id: "tab".into() }).await, Err(Error::Busy));
+        assert_eq!(connection.invokes.load(Ordering::SeqCst), 2, "the queued same-Run command must not enter native work");
+        connection.block_invokes.store(false, Ordering::Release);
+        connection.invoke_release.add_permits(1);
+        native.await.unwrap().unwrap();
+        queued.await.unwrap();
+        assert_eq!(*connection.invoke_order.lock().unwrap(), vec!["tab", "other-tab", "tab"]);
+        first.settle().await.unwrap(); first.finish().await.unwrap();
+        second.settle().await.unwrap(); second.finish().await.unwrap();
+        service.shutdown().await.unwrap();
+        assert!(service.runtime.state.lock().unwrap().claims.is_empty());
+    }
+
+    #[tokio::test]
+    async fn disconnect_preempts_native_work_and_dropped_waiters_do_not_release_its_owner() {
+        let (service, _, connection) = fixture();
+        let connected = service.connect("alice").await.unwrap();
+        let turn = service.resource("alice", "session-native").await.unwrap().begin_run().await.unwrap();
+        connection.block_invokes.store(true, Ordering::Release);
+        let busy = turn.clone();
+        let caller = tokio::spawn(async move { busy.invoke(AttachedBrowserCommand::Observe { tab_id: "tab".into() }).await });
+        connection.invoke_started.notified().await;
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert_eq!(connection.active_invokes.load(Ordering::SeqCst), 1,
+            "dropping a waiter must not drop a dispatched native future");
+        let mut queued = Box::pin(turn.invoke(AttachedBrowserCommand::Observe { tab_id: "other-tab".into() }));
+        assert!(futures_util::poll!(&mut queued).is_pending());
+        let closing = service.clone();
+        let disconnect = tokio::spawn(async move { closing.disconnect("alice", &connected.incarnation).await });
+        tokio::time::timeout(std::time::Duration::from_secs(3), connection.invoke_cancelled.notified()).await
+            .expect("disconnect must signal the native owner without waiting for its operation lock");
+        assert_eq!(queued.await, Err(Error::Cancelled));
+        assert_eq!(service.snapshot("alice").unwrap().unwrap().state, AttachedProviderState::Disconnecting);
+        assert_eq!(connection.invokes.load(Ordering::SeqCst), 1, "closing must reject the queued native dispatch");
+        assert_eq!(connection.settles.load(Ordering::SeqCst), 0);
+        assert_eq!(connection.disconnects.load(Ordering::SeqCst), 0);
+        assert!(!disconnect.is_finished(), "a cancellation signal is not native cleanup proof");
+        disconnect.abort();
+        assert!(disconnect.await.unwrap_err().is_cancelled());
+        connection.invoke_release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while service.snapshot("alice").unwrap().is_some() { tokio::task::yield_now().await; }
+        }).await.expect("the retained disconnect owner must finish after its caller leaves");
+        assert_eq!(connection.completed_invokes.load(Ordering::SeqCst), 1);
+        assert_eq!(connection.active_invokes.load(Ordering::SeqCst), 0);
+        assert_eq!(connection.settles.load(Ordering::SeqCst), 1);
+        assert_eq!(connection.disconnects.load(Ordering::SeqCst), 1);
+        assert!(service.runtime.state.lock().unwrap().runs.is_empty());
+        assert!(service.runtime.state.lock().unwrap().claims.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_fences_and_disposes_a_retained_constructor_after_its_waiter_leaves() {
+        let (service, factory, connection) = fixture();
+        factory.block_connect.store(true, Ordering::Release);
+        let connecting = service.clone();
+        let caller = tokio::spawn(async move { connecting.connect("alice").await });
+        factory.connect_started.notified().await;
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        let mut shutdown = Box::pin(service.shutdown());
+        assert!(futures_util::poll!(&mut shutdown).is_pending());
+        assert_eq!(service.connect("alice").await, Err(AttachedProviderError::Closed));
+        factory.connect_release.notify_one();
+        shutdown.await.unwrap();
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(connection.disconnects.load(Ordering::SeqCst), 1);
+        assert!(service.snapshot("alice").unwrap().is_none());
     }
 
     #[tokio::test]

@@ -110,7 +110,7 @@ async fn fixture() -> (Arc<BrowserWorkspace>, Arc<BlockingRuntime>, BrowserTabTa
     });
     let service = BrowserResourceService::new(Arc::new(BlockingFactory(runtime.clone())));
     let workspace = service.ensure_user("alice", "session", BrowserProfile::Ephemeral).await.unwrap();
-    workspace.slot.ensure().await.unwrap();
+    workspace.slot.ensure(RuntimeUseSource::User).await.unwrap();
     (workspace, runtime, target)
 }
 

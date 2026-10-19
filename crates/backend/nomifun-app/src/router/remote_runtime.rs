@@ -220,6 +220,29 @@ impl NomiCoreRemoteRuntimeCoordinator {
     {
         let key = key.into();
         let permit = self.detached_mutations.try_admit(key.clone())?;
+        self.start_owned(key, Some(permit), task)
+    }
+
+    /// Retain only already-authorized source resource cleanup. It shares the
+    /// original single-flight/join owner, but never consumes a business-work
+    /// admission slot or starts a new Remote operation.
+    pub(crate) fn retain_resource_cleanup_once<F, Fut>(
+        &self, key: impl Into<String>, task: F,
+    ) -> Result<(), RemoteDetachedMutationAdmissionError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.start_owned(key.into(), None, task)
+    }
+
+    fn start_owned<F, Fut>(
+        &self, key: String, permit: Option<RemoteDetachedMutationPermit>, task: F,
+    ) -> Result<(), RemoteDetachedMutationAdmissionError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
         let tasks = Arc::clone(&self.tasks);
         let changed = Arc::clone(&self.changed);
         {
@@ -349,6 +372,34 @@ impl NomiCoreRemoteRuntimeCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retained_source_resource_cleanup_is_single_flight_without_a_business_slot_and_joins_original_shutdown() {
+        let mut coordinator = NomiCoreRemoteRuntimeCoordinator::new();
+        coordinator.detached_mutations = RemoteDetachedMutationRegistry::with_limit(1);
+        let business = coordinator.detached_mutations.try_admit("the-existing-business-operation").unwrap();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        coordinator.retain_resource_cleanup_once("the-original-source-cleanup", move || async move {
+            let _ = entered.send(()); let _ = released.await;
+        }).unwrap();
+        started.await.unwrap();
+        assert!(matches!(coordinator.start_once("another-business-operation", || async {}),
+            Err(RemoteDetachedMutationAdmissionError::CapacityExceeded)));
+        assert!(matches!(coordinator.retain_resource_cleanup_once("the-original-source-cleanup", || async {}),
+            Err(RemoteDetachedMutationAdmissionError::AlreadyRunning)));
+        assert_eq!(coordinator.detached_mutations.active_keys(), vec!["the-existing-business-operation"]);
+        assert_eq!(coordinator.active_keys(), vec!["the-original-source-cleanup"]);
+        drop(business);
+        let shutdown = { let owner = coordinator.clone(); tokio::spawn(async move { owner.shutdown().await }) };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !coordinator.lock_tasks().closed { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert!(!shutdown.is_finished(), "shutdown cannot claim that the retained original owner has joined early");
+        release.send(()).unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(2), shutdown).await.unwrap().unwrap());
+        assert!(coordinator.is_empty());
+    }
 
     #[test]
     fn detached_registry_enforces_key_deduplication_capacity_and_close() {

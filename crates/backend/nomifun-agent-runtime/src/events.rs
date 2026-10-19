@@ -8,6 +8,18 @@ use crate::engine::EngineBinding;
 use crate::error::AgentEngineError;
 use crate::tool::AgentToolResult;
 
+/// Host-bound proof of one immutable public prefix in the canonical part
+/// chain. It contains references and integrity data, never a mirrored body.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPublicOutputSource {
+    pub message_id: String,
+    pub part_count: u64,
+    pub content_digest: nomifun_agent_contracts::DigestHex,
+    pub through_event_id: nomifun_agent_contracts::EventId,
+    pub binding_version: u64,
+}
+
 /// Typed model or native owner failure. Diagnostic prose never selects a
 /// classification or recreates missing execution facts.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -155,6 +167,10 @@ pub enum AgentEngineEvent {
     /// syntax checks. This clears a pending protocol correction only; it is
     /// not Schema validation, tool admission, an effect or task completion.
     ModelResponseValidated { step: u16 },
+    /// The exact public prefix already emitted by this model step is now
+    /// irrevocable. This is a publication boundary, never a tool result or
+    /// task-completion claim. Raw deltas remain retractable until this fact.
+    PublicOutputCommitted { step: u16, #[serde(default,skip_serializing_if="Option::is_none")] source: Option<AgentPublicOutputSource> },
     /// Only an explicitly voice-started Immediate-policy Turn can emit this.
     /// The exact unadmitted proposal is withdrawn after owned abort/join;
     /// no Turn cancellation, tool result, applied input or success is claimed.

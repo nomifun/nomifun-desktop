@@ -695,7 +695,7 @@ mod tests {
             CompanionRegistry::scan(dir.join("companions"), dir.join("shared"))
                 .unwrap(),
         );
-        let companion = registry.create("测试", "ink").await.unwrap();
+        let companion = registry.create("测试", "mochi").await.unwrap();
         registry
             .patch(
                 &companion.companion_id,

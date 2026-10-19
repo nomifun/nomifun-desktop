@@ -1,5 +1,164 @@
 use super::*;
 use nomifun_agent_contracts::{NativeRetainedProcess,NativeSessionProcessRetention,SessionProcessOwnerReleasedV1,SESSION_PROCESS_OWNER_RELEASED};
+use crate::{ClearSessionContext,ContextClearPreparation};
+#[path="session_process_archive_tests.rs"]
+mod archive_tests;
+#[path="session_process_live_reap_tests.rs"]
+mod live_reap_tests;
+
+fn native_terminal()->StrictJsonValue {StrictJsonValue(json!({"state":"exited","exit_code":0,"signal":null,
+    "output":{"text":"late original output\n","next_cursor":21,"retained_bytes":21,"dropped_bytes":0,"source_encoding":"utf-8","decode_errors":0},
+    "cleanup":{"interrupt_attempted":false,"terminate_attempted":false,"force_kill_attempted":false,"reaped":true,"elapsed_ms":0,"errors":[]}}))}
+
+#[tokio::test]
+async fn portable_reap_contract_fixture_does_not_require_foreign_decoder_but_explicit_output_replay_fails_closed() {
+    let(store,session,release,_)=retained_process_fixture().await;let sid=&session.agent_session_id;
+    // This is a foreign canonical receipt/body fixture, not a claim that this
+    // host executed or natively validated another platform's process/decoder.
+    #[cfg(windows)]
+    let (foreign,text,encoding,errors)=(include_str!("../../../shared/nomi-process-runtime/src/io/frozen_output/fixtures/frozen-output-v1-utf8.json"),"a\u{fffd}","utf-8",1);
+    #[cfg(not(windows))]
+    let (foreign,text,encoding,errors)=(include_str!("../../../shared/nomi-process-runtime/src/io/frozen_output/fixtures/frozen-output-v1-windows-cp936.json"),"x丂\u{fffd}","mixed",3);
+    let replay:serde_json::Value=serde_json::from_str(foreign).unwrap();let mut terminal=native_terminal();
+    terminal.0["output"]=json!({"text":text,"next_cursor":6,"retained_bytes":3,"dropped_bytes":3,"source_encoding":encoding,"decode_errors":errors});
+    let mut receipt=nomifun_agent_contracts::SessionProcessReapedV1 {retention:release.retention.clone(),terminal:Some(terminal),
+        terminal_ref:None,output_replay:Some(StrictJsonValue(replay.clone())),output_archive:None,component_identity:None};
+    let before=store.current_cursor(sid).await.unwrap();
+    assert!(store.record_session_process_reaped(&owner(),receipt.clone()).await.is_err(),"a new writer still requires the actual supported original decoder");
+    assert_eq!(store.current_cursor(sid).await.unwrap(),before);
+    receipt.output_replay=None;let ack=store.record_session_process_reaped(&owner(),receipt.clone()).await.unwrap();
+    receipt.output_replay=Some(StrictJsonValue(replay));let value=serde_json::to_value(receipt).unwrap();
+    let bytes=nomifun_agent_contracts::canonical_json_bytes(&value).unwrap();
+    let body=serde_json::to_vec(&SessionPayloadBody::Json(StrictJsonValue(value))).unwrap();
+    sqlx::query("UPDATE agent_payloads SET body=?,byte_len=?,digest=? WHERE payload_id=(SELECT payload_id FROM agent_events WHERE session_id=? AND event_id=?)")
+        .bind(body).bind(bytes.len() as i64).bind(nomifun_agent_contracts::digest_bytes(&bytes).as_ref()).bind(sid.as_ref()).bind(ack.event_id.as_ref())
+        .execute(store.test_pool()).await.unwrap();
+    assert!(store.unreleased_session_process_generations(&owner(),sid).await.unwrap().is_empty());
+    store.rebuild_projections(sid).await.unwrap();
+    let root=tempfile::tempdir().unwrap();store.validate_workspace_relocation(root.path(),root.path()).await.unwrap();
+    let process=&release.retention.processes[0];
+    assert!(store.session_process_resource_stopped(&owner(),sid,&release.retention.owner_generation,&process.process_id,
+        process.creator_turn_id.as_ref(),process.creator_call_id.as_ref()).await.unwrap());
+    assert!(store.session_process_terminal(&owner(),sid,&process.process_id,&process.resolved_snapshot_ref,&process.resource_binding_digest,
+        &"workspace.process/poll".into(),0).await.is_err(),"explicit byte replay never falls back to flattened text");
+    let request=ClearSessionContext {idempotency_key:"portable-clear".into(),reason:"fixture clear".into()};
+    let ContextClearPreparation::Ready(boundary)=store.preflight_context_clear(&owner(),sid,&request).await.unwrap() else {panic!("new clear expected")};
+    store.clear_context(&owner(),sid,&request,&boundary).await.unwrap();
+}
+
+#[tokio::test]
+async fn exact_native_process_reap_keeps_terminal_output_and_does_not_forge_whole_owner_release() {
+    let(store,session,release,_)=retained_process_fixture().await;
+    let process=&release.retention.processes[0];
+    let receipt=nomifun_agent_contracts::SessionProcessReapedV1 {retention:release.retention.clone(),terminal:Some(native_terminal()),
+        terminal_ref:None,output_replay:None,output_archive:None,component_identity:None};
+    let ack=store.record_session_process_reaped(&owner(),receipt.clone()).await.unwrap();
+    assert_eq!(store.record_session_process_reaped(&owner(),receipt).await.unwrap(),ack);
+    assert!(store.unreleased_session_process_generations(&owner(),&session.agent_session_id).await.unwrap().is_empty());
+    let (terminal,_)=store.session_process_terminal(&owner(),&session.agent_session_id,&process.process_id,&process.resolved_snapshot_ref,
+        &process.resource_binding_digest,&"workspace.process/poll".into(),0).await.unwrap().unwrap();
+    assert_eq!(serde_json::to_value(terminal).unwrap(),native_terminal().0);
+    let root=tempfile::tempdir().unwrap();store.validate_workspace_relocation(root.path(),root.path()).await.unwrap();
+    store.rebuild_projections(&session.agent_session_id).await.unwrap();
+    assert!(store.unreleased_session_process_generations(&owner(),&session.agent_session_id).await.unwrap().is_empty());
+    assert!(!store.read_events(&session.agent_session_id,None,500).await.unwrap().events.iter().any(|event|event.kind.0==SESSION_PROCESS_OWNER_RELEASED));
+}
+
+#[tokio::test]
+async fn process_reap_rejects_foreign_creator_unknown_cleanup_or_modified_frozen_authority() {
+    for changed in ["owner","generation","process","snapshot","resource","lost","unreaped","cleanup_error","terminal_ref"] {
+        let(store,session,release,_)=retained_process_fixture().await;
+        let mut receipt=nomifun_agent_contracts::SessionProcessReapedV1 {retention:release.retention,terminal:Some(native_terminal()),
+            terminal_ref:None,output_replay:None,output_archive:None,component_identity:None};
+        match changed {
+            "owner"=>receipt.retention.owner_ref.principal_id="another-owner".into(),
+            "generation"=>receipt.retention.owner_generation=Uuid::now_v7().to_string(),
+            "process"=>receipt.retention.processes[0].process_id=Uuid::now_v7().to_string(),
+            "snapshot"=>receipt.retention.processes[0].resolved_snapshot_ref.snapshot_digest=digest('d'),
+            "resource"=>receipt.retention.processes[0].resource_binding_digest=digest('d'),
+            "lost"=>{let body=&mut receipt.terminal.as_mut().unwrap().0;body.as_object_mut().unwrap().remove("exit_code");
+                body.as_object_mut().unwrap().remove("signal");body["state"]=json!("lost");body["pid"]=json!(100);},
+            "unreaped"=>receipt.terminal.as_mut().unwrap().0["cleanup"]["reaped"]=json!(false),
+            "cleanup_error"=>receipt.terminal.as_mut().unwrap().0["cleanup"]["errors"]=json!(["original cleanup unknown"]),
+            _=>{receipt.terminal=None;receipt.terminal_ref=Some("not-a-process-terminal".into());},
+        }
+        let before=store.current_cursor(&session.agent_session_id).await.unwrap();
+        assert!(store.record_session_process_reaped(&owner(),receipt).await.is_err(),"{changed}");
+        assert_eq!(store.current_cursor(&session.agent_session_id).await.unwrap(),before);
+    }
+}
+
+#[tokio::test]
+async fn already_canonical_process_terminal_without_retention_is_referenced_without_a_second_tool_result() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();let(session,_)=create_ready(&store,"short-process").await;
+    let sid=&session.agent_session_id;
+    let(_,started)=store.start_turn(sid,"session_api".into(),"short-input".into(),"short-turn".into(),StrictJsonValue(json!({"content":"Run",
+        "admission":{"resolved_snapshot_ref":session.agent_binding.resolved_snapshot_ref}}))).await.unwrap();
+    let start=started.ack.unwrap().event_id;
+    let retention=NativeSessionProcessRetention {agent_session_id:sid.clone(),owner_ref:owner(),owner_generation:Uuid::now_v7().to_string(),
+        processes:vec![NativeRetainedProcess {process_id:Uuid::now_v7().to_string(),pid:100,creator_turn_id:"short-turn".into(),creator_call_id:"short-operation".into(),
+            resolved_snapshot_ref:session.agent_binding.resolved_snapshot_ref.clone(),resource_binding_digest:digest('c')}]};
+    process_tool_fact(&store,sid,"short-dispatch","short-turn",start.clone(),json!({"event":"host_tool_dispatch","dispatch":{
+        "operation_id":"short-operation","call_id":"short-call","capability_id":"workspace.process","action_id":"workspace.process/start"}})).await;
+    let mut terminal=native_terminal().0;terminal["process_id"]=json!(retention.processes[0].process_id);
+    process_tool_fact(&store,sid,"short-result","short-turn",start.clone(),process_settled("short-operation","short-call",terminal)).await;
+    process_tool_fact(&store,sid,"short-cleanup","short-turn",start.clone(),json!({"event":"host_cleanup_proven"})).await;
+    store.append_event(&append(sid,"short-completed","runtime_supervisor","short-completed","turn/completed","short-turn",Some(start),json!({}))).await.unwrap();
+    let receipt=nomifun_agent_contracts::SessionProcessReapedV1 {retention,terminal:Some(native_terminal()),terminal_ref:None,output_replay:None,output_archive:None,component_identity:None};
+    let ack=store.record_session_process_reaped(&owner(),receipt.clone()).await.unwrap();
+    assert_eq!(store.record_session_process_reaped(&owner(),receipt).await.unwrap(),ack);
+    let facts=store.read_events(sid,None,500).await.unwrap();
+    let reaped=facts.events.iter().find(|event|event.kind.0==nomifun_agent_contracts::SESSION_PROCESS_REAPED).unwrap();
+    let values=store.resolved_event_payloads(sid,&[reaped.event_id.clone()]).await.unwrap();
+    let stored:nomifun_agent_contracts::SessionProcessReapedV1=serde_json::from_value(values[reaped.event_id.as_ref()].clone()).unwrap();
+    assert!(stored.terminal.is_none());assert_eq!(stored.terminal_ref,Some("short-result".into()));
+    let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='host_tool_settled'")
+        .bind(sid.as_ref()).fetch_one(store.test_pool()).await.unwrap();assert_eq!(count,1);
+}
+
+#[tokio::test]
+async fn single_process_reap_reduces_only_its_exact_tuple_and_storage_waits_for_the_other_original_process() {
+    let(store,session,first,_)=retained_process_fixture().await;let sid=&session.agent_session_id;
+    let(_,started)=store.start_turn(sid,"session_api".into(),"second-input".into(),"second-turn".into(),StrictJsonValue(json!({"content":"Run second",
+        "admission":{"resolved_snapshot_ref":session.agent_binding.resolved_snapshot_ref}}))).await.unwrap();let start=started.ack.unwrap().event_id;
+    let mut second=first.retention.clone();second.processes[0].process_id=Uuid::now_v7().to_string();second.processes[0].pid=101;
+    second.processes[0].creator_turn_id="second-turn".into();second.processes[0].creator_call_id="second-operation".into();
+    process_tool_fact(&store,sid,"second-dispatch","second-turn",start.clone(),json!({"event":"host_tool_dispatch","dispatch":{
+        "operation_id":"second-operation","call_id":"second-call","capability_id":"workspace.process","action_id":"workspace.process/start"}})).await;
+    process_tool_fact(&store,sid,"second-result","second-turn",start.clone(),process_settled("second-operation","second-call",json!({
+        "process_id":second.processes[0].process_id,"state":"running","pid":101,"output":process_test_output()}))).await;
+    process_tool_fact(&store,sid,"second-cleanup","second-turn",start.clone(),json!({"event":"host_cleanup_proven","session_process_retention":second})).await;
+    store.append_event(&append(sid,"second-completed","runtime_supervisor","second-completed","turn/completed","second-turn",Some(start),json!({}))).await.unwrap();
+    let reaped=|retention|nomifun_agent_contracts::SessionProcessReapedV1 {retention,terminal:Some(native_terminal()),terminal_ref:None,output_replay:None,output_archive:None,component_identity:None};
+    store.record_session_process_reaped(&owner(),reaped(first.retention.clone())).await.unwrap();
+    assert_eq!(store.session_process_owner_retention(&owner(),sid,&first.retention.owner_generation).await.unwrap().unwrap(),second);
+    let root=tempfile::tempdir().unwrap();assert!(store.validate_workspace_relocation(root.path(),root.path()).await.is_err());
+    store.record_session_process_reaped(&owner(),reaped(second)).await.unwrap();
+    store.validate_workspace_relocation(root.path(),root.path()).await.unwrap();
+}
+
+#[tokio::test]
+async fn ssh_exact_close_requested_and_unknown_result_survive_projection_rebuild_and_owner_checks() {
+    use nomifun_agent_contracts::{SessionSshLinkCloseV1,SessionSshLinkClosedV1,SessionSshLinkCloseResult};
+    let store=AgentSessionStore::open_in_memory().await.unwrap();let(session,_)=create_ready(&store,"ssh-exact-close").await;
+    let close=SessionSshLinkCloseV1 {agent_session_id:session.agent_session_id.clone(),owner_ref:owner(),ssh_host_id:Uuid::now_v7().to_string(),
+        pool_instance_id:Uuid::now_v7().to_string(),instance_id:1};
+    let request=store.record_session_ssh_link_close_requested(&owner(),close.clone()).await.unwrap();
+    assert_eq!(store.record_session_ssh_link_close_requested(&owner(),close.clone()).await.unwrap(),request);
+    assert_eq!(store.session_ssh_link_closes(&owner(),&session.agent_session_id).await.unwrap(),vec![(close.clone(),None)]);
+    let result=SessionSshLinkClosedV1 {close:close.clone(),result:SessionSshLinkCloseResult::Lost {detail:"channel closed without original exit evidence".into()}};
+    let settled=store.record_session_ssh_link_closed(&owner(),result.clone()).await.unwrap();
+    assert_eq!(store.record_session_ssh_link_closed(&owner(),result.clone()).await.unwrap(),settled);
+    store.rebuild_projections(&session.agent_session_id).await.unwrap();
+    assert_eq!(store.session_ssh_link_closes(&owner(),&session.agent_session_id).await.unwrap(),vec![(close.clone(),Some(result.clone()))]);
+    let mut foreign=owner();foreign.principal_id="foreign-owner".into();
+    assert!(store.session_ssh_link_closes(&foreign,&session.agent_session_id).await.is_err());
+    assert!(store.record_session_ssh_link_closed(&foreign,result.clone()).await.is_err());
+    let mut changed=result.clone();changed.close.instance_id+=1;
+    assert!(store.record_session_ssh_link_closed(&owner(),changed).await.is_err());
+    let changed=SessionSshLinkClosedV1 {close,result:SessionSshLinkCloseResult::Reaped {detail:"a new connection is not old cleanup proof".into()}};
+    assert!(store.record_session_ssh_link_closed(&owner(),changed).await.is_err(),"unknown original result is immutable");
+}
 
 async fn retained_process_fixture() ->(AgentSessionStore,AgentSessionLiveRecord,SessionProcessOwnerReleasedV1,EventId) {
     let store=AgentSessionStore::open_in_memory().await.unwrap();

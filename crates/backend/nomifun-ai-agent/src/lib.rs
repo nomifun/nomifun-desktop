@@ -101,5 +101,5 @@ pub use routes::{AgentRouterState, agent_routes};
 pub use services::AgentService;
 pub use runtime_sessions::{
     RuntimeModelConfigResolver, AgentRuntimeSessions, InMemoryAgentRuntimeSessions,
-    RuntimeModelConfigBinding,
+    RuntimeModelConfigBinding, RuntimeCarrierObservation,
 };

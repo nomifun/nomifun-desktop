@@ -206,7 +206,8 @@ async fn database_contains_encrypted_values(database: &nomifun_db::Database) -> 
     const PROBES: &[&str] = &[
         "SELECT EXISTS(SELECT 1 FROM providers WHERE credentials_encrypted <> '' LIMIT 1)",
         "SELECT EXISTS(SELECT 1 FROM channel_plugins WHERE config <> '' LIMIT 1)",
-        "SELECT EXISTS(SELECT 1 FROM oauth_tokens WHERE access_token <> '' OR refresh_token IS NOT NULL LIMIT 1)",
+        "SELECT EXISTS(SELECT 1 FROM mcp_oauth_grants WHERE token_encrypted <> '' LIMIT 1)",
+        "SELECT EXISTS(SELECT 1 FROM mcp_oauth_clients WHERE client_secret_encrypted IS NOT NULL LIMIT 1)",
     ];
     for query in PROBES {
         let present: i64 = nomifun_db::sqlx::query_scalar(query)
@@ -606,7 +607,7 @@ fn prepare_restore_destination(destination: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_offline_backup, load_or_create_storage_generation, prepare_restore_destination,
+        create_offline_backup, database_contains_encrypted_values, load_or_create_storage_generation, prepare_restore_destination,
         restore_offline_backup,
     };
     #[cfg(windows)]
@@ -840,6 +841,27 @@ mod tests {
 
         assert!(format!("{error:#}").contains("already in use"));
         assert!(!root.path().join("bundle").exists());
+    }
+
+    #[tokio::test]
+    async fn backup_key_dependency_includes_oauth_client_secrets_and_grant_envelopes() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let owner = nomifun_db::installation_owner_id(database.pool()).await.unwrap();
+        let client = "0190f5fe-7c00-7a00-8000-000000000071";
+        nomifun_db::sqlx::query("INSERT INTO mcp_oauth_clients(client_ref,owner_id,issuer,profile_key,registration_kind,client_id,token_endpoint_auth_method,redirect_uris_json,created_at,updated_at) VALUES(?,?,'https://auth.example','public','dynamic','registered','none','[]',1,1)")
+            .bind(client).bind(&owner).execute(database.pool()).await.unwrap();
+        assert!(!database_contains_encrypted_values(&database).await.unwrap(), "public registrations do not require a key");
+        let encrypted = nomifun_common::encrypt_string("oauth-test-secret", &[0x42; 32]).unwrap();
+        nomifun_db::sqlx::query("UPDATE mcp_oauth_clients SET token_endpoint_auth_method='client_secret_basic',client_secret_encrypted=? WHERE client_ref=?")
+            .bind(&encrypted).bind(client).execute(database.pool()).await.unwrap();
+        assert!(database_contains_encrypted_values(&database).await.unwrap());
+        nomifun_db::sqlx::query("UPDATE mcp_oauth_clients SET token_endpoint_auth_method='none',client_secret_encrypted=NULL WHERE client_ref=?")
+            .bind(client).execute(database.pool()).await.unwrap();
+        nomifun_db::sqlx::query("INSERT INTO mcp_servers(mcp_server_id,name,transport_type,transport_config,created_at,updated_at) VALUES('0190f5fe-7c00-7a00-8000-000000000072','Backup OAuth','http','{\"url\":\"https://resource.example/mcp\"}',1,1)")
+            .execute(database.pool()).await.unwrap();
+        nomifun_db::sqlx::query("INSERT INTO mcp_oauth_grants(grant_id,owner_id,server_id,connection_config_ref,issuer,resource,client_ref,scopes_json,token_encrypted,obtained_at,revision,created_at,updated_at) VALUES('0190f5fe-7c00-7a00-8000-000000000073',?,'0190f5fe-7c00-7a00-8000-000000000072','config','https://auth.example','https://resource.example/mcp',?,'[]',?,1,1,1,1)")
+            .bind(&owner).bind(client).bind(&encrypted).execute(database.pool()).await.unwrap();
+        assert!(database_contains_encrypted_values(&database).await.unwrap());
     }
 
     #[tokio::test]

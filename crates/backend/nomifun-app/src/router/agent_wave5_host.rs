@@ -53,16 +53,14 @@ impl NomiCoreWave5Host {
             .map_err(|_| "Wave 5 Session owner was already installed".to_owned())
     }
 
-    fn sessions(&self) -> Result<Arc<super::nomi_core_session::NomiCoreSessionOwner>, Wave5HostPortError> {
-        self.session_owner.get().and_then(Weak::upgrade)
-            .ok_or_else(|| Wave5HostPortError::unavailable("Session owner is not installed"))
-    }
-
     pub(crate) fn install_runtime_owners(
         &self,
         execution: Arc<nomifun_agent_execution::AgentExecutionEngine>,
         schedule: Arc<nomifun_cron::service::CronService>,
     ) -> Result<(), String> {
+        self.session_owner.get().and_then(Weak::upgrade)
+            .ok_or_else(|| "Session owner is not installed".to_owned())?
+            .install_execution_progress_owner(&execution)?;
         self.execution
             .set(execution)
             .map_err(|_| "Wave 5 AgentExecution owner was already installed".to_owned())?;
@@ -94,7 +92,6 @@ impl NomiCoreWave5Host {
                 let input = normalize_agent_delegate_input(input);
                 let effect_input = input.clone();
                 let input: AgentDelegateInput = decode(input)?;
-                let sessions = self.sessions()?;
                 self.require_collaboration_source(&context).await?;
                 self.run_effect(
                     &context,
@@ -103,49 +100,23 @@ impl NomiCoreWave5Host {
                     nomifun_agent_session::EffectStrategy::ManagedEffect,
                     async {
                         let execution = match input {
-                            AgentDelegateInput::Planned(PlannedCollaborationInput {
-                                strategy,
-                                goal,
-                                target_role,
-                            }) => {
+                            AgentDelegateInput::Planned(PlannedCollaborationInput { strategy, goal }) => {
                                 let _strategy = strategy;
-                                if matches!(target_role, Some(DirectedTargetRole::Desktop)) {
-                                    let target = sessions.resolve_companion_desktop_delegate_snapshot(
-                                        &context.principal.principal_id, &context.agent_session_id,
-                                    ).await.map_err(app_error)?;
-                                    self.execution()?.delegate_to_frozen_agent(
-                                        &context.principal.principal_id,
-                                        nomifun_agent_execution::DirectedDelegationSource {
-                                            agent_session_id: context.agent_session_id.as_ref().into(),
-                                            turn_operation_id: context.turn_id.as_ref().into(),
-                                            tool_operation_id: context.operation_id.as_ref().into(),
-                                            effect_id: effect_id(&context)?,
-                                        }, target, goal,
-                                    ).await
-                                } else { self.execution()?
-                                    .collaborate_from_session(
-                                        &context.principal.principal_id,
-                                        context.agent_session_id.as_ref(),
-                                        goal,
-                                        false,
-                                    )
-                                    .await }
+                                self.execution()?.collaborate_from_exact_source(
+                                    &context.principal.principal_id, execution_source(&context)?, goal, false,
+                                ).await
                             }
                             AgentDelegateInput::Parallel(input) => {
-                                self.execution()?
-                                    .collaborate_parallel_from_session(
-                                        &context.principal.principal_id,
-                                        context.agent_session_id.as_ref(),
-                                        input,
-                                    )
-                                    .await
+                                self.execution()?.collaborate_parallel_from_exact_source(
+                                    &context.principal.principal_id, execution_source(&context)?, input,
+                                ).await
                             }
                         }
                         .map_err(app_error)?;
                         encode(nomifun_common::AgentExecutionReceipt::new(
                             execution.execution_id,
                             execution.status,
-                            "Delegated work was accepted as one AgentExecution. End this turn now: do not poll, call agent/fork, inspect tool history, or report completion. The terminal synthesis will be projected automatically and the collaboration panel will show the complete dependency graph.",
+                            "Delegated work was accepted as one AgentExecution. End this turn now: do not poll, call agent/fork, inspect tool history, or report completion. The terminal result will be delivered to this exact source automatically and the collaboration panel will show the complete dependency graph.",
                         ))
                     },
                 )
@@ -162,9 +133,9 @@ impl NomiCoreWave5Host {
                     async {
                         let execution = self
                             .execution()?
-                            .collaborate_from_session(
+                            .collaborate_from_exact_source(
                                 &context.principal.principal_id,
-                                context.agent_session_id.as_ref(),
+                                execution_source(&context)?,
                                 input.goal,
                                 true,
                             )
@@ -493,8 +464,17 @@ impl Wave5HostPort for NomiCoreWave5Host {
     }
 }
 
+fn execution_source(context: &Wave5HostContext) -> Result<nomifun_agent_execution::AgentExecutionSource, Wave5HostPortError> {
+    Ok(nomifun_agent_execution::AgentExecutionSource {
+        agent_session_id: context.agent_session_id.as_ref().into(),
+        turn_operation_id: context.turn_id.as_ref().into(),
+        tool_operation_id: context.operation_id.as_ref().into(),
+        effect_id: effect_id(context)?,
+    })
+}
+
 fn validate_collaboration_source(accepted: &Value) -> Result<(), Wave5HostPortError> {
-    let source = accepted.get("input_source")
+    accepted.get("input_source")
         .filter(|source| !source.is_null())
         .cloned()
         .map(serde_json::from_value::<nomifun_agent_contracts::AgentInputSource>)
@@ -502,11 +482,6 @@ fn validate_collaboration_source(accepted: &Value) -> Result<(), Wave5HostPortEr
         .map_err(|error| Wave5HostPortError::invalid_request(format!(
             "canonical collaboration source is invalid: {error}",
         )))?;
-    if matches!(source, Some(nomifun_agent_contracts::AgentInputSource::DirectedDelegationResult { .. })) {
-        return Err(Wave5HostPortError::invalid_request(
-            "A desktop result callback cannot delegate or fork another task",
-        ));
-    }
     Ok(())
 }
 
@@ -527,13 +502,7 @@ enum PlannedDelegationStrategy {
 struct PlannedCollaborationInput {
     strategy: PlannedDelegationStrategy,
     goal: String,
-    #[serde(default)]
-    target_role: Option<DirectedTargetRole>,
 }
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum DirectedTargetRole { Desktop }
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -1166,18 +1135,14 @@ mod tests {
     }
 
     #[test]
-    fn directed_desktop_delegation_accepts_only_the_planned_product_role() {
+    fn delegation_accepts_generic_strategies_and_rejects_retired_product_targets() {
         assert!(matches!(decode::<AgentDelegateInput>(StrictJsonValue(json!({
-            "strategy":"planned","goal":"prepare the requested document","target_role":"desktop"
-        }))).unwrap(), AgentDelegateInput::Planned(PlannedCollaborationInput {
-            target_role: Some(DirectedTargetRole::Desktop), ..
-        })));
-        for invalid in [
-            json!({"strategy":"planned","goal":"work","target_role":"robot"}),
-            json!({"strategy":"planned","goal":"work","target_role":"desktop","preset_id":"chosen-by-model"}),
-            json!({"strategy":"parallel","tasks":[{"name":"one","prompt":"work"}],"target_role":"desktop"}),
-        ] {
-            assert!(decode::<AgentDelegateInput>(StrictJsonValue(invalid)).is_err());
+            "strategy":"planned","goal":"prepare the requested document"
+        }))).unwrap(), AgentDelegateInput::Planned(_)));
+        for target in ["desktop", "robot"] {
+            assert!(decode::<AgentDelegateInput>(StrictJsonValue(json!({
+                "strategy":"planned","goal":"work","target_role":target
+            }))).is_err());
         }
     }
 
@@ -1198,7 +1163,7 @@ mod tests {
             "report_seq":12,"execution_id":"original-execution","source_turn_operation_id":"original-turn"
         }});
         let error = validate_collaboration_source(&result).unwrap_err();
-        assert!(error.message.contains("delegate or fork"));
+        assert!(error.message.contains("invalid"));
         assert!(validate_collaboration_source(&json!({"input_source":{
             "kind":"directed_delegation_result","execution_id":"missing-source-facts"
         }})).is_err());

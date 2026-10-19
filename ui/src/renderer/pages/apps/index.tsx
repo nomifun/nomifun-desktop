@@ -2,6 +2,7 @@ import { appHosting } from '@/common/adapter/appHostingBridge';
 import type { HostedApp } from '@/common/types/appHosting';
 import { Alert, Button, Input, Spin, Tag } from '@arco-design/web-react';
 import NomiPagination from '@/renderer/components/base/NomiPagination';
+import PageHeader from '@/renderer/components/layout/PageHeader';
 import { Application, Plus, Refresh } from '@icon-park/react';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -23,15 +24,13 @@ export default function AppsPage() {
   const currentPage = Math.min(page, Math.max(1, Math.ceil(filtered.length / 9)));
   const enter = (app: HostedApp) => void navigate(`/apps/${encodeURIComponent(app.id)}`);
   return <main className={styles.page}>
-    <header className={styles.header}><h1>{t('appHosting.title')}<span>/</span>{t('appHosting.home.title')}</h1>
-      <Button aria-label={t('appHosting.actions.refresh')} icon={<Refresh />} onClick={() => void mutate()} />
-    </header>
-    <div className={styles.toolbar}>
-      <div className={styles.actions}><Button type='primary' icon={<Plus />} onClick={() => void navigate('/apps/new')}>{t('appHosting.create.action')}</Button>
-        <Button onClick={() => void navigate('/apps/import')}>{t('appHosting.import.action')}</Button></div>
+    <PageHeader className={styles.header} title={<>{t('appHosting.title')}<span className={styles.titleSeparator}>/</span>{t('appHosting.home.title')}</>} actions={<>
+      <Button type='primary' icon={<Plus fill='currentColor' />} onClick={() => void navigate('/apps/new')}>{t('appHosting.create.action')}</Button>
+      <Button onClick={() => void navigate('/apps/import')}>{t('appHosting.import.action')}</Button>
       <Input.Search className={styles.appSearch} value={search} onChange={(value) => { setSearch(value); setPage(1); }} allowClear
         placeholder={t('appHosting.home.search')} aria-label={t('appHosting.home.search')} />
-    </div>
+      <Button aria-label={t('appHosting.actions.refresh')} icon={<Refresh />} onClick={() => void mutate()} />
+    </>} />
     <section className={styles.categories} aria-label={t('appHosting.home.categories')}>
       <span>{t('appHosting.home.categories')}</span><Button type={!tag ? 'primary' : 'text'} size='small' onClick={() => { setTag(undefined); setPage(1); }}>{t('appHosting.home.all')}</Button>
       {tags.map((value) => <Button key={value} size='small' type={tag === value ? 'primary' : 'text'} onClick={() => { setTag(value); setPage(1); }}>{value}</Button>)}

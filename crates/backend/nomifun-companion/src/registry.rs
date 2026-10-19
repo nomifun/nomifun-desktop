@@ -230,6 +230,7 @@ impl CompanionRegistry {
                         let child_name = child.file_name().to_string_lossy().into_owned();
                         if child_type.is_symlink()
                             || (child_name != "config.json"
+                                && child_name != "config.pre-unified-agent.json"
                                 && child_name != crate::figure::FIGURE_FILE)
                         {
                             return Err(AppError::Internal(format!(
@@ -247,6 +248,7 @@ impl CompanionRegistry {
                             local_figure_path = Some(child_path);
                         }
                     }
+                    CompanionProfileConfig::transition_unified_agent_profile(&path, &dir_name)?;
                     let profile = match CompanionProfileConfig::load(&path) {
                         Ok(Some(profile)) => profile,
                         Ok(None) => {
@@ -754,6 +756,27 @@ mod tests {
         scan_at(dir).unwrap()
     }
 
+    #[tokio::test]
+    async fn current_generation_profile_transition_is_restart_safe_and_retains_original_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        let initial = registry(dir.path());
+        let profile = initial.create("Unified", "mochi").await.unwrap();
+        let profile_dir = dir.path().join("companions").join(&profile.companion_id);
+        let mut old = serde_json::to_value(&profile).unwrap();
+        old["robot"] = serde_json::json!({"model":null,"skills":{"enabled":["former-device-choice"]},"mcp_servers":["former-mcp"]});
+        let bytes = serde_json::to_vec_pretty(&old).unwrap();
+        std::fs::write(CompanionProfileConfig::config_path(&profile_dir), &bytes).unwrap();
+        drop(initial);
+        let transitioned = scan_at(dir.path()).unwrap();
+        assert_eq!(transitioned.get(&profile.companion_id).await.unwrap(), profile);
+        assert_eq!(std::fs::read(profile_dir.join("config.pre-unified-agent.json")).unwrap(), bytes);
+        drop(transitioned);
+        let reopened = scan_at(dir.path()).unwrap();
+        assert_eq!(reopened.get(&profile.companion_id).await.unwrap(), profile);
+        assert!(reopened.patch(&profile.companion_id, serde_json::json!({"robot":{}})).await.is_err(),
+            "retired configuration cannot be written through the current API");
+    }
+
     struct CatalogRegistryFixture {
         _db: nomifun_db::Database,
         registry: std::sync::Arc<CompanionRegistry>,
@@ -813,7 +836,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fixture = catalog_registry(dir.path()).await;
         let reg = &fixture.registry;
-        let profile = reg.create("Original", "ink").await.unwrap();
+        let profile = reg.create("Original", "mochi").await.unwrap();
         let selected = serde_json::json!({"provider_id": fixture.provider_id, "model": "removed"});
         let old_profile = reg.patch(&profile.companion_id, serde_json::json!({
             "model": selected, "learn": {"model": selected}, "evolve": {"model": selected},
@@ -865,7 +888,7 @@ mod tests {
     async fn catalog_model_guard_keeps_old_missing_models_loadable_but_rejects_new_writes() {
         let dir = tempfile::tempdir().unwrap();
         let fixture = catalog_registry(dir.path()).await;
-        let profile = fixture.registry.create("Audited", "ink").await.unwrap();
+        let profile = fixture.registry.create("Audited", "mochi").await.unwrap();
         {
             let _guard = fixture.barrier.read().await;
             fixture.registry.validate_provider_references_under_guard().await.unwrap();
@@ -899,7 +922,7 @@ mod tests {
             dir.path().join("isolated-companions"), dir.path().join("isolated-shared"),
             Some(std::sync::Arc::clone(&fixture.provider_repo)), None, Some(std::sync::Arc::clone(&fixture.barrier)),
         ).unwrap();
-        let profile = reg.create("Empty remains valid", "ink").await.unwrap();
+        let profile = reg.create("Empty remains valid", "mochi").await.unwrap();
         let error = reg.patch(&profile.companion_id, serde_json::json!({
             "model": {"provider_id": fixture.provider_id, "model": "sibling"}
         })).await.unwrap_err();
@@ -933,8 +956,8 @@ mod tests {
         assert_eq!(reg.resolve_row_owner(None).await, None);
         assert_eq!(reg.resolve_row_owner(Some("malformed-companion-id")).await, None);
 
-        let a = reg.create("甲", "ink").await.unwrap();
-        let b = reg.create("乙", "ink").await.unwrap();
+        let a = reg.create("甲", "mochi").await.unwrap();
+        let b = reg.create("乙", "mochi").await.unwrap();
         // 未配置默认体 → 最早创建的伙伴
         assert_eq!(reg.resolve_row_owner(None).await.as_deref(), Some(a.companion_id.as_str()));
         // 显式默认体且存活 → 用之
@@ -957,8 +980,8 @@ mod tests {
         assert_eq!(reg.resolve_row_owner(None).await.as_deref(), Some(a.companion_id.as_str()));
 
         // 同毫秒并列时用 companion_id 做稳定 tie-break。
-        let mut left = CompanionProfileConfig::new("同刻甲", "ink", 90);
-        let mut right = CompanionProfileConfig::new("同刻乙", "ink", 91);
+        let mut left = CompanionProfileConfig::new("同刻甲", "mochi", 90);
+        let mut right = CompanionProfileConfig::new("同刻乙", "mochi", 91);
         left.created_at = 1;
         right.created_at = 1;
         let (small, large) = if left.companion_id < right.companion_id {
@@ -976,10 +999,10 @@ mod tests {
         let reg = registry(dir.path());
         assert!(reg.list().await.is_empty());
 
-        let companion = reg.create("  毛球  ", "ink").await.unwrap();
+        let companion = reg.create("  毛球  ", "mochi").await.unwrap();
         assert_eq!(companion.companion_id.len(), nomifun_common::UUID_STRING_LEN);
         assert_eq!(companion.name, "毛球"); // trimmed
-        assert_eq!(companion.character, "ink");
+        assert_eq!(companion.character, "mochi");
         assert_eq!(companion.seq, 1);
 
         // Persisted on disk under {companions_dir}/{companion_id}/config.json.
@@ -999,7 +1022,7 @@ mod tests {
         let companions_dir = dir.path().join("companions");
         // Hand-build two profiles with crafted created_at, newer one first
         // alphabetically so the sort genuinely exercises created_at.
-        let mut newer = CompanionProfileConfig::new("新宠", "boo", 2);
+        let mut newer = CompanionProfileConfig::new("新宠", "bolt", 2);
         newer.created_at = 2_000;
         newer.save(&companions_dir.join(&newer.companion_id)).unwrap();
         let mut older = CompanionProfileConfig::new("老宠", "mochi", 1);
@@ -1019,15 +1042,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reg = registry(dir.path());
 
-        assert!(matches!(reg.create("", "ink").await, Err(AppError::BadRequest(_))));
-        assert!(matches!(reg.create("   ", "ink").await, Err(AppError::BadRequest(_))));
+        assert!(matches!(reg.create("", "mochi").await, Err(AppError::BadRequest(_))));
+        assert!(matches!(reg.create("   ", "mochi").await, Err(AppError::BadRequest(_))));
 
         // 40 chars (counted in chars, not bytes) is fine, 41 is not.
         let ok = "宠".repeat(40);
         let too_long = "宠".repeat(41);
-        let companion = reg.create(&ok, "ink").await.unwrap();
+        let companion = reg.create(&ok, "mochi").await.unwrap();
         assert_eq!(companion.name.chars().count(), 40);
-        assert!(matches!(reg.create(&too_long, "ink").await, Err(AppError::BadRequest(_))));
+        assert!(matches!(reg.create(&too_long, "mochi").await, Err(AppError::BadRequest(_))));
 
         // patch enforces the same rules.
         let err = reg.patch(&companion.companion_id, serde_json::json!({"name": too_long})).await;
@@ -1040,7 +1063,7 @@ mod tests {
     async fn patch_renames_but_never_changes_companion_id_or_created_at() {
         let dir = tempfile::tempdir().unwrap();
         let reg = registry(dir.path());
-        let companion = reg.create("旧名", "ink").await.unwrap();
+        let companion = reg.create("旧名", "mochi").await.unwrap();
 
         let patched = reg
             .patch(
@@ -1062,7 +1085,7 @@ mod tests {
         assert!(patched.appearance.companion_enabled);
         assert_eq!(patched.appearance.companion_x, Some(7));
         // Untouched fields survive the merge.
-        assert_eq!(patched.character, "ink");
+        assert_eq!(patched.character, "mochi");
 
         // Persisted and visible through the map.
         let on_disk =
@@ -1087,8 +1110,8 @@ mod tests {
     async fn remove_deletes_dir_and_returns_profile() {
         let dir = tempfile::tempdir().unwrap();
         let reg = registry(dir.path());
-        let companion = reg.create("一郎", "ink").await.unwrap();
-        let keep = reg.create("二郎", "boo").await.unwrap();
+        let companion = reg.create("一郎", "mochi").await.unwrap();
+        let keep = reg.create("二郎", "bolt").await.unwrap();
         let companion_dir = dir.path().join("companions").join(&companion.companion_id);
         assert!(companion_dir.exists());
 
@@ -1117,7 +1140,7 @@ mod tests {
         assert!(scan_at(dir.path()).is_err());
 
         std::fs::remove_dir_all(&corrupt_dir).unwrap();
-        let homeless = CompanionProfileConfig::new("流浪", "boo", 2);
+        let homeless = CompanionProfileConfig::new("流浪", "bolt", 2);
         let wrong_dir = companions_dir.join(CompanionId::new().as_str());
         homeless.save(&wrong_dir).unwrap();
         assert!(scan_at(dir.path()).is_err());
@@ -1154,7 +1177,7 @@ mod tests {
         assert!(scan_at(dir.path()).is_err());
 
         std::fs::remove_dir_all(&companions_dir).unwrap();
-        let orphaned = CompanionProfileConfig::new("孤图", "ink", 1);
+        let orphaned = CompanionProfileConfig::new("孤图", "mochi", 1);
         let orphaned_dir = companions_dir.join(&orphaned.companion_id);
         orphaned.save(&orphaned_dir).unwrap();
         std::fs::write(orphaned_dir.join(crate::figure::FIGURE_FILE), b"not an image").unwrap();
@@ -1166,8 +1189,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reg = registry(dir.path());
 
-        let first = reg.create("一号", "ink").await.unwrap();
-        let second = reg.create("二号", "boo").await.unwrap();
+        let first = reg.create("一号", "mochi").await.unwrap();
+        let second = reg.create("二号", "bolt").await.unwrap();
         assert_eq!(first.seq, 1);
         assert_eq!(second.seq, 2);
 
@@ -1192,7 +1215,7 @@ mod tests {
         // when the highest-numbered companion is gone.
         reg.remove(&third.companion_id).await.unwrap();
         let reg2 = registry(dir.path());
-        let fourth = reg2.create("四号", "boo").await.unwrap();
+        let fourth = reg2.create("四号", "bolt").await.unwrap();
         assert_eq!(fourth.seq, 4);
     }
 
@@ -1213,7 +1236,7 @@ mod tests {
             provider_lifecycle: None,
         };
 
-        assert!(matches!(reg.create("一号", "ink").await, Err(AppError::Internal(_))));
+        assert!(matches!(reg.create("一号", "mochi").await, Err(AppError::Internal(_))));
         // The entity was not published, but its allocated display number is
         // durable and can never be reused.
         assert_eq!(CompanionSeqState::load(&dir.path().join("shared")).unwrap().last_companion_seq, 1);
@@ -1221,7 +1244,7 @@ mod tests {
 
         // The retry (after the cause is fixed) gets #2.
         std::fs::remove_file(dir.path().join("companions")).unwrap();
-        let companion = reg.create("一号", "ink").await.unwrap();
+        let companion = reg.create("一号", "mochi").await.unwrap();
         assert_eq!(companion.seq, 2);
         assert_eq!(CompanionSeqState::load(&dir.path().join("shared")).unwrap().last_companion_seq, 2);
     }

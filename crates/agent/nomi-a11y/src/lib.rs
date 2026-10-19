@@ -12,6 +12,7 @@
 //! no-op) so the agent can route around them.
 
 pub mod engine;
+mod controlled;
 pub mod tree;
 
 #[cfg(target_os = "macos")]
@@ -103,6 +104,13 @@ pub fn focus_named_window(
     expected_title: Option<String>,
 ) -> Result<Effect, A11yError> {
     macos::MacEngine::start()?.focus_named_window(pid, expected_bounds, expected_title)
+}
+
+#[cfg(target_os = "macos")]
+pub fn focus_named_window_controlled(pid: i32, expected_bounds: Rect, expected_title: Option<String>,
+    cancellation: &tokio_util::sync::CancellationToken) -> Result<Effect, A11yError> {
+    if cancellation.is_cancelled() { return Err(A11yError::CancelledBeforeDispatch); }
+    macos::MacEngine::start()?.focus_named_window_controlled(pid, expected_bounds, expected_title, cancellation)
 }
 
 #[cfg(test)]

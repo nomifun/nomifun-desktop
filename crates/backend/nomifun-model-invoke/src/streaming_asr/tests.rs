@@ -99,7 +99,11 @@ fn streaming_catalog_protocols_are_distinct_from_upload_protocols() {
         );
         assert_eq!(
             descriptor.executor,
-            crate::ProtocolExecutorKind::RealtimeSession
+            if protocol == "deepgram.listen_stream" {
+                crate::ProtocolExecutorKind::ModelInvoke
+            } else {
+                crate::ProtocolExecutorKind::RealtimeSession
+            }
         );
     }
 }
