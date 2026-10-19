@@ -5,23 +5,35 @@
  */
 
 import { describe, expect, it } from 'bun:test';
-import { CHARACTERS, DEFAULT_DESK, getDeskSpec } from './index';
+import { CHARACTERS, CUSTOM_CHARACTER_ID, DEFAULT_DESK, getDeskSpecFor } from './index';
+import type { CustomFigureMeta } from './types';
 
-describe('getDeskSpec', () => {
+const customFigure: CustomFigureMeta = {
+  aspect: 0.9, headBox: { x: 0.3, y: 0, w: 0.3, h: 0.3 }, sizeTier: 'm', sizePx: 256,
+};
+
+describe('getDeskSpecFor', () => {
   it('uses the compact built-in desktop footprint', () => {
     expect(DEFAULT_DESK).toEqual({ windowWidth: 200, windowHeight: 180, figureHeight: 120 });
   });
 
-  it('falls back to DEFAULT_DESK for unknown / missing ids', () => {
-    expect(getDeskSpec('no-such-character')).toBe(DEFAULT_DESK);
-    expect(getDeskSpec(null)).toBe(DEFAULT_DESK);
-    expect(getDeskSpec(undefined)).toBe(DEFAULT_DESK);
+  it('uses DEFAULT_DESK for unavailable looks and custom looks without metadata', () => {
+    for (const id of ['ink', 'no-such-character', CUSTOM_CHARACTER_ID, null, undefined]) {
+      expect(getDeskSpecFor(id)).toBe(DEFAULT_DESK);
+    }
   });
 
   it('keeps every roster character on the default desk', () => {
-    for (const id of ['mochi', 'ink', 'bolt']) {
-      expect(getDeskSpec(id)).toBe(DEFAULT_DESK);
+    for (const { id } of CHARACTERS) {
+      expect(getDeskSpecFor(id)).toBe(DEFAULT_DESK);
+      expect(getDeskSpecFor(id, customFigure)).toBe(DEFAULT_DESK);
     }
+  });
+
+  it('uses the configured custom-figure dimensions through the desktop entry point', () => {
+    expect(getDeskSpecFor(CUSTOM_CHARACTER_ID, customFigure)).toEqual({
+      windowWidth: 255, windowHeight: 316, figureHeight: 256,
+    });
   });
 
   it('uses the teal palette for bolt', () => {

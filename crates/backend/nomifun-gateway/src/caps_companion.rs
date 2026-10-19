@@ -433,8 +433,8 @@ struct CompanionGetParams {
 struct CompanionCreateParams {
     /// Display name for the new companion.
     name: String,
-    /// Character archetype / seed description. This seeds the companion's
-    /// personality and initial system prompt generation.
+    /// Appearance ID: mochi or bolt for an official character, or custom for a
+    /// user-supplied figure. Unavailable IDs use mochi; personality is separate.
     character: String,
 }
 

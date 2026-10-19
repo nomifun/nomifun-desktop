@@ -85,7 +85,7 @@ impl Fixture {
             &router,
             "POST",
             "/api/companion/companions",
-            json!({"name":"PRIVATE_PAIRED_COMPANION_PERSONA","character":"ink"}),
+            json!({"name":"PRIVATE_PAIRED_COMPANION_PERSONA","character":"mochi"}),
         )
         .await;
         let companion_id = companion["companion_id"].as_str().unwrap().to_owned();

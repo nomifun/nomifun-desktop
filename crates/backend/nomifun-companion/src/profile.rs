@@ -19,8 +19,8 @@ use nomifun_common::{CompanionId, FigureId, ProviderWithModel, now_ms};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    CollectConfig, DEFAULT_CHARACTER, PersonaConfig, deserialize_optional_model,
-    serialize_optional_model,
+    CollectConfig, PersonaConfig, deserialize_character, deserialize_optional_model,
+    normalize_character, serialize_character, serialize_optional_model,
 };
 
 /// Desktop-companion window settings for one companion. `character` lives
@@ -458,7 +458,12 @@ pub struct CompanionProfileConfig {
     pub seq: u64,
     /// Display name chosen by the user.
     pub name: String,
-    /// Which character renders in the companion window (mochi/ink/roux/pixel/bolt/boo).
+    /// Appearance ID: official mochi/bolt or custom. Unavailable IDs resolve to
+    /// the default at the profile boundary; identity and other settings survive.
+    #[serde(
+        deserialize_with = "deserialize_character",
+        serialize_with = "serialize_character"
+    )]
     pub character: String,
     /// A manual emotion held until cleared. `None` follows the latest learned
     /// mood without overwriting that runtime fact.
@@ -518,17 +523,15 @@ pub struct CompanionProfileConfig {
 }
 
 impl CompanionProfileConfig {
-    /// Fresh profile with a generated companion ID. An empty `character` falls back to
-    /// the default roster character.
+    /// Fresh profile with a generated companion ID and a supported appearance.
     pub fn new(name: &str, character: &str, seq: u64) -> Self {
         assert!(seq > 0, "companion display sequence must be positive");
-        let character = if character.is_empty() { DEFAULT_CHARACTER } else { character };
         Self {
             companion_id: CompanionId::new().into_string(),
             control_robot_id: None,
             seq,
             name: name.to_owned(),
-            character: character.to_owned(),
+            character: normalize_character(character).to_owned(),
             mood_override: None,
             persona: PersonaConfig::default(),
             model: None,
@@ -1080,7 +1083,7 @@ mod tests {
         let loaded = CompanionProfileConfig::load(dir.path()).unwrap();
         assert_eq!(loaded, None);
 
-        let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         profile.model = Some(ProviderWithModel {
             provider_id: nomifun_common::ProviderId::new().into_string(),
             model: "claude-fable-5".into(),
@@ -1104,7 +1107,7 @@ mod tests {
             "companion_id": companion_id,
             "seq": 1,
             "name": "Old",
-            "character": "ink",
+            "character": "mochi",
             "persona": PersonaConfig::default(),
             "model": null,
             "appearance": CompanionWindowConfig::default(),
@@ -1119,7 +1122,7 @@ mod tests {
     #[test]
     fn mood_preference_roundtrips_and_invalid_durable_value_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
-        let mut profile = CompanionProfileConfig::new("手动情绪", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("手动情绪", "mochi", 1);
         profile.mood_override = Some(CompanionMood::Worried);
         profile.save(dir.path()).unwrap();
         let loaded = CompanionProfileConfig::load(dir.path()).unwrap().unwrap();
@@ -1146,11 +1149,73 @@ mod tests {
     }
 
     #[test]
-    fn profile_new_falls_back_to_default_character() {
-        let p = CompanionProfileConfig::new("无名", "", 1);
-        assert_eq!(p.character, "mochi");
-        let q = CompanionProfileConfig::new("有名", "boo", 1);
-        assert_eq!(q.character, "boo");
+    fn supported_appearances_roundtrip_and_unavailable_ones_use_default() {
+        for character in ["mochi", "bolt", "custom"] {
+            let profile = CompanionProfileConfig::new("伙伴", character, 1);
+            assert_eq!(profile.character, character);
+            let loaded: CompanionProfileConfig =
+                serde_json::from_value(serde_json::to_value(&profile).unwrap()).unwrap();
+            assert_eq!(loaded, profile);
+        }
+        for character in ["", "ink", "roux", "pixel", "boo", "unknown-character"] {
+            let profile = CompanionProfileConfig::new("伙伴", character, 1);
+            assert_eq!(profile.character, "mochi");
+        }
+    }
+
+    #[test]
+    fn unavailable_appearance_load_preserves_every_other_profile_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut expected = CompanionProfileConfig::new("原来的伙伴", "mochi", 7);
+        expected.control_robot_id = Some("existing-device".into());
+        expected.persona.custom = "保留原来的人格".into();
+        expected.skills.enabled = vec!["mermaid".into()];
+        expected.mcp_servers = vec!["existing-server".into()];
+        expected.model = Some(ProviderWithModel {
+            provider_id: nomifun_common::ProviderId::new().into_string(),
+            model: "existing-model".into(),
+            use_model: None,
+        });
+        expected.appearance.companion_enabled = true;
+        expected.appearance.companion_x = Some(42);
+        expected.appearance.custom_figure = Some(CustomFigureMeta {
+            aspect: 1.0,
+            head_box: HeadBox { x: 0.1, y: 0.1, w: 0.5, h: 0.5 },
+            size_tier: "m".into(),
+            size_px: None,
+            figure_id: Some(FigureId::new().into_string()),
+        });
+        expected.order_index = Some(3);
+        expected.mood_override = Some(CompanionMood::Happy);
+        let mut raw = serde_json::to_value(&expected).unwrap();
+        raw["character"] = serde_json::json!("ink");
+        let original = serde_json::to_vec(&raw).unwrap();
+        std::fs::write(CompanionProfileConfig::config_path(dir.path()), &original).unwrap();
+
+        let loaded = CompanionProfileConfig::load(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded, expected, "only the unavailable appearance may change");
+        assert_eq!(std::fs::read(CompanionProfileConfig::config_path(dir.path())).unwrap(), original,
+            "reading a profile must not introduce a mandatory startup write");
+        loaded.save(dir.path()).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(CompanionProfileConfig::config_path(dir.path())).unwrap(),
+        ).unwrap();
+        assert_eq!(saved["character"], "mochi");
+        assert_eq!(CompanionProfileConfig::load(dir.path()).unwrap().unwrap(), expected);
+    }
+
+    #[test]
+    fn appearance_output_is_canonical_but_malformed_input_still_fails() {
+        let mut profile = CompanionProfileConfig::new("伙伴", "bolt", 1);
+        profile.character = "ink".into();
+        let mut raw = serde_json::to_value(&profile).unwrap();
+        assert_eq!(raw["character"], "mochi", "save and export cannot emit retired IDs");
+        for invalid in [serde_json::Value::Null, serde_json::json!(42), serde_json::json!({"id": "mochi"})] {
+            raw["character"] = invalid;
+            assert!(serde_json::from_value::<CompanionProfileConfig>(raw.clone()).is_err());
+        }
+        raw.as_object_mut().unwrap().remove("character");
+        assert!(serde_json::from_value::<CompanionProfileConfig>(raw).is_err());
     }
 
     #[test]
@@ -1233,7 +1298,7 @@ mod tests {
         assert!(wire.get("learn").is_none());
         assert!(wire.get("evolve").is_none());
 
-        let profile = CompanionProfileConfig::new("新宠", "ink", 1);
+        let profile = CompanionProfileConfig::new("新宠", "mochi", 1);
         assert!(!profile.learn.enabled);
         assert_eq!(profile.learn.interval_minutes, 60);
         assert!(profile.learn.model.is_none());
@@ -1253,7 +1318,7 @@ mod tests {
     #[test]
     fn a_pre_migration_profile_loads_and_reports_itself_unseeded() {
         let dir = tempfile::tempdir().unwrap();
-        let profile = CompanionProfileConfig::new("老宠", "ink", 1);
+        let profile = CompanionProfileConfig::new("老宠", "mochi", 1);
         let mut raw = serde_json::to_value(&profile).unwrap();
         let object = raw.as_object_mut().unwrap();
         object.remove("learn");
@@ -1515,7 +1580,7 @@ mod tests {
             use_model: None,
         };
 
-        let mut profile = CompanionProfileConfig::new("严格模型", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("严格模型", "mochi", 1);
         profile.model = Some(model.clone());
         let profile_json = serde_json::to_value(&profile).unwrap();
         assert_eq!(
@@ -1526,7 +1591,7 @@ mod tests {
             })
         );
 
-        let mut owner = CompanionProfileConfig::new("双模型", "ink", 1);
+        let mut owner = CompanionProfileConfig::new("双模型", "mochi", 1);
         owner.learn.model = Some(model.clone());
         owner.evolve.model = Some(model);
         let owner_json = serde_json::to_value(owner).unwrap();
@@ -1574,7 +1639,7 @@ mod tests {
             "companion_id": companion_id,
             "seq": 1,
             "name": "Old",
-            "character": "ink",
+            "character": "mochi",
             "persona": PersonaConfig::default(),
             "model": null,
             "appearance": CompanionWindowConfig::default(),
@@ -1600,7 +1665,7 @@ mod tests {
             use_model: None,
         };
 
-        let mut profile = CompanionProfileConfig::new("全槽位", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("全槽位", "mochi", 1);
         profile.model = Some(model.clone());
         profile.fallback_model = Some(model.clone());
         profile.vision_model = Some(model.clone());
@@ -1643,10 +1708,10 @@ mod tests {
             use_model: None,
         };
 
-        let empty = CompanionProfileConfig::new("空", "ink", 1);
+        let empty = CompanionProfileConfig::new("空", "mochi", 1);
         assert!(empty.provider_model_slots().is_empty());
 
-        let mut full = CompanionProfileConfig::new("满", "ink", 1);
+        let mut full = CompanionProfileConfig::new("满", "mochi", 1);
         full.model = Some(model.clone());
         full.learn.model = Some(model.clone());
         full.evolve.model = Some(model.clone());
@@ -1670,7 +1735,7 @@ mod tests {
     #[test]
     fn vad_settings_are_clamped_on_read_and_range_checked_on_save() {
         let dir = tempfile::tempdir().unwrap();
-        let mut profile = CompanionProfileConfig::new("VAD", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("VAD", "mochi", 1);
 
         profile.voice.vad.sensitivity = 9.0;
         profile.voice.vad.min_silence_ms = 99_999;
@@ -1726,7 +1791,7 @@ mod tests {
 
     #[test]
     fn unified_profile_has_one_model_and_extension_selection() {
-        let mut profile = CompanionProfileConfig::new("Nomi", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("Nomi", "mochi", 1);
         profile.skills.enabled.push("shared-skill".into());
         profile.mcp_servers.push("shared-server".into());
         let value = serde_json::to_value(&profile).unwrap();
@@ -1737,7 +1802,7 @@ mod tests {
     #[test]
     fn explicit_profile_transition_preserves_original_bytes_and_main_choices() {
         let dir = tempfile::tempdir().unwrap();
-        let mut profile = CompanionProfileConfig::new("Nomi", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("Nomi", "mochi", 1);
         profile.skills.enabled.push("main-skill".into());
         let mut prior = serde_json::to_value(&profile).unwrap();
         prior["robot"] = serde_json::json!({"model":null,"skills":{"enabled":["retired-skill"]},"mcp_servers":["retired-server"]});
@@ -1752,7 +1817,7 @@ mod tests {
     #[test]
     fn profile_transition_rejects_malformed_unknown_duplicate_and_conflicting_backup_without_rewriting() {
         let dir = tempfile::tempdir().unwrap();
-        let profile = CompanionProfileConfig::new("Nomi", "ink", 1);
+        let profile = CompanionProfileConfig::new("Nomi", "mochi", 1);
         let mut value = serde_json::to_value(&profile).unwrap();
         value["robot"] = serde_json::json!({"model":null,"skills":{},"mcp_servers":[]});
         let valid = serde_json::to_string(&value).unwrap();

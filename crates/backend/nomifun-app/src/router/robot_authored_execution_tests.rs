@@ -104,7 +104,7 @@ impl RobotFixture {
         let owner = fixture.services.authoritative_user_id.as_ref();
         let projection = fixture.owner.get_session(owner,&fixture.host.options.conversation_id).await.unwrap();
         let model = serde_json::to_value(projection.model.unwrap()).unwrap();
-        let companion = api(router,"/api/companion/companions",json!({"name":scenario,"character":"ink"})).await;
+        let companion = api(router,"/api/companion/companions",json!({"name":scenario,"character":"mochi"})).await;
         let companion = companion["companion_id"].as_str().unwrap().to_owned();
         request(router,"PATCH",&format!("/api/companion/companions/{companion}"),json!({"model":model})).await;
         let editor = api(router,"/api/agent-presets/from-template/companion.default",json!({

@@ -63,7 +63,7 @@ const AppearanceSection: React.FC<AppearanceSectionProps> = ({
     profile.character === CUSTOM_CHARACTER_ID
       ? (figures.find((f) => f.figure_id === figure?.figureId)?.name ??
         t('nomi.customFigure.cardLabel', { defaultValue: '自定义形象' }))
-      : t(`nomi.characters.${getCharacter(profile.character).nameKey}.name`);
+      : t(`nomi.characters.${getCharacter(profile.character).id}.name`);
 
   // Lv = floor(sqrt(xp / 100)) + 1 ⇒ level L spans [(L-1)²·100, L²·100).
   const level = Math.max(1, status.level);

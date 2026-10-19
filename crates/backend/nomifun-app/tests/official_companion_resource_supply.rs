@@ -241,7 +241,7 @@ async fn companion_first_entry_executes_and_publishes_without_optional_connectio
     assert_eq!(status, StatusCode::CREATED, "{provider}");
     let model = json!({"provider_id":provider["data"]["provider_id"],"model":"full-companion-model"});
     let (status, companion) = call(&router, "POST", "/api/companion/companions",
-        json!({"name":"Ready Companion", "character":"ink"})).await;
+        json!({"name":"Ready Companion", "character":"mochi"})).await;
     assert_eq!(status, StatusCode::CREATED, "{companion}");
     let companion_id = companion["data"]["companion_id"].as_str().unwrap();
     let (status, patched) = call(&router, "PATCH", &format!("/api/companion/companions/{companion_id}"),

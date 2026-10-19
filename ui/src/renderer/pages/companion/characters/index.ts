@@ -5,7 +5,6 @@
  */
 
 import Mochi from './Mochi';
-import Ink from './Ink';
 import Bolt from './Bolt';
 import { customDeskSpec } from './customDesk';
 import type { CharacterDeskSpec, CharacterMeta, CustomFigureMeta } from './types';
@@ -19,23 +18,28 @@ export type {
   CompanionMood,
 } from './types';
 
+export const DEFAULT_CHARACTER_ID = 'mochi';
+
+const DEFAULT_CHARACTER: CharacterMeta = {
+  id: DEFAULT_CHARACTER_ID,
+  palette: ['#fff6f0', '#ffb7c9'],
+  Component: Mochi,
+};
+
 /**
  * The character roster. Order = display order in the picker.
  * `palette` feeds the little swatch chip on each picker card.
  */
-export const CHARACTERS: CharacterMeta[] = [
-  { id: 'mochi', nameKey: 'mochi', palette: ['#fff6f0', '#ffb7c9'], Component: Mochi },
-  { id: 'ink', nameKey: 'ink', palette: ['#2b2b33', '#e8b04b'], Component: Ink },
-  { id: 'bolt', nameKey: 'bolt', palette: ['#bfeee0', '#37e0ff'], Component: Bolt },
+export const CHARACTERS: readonly CharacterMeta[] = [
+  DEFAULT_CHARACTER,
+  { id: 'bolt', palette: ['#bfeee0', '#37e0ff'], Component: Bolt },
 ];
 
-export const DEFAULT_CHARACTER_ID = 'mochi';
-
 export const getCharacter = (id?: string | null): CharacterMeta =>
-  CHARACTERS.find((c) => c.id === id) ?? CHARACTERS[0];
+  CHARACTERS.find((c) => c.id === id) ?? DEFAULT_CHARACTER;
 
 /**
- * The classic chibi window every character used before per-character desks.
+ * The compact desktop window shared by the built-in characters.
  * Must match the creation-time `inner_size` in apps/desktop/src/main.rs —
  * applyDeskSize self-heals a mismatch with a visible startup resize.
  * Height = figure (120) + chrome (60: hover chat bar reserve + hop headroom);
@@ -45,10 +49,8 @@ export const getCharacter = (id?: string | null): CharacterMeta =>
  */
 export const DEFAULT_DESK: CharacterDeskSpec = { windowWidth: 200, windowHeight: 180, figureHeight: 120 };
 
-export const getDeskSpec = (id?: string | null): CharacterDeskSpec => getCharacter(id).desk ?? DEFAULT_DESK;
-
 export const CUSTOM_CHARACTER_ID = 'custom';
 
-/** Desk spec resolution that understands DIY custom figures. */
+/** Custom figures use their configured dimensions; all other looks use the compact window. */
 export const getDeskSpecFor = (id?: string | null, meta?: CustomFigureMeta | null): CharacterDeskSpec =>
-  id === CUSTOM_CHARACTER_ID && meta ? customDeskSpec(meta) : getDeskSpec(id);
+  id === CUSTOM_CHARACTER_ID && meta ? customDeskSpec(meta) : DEFAULT_DESK;

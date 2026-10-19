@@ -1856,8 +1856,8 @@ mod tests {
     async fn memory_import_rehomes_foreign_and_unowned_rows_onto_the_local_owner() {
         let dir = tempfile::TempDir::new().unwrap();
         let roster = scan_registry(dir.path(), "companions");
-        let oldest = roster.create_companion("甲", "ink").await.unwrap().companion_id;
-        let second = roster.create_companion("乙", "ink").await.unwrap().companion_id;
+        let oldest = roster.create_companion("甲", "mochi").await.unwrap().companion_id;
+        let second = roster.create_companion("乙", "mochi").await.unwrap().companion_id;
 
         // Three rows: one owned by a companion that only exists on the SOURCE
         // machine, one vestigial unowned row, one owned by a live local companion.
@@ -1927,8 +1927,8 @@ mod tests {
     async fn memory_import_dedup_is_owner_scoped_not_install_wide() {
         let dir = tempfile::TempDir::new().unwrap();
         let roster = scan_registry(dir.path(), "companions");
-        let oldest = roster.create_companion("甲", "ink").await.unwrap().companion_id;
-        let other = roster.create_companion("乙", "ink").await.unwrap().companion_id;
+        let oldest = roster.create_companion("甲", "mochi").await.unwrap().companion_id;
+        let other = roster.create_companion("乙", "mochi").await.unwrap().companion_id;
 
         let store = CompanionStore::open_memory().await.unwrap();
         // 乙 already holds this exact fact. It is 乙's, and only 乙's.
@@ -2290,7 +2290,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let store_a = CompanionStore::open_memory().await.unwrap();
         let reg_a = scan_registry(dir.path(), "companions-a");
-        let created = reg_a.create("毛球", "ink").await.unwrap();
+        let created = reg_a.create("毛球", "mochi").await.unwrap();
         let provider_id = provider_fixture(1);
         let profile = reg_a
             .patch(
@@ -2360,7 +2360,7 @@ mod tests {
         // A fresh local short number is allocated (the bundle's own seq is
         // ignored): "毛球" took 1 on this roster, so the import gets 2.
         assert_eq!(imported.seq, 2);
-        assert_eq!(imported.character, "ink");
+        assert_eq!(imported.character, "mochi");
         assert_eq!(imported.persona, profile.persona);
         assert_eq!(imported.model, profile.model);
         assert_eq!(imported.mood_override, profile.mood_override);
@@ -2582,6 +2582,46 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn removed_appearance_bundle_import_preserves_settings_memories_and_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CompanionStore::open_memory().await.unwrap();
+        let roster = scan_registry(dir.path(), "companions");
+        let mut profile = CompanionProfileConfig::new("原来的伙伴", "mochi", 7);
+        profile.persona.custom = "保留原来的人格".into();
+        profile.appearance.companion_enabled = true;
+        let mut old = serde_json::to_value(&profile).unwrap();
+        old["character"] = serde_json::json!("ink");
+        let mut memory = raw_memory(&memory_fixture(1), "preference", "主人喜欢深色主题", "active");
+        memory.companion_id = Some(profile.companion_id.clone());
+        let archive = dir.path().join("old-companion.zip");
+        write_test_zip(&archive, &[
+            ("manifest.json", &manifest_json(3, EXPORT_KIND_COMPANION)),
+            ("companion.json", &serde_json::to_string(&old).unwrap()),
+            ("state.json", r#"{"xp":57,"mood":"happy"}"#),
+            ("knowledge_refs.json", r#"{"names":["原来的知识库"]}"#),
+            ("memories.jsonl", &format!("{}\n", serde_json::to_string(&memory).unwrap())),
+        ]);
+        let outcome = import_bundle(&store, &roster, &skill_paths(dir.path()), &dir.path().join("shared"), &archive).await.unwrap();
+        let ImportOutcome::Companion { companion_id, knowledge_names, memories, .. } = outcome else {
+            panic!("expected companion outcome");
+        };
+        let imported = roster.get(&companion_id).await.unwrap();
+        assert_ne!(companion_id, profile.companion_id, "import remains a clone with its own identity");
+        assert_eq!(imported.character, "mochi");
+        assert_eq!(imported.name, profile.name);
+        assert_eq!(imported.persona, profile.persona);
+        assert_eq!(imported.appearance, profile.appearance);
+        assert_eq!(knowledge_names, vec!["原来的知识库".to_string()]);
+        assert_eq!(memories, 1);
+        assert_eq!(store.get_companion_state_i64(&companion_id, "xp").await.unwrap(), 57);
+        assert_eq!(store.get_companion_state(&companion_id, crate::store::MOOD_KEY).await.unwrap().as_deref(), Some("happy"));
+        let imported_memories = store.dump_memories_for_companion(&companion_id).await.unwrap();
+        assert_eq!(imported_memories.len(), 1);
+        assert_eq!(imported_memories[0].content, memory.content);
+        assert_ne!(imported_memories[0].memory_id, memory.memory_id);
+    }
+
     /// A bundle written by the OLD exporter — four entries, no memories, no
     /// skills, no image — must still import. When such a bundle claims a custom
     /// figure it has no pixels for, the figure is dropped instead of leaving a
@@ -2780,7 +2820,7 @@ mod tests {
         let store = CompanionStore::open_memory().await.unwrap();
         let roster = scan_registry(dir.path(), "companions");
         let shared = dir.path().join("shared");
-        let profile = CompanionProfileConfig::new("严格伙伴", "ink", 1);
+        let profile = CompanionProfileConfig::new("严格伙伴", "mochi", 1);
         let profile_json = serde_json::to_string(&profile).unwrap();
 
         let memory_state_missing = dir.path().join("memory-state-missing.zip");

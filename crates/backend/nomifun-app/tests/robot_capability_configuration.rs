@@ -30,7 +30,7 @@ async fn fixture() -> Fixture {
     assert_eq!(status, StatusCode::CREATED, "{provider}");
     let model = json!({"provider_id":provider["data"]["provider_id"], "model":"step-3.7-flash"});
     let (status, companion) = call(router.clone(), "POST", "/api/companion/companions",
-        json!({"name":"Unified entry companion", "character":"ink"})).await;
+        json!({"name":"Unified entry companion", "character":"mochi"})).await;
     assert_eq!(status, StatusCode::CREATED, "{companion}");
     let companion_id = companion["data"]["companion_id"].as_str().unwrap().to_owned();
     let (status, patched) = call(router.clone(), "PATCH",
@@ -287,7 +287,7 @@ async fn physical_entry_without_robot_tools_keeps_verified_device_identity_and_r
     let services = &f.services;
     let companion_id = &f.companion_id;
     let (status, other) = call(f.router.clone(), "POST", "/api/companion/companions",
-        json!({"name":"Separate physical owner", "character":"ink"})).await;
+        json!({"name":"Separate physical owner", "character":"mochi"})).await;
     assert_eq!(status, StatusCode::CREATED, "{other}");
     let other_id = other["data"]["companion_id"].as_str().unwrap();
     let registry = &services.robot.as_ref().unwrap().registry;

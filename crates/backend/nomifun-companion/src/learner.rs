@@ -518,7 +518,7 @@ mod tests {
             CompanionRegistry::scan(dir.join("companions"), dir.join("shared"))
                 .unwrap(),
         );
-        let companion = registry.create("测试宠", "ink").await.unwrap();
+        let companion = registry.create("测试宠", "mochi").await.unwrap();
         registry
             .patch(
                 &companion.companion_id,
@@ -737,7 +737,7 @@ mod tests {
         let reply = r#"{"memories":[{"kind":"profile","content":"主人写 Rust","importance":0.9}],
             "mood":"proud","diary":"d"}"#;
         let (learner, learned) = make_learner(dir.path(), reply).await;
-        let idle = learner.registry.create("旁观者", "ink").await.unwrap().companion_id;
+        let idle = learner.registry.create("旁观者", "mochi").await.unwrap().companion_id;
 
         assert_eq!(learner.run_for(&learned).await.unwrap().status, "ok");
         assert_eq!(learner.store.get_companion_state_i64(&learned, "xp").await.unwrap(), 6);
@@ -767,7 +767,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         seed_event(dir.path());
         let (learner, owner) = make_learner(dir.path(), "{}").await;
-        let stranger = learner.registry.create("别的伙伴", "ink").await.unwrap().companion_id;
+        let stranger = learner.registry.create("别的伙伴", "mochi").await.unwrap().companion_id;
 
         // 一条属于 stranger 的活跃记忆 + 一条属于 owner 的活跃记忆。
         let theirs = learner
@@ -867,7 +867,7 @@ mod tests {
         let reply = r#"{"memories":[{"kind":"profile","content":"主人在写 Rust","importance":0.9}],
             "mood":"content","diary":"补上了"}"#;
         let learner = Learner { completer: Arc::new(CannedCompleter(reply.to_owned())), ..learner };
-        let owner = learner.registry.create("迟到的伙伴", "ink").await.unwrap().companion_id;
+        let owner = learner.registry.create("迟到的伙伴", "mochi").await.unwrap().companion_id;
         learner
             .registry
             .patch(
@@ -924,7 +924,7 @@ mod tests {
         seed_event(dir.path());
         let reply = r#"{"memories":[{"kind":"profile","content":"主人写 Rust","importance":0.9}],"mood":"ok","diary":"d"}"#;
         let (learner, first) = make_learner(dir.path(), reply).await;
-        let second = learner.registry.create("第二只", "ink").await.unwrap().companion_id;
+        let second = learner.registry.create("第二只", "mochi").await.unwrap().companion_id;
         learner
             .registry
             .patch(
@@ -956,7 +956,7 @@ mod tests {
         store.set_state(LEARN_CURSOR_KEY, "900").await.unwrap();
         store.set_state(EVOLVE_CURSOR_KEY, "400").await.unwrap();
         store.set_state(MOOD_KEY, "happy").await.unwrap();
-        let other = learner.registry.create("第二只", "ink").await.unwrap().companion_id;
+        let other = learner.registry.create("第二只", "mochi").await.unwrap().companion_id;
 
         let ids = vec![id.clone(), other.clone()];
         assert!(store.seed_companion_state_from_global(&ids).await.unwrap() > 0);
@@ -1000,8 +1000,8 @@ mod tests {
             )
             .unwrap(),
         );
-        let _a = registry.create("甲", "ink").await.unwrap();
-        let b = registry.create("乙", "ink").await.unwrap();
+        let _a = registry.create("甲", "mochi").await.unwrap();
+        let b = registry.create("乙", "mochi").await.unwrap();
         registry
             .patch(
                 &b.companion_id,

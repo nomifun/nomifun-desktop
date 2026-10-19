@@ -1155,7 +1155,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
         let companion_id = service
-            .create_companion("学习者", "ink")
+            .create_companion("学习者", "mochi")
             .await
             .unwrap()
             .companion_id;
@@ -1299,7 +1299,7 @@ mod tests {
     async fn history_days_reads_without_minting_and_keeps_digest_only_days() {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
-        let companion = service.create_companion("小南", "ink").await.unwrap();
+        let companion = service.create_companion("小南", "mochi").await.unwrap();
 
         let days = |uri: String| {
             let app = app.clone();
@@ -1352,7 +1352,7 @@ mod tests {
     async fn batch_endpoint_applies_all_actions_atomically() {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
-        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let owner = service.create_companion("甲", "mochi").await.unwrap().companion_id;
         let a = service
             .add_memory("episode", "上周试了埃塞俄比亚豆", &[], Some(&owner))
             .await
@@ -1430,7 +1430,7 @@ mod tests {
         assert!(service.store.get_memory(&a.memory_id).await.unwrap().is_some(), "failed batch must roll back");
 
         // another companion cannot batch A's rows, and the refusal changes nothing
-        let stranger = service.create_companion("乙", "ink").await.unwrap().companion_id;
+        let stranger = service.create_companion("乙", "mochi").await.unwrap().companion_id;
         let resp = app
             .clone()
             .oneshot(post_json(
@@ -1468,7 +1468,7 @@ mod tests {
     async fn memory_wire_names_the_owner_companion_id() {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
-        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let owner = service.create_companion("甲", "mochi").await.unwrap().companion_id;
 
         // The write takes the owner under the same name the read gives it back.
         let created = json_body(
@@ -1519,7 +1519,7 @@ mod tests {
     async fn skill_wire_names_the_owner_companion_id() {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
-        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let owner = service.create_companion("甲", "mochi").await.unwrap().companion_id;
 
         // The list route fails closed without a real SKILL.md, so seed both halves:
         // the file under the owner's scope and the registry row that points at it.
@@ -1596,8 +1596,8 @@ mod tests {
     async fn single_memory_mutations_are_scoped_to_the_asking_companion() {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
-        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
-        let stranger = service.create_companion("乙", "ink").await.unwrap().companion_id;
+        let owner = service.create_companion("甲", "mochi").await.unwrap().companion_id;
+        let stranger = service.create_companion("乙", "mochi").await.unwrap().companion_id;
         let mine = service
             .add_memory("preference", "主人喜欢深烘焙咖啡", &[], Some(&owner))
             .await
@@ -1682,8 +1682,8 @@ mod tests {
     async fn memory_put_returns_the_committed_revision_and_stale_put_cannot_replace_it() {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
-        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
-        let stranger = service.create_companion("乙", "ink").await.unwrap().companion_id;
+        let owner = service.create_companion("甲", "mochi").await.unwrap().companion_id;
+        let stranger = service.create_companion("乙", "mochi").await.unwrap().companion_id;
         let memory = service.add_memory("preference", "原先的咖啡偏好", &[], Some(&owner)).await.unwrap();
         let revision = memory_revision(&service, &memory.memory_id).await;
         let uri = format!("/api/companion/memories/{}", memory.memory_id);
@@ -1714,7 +1714,7 @@ mod tests {
     async fn memory_mutation_routes_require_versions_and_exact_revision_maps() {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
-        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let owner = service.create_companion("甲", "mochi").await.unwrap().companion_id;
         let a = service.add_memory("preference", "第一条独立偏好", &[], Some(&owner)).await.unwrap();
         let b = service.add_memory("preference", "第二条不同约定", &[], Some(&owner)).await.unwrap();
         let a_before = service.store.get_memory(&a.memory_id).await.unwrap().unwrap();
@@ -1756,7 +1756,7 @@ mod tests {
     async fn one_stale_member_rolls_back_entire_batch_and_merge_requests() {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
-        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let owner = service.create_companion("甲", "mochi").await.unwrap().companion_id;
         let a = service.add_memory("preference", "保留第一条偏好", &[], Some(&owner)).await.unwrap();
         let b = service.add_memory("preference", "待修正的第二条约定", &[], Some(&owner)).await.unwrap();
         let versions = memory_revisions(&service, &[&a.memory_id, &b.memory_id]).await;
@@ -1786,7 +1786,7 @@ mod tests {
     async fn stale_memory_delete_preserves_the_corrections_existing_source_cut() {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
-        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
+        let owner = service.create_companion("甲", "mochi").await.unwrap().companion_id;
         let event = nomifun_common::CompanionEventId::new().into_string();
         let candidate = crate::learning_commit::LearnedMemoryCandidate {
             kind: "preference".into(), content: "可被用户明确忘记的偏好".into(), tags: vec![], importance: 0.8,
@@ -1826,8 +1826,8 @@ mod tests {
     async fn merge_flow_groups_then_archives_sources_with_audit_tag() {
         let dir = tempfile::tempdir().unwrap();
         let (app, service) = test_app(dir.path()).await;
-        let owner = service.create_companion("甲", "ink").await.unwrap().companion_id;
-        let stranger = service.create_companion("乙", "ink").await.unwrap().companion_id;
+        let owner = service.create_companion("甲", "mochi").await.unwrap().companion_id;
+        let stranger = service.create_companion("乙", "mochi").await.unwrap().companion_id;
         // Two normalized-similar actives of one kind (dedup guard skips exact
         // duplicates, so use containment ≥0.6 variants) + one unrelated.
         // Written through the store: `add_memory`'s dedup guard uses the very

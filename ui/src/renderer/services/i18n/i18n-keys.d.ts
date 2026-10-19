@@ -4602,8 +4602,6 @@ export type I18nKey =
   | 'nomi.archive.onThisDayEmpty'
   | 'nomi.characters.bolt.name'
   | 'nomi.characters.bolt.style'
-  | 'nomi.characters.ink.name'
-  | 'nomi.characters.ink.style'
   | 'nomi.characters.mochi.name'
   | 'nomi.characters.mochi.style'
   | 'nomi.chat.clear'

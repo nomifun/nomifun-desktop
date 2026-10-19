@@ -4778,7 +4778,7 @@ export interface ICompanionProfile {
   /** Positive dataset-local display ordinal. */
   seq: number;
   name: string;
-  /** Character id (mochi/ink/roux/pixel/bolt/boo); unknown → default. */
+  /** Character id (mochi/bolt/custom); unknown → default. */
   character: string;
   /** Manual emotion held until cleared; null follows the latest learned mood. */
   mood_override: ICompanionMood | null;

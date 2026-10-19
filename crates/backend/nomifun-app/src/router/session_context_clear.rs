@@ -292,7 +292,7 @@ mod tests {
         let f=Fixture::new().await;
         f.seed_prior_turn("original-window").await;
         let registry=Arc::new(CompanionRegistry::scan(f._root.path().join("companions"),f._root.path().join("shared")).unwrap());
-        let companion=registry.create("Archive fixture","ink").await.unwrap();
+        let companion=registry.create("Archive fixture","mochi").await.unwrap();
         let store=CompanionStore::open_memory().await.unwrap();
         store.insert_companion_thread(f.session.as_ref(),&companion.companion_id,"Archive fixture").await.unwrap();
         let started=Arc::new(tokio::sync::Notify::new());

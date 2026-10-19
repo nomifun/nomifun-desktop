@@ -4060,7 +4060,7 @@ async fn official_agent_read_surfaces_load_on_the_full_product_graph_without_a_m
         }
     }
     let (status, created) = client.call(router.clone(), "POST", "/api/companion/companions", json!({
-        "name": "Read-only Agent options", "character": "ink"
+        "name": "Read-only Agent options", "character": "mochi"
     })).await;
     assert_eq!(status, StatusCode::CREATED, "Companion creation failed: {created}");
     let id = created["data"]["companion_id"].as_str().unwrap();
@@ -4093,7 +4093,7 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
     let client = LocalJsonClient(TRUST);
     const TRUST: &str = "product-selection-preflight";
     let (router, services) = common::build_local_trust_app(TRUST).await;
-    let (_, created) = client.call(router.clone(), "POST", "/api/companion/companions", json!({ "name": "Choose Agent first", "character": "ink" })).await;
+    let (_, created) = client.call(router.clone(), "POST", "/api/companion/companions", json!({ "name": "Choose Agent first", "character": "mochi" })).await;
     let companion_id = created["data"]["companion_id"].as_str().unwrap();
     let chosen = json!({ "kind": "template", "template_key": "chat.minimal" });
     let mut paths = Vec::new();
@@ -4595,7 +4595,7 @@ async fn companion_implicit_entry_binds_its_exact_owner_resources() {
     assert_eq!(status, StatusCode::CREATED, "{provider}");
     let provider_id = provider["data"]["provider_id"].as_str().unwrap();
     let (status, companion) = client.call(router.clone(), "POST", "/api/companion/companions",
-        json!({ "name": "Implicit binding companion", "character": "ink" })).await;
+        json!({ "name": "Implicit binding companion", "character": "mochi" })).await;
     assert_eq!(status, StatusCode::CREATED, "{companion}");
     let companion_id = companion["data"]["companion_id"].as_str().unwrap();
     let (status, patched) = client.call(router.clone(), "PATCH",
@@ -4632,7 +4632,7 @@ async fn companion_implicit_entry_binds_its_exact_owner_resources() {
         assert_eq!(resource(absent), None, "optional {absent} must not be invented");
     }
     let (status, unrelated) = client.call(router.clone(), "POST", "/api/companion/companions",
-        json!({ "name": "Unrelated companion must stay private", "character": "ink" })).await;
+        json!({ "name": "Unrelated companion must stay private", "character": "mochi" })).await;
     assert_eq!(status, StatusCode::CREATED, "{unrelated}");
     let (status, turn) = client.call(router.clone(), "POST",
         &format!("/api/agent-sessions/{session_id}/turns"), json!({
@@ -4711,7 +4711,7 @@ async fn companion_options_survive_a_first_launch_selection_default_save_failure
     let provider = create_chat_provider(&router, COMPANION_AGENT_TEST_TRUST, "First-launch selection", "first-launch-chat", 0).await;
     let model = json!({ "provider_id": provider["provider_id"], "model": "first-launch-chat" });
     let (status, companion) = call(router.clone(), "POST", "/api/companion/companions", json!({
-        "name": "Partially saved personal Agent", "character": "ink",
+        "name": "Partially saved personal Agent", "character": "mochi",
     })).await;
     assert_eq!(status, StatusCode::CREATED, "{companion}");
     let companion_id = companion["data"]["companion_id"].as_str().unwrap();
@@ -4920,7 +4920,7 @@ async fn started_companion_fixture() -> StartedCompanion {
     assert_eq!(status, StatusCode::CREATED, "{provider}");
     let provider_id = provider["data"]["provider_id"].as_str().unwrap();
     let (status, companion) = call(router.clone(), "POST", "/api/companion/companions",
-        json!({ "name": "Agent-bound companion", "character": "ink" })).await;
+        json!({ "name": "Agent-bound companion", "character": "mochi" })).await;
     assert_eq!(status, StatusCode::CREATED, "{companion}");
     let companion_id = companion["data"]["companion_id"].as_str().unwrap();
     let (status, patched) = call(router.clone(), "PATCH",
@@ -5431,7 +5431,7 @@ async fn companion_agent_settings_switch_in_place_and_preserve_persona_history_a
         .find(|option| option["selection"] == custom_selection).unwrap()["available"], true);
 
     let (status, other) = call(router.clone(), "POST", "/api/companion/companions",
-        json!({"name":"Another Companion", "character":"ink"})).await;
+        json!({"name":"Another Companion", "character":"mochi"})).await;
     assert_eq!(status, StatusCode::CREATED, "{other}");
     let other_id = other["data"]["companion_id"].as_str().unwrap();
     let (status, cross_target) = call(router.clone(), "PUT",
