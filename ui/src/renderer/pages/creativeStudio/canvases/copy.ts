@@ -9,6 +9,13 @@ import i18n, { type TFunction } from 'i18next';
 export interface CreativeStudioCanvasesCopy {
   libraryLabel: string;
   title: string;
+  allCanvases: string;
+  emptyCanvas: string;
+  moreActions: string;
+  manageSelection: string;
+  selectedCount: (count: number) => string;
+  selectAll: string;
+  finishSelection: string;
   newCanvas: string;
   defaultCanvasTitle: (index: number) => string;
   importCanvases: string;
@@ -63,6 +70,29 @@ export const resolveCreativeStudioCanvasesCopy = (
     }),
     title: t('creativeStudio.canvases.title', {
       defaultValue: 'Infinite canvas',
+    }),
+    allCanvases: t('creativeStudio.canvases.allCanvases', {
+      defaultValue: 'All canvases',
+    }),
+    emptyCanvas: t('creativeStudio.canvases.emptyCanvas', {
+      defaultValue: 'Blank canvas',
+    }),
+    moreActions: t('creativeStudio.canvases.moreActions', {
+      defaultValue: 'More actions',
+    }),
+    manageSelection: t('creativeStudio.canvases.manageSelection', {
+      defaultValue: 'Manage selection',
+    }),
+    selectedCount: (count) =>
+      t('creativeStudio.canvases.selectedCount', {
+        defaultValue: '{{count}} selected',
+        count,
+      }),
+    selectAll: t('creativeStudio.canvases.selectAll', {
+      defaultValue: 'Select all',
+    }),
+    finishSelection: t('creativeStudio.canvases.finishSelection', {
+      defaultValue: 'Done',
     }),
     newCanvas: t('creativeStudio.canvases.newCanvas', {
       defaultValue: 'New canvas',

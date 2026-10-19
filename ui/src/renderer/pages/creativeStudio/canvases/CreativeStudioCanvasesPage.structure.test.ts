@@ -38,15 +38,13 @@ describe('Creative Studio Canvas library product contract', () => {
     expect(card.includes('data-canvas-id')).toBe(true);
   });
 
-  test('keeps the established responsive card-grid measurements', () => {
+  test('fits compact cards to the available desktop pane without viewport breakpoints', () => {
     expect(css.includes('max-width: 1152px')).toBe(true);
     expect(
-      css.includes('grid-template-columns: repeat(3, minmax(0, 1fr))')
+      css.includes('grid-template-columns: repeat(auto-fill, minmax(245px, 1fr))')
     ).toBe(true);
-    expect(css.includes('@media (max-width: 1279px)')).toBe(true);
-    expect(
-      css.includes('grid-template-columns: repeat(2, minmax(0, 1fr))')
-    ).toBe(true);
+    expect(css.includes('@media (max-width:')).toBe(false);
+    expect(page.includes('<PageHeader')).toBe(true);
   });
 
   test('uses shared theme tokens instead of fixed light-only controls', () => {

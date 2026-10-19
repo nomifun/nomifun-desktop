@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Button, Message, Modal, Result } from '@arco-design/web-react';
-import { Download, Plus, Upload } from '@icon-park/react';
+import {
+  Button,
+  Checkbox,
+  Message,
+  Modal,
+  Result,
+} from '@arco-design/web-react';
+import { Delete, Download, Plus, Upload } from '@icon-park/react';
 import React, {
   useCallback,
   useEffect,
@@ -15,12 +21,15 @@ import React, {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import PageHeader from '@/renderer/components/layout/PageHeader';
+
 import type { CreativeCanvasSummary } from '../domain';
 import {
   canvasErrorMessage,
   mergeCanvases,
   pruneCanvasSelection,
 } from './canvasList';
+import CanvasActionsMenu from './CanvasActionsMenu';
 import { creativeStudioCanvasesService } from './canvasServiceAdapter';
 import type { CreativeStudioCanvasesCopy } from './copy';
 import { resolveCreativeStudioCanvasesCopy } from './copy';
@@ -84,6 +93,9 @@ const CreativeStudioCanvasesPage: React.FC<
   const [selectedIds, setSelectedIds] = useState<Set<string>>(
     () => new Set(initialSelectedIds)
   );
+  const [selectionMode, setSelectionMode] = useState(
+    initialSelectedIds.length > 0
+  );
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [deleteIds, setDeleteIds] = useState<string[]>([]);
@@ -136,6 +148,7 @@ const CreativeStudioCanvasesPage: React.FC<
   }, [canvases, editingId]);
 
   const selectionActive = selectedIds.size > 0;
+  const allSelected = canvases.length > 0 && selectedIds.size === canvases.length;
   const controlsDisabled =
     loadState !== 'ready' || busyAction !== null || openingCanvasId !== null;
 
@@ -251,52 +264,14 @@ const CreativeStudioCanvasesPage: React.FC<
       data-creative-studio-canvases
       data-canvases-state={loadState}
       data-selection-active={selectionActive ? 'true' : 'false'}
+      data-selection-mode={selectionMode ? 'true' : 'false'}
       aria-busy={loadState === 'loading'}
     >
       <div className={styles.container}>
-        <header className={styles.header}>
-          <div className={styles.heading}>
-            <h1 className={styles.title}>{copy.title}</h1>
-          </div>
-          <div className={styles.headerActions}>
-            {selectionActive && loadState === 'ready' ? (
-              <>
-                <Button
-                  icon={
-                    <Download theme='outline' size={16} fill='currentColor' />
-                  }
-                  loading={busyAction === 'export'}
-                  disabled={
-                    controlsDisabled ||
-                    !service.archiveCapabilities.canExport
-                  }
-                  title={
-                    service.archiveCapabilities.canExport
-                      ? undefined
-                      : copy.archiveUnavailable
-                  }
-                  onClick={() => void exportCanvases([...selectedIds])}
-                >
-                  {copy.exportSelected}
-                </Button>
-                <Button
-                  disabled={controlsDisabled}
-                  onClick={() => setDeleteIds([...selectedIds])}
-                >
-                  {copy.deleteSelected}
-                </Button>
-              </>
-            ) : null}
-            {canvases.length > 0 && loadState === 'ready' ? (
-              <Button
-                disabled={controlsDisabled}
-                onClick={() =>
-                  setDeleteIds(canvases.map((canvas) => canvas.canvasId))
-                }
-              >
-                {copy.deleteAll}
-              </Button>
-            ) : null}
+        <PageHeader
+          className={styles.header}
+          title={copy.title}
+          actions={<div className={styles.headerActions}>
             <Button
               icon={<Upload theme='outline' size={16} fill='currentColor' />}
               loading={busyAction === 'import'}
@@ -321,8 +296,23 @@ const CreativeStudioCanvasesPage: React.FC<
             >
               {copy.newCanvas}
             </Button>
-          </div>
-        </header>
+            {canvases.length > 0 && loadState === 'ready' ? (
+              <CanvasActionsMenu
+                label={copy.moreActions}
+                triggerClassName={styles.pageMoreAction}
+                disabled={controlsDisabled}
+                actions={[{
+                  key: 'delete-all',
+                  label: copy.deleteAll,
+                  icon: <Delete theme='outline' size={15} fill='currentColor' />,
+                  danger: true,
+                  onSelect: () =>
+                    setDeleteIds(canvases.map((canvas) => canvas.canvasId)),
+                }]}
+              />
+            ) : null}
+          </div>}
+        />
 
         <input
           ref={fileInputRef}
@@ -332,6 +322,87 @@ const CreativeStudioCanvasesPage: React.FC<
           disabled={!service.archiveCapabilities.canImport}
           onChange={(event) => void importCanvases(event.target.files?.[0])}
         />
+
+        {loadState === 'ready' && canvases.length > 0 ? (
+          <div className={styles.toolbar} data-canvases-toolbar>
+            {selectionMode ? (
+              <div className={styles.selectionSummary}>
+                <Checkbox
+                  checked={allSelected}
+                  indeterminate={selectionActive && !allSelected}
+                  disabled={controlsDisabled}
+                  onChange={(checked) =>
+                    setSelectedIds(
+                      checked
+                        ? new Set(canvases.map((canvas) => canvas.canvasId))
+                        : new Set()
+                    )
+                  }
+                >
+                  {copy.selectAll}
+                </Checkbox>
+                <span>{copy.selectedCount(selectedIds.size)}</span>
+              </div>
+            ) : (
+              <div className={styles.toolbarLabel}>
+                <span>{copy.allCanvases}</span>
+                <span className={styles.toolbarCount}>{canvases.length}</span>
+              </div>
+            )}
+            <div className={styles.toolbarActions}>
+              {selectionMode ? (
+                <>
+                  <Button
+                    size='small'
+                    icon={<Download theme='outline' size={14} fill='currentColor' />}
+                    loading={busyAction === 'export'}
+                    disabled={
+                      controlsDisabled ||
+                      !selectionActive ||
+                      !service.archiveCapabilities.canExport
+                    }
+                    title={
+                      service.archiveCapabilities.canExport
+                        ? undefined
+                        : copy.archiveUnavailable
+                    }
+                    onClick={() => void exportCanvases([...selectedIds])}
+                  >
+                    {copy.exportSelected}
+                  </Button>
+                  <Button
+                    size='small'
+                    status='danger'
+                    disabled={controlsDisabled || !selectionActive}
+                    onClick={() => setDeleteIds([...selectedIds])}
+                  >
+                    {copy.deleteSelected}
+                  </Button>
+                  <Button
+                    size='small'
+                    type='text'
+                    disabled={controlsDisabled}
+                    onClick={() => {
+                      setSelectionMode(false);
+                      setSelectedIds(new Set());
+                    }}
+                  >
+                    {copy.finishSelection}
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  size='small'
+                  type='text'
+                  disabled={controlsDisabled}
+                  onClick={() => setSelectionMode(true)}
+                >
+                  {copy.manageSelection}
+                </Button>
+              )}
+            </div>
+          </div>
+        ) : null}
 
         {loadState === 'loading' ? (
           <div className={styles.statePanel} data-canvases-loading>
@@ -373,6 +444,7 @@ const CreativeStudioCanvasesPage: React.FC<
                 copy={copy}
                 language={language}
                 selected={selectedIds.has(canvas.canvasId)}
+                selectionMode={selectionMode}
                 editing={editingId === canvas.canvasId}
                 editingTitle={editingTitle}
                 disabled={busyAction !== null || openingCanvasId !== null}
