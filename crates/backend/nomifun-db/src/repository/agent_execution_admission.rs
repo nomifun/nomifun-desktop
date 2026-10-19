@@ -1,0 +1,304 @@
+//! Read-only capacity decisions over the existing Attempt and native owner
+//! facts. Callers that admit work hold the SQLite writer through admission.
+use sqlx::{Sqlite, Transaction};
+use crate::{DbError, AttemptConversationEffects};
+use nomifun_agent_contracts::NativePauseState;
+
+#[derive(Debug)]
+pub struct AgentExecutionReservation {
+    pub attempt_id: String,
+    pub step_id: String,
+    pub participant_id: Option<String>,
+    pub workspace_mutator: bool,
+    pub workspace_held: bool,
+    pub capacity_held: bool,
+}
+
+pub async fn execution_reservations_tx(tx: &mut Transaction<'_, Sqlite>, execution_id: &str)
+    -> Result<Vec<AgentExecutionReservation>, DbError> {
+    let rows: Vec<(String, String, Option<String>, String, Option<String>,String)> = sqlx::query_as(
+        "SELECT attempt.attempt_id,step.step_id,step.assigned_participant_id,step.tool_policy,attempt.runtime_state,attempt.status \
+         FROM agent_execution_attempts attempt JOIN agent_execution_steps step \
+         ON step.execution_id=attempt.execution_id AND step.step_id=attempt.step_id \
+         WHERE attempt.execution_id=? AND attempt.status IN ('queued','running','waiting_input') \
+           AND step.kind='agent' AND step.superseded_in_revision IS NULL ORDER BY attempt.id",
+    ).bind(execution_id).fetch_all(&mut **tx).await?;
+    let mut reservations = Vec::with_capacity(rows.len());
+    for (attempt_id, step_id, participant_id, tool_policy, runtime_state,status) in rows {
+        let tool_policy = tool_policy.parse::<nomifun_common::AgentToolPolicy>()
+            .map_err(|error| DbError::Init(format!("invalid persisted tool policy: {error}")))?;
+        let effects = AttemptConversationEffects::decode(runtime_state.as_deref())
+            .map_err(|error| DbError::Init(error.to_string()))?;
+        let turn_key = current_attempt_turn_key_tx(tx,execution_id,&step_id,&attempt_id,&effects).await?;
+        let native: Vec<(String, Option<String>, Option<String>, Option<String>, i64, i64, i64, Option<String>, bool)> = sqlx::query_as(
+            "SELECT turn.operation_id,head.status,head.active_turn_id,turn.native_pause_json, \
+             turn.execution_fence,turn.native_pause_revision,turn.native_checkpoint_revision,turn.native_checkpoint_digest, \
+             EXISTS(SELECT 1 FROM agent_effects effect WHERE effect.session_id=link.conversation_id AND effect.state IN ('pending','unknown')) \
+             FROM conversation_execution_links link JOIN agent_executions execution ON execution.execution_id=link.execution_id \
+             JOIN agent_turns turn ON turn.session_id=link.conversation_id \
+               AND turn.operation_id='turn:user:'||execution.user_id||':'||link.conversation_id||':'||? \
+             LEFT JOIN agent_session_heads head ON head.session_id=link.conversation_id \
+             WHERE link.execution_id=? AND link.attempt_id=? AND link.active=1 \
+               AND link.relation IN ('attempt','automation') AND turn.state='running' LIMIT 2",
+        ).bind(&turn_key).bind(execution_id).bind(&attempt_id).fetch_all(&mut **tx).await?;
+        let closed_input = status=="waiting_input" && effects.review_blocked.is_none()
+            && closed_input_required_tx(tx,execution_id,&step_id,&attempt_id,&turn_key).await?;
+        // A typed, exact closed InputRequired source may release its model
+        // slot. Review/unknown/live-native WaitingInput has no such authority.
+        // Full/ReadShell still own a possible independent background writer.
+        let mut capacity_held = !closed_input;
+        if let [(operation, head, active_turn, Some(raw), fence, revision, checkpoint_revision, digest, unsettled)] = native.as_slice() {
+            let pause: NativePauseState = serde_json::from_str(raw)
+                .map_err(|error| DbError::Init(format!("invalid canonical native pause: {error}")))?;
+            // Neither waiting, a checkpoint, idleness nor a terminal-looking
+            // display releases a reservation. The original native owner must
+            // have fenced itself and committed its actual cleanup evidence.
+            capacity_held = !(head.as_deref() == Some("paused") && active_turn.as_deref() == Some(operation)
+                && pause.cleanup_proven && !unsettled && *fence >= 0 && pause.execution_fence == *fence as u64
+                && *revision > 0 && pause.revision == *revision as u64 && *checkpoint_revision > 0
+                && pause.checkpoint_revision == *checkpoint_revision as u64
+                && pause.checkpoint_digest.as_ref().map(|value| value.as_ref()) == digest.as_deref()
+                && digest.is_some());
+        }
+        reservations.push(AgentExecutionReservation { attempt_id, step_id, participant_id,
+            workspace_mutator: tool_policy != nomifun_common::AgentToolPolicy::ReadOnly,
+            workspace_held: !(closed_input && tool_policy==nomifun_common::AgentToolPolicy::ReadOnly),capacity_held });
+    }
+    Ok(reservations)
+}
+
+async fn closed_input_required_tx(tx:&mut Transaction<'_,Sqlite>,execution_id:&str,step_id:&str,attempt_id:&str,
+    turn_key:&str)->Result<bool,DbError> {
+    let rows:Vec<(Option<String>,Option<Vec<u8>>,Option<String>)>=sqlx::query_as(
+        "SELECT terminal.inline_json,payload.body,attempt.question FROM conversation_execution_links link \
+         JOIN agent_executions execution ON execution.execution_id=link.execution_id \
+         JOIN agent_execution_attempts attempt ON attempt.execution_id=link.execution_id AND attempt.step_id=link.step_id AND attempt.attempt_id=link.attempt_id \
+         JOIN agent_sessions session ON session.agent_session_id=link.conversation_id \
+         JOIN agent_session_heads head ON head.session_id=session.agent_session_id \
+         JOIN agent_turns turn ON turn.session_id=session.agent_session_id AND turn.operation_id='turn:user:'||execution.user_id||':'||link.conversation_id||':'||? \
+         JOIN agent_events started ON started.session_id=turn.session_id AND started.event_id=turn.started_event_id \
+         JOIN agent_events terminal ON terminal.session_id=turn.session_id AND terminal.event_id=turn.terminal_event_id \
+         LEFT JOIN agent_payloads payload ON payload.session_id=terminal.session_id AND payload.payload_id=terminal.payload_id \
+         WHERE link.execution_id=? AND link.step_id=? AND link.attempt_id=? AND link.active=1 AND link.relation IN('attempt','automation') \
+           AND session.state='live' AND json_extract(session.owner_ref_json,'$.principal_kind')='user' \
+           AND json_extract(session.owner_ref_json,'$.principal_id')=execution.user_id \
+           AND head.active_turn_id IS NULL AND head.status='ready' AND turn.state='completed' \
+           AND started.kind='turn/started' AND started.kind_version=1 AND started.correlation_id=turn.operation_id \
+           AND terminal.kind='turn/completed' AND terminal.kind_version=1 AND terminal.correlation_id=turn.operation_id AND terminal.seq>started.seq \
+           AND head.last_seq>=terminal.seq \
+           AND (SELECT COUNT(*) FROM conversation_execution_links peer WHERE peer.conversation_id=link.conversation_id AND peer.active=1 AND peer.relation IN('attempt','automation'))=1 \
+           AND NOT EXISTS(SELECT 1 FROM agent_effects effect WHERE effect.session_id=session.agent_session_id AND effect.state IN('pending','unknown')) \
+           AND NOT EXISTS(SELECT 1 FROM agent_turns successor WHERE successor.session_id=turn.session_id AND successor.rowid>turn.rowid) LIMIT 2"
+    ).bind(turn_key).bind(execution_id).bind(step_id).bind(attempt_id).fetch_all(&mut **tx).await?;
+    let [(inline,stored,question)]=rows.as_slice() else {return Ok(false);};
+    let value=match (inline,stored) {
+        (Some(raw),None)=>serde_json::from_str::<serde_json::Value>(raw).map_err(|error|DbError::Init(format!("invalid canonical input terminal: {error}")))?,
+        (None,Some(raw))=>match serde_json::from_slice::<nomifun_agent_contracts::SessionPayloadBody>(raw)
+            .map_err(|error|DbError::Init(format!("invalid canonical input terminal payload: {error}")))? {
+                nomifun_agent_contracts::SessionPayloadBody::Json(value)=>value.0,
+                _=>return Err(DbError::Init("canonical input terminal payload is not typed JSON".into())),
+            },
+        _=>return Err(DbError::Init("canonical input terminal has no unique payload".into())),
+    };
+    let Some(request)=value.get("user_input_request") else {return Ok(false);};
+    let request:nomifun_agent_contracts::AgentUserInputRequest=serde_json::from_value(request.clone())
+        .map_err(|error|DbError::Init(format!("invalid canonical user input request: {error}")))?;
+    request.validate().map_err(DbError::Init)?;
+    Ok(question.as_deref()==Some(request.question.as_str()))
+}
+
+/// Revalidate the user's existing Execution/Participant limits under the same
+/// writer that creates/resumes the exact Attempt. It never allocates a quota,
+/// alters policy, pauses a task, or starts native work.
+pub async fn execution_capacity_available_tx(tx: &mut Transaction<'_, Sqlite>, execution_id: &str,
+    step_id: &str, excluding_attempt_id: Option<&str>) -> Result<bool, DbError> {
+    let policy: Option<(String, i64, Option<String>, String, Option<String>)> = sqlx::query_as(
+        "SELECT execution.status,execution.max_parallel,step.assigned_participant_id,step.tool_policy,participant.constraints \
+         FROM agent_execution_steps step JOIN agent_executions execution ON execution.execution_id=step.execution_id \
+         LEFT JOIN agent_execution_participants participant ON participant.execution_id=step.execution_id \
+            AND participant.participant_id=step.assigned_participant_id AND participant.retired_in_revision IS NULL \
+         WHERE step.execution_id=? AND step.step_id=? AND step.superseded_in_revision IS NULL \
+           AND execution.deleted_at IS NULL AND step.kind='agent' AND participant.participant_id IS NOT NULL",
+    ).bind(execution_id).bind(step_id).fetch_optional(&mut **tx).await?;
+    let Some((status, max_parallel, participant, tool_policy, constraints)) = policy else {
+        return Err(DbError::Conflict("exact Agent Execution admission target is missing".into()));
+    };
+    if status == "paused" { return Ok(false); }
+    if !matches!(status.as_str(), "running" | "waiting_input") {
+        return Err(DbError::Conflict("Agent Execution is no longer active for admission".into()));
+    }
+    if !(1..=nomifun_common::MAX_AGENT_EXECUTION_PARALLELISM).contains(&max_parallel) {
+        return Err(DbError::Init("invalid persisted Execution concurrency".into()));
+    }
+    let tool_policy = tool_policy.parse::<nomifun_common::AgentToolPolicy>()
+        .map_err(|error| DbError::Init(format!("invalid admission tool policy: {error}")))?;
+    let participant_limit = if let Some(raw) = constraints {
+        super::agent_execution::validate_participant_constraints_json(&raw)?;
+        serde_json::from_str::<serde_json::Value>(&raw).map_err(|error| DbError::Init(error.to_string()))?
+            .get("max_concurrency").and_then(serde_json::Value::as_i64).unwrap_or(i64::MAX)
+    } else { i64::MAX };
+    let reservations = execution_reservations_tx(tx, execution_id).await?;
+    let peers = reservations.iter().filter(|reservation| Some(reservation.attempt_id.as_str()) != excluding_attempt_id).collect::<Vec<_>>();
+    if peers.iter().filter(|reservation| reservation.capacity_held).count() >= max_parallel as usize
+        || peers.iter().filter(|reservation| reservation.capacity_held && reservation.participant_id == participant).count() as i64 >= participant_limit {
+        return Ok(false);
+    }
+    // Arbitrary shell may retain a writer after native parking. A yielded
+    // model slot never releases that existing workspace responsibility.
+    if peers.iter().any(|reservation| reservation.workspace_held && reservation.workspace_mutator)
+        || (tool_policy != nomifun_common::AgentToolPolicy::ReadOnly && peers.iter().any(|reservation|reservation.workspace_held)) { return Ok(false); }
+    Ok(true)
+}
+
+/// Canonical native resume uses this narrow guard inside its original writer
+/// transaction. A retained history link never grants authority over another
+/// Turn, and an inactive/cancelled exact Attempt cannot become ordinary input.
+pub async fn native_resume_capacity_available_tx(tx: &mut Transaction<'_, Sqlite>, user_id: &str,
+    session_id: &str, canonical_operation_id: &str) -> Result<bool, DbError> {
+    crate::ensure_remote_session_admitted_tx(tx,session_id).await?;
+    require_cron_target_admitted_tx(tx,user_id,session_id,canonical_operation_id).await?;
+    let (execution_id, step_id, attempt_id) = match native_attempt_identity_tx(tx, user_id, session_id, canonical_operation_id).await? {
+        NativeAttemptIdentity::Unbound => return Ok(true),
+        NativeAttemptIdentity::Fenced => return Err(DbError::Conflict("native resume no longer owns its exact active Attempt".into())),
+        NativeAttemptIdentity::Current {execution_id,step_id,attempt_id} => (execution_id,step_id,attempt_id),
+    };
+    execution_capacity_available_tx(tx, &execution_id, &step_id, Some(&attempt_id)).await
+}
+
+/// Claim consumes the reservation already held by the original invocation; it
+/// cannot turn a parked task into runnable work without its native resume CAS.
+pub async fn native_execution_claim_admitted_tx(tx: &mut Transaction<'_, Sqlite>, user_id: &str,
+    session_id: &str, canonical_operation_id: &str) -> Result<bool, DbError> {
+    crate::ensure_remote_session_admitted_tx(tx,session_id).await?;
+    require_cron_target_admitted_tx(tx,user_id,session_id,canonical_operation_id).await?;
+    let (execution_id, attempt_id) = match native_attempt_identity_tx(tx, user_id, session_id, canonical_operation_id).await? {
+        NativeAttemptIdentity::Unbound => return Ok(true),
+        NativeAttemptIdentity::Fenced => return Err(DbError::Conflict("native claim no longer owns its exact active Attempt".into())),
+        NativeAttemptIdentity::Current {execution_id,attempt_id,..} => (execution_id,attempt_id),
+    };
+    let status: String = sqlx::query_scalar("SELECT status FROM agent_executions WHERE execution_id=?")
+        .bind(&execution_id).fetch_one(&mut **tx).await?;
+    if !matches!(status.as_str(), "running" | "waiting_input" | "paused") {
+        return Err(DbError::Conflict("native claim targets a settled Execution".into()));
+    }
+    Ok(execution_reservations_tx(tx, &execution_id).await?.iter()
+        .any(|reservation| reservation.attempt_id == attempt_id && reservation.capacity_held))
+}
+
+/// Queue/history projection needs to distinguish an ordinary durable fence
+/// from damaged canonical data. False means only a known domain target fence;
+/// SQL/JSON/schema failures are returned intact and never hidden as a stop.
+pub async fn native_resume_target_eligible_tx(tx: &mut Transaction<'_, Sqlite>, user_id: &str,
+    session_id: &str, canonical_operation_id: &str) -> Result<bool, DbError> {
+    if !crate::remote_session_admitted_tx(tx,session_id).await? {return Ok(false);}
+    if matches!(cron_target_admitted_tx(tx,user_id,session_id,canonical_operation_id).await?,Some(false)) { return Ok(false); }
+    Ok(!matches!(native_attempt_identity_tx(tx,user_id,session_id,canonical_operation_id).await?,NativeAttemptIdentity::Fenced))
+}
+
+/// Match the host-derived operation against the original immutable Cron
+/// reservation. Ordinary input without that domain relation remains unbound.
+/// The writer that claims/resumes native execution consumes cancellation in
+/// the same transaction, so a preflight read can never revive a stopped run.
+async fn cron_target_admitted_tx(tx: &mut Transaction<'_, Sqlite>, user_id: &str,
+    session_id: &str, canonical_operation_id: &str) -> Result<Option<bool>, DbError> {
+    Ok(sqlx::query_scalar("SELECT reservation.status='reserved' AND reservation.cancel_requested_at_ms IS NULL \
+        FROM cron_run_reservations reservation LEFT JOIN cron_jobs job ON job.cron_job_id=reservation.cron_job_id \
+        JOIN agent_sessions session ON session.agent_session_id=reservation.conversation_id \
+        WHERE (job.user_id=? OR (job.cron_job_id IS NULL AND json_extract(session.owner_ref_json,'$.principal_kind')='user' \
+          AND json_extract(session.owner_ref_json,'$.principal_id')=?)) AND reservation.conversation_id=? \
+          AND ?='turn:user:'||?||':'||reservation.conversation_id||':cron:'||reservation.cron_job_run_id||':turn'")
+        .bind(user_id).bind(user_id).bind(session_id).bind(canonical_operation_id).bind(user_id).fetch_optional(&mut **tx).await?)
+}
+
+async fn require_cron_target_admitted_tx(tx: &mut Transaction<'_, Sqlite>, user_id: &str,
+    session_id: &str, canonical_operation_id: &str) -> Result<(), DbError> {
+    if matches!(cron_target_admitted_tx(tx,user_id,session_id,canonical_operation_id).await?,Some(false)) {
+        return Err(DbError::Conflict("native execution no longer owns its exact uncancelled Cron occurrence".into()));
+    }
+    Ok(())
+}
+
+enum NativeAttemptIdentity { Unbound, Current {execution_id:String,step_id:String,attempt_id:String}, Fenced }
+
+/// The existing Requirement claim is the cancellation fence for its one
+/// AutoWork generation. Read it under the writer that admits native/Attempt
+/// work, including after restart; a missed in-memory signal cannot revive it.
+pub(super) async fn require_autowork_admitted_tx(tx: &mut Transaction<'_, Sqlite>, user_id: &str,
+    initial_plan_input: &str, lead_session_id: Option<&str>) -> Result<(), DbError> {
+    if !autowork_admitted_tx(tx, user_id, initial_plan_input, lead_session_id).await? {
+        return Err(DbError::Conflict("AutoWork no longer owns its exact uncancelled Requirement claim".into()));
+    }
+    Ok(())
+}
+
+async fn autowork_admitted_tx(tx: &mut Transaction<'_, Sqlite>, user_id: &str,
+    initial_plan_input: &str, lead_session_id: Option<&str>) -> Result<bool, DbError> {
+    let plan: serde_json::Value = serde_json::from_str(initial_plan_input)
+        .map_err(|error| DbError::Init(format!("invalid persisted execution input: {error}")))?;
+    if plan.get("mode").and_then(serde_json::Value::as_str) != Some("automation") { return Ok(true); }
+    let requirement_id = plan.pointer("/source/requirement_id").and_then(serde_json::Value::as_str)
+        .ok_or_else(|| DbError::Init("AutoWork source has no Requirement identity".into()))?;
+    let generation = plan.pointer("/source/claim_generation").and_then(serde_json::Value::as_i64)
+        .filter(|value| *value > 0).ok_or_else(|| DbError::Init("AutoWork source has no claim generation".into()))?;
+    let Some(session_id) = lead_session_id else { return Ok(false); };
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM requirements requirement JOIN agent_sessions session \
+        ON session.agent_session_id=requirement.owner_conversation_id \
+        WHERE requirement.requirement_id=? AND requirement.claim_generation=? \
+          AND requirement.owner_conversation_id=? AND requirement.owner_terminal_id IS NULL \
+          AND requirement.claim_token IS NOT NULL AND requirement.status<>'cancelled' \
+          AND session.state='live' \
+          AND json_extract(session.owner_ref_json,'$.principal_kind')='user' \
+          AND json_extract(session.owner_ref_json,'$.principal_id')=?)")
+        .bind(requirement_id).bind(generation).bind(session_id).bind(user_id).fetch_one(&mut **tx).await?)
+}
+
+async fn native_attempt_identity_tx(tx: &mut Transaction<'_, Sqlite>, user_id: &str,
+    session_id: &str, canonical_operation_id: &str) -> Result<NativeAttemptIdentity, DbError> {
+    type Link = (String, String, String, String, bool, String, Option<String>, String, String, Option<i64>, Option<i64>);
+    let links: Vec<Link> = sqlx::query_as(
+        "SELECT link.execution_id,link.step_id,link.attempt_id,link.relation,link.active,execution.user_id, \
+         attempt.runtime_state,attempt.status,step.status,step.superseded_in_revision,execution.deleted_at \
+         FROM conversation_execution_links link JOIN agent_executions execution ON execution.execution_id=link.execution_id \
+         JOIN agent_execution_attempts attempt ON attempt.execution_id=link.execution_id AND attempt.attempt_id=link.attempt_id \
+         JOIN agent_execution_steps step ON step.execution_id=link.execution_id AND step.step_id=link.step_id \
+         WHERE link.conversation_id=? AND link.relation IN ('attempt','automation') ORDER BY link.id",
+    ).bind(session_id).fetch_all(&mut **tx).await?;
+    let child_session = links.iter().any(|link| link.3 == "attempt");
+    let mut exact = Vec::new();
+    for link in &links {
+        let effects = AttemptConversationEffects::decode(link.6.as_deref()).map_err(|error| DbError::Init(error.to_string()))?;
+        let key = current_attempt_turn_key_tx(tx,&link.0,&link.1,&link.2,&effects).await?;
+        if canonical_operation_id == format!("turn:user:{}:{session_id}:{key}", link.5) { exact.push(link); }
+    }
+    let (execution_id, step_id, attempt_id) = match exact.as_slice() {
+        [] if !child_session => return Ok(NativeAttemptIdentity::Unbound),
+        [link] if link.4 && link.5 == user_id && link.7 == "running" && link.8 == "running"
+            && link.9.is_none() && link.10.is_none() => (&link.0, &link.1, &link.2),
+        _ => return Ok(NativeAttemptIdentity::Fenced),
+    };
+    let stopped: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM agent_execution_events event,json_each(event.payload,'$.cancelled_step_ids') selected \
+         WHERE event.execution_id=? AND event.event_type='step_changed' \
+           AND json_extract(event.payload,'$.action')='cancel_step' AND selected.value=?)",
+    ).bind(execution_id).bind(step_id).fetch_one(&mut **tx).await?;
+    if stopped { return Ok(NativeAttemptIdentity::Fenced); }
+    let (input, lead): (String, Option<String>) = sqlx::query_as(
+        "SELECT initial_plan_input,(SELECT conversation_id FROM conversation_execution_links \
+         WHERE execution_id=execution.execution_id AND relation='lead' ORDER BY id DESC LIMIT 1) \
+         FROM agent_executions execution WHERE execution_id=?")
+        .bind(execution_id).fetch_one(&mut **tx).await?;
+    if !autowork_admitted_tx(tx, user_id, &input, lead.as_deref()).await? { return Ok(NativeAttemptIdentity::Fenced); }
+    Ok(NativeAttemptIdentity::Current {execution_id:execution_id.clone(),step_id:step_id.clone(),attempt_id:attempt_id.clone()})
+}
+
+async fn current_attempt_turn_key_tx(tx:&mut Transaction<'_,Sqlite>,execution_id:&str,step_id:&str,attempt_id:&str,
+    effects:&AttemptConversationEffects)->Result<String,DbError> {
+    let key=effects.current_turn_operation_key(attempt_id).map_err(|error|DbError::Init(error.to_string()))?;
+    if !effects.pending_conversation_effects.is_empty() {return Ok(key);}
+    // A completed handoff retires its delivery queue, not its original Turn
+    // identity. Resolve the last exact reference from the existing domain
+    // event, just as native claim/resume do; never select the Session's latest.
+    Ok(sqlx::query_scalar::<_,String>("SELECT json_extract(payload,'$.turn_operation_key') FROM agent_execution_events \
+        WHERE execution_id=? AND step_id=? AND attempt_id=? AND json_type(payload,'$.turn_operation_key')='text' ORDER BY sequence DESC LIMIT 1")
+        .bind(execution_id).bind(step_id).bind(attempt_id).fetch_optional(&mut **tx).await?.unwrap_or(key))
+}

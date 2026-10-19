@@ -5,7 +5,7 @@
 //! parallel alias entities; every lifecycle fact belongs to AgentExecution.
 
 use nomifun_common::{
-    AdaptationPolicy, AgentExecutionActorType, AgentExecutionEventKind, AgentExecutionStatus,
+    AdaptationPolicy, AgentExecutionActorType, AgentExecutionCancellationScope, AgentExecutionEventKind, AgentExecutionStatus,
     AgentStepMode, AgentToolPolicy, DecisionPolicy, DelegationPolicy, ExecutionAttemptStatus,
     ExecutionStepKind, ExecutionStepStatus, MAX_AGENT_EXECUTION_MODELS,
     MAX_AGENT_EXECUTION_PARALLELISM, ParticipantAssignmentSource, ProviderId, StepFailurePolicy,
@@ -429,12 +429,27 @@ pub struct ExecutionAttempt {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationExecutionControl {
+    /// The original sole Step from the immutable automation plan. None only
+    /// before that plan has materialized; titles and roles are not identity.
+    pub root_step_id:Option<String>,
+    pub lead_conversation_id:String,
+    pub requirement_id:String,
+    pub claim_generation:i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExecutionDetail {
     pub execution: AgentExecution,
     pub participants: Vec<ExecutionParticipant>,
     pub steps: Vec<ExecutionStep>,
     pub dependencies: Vec<ExecutionStepDependency>,
     pub attempts: Vec<ExecutionAttempt>,
+    /// Read-only original Requirement control target, never new authorization
+    /// or a mirror of its current status. Local child Stop still targets Step.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub automation_control:Option<AutomationExecutionControl>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -608,6 +623,41 @@ pub struct SteerExecutionStepRequest {
     pub text: String,
     pub expected_execution_version: i64,
     pub expected_step_version: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "CancelExecutionStepWire")]
+pub struct CancelExecutionStepRequest {
+    pub expected_execution_version: i64,
+    pub expected_step_version: i64,
+    pub scope: AgentExecutionCancellationScope,
+}
+
+/// The retired boolean is accepted only at the transport boundary. Every
+/// command after deserialization carries the same explicit ownership scope.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelExecutionStepWire {
+    expected_execution_version: i64,
+    expected_step_version: i64,
+    scope: Option<AgentExecutionCancellationScope>,
+    include_delegated: Option<bool>,
+}
+
+impl TryFrom<CancelExecutionStepWire> for CancelExecutionStepRequest {
+    type Error = &'static str;
+
+    fn try_from(wire: CancelExecutionStepWire) -> Result<Self, Self::Error> {
+        let legacy_scope = wire.include_delegated.map(|include| if include {
+            AgentExecutionCancellationScope::TaskAndDelegated
+        } else { AgentExecutionCancellationScope::Task });
+        if wire.scope.zip(legacy_scope).is_some_and(|(scope, legacy)| scope != legacy) {
+            return Err("scope and include_delegated select different cancellation ranges");
+        }
+        Ok(Self { expected_execution_version: wire.expected_execution_version,
+            expected_step_version: wire.expected_step_version,
+            scope: wire.scope.or(legacy_scope).unwrap_or(AgentExecutionCancellationScope::Task) })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -854,6 +904,35 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn task_cancellation_requires_captured_versions_and_defaults_to_one_task() {
+        let command = serde_json::json!({
+            "expected_execution_version": 4,
+            "expected_step_version": 7
+        });
+        let request: CancelExecutionStepRequest = serde_json::from_value(command.clone()).unwrap();
+        assert_eq!(request.scope, AgentExecutionCancellationScope::Task);
+        for field in ["expected_execution_version", "expected_step_version"] {
+            let mut missing = command.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<CancelExecutionStepRequest>(missing).is_err());
+        }
+        let mut scoped = command;
+        scoped["include_delegated"] = serde_json::json!(true);
+        let decoded=serde_json::from_value::<CancelExecutionStepRequest>(scoped.clone()).unwrap();
+        assert_eq!(decoded.scope, AgentExecutionCancellationScope::TaskAndDelegated);
+        let canonical=serde_json::to_value(decoded).unwrap();
+        assert_eq!(canonical["scope"], "task_and_delegated");
+        assert!(canonical.get("include_delegated").is_none());
+        scoped["scope"] = serde_json::json!("delegated_work");
+        assert!(serde_json::from_value::<CancelExecutionStepRequest>(scoped.clone()).is_err(), "contradictory ranges cannot be silently combined");
+        scoped.as_object_mut().unwrap().remove("include_delegated");
+        assert_eq!(serde_json::from_value::<CancelExecutionStepRequest>(scoped.clone()).unwrap().scope,
+            AgentExecutionCancellationScope::DelegatedWork);
+        scoped["scope"] = serde_json::json!("execution");
+        assert!(serde_json::from_value::<CancelExecutionStepRequest>(scoped).is_err());
     }
 
     #[test]

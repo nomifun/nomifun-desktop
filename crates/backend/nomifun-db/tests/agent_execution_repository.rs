@@ -50,11 +50,62 @@ async fn database_with_provider(database: nomifun_db::Database) -> nomifun_db::D
 }
 
 #[tokio::test]
+async fn cleanup_keyset_passes_a_failed_full_page_and_bounds_continuous_arrivals() {
+    let titles=(0..102).map(|index|format!("cleanup-{index}")).collect::<Vec<_>>();
+    let fixture=scoped_stop::Fixture::memory(&titles.iter().map(String::as_str).collect::<Vec<_>>(),&[]).await;
+    let db=&fixture.db;let repository=&fixture.repository;
+    let mut conversations=Vec::new();
+    for title in &titles[..101] {
+        let started=fixture.start(title).await;
+        conversations.push(started.current_attempt.as_ref().unwrap().conversation_id.clone().unwrap());
+        fixture.complete(title).await;
+    }
+    // Repeated links of one original Attempt are a single cleanup unit.
+    nomifun_db::sqlx::query("INSERT INTO conversation_execution_links (conversation_id,execution_id,relation,step_id,attempt_id,active,created_at,updated_at) SELECT conversation_id,execution_id,relation,step_id,attempt_id,0,1,1 FROM conversation_execution_links WHERE conversation_id=? LIMIT 1")
+        .bind(&conversations[0]).execute(db.pool()).await.unwrap();
+    let first=repository.list_pending_conversation_cleanups(None,None,100).await.unwrap();
+    assert_eq!(first.cleanups.len(),100);assert_eq!(first.cleanups[0].conversation_id,conversations[0]);
+    let cursor=first.next_cursor.unwrap();
+    for cleanup in &first.cleanups {assert!(repository.validate_conversation_cleanup(cleanup).await.unwrap());}
+    let arrival=fixture.start(&titles[101]).await.current_attempt.unwrap().conversation_id.unwrap();
+    fixture.complete(&titles[101]).await;
+    let arrival_id:i64=nomifun_db::sqlx::query_scalar("SELECT id FROM conversation_execution_links WHERE conversation_id=?")
+        .bind(&arrival).fetch_one(db.pool()).await.unwrap();
+    assert!(arrival_id>cursor.through_link_id);
+    nomifun_db::sqlx::query("UPDATE conversation_execution_links SET updated_at=999999 WHERE id<=?")
+        .bind(cursor.after_link_id).execute(db.pool()).await.unwrap();
+    let tail=repository.list_pending_conversation_cleanups(None,Some(cursor),100).await.unwrap();
+    assert_eq!(tail.cleanups.len(),1,"duplicate links do not hide item 101");
+    assert_eq!(tail.cleanups[0].conversation_id,conversations[100]);assert!(tail.next_cursor.is_none());
+    assert!(repository.mark_conversation_cleanup_completed_exact(&tail.cleanups[0],10000).await.unwrap());
+    let retry=repository.list_pending_conversation_cleanups(None,None,100).await.unwrap();
+    assert_eq!(retry.cleanups.iter().map(|cleanup|cleanup.link_id).collect::<Vec<_>>(),first.cleanups.iter().map(|cleanup|cleanup.link_id).collect::<Vec<_>>());
+    let next=repository.list_pending_conversation_cleanups(None,retry.next_cursor,100).await.unwrap();
+    assert_eq!(next.cleanups.len(),1);assert_eq!(next.cleanups[0].conversation_id,arrival);
+    assert!(repository.mark_conversation_cleanup_completed_exact(&next.cleanups[0],10001).await.unwrap());
+    assert!(repository.mark_conversation_cleanup_completed_exact(&retry.cleanups[0],10002).await.unwrap());
+    let remaining:i64=nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM conversation_execution_links WHERE conversation_id=? AND cleanup_completed_at IS NULL")
+        .bind(&conversations[0]).fetch_one(db.pool()).await.unwrap();
+    assert_eq!(remaining,0,"only duplicate links of that same Attempt are acknowledged together");
+}
+async fn claimed_autowork_requirement(db:&nomifun_db::Database,session:&str)->nomifun_db::models::RequirementRow {
+    use nomifun_db::IRequirementRepository;
+    let repository=nomifun_db::SqliteRequirementRepository::new(db.pool().clone());
+    let tag=nomifun_common::generate_id();
+    repository.insert(&nomifun_db::models::NewRequirementRow {title:"Original AutoWork claim".into(),content:"same original work".into(),tag:tag.clone(),
+        order_key:String::new(),sort_seq:String::new(),status:"pending".into(),priority:0,completion_note:None,
+        owner_conversation_id:None,owner_terminal_id:None,active_turn_started_at:None,lease_expires_at:None,started_at:None,completed_at:None,
+        attempt_count:0,created_by:"user".into(),extra:"{}".into(),created_at:1,updated_at:1}).await.unwrap();
+    repository.claim_next_for_runner(&tag,Some(session),None,30_000,2).await.unwrap().unwrap().row
+}
+
+#[tokio::test]
 async fn autowork_attempt_reuses_lead_without_becoming_disposable_attempt_transcript() {
     let db = database().await;
     insert_canonical_session(&db, CANONICAL_LEAD_ID, OWNER_ID, "live").await;
     nomifun_db::sqlx::query("INSERT INTO agent_session_heads(session_id,status,active_turn_id,active_set_generation,last_seq,unread_count) VALUES (?,'ready',NULL,0,0,0)")
         .bind(CANONICAL_LEAD_ID).execute(db.pool()).await.unwrap();
+    let claim=claimed_autowork_requirement(&db,CANONICAL_LEAD_ID).await;
     let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
     let participant_id = nomifun_common::generate_id();
     let mut params = execution_params();
@@ -62,8 +113,8 @@ async fn autowork_attempt_reuses_lead_without_becoming_disposable_attempt_transc
     params.initial_plan_input = serde_json::json!({
         "mode": "automation",
         "source": {
-            "requirement_id": "0190f5fe-7c00-7a00-8000-000000000191",
-            "claim_generation": 1,
+            "requirement_id": claim.requirement_id,
+            "claim_generation": claim.claim_generation,
             "operation_id": "autowork:test"
         },
         "plan": { "steps": [] }
@@ -954,10 +1005,20 @@ async fn recovered_input_handoff_waits_on_the_same_attempt_without_marking_work_
     };
     let waiting=repository.reconcile_recovered_attempt(OWNER_ID,&execution_id,&resumed.detail.step.step_id,resumed.detail.step.version,
         &second.attempt_id,resumed.detail.current_attempt.as_ref().unwrap().attempt.version,&lease,Some(&second),
-        &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
+        &NewAgentExecutionEvent {payload:serde_json::json!({"turn_operation_key":"caller-cannot-select-a-successor"}).to_string(),
+            ..event(AgentExecutionEventKind::AttemptChanged)}).await.unwrap();
     let attempt=waiting.detail.current_attempt.unwrap().attempt;
     assert_eq!(attempt.question.as_deref(),Some("请提供班级。"));
     assert!(attempt.runtime_state.is_none(),"recovery retires the already-delivered answer instead of replaying its closed Turn");
+    let events=repository.list_events(OWNER_ID,&execution_id,0,50).await.unwrap();
+    let saved:serde_json::Value=serde_json::from_str(&events.last().unwrap().payload).unwrap();
+    assert_eq!(saved["turn_operation_key"],answer,"the original verified Turn supplies its identity, not caller metadata");
+    let mut tx=db.pool().begin().await.unwrap();
+    let reservations=nomifun_db::execution_reservations_tx(&mut tx,&execution_id).await.unwrap();
+    assert_eq!(reservations.len(),1);
+    assert!(!reservations[0].capacity_held&&reservations[0].workspace_held,
+        "a second typed question uses its original saved continuation identity after the delivery queue retires");
+    tx.commit().await.unwrap();
     let mut pending=nomifun_db::AttemptConversationEffects::decode(attempt.runtime_state.as_deref()).unwrap();
     let next=nomifun_common::generate_id();pending.push_decision(next.clone(),"一年级".into()).unwrap();
     assert_eq!(pending.current_turn_operation_key(&attempt.attempt_id).unwrap(),next);
@@ -1081,18 +1142,9 @@ async fn recovery_rejects_mismatched_terminal_identity_and_empty_public_delivery
 }
 
 #[tokio::test]
-async fn recovery_pause_requires_typed_output_before_adopting_completed_turn() {
+async fn dispatch_pause_preserves_the_exact_running_attempt_and_pending_controls() {
     let db = database().await;
     let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
-    let (execution_id, running, output) = recovery_fixture(&db, &repository).await;
-    let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
-    repository.pause_execution(OWNER_ID, &execution_id, execution.version, &[output], &event(AgentExecutionEventKind::StatusChanged))
-        .await.unwrap();
-    let paused = repository.get_step_detail(OWNER_ID, &execution_id, &running.step.step_id)
-        .await.unwrap().unwrap();
-    assert_eq!(paused.step.status, "completed");
-    assert_eq!(paused.current_attempt.unwrap().attempt.output_summary.as_deref(), Some("已完成游戏实现"));
-
     let (execution_id, running, _) = recovery_fixture(&db, &repository).await;
     let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
     let attempt = &running.current_attempt.as_ref().unwrap().attempt;
@@ -1104,20 +1156,38 @@ async fn recovery_pause_requires_typed_output_before_adopting_completed_turn() {
         }).to_string()) }, &event(AgentExecutionEventKind::StepChanged),
     ).await.unwrap();
     let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
-    repository.pause_execution(OWNER_ID, &execution_id, execution.version, &[], &event(AgentExecutionEventKind::StatusChanged))
+    let lease = AgentExecutionLeaseToken::new("dispatch-pause-owner".into());
+    let expires_at = nomifun_common::now_ms() + 30_000;
+    repository.try_acquire_lease(&execution_id, execution.version, lease.owner(), expires_at).await.unwrap().unwrap();
+    let before = repository.get_step_detail(OWNER_ID, &execution_id, &running.step.step_id).await.unwrap().unwrap();
+    let paused_execution = repository.pause_execution(OWNER_ID, &execution_id, execution.version, &event(AgentExecutionEventKind::StatusChanged))
         .await.unwrap();
     let paused = repository.get_step_detail(OWNER_ID, &execution_id, &running.step.step_id)
         .await.unwrap().unwrap();
-    assert_eq!(paused.step.status, "waiting_input");
+    assert_eq!(paused_execution.status, "paused");
+    assert_eq!(paused_execution.lease_owner.as_deref(), Some(lease.owner()));
+    assert_eq!(paused.step.status, "running");
+    assert_eq!(paused.step.version, before.step.version);
     let attempt = paused.current_attempt.unwrap().attempt;
+    let before_attempt = before.current_attempt.unwrap().attempt;
+    assert_eq!(attempt.attempt_id, before_attempt.attempt_id);
+    assert_eq!(attempt.version, before_attempt.version);
+    assert_eq!(attempt.runtime_state, before_attempt.runtime_state);
     assert!(attempt.output_summary.is_none());
     let state = attempt.runtime_state.unwrap();
-    assert!(state.contains("terminal_output_unavailable"));
-    assert!(state.contains("preserve this correction"), "manual review must retain accepted but undelivered input");
+    assert!(!state.contains("review_blocked"), "a dispatch pause cannot quarantine a healthy original owner");
+    assert!(state.contains("preserve this correction"));
+    assert!(repository.list_conversation_links(OWNER_ID, &execution_id).await.unwrap().iter()
+        .any(|link| link.relation == "attempt" && link.active && link.cleanup_completed_at.is_none()));
+    assert!(repository.list_pending_conversation_cleanups(Some(&execution_id), None, 100).await.unwrap().cleanups.is_empty());
+    let resumed = repository.resume_execution(OWNER_ID, &execution_id, paused_execution.version,
+        &event(AgentExecutionEventKind::StatusChanged)).await.unwrap();
+    assert_eq!(resumed.status, "running");
+    assert_eq!(resumed.lease_owner.as_deref(), Some(lease.owner()), "resume cannot fence its still-running original owner");
 }
 
 #[tokio::test]
-async fn recovery_pause_uses_the_current_decision_turn_instead_of_the_closed_initial_turn() {
+async fn recovery_uses_the_current_decision_turn_instead_of_the_closed_initial_turn() {
     let db = database().await;
     let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
     let (execution_id, running, initial_output) = recovery_fixture(&db, &repository).await;
@@ -1158,16 +1228,24 @@ async fn recovery_pause_uses_the_current_decision_turn_instead_of_the_closed_ini
     ).bind(&initial_output.conversation_id).bind(&operation_id).bind(&operation_id).bind(&operation_id)
         .bind(&terminal_event_id).execute(db.pool()).await.unwrap();
     let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
-    assert!(repository.pause_execution(
-        OWNER_ID, &execution_id, execution.version, &[initial_output.clone()], &event(AgentExecutionEventKind::StatusChanged),
+    let current = repository.get_step_detail(OWNER_ID, &execution_id, &running.step.step_id).await.unwrap().unwrap();
+    let lease = AgentExecutionLeaseToken::new("current-decision-owner".into());
+    repository.try_acquire_lease(&execution_id, execution.version, lease.owner(), nomifun_common::now_ms()+30_000).await.unwrap().unwrap();
+    let current_attempt = current.current_attempt.as_ref().unwrap();
+    assert!(repository.reconcile_recovered_attempt(
+        OWNER_ID, &execution_id, &current.step.step_id, current.step.version,
+        &current_attempt.attempt.attempt_id, current_attempt.attempt.version, &lease,
+        Some(&initial_output), &event(AgentExecutionEventKind::AttemptChanged),
     ).await.is_err(), "a completed older Turn is not the resumed invocation's output");
     let current_output = RecoveredAgentExecutionAttemptOutput {
         canonical_operation_id: operation_id, terminal_event_id,
         text: Some("current continuation output".to_owned()),
         ..initial_output
     };
-    repository.pause_execution(
-        OWNER_ID, &execution_id, execution.version, &[current_output], &event(AgentExecutionEventKind::StatusChanged),
+    repository.reconcile_recovered_attempt(
+        OWNER_ID, &execution_id, &current.step.step_id, current.step.version,
+        &current_attempt.attempt.attempt_id, current_attempt.attempt.version, &lease,
+        Some(&current_output), &event(AgentExecutionEventKind::AttemptChanged),
     ).await.unwrap();
     let paused = repository.get_step_detail(OWNER_ID, &execution_id, &running.step.step_id).await.unwrap().unwrap();
     assert_eq!(paused.step.status, "completed");
@@ -1267,7 +1345,7 @@ async fn automatic_human_handoff_keeps_the_exact_attempt_waiting_until_a_real_re
 }
 
 #[tokio::test]
-async fn cancelled_canonical_terminal_settles_domain_cancellation_and_rejects_foreign_source() {
+async fn cancelled_canonical_terminal_settles_only_its_task_and_rejects_foreign_source() {
     for mutation in ["terminal", "kind", "successor", "link", "unknown_effect", "valid"] {
         let db = database().await;
         let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
@@ -1296,7 +1374,7 @@ async fn cancelled_canonical_terminal_settles_domain_cancellation_and_rejects_fo
                     terminal_event_id:if mutation=="terminal" {nomifun_common::generate_id()} else {output.terminal_event_id.clone()},
                 }),
                 attempt_status:nomifun_common::ExecutionAttemptStatus::Cancelled, step_status:ExecutionStepStatus::Cancelled,
-                execution_status:Some(AgentExecutionStatus::Cancelled), question:Some(None),error:Some(None),output_summary:None,
+                execution_status:None, question:Some(None),error:Some(None),output_summary:None,
                 output_files:None,tokens:None,retry_after:Some(None),runtime_state:Some(None),started_at:None,finished_at:None,loop_repeat_reset:None,
             }, &event(AgentExecutionEventKind::AttemptChanged)).await;
         if mutation!="valid" {
@@ -1309,7 +1387,7 @@ async fn cancelled_canonical_terminal_settles_domain_cancellation_and_rejects_fo
             assert_eq!(attempt.status, "cancelled");
             assert!(attempt.error.is_none() && attempt.retry_after.is_none());
             let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
-            assert_eq!(execution.status, "cancelled");
+            assert_eq!(execution.status, "running");
             assert!(execution.lease_owner.is_none());
             assert!(repository.resolve_conversation_link(OWNER_ID, &output.conversation_id).await.unwrap().iter().all(|link|!link.active));
         }
@@ -1317,27 +1395,26 @@ async fn cancelled_canonical_terminal_settles_domain_cancellation_and_rejects_fo
 }
 
 #[tokio::test]
-async fn recovery_and_manual_pause_adopt_canonical_cancellation_without_retry_or_failure() {
+async fn recovery_adopts_canonical_cancellation_without_cancelling_a_dispatch_paused_aggregate() {
     for during_pause in [false, true] {
         let db = database().await;
         let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
         let (execution_id, running, output) = cancelled_terminal_fixture(&db, &repository).await;
         let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
+        let lease = AgentExecutionLeaseToken::new("cancel-recovery-owner".into());
+        repository.try_acquire_lease(&execution_id, execution.version, lease.owner(), nomifun_common::now_ms()+30_000).await.unwrap().unwrap();
         if during_pause {
-            let result = repository.pause_execution(OWNER_ID, &execution_id, execution.version, &[output.clone()],
+            let result = repository.pause_execution(OWNER_ID, &execution_id, execution.version,
                 &event(AgentExecutionEventKind::StatusChanged)).await.unwrap();
-            assert_eq!(result.status, "cancelled");
-        } else {
-            let lease = AgentExecutionLeaseToken::new("cancel-recovery-owner".into());
-            repository.try_acquire_lease(&execution_id, execution.version, lease.owner(), nomifun_common::now_ms()+30_000).await.unwrap().unwrap();
-            let result = repository.reconcile_recovered_attempt(OWNER_ID, &execution_id, &running.step.step_id, running.step.version,
+            assert_eq!(result.status, "paused");
+        }
+        let result = repository.reconcile_recovered_attempt(OWNER_ID, &execution_id, &running.step.step_id, running.step.version,
                 &output.attempt_id, running.current_attempt.as_ref().unwrap().attempt.version, &lease, Some(&output),
                 &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
-            assert_eq!(result.disposition, AgentExecutionAttemptRecoveryDisposition::CancelledReceiptAdopted);
-        }
+        assert_eq!(result.disposition, AgentExecutionAttemptRecoveryDisposition::CancelledReceiptAdopted);
         let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
-        assert_eq!(execution.status, "cancelled");
-        assert!(execution.lease_owner.is_none());
+        assert_eq!(execution.status, if during_pause { "paused" } else { "running" });
+        assert_eq!(execution.lease_owner.as_deref(), Some(lease.owner()));
         let detail = repository.get_step_detail(OWNER_ID, &execution_id, &running.step.step_id).await.unwrap().unwrap();
         assert_eq!(detail.step.status, "cancelled");
         let attempt = detail.current_attempt.unwrap().attempt;
@@ -1346,3 +1423,27 @@ async fn recovery_and_manual_pause_adopt_canonical_cancellation_without_retry_or
         assert!(attempt.error.is_none() && attempt.retry_after.is_none());
     }
 }
+
+#[path = "agent_execution_repository/scoped_stop.rs"]
+mod scoped_stop;
+
+#[path = "agent_execution_repository/cleanup_exact.rs"]
+mod cleanup_exact;
+
+#[path = "agent_execution_repository/cleanup_continuation.rs"]
+mod cleanup_continuation;
+
+#[path = "agent_execution_repository/automation_stop_admission.rs"]
+mod automation_stop_admission;
+
+#[path = "agent_execution_repository/recovery_handoff.rs"]
+mod recovery_handoff;
+
+#[path = "agent_execution_repository/waiting_writer_reservations.rs"]
+mod waiting_writer_reservations;
+
+#[path = "agent_execution_repository/task_retirement.rs"]
+mod task_retirement;
+
+#[path = "agent_execution_repository/stopped_backoff_cleanup.rs"]
+mod stopped_backoff_cleanup;

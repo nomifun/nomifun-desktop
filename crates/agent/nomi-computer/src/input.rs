@@ -13,6 +13,7 @@
 //! the caller).
 
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 use enigo::{Button, Direction, Enigo, Keyboard, Settings};
 #[cfg(not(target_os = "macos"))]
@@ -198,13 +199,15 @@ fn new_enigo() -> Result<Enigo, String> {
     })
 }
 
-fn run_enigo_operation_blocking<T, F>(op: F) -> Result<T, String>
+fn run_enigo_operation_blocking<T, F>(cancellation: CancellationToken, op: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&mut Enigo) -> Result<T, String> + Send + 'static,
 {
-    crate::macos_main::run_blocking(move || {
+    let native_cancellation = cancellation.clone();
+    crate::macos_main::run_blocking_controlled(&cancellation, move || {
         let mut enigo = new_enigo()?;
+        crate::native_control::require_open(&native_cancellation)?;
         op(&mut enigo)
     })
 }
@@ -217,7 +220,15 @@ where
     T: Send + 'static,
     F: FnOnce(&mut Enigo) -> Result<T, String> + Send + 'static,
 {
-    let handle = tokio::task::spawn_blocking(move || run_enigo_operation_blocking(op));
+    with_enigo_controlled(&CancellationToken::new(), op).await
+}
+
+async fn with_enigo_controlled<T, F>(cancellation: &CancellationToken, op: F) -> Result<T, String>
+where T: Send + 'static, F: FnOnce(&mut Enigo) -> Result<T, String> + Send + 'static,
+{
+    crate::native_control::require_open(cancellation)?;
+    let cancellation = cancellation.clone();
+    let handle = tokio::task::spawn_blocking(move || run_enigo_operation_blocking(cancellation, op));
     join_input_task(handle, INPUT_TIMEOUT).await
 }
 
@@ -438,27 +449,37 @@ fn combine_input_and_cleanup_error(input_error: String, cleanup: Result<(), Stri
 
 /// Move the cursor to absolute screen coordinates.
 pub async fn mouse_move(x: i32, y: i32) -> Result<(), String> {
+    mouse_move_controlled(&CancellationToken::new(), x, y).await
+}
+
+pub(crate) async fn mouse_move_controlled(cancellation: &CancellationToken, x: i32, y: i32) -> Result<(), String> {
+    crate::native_control::require_open(cancellation)?;
     #[cfg(target_os = "linux")]
     if use_wayland() {
-        return with_wayland(move |cancel| crate::linux_wayland_input::mouse_move_blocking(cancel, x, y)).await;
+        return with_wayland_controlled(cancellation, move |cancel| crate::linux_wayland_input::mouse_move_blocking(cancel, x, y)).await;
     }
-    with_enigo(move |enigo| move_abs(enigo, x, y)).await
+    with_enigo_controlled(cancellation, move |enigo| move_abs(enigo, x, y)).await
 }
 
 /// Click `button` `count` times at absolute screen coordinates.
 pub async fn click(x: i32, y: i32, button: Button, count: u32) -> Result<(), String> {
+    click_controlled(&CancellationToken::new(), x, y, button, count).await
+}
+
+pub(crate) async fn click_controlled(cancellation: &CancellationToken, x: i32, y: i32, button: Button, count: u32) -> Result<(), String> {
+    crate::native_control::require_open(cancellation)?;
     #[cfg(target_os = "linux")]
     if use_wayland() {
-        return with_wayland(move |cancel| crate::linux_wayland_input::click_blocking(cancel, x, y, button, count)).await;
+        return with_wayland_controlled(cancellation, move |cancel| crate::linux_wayland_input::click_blocking(cancel, x, y, button, count)).await;
     }
     #[cfg(target_os = "macos")]
     {
         // Constructing Enigo still establishes the existing non-interactive
         // Accessibility prerequisite before the Quartz pointer layer starts.
-        return with_enigo(move |_enigo| macos_pointer::click(x, y, button, count)).await;
+        return with_enigo_controlled(cancellation, move |_enigo| macos_pointer::click(x, y, button, count)).await;
     }
     #[cfg(not(target_os = "macos"))]
-    with_enigo(move |enigo| {
+    with_enigo_controlled(cancellation, move |enigo| {
         move_abs(enigo, x, y)?;
         for i in 0..count {
             if i > 0 {
@@ -484,16 +505,21 @@ fn drag_axis(start: i32, end: i32, step: i64) -> i32 {
 /// Press at (start), drag to (end), release. Includes intermediate moves so
 /// apps that track motion register the drag.
 pub async fn drag(start_x: i32, start_y: i32, end_x: i32, end_y: i32) -> Result<(), String> {
+    drag_controlled(&CancellationToken::new(), start_x, start_y, end_x, end_y).await
+}
+
+pub(crate) async fn drag_controlled(cancellation: &CancellationToken, start_x: i32, start_y: i32, end_x: i32, end_y: i32) -> Result<(), String> {
+    crate::native_control::require_open(cancellation)?;
     #[cfg(target_os = "linux")]
     if use_wayland() {
-        return with_wayland(move |cancel| crate::linux_wayland_input::drag_blocking(cancel, start_x, start_y, end_x, end_y)).await;
+        return with_wayland_controlled(cancellation, move |cancel| crate::linux_wayland_input::drag_blocking(cancel, start_x, start_y, end_x, end_y)).await;
     }
     #[cfg(target_os = "macos")]
     {
-        return with_enigo(move |_enigo| macos_pointer::drag(start_x, start_y, end_x, end_y)).await;
+        return with_enigo_controlled(cancellation, move |_enigo| macos_pointer::drag(start_x, start_y, end_x, end_y)).await;
     }
     #[cfg(not(target_os = "macos"))]
-    with_enigo(move |enigo| {
+    with_enigo_controlled(cancellation, move |enigo| {
         move_abs(enigo, start_x, start_y)?;
         let mut pressed = PressedInputGuard::new(enigo);
         pressed.press_button(Button::Left)?;
@@ -521,20 +547,30 @@ pub async fn drag(start_x: i32, start_y: i32, end_x: i32, end_y: i32) -> Result<
 
 /// Type a unicode string (layout-independent).
 pub async fn type_text(text: String) -> Result<(), String> {
+    type_text_controlled(&CancellationToken::new(), text).await
+}
+
+pub(crate) async fn type_text_controlled(cancellation: &CancellationToken, text: String) -> Result<(), String> {
+    crate::native_control::require_open(cancellation)?;
     #[cfg(target_os = "linux")]
     if use_wayland() {
-        return with_wayland(move |cancel| crate::linux_wayland_input::type_text_blocking(cancel, text)).await;
+        return with_wayland_controlled(cancellation, move |cancel| crate::linux_wayland_input::type_text_blocking(cancel, text)).await;
     }
-    with_enigo(move |enigo| enigo.text(&text).map_err(input_err)).await
+    with_enigo_controlled(cancellation, move |enigo| enigo.text(&text).map_err(input_err)).await
 }
 
 /// Press a key combo: press front-to-back, release back-to-front.
 pub async fn key_combo(keys: Vec<enigo::Key>) -> Result<(), String> {
+    key_combo_controlled(&CancellationToken::new(), keys).await
+}
+
+pub(crate) async fn key_combo_controlled(cancellation: &CancellationToken, keys: Vec<enigo::Key>) -> Result<(), String> {
+    crate::native_control::require_open(cancellation)?;
     #[cfg(target_os = "linux")]
     if use_wayland() {
-        return with_wayland(move |cancel| crate::linux_wayland_input::key_combo_blocking(cancel, keys)).await;
+        return with_wayland_controlled(cancellation, move |cancel| crate::linux_wayland_input::key_combo_blocking(cancel, keys)).await;
     }
-    with_enigo(move |enigo| {
+    with_enigo_controlled(cancellation, move |enigo| {
         // Resolve before recording or submitting any press, on this existing
         // main-queue native input path. The same resolved keys are released by
         // the unchanged guard; text input and named modifiers are unaffected.
@@ -552,21 +588,22 @@ pub async fn key_combo(keys: Vec<enigo::Key>) -> Result<(), String> {
 
 /// Scroll by `amount` wheel clicks in `direction` (optionally moving the
 /// cursor to (x, y) first so the scroll lands on the right surface).
-pub async fn scroll(
-    at: Option<(i32, i32)>,
-    direction: ScrollDirection,
-    amount: i32,
-) -> Result<(), String> {
+pub async fn scroll(at: Option<(i32, i32)>, direction: ScrollDirection, amount: i32) -> Result<(), String> {
+    scroll_controlled(&CancellationToken::new(), at, direction, amount).await
+}
+
+pub(crate) async fn scroll_controlled(cancellation: &CancellationToken, at: Option<(i32, i32)>, direction: ScrollDirection, amount: i32) -> Result<(), String> {
+    crate::native_control::require_open(cancellation)?;
     #[cfg(target_os = "linux")]
     if use_wayland() {
-        return with_wayland(move |cancel| crate::linux_wayland_input::scroll_blocking(cancel, at, direction, amount)).await;
+        return with_wayland_controlled(cancellation, move |cancel| crate::linux_wayland_input::scroll_blocking(cancel, at, direction, amount)).await;
     }
     #[cfg(target_os = "macos")]
     {
-        return with_enigo(move |_enigo| macos_pointer::scroll(at, direction, amount)).await;
+        return with_enigo_controlled(cancellation, move |_enigo| macos_pointer::scroll(at, direction, amount)).await;
     }
     #[cfg(not(target_os = "macos"))]
-    with_enigo(move |enigo| {
+    with_enigo_controlled(cancellation, move |enigo| {
         if let Some((x, y)) = at {
             move_abs(enigo, x, y)?;
         }
@@ -607,20 +644,27 @@ fn use_wayland() -> bool {
     matches!(crate::linux_x11::desktop_state(), crate::linux_x11::DesktopState::Wayland)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 async fn with_wayland<T: Send + 'static>(operation: impl FnOnce(std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    with_wayland_controlled(&CancellationToken::new(), operation).await
+}
+
+#[cfg(target_os = "linux")]
+async fn with_wayland_controlled<T: Send + 'static>(cancellation: &CancellationToken, operation: impl FnOnce(std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    crate::native_control::require_open(cancellation)?;
     // Preserve the same admitted worker and settlement rules as X11/Enigo.
     // The portal adapter records and releases exact input obligations, and an
     // expired deadline never detaches an outstanding native operation.
-    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let worker_cancellation = cancellation.clone();
+    let native_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(cancellation.is_cancelled()));
+    let worker_cancellation = native_cancel.clone();
     let (completed, completion) = std::sync::mpsc::sync_channel(1);
-    let mut guard = crate::linux_native_worker::CancelAndJoin::new(cancellation.clone(), completion);
+    let mut guard = crate::linux_native_worker::CancelAndJoin::new(native_cancel.clone(), completion);
     let handle = tokio::task::spawn_blocking(move || {
         let _completion = crate::linux_native_worker::Completion(completed);
         operation(worker_cancellation)
     });
-    let result = join_input_task_with_cancel(handle, INPUT_TIMEOUT, Some(cancellation)).await;
+    let result = crate::native_control::join_with_cancellation(cancellation, &native_cancel,
+        join_input_task_with_cancel(handle, INPUT_TIMEOUT, Some(native_cancel.clone()))).await;
     guard.disarm();
     result
 }

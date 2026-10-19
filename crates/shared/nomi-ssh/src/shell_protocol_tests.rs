@@ -16,6 +16,7 @@ struct Peer {
     fence_status: i32,
     fence_runs: Arc<std::sync::atomic::AtomicUsize>,
     received: Arc<std::sync::Mutex<Vec<u8>>>,
+    reported_statuses:Arc<std::sync::Mutex<Vec<u32>>>,
 }
 
 impl server::Handler for Peer {
@@ -75,6 +76,7 @@ impl server::Handler for Peer {
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
         if self.exit_proof && matches!(signal, russh::Sig::TERM) {
+            self.reported_statuses.lock().unwrap().push(143);
             session.exit_status_request(channel, 143)?;
             session.close(channel)?;
         }
@@ -111,7 +113,7 @@ impl server::Handler for Peer {
             self.input.clear();
         } else if self.input.windows(b"fixture_terminal_exit".len()).any(|s| s == b"fixture_terminal_exit") {
             session.data(channel, b"terminal_marker".to_vec())?;
-            session.exit_status_request(channel, 7)?;
+            self.reported_statuses.lock().unwrap().push(7);session.exit_status_request(channel, 7)?;
             session.close(channel)?;
             self.input.clear();
         } else if self
@@ -152,6 +154,7 @@ impl server::Handler for Peer {
             session.data(channel, b"__NOMI_END_2__0__/requested-directory\n".to_vec())?;
             self.input.clear();
         } else if self.exit_proof && data == b"exit\n" {
+            self.reported_statuses.lock().unwrap().push(0);
             session.exit_status_request(channel, 0)?;
             session.close(channel)?;
         } else if self.input.windows(b"__NOMI_END_3__".len()).any(|s| s == b"__NOMI_END_3__") {
@@ -206,7 +209,7 @@ pub(super) async fn connect_scripted_peer(
     (connection, task, closed)
 }
 
-async fn connect_fenced_peer(
+pub(super) async fn connect_fenced_peer(
     init_status: i32,
     window_size: u32,
     exit_proof: bool,
@@ -218,12 +221,19 @@ async fn connect_fenced_peer(
     Arc<std::sync::atomic::AtomicUsize>,
     Arc<std::sync::Mutex<Vec<u8>>>,
 ) {
+    let(connection,task,closed,fenced,received,_)=connect_recorded_peer(init_status,window_size,exit_proof,fence_status).await;
+    (connection,task,closed,fenced,received)
+}
+
+pub(super) async fn connect_recorded_peer(init_status:i32,window_size:u32,exit_proof:bool,fence_status:i32)
+    ->(SshConnection,tokio::task::JoinHandle<Result<(),russh::Error>>,Arc<tokio::sync::Notify>,Arc<std::sync::atomic::AtomicUsize>,Arc<std::sync::Mutex<Vec<u8>>>,Arc<std::sync::Mutex<Vec<u32>>>) {
     let closed = Arc::new(tokio::sync::Notify::new());
     let peer_closed = closed.clone();
     let fence_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let peer_fence_runs = fence_runs.clone();
     let received = Arc::new(std::sync::Mutex::new(Vec::new()));
     let peer_received = received.clone();
+    let reported_statuses=Arc::new(std::sync::Mutex::new(Vec::new()));let peer_reported=reported_statuses.clone();
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
         .unwrap();
@@ -249,6 +259,7 @@ async fn connect_fenced_peer(
                 fence_status,
                 fence_runs: peer_fence_runs,
                 received: peer_received,
+                reported_statuses:peer_reported,
             },
         )
         .await?
@@ -269,7 +280,7 @@ async fn connect_fenced_peer(
     )
     .await
     .unwrap();
-    (connection, task, closed, fence_runs, received)
+    (connection, task, closed, fence_runs, received,reported_statuses)
 }
 
 #[tokio::test]

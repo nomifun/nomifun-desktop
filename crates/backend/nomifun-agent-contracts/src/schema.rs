@@ -146,6 +146,7 @@ mod tests {
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
 
         let actual = database
             .prepare(
@@ -173,6 +174,7 @@ mod tests {
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
 
         for (table, _, _, _) in TABLES {
             let quoted_table = table.replace('"', "\"\"");
@@ -271,6 +273,7 @@ mod tests {
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
 
         let columns = database
             .prepare("PRAGMA table_info(agent_runtime_snapshots)")
@@ -297,6 +300,7 @@ mod tests {
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/008_retire_payload_object_placeholder.sql"))
             .expect("current payload schema");
         database
@@ -373,6 +377,7 @@ mod tests {
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
 
         let columns = database
             .prepare("PRAGMA table_info(installation_role_bindings)")

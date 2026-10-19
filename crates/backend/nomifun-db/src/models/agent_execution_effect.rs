@@ -60,22 +60,12 @@ impl AttemptConversationEffects {
         }
     }
     pub fn push_stop_turn(&mut self, operation_id: String, target_operation_id: String) -> Result<(), AppError> {
-        if !self.pending_conversation_effects.is_empty() {
-            return Err(AppError::Conflict(
-                "a conversation effect is already pending for this attempt".to_owned(),
-            ));
-        }
         self.pending_conversation_effects
             .push(PendingConversationEffect::StopTurn { operation_id, target_operation_id });
         Ok(())
     }
 
     pub fn push_steer(&mut self, operation_id: String, target_operation_id: String, content: String) -> Result<(), AppError> {
-        if !self.pending_conversation_effects.is_empty() {
-            return Err(AppError::Conflict(
-                "a conversation effect is already pending for this attempt".to_owned(),
-            ));
-        }
         self.pending_conversation_effects
             .push(PendingConversationEffect::Steer {
                 operation_id,

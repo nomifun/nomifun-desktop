@@ -9,6 +9,9 @@ mod cancellation;
 #[path = "initialization_tests.rs"]
 mod initialization;
 
+#[path = "concurrency_tests.rs"]
+mod concurrency;
+
 #[path = "dialog_tests.rs"]
 mod dialogs;
 #[path = "frame_live_tests.rs"]
@@ -62,7 +65,7 @@ async fn inspect(browser: &AttachedBrowser, grant: &GrantedTab) -> Value {
 }
 
 async fn fixture_eval(browser: &AttachedBrowser, grant: &GrantedTab, script: &str) -> Value {
-    let _operation = browser.operations.lock().await;
+    let _operation = browser.operations.write().await;
     let connection = browser.current_connection().unwrap();
     let session = browser.state.lock().unwrap().automation[&grant.target_id]
         .session

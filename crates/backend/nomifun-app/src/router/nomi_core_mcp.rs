@@ -549,6 +549,13 @@ impl NomiCoreMcpHost {
         self.receipts.ensure_settled(owner, session).await
     }
 
+    /// The resource teardown path joins the original tool task before calling
+    /// this. Business uncertainty remains a strict gate for every new call.
+    pub(crate) async fn ensure_shutdown_resources_closed(&self, owner: &str, session: &str) -> Result<(), AppError> {
+        self.ensure_memory_settled(owner, session)?;
+        self.receipts.ensure_shutdown_resources_closed(owner, session).await
+    }
+
     fn ensure_memory_settled(&self, owner: &str, session: &str) -> Result<(), AppError> {
         let sessions = self
             .sessions

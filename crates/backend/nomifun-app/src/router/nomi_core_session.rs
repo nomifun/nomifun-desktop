@@ -7,9 +7,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
+use super::operation_gates::{OperationGateCache,DeleteCleanupGateCache};
 
 #[path = "native_turn_recovery.rs"]
 mod native_turn_recovery;
+#[path = "completed_runtime_retirement.rs"]
+mod completed_runtime_retirement;
+#[path = "source_browser_retirement.rs"]
+mod source_browser_retirement;
+#[path = "execution_progress_observer.rs"]
+mod execution_progress_observer;
+#[path = "agent_activities.rs"]
+mod agent_activities;
 #[path = "session_capability_selection.rs"]
 mod session_capability_selection;
 #[path = "app_project_fences.rs"]
@@ -77,7 +86,6 @@ use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
-use dashmap::DashMap;
 use futures_util::FutureExt;
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_ai_agent::{
@@ -202,9 +210,9 @@ pub(crate) struct NomiCoreSessionOwner {
     managed_workspace_root: std::path::PathBuf,
     pool: nomifun_db::SqlitePool,
     creation_service: Arc<nomifun_creation::CreationService>,
-    session_operation_locks:
-        Arc<DashMap<String, Arc<tokio::sync::RwLock<()>>>>,
-    companion_lifecycle_locks: Arc<DashMap<String, Arc<tokio::sync::RwLock<()>>>>,
+    session_operation_locks:Arc<OperationGateCache>,
+    companion_lifecycle_locks:Arc<OperationGateCache>,
+    input_preparations: session_input_intake::InputPreparationControls,
     #[cfg(test)]
     cancellation_signal_barrier: std::sync::Mutex<Option<(AgentSessionId, Arc<NativeCancellationTestBarrier>)>>,
 }
@@ -795,8 +803,9 @@ impl NomiCoreSessionOwner {
             managed_workspace_root,
             pool,
             creation_service,
-            session_operation_locks: Arc::new(DashMap::new()),
-            companion_lifecycle_locks: Arc::new(DashMap::new()),
+            session_operation_locks: Arc::new(OperationGateCache::default()),
+            companion_lifecycle_locks: Arc::new(OperationGateCache::default()),
+            input_preparations: Default::default(),
             #[cfg(test)]
             cancellation_signal_barrier: std::sync::Mutex::new(None),
         }
@@ -819,7 +828,7 @@ impl NomiCoreSessionOwner {
     }
 
     #[cfg(feature = "browser-use")]
-    pub(crate) fn session_operation_locks(&self) -> Arc<DashMap<String, Arc<tokio::sync::RwLock<()>>>> {
+    pub(crate) fn session_operation_locks(&self) -> Arc<OperationGateCache> {
         self.session_operation_locks.clone()
     }
 
@@ -827,10 +836,7 @@ impl NomiCoreSessionOwner {
         &self,
         session_id: &str,
     ) -> Arc<tokio::sync::RwLock<()>> {
-        self.session_operation_locks
-            .entry(session_id.to_owned())
-            .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
-            .clone()
+        self.session_operation_locks.get(session_id)
     }
 
     async fn materialize_workspace_for_binding(
@@ -2071,6 +2077,7 @@ impl NomiCoreSessionOwner {
         let store = self.canonical.store().clone();
         let input_owner=self.native_engines.get().and_then(std::sync::Weak::upgrade).and_then(|host|host.session_owner().ok());
         let execution_progress=self.execution_progress.get().and_then(std::sync::Weak::upgrade);
+        let original_runtime = runtimes.get_runtime(session_id.as_ref());
         let task = async move {
             let mut committed_terminal = false;
             loop {
@@ -2180,7 +2187,13 @@ impl NomiCoreSessionOwner {
                     "canonical Runtime turn release failed"
                 );
             }
-            if let Some(owner)=input_owner {owner.schedule_session_input_drain(owner_id.clone(),session_id.clone(),None);}
+            if let Some(owner)=input_owner {
+                owner.schedule_session_input_drain(owner_id.clone(),session_id.clone(),None);
+                if committed_terminal && let Some(runtime) = original_runtime {
+                    owner.schedule_completed_runtime_retirement(owner_id.clone(), session_id.clone(),
+                        operation_id.clone(), runtime);
+                }
+            }
             if committed_terminal && let Some(execution)=execution_progress {
                 if let Err(error)=execution.notify_source_turn_settled(&owner_id,session_id.as_ref(),operation_id.as_ref()).await {
                     tracing::warn!(agent_session_id=session_id.as_ref(),%error,"source completion could not advance Execution delivery; durable recovery remains available");
@@ -2237,8 +2250,37 @@ impl NomiCoreSessionOwner {
         self.dispatch_canonical_turn_locked(owner_id,session_id,idempotency_key,request,initial_only,None,None,None,false,idmm_decision,None).await
     }
 
+    /// Only the authenticated Remote owner calls this dispatcher. The frozen
+    /// source is rechecked under the ordinary Session operation gate before
+    /// authoring the original accepted input; public message fields cannot
+    /// create or amend this provenance.
+    async fn dispatch_remote_source_turn(
+        &self, owner_id: &str, session_id: &AgentSessionId, idempotency_key: &str,
+        request: SendMessageRequest, remote: &NomiRemoteSessionRow,
+    ) -> Result<IdempotentMessageDelivery, AppError> {
+        let exact = self.canonical.get(&PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() }, session_id).await?;
+        let _project_directory_fence = self.guard_binding_workspace_read(owner_id, &exact.session.agent_binding)?;
+        if self.canonical.store().head(session_id).await.map_err(agent_session_store_error)?.status == "paused" {
+            self.canonical_conversation_projection(owner_id, session_id).await?;
+        }
+        let _operation_fence = self.session_operation_lock(session_id.as_ref()).write_owned().await;
+        let exact = self.canonical.store().get_live_session(session_id).await.map_err(agent_session_store_error)?;
+        let source = source_browser_retirement::validated_remote_runtime_source(&exact, remote, owner_id, session_id)?;
+        self.dispatch_canonical_turn_locked_with_source_ref(owner_id, session_id, idempotency_key, request,
+            false, None, None, None, false, None, None,
+            Some(source_browser_retirement::ServerTurnSource::Remote(source))).await
+    }
+
     async fn dispatch_canonical_turn_locked(&self,owner_id:&str,session_id:&AgentSessionId,idempotency_key:&str,request:SendMessageRequest,
         initial_only:bool,voice_binding:Option<u64>,voice_context_floor:Option<u64>,voice_shutdown:Option<&tokio_util::sync::CancellationToken>,voice_supersede:bool,idmm_decision:Option<IdmmDecisionExplanation>,input_source:Option<nomifun_agent_contracts::AgentInputSource>)->Result<IdempotentMessageDelivery,AppError> {
+        self.dispatch_canonical_turn_locked_with_source_ref(owner_id,session_id,idempotency_key,request,initial_only,
+            voice_binding,voice_context_floor,voice_shutdown,voice_supersede,idmm_decision,input_source,None).await
+    }
+
+    async fn dispatch_canonical_turn_locked_with_source_ref(&self,owner_id:&str,session_id:&AgentSessionId,idempotency_key:&str,request:SendMessageRequest,
+        initial_only:bool,voice_binding:Option<u64>,voice_context_floor:Option<u64>,voice_shutdown:Option<&tokio_util::sync::CancellationToken>,voice_supersede:bool,
+        idmm_decision:Option<IdmmDecisionExplanation>,input_source:Option<nomifun_agent_contracts::AgentInputSource>,mut source_ref:Option<source_browser_retirement::ServerTurnSource>)
+        ->Result<IdempotentMessageDelivery,AppError> {
         if idmm_decision.is_some() || request.origin.as_deref() == Some("idmm") {
             self.ensure_channel_guest_idmm_allowed(session_id).await?;
         }
@@ -2262,8 +2304,37 @@ impl NomiCoreSessionOwner {
             input["idmm_decision"] = serde_json::to_value(decision)
                 .map_err(|error| AppError::Internal(error.to_string()))?;
         }
+        // A duplicate belongs to its original accepted input. New source
+        // metadata cannot retrofit an older or unrelated invocation using the
+        // same literal key; ordinary canonical payload comparison still rejects
+        // changed business input. Source-less historical replays stay source-less.
+        if let Some(source_key) = source_ref.as_ref().map(|source| match source {
+            source_browser_retirement::ServerTurnSource::Cron(_) => "cron_runtime_overlay",
+            source_browser_retirement::ServerTurnSource::Remote(_) => "remote_runtime_source",
+        }) {
+            let operation = Self::turn_operation_id(owner_id, session_id.as_ref(), idempotency_key);
+            if self.canonical.store().read_turn_receipt(session_id, &operation).await.map_err(agent_session_store_error)?.status
+                != nomifun_agent_session::TurnReceiptStatus::NotFound {
+                let (_, original) = self.canonical.store().turn_accepted_input(session_id, &operation).await.map_err(agent_session_store_error)?;
+                if original.0.get(source_key).is_none() { source_ref = None; }
+            }
+        }
+        // Server-owned sources are mutually exclusive and are never copied
+        // from the public request, extra metadata or a guessed operation key.
+        if input_source.is_some() && source_ref.is_some() {
+            return Err(AppError::Conflict("canonical input has conflicting trusted sources".into()));
+        }
         if let Some(source) = input_source {
             input["input_source"] = serde_json::to_value(source).map_err(|error| AppError::Internal(error.to_string()))?;
+        }
+        match source_ref {
+            Some(source_browser_retirement::ServerTurnSource::Cron(source)) => {
+                input["cron_runtime_overlay"] = serde_json::to_value(source).map_err(|error| AppError::Internal(error.to_string()))?;
+            }
+            Some(source_browser_retirement::ServerTurnSource::Remote(source)) => {
+                input["remote_runtime_source"] = serde_json::to_value(source).map_err(|error| AppError::Internal(error.to_string()))?;
+            }
+            None => {},
         }
         let principal = PrincipalRef {
             principal_kind: "user".to_owned(),
@@ -2516,7 +2587,7 @@ impl NomiCoreSessionOwner {
             "UPDATE agent_executions SET lease_owner = lease_owner \
              WHERE execution_id = ? AND user_id = ? AND lease_owner = ? \
                AND lease_expires_at > ? AND deleted_at IS NULL \
-               AND status IN ('running', 'waiting_input')",
+               AND status IN ('running', 'waiting_input', 'paused')",
         )
         .bind(&authority.execution_id)
         .bind(owner_id)
@@ -3150,6 +3221,7 @@ impl NomiCoreSessionOwner {
     ) -> Result<AgentMutationReceipt, AppError> {
         let canonical = self.canonical.clone();
         let runtimes = self.runtime_sessions.clone();
+        let original_runtime = runtimes.get_runtime(session_id.as_ref());
         let engines = self.native_engines.get().and_then(std::sync::Weak::upgrade);
         let input_owner = engines.as_ref().and_then(|host| host.session_owner().ok());
         let input_owner_id = owner_id.to_owned();
@@ -3171,13 +3243,31 @@ impl NomiCoreSessionOwner {
                 let receipt = canonical.cancel_exact_turn(&principal, &session, &key, &target).await?;
                 #[cfg(test)]
                 if let Some(barrier) = barrier { barrier.entered.notify_one(); barrier.release.notified().await; }
-                Self::signal_receipted_runtime_turn(canonical.store(), runtimes.as_ref(), engines,
-                    &session, &receipt, reason).await?;
+                let signalled = Self::signal_receipted_runtime_turn(canonical.store(), runtimes.as_ref(), engines,
+                    &session, &receipt, reason).await;
                 // Keep the unified intake wake within the same owned mutation:
                 // a dropped HTTP/scheduler waiter cannot strand saved inputs.
                 if let Some(owner) = input_owner {
-                    owner.schedule_session_input_drain(input_owner_id, session.clone(), None);
+                    if signalled.is_ok() {
+                        owner.schedule_session_input_drain(input_owner_id.clone(), session.clone(), None);
+                    }
+                    // A native-paused Turn has already released its stream
+                    // relay and active admission. Its later cancellation has
+                    // no second terminal stream to retire the idle carrier.
+                    // Reuse the exact committed-terminal retirement owner;
+                    // it rechecks this operation, instance and live effects
+                    // before disposal and cannot select a successor Runtime.
+                    // Replayed or already-closed targets retain their first
+                    // retirement owner; they must not capture and pin the
+                    // current carrier or its new background responsibilities.
+                    // Keep that first exact responsibility even if signal
+                    // observation failed after the cancellation committed.
+                    if let Some(runtime) = original_runtime.filter(|_| !receipt.duplicate) {
+                        owner.schedule_completed_runtime_retirement(input_owner_id,
+                            session.clone(), target.clone(), runtime);
+                    }
                 }
+                signalled?;
                 Ok(receipt)
             }.await;
             if let Err(error) = &result { tracing::warn!(agent_session_id=session.as_ref(), %error, "exact Turn cancellation remains unacknowledged"); }
@@ -3195,7 +3285,9 @@ impl NomiCoreSessionOwner {
         idempotency_key: &str,
         target_operation_id: &OperationId,
     ) -> Result<AgentMutationReceipt, AppError> {
-        let _guard = self.session_operation_lock(session_id.as_ref()).write_owned().await;
+        // The canonical exact-Turn writer is the durable control fence. A
+        // management Stop must not queue behind in-flight Session business
+        // controls; a changed/deleted Session is revalidated by that writer.
         let observation = self.canonical.get(&PrincipalRef {
             principal_kind: "user".into(), principal_id: owner_id.into(),
         }, session_id).await?;
@@ -3621,6 +3713,48 @@ fn merge_product_agent_resolution(
 
 #[async_trait]
 impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
+    async fn retire_new_conversation_run_resources(
+        &self, request: &nomifun_cron::CronRunResourceRetirement,
+    ) -> Result<(), AppError> {
+        self.retain_finalized_cron_browser_retirement(request.clone())
+    }
+    async fn cancel_reserved_turn(&self, request: &nomifun_cron::CronTurnCancellationRequest)
+        -> Result<nomifun_cron::CronTurnCancellationReceipt, AppError> {
+        // Consume only the original owner/job/run/Session cancellation. A
+        // current job summary or the Session's newest Turn is never a target.
+        let authorised: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cron_run_reservations reservation \
+            LEFT JOIN cron_jobs job ON job.cron_job_id=reservation.cron_job_id \
+            JOIN agent_sessions session ON session.agent_session_id=reservation.conversation_id \
+            WHERE (job.user_id=? OR (job.cron_job_id IS NULL AND json_extract(session.owner_ref_json,'$.principal_kind')='user' \
+              AND json_extract(session.owner_ref_json,'$.principal_id')=?)) \
+              AND reservation.cron_job_id=? AND reservation.cron_job_run_id=? AND reservation.conversation_id=? \
+              AND reservation.cancel_requested_at_ms IS NOT NULL)")
+            .bind(&request.owner_id).bind(&request.owner_id).bind(&request.cron_job_id).bind(&request.cron_job_run_id)
+            .bind(request.agent_session_id.as_ref()).fetch_one(&self.pool).await
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        if !authorised { return Err(AppError::Conflict("scheduled Stop has no exact durable run cancellation".into())); }
+        let principal = PrincipalRef { principal_kind: "user".into(), principal_id: request.owner_id.clone() };
+        self.canonical.get(&principal, &request.agent_session_id).await?;
+        let operation = Self::turn_operation_id(&request.owner_id, request.agent_session_id.as_ref(),
+            &format!("cron:{}:turn", request.cron_job_run_id));
+        let receipt = self.canonical.turn_receipt(&principal, &request.agent_session_id, &operation).await?;
+        if receipt.status == nomifun_agent_session::TurnReceiptStatus::NotFound {
+            // The original durable cancellation also fences a raced native
+            // claim/resume in that claim's own writer transaction.
+            return Ok(nomifun_cron::CronTurnCancellationReceipt { execution_stopped: true });
+        }
+        self.cancel_exact_turn(&request.owner_id, &request.agent_session_id,
+            &format!("cron:{}:cancel", request.cron_job_run_id), &operation,
+            nomifun_common::AgentKillReason::UserCancelled).await?;
+        let native_claimed = self.canonical.store().has_native_execution_owner(&request.agent_session_id, &operation)
+            .await.map_err(agent_session_store_error)?;
+        let generation = self.canonical.store().native_execution_generation(&request.agent_session_id, &operation)
+            .await.map_err(agent_session_store_error)?;
+        let carrier = self.runtime_sessions.observe_runtime_carrier(request.agent_session_id.as_ref());
+        let execution_stopped = !native_claimed || (carrier.supported && carrier.registered && !carrier.uncertain_acquisition
+            && carrier.active_generation != Some(generation) && carrier.constructing_generation != Some(generation));
+        Ok(nomifun_cron::CronTurnCancellationReceipt { execution_stopped })
+    }
     async fn get_session(
         &self,
         query: &nomifun_cron::CronSessionLookup,
@@ -3852,7 +3986,8 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
              FROM cron_run_reservations reservation \
              JOIN cron_jobs job ON job.cron_job_id = reservation.cron_job_id \
              WHERE job.user_id = ? AND reservation.cron_job_id = ? \
-               AND reservation.cron_job_run_id = ? AND reservation.status = 'reserved'",
+               AND reservation.cron_job_run_id = ? AND reservation.status = 'reserved' \
+               AND reservation.cancel_requested_at_ms IS NULL",
         )
         .bind(&owner_id)
         .bind(&runtime.overlay.cron_job_id)
@@ -3903,9 +4038,13 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                 },
             ).await.map_err(agent_session_store_error)?;
         }
-        let delivery = self.dispatch_canonical_turn_locked(
+        let source = nomifun_agent_contracts::CronRunRuntimeSource {
+            cron_job_id: runtime.overlay.cron_job_id.clone(), cron_job_run_id: runtime.overlay.cron_job_run_id.clone(),
+            agent_session_id: agent_session_id.clone(),
+        };
+        let delivery = self.dispatch_canonical_turn_locked_with_source_ref(
             &owner_id, &agent_session_id, &idempotency_key,
-            message, false, None, None, None, false, None, None,
+            message, false, None, None, None, false, None, None, Some(source_browser_retirement::ServerTurnSource::Cron(source)),
         ).await?;
         Ok(nomifun_cron::CronPreparedTurnDelivery {
             delivery: cron_delivery_from_conversation(delivery),
@@ -4708,6 +4847,22 @@ fn companion_archive_message(
     })
 }
 
+impl NomiCoreSessionOwner {
+    async fn read_execution_turn_progress(
+        &self, session: &AgentSessionId, operation: &OperationId,
+    ) -> Result<nomifun_agent_execution::AgentExecutionTurnProgress, AppError> {
+        let store = self.canonical.store();
+        let progress = store.read_turn_progress(session, operation).await.map_err(agent_session_store_error)?;
+        use nomifun_agent_session::TurnReceiptStatus;
+        Ok(nomifun_agent_execution::AgentExecutionTurnProgress {
+            found: progress.status != TurnReceiptStatus::NotFound,
+            terminal: matches!(progress.status, TurnReceiptStatus::Completed | TurnReceiptStatus::Failed | TurnReceiptStatus::Cancelled),
+            cursor: progress.cursor,
+            suspended: progress.suspended,
+        })
+    }
+}
+
 #[async_trait]
 impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner {
     async fn create_idempotent(
@@ -4856,6 +5011,23 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         .map(agent_execution_delivery_from_conversation)
     }
 
+    async fn observe_turn_progress(
+        &self, owner_id: &str, conversation_id: &str, operation_id: &str,
+        after_cursor: Option<u64>,
+    ) -> Result<nomifun_agent_execution::AgentExecutionTurnProgress, AppError> {
+        let session = AgentSessionId::from(conversation_id.to_owned());
+        self.canonical.session_record(&PrincipalRef {
+            principal_kind: "user".into(), principal_id: owner_id.into(),
+        }, &session).await?;
+        let operation = Self::turn_operation_id(owner_id, conversation_id, operation_id);
+        // Subscribe before the canonical re-read, including when the stream
+        // belongs to a reattached native generation. Stream data never settles
+        // an Attempt and a missing transport does not authorize its creation.
+        let stream = self.runtime_sessions.get_runtime(conversation_id).map(|runtime| runtime.subscribe());
+        execution_progress_observer::observe(after_cursor, stream,
+            || self.read_execution_turn_progress(&session, &operation)).await
+    }
+
     async fn delivery_result(
         &self,
         owner_id: &str,
@@ -4978,38 +5150,45 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         None
     }
 
-    async fn cancel_for_execution(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
+    async fn cancel_attempt_for_execution(
+        &self, owner_id: &str, conversation_id: &str,
+        attempt_id: &str, target_operation_id: &str,
     ) -> Result<(), AppError> {
         let session = AgentSessionId::from(conversation_id.to_owned());
-        // Capture native identity before any await. Canonical cancellation
-        // clears active_turn_id before the native signal; an empty head alone
-        // therefore cannot acknowledge this Attempt's runtime cleanup.
-        let generation = self.runtime_sessions.active_turn_generation(conversation_id);
-        let observation = self.canonical.get(&PrincipalRef {
+        self.canonical.get(&PrincipalRef {
             principal_kind: "user".into(), principal_id: owner_id.into(),
         }, &session).await?;
-        let target = if let Some(generation) = generation {
-            let operations: Vec<String> = sqlx::query_scalar(
-                "SELECT operation_id FROM agent_turns WHERE session_id=? \
-                 AND (CASE WHEN execution_generation>0 THEN execution_generation ELSE started_at END)=? LIMIT 2",
-            ).bind(conversation_id).bind(i64::try_from(generation).map_err(|_| AppError::Conflict("native cleanup generation exceeds canonical range".into()))?)
-                .fetch_all(&self.pool).await.map_err(|error| AppError::Internal(error.to_string()))?;
-            let [operation] = operations.as_slice() else {
-                return Err(AppError::Conflict("Attempt cleanup has no unique exact native Turn".into()));
-            };
-            Some(OperationId::from(operation.clone()))
-        } else { observation.head.active_turn_id.map(OperationId::from) };
-        let Some(target) = target else { return Ok(()); };
-        let receipt = self.cancel_exact_turn(owner_id, &session,
-            &format!("execution-cleanup:{}", target.as_ref()), &target,
-            nomifun_common::AgentKillReason::UserCancelled).await?;
-        let cancelled_generation = self.canonical.store().native_execution_generation(&session, &receipt.target_operation_id)
+        let target = OperationId::from(target_operation_id.to_owned());
+        let receipt = self.canonical.store().read_turn_receipt(&session, &target)
             .await.map_err(agent_session_store_error)?;
-        if self.runtime_sessions.active_turn_generation(conversation_id) == Some(cancelled_generation) {
-            return Err(AppError::Conflict("Attempt native cleanup is still running for the exact cancelled Turn".into()));
+        if receipt.status == nomifun_agent_session::TurnReceiptStatus::NotFound {
+            // The cancelled Step/link fences later admission of this exact
+            // invocation. No other Turn gains cancellation authority here.
+            return Ok(());
+        }
+        if !matches!(receipt.status, nomifun_agent_session::TurnReceiptStatus::Completed
+            | nomifun_agent_session::TurnReceiptStatus::Failed) {
+            self.cancel_exact_turn(owner_id, &session,
+                &format!("execution-attempt-cleanup:{attempt_id}:{}",
+                    nomifun_agent_contracts::digest_bytes(target.as_ref().as_bytes()).as_ref()), &target,
+                nomifun_common::AgentKillReason::UserCancelled).await?;
+        }
+        let generation = self.canonical.store().native_execution_generation(&session, &target)
+            .await.map_err(agent_session_store_error)?;
+        if self.runtime_sessions.active_turn_generation(conversation_id) == Some(generation) {
+            return Err(AppError::Conflict("exact Attempt native cleanup is still running".into()));
+        }
+        // This retry runs after the Execution's domain settlement, whereas a
+        // canonical terminal notification may precede that settlement. The
+        // Browser owner verifies the original task and retains its own native
+        // close/download responsibilities independently of Runtime retirement.
+        if let Some(engines) = self.native_engines.get().and_then(std::sync::Weak::upgrade) {
+            if !engines.retire_completed_attempt_browser_resources(owner_id, &session, attempt_id, &target).await? {
+                // The original Browser has not accepted retirement while a
+                // successor still protects it. Keep this exact outbox item;
+                // acknowledging it here would lose its only later recheck.
+                return Err(AppError::Conflict("Original Browser retirement has not accepted cleanup responsibility yet".into()));
+            }
         }
         Ok(())
     }
@@ -5757,10 +5936,10 @@ fn visible_conversation_execution(
     execution_link.map_or(
         (None, None, None),
         |(execution_id, relation, step_id, attempt_id, initial_mode)| {
-            // AutoWork uses AgentExecution for durability, but the bound main
-            // AgentSession is the work surface. Never project that internal
-            // aggregate as a user-created collaboration canvas/transcript.
-            if initial_mode.as_deref() == Some("automation") {
+            // The bound AutoWork lead remains its original work surface.
+            // Delegated Attempts own independent Sessions and retain their
+            // exact task projection and host controls, as other children do.
+            if initial_mode.as_deref() == Some("automation") && relation != "attempt" {
                 return (None, None, None);
             }
             if relation == "attempt" {
@@ -6403,6 +6582,7 @@ fn parse_canonical_autowork_revision(revision: &str) -> Result<u64, AppError> {
 
 fn agent_session_store_error(error: nomifun_agent_session::SessionStoreError) -> AppError {
     match error {
+        nomifun_agent_session::SessionStoreError::ExecutionCapacityPending => AppError::ExecutionAdmissionPending,
         nomifun_agent_session::SessionStoreError::NotFound(message) => AppError::NotFound(message),
         nomifun_agent_session::SessionStoreError::Deleted(message)
         | nomifun_agent_session::SessionStoreError::Conflict(message)
@@ -6645,17 +6825,31 @@ mod session_boundary_tests {
     }
 
     #[test]
-    fn autowork_execution_is_not_projected_as_collaboration_or_attempt_ui() {
+    fn autowork_lead_stays_on_its_original_surface_and_children_keep_exact_task_controls() {
         let execution_id = "0190f5fe-7c00-7a00-8000-000000000099".to_owned();
-        assert_eq!(
+        let step_id = "0190f5fe-7c00-7a00-8000-000000000098".to_owned();
+        let attempt_id = "0190f5fe-7c00-7a00-8000-000000000097".to_owned();
+        for relation in ["automation", "lead"] {
+            assert_eq!(
             visible_conversation_execution(Some((
                 execution_id.clone(),
-                "automation".to_owned(),
-                Some("0190f5fe-7c00-7a00-8000-000000000098".to_owned()),
-                Some("0190f5fe-7c00-7a00-8000-000000000097".to_owned()),
+                relation.to_owned(),
+                Some(step_id.clone()),
+                Some(attempt_id.clone()),
                 Some("automation".to_owned()),
             ))),
             (None, None, None),
+            );
+        }
+        assert_eq!(
+            visible_conversation_execution(Some((
+                execution_id.clone(),
+                "attempt".to_owned(),
+                Some(step_id.clone()),
+                Some(attempt_id.clone()),
+                Some("automation".to_owned()),
+            ))),
+            (Some(execution_id.clone()), Some(step_id), Some(attempt_id)),
         );
         assert_eq!(
             visible_conversation_execution(Some((
@@ -7308,9 +7502,14 @@ mod session_boundary_tests {
                 super::super::nomi_core_resource_bindings::freeze_resource_definition_id(resource).unwrap();
             }
         }
-        let relocated = a.typed_resource_bindings.clone();
+        let mut relocated = a.typed_resource_bindings.clone();
         freeze_selected_workspace(&mut a, OWNER_ID, &moved.to_string_lossy(), WorkspaceDirectoryCheck::Runtime).unwrap();
-        assert_eq!(a.typed_resource_bindings, relocated, "runtime validation preserves logical resource IDs from a verified location transition");
+        let mut validated = a.typed_resource_bindings.clone();
+        // Updating resource definitions may change their canonical ordering;
+        // the location transition preserves every complete definition.
+        relocated.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+        validated.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+        assert_eq!(validated, relocated, "runtime validation preserves logical resource IDs from a verified location transition");
     }
 
     #[test]
@@ -7938,8 +8137,7 @@ pub(crate) struct NomiCoreAgentApiState {
     browser_profile_store: nomifun_browser_platform::runtime::BrowserProfileStore,
     #[cfg(feature = "browser-use")]
     pub(crate) browser_user_close: Arc<dyn crate::browser_workspace_provider::BrowserUserClosePort>,
-    delete_cleanup_locks:
-        Arc<DashMap<(String, String), Arc<tokio::sync::Mutex<()>>>>,
+    delete_cleanup_locks:Arc<DeleteCleanupGateCache>,
 }
 
 impl NomiCoreAgentApiState {
@@ -7989,7 +8187,7 @@ impl NomiCoreAgentApiState {
             browser_profile_store,
             #[cfg(feature = "browser-use")]
             browser_user_close,
-            delete_cleanup_locks: Arc::new(DashMap::new()),
+            delete_cleanup_locks: Arc::new(DeleteCleanupGateCache::default()),
         }
     }
 
@@ -8074,10 +8272,7 @@ impl NomiCoreAgentApiState {
         owner_id: &str,
         agent_session_id: &str,
     ) -> Arc<tokio::sync::Mutex<()>> {
-        self.delete_cleanup_locks
-            .entry((owner_id.to_owned(), agent_session_id.to_owned()))
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+        self.delete_cleanup_locks.get(&(owner_id.to_owned(),agent_session_id.to_owned()))
     }
 
     async fn cleanup_agent_session_resources_before_delete(
@@ -9029,6 +9224,9 @@ pub(crate) fn build_nomi_core_remote_router(
 
 fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
     Router::new()
+        .route("/api/agent-activities", get(agent_activities::list))
+        .route("/api/agent-activities/stop", post(agent_activities::stop))
+        .route("/api/agent-activities/stop-targets", get(agent_activities::stop_targets))
         .route(
             "/api/product-agent-bindings/{target_kind}/{target_id}",
             get(product_agent_options).put(select_product_agent_binding),
@@ -10987,13 +11185,8 @@ async fn execute_initial_remote_turn(
     let initial_key = format!("remote-initial:{open_key}");
     let delivery = state
         .session_owner
-        .dispatch_canonical_turn(
-            owner.as_ref(),
-            session_id,
-            &initial_key,
-            input,
-            false,
-            None,
+        .dispatch_remote_source_turn(
+            owner.as_ref(), session_id, &initial_key, input, &current,
         )
         .await;
 
@@ -11357,6 +11550,7 @@ fn schedule_remote_cancel_finalizer(
         operation_digest
     );
     let coordinator = state.remote_runtime.clone();
+    let source_coordinator = coordinator.clone();
     let repository = state.remote_repository.clone();
     let session_owner = state.session_owner.clone();
     let owner_id = owner_id.to_owned();
@@ -11364,6 +11558,17 @@ fn schedule_remote_cancel_finalizer(
     let operation_key = operation_key.to_owned();
     let request_digest = remote_cancel_request_digest(&session_id, &operation_key)?;
     match coordinator.start_once(task_key, move || async move {
+        let target=match repository.find_event_by_operation_key(&owner_id,session_id.as_ref(),"session/cancel-requested",&operation_digest).await {
+            Ok(Some(request))=>match serde_json::from_str::<Value>(&request.payload_json).map_err(NomiCoreApiError::from).and_then(|payload|remote_cancel_target(&payload)) {
+                Ok(target)=>target,Err(error)=>{tracing::error!(agent_session_id=session_id.as_ref(),?error,"Remote cancellation target is invalid");return;}
+            },
+            Ok(None)=>return,
+            Err(error)=>{tracing::error!(agent_session_id=session_id.as_ref(),%error,"Remote cancellation target lookup failed");return;}
+        };
+        let Some(target)=target else {
+            tracing::warn!(agent_session_id=session_id.as_ref(),"legacy Remote cancellation has no exact target; retain its unknown outcome without selecting a later Turn");
+            return;
+        };
         let deadline =
             tokio::time::Instant::now() + NOMI_CORE_REMOTE_TURN_FINALIZER_TIMEOUT;
         loop {
@@ -11376,7 +11581,13 @@ fn schedule_remote_cancel_finalizer(
             )
             .await
             {
-                Ok((Some(RemoteCancelEventState::Cancelled | RemoteCancelEventState::Rejected), _)) => {
+                Ok((Some(RemoteCancelEventState::Cancelled), _)) => {
+                    if let Err(error) = source_browser_retirement::retain_remote_source_browser_retirement_with_owner(
+                        &source_coordinator, session_owner.clone(), repository.clone(), &owner_id, &session_id, &operation_key, &target,
+                    ) { tracing::warn!(session_id=session_id.as_ref(),?error,"Remote source Browser retirement remains unconfirmed"); }
+                    return;
+                }
+                Ok((Some(RemoteCancelEventState::Rejected), _)) => {
                     return;
                 }
                 Ok((Some(RemoteCancelEventState::Requested | RemoteCancelEventState::Unknown), _))
@@ -11391,12 +11602,12 @@ fn schedule_remote_cancel_finalizer(
                 }
             }
 
-            let is_idle = session_owner
-                .canonical()
-                .store()
-                .head(&session_id)
-                .await
-                .is_ok_and(|head| head.status != "running");
+            let is_idle={
+                if let Err(error)=signal_exact_remote_cancellation(&session_owner,&owner_id,&session_id,&operation_key,&target).await {
+                    tracing::warn!(agent_session_id=session_id.as_ref(),%error,"original Remote cancellation still awaits its exact owner");
+                }
+                exact_remote_cancellation_stopped(&session_owner,&session_id,&target).await.unwrap_or(false)
+            };
             if is_idle {
                 let current = match repository
                     .get_session(&owner_id, session_id.as_ref())
@@ -11413,6 +11624,17 @@ fn schedule_remote_cancel_finalizer(
                         return;
                     }
                 };
+                if current.state=="failed" {
+                    if let Err(error)=append_remote_event_once(&repository,&owner_id,session_id.as_ref(),"session/cancelled",Some(&operation_key),
+                        json!({"outcome":"cancelled","request_digest":request_digest,"preserved_failure":true,"recovered":true})).await {
+                        tracing::error!(agent_session_id=session_id.as_ref(),?error,"Remote cleanup receipt could not be committed while preserving its original failure");
+                        return;
+                    }
+                    if let Err(error) = source_browser_retirement::retain_remote_source_browser_retirement_with_owner(
+                        &source_coordinator, session_owner.clone(), repository.clone(), &owner_id, &session_id, &operation_key, &target,
+                    ) { tracing::warn!(session_id=session_id.as_ref(),?error,"Remote source Browser retirement remains unconfirmed"); }
+                    return;
+                }
                 if let Err(error) = transition_remote_state_with_repository(
                     &repository,
                     &owner_id,
@@ -11433,7 +11655,11 @@ fn schedule_remote_cancel_finalizer(
                         error = ?error,
                         "Nomi-core Remote cancellation state/event could not be persisted"
                     );
+                    return;
                 }
+                if let Err(error) = source_browser_retirement::retain_remote_source_browser_retirement_with_owner(
+                    &source_coordinator, session_owner.clone(), repository.clone(), &owner_id, &session_id, &operation_key, &target,
+                ) { tracing::warn!(session_id=session_id.as_ref(),?error,"Remote source Browser retirement remains unconfirmed"); }
                 return;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -16277,12 +16503,27 @@ async fn warm_nomi_core_agent_session(
     Path(agent_session_id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, NomiCoreApiError> {
     let session_id = parse_agent_session_id(&agent_session_id)?;
+    let principal=authenticated_principal(&owner);
+    let original=state.session_owner.canonical().store().get_live_session(&session_id).await.map_err(agent_session_store_error)?;
+    if original.owner_ref!=principal {return Err(AppError::Forbidden("AgentSession preparation belongs to another owner".into()).into());}
+    // A physical project mutation also owns the Session gate. Reject its
+    // already-held directory fence before waiting for that gate, otherwise
+    // the mutation caller and preparation could wait on each other. Release
+    // this preliminary read before the await; the authoritative binding/root
+    // fence is reacquired below after the Session handoff.
+    drop(original.metadata.app_project_id.as_deref().map(|app_id|
+        state.session_owner.guard_app_project_scope_read(owner.as_ref(), app_id)).transpose()?);
+    drop(state.session_owner.guard_binding_workspace_read(owner.as_ref(), &original.agent_binding)?);
+    // Automatic exact retirement is an ordinary ownership handoff. A valid
+    // preparation waits for that gate instead of failing because GC happened
+    // to win first; all live/binding/checkpoint checks below run after the wait.
     let _operation_fence = state
         .session_owner
         .session_operation_lock(session_id.as_ref())
-        .try_write_owned()
-        .map_err(|_| AppError::Conflict("AgentSession preparation is unavailable during a concurrent lifecycle mutation".into()))?;
+        .write_owned().await;
     let exact = state.session_owner.canonical().get(&authenticated_principal(&owner), &session_id).await?;
+    let _project_scope_fence=exact.session.metadata.app_project_id.as_deref().map(|app_id|
+        state.session_owner.guard_app_project_scope_read(owner.as_ref(), app_id)).transpose()?;
     let _project_directory_fence = state.session_owner.guard_binding_workspace_read(owner.as_ref(), &exact.session.agent_binding)?;
     state.session_owner.prepare_session_contract_evolution(owner.as_ref(), &session_id).await?;
     let observation = state.session_owner.canonical()
@@ -17484,13 +17725,8 @@ async fn turn_nomi_core_remote(
                 .session_owner
                 // This exact Remote Session was authenticated above. Ordinary
                 // owner intake correctly refuses domain-owned Sessions.
-                .dispatch_canonical_turn(
-                    task_owner.as_ref(),
-                    &task_session_id,
-                    &task_key,
-                    input,
-                    false,
-                    None,
+                .dispatch_remote_source_turn(
+                    task_owner.as_ref(), &task_session_id, &task_key, input, &remote_session,
                 )
                 .await?;
             record_remote_turn_delivery(
@@ -17608,8 +17844,72 @@ async fn cancel_nomi_core_remote(
     Extension(owner): Extension<AuthenticatedOwner>,
     Json(request): Json<RemoteCancelRequestDto>,
 ) -> Result<Json<RemoteMutationResponseDto>, NomiCoreApiError> {
+    cancel_nomi_core_remote_with_target(state,owner,request,None).await
+}
+
+#[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteCancelTarget {
+    expected_operation_id:Option<OperationId>,
+    expected_head_seq:u64,
+    expected_binding_version:i64,
+}
+
+async fn signal_exact_remote_cancellation(owner:&NomiCoreSessionOwner,user:&str,session:&AgentSessionId,key:&str,target:&RemoteCancelTarget)
+    ->Result<(),AppError> {
+    if let Some(operation)=&target.expected_operation_id {
+        owner.cancel_exact_turn(user,session,&format!("remote-cancel:{:x}",Sha256::digest(key.as_bytes())),operation,
+            nomifun_common::AgentKillReason::UserCancelled).await?;
+    } else {
+        // The original Remote request already fences every future canonical
+        // claim. Close only the exact opening carrier, never select a Turn.
+        let carrier=owner.runtime_sessions.observe_runtime_carrier(session.as_ref());
+        if let Some(instance)=carrier.instance_id {
+            if owner.runtime_sessions.request_runtime_stop(session.as_ref(),&instance,carrier.active_generation.or(carrier.constructing_generation))? {
+                owner.runtime_sessions.finish_runtime_stop(session.as_ref(),&instance).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn exact_remote_cancellation_stopped(owner:&NomiCoreSessionOwner,session:&AgentSessionId,target:&RemoteCancelTarget)
+    ->Result<bool,AppError> {
+    if let Some(operation)=&target.expected_operation_id {
+        let progress=owner.canonical.store().read_turn_progress(session,operation).await.map_err(agent_session_store_error)?;
+        if !matches!(progress.status,nomifun_agent_session::TurnReceiptStatus::Completed|nomifun_agent_session::TurnReceiptStatus::Failed|nomifun_agent_session::TurnReceiptStatus::Cancelled) {return Ok(false);}
+    }
+    let carrier=owner.runtime_sessions.observe_runtime_carrier(session.as_ref());
+    Ok(carrier.supported&&carrier.active_generation.is_none()&&carrier.constructing_generation.is_none()
+        &&!carrier.uncertain_acquisition&&!carrier.teardown_pending)
+}
+
+fn remote_cancel_target(payload:&Value)->Result<Option<RemoteCancelTarget>,NomiCoreApiError> {
+    if payload.get("expected_head_seq").is_none() {return Ok(None);}
+    Ok(Some(serde_json::from_value(json!({"expected_operation_id":payload.get("expected_operation_id"),
+        "expected_head_seq":payload.get("expected_head_seq"),"expected_binding_version":payload.get("expected_binding_version")}))?))
+}
+
+async fn cancel_nomi_core_remote_with_target(state:NomiCoreAgentApiState,owner:AuthenticatedOwner,
+    request:RemoteCancelRequestDto,expected_target:Option<RemoteCancelTarget>)
+    ->Result<Json<RemoteMutationResponseDto>,NomiCoreApiError> {
+    let tasks = state.session_owner.background_tasks.clone();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    if !tasks.spawn(Box::pin(async move {
+        let result = cancel_nomi_core_remote_with_target_owned(state, owner, request, expected_target).await;
+        let _ = sender.send(result);
+    })) {
+        return Err(AppError::Conflict("Remote cancellation owner is closing before admission".into()).into());
+    }
+    receiver.await.map_err(|_| AppError::Internal("Remote cancellation owner ended before its receipt".into()))?
+}
+
+async fn cancel_nomi_core_remote_with_target_owned(state:NomiCoreAgentApiState,owner:AuthenticatedOwner,
+    request:RemoteCancelRequestDto,expected_target:Option<RemoteCancelTarget>)
+    ->Result<Json<RemoteMutationResponseDto>,NomiCoreApiError> {
     let session_id = parse_agent_session_id(&request.agent_session_id)?;
     let key = canonical_nonempty(&request.idempotency_key, "idempotency_key")?;
+    let explicit_target=expected_target.is_some();
     let request_digest = remote_cancel_request_digest(&session_id, &key)?;
     let remote_session = remote_session_projection(&state, &owner, &session_id).await?;
     let response = load_owned_nomi_core_session(&state, &owner, &session_id).await?;
@@ -17617,6 +17917,20 @@ async fn cancel_nomi_core_remote(
     if metadata.remote.is_none() {
         return Err(remote_session_not_found());
     }
+    let operation_digest=remote_operation_key_digest(&key)?;
+    let original=state.remote_repository.find_event_by_operation_key(owner.as_ref(),session_id.as_ref(),"session/cancel-requested",&operation_digest)
+        .await.map_err(|error|remote_db_error(error,"exact cancel request lookup"))?;
+    let stored=original.as_ref().map(|event|serde_json::from_str::<Value>(&event.payload_json)).transpose()?;
+    let stored_target=stored.as_ref().map(remote_cancel_target).transpose()?.flatten();
+    if original.is_some()&&expected_target.is_some()&&expected_target!=stored_target {
+        return Err(AppError::Conflict("Remote cancel key is bound to another original task".into()).into());
+    }
+    let target=if let Some(target)=stored_target.or(expected_target) {Some(target)}
+        else if original.is_some(){None}else{
+            let head=state.session_owner.canonical.store().head(&session_id).await.map_err(agent_session_store_error)?;
+            Some(RemoteCancelTarget {expected_operation_id:head.active_turn_id.map(OperationId::from),expected_head_seq:head.last_seq,
+                expected_binding_version:remote_session.binding_version})
+        };
 
     let (existing_cancel, another_cancel_pending) = remote_cancel_event_state(
         &state.remote_repository,
@@ -17628,6 +17942,16 @@ async fn cancel_nomi_core_remote(
     .await?;
     match existing_cancel {
         Some(RemoteCancelEventState::Cancelled) => {
+            if explicit_target {
+                let original=target.as_ref().ok_or_else(||AppError::Conflict("Remote cleanup has no original exact target".into()))?;
+                signal_exact_remote_cancellation(&state.session_owner,owner.as_ref(),&session_id,&key,original).await?;
+                if !exact_remote_cancellation_stopped(&state.session_owner,&session_id,original).await? {
+                    return Err(nomi_core_remote_unknown_error("Original Remote execution is still settling after its accepted Stop",&session_id,&key));
+                }
+            }
+            if let Some(original) = target.as_ref() {
+                source_browser_retirement::retain_remote_source_browser_retirement(&state, owner.as_ref(), &session_id, &key, original)?;
+            }
             return Ok(Json(RemoteMutationResponseDto {
                 agent_session_id: session_id.as_ref().to_owned(),
                 cursor: remote_event_cursor(&state, &owner, &session_id).await?,
@@ -17661,7 +17985,7 @@ async fn cancel_nomi_core_remote(
                 }),
             ));
         }
-        None if another_cancel_pending => {
+        None if another_cancel_pending&&!explicit_target => {
             return Err(NomiCoreApiError::with_details(
                 StatusCode::CONFLICT,
                 "REMOTE_SESSION_CANCEL_PENDING",
@@ -17675,14 +17999,14 @@ async fn cancel_nomi_core_remote(
         None => {}
     }
 
-    if remote_session.state == "cancelled" {
+    if remote_session.state == "cancelled"&&!explicit_target {
         return Ok(Json(RemoteMutationResponseDto {
             agent_session_id: session_id.as_ref().to_owned(),
             cursor: remote_event_cursor(&state, &owner, &session_id).await?,
             session_status: "cancelled".to_owned(),
         }));
     }
-    if remote_session.state == "failed" {
+    if remote_session.state == "failed"&&!explicit_target {
         return Err(NomiCoreApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "REMOTE_OPEN_FAILED",
@@ -17693,19 +18017,14 @@ async fn cancel_nomi_core_remote(
     // Persist the cancellation request before crossing the runtime boundary.
     // A retry that arrives after an HTTP timeout can then observe the same
     // request identity and must not issue a second cancel command.
-    let requested = append_remote_event_with_inserted(
-        &state.remote_repository,
-        owner.as_ref(),
-        session_id.as_ref(),
-        "session/cancel-requested",
-        Some(&key),
-        json!({
-            "outcome": "requested",
-            "request_digest": request_digest,
-        }),
-    )
-    .await?;
-    if !requested.as_ref().is_some_and(|(_, inserted)| *inserted) {
+    let target=target.ok_or_else(||AppError::Conflict("legacy Remote cancellation has no exact target; its original outcome remains unconfirmed".into()))?;
+    let requested=state.remote_repository.append_cancel_request_exact(AppendNomiRemoteEventParams {owner_user_id:owner.as_ref().into(),
+        agent_session_id:session_id.as_ref().into(),event_type:"session/cancel-requested".into(),payload_json:serde_json::to_string(&json!({
+            "outcome":"requested","request_digest":request_digest,"operation_key_digest":operation_digest,
+            "expected_operation_id":target.expected_operation_id,"expected_head_seq":target.expected_head_seq,"expected_binding_version":target.expected_binding_version}))?},
+        target.expected_operation_id.as_ref().map(AsRef::as_ref),target.expected_head_seq,target.expected_binding_version).await
+        .map_err(|error|remote_db_error(error,"exact cancel request"))?;
+    if !requested.inserted {
         schedule_remote_cancel_finalizer(&state, owner.as_ref(), &session_id, &key)?;
         return Err(NomiCoreApiError::with_details(
             StatusCode::GATEWAY_TIMEOUT,
@@ -17724,15 +18043,14 @@ async fn cancel_nomi_core_remote(
     let task_owner = owner.clone();
     let task_session_id = session_id.clone();
     let task_key = key.clone();
+    let task_target=target.clone();
+    let task_signal_key=key.clone();
     let task_result = run_nomi_core_remote_detached(
         &state,
         nomi_core_remote_mutation_key("cancel", &owner, &session_id, &key),
         NOMI_CORE_REMOTE_CANCEL_COMMAND_TIMEOUT,
         async move {
-            task_state
-                .session_owner
-                .cancel_session(task_owner.as_ref(), task_session_id.as_ref())
-                .await
+            signal_exact_remote_cancellation(&task_state.session_owner,task_owner.as_ref(),&task_session_id,&task_signal_key,&task_target).await
         },
     )
     .await;
@@ -17821,20 +18139,13 @@ async fn cancel_nomi_core_remote(
         }
     }
 
-    let current = match transition_remote_state(
-        &state,
-        &owner,
-        &session_id,
-        remote_session,
-        "cancelled",
-        &key,
-        json!({
-            "outcome": "cancelled",
-            "request_digest": request_digest,
-        }),
-    )
-    .await
-    {
+    if !exact_remote_cancellation_stopped(&state.session_owner,&session_id,&target).await? {
+        schedule_remote_cancel_finalizer(&state,owner.as_ref(),&session_id,&key)?;
+        return Err(nomi_core_remote_unknown_error("Remote Stop was accepted; its original native owner is still settling",&session_id,&key));
+    }
+    let current = match source_browser_retirement::commit_remote_cancellation_and_handoff(
+        state.clone(), owner.clone(), session_id.clone(), key.clone(), target, remote_session, request_digest,
+    ).await {
         Ok(current) => current,
         Err(error) => {
             // The runtime command succeeded, but the durable state/event
@@ -18308,7 +18619,7 @@ pub(super) fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, Nom
             "turn input must be a string or an object containing content",
         )
     })?;
-    if ["idmm_decision", "idmm_notice", "input_source", "channel_source", "reply_to"].iter().any(|key| object.contains_key(*key))
+    if ["idmm_decision", "idmm_notice", "input_source", "channel_source", "reply_to", "cron_runtime_overlay", "remote_runtime_source"].iter().any(|key| object.contains_key(*key))
         || matches!(object.get("origin").and_then(Value::as_str), Some("idmm" | "robot" | "directed_delegation_result" | "channel_guest")) {
         return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST,
             "NOMI_CORE_INVALID_REQUEST", "Input source metadata is reserved for its authenticated host"));

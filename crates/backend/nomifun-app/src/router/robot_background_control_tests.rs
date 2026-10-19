@@ -703,7 +703,9 @@ async fn background_correction_keeps_real_input_in_exact_native_attempt_without_
             "the background safe-boundary path does not opt into immediate model superseding"
         );
     }
-    let source_before = store.head(&flow.robot_id).await.unwrap().last_seq;
+    let source_before = store.read_events(&flow.robot_id, None, 500).await.unwrap().events;
+    let child_before = store.read_events(&child, None, 500).await.unwrap().events;
+    assert!(source_before.len() < 500 && child_before.len() < 500);
     assert!(
         store
             .pending_session_inputs(&flow.robot_id, None)
@@ -725,11 +727,68 @@ async fn background_correction_keeps_real_input_in_exact_native_attempt_without_
             .await
             .is_err()
     );
-    assert_eq!(
-        store.head(&flow.robot_id).await.unwrap().last_seq,
-        source_before,
-        "an expired target is not a new ordinary input"
-    );
+    // Completion and its original report outbox are independent commits. The
+    // report may arrive after the source Turn's terminal while this rejected
+    // control is observed; it is not a new user input or a reopened task.
+    let (source_after, payloads) = tokio::time::timeout(Duration::from_secs(25), async {
+        loop {
+            let events = store.read_events(&flow.robot_id, None, 500).await.unwrap().events;
+            assert!(events.len() < 500);
+            let ids = events.iter().map(|event| event.event_id.clone()).collect::<Vec<_>>();
+            let payloads = store.resolved_event_payloads(&flow.robot_id, &ids).await.unwrap();
+            if events.iter().any(|event| event.kind.0 == "message/assistant-projected"
+                && payloads[event.event_id.as_ref()]["delegation_report"]["execution_id"] == captured.execution_id) {
+                break (events, payloads);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("the original completed Execution directly delivers its own report");
+    let reports = source_after.iter().filter(|event| event.kind.0 == "message/assistant-projected"
+        && payloads[event.event_id.as_ref()]["delegation_report"]["execution_id"] == captured.execution_id).collect::<Vec<_>>();
+    assert_eq!(reports.len(), 1, "the original completion report is published exactly once");
+    let report_event = reports[0];
+    let payload = &payloads[report_event.event_id.as_ref()];
+    assert_eq!(report_event.producer_id.as_ref(), "session_api");
+    assert_eq!(report_event.kind_version, 1);
+    assert_eq!(payload["origin"], "agent_execution_report");
+    let report: nomifun_agent_execution::AgentExecutionReport = serde_json::from_value(payload["delegation_report"].clone()).unwrap();
+    assert_eq!(report.source, nomifun_agent_execution::AgentExecutionSource {
+        agent_session_id:flow.robot_id.as_ref().to_owned(),turn_operation_id:captured.source_turn_operation_id.clone(),
+        tool_operation_id:captured.source_tool_operation_id.clone(),effect_id:captured.source_effect_id.clone(),
+    });
+    assert_eq!(report.execution_id, captured.execution_id);
+    assert_eq!(report.status, "completed");
+    assert_eq!(payload["operation_id"], format!("exec-lead-report:{}:event:{}", report.execution_id, report.execution_event_sequence));
+    let execution_events = flow.fixture.voice_execution.events(&flow.owner, &captured.execution_id, None, Some(128)).await.unwrap();
+    assert!(execution_events.iter().any(|event| event.sequence == report.execution_event_sequence
+        && event.event_type == nomifun_common::AgentExecutionEventKind::StatusChanged && event.payload["status"] == "completed"));
+    let source_terminal = store.read_turn_receipt(&flow.robot_id, &captured.source_turn_operation_id.clone().into())
+        .await.unwrap().terminal_event.unwrap();
+    assert_eq!(report_event.causation_event_id.as_ref(), Some(&source_terminal.event_id));
+    assert_eq!(report.attempts.len(), 1);
+    assert_eq!(report.attempts[0].step_id, attempt.step_id);
+    assert_eq!(report.attempts[0].attempt_id, attempt.attempt_id);
+    assert_eq!(report.attempts[0].agent_session_id, child.as_ref());
+    assert_eq!(report.attempts[0].turn_operation_id, operation.as_ref());
+    assert_eq!(report.attempts[0].terminal_event_id,
+        store.read_turn_receipt(&child, &operation).await.unwrap().terminal_event.unwrap().event_id.as_ref());
+    assert_eq!(report.attempts[0].result_ok, Some(true));
+    assert!(report.attempts[0].output_integrity_ok);
+    assert!(source_after.starts_with(&source_before), "previous canonical facts stay immutable");
+    assert!(source_after[source_before.len()..].iter().all(|event| event.event_id == report_event.event_id),
+        "the rejected expired control cannot append input, Turn, steer or public output; only the original report may arrive");
+    let child_after = store.read_events(&child, None, 500).await.unwrap().events;
+    let controls = |events: &[nomifun_agent_contracts::SessionEventRecord]| events.iter()
+        .filter(|event| matches!(event.kind.0.as_str(), "message/user-accepted" | "turn/started" | "turn/steer-accepted"))
+        .cloned().collect::<Vec<_>>();
+    assert_eq!(controls(&child_after), controls(&child_before), "an expired correction neither steers nor reopens the original native task");
+    let final_child = store.turn_output_facts(&child, &operation).await.unwrap();
+    let public = |facts: &nomifun_agent_session::ChatCausalityFacts| facts.events.iter().filter(|event| {
+        matches!(facts.event_payloads.get(event.event_id.as_ref()).and_then(|payload| payload.pointer("/event/event")).and_then(Value::as_str),
+            Some("public_output_committed" | "voice_model_step_superseded" | "delivery_review_superseded"))
+    }).cloned().collect::<Vec<_>>();
+    assert_eq!(public(&final_child), public(&complete), "rejection cannot publish or withdraw the original public output");
+    assert!(store.pending_session_inputs(&flow.robot_id, None).await.unwrap().is_empty());
     flow.finish().await;
     server.close().await;
 }

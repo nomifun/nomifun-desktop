@@ -30,7 +30,7 @@ pub use events::RequirementEventEmitter;
 pub use mcp_server::RequirementMcpServer;
 pub use notifier::CompletionNotifier;
 pub use auto_work_runner::{
-    AutoWorkRunner, AutoWorkRunnerDeps, AutoWorkStartOutcome, AutoWorkStopOutcome,
+    AutoWorkRunner, AutoWorkRunnerDeps, AutoWorkStartOutcome, AutoWorkStopOutcome, AutoWorkCurrentStopOutcome,
 };
 pub use routes::requirement_routes;
 pub use service::RequirementService;

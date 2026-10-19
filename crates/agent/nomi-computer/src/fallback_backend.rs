@@ -96,17 +96,25 @@ pub fn find_window(window_id: u32) -> Result<WindowInfo, String> {
 /// Accessibility tree and verify native focus. Linux requests EWMH activation
 /// and checks the exact active window without clicking application content.
 pub async fn focus_window(window_id: u32) -> Result<String, String> {
+    focus_window_controlled(&tokio_util::sync::CancellationToken::new(), window_id).await
+}
+
+pub(crate) async fn focus_window_controlled(cancellation: &tokio_util::sync::CancellationToken, window_id: u32) -> Result<String, String> {
+    crate::native_control::require_open(cancellation)?;
     #[cfg(not(target_os = "macos"))]
-    let info = tokio::task::spawn_blocking(move || find_window(window_id))
-        .await
-        .map_err(|e| format!("Window lookup task failed: {e}"))??;
+    return crate::native_control::after_preparation(cancellation,
+        async move { tokio::task::spawn_blocking(move || find_window(window_id)).await
+            .map_err(|e| format!("Window lookup task failed: {e}"))? },
+        move |info, cancellation| async move {
 
     #[cfg(target_os = "windows")]
     {
-        tokio::task::spawn_blocking(move || nomi_a11y::focus_windows_window(window_id))
+        tokio::task::spawn_blocking(move || {
+            crate::native_control::require_open(&cancellation)?;
+            nomi_a11y::focus_windows_window(window_id).map_err(windows_focus_error_message)
+        })
             .await
-            .map_err(|e| format!("Focus task failed: {e}"))?
-            .map_err(windows_focus_error_message)?;
+            .map_err(|e| format!("Focus task failed: {e}"))??;
         Ok(format!(
             "Activated window {window_id} ({:?} — {:?}) via the Windows foreground API. \
              Take a screenshot to verify.",
@@ -114,16 +122,12 @@ pub async fn focus_window(window_id: u32) -> Result<String, String> {
         ))
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        tokio::task::spawn_blocking(move || focus_window_macos(window_id))
-            .await
-            .map_err(|e| format!("Focus task failed: {e}"))?
-    }
-
     #[cfg(target_os = "linux")]
     {
-        tokio::task::spawn_blocking(move || crate::linux_x11::focus_window(window_id))
+        tokio::task::spawn_blocking(move || {
+            crate::native_control::require_open(&cancellation)?;
+            crate::linux_x11::focus_window(window_id)
+        })
             .await
             .map_err(|e| format!("Focus task failed: {e}"))??;
         Ok(format!(
@@ -138,10 +142,18 @@ pub async fn focus_window(window_id: u32) -> Result<String, String> {
         let _ = info;
         Err("Native window activation is unavailable on this platform".to_owned())
     }
+    }).await;
+
+    #[cfg(target_os = "macos")]
+    {
+        let cancellation = cancellation.clone();
+        tokio::task::spawn_blocking(move || focus_window_macos(&cancellation, window_id))
+            .await.map_err(|e| format!("Focus task failed: {e}"))?
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn focus_window_macos(window_id: u32) -> Result<String, String> {
+fn focus_window_macos(cancellation: &tokio_util::sync::CancellationToken, window_id: u32) -> Result<String, String> {
     if crate::permissions::accessibility_granted() == Some(false) {
         return Err(format!(
             "Accessibility permission is not granted, so the window cannot be activated. {}",
@@ -151,7 +163,7 @@ fn focus_window_macos(window_id: u32) -> Result<String, String> {
     // Re-read metadata for this exact current CGWindowID. Invented origins or
     // dimensions could resolve a different window in the AX tree, so none of
     // the generic display-list fallbacks are appropriate here.
-    let (pid, bounds, title) = crate::macos_main::run_blocking(move || {
+    let (pid, bounds, title) = crate::macos_main::run_blocking_controlled(cancellation, move || {
         let windows = Window::all().map_err(|e| format!("Failed to enumerate windows: {e}"))?;
         let window = windows.iter().find(|window| window.id().ok() == Some(window_id))
             .ok_or_else(|| format!("Window {window_id} no longer exists; run list_windows again."))?;
@@ -171,13 +183,17 @@ fn focus_window_macos(window_id: u32) -> Result<String, String> {
         let title = window.title().ok().filter(|title| !title.is_empty());
         Ok((pid, bounds, title))
     })?;
+    crate::native_control::require_open(cancellation)?;
     if u32::try_from(pid).ok() == Some(std::process::id()) {
-        let effect = macos_self_focus::focus(macos_self_focus::SelfWindowTarget { window_id, pid, bounds, title })
-            .map_err(|error| format!("Could not activate current-process macOS window {window_id}: {error}"))?;
+        let effect = macos_self_focus::focus(macos_self_focus::SelfWindowTarget { window_id, pid, bounds, title }, cancellation)
+            .map_err(|error| if error == crate::native_control::CANCELLED_BEFORE_DISPATCH { error }
+                else { format!("Could not activate current-process macOS window {window_id}: {error}") })?;
         return Ok(format!("Activated window {window_id} via macOS AppKit. {}", effect.message));
     }
-    let effect = nomi_a11y::focus_named_window(pid, bounds, title)
-        .map_err(|e| format!("Could not activate macOS window {window_id}: {e}"))?;
+    let effect = nomi_a11y::focus_named_window_controlled(pid, bounds, title, cancellation)
+        .map_err(|e| if matches!(e, nomi_a11y::A11yError::CancelledBeforeDispatch) {
+            crate::native_control::CANCELLED_BEFORE_DISPATCH.into()
+        } else { format!("Could not activate macOS window {window_id}: {e}") })?;
     Ok(format!("Activated window {window_id} via macOS Accessibility. {}", effect.message))
 }
 

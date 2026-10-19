@@ -51,7 +51,7 @@ pub use darwin_registered::{
     DarwinGenerationTerminationOutcome, DarwinRegisteredChildAuthority,
     own_registered_child_process,
 };
-pub use io::{OutputBuffer, OutputObserver};
+pub use io::{FrozenOutput, FrozenOutputError, OutputBuffer, OutputObserver};
 pub use outcome::{
     CleanupReport, EncodingMetadata, OutputChunk, OutputCursor, OutputSnapshot, OutputStream,
     ProcessOutcome, ProcessSnapshot, ProcessState, SessionId, SpawnFailure,

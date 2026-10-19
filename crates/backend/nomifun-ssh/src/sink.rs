@@ -27,6 +27,10 @@ use crate::pool::{SshActionLease, SshConnectionPool, SshLink};
 use crate::service::{DecryptedCredential, SshServiceError};
 use crate::state::SshLinkState;
 
+#[cfg(test)]
+#[path = "sink_retirement_tests.rs"]
+mod retirement_tests;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SshActionDispatchError {
     #[error("{0}")]
@@ -109,6 +113,7 @@ impl From<SshError> for SshDialError {
                 "host key for {host} changed (known_hosts line {line})"
             )),
             SshError::Protocol(m) => SshDialError::Protocol(m),
+            SshError::Retired {output} => SshDialError::Protocol(format!("original shell retired; retained output: {output}")),
         }
     }
 }
@@ -132,6 +137,9 @@ pub struct SshConnectionHandle {
     conn: Arc<SshConnection>,
     /// SHA256 host fingerprint observed at connect (for status/display).
     pub fingerprint: Option<String>,
+    temporary_shells:std::sync::Mutex<Vec<Arc<RemoteShell>>>,
+    retiring:std::sync::atomic::AtomicBool,
+    unconfirmed_temporary:std::sync::atomic::AtomicBool,
 }
 
 impl SshConnectionHandle {
@@ -144,25 +152,66 @@ impl SshConnectionHandle {
         known_hosts: std::path::PathBuf,
         remote_cwd: &str,
     ) -> Result<Self, SshDialError> {
+        Self::connect_tracked(cred,known_hosts,remote_cwd,Arc::new(std::sync::atomic::AtomicBool::new(false))).await
+    }
+
+    pub(crate) async fn connect_tracked(cred:DecryptedCredential,known_hosts:std::path::PathBuf,remote_cwd:&str,
+        shell_started:Arc<std::sync::atomic::AtomicBool>)->Result<Self,SshDialError> {
+        validate_path(remote_cwd).map_err(|error|SshDialError::InvalidInput(error.to_string()))?;
         let ssh_cred = to_ssh_credential(&cred)?;
         let conn =
             SshConnection::connect(&ssh_cred, HostKeyPolicy::AcceptNew { known_hosts }).await?;
         let fingerprint = conn.fingerprint.clone();
         let conn = Arc::new(conn);
 
+        shell_started.store(true,std::sync::atomic::Ordering::Release);
         let shell = conn.open_shell(remote_cwd).await?;
-        let fs = Arc::new(conn.open_sftp().await?);
+        let fs = match conn.open_sftp().await {Ok(fs)=>Arc::new(fs),Err(error)=>{
+            let proof=shell.close(crate::state::SSH_CLOSE_BUDGET).await;
+            if proof.is_reaped(){shell_started.store(false,std::sync::atomic::Ordering::Release);}
+            return Err(error.into());
+        }};
 
         Ok(SshConnectionHandle {
             shell,
             fs,
             conn,
             fingerprint,
+            temporary_shells:Default::default(),retiring:false.into(),unconfirmed_temporary:false.into(),
         })
     }
 
     pub(crate) fn shell(&self) -> &Arc<RemoteShell> {
         &self.shell
+    }
+
+    pub(crate) fn request_retirement(&self) {
+        let shells=self.temporary_shells.lock().unwrap();
+        self.retiring.store(true,std::sync::atomic::Ordering::Release);self.shell.request_retirement();
+        for shell in shells.iter(){shell.request_retirement();}
+    }
+
+    pub(crate) fn channels_reaped(&self)->bool {
+        self.shell.close_proof().is_some_and(|proof|proof.is_reaped())&&self.temporary_shells.lock().unwrap().is_empty()
+            &&!self.unconfirmed_temporary.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub(crate) fn has_unconfirmed_cleanup(&self)->bool {
+        self.unconfirmed_temporary.load(std::sync::atomic::Ordering::Acquire)
+            ||self.temporary_shells.lock().unwrap().iter().any(|shell|shell.close_proof().is_some_and(|proof|!proof.is_reaped()))
+    }
+
+    pub(crate) async fn close_shells(&self,budget:std::time::Duration)->Vec<nomi_ssh::shell::ShellCloseProof> {
+        self.request_retirement();let temporary=self.temporary_shells.lock().unwrap().clone();
+        let mut proofs=vec![self.shell.close(budget).await];
+        for shell in temporary {
+            let proof=shell.close(budget).await;
+            if proof.is_reaped(){self.temporary_shells.lock().unwrap().retain(|current|!Arc::ptr_eq(current,&shell));}
+            proofs.push(proof);
+        }
+        if self.unconfirmed_temporary.load(std::sync::atomic::Ordering::Acquire) {
+            let mut proof=nomi_ssh::shell::ShellCloseProof::default();proof.errors.push("an earlier temporary shell initialization has no original exit evidence".into());proofs.push(proof);
+        }
+        proofs
     }
 
     pub(crate) fn fs(&self) -> &Arc<RemoteFs> {
@@ -188,14 +237,22 @@ impl SshConnectionHandle {
     pub(crate) async fn reopen_channels(
         &self,
         cwd: &str,
+        shell_started:Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Self, SshDialError> {
+        validate_path(cwd).map_err(|error|SshDialError::InvalidInput(error.to_string()))?;
+        shell_started.store(true,std::sync::atomic::Ordering::Release);
         let shell = self.conn.open_shell(cwd).await?;
-        let fs = Arc::new(self.conn.open_sftp().await?);
+        let fs = match self.conn.open_sftp().await {Ok(fs)=>Arc::new(fs),Err(error)=>{
+            let proof=shell.close(crate::state::SSH_CLOSE_BUDGET).await;
+            if proof.is_reaped(){shell_started.store(false,std::sync::atomic::Ordering::Release);}
+            return Err(error.into());
+        }};
         Ok(SshConnectionHandle {
             shell,
             fs,
             conn: Arc::clone(&self.conn),
             fingerprint: self.fingerprint.clone(),
+            temporary_shells:Default::default(),retiring:false.into(),unconfirmed_temporary:false.into(),
         })
     }
 
@@ -232,12 +289,16 @@ impl SshConnectionHandle {
     ) -> Result<RemoteCommandOutput, SshActionDispatchError> {
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(timeout_ms);
-        let shell = self
-            .conn
-            .open_shell(cwd)
-            .await
-            .map_err(|error| SshActionDispatchError::Rejected(error.to_string()))?;
+        validate_path(cwd).map_err(|error|SshActionDispatchError::Rejected(error.to_string()))?;
+        {let _shells=self.temporary_shells.lock().unwrap();if self.retiring.load(std::sync::atomic::Ordering::Acquire){return Err(SshActionDispatchError::Rejected("original SSH handle is retiring".into()));}}
+        let shell=match self.conn.open_shell(cwd).await {Ok(shell)=>shell,Err(error)=>{
+            self.unconfirmed_temporary.store(true,std::sync::atomic::Ordering::Release);
+            return Err(SshActionDispatchError::Rejected(error.to_string()));
+        }};
+        {let mut shells=self.temporary_shells.lock().unwrap();shells.push(shell.clone());
+            if self.retiring.load(std::sync::atomic::Ordering::Acquire){shell.request_retirement();}}
         let remaining = || deadline.saturating_duration_since(tokio::time::Instant::now());
+        let result=async {
         let validation = match &credential.sudo_password {
             Some(password) => {
                 let prompt = format!(
@@ -263,13 +324,12 @@ impl SshConnectionHandle {
         }
         .map_err(|error| SshActionDispatchError::Rejected(error.to_string()))?;
         if validation.timed_out || validation.exit_code != 0 {
-            let _ = shell.close(crate::state::SSH_CLOSE_BUDGET).await;
             return Err(SshActionDispatchError::Rejected(
                 "sudo authentication failed without exposing credential output".into(),
             ));
         }
         let elevated = format!("sudo -n -- sh -lc {}", shell_single_quote(command));
-        let result = shell
+        shell
             .run(&elevated, remaining())
             .await
             .map(remote_output)
@@ -277,8 +337,10 @@ impl SshConnectionHandle {
                 SshActionDispatchError::OutcomeUnknown(format!(
                     "ssh/sudo dispatch did not produce a terminal receipt: {error}"
                 ))
-            });
-        let _ = shell.close(crate::state::SSH_CLOSE_BUDGET).await;
+            })
+        }.await;
+        let proof=shell.close(crate::state::SSH_CLOSE_BUDGET).await;
+        if proof.is_reaped(){self.temporary_shells.lock().unwrap().retain(|current|!Arc::ptr_eq(current,&shell));}
         result
     }
 }

@@ -39,14 +39,27 @@ pub(super) struct KnowledgeWritebacks {
 }
 
 impl KnowledgeWritebacks {
+    pub(super) fn has_unsettled_work(&self)->Result<bool,AppError> {
+        let state=self.state.lock().map_err(|_|failure("Knowledge task ownership poisoned"))?;
+        Ok(!state.tokens.is_empty()||!state.settlements.is_empty())
+    }
+    pub(super) fn running_operations(&self) -> Result<Vec<OperationId>,AppError> {
+        let state=self.state.lock().map_err(|_|failure("Knowledge task ownership poisoned"))?;
+        Ok(state.tokens.keys().cloned().map(OperationId::from).collect())
+    }
+    pub(super) fn stop_requested(&self,operation:&OperationId)->Result<bool,AppError> {
+        Ok(self.state.lock().map_err(|_|failure("Knowledge task ownership poisoned"))?.tokens
+            .get(operation.as_ref()).is_some_and(CancellationToken::is_cancelled))
+    }
     pub(super) fn new(binding_version: u64) -> Result<Self, AppError> {
         Ok(Self { binding_version, tasks: EngineTaskGroup::new(32)?,
             state: Default::default() })
     }
 
-    pub(super) fn close(&self) -> Result<(), AppError> {
+    pub(super) fn close(&self, cancel: bool) -> Result<(), AppError> {
         self.tasks.close()?;
-        self.cancel_all()
+        if cancel { self.cancel_all()?; }
+        Ok(())
     }
 
     fn cancel(&self, operation: &str) -> Result<bool, AppError> {
@@ -102,6 +115,41 @@ fn detail(value: impl std::fmt::Display) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn soft_retirement_joins_the_original_writeback_without_cancelling_it() {
+        let owner = KnowledgeWritebacks::new(1).unwrap();
+        let token = CancellationToken::new();
+        owner.state.lock().unwrap().tokens.insert("original-turn".into(), token.clone());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let worker_release = release.clone();
+        let worker_token = token.clone();
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_completed = completed.clone();
+        let _result = owner.tasks.spawn(async move {
+            worker_release.notified().await;
+            assert!(!worker_token.is_cancelled());
+            worker_completed.store(true, std::sync::atomic::Ordering::Release);
+        }).unwrap();
+        owner.close(false).unwrap();
+        assert!(!token.is_cancelled(), "main Turn completion cannot cancel its writeback");
+        assert!(owner.join().now_or_never().is_none(), "retirement must retain and join the live owner");
+        release.notify_one();
+        owner.join().await.unwrap();
+        assert!(completed.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn explicit_session_teardown_still_cancels_and_joins_writebacks() {
+        let owner = KnowledgeWritebacks::new(1).unwrap();
+        let token = CancellationToken::new();
+        owner.state.lock().unwrap().tokens.insert("original-turn".into(), token.clone());
+        let worker_token = token.clone();
+        let _result = owner.tasks.spawn(async move { worker_token.cancelled().await; }).unwrap();
+        owner.close(true).unwrap();
+        owner.join().await.unwrap();
+        assert!(token.is_cancelled());
+    }
+
     #[test]
     fn knowledge_writeback_owner_error_is_bounded_in_bytes_and_valid_for_settlement() {
         for message in ["中文错误🙂".repeat(1000), "\u{0000}\r \t\n".into()] {
@@ -118,12 +166,25 @@ mod tests {
 }
 
 impl EngineKernelSession {
+    pub(in crate::router) fn running_knowledge_operations(&self)->Result<Vec<OperationId>,AppError> {
+        self.knowledge_writebacks.running_operations()
+    }
+    pub(in crate::router) fn knowledge_stop_requested(&self,operation:&OperationId)->Result<bool,AppError> {
+        self.knowledge_writebacks.stop_requested(operation)
+    }
+    pub(in crate::router) fn has_unsettled_knowledge_work(&self)->Result<bool,AppError> {
+        self.knowledge_writebacks.has_unsettled_work()
+    }
     pub(in crate::router) fn cancel_knowledge_writeback(&self, operation: &str) -> Result<bool, AppError> {
         self.knowledge_writebacks.cancel(operation)
     }
 
     pub(in crate::router) async fn cancel_and_join_knowledge_writebacks(&self) -> Result<(), AppError> {
         self.knowledge_writebacks.cancel_all()?;
+        self.knowledge_writebacks.join().await
+    }
+
+    pub(in crate::router) async fn join_knowledge_writebacks(&self) -> Result<(), AppError> {
         self.knowledge_writebacks.join().await
     }
 

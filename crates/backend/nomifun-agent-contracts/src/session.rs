@@ -414,6 +414,17 @@ pub enum AgentInputSource {
 
 }
 
+/// Server-authored source of one scheduled invocation. It is carried by the
+/// original canonical accepted input after the host validated the exact run
+/// reservation; user message fields and operation spellings cannot mint it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CronRunRuntimeSource {
+    pub cron_job_id: String,
+    pub cron_job_run_id: String,
+    pub agent_session_id: AgentSessionId,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSessionMetadata {

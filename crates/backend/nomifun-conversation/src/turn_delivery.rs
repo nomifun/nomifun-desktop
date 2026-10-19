@@ -43,6 +43,9 @@ pub enum PublicTurnDeliveryState {
 }
 
 pub trait BackgroundTaskRegistrar: Send + Sync {
+    /// Transfer process-owned cleanup to shutdown without aborting native work.
+    fn shutdown_signal(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+
     fn spawn(
         &self,
         task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,

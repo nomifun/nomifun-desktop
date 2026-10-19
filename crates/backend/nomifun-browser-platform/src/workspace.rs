@@ -38,12 +38,16 @@ struct RuntimeSlot {
 
 struct SlotState {
     runtime: Option<Arc<dyn BrowserRuntime>>,
+    created_by: Option<RuntimeUseSource>,
     locked: bool,
     closed: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuntimeUseSource { Agent, User }
+
 impl RuntimeSlot {
-    async fn ensure(&self) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError> {
+    async fn ensure(&self, source: RuntimeUseSource) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError> {
         let mut state = self.inner.lock().await;
         if state.closed {
             return Err(WorkspaceError::WorkspaceClosed);
@@ -54,6 +58,7 @@ impl RuntimeSlot {
         let mut request = self.request.clone();
         request.user_input_enabled = !state.locked;
         let runtime = self.factory.create(request).await?;
+        state.created_by = Some(source);
         state.runtime = Some(runtime.clone());
         Ok(runtime)
     }
@@ -137,6 +142,46 @@ pub struct BrowserUserSnapshot {
     pub runtime: Option<BrowserRuntimeSnapshot>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserRetentionReason {
+    NoRegisteredWorkspace,
+    ActiveTask,
+    CurrentUserUse,
+    TaskCompletionUnknown,
+    UserPageStateUnknown,
+    NativeCleanup,
+    EligibleTaskResources,
+    ObservationBusy,
+    Retired,
+}
+
+/// Process-local observation of this Browser owner. Absence of a registered
+/// Workspace is not a process-wide resource release receipt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BrowserWorkspaceObservation {
+    pub service_instance_id: Option<String>,
+    pub registered: bool,
+    pub runtime_generation: Option<u64>,
+    /// Native handle registration, never an inference that an OS process lives.
+    pub native_registered: Option<bool>,
+    /// Only a positive exact native close can produce Some(true).
+    pub close_confirmed: Option<bool>,
+    pub closing: bool,
+    pub cleanup_unconfirmed: bool,
+    pub task_operation_id: Option<String>,
+    pub retention: BrowserRetentionReason,
+    pub operation_in_flight: Option<bool>,
+}
+
+impl BrowserWorkspaceObservation {
+    pub fn unregistered() -> Self {
+          Self { service_instance_id: None, registered: false, runtime_generation: None, native_registered: None,
+            close_confirmed: None, closing: false, cleanup_unconfirmed: false, task_operation_id: None,
+            retention: BrowserRetentionReason::NoRegisteredWorkspace, operation_in_flight: None }
+    }
+}
+
 pub fn managed_workspace_key(principal_id: &str, agent_session_id: &str) -> Result<BrowserResourceKey, WorkspaceError> {
     let key = BrowserResourceKey {
         principal_id: principal_id.to_owned(),
@@ -157,6 +202,26 @@ pub struct BrowserWorkspace {
     // Only the currently admitted human navigation's native cancellation.
     // This is transient operation ownership, never a second history ledger.
     user_navigation: std::sync::Mutex<Option<Arc<UserNavigation>>>,
+    uses: Mutex<WorkspaceUses>,
+    use_changes: crate::revision::BrowserRevision,
+    registry: std::sync::Weak<Mutex<BTreeMap<BrowserResourceKey, Arc<BrowserWorkspace>>>>,
+    retirement_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+struct WorkspaceUses {
+    task: Option<String>,
+    turn_ended: bool,
+    task_completed: bool,
+    // Actual user command or possible native exposure retains nonempty pages;
+    // the marker alone never retains a carrier whose last page was closed.
+    user_pages: bool,
+    // None means no native presentation lifecycle has been acknowledged. An
+    // API command alone cannot invent an active or detached physical surface.
+    presentation: Option<bool>,
+    presentation_epoch: u64,
+    surface_attachments: BTreeSet<u64>,
+    retirement_started: bool,
 }
 
 enum UserNavigationScope {
@@ -186,6 +251,189 @@ impl Drop for UserNavigationLease {
 }
 
 impl BrowserWorkspace {
+    /// Exact native UI attachment ownership, separate from temporary hiding
+    /// for a menu/overlay. Only the trusted native surface owner authors this.
+    pub async fn retain_surface_attachment(&self, attachment: u64) -> Result<(), WorkspaceError> {
+        if attachment == 0 { return Err(WorkspaceError::StaleTarget); }
+        let mut uses = self.uses.lock().await;
+        if self.closing.load(Ordering::Acquire) { return Err(WorkspaceError::WorkspaceClosed); }
+        uses.surface_attachments.insert(attachment);
+        self.use_changes.bump();
+        Ok(())
+    }
+
+    /// Native hide is already acknowledged, or this exact attachment failed
+    /// before any show was dispatched. A stale release cannot end a successor.
+    pub async fn release_surface_attachment(&self, attachment: u64) {
+        self.uses.lock().await.surface_attachments.remove(&attachment);
+        self.use_changes.bump();
+        self.schedule_registered_retirement().await;
+    }
+
+    /// The Browser owner registers the exact canonical task before borrowing
+    /// the carrier. A successor protects it even between browser interactions.
+    pub async fn retain_task(&self, operation: &str) -> Result<(), WorkspaceError> {
+        if operation.is_empty() { return Err(WorkspaceError::StaleTarget); }
+        let mut uses = self.uses.lock().await;
+        if self.closing.load(Ordering::Acquire) { return Err(WorkspaceError::WorkspaceClosed); }
+        uses.task = Some(operation.to_owned());
+        uses.turn_ended = false;
+        uses.task_completed = false;
+        self.use_changes.bump();
+        Ok(())
+    }
+
+    /// Accept cleanup responsibility without holding the Session caller while
+    /// native destruction waits. The owned worker remains the close authority.
+    pub async fn request_retirement_after_turn(self: &Arc<Self>, operation: &str, mission_completed: bool)
+        -> Result<bool, WorkspaceError> {
+        {
+            let mut uses = self.uses.lock().await;
+            if uses.task.as_deref() != Some(operation) { return Ok(false); }
+            uses.turn_ended = true;
+            uses.task_completed |= mission_completed;
+            self.use_changes.bump();
+        }
+        self.schedule_retirement().await;
+        Ok(true)
+    }
+
+    /// The trusted task owner already proved the formal result and settled
+    /// effects/native work. This is a retirement request, not a close receipt.
+    pub async fn try_retire_after_task(self: &Arc<Self>, operation: &str) -> Result<bool, WorkspaceError> {
+        {
+            let mut uses = self.uses.lock().await;
+            if uses.task.as_deref() != Some(operation) { return Ok(false); }
+            uses.turn_ended = true;
+            uses.task_completed = true;
+            self.use_changes.bump();
+        }
+        // Subscribe before inspecting the remaining responsibility. Download
+        // completion at this boundary must not be lost between read and wait.
+        self.schedule_retirement().await;
+        self.try_retire_once().await
+    }
+
+    /// A closed conversational Turn alone permits only an already-empty
+    /// carrier to retire. Nonempty page/background responsibility is unknown.
+    pub async fn try_retire_empty_after_turn(self: &Arc<Self>, operation: &str) -> Result<bool, WorkspaceError> {
+        {
+            let mut uses = self.uses.lock().await;
+            if uses.task.as_deref() != Some(operation) { return Ok(false); }
+            uses.turn_ended = true;
+            self.use_changes.bump();
+        }
+        self.schedule_retirement().await;
+        self.try_retire_once().await
+    }
+
+    async fn try_retire_once(self: &Arc<Self>) -> Result<bool, WorkspaceError> {
+        let workspace = self.clone();
+        let retired = self.coordinator.idle_retirement(move || async move {
+            let observed = {
+                let uses = workspace.uses.lock().await;
+                if uses.task.is_some() && !uses.turn_ended { return Ok(false); }
+                if workspace.closing.load(Ordering::Acquire) && !uses.retirement_started { return Ok(false); }
+                uses.clone()
+            };
+            if !observed.retirement_started {
+                let state = workspace.slot.inner.lock().await;
+                if let Some(runtime) = &state.runtime {
+                    let snapshot = runtime.snapshot().await?;
+                    if snapshot.downloads.iter().any(|download| matches!(download.state,
+                        crate::runtime::BrowserDownloadState::Choosing | crate::runtime::BrowserDownloadState::InProgress)) {
+                        return Ok(false);
+                    }
+                    // Cancelling/failed transfers still need native proof;
+                    // close joins that original cleanup rather than pinning a
+                    // completed task forever on its failed release projection.
+                    let task_only = observed.task_completed && state.created_by == Some(RuntimeUseSource::Agent) && !observed.user_pages;
+                    let detached_empty = snapshot.tabs.is_empty() && observed.presentation == Some(false);
+                    if !observed.surface_attachments.is_empty() || observed.presentation == Some(true)
+                        || (!task_only && !detached_empty) { return Ok(false); }
+                } else if !observed.turn_ended && observed.presentation != Some(false) { return Ok(false); }
+                drop(state);
+                let mut uses = workspace.uses.lock().await;
+                // A successor or human use may have arrived during the native
+                // read. The short use/admission fence decides which one wins.
+                if *uses != observed || workspace.closing.load(Ordering::Acquire) { return Ok(false); }
+                // No user page can be lost: either no native page remains, or
+                // this Agent-created carrier was never exposed to human input.
+                // Visible/user downloads cannot be newly admitted in that
+                // subset; native close still joins exact producers and handles.
+                uses.retirement_started = true;
+                workspace.closing.store(true, Ordering::Release);
+                workspace.use_changes.bump();
+            }
+            // No use lock crosses the native close. New task admission can
+            // observe this exact closing generation without waiting on it.
+            workspace.slot.close().await?;
+            Ok::<bool, WorkspaceError>(true)
+        }).await?;
+        let retired = retired.transpose()?.unwrap_or(false);
+        if retired {
+            if let Some(registry) = self.registry.upgrade() {
+                let mut registry = registry.lock().await;
+                if registry.get(&self.key).is_some_and(|current| Arc::ptr_eq(current, self)) {
+                    registry.remove(&self.key);
+                }
+            }
+        }
+        Ok(retired)
+    }
+
+    async fn schedule_retirement(self: &Arc<Self>) {
+        if self.closing.load(Ordering::Acquire) && !self.uses.lock().await.retirement_started { return; }
+        let mut worker = self.retirement_worker.lock().await;
+        if worker.as_ref().is_some_and(|worker| !worker.is_finished()) { return; }
+        let weak = Arc::downgrade(self);
+        *worker = Some(tokio::spawn(async move {
+            let mut delay = std::time::Duration::from_secs(1);
+            loop {
+                let Some(workspace) = weak.upgrade() else { return; };
+                let mut use_changes = workspace.use_changes.subscribe();
+                let mut changes = {
+                    let state = workspace.slot.inner.lock().await;
+                    state.runtime.as_ref().and_then(|runtime| runtime.changes())
+                };
+                let result = workspace.try_retire_once().await;
+                if matches!(result, Ok(true)) { return; }
+                {
+                    let uses = workspace.uses.lock().await;
+                    if workspace.closing.load(Ordering::Acquire) && !uses.retirement_started { return; }
+                }
+                drop(workspace);
+                match result {
+                    Ok(false) => {
+                        tokio::select! {
+                            changed = use_changes.changed() => if changed.is_err() { return; },
+                            changed = async { match changes.as_mut() {
+                                Some(changes) => changes.changed().await,
+                                None => std::future::pending().await,
+                            }} => if changed.is_err() { return; },
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!(code=error.code(), "Browser automatic retirement remains owned for retry");
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {},
+                            changed = use_changes.changed() => if changed.is_err() { return; },
+                        }
+                        delay = (delay * 2).min(std::time::Duration::from_secs(30));
+                    },
+                    Ok(true) => return,
+                }
+            }
+        }));
+    }
+
+    async fn schedule_registered_retirement(&self) {
+        let Some(registry) = self.registry.upgrade() else { return; };
+        let workspace = registry.lock().await.get(&self.key)
+            .filter(|current| std::ptr::eq(current.as_ref(), self)).cloned();
+        if let Some(workspace) = workspace { workspace.schedule_retirement().await; }
+    }
+
     async fn authorize_agent(self: &Arc<Self>, authority: BrowserSessionAuthority) -> Result<Arc<BrowserResource>, WorkspaceError> {
         if authority.principal_id() != self.key.principal_id || authority.agent_session_id() != self.key.agent_session_id {
             return Err(WorkspaceError::ActionDenied);
@@ -223,7 +471,7 @@ impl BrowserWorkspace {
             return Err(WorkspaceError::WorkspaceClosed);
         }
         self.slot
-            .ensure()
+            .ensure(RuntimeUseSource::User)
             .await?
             .changes()
             .ok_or(WorkspaceError::NativeUnavailable)
@@ -337,25 +585,49 @@ impl BrowserWorkspace {
         if layout_cancel.is_cancelled() {
             return Ok(());
         }
+        let epoch = {
+            let mut uses = self.uses.lock().await;
+            uses.presentation_epoch = uses.presentation_epoch.checked_add(1).ok_or(WorkspaceError::NativeCommandFailed)?;
+            if visible {
+                // Dispatching a show can expose input before its caller sees
+                // the response; an unknown/cancelled show remains retained.
+                uses.user_pages = true;
+                uses.presentation = Some(true);
+            }
+            self.use_changes.bump();
+            uses.presentation_epoch
+        };
         if !visible {
             // Detaching a closed/never-opened pane must not create a runtime.
             // If cleanup is in flight, retain its handle and hide what remains.
             let runtime = self.slot.inner.lock().await.runtime.clone();
-            return match runtime {
+            let result = match runtime {
                 Some(runtime) => {
                     runtime
                         .surface()
                         .ok_or(WorkspaceError::NativeUnavailable)?
-                        .set_surface(bounds, false, layout_cancel)
+                        .set_surface(bounds, false, layout_cancel.clone())
                         .await
                 }
                 None => Ok(()),
             };
+            if result.is_ok() && !layout_cancel.is_cancelled() {
+                let mut uses = self.uses.lock().await;
+                if uses.presentation_epoch == epoch {
+                    // Only the current original native acknowledgement ends
+                    // presentation use; a late hide cannot overtake a show.
+                    uses.presentation = Some(false);
+                    self.use_changes.bump();
+                }
+                drop(uses);
+                self.schedule_registered_retirement().await;
+            }
+            return result;
         }
         if self.closing.load(Ordering::Acquire) {
             return Err(WorkspaceError::WorkspaceClosed);
         }
-        let runtime = self.slot.ensure().await?;
+        let runtime = self.slot.ensure(RuntimeUseSource::User).await?;
         runtime
             .surface()
             .ok_or(WorkspaceError::NativeUnavailable)?
@@ -392,11 +664,14 @@ impl BrowserWorkspace {
             }
         }
         let workspace = self.clone();
-        self.coordinator
+        let result = self.coordinator
             .user_operation(move || async move {
+                workspace.uses.lock().await.user_pages = true;
                 Ok(workspace.execute_user_command(command).await)
             })
-            .await?
+            .await?;
+        if result.is_ok() { self.schedule_retirement().await; }
+        result
     }
 
     async fn existing_runtime_snapshot(&self) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
@@ -445,7 +720,7 @@ impl BrowserWorkspace {
             | BrowserTabCommand::Back { target } | BrowserTabCommand::Forward { target } =>
                 Some(UserNavigationScope::Existing(target.clone())),
             BrowserTabCommand::Create { .. } => {
-                let snapshot = self.slot.ensure().await?.snapshot().await?;
+                let snapshot = self.slot.ensure(RuntimeUseSource::User).await?.snapshot().await?;
                 Some(UserNavigationScope::Creating { runtime_generation: snapshot.runtime_generation,
                     previous_tabs: snapshot.tabs.into_iter().map(|tab| tab.target.tab_id).collect() })
             }
@@ -457,13 +732,14 @@ impl BrowserWorkspace {
             *self.user_navigation.lock().unwrap_or_else(|error| error.into_inner()) = Some(navigation.clone());
             UserNavigationLease { workspace: Arc::downgrade(self), navigation }
         });
-        self.execute(command, cancel).await
+        self.execute(command, cancel, RuntimeUseSource::User).await
     }
 
     async fn execute(
         &self,
         command: BrowserTabCommand,
         cancel: CancellationToken,
+        source: RuntimeUseSource,
     ) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
         if self.closing.load(Ordering::Acquire) {
             return Err(WorkspaceError::WorkspaceClosed);
@@ -475,7 +751,7 @@ impl BrowserWorkspace {
             let state=self.slot.inner.lock().await;
             if state.closed { return Err(WorkspaceError::WorkspaceClosed); }
             state.runtime.clone().ok_or(WorkspaceError::TabNotFound)?
-        } else { self.slot.ensure().await? };
+        } else { self.slot.ensure(source).await? };
         if cancel.is_cancelled() {
             return Err(RunAdmissionError::Cancelled.into());
         }
@@ -486,6 +762,7 @@ impl BrowserWorkspace {
     /// in-flight run operation. Failure retains authority for another close.
     pub async fn close(self: &Arc<Self>) -> Result<(), WorkspaceError> {
         self.closing.store(true, Ordering::Release);
+        self.use_changes.bump();
         let workspace = self.clone();
         self.coordinator
             .close_runtime(move || async move { workspace.slot.close().await })
@@ -535,7 +812,7 @@ impl BrowserResource {
             Ok(async {
                 workspace.authority.authorize(BrowserCapabilityAction::Observe)?;
                 if workspace.closing.load(Ordering::Acquire) { return Err(WorkspaceError::WorkspaceClosed); }
-                let runtime = workspace.slot.ensure().await?;
+                let runtime = workspace.slot.ensure(RuntimeUseSource::Agent).await?;
                 runtime.automation().ok_or(WorkspaceError::UnsupportedAction)?.screenshot(tab_id, cancel).await
             }.await)
         }).await?
@@ -571,7 +848,7 @@ impl BrowserResource {
                     if workspace.closing.load(Ordering::Acquire) {
                         return Err(WorkspaceError::WorkspaceClosed);
                     }
-                    let runtime = workspace.slot.ensure().await?;
+                    let runtime = workspace.slot.ensure(RuntimeUseSource::Agent).await?;
                     runtime
                         .automation()
                         .ok_or(WorkspaceError::UnsupportedAction)?
@@ -596,7 +873,7 @@ impl BrowserResource {
                     if workspace.closing.load(Ordering::Acquire) {
                         return Err(WorkspaceError::WorkspaceClosed);
                     }
-                    let runtime = workspace.slot.ensure().await?;
+                    let runtime = workspace.slot.ensure(RuntimeUseSource::Agent).await?;
                     runtime
                         .automation()
                         .ok_or(WorkspaceError::UnsupportedAction)?
@@ -620,7 +897,7 @@ impl BrowserResource {
             Ok(async {
                 workspace.authority.authorize(BrowserCapabilityAction::Evaluate)?;
                 if workspace.closing.load(Ordering::Acquire) { return Err(WorkspaceError::WorkspaceClosed); }
-                let runtime = workspace.slot.ensure().await?;
+                let runtime = workspace.slot.ensure(RuntimeUseSource::Agent).await?;
                 runtime.automation().ok_or(WorkspaceError::UnsupportedAction)?.evaluate(request, cancel).await
             }.await)
         }).await?
@@ -632,7 +909,7 @@ impl BrowserResource {
             Ok(async {
                 workspace.authority.authorize(BrowserCapabilityAction::Act)?;
                 if workspace.closing.load(Ordering::Acquire) { return Err(WorkspaceError::WorkspaceClosed); }
-                let runtime = workspace.slot.ensure().await?;
+                let runtime = workspace.slot.ensure(RuntimeUseSource::Agent).await?;
                 runtime.automation().ok_or(WorkspaceError::UnsupportedAction)?.respond_dialog(reply, cancel).await
             }.await)
         }).await?
@@ -647,7 +924,7 @@ impl BrowserResource {
             Ok(async {
                 workspace.authority.authorize(BrowserCapabilityAction::Upload)?;
                 if workspace.closing.load(Ordering::Acquire) {return Err(WorkspaceError::WorkspaceClosed);}
-                let runtime=workspace.slot.ensure().await?;
+                let runtime=workspace.slot.ensure(RuntimeUseSource::Agent).await?;
                 let automation=runtime.automation().ok_or(WorkspaceError::UnsupportedAction)?;
                 let files=scope.prepare(paths,cancel.clone()).await?;
                 automation.upload(element,files,cancel).await
@@ -664,7 +941,7 @@ impl BrowserResource {
             Ok(async {
                 workspace.authority.authorize(BrowserCapabilityAction::Download)?;
                 if workspace.closing.load(Ordering::Acquire) {return Err(WorkspaceError::WorkspaceClosed);}
-                let runtime=workspace.slot.ensure().await?;
+                let runtime=workspace.slot.ensure(RuntimeUseSource::Agent).await?;
                 let automation=runtime.automation().ok_or(WorkspaceError::UnsupportedAction)?;
                 let file=scope.prepare()?;
                 automation.download(element,file,cancel).await
@@ -716,7 +993,7 @@ impl BrowserResource {
         let workspace = self.clone();
         self.coordinator
             .agent_operation(run, move |cancel| async move {
-                Ok(workspace.execute(command, cancel).await)
+                Ok(workspace.execute(command, cancel, RuntimeUseSource::Agent).await)
             })
             .await?
     }
@@ -725,10 +1002,11 @@ impl BrowserResource {
 pub struct BrowserResourceService {
     factory: Arc<dyn BrowserRuntimeFactory>,
     profile_store: Option<BrowserProfileStore>,
-    resources: Mutex<BTreeMap<BrowserResourceKey, Arc<BrowserWorkspace>>>,
+    resources: Arc<Mutex<BTreeMap<BrowserResourceKey, Arc<BrowserWorkspace>>>>,
     lifecycle: Mutex<ServiceLifecycle>,
-    retired_sessions: Mutex<BTreeSet<(String, String)>>,
+    retired_sessions: Mutex<BTreeMap<(String, String), Arc<SessionRetirement>>>,
     next_generation: AtomicU64,
+    service_instance_id: String,
     stopping: AtomicBool,
 }
 
@@ -739,7 +1017,159 @@ struct ServiceLifecycle {
     native_closed: bool,
 }
 
+/// The original exact-Session cleanup owner survives both a dropped waiter and
+/// removal of its native Workspace from the live registry. In particular, a
+/// failed Profile deletion must not lose the Profile that still needs cleanup.
+struct SessionRetirement {
+    key: BrowserResourceKey,
+    runtime_generation: Option<u64>,
+    resources: Mutex<Vec<Arc<BrowserWorkspace>>>,
+    profiles: Vec<BrowserProfile>,
+    registry: std::sync::Weak<Mutex<BTreeMap<BrowserResourceKey, Arc<BrowserWorkspace>>>>,
+    factory: Arc<dyn BrowserRuntimeFactory>,
+    profile_store: Option<BrowserProfileStore>,
+    delete_requested: AtomicBool,
+    native_closed: AtomicBool,
+    profile_deleted: AtomicBool,
+    worker: Mutex<Option<tokio::task::JoinHandle<Result<(), WorkspaceError>>>>,
+}
+
+impl SessionRetirement {
+    fn complete(&self) -> bool {
+        self.native_closed.load(Ordering::Acquire)
+            && (!self.delete_requested.load(Ordering::Acquire) || self.profile_deleted.load(Ordering::Acquire))
+    }
+
+    /// Called under the short service admission fence, before returning the
+    /// owner to a waiter. The task, rather than the waiter, owns native cleanup.
+    fn start(self: &Arc<Self>) {
+        if let Ok(mut worker) = self.worker.try_lock() {
+            if worker.is_none() && !self.complete() {
+                let owner = self.clone();
+                *worker = Some(tokio::spawn(async move { owner.cleanup().await }));
+            }
+        }
+    }
+
+    async fn settle(self: &Arc<Self>) -> Result<(), WorkspaceError> {
+        loop {
+            let mut worker = self.worker.lock().await;
+            if worker.is_none() && !self.complete() {
+                let owner = self.clone();
+                *worker = Some(tokio::spawn(async move { owner.cleanup().await }));
+            }
+            let Some(task) = worker.as_mut() else { return Ok(()); };
+            let result = task.await.unwrap_or(Err(WorkspaceError::Admission(RunAdmissionError::WorkerFailed)));
+            *worker = None;
+            result?;
+            // A close-only flight may have finished just before another
+            // caller requested deletion. Consume that upgrade on this owner.
+            if self.complete() { return Ok(()); }
+        }
+    }
+
+    async fn cleanup(&self) -> Result<(), WorkspaceError> {
+        if !self.native_closed.load(Ordering::Acquire) {
+            let mut resources = self.resources.lock().await;
+            let mut failure = None;
+            for resource in resources.iter() {
+                if let Err(error) = resource.close().await {
+                    failure = Some(error);
+                    continue;
+                }
+                if let Some(registry) = self.registry.upgrade() {
+                    let mut registry = registry.lock().await;
+                    if registry.get(&resource.key).is_some_and(|current| Arc::ptr_eq(current, resource)) {
+                        registry.remove(&resource.key);
+                    }
+                }
+            }
+            if let Some(error) = failure { return Err(error); }
+            resources.clear();
+            self.native_closed.store(true, Ordering::Release);
+        }
+        if !self.delete_requested.load(Ordering::Acquire) || self.profile_deleted.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let persistent = self.profiles.iter().any(|profile| profile.persistence() == BrowserProfilePersistence::Persistent);
+        let Some(store) = self.profile_store.clone() else {
+            if persistent { return Err(WorkspaceError::ProfileCleanupUnavailable); }
+            self.profile_deleted.store(true, Ordering::Release);
+            return Ok(());
+        };
+        let profile = store.profile_for(&self.key, BrowserProfilePersistence::Persistent)?;
+        if self.profiles.iter().any(|existing| existing.persistence() == BrowserProfilePersistence::Persistent && existing != &profile) {
+            return Err(WorkspaceError::ProfileCleanupInvalid);
+        }
+        self.factory.delete_persistent_profile(&profile).await?;
+        match profile {
+            BrowserProfile::WebKitPersistent { .. } => (),
+            BrowserProfile::Persistent(_) => {
+                let key = self.key.clone();
+                tokio::task::spawn_blocking(move || store.delete_persistent_profile(&key))
+                    .await.map_err(|_| WorkspaceError::ProfileCleanupFailed)??;
+            }
+            BrowserProfile::Ephemeral => return Err(WorkspaceError::ProfileCleanupInvalid),
+        }
+        self.profile_deleted.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
 impl BrowserResourceService {
+    pub fn service_instance_id(&self) -> &str { &self.service_instance_id }
+    /// Original owner inventory only. Historical Session presence and native
+    /// liveness are not inferred; no native method or lazy creation is called.
+    pub async fn registered_workspace_sessions(&self, principal_id: &str) -> Result<Vec<String>, WorkspaceError> {
+        let mut sessions = self.resources.lock().await.keys()
+            .filter(|key| key.principal_id == principal_id)
+            .map(|key| key.agent_session_id.clone()).collect::<BTreeSet<_>>();
+        for ((owner, session), cleanup) in self.retired_sessions.lock().await.iter() {
+            if owner == principal_id && !cleanup.complete() { sessions.insert(session.clone()); }
+        }
+        Ok(sessions.into_iter().collect())
+    }
+
+    /// Peek only: no runtime creation, native request, Session claim or replay.
+    /// Native close can hold its mutex indefinitely; activity observations
+    /// report uncertainty instead of waiting behind that original owner.
+    pub async fn observe_workspace(&self, principal_id: &str, agent_session_id: &str)
+        -> Result<BrowserWorkspaceObservation, WorkspaceError> {
+        let Some(workspace) = self.get_for_agent_session(principal_id, agent_session_id).await? else {
+            if let Some(owner) = self.retired_sessions.lock().await.get(&(principal_id.to_owned(), agent_session_id.to_owned())) {
+                if !owner.complete() {
+                    let closed = owner.native_closed.load(Ordering::Acquire);
+                    return Ok(BrowserWorkspaceObservation { service_instance_id: Some(self.service_instance_id.clone()), registered: true, runtime_generation: owner.runtime_generation,
+                        native_registered: closed.then_some(false), close_confirmed: closed.then_some(true),
+                        closing: true, cleanup_unconfirmed: true, task_operation_id: None,
+                        retention: BrowserRetentionReason::NativeCleanup, operation_in_flight: None });
+                }
+            }
+            return Ok(BrowserWorkspaceObservation::unregistered());
+        };
+        let closing = workspace.closing.load(Ordering::Acquire);
+        let (native_registered, close_confirmed) = match workspace.slot.inner.try_lock() {
+            Ok(state) => (Some(state.runtime.is_some()), Some(state.closed && state.runtime.is_none())),
+            Err(_) => (None, None),
+        };
+        let (task_operation_id, retention) = match workspace.uses.try_lock() {
+            Ok(uses) => {
+                let reason = if close_confirmed == Some(true) { BrowserRetentionReason::Retired }
+                    else if closing { BrowserRetentionReason::NativeCleanup }
+                    else if uses.task.is_some() && !uses.turn_ended { BrowserRetentionReason::ActiveTask }
+                    else if !uses.surface_attachments.is_empty() || uses.presentation == Some(true) { BrowserRetentionReason::CurrentUserUse }
+                    else if uses.user_pages { BrowserRetentionReason::UserPageStateUnknown }
+                    else if uses.task.is_some() && !uses.task_completed { BrowserRetentionReason::TaskCompletionUnknown }
+                    else { BrowserRetentionReason::EligibleTaskResources };
+                (uses.task.clone(), reason)
+            },
+            Err(_) => (None, BrowserRetentionReason::ObservationBusy),
+        };
+        Ok(BrowserWorkspaceObservation { service_instance_id: Some(self.service_instance_id.clone()), registered: true, runtime_generation: Some(workspace.runtime_generation()),
+            native_registered, close_confirmed, closing, cleanup_unconfirmed: closing && close_confirmed != Some(true),
+            task_operation_id, retention, operation_in_flight: Some(workspace.coordinator.operation_in_flight()) })
+    }
+
     pub async fn get_for_agent_session(
         &self,
         principal_id: &str,
@@ -771,10 +1201,11 @@ impl BrowserResourceService {
         Self {
             factory,
             profile_store: None,
-            resources: Mutex::new(BTreeMap::new()),
+            resources: Arc::new(Mutex::new(BTreeMap::new())),
             lifecycle: Mutex::new(ServiceLifecycle::default()),
-            retired_sessions: Mutex::new(BTreeSet::new()),
+            retired_sessions: Mutex::new(BTreeMap::new()),
             next_generation: AtomicU64::new(1),
+            service_instance_id: uuid::Uuid::now_v7().to_string(),
             stopping: AtomicBool::new(false),
         }
     }
@@ -800,7 +1231,7 @@ impl BrowserResourceService {
                 return Err(WorkspaceError::ProfileCleanupInvalid);
             }
         }
-        if self.retired_sessions.lock().await.contains(&(key.principal_id.clone(), key.agent_session_id.clone())) {
+        if self.retired_sessions.lock().await.contains_key(&(key.principal_id.clone(), key.agent_session_id.clone())) {
             return Err(WorkspaceError::WorkspaceClosed);
         }
         let mut resources = self.resources.lock().await;
@@ -818,7 +1249,7 @@ impl BrowserResourceService {
                 profile,
                 user_input_enabled: true,
             },
-            inner: Mutex::new(SlotState { runtime: None, locked: false, closed: false }),
+            inner: Mutex::new(SlotState { runtime: None, created_by: None, locked: false, closed: false }),
         });
         let workspace = Arc::new(BrowserWorkspace {
             key: key.clone(),
@@ -828,6 +1259,10 @@ impl BrowserResourceService {
             slot,
             closing: AtomicBool::new(false),
             user_navigation: std::sync::Mutex::new(None),
+            uses: Mutex::new(WorkspaceUses::default()),
+            use_changes: Default::default(),
+            registry: Arc::downgrade(&self.resources),
+            retirement_worker: Mutex::new(None),
         });
         resources.insert(key, workspace.clone());
         Ok(workspace)
@@ -872,10 +1307,7 @@ impl BrowserResourceService {
         principal_id: &str,
         agent_session_id: &str,
     ) -> Result<(), WorkspaceError> {
-        let _lifecycle = self.lifecycle.lock().await;
-        self.close_agent_session_locked(principal_id, agent_session_id)
-            .await
-            .map(|_| ())
+        self.retire_agent_session(principal_id, agent_session_id, false).await?.settle().await
     }
 
     /// Canonical deletion includes the domain-owned user browser, even when
@@ -885,24 +1317,7 @@ impl BrowserResourceService {
         principal_id: &str,
         agent_session_id: &str,
     ) -> Result<(), WorkspaceError> {
-        let key = managed_workspace_key(principal_id, agent_session_id)?;
-        let _lifecycle = self.lifecycle.lock().await;
-        let live = self.close_agent_session_locked(principal_id, agent_session_id).await?;
-        let persistent = live.iter().any(|(_, profile)| profile.persistence() == BrowserProfilePersistence::Persistent);
-        let Some(store) = self.profile_store.clone() else {
-            return if persistent { Err(WorkspaceError::ProfileCleanupUnavailable) } else { Ok(()) };
-        };
-        let profile = store.profile_for(&key, BrowserProfilePersistence::Persistent)?;
-        if live.iter().any(|(_, existing)| existing.persistence() == BrowserProfilePersistence::Persistent && existing != &profile) {
-            return Err(WorkspaceError::ProfileCleanupInvalid);
-        }
-        self.factory.delete_persistent_profile(&profile).await?;
-        match profile {
-            BrowserProfile::WebKitPersistent { .. } => Ok(()),
-            BrowserProfile::Persistent(_) => tokio::task::spawn_blocking(move || store.delete_persistent_profile(&key))
-                .await.map_err(|_| WorkspaceError::ProfileCleanupFailed)?,
-            BrowserProfile::Ephemeral => Err(WorkspaceError::ProfileCleanupInvalid),
-        }
+        self.retire_agent_session(principal_id, agent_session_id, true).await?.settle().await
     }
 
     /// Bootstrap dataset coordinator only. Retired canonical keys and the
@@ -919,44 +1334,59 @@ impl BrowserResourceService {
         if !self.resources.lock().await.is_empty() {
             return Err(WorkspaceError::ProfileCleanupFailed);
         }
+        for owner in self.retired_sessions.lock().await.values() {
+            owner.settle().await?;
+        }
         let store = self.profile_store.as_ref().ok_or(WorkspaceError::ProfileCleanupUnavailable)?;
         let key = managed_workspace_key(principal_id, agent_session_id)?;
         let profile = store.webkit_profile_for_generation(&key, storage_generation)?;
         self.factory.delete_persistent_profile(&profile).await
     }
 
-    async fn close_agent_session_locked(
+    async fn retire_agent_session(
         &self,
         principal_id: &str,
         agent_session_id: &str,
-    ) -> Result<Vec<(BrowserResourceKey, BrowserProfile)>, WorkspaceError> {
-        self.retired_sessions.lock().await.insert((
-            principal_id.to_owned(),
-            agent_session_id.to_owned(),
-        ));
-        let resources = self
-            .resources
-            .lock()
-            .await
-            .iter()
-            .filter_map(|(key, resource)| {
-                (key.principal_id == principal_id
-                    && key.agent_session_id == agent_session_id)
-                    .then(|| {
-                        (
-                            key.clone(),
-                            resource.slot.request.profile.clone(),
-                        )
-                    })
-            })
-            .collect::<Vec<_>>();
-        let mut failure = None;
-        for (key, _) in &resources {
-            if let Err(error) = self.close(key).await {
-                failure = Some(error);
-            }
+        delete: bool,
+    ) -> Result<Arc<SessionRetirement>, WorkspaceError> {
+        let key = managed_workspace_key(principal_id, agent_session_id)?;
+        let lifecycle = self.lifecycle.lock().await;
+        let mut retired = self.retired_sessions.lock().await;
+        let identity = (principal_id.to_owned(), agent_session_id.to_owned());
+        // No new native/Profile work may begin after the global resource
+        // barrier has been acknowledged and shared native shutdown may start.
+        if lifecycle.resources_closed || lifecycle.native_closed {
+            let owner = retired.get(&identity).filter(|owner| owner.complete()
+                && (!delete || owner.profile_deleted.load(Ordering::Acquire)));
+            return owner.cloned().ok_or(WorkspaceError::WorkspaceClosed);
         }
-        failure.map_or(Ok(resources), Err)
+        if !retired.contains_key(&identity) {
+            // Capture exact resource/Profile authority and close ingress under
+            // the same short admission fence, once for this Session lifetime.
+            let resources = self.resources.lock().await;
+            let mut owned = Vec::new();
+            let mut profiles = Vec::new();
+            for (resource_key, resource) in resources.iter() {
+                if resource_key.principal_id == principal_id && resource_key.agent_session_id == agent_session_id {
+                    resource.closing.store(true, Ordering::Release);
+                    resource.use_changes.bump();
+                    profiles.push(resource.slot.request.profile.clone());
+                    owned.push(resource.clone());
+                }
+            }
+            retired.insert(identity.clone(), Arc::new(SessionRetirement {
+                key, runtime_generation: owned.first().map(|resource| resource.runtime_generation()),
+                resources: Mutex::new(owned), profiles,
+                registry: Arc::downgrade(&self.resources), factory: self.factory.clone(),
+                profile_store: self.profile_store.clone(), delete_requested: AtomicBool::new(false),
+                native_closed: AtomicBool::new(false), profile_deleted: AtomicBool::new(false),
+                worker: Mutex::new(None),
+            }));
+        }
+        let owner = retired.get(&identity).expect("retired Session owner was registered");
+        if delete { owner.delete_requested.store(true, Ordering::Release); }
+        owner.start();
+        Ok(owner.clone())
     }
 
     /// Infrastructure for an explicitly confirmed human browser rebuild.
@@ -972,6 +1402,8 @@ impl BrowserResourceService {
                 resource.close_idle().await?;
                 let mut resources=service.resources.lock().await;
                 if resources.get(&key).is_some_and(|current|Arc::ptr_eq(current,&resource)) {resources.remove(&key);}
+            } else {
+                service.retry_retired_session_cleanup(&key,expected_generation).await?;
             }
             Ok(())
         }).await.map_err(|_|WorkspaceError::Admission(RunAdmissionError::WorkerFailed))?
@@ -990,9 +1422,24 @@ impl BrowserResourceService {
                 resource.close().await?;
                 let mut resources = service.resources.lock().await;
                 if resources.get(&key).is_some_and(|current| Arc::ptr_eq(current, &resource)) { resources.remove(&key); }
+            } else {
+                service.retry_retired_session_cleanup(&key,expected_generation).await?;
             }
             Ok(())
         }).await.map_err(|_| WorkspaceError::Admission(RunAdmissionError::WorkerFailed))?
+    }
+
+    async fn retry_retired_session_cleanup(&self, key: &BrowserResourceKey, expected_generation: u64)
+        -> Result<(), WorkspaceError> {
+        let owner = self.retired_sessions.lock().await
+            .get(&(key.principal_id.clone(),key.agent_session_id.clone())).cloned();
+        if let Some(owner) = owner.filter(|owner| !owner.complete()) {
+            if owner.runtime_generation != Some(expected_generation) { return Err(WorkspaceError::StaleTarget); }
+            // This is a retry of the already-authorized original deletion,
+            // never permission to delete an unrelated Profile or new runtime.
+            owner.settle().await?;
+        }
+        Ok(())
     }
 
     /// Permanently close admission and wait for every Resource's native view
@@ -1022,6 +1469,12 @@ impl BrowserResourceService {
             if let Err(error) = self.close(&key).await {
                 failure = Some(error);
             }
+        }
+        // Session deletion may already have removed its native registry entry
+        // while Profile cleanup is still running. Join that original owner
+        // before permitting process-wide native shutdown or dataset cleanup.
+        for owner in self.retired_sessions.lock().await.values() {
+            if let Err(error) = owner.settle().await { failure = Some(error); }
         }
         if let Some(error) = failure {
             return Err(error);

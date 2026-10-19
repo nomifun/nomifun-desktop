@@ -3,18 +3,29 @@
 <label>__LEVEL__ attachment<input id="file" type="file"></label>
 <button id="pick">__LEVEL__ custom picker</button>
 <script>
+const tracePickerInput=new URL(location.href).searchParams.has('native-user-picker-trace');
+if(tracePickerInput)for(const kind of ['mousemove','mousedown','mouseup','click'])addEventListener(kind,event=>{
+  const rect=document.getElementById('pick').getBoundingClientRect();
+  parent.postMessage({kind:'picker-input',type:kind,target:event.target.id,trusted:event.isTrusted,x:event.clientX,y:event.clientY,button:{x:rect.x,y:rect.y,width:rect.width,height:rect.height}},'*');
+},{capture:true,passive:true});
 async function received(event,source,clicked){
   const file=event.target.files[0];
   parent.postMessage({kind:'file',level:'__LEVEL__',source,name:file.name,text:await file.text(),trusted:event.isTrusted,clicked},'*');
 }
 document.getElementById('file').onchange=event=>received(event,'direct',null);
 document.getElementById('pick').onclick=event=>{
+  if(tracePickerInput)parent.postMessage({kind:'picker-click',trusted:event.isTrusted,activation:navigator.userActivation.isActive,x:event.clientX,y:event.clientY},'*');
   // This is application code: a transient input need not be attached to DOM.
   const input=document.createElement('input');input.type='file';
   input.onchange=chosen=>received(chosen,'custom',event.isTrusted);
   input.click();
 };
 window.pickFromParent=clicked=>{const input=document.createElement('input');input.type='file';input.onchange=event=>received(event,'parent',clicked);input.click();};
+addEventListener('message',event=>{
+  if(event.source!==parent||event.data?.kind!=='picker-point-request'||typeof event.data.request!=='string'||event.data.request.length>64)return;
+  const rect=document.getElementById('pick').getBoundingClientRect();
+  parent.postMessage({kind:'picker-point',request:event.data.request,pickPoint:{x:rect.x+rect.width/2,y:rect.y+rect.height/2}},event.origin);
+});
 addEventListener('load',()=>{
   const rect=document.getElementById('pick').getBoundingClientRect();
   parent.postMessage({kind:'ready',level:'__LEVEL__',nonce:crypto.randomUUID(),pickPoint:{x:rect.x+rect.width/2,y:rect.y+rect.height/2}},'*');

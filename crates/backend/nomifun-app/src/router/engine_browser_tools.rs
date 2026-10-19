@@ -162,6 +162,21 @@ struct ManagedSessionTurn {
     settled: AtomicBool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedTaskInputHandoff {
+    canonical_operation_id: String,
+    terminal_event_id: String,
+    question: String,
+    user_input_request: nomifun_agent_contracts::AgentUserInputRequest,
+    #[serde(default)]
+    turn_operation_key: Option<String>,
+    #[serde(default)]
+    reconciliation: Option<String>,
+}
+
+pub(crate) use super::engine_session_host::EndedBrowserTaskSource;
+
 /// Shared owner mounted both into the Browser Role handler and into the
 /// EngineKernelSession lifecycle. The latter is what proves native input is
 /// settled before the turn cleanup witness is published.
@@ -174,6 +189,7 @@ pub(crate) struct BrowserRoleOwner {
     effect_store: nomifun_agent_session::AgentSessionStore,
     turns: Arc<Mutex<BTreeMap<TurnKey, Arc<BrowserTurnAdmission>>>>,
     managed_turns: Arc<Mutex<BTreeMap<TurnKey, Arc<ManagedSessionTurn>>>>,
+    task_repository: Arc<std::sync::OnceLock<Arc<dyn nomifun_db::IAgentExecutionRepository>>>,
 }
 
 impl BrowserRoleOwner {
@@ -192,7 +208,313 @@ impl BrowserRoleOwner {
             effect_store,
             turns: Arc::new(Mutex::new(BTreeMap::new())),
             managed_turns: Arc::new(Mutex::new(BTreeMap::new())),
+            task_repository: Arc::new(std::sync::OnceLock::new()),
         })
+    }
+
+    pub(crate) fn install_task_repository(&self, repository: Arc<dyn nomifun_db::IAgentExecutionRepository>) -> Result<(), AppError> {
+        self.task_repository.set(repository).map_err(|_| browser_lifecycle_error("Browser task repository already installed"))
+    }
+
+    pub(crate) async fn observe_workspace(&self, principal_id: &str, session: &AgentSessionId)
+        -> Result<nomifun_browser_platform::workspace::BrowserWorkspaceObservation, AppError> {
+        match &self.resources {
+            Some(resources) => resources.observe_workspace(principal_id, session.as_ref()).await.map_err(browser_lifecycle_error),
+            None => Ok(nomifun_browser_platform::workspace::BrowserWorkspaceObservation::unregistered()),
+        }
+    }
+
+    pub(crate) async fn registered_workspace_sessions(&self, principal_id: &str) -> Result<Vec<String>, AppError> {
+        match &self.resources {
+            Some(resources) => resources.registered_workspace_sessions(principal_id).await.map_err(browser_lifecycle_error),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    async fn has_settled_attempt_task(&self, principal_id: &str, session: &AgentSessionId, operation: &OperationId,
+        attempt_scope: Option<(&str, &OperationId)>)
+        -> Result<bool, AppError> {
+        use nomifun_common::{AgentExecutionEventKind, ExecutionAttemptStatus, ExecutionStepStatus};
+        use nomifun_agent_session::TurnReceiptStatus;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SettledAttempt {
+            attempt_status: ExecutionAttemptStatus,
+            step_status: ExecutionStepStatus,
+            turn_operation_key: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct CancelledAttempt {
+            attempt_status: ExecutionAttemptStatus,
+            step_status: ExecutionStepStatus,
+            canonical_operation_id: String,
+            terminal_event_id: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RecoveredAttempt {
+            reason: String,
+            reconciliation: String,
+            turn_operation_key: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ScopedStop {
+            action: String,
+            scope: nomifun_common::AgentExecutionCancellationScope,
+            expected_execution_version: i64,
+            expected_step_version: i64,
+            cancelled_step_ids: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct AggregateStop {
+            status: nomifun_common::AgentExecutionStatus,
+            reason: String,
+            #[serde(default)]
+            canonical_control_source: Option<nomifun_agent_execution::AgentExecutionControlSource>,
+            #[serde(default)]
+            canonical_control_expected_version: Option<i64>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct FatalFailure {
+            status: nomifun_common::AgentExecutionStatus,
+            lead_report_operation_id: Option<String>,
+            reason: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct DeletedExecution { deleted: bool }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct StoppedAutomationSource { reason: String }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct AdoptedOutput { change: String }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SkippedDependency { status: ExecutionStepStatus, reason: String }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ReplannedSteps {
+            change: String,
+            #[serde(default, rename = "intent")]
+            _intent: Option<String>,
+            plan_revision: i64,
+            superseded_step_ids: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct StepSnapshot {
+            plan_revision: i64,
+            #[serde(rename = "title")] _title: String,
+            #[serde(rename = "spec")] _spec: String,
+            #[serde(rename = "participant_id")] _participant_id: Option<String>,
+            #[serde(rename = "assignment_source")] _assignment_source: Option<String>,
+            #[serde(rename = "assignment_locked")] _assignment_locked: bool,
+            #[serde(rename = "preset_prompt")] _preset_prompt: Option<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ReplacedStep { change: String, command: String, before: StepSnapshot, after: StepSnapshot }
+
+        let Some(repository) = self.task_repository.get() else { return Ok(false); };
+        let links = repository.resolve_conversation_link(principal_id, session.as_ref()).await.map_err(browser_lifecycle_error)?;
+        for link in links.iter().filter(|link| !link.active && matches!(link.relation.as_str(), "attempt" | "automation")) {
+            let (Some(step_id), Some(attempt_id)) = (&link.step_id, &link.attempt_id) else { continue; };
+            if attempt_scope.is_some_and(|(required, _)| required != attempt_id.as_str()) { continue; }
+            // The original repository reads one owner/Session/link/Attempt
+            // snapshot, including soft-deleted Executions. It rejects active
+            // same-Session successors without changing business
+            // API visibility or depending on the later cleanup-outbox ACK.
+            // A lead link is audit ancestry, not authority over this exact
+            // managed workspace: delegated Sessions have different resources.
+            let Some(facts) = repository.read_task_retirement_facts(principal_id, session.as_ref(),
+                &link.execution_id, step_id, attempt_id).await.map_err(browser_lifecycle_error)? else { continue; };
+            if attempt_scope.is_some_and(|(_, target)| !matches!(&facts.target,
+                nomifun_db::ConversationCleanupTurnTarget::Exact { operation_id } if operation_id == target.as_ref())) { continue; }
+            let attempt = &facts.original_attempt;
+            let Some(current) = &facts.detail.current_attempt else { continue; };
+            let attempt_status = attempt.attempt.status.parse::<ExecutionAttemptStatus>().map_err(browser_lifecycle_error)?;
+            let current_status = current.attempt.status.parse::<ExecutionAttemptStatus>().map_err(browser_lifecycle_error)?;
+            let step_status = facts.detail.step.status.parse::<ExecutionStepStatus>().map_err(browser_lifecycle_error)?;
+            let same_attempt = current.attempt.attempt_id == attempt.attempt.attempt_id;
+            if attempt.attempt.attempt_id != *attempt_id || attempt.conversation_id.as_deref() != Some(session.as_ref())
+                || !attempt_status.is_terminal() || !current_status.is_terminal() || !step_status.is_terminal()
+                || attempt.attempt.question.is_some() || attempt.attempt.finished_at.is_none()
+                || current.attempt.question.is_some() || current.attempt.finished_at.is_none() {
+                continue;
+            }
+            let effects = nomifun_db::AttemptConversationEffects::decode(attempt.attempt.runtime_state.as_deref())?;
+            if effects.review_blocked.is_some() || !effects.pending_conversation_effects.is_empty() { continue; }
+            let current_effects = nomifun_db::AttemptConversationEffects::decode(current.attempt.runtime_state.as_deref())?;
+            if current_effects.review_blocked.is_some() || !current_effects.pending_conversation_effects.is_empty() { continue; }
+            let receipt = self.effect_store.read_turn_receipt(session, operation).await.map_err(browser_lifecycle_error)?;
+            let Some(terminal) = receipt.terminal_event.as_ref() else { continue; };
+            let input_handoff = receipt.status == TurnReceiptStatus::Completed
+                && matches!(self.effect_store.turn_outcome(session, operation).await.map_err(browser_lifecycle_error)?,
+                    Some(nomifun_agent_contracts::AgentTurnOutcome::InputRequired { .. }));
+            let canonical_matches = match attempt_status {
+                ExecutionAttemptStatus::Completed => receipt.status == TurnReceiptStatus::Completed,
+                ExecutionAttemptStatus::Failed => matches!(receipt.status, TurnReceiptStatus::Completed | TurnReceiptStatus::Failed),
+                ExecutionAttemptStatus::Cancelled | ExecutionAttemptStatus::Interrupted => input_handoff
+                    || (receipt.status == TurnReceiptStatus::Cancelled && terminal.kind.0 == "turn/cancelled"),
+                _ => false,
+            };
+            if !canonical_matches { continue; }
+            let original_target = matches!(&facts.target,
+                nomifun_db::ConversationCleanupTurnTarget::Exact { operation_id } if operation_id == operation.as_ref()
+                    || attempt_scope.is_some_and(|(_, target)| operation_id == target.as_ref()));
+            // Only the domain's exact Attempt scope can connect a previously
+            // completed question to its later final Step. The caller verified
+            // that phase's original System/canonical references below.
+            let mut original_settled = input_handoff && attempt_scope.is_some();
+            let mut step_settled = false;
+            let mut explicit_end = false;
+            let normal_settlement = facts.detail.step.superseded_in_revision.is_none()
+                && current.attempt.retry_after.is_none() && (attempt.attempt.retry_after.is_none() || !same_attempt);
+            for event in facts.events.iter().filter(|event| event.sequence <= facts.execution.event_sequence
+                && event.on_behalf_of_user_id == principal_id) {
+                if event.step_id.as_deref() == Some(step_id.as_str()) && event.attempt_id.as_deref() == Some(attempt_id.as_str())
+                    && event.event_type == AgentExecutionEventKind::AttemptChanged.as_str() && event.actor_type == "system" {
+                    if let Ok(settled) = serde_json::from_str::<SettledAttempt>(&event.payload)
+                        && original_target && settled.attempt_status == attempt_status
+                        && matches!((attempt_status, settled.step_status),
+                            (ExecutionAttemptStatus::Completed, ExecutionStepStatus::Completed | ExecutionStepStatus::Pending)
+                            | (ExecutionAttemptStatus::Failed, ExecutionStepStatus::Failed | ExecutionStepStatus::Pending)
+                            | (ExecutionAttemptStatus::Cancelled, ExecutionStepStatus::Cancelled))
+                        && operation.as_ref() == format!("turn:user:{principal_id}:{}:{}", session.as_ref(), settled.turn_operation_key) {
+                        original_settled = true;
+                        if same_attempt && normal_settlement && settled.step_status == step_status { step_settled = true; }
+                    }
+                    if let Ok(cancelled) = serde_json::from_str::<CancelledAttempt>(&event.payload)
+                        && attempt_status == ExecutionAttemptStatus::Cancelled
+                        && cancelled.attempt_status == attempt_status && cancelled.step_status == ExecutionStepStatus::Cancelled
+                        && cancelled.canonical_operation_id == operation.as_ref()
+                        && cancelled.terminal_event_id == terminal.event_id.as_ref() {
+                        original_settled = true;
+                        if same_attempt && normal_settlement && step_status == ExecutionStepStatus::Cancelled { step_settled = true; }
+                    }
+                    if let Ok(recovered) = serde_json::from_str::<RecoveredAttempt>(&event.payload)
+                        && original_target && recovered.reason == "process_restart" && recovered.reconciliation == "initial_turn_receipt"
+                        && operation.as_ref() == format!("turn:user:{principal_id}:{}:{}", session.as_ref(), recovered.turn_operation_key) {
+                        original_settled = true;
+                        if same_attempt && normal_settlement && matches!((attempt_status, step_status),
+                            (ExecutionAttemptStatus::Completed, ExecutionStepStatus::Completed)
+                            | (ExecutionAttemptStatus::Failed, ExecutionStepStatus::Failed)
+                            | (ExecutionAttemptStatus::Cancelled, ExecutionStepStatus::Cancelled)) { step_settled = true; }
+                    }
+                }
+                // A later Attempt belongs to its real Session. Its formal
+                // Step result ends the older retry purpose, not its identity;
+                // the old canonical/native/Browser proofs remain separate.
+                if normal_settlement && event.step_id.as_deref() == Some(step_id.as_str())
+                    && event.attempt_id.as_deref() == Some(current.attempt.attempt_id.as_str())
+                    && event.event_type == AgentExecutionEventKind::AttemptChanged.as_str() {
+                    if event.actor_type == "system" {
+                        if let Ok(settled) = serde_json::from_str::<SettledAttempt>(&event.payload)
+                            && settled.attempt_status == current_status && settled.step_status == step_status
+                            && !settled.turn_operation_key.trim().is_empty()
+                            && matches!((current_status, step_status),
+                                (ExecutionAttemptStatus::Completed, ExecutionStepStatus::Completed)
+                                | (ExecutionAttemptStatus::Failed, ExecutionStepStatus::Failed)) { step_settled = true; }
+                        if let Ok(cancelled) = serde_json::from_str::<CancelledAttempt>(&event.payload)
+                            && current_status == ExecutionAttemptStatus::Cancelled && step_status == ExecutionStepStatus::Cancelled
+                            && cancelled.attempt_status == current_status && cancelled.step_status == step_status
+                            && !cancelled.terminal_event_id.trim().is_empty()
+                            && current.conversation_id.as_ref().is_some_and(|session| cancelled.canonical_operation_id
+                                .strip_prefix(&format!("turn:user:{principal_id}:{session}:"))
+                                .is_some_and(|key| !key.trim().is_empty())) { step_settled = true; }
+                        if let Ok(recovered) = serde_json::from_str::<RecoveredAttempt>(&event.payload)
+                            && recovered.reason == "process_restart" && recovered.reconciliation == "initial_turn_receipt"
+                            && !recovered.turn_operation_key.trim().is_empty()
+                            && matches!((current_status, step_status),
+                                (ExecutionAttemptStatus::Completed, ExecutionStepStatus::Completed)
+                                | (ExecutionAttemptStatus::Failed, ExecutionStepStatus::Failed)
+                                | (ExecutionAttemptStatus::Cancelled, ExecutionStepStatus::Cancelled)) { step_settled = true; }
+                    }
+                    if matches!(event.actor_type.as_str(), "system" | "user" | "agent")
+                        && current_status == ExecutionAttemptStatus::Completed && step_status == ExecutionStepStatus::Completed
+                        && current.attempt.trigger_reason == "adopt"
+                        && let Ok(adopted) = serde_json::from_str::<AdoptedOutput>(&event.payload)
+                        && adopted.change == "output_adopted" { step_settled = true; }
+                }
+                if !original_target { continue; }
+                if event.step_id.as_deref() == Some(step_id.as_str()) && event.attempt_id.is_none()
+                    && event.event_type == AgentExecutionEventKind::StepChanged.as_str() {
+                    if event.actor_type == "system" && step_status == ExecutionStepStatus::Skipped
+                        && facts.detail.step.superseded_in_revision.is_none()
+                        && let Ok(skipped) = serde_json::from_str::<SkippedDependency>(&event.payload)
+                        && skipped.status == step_status && skipped.reason == "dependency_failed" { explicit_end = true; }
+                    if let Some(revision) = facts.detail.step.superseded_in_revision
+                        && matches!(event.actor_type.as_str(), "system" | "user" | "agent")
+                        && let Ok(replaced) = serde_json::from_str::<ReplacedStep>(&event.payload)
+                        && replaced.change == "step_snapshot_replaced"
+                        && matches!(replaced.command.as_str(), "content_updated" | "participant_reassigned" | "configured")
+                        && replaced.before.plan_revision.checked_add(1) == Some(replaced.after.plan_revision)
+                        && replaced.after.plan_revision == revision { explicit_end = true; }
+                }
+                if let Some(revision) = facts.detail.step.superseded_in_revision
+                    && event.event_type == AgentExecutionEventKind::PlanChanged.as_str()
+                    && matches!(event.actor_type.as_str(), "system" | "user" | "agent")
+                    && let Ok(replanned) = serde_json::from_str::<ReplannedSteps>(&event.payload)
+                    && matches!(replanned.change.as_str(), "replanned" | "adjusted") && replanned.plan_revision == revision
+                    && replanned.superseded_step_ids.iter().any(|selected| selected == step_id) { explicit_end = true; }
+                if event.step_id.is_none() && event.attempt_id.is_none()
+                    && matches!(event.actor_type.as_str(), "system" | "user" | "agent")
+                    && event.event_type == AgentExecutionEventKind::Deleted.as_str() && facts.execution.deleted_at.is_some()
+                    && let Ok(deleted) = serde_json::from_str::<DeletedExecution>(&event.payload)
+                    && deleted.deleted { explicit_end = true; }
+                // Scope/aggregate Stops do not invent a per-Attempt result.
+                // Their exact repository-derived invocation must also have a
+                // real canonical terminal. A previously Failed/Completed Turn
+                // stays unchanged when Stop ends its queued retry purpose.
+                if step_status != ExecutionStepStatus::Cancelled { continue; }
+                if event.event_type == AgentExecutionEventKind::StepChanged.as_str()
+                    && event.actor_type == "user" && event.actor_id.as_deref() == Some(principal_id)
+                    && let Ok(stop) = serde_json::from_str::<ScopedStop>(&event.payload)
+                    && stop.action == "cancel_step" && stop.expected_execution_version >= 0 && stop.expected_step_version >= 0
+                    && stop.cancelled_step_ids.iter().any(|selected| selected == step_id) {
+                    // The writer's selected set already distinguishes task,
+                    // delegated-work and DAG dependencies; do not walk it again.
+                    let _ = stop.scope;
+                    explicit_end = true;
+                }
+                if event.step_id.is_some() || event.attempt_id.is_some()
+                    || !matches!(event.actor_type.as_str(), "system" | "user" | "agent") { continue; }
+                if event.event_type == AgentExecutionEventKind::StatusChanged.as_str() {
+                    if let Ok(stop) = serde_json::from_str::<AggregateStop>(&event.payload)
+                        && facts.execution.status == "cancelled" && stop.status == nomifun_common::AgentExecutionStatus::Cancelled
+                        && stop.reason == "cancelled_by_caller"
+                        && (stop.canonical_control_source.is_some() == stop.canonical_control_expected_version.is_some())
+                        && stop.canonical_control_expected_version.is_none_or(|version| version >= 0) {
+                        explicit_end = true;
+                    }
+                    if let Ok(failure) = serde_json::from_str::<FatalFailure>(&event.payload)
+                        && event.actor_type == "system" && facts.execution.status == "failed"
+                        && failure.status == nomifun_common::AgentExecutionStatus::Failed && !failure.reason.trim().is_empty() {
+                        let _ = failure.lead_report_operation_id;
+                        explicit_end = true;
+                    }
+                    if let Ok(source) = serde_json::from_str::<StoppedAutomationSource>(&event.payload)
+                        && event.actor_type == "system" && facts.execution.status == "cancelled"
+                        && source.reason == "original_automation_source_stopped"
+                        && repository.automation_source_cancelled(principal_id, &link.execution_id)
+                            .await.map_err(browser_lifecycle_error)? {
+                        explicit_end = true;
+                    }
+                }
+            }
+            // A question is a normal canonical completion, never an answer or
+            // cancellation. Only a separate exact formal mission-ending fact
+            // can end its Browser purpose; preserve the original question.
+            if input_handoff && !(original_target && explicit_end)
+                && !(attempt_scope.is_some() && original_settled && step_settled) { continue; }
+            if (original_settled && step_settled) || (original_target && explicit_end) { return Ok(true); }
+        }
+        Ok(false)
     }
 
     pub(crate) fn ensure_previous_turn_finished(&self, principal_id: &str, agent_session_id: &str) -> Result<(), AppError> {
@@ -202,6 +524,125 @@ impl BrowserRoleOwner {
             return Err(browser_lifecycle_error("A previous Browser turn has not proven terminal release"));
         }
         Ok(())
+    }
+
+    /// Accept retirement responsibility after an exact formal task result.
+    /// The resource owner separately retains downloads, user pages and failed
+    /// native cleanup; success here is not a physical-close acknowledgement.
+    pub(crate) async fn retire_completed_task_resources(&self, principal_id: &str,
+        session: &AgentSessionId, operation: &OperationId) -> Result<bool, AppError> {
+        self.retire_task_resources(principal_id, session, operation, None, None).await
+    }
+
+    /// An Execution cleanup owns one original Attempt across its question
+    /// phases. This never broadens a late Runtime/Turn callback's authority.
+    pub(crate) async fn retire_completed_attempt_resources(&self, principal_id: &str,
+        session: &AgentSessionId, attempt_id: &str, target: &OperationId) -> Result<bool, AppError> {
+        self.retire_task_resources(principal_id, session, target, Some(attempt_id), None).await
+    }
+
+    /// Only the original finalized Cron run or durably cancelled exclusive
+    /// Remote Session supplies this source authority. No Runtime is created.
+    pub(crate) async fn retire_ended_source_task_resources(&self, principal_id: &str,
+        session: &AgentSessionId, purpose: &OperationId, source: EndedBrowserTaskSource) -> Result<bool, AppError> {
+        self.retire_task_resources(principal_id, session, purpose, None, Some(source)).await
+    }
+
+    async fn attempt_owns_retirement_purpose(&self, principal_id: &str, session: &AgentSessionId,
+        attempt_id: &str, target: &OperationId, purpose: &OperationId) -> Result<bool, AppError> {
+        let repository = self.task_repository.get().ok_or_else(|| browser_lifecycle_error("Original Browser task repository is unavailable"))?;
+        let links = repository.resolve_conversation_link(principal_id, session.as_ref()).await.map_err(browser_lifecycle_error)?;
+        let link = links.iter().find(|link| !link.active && link.attempt_id.as_deref() == Some(attempt_id)
+            && matches!(link.relation.as_str(), "attempt" | "automation"))
+            .ok_or_else(|| browser_lifecycle_error("Original Browser Attempt ownership is unconfirmed"))?;
+        let step = link.step_id.as_deref().ok_or_else(|| browser_lifecycle_error("Original Browser task Step is unavailable"))?;
+        let facts = repository.read_task_retirement_facts(principal_id, session.as_ref(), &link.execution_id, step, attempt_id)
+            .await.map_err(browser_lifecycle_error)?.ok_or_else(|| browser_lifecycle_error("Original Browser task retirement facts are not yet quiescent"))?;
+        if !matches!(&facts.target, nomifun_db::ConversationCleanupTurnTarget::Exact { operation_id } if operation_id == target.as_ref()) {
+            return Err(browser_lifecycle_error("Browser cleanup target differs from the original Attempt's latest committed phase"));
+        }
+        if purpose == target { return Ok(true); }
+        let receipt = self.effect_store.read_turn_receipt(session, purpose).await.map_err(browser_lifecycle_error)?;
+        let Some(terminal) = receipt.terminal_event.as_ref() else { return Ok(false); };
+        if receipt.status != nomifun_agent_session::TurnReceiptStatus::Completed
+            || !matches!(self.effect_store.turn_outcome(session, purpose).await.map_err(browser_lifecycle_error)?,
+                Some(nomifun_agent_contracts::AgentTurnOutcome::InputRequired { .. })) { return Ok(false); }
+        let payloads = self.effect_store.resolved_event_payloads(session, &[terminal.event_id.clone()]).await.map_err(browser_lifecycle_error)?;
+        let request: nomifun_agent_contracts::AgentUserInputRequest = serde_json::from_value(payloads.get(terminal.event_id.as_ref())
+            .and_then(|payload| payload.get("user_input_request")).cloned()
+            .ok_or_else(|| browser_lifecycle_error("Original Browser handoff lost its canonical question"))?).map_err(browser_lifecycle_error)?;
+        request.validate().map_err(browser_lifecycle_error)?;
+        for event in facts.events.iter().filter(|event| event.step_id.as_deref() == Some(step)
+            && event.attempt_id.as_deref() == Some(attempt_id) && event.event_type == "decision_requested"
+            && event.actor_type == "system" && event.actor_id.is_none() && event.actor_conversation_id.is_none()
+            && event.actor_attempt_id.is_none() && event.on_behalf_of_user_id == principal_id) {
+            let Ok(handoff) = serde_json::from_str::<RecordedTaskInputHandoff>(&event.payload) else { continue; };
+            if handoff.canonical_operation_id != purpose.as_ref() { continue; }
+            if handoff.terminal_event_id != terminal.event_id.as_ref() || handoff.question != request.question
+                || handoff.user_input_request != request || !match (&handoff.turn_operation_key, &handoff.reconciliation) {
+                    (None, None) => true,
+                    (Some(key), Some(reason)) => reason == "completed_user_input_handoff"
+                        && purpose.as_ref() == format!("turn:user:{principal_id}:{}:{key}", session.as_ref()),
+                    _ => false,
+                } {
+                return Err(browser_lifecycle_error("Browser task phase differs from its original canonical handoff"));
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn retire_task_resources(&self, principal_id: &str, session: &AgentSessionId,
+        operation: &OperationId, attempt_id: Option<&str>, ended_source: Option<EndedBrowserTaskSource>) -> Result<bool, AppError> {
+        let Some(resources) = &self.resources else { return Ok(true); };
+        let observed = self.effect_store.observe(session, None, 1).await.map_err(browser_lifecycle_error)?;
+        if observed.session.owner_ref.principal_kind != "user" || observed.session.owner_ref.principal_id != principal_id {
+            return Err(browser_lifecycle_error("Browser retirement belongs to another principal"));
+        }
+        let Some(workspace) = resources.get_for_agent_session(principal_id, session.as_ref()).await.map_err(browser_lifecycle_error)? else {
+            return Ok(true);
+        };
+        let purpose = resources.observe_workspace(principal_id, session.as_ref()).await.map_err(browser_lifecycle_error)?;
+        // A busy observation is unknown, never evidence that this exact task
+        // transferred its responsibility. Already-owned native close may finish
+        // independently of Runtime transport or an Execution cleanup waiter.
+        if purpose.retention == nomifun_browser_platform::workspace::BrowserRetentionReason::ObservationBusy { return Ok(false); }
+        if !purpose.registered || purpose.closing { return Ok(true); }
+        let Some(purpose_operation) = purpose.task_operation_id.map(OperationId::from) else { return Ok(true); };
+        if attempt_id.is_none() && purpose_operation != *operation { return Ok(true); }
+        // The original purpose is still ours, but no retirement was handed to
+        // its Browser worker. Keep the domain's original outbox unacknowledged
+        // so a successor ending can trigger a real resource-only retry.
+        if observed.head.active_turn_id.is_some() { return Ok(false); }
+        if let Some(attempt) = attempt_id
+            && !self.attempt_owns_retirement_purpose(principal_id, session, attempt, operation, &purpose_operation).await? { return Ok(true); }
+        let outcome = self.effect_store.turn_outcome(session, &purpose_operation).await.map_err(browser_lifecycle_error)?;
+        if matches!(ended_source, Some(EndedBrowserTaskSource::CronNewConversation))
+            && matches!(outcome, Some(nomifun_agent_contracts::AgentTurnOutcome::InputRequired { .. })) { return Ok(false); }
+        let completed_task = if ended_source.is_some() { true } else {
+            self.has_settled_attempt_task(principal_id, session, &purpose_operation, attempt_id.map(|attempt| (attempt, operation))).await?
+        };
+        if matches!(outcome, Some(nomifun_agent_contracts::AgentTurnOutcome::InputRequired { .. })) && !completed_task {
+            return Ok(false);
+        }
+        if !matches!(outcome, Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { .. }
+            | nomifun_agent_contracts::AgentTurnOutcome::Silent { .. }
+            | nomifun_agent_contracts::AgentTurnOutcome::Failed { .. }
+            | nomifun_agent_contracts::AgentTurnOutcome::InputRequired { .. }
+            | nomifun_agent_contracts::AgentTurnOutcome::Cancelled { .. })) { return Ok(false); }
+        // A missing Browser workspace has no retirement responsibility. An
+        // existing one consumes the same canonical resource proof as Runtime
+        // retirement, retaining Browser/other-domain uncertainty and all
+        // native/user-page/download protections.
+        super::hosted_effect_receipts::ensure_original_effect_resource_cleanup(&self.effect_store, session).await?;
+        let result = workspace.request_retirement_after_turn(purpose_operation.as_ref(), completed_task).await;
+        if let Err(error) = result {
+            // The same Browser owner already retained notification/retry
+            // responsibility. Runtime transport retirement need not pin it.
+            tracing::warn!(session_id=session.as_ref(), operation_id=operation.as_ref(), code=error.code(),
+                "completed Browser task retains unconfirmed native retirement");
+        }
+        Ok(true)
     }
 
     async fn begin_managed_turn(&self, key: &TurnKey, workspace: Arc<BrowserWorkspace>, preserve_observations: bool) -> Result<(), AppError> {
@@ -216,11 +657,11 @@ impl BrowserRoleOwner {
             let worker_uses = self.managed_turns.clone();
             let worker_key = key.clone();
             let worker = tokio::spawn(async move {
-                let result = if preserve_observations {
-                    worker_workspace.begin_interaction().await
-                } else {
-                    worker_workspace.begin_run().await
-                };
+                let result = async {
+                    worker_workspace.retain_task(&worker_key.turn_id).await?;
+                    if preserve_observations { worker_workspace.begin_interaction().await }
+                    else { worker_workspace.begin_run().await }
+                }.await;
                 if matches!(result, Err(WorkspaceError::WorkspaceClosed)) {
                     // The parent holds this registry through insertion. Even a
                     // dropped caller cannot leave a known-closed generation
@@ -345,6 +786,7 @@ impl BrowserRoleOwner {
             observations_started: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
         });
+        {
         let mut turns = self
             .turns
             .lock()
@@ -357,7 +799,17 @@ impl BrowserRoleOwner {
                 "A previous Browser turn has not proven cleanup",
             ));
         }
-        turns.insert(key, admission);
+        turns.insert(key.clone(), admission);
+        }
+        if let Some(resources) = &self.resources {
+            if let Some(workspace) = resources.get_for_agent_session(&key.principal_id, &key.agent_session_id)
+                .await.map_err(browser_lifecycle_error)? {
+                match workspace.retain_task(&key.turn_id).await {
+                    Ok(()) | Err(WorkspaceError::WorkspaceClosed) => {},
+                    Err(error) => return Err(browser_lifecycle_error(error)),
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1008,6 +1460,12 @@ fn browser_lifecycle_error(error: impl std::fmt::Display) -> AppError {
 
 #[async_trait::async_trait]
 impl crate::browser_workspace_provider::BrowserUserClosePort for BrowserRoleOwner {
+    async fn close_user_workspace_instance(&self, principal_id: &str, agent_session_id: &str, service_instance_id: &str, runtime_generation: u64) -> Result<(), WorkspaceError> {
+        if self.resources.as_ref().is_none_or(|resources| resources.service_instance_id()!=service_instance_id) {
+            return Err(WorkspaceError::StaleTarget);
+        }
+        self.close_user_workspace(principal_id,agent_session_id,runtime_generation).await
+    }
     async fn close_user_workspace(&self, principal_id: &str, agent_session_id: &str, runtime_generation: u64) -> Result<(), WorkspaceError> {
         let session_id = AgentSessionId::from(agent_session_id.to_owned());
         let session = self.effect_store.get_live_session(&session_id).await.map_err(|_| WorkspaceError::ActionDenied)?;
@@ -1025,7 +1483,9 @@ impl crate::browser_workspace_provider::BrowserUserClosePort for BrowserRoleOwne
         };
         let head = self.effect_store.head(&session_id).await.map_err(|_| WorkspaceError::ActionDenied)?;
         let resources = self.resources.as_ref().ok_or(WorkspaceError::NativeUnavailable)?;
-        let Some(current) = resources.get_for_agent_session(principal_id, agent_session_id).await? else { return Ok(()); };
+        let Some(current) = resources.get_for_agent_session(principal_id, agent_session_id).await? else {
+            return resources.close_idle(nomifun_browser_platform::workspace::managed_workspace_key(principal_id,agent_session_id)?,runtime_generation).await;
+        };
         if current.runtime_generation() != runtime_generation { return Err(WorkspaceError::StaleTarget); }
         // Failed native admission still belongs to this browser Turn even
         // when no guard was issued. An unrelated running Turn has no owner
@@ -1593,6 +2053,10 @@ fn remember_single_attached_target(
 mod interaction_tests;
 
 #[cfg(test)]
+#[path = "engine_browser_tools/mission_retirement_tests.rs"]
+mod mission_retirement_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
@@ -1890,6 +2354,22 @@ mod managed_user_browser_tests {
         let user = resources.ensure_user(principal_id, session.as_ref(), profile).await.unwrap();
         user.user_command(BrowserTabCommand::Create { url: "https://example.test/user".into() }).await.unwrap();
         let generation = user.runtime_generation();
+
+        // A WebUI tab may survive App restart while no Agent Turn changes its
+        // head cursor. Numeric generations can repeat, original service UUIDs
+        // cannot authorize destruction of that replacement workspace.
+        let replacement_resources=Arc::new(BrowserResourceService::new(Arc::new(GateFactory(
+            Arc::new(AtomicBool::new(false)),Arc::new(AtomicBool::new(false)),Arc::new(AtomicBool::new(false))))));
+        let replacement_profile=nomifun_browser_platform::runtime::BrowserProfileStore::new(root.path()).unwrap()
+            .profile_for(&key,nomifun_browser_platform::runtime::BrowserProfilePersistence::Persistent).unwrap();
+        let replacement=replacement_resources.ensure_user(principal_id,session.as_ref(),replacement_profile).await.unwrap();
+        assert_eq!(replacement.runtime_generation(),generation);
+        assert_ne!(replacement_resources.service_instance_id(),resources.service_instance_id());
+        let replacement_owner=BrowserRoleOwner::new(Some(replacement_resources.clone()),None,root.path().to_path_buf(),None,store.clone());
+        assert!(matches!(replacement_owner.close_user_workspace_instance(principal_id,session.as_ref(),resources.service_instance_id(),generation).await,
+            Err(WorkspaceError::StaleTarget)));
+        assert!(Arc::ptr_eq(&replacement,&replacement_resources.get_for_agent_session(principal_id,session.as_ref()).await.unwrap().unwrap()));
+        replacement_resources.shutdown().await.unwrap();
 
         // A click racing first browser use fails immediately instead of waiting
         // to destroy whichever runtime the browser invocation later claims.

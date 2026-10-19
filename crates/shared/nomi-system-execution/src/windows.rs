@@ -11,7 +11,7 @@ use std::{
     path::PathBuf,
     ptr,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -62,7 +62,35 @@ use windows_sys::Win32::{
 /// request validation. The transport owns their admission and shutdown fence.
 pub trait WindowsExecutionExtension: Send + Sync {
     fn call(&self, request: Value) -> Result<Value, SystemExecutionError>;
+    fn call_controlled(&self, request: Value, cancellation: WindowsCancellation) -> Result<Value, SystemExecutionError> {
+        if cancellation.is_cancelled() { return Err(cancelled_before_dispatch()); }
+        self.call(request)
+    }
     fn shutdown(&self) -> Result<(), SystemExecutionError>;
+}
+#[path = "windows_cancellation.rs"]
+mod cancellation;
+pub use cancellation::WindowsCancellation;
+pub(super) use cancellation::{CancellationSource, cancelled_before_dispatch};
+
+pub(super) fn retain_control_delivery_error(result: Result<Value, SystemExecutionError>, delivery: Option<SystemExecutionError>) -> Result<Value, SystemExecutionError> {
+    let Some(delivery) = delivery else { return result; };
+    // A failed signal never settles, drops or reclassifies the original native
+    // operation. Return its actual result, retaining this distinct diagnostic.
+    match result {
+        Ok(mut value) => {
+            if let Some(object) = value.as_object_mut() { object.insert("control_delivery_error".into(), json!(delivery.to_string())); }
+            else { eprintln!("Native cancellation delivery failed; original non-object extension result retained: {delivery}"); }
+            Ok(value)
+        },
+        Err(mut original) => {
+            if let Some(object) = original.details.as_object_mut() {
+                object.insert("control_delivery_error".into(), json!(delivery.to_string()));
+            }
+            original.message.push_str(&format!("; cancellation signal delivery failed: {delivery}"));
+            Err(original)
+        }
+    }
 }
 type ExtensionFactory = fn() -> Arc<dyn WindowsExecutionExtension>;
 static EXTENSION: OnceLock<ExtensionFactory> = OnceLock::new();
@@ -83,9 +111,62 @@ pub(super) fn new_extension() -> Option<Arc<dyn WindowsExecutionExtension>> {
 const BUILD: &str = env!("NOMIFUN_SYSTEM_EXECUTION_BUILD_ID");
 const MODE: &str = "--nomifun-system-runner";
 const MAX_REQUEST: usize = 2 * 1024 * 1024;
-const MAX_REPLY: usize = 64 * 1024 * 1024;
+// A supported 16 MiB retained output can contain JSON-escaped text, its legacy
+// raw chunks and an opt-in exact decoder/raw replay receipt. Keep all original
+// facts without truncating them or reducing the user's output limit.
+const MAX_REPLY: usize = 256 * 1024 * 1024;
 const RPC_DEADLINE: Duration = Duration::from_secs(45);
+const BUSINESS_RPC_SLOTS: usize = 64;
 static HOST_SUPPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Keep the existing business dispatch bound after reading the authenticated
+/// request. The listener must remain available to the exact owner's Stop even
+/// when every ordinary native call is waiting on its real result.
+struct RpcDispatchSlots {
+    active: Mutex<usize>,
+    available: Condvar,
+    #[cfg(test)]
+    waiting: std::sync::atomic::AtomicUsize,
+}
+struct RpcDispatchPermit<'a>(&'a RpcDispatchSlots);
+impl RpcDispatchSlots {
+    fn new() -> Self { Self { active: Mutex::new(0), available: Condvar::new(),
+        #[cfg(test)] waiting: std::sync::atomic::AtomicUsize::new(0) } }
+
+    fn admit(&self, op: &str, interrupted: impl Fn() -> bool) -> io::Result<Option<RpcDispatchPermit<'_>>> {
+        if matches!(op, "cancel" | "terminate" | "timeout" | "interrupt" | "quiesce" | "shutdown"
+            | "release" | "stop_facility" | "observe" | "terminal" | "wait_terminal"
+            | "output_archive" | "release_terminal") { return Ok(None); }
+        let mut active = self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if interrupted() { return Err(io::Error::new(io::ErrorKind::Interrupted, "original native RPC admission closed before dispatch")); }
+            if *active < BUSINESS_RPC_SLOTS {
+                *active += 1;
+                return Ok(Some(RpcDispatchPermit(self)));
+            }
+            #[cfg(test)] self.waiting.fetch_add(1, Ordering::AcqRel);
+            active = self.available.wait_timeout(active, Duration::from_millis(25))
+                .unwrap_or_else(std::sync::PoisonError::into_inner).0;
+            #[cfg(test)] self.waiting.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "windows_rpc_cancellation_tests.rs"]
+mod rpc_cancellation_tests;
+impl Drop for RpcDispatchPermit<'_> {
+    fn drop(&mut self) {
+        let mut active = self.0.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = active.checked_sub(1).expect("native business dispatch permit returned once");
+        self.0.available.notify_one();
+    }
+}
+
+fn validate_reply_size(length:usize)->io::Result<()> {
+    if length>MAX_REPLY {return Err(io::Error::other("Native reply exceeds its envelope"));}
+    Ok(())
+}
 
 #[derive(Debug)]
 struct Handle(HANDLE);
@@ -313,6 +394,12 @@ impl Facility {
         }))
     }
     fn exchange(&self, client: Uuid, request: Value) -> Result<Value, SystemExecutionError> {
+        self.exchange_controlled(client, request, None)
+    }
+    fn exchange_controlled(&self, client: Uuid, request: Value, cancellation: Option<&CancellationSource>) -> Result<Value, SystemExecutionError> {
+        if cancellation.is_some_and(|source| source.connection != client) {
+            return Err(before("SYSTEM_EXECUTION_NOT_ADMITTED", "Cancellation belongs to a different original connection"));
+        }
         let _foreground_fence = if request["op"] == "stop_facility" {
             self.foreground_admission.closing.store(true, Ordering::Release);
             Some(self.foreground_admission.gate.write().unwrap_or_else(|poison| poison.into_inner()))
@@ -322,8 +409,10 @@ impl Facility {
                 "The original elevated runner has stopped; its operations cannot be replayed",
             ));
         }
-        let id = Uuid::now_v7();
-        let bytes = serde_json::to_vec(&json!({"build":BUILD,"connection":client.to_string(),"id":id.to_string(),"request":request})).expect("JSON");
+        let id = cancellation.map(|source| source.id).unwrap_or_else(Uuid::now_v7);
+        let mut envelope = json!({"build":BUILD,"connection":client.to_string(),"id":id.to_string(),"request":request});
+        if let Some(source) = cancellation { envelope["cancel_event"] = json!(source.name); }
+        let bytes = serde_json::to_vec(&envelope).expect("JSON");
         if bytes.len() > MAX_REQUEST {
             return Err(before(
                 "invalid_system_request",
@@ -397,6 +486,12 @@ pub(super) struct Client {
     id: Uuid,
 }
 impl Client {
+    pub(super) fn cancellation_source(&self) -> Result<CancellationSource, SystemExecutionError> {
+        CancellationSource::new(self.id)
+    }
+    pub(super) fn call_controlled(&self, request: Value, cancellation: &CancellationSource) -> Result<Value, SystemExecutionError> {
+        self.facility.exchange_controlled(self.id, request, Some(cancellation))
+    }
     pub(super) fn allow_foreground_from_current_app(&self) -> bool {
         self.facility.foreground_admission.delegate_if_open(&self.facility.stopped,
             &mut NativeForegroundDelegation(&self.facility.process))
@@ -788,13 +883,10 @@ fn serve(key: Uuid, parent_pid: u32, stamp: u64) -> Result<(), String> {
         }).map_err(|e|e.to_string())?;
     }
     let mut pending = listener(&name, &security, true).map_err(|e| e.to_string())?;
+    let slots = Arc::new(RpcDispatchSlots::new());
     let mut workers: Vec<thread::JoinHandle<()>> = Vec::new();
     while parent.running() && !stopping.load(Ordering::Acquire) {
         workers.retain(|worker| !worker.is_finished());
-        if workers.len() >= 64 {
-            thread::sleep(Duration::from_millis(10));
-            continue;
-        }
         match connect_pipe(
             &pending,
             &parent,
@@ -822,8 +914,9 @@ fn serve(key: Uuid, parent_pid: u32, stamp: u64) -> Result<(), String> {
         let stopping = stopping.clone();
         let stop_event = stop_event.clone();
         let admission = admission.clone();
+        let slots = slots.clone();
         workers.push(thread::spawn(move || {
-            let _ = handle_rpc(&pipe, &parent, &runners, &stopping, &stop_event, &admission);
+            let _ = handle_rpc(&pipe, &parent, &runners, &stopping, &stop_event, &admission, &slots);
             unsafe {
                 DisconnectNamedPipe(pipe.0);
             }
@@ -847,6 +940,7 @@ fn handle_rpc(
     stopping: &AtomicBool,
     stop_event: &Handle,
     admission: &FacilityAdmission,
+    slots: &RpcDispatchSlots,
 ) -> io::Result<()> {
     let deadline = Instant::now() + RPC_DEADLINE;
     let bytes = read_frame(pipe.0, MAX_REQUEST, deadline, parent)?;
@@ -859,13 +953,48 @@ fn handle_rpc(
         .ok_or_else(|| io::Error::other("Missing native connection identity"))?
         .parse()
         .map_err(io::Error::other)?;
-    let _: Uuid = envelope["id"]
+    let id: Uuid = envelope["id"]
         .as_str()
         .ok_or_else(|| io::Error::other("Missing native request identity"))?
         .parse()
         .map_err(io::Error::other)?;
     let request = &envelope["request"];
     let op = request["op"].as_str().unwrap_or("");
+    // The original Event is opened after authenticating the pipe, client and
+    // request identity, before any business-slot wait. An early Stop remains
+    // signalled even when no helper worker had registered this request yet.
+    let cancellation = match envelope.get("cancel_event") {
+        None => WindowsCancellation::default(),
+        Some(value) => {
+            let opened = value.as_str().filter(|_| op == "extension")
+                .ok_or_else(|| io::Error::other("Native cancellation is only valid for the original extension request"))
+                .and_then(|name| WindowsCancellation::open(name, client, id));
+            match opened {
+                Ok(cancellation) => cancellation,
+                Err(error) => return reply_rpc(pipe, parent, client, id,
+                    json!({"ok":false,"error":{"code":"SYSTEM_EXECUTION_NOT_ADMITTED","message":error.to_string(),
+                        "details":{"user_code_not_started":true,"cleanup_proven":true}}}), deadline),
+            }
+        }
+    };
+    let cancelled_reply = || { let error = cancellation.require_open().err().unwrap_or_else(cancelled_before_dispatch);
+        json!({"ok":false,"error":{"code":error.code,"message":error.message,"details":error.details}}) };
+    // Admission owns the complete original request and lives through its
+    // result/ACK. Waiting for an ordinary slot does not block the pipe listener
+    // or drop an already-dispatched native future.
+    let _slot = match slots.admit(op, || cancellation.is_cancelled() || !parent.running() || stopping.load(Ordering::Acquire) || Instant::now() >= deadline) {
+        Ok(slot) => slot,
+        Err(_) if cancellation.is_cancelled() => return reply_rpc(pipe, parent, client, id, cancelled_reply(), deadline),
+        // An authenticated request received after the original facility Stop
+        // still owns a reply/ACK. Let the existing admission/Runner owner
+        // return its known closing rejection or original terminal receipt;
+        // do not turn a deliberate closed admission into transport-unknown.
+        Err(_) if parent.running() && stopping.load(Ordering::Acquire) && Instant::now() < deadline => None,
+        Err(error) => return Err(error),
+    };
+    if cancellation.is_cancelled() {
+        return reply_rpc(pipe, parent, client, id, cancelled_reply(), deadline);
+    }
     let response = if op == "stop_facility" {
         admission.closing.store(true, Ordering::Release);
         let _fence = admission
@@ -925,17 +1054,19 @@ fn handle_rpc(
                 }
                 response
             }
-            Some(runner) => runner.call(&serde_json::to_vec(request).map_err(io::Error::other)?),
+            Some(runner) => runner.call_with_cancellation(&serde_json::to_vec(request).map_err(io::Error::other)?, cancellation),
             None => {
                 json!({"ok":false,"error":{"code":"SYSTEM_EXECUTION_CONNECTION_CLOSED","message":"The exact native connection is absent or closed","details":{"user_code_not_started":true,"cleanup_proven":true}}})
             }
         }
     };
-    let response = json!({"build":BUILD,"connection":client.to_string(),"id":envelope["id"],"response":response});
+    reply_rpc(pipe, parent, client, id, response, deadline)
+}
+
+fn reply_rpc(pipe: &Handle, parent: &Handle, client: Uuid, id: Uuid, response: Value, deadline: Instant) -> io::Result<()> {
+    let response = json!({"build":BUILD,"connection":client.to_string(),"id":id.to_string(),"response":response});
     let bytes = serde_json::to_vec(&response).map_err(io::Error::other)?;
-    if bytes.len() > MAX_REPLY {
-        return Err(io::Error::other("Native reply exceeds its envelope"));
-    }
+    validate_reply_size(bytes.len())?;
     write_frame(pipe.0, &bytes, deadline, parent)?;
     if read_frame(pipe.0, 1, deadline, parent)? != [1] {
         return Err(io::Error::other("Invalid native receipt acknowledgement"));
@@ -1019,6 +1150,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_output_archive_envelope_carries_supported_raw_and_escaped_text_and_keeps_exact_boundary() {
+        let supported_raw=16*1024*1024;
+        // JSON can use six bytes per decoded control character and up to four
+        // per u8 in each of the legacy raw array and the original frozen raw
+        // array. Leave framing/chunk/decoder metadata room as well.
+        let supported_capture=supported_raw*(6+4+4)+1024*1024;
+        assert!(validate_reply_size(supported_capture).is_ok());
+        assert!(validate_reply_size(MAX_REPLY).is_ok());
+        assert!(validate_reply_size(MAX_REPLY+1).is_err());
+        assert!(validate_reply_size(usize::MAX).is_err());
+        let error=unknown("Native reply exceeds its envelope");
+        assert_eq!(error.details["cleanup_proven"],false);
+        assert_eq!(error.details["user_code_not_started"],false);
+    }
+
+    #[test]
     fn uac_launch_failure_preserves_os_facts_without_guessing_who_cancelled() {
         for raw in [1223, 5, 2, 1460] {
             let native = io::Error::from_raw_os_error(raw);
@@ -1046,7 +1193,7 @@ mod tests {
     }
     // Exercise the real named-pipe framing and Runner without UAC. These are
     // transport tests, never evidence of an administrator token or product UI.
-    fn security() -> PipeSecurity {
+    pub(super) fn security() -> PipeSecurity {
         let sddl = wide(format!(
             "D:P(A;;GA;;;{})",
             sid(unsafe { GetCurrentProcess() }).unwrap()
@@ -1161,6 +1308,61 @@ mod tests {
         assert_eq!(stopped["result"]["cleanup"]["reaped"], true, "{stopped}");
         let closed = runner.call(br#"{"op":"shutdown"}"#);
         assert_eq!(closed["result"]["exact"], true, "{closed}");
+    }
+    #[test]
+    fn full_business_dispatch_still_accepts_exact_stop_over_the_original_pipe() {
+        let slots = Arc::new(RpcDispatchSlots::new());
+        let permits = (0..BUSINESS_RPC_SLOTS).map(|_| slots.admit("poll", || false).unwrap().unwrap()).collect::<Vec<_>>();
+        let runner = Arc::new(Runner::new());
+        let root = tempfile::tempdir().unwrap();
+        let owner = |op: &str| json!({"op":op,"invocation_id":Uuid::nil().to_string(),"call_id":Uuid::nil().to_string()});
+        let mut start = owner("start");
+        start["cwd"] = json!(root.path());
+        start["command"] = json!({"kind":"program","program":"cmd.exe","args":["/d","/c","set /p fixture="]});
+        let a = runner.call(&serde_json::to_vec(&start).unwrap());
+        let b = runner.call(&serde_json::to_vec(&start).unwrap());
+        assert_eq!(a["ok"], true, "{a}"); assert_eq!(b["ok"], true, "{b}");
+        let name = format!(r"\\.\pipe\NomiFun.SystemExecution.FullDispatch.{}", Uuid::now_v7());
+        let pipe = listener(&name, &security(), true).unwrap();
+        let client = Uuid::now_v7();
+        let native = runner.clone(); let dispatch = slots.clone();
+        let worker = thread::spawn(move || {
+            let peer = process(std::process::id()).unwrap();
+            connect_pipe(&pipe, &peer, None, Instant::now() + Duration::from_secs(15)).unwrap();
+            let runners = Mutex::new(HashMap::from([(client, native)]));
+            let stopping = AtomicBool::new(false);
+            handle_rpc(&pipe, &peer, &runners, &stopping, &event().unwrap(), &FacilityAdmission::default(), &dispatch).unwrap();
+            assert!(!stopping.load(Ordering::Acquire), "one Stop cannot close the shared facility");
+            assert_eq!(runners.lock().unwrap().len(), 1);
+        });
+        let facility = Facility { pipe: name, process: process(std::process::id()).unwrap(),
+            stopped: AtomicBool::new(false), foreground_admission: FacilityAdmission::default() };
+        let mut cancel = owner("cancel"); cancel["session_id"] = a["result"]["session_id"].clone();
+        let stopped = facility.exchange(client, cancel).unwrap();
+        assert_eq!(stopped["cleanup"]["reaped"], true, "{stopped}");
+        assert_eq!(*slots.active.lock().unwrap(), BUSINESS_RPC_SLOTS, "Stop does not release another original request's permit");
+        let mut sibling = owner("poll"); sibling["session_id"] = b["result"]["session_id"].clone();
+        assert_eq!(runner.call(&serde_json::to_vec(&sibling).unwrap())["result"]["state"], "running");
+        worker.join().unwrap();
+        drop(permits);
+        assert_eq!(runner.call(br#"{"op":"shutdown"}"#)["result"]["exact"], true);
+    }
+
+    #[test]
+    fn full_business_dispatch_keeps_ordinary_requests_until_their_original_slot_is_available() {
+        let slots = Arc::new(RpcDispatchSlots::new());
+        let mut permits = (0..BUSINESS_RPC_SLOTS).map(|_| slots.admit("poll", || false).unwrap().unwrap()).collect::<Vec<_>>();
+        let dispatch = slots.clone(); let (sent, received) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _permit = dispatch.admit("write", || false).unwrap().unwrap(); sent.send(()).unwrap();
+        });
+        assert!(received.recv_timeout(Duration::from_millis(50)).is_err());
+        for op in ["cancel", "terminate", "timeout", "quiesce", "shutdown", "release", "stop_facility",
+            "observe", "terminal", "wait_terminal", "output_archive", "release_terminal"] {
+            assert!(slots.admit(op, || false).unwrap().is_none(), "{op} retains an independent ingress");
+        }
+        drop(permits.pop());
+        received.recv_timeout(Duration::from_secs(2)).unwrap(); worker.join().unwrap();
     }
     #[test]
     fn native_extension_quiesce_is_reusable_but_shutdown_closes_admission() {
@@ -1286,7 +1488,7 @@ mod tests {
             let admission = FacilityAdmission::default();
             for index in 0..10 {
                 connect_pipe(&pipe, &peer, None, Instant::now() + Duration::from_secs(20)).unwrap();
-                handle_rpc(&pipe, &peer, &runners, &stopping, &stop, &admission).unwrap();
+                handle_rpc(&pipe, &peer, &runners, &stopping, &stop, &admission, &RpcDispatchSlots::new()).unwrap();
                 unsafe {
                     DisconnectNamedPipe(pipe.0);
                 }

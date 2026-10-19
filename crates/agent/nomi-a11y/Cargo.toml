@@ -10,6 +10,7 @@ repository.workspace = true
 tracing.workspace    = true
 thiserror.workspace  = true
 serde.workspace      = true
+tokio-util.workspace = true
 
 # --- macOS backend: Accessibility (AXUIElement) + CoreGraphics actuation +
 #     AppKit (NSRunningApplication focus). macOS only. ---

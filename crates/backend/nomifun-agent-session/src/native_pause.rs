@@ -3,17 +3,7 @@
 use super::*;
 use nomifun_agent_contracts::{NativeBudgetIncrease, NativeExecutionBudget};
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativePauseState {
-    pub revision: u64,
-    pub reason: String,
-    pub checkpoint_revision: u64,
-    pub checkpoint_digest: Option<DigestHex>,
-    pub execution_fence: u64,
-    pub cleanup_proven: bool,
-    pub paused_at_ms: i64,
-}
+pub use nomifun_agent_contracts::NativePauseState;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -339,6 +329,13 @@ impl AgentSessionStore {
         let unsettled: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_effects WHERE session_id=? AND state IN ('pending','unknown'))")
             .bind(session.as_ref()).fetch_one(&mut *tx).await?;
         if unsettled { return Err(SessionStoreError::RecoveryRequiresReconciliation); }
+        native_resume_queue::ensure_request_not_blocked_tx(&mut tx,session,owner,request).await?;
+        native_execution::check_domain_work_admission_tx(&mut tx,session,&request.operation_id).await?;
+        if !nomifun_db::native_resume_capacity_available_tx(
+            &mut tx, &owner.principal_id, session.as_ref(), request.operation_id.as_ref(),
+        ).await.map_err(native_resume_queue::admission_error)? {
+            return Err(SessionStoreError::ExecutionCapacityPending);
+        }
         let budget = native_budget_tx(&mut tx, session, &request.operation_id).await?.increased(&request.budget)
             .map_err(|error| SessionStoreError::InvalidPayload(error.into()))?;
         let bytes = canonical_json_bytes(&prepared.checkpoint_state.0)?;

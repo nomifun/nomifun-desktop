@@ -10,6 +10,9 @@ mod error;
 mod id_schema_contract;
 pub mod models;
 mod repository;
+pub use repository::agent_execution_admission::{AgentExecutionReservation, execution_capacity_available_tx,
+    execution_reservations_tx, native_execution_claim_admitted_tx, native_resume_capacity_available_tx,
+    native_resume_target_eligible_tx};
 mod provider_cleanup;
 pub use provider_cleanup::insert_agent_preset_revision_tx;
 mod session_projection;
@@ -25,6 +28,7 @@ pub use database::{
 pub use agent_store_reset::{AgentDataResetReport, reset_agent_data};
 pub use agent_store_clean_cut::requires_agent_store_clean_cut;
 pub use error::DbError;
+pub use repository::remote_session_admission::{ensure_remote_session_admitted_tx,remote_session_admitted_tx};
 pub use id_schema_contract::{validate_id_data_contract, validate_id_schema_contract};
 pub use session_projection::MessageDayBucket;
 pub use models::{
@@ -89,7 +93,8 @@ pub use models::SshHostRow;
 pub use repository::{
     AdoptAgentExecutionStepOutputParams, AgentExecutionAttemptRecoveryDisposition,
     AgentExecutionAttemptRecoveryResult, AgentExecutionAttemptSessionKind,
-    AgentExecutionLeaseToken, AgentExecutionTurnAuthority,
+    ConversationCleanupCursor, ConversationCleanupTurnTarget, PendingConversationCleanup, PendingConversationCleanupPage,
+    AgentExecutionLeaseToken, AgentExecutionTurnAuthority, AgentExecutionTaskRetirementFacts,
     AppendAgentExecutionStepsFromAttemptParams, AppendAgentExecutionStepsFromAttemptResult,
     AppendAgentExecutionStepsParams,
     AttemptConversationEffectParams, CreateAgentExecutionAttemptParams,

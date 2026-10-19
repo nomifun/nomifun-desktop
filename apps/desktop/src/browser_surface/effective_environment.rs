@@ -249,6 +249,14 @@ fn policy_overrides_present() -> Option<bool> {
     combine_presence(values)
 }
 
+/// Debug fixture admission only, before either shell or managed controller
+/// creation. Never read override values or change ordinary product policy.
+#[cfg(debug_assertions)]
+pub(crate) fn isolated_fixture_environment_proven() -> bool {
+    ENVIRONMENT_OVERRIDES.iter().all(|name| std::env::var_os(name).is_none())
+        && policy_overrides_present() == Some(false)
+}
+
 fn os_dword(name: &str) -> Option<u32> {
     let key = HSTRING::from("Software\\Microsoft\\Windows NT\\CurrentVersion");
     let name = HSTRING::from(name);

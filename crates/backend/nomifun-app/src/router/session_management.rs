@@ -939,6 +939,7 @@ mod tests {
             updated_at: 2,
         };
         let detail = AgentExecutionDetail {
+            automation_control:None,
             execution,
             participants: vec![],
             steps: vec![],

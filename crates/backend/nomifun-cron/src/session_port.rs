@@ -197,6 +197,70 @@ pub struct CronTurnReceiptQuery {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronTurnCancellationRequest {
+    pub owner_id: String,
+    pub agent_session_id: AgentSessionId,
+    pub cron_job_id: String,
+    pub cron_job_run_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CronTurnCancellationReceipt {
+    /// Positive exact-owner/no-admission evidence, never just a cancel signal.
+    pub execution_stopped: bool,
+}
+
+/// The immutable Session created for one new-conversation Cron occurrence.
+/// A successful handoff means the host retained the cleanup responsibility;
+/// it does not claim that physical resources have already closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronRunResourceRetirement {
+    pub owner_id: String,
+    pub cron_job_id: String,
+    pub cron_job_run_id: String,
+    pub agent_session_id: AgentSessionId,
+    finalized: Option<CronRunResourceFinalization>,
+}
+
+/// A live receipt from the original formal finalizer, retained across deletion
+/// of the job/run rows. Its scope cannot be borrowed by editing a public field
+/// on a cloned request. It is neither serialized nor a second durable ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CronRunResourceFinalization {
+    owner_id: String,
+    cron_job_id: String,
+    cron_job_run_id: String,
+    agent_session_id: AgentSessionId,
+    status: &'static str,
+}
+
+impl CronRunResourceRetirement {
+    pub(crate) fn capture(owner_id: String, cron_job_id: String, cron_job_run_id: String,
+        agent_session_id: AgentSessionId) -> Self {
+        Self { owner_id, cron_job_id, cron_job_run_id, agent_session_id, finalized: None }
+    }
+
+    pub(crate) fn seal_finalized(mut self, status: &'static str) -> Option<Self> {
+        if !matches!(status, "ok" | "error" | "cancelled") { return None; }
+        self.finalized = Some(CronRunResourceFinalization {
+            owner_id: self.owner_id.clone(), cron_job_id: self.cron_job_id.clone(),
+            cron_job_run_id: self.cron_job_run_id.clone(), agent_session_id: self.agent_session_id.clone(), status,
+        });
+        Some(self)
+    }
+
+    /// Only the exact source tuple sealed by an Applied/AlreadyApplied formal
+    /// finalizer can authorize the host resource handoff. A prepared request,
+    /// or a clone whose public coordinates were changed, has no such authority.
+    pub fn finalized_status(&self) -> Option<&str> {
+        let finalized = self.finalized.as_ref()?;
+        (self.owner_id == finalized.owner_id && self.cron_job_id == finalized.cron_job_id
+            && self.cron_job_run_id == finalized.cron_job_run_id && self.agent_session_id == finalized.agent_session_id)
+            .then_some(finalized.status)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronTurnReconciliationRequest {
     pub owner_id: String,
     pub agent_session_id: AgentSessionId,
@@ -222,6 +286,17 @@ pub enum CronTurnReconciliation {
 /// Exact Session operations needed by the Cron domain.
 #[async_trait]
 pub trait CronSessionPort: Send + Sync {
+    async fn retire_new_conversation_run_resources(
+        &self,
+        request: &CronRunResourceRetirement,
+    ) -> Result<(), AppError>;
+
+    /// Only an already persisted exact reservation cancellation can authorize
+    /// this operation. Never cancel the current/latest Turn of a Session.
+    async fn cancel_reserved_turn(&self, _request: &CronTurnCancellationRequest)
+        -> Result<CronTurnCancellationReceipt, AppError> {
+        Err(AppError::Conflict("exact scheduled Turn cancellation is unavailable".into()))
+    }
     async fn get_session(
         &self,
         query: &CronSessionLookup,
@@ -292,14 +367,43 @@ pub(crate) mod test_support {
         pub receipt: Mutex<CronTurnReceiptState>,
         pub reads: AtomicUsize,
         pub transient_failures: AtomicUsize,
+        pub cancellations: Mutex<Vec<CronTurnCancellationRequest>>,
+        pub cancellation_gate: Mutex<Option<std::sync::Arc<CancellationGate>>>,
     }
+    #[derive(Default)]
+    pub(crate) struct CancellationGate { pub entered: tokio::sync::Notify, pub release: tokio::sync::Notify }
     impl ReceiptOnlySessions {
         pub fn new(receipt: CronTurnReceiptState) -> Self {
-            Self { receipt: Mutex::new(receipt), reads: AtomicUsize::new(0), transient_failures: AtomicUsize::new(0) }
+            Self { receipt: Mutex::new(receipt), reads: AtomicUsize::new(0), transient_failures: AtomicUsize::new(0), cancellations: Mutex::new(Vec::new()), cancellation_gate: Mutex::new(None) }
         }
     }
     #[async_trait]
     impl CronSessionPort for ReceiptOnlySessions {
+        async fn retire_new_conversation_run_resources(&self, _: &CronRunResourceRetirement) -> Result<(), AppError> {
+            // Receipt-only adapters own no Runtime or physical resources.
+            Ok(())
+        }
+        async fn cancel_reserved_turn(&self, request: &CronTurnCancellationRequest) -> Result<CronTurnCancellationReceipt, AppError> {
+            self.cancellations.lock().unwrap().push(request.clone());
+            let gate = self.cancellation_gate.lock().unwrap().take();
+            if let Some(gate) = gate { gate.entered.notify_one(); gate.release.notified().await; }
+            let mut receipt = self.receipt.lock().unwrap();
+            let current = match receipt.clone() {
+                CronTurnReceiptState::Missing => return Ok(CronTurnCancellationReceipt { execution_stopped: true }),
+                CronTurnReceiptState::Completed(_) => return Ok(CronTurnCancellationReceipt { execution_stopped: false }),
+                CronTurnReceiptState::Suspended(delivery) => delivery,
+                CronTurnReceiptState::Accepted { message_id } => CronTurnDelivery {
+                    message_id, replayed: true, completed: false, turn_outcome: None, user_input_request: None,
+                    result_ok: None, result_text: None, result_error: None, result_error_code: None, result_error_retryable: None,
+                },
+            };
+            *receipt = CronTurnReceiptState::Completed(CronTurnDelivery { completed: true,
+                turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Cancelled { message_ids: Vec::new() }),
+                result_ok: Some(false), result_error_code: Some("cancelled".into()), ..current });
+            // This adapter publishes a durable terminal, not a native cleanup
+            // receipt. It deliberately cannot claim physical completion.
+            Ok(CronTurnCancellationReceipt { execution_stopped: false })
+        }
         async fn read_turn_receipt(&self, _: &CronTurnReceiptQuery) -> Result<CronTurnReceiptState, AppError> {
             self.reads.fetch_add(1, Ordering::SeqCst);
             if self.transient_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst,

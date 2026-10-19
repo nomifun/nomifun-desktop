@@ -25,6 +25,8 @@ pub struct NativeExecutionInspection {
     pub turn_state: String,
     pub pause: Option<NativePauseState>,
     pub pause_requested: bool,
+    pub resume_requested: bool,
+    pub resume_blocked_reason: Option<String>,
     pub budget: nomifun_agent_contracts::NativeExecutionBudget,
     pub model_progress: Value,
 }
@@ -78,13 +80,14 @@ impl AgentSessionStore {
         let Some(row) = row else { return Ok(None); };
         let counts: (i64, i64) = sqlx::query_as("SELECT COALESCE(SUM(state='pending'),0),COALESCE(SUM(state='unknown'),0) FROM agent_effects WHERE session_id=? AND turn_id=?")
             .bind(session_id.as_ref()).bind(&row.operation_id).fetch_one(&mut *tx).await?;
-        let payload_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(byte_len),0) FROM agent_payloads WHERE session_id=?")
-            .bind(session_id.as_ref()).fetch_one(&mut *tx).await?;
+        let payload_bytes=session_process_archive::model_payload_bytes_tx(&mut tx,session_id).await?;
         let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='runtime/execution-recovery-blocked')")
             .bind(session_id.as_ref()).bind(&row.operation_id).fetch_one(&mut *tx).await?;
         let suspension: (Option<String>, bool) = sqlx::query_as("SELECT native_pause_json,native_pause_requested_json IS NOT NULL FROM agent_turns WHERE session_id=? AND operation_id=?")
             .bind(session_id.as_ref()).bind(&row.operation_id).fetch_one(&mut *tx).await?;
         let pause: Option<NativePauseState> = suspension.0.map(|value| serde_json::from_str(&value)).transpose()?;
+        let (resume_requested,resume_blocked_reason) = native_resume_queue::queue_state_tx(&mut tx,session_id,
+            &OperationId::from(row.operation_id.clone()),pause.as_ref()).await?;
         let budget = native_pause::native_budget_tx(&mut tx,session_id,&row.operation_id.clone().into()).await?;
         let model: (Option<i64>,Option<i64>,Option<i64>,Option<i64>) = sqlx::query_as("SELECT json_extract(native_checkpoint_json,'$.model_steps'),json_extract(native_checkpoint_json,'$.segments.model_steps_per_segment'),json_extract(native_checkpoint_json,'$.segments.segment'),json_extract(native_checkpoint_json,'$.segments.policy.max_segments') FROM agent_turns WHERE session_id=? AND operation_id=?")
             .bind(session_id.as_ref()).bind(&row.operation_id).fetch_one(&mut *tx).await?;
@@ -93,7 +96,8 @@ impl AgentSessionStore {
         let model_progress = json!({"used_model_steps":used,"checkpoint_model_steps":model.0,"steps_per_segment":model.1,"segment":model.2,"maximum_segments":model.3});
         Ok(Some(NativeExecutionInspection {
             operation_id: row.operation_id.into(), producer_lease_live: row.state == "running" && row.execution_owner.is_some() && row.execution_lease_until > wall_clock_now_ms(),
-            state: if pause.is_some() { "paused".into() } else { row.state.clone() }, turn_state: row.state, pause, pause_requested: suspension.1, budget, model_progress,
+            state: if pause.is_some() { "paused".into() } else { row.state.clone() }, turn_state: row.state, pause, pause_requested: suspension.1,
+            resume_requested,resume_blocked_reason,budget, model_progress,
             execution_fence: as_u64(row.execution_fence, "execution fence")?,
             execution_generation: as_u64(row.execution_generation, "execution generation")?, lease_until_ms: row.execution_lease_until,
             checkpoint_revision: as_u64(row.native_checkpoint_revision, "checkpoint revision")?,

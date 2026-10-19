@@ -14,6 +14,94 @@ fn binding_digest(json: &str) -> String {
     hex::encode(Sha256::digest(json.as_bytes()))
 }
 
+async fn exact_cancel_fixture()->(nomifun_db::Database,SqliteRemoteBindingRepository,String,String,String) {
+    let database=init_database_memory().await.unwrap();let pool=database.pool();
+    let owner:String=sqlx::query_scalar("SELECT owner_user_id FROM installation_identity").fetch_one(pool).await.unwrap();
+    let session=nomifun_common::ConversationId::new().into_string();
+    let binding=nomifun_common::generate_id();let json=binding_json(1);let digest=binding_digest(&json);
+    let repository=SqliteRemoteBindingRepository::new(pool.clone());
+    repository.create_binding(CreateRemoteBindingParams {remote_binding_id:binding.clone(),owner_user_id:owner.clone(),name:"exact Stop".into(),
+        agent_binding_json:json,nomi_snapshot_json:r#"{"snapshot":"frozen"}"#.into(),provenance_json:r#"{"source":"test","version":1}"#.into(),agent_binding_digest:digest.clone(),binding_version:1}).await.unwrap();
+    sqlx::query("INSERT INTO agent_sessions(agent_session_id,owner_ref_json,state,title,archived,pinned,agent_binding_json,remote_binding_id,remote_binding_version,next_seq,created_at) \
+        VALUES(?,json_object('principal_kind','user','principal_id',?),'live','exact',0,0,json_object('binding_version',1),?,1,2,1)")
+        .bind(&session).bind(&owner).bind(&binding).execute(pool).await.unwrap();
+    let operation=format!("turn:user:{owner}:{session}:original");
+    sqlx::query("INSERT INTO agent_session_heads(session_id,status,active_turn_id,active_set_generation,last_seq,unread_count) VALUES(?,'running',?,0,7,0)")
+        .bind(&session).bind(&operation).execute(pool).await.unwrap();
+    repository.get_or_create_session(GetOrCreateRemoteSessionParams {owner_user_id:owner.clone(),remote_binding_id:binding,
+        expected_binding_version:1,expected_agent_binding_digest:digest,open_idempotency_key:"open-exact".into(),agent_session_id:session.clone(),initial_input_digest:None}).await.unwrap();
+    (database,repository,owner,session,operation)
+}
+
+fn exact_cancel(owner:&str,session:&str,operation:&str,key:&str,seq:u64)->AppendNomiRemoteEventParams {
+    AppendNomiRemoteEventParams {owner_user_id:owner.into(),agent_session_id:session.into(),event_type:"session/cancel-requested".into(),
+        payload_json:serde_json::json!({"operation_key_digest":binding_digest(key),"request_digest":binding_digest(&format!("{key}:{operation}:{seq}")),"outcome":"requested",
+            "expected_operation_id":operation,"expected_head_seq":seq,"expected_binding_version":1}).to_string()}
+}
+
+#[tokio::test]
+async fn exact_remote_stop_rejects_a_stale_turn_before_persisting_any_cancel_fence() {
+    let (database,repository,owner,session,operation)=exact_cancel_fixture().await;
+    let command=exact_cancel(&owner,&session,&operation,"stale",7);
+    sqlx::query("UPDATE agent_session_heads SET active_turn_id='successor',last_seq=9 WHERE session_id=?").bind(&session).execute(database.pool()).await.unwrap();
+    assert!(matches!(repository.append_cancel_request_exact(command,Some(&operation),7,1).await,Err(nomifun_db::DbError::Conflict(_))));
+    assert_eq!(repository.current_event_cursor(&owner,&session).await.unwrap(),0);
+    let mut tx=database.pool().begin().await.unwrap();
+    assert!(nomifun_db::remote_session_admitted_tx(&mut tx,&session).await.unwrap());tx.commit().await.unwrap();
+    database.close().await;
+}
+
+#[tokio::test]
+async fn exact_remote_stop_writer_fences_all_later_claims_and_replay_keeps_its_original_target() {
+    let (database,repository,owner,session,operation)=exact_cancel_fixture().await;
+    let command=exact_cancel(&owner,&session,&operation,"original",7);
+    assert!(repository.append_cancel_request_exact(command.clone(),Some(&operation),7,1).await.unwrap().inserted);
+    let mut tx=database.pool().begin().await.unwrap();
+    assert!(!nomifun_db::remote_session_admitted_tx(&mut tx,&session).await.unwrap());
+    assert!(nomifun_db::ensure_remote_session_admitted_tx(&mut tx,&session).await.is_err());tx.commit().await.unwrap();
+    sqlx::query("UPDATE agent_session_heads SET active_turn_id=NULL,last_seq=10,status='ready' WHERE session_id=?").bind(&session).execute(database.pool()).await.unwrap();
+    assert!(!repository.append_cancel_request_exact(command,Some(&operation),7,1).await.unwrap().inserted,"same request replays its captured target after settlement");
+    let different=exact_cancel(&owner,&session,"successor","original",10);
+    assert!(repository.append_cancel_request_exact(different,Some("successor"),10,1).await.is_err(),"a retry key cannot retarget a successor");
+    database.close().await;
+}
+
+#[tokio::test]
+async fn rejecting_one_remote_stop_key_cannot_clear_another_exact_stop_fence() {
+    let (database,repository,owner,session,operation)=exact_cancel_fixture().await;
+    repository.append_cancel_request_exact(exact_cancel(&owner,&session,&operation,"first",7),Some(&operation),7,1).await.unwrap();
+    repository.append_cancel_request_exact(exact_cancel(&owner,&session,&operation,"second",7),Some(&operation),7,1).await.unwrap();
+    repository.append_event_once(AppendNomiRemoteEventParams {owner_user_id:owner.clone(),agent_session_id:session.clone(),event_type:"session/cancel-rejected".into(),
+        payload_json:serde_json::json!({"operation_key_digest":binding_digest("second"),"request_digest":binding_digest(&format!("second:{operation}:7")),"outcome":"rejected"}).to_string()}).await.unwrap();
+    let mut tx=database.pool().begin().await.unwrap();assert!(!nomifun_db::remote_session_admitted_tx(&mut tx,&session).await.unwrap());tx.commit().await.unwrap();
+    database.close().await;
+}
+
+#[tokio::test]
+async fn a_legacy_unknown_remote_cancel_does_not_retarget_or_block_a_new_explicit_exact_stop() {
+    let (database,repository,owner,session,operation)=exact_cancel_fixture().await;
+    let legacy=|kind:&str,outcome:&str|AppendNomiRemoteEventParams {owner_user_id:owner.clone(),agent_session_id:session.clone(),event_type:kind.into(),
+        payload_json:serde_json::json!({"operation_key_digest":binding_digest("legacy"),"request_digest":binding_digest("legacy request"),"outcome":outcome}).to_string()};
+    repository.append_event_once(legacy("session/cancel-requested","requested")).await.unwrap();
+    repository.append_event_once(legacy("session/cancel-unknown","unknown")).await.unwrap();
+    assert!(repository.append_cancel_request_exact(exact_cancel(&owner,&session,&operation,"new exact",7),Some(&operation),7,1).await.unwrap().inserted);
+    let old=repository.find_event_by_operation_key(&owner,&session,"session/cancel-requested",&binding_digest("legacy")).await.unwrap().unwrap();
+    assert!(serde_json::from_str::<serde_json::Value>(&old.payload_json).unwrap().get("expected_operation_id").is_none());
+    assert!(repository.find_event_by_operation_key(&owner,&session,"session/cancel-unknown",&binding_digest("legacy")).await.unwrap().is_some());
+    let mut tx=database.pool().begin().await.unwrap();assert!(!nomifun_db::remote_session_admitted_tx(&mut tx,&session).await.unwrap());tx.commit().await.unwrap();
+    database.close().await;
+}
+
+#[tokio::test]
+async fn failed_remote_projection_keeps_its_failure_while_accepting_an_exact_native_cleanup_stop() {
+    let (database,repository,owner,session,operation)=exact_cancel_fixture().await;
+    repository.set_session_state(&owner,&session,"failed").await.unwrap();
+    assert!(repository.append_cancel_request_exact(exact_cancel(&owner,&session,&operation,"stop failed native owner",7),Some(&operation),7,1).await.unwrap().inserted);
+    assert_eq!(repository.get_session(&owner,&session).await.unwrap().unwrap().state,"failed");
+    let mut tx=database.pool().begin().await.unwrap();assert!(!nomifun_db::remote_session_admitted_tx(&mut tx,&session).await.unwrap());tx.commit().await.unwrap();
+    database.close().await;
+}
+
 #[tokio::test]
 async fn remote_binding_cas_open_idempotency_and_cursor_events() {
     let database = init_database_memory().await.expect("database");

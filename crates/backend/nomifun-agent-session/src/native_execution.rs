@@ -48,10 +48,7 @@ impl AgentSessionStore {
     pub async fn native_payload_bytes(&self, lease: &NativeExecutionLease) -> Result<u64, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
         check_native_lease_tx(&mut tx, lease, false).await?;
-        let bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(p.byte_len),0) FROM agent_payloads p WHERE p.session_id=? \
-            AND p.payload_id NOT IN(SELECT e.payload_id FROM agent_events e WHERE e.session_id=? \
-            AND e.kind='turn/workspace-files-observed' AND e.payload_id IS NOT NULL)")
-            .bind(lease.session_id.as_ref()).bind(lease.session_id.as_ref()).fetch_one(&mut *tx).await?;
+        let bytes=session_process_archive::native_model_payload_bytes_tx(&mut tx,&lease.session_id).await?;
         as_u64(bytes, "native Session payload bytes")
     }
 
@@ -97,6 +94,11 @@ impl AgentSessionStore {
             || head.status != "running" || head.active_turn_id.as_deref() != Some(claim.operation_id.as_ref())
             || head.active_set_generation != claim.active_set_generation {
             return Err(SessionStoreError::ExecutionFenced);
+        }
+        check_domain_work_admission_tx(&mut tx,&claim.agent_session_id,&claim.operation_id).await?;
+        if !nomifun_db::native_execution_claim_admitted_tx(&mut tx,&claim.owner.principal_id,
+            claim.agent_session_id.as_ref(),claim.operation_id.as_ref()).await.map_err(native_resume_queue::admission_error)? {
+            return Err(SessionStoreError::ExecutionCapacityPending);
         }
         let row: (i64, Option<String>, i64, i64, Option<String>, Option<i64>, String, Option<String>) = sqlx::query_as(
             "SELECT execution_fence, execution_owner, execution_lease_until, native_checkpoint_revision, \
@@ -179,6 +181,7 @@ impl AgentSessionStore {
     pub async fn verify_native_execution(&self, lease: &NativeExecutionLease) -> Result<(), SessionStoreError> {
         let mut tx = self.pool.begin().await?;
         check_native_lease_tx(&mut tx, lease, false).await?;
+        check_domain_work_admission_tx(&mut tx,lease.session_id(),lease.operation_id()).await?;
         Ok(())
     }
 
@@ -193,6 +196,74 @@ impl AgentSessionStore {
         let result = self.append_event_tx(&mut tx, append, payload).await?;
         tx.commit().await?;
         Ok(result)
+    }
+
+    /// Settle the original producer's cancellation after its host cleanup.
+    /// Business uncertainty can close work admission without revoking this
+    /// exact cleanup responsibility. This never renews a lease or clears an
+    /// Effect, and cannot append progress, tools, success or failure terminals.
+    pub async fn append_native_cancellation_after_cleanup(&self, lease: &NativeExecutionLease,
+        append: &SessionEventAppend) -> Result<SessionEventAppendResult, SessionStoreError> {
+        let SessionEventPayloadRef::InlineJson(payload)=&append.semantic_event.payload else {return Err(SessionStoreError::ExecutionFenced);};
+        if append.agent_session_id!=lease.session_id||append.producer_id.as_ref()!="runtime_supervisor"
+            ||append.semantic_event.kind.0!="turn/cancelled"||append.semantic_event.kind_version!=1
+            ||append.semantic_event.correlation_id.as_ref()!=lease.operation_id.as_ref()
+            ||payload.0.as_object().is_none_or(|body|body.len()!=1)
+            ||payload.0.get("operation_id").and_then(Value::as_str)!=Some(lease.operation_id.as_ref()) {
+            return Err(SessionStoreError::ExecutionFenced);
+        }
+        let mut tx=self.begin_write_transaction().await?;
+        require_live_session_tx(&mut tx,lease.session_id.as_ref()).await?;
+        let state=check_native_identity_tx(&mut tx,lease).await?;
+        let (started_id,generation,terminal_id):(String,i64,Option<String>)=sqlx::query_as(
+            "SELECT started_event_id,execution_generation,terminal_event_id FROM agent_turns WHERE session_id=? AND operation_id=?")
+            .bind(lease.session_id.as_ref()).bind(lease.operation_id.as_ref()).fetch_one(&mut *tx).await?;
+        if generation<=0||as_u64(generation,"cancellation execution generation")?!=lease.generation
+            ||append.semantic_event.causation_event_id.as_ref().map(EventId::as_ref)!=Some(started_id.as_str()) {
+            return Err(SessionStoreError::ExecutionFenced);
+        }
+        let started=event_by_event_id_tx(&mut tx,&started_id).await?.map(event_from_row).transpose()?.ok_or(SessionStoreError::ExecutionFenced)?;
+        if started.agent_session_id!=lease.session_id||started.kind.0!="turn/started"||started.kind_version!=1
+            ||started.correlation_id.as_ref()!=lease.operation_id.as_ref()||started.seq>lease.generation {
+            return Err(SessionStoreError::ExecutionFenced);
+        }
+        let head=head_by_id_tx(&mut tx,lease.session_id.as_ref()).await?;
+        let proof:Option<StoredEventRow>=sqlx::query_as("SELECT e.session_id,e.seq,e.event_id,e.producer_id,e.idempotency_key,e.kind,e.kind_version,e.correlation_id,e.causation_event_id,e.inline_json,e.payload_id \
+            FROM agent_events e LEFT JOIN agent_payloads p ON p.session_id=e.session_id AND p.payload_id=e.payload_id \
+            WHERE e.session_id=? AND e.correlation_id=? AND e.kind='runtime/progress-recorded' AND e.kind_version=1 AND e.producer_id='runtime_supervisor' \
+              AND e.seq>=? AND e.seq<=? \
+              AND COALESCE(json_extract(e.inline_json,'$.event.event'),json_extract(CAST(p.body AS TEXT),'$.value.event.event'))='host_cleanup_proven' \
+            ORDER BY e.seq DESC LIMIT 1")
+            .bind(lease.session_id.as_ref()).bind(lease.operation_id.as_ref()).bind(generation)
+            .bind(as_i64(head.last_seq,"cancellation cleanup cursor")?).fetch_optional(&mut *tx).await?;
+        let proof=proof.map(event_from_row).transpose()?.ok_or(SessionStoreError::ExecutionFenced)?;
+        if proof.seq<=started.seq
+            ||(proof.causation_event_id.as_ref()!=Some(&started.event_id)&&proof.causation_event_id!=started.causation_event_id)
+            ||payload_value_for_event_tx(&mut tx,&proof).await?.pointer("/event/event").and_then(Value::as_str)!=Some("host_cleanup_proven") {
+            return Err(SessionStoreError::ExecutionFenced);
+        }
+        // Check the caller's natural key even if an ordinary exact Stop won.
+        // A changed body must not be hidden behind an already-cancelled Turn.
+        let duplicate=duplicate_event_tx(&mut tx,append).await?;
+        if state=="cancelled" {
+            let terminal=event_by_event_id_tx(&mut tx,terminal_id.as_deref().ok_or(SessionStoreError::ExecutionFenced)?).await?
+                .map(event_from_row).transpose()?.ok_or(SessionStoreError::ExecutionFenced)?;
+            if terminal.agent_session_id!=lease.session_id||terminal.kind.0!="turn/cancelled"||terminal.kind_version!=1
+                ||terminal.correlation_id.as_ref()!=lease.operation_id.as_ref()||terminal.seq<=started.seq
+                ||duplicate.as_ref().is_some_and(|record|record.event_id!=terminal.event_id.as_ref()) {
+                return Err(SessionStoreError::ExecutionFenced);
+            }
+            // Validate the existing terminal's original Payload before ACK.
+            if !payload_value_for_event_tx(&mut tx,&terminal).await?.is_object() {return Err(SessionStoreError::ExecutionFenced);}
+            let ack=event_ack(&terminal);tx.commit().await?;
+            return Ok(SessionEventAppendResult {cursor:ack.cursor.clone(),record:Some(terminal),ack:Some(ack),persisted:true,duplicate:true});
+        }
+        if state!="running"||terminal_id.is_some()||duplicate.is_some()
+            ||head.active_turn_id.as_deref()!=Some(lease.operation_id.as_ref())||!matches!(head.status.as_str(),"running"|"reconciliation") {
+            return Err(SessionStoreError::ExecutionFenced);
+        }
+        let result=self.append_event_tx(&mut tx,append,None).await?;
+        tx.commit().await?;Ok(result)
     }
 
     /// Close an already-admitted observation after cancellation. This cannot
@@ -261,6 +332,17 @@ pub(super) async fn check_native_identity_tx(tx: &mut Transaction<'_, Sqlite>, l
             && holder.as_deref() == Some(lease.holder.as_str()) => Ok(state),
         _ => Err(SessionStoreError::ExecutionFenced),
     }
+}
+
+/// New model/tool/effect work consumes the original domain Stop under the
+/// same SQLite snapshot/writer. Identity-only observation and settlement must
+/// remain available to the original owner after this admission closes.
+pub(super) async fn check_domain_work_admission_tx(tx:&mut Transaction<'_,Sqlite>,session:&AgentSessionId,
+    operation:&OperationId)->Result<(),SessionStoreError> {
+    let live=require_live_session_tx(tx,session.as_ref()).await?;
+    if !nomifun_db::native_resume_target_eligible_tx(tx,&live.owner_ref.principal_id,session.as_ref(),operation.as_ref())
+        .await.map_err(native_resume_queue::admission_error)? {return Err(SessionStoreError::ExecutionFenced);}
+    Ok(())
 }
 
 /// Renewal and the protected write happen under the same SQLite lock. An

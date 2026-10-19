@@ -181,9 +181,29 @@ workspace relocation and restart retain their owner fences.
 The 64-process Session limit covers active handles and handles lacking proven cleanup. Only an
 original first-party launch plus its committed terminal owner result and real reap receipt retires
 a native handle from that quota. Historical results remain; old handles are never recreated.
+Before a live Turn commits retention, the original typed `host_process_dispatch.process_owner`
+can bind its frozen owner generation and resource digest. Reaping requires the exact original
+returned start ToolResult, Effect, creator, Turn Snapshot and native FrozenOutput. Older dispatches
+without that binding still require original retention or a terminal ToolResult; current bindings,
+PIDs and timestamps cannot supply missing authority. The original Event/Payload chain archives
+output before releasing the final handle, without creating another execution or output ledger.
 Session deletion and application shutdown drain the shared resource owner even without a Runtime.
 After restart, unproven old ownership fences new process operations while ordinary chat remains
 available; neither PID adoption nor automatic command restart is permitted.
+
+MCP business uncertainty and native resource closure are separate facts. After the original task
+joins and its owner has no active work, the exact canonical MCP cleanup receipt may prove resource
+closure while the external business result remains Unknown. Turn and Runtime teardown may consume
+that proof; `host_cleanup_proven` never reconciles the business result or proves rollback. Dispatch,
+context and checkpoint resume still reject Unknown, and retirement cannot replay work. Missing,
+malformed or pending cleanup and another domain's unknown effects cannot borrow this MCP proof.
+Native cancellation uses a dedicated settlement entry: one writer transaction checks the original
+holder, fence, generation, Turn start and current-generation `host_cleanup_proven`. The exact active
+Turn can then settle from reconciliation to cancelled without granting new work or widening generic
+event/observation writes. Unknown stays unchanged, and the original journal retries the same terminal
+after a failed write. Host activity controls preserve the original Operation's exact identity, including
+valid Unicode, within its 1024 UTF-8 byte contract; the control request's 128-byte idempotency-key limit
+cannot be applied to that target or used to truncate it.
 
 Human replies have no application timeout. Background output, exit, deadline or external link
 expiry never answers a question, reopens model execution or authorizes a fresh launch. The next
@@ -562,6 +582,14 @@ One `ModelFailureDiagnostic` carries model-request refinements and evidence from
 Failures, current pauses and rejected requests share one error presentation. Model or provider failures automatically unlock the composer after the existing owner proves cleanup and native resource release and commits canonical `turn/failed`; the user does not need to end the Turn again. The same owner may settle an already-saved current-generation typed model failure pause during startup, Session reads or the next admission. Its transaction rechecks the exact pause revision, execution fence, Snapshot, current-generation cleanup receipt and absence of pending/unknown effects. It never runs a model, replays a tool, or changes failure into success or cancellation. Unproven cleanup, unknown effects, manual pauses and other recovery pauses retain their native fences and explicit recovery authority. Genuine pause notes derive only from verified current state and never enter Message history or invent failed terminals. Rejected requests remain transient within their originating Session, and an admitted request's canonical error replaces its HTTP fallback.
 
 Cron, Companion, Requirements, AutoWork, IDMM and AgentExecution retain their own business configuration and supervision state. Session input, admission, cancellation and completion use canonical Turn receipts.
+
+Cron's private dispatcher records its server-validated job/run/Session reference as typed
+`cron_runtime_overlay` on the original `message/user-accepted` input. Ordinary message requests
+cannot supply it; text, colliding operation keys, mutable job settings and message projections do
+not establish source ownership. Existing inputs are not rewritten. This changes neither
+AgentInputSource, Robot delivery nor model grants. Resource retirement for a new per-run Session
+retains its original creation and finalized receipt even after legitimate job/history deletion,
+without adding a persistent ledger alongside the original Session and domain facts.
 
 An `auto_group` channel guest enters a dedicated model-only Session through the
 trusted Channel port and repository relationships. A caller-supplied

@@ -40,6 +40,10 @@ use super::agent_wave2_host::{
     finish_wave2_failed_effect, finish_wave2_succeeded_effect, finish_wave2_uncertain_effect,
 };
 
+#[cfg(test)]
+#[path="workspace_cache_retirement_tests.rs"]
+mod workspace_cache_retirement_tests;
+
 const WORKSPACE_FILES: &str = nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID;
 const WORKSPACE_VCS: &str = nomifun_agent_domain_wave2::WORKSPACE_VCS_MODULE_ID;
 const WORKSPACE_PROCESS: &str = nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID;
@@ -151,6 +155,7 @@ pub(crate) fn action_host_port(
     Arc::new(NomiCoreWave2Host {
         mcp: Some(super::nomi_core_mcp::NomiCoreMcpHost::for_services(services)),
         ssh: Some(nomifun_ssh::SshActionOwner::new(services.ssh_pool.clone())),
+        process_tasks:Some(services.background_tasks.clone()),
         ..NomiCoreWave2Host::new(services.event_bus.clone(), services.file_inventory.clone())
     }
     .with_effect_store(effect_store))
@@ -297,8 +302,41 @@ pub(crate) struct NomiCoreWave2Host {
     ssh: Option<nomifun_ssh::SshActionOwner>,
     effect_store: Option<nomifun_agent_session::AgentSessionStore>,
     roots: Mutex<HashMap<PathBuf, Arc<Wave2ApplicationHost>>>,
-    processes: Mutex<HashMap<(String, String), Arc<super::engine_process_host::EngineProcessScope>>>,
+    #[cfg(test)]
+    cache_failures:Arc<Mutex<std::collections::BTreeSet<PathBuf>>>,
+    processes: Arc<super::engine_process_host::ProcessScopeRegistry>,
     processes_closing: std::sync::atomic::AtomicBool,
+    process_tasks:Option<Arc<dyn nomifun_conversation::BackgroundTaskRegistrar>>,
+}
+
+#[cfg(test)]
+pub(crate) struct WorkspaceCacheFailureGuard {roots:Arc<Mutex<std::collections::BTreeSet<PathBuf>>>,root:PathBuf}
+#[cfg(test)]
+impl Drop for WorkspaceCacheFailureGuard {
+    fn drop(&mut self){self.roots.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.root);}
+}
+
+/// An exact existing cache instance, captured from its admitted canonical key.
+/// Keeping this ticket never keeps its native directory handles alive.
+#[derive(Clone)]
+pub(crate) struct WorkspaceHostRetirementTicket {
+    root:PathBuf,
+    owner:std::sync::Weak<Wave2ApplicationHost>,
+}
+
+pub(crate) struct WorkspaceHostRetirementFlight {ticket:WorkspaceHostRetirementTicket}
+impl WorkspaceHostRetirementFlight {
+    pub(crate) fn ticket(&self)->&WorkspaceHostRetirementTicket {&self.ticket}
+}
+impl Drop for WorkspaceHostRetirementFlight {
+    fn drop(&mut self) {if let Some(owner)=self.ticket.owner.upgrade() {owner.finish_cache_retirement();}}
+}
+
+impl WorkspaceHostRetirementTicket {
+    pub(crate) fn begin_retry(&self)->Option<WorkspaceHostRetirementFlight> {
+        let owner=self.owner.upgrade()?;
+        owner.try_begin_cache_retirement().then(||WorkspaceHostRetirementFlight {ticket:self.clone()})
+    }
 }
 
 #[cfg(test)]
@@ -324,8 +362,11 @@ impl NomiCoreWave2Host {
             ssh: None,
             effect_store: None,
             roots: Mutex::new(HashMap::new()),
-            processes: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            cache_failures:Default::default(),
+            processes: Arc::new(Mutex::new(HashMap::new())),
             processes_closing: false.into(),
+            process_tasks:None,
         }
     }
 
@@ -396,6 +437,23 @@ impl NomiCoreWave2Host {
         Ok(())
     }
 
+    pub(crate) fn capture_workspace_host_retirement(&self,root:&Path)->Result<Option<WorkspaceHostRetirementTicket>,AppError> {
+        let roots=self.roots.lock().map_err(|_|AppError::Conflict("workspace owners poisoned".into()))?;
+        Ok(roots.get(root).map(|owner|WorkspaceHostRetirementTicket {root:root.to_path_buf(),owner:Arc::downgrade(owner)}))
+    }
+
+    pub(crate) fn retire_captured_workspace_host(&self,ticket:&WorkspaceHostRetirementTicket)->Result<(),AppError> {
+        let mut roots=self.roots.lock().map_err(|_|AppError::Conflict("workspace owners poisoned".into()))?;
+        let Some(owner)=roots.get(&ticket.root) else {return Ok(());};
+        if Arc::as_ptr(owner)!=ticket.owner.as_ptr() {return Ok(());}
+        if Arc::strong_count(owner)!=1 {
+            return Err(AppError::Conflict("Original workspace cache still has a retained capability invocation".into()));
+        }
+        owner.ensure_git_ready()?;
+        roots.remove(&ticket.root);
+        Ok(())
+    }
+
     pub(crate) async fn invoke_mcp_tool(&self, context: nomifun_agent_kernel::CapabilityInvocationContext, input: StrictJsonValue) -> Result<StrictJsonValue, Wave2HostPortError> {
         self.mcp.as_ref().ok_or_else(|| Wave2HostPortError::unavailable("no current-product MCP owner is configured"))?
             .invoke(context.into(), input).await
@@ -403,6 +461,12 @@ impl NomiCoreWave2Host {
     pub(crate) async fn ensure_mcp_settled(&self, user: &str, session: &str) -> Result<(), AppError> {
         match &self.mcp {
             Some(owner) => owner.ensure_settled(user, session).await,
+            None => Ok(()),
+        }
+    }
+    pub(crate) async fn ensure_mcp_shutdown_resources_closed(&self, user: &str, session: &str) -> Result<(), AppError> {
+        match &self.mcp {
+            Some(owner) => owner.ensure_shutdown_resources_closed(user, session).await,
             None => Ok(()),
         }
     }
@@ -415,16 +479,21 @@ impl NomiCoreWave2Host {
         let scope = match scopes.entry(key) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => entry.insert(Arc::new(
-                super::engine_process_host::EngineProcessScope::new_session(&root,user,session).map_err(|error| AppError::Conflict(error.to_string()))?)),
+                super::engine_process_host::EngineProcessScope::new_session(&root,user,session).map_err(|error| AppError::Conflict(error.to_string()))?
+                    .with_task_registrar(self.process_tasks.clone()))),
         };
         if !paths_equivalent(scope.workspace_root(), &root) { return Err(AppError::Conflict("Session process workspace authority changed".into())); }
+        scope.bind_owner(&self.processes);
         scope.open_turn(operation, journal, Some(authority)).map_err(|error| AppError::Conflict(error.to_string()))
     }
 
     pub(crate) fn finish_runtime_process_turn(&self, user: &str, session: &str, operation: &str) -> Result<(), AppError> {
         let scope = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?
             .get(&(user.to_owned(), session.to_owned())).cloned();
-        if let Some(scope) = scope { scope.finish_turn(operation).map_err(|error| AppError::Conflict(error.to_string()))?; }
+        if let Some(scope) = scope {
+            scope.finish_turn(operation).map_err(|error| AppError::Conflict(error.to_string()))?;
+            scope.retire_empty_scope();
+        }
         Ok(())
     }
 
@@ -440,6 +509,42 @@ impl NomiCoreWave2Host {
         let scope=self.processes.lock().map_err(|_|AppError::Conflict("process scopes poisoned".into()))?
             .get(&(user.to_owned(),session.to_owned())).cloned();
         match scope {Some(scope)=>scope.retention().await.map(Some).map_err(|error|AppError::Conflict(error.to_string())),None=>Ok(None)}
+    }
+
+    pub(crate) fn registered_runtime_process_sessions(&self,user:&str)->Result<Vec<String>,AppError> {
+        let scopes=self.processes.lock().map_err(|_|AppError::Conflict("process scopes poisoned".into()))?;
+        Ok(scopes.keys().filter(|(owner,_)|owner==user).map(|(_,session)|session.clone()).collect())
+    }
+
+    pub(crate) fn observe_runtime_process_resources(&self,user:&str,session:&str)
+        ->Result<Option<super::engine_process_host::ProcessResourceObservation>,AppError> {
+        let scope=self.processes.lock().map_err(|_|AppError::Conflict("process scopes poisoned".into()))?
+            .get(&(user.to_owned(),session.to_owned())).cloned();
+        Ok(scope.map(|scope|scope.observe_resources()))
+    }
+
+    pub(crate) fn process_resource_instances(&self,user:&str,session:&str)
+        ->Result<Vec<super::engine_process_host::ProcessInstanceObservation>,AppError> {
+        let scope=self.processes.lock().map_err(|_|AppError::Conflict("process scopes poisoned".into()))?
+            .get(&(user.to_owned(),session.to_owned())).cloned();
+        match scope {Some(scope)=>scope.instance_observations().map_err(|error|AppError::Conflict(error.to_string())),None=>Ok(Vec::new())}
+    }
+
+    pub(crate) async fn stop_process_resource(&self,user:&str,session:&str,generation:&str,process:&str,creator_turn:&str,creator_call:&str)
+        ->Result<super::engine_process_host::ProcessStopReceipt,AppError> {
+        let scope=self.processes.lock().map_err(|_|AppError::Conflict("process scopes poisoned".into()))?
+            .get(&(user.to_owned(),session.to_owned())).cloned();
+        if let Some(scope)=scope {
+            if let Ok(receipt)=scope.stop_instance(generation,process,creator_turn,creator_call) {return Ok(receipt);}
+        }
+        if let Some(store)=&self.effect_store {
+            let owner=PrincipalRef {principal_kind:"user".into(),principal_id:user.into()};
+            if store.session_process_resource_stopped(&owner,&session.into(),generation,process,creator_turn,creator_call).await
+                .map_err(|error|AppError::Conflict(error.to_string()))? {
+                return Ok(super::engine_process_host::ProcessStopReceipt {accepted:true,execution_stopped:true});
+            }
+        }
+        Err(AppError::Conflict("original process resource owner is unavailable and has no exact reap receipt".into()))
     }
 
     async fn unavailable_process_owner(&self,owner:&PrincipalRef,session:&AgentSessionId,generation:&str,action:&str)
@@ -692,6 +797,10 @@ impl NomiCoreWave2Host {
         &self,
         canonical_root: PathBuf,
     ) -> Result<Arc<Wave2ApplicationHost>, Wave2HostPortError> {
+        #[cfg(test)]
+        if self.cache_failures.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&canonical_root) {
+            return Err(Wave2HostPortError::unavailable("controlled derived workspace cache load failure"));
+        }
         let mut roots = self
             .roots
             .lock()
@@ -711,11 +820,24 @@ impl NomiCoreWave2Host {
     }
 
     #[cfg(test)]
-    fn cached_root_count(&self) -> usize {
+    pub(crate) fn cached_root_count(&self) -> usize {
         self.roots
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_workspace_cache_for_test(&self,root:&Path)->Result<WorkspaceCacheFailureGuard,AppError> {
+        let root=canonical_workspace_root(root).map_err(|error|AppError::Conflict(error.to_string()))?;
+        self.cache_failures.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(root.clone());
+        Ok(WorkspaceCacheFailureGuard {roots:self.cache_failures.clone(),root})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_workspace_cache_for_test(&self,root:&Path)->Result<(),AppError> {
+        self.host_for_root(canonical_workspace_root(root).map_err(|error|AppError::Conflict(error.to_string()))?)
+            .map(|_|()).map_err(|error|AppError::Conflict(error.to_string()))
     }
 }
 

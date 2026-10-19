@@ -354,8 +354,11 @@ impl Wave2StateHandle {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Wave2HostContext {
+    /// Process-local control from the exact admitted Kernel invocation. It is
+    /// neither frozen authorization nor part of context equality.
+    pub control: nomifun_agent_kernel::InvocationControl,
     /// The authenticated principal used for owner checks; adapters must not
     /// infer identity from input payloads or resource IDs.
     pub principal: PrincipalRef,
@@ -566,13 +569,13 @@ impl Wave2TypedCapabilityOperation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Wave2HostRequest {
     pub context: Wave2HostContext,
     pub operation: Wave2CapabilityOperation,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Wave2TypedHostRequest {
     pub context: Wave2HostContext,
     pub operation: Wave2TypedCapabilityOperation,
@@ -1918,6 +1921,7 @@ impl CapabilityHandler for Wave2CapabilityHandler {
             self.host_port
                 .invoke(Wave2HostRequest {
                     context: Wave2HostContext {
+                        control: context.control,
                         principal: context.principal,
                         agent_session_id: context.agent_session_id,
                         turn_id: context.turn_id,
@@ -3920,6 +3924,7 @@ mod tests {
             typed_parameters: Default::default(),
         };
         let context = Wave2HostContext {
+            control: Default::default(),
             principal: principal.clone(),
             agent_session_id: AgentSessionId::from("session"),
             turn_id: OperationId::from("turn"),
@@ -3968,6 +3973,7 @@ mod tests {
 
         let wrong_owner = match (Wave2HostRequest {
             context: Wave2HostContext {
+                control: Default::default(),
                 principal: PrincipalRef {
                     principal_id: "different-owner".to_owned(),
                     ..principal
@@ -4088,6 +4094,7 @@ mod tests {
         let dispatcher = Wave2HostPortDispatcher::new(vec![adapter]);
         let request = Wave2HostRequest {
             context: Wave2HostContext {
+                control: Default::default(),
                 principal: PrincipalRef {
                     principal_kind: "user".to_owned(),
                     principal_id: "owner".to_owned(),
@@ -4147,6 +4154,7 @@ mod tests {
         let host_port = unconfigured_host_port();
         let future = host_port.invoke(Wave2HostRequest {
                 context: Wave2HostContext {
+                    control: Default::default(),
                     principal: PrincipalRef {
                         principal_kind: "user".to_owned(),
                         principal_id: "wave2-test-owner".to_owned(),

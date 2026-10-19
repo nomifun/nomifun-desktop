@@ -48,6 +48,11 @@ impl A11yEngine for LinuxEngine {
     ) -> Result<Effect, A11yError> {
         self.inner.invoke(target.clone(), generation, action)
     }
+    fn invoke_controlled(&self, target: &Target, generation: SnapshotGen, action: ElementAction,
+        cancellation: &tokio_util::sync::CancellationToken) -> Result<Effect, A11yError> {
+        self.inner.invoke_controlled(target.clone(), generation, action, cancellation.clone())
+    }
+
     fn focus_window(&self, pid: i32) -> Result<Effect, A11yError> {
         self.inner.focus_window(pid)
     }

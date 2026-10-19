@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 pub(crate) struct BrowserSurfaceState {
-    next: AtomicU64,
+    next: Arc<AtomicU64>,
     current: Arc<Mutex<Option<Attachment>>>,
 }
 
@@ -74,6 +74,7 @@ async fn detach(current: &Mutex<Option<Attachment>>, id: u64) -> Result<(), Stri
             .set_surface(attachment.bounds, false, attachment.layout.clone())
             .await
             .map_err(|error| error.code().to_owned())?;
+        attachment.resource.release_surface_attachment(attachment.id).await;
         current.take();
     }
     Ok(())
@@ -135,16 +136,30 @@ pub(crate) async fn browser_surface_attach(
 ) -> Result<u64, String> {
     require_main(&view)?;
     validate_bounds(&view, bounds)?;
-    let id = state.next.fetch_add(1, Ordering::AcqRel) + 1;
+    let next = state.next.clone();
+    let current = state.current.clone();
+    let server = server.inner().clone();
+    // The original owner must complete native attachment/hide cleanup even
+    // when the renderer drops its command waiter during a Session switch.
+    tokio::spawn(async move { attach_owned(server, current, next, agent_session_id, bounds, events).await })
+        .await.map_err(|_| "Browser surface attachment owner stopped without native proof".to_owned())?
+}
+
+async fn attach_owned(server: Arc<nomifun_app::DesktopServer>, current: Arc<Mutex<Option<Attachment>>>,
+    next: Arc<AtomicU64>, agent_session_id: String, bounds: BrowserSurfaceBounds, events: Channel<BrowserViewEvent>)
+    -> Result<u64, String> {
+    let id = next.fetch_add(1, Ordering::AcqRel) + 1;
     let resource = server
         .browser_resource_for_local_surface(&agent_session_id)
         .await
         .map_err(|_| "BROWSER_NATIVE_SURFACE_UNAVAILABLE".to_owned())?;
-    let mut current = state.current.lock().await;
-    if state.next.load(Ordering::Acquire) != id {
+    let mut attachment = current.lock().await;
+    if next.load(Ordering::Acquire) != id {
         return Err("Browser attachment was superseded.".into());
     }
-    if let Some(previous) = current.as_mut() {
+    resource.retain_surface_attachment(id).await.map_err(|error| error.code().to_owned())?;
+    let prepared = async {
+    if let Some(previous) = attachment.as_mut() {
         previous.stop.cancel();
         previous.layout.cancel();
         previous.layout = CancellationToken::new();
@@ -153,17 +168,18 @@ pub(crate) async fn browser_surface_attach(
             .set_surface(previous.bounds, false, previous.layout.clone())
             .await
             .map_err(|error| error.code().to_owned())?;
+        previous.resource.release_surface_attachment(previous.id).await;
     }
-    let mut run = resource.run_changes();
-    let mut page = resource
+    let run = resource.run_changes();
+    let page = resource
         .runtime_changes()
         .await
         .map_err(|error| error.code().to_owned())?;
-    if state.next.load(Ordering::Acquire) != id {
+    if next.load(Ordering::Acquire) != id {
         return Err("Browser attachment was superseded.".into());
     }
     let stop = CancellationToken::new();
-    *current = Some(Attachment {
+    *attachment = Some(Attachment {
         id,
         sequence: 0,
         resource: resource.clone(),
@@ -171,10 +187,20 @@ pub(crate) async fn browser_surface_attach(
         stop: stop.clone(),
         layout: CancellationToken::new(),
     });
-    drop(current);
+    Ok::<_, String>((run, page, stop))
+    }.await;
+    let (mut run, mut page, stop) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            // This new attachment has not issued a show; old failed-hide
+            // ownership remains registered independently for an exact retry.
+            resource.release_surface_attachment(id).await;
+            return Err(error);
+        },
+    };
+    drop(attachment);
     // Attach is hidden. The renderer's first measured update decides visibility,
     // including overlays or disposal which happened while attach was pending.
-    let current = state.current.clone();
     tauri::async_runtime::spawn(async move {
         loop {
             if stop.is_cancelled() {
@@ -245,7 +271,9 @@ pub(crate) async fn browser_surface_detach(
     attachment_id: u64,
 ) -> Result<(), String> {
     require_main(&view)?;
-    detach(&state.current, attachment_id).await
+    let current = state.current.clone();
+    tokio::spawn(async move { detach(&current, attachment_id).await }).await
+        .map_err(|_| "Browser surface detach owner stopped without native proof".to_owned())?
 }
 
 #[cfg(test)]
@@ -375,6 +403,7 @@ mod tests {
             width: 900.0,
             height: 600.0,
         };
+        resource.retain_surface_attachment(1).await.unwrap();
         let current = Arc::new(Mutex::new(Some(Attachment {
             id: 1,
             sequence: 0,

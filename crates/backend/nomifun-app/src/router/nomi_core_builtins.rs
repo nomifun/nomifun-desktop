@@ -91,6 +91,10 @@ pub(crate) async fn build(
         effect_store.clone(),
     );
     #[cfg(feature = "browser-use")]
+    browser_owner.install_task_repository(Arc::new(nomifun_db::SqliteAgentExecutionRepository::new(
+        services.database.pool().clone(),
+    )))?;
+    #[cfg(feature = "browser-use")]
     let wave2_ports = {
         let mut wave2_ports = wave2_ports;
         wave2_ports.browser_actions = browser_owner.clone();

@@ -1,6 +1,7 @@
 //! Retire native handles only from the original first-party launch and a
 //! committed terminal owner result. Model prose and in-memory exit flags are
-//! never cleanup evidence. No additional lifecycle fact is needed.
+//! never cleanup evidence. A later native owner receipt preserves the original
+//! complete terminal after its business Turn has already finished.
 use super::*;
 use nomifun_agent_contracts::{NativeRetainedProcess, NativeSessionProcessRetention};
 use nomifun_engine_core::{EngineProcessPoll, EngineToolResult};
@@ -18,12 +19,25 @@ struct ProcessSettlement {
     process_call: String,
     process_action: String,
     process_operation: String,
+    process_dispatch_event_id: String,
+}
+
+pub(super) struct ProcessLaunch {
+    pub dispatch_event_id: EventId,
+    pub settlement: SessionEventRecord,
+}
+
+#[derive(Default)]
+struct ProcessOutcomes {
+    launched: BTreeSet<String>,
+    terminals: BTreeMap<String,(EventId,EngineProcessPoll)>,
+    running_launches: BTreeMap<String,Vec<ProcessLaunch>>,
 }
 
 fn process_observation(value: &Value, dispatch: &Dispatch) -> Option<(String, EngineProcessPoll)> {
     if value.get("error").is_some_and(|error| !error.is_null()) { return None; }
     let result: EngineToolResult = serde_json::from_value(value.get("result")?.clone()).ok()?;
-    if result.call_id.as_ref() != dispatch.call || result.validate_for(&result.call_id).is_err() { return None; }
+    if result.call_id.as_ref() != dispatch.call || result.is_error || result.validate_for(&result.call_id).is_err() { return None; }
     let mut output: Value = serde_json::from_str(&result.output_text()).ok()?;
     let id = output.get("process_id")?.as_str()?.to_owned();
     let object = output.as_object_mut()?;
@@ -46,17 +60,17 @@ fn reaped(poll: &EngineProcessPoll) -> bool {
 /// The exclusive upper cursor keeps a historical release independent of later
 /// observations. Original launch tuples must already have been validated by
 /// their retention reader, or supplied by the exact live native owner.
-pub(super) async fn confirmed_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId,
+async fn tool_outcomes_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId,
     processes: &BTreeMap<String, NativeRetainedProcess>, through: u64,
-) -> Result<BTreeSet<String>, SessionStoreError> {
-    if processes.is_empty() { return Ok(BTreeSet::new()); }
+) -> Result<ProcessOutcomes, SessionStoreError> {
+    if processes.is_empty() { return Ok(Default::default()); }
     let creators = processes.values().map(|process| json!({"turn":process.creator_turn_id,"operation":process.creator_call_id})).collect::<Vec<_>>();
     let creators=serde_json::to_string(&creators)?;
     let creation_floor: Option<i64> = sqlx::query_scalar(
         "SELECT MIN(started.seq) FROM agent_turns turn JOIN agent_events started ON started.session_id=turn.session_id AND started.event_id=turn.started_event_id \
          JOIN json_each(?) creator ON turn.operation_id=json_extract(creator.value,'$.turn') WHERE turn.session_id=?")
         .bind(&creators).bind(session.as_ref()).fetch_one(&mut **tx).await?;
-    let Some(creation_floor)=creation_floor else { return Ok(BTreeSet::new()); };
+    let Some(creation_floor)=creation_floor else { return Ok(Default::default()); };
     // The original launch dispatch is a tighter floor than the Turn start:
     // hundreds of sequential short commands in one Turn do not repeatedly
     // hydrate results preceding the candidate's actual creation.
@@ -69,10 +83,9 @@ pub(super) async fn confirmed_tx(tx: &mut Transaction<'_, Sqlite>, session: &Age
          AND COALESCE(json_extract(e.inline_json,'$.event.dispatch.capability_id'),json_extract(CAST(p.body AS TEXT),'$.value.event.dispatch.capability_id'))='workspace.process' \
          AND COALESCE(json_extract(e.inline_json,'$.event.dispatch.action_id'),json_extract(CAST(p.body AS TEXT),'$.value.event.dispatch.action_id'))='workspace.process/start'")
         .bind(&creators).bind(session.as_ref()).bind(creation_floor).bind(as_i64(through, "process retirement cursor")?).fetch_one(&mut **tx).await?;
-    let Some(mut cursor) = floor else { return Ok(BTreeSet::new()); };
+    let Some(mut cursor) = floor else { return Ok(Default::default()); };
     cursor = cursor.saturating_sub(1);
-    let mut launched = BTreeSet::new();
-    let mut completed = BTreeSet::new();
+    let mut outcomes = ProcessOutcomes::default();
     loop {
     // Filter the formal first-party dispatch before hydrating any result.
     // File/media/MCP payloads never enter this bounded reader.
@@ -80,7 +93,7 @@ pub(super) async fn confirmed_tx(tx: &mut Transaction<'_, Sqlite>, session: &Age
         "SELECT e.session_id,e.seq,e.event_id,e.producer_id,e.idempotency_key,e.kind,e.kind_version,e.correlation_id,e.causation_event_id,e.inline_json,e.payload_id, \
          COALESCE(json_extract(d.inline_json,'$.event.dispatch.call_id'),json_extract(CAST(dp.body AS TEXT),'$.value.event.dispatch.call_id')) AS process_call, \
          COALESCE(json_extract(d.inline_json,'$.event.dispatch.action_id'),json_extract(CAST(dp.body AS TEXT),'$.value.event.dispatch.action_id')) AS process_action, \
-         COALESCE(json_extract(d.inline_json,'$.event.dispatch.operation_id'),json_extract(CAST(dp.body AS TEXT),'$.value.event.dispatch.operation_id')) AS process_operation \
+          COALESCE(json_extract(d.inline_json,'$.event.dispatch.operation_id'),json_extract(CAST(dp.body AS TEXT),'$.value.event.dispatch.operation_id')) AS process_operation, d.event_id AS process_dispatch_event_id \
          FROM agent_events e LEFT JOIN agent_payloads p ON p.payload_id=e.payload_id AND p.session_id=e.session_id \
          JOIN agent_events d ON d.session_id=e.session_id AND d.correlation_id=e.correlation_id AND d.seq<e.seq \
          AND d.kind='runtime/progress-recorded' AND d.kind_version=1 AND d.producer_id='runtime_supervisor' \
@@ -111,11 +124,63 @@ pub(super) async fn confirmed_tx(tx: &mut Transaction<'_, Sqlite>, session: &Age
                 if dispatch.action == "workspace.process/start" {
                     if original.creator_turn_id.as_ref() != turn || original.creator_call_id.as_ref() != operation.as_str() { continue; }
                     if matches!(&poll, EngineProcessPoll::Running { pid, .. } | EngineProcessPoll::Lost { pid, .. } if *pid != original.pid) { continue; }
-                    launched.insert(id.clone());
+                    outcomes.launched.insert(id.clone());
+                    if matches!(poll, EngineProcessPoll::Running { .. }) {
+                        outcomes.running_launches.entry(id.clone()).or_default().push(ProcessLaunch {
+                            dispatch_event_id: row.process_dispatch_event_id.into(), settlement: event.clone(),
+                        });
+                    }
                 }
-                if launched.contains(&id) && reaped(&poll) { completed.insert(id); }
+                if outcomes.launched.contains(&id) && reaped(&poll) { outcomes.terminals.entry(id).or_insert((event.event_id,poll)); }
     }
-    if completed.len()==processes.len() { break; }
+    if outcomes.terminals.len()==processes.len() { break; }
+    }
+    Ok(outcomes)
+}
+
+pub(super) async fn launched_tx(tx:&mut Transaction<'_,Sqlite>,session:&AgentSessionId,
+    processes:&BTreeMap<String,NativeRetainedProcess>,through:u64)->Result<BTreeSet<String>,SessionStoreError> {
+    Ok(tool_outcomes_tx(tx,session,processes,through).await?.launched)
+}
+
+/// An exact returned Running launch is creation evidence, never a terminal or
+/// permission to replay. Its owner binding is checked by the receipt writer.
+pub(super) async fn running_launch_tx(tx:&mut Transaction<'_,Sqlite>,session:&AgentSessionId,
+    process:&NativeRetainedProcess,through:u64)->Result<Option<ProcessLaunch>,SessionStoreError> {
+    let mut outcomes=tool_outcomes_tx(tx,session,&BTreeMap::from([(process.process_id.clone(),process.clone())]),through).await?;
+    let Some(mut sources)=outcomes.running_launches.remove(&process.process_id) else {return Ok(None);};
+    if sources.len()!=1 {return Err(SessionStoreError::InvalidPayload("original process launch settlement is ambiguous".into()));}
+    Ok(sources.pop())
+}
+
+pub(super) async fn terminal_tx(tx:&mut Transaction<'_,Sqlite>,session:&AgentSessionId,
+    process:&NativeRetainedProcess,through:u64)->Result<Option<(EventId,EngineProcessPoll)>,SessionStoreError> {
+    Ok(tool_outcomes_tx(tx,session,&BTreeMap::from([(process.process_id.clone(),process.clone())]),through).await?.terminals
+        .remove(&process.process_id))
+}
+
+pub(super) async fn confirmed_tx(tx:&mut Transaction<'_,Sqlite>,session:&AgentSessionId,generation:&str,
+    processes:&BTreeMap<String,NativeRetainedProcess>,through:u64)->Result<BTreeSet<String>,SessionStoreError> {
+    let outcomes=tool_outcomes_tx(tx,session,processes,through).await?;
+    let launched=outcomes.launched;
+    let mut completed:BTreeSet<String>=outcomes.terminals.into_keys().collect();
+    if launched.is_empty() {return Ok(completed);}
+    let mut cursor=0i64;
+    loop {
+        let rows:Vec<StoredEventRow>=sqlx::query_as("SELECT e.session_id,e.seq,e.event_id,e.producer_id,e.idempotency_key,e.kind,e.kind_version,e.correlation_id,e.causation_event_id,e.inline_json,e.payload_id \
+            FROM agent_events e LEFT JOIN agent_payloads p ON p.payload_id=e.payload_id AND p.session_id=e.session_id \
+            WHERE e.session_id=? AND e.kind='session/process-reaped' AND e.seq>? AND e.seq<? \
+              AND COALESCE(json_extract(e.inline_json,'$.retention.owner_generation'),json_extract(CAST(p.body AS TEXT),'$.value.retention.owner_generation'))=? \
+            ORDER BY e.seq LIMIT 64")
+            .bind(session.as_ref()).bind(cursor).bind(as_i64(through,"process reap cursor")?).bind(generation).fetch_all(&mut **tx).await?;
+        if rows.is_empty() {break;}
+        for row in rows {
+            cursor=cursor.max(row.seq);let event=event_from_row(row)?;
+            let receipt:nomifun_agent_contracts::SessionProcessReapedV1=serde_json::from_value(payload_value_for_event_tx(tx,&event).await?)?;
+            session_process_owner::validate_reaped_tx(tx,&event,&receipt).await?;
+            let process=&receipt.retention.processes[0];
+            if launched.contains(&process.process_id)&&processes.get(&process.process_id)==Some(process) {completed.insert(process.process_id.clone());}
+        }
     }
     Ok(completed)
 }
@@ -140,7 +205,7 @@ impl AgentSessionStore {
             }
         }
         let processes = retention.processes.iter().map(|process| (process.process_id.clone(), process.clone())).collect();
-        let confirmed = confirmed_tx(&mut tx, &retention.agent_session_id, &processes, i64::MAX as u64).await?;
+        let confirmed = confirmed_tx(&mut tx, &retention.agent_session_id,&retention.owner_generation, &processes, i64::MAX as u64).await?;
         tx.commit().await?;
         Ok(confirmed)
     }

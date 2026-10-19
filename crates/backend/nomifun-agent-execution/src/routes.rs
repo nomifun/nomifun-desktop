@@ -10,7 +10,7 @@ use axum::Router;
 use nomifun_api_types::{
     AddExecutionStepsRequest, AdoptExecutionStepOutputRequest, AdjustAgentExecutionRequest,
     AgentExecution, AgentExecutionDetail, AgentExecutionEvent, AgentExecutionEventsQuery,
-    AnswerExecutionDecisionRequest, ApiResponse, ConfigureExecutionStepRequest,
+    AnswerExecutionDecisionRequest, ApiResponse, CancelExecutionStepRequest, ConfigureExecutionStepRequest,
     CreateAgentExecutionRequest, ExecutionStep, ReassignExecutionStepRequest,
     RenameAgentExecutionRequest, ReplanAgentExecutionRequest, RetryExecutionStepRequest,
     SteerExecutionStepRequest, UpdateExecutionStepRequest, VersionedAgentExecutionCommand,
@@ -81,6 +81,10 @@ pub fn agent_execution_routes(engine: Arc<AgentExecutionEngine>) -> Router {
         .route(
             "/api/agent-executions/{execution_id}/steps/{step_id}/retry",
             post(retry_execution_step),
+        )
+        .route(
+            "/api/agent-executions/{execution_id}/steps/{step_id}/cancel",
+            post(cancel_execution_step),
         )
         .route(
             "/api/agent-executions/{execution_id}/steps/{step_id}/adopt",
@@ -320,6 +324,26 @@ async fn retry_execution_step(
     Ok(Json(ApiResponse::ok(
         engine
             .retry_step(
+                &user.id,
+                &user_actor(&user),
+                execution_id.as_str(),
+                step_id.as_str(),
+                request,
+            )
+            .await?,
+    )))
+}
+
+async fn cancel_execution_step(
+    State(engine): State<Arc<AgentExecutionEngine>>,
+    Extension(user): Extension<CurrentUser>,
+    Path((execution_id, step_id)): Path<(AgentExecutionId, AgentExecutionStepId)>,
+    body: Result<Json<CancelExecutionStepRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<AgentExecutionDetail>>, AppError> {
+    let Json(request) = json_body(body)?;
+    Ok(Json(ApiResponse::ok(
+        engine
+            .cancel_step(
                 &user.id,
                 &user_actor(&user),
                 execution_id.as_str(),

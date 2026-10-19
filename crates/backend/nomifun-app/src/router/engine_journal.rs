@@ -576,6 +576,14 @@ impl EngineTurnJournal {
                     cursor.uncertain = false;
                     return Ok(None);
                 }
+                Err(error @ nomifun_agent_session::SessionStoreError::ExecutionFenced) => {
+                    // The Store rejects the exact fence inside its transaction
+                    // before commit. Stop winning this race is known rejection,
+                    // not an ambiguous checkpoint write. Preserve cleanup's
+                    // authority without admitting/replaying any model work.
+                    cursor.uncertain = false;
+                    return Err(failure(error));
+                }
                 Err(error) => return Err(failure(error)),
             };
             cursor.sequence = next;
@@ -600,13 +608,14 @@ impl EngineTurnJournal {
         cursor: &Cursor,
         event: &Value,
         kind: EngineJournalWrite,
-    ) -> Result<Option<u64>, AppError> {
+    ) -> Result<Option<u64>, nomifun_agent_session::SessionStoreError> {
         let next = cursor.sequence.saturating_add(1);
         let value = json!({
             "producer_seq": next,
             "event": event,
         });
-        let (payload_ref, payload) = canonical_event_payload(&journal.session, value)?;
+        let (payload_ref, payload) = canonical_event_payload(&journal.session, value)
+            .map_err(|error|nomifun_agent_session::SessionStoreError::InvalidPayload(error.to_string()))?;
         let identity = format!(
             "runtime-progress:{}:{}:{next}",
             journal.session.as_ref(),
@@ -626,9 +635,9 @@ impl EngineTurnJournal {
             },
         };
         let appended = if kind == EngineJournalWrite::Progress {
-            journal.store.append_native_event(&journal.lease, &append, payload.as_ref()).await.map_err(failure)?
+            journal.store.append_native_event(&journal.lease, &append, payload.as_ref()).await?
         } else {
-            journal.store.append_native_observation(&journal.lease, &append, payload.as_ref()).await.map_err(failure)?
+            journal.store.append_native_observation(&journal.lease, &append, payload.as_ref()).await?
         };
         Ok(appended.ack.map(|ack| ack.seq))
     }
@@ -997,7 +1006,7 @@ impl EngineTurnJournal {
                     .map_err(failure)?;
                 if receipt.status != TurnReceiptStatus::Cancelled {
                     let identity = format!("runtime-cancel:{}:{}", journal.session.as_ref(), journal.operation.as_ref());
-                    journal.store.append_native_event(&journal.lease, &SessionEventAppend {
+                    journal.store.append_native_cancellation_after_cleanup(&journal.lease, &SessionEventAppend {
                         agent_session_id: journal.session.clone(), event_id: identity.clone().into(),
                         producer_id: "runtime_supervisor".into(), idempotency_key: identity.into(),
 
@@ -1006,7 +1015,7 @@ impl EngineTurnJournal {
                             correlation_id: journal.operation.as_ref().into(), causation_event_id: Some(journal.turn_started.clone()),
                             payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"operation_id":journal.operation}))),
                         },
-                    }, None).await.map_err(failure)?;
+                    }).await.map_err(failure)?;
                 }
                 Ok(())
             }
@@ -1196,8 +1205,22 @@ impl EngineTurnJournal {
             if matches!(kind,EngineJournalWrite::Cleanup | EngineJournalWrite::Terminal) {
                 cursor.pending_cleanup_write = Some((payload.clone(),model_operation.clone(),kind));
             }
+            let was_uncertain=cursor.uncertain;
             cursor.uncertain = true;
-            let event_seq = Self::append_progress(&journal, &cursor, &event_value, kind).await?;
+            let event_seq = match Self::append_progress(&journal, &cursor, &event_value, kind).await {
+                Ok(receipt)=>receipt,
+                Err(error)=> {
+                    if !was_uncertain && matches!(&error,nomifun_agent_session::SessionStoreError::ExecutionFenced) {
+                        // No progress row committed in this rejected Store
+                        // transaction. Do not poison a fresh journal when Stop
+                        // beat a late callback to the writer. An earlier unknown
+                        // or partially committed projection remains uncertain.
+                        cursor.uncertain=false;
+                        cursor.pending_cleanup_write=None;
+                    }
+                    return Err(failure(error));
+                }
+            };
             Self::append_tool_projection(&journal, &mut cursor, &event_value).await?;
             if let Some(AgentEngineEvent::ModelStepStarted {step,..})=&runtime_event {cursor.current_model_step=Some(*step);}
             if let Some(AgentEngineEvent::ModelResponseRejected {step,..}|AgentEngineEvent::ModelOutputTruncated {step,..}|AgentEngineEvent::DeliveryReviewSuperseded {step,..}|AgentEngineEvent::VoiceModelStepSuperseded {step,..})=&runtime_event {
@@ -1312,6 +1335,13 @@ pub(super) async fn test_fixture_at(
 async fn test_fixture_from_pool(
     pool:nomifun_db::SqlitePool,
 ) -> (EngineTurnJournal,nomifun_db::SqlitePool) {
+    test_fixture_for_operation(pool,"turn","turn-key").await
+}
+
+#[cfg(test)]
+pub(super) async fn test_fixture_for_operation(
+    pool:nomifun_db::SqlitePool,operation:&str,turn_key:&str,
+) -> (EngineTurnJournal,nomifun_db::SqlitePool) {
     use nomifun_agent_contracts::{
         AgentBindingValue, AgentPresetId, AgentSessionLiveRecord, AgentSessionMetadata,
         DigestHex, PresetRevisionRef, PrincipalRef, ResolvedSnapshotId,
@@ -1391,8 +1421,8 @@ async fn test_fixture_from_pool(
         .start_turn(
             &session_id,
             EventProducerId::from("session_api"),
-            IdempotencyKey::from("turn-key"),
-            OperationId::from("turn"),
+            IdempotencyKey::from(turn_key),
+            OperationId::from(operation),
             input,
         )
         .await
@@ -1400,7 +1430,7 @@ async fn test_fixture_from_pool(
     let root = message.record.unwrap().event_id;
     let turn_started = turn.record.as_ref().unwrap().event_id.clone();
     let lease = store.claim_native_execution(nomifun_agent_session::NativeExecutionClaim {
-        owner: owner.clone(), agent_session_id: session_id.clone(), operation_id: "turn".into(),
+        owner: owner.clone(), agent_session_id: session_id.clone(), operation_id: operation.into(),
         snapshot: binding.resolved_snapshot_ref.clone(), active_set_generation: 0,
         holder: Uuid::now_v7().to_string(), expected_fence: 0, checkpoint: None,
     }).await.unwrap();
@@ -1409,7 +1439,7 @@ async fn test_fixture_from_pool(
         attachment: AtomicU8::new(0), attached_notify: Default::default(), recovery: None,
         user: owner.principal_id,
         session: session_id,
-        operation: OperationId::from("turn"),
+        operation: OperationId::from(operation),
         root,
         turn_started,
         generation: turn.cursor.seq as i64,

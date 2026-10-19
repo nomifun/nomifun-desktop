@@ -151,6 +151,13 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-execution/src/user_input.rs"),
                     include_str!("../../../nomifun-db/src/repository/agent_execution.rs"),
                     include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution.rs"),
+                    include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution_stop.rs"),
+                    include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution_cleanup.rs"),
+                    include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution_retirement.rs"),
+                    include_str!("../../../nomifun-cron/src/lib.rs"),
+                    include_str!("../../../nomifun-cron/src/session_port.rs"),
+                    include_str!("../../../nomifun-cron/src/executor.rs"),
+                    include_str!("../../../nomifun-cron/src/service.rs"),
                     include_str!("../../../nomifun-public/Cargo.toml"),
                     include_str!("../../../nomifun-agent-control-plane/src/kernel_catalog.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/engine_features.rs"),
@@ -208,6 +215,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-kernel/src/session_capabilities.rs"),
                     include_str!("nomi_core_resource_bindings.rs"),
                     include_str!("nomi_core_session.rs"),
+                    include_str!("source_browser_retirement.rs"),
                     include_str!("session_context_clear.rs"),
                     include_str!("../../../nomifun-agent-session/src/context_clear.rs"),
                     include_str!("../../../nomifun-agent-session/src/tool_call_causation.rs"),
@@ -272,7 +280,14 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-engine-core/src/process.rs"),
                     include_str!("../../../nomifun-engine-core/src/system_process.rs"),
                     include_str!("../../../../shared/nomi-system-execution/src/lib.rs"),
+                    include_str!("../../../../shared/nomi-system-execution/src/windows.rs"),
+                    include_str!("../../../../shared/nomi-system-execution/src/linux.rs"),
                     include_str!("../../../../shared/nomi-process-runtime/src/supervisor.rs"),
+                    include_str!("../../../../shared/nomi-process-runtime/src/registry.rs"),
+                    include_str!("../../../../shared/nomi-process-runtime/src/io.rs"),
+                    include_str!("../../../../shared/nomi-process-runtime/src/io/frozen_output.rs"),
+                    include_str!("../../../../shared/nomi-process-runtime/src/outcome.rs"),
+                    include_str!("../../../../shared/nomi-ssh/src/connection.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/engine_port.rs"),
                     include_str!("chat_broker_host.rs"),
                     include_str!("../../../nomifun-model-invoke/src/model_profiles.rs"),
@@ -438,8 +453,12 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-session/src/shared_input_content.rs"),
                     include_str!("../../../nomifun-agent-session/src/session_input.rs"),
                     include_str!("../../../nomifun-agent-session/src/session_process_owner.rs"),
+                    include_str!("../../../nomifun-agent-session/src/session_process_archive.rs"),
                     include_str!("../../../nomifun-agent-session/src/session_process_retirement.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/session_process_owner.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/session_ssh_link.rs"),
+                    include_str!("../../../nomifun-agent-session/src/session_ssh_link.rs"),
+                    include_str!("session_ssh_resources.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/channel_input_delivery.rs"),
                     include_str!("../../../nomifun-agent-session/src/channel_input_observation.rs"),
                     include_str!("../../../nomifun-agent-session/src/terminal_content.rs"),
@@ -448,6 +467,8 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-session/src/context_snapshot.rs"),
                     include_str!("../../../nomifun-agent-session/src/native_checkpoint.rs"),
                     include_str!("../../../nomifun-agent-session/src/native_execution.rs"),
+                    include_str!("../../../nomifun-db/src/repository/agent_execution_admission.rs"),
+                    include_str!("../../../nomifun-db/src/repository/remote_session_admission.rs"),
                     include_str!("../../../nomifun-agent-session/src/native_pause.rs"),
                     include_str!("../../../nomifun-agent-session/src/native_effect_reconciliation.rs"),
                     include_str!("../../../nomifun-agent-session/src/native_recovery.rs"),
@@ -455,6 +476,9 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-db/migrations/001_canonical_baseline.sql"),
                     include_str!("../../../nomifun-db/migrations/007_retire_terminal_content_mirrors.sql"),
                     include_str!("../../../nomifun-db/migrations/008_retire_payload_object_placeholder.sql"),
+                    include_str!("../../../nomifun-db/migrations/009_cron_input_handoff.sql"),
+                    include_str!("../../../nomifun-db/migrations/010_mcp_oauth_authority.sql"),
+                    include_str!("../../../nomifun-db/migrations/011_cron_run_cancellation.sql"),
                     include_str!("engine_mcp_resources.rs"),
                     include_str!("engine_mcp_media.rs"),
                     include_str!("engine_workspace_media.rs"),
@@ -1566,7 +1590,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             ).await.map_err(error)
     }
 
-    async fn cleanup_turn(&self, message: &SendMessageData, terminal: &nomifun_ai_agent::engine_sdk::EngineTurnTerminal) -> Result<(), AppError> {
+    async fn cleanup_turn(&self, message: &SendMessageData, _terminal: &nomifun_ai_agent::engine_sdk::EngineTurnTerminal) -> Result<(), AppError> {
         let root = self.root(message);
         self.wait_preparation(root).await?;
         let unstarted = self.unstarted_cancelled_root.lock()
@@ -1614,7 +1638,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         if let Some(port)=voice_control {
             port.quiesce_all(tokio::time::Instant::now()+std::time::Duration::from_secs(5)).await.map_err(error)?;
         }
-        self.resources.cleanup_turn(root,matches!(terminal,nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Paused {..})).await?;
+        self.resources.cleanup_turn(root).await?;
         steering?;
         // Persist the last partial response before the cleanup witness, so a
         // crash between cleanup and terminal publication retains its text.
@@ -1824,8 +1848,13 @@ mod build_identity_tests {
             "../../../nomifun-agent-session/src/shared_input_content.rs",
             "../../../nomifun-agent-session/src/session_input.rs",
             "../../../nomifun-agent-session/src/session_process_owner.rs",
+            "../../../nomifun-agent-session/src/session_process_archive.rs",
             "../../../nomifun-agent-session/src/session_process_retirement.rs",
             "../../../nomifun-agent-contracts/src/session_process_owner.rs",
+            "../../../nomifun-agent-contracts/src/session_ssh_link.rs",
+            "../../../nomifun-agent-session/src/session_ssh_link.rs",
+            "session_ssh_resources.rs",
+            "source_browser_retirement.rs",
             "../../../nomifun-agent-contracts/src/channel_input_delivery.rs",
             "../../../nomifun-agent-session/src/channel_input_observation.rs",
             "../../../nomifun-agent-session/src/terminal_content.rs",
@@ -1834,6 +1863,14 @@ mod build_identity_tests {
             "../../../nomifun-engine-core/src/tool_display.rs",
             "../../../nomifun-engine-core/src/system_process.rs",
             "../../../../shared/nomi-system-execution/src/lib.rs",
+            "../../../../shared/nomi-system-execution/src/windows.rs",
+            "../../../../shared/nomi-system-execution/src/linux.rs",
+            "../../../../shared/nomi-process-runtime/src/supervisor.rs",
+            "../../../../shared/nomi-process-runtime/src/registry.rs",
+            "../../../../shared/nomi-process-runtime/src/io.rs",
+            "../../../../shared/nomi-process-runtime/src/io/frozen_output.rs",
+            "../../../../shared/nomi-process-runtime/src/outcome.rs",
+            "../../../../shared/nomi-ssh/src/connection.rs",
             "../../../nomifun-agent-session/src/context_clear.rs",
             "../../../nomifun-agent-session/src/context_snapshot.rs",
             "../../../nomifun-agent-contracts/src/native_execution.rs",
@@ -1854,6 +1891,15 @@ mod build_identity_tests {
             "native_turn_recovery.rs",
             "native_execution_control.rs",
             "../../../nomifun-agent-session/src/native_execution.rs",
+            "../../../nomifun-db/src/repository/agent_execution_admission.rs",
+            "../../../nomifun-db/src/repository/sqlite_agent_execution_stop.rs",
+            "../../../nomifun-db/src/repository/sqlite_agent_execution_cleanup.rs",
+            "../../../nomifun-db/src/repository/sqlite_agent_execution_retirement.rs",
+            "../../../nomifun-cron/src/lib.rs",
+            "../../../nomifun-cron/src/session_port.rs",
+            "../../../nomifun-cron/src/executor.rs",
+            "../../../nomifun-cron/src/service.rs",
+            "../../../nomifun-db/src/repository/remote_session_admission.rs",
             "../../../nomifun-agent-session/src/native_pause.rs",
             "../../../nomifun-agent-session/src/native_effect_reconciliation.rs",
             "../../../nomifun-agent-session/src/native_recovery.rs",
@@ -1861,6 +1907,9 @@ mod build_identity_tests {
             "../../../nomifun-db/migrations/001_canonical_baseline.sql",
             "../../../nomifun-db/migrations/007_retire_terminal_content_mirrors.sql",
             "../../../nomifun-db/migrations/008_retire_payload_object_placeholder.sql",
+            "../../../nomifun-db/migrations/009_cron_input_handoff.sql",
+            "../../../nomifun-db/migrations/010_mcp_oauth_authority.sql",
+            "../../../nomifun-db/migrations/011_cron_run_cancellation.sql",
         ] {
             assert!(
                 source.contains(&format!("include_str!(\"{required}\")")),

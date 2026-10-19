@@ -4,6 +4,8 @@ use super::*;
 use nomifun_agent_runtime::{AgentExecutionCheckpoint, AgentReconciledOutcome, AgentReconciliationSource, AgentToolResult};
 use nomifun_agent_session::{AgentEffectState, NativeEffectReconciliationRequest, NativeResumePreparation, NativeResumeRequest};
 use nomifun_chat_model_broker::ToolCallId;
+#[path = "native_resume_waiter.rs"]
+mod native_resume_waiter;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,16 +91,28 @@ pub(super) async fn reconcile(
 pub(in crate::router) async fn resume(
     State(state): State<NomiCoreAgentApiState>, Extension(owner): Extension<AuthenticatedOwner>,
     Path(id): Path<String>, Json(request): Json<NativeResumeRequest>,
-) -> Result<Json<ApiResponse<nomifun_agent_session::NativeResumeReceipt>>, NomiCoreApiError> {
+) -> Result<Json<ApiResponse<nomifun_agent_session::NativeResumeCommandReceipt>>, NomiCoreApiError> {
     let session = parse_agent_session_id(&id)?;
     let _operation_guard = state.session_owner.session_operation_lock(session.as_ref()).write_owned().await;
     let principal = authenticated_principal(&owner);
     let store = state.session_owner.canonical().store();
+    if let Some(receipt) = store.native_resume_request_receipt(&principal,&session,&request).await.map_err(agent_session_store_error)? {
+        state.session_owner.enqueue_requested_native_resume(principal,session,request)?;
+        return Ok(Json(ApiResponse::ok(nomifun_agent_session::NativeResumeCommandReceipt::Queued {receipt})));
+    }
     let receipt = if let Some(receipt) = store.native_resume_receipt(&principal,&session,&request).await.map_err(agent_session_store_error)? {
         receipt
     } else {
         match state.session_owner.prepare_native_resume(&principal,&session,&request).await {
-            Ok(prepared) => store.commit_native_resume(&principal,&session,&request,prepared).await.map_err(agent_session_store_error)?,
+            Ok(prepared) => match store.commit_native_resume(&principal,&session,&request,prepared).await {
+                Ok(receipt) => receipt,
+                Err(nomifun_agent_session::SessionStoreError::ExecutionCapacityPending) => {
+                    let receipt = store.request_native_resume(&principal,&session,&request).await.map_err(agent_session_store_error)?;
+                    state.session_owner.enqueue_requested_native_resume(principal,session,request)?;
+                    return Ok(Json(ApiResponse::ok(nomifun_agent_session::NativeResumeCommandReceipt::Queued {receipt})));
+                }
+                Err(error) => return Err(agent_session_store_error(error).into()),
+            },
             Err(error) => {
                 // A concurrent identical authorization may have changed the
                 // checkpoint while this read-only preparation was in flight.
@@ -111,7 +125,7 @@ pub(in crate::router) async fn resume(
         }
     };
     state.session_owner.enqueue_authorized_native_resume(session,request.operation_id,receipt.seq).await?;
-    Ok(Json(ApiResponse::ok(receipt)))
+    Ok(Json(ApiResponse::ok(nomifun_agent_session::NativeResumeCommandReceipt::Authorized {receipt})))
 }
 
 impl NomiCoreSessionOwner {

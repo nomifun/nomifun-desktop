@@ -714,6 +714,8 @@ export interface NativeAgentExecution {
   checkpoint_revision: number;
   checkpoint_digest: DigestHex | null;
   checkpoint_retained: boolean;
+  resume_requested?: boolean;
+  resume_blocked_reason?: string | null;
   pause: {
     revision: number;
     reason: string;
@@ -730,12 +732,19 @@ export interface ResumeNativeAgentExecutionRequest {
   budget: Record<string, never>;
 }
 
-export interface ResumeNativeAgentExecutionResponse {
+export type ResumeNativeAgentExecutionResponse = {
+  status: 'authorized';
   operation_id: string;
   authorization_event_id: string;
   seq: number;
   duplicate: boolean;
-}
+} | {
+  status: 'queued';
+  operation_id: string;
+  request_event_id: string;
+  seq: number;
+  duplicate: boolean;
+};
 
 export interface AgentSessionEventsResponse {
   agent_session_id: AgentSessionId;

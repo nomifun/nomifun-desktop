@@ -133,6 +133,7 @@ pub(crate) enum RoleHostError {
     ProviderUnavailable,
     ProviderFailure(String),
     EffectSettlementFailure(String),
+    CancelledBeforeDispatch,
 }
 
 impl RoleHostError {
@@ -155,6 +156,7 @@ impl RoleHostError {
             Self::ProviderUnavailable => "ROLE_HOST_PROVIDER_UNAVAILABLE",
             Self::ProviderFailure(_) => "ROLE_HOST_PROVIDER_FAILURE",
             Self::EffectSettlementFailure(_) => "CAPABILITY_UNAVAILABLE",
+            Self::CancelledBeforeDispatch => "CANCELLED_BY_OWNER",
         }
     }
 }
@@ -213,6 +215,7 @@ impl fmt::Display for RoleHostError {
             Self::EffectSettlementFailure(message) => {
                 write!(formatter, "role effect settlement failed: {message}")
             }
+            Self::CancelledBeforeDispatch => formatter.write_str("Computer operation cancelled before native dispatch; no device effect was admitted"),
         }
     }
 }
@@ -358,6 +361,12 @@ mod computer {
 
         async fn execute_authorized(&self, action_id: &str, input: serde_json::Value)
             -> ToolResult;
+
+        async fn execute_authorized_controlled(&self, action_id: &str, input: serde_json::Value,
+            control: nomifun_agent_kernel::InvocationControl) -> ToolResult {
+            if control.is_cancelled() { return nomi_computer::tool::cancelled_before_dispatch_result(); }
+            self.execute_authorized(action_id, input).await
+        }
     }
 
     #[async_trait::async_trait]
@@ -376,6 +385,11 @@ mod computer {
             input: serde_json::Value,
         ) -> ToolResult {
             ComputerTool::execute_authorized(self, action_id, input).await
+        }
+
+        async fn execute_authorized_controlled(&self, action_id: &str, input: serde_json::Value,
+            control: nomifun_agent_kernel::InvocationControl) -> ToolResult {
+            ComputerTool::execute_authorized_controlled(self, action_id, input, &control.cancellation()).await
         }
     }
 
@@ -632,10 +646,11 @@ mod computer {
             context: RoleHostContext,
             operation: ComputerRoleOperation,
         ) -> Result<ComputerRoleResult, RoleHostError> {
-            self.invoke_with_authority(context, operation, ComputerCallAuthority::Fixture)
+            self.invoke_with_authority(context, operation, ComputerCallAuthority::Fixture, Default::default())
                 .await
         }
 
+        #[cfg(test)]
         pub(super) async fn invoke_canonical(
             &self,
             context: RoleHostContext,
@@ -643,10 +658,19 @@ mod computer {
             store: &nomifun_agent_session::AgentSessionStore,
             source: ComputerInvocationSource,
         ) -> Result<ComputerRoleResult, RoleHostError> {
+            self.invoke_canonical_controlled(context, operation, store, source, Default::default()).await
+        }
+
+        pub(super) async fn invoke_canonical_controlled(
+            &self, context: RoleHostContext, operation: ComputerRoleOperation,
+            store: &nomifun_agent_session::AgentSessionStore, source: ComputerInvocationSource,
+            control: nomifun_agent_kernel::InvocationControl,
+        ) -> Result<ComputerRoleResult, RoleHostError> {
             self.invoke_with_authority(
                 context,
                 operation,
                 ComputerCallAuthority::Canonical(store, source),
+                control,
             )
             .await
         }
@@ -656,6 +680,7 @@ mod computer {
             context: RoleHostContext,
             operation: ComputerRoleOperation,
             authority: ComputerCallAuthority<'_>,
+            control: nomifun_agent_kernel::InvocationControl,
         ) -> Result<ComputerRoleResult, RoleHostError> {
             if context.provider.role.key.role_id.as_ref() != COMPUTER_ROLE_ID {
                 return Err(RoleHostError::InvalidContext("computer role id"));
@@ -675,7 +700,12 @@ mod computer {
                 return Err(RoleHostError::ResourceIdentityMismatch);
             }
 
-            let mut target = self.target.state.lock().await;
+            let mut target = tokio::select! {
+                biased;
+                _ = control.cancelled() => return Err(RoleHostError::CancelledBeforeDispatch),
+                target = self.target.state.lock() => target,
+            };
+            if control.is_cancelled() { return Err(RoleHostError::CancelledBeforeDispatch); }
             let (execution, call_seq) = match authority {
                 ComputerCallAuthority::Canonical(store, source) => {
                     if source.session_id != self.session_id
@@ -780,9 +810,10 @@ mod computer {
                     let result = self
                         .target
                         .tool
-                        .execute_authorized(request.action_id, serde_json::Value::Object(input))
+                        .execute_authorized_controlled(request.action_id, serde_json::Value::Object(input), control.clone())
                         .await;
                     if result.is_error {
+                        if nomi_computer::tool::is_proven_cancelled_before_dispatch(&result) { return Err(RoleHostError::CancelledBeforeDispatch); }
                         return Err(RoleHostError::ProviderFailure(result.content));
                     }
                     let generation = match observation_kind {
@@ -856,13 +887,15 @@ mod computer {
                     let result = self
                         .target
                         .tool
-                        .execute_authorized(
+                        .execute_authorized_controlled(
                             nomi_computer::capability::COMPUTER_INPUT_ACTION_ID,
                             serde_json::Value::Object(input),
+                            control.clone(),
                         )
                         .await;
                     self.target.tool.clear_cached_observation();
                     if result.is_error {
+                        if nomi_computer::tool::is_proven_cancelled_before_dispatch(&result) { return Err(RoleHostError::CancelledBeforeDispatch); }
                         if nomi_computer::tool::is_proven_unsupported_input_rejection(&result) {
                             return Err(RoleHostError::UnsupportedInput(result.content));
                         }
@@ -892,17 +925,19 @@ mod computer {
                     let result = self
                         .target
                         .tool
-                        .execute_authorized(
+                        .execute_authorized_controlled(
                             nomi_computer::capability::COMPUTER_LAUNCH_ACTION_ID,
                             serde_json::json!({
                                 "action": "launch",
                                 "target": request.target,
                                 "app": request.app,
                             }),
+                            control.clone(),
                         )
                         .await;
                     self.target.tool.clear_cached_observation();
                     if result.is_error {
+                        if nomi_computer::tool::is_proven_cancelled_before_dispatch(&result) { return Err(RoleHostError::CancelledBeforeDispatch); }
                         return Err(RoleHostError::ProviderFailure(result.content));
                     }
                     Ok(ComputerRoleResult {
@@ -1139,7 +1174,7 @@ impl RoleHostInvoker for ComputerRoleInvoker {
             action_id: effect_context.action_id.clone(),
         };
         let result = match host
-            .invoke_canonical(context, operation, &self.effect_store, source)
+            .invoke_canonical_controlled(context, operation, &self.effect_store, source, effect_context.control.clone())
             .await
         {
             Ok(result) => result,
@@ -1207,6 +1242,32 @@ mod tests {
         uncertain_input: std::sync::atomic::AtomicBool,
         deny_accessibility: std::sync::atomic::AtomicBool,
         deny_screen_recording: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[derive(Default)]
+    struct ControlledNativeComputerPort {
+        block: std::sync::atomic::AtomicBool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        inputs: std::sync::atomic::AtomicUsize,
+        settled: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[async_trait::async_trait]
+    impl ComputerToolPort for ControlledNativeComputerPort {
+        fn clear_cached_observation(&self) {}
+        async fn execute_authorized(&self, action_id: &str, _: serde_json::Value) -> nomi_types::tool::ToolResult {
+            use std::sync::atomic::Ordering;
+            if action_id == nomi_computer::capability::COMPUTER_INPUT_ACTION_ID { self.inputs.fetch_add(1, Ordering::SeqCst); }
+            if self.block.load(Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.settled.store(true, Ordering::SeqCst);
+            nomi_types::tool::ToolResult::text("native result with recorded input cleanup settled")
+        }
     }
 
     #[cfg(feature = "computer-use")]
@@ -2054,6 +2115,14 @@ mod tests {
             key: &str,
             operation: ComputerRoleOperation,
         ) -> Result<StrictJsonValue, RoleHostError> {
+            self.invoke_actual_invoker_controlled(invoker, state, key, operation, Default::default()).await
+        }
+
+        async fn invoke_actual_invoker_controlled(
+            &self, invoker: &ComputerRoleInvoker,
+            state: nomifun_agent_domain_wave2::Wave2StateHandle, key: &str,
+            operation: ComputerRoleOperation, control: nomifun_agent_kernel::InvocationControl,
+        ) -> Result<StrictJsonValue, RoleHostError> {
             let source = self.call(key, &operation).await;
             let typed = match operation {
                 ComputerRoleOperation::Observe(request) => {
@@ -2086,6 +2155,7 @@ mod tests {
                 invoker,
                 Wave2TypedHostRequest {
                     context: nomifun_agent_domain_wave2::Wave2HostContext {
+                        control,
                         principal: self.context.principal.clone(),
                         agent_session_id: source.session_id,
                         turn_id: source.turn_id,
@@ -2683,6 +2753,89 @@ mod tests {
         assert_eq!(error.code(), "CAPABILITY_UNAVAILABLE");
         assert!(error.to_string().contains("role effect settlement failed"));
         assert!(!error.to_string().contains("role provider failed"));
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn computer_cancelled_in_physical_queue_rejects_effect_without_dispatch() {
+        use std::sync::atomic::Ordering;
+        let fixture = Arc::new(CanonicalComputerFixture::new("queue-cancel").await);
+        let blocker = Arc::new(CanonicalComputerFixture::new_in_store("queue-blocker", fixture.store.clone()).await);
+        let tool = Arc::new(ControlledNativeComputerPort::default());
+        let invoker = Arc::new(ComputerRoleInvoker::new_with_test_executor(tool.clone(), fixture.store.clone()));
+        let state = computer_fixture_state_handle().await;
+        let observe = || ComputerRoleOperation::Observe(ComputerObserve {
+            action_id: nomi_computer::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID,
+            input: serde_json::json!({"action":"observe"}),
+        });
+        let observed = fixture.invoke_actual_invoker(&invoker, state.clone(), "original-observe", observe()).await.unwrap();
+        let generation = observed.0["generation"].as_u64().unwrap();
+        tool.block.store(true, Ordering::SeqCst);
+        let blocked = {
+            let blocker = blocker.clone(); let invoker = invoker.clone(); let state = state.clone();
+            tokio::spawn(async move { blocker.invoke_actual_invoker(&invoker, state, "hold-native-owner", observe()).await })
+        };
+        tool.entered.notified().await;
+        let stop = tokio_util::sync::CancellationToken::new();
+        let queued = {
+            let fixture = fixture.clone(); let invoker = invoker.clone(); let state = state.clone(); let stop = stop.clone();
+            tokio::spawn(async move { fixture.invoke_actual_invoker_controlled(&invoker, state, "queued-input",
+                ComputerRoleOperation::Input(ComputerInput { action:"set_element_value".into(),
+                    parameters:serde_json::json!({"ref":7,"text":"never dispatched"}),expected_generation:generation }),
+                nomifun_agent_kernel::InvocationControl::new(stop)).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while fixture.store.list_effects(&fixture.session_id).await.unwrap().is_empty() { tokio::task::yield_now().await; }
+        }).await.expect("the real Effect reservation reaches the physical lock queue");
+        stop.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), queued).await
+            .expect("queue cancellation must not wait for another native operation").unwrap();
+        assert_eq!(result.unwrap_err(), RoleHostError::CancelledBeforeDispatch);
+        assert_eq!(tool.inputs.load(Ordering::SeqCst), 0);
+        let effects = fixture.store.list_effects(&fixture.session_id).await.unwrap();
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].state, nomifun_agent_session::AgentEffectState::Rejected,
+            "the known queue rejection must not become an unknown external effect");
+        assert!(!blocked.is_finished(), "cancelling the queued peer cannot drop the existing native owner");
+        tool.release.notify_one();
+        blocked.await.unwrap().unwrap();
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn computer_cancel_after_native_dispatch_keeps_owner_until_real_settlement() {
+        use std::sync::atomic::Ordering;
+        let fixture = Arc::new(CanonicalComputerFixture::new("dispatched-cancel").await);
+        let tool = Arc::new(ControlledNativeComputerPort::default());
+        let invoker = Arc::new(ComputerRoleInvoker::new_with_test_executor(tool.clone(), fixture.store.clone()));
+        let state = computer_fixture_state_handle().await;
+        let observed = fixture.invoke_actual_invoker(&invoker, state.clone(), "observe-before-input",
+            ComputerRoleOperation::Observe(ComputerObserve { action_id:nomi_computer::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID,
+                input:serde_json::json!({"action":"observe"}) })).await.unwrap();
+        let generation = observed.0["generation"].as_u64().unwrap();
+        tool.block.store(true, Ordering::SeqCst);
+        tool.settled.store(false, Ordering::SeqCst);
+        let stop = tokio_util::sync::CancellationToken::new();
+        let dispatched = {
+            let fixture = fixture.clone(); let invoker = invoker.clone(); let stop = stop.clone();
+            tokio::spawn(async move { fixture.invoke_actual_invoker_controlled(&invoker, state, "dispatched-input",
+                ComputerRoleOperation::Input(ComputerInput { action:"set_element_value".into(),
+                    parameters:serde_json::json!({"ref":7,"text":"admitted once"}),expected_generation:generation }),
+                nomifun_agent_kernel::InvocationControl::new(stop)).await })
+        };
+        tool.entered.notified().await;
+        stop.cancel();
+        assert_eq!(tool.inputs.load(Ordering::SeqCst), 1);
+        assert!(!dispatched.is_finished(), "a stop request is not native completion or input-release proof");
+        let pending = fixture.store.list_effects(&fixture.session_id).await.unwrap();
+        assert_eq!(pending[0].state, nomifun_agent_session::AgentEffectState::Pending);
+        tool.release.notify_one();
+        dispatched.await.unwrap().unwrap();
+        assert!(tool.settled.load(Ordering::SeqCst));
+        assert_eq!(tool.inputs.load(Ordering::SeqCst), 1, "native input must not be replayed after cancellation");
+        let effects = fixture.store.list_effects(&fixture.session_id).await.unwrap();
+        assert_eq!(effects[0].state, nomifun_agent_session::AgentEffectState::Returned,
+            "the original owner keeps the actual native result after cancellation");
     }
 
     #[cfg(feature = "computer-use")]

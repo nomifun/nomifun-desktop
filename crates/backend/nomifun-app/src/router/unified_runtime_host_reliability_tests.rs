@@ -10,6 +10,15 @@ use tower::ServiceExt;
 #[path = "engine_knowledge_writeback_tests.rs"]
 mod knowledge_writeback_tests;
 
+#[path = "completed_runtime_stability_tests.rs"]
+mod completed_runtime_stability_tests;
+
+#[path = "waiting_runtime_resource_tests.rs"]
+mod waiting_runtime_resource_tests;
+
+#[path = "paused_workspace_cache_tests.rs"]
+mod paused_workspace_cache_tests;
+
 #[path = "engine_knowledge_demand_tests.rs"]
 mod knowledge_demand_tests;
 
@@ -94,6 +103,13 @@ impl Fixture {
         ).await
     }
 
+    async fn with_process(scenario:&str,model_base:&str)->Self {
+        Self::build_delivery_with_options(scenario,vec![],vec![],None,false,Some(model_base),false,
+            #[cfg(feature="browser-use")] None,
+            None,true,
+        ).await
+    }
+
     async fn with_input_model_and_search(scenario: &str, model_base: &str,
         search: Arc<dyn nomifun_ai_agent::web_search::SearchProvider>) -> Self {
         Self::build_delivery_with_search(scenario,vec![],vec![],None,false,Some(model_base),false,
@@ -114,6 +130,16 @@ impl Fixture {
     async fn build_delivery_with_search(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool,model_base_override:Option<&str>, knowledge: bool,
         #[cfg(feature = "browser-use")] browser: Option<(Arc<dyn nomifun_browser_platform::runtime::BrowserRuntimeFactory>, String)>,
         search:Option<Arc<dyn nomifun_ai_agent::web_search::SearchProvider>>,
+    ) -> Self {
+        Self::build_delivery_with_options(scenario,files,inject_skills,origin,explicit_metadata,model_base_override,knowledge,
+            #[cfg(feature="browser-use")] browser,
+            search,false,
+        ).await
+    }
+
+    async fn build_delivery_with_options(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool,model_base_override:Option<&str>, knowledge: bool,
+        #[cfg(feature = "browser-use")] browser: Option<(Arc<dyn nomifun_browser_platform::runtime::BrowserRuntimeFactory>, String)>,
+        search:Option<Arc<dyn nomifun_ai_agent::web_search::SearchProvider>>,process:bool,
     ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = std::env::var_os("NOMIFUN_RELIABILITY_EVIDENCE_DIR")
@@ -165,6 +191,11 @@ impl Fixture {
         if knowledge {
             draft["document"]["enabled_capabilities"].as_array_mut().unwrap().push(json!({
                 "capability":{"id":"knowledge"}, "action_allowlist":["knowledge/search","knowledge/read","knowledge/write"]
+            }));
+        }
+        if process {
+            draft["document"]["enabled_capabilities"].as_array_mut().unwrap().push(json!({
+                "capability":{"id":"workspace.process"},"action_allowlist":["workspace.process/start"]
             }));
         }
         api(&router, &format!("/api/agent-presets/{preset}/revisions"), json!({
@@ -737,6 +768,71 @@ async fn cancellation_replay_and_delayed_stop_preserve_the_real_successor_runtim
     let steering: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/steer-accepted'")
         .bind(session.as_ref()).fetch_one(fixture.pool()).await.unwrap();
     assert_eq!(steering, 0, "first late delivery cannot add steering to the successor");
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn late_and_replayed_stop_preserve_a_new_idle_warmup_without_retirement_waiters() {
+    use nomifun_agent_execution::AgentExecutionSessionPort;
+    let fixture = Fixture::new("cancel-old-turn-after-new-warmup").await;
+    let owner = fixture.host.options.user_id.clone();
+    let session = AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let runtimes = &fixture.services.agent_runtime_sessions;
+    let original = runtimes.observe_runtime_carrier(session.as_ref()).instance_id.unwrap();
+    fixture.owner.cancel_turn_for_execution(&owner, session.as_ref(),
+        "first-exact-stop-before-warmup", "cleanup-retry-turn").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let carrier = runtimes.observe_runtime_carrier(session.as_ref());
+            if !carrier.registered && !carrier.teardown_pending { break; }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }).await.expect("the first committed Stop must retire its original idle Runtime owner");
+    api(&fixture._router, &format!("/api/agent-sessions/{}/warmup", session.as_ref()), json!({})).await;
+    let prepared = runtimes.get_runtime(session.as_ref()).unwrap();
+    let prepared_owner = match &prepared {
+        nomifun_ai_agent::AgentRuntimeHandle::Official(runtime) => Arc::downgrade(runtime),
+        _ => panic!("the original official factory must create the warmup carrier"),
+    };
+    let prepared_carrier = runtimes.observe_runtime_carrier(session.as_ref());
+    assert_ne!(prepared_carrier.instance_id.as_ref().unwrap(), &original);
+    assert!(prepared_carrier.registered && !prepared_carrier.teardown_pending);
+    assert!(prepared_carrier.active_generation.is_none());
+    let store = fixture.owner.canonical().store();
+    let head = store.head(&session).await.unwrap();
+    assert!(head.active_turn_id.is_none(), "warmup must not create a business Turn");
+    let owner_count = prepared_owner.strong_count();
+    let task_count = fixture.services.background_tasks.lifecycle_test_counts().0;
+    let cancel_path = format!("/api/agent-sessions/{}/turns/cancel", session.as_ref());
+    for _ in 0..8 {
+        let stopped = api(&fixture._router, &cancel_path, json!({
+            "idempotency_key":"old-stop-after-warmup", "expected_turn_id":fixture.message.source_message_id,
+        })).await;
+        assert_eq!(stopped["target_operation_id"], "cleanup-retry-turn");
+        assert_eq!(stopped["duplicate"], true);
+        fixture.owner.cancel_turn_for_execution(&owner, session.as_ref(),
+            "old-execution-cleanup-after-warmup", "cleanup-retry-turn").await.unwrap();
+        let current = runtimes.observe_runtime_carrier(session.as_ref());
+        assert_eq!(current.instance_id, prepared_carrier.instance_id);
+        assert!(current.registered && !current.teardown_pending && current.active_generation.is_none());
+        assert!(runtimes.get_runtime(session.as_ref()).as_ref().is_some_and(|runtime|
+            std::ptr::eq(runtime.as_runtime(), prepared.as_runtime())));
+        assert_eq!(prepared_owner.strong_count(), owner_count,
+            "a repeated old Stop cannot retain the new carrier in another retirement waiter");
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.services.background_tasks.lifecycle_test_counts().0 > task_count {
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("old Stop receipts may wake intake, but cannot leave new long-lived retirement tasks");
+    assert_eq!(runtimes.observe_runtime_carrier(session.as_ref()).instance_id, prepared_carrier.instance_id);
+    assert_eq!(store.head(&session).await.unwrap(), head);
+    let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_turns WHERE session_id=?")
+        .bind(session.as_ref()).fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(turns, 1);
+    let models: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='context/model-visible-applied'")
+        .bind(session.as_ref()).fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(models, 0, "neither warmup nor replayed Stop starts a model request");
     fixture.finish().await;
 }
 

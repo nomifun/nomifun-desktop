@@ -121,7 +121,7 @@ impl AttachedBrowser {
             .get(target)
             .cloned()
     }
-    pub(super) fn forget_pending(&self, target: &str, id: &str) {
+    pub(super) fn forget_pending(&self, target: &str, id: &str) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state
             .pending
@@ -129,6 +129,9 @@ impl AttachedBrowser {
             .is_some_and(|pending| pending.id == id)
         {
             state.pending.remove(target);
+            true
+        } else {
+            false
         }
     }
     pub(super) async fn wait_pending(
@@ -142,8 +145,9 @@ impl AttachedBrowser {
             tokio::select! {
                 biased;
                 result=&mut job=>{
-                    self.forget_pending(&grant.target_id,&pending.id);
-                    if pending.interrupted.load(std::sync::atomic::Ordering::Acquire) {
+                    let _target=self.target_operation(&grant.target_id).lock_owned().await;
+                    let current=self.forget_pending(&grant.target_id,&pending.id);
+                    if current && pending.interrupted.load(std::sync::atomic::Ordering::Acquire) {
                         if let Some(state)=self.state.lock().unwrap_or_else(|e|e.into_inner()).automation.get_mut(&grant.target_id) {
                             state.observation.clear();state.refs.clear();
                         }

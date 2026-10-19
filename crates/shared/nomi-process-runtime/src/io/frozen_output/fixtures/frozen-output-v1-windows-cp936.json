@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "decoder_scheme": "windows_acp_v1",
+  "state": {
+    "next_seq": 5,
+    "next_offset": 6,
+    "base_offset": 3,
+    "retained": 3,
+    "dropped_bytes": 3,
+    "chunks": [
+      { "seq": 2, "start": 3, "stream": "stderr", "bytes": [120] },
+      { "seq": 3, "start": 4, "stream": "stdout", "bytes": [64] },
+      { "seq": 4, "start": 5, "stream": "pty", "bytes": [228] }
+    ],
+    "decoders": {
+      "stdout": { "utf8_pending": [], "decode_errors": 1, "source_encoding": "mixed", "observed_bytes": true, "saw_non_ascii_utf8": true, "active_code_page": 936, "windows": { "code_page": 936, "pending": [] } },
+      "stderr": { "utf8_pending": [], "decode_errors": 0, "source_encoding": "utf-8", "observed_bytes": true, "saw_non_ascii_utf8": false, "active_code_page": 936, "windows": null },
+      "pty": { "utf8_pending": [], "decode_errors": 2, "source_encoding": "windows-936", "observed_bytes": true, "saw_non_ascii_utf8": false, "active_code_page": 936, "windows": { "code_page": 936, "pending": [] } }
+    },
+    "base_decoders": {
+      "stdout": { "utf8_pending": [], "decode_errors": 1, "source_encoding": "mixed", "observed_bytes": true, "saw_non_ascii_utf8": true, "active_code_page": 936, "windows": { "code_page": 936, "pending": [129] } },
+      "stderr": { "utf8_pending": [], "decode_errors": 0, "source_encoding": "utf-8", "observed_bytes": false, "saw_non_ascii_utf8": false, "active_code_page": 936, "windows": null },
+      "pty": { "utf8_pending": [], "decode_errors": 0, "source_encoding": "utf-8", "observed_bytes": false, "saw_non_ascii_utf8": false, "active_code_page": 936, "windows": null }
+    },
+    "finalized": true
+  }
+}

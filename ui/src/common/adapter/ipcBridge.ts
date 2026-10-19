@@ -13,6 +13,7 @@
  */
 
 import { bridge } from '@/platform';
+import type { AgentActivitiesResponse, AgentActivityCommandReceipt, AgentActivityStopSnapshot, StopAgentActivityRequest } from '../types/agentExecution/agentActivity';
 import type { DiscoverModelProtocolsRequest } from '@/common/protocolBindings/DiscoverModelProtocolsRequest';
 import type { DiscoverModelProtocolsAnonymousRequest } from '@/common/protocolBindings/DiscoverModelProtocolsAnonymousRequest';
 import type { DiscoverModelProtocolsResponse } from '@/common/protocolBindings/DiscoverModelProtocolsResponse';
@@ -132,6 +133,7 @@ import type {
   TAgentExecutionEvent,
   TAgentExecutionEventsQuery,
   TAnswerExecutionDecision,
+  TCancelExecutionStep,
   TConfigureExecutionStep,
   TCreateAgentExecution,
   TDecisionPolicy,
@@ -4221,12 +4223,19 @@ const fromApiExecutionAttempt = (raw: unknown): TExecutionAttempt => {
 
 const fromApiAgentExecutionDetail = (raw: unknown): TAgentExecutionDetail => {
   const value = executionWireObject(raw);
+  const automation = value.automation_control == null ? null : executionWireObject(value.automation_control);
   return {
     execution: fromApiAgentExecution(value.execution),
     participants: (value.participants as unknown[]).map(fromApiExecutionParticipant),
     steps: (value.steps as unknown[]).map(fromApiExecutionStep),
     dependencies: (value.dependencies as unknown[]).map(fromApiExecutionDependency),
     attempts: (value.attempts as unknown[]).map(fromApiExecutionAttempt),
+    ...(automation && { automation_control: {
+      root_step_id: automation.root_step_id == null ? null : parseExecutionStepId(automation.root_step_id),
+      lead_conversation_id: parseConversationId(automation.lead_conversation_id),
+      requirement_id: automation.requirement_id as string,
+      claim_generation: automation.claim_generation as number,
+    } }),
   };
 };
 
@@ -4272,6 +4281,17 @@ const fromApiExecutionTemplateDetail = (raw: unknown): TAgentExecutionTemplateDe
     ...fromApiExecutionTemplate(value),
     participants: (value.participants as unknown[]).map(fromApiExecutionTemplateParticipant),
   };
+};
+
+export const agentActivities = {
+  stopTargets: httpGet<AgentActivityStopSnapshot, void>('/api/agent-activities/stop-targets'),
+  list: httpGet<AgentActivitiesResponse, { after_cursor?: string; limit?: number }>((params) => {
+    const query = new URLSearchParams();
+    if (params.after_cursor) query.set('after_cursor', params.after_cursor);
+    if (params.limit != null) query.set('limit', String(params.limit));
+    return `/api/agent-activities?${query}`;
+  }),
+  stop: httpPost<AgentActivityCommandReceipt, StopAgentActivityRequest>('/api/agent-activities/stop'),
 };
 
 export const agentExecution = {
@@ -4328,6 +4348,13 @@ export const agentExecution = {
   cancel: withResponseMap(
     httpPost<unknown, { execution_id: ExecutionId; updates: TVersionedAgentExecutionCommand }>(
       (p) => `/api/agent-executions/${p.execution_id}/cancel`,
+      (p) => p.updates
+    ),
+    fromApiAgentExecutionDetail
+  ),
+  cancelStep: withResponseMap(
+    httpPost<unknown, { execution_id: ExecutionId; step_id: ExecutionStepId; updates: TCancelExecutionStep }>(
+      (p) => `/api/agent-executions/${p.execution_id}/steps/${p.step_id}/cancel`,
       (p) => p.updates
     ),
     fromApiAgentExecutionDetail

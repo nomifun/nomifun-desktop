@@ -257,6 +257,7 @@ const ExecutionTopPanel: React.FC = () => {
             <ExecutionControls
               executionId={executionId}
               executionVersion={detail?.execution.version ?? 0}
+              automationControl={detail?.automation_control}
               status={status}
               inFlightCount={runningCount}
               resumeBlocked={resumeBlocked}
@@ -353,7 +354,7 @@ const ExecutionTopPanel: React.FC = () => {
         </Suspense>
       </div>
 
-      {detail && ['running', 'paused'].includes(status) && (
+      {detail && !detail.automation_control && ['running', 'paused'].includes(status) && (
         <ExecutionAdjustBox detail={detail} refetch={refetch} onApplied={returnToMain} />
       )}
 

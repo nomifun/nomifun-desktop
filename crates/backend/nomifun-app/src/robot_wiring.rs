@@ -582,17 +582,8 @@ impl AppRobotBackend {
                     .await?
                 {
                     nomifun_conversation::PublicTurnDeliveryState::Completed(receipt) => {
-                        // A terminal question is a formal public interaction,
-                        // and must survive even when this Turn has no answer.
-                        if let Some(question)=receipt.user_input_request.as_ref() {
-                            if let Some((source,presentation_id,text))=self.sessions.robot_question_output(&self.owner_user_id,&request.conversation_id,&key,question).await? {
-                                let _=tx.send(TurnEvent::Question {source,text,presentation_id}).await;
-                            }
-                            let _=tx.send(TurnEvent::Done).await;return Ok(());
-                        }
-                        let events=if delivered_bytes.is_empty() {completed_robot_delivery_events(&receipt)}
-                            else if receipt.result_ok==Some(true) {vec![TurnEvent::Done]}
-                            else {vec![robot_stream_failure(receipt.result_error.unwrap_or_else(||"The robot Turn failed".into()))]};
+                        let events=completed_robot_public_delivery_events(&self.sessions,&self.owner_user_id,request,&key,
+                            &receipt,after_seq,&mut delivered_bytes).await?;
                         for event in events {
                             if tx.send(event).await.is_err() { break; }
                         }
@@ -732,6 +723,38 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
 
 }
 
+
+/// The earlier output snapshot may precede the terminal commit observed by
+/// the delivery reader. Refresh only this original key/cursor before deciding
+/// that a completed answer lacks a source. The reader validates canonical
+/// parts and Host terminal proof; neither a receipt's text nor a new model
+/// invocation can fill missing output. Delivered prefixes remain deduplicated.
+pub(crate) async fn completed_robot_public_delivery_events(
+    sessions:&crate::router::nomi_core_session::NomiCoreSessionOwner,owner:&str,
+    request:&nomifun_robot::services::RobotTurnRequest,key:&str,
+    receipt:&nomifun_conversation::IdempotentMessageDelivery,after_seq:u64,
+    delivered_bytes:&mut std::collections::BTreeMap<String,usize>,
+) -> anyhow::Result<Vec<TurnEvent>> {
+    let public=sessions.robot_public_output(owner,&request.conversation_id,key,after_seq,delivered_bytes).await?;
+    let mut events=Vec::new();
+    for (source,text) in public.segments {
+        tracing::info!(agent_session_id=%request.conversation_id,request_id=%request.request_id,
+            source_event_id=%source.message_id,through_seq=source.through_seq,"robot: canonical public source queued for delivery");
+        events.push(TurnEvent::PublicSpeech {source,text});
+    }
+    // A terminal question is a formal public interaction even without an
+    // answer. Its existing exact presentation-source checks remain required.
+    if let Some(question)=receipt.user_input_request.as_ref() {
+        if let Some((source,presentation_id,text))=sessions.robot_question_output(owner,&request.conversation_id,key,question).await? {
+            events.push(TurnEvent::Question {source,text,presentation_id});
+        }
+        events.push(TurnEvent::Done);return Ok(events);
+    }
+    events.extend(if delivered_bytes.is_empty() {completed_robot_delivery_events(receipt)}
+        else if receipt.result_ok==Some(true) {vec![TurnEvent::Done]}
+        else {vec![robot_stream_failure(receipt.result_error.as_deref().unwrap_or("The robot Turn failed"))]});
+    Ok(events)
+}
 
 fn completed_robot_delivery_events(
     delivery: &nomifun_conversation::IdempotentMessageDelivery,

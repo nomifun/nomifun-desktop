@@ -293,12 +293,12 @@ mod tests {
         let session_id = AgentSessionId::from("0190f5fe-7c00-7a00-8000-000000000002");
         journal.append(json!({
             "event":"tool_call_completed", "step":1,
-            "call":{"call_id":"cancel-call","name":"exec_command","arguments":{"command":"bun","args":["wait.mjs"]}}
+            "call":{"call_id":"cancel-call","name":"start_process","arguments":{"cmd":"bun wait.mjs"}}
         }).to_string(), None, EngineJournalWrite::Progress).await.unwrap();
         journal.append(json!({
             "event":"host_tool_dispatch", "dispatch":{
                 "operation_id":"cancel-operation", "call_id":"cancel-call",
-                "capability_id":"workspace.process", "action_id":"workspace.process/exec", "model_name":"exec_command"
+                "capability_id":"workspace.process", "action_id":"workspace.process/start", "model_name":"start_process"
             }
         }).to_string(), None, EngineJournalWrite::Progress).await.unwrap();
         let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();

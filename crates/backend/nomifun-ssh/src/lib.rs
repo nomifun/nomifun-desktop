@@ -34,8 +34,10 @@ pub use agent::{
 };
 pub use events::SshEventEmitter;
 pub use pool::{
+    SshLinkCloseControl,
     PoolTuning, SshConnectionPool, SshLink, SshLinkKey, SshProbeOutcome, SshShutdownReport,
     SSH_DIAL_COOLDOWN, SSH_PING_TIMEOUT,
+    SshResourceObservation,
 };
 pub use routes::{ssh_host_routes, SshHostRouterState};
 pub use service::{DecryptedCredential, SshHostService, SshServiceError};

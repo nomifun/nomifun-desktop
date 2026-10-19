@@ -37,6 +37,9 @@ pub struct ProcessHandle {
 /// It cannot renew a lease or authorize I/O after registry retirement.
 #[derive(Clone)]
 pub struct ProcessTerminalWitness {
+    // Deliberately excludes Session/PlatformProcess and OutputBuffer (which has
+    // activity/reader callbacks). Keeping history output cannot pin a Job,
+    // process handle, PTY controller or a native reader task through this type.
     state: Arc<Mutex<SessionState>>,
     lifecycle: tokio::sync::watch::Receiver<u64>,
 }
@@ -54,6 +57,19 @@ impl ProcessTerminalWitness {
     pub fn terminal(&self, cursor: OutputCursor) -> Option<ProcessOutcome> {
         self.state.lock().expect("process terminal witness state lock is poisoned")
             .terminal.as_ref().map(|record| Session::outcome_from(record, cursor))
+    }
+
+    /// Capture the exact original terminal raw output without another reader
+    /// or a registry lookup. No output is exposed until native final draining
+    /// and EOF freezing have installed the original terminal record.
+    pub fn frozen_output(&self) -> Option<FrozenOutput> {
+        let state = self.state.lock().expect("process terminal witness state lock is poisoned");
+        state.terminal.as_ref().map(|record| match &record.kind {
+            TerminalKind::Exited { output, .. }
+            | TerminalKind::Cancelled { output }
+            | TerminalKind::TimedOut { output }
+            | TerminalKind::Lost { output, .. } => output.clone(),
+        })
     }
 }
 
@@ -564,6 +580,31 @@ impl ProcessSupervisor {
         Ok(session
             .terminal()
             .map(|terminal| session.outcome(&terminal, cursor)))
+    }
+
+    /// Authenticate one exact original owner and retain its read-only terminal
+    /// witness. This neither renews its lease nor restores I/O or registry
+    /// membership after retirement.
+    pub fn terminal_witness(
+        &self,
+        owner: &ProcessOwner,
+        session_id: &SessionId,
+    ) -> Result<ProcessTerminalWitness, ProcessError> {
+        let session = self.inspect_session(owner, session_id)?;
+        Ok(ProcessTerminalWitness {
+            state: Arc::clone(&session.state),
+            lifecycle: session.lifecycle.subscribe(),
+        })
+    }
+
+    /// Drop one exact terminal native registry owner after its consumer saved
+    /// the original frozen output. No signal, lease renewal, or sibling sweep.
+    /// `true` proves registry release only; reap comes from the original witness.
+    pub fn release_terminal(&self,owner:&ProcessOwner,session_id:&SessionId)->Result<bool,ProcessError> {
+        self.registry.release_terminal(session_id,owner).map_err(|error|match error {
+            LookupError::OwnerMismatch=>ProcessError::OwnerMismatch {session_id:*session_id},
+            LookupError::NotFound=>ProcessError::SessionNotFound {session_id:*session_id},
+        })
     }
 
     /// Subscribe before inspecting output. The exact owner's retained buffer
@@ -1925,7 +1966,7 @@ mod tests {
         SupervisorConfig, outcome_reaped, start_waiter,
     };
     use crate::{
-        CleanupReport, CommandSpec, ProcessOwner, ProcessPolicy,
+        CleanupReport, CommandSpec, FrozenOutput, ProcessOwner, ProcessPolicy,
         ProcessOutcome, NormalizedProcessRequest, OutputBuffer, OutputCursor, OutputSnapshot,
         OutputStream, PollResult, ProcessState, SessionId, Transport,
         platform::{ExitFact, PlatformProcess},
@@ -3069,6 +3110,7 @@ mod tests {
     async fn terminal_inspection_waits_for_final_output_freeze() {
         let (supervisor, handle, _fake, output) =
             register_fake(FakeOwner::exits_after(Duration::from_millis(5), 0)).await;
+        let witness = handle.terminal_witness();
         tokio::time::advance(Duration::from_millis(6)).await;
         let session = supervisor
             .registry
@@ -3076,6 +3118,7 @@ mod tests {
             .expect("exit-observed session should remain registered");
         wait_for_test_condition(|| session.exit_observation().is_some()).await;
         output.push(OutputStream::Stdout, b"final-drain-output");
+        assert!(witness.frozen_output().is_none());
 
         assert!(
             supervisor
@@ -3103,6 +3146,15 @@ mod tests {
             panic!("natural exit should stay Exited");
         };
         assert_eq!(output.raw_bytes(), b"final-drain-output");
+        let frozen = witness.frozen_output().expect("original terminal freeze is ready");
+        let persisted = serde_json::to_vec(&frozen).unwrap();
+        assert!(supervisor.registry.evict_oldest_finished());
+        drop(supervisor);
+        drop(session);
+        drop(handle);
+        drop(witness);
+        let replay: FrozenOutput = serde_json::from_slice(&persisted).unwrap();
+        assert_eq!(replay.snapshot_from(OutputCursor::START), output);
     }
 
     #[tokio::test]
@@ -4645,6 +4697,36 @@ mod tests {
             }).to_string()).unwrap();
         }
         assert!(no_dispatch);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test(flavor="multi_thread",worker_threads=3)]
+    async fn exact_terminal_release_drops_only_reaped_native_registration_and_preserves_live_sibling_and_witness() {
+        let directory=tempfile::tempdir().unwrap();let supervisor=ProcessSupervisor::new(SupervisorConfig::default());
+        let a_marker=directory.path().join("owned-a");let b_marker=directory.path().join("owned-b");
+        let a=supervisor.start(native_start_request(directory.path(),&a_marker)).await.unwrap();
+        let b=supervisor.start(native_start_request(directory.path(),&b_marker)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(15),async {while !a_marker.exists()||!b_marker.exists(){tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
+        assert!(!supervisor.release_terminal(&a.owner,&a.session_id).unwrap(),"live native authority is never a cache");
+        let foreign=ProcessOwner::new(uuid::Uuid::now_v7(),uuid::Uuid::now_v7());
+        assert!(supervisor.release_terminal(&foreign,&a.session_id).is_err());
+        let native_owner={let original=supervisor.registry.get(&a.session_id).unwrap();Arc::downgrade(&original.process)};
+        let witness=a.terminal_witness();let terminal=supervisor.cancel(&a.owner,&a.session_id).await.unwrap();
+        assert!(outcome_reaped(&terminal),"native cleanup must finish before registry release");
+        let active=match supervisor.registry.begin_poll(&a.session_id,&a.owner,Instant::now()) {Ok(active)=>active,Err(_)=>panic!("original reaped owner must remain registered before exact release")};
+        assert!(!supervisor.release_terminal(&a.owner,&a.session_id).unwrap(),"registered native observers retain the actual owner until they settle");
+        drop(active);
+        assert!(supervisor.release_terminal(&a.owner,&a.session_id).unwrap());
+        assert!(supervisor.registry.get(&a.session_id).is_none());
+        tokio::time::timeout(Duration::from_secs(3),async {while native_owner.upgrade().is_some(){tokio::task::yield_now().await;}}).await.unwrap();
+        // This only checks cache ownership after the real reap assertion above.
+        // The retained witness contains state/output, never PlatformProcess.
+        assert!(supervisor.release_terminal(&a.owner,&a.session_id).unwrap(),"registry absence is only an idempotent cache observation");
+        assert!(witness.frozen_output().is_some());assert!(outcome_reaped(&witness.terminal(OutputCursor::START).unwrap()));
+        let sibling=supervisor.status(&b.owner,&b.session_id).await.unwrap();
+        assert_eq!(sibling.pid,b.pid);assert!(supervisor.terminal_outcome_if_ready(&b.owner,&b.session_id,OutputCursor::START).unwrap().is_none());
+        assert!(outcome_reaped(&supervisor.cancel(&b.owner,&b.session_id).await.unwrap()));
+        assert!(supervisor.shutdown().await.is_exact());
     }
 
     #[cfg(any(unix, windows))]

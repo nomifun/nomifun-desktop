@@ -433,6 +433,23 @@ impl Registry {
         removed
     }
 
+    /// Release only this already-terminal native registration. Absence is a
+    /// registry fact, never independent evidence that a process was reaped.
+    pub(crate) fn release_terminal(&self,session_id:&SessionId,owner:&ProcessOwner)->Result<bool,LookupError> {
+        let removed={
+            let mut state=self.state.lock().expect("process registry lock is poisoned");
+            if let Some(retirement)=state.retiring.get(session_id) {
+                if &retirement.owner!=owner {return Err(LookupError::OwnerMismatch);}
+                return Ok(false);
+            }
+            let Some(entry)=state.active.get(session_id) else {return Ok(true);};
+            if &entry.owner!=owner {return Err(LookupError::OwnerMismatch);}
+            if entry.in_flight_actions!=0||!entry.session.is_reclaimable_terminal() {return Ok(false);}
+            state.active.remove(session_id)
+        };
+        drop(removed);self.bump_changes();Ok(true)
+    }
+
     pub(crate) fn begin_shutdown(&self) {
         let terminals = {
             let mut state = self

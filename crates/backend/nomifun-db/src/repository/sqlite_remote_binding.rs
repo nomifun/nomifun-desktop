@@ -1003,20 +1003,46 @@ impl IRemoteBindingRepository for SqliteRemoteBindingRepository {
         validate_uuid(owner_user_id, "owner_user_id")?;
         validate_uuid(agent_session_id, "agent_session_id")?;
         if event_type.trim().is_empty() {
-            return Err(DbError::Conflict(
-                "Remote event type must not be empty".to_owned(),
-            ));
+            return Err(DbError::Conflict("Remote event type must not be empty".to_owned()));
         }
         validate_digest(operation_key_digest, "operation_key_digest")?;
         let mut conn = self.pool.acquire().await?;
-        fetch_event_by_operation_key(
-            &mut conn,
-            owner_user_id,
-            agent_session_id,
-            event_type,
-            operation_key_digest,
-        )
-        .await
+        fetch_event_by_operation_key(&mut conn,owner_user_id,agent_session_id,event_type,operation_key_digest).await
+    }
+
+    async fn append_cancel_request_exact(&self,input:AppendNomiRemoteEventParams,
+        expected_operation_id:Option<&str>,expected_head_seq:u64,expected_binding_version:i64)
+        ->Result<AppendNomiRemoteEventResult,DbError> {
+        validate_uuid(&input.owner_user_id,"owner_user_id")?;validate_uuid(&input.agent_session_id,"agent_session_id")?;
+        if input.event_type!="session/cancel-requested" {return Err(DbError::Conflict("exact cancellation must use its original request event".into()));}
+        let payload:serde_json::Value=serde_json::from_str(&input.payload_json).map_err(|error|DbError::Conflict(error.to_string()))?;
+        let digest=payload.get("operation_key_digest").and_then(serde_json::Value::as_str)
+            .ok_or_else(||DbError::Conflict("Remote cancellation request lost its exact identity".into()))?;
+        validate_digest(digest,"operation_key_digest")?;
+        if payload.get("expected_operation_id").and_then(serde_json::Value::as_str)!=expected_operation_id
+            ||payload.get("expected_head_seq").and_then(serde_json::Value::as_u64)!=Some(expected_head_seq)
+            ||payload.get("expected_binding_version").and_then(serde_json::Value::as_i64)!=Some(expected_binding_version) {
+            return Err(DbError::Conflict("Remote cancellation target differs from its event".into()));
+        }
+        let mut conn=begin_immediate(&self.pool).await?;
+        let result=async {
+            if fetch_event_by_operation_key(&mut conn,&input.owner_user_id,&input.agent_session_id,"session/cancel-requested",digest).await?.is_some() {
+                return append_event_in_transaction(&mut conn,&input).await;
+            }
+            let target:Option<(Option<String>,i64,i64,String)>=sqlx::query_as("SELECT head.active_turn_id,head.last_seq,remote.binding_version,remote.state \
+                FROM nomi_remote_sessions remote JOIN agent_sessions session ON session.agent_session_id=remote.agent_session_id \
+                JOIN agent_session_heads head ON head.session_id=remote.agent_session_id WHERE remote.agent_session_id=? AND remote.owner_user_id=? \
+                AND session.state='live' AND json_extract(session.owner_ref_json,'$.principal_kind')='user' AND json_extract(session.owner_ref_json,'$.principal_id')=? \
+                AND session.remote_binding_id=remote.remote_binding_id AND session.remote_binding_version=remote.binding_version")
+                .bind(&input.agent_session_id).bind(&input.owner_user_id).bind(&input.owner_user_id).fetch_optional(&mut *conn).await?;
+            let Some((operation,seq,binding,state))=target else{return Err(DbError::Conflict("Remote cancellation binding is no longer current".into()));};
+            if operation.as_deref()!=expected_operation_id||u64::try_from(seq).ok()!=Some(expected_head_seq)||binding!=expected_binding_version
+                ||!matches!(state.as_str(),"opening"|"ready"|"failed"|"cancelled") {
+                return Err(DbError::Conflict("Remote cancellation target changed before acceptance".into()));
+            }
+            append_event_in_transaction(&mut conn,&input).await
+        }.await;
+        match result {Ok(result)=>{commit(&mut conn).await?;Ok(result)},Err(error)=>{rollback(&mut conn).await;Err(error)}}
     }
 
     async fn current_event_cursor(

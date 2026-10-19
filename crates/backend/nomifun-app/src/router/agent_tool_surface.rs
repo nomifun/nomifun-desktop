@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn all_guides_render_formal_schemas_and_valid_examples_without_constraint_copies() {
-        assert_eq!(tool_model_guides().len(),22);
+        assert_eq!(tool_model_guides().len(),23);
         for host_os in ["windows","macos","linux"] {
             let mut names=BTreeSet::new();
             let mut actions=BTreeSet::new();

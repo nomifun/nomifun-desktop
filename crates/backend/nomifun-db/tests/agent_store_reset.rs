@@ -90,6 +90,9 @@ async fn main_database_agent_store_tables_match_the_forward_migrated_baseline() 
     for migration in [
         include_str!("../migrations/007_retire_terminal_content_mirrors.sql"),
         include_str!("../migrations/008_retire_payload_object_placeholder.sql"),
+        include_str!("../migrations/009_cron_input_handoff.sql"),
+        include_str!("../migrations/010_mcp_oauth_authority.sql"),
+        include_str!("../migrations/011_cron_run_cancellation.sql"),
     ] {
         sqlx::raw_sql(migration).execute(&baseline).await.unwrap();
     }

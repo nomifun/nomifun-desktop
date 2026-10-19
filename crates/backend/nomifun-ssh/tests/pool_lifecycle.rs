@@ -596,18 +596,21 @@ async fn session_retirement_drains_the_admitted_exec_and_rejects_later_actions_a
         return;
     };
     let backend = harness.pool.backend_for(&link);
+    let Some(sibling_link) = harness.open_or_skip(NAME, "healthy-sibling", &first_host, "/").await else { return; };
+    let sibling = harness.pool.backend_for(&sibling_link);
     let marker = format!("/tmp/nomifun-ssh-retire-{}", nomifun_common::generate_id());
     let command = format!(
-        "printf started > {marker}; sleep 2; printf done >> {marker}",
+        "printf admitted-output; printf started > {marker}; sleep 60; printf done >> {marker}",
         marker = shell_path(&marker),
     );
     let execution = {
         let backend = Arc::clone(&backend);
-        tokio::spawn(async move { backend.run_command(&command, 15_000).await })
+        tokio::spawn(async move { backend.run_command(&command, 120_000).await })
     };
 
     // The SFTP marker proves the command passed action admission and reached the
-    // remote shell. Retirement after this point must wait for that exact winner.
+    // remote shell. Explicit close must interrupt/drain that same original
+    // receiver, preserve its output and wait for its real settlement.
     let marker_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         if backend
@@ -625,16 +628,10 @@ async fn session_retirement_drains_the_admitted_exec_and_rejects_later_actions_a
     }
 
     harness.pool.retire_agent_session("session-retire");
-    let mut cleanup = {
+    let cleanup = {
         let pool = harness.pool.clone();
         tokio::spawn(async move { pool.close_conversation("session-retire").await })
     };
-    assert!(
-        tokio::time::timeout(Duration::from_millis(150), &mut cleanup)
-            .await
-            .is_err(),
-        "cleanup returned before the admitted exec reached a terminal result"
-    );
 
     let post_retire = backend
         .write_file(&marker, b"must-not-publish".to_vec())
@@ -653,12 +650,16 @@ async fn session_retirement_drains_the_admitted_exec_and_rejects_later_actions_a
         .expect_err("a retired Session must not publish another host link");
     assert!(matches!(acquire, SshDialError::SessionRetired), "{acquire:?}");
 
-    let output = tokio::time::timeout(SETTLE, execution)
+    let output = tokio::time::timeout(Duration::from_secs(8), execution)
         .await
-        .expect("the admitted exec should reach a terminal result")
-        .expect("the exec task should not panic")
-        .expect("the admitted exec should complete");
-    assert!(output.exit_code == 0 && !output.timed_out, "{output:?}");
+        .expect("explicit close must preempt the original sixty-second command")
+        .expect("the original exec task should settle without being dropped");
+    match output {
+        Ok(output) => assert!(!output.timed_out && output.stdout.contains("admitted-output"),
+            "a proven original terminal keeps its actual status and output: {output:?}"),
+        Err(error) => assert!(error.contains("retired") && error.contains("admitted-output"),
+            "without its original sentinel the interrupted command stays unknown with its partial output: {error}"),
+    }
     let teardowns = tokio::time::timeout(SETTLE, cleanup)
         .await
         .expect("cleanup should finish after the action drains")
@@ -668,7 +669,11 @@ async fn session_retirement_drains_the_admitted_exec_and_rejects_later_actions_a
         matches!(&teardowns[0], SshTeardown::Reaped { .. }),
         "cleanup must retain exact positive teardown evidence: {teardowns:?}"
     );
-    assert_eq!(harness.pool.active_link_count(), 0);
+    assert_eq!(harness.pool.active_link_count(), 1, "closing this Session must preserve the sibling service");
+    let healthy = sibling.run_command("printf healthy-after-close", 2_000).await.unwrap();
+    assert_eq!(healthy.exit_code, 0); assert!(healthy.stdout.contains("healthy-after-close"));
+    assert_eq!(sibling.run_command(&format!("rm -f -- {}", shell_path(&marker)), 2_000).await.unwrap().exit_code, 0);
+    harness.pool.shutdown_all().await;
 }
 
 fn shell_path(path: &str) -> String {

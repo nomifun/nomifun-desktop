@@ -4,6 +4,14 @@
     "registry_version": "canonical-errors-v1",
     "entries": [
       {
+        "code": "AGENT_EXECUTION_ADMISSION_PENDING",
+        "version": 1,
+        "class": "runtime",
+        "retry": "retry_after_state_change",
+        "terminal_scope": "request",
+        "http_status": 409
+      },
+      {
         "code": "AGENT_PRESET_NOT_FOUND",
         "version": 1,
         "class": "resource",
@@ -309,5 +317,5 @@
       }
     ]
   },
-  "payload_digest": "ff3b5f493e1074300216596660500c204008de331b172965b241a5d2b69a59a6"
+  "payload_digest": "075ed8b736b67ac4fc8632d2a254e1b28924e36db6a51ab5e7ef821af5cf5db0"
 }

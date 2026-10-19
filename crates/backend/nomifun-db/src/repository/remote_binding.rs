@@ -140,6 +140,14 @@ pub trait IRemoteBindingRepository: Send + Sync {
         &self,
         input: AppendNomiRemoteEventParams,
     ) -> Result<AppendNomiRemoteEventResult, DbError>;
+    /// Persist the original cancellation request only if its captured canonical
+    /// Turn (or opening boundary) and binding still match in the same writer.
+    async fn append_cancel_request_exact(&self,input:AppendNomiRemoteEventParams,
+        expected_operation_id:Option<&str>,expected_head_seq:u64,expected_binding_version:i64)
+        ->Result<AppendNomiRemoteEventResult,DbError> {
+        let _=(input,expected_operation_id,expected_head_seq,expected_binding_version);
+        Err(DbError::Conflict("exact Remote cancellation owner is unavailable".into()))
+    }
     /// Find the first event for one exact operation digest and event type.
     ///
     /// The query is owner-scoped and is intentionally exposed separately from

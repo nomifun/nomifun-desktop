@@ -124,6 +124,11 @@ pub struct SshLink {
     key: SshLinkKey,
     owner_id: String,
     handle: RwLock<Option<Arc<SshConnectionHandle>>>,
+    /// Exact shells displaced by recovery retain their native owner until
+    /// positive close proof. A concurrent user close must not lose either the
+    /// old channel or a new channel whose opening was already in flight.
+    retired_handles:Mutex<Vec<Arc<SshConnectionHandle>>>,
+    unconfirmed_dial:AtomicBool,
     /// The last cwd the shell's sentinel actually proved. Replayed as the remote
     /// cwd on redial, because a reconnect that silently drops the model back into
     /// `$HOME` is worse than a visible failure.
@@ -161,6 +166,8 @@ impl SshLink {
             key,
             owner_id: owner_id.to_string(),
             handle: RwLock::new(None),
+            retired_handles:Mutex::new(Vec::new()),
+            unconfirmed_dial:AtomicBool::new(false),
             last_cwd: std::sync::Mutex::new(remote_cwd.to_string()),
             state_tx,
             changed_at: AtomicI64::new(nomifun_common::now_ms()),
@@ -267,11 +274,47 @@ impl LinkCloseCompletion {
 struct TeardownReceiptKey {
     link: SshLinkKey,
     instance_id: u64,
+    owner_id:String,
+}
+
+/// Exact original pool incarnations, including retained teardown uncertainty.
+/// A key or absent socket alone is never a remote process exit receipt.
+#[derive(Clone,Debug)]
+pub struct SshResourceObservation {
+    pub pool_instance_id:String,pub agent_session_id:String,pub ssh_host_id:String,pub instance_id:u64,
+    pub registered:bool,pub phase:Option<crate::state::SshLinkPhase>,
+    pub closing:bool,pub close_in_flight:bool,pub close_confirmed:Option<bool>,pub cleanup_unconfirmed:bool,
+    pub display_name:Option<String>,
+}
+
+/// Capability captured from one authenticated original link or its immutable
+/// teardown receipt. It cannot select a successor or dial a replacement.
+#[derive(Clone)]
+pub struct SshLinkCloseControl {
+    pool:Arc<PoolInner>,
+    link:Option<Arc<SshLink>>,
+    receipt:Option<SshTeardown>,
+}
+
+impl SshLinkCloseControl {
+    pub fn request(&self) {
+        if let Some(link)=&self.link {
+            link.actions.retire();
+            if let Ok(handle)=link.handle.try_read()&&let Some(handle)=handle.as_ref() {handle.request_retirement();}
+            for handle in link.retired_handles.lock().unwrap().iter() {handle.request_retirement();}
+            self.pool.start_link_teardown(link.clone());
+        }
+    }
+    pub async fn settled(&self)->SshTeardown {
+        match (&self.link,&self.receipt) {(Some(link),_)=>link.close.wait().await,(_,Some(receipt))=>receipt.clone(),
+            _=>unreachable!("exact close control always owns an original link or receipt")}
+    }
 }
 
 #[derive(Default)]
 struct TeardownReceipts {
     entries: DashMap<TeardownReceiptKey, SshTeardown>,
+    owners:DashMap<TeardownReceiptKey,Arc<SshLink>>,
 }
 
 impl TeardownReceipts {
@@ -306,7 +349,7 @@ impl TeardownReceipts {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         keys.into_iter()
-            .filter(|key| self.entries.remove(key).is_some())
+            .filter(|key| {self.owners.remove(key);self.entries.remove(key).is_some()})
             .count()
     }
 
@@ -317,6 +360,7 @@ impl TeardownReceipts {
             .is_some_and(|entry| !matches!(entry.value(), SshTeardown::Lost { .. }))
         {
             self.entries.remove(key);
+            self.owners.remove(key);
         }
     }
 }
@@ -336,6 +380,9 @@ struct ActionAdmissionState {
 struct ActionAdmission {
     state: Mutex<ActionAdmissionState>,
     drained: Notify,
+    // Only permanent Session admission uses this lazy original bulk close.
+    // Link/global action gates do not construct another close owner here.
+    session_close: OnceLock<Arc<BulkCloseCompletion<Vec<SshTeardown>>>>,
 }
 
 impl ActionAdmission {
@@ -353,9 +400,7 @@ impl ActionAdmission {
     fn retire(&self) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.retired = true;
-        if state.in_flight == 0 {
-            self.drained.notify_waiters();
-        }
+        self.drained.notify_waiters();
     }
 
     fn is_retired(&self) -> bool {
@@ -381,6 +426,10 @@ impl ActionAdmission {
             }
             drained.await;
         }
+    }
+
+    async fn wait_retired(&self) {
+        loop {let retired=self.drained.notified();if self.is_retired(){return;}retired.await;}
     }
 }
 
@@ -443,6 +492,33 @@ pub struct SshShutdownReport {
     pub lost: usize,
     /// Already gone when we got there; nothing to reap and nothing wrong.
     pub already_down: usize,
+}
+
+/// One original bulk owner and its immutable terminal report. Observers can
+/// leave/retry without cancelling producers, losing a final sweep, or treating
+/// an emptied live-link map as a new physical cleanup proof.
+struct BulkCloseCompletion<T> {
+    started: AtomicBool,
+    receipt: OnceLock<T>,
+    finished: Notify,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl<T> Default for BulkCloseCompletion<T> {
+    fn default() -> Self { Self { started: AtomicBool::new(false), receipt: OnceLock::new(),
+        finished: Notify::new(), worker: Mutex::new(None) } }
+}
+
+impl<T: Clone> BulkCloseCompletion<T> {
+    fn try_start(&self) -> bool { self.started.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() }
+    fn finish(&self, receipt: T) { if self.receipt.set(receipt).is_ok() { self.finished.notify_waiters(); } }
+    async fn wait(&self) -> T {
+        loop {
+            let finished = self.finished.notified();
+            if let Some(receipt) = self.receipt.get() { return receipt.clone(); }
+            finished.await;
+        }
+    }
 }
 
 impl SshShutdownReport {
@@ -534,6 +610,7 @@ impl HostGate {
 }
 
 struct PoolInner {
+    instance_id:String,
     service: SshHostService,
     known_hosts: PathBuf,
     events: SshEventEmitter,
@@ -546,6 +623,7 @@ struct PoolInner {
     teardown_receipts: TeardownReceipts,
     /// Process-wide admission used only to make `shutdown_all` a true fence.
     global_admission: Arc<ActionAdmission>,
+    shutdown: Arc<BulkCloseCompletion<SshShutdownReport>>,
     /// Permanent per-AgentSession fences. Session UUIDs are never reused, so a
     /// retired entry intentionally lives for the process lifetime.
     session_admissions: DashMap<String, Arc<ActionAdmission>>,
@@ -577,6 +655,7 @@ impl SshConnectionPool {
         tuning: PoolTuning,
     ) -> Self {
         Self(Arc::new(PoolInner {
+            instance_id:uuid::Uuid::now_v7().to_string(),
             service,
             known_hosts,
             events,
@@ -585,6 +664,7 @@ impl SshConnectionPool {
             next_link_instance: AtomicU64::new(1),
             teardown_receipts: TeardownReceipts::default(),
             global_admission: Arc::new(ActionAdmission::default()),
+            shutdown: Arc::new(BulkCloseCompletion::default()),
             session_admissions: DashMap::new(),
             supervisors: DashMap::new(),
             gates: DashMap::new(),
@@ -738,6 +818,7 @@ impl SshConnectionPool {
                 &credential,
             )
             .await;
+        link.retired_handles.lock().unwrap().retain(|handle|!handle.channels_reaped());
         drop(action_lease);
         result
     }
@@ -826,8 +907,69 @@ impl SshConnectionPool {
             .collect()
     }
 
+    pub fn resource_instances(&self,user_id:&str)->Vec<SshResourceObservation> {
+        let mut resources=std::collections::BTreeMap::new();
+        for entry in self.0.links.iter().filter(|entry|entry.owner_id==user_id) {
+            let receipt=entry.close.receipt.get();
+            let closing=entry.actions.is_retired();
+            let temporary_unknown=match entry.handle.try_read() {Ok(handle)=>handle.as_ref().is_some_and(|handle|handle.has_unconfirmed_cleanup()),Err(_)=>true};
+            resources.insert((entry.key.conversation_id.clone(),entry.key.ssh_host_id.as_str().to_owned(),entry.instance_id),SshResourceObservation {
+                pool_instance_id:self.0.instance_id.clone(),agent_session_id:entry.key.conversation_id.clone(),ssh_host_id:entry.key.ssh_host_id.as_str().into(),instance_id:entry.instance_id,
+                registered:true,phase:Some(entry.state().phase()),
+                closing,close_in_flight:entry.close.started.load(Ordering::Acquire)&&receipt.is_none(),
+                close_confirmed:receipt.map(|receipt|matches!(receipt,SshTeardown::Reaped {..})),
+                cleanup_unconfirmed:receipt.is_some_and(|receipt|!matches!(receipt,SshTeardown::Reaped {..}))||!entry.retired_handles.lock().unwrap().is_empty()
+                    ||entry.unconfirmed_dial.load(Ordering::Acquire)||temporary_unknown,display_name:None,
+            });
+        }
+        for entry in self.0.teardown_receipts.entries.iter().filter(|entry|entry.key().owner_id==user_id) {
+            let key=entry.key();
+            resources.entry((key.link.conversation_id.clone(),key.link.ssh_host_id.as_str().to_owned(),key.instance_id)).or_insert_with(||SshResourceObservation {
+                pool_instance_id:self.0.instance_id.clone(),agent_session_id:key.link.conversation_id.clone(),ssh_host_id:key.link.ssh_host_id.as_str().into(),instance_id:key.instance_id,
+                registered:false,phase:Some(crate::state::SshLinkPhase::Closed),
+                closing:true,close_in_flight:false,close_confirmed:Some(matches!(entry.value(),SshTeardown::Reaped {..})),
+                cleanup_unconfirmed:!matches!(entry.value(),SshTeardown::Reaped {..}),display_name:None,
+            });
+        }
+        resources.into_values().collect()
+    }
+
+    /// Short exact-instance admission only. Original teardown owns the drain,
+    /// transport result and immutable receipt after the caller has returned.
+    pub fn request_close_instance(&self,user_id:&str,key:&SshLinkKey,pool_instance_id:&str,instance_id:u64)->Result<SshResourceObservation,String> {
+        self.prepare_close_instance(user_id,key,pool_instance_id,instance_id)?.request();
+        self.resource_instances(user_id).into_iter().find(|resource|resource.agent_session_id==key.conversation_id
+            &&resource.ssh_host_id==key.ssh_host_id.as_str()&&resource.instance_id==instance_id)
+            .ok_or_else(||"the original SSH close receipt is unavailable".into())
+    }
+
+    pub fn prepare_close_instance(&self,user_id:&str,key:&SshLinkKey,pool_instance_id:&str,instance_id:u64)->Result<SshLinkCloseControl,String> {
+        if pool_instance_id!=self.0.instance_id {return Err("SSH resource pool incarnation changed".into());}
+        let link=self.0.links.get(key).map(|entry|Arc::clone(entry.value()));
+        if let Some(link)=link.filter(|link|link.instance_id==instance_id&&link.owner_id==user_id) {
+            Ok(SshLinkCloseControl {pool:self.0.clone(),link:Some(link),receipt:None})
+        } else {
+            let receipt=TeardownReceiptKey {link:key.clone(),instance_id,owner_id:user_id.into()};
+            if let Some(owner)=self.0.teardown_receipts.owners.get(&receipt) {
+                return Ok(SshLinkCloseControl {pool:self.0.clone(),link:Some(owner.value().clone()),receipt:None});
+            }
+            let receipt=self.0.teardown_receipts.entries.get(&receipt).map(|entry|entry.value().clone())
+                .ok_or_else(||"the original SSH link incarnation is unavailable or belongs to another owner".to_string())?;
+            Ok(SshLinkCloseControl {pool:self.0.clone(),link:None,receipt:Some(receipt)})
+        }
+    }
+
     pub fn active_link_count(&self) -> usize {
         self.0.links.len()
+    }
+
+    /// Inventory only. Callers must authorize each canonical Session before
+    /// exposing a row; retained teardown losses outlive the socket map.
+    pub fn retained_resource_sessions(&self)->Vec<String> {
+        let mut sessions=self.0.links.iter().map(|entry|entry.key().conversation_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        sessions.extend(self.0.teardown_receipts.entries.iter().map(|entry|entry.key().link.conversation_id.clone()));
+        sessions.into_iter().collect()
     }
 
     /// Confirm that every currently retained SSH teardown receipt for this
@@ -857,33 +999,69 @@ impl SshConnectionPool {
         let receipt_key = TeardownReceiptKey {
             link: link.key.clone(),
             instance_id: link.instance_id,
+            owner_id:link.owner_id.clone(),
         };
         let teardown = self.close_exact_link(link).await;
         self.0.teardown_receipts.discard_proven(&receipt_key);
         teardown
     }
 
-    async fn close_exact_link(&self, link: Arc<SshLink>) -> SshTeardown {
+    fn request_exact_link_close(&self, link: &Arc<SshLink>) {
         // Retire while the exact map entry is still published. An action that
         // acquired its lease first is allowed to finish and cleanup waits; an
         // action arriving now is rejected before it can read a handle.
         link.actions.retire();
-        self.0.start_link_teardown(Arc::clone(&link));
+        if let Ok(handle) = link.handle.try_read() && let Some(handle) = handle.as_ref() {
+            handle.request_retirement();
+        }
+        for handle in link.retired_handles.lock().unwrap().iter() { handle.request_retirement(); }
+        link.wake.notify_waiters();
+        self.0.start_link_teardown(Arc::clone(link));
+    }
+
+    async fn close_exact_link(&self, link: Arc<SshLink>) -> SshTeardown {
+        self.request_exact_link_close(&link);
         link.close.wait().await
     }
 
     /// Close every link bound to a conversation (a session may have been rebound
     /// and still hold a link to its previous host).
     pub async fn close_conversation(&self, conversation_id: &str) -> Vec<SshTeardown> {
+        let admission = self.0.session_admission_for(conversation_id);
+        let completion = admission.session_close.get_or_init(|| Arc::new(BulkCloseCompletion::default())).clone();
+        if completion.try_start() {
+            let pool = self.clone(); let conversation_id = conversation_id.to_owned();
+            let native = tokio::spawn(async move { pool.close_conversation_owned(&conversation_id).await });
+            let original = completion.clone();
+            *completion.worker.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tokio::spawn(async move {
+                let receipt = match native.await {
+                    Ok(teardowns) => teardowns,
+                    Err(error) => vec![SshTeardown::Lost { detail: format!("original SSH Session close owner did not settle: {error}") }],
+                };
+                original.finish(receipt);
+            }));
+        }
+        completion.wait().await
+    }
+
+    async fn close_conversation_owned(&self, conversation_id: &str) -> Vec<SshTeardown> {
         let session_admission = self.0.session_admission_for(conversation_id);
         // This is the permanent AgentSession fence. It must precede both the
         // drain and the key sweep so an acquire cannot publish a new host link
         // after the sweep took its snapshot.
         session_admission.retire();
+        let mut links = self.0.links_where(|key| key.conversation_id == conversation_id);
+        for link in &links { self.request_exact_link_close(link); }
+        // Notify every existing original shell before waiting for its action
+        // lease. A long command must not postpone its own retirement signal.
         session_admission.wait_drained().await;
-        let links = self
-            .0
-            .links_where(|key| key.conversation_id == conversation_id);
+        // A producer admitted before the Session fence can register/adopt its
+        // exact owner after the first snapshot. No such producer remains now.
+        for link in self.0.links_where(|key| key.conversation_id == conversation_id) {
+            if !links.iter().any(|original| Arc::ptr_eq(original, &link)) {
+                self.request_exact_link_close(&link); links.push(link);
+            }
+        }
         let mut closed_instances = HashSet::with_capacity(links.len());
         let mut teardowns = Vec::with_capacity(links.len());
         for link in links {
@@ -925,19 +1103,59 @@ impl SshConnectionPool {
 
     /// Quiesce: refuse new links, then close everything that is open.
     pub async fn shutdown_all(&self) -> SshShutdownReport {
+        let completion = self.0.shutdown.clone();
+        if completion.try_start() {
+            let pool = self.clone();
+            let native = tokio::spawn(async move { pool.shutdown_all_owned().await });
+            let original = completion.clone();
+            *completion.worker.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tokio::spawn(async move {
+                let report = match native.await {
+                    Ok(report) => report,
+                    Err(error) => {
+                        warn!(%error, "original SSH shutdown owner did not settle");
+                        SshShutdownReport { lost: 1, ..Default::default() }
+                    }
+                };
+                original.finish(report);
+            }));
+        }
+        completion.wait().await
+    }
+
+    async fn shutdown_all_owned(&self) -> SshShutdownReport {
         // Refusing first is what makes the count honest — a link opened while we
         // were closing would be missed by the sweep and leak into shutdown.
         self.0.quiescing.store(true, Ordering::SeqCst);
         self.0.global_admission.retire();
+        let mut links = self.0.links_where(|_| true);
+        for link in &links { self.request_exact_link_close(link); }
         self.0.global_admission.wait_drained().await;
+        for link in self.0.links_where(|_| true) {
+            if !links.iter().any(|original| Arc::ptr_eq(original, &link)) {
+                self.request_exact_link_close(&link); links.push(link);
+            }
+        }
         let mut report = SshShutdownReport::default();
-        for key in self.0.keys_where(|_| true) {
-            match self.close_link(&key).await {
+        let mut closed = HashSet::new();
+        let mut teardowns = Vec::with_capacity(links.len());
+        for link in links {
+            let key = TeardownReceiptKey { link: link.key.clone(), instance_id: link.instance_id, owner_id: link.owner_id.clone() };
+            if closed.insert(key.clone()) { teardowns.push((key, self.close_exact_link(link).await)); }
+        }
+        // A previous exact close can remove a link while retaining its Lost
+        // native owner. Map absence cannot erase that uncertainty at Quit.
+        for entry in self.0.teardown_receipts.entries.iter() {
+            if matches!(entry.value(), SshTeardown::Lost { .. }) && closed.insert(entry.key().clone()) {
+                teardowns.push((entry.key().clone(), entry.value().clone()));
+            }
+        }
+        for (key, teardown) in teardowns {
+            match teardown {
                 SshTeardown::Reaped { .. } => report.reaped += 1,
                 SshTeardown::Lost { detail } => {
                     warn!(
-                        conversation_id = %key.conversation_id,
-                        ssh_host_id = %key.ssh_host_id,
+                        conversation_id = %key.link.conversation_id,
+                        ssh_host_id = %key.link.ssh_host_id,
                         detail = %detail,
                         "ssh link let go of without proof the remote shell died"
                     );
@@ -971,7 +1189,7 @@ impl SshConnectionPool {
         // honour.
         let handle = match self
             .0
-            .dial_host(user_id, ssh_host_id, ".", DialIntent::Fresh)
+            .dial_host(user_id, ssh_host_id, ".", DialIntent::Fresh,None,None)
             .await
         {
             Ok(handle) => handle,
@@ -1162,13 +1380,15 @@ impl PoolInner {
             // This task, rather than any HTTP/action caller, owns the close. A
             // cancelled waiter merely stops waiting; teardown continues and its
             // terminal receipt remains available to the next caller.
+            if let Some(handle)=link.handle.read().await.as_ref() {handle.request_retirement();}
+            for handle in link.retired_handles.lock().unwrap().iter() {handle.request_retirement();}
+            link.wake.notify_waiters();
             link.actions.wait_drained().await;
             let teardown = pool.tear_down(&link).await;
+            let key=TeardownReceiptKey {link:link.key.clone(),instance_id:link.instance_id,owner_id:link.owner_id.clone()};
+            if matches!(teardown,SshTeardown::Lost {..}) {pool.teardown_receipts.owners.insert(key.clone(),link.clone());}
             pool.teardown_receipts.record(
-                TeardownReceiptKey {
-                    link: link.key.clone(),
-                    instance_id: link.instance_id,
-                },
+                key,
                 teardown.clone(),
             );
             link.close.finish(teardown);
@@ -1254,10 +1474,15 @@ impl PoolInner {
     }
 
     async fn ensure_connected(self: &Arc<Self>, link: &Arc<SshLink>) -> Result<(), SshDialError> {
+        if link.actions.is_retired() {return Err(SshDialError::LinkRetired);}
         if link.has_live_transport().await {
             return Ok(());
         }
-        let _turn = link.transition.lock().await;
+        let _turn=tokio::select! {biased;
+            _=link.actions.wait_retired()=>return Err(SshDialError::LinkRetired),
+            turn=link.transition.lock()=>turn,
+        };
+        if link.actions.is_retired() {return Err(SshDialError::LinkRetired);}
         // Someone may have dialled while we queued for the lock.
         if link.has_live_transport().await {
             return Ok(());
@@ -1268,6 +1493,7 @@ impl PoolInner {
                 self.adopt(link, handle).await;
                 Ok(())
             }
+            Err(SshDialError::LinkRetired)=>Err(SshDialError::LinkRetired),
             Err(e) => {
                 self.fail(link, &e).await;
                 Err(e)
@@ -1278,7 +1504,12 @@ impl PoolInner {
     /// Install a freshly dialled handle and let everyone know.
     async fn adopt(self: &Arc<Self>, link: &Arc<SshLink>, handle: SshConnectionHandle) {
         let fingerprint = handle.fingerprint.clone();
-        *link.handle.write().await = Some(Arc::new(handle));
+        {
+            let mut slot=link.handle.write().await;
+            let admission=link.actions.state.lock().unwrap();
+            if admission.retired {handle.request_retirement();}
+            *slot=Some(Arc::new(handle));
+        }
         self.publish(
             link,
             SshLinkState::Connected {
@@ -1325,11 +1556,14 @@ impl PoolInner {
         link: &Arc<SshLink>,
         intent: DialIntent,
     ) -> Result<SshConnectionHandle, SshDialError> {
+        if link.actions.is_retired() {return Err(SshDialError::LinkRetired);}
         self.dial_host(
             &link.owner_id,
             &link.key.ssh_host_id,
             &link.last_cwd(),
             intent,
+            Some(&link.actions),
+            Some(&link.unconfirmed_dial),
         )
         .await
     }
@@ -1342,26 +1576,35 @@ impl PoolInner {
         host_id: &SshHostId,
         cwd: &str,
         intent: DialIntent,
+        retirement:Option<&Arc<ActionAdmission>>,
+        unconfirmed:Option<&AtomicBool>,
     ) -> Result<SshConnectionHandle, SshDialError> {
         let gate = self.gate_for(host_id);
         if let Some(err) = gate.blocked(intent) {
             return Err(err);
         }
-        let _queue = gate.dialing.lock().await;
+        let _queue=tokio::select! {biased;
+            _=async {match retirement {Some(retirement)=>retirement.wait_retired().await,None=>std::future::pending().await}}=>return Err(SshDialError::LinkRetired),
+            queue=gate.dialing.lock()=>queue,
+        };
+        if retirement.is_some_and(|retirement|retirement.is_retired()) {return Err(SshDialError::LinkRetired);}
         // Whoever held the gate ahead of us may have just learned something
         // terminal about this host.
         if let Some(err) = gate.blocked(intent) {
             return Err(err);
         }
 
+        let shell_started=Arc::new(AtomicBool::new(false));
         let outcome = match self.service.decrypt_credential(user_id, host_id).await {
             // Bounded here and nowhere else: the transport has no connect or
             // handshake timeout, and this await is held under the per-host dial
             // lock, so an unbounded one blocks every other session's `acquire` on
             // this host — the agent's included — not just the caller's.
-            Ok(cred) => match tokio::time::timeout(
+            Ok(cred) => {
+                let _native=match retirement {Some(retirement)=>Some(retirement.admit().ok_or(SshDialError::LinkRetired)?),None=>None};
+                match tokio::time::timeout(
                 SSH_DIAL_TIMEOUT,
-                SshConnectionHandle::connect(cred, self.known_hosts.clone(), cwd),
+                SshConnectionHandle::connect_tracked(cred, self.known_hosts.clone(), cwd,shell_started.clone()),
             )
             .await
             {
@@ -1370,9 +1613,11 @@ impl PoolInner {
                     "ssh dial timed out after {}s",
                     SSH_DIAL_TIMEOUT.as_secs()
                 ))),
+                }
             },
             Err(e) => Err(SshDialError::from(e)),
         };
+        if outcome.is_err()&&shell_started.load(Ordering::Acquire)&&let Some(unconfirmed)=unconfirmed {unconfirmed.store(true,Ordering::Release);}
         match &outcome {
             Ok(_) => gate.clear(),
             Err(e) => gate.record_failure(e.clone(), self.tuning.dial_cooldown),
@@ -1393,7 +1638,9 @@ impl PoolInner {
     /// same session instead of redialling (which would cost a handshake and
     /// re-touch `known_hosts` for nothing).
     async fn recycle_shell(&self, link: &Arc<SshLink>, detail: &str) {
-        let _turn = link.transition.lock().await;
+        if link.actions.is_retired() {return;}
+        let _turn=tokio::select! {biased;_=link.actions.wait_retired()=>return,turn=link.transition.lock()=>turn};
+        if link.actions.is_retired() {return;}
         let Some(stale) = link.current_handle().await else {
             return;
         };
@@ -1415,17 +1662,37 @@ impl PoolInner {
         );
 
         let cwd = link.last_cwd();
-        match stale.reopen_channels(&cwd).await {
+        let Some(_native)=link.actions.admit() else {return;};
+        {
+            let mut retired=link.retired_handles.lock().unwrap();
+            if !retired.iter().any(|handle|Arc::ptr_eq(handle,&stale)) {retired.push(stale.clone());}
+        }
+        let shell_started=Arc::new(AtomicBool::new(false));
+        match stale.reopen_channels(&cwd,shell_started.clone()).await {
             Ok(fresh) => {
                 let fingerprint = fresh.fingerprint.clone();
-                *link.handle.write().await = Some(Arc::new(fresh));
+                let fresh=Arc::new(fresh);
+                let installed={
+                    let mut slot=link.handle.write().await;
+                    let admission=link.actions.state.lock().unwrap();
+                    let mut retired=link.retired_handles.lock().unwrap();
+                    if admission.retired {
+                        fresh.request_retirement();retired.push(fresh.clone());false
+                    } else {
+                        *slot=Some(fresh);true
+                    }
+                };
+                if !installed {return;}
                 // The stale shell is wedged, so its close is unlikely to be
                 // provable; we only want its channel off the transport.
                 let proof = stale.shell().close(self.tuning.close_budget).await;
                 debug!(reaped = proof.is_reaped(), "closed the recycled remote shell");
+                if proof.is_reaped()&&stale.channels_reaped() {link.retired_handles.lock().unwrap().retain(|handle|!Arc::ptr_eq(handle,&stale));}
+                if link.actions.is_retired() {return;}
                 self.publish(link, SshLinkState::Connected { fingerprint });
             }
             Err(e) => {
+                if shell_started.load(Ordering::Acquire) {link.unconfirmed_dial.store(true,Ordering::Release);}
                 *link.handle.write().await = None;
                 let retryable = e.is_retryable();
                 self.publish(
@@ -1451,7 +1718,7 @@ impl PoolInner {
             if !slot.as_ref().is_some_and(|h| h.is_transport_closed()) {
                 return;
             }
-            *slot = None;
+            if let Some(old)=slot.take() {link.retired_handles.lock().unwrap().push(old);}
         }
         if matches!(
             link.state(),
@@ -1471,10 +1738,10 @@ impl PoolInner {
     /// Close a link that has already been removed from the map, and publish what
     /// could be proven.
     async fn tear_down(&self, link: &Arc<SshLink>) -> SshTeardown {
-        // Stop the supervisor *before* queueing for the transition lock: it may be
-        // asleep on a backoff rung while holding that lock, and shutdown must not
-        // have to wait out a ladder. Aborting at an await point drops its guard.
-        self.abort_supervisor(&link.key);
+        // The original supervisor is a real producer too. Retirement wakes its
+        // passive waits; native dial/open already claimed must return to this
+        // owner before close. Never abort a Future holding a remote channel.
+        let supervisor_error=self.retire_supervisor(&link.key).await;
 
         let teardown = match tokio::time::timeout(
             self.tuning.close_budget,
@@ -1487,6 +1754,7 @@ impl PoolInner {
                 detail: "link busy; could not take it over to close it".to_string(),
             },
         };
+        let teardown=match supervisor_error {None=>teardown,Some(error)=>SshTeardown::Lost {detail:format!("original SSH supervisor did not settle: {error}; {teardown:?}")}};
         self.publish(
             link,
             SshLinkState::Closed {
@@ -1498,30 +1766,44 @@ impl PoolInner {
 
     /// Take the handle away and try to prove the remote shell died.
     async fn reap(&self, link: &Arc<SshLink>) -> SshTeardown {
-        let Some(handle) = link.handle.write().await.take() else {
+        let current=link.handle.write().await.take();
+        let mut handles=link.retired_handles.lock().unwrap().clone();
+        if let Some(current)=current {if !handles.iter().any(|handle|Arc::ptr_eq(handle,&current)) {handles.push(current);}}
+        if handles.is_empty() {
+            if link.unconfirmed_dial.load(Ordering::Acquire) {return SshTeardown::Lost {detail:"a previous native shell initialization returned without its original exit evidence".into()};}
             return SshTeardown::AlreadyDown {
                 detail: "the link was already down".to_string(),
             };
-        };
-        if handle.is_transport_closed() {
-            return SshTeardown::AlreadyDown {
-                detail: "the transport was already gone; nothing left to reap".to_string(),
-            };
         }
-        let proof = handle.shell().close(self.tuning.close_budget).await;
-        let teardown = SshTeardown::from_proof(&proof);
+        let mut results=Vec::with_capacity(handles.len());
+        for handle in &handles {
+            handle.request_retirement();
+            let proofs=handle.close_shells(self.tuning.close_budget).await;
+            let reaped=proofs.iter().all(|proof|proof.is_reaped());
+            let detail=proofs.iter().map(|proof|format!("{proof:?}")).collect::<Vec<_>>().join("; ");
+            results.push(if reaped {SshTeardown::Reaped {detail}}else{SshTeardown::Lost {detail}});
+        }
+        let reaped=!link.unconfirmed_dial.load(Ordering::Acquire)&&results.iter().all(|result|matches!(result,SshTeardown::Reaped {..}));
+        // Keep failed native owners with their original receivers for a real
+        // same-incarnation observation/retry, never a replacement connection.
+        *link.retired_handles.lock().unwrap()=handles.iter().zip(&results).filter_map(|(handle,result)|
+            (!matches!(result,SshTeardown::Reaped {..})).then(||handle.clone())).collect();
         // Say goodbye properly so the server logs a deliberate disconnect rather
         // than a torn-down TCP connection.
-        if let Err(e) = handle.conn().disconnect().await {
-            debug!(error = %e, "ssh disconnect message could not be sent");
+        for handle in handles {
+            if let Err(e) = handle.conn().disconnect().await {debug!(error = %e, "ssh disconnect message could not be sent");}
         }
-        teardown
+        let mut detail=results.into_iter().map(|result|match result {SshTeardown::Reaped {detail}|SshTeardown::Lost {detail}|SshTeardown::AlreadyDown {detail}=>detail})
+            .collect::<Vec<_>>().join("; ");
+        if link.unconfirmed_dial.load(Ordering::Acquire) {detail.push_str("; a previous native shell initialization has no original exit evidence");}
+        if reaped {SshTeardown::Reaped {detail}}else{SshTeardown::Lost {detail}}
     }
 
-    fn abort_supervisor(&self, key: &SshLinkKey) {
+    async fn retire_supervisor(&self, key: &SshLinkKey)->Option<String> {
         if let Some((_, supervisor)) = self.supervisors.remove(key) {
-            supervisor.abort();
+            return supervisor.await.err().map(|error|error.to_string());
         }
+        None
     }
 
     /// Give a link a supervisor, unless it already has a live one.
@@ -1555,6 +1837,7 @@ impl PoolInner {
         if self.quiescing.load(Ordering::SeqCst) {
             return false;
         }
+        let Some(_native)=link.actions.admit() else {return false;};
         match link.state() {
             SshLinkState::Closed { .. } => return false,
             // The ladder gave up, or a terminal failure stopped it. The link is
@@ -1567,7 +1850,11 @@ impl PoolInner {
         }
 
         if let Some(handle) = link.current_handle().await {
-            if self.transport_is_alive(&handle).await {
+            let alive=tokio::select! {biased;
+                _=link.actions.wait_retired()=>return false,
+                alive=self.transport_is_alive(&handle)=>alive,
+            };
+            if alive {
                 // Nothing changed, so nothing is published: an idle session must
                 // not heartbeat the shared realtime channel.
                 return true;
@@ -1587,7 +1874,7 @@ impl PoolInner {
                 // Taken away *before* anything is announced, so a tool call
                 // arriving now is told the link is down instead of being handed a
                 // dead shell.
-                *slot = None;
+                if let Some(old)=slot.take() {link.retired_handles.lock().unwrap().push(old);}
             }
             self.publish(
                 link,
@@ -1632,6 +1919,7 @@ impl PoolInner {
     /// terminal failure stops us. Returns false when the supervisor should stop.
     async fn climb_the_ladder(self: &Arc<Self>, link: &Arc<SshLink>) -> bool {
         for attempt in 1..=self.tuning.max_attempts {
+            if link.actions.is_retired() {return false;}
             let wait = self.tuning.delay(attempt);
             self.publish(
                 link,
@@ -1640,7 +1928,7 @@ impl PoolInner {
                     next_retry_in_ms: wait.as_millis() as u64,
                 },
             );
-            tokio::time::sleep(wait).await;
+            tokio::select! {biased;_=link.actions.wait_retired()=>return false,_=tokio::time::sleep(wait)=>{}}
             if self.quiescing.load(Ordering::SeqCst) {
                 return false;
             }
@@ -1648,7 +1936,8 @@ impl PoolInner {
             // Taken per attempt rather than around the whole climb: an `acquire`
             // arriving mid-outage must be able to answer its caller instead of
             // queueing behind a ladder that can run for minutes.
-            let _turn = link.transition.lock().await;
+            let _turn=tokio::select! {biased;_=link.actions.wait_retired()=>return false,turn=link.transition.lock()=>turn};
+            if link.actions.is_retired() {return false;}
             if link.has_live_transport().await {
                 // An `acquire` beat us to it while we were waiting.
                 return true;
@@ -1663,6 +1952,7 @@ impl PoolInner {
                     self.adopt(link, handle).await;
                     return true;
                 }
+                Err(SshDialError::LinkRetired)=>return false,
                 Err(e) if !e.is_retryable() => {
                     // Rejected credentials, a changed host key, a withdrawn host:
                     // retrying would only lock the account out or re-accept a key
@@ -1692,6 +1982,7 @@ impl PoolInner {
 /// for the rest of the process.
 async fn supervise(pool: std::sync::Weak<PoolInner>, link: Arc<SshLink>) {
     loop {
+        if link.actions.is_retired() {return;}
         let Some(inner) = pool.upgrade() else {
             return;
         };
@@ -1701,6 +1992,7 @@ async fn supervise(pool: std::sync::Weak<PoolInner>, link: Arc<SshLink>) {
         // A tool call that just found the link dead wakes us instead of leaving the
         // operator staring at a "connected" pill for the rest of the interval.
         tokio::select! {
+            _=link.actions.wait_retired()=>return,
             _ = tokio::time::sleep(poll) => {}
             _ = link.wake.notified() => {}
         }
@@ -1717,6 +2009,146 @@ async fn supervise(pool: std::sync::Weak<PoolInner>, link: Arc<SshLink>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct SilentEvents;
+    impl nomifun_realtime::UserEventSink for SilentEvents {
+        fn send_to_user(&self,_user:&str,_event:nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+    }
+
+    #[tokio::test]
+    async fn exact_resource_close_fences_only_original_link_and_retains_unknown_after_dropped_waiter() {
+        let db=nomifun_db::init_database_memory().await.unwrap();
+        let service=SshHostService::new(Arc::new(nomifun_db::SqliteSshHostRepository::new(db.pool().clone())),[7;32]);
+        let pool=SshConnectionPool::new(service,PathBuf::from("unused-fixture-known-hosts"),SshEventEmitter::new(Arc::new(SilentEvents)));
+        let key=SshLinkKey::new("original-session",SshHostId::new());let other_key=SshLinkKey::new("other-session",SshHostId::new());
+        let original=pool.0.link_for(&key,"owner","/original");let other=pool.0.link_for(&other_key,"owner","/other");
+        let lease=original.actions.admit().unwrap();
+        assert!(pool.prepare_close_instance("foreign-owner",&key,&pool.0.instance_id,original.instance_id).is_err());
+        assert!(pool.prepare_close_instance("owner",&key,&uuid::Uuid::now_v7().to_string(),original.instance_id).is_err());
+        let control=pool.prepare_close_instance("owner",&key,&pool.0.instance_id,original.instance_id).unwrap();control.request();drop(control);
+        assert!(original.actions.admit().is_none());assert!(other.actions.admit().is_some());
+        let observed=pool.resource_instances("owner").into_iter().find(|resource|resource.instance_id==original.instance_id).unwrap();
+        assert!(observed.closing&&observed.close_in_flight);assert_ne!(observed.close_confirmed,Some(true));
+        assert!(pool.resource_instances("foreign-owner").is_empty());
+        assert!(!original.close.receipt.get().is_some(),"the retained original close waits for its actual active action");
+        drop(lease);
+        let result=tokio::time::timeout(Duration::from_secs(3),original.close.wait()).await.unwrap();
+        assert!(matches!(result,SshTeardown::AlreadyDown {..}),"absence of a transport is not remote shell exit proof");
+        let successor=pool.0.link_for(&key,"owner","/successor");assert_ne!(successor.instance_id,original.instance_id);
+        let retry=pool.prepare_close_instance("owner",&key,&pool.0.instance_id,original.instance_id).unwrap();retry.request();
+        assert_eq!(retry.settled().await,result);assert!(successor.actions.admit().is_some(),"retry must not choose the new link");
+        let observed=pool.resource_instances("owner").into_iter().find(|resource|resource.instance_id==original.instance_id).unwrap();
+        assert!(!observed.close_in_flight&&observed.cleanup_unconfirmed);assert_eq!(observed.close_confirmed,Some(false));
+        pool.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn queued_original_acquire_observes_retirement_before_any_host_dial() {
+        let db=nomifun_db::init_database_memory().await.unwrap();
+        let service=SshHostService::new(Arc::new(nomifun_db::SqliteSshHostRepository::new(db.pool().clone())),[7;32]);
+        let pool=SshConnectionPool::new(service,PathBuf::from("unused-fixture-known-hosts"),SshEventEmitter::new(Arc::new(SilentEvents)));
+        let key=SshLinkKey::new("queued-session",SshHostId::new());let original=pool.0.link_for(&key,"owner","/");
+        let transition=original.transition.lock().await;let admitted=original.actions.admit().unwrap();
+        let queued=original.clone();let inner=pool.0.clone();
+        let acquire=tokio::spawn(async move {let _admitted=admitted;inner.ensure_connected(&queued).await});
+        tokio::task::yield_now().await;
+        let control=pool.prepare_close_instance("owner",&key,&pool.0.instance_id,original.instance_id).unwrap();control.request();
+        let outcome=tokio::time::timeout(Duration::from_secs(2),acquire).await.unwrap().unwrap();
+        assert!(matches!(outcome,Err(SshDialError::LinkRetired)));
+        assert!(!pool.0.gates.contains_key(&key.ssh_host_id),"retirement must win before credentials or a new native host dial");
+        drop(transition);assert!(matches!(control.settled().await,SshTeardown::AlreadyDown {..}));
+        pool.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn teardown_joins_original_supervisor_producer_and_retains_its_exact_lost_owner() {
+        let db=nomifun_db::init_database_memory().await.unwrap();
+        let service=SshHostService::new(Arc::new(nomifun_db::SqliteSshHostRepository::new(db.pool().clone())),[7;32]);
+        let pool=SshConnectionPool::new(service,PathBuf::from("unused-fixture-known-hosts"),SshEventEmitter::new(Arc::new(SilentEvents)));
+        let key=SshLinkKey::new("supervisor-session",SshHostId::new());let original=pool.0.link_for(&key,"owner","/");
+        let producer=original.actions.admit().unwrap();let release=Arc::new(Notify::new());let released=release.clone();
+        let finished=Arc::new(AtomicBool::new(false));let completed=finished.clone();
+        let supervisor=tokio::spawn(async move {let _producer=producer;released.notified().await;completed.store(true,Ordering::Release);panic!("controlled original producer failure");});
+        pool.0.supervisors.insert(key.clone(),supervisor);
+        let control=pool.prepare_close_instance("owner",&key,&pool.0.instance_id,original.instance_id).unwrap();control.request();
+        tokio::task::yield_now().await;assert!(!finished.load(Ordering::Acquire));assert!(original.close.receipt.get().is_none());
+        release.notify_one();let receipt=tokio::time::timeout(Duration::from_secs(3),control.settled()).await.unwrap();
+        assert!(finished.load(Ordering::Acquire));assert!(matches!(receipt,SshTeardown::Lost {..}),"a producer panic is never native release proof");
+        let identity=TeardownReceiptKey {link:key.clone(),instance_id:original.instance_id,owner_id:"owner".into()};
+        assert!(Arc::ptr_eq(pool.0.teardown_receipts.owners.get(&identity).unwrap().value(),&original));
+        let successor=pool.0.link_for(&key,"owner","/");assert_ne!(successor.instance_id,original.instance_id);
+        let retry=pool.prepare_close_instance("owner",&key,&pool.0.instance_id,original.instance_id).unwrap();retry.request();
+        assert_eq!(retry.settled().await,receipt);assert!(successor.actions.admit().is_some());
+        assert_eq!(pool.acknowledge_persisted_agent_session_teardowns("supervisor-session"),1);
+        assert!(!pool.0.teardown_receipts.owners.contains_key(&identity));pool.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn bulk_close_signals_before_domain_drain_and_retains_the_final_sweep_after_observer_drop() {
+        for global in [false, true] {
+            let db = nomifun_db::init_database_memory().await.unwrap();
+            let service = SshHostService::new(Arc::new(nomifun_db::SqliteSshHostRepository::new(db.pool().clone())), [7; 32]);
+            let pool = SshConnectionPool::new(service, PathBuf::from("unused-fixture-known-hosts"), SshEventEmitter::new(Arc::new(SilentEvents)));
+            let key = SshLinkKey::new("bulk-session", SshHostId::new());
+            let other_key = SshLinkKey::new("healthy-session", SshHostId::new());
+            let original = pool.0.link_for(&key, "owner", "/");
+            let other = pool.0.link_for(&other_key, "owner", "/");
+            let action = pool.action_lease(&original).unwrap();
+            let domain = if global { pool.0.global_admission.clone() } else { pool.0.session_admission_for("bulk-session") };
+            // A controlled original producer accepted before the fence has not
+            // published its exact link yet. It owns this real admission lease.
+            let incoming = domain.admit().unwrap();
+            let closing = pool.clone();
+            let observer = tokio::spawn(async move {
+                if global { closing.shutdown_all().await; } else { closing.close_conversation("bulk-session").await; }
+            });
+            tokio::time::timeout(Duration::from_secs(2), original.actions.wait_retired()).await.unwrap();
+            assert!(domain.is_retired());
+            assert!(original.close.started.load(Ordering::Acquire));
+            assert!(original.close.receipt.get().is_none(), "native completion cannot be inferred from its retirement request");
+            if !global { assert!(other.actions.admit().is_some(), "Session close preserves another Session's admission"); }
+            observer.abort(); observer.await.expect_err("only the waiting observer is cancelled");
+            drop(action);
+            let late_key = SshLinkKey::new("bulk-session", SshHostId::new());
+            let late = pool.0.link_for(&late_key, "owner", "/");
+            drop(incoming);
+            let receipt = tokio::time::timeout(Duration::from_secs(2), late.close.wait()).await.unwrap();
+            assert!(matches!(receipt, SshTeardown::AlreadyDown { .. }), "absence remains unconfirmed remote exit");
+            assert!(late.actions.is_retired());
+            assert!(!pool.is_pooled(&late_key));
+            if global {
+                let report = pool.shutdown_all().await;
+                assert_eq!(report.already_down, 3, "retry reads the original complete report, including the late exact owner");
+                assert_eq!(report.lost, 0);
+            } else {
+                assert!(other.actions.admit().is_some());
+                let report = pool.close_conversation("bulk-session").await;
+                assert_eq!(report.len(), 2, "retry shares the original Session close report after its live map emptied");
+                pool.shutdown_all().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_shutdown_report_keeps_prior_exact_lost_receipts_without_double_counting_or_new_dials() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let service = SshHostService::new(Arc::new(nomifun_db::SqliteSshHostRepository::new(db.pool().clone())), [7; 32]);
+        let pool = SshConnectionPool::new(service, PathBuf::from("unused-fixture-known-hosts"), SshEventEmitter::new(Arc::new(SilentEvents)));
+        let key = SshLinkKey::new("prior-lost-session", SshHostId::new());
+        let old = pool.0.link_for(&key, "owner", "/");
+        old.unconfirmed_dial.store(true, Ordering::Release);
+        let close = pool.prepare_close_instance("owner", &key, &pool.0.instance_id, old.instance_id).unwrap();
+        close.request(); let original = close.settled().await;
+        assert!(matches!(original, SshTeardown::Lost { .. }));
+        let successor = pool.0.link_for(&key, "owner", "/");
+        assert_ne!(successor.instance_id, old.instance_id);
+        let report = pool.shutdown_all().await;
+        assert_eq!(report.lost, 1, "the removed old incarnation still has unconfirmed native responsibility");
+        assert_eq!(report.already_down, 1, "the successor is counted once under its own immutable identity");
+        assert_eq!(pool.shutdown_all().await, report, "retry observes the original report instead of an empty-map success");
+        assert_eq!(close.settled().await, original, "Quit cannot upgrade or rewrite the old Lost receipt");
+        assert!(pool.0.gates.is_empty(), "cleanup never dials a replacement to obtain apparent proof");
+    }
 
     #[tokio::test]
     async fn close_completion_is_shared_and_outlives_a_cancelled_waiter() {
@@ -1766,10 +2198,12 @@ mod tests {
         let first = TeardownReceiptKey {
             link: link.clone(),
             instance_id: 1,
+            owner_id:"fixture-owner".into(),
         };
         let second = TeardownReceiptKey {
             link: link.clone(),
             instance_id: 2,
+            owner_id:"fixture-owner".into(),
         };
         receipts.record(
             first,
@@ -1786,6 +2220,7 @@ mod tests {
         let proven = TeardownReceiptKey {
             link: SshLinkKey::new("session-a", SshHostId::new()),
             instance_id: 3,
+            owner_id:"fixture-owner".into(),
         };
         receipts.record(
             proven.clone(),
