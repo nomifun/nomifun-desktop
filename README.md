@@ -37,7 +37,7 @@
   <a href="#-getting-started">🚀 Get started</a>&nbsp;·&nbsp;
   <a href="https://github.com/nomifun/nomifun-desktop/releases">📦 Releases</a>&nbsp;·&nbsp;
   <a href="https://gitee.com/nomifun/nomifun-desktop">🇨🇳 Gitee source</a>&nbsp;·&nbsp;
-  <a href="https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA">China mirror</a>&nbsp;·&nbsp;
+  <a href="https://www.nomifun.com/download">Official download</a>&nbsp;·&nbsp;
   <a href="./RELEASING.zh-CN.md">发版手册</a>&nbsp;·&nbsp;
   <a href="#-contact--community">💬 Community</a>
 </p>
@@ -100,8 +100,8 @@ refresh procedure are recorded in the [screenshot manifest](docs/images/SCREENSH
 ## 🚀 Getting started
 
 Install from [GitHub Releases](https://github.com/nomifun/nomifun-desktop/releases).
-Mainland China users can use the [Baidu Netdisk mirror](https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA)
-(shared as `nomifun`). Follow [Installation](docs/getting-started/installation.md), then
+You can also download installers from the [official website](https://www.nomifun.com/download).
+Follow [Installation](docs/getting-started/installation.md), then
 [Quick start](docs/getting-started/quick-start.md).
 
 For source development, install the Rust toolchain, Bun and your platform's Tauri prerequisites

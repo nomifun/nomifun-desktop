@@ -1184,7 +1184,7 @@
   "openLink": "打开链接",
   "officialWebsite": "官网",
   "checkForUpdates": "检查更新",
-  "baiduManualDownload": "百度网盘手动下载",
+  "officialDownload": "官网下载",
   "includePrereleaseUpdates": "包含预发布/dev 版本",
   "saveModelConfigFailed": "保存模型配置失败",
   "modelDeletion": {

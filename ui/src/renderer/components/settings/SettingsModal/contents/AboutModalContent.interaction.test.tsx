@@ -22,7 +22,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); restores.splice(0).forEach((restore) => restore()); delete window.__backendPort; });
 const renderPage = () => render(<I18nextProvider i18n={i18n}><AboutModalContent /></I18nextProvider>);
 
-test('desktop About shows the backend version and opens the existing update flow and public contact link', async () => {
+test('desktop About shows the backend version and opens the update flow, official download page, and public contact link', async () => {
   const update = spyOn(window, 'dispatchEvent');
   restores.push(() => update.mockRestore());
   const page = renderPage();
@@ -30,16 +30,18 @@ test('desktop About shows the backend version and opens the existing update flow
   fireEvent.click(page.getByRole('button', { name: settings.checkForUpdates }));
   const event = update.mock.calls.map(([event]) => event).find((event) => event.type === 'nomifun-open-update-modal') as CustomEvent;
   expect(event?.detail).toEqual({ source: 'about' });
+  fireEvent.click(page.getByRole('button', { name: settings.officialDownload }));
+  await waitFor(() => expect(ipcBridge.shell.openExternal.invoke).toHaveBeenCalledWith('https://www.nomifun.com/download'));
   fireEvent.click(page.getByRole('button', { name: new RegExp(settings.contactMe) }));
   await waitFor(() => expect(ipcBridge.shell.openExternal.invoke).toHaveBeenCalledWith(NOMIFUN_PUBLIC_LINKS.contact));
 });
 
-test('WebUI retains public resources while hiding native update and manual download controls', async () => {
+test('WebUI retains public resources while hiding native update and official download controls', async () => {
   delete window.__backendPort;
   const page = renderPage();
   expect(await page.findByText('v0.8.2-test')).toBeTruthy();
   expect(page.queryByRole('button', { name: settings.checkForUpdates })).toBeNull();
-  expect(page.queryByRole('button', { name: settings.baiduManualDownload })).toBeNull();
+  expect(page.queryByRole('button', { name: settings.officialDownload })).toBeNull();
   expect(page.getByRole('button', { name: /^GitHub$/ })).toBeTruthy();
   expect(page.getByRole('button', { name: new RegExp(settings.helpDocumentation) })).toBeTruthy();
 });

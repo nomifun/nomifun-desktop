@@ -44,7 +44,7 @@ const formatVersion = (version?: string | null) => {
   return version.startsWith('v') ? version : `v${version}`;
 };
 
-const BAIDU_RELEASE_MIRROR_URL = 'https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA';
+const OFFICIAL_DOWNLOAD_URL = 'https://www.nomifun.com/download';
 const PRODUCT_WEBSITE_URL = 'https://www.nomifun.com';
 const PRODUCT_CONTACT_URL = 'https://www.nomifun.com/contact';
 const GITHUB_ISSUES_PAGE = 'https://github.com/nomifun/nomifun-tauri/issues';
@@ -102,9 +102,9 @@ const UpdateModal: React.FC = () => {
     });
   };
 
-  const openBaiduReleaseMirror = () => {
-    void ipcBridge.shell.openExternal.invoke(BAIDU_RELEASE_MIRROR_URL).catch((error) => {
-      console.error('Failed to open Baidu release mirror:', error);
+  const openOfficialDownload = () => {
+    void ipcBridge.shell.openExternal.invoke(OFFICIAL_DOWNLOAD_URL).catch((error) => {
+      console.error('Failed to open official download page:', error);
     });
   };
 
@@ -418,14 +418,14 @@ const UpdateModal: React.FC = () => {
     <div className={`text-12px leading-18px text-warning-6 ${className}`}>{t('update.disclaimer')}</div>
   );
 
-  const renderBaiduManualDownloadButton = (className = '') => (
+  const renderOfficialDownloadButton = (className = '') => (
     <Button
       size='small'
-      onClick={openBaiduReleaseMirror}
+      onClick={openOfficialDownload}
       icon={<Download size='14' />}
       className={`!px-16px ${className}`}
     >
-      {t('settings.baiduManualDownload')}
+      {t('settings.officialDownload')}
     </Button>
   );
 
@@ -539,8 +539,8 @@ const UpdateModal: React.FC = () => {
               <Button type='primary' size='mini' onClick={openReleasePage} className='update-compact-card__action'>
                 {t('update.goToRelease')}
               </Button>
-              <Button size='mini' onClick={openBaiduReleaseMirror} className='update-compact-card__action'>
-                {t('settings.baiduManualDownload')}
+              <Button size='mini' onClick={openOfficialDownload} className='update-compact-card__action'>
+                {t('settings.officialDownload')}
               </Button>
             </div>
           </>
@@ -694,14 +694,14 @@ const UpdateModal: React.FC = () => {
                 <div className='update-modal__source-note'>
                   <div>{t('update.downloadSourceHint')}</div>
                   <div>
-                    {t('update.baiduMirrorHint')}{' '}
+                    {t('update.manualDownloadHint')}{' '}
                     <button
                       type='button'
-                      onClick={openBaiduReleaseMirror}
-                      title={BAIDU_RELEASE_MIRROR_URL}
+                      onClick={openOfficialDownload}
+                      title={OFFICIAL_DOWNLOAD_URL}
                       className='update-modal__inline-link'
                     >
-                      {t('update.baiduMirrorLink')}
+                      {t('settings.officialDownload')}
                     </button>
                     <span aria-hidden='true'> · </span>
                     <button
@@ -727,7 +727,7 @@ const UpdateModal: React.FC = () => {
                   {t('update.downloadButton')}
                 </Button>
               )}
-              {renderBaiduManualDownloadButton('update-modal__action')}
+              {renderOfficialDownloadButton('update-modal__action')}
             </div>
           </div>
         );
@@ -775,8 +775,8 @@ const UpdateModal: React.FC = () => {
               >
                 {t('common.retry')}
               </Button>
-              <Button size='small' onClick={openBaiduReleaseMirror} className='update-modal__action'>
-                {t('settings.baiduManualDownload')}
+              <Button size='small' onClick={openOfficialDownload} className='update-modal__action'>
+                {t('settings.officialDownload')}
               </Button>
             </div>
           </div>
