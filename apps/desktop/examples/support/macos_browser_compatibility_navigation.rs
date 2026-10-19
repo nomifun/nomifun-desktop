@@ -68,12 +68,14 @@ pub(super) async fn verify(runtime: &Arc<dyn BrowserRuntime>, fixture: &Fixture,
         || !cross_report.trace.events.iter().any(|event| event.sequence > cross_start && event.kind == BrowserNavigationEventKind::Committed) {
         return Err("Full-document navigation lost its native lifecycle after SPA controls".into());
     }
+    let back_dispatch_trace = trace_sequence(runtime,id).await?;
     command(runtime, BrowserTabCommand::Back { target: full.target }).await?;
-    settled_url(runtime, id, &format!("{url}&step=second")).await?;
-    let back_from_full = tab(runtime, id).await?;
+    let (back_from_full, _) = settled_document(runtime, id, &format!("{url}&step=second"),
+        &[&format!("Document nonce: {nonce}"), "SPA step: second"],back_dispatch_trace).await?;
+    let forward_dispatch_trace = trace_sequence(runtime,id).await?;
     command(runtime, BrowserTabCommand::Forward { target: back_from_full.target }).await?;
-    let final_tab = settled_url(runtime, id, &full_url).await?;
-    let final_observation = observe(runtime, id).await.map_err(error)?;
+    let (final_tab, final_observation) = settled_document(runtime, id, &full_url,
+        &["Compatibility redirects settled"],forward_dispatch_trace).await?;
     if !final_observation.content.contains("Compatibility redirects settled") {
         return Err("Full-document Forward did not restore its actual document".into());
     }
@@ -99,6 +101,43 @@ async fn settled_url(runtime: &Arc<dyn BrowserRuntime>, id: &str, url: &str) -> 
         && tab.load.as_ref().is_some_and(|load| load.phase == BrowserNavigationPhase::Finished
             && load.estimated_progress == Some(100))).await?;
     Ok(current)
+}
+
+// History preserves the old document's Finished state until the actual
+// WKNavigation starts. URL metadata alone therefore cannot authorize the next
+// history command. Wait for this read-only DOM witness and the same exact
+// current target; never replay Back/Forward to manufacture a fresh document.
+async fn settled_document(runtime: &Arc<dyn BrowserRuntime>, id: &str, url: &str,
+    markers:&[&str],after_trace:u64) -> Result<(BrowserTabSnapshot,BrowserObservation),String> {
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        let current = tab(runtime,id).await?;
+        let ready = |tab:&BrowserTabSnapshot| tab.url == url && tab.lifecycle == BrowserTabLifecycle::Ready
+            && tab.load.as_ref().is_some_and(|load|load.phase == BrowserNavigationPhase::Finished
+                && load.estimated_progress == Some(100));
+        let native_finished = if ready(&current) {
+            match runtime.navigation_diagnostics(current.target.clone()).await {
+                Ok(report) => report.trace.events.iter().any(|event|event.sequence > after_trace
+                    && event.kind == BrowserNavigationEventKind::Finished
+                    && event.navigation_sequence == current.load.as_ref().map(|load|load.navigation_sequence)),
+                Err(WorkspaceError::StaleTarget | WorkspaceError::StaleObservation) => false,
+                Err(failure) => return Err(error(failure)),
+            }
+        } else { false };
+        if native_finished {
+            match observe(runtime,id).await {
+                Ok(observed) if observed.target == current.target
+                    && markers.iter().all(|marker|observed.content.contains(*marker)) => {
+                    let after = tab(runtime,id).await?;
+                    if after.target == current.target && ready(&after) { return Ok((after,observed)); }
+                },
+                Ok(_) | Err(WorkspaceError::StaleTarget | WorkspaceError::StaleObservation) => {},
+                Err(failure) => return Err(error(failure)),
+            }
+        }
+        if Instant::now() >= deadline { return Err("History did not settle the expected exact native document".into()); }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 async fn click_named(runtime: &Arc<dyn BrowserRuntime>, id: &str, name: &str) -> Result<(), String> {

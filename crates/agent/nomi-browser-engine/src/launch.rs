@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-#[cfg(windows)]
+#[cfg(any(windows, test, feature = "conformance"))]
 use std::time::Instant;
 
 use crate::engine::BrowserError;
@@ -32,11 +32,11 @@ pub enum BrowserHostLaunchMode {
     Headful,
 }
 
-/// 轮询 DevToolsActivePort 文件的最长等待（chrome 冷启 + 端口监听就绪）。仅 Windows ws 路径用。
-#[cfg(windows)]
+/// Windows 与显式 Attached fixture 等待原 DevToolsActivePort 就绪的上限。
+#[cfg(any(windows, test, feature = "conformance"))]
 const PORT_FILE_TIMEOUT: Duration = Duration::from_secs(30);
-/// 轮询间隔。仅 Windows ws 路径用。
-#[cfg(windows)]
+/// 原 DevToolsActivePort 的轮询间隔。
+#[cfg(any(windows, test, feature = "conformance"))]
 const PORT_FILE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// 托管启动配置：宿主明确供应的可执行文件、专属数据目录及窗口模式。
@@ -2274,11 +2274,9 @@ fn safe_chromium_spawn_error() -> BrowserError {
     BrowserError::Other("browser launch could not start Chromium".into())
 }
 
-// The DevToolsActivePort polling machinery is Windows-only (Unix connects over
-// --remote-debugging-pipe and never waits for the port file), so this error is
-// unreachable on Unix production builds; `test` keeps the cross-platform
-// privacy assertion in launch_boundary_errors_do_not_echo_private_paths_or_endpoints.
-#[cfg(any(windows, test))]
+// Ordinary Unix launches use the debugging pipe. Only the explicitly owned
+// Attached conformance fixture opts into the same port-file launch protocol.
+#[cfg(any(windows, test, feature = "conformance"))]
 fn safe_devtools_timeout_error() -> BrowserError {
     BrowserError::Other("browser launch timed out waiting for DevToolsActivePort".into())
 }
@@ -2338,6 +2336,24 @@ pub async fn launch_chrome(
     launch_chrome_with_cleanup_profile(config, force_headless, None, None).await
 }
 
+/// Launch a separately owned, visible Attached Chrome conformance fixture.
+/// Its fresh Profile exposes an OS-assigned loopback debugging port so the
+/// connection-only owner can open an independent socket. The original launch
+/// guard retains process-tree/watchdog and Profile cleanup authority; ordinary
+/// Unix launches continue to use their parent-death debugging pipe.
+#[cfg(any(test, feature = "conformance"))]
+pub async fn launch_attached_chrome_fixture(config: &LaunchConfig) -> Result<Launched, BrowserError> {
+    launch_chrome_owned(config, false, None, None, None, None, cfg!(unix)).await
+}
+
+#[cfg(any(test, feature = "conformance"))]
+fn attached_fixture_chrome_args(profile: &Path) -> Vec<String> {
+    let mut args = build_chrome_args(profile, false);
+    args.retain(|arg| arg != "--remote-debugging-pipe" && arg != "--remote-debugging-port=0");
+    args.push("--remote-debugging-port=0".into());
+    args
+}
+
 /// Isolated page launches never use user profiles, visible windows, environment
 /// overrides, or startup-page fallback. All browser networking hits an owned
 /// rejecting proxy; only the separate restricted request broker may fetch.
@@ -2353,7 +2369,7 @@ pub async fn launch_headless_page_chrome(
         .map_err(|_|BrowserError::Other("search profile could not be created".into()))?;
     let path = directory.path().to_path_buf();
     let config = LaunchConfig {chrome_path,user_data_dir:path.clone(),headful:false};
-    launch_chrome_owned(&config,true,Some(path),Some(network_boundary),Some(rejecting_proxy),Some(directory)).await
+    launch_chrome_owned(&config,true,Some(path),Some(network_boundary),Some(rejecting_proxy),Some(directory),false).await
 }
 
 fn headless_network_args(proxy: std::net::SocketAddr) -> Vec<String> {
@@ -2414,7 +2430,7 @@ pub(crate) async fn launch_chrome_with_cleanup_profile(
     cleanup_user_data_dir: Option<PathBuf>,
     host_cleanup_lease: Option<crate::cleanup::HostCleanupLease>,
 ) -> Result<Launched, BrowserError> {
-    launch_chrome_owned(config,force_headless,cleanup_user_data_dir,host_cleanup_lease,None,None).await
+    launch_chrome_owned(config,force_headless,cleanup_user_data_dir,host_cleanup_lease,None,None,false).await
 }
 
 async fn launch_chrome_owned(
@@ -2424,6 +2440,7 @@ async fn launch_chrome_owned(
     host_cleanup_lease: Option<crate::cleanup::HostCleanupLease>,
     restricted_proxy: Option<std::net::SocketAddr>,
     pending_directory: Option<tempfile::TempDir>,
+    attached_fixture: bool,
 ) -> Result<Launched, BrowserError> {
     if !config.chrome_path.is_absolute() || !config.chrome_path.is_file() {
         return Err(BrowserError::Unsupported {
@@ -2502,6 +2519,13 @@ async fn launch_chrome_owned(
         None=>build_chrome_args(&config.user_data_dir, force_headless),
     };
 
+    #[cfg(any(test, feature = "conformance"))]
+    if attached_fixture {
+        args = attached_fixture_chrome_args(&config.user_data_dir);
+    }
+    #[cfg(not(any(test, feature = "conformance")))]
+    let _ = attached_fixture;
+
     // The environment escape hatch is compiled out of release builds.
     // Debug builds still use the exact allowlist above; arbitrary Chromium
     // switches must never be able to replace the managed profile or CDP
@@ -2509,6 +2533,11 @@ async fn launch_chrome_owned(
     #[cfg(debug_assertions)]
     if restricted_proxy.is_none() && let Ok(extra) = std::env::var("NOMI_CHROME_EXTRA_ARGS") {
         args.extend(filtered_extra_chrome_args(&extra));
+    }
+
+    #[cfg(any(test, feature = "conformance"))]
+    if attached_fixture {
+        return launch_chrome_ws(config, &args, first_attempt).await;
     }
 
     #[cfg(unix)]
@@ -2685,8 +2714,8 @@ fn set_cloexec(fd: &std::os::fd::OwnedFd) -> Result<(), BrowserError> {
     Ok(())
 }
 
-/// **Windows**：`--remote-debugging-port=0` 启动,轮询 DevToolsActivePort 拿端口 + ws 路径,拼 ws url。
-#[cfg(windows)]
+/// Windows／显式 Attached fixture：等待原 port=0 的 DevToolsActivePort；复用原进程与 Profile owner。
+#[cfg(any(windows, test, feature = "conformance"))]
 async fn launch_chrome_ws(
     config: &LaunchConfig,
     args: &[String],
@@ -3612,6 +3641,24 @@ mod tests {
         })
         .await
         .expect("managed fixture process exits within cleanup deadline");
+    }
+
+    #[test]
+    fn attached_fixture_exposes_one_port_without_changing_the_normal_unix_transport() {
+        let profile = Path::new("/tmp/nomi-attached-fixture");
+        let args = attached_fixture_chrome_args(profile);
+        assert_eq!(args.iter().filter(|arg| *arg == "--remote-debugging-port=0").count(), 1);
+        assert!(!args.iter().any(|arg| arg == "--remote-debugging-pipe"));
+        assert!(args.iter().any(|arg| arg == "--user-data-dir=/tmp/nomi-attached-fixture"));
+        assert!(args.iter().any(|arg| arg == "--disable-background-networking"));
+        assert!(args.iter().any(|arg| arg == "--no-startup-window"));
+        assert!(!args.iter().any(|arg| arg == "--headless=new" || arg == "--no-sandbox"));
+        #[cfg(unix)]
+        {
+            let normal = build_chrome_args(profile, false);
+            assert!(normal.iter().any(|arg| arg == "--remote-debugging-pipe"));
+            assert!(!normal.iter().any(|arg| arg.starts_with("--remote-debugging-port=")));
+        }
     }
 
     #[test]

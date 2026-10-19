@@ -148,22 +148,35 @@ session/frame/node、trusted activation、隐藏/导航/框架替换/Agent 接�
 主进程在关闭前存活，并在关闭后的五秒观察上限内退出。同一 Session 随后能够创建新 runtime generation，
 临时原生 profile 清理也已通过。进程见证不保留 COM environment，等待前释放测试 view 句柄，且不终止浏览器进程。
 
-两个平台的生产 GUI，以及 macOS 的本次原生交接，仍待验收。上述 Windows fixture 不证明安装包行为、
-外部站点兼容或每个子进程退出。完整生产覆盖仍须包含浏览器完成后继续思考或使用无关工具、
-释放后的人工输入及 runtime 关闭、等待的导航/对话框完成、结算或解锁失败与 exact terminal 恢复。
-在生产窗口重验 observe → release → act，再由用户导航或关闭浏览器后在同一 Turn 调用；
-安全清理须保留仍可用的观察，旧代际及旧 owner 清理不能影响替代实体。
-当前源码的后端/unit、真实原生输入及生产窗口证据分别记录。
+原生组件、完整生产 GUI、真实模型、外部站点与安装包分别计证。上述 Windows fixture 不证明安装包行为、
+外部站点兼容或每个子进程退出。macOS 本轮源码、构建身份、实际回执、首次失败和未运行范围统一保存在
+[生命周期方案第 10.5 节](../handoffs/agent-lifecycle-reliability.zh.md#105-macos-接续2026-10-19)，本文只维护当前入口和证据边界。
 
-macOS 最新的 popup Pause、同文档 History 与启动回执修复已有源码、定向检查及构建记录，
-仍缺融合后 WK 原生运行和生产 GUI 的完整证明。后续需要：
+macOS `macos_browser_compatibility_smoke` 的默认入口保留导航 Stop、queued/claimed popup Pause、
+同文档及跨文档 History、失败保留文档和原生 Save chooser 取消／页面关闭矩阵。跨文档 Back/Forward
+必须等该命令之后准确 native navigation sequence 的 Finished 回执、当前 exact target 及真实 DOM nonce
+共同成立，不能从 URL 元数据加旧 Finished 状态判定新文档完成，也不重发 Back/Forward 来获得通过。
 
-1. 实际运行当前完整静态 UI App 与两个 smoke，核对固定 descriptor、LaunchServices admission、构建身份、native exit 和最终清理回执。
-2. 在确定性 queued/claimed 阶段执行 popup Pause/Resume，核对准确 child 关闭、活动标签、父文档 nonce 与主文档请求计数。
-3. 完成 Stop、失败恢复、旧控制与迟到 callback、输入锁、同文档及跨文档 Back/Forward 的实机覆盖。
-4. 补持久 store 重启、Session 隔离和临时 store 清理证明。
-5. 在生产窗口操作地址栏、标签、菜单、暂停、显隐与恢复，保留安全导航时间线和截图。
-6. 对 Safari17、NativeWebKit 与系统 Safari 做独立站点对照；原始百度重复导航现场仍未完成复现、归因或修复证明。
+独立的 `--lifecycle-case empty` 与 `--lifecycle-case nonempty` 使用同一固定 compatibility audit scope，
+各自保留独立新数据根和最终回执。前者验证非空用户页面保留，原生 CloseAll 与 hide 确认后的空载体自动退休；
+后者使用原 Agent Create 的原在途 owner、正式 Agent 自动呈现、真实输入锁确认，以及同一 run 内的 hide ACK／
+准确 attachment 释放，验证使命结束后非空 task-only 载体自动退休。默认人工／未知呈现仍保守保留用户现场，
+fixture 不能绕过 BrowserWorkspace 直接调用 Runtime surface 或把人工用途改称 Agent 用途。
+两种独立 case 还核对原用户文档／语义输入草稿保留、准确 Confirm Stop、旧 request ID 对后继页面无效，以及
+pending Confirm 中的原 Browser service／factory shutdown。语义输入不是人工可信键鼠输入；使命完成由组件
+fixture 提供，不代替 canonical Session／Execution 的正式结算和完整 Desktop coordinator 验收。
+
+这些入口必须先打包准确构建，再通过现役 controller 的 LaunchServices admission 启动；打包签名不证明运行。
+`package-macos-native-fixture.mjs --kind compatibility` 在 `--` 后传递独立 case 参数。退出成功同时要求原
+controller 的 authenticated cleanup receipt 与准确 kernel normal-exit 证明；页面隐藏、native view 数量归零或
+单个 exit 0 均不替代这两项。关闭时，已经 yield 真实 dialog 的原工作先在 native drain 后取得自己的 completion，
+再销毁 view；其他可能依赖 Page close 才能结束的原生工作保留原 close／join 顺序。未知结果仍保持未知，不能以
+销毁 view 冒充脚本已结算。共享 WebContent 不按名称或 PID 扫杀。
+
+生产窗口的地址栏、标签、菜单、显隐和恢复、完整持久 store 重启／Session 隔离，以及 Safari17、NativeWebKit
+与系统 Safari 的外部站点对照仍各自需要独立证据；适用本轮生命周期专项的已验／未验范围只在上述单份进度记录。
+完整生产覆盖还须区分浏览器调用完成后继续思考或使用无关工具、释放后的人工输入及 runtime 关闭、
+结算／解锁失败和 exact terminal 恢复。安全清理须保留仍可用的观察，旧代际清理不能影响替代实体。
 
 最低支持系统、Intel、Developer ID 签名与公证发布没有由 Apple Silicon 开发构建自动覆盖。
 工具限制需要如实记录；无法启动的用例继续标为未运行，不改变启动、权限或清理合同来取得通过。

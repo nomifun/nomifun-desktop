@@ -371,7 +371,7 @@ pub async fn dispatch_mouse_move(
 
 /// 发一条 `Input.dispatchKeyEvent`（内部）。`text` 仅 keyDown 时按需带（具名键 / 快捷键不带 text，
 /// 普通字符 keyDown 才带，让页面收到 `input`/`keypress`）。
-async fn dispatch_key(
+pub(crate) async fn dispatch_key(
     conn: &Connection,
     session: &str,
     r#type: DispatchKeyEventType,

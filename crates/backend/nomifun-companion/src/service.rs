@@ -226,6 +226,7 @@ pub struct CompanionService {
     models_dir: PathBuf,
     /// Serializes first-time matting-model downloads (one fetch for N callers).
     model_lock: Mutex<()>,
+    model_lifecycle: crate::matting_model::ModelLifecycle,
     /// Shared custom-figure library home (`{data_dir}/companion/figures`).
     figures_dir: PathBuf,
     /// Serializes figure-library index read-modify-write.
@@ -461,6 +462,7 @@ impl CompanionService {
             shared_dir,
             models_dir,
             model_lock: Mutex::new(()),
+            model_lifecycle: crate::matting_model::ModelLifecycle::default(),
             figures_dir,
             figures_lock: Mutex::new(()),
             config,
@@ -929,7 +931,19 @@ impl CompanionService {
     /// Return bytes matching the shared pinned model identity. The backend is
     /// the persistent cache owner and reacquires missing or corrupt artifacts.
     pub async fn matting_model_bytes(&self) -> Result<Vec<u8>, AppError> {
-        crate::matting_model::model_bytes(&self.models_dir, &self.model_lock).await
+        crate::matting_model::model_bytes(&self.models_dir, &self.model_lock, &self.model_lifecycle).await
+    }
+
+    /// Fence new model requests and cancel queued/network acquisition before
+    /// the host waits for HTTP drain. This does not close Companion storage.
+    pub fn request_matting_model_shutdown(&self) {
+        self.model_lifecycle.request_shutdown();
+    }
+
+    /// Join the original requests and any atomic publisher already admitted.
+    /// Published cache data is retained, including when the HTTP waiter left.
+    pub async fn shutdown_matting_model(&self) {
+        self.model_lifecycle.shutdown().await;
     }
 
     // ----- custom-figure library (decoupled from companions) -----

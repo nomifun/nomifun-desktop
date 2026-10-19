@@ -182,10 +182,22 @@ impl CompanionFlowModelServer {
                         assert_eq!(output["exit_code"],0);assert_eq!(output["cleanup"]["reaped"],true);
                         assert_eq!(output["output"]["text"].as_str().unwrap().trim(),state.file_marker);
                         assert!(tool_available(&body,"report_completion"),"the Runtime advertises formal completion after the original process settles");
+                        // A fast native command can already be reaped when
+                        // start returns. Its later poll reads FrozenOutput;
+                        // that historical read does not create fresh evidence.
+                        // Cite only the matching original process observation
+                        // that the current completion schema actually admits.
+                        let completion=body["tools"].as_array().unwrap().iter()
+                            .find(|tool|tool["function"]["name"]=="report_completion").unwrap();
+                        let eligible=completion.pointer("/function/parameters/properties/criteria/items/properties/evidence_call_ids/items/enum")
+                            .and_then(Value::as_array).expect("settled native process exposes exact completion evidence");
+                        let evidence=["native-process-poll","native-process-start"].into_iter()
+                            .find(|id|eligible.iter().any(|value|value.as_str()==Some(*id)))
+                            .expect("only the original process's eligible observation can support its completion");
                         tool_call("report_completion","native-process-completion",json!({
                             "summary":format!("The real native process output is verified: {}",state.file_marker),
-                            "criteria":[{"disposition":"supported","evidence_call_ids":["native-process-poll"],
-                                "rationale":"The original process poll returned the exact output, exit code zero, and proven child cleanup."}]
+                            "criteria":[{"disposition":"supported","evidence_call_ids":[evidence],
+                                "rationale":"The original process returned the exact output, exit code zero, and proven child cleanup."}]
                         }))
                     } else if let Some(result)=tool_result(&body,"native-process-start") {
                         let started:Value=serde_json::from_str(result["content"].as_str().unwrap()).unwrap();

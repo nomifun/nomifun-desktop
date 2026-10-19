@@ -21,10 +21,53 @@ pub(crate) struct BrowserSurfaceState {
 struct Attachment {
     id: u64,
     sequence: u64,
+    source: BrowserSurfaceSource,
     resource: Arc<BrowserWorkspace>,
     bounds: BrowserSurfaceBounds,
     stop: CancellationToken,
     layout: CancellationToken,
+}
+
+/// Presentation intent from the main renderer. This never grants Agent
+/// authority: the Workspace verifies the current native input owner itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BrowserSurfaceSource {
+    #[default]
+    User,
+    AgentAuto,
+}
+
+async fn set_attachment_surface(
+    resource: &BrowserWorkspace,
+    source: BrowserSurfaceSource,
+    bounds: BrowserSurfaceBounds,
+    visible: bool,
+    layout: CancellationToken,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if source == BrowserSurfaceSource::AgentAuto {
+        return resource.set_agent_surface(bounds, visible, layout)
+            .await.map_err(|error| error.code().to_owned());
+    }
+    // Other platforms retain their existing conservative presentation path.
+    #[cfg(not(target_os = "macos"))]
+    let _ = source;
+    resource.set_surface(bounds, visible, layout)
+        .await.map_err(|error| error.code().to_owned())
+}
+
+async fn retain_manual_surface_use(
+    resource: &BrowserWorkspace,
+    source: BrowserSurfaceSource,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if source == BrowserSurfaceSource::User {
+        resource.retain_user_page_use().await.map_err(|error| error.code().to_owned())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (resource, source);
+    Ok(())
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -69,11 +112,8 @@ async fn detach(current: &Mutex<Option<Attachment>>, id: u64) -> Result<(), Stri
         attachment.layout = CancellationToken::new();
         // Hide never waits for a page operation. Retain ownership on failure
         // so a retry cannot orphan a visible native surface.
-        attachment
-            .resource
-            .set_surface(attachment.bounds, false, attachment.layout.clone())
-            .await
-            .map_err(|error| error.code().to_owned())?;
+        set_attachment_surface(&attachment.resource, attachment.source,
+            attachment.bounds, false, attachment.layout.clone()).await?;
         attachment.resource.release_surface_attachment(attachment.id).await;
         current.take();
     }
@@ -87,8 +127,9 @@ async fn update(
     bounds: BrowserSurfaceBounds,
     visible: bool,
     validation: Result<(), String>,
+    surface_source: BrowserSurfaceSource,
 ) -> Result<(), String> {
-    let (resource, bounds, visible, layout) = {
+    let (resource, source, bounds, visible, layout) = {
         let mut current = current.lock().await;
         let Some(attachment) = current
             .as_mut()
@@ -99,6 +140,10 @@ async fn update(
         if sequence <= attachment.sequence {
             return Ok(());
         }
+        // A later Agent event cannot remove a real manual-open responsibility.
+        if surface_source == BrowserSurfaceSource::User {
+            attachment.source = BrowserSurfaceSource::User;
+        }
         attachment.sequence = sequence;
         attachment.layout.cancel();
         attachment.layout = CancellationToken::new();
@@ -108,20 +153,23 @@ async fn update(
         }
         (
             attachment.resource.clone(),
+            attachment.source,
             attachment.bounds,
             visible,
             attachment.layout.clone(),
         )
     };
+    let manual_use = retain_manual_surface_use(&resource, source).await;
+    if visible {
+        manual_use.clone()?;
+    }
     // No attachment mutex across a possibly input-blocked visible resize.
-    let result = resource
-        .set_surface(bounds, visible, layout.clone())
-        .await
-        .map_err(|error| error.code().to_owned());
+    let result = set_attachment_surface(&resource, source, bounds, visible, layout.clone()).await;
     if layout.is_cancelled() {
         return Ok(());
     }
     result?;
+    manual_use?;
     validation
 }
 
@@ -133,6 +181,7 @@ pub(crate) async fn browser_surface_attach(
     agent_session_id: String,
     bounds: BrowserSurfaceBounds,
     events: Channel<BrowserViewEvent>,
+    surface_source: Option<BrowserSurfaceSource>,
 ) -> Result<u64, String> {
     require_main(&view)?;
     validate_bounds(&view, bounds)?;
@@ -141,12 +190,12 @@ pub(crate) async fn browser_surface_attach(
     let server = server.inner().clone();
     // The original owner must complete native attachment/hide cleanup even
     // when the renderer drops its command waiter during a Session switch.
-    tokio::spawn(async move { attach_owned(server, current, next, agent_session_id, bounds, events).await })
+    tokio::spawn(async move { attach_owned(server, current, next, agent_session_id, bounds, events, surface_source.unwrap_or_default()).await })
         .await.map_err(|_| "Browser surface attachment owner stopped without native proof".to_owned())?
 }
 
 async fn attach_owned(server: Arc<nomifun_app::DesktopServer>, current: Arc<Mutex<Option<Attachment>>>,
-    next: Arc<AtomicU64>, agent_session_id: String, bounds: BrowserSurfaceBounds, events: Channel<BrowserViewEvent>)
+    next: Arc<AtomicU64>, agent_session_id: String, bounds: BrowserSurfaceBounds, events: Channel<BrowserViewEvent>, source: BrowserSurfaceSource)
     -> Result<u64, String> {
     let id = next.fetch_add(1, Ordering::AcqRel) + 1;
     let resource = server
@@ -157,17 +206,15 @@ async fn attach_owned(server: Arc<nomifun_app::DesktopServer>, current: Arc<Mute
     if next.load(Ordering::Acquire) != id {
         return Err("Browser attachment was superseded.".into());
     }
+    retain_manual_surface_use(&resource, source).await?;
     resource.retain_surface_attachment(id).await.map_err(|error| error.code().to_owned())?;
     let prepared = async {
     if let Some(previous) = attachment.as_mut() {
         previous.stop.cancel();
         previous.layout.cancel();
         previous.layout = CancellationToken::new();
-        previous
-            .resource
-            .set_surface(previous.bounds, false, previous.layout.clone())
-            .await
-            .map_err(|error| error.code().to_owned())?;
+        set_attachment_surface(&previous.resource, previous.source,
+            previous.bounds, false, previous.layout.clone()).await?;
         previous.resource.release_surface_attachment(previous.id).await;
     }
     let run = resource.run_changes();
@@ -182,6 +229,7 @@ async fn attach_owned(server: Arc<nomifun_app::DesktopServer>, current: Arc<Mute
     *attachment = Some(Attachment {
         id,
         sequence: 0,
+        source,
         resource: resource.clone(),
         bounds,
         stop: stop.clone(),
@@ -246,6 +294,7 @@ pub(crate) async fn browser_surface_update(
     sequence: u64,
     bounds: BrowserSurfaceBounds,
     visible: bool,
+    surface_source: Option<BrowserSurfaceSource>,
 ) -> Result<(), String> {
     require_main(&view)?;
     let validation = if visible {
@@ -260,6 +309,7 @@ pub(crate) async fn browser_surface_update(
         bounds,
         visible,
         validation,
+        surface_source.unwrap_or_default(),
     )
     .await
 }
@@ -407,6 +457,7 @@ mod tests {
         let current = Arc::new(Mutex::new(Some(Attachment {
             id: 1,
             sequence: 0,
+            source: BrowserSurfaceSource::User,
             resource: resource.workspace().clone(),
             bounds,
             stop: CancellationToken::new(),
@@ -420,12 +471,12 @@ mod tests {
         let (current, surface, bounds) = fixture().await;
         let resize = {
             let current = current.clone();
-            tokio::spawn(async move { update(&current, 1, 1, bounds, true, Ok(())).await })
+            tokio::spawn(async move { update(&current, 1, 1, bounds, true, Ok(()), BrowserSurfaceSource::User).await })
         };
         surface.started.notified().await;
         tokio::time::timeout(
             std::time::Duration::from_millis(200),
-            update(&current, 1, 2, bounds, false, Ok(())),
+            update(&current, 1, 2, bounds, false, Ok(()), BrowserSurfaceSource::User),
         )
         .await
         .unwrap()
@@ -435,17 +486,57 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        update(&current, 1, 1, bounds, true, Ok(())).await.unwrap();
+        update(&current, 1, 1, bounds, true, Ok(()), BrowserSurfaceSource::User).await.unwrap();
         surface.release.notify_waiters();
         assert!(!surface.visible.load(Ordering::SeqCst));
         assert_eq!(current.lock().await.as_ref().unwrap().sequence, 2);
     }
 
     #[tokio::test]
+    async fn manual_open_is_monotonic_across_automatic_overlay_layouts() {
+        let (current, surface, bounds) = fixture().await;
+        current.lock().await.as_mut().unwrap().source = BrowserSurfaceSource::AgentAuto;
+        update(&current, 1, 1, bounds, false, Ok(()), BrowserSurfaceSource::AgentAuto).await.unwrap();
+        assert_eq!(current.lock().await.as_ref().unwrap().source, BrowserSurfaceSource::AgentAuto);
+        // A manual open while an overlay obscures the page already owns its
+        // preservation responsibility, before a native show is possible.
+        update(&current, 1, 2, bounds, false, Ok(()), BrowserSurfaceSource::User).await.unwrap();
+        assert_eq!(current.lock().await.as_ref().unwrap().source, BrowserSurfaceSource::User);
+        surface.release.notify_one();
+        update(&current, 1, 3, bounds, true, Ok(()), BrowserSurfaceSource::AgentAuto).await.unwrap();
+        assert!(surface.visible.load(Ordering::SeqCst));
+        assert_eq!(current.lock().await.as_ref().unwrap().source, BrowserSurfaceSource::User);
+    }
+
+    #[tokio::test]
+    async fn stale_attachment_cannot_promote_another_surface() {
+        let (current, surface, bounds) = fixture().await;
+        current.lock().await.as_mut().unwrap().source = BrowserSurfaceSource::AgentAuto;
+        update(&current, 99, 1, bounds, true, Ok(()), BrowserSurfaceSource::User).await.unwrap();
+        assert!(!surface.visible.load(Ordering::SeqCst));
+        assert_eq!(current.lock().await.as_ref().unwrap().source, BrowserSurfaceSource::AgentAuto);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn failed_manual_retention_does_not_skip_native_hide() {
+        let (current, surface, bounds) = fixture().await;
+        surface.release.notify_one();
+        update(&current, 1, 1, bounds, true, Ok(()), BrowserSurfaceSource::User).await.unwrap();
+        let resource = current.lock().await.as_ref().unwrap().resource.clone();
+        surface.fail_close.store(true, Ordering::SeqCst);
+        assert!(resource.close().await.is_err());
+        assert!(update(&current, 1, 2, bounds, false, Ok(()), BrowserSurfaceSource::User).await.is_err());
+        assert!(!surface.visible.load(Ordering::SeqCst));
+        surface.fail_close.store(false, Ordering::SeqCst);
+        resource.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn detach_retains_failed_hide_but_releases_a_closed_runtime() {
         let (current,surface,bounds)=fixture().await;
         surface.release.notify_one();
-        update(&current,1,1,bounds,true,Ok(())).await.unwrap();
+        update(&current,1,1,bounds,true,Ok(()),BrowserSurfaceSource::User).await.unwrap();
         let resource=current.lock().await.as_ref().unwrap().resource.clone();
         surface.fail_close.store(true,Ordering::SeqCst);
         surface.fail_hide.store(true,Ordering::SeqCst);
@@ -463,7 +554,7 @@ mod tests {
     async fn failed_close_can_detach_after_hiding_the_remaining_surface() {
         let (current,surface,bounds)=fixture().await;
         surface.release.notify_one();
-        update(&current,1,1,bounds,true,Ok(())).await.unwrap();
+        update(&current,1,1,bounds,true,Ok(()),BrowserSurfaceSource::User).await.unwrap();
         let resource=current.lock().await.as_ref().unwrap().resource.clone();
         surface.fail_close.store(true,Ordering::SeqCst);
         assert!(resource.close().await.is_err());
@@ -479,7 +570,7 @@ mod tests {
         let (current, surface, bounds) = fixture().await;
         let resize = {
             let current = current.clone();
-            tokio::spawn(async move { update(&current, 1, 1, bounds, true, Ok(())).await })
+            tokio::spawn(async move { update(&current, 1, 1, bounds, true, Ok(()), BrowserSurfaceSource::User).await })
         };
         surface.started.notified().await;
         tokio::time::timeout(std::time::Duration::from_millis(200), detach(&current, 1))
@@ -488,7 +579,7 @@ mod tests {
             .unwrap();
         resize.await.unwrap().unwrap();
         assert!(current.lock().await.is_none());
-        update(&current, 1, 99, bounds, true, Ok(())).await.unwrap();
+        update(&current, 1, 99, bounds, true, Ok(()), BrowserSurfaceSource::User).await.unwrap();
         assert!(!surface.visible.load(Ordering::SeqCst));
     }
 
@@ -497,7 +588,7 @@ mod tests {
         let (current, surface, bounds) = fixture().await;
         let resize = {
             let current = current.clone();
-            tokio::spawn(async move { update(&current, 1, 1, bounds, true, Ok(())).await })
+            tokio::spawn(async move { update(&current, 1, 1, bounds, true, Ok(()), BrowserSurfaceSource::User).await })
         };
         surface.started.notified().await;
         let invalid = BrowserSurfaceBounds {
@@ -505,7 +596,7 @@ mod tests {
             ..bounds
         };
         assert!(
-            update(&current, 1, 2, invalid, true, Err("outside window".into()))
+            update(&current, 1, 2, invalid, true, Err("outside window".into()), BrowserSurfaceSource::User)
                 .await
                 .is_err()
         );

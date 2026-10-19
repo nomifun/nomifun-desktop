@@ -33,7 +33,7 @@ describe('ChatLayout advanced controls', () => {
     expect(source).not.toContain('initial-browser-open');
     expect(source).not.toContain("sessionStorage.getItem");
     expect(source).toContain('<BrowserPanel panelId={browserPanelId} agentSessionId={conversation_id}');
-    expect(source).toContain('<BrowserLinkContext.Provider value={conversation_id && browserLinkAvailable ? openBrowserLink : null}>');
+    expect(source).toContain('<BrowserLinkContext.Provider value={browserOpen && conversation_id && browserLinkAvailable ? openBrowserLink : null}>');
     expect(source).toContain('hostSurfaceAvailable={isDesktopRuntime}');
     expect(source).toContain('onLinkAvailabilityChange={setBrowserLinkAvailable}');
   });

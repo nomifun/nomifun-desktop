@@ -87,7 +87,7 @@ async fn reply(
 async fn real_dialogs_resume_exact_input_and_stop_preserves_existing_modal() {
     let directory = tempfile::tempdir().unwrap();
     let profile = directory.path().join("dialog-profile");
-    let launched = crate::launch::launch_chrome(
+    let launched = crate::launch::launch_attached_chrome_fixture(
         &crate::launch::LaunchConfig {
             chrome_path: std::env::var_os("NOMIFUN_CHROME_BINARY")
                 .expect("explicit fixture Chrome")
@@ -95,7 +95,6 @@ async fn real_dialogs_resume_exact_input_and_stop_preserves_existing_modal() {
             user_data_dir: profile.clone(),
             headful: true,
         },
-        false,
     )
     .await
     .unwrap();

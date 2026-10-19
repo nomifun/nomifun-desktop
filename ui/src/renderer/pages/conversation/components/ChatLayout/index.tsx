@@ -41,6 +41,7 @@ import { uuid } from '@/renderer/utils/common';
 import type { WorkspaceExtraTab, WorkspaceTab } from '@/renderer/pages/conversation/Workspace/types';
 import './chat-layout.css';
 import BrowserPanel from '../../Browser/BrowserPanel';
+import type { BrowserSurfaceSource } from '../../Browser/client';
 import { BrowserLinkContext, type BrowserLinkRequest } from '../../Browser/BrowserLinkContext';
 import type { LocalBrowserLink } from '../../Browser/localBrowserLink';
 
@@ -118,15 +119,18 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   const isWindowsRuntime = isDesktopRuntime && isWindows();
   // Preview panel state
   const { isOpen: isPreviewOpen, closePreview } = usePreviewContext();
-  const [browserOpen, setBrowserOpen] = useState(false);
+  const [browserSurface, setBrowserSurface] = useState<{ open: boolean; source: BrowserSurfaceSource; sessionId?: ConversationId }>({ open: false, source: 'user' });
+  const browserOpen = browserSurface.open && (browserSurface.source === 'user' || browserSurface.sessionId === conversation_id);
+  const browserSource = browserSurface.source;
   const browserButton = useRef<HTMLButtonElement>(null);
-  const [browserLinkRequest, setBrowserLinkRequest] = useState<BrowserLinkRequest>();
+  const [browserLinkRequest, setBrowserLinkRequest] = useState<(BrowserLinkRequest & { agentSessionId: ConversationId })>();
   const [browserLinkAvailable, setBrowserLinkAvailable] = useState(false);
   const browserLinkSequence = useRef(0);
+  useEffect(() => { setBrowserLinkAvailable(false); setBrowserLinkRequest(undefined); }, [conversation_id]);
   const browserPanelId = conversation_id ? `agent-session-browser-${conversation_id}` : 'agent-session-browser';
   const browserTitle = t('settings.openCapabilities.domainBrowserTitle', { defaultValue: 'Browser' });
   const workSurfaceOpen = browserOpen || isPreviewOpen;
-  useEffect(() => { if (isPreviewOpen) setBrowserOpen(false); }, [isPreviewOpen]);
+  useEffect(() => { if (isPreviewOpen) setBrowserSurface(current => ({ ...current, open: false })); }, [isPreviewOpen]);
 
   // --- Hook A: workspace collapse ---
   const { rightSiderCollapsed, setRightSiderCollapsed, persistRightSiderCollapsed } = useWorkspaceCollapse({
@@ -137,21 +141,26 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
     autoExpandOnFiles: false,
   });
   const { activeWorkspaceTab, setActiveWorkspaceTab } = useWorkspacePanelTabs(workspaceTarget);
-  const openBrowser = useCallback(() => {
+  const openBrowser = useCallback((source: BrowserSurfaceSource = 'user') => {
     closePreview();
     setRightSiderCollapsed(true);
-    setBrowserOpen(true);
-  }, [closePreview, setRightSiderCollapsed]);
+    setBrowserSurface(current => ({ open: true, sessionId: conversation_id,
+      source: current.open && current.source === 'user' ? 'user' : source }));
+  }, [closePreview, setRightSiderCollapsed, conversation_id]);
+  const claimBrowserSurface = useCallback(() => {
+    setBrowserSurface(current => current.open ? { ...current, source: 'user' } : current);
+  }, []);
   const closeBrowser = useCallback(() => {
-    setBrowserOpen(false);
+    setBrowserSurface(current => ({ ...current, open: false }));
     setBrowserLinkAvailable(false);
     setBrowserLinkRequest(undefined);
     requestAnimationFrame(() => browserButton.current?.focus());
   }, []);
   const openBrowserLink = useCallback((link: LocalBrowserLink) => {
+    if (!conversation_id) return;
     openBrowser();
-    setBrowserLinkRequest({ ...link, id: ++browserLinkSequence.current });
-  }, [openBrowser]);
+    setBrowserLinkRequest({ ...link, id: ++browserLinkSequence.current, agentSessionId: conversation_id });
+  }, [openBrowser, conversation_id]);
   useEffect(() => {
     if (!isDesktopRuntime || !conversation_id) return;
     let disposed = false;
@@ -159,12 +168,12 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
     void import('@tauri-apps/api/event').then(async ({ listen }) => {
       const stop = await listen<string>('browser-workspace-open', event => {
         if (event.payload !== conversation_id || disposed) return;
-        openBrowser();
+        openBrowser(isMacRuntime ? 'agent_auto' : 'user');
       });
       if (disposed) stop(); else unsubscribe = stop;
     }).catch(() => {});
     return () => { disposed = true; unsubscribe?.(); };
-  }, [isDesktopRuntime, conversation_id, openBrowser]);
+  }, [isDesktopRuntime, isMacRuntime, conversation_id, openBrowser]);
 
   const activeWorkspaceTitle =
     activeWorkspaceTab === 'files'
@@ -351,7 +360,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   );
 
   return (
-    <BrowserLinkContext.Provider value={conversation_id && browserLinkAvailable ? openBrowserLink : null}>
+    <BrowserLinkContext.Provider value={browserOpen && conversation_id && browserLinkAvailable ? openBrowserLink : null}>
     <ArcoLayout
       className='size-full color-black '
       style={{
@@ -411,7 +420,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
                   lineStyle: { width: '2px' },
                 })}
                 <div className='h-full w-full overflow-hidden'>
-                  {browserOpen && conversation_id ? <BrowserPanel panelId={browserPanelId} agentSessionId={conversation_id} hostSurfaceAvailable={isDesktopRuntime} linkRequest={browserLinkRequest} onLinkAvailabilityChange={setBrowserLinkAvailable} onLinkConsumed={(id, handled) => setBrowserLinkRequest(current => {
+                  {browserOpen && conversation_id ? <BrowserPanel panelId={browserPanelId} agentSessionId={conversation_id} surfaceSource={browserSource} onUserSurfaceUse={claimBrowserSurface} hostSurfaceAvailable={isDesktopRuntime} linkRequest={browserLinkRequest?.agentSessionId === conversation_id ? browserLinkRequest : undefined} onLinkAvailabilityChange={setBrowserLinkAvailable} onLinkConsumed={(id, handled) => setBrowserLinkRequest(current => {
                     if (current?.id !== id) return current;
                     if (!handled) void openExternalUrl(current.url).catch(() => {});
                     return undefined;

@@ -48,7 +48,7 @@ where T: Send + 'static, F: FnOnce() -> Result<T, String> + Send + 'static,
 /// Testable original main-queue slot. Taking the slot begins native admission;
 /// a queued cancellation removes it, while an admitted operation stays joined.
 #[cfg(any(target_os = "macos", test))]
-fn run_queued_controlled<T, D, F>(cancellation: &CancellationToken, enqueue: D, task: F) -> Result<T, String>
+pub(crate) fn run_queued_controlled<T, D, F>(cancellation: &CancellationToken, enqueue: D, task: F) -> Result<T, String>
 where T: Send + 'static, D: FnOnce(Box<dyn FnOnce() + Send>),
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {

@@ -67,6 +67,10 @@ async fn fixture_in(
     AgentSessionId,
     PrincipalRef,
 ) {
+    // macOS's default temporary directory passes through /var, a symlink.
+    // Resolve this fixture-owned directory before the real storage guard;
+    // production admission must still reject symbolic storage ancestors.
+    let root = root.canonicalize().expect("the isolated activity fixture root exists");
     let config = crate::AppConfig {
         data_dir: root.join("data"),
         work_dir: root.join("work"),

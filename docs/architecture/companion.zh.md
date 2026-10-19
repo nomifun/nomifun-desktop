@@ -142,6 +142,11 @@ TTS/ASR 的实际流式能力由供应商端口明确表达；批量合成后切
 
 ## 实现与验证入口
 
+本地头像抠图的 MODNet 供给属于原 Companion service 的应用生命周期资源。真正应用关闭时先封住新供给，
+取消原排队或网络等待并 join 原 worker；已经开始的原子发布仍等待同一写者真实结束。HTTP 观察者离开不丢失
+原供给责任，关闭后不 fallback 或重启下载。已发布的模型缓存保留，正常重启按原摘要验证后复用，不把缓存命中
+或空活动表当作当前 worker 已退出的证明。该供给不持有 Agent 执行或恢复权限。
+
 | 边界 | 入口 |
 | --- | --- |
 | 统一配置 | [profile.rs](../../crates/backend/nomifun-companion/src/profile.rs)、[control plane](../../crates/backend/nomifun-agent-control-plane/src/service.rs) |

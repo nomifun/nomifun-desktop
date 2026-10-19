@@ -152,11 +152,26 @@ impl DesktopBrowserRuntime {
         }
         Ok(self.current_dialog().await.is_none())
     }
-    pub(super) async fn cancel_pending_for_close(&self) {
-        for pending in self.owned_tasks().await {
-            pending.cancel.cancel();
+    pub(super) async fn cancel_pending_for_close(&self) -> Result<(), WorkspaceError> {
+        let tasks = self.owned_tasks().await;
+        // Only work that already yielded a real native dialog needs this
+        // pre-destruction join. Other native work may require Page close to
+        // settle, and retains the existing close-then-join ordering below.
+        let dialogs = tasks.iter().filter(|pending| !pending.closing_tab && pending.waiting_for
+            .lock().unwrap_or_else(|error| error.into_inner()).is_some()).cloned().collect::<Vec<_>>();
+        for pending in tasks { pending.cancel.cancel(); }
+        self.dialog_policy(true).await?;
+        let mut failure = None;
+        for pending in dialogs {
+            // Draining the owned dialog calls its native completion block but
+            // is not the original evaluate/navigation completion. Keep WK alive
+            // until that exact worker returns; removing the view first would
+            // manufacture UNCONFIRMED from an otherwise settled cancellation.
+            if uncertain(&pending.wait().await) {
+                failure = Some(RunAdmissionError::WorkerFailed.into());
+            } else { self.clear_pending(&pending).await; }
         }
-        let _ = self.dialog_policy(true).await;
+        failure.map_or(Ok(()), Err)
     }
     pub(super) async fn retire_pending_after_close(&self) -> Result<(), WorkspaceError> {
         for pending in self.owned_tasks().await {

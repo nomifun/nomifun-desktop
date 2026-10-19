@@ -5,7 +5,7 @@ use crate::{input, native_semantic};
 use chromiumoxide::cdp::{
     browser_protocol::{
         input::{
-            DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
+            DispatchKeyEventType, DispatchMouseEventParams,
             DispatchMouseEventType, MouseButton,
         },
         page::{BringToFrontParams, CreateIsolatedWorldParams, GetFrameTreeParams, NavigateParams},
@@ -687,7 +687,7 @@ impl AttachedBrowser {
                     }
                     check(cancel, &conn)?;
                     if replace {
-                        key_combo(&conn, state, "Ctrl+A").await?;
+                        key_combo(&conn, state, "ControlOrMeta+A").await?;
                     }
                     check(cancel, &conn)?;
                     require_document(&conn, state).await?;
@@ -1020,14 +1020,7 @@ async fn dispatch_key(
     kind: DispatchKeyEventType,
     text: Option<String>,
 ) -> Result<(), Error> {
-    let mut params = DispatchKeyEventParams::new(kind);
-    params.modifiers = Some(chord.modifiers.into());
-    params.key = Some(chord.key.clone());
-    params.code = Some(chord.code.clone());
-    params.windows_virtual_key_code = Some(chord.vk);
-    params.native_virtual_key_code = Some(chord.vk);
-    params.text = text;
-    conn.send(session, &params)
+    input::dispatch_key(conn, session, kind, chord, text.as_deref())
         .await
         .map_err(|_| Error::ExecutionFailed)?;
     Ok(())

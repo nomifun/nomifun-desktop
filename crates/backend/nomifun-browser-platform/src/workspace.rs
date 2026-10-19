@@ -34,12 +34,17 @@ struct RuntimeSlot {
     factory: Arc<dyn BrowserRuntimeFactory>,
     request: CreateBrowserRuntime,
     inner: Mutex<SlotState>,
+    // The Workspace and its native input gate author one shared purpose fact.
+    // Input handoff must pin possible human use before native enable begins.
+    uses: Arc<Mutex<WorkspaceUses>>,
+    use_changes: Arc<crate::revision::BrowserRevision>,
 }
 
 struct SlotState {
     runtime: Option<Arc<dyn BrowserRuntime>>,
     created_by: Option<RuntimeUseSource>,
     locked: bool,
+    native_lock_acknowledged: bool,
     closed: bool,
 }
 
@@ -53,6 +58,9 @@ impl RuntimeSlot {
             return Err(WorkspaceError::WorkspaceClosed);
         }
         if let Some(runtime) = &state.runtime {
+            if source == RuntimeUseSource::Agent && state.locked && !state.native_lock_acknowledged {
+                return Err(RunAdmissionError::InputGateFailed.into());
+            }
             return Ok(runtime.clone());
         }
         let mut request = self.request.clone();
@@ -60,6 +68,13 @@ impl RuntimeSlot {
         let runtime = self.factory.create(request).await?;
         state.created_by = Some(source);
         state.runtime = Some(runtime.clone());
+        if state.locked {
+            // Keep the created owner even if its native gate fails. The
+            // request's initial-input policy is not a native acknowledgement.
+            state.native_lock_acknowledged = false;
+            runtime.lock_user_input().await?;
+            state.native_lock_acknowledged = true;
+        }
         Ok(runtime)
     }
 
@@ -78,42 +93,78 @@ impl RuntimeSlot {
 #[async_trait]
 impl NativeInputGate for RuntimeSlot {
     async fn lock_user_input(&self) -> Result<(), RunAdmissionError> {
-        let mut state = self.inner.lock().await;
-        state.locked = true;
-        if let Some(runtime) = &state.runtime {
+        let runtime = {
+            let mut state = self.inner.lock().await;
+            state.locked = true;
+            state.native_lock_acknowledged = false;
+            state.runtime.clone()
+        };
+        if let Some(runtime) = runtime {
             runtime.lock_user_input().await?;
+            let mut state = self.inner.lock().await;
+            if !state.closed && state.runtime.as_ref().is_some_and(|current| Arc::ptr_eq(current, &runtime)) {
+                state.native_lock_acknowledged = true;
+            }
         }
         Ok(())
     }
     async fn release_pressed_input(&self) -> Result<(), RunAdmissionError> {
-        let state = self.inner.lock().await;
+        let mut state = self.inner.lock().await;
+        let acknowledged = state.native_lock_acknowledged;
+        state.native_lock_acknowledged = false;
         if let Some(runtime) = &state.runtime {
             runtime.release_pressed_input().await?;
         }
+        state.native_lock_acknowledged = acknowledged;
         Ok(())
     }
     async fn prepare_agent_operation(&self) -> Result<(), RunAdmissionError> {
-        let state = self.inner.lock().await;
+        let mut state = self.inner.lock().await;
+        let acknowledged = state.native_lock_acknowledged;
+        state.native_lock_acknowledged = false;
         if let Some(runtime) = &state.runtime {
             runtime.prepare_agent_operation().await?;
         }
+        state.native_lock_acknowledged = acknowledged;
         Ok(())
     }
     async fn try_release_for_user(&self) -> Result<bool, RunAdmissionError> {
-        let state = self.inner.lock().await;
-        match &state.runtime {
+        let mut state = self.inner.lock().await;
+        let acknowledged = state.native_lock_acknowledged;
+        state.native_lock_acknowledged = false;
+        let released = match &state.runtime {
             Some(runtime) => runtime.try_release_for_user().await,
             None => Ok(true),
-        }
+        }?;
+        state.native_lock_acknowledged = acknowledged;
+        Ok(released)
     }
     async fn unlock_user_input(&self) -> Result<(), RunAdmissionError> {
-        let mut state = self.inner.lock().await;
-        if !state.closed {
-            if let Some(runtime) = &state.runtime {
-                runtime.unlock_user_input().await?;
+        let runtime = {
+            let mut state = self.inner.lock().await;
+            if state.closed { return Ok(()); }
+            let mut uses = self.uses.lock().await;
+            // Some(true) includes an unconfirmed/cancelled show. None means
+            // this owner never dispatched a show; retain that existing hidden
+            // task-only path. An attachment can later expose the same page.
+            if uses.presentation == Some(true) || !uses.surface_attachments.is_empty() {
+                uses.user_pages = true;
+                self.use_changes.bump();
+            }
+            state.native_lock_acknowledged = false;
+            let runtime = state.runtime.clone();
+            if runtime.is_none() { state.locked = false; }
+            runtime
+        };
+        if let Some(runtime) = runtime {
+            // No slot/use lock across native enable: a hide can still make
+            // progress. A concurrent show sees the unconfirmed gate and pins.
+            runtime.unlock_user_input().await?;
+            let mut state = self.inner.lock().await;
+            if !state.closed && state.runtime.as_ref().is_some_and(|current| Arc::ptr_eq(current, &runtime)) {
+                state.locked = false;
             }
         }
-        state.locked = false;
         Ok(())
     }
 }
@@ -202,8 +253,8 @@ pub struct BrowserWorkspace {
     // Only the currently admitted human navigation's native cancellation.
     // This is transient operation ownership, never a second history ledger.
     user_navigation: std::sync::Mutex<Option<Arc<UserNavigation>>>,
-    uses: Mutex<WorkspaceUses>,
-    use_changes: crate::revision::BrowserRevision,
+    uses: Arc<Mutex<WorkspaceUses>>,
+    use_changes: Arc<crate::revision::BrowserRevision>,
     registry: std::sync::Weak<Mutex<BTreeMap<BrowserResourceKey, Arc<BrowserWorkspace>>>>,
     retirement_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -213,8 +264,9 @@ struct WorkspaceUses {
     task: Option<String>,
     turn_ended: bool,
     task_completed: bool,
-    // Actual user command or possible native exposure retains nonempty pages;
-    // the marker alone never retains a carrier whose last page was closed.
+    // Actual human intent or possible input-enabled exposure retains nonempty
+    // pages. Agent-only presentation never clears a preceding human purpose.
+    // This marker never retains a carrier whose last page was closed.
     user_pages: bool,
     // None means no native presentation lifecycle has been acknowledged. An
     // API command alone cannot invent an active or detached physical surface.
@@ -575,25 +627,69 @@ impl BrowserWorkspace {
         Ok(())
     }
 
-    /// Host-authenticated desktop layout only. This never changes run authority.
+    /// An explicit human opening/retention intent, including opening a pane
+    /// under an Agent input lock. It grants no Agent or native input authority.
+    pub async fn retain_user_page_use(&self) -> Result<(), WorkspaceError> {
+        let mut uses = self.uses.lock().await;
+        if self.closing.load(Ordering::Acquire) { return Err(WorkspaceError::WorkspaceClosed); }
+        uses.user_pages = true;
+        self.use_changes.bump();
+        Ok(())
+    }
+
+    /// Host-authenticated human/unknown desktop layout. Possible human page
+    /// exposure remains retained before native show, including failed shows.
     pub async fn set_surface(
         &self,
         bounds: crate::runtime::BrowserSurfaceBounds,
         visible: bool,
         layout_cancel: CancellationToken,
     ) -> Result<(), WorkspaceError> {
+        self.set_surface_for_source(bounds, visible, layout_cancel, false).await
+    }
+
+    /// Trusted native Agent-auto presentation only; the caller's source flag
+    /// is not authority. Only a proven original native input lock can avoid
+    /// pinning human page use. Native show/hide still uses the normal owner.
+    pub async fn set_agent_surface(
+        &self,
+        bounds: crate::runtime::BrowserSurfaceBounds,
+        visible: bool,
+        layout_cancel: CancellationToken,
+    ) -> Result<(), WorkspaceError> {
+        self.set_surface_for_source(bounds, visible, layout_cancel, true).await
+    }
+
+    async fn set_surface_for_source(
+        &self,
+        bounds: crate::runtime::BrowserSurfaceBounds,
+        visible: bool,
+        layout_cancel: CancellationToken,
+        agent_auto: bool,
+    ) -> Result<(), WorkspaceError> {
         if layout_cancel.is_cancelled() {
             return Ok(());
         }
-        let epoch = {
+        // Never await coordinator state while holding the Slot: input
+        // transitions call the Slot from that original coordinator. A later
+        // handoff still pins the latest presentation before native enable.
+        let run = if visible && agent_auto { Some(self.coordinator.snapshot().await) } else { None };
+        let epoch = if visible {
+            let state = self.slot.inner.lock().await;
+            let agent_locked = agent_auto && state.created_by == Some(RuntimeUseSource::Agent)
+                && state.locked && state.native_lock_acknowledged && !state.closed
+                && run.is_some_and(|run| run.input_state == crate::run_guard::BrowserInputState::AgentRunning && !run.input_gate_failed);
             let mut uses = self.uses.lock().await;
             uses.presentation_epoch = uses.presentation_epoch.checked_add(1).ok_or(WorkspaceError::NativeCommandFailed)?;
-            if visible {
-                // Dispatching a show can expose input before its caller sees
-                // the response; an unknown/cancelled show remains retained.
-                uses.user_pages = true;
-                uses.presentation = Some(true);
-            }
+            if !agent_locked { uses.user_pages = true; }
+            // Dispatch may show before its waiter returns. Even Agent-only
+            // unknown/cancelled shows retain presentation until exact hide.
+            uses.presentation = Some(true);
+            self.use_changes.bump();
+            uses.presentation_epoch
+        } else {
+            let mut uses = self.uses.lock().await;
+            uses.presentation_epoch = uses.presentation_epoch.checked_add(1).ok_or(WorkspaceError::NativeCommandFailed)?;
             self.use_changes.bump();
             uses.presentation_epoch
         };
@@ -1241,6 +1337,8 @@ impl BrowserResourceService {
             if workspace.slot.request.profile != profile { return Err(WorkspaceError::ProfileCleanupInvalid); }
             return Ok(workspace.clone());
         }
+        let uses = Arc::new(Mutex::new(WorkspaceUses::default()));
+        let use_changes = Arc::new(crate::revision::BrowserRevision::default());
         let slot = Arc::new(RuntimeSlot {
             factory: self.factory.clone(),
             request: CreateBrowserRuntime {
@@ -1249,7 +1347,9 @@ impl BrowserResourceService {
                 profile,
                 user_input_enabled: true,
             },
-            inner: Mutex::new(SlotState { runtime: None, created_by: None, locked: false, closed: false }),
+            inner: Mutex::new(SlotState { runtime: None, created_by: None, locked: false, native_lock_acknowledged: false, closed: false }),
+            uses: uses.clone(),
+            use_changes: use_changes.clone(),
         });
         let workspace = Arc::new(BrowserWorkspace {
             key: key.clone(),
@@ -1259,8 +1359,8 @@ impl BrowserResourceService {
             slot,
             closing: AtomicBool::new(false),
             user_navigation: std::sync::Mutex::new(None),
-            uses: Mutex::new(WorkspaceUses::default()),
-            use_changes: Default::default(),
+            uses,
+            use_changes,
             registry: Arc::downgrade(&self.resources),
             retirement_worker: Mutex::new(None),
         });

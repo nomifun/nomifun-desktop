@@ -10,11 +10,17 @@ use nomifun_db::IRequirementRepository;
 #[path = "waiting_runtime_soft_recycle_tests.rs"]
 mod soft_recycle_tests;
 
+#[path = "completed_runtime_effect_retirement_tests.rs"]
+mod completed_effect_retirement_tests;
+
 #[derive(Clone)]
 struct WaitingWriterModel {
     requests: Arc<Mutex<Vec<Value>>>,
     launch: Arc<OnceLock<Value>>,
     process: Arc<OnceLock<String>>,
+    hold_after_start: bool,
+    started_entered: Arc<tokio::sync::Notify>,
+    started_release: Arc<tokio::sync::Notify>,
 }
 struct WaitingWriterServer {
     url: String,
@@ -42,10 +48,17 @@ fn writer_result<'a>(body: &'a Value, id: &str) -> Option<&'a Value> {
 }
 impl WaitingWriterServer {
     async fn new() -> Self {
+        Self::with_start_hold(false).await
+    }
+
+    async fn with_start_hold(hold_after_start: bool) -> Self {
         let state = WaitingWriterModel {
             requests: Default::default(),
             launch: Default::default(),
             process: Default::default(),
+            hold_after_start,
+            started_entered: Default::default(),
+            started_release: Default::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -57,6 +70,10 @@ impl WaitingWriterServer {
                     let started:Value=serde_json::from_str(result["content"].as_str().unwrap()).unwrap();
                     let process=started["process_id"].as_str().expect("original native process identity must reach the model");
                     if let Some(original)=state.process.get(){assert_eq!(original,process);}else{state.process.set(process.into()).unwrap();}
+                    if state.hold_after_start {
+                        state.started_entered.notify_one();
+                        state.started_release.notified().await;
+                    }
                     writer_tool("request_user_input","waiting-writer-question",json!({"question":"Which report should the existing writer produce next?","remaining_work":"Use the original background writer after the user answers."}))
                 } else if let Some(result)=writer_result(&body,"waiting-writer-read") {
                     assert!(result["content"].as_str().unwrap().contains("setInterval"),"the real file read must materialize the original derived workspace owner");

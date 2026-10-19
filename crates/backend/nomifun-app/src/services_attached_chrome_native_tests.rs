@@ -76,7 +76,7 @@ async fn t36_page(
 async fn real_app_quit_detaches_attached_chrome_without_closing_or_reloading_original_pages() {
     use chromiumoxide::cdp::browser_protocol::target::{ActivateTargetParams, GetTargetsParams};
     use futures_util::FutureExt;
-    use nomi_browser_engine::launch::{LaunchConfig, launch_chrome};
+    use nomi_browser_engine::launch::{LaunchConfig, launch_attached_chrome_fixture};
     use nomi_browser_engine::transport::ROOT_SESSION;
     use nomifun_browser_platform::attached_browser::{
         AttachedBrowserCommand, AttachedBrowserProviderHost, AttachedBrowserRuntimeError,
@@ -113,13 +113,12 @@ async fn real_app_quit_detaches_attached_chrome_without_closing_or_reloading_ori
     );
     let directory = tempfile::tempdir().unwrap();
     let profile = directory.path().join("external-chrome-profile");
-    let launched = launch_chrome(
+    let launched = launch_attached_chrome_fixture(
         &LaunchConfig {
             chrome_path: chrome,
             user_data_dir: profile.clone(),
             headful: true,
         },
-        false,
     )
     .await
     .unwrap();

@@ -1,6 +1,6 @@
 //! Deterministic protocol fixture for the actual Desktop App, never a native
 //! replacement window. Only the separately launched product owns the browser.
-use super::{Fixture, browser_tool, computer_result_text, contains_inline_png};
+use super::{Fixture, browser_tool, computer_result_text};
 use serde_json::{Value, json};
 use base64::Engine as _;
 
@@ -50,13 +50,41 @@ fn semantic(fixture: &Fixture, body: &Value, step: usize, name: &str) -> anyhow:
     Ok(())
 }
 
-fn image_part(value: &Value) -> Option<&str> {
-    match value {
-        Value::String(value)=>value.strip_prefix("data:image/png;base64,"),
-        Value::Array(values)=>values.iter().find_map(image_part),
-        Value::Object(values)=>values.values().find_map(image_part),
-        _=>None,
-    }
+fn screenshot_png(body: &Value, call_id: &str) -> anyhow::Result<Vec<u8>> {
+    let messages=body["messages"].as_array().ok_or_else(||anyhow::anyhow!("WK model messages missing"))?;
+    let results=messages.iter().enumerate().filter(|(_,message)|
+        message["role"]=="tool" && message["tool_call_id"].as_str()==Some(call_id)).collect::<Vec<_>>();
+    anyhow::ensure!(results.len()==1,"WK screenshot requires one exact tool result for {call_id}");
+    let (index,_)=results[0];
+    // OpenAI Chat carries tool text first, then one adjacent user media message
+    // for the complete tool batch. Never borrow an earlier/later screenshot or
+    // accept a data URI merely embedded in arbitrary tool text.
+    let media=messages[index+1..].iter().find(|message|message["role"]!="tool")
+        .ok_or_else(||anyhow::anyhow!("WK screenshot media batch missing for {call_id}"))?;
+    anyhow::ensure!(media["role"]=="user","WK screenshot media is not adjacent to its tool batch");
+    let parts=media["content"].as_array().ok_or_else(||anyhow::anyhow!("WK screenshot requires typed media content"))?;
+    let marker=format!("Attachments returned by tool call {call_id}: ");
+    let markers=parts.iter().enumerate().filter(|(_,part)|part["type"]=="text" && part["text"].as_str()==Some(marker.as_str()))
+        .map(|(index,_)|index).collect::<Vec<_>>();
+    anyhow::ensure!(markers.len()==1,"WK screenshot requires one exact attachment marker for {call_id}");
+    let image=parts[markers[0]+1..].iter().take_while(|part|!(part["type"]=="text"
+        && part["text"].as_str().is_some_and(|text|text.starts_with("Attachments returned by tool call ") && text.ends_with(": "))))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(image.len()==1 && image[0]["type"]=="image_url","WK screenshot requires exactly one typed image for {call_id}");
+    let encoded=image[0]["image_url"]["url"].as_str().and_then(|url|url.strip_prefix("data:image/png;base64,"))
+        .ok_or_else(||anyhow::anyhow!("WK screenshot is not an inline PNG image for {call_id}"))?;
+    let bytes=base64::engine::general_purpose::STANDARD.decode(encoded)?;
+    anyhow::ensure!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"),"WK screenshot is not PNG");
+    let observed:Value=serde_json::from_str(computer_result_text(body,call_id)?)?;
+    let observed=observed.get("result").unwrap_or(&observed);
+    let screenshot=&observed["screenshot"];
+    anyhow::ensure!(observed["target"].is_object() && screenshot["target"]==observed["target"]
+        && screenshot["media_type"]=="image/png","WK screenshot metadata does not match its exact observation");
+    let decoded=image::load_from_memory_with_format(&bytes,image::ImageFormat::Png)?;
+    anyhow::ensure!(screenshot["width"].as_u64()==Some(u64::from(decoded.width()))
+        && screenshot["height"].as_u64()==Some(u64::from(decoded.height())),
+        "WK screenshot PNG dimensions do not match its exact native metadata");
+    Ok(bytes)
 }
 
 pub(super) fn operation(fixture: &Fixture, body: &Value, step: usize) -> anyhow::Result<Option<(String, Value)>> {
@@ -97,8 +125,7 @@ pub(super) fn operation(fixture: &Fixture, body: &Value, step: usize) -> anyhow:
         13 => ("browser/act",json!({"action":"click","element":element(body,12,"提交验收")?})),
         14 => { semantic(fixture,body,13,"click_semantic_dom")?; ("browser/observe",json!({"screenshot":true})) }
         15 => {
-            let screenshot_result=super::computer_tool_result(body,"gui-wk-14").ok_or_else(||anyhow::anyhow!("Exact first WK screenshot result missing"))?;
-            anyhow::ensure!(contains_inline_png(screenshot_result),"First WK screenshot missing typed image");
+            screenshot_png(body,"gui-wk-14")?;
             ("browser/act",json!({"action":"click","element":element(body,14,"用户计数")?}))
         }
         16 => { semantic(fixture,body,15,"post_screenshot_reference_usable")?; ("browser/observe",json!({"screenshot":true})) }
@@ -106,11 +133,7 @@ pub(super) fn operation(fixture: &Fixture, body: &Value, step: usize) -> anyhow:
             let observed = result(body,16)?;
             let content = observed["content"].as_str().unwrap_or_default();
             anyhow::ensure!(content.contains(TEXT) && content.contains("Café 中文") && content.contains("滚动完成") && content.contains("isTrusted=false"), "WK result missing exact form, select, scroll or semantic event evidence");
-            let screenshot_result=super::computer_tool_result(body,"gui-wk-16").ok_or_else(||anyhow::anyhow!("Exact WK screenshot tool result missing"))?;
-            anyhow::ensure!(contains_inline_png(screenshot_result),"WK screenshot did not reach model as an image part");
-            let encoded=image_part(screenshot_result).ok_or_else(||anyhow::anyhow!("WK screenshot image missing"))?;
-            let bytes=base64::engine::general_purpose::STANDARD.decode(encoded)?;
-            anyhow::ensure!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"),"WK screenshot is not PNG");
+            let bytes=screenshot_png(body,"gui-wk-16")?;
             let path=fixture.wk_screenshot.as_ref().ok_or_else(||anyhow::anyhow!("WK screenshot output missing"))?;
             use std::io::Write;
             let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
@@ -161,4 +184,76 @@ fn dialog_operation(fixture:&Fixture,body:&Value,step:usize)->anyhow::Result<Opt
         _=>anyhow::bail!("Unexpected pending-dialog model step {step}"),
     };
     Ok(Some((browser_tool(body,action)?,input)))
+}
+
+#[cfg(test)]
+mod screenshot_wire_tests {
+    use super::*;
+
+    fn fixture() -> (Value, Vec<u8>) {
+        let image=image::RgbaImage::from_pixel(2,3,image::Rgba([17,31,47,255]));
+        let mut png=std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image).write_to(&mut png,image::ImageFormat::Png).unwrap();
+        let png=png.into_inner();
+        let target=json!({"tab_id":"exact-tab","runtime_generation":1,"document_generation":3});
+        let observation=json!({"target":target,"screenshot":{"target":target,"width":2,"height":3,"media_type":"image/png"}});
+        let url=format!("data:image/png;base64,{}",base64::engine::general_purpose::STANDARD.encode(&png));
+        (json!({"messages":[
+            {"role":"tool","tool_call_id":"gui-wk-14","content":observation.to_string()},
+            {"role":"tool","tool_call_id":"other-tool","content":"{}"},
+            {"role":"user","content":[
+                {"type":"text","text":"Attachments returned by tool call gui-wk-14: "},
+                {"type":"image_url","image_url":{"url":url}},
+                {"type":"text","text":"Attachments returned by tool call other-tool: "},
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,b3RoZXI="}}
+            ]}
+        ]}),png)
+    }
+
+    #[test]
+    fn screenshot_uses_exact_call_media_after_the_whole_tool_batch() {
+        let (body,png)=fixture();
+        assert!(!super::super::contains_inline_png(super::super::computer_tool_result(&body,"gui-wk-14").unwrap()));
+        assert_eq!(screenshot_png(&body,"gui-wk-14").unwrap(),png);
+    }
+
+    #[test]
+    fn screenshot_rejects_unrelated_nonadjacent_and_ambiguous_media() {
+        let (body,_)=fixture();
+        let mut unrelated=body.clone();
+        unrelated["messages"][2]["content"][0]["text"]=json!("Attachments returned by tool call another-call: ");
+        let mut nonadjacent=body.clone();
+        nonadjacent["messages"].as_array_mut().unwrap().insert(2,json!({"role":"assistant","content":"Intervening round"}));
+        let mut duplicate_call=body.clone();
+        duplicate_call["messages"].as_array_mut().unwrap().insert(1,body["messages"][0].clone());
+        let mut duplicate_marker=body.clone();
+        duplicate_marker["messages"][2]["content"].as_array_mut().unwrap().push(body["messages"][2]["content"][0].clone());
+        let mut duplicate_image=body.clone();
+        duplicate_image["messages"][2]["content"].as_array_mut().unwrap().insert(2,body["messages"][2]["content"][1].clone());
+        for (name,invalid) in [("other call",unrelated),("later batch",nonadjacent),("duplicate call",duplicate_call),
+            ("duplicate marker",duplicate_marker),("multiple images",duplicate_image)] {
+            assert!(screenshot_png(&invalid,"gui-wk-14").is_err(),"accepted {name} image");
+        }
+    }
+
+    #[test]
+    fn screenshot_requires_real_png_matching_the_original_native_metadata() {
+        let (body,_)=fixture();
+        let mut wrong_target=body.clone();
+        let mut observation:Value=serde_json::from_str(body["messages"][0]["content"].as_str().unwrap()).unwrap();
+        observation["screenshot"]["target"]["document_generation"]=json!(4);
+        wrong_target["messages"][0]["content"]=json!(observation.to_string());
+        let mut wrong_size=body.clone();
+        let mut observation:Value=serde_json::from_str(body["messages"][0]["content"].as_str().unwrap()).unwrap();
+        observation["screenshot"]["width"]=json!(3);
+        wrong_size["messages"][0]["content"]=json!(observation.to_string());
+        let mut wrong_type=body.clone();
+        wrong_type["messages"][2]["content"][1]["type"]=json!("text");
+        let mut truncated=body.clone();
+        truncated["messages"][2]["content"][1]["image_url"]["url"]=json!(format!("data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n")));
+        for (name,invalid) in [("wrong target",wrong_target),("wrong dimensions",wrong_size),("untyped image",wrong_type),("truncated PNG",truncated)] {
+            assert!(screenshot_png(&invalid,"gui-wk-14").is_err(),"accepted {name}");
+        }
+    }
 }

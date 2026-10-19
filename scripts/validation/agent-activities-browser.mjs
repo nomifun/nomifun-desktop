@@ -15,9 +15,13 @@ const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const option = (name) => { const at = process.argv.indexOf(name); return at < 0 ? undefined : process.argv[at + 1]; };
 const binary = option('--backend-test');
 const playwrightModule = option('--playwright-module') ?? process.env.NOMIFUN_LIVE_PLAYWRIGHT_MODULE;
+const browserExecutable = option('--browser-executable') ?? process.env.NOMIFUN_CHROME_BINARY;
 if (!binary || !playwrightModule || !isAbsolute(binary) || !isAbsolute(playwrightModule)) {
   throw new Error('Pass absolute --backend-test <compiled nomifun-app lib test exe> and --playwright-module <existing playwright index.mjs>.');
 }
+if (browserExecutable && !isAbsolute(browserExecutable)) throw new Error('Optional --browser-executable / NOMIFUN_CHROME_BINARY must be an absolute existing browser executable.');
+const browserExecutablePath = browserExecutable ? await realpath(browserExecutable) : undefined;
+if (browserExecutablePath && !(await stat(browserExecutablePath)).isFile()) throw new Error('Browser executable must resolve to an existing file.');
 const backendPath = await realpath(binary);
 const backendFile = await stat(backendPath);
 if (!isAbsolute(backendPath) || !backendFile.isFile()) throw new Error('Backend test binary must resolve to an existing absolute file.');
@@ -119,7 +123,8 @@ try {
   const address = rendererServer.address();
   if (!address || typeof address === 'string') throw new Error('Vite did not bind a private port');
   const { chromium } = await import(pathToFileURL(playwrightModule).href);
-  browser = await chromium.launch({ channel: 'msedge', headless: true });
+  browser = await chromium.launch({ ...(browserExecutablePath ? { executablePath: browserExecutablePath } : { channel: 'msedge' }), headless: true });
+  report.browser = { ...(browserExecutablePath ? { executable_path: browserExecutablePath } : { channel: 'msedge' }), version: browser.version(), headless: true };
   context = await browser.newContext({ locale: 'en-US', viewport: { width: 1280, height: 800 }, extraHTTPHeaders: { 'x-nomi-local-trust': 'activity-lifecycle-regression' } });
   stage = 'fixture-authentication';
   const renderer = `http://127.0.0.1:${address.port}`;

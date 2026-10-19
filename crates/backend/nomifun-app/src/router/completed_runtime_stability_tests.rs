@@ -39,9 +39,16 @@ fn os_load_sample() -> Value {
     } Some(count) };
     #[cfg(not(windows))]
     let native_handles: Option<u32> = None;
+    // sysinfo queries this exact process through proc_pidinfo on macOS and
+    // /proc on Linux. Keep unsupported observations absent rather than
+    // treating a missing platform handle counter as zero live descriptors.
+    #[cfg(unix)]
+    let native_fds = process.open_files().expect("Unix lifecycle probe must count actual open descriptors");
+    #[cfg(not(unix))]
+    let native_fds: Option<usize> = None;
     let sqlx_completed_queries=SQL_QUERY_PROBE.get().map(|count|count.load(Ordering::Relaxed));
     if let Some(count)=sqlx_completed_queries {assert!(count>0,"enabled SQL probe must observe actual query completions");}
-    json!({"rss_bytes":process.memory(),"cpu_ms":process.accumulated_cpu_time(),"native_handles":native_handles,
+    json!({"rss_bytes":process.memory(),"cpu_ms":process.accumulated_cpu_time(),"native_handles":native_handles,"native_fds":native_fds,
         "sqlx_completed_queries":sqlx_completed_queries})
 }
 

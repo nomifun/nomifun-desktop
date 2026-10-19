@@ -14,7 +14,12 @@ impl NomiCoreSessionOwner {
             let mut workspace_ticket=None;
             loop {
                 match owner.retire_completed_runtime_with_workspace_ticket(&owner_id, &session, &operation, &expected_runtime,&mut workspace_ticket).await {
-                    Ok(()) => return,
+                    Ok(()) => {
+                        tracing::info!(session_id=session.as_ref(), operation_id=operation.as_ref(),
+                            native_teardown_proven=expected_runtime.teardown_proven(),
+                            "completed Runtime retirement owner settled");
+                        return;
+                    }
                     Err(error) => tracing::warn!(session_id=session.as_ref(),operation_id=operation.as_ref(),%error,
                         "completed Runtime retirement remains unconfirmed; exact owner retained"),
                 }
@@ -106,10 +111,14 @@ impl NomiCoreSessionOwner {
                 return Err(AppError::Conflict("completed Runtime admission is still retained".into()));
             }
         }
-        if self.canonical.store().has_unsettled_effects(session).await.map_err(agent_session_store_error)? {
+        if self.canonical.store().has_unsettled_effects(session).await.map_err(agent_session_store_error)?
+            && !expected_runtime.teardown_proven() {
             // The exact MCP owner can prove physical closure while retaining
             // Unknown external outcome. This never clears that Effect or
             // grants a new Turn, tool dispatch or checkpoint resume.
+            // A concurrent retirement may already have completed this exact
+            // Runtime's full teardown and evicted its Kernel weak cache. Its
+            // retained successful result is the proof; cache absence is not.
             engines.ensure_completed_effect_resources_closed(session).await?;
         }
         let current = self.runtime_sessions.get_runtime(session.as_ref());

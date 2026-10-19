@@ -795,6 +795,10 @@ async fn late_and_replayed_stop_preserve_a_new_idle_warmup_without_retirement_wa
         _ => panic!("the original official factory must create the warmup carrier"),
     };
     let prepared_carrier = runtimes.observe_runtime_carrier(session.as_ref());
+    assert!(fixture.runtime.teardown_proven(), "the original instance retains its successful teardown result");
+    assert!(!prepared.teardown_proven(), "the successor has no teardown proof");
+    fixture.owner.retire_completed_runtime(&owner, &session, &"cleanup-retry-turn".into(), &fixture.runtime)
+        .await.unwrap();
     assert_ne!(prepared_carrier.instance_id.as_ref().unwrap(), &original);
     assert!(prepared_carrier.registered && !prepared_carrier.teardown_pending);
     assert!(prepared_carrier.active_generation.is_none());

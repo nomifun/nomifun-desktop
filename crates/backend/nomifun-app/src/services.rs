@@ -672,6 +672,7 @@ async fn await_browser_shutdown_step(step: Option<BrowserShutdownStep>) -> Resul
 
 #[derive(Default)]
 struct HostShutdownStage {
+    resources_closed: bool,
     mcp_auth_task: Option<JoinHandle<()>>,
     mcp_auth_closed: bool,
     mcp_auth_failure: Option<String>,
@@ -1460,12 +1461,40 @@ impl AppServices {
     /// terminal, channel, Agent Execution, Browser/Gateway, robot, or SSH
     /// resources are still active.
     pub(crate) async fn shutdown_nomi_core_host(&self) -> anyhow::Result<()> {
+        self.quiesce_nomi_core_host().await?;
         let mut stage=self.host_shutdown_stage.lock().await;
         if stage.complete {return Ok(());}
-        // A cancelled storage waiter cannot re-run producers
-        // against SQLite that the retained storage worker has already closed.
+        // A cancelled observer resumes the original storage worker. It must
+        // never re-enter producers against a pool that worker may have closed.
         if stage.storage_task.is_some() || stage.storage_closed || stage.storage_failure.is_some() {
             return self.finish_host_storage_shutdown(&mut stage).await;
+        }
+        // Desktop reaches this only after its original HTTP listeners drain.
+        // Catch a late defensive registration from an already accepted request
+        // before publishing the final storage closure.
+        let errors=self.shutdown_background_tasks(Duration::from_secs(1)).await;
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!("Nomi-core final background cleanup failed: {}",errors.join("; ")));
+        }
+        let companion=self.companion_service.clone();let database=self.database.clone();
+        stage.storage_task=Some(tokio::spawn(async move {
+            companion.close_storage().await;
+            database.close().await;
+        }));
+        self.finish_host_storage_shutdown(&mut stage).await
+    }
+
+    /// Close resource admission and join original producers without closing
+    /// storage. HTTP hosts invoke this before graceful drain: accepted requests
+    /// can depend on these same owners receiving cancellation.
+    pub(crate) async fn quiesce_nomi_core_host(&self) -> anyhow::Result<()> {
+        self.companion_service.request_matting_model_shutdown();
+        let mut stage=self.host_shutdown_stage.lock().await;
+        if stage.resources_closed || stage.complete {return Ok(());}
+        // Startup/error cleanup can already have an original storage worker.
+        // That authority is joined only by the complete shutdown entry point.
+        if stage.storage_task.is_some() || stage.storage_closed || stage.storage_failure.is_some() {
+            return Ok(());
         }
         self.request_background_shutdown();
         self.shutdown_cron_timers();
@@ -1477,7 +1506,7 @@ impl AppServices {
         // Resource owners close admission while producers drain. A failed
         // producer may retain native infrastructure and storage, but must not
         // skip cancellation and exact view/connection cleanup in other domains.
-        let ((mut errors, runtimes_stopped, producers_stopped), browser_resources, (mut terminal_resources, mut mcp_auth_resources)) = tokio::join!(async {
+        let ((mut errors, runtimes_stopped, producers_stopped), browser_resources, (mut terminal_resources, mut mcp_auth_resources), ()) = tokio::join!(async {
             let mut errors = Vec::new();
             if let Err(error) = self.app_hosting.shutdown().await {
                 errors.push(format!("Hosted application cleanup failed: {error}"));
@@ -1546,7 +1575,7 @@ impl AppServices {
             let terminal = stage.wait_terminal_cleanup().await;
             let mcp_auth = stage.wait_mcp_auth_cleanup().await;
             (terminal, mcp_auth)
-        });
+        }, self.companion_service.shutdown_matting_model());
         // The five-second observer may have finished before another domain.
         // Consume this exact worker's now-settled result before reporting an
         // old timeout or deciding whether native infrastructure can close.
@@ -1602,12 +1631,8 @@ impl AppServices {
             }
         }
         if errors.is_empty() {
-            let companion=self.companion_service.clone();let database=self.database.clone();
-            stage.storage_task=Some(tokio::spawn(async move {
-                companion.close_storage().await;
-                database.close().await;
-            }));
-            self.finish_host_storage_shutdown(&mut stage).await
+            stage.resources_closed=true;
+            Ok(())
         } else {
             // A worker can settle during the remaining independent drains.
             // Deliver its actual failure in this aggregate when it is known;

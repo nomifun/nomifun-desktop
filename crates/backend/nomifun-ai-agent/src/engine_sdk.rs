@@ -511,6 +511,11 @@ fn break_transport(shared: &SharedRuntime, turn: AgentRuntimeTurn, message: Stri
 
 #[async_trait]
 impl OfficialAgentRuntime for HostedAgentRuntime {
+    fn teardown_proven(&self) -> bool {
+        self.shared.cleanup.lock().ok().is_some_and(|flight|
+            flight.as_ref().is_some_and(|flight| matches!(flight.completion.peek(), Some(Ok(())))))
+    }
+
     fn supports_steering_context(&self) -> bool {
         self.shared.driver.supports_steering_context()
     }
@@ -701,6 +706,27 @@ mod tests {
 
     async fn next_event(events: &mut broadcast::Receiver<AgentStreamEvent>) -> AgentStreamEvent {
         tokio::time::timeout(std::time::Duration::from_secs(2), events.recv()).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn teardown_proof_requires_success_of_the_original_full_cleanup_flight() {
+        for fail_cleanup in [false, true] {
+            let (runtime, driver) = model_failure_runtime(fail_cleanup, false);
+            assert!(!runtime.teardown_proven(), "absence of a teardown flight is not resource proof");
+            runtime.send_message(model_failure_message()).await.unwrap();
+            driver.cleanup_entered.notified().await;
+            let cleanup = runtime.kill_and_wait(Some(AgentKillReason::TurnBoundaryRecycle));
+            assert!(!runtime.teardown_proven(), "a closed transport and pending original cleanup are not proof");
+            driver.cleanup_release.notify_one();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), cleanup).await.unwrap();
+            assert_eq!(result.is_ok(), !fail_cleanup);
+            assert_eq!(runtime.teardown_proven(), !fail_cleanup,
+                "only a successful retained full cleanup result proves this exact Runtime released");
+            if !fail_cleanup {
+                runtime.kill_and_wait(Some(AgentKillReason::TurnBoundaryRecycle)).await.unwrap();
+                assert!(runtime.teardown_proven(), "observing the same successful flight remains idempotent");
+            }
+        }
     }
 
     #[tokio::test]

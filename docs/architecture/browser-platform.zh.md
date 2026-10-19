@@ -50,7 +50,10 @@ paused 本身不构成浏览器输入锁。Browser snapshot 只报告实际输�
 完整 Runtime teardown 成功后，Kernel 资源上下文只按对应实例的 Arc 身份退出 Weak cache；即使旧 handle 仍被持有，
 后继 Runtime 也不能复用已关闭上下文，迟到的旧 cleanup 不能驱逐新的实例。
 
-真正应用退出时，AppServices 在关闭 Agent 准入后并行推进 producer 收束与 Browser 各 owner 的资源关闭。
+真正应用退出时，HTTP host 先关闭新准入，不在发出资源停止前等待所有已接受请求返回。原 AppServices
+在关闭 Agent 准入后并行推进 producer 收束与 Browser 各 owner 的资源关闭。资源关闭证明与 listener、
+storage 关闭仍由同一 HostShutdownStage 分别持有；原 HTTP 请求尚未结束时数据库保持打开，只有原资源
+和各 listener 都已实际收束后才关闭 storage。长请求不再延误向 Agent 或其他独立资源发出关闭。
 Gateway、Attached Chrome、headless 和 managed Workspace 各自封住准入并等待原生操作／精确载体清理；
 某个 producer 或资源 owner 失败、仍在等待，不能跳过其他 owner 的关闭请求。managed Workspace 的 view
 关闭与进程级 native infrastructure 释放分开：后者仍须取得原有 producer 与资源收束证明，数据库也继续
@@ -66,8 +69,10 @@ AutoWork 根任务读取自己的 automation link；失败使用原 System settl
 同 Session 仍有活动任务、后继、重试、review、无原资源关闭证明的未知 Effect、等待或暂停时不能取得这份证明。
 委派子任务使用自己的 Session 和 BrowserWorkspace，未结算的聚合 lead 记录本身不持有根任务的浏览器用途；
 根任务正式结算后可退休自己的独占载体，其他 Session 的合法委派及其浏览器继续运行。
-MCP 的原物理清理证明仅用于资源退休，业务 Unknown 与恢复围栏继续保留。只有原生载体确由 Agent 创建、从未向用户暴露或接受人工
-页面命令，且任务及后置责任已经结算时，才进入该自动退休子集。
+MCP 的原物理清理证明仅用于资源退休，业务 Unknown 与恢复围栏继续保留。只有原生载体确由 Agent 创建、
+从未具有人工可操作或明确人工保留用途，且任务及后置责任已经结算时，才进入该自动退休子集。Agent 仅在
+原生输入已确认禁用期间的自动展示，不自行产生人工用途；这不允许凭 Session 状态、UI 来源标签或锁定意图
+推断安全，也不放宽正式使命与原生操作的结算要求。
 
 合法重试仍等待时保留用途；正式 Stop 或 Step 最终结算结束这份责任后，原 writer 重新唤醒该 Step
 已确认清理的旧终态 Attempt，仍使用各自原 invocation，不能选择后继 Turn。旧失败结果及 retry 元数据
@@ -81,13 +86,18 @@ Remote 的普通 Ready 会话同样持续保留，只有原取消 owner 持久�
 才可结束该 Remote 来源的浏览器用途。来源回调由原 TaskTracker 保留至 Browser 接责或真正退出的
 原 owner 接管，不重建 Runtime，不发送输入或重跑任务；接责不冒称物理关闭已经完成。
 
-当前 presentation 与原生 Attachment 是独立的用户使用责任。visible=true 的派发先保留可能已暴露的页面，只有
-同一最新 epoch 的 visible=false 原生确认才结束此次展示；菜单／模态的临时遮挡仍由原 Attachment 持有。
+当前 presentation 与原生 Attachment 是独立的使用责任。人工或来源不明的 visible=true 派发先单调保留
+用户页面用途；明确的人工打开、链接或页面命令，即使发生在 Agent 锁内也保留这一用途。macOS 自动打开的
+Attachment 只提供来源候选，仍由原 Workspace 在真实 coordinator 门禁及 native lock ACK 下判断；旧来源
+不能把人工用途降级。输入交还在任何 native enable 前，先保留仍可能可见或仍有 Attachment 的页面；原生
+锁定、展示或交接结果不确定时同样保守保留，不把锁延长到模型思考阶段。缺省来源和 Windows surface 路径
+保持原人工保守语义。只有同一最新 epoch 的 visible=false 原生确认才结束此次展示；菜单／模态的临时遮挡
+仍由原 Attachment 持有。
 真正 detach 在 hide 确认后释放准确 attachment ID，迟到 hide／detach、请求取消及历史 user_command 都不能
 冒充当前使用结束。正在使用的
 空浏览器保持 close-all 后在同一 runtime 创建新标签的能力；已确认收起、无剩余标签／传输／任务责任的空载体
 可自动关闭，不要求用户删除 Session。没有真实 presentation 生命周期的 API-only 使用保持 unknown，不能从请求
-返回或断开猜测未来使用已经结束。已暴露过的非空网页仍可能有未保存编辑或页面服务，当前原生接口不能为任意
+返回或断开猜测未来使用已经结束。曾可供人工操作或明确由用户打开保留的非空网页仍可能有未保存编辑或页面服务，当前原生接口不能为任意
 JS 提供可无损销毁的负面证明；该范围继续保留并可由用户显式关闭，不宣称已经完成全部非空旧网页自动回收。
 
 正式任务结束只登记退休责任并唤醒原 worker，不能让后台原生 close 占住 Session 后继输入的门禁。worker 订阅

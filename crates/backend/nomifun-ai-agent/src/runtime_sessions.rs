@@ -913,6 +913,8 @@ impl InMemoryAgentRuntimeSessions {
                 // retains its physical workspace binding below.
                 self.clear_workspace_binding_if_matches(conversation_id, &slot);
                 self.clear_model_config_binding_if_matches(conversation_id, &slot);
+                info!(conversation_id, instance_id=%slot.instance_id, ?reason,
+                    "Agent Runtime carrier retired after proven native teardown");
                 Ok(())
             }
             Err(error) => {

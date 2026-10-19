@@ -654,6 +654,8 @@ async fn cleanup_start_failure(
 /// Headless hosts leave these absent; no fallback creates a hidden second browser.
 #[derive(Default)]
 pub struct DesktopHostServices {
+    #[cfg(test)]
+    pub(crate) test_routes: Option<Router>,
     /// Pinned installed release; live protocol admission happens before use.
     #[cfg(feature = "browser-use")]
     pub local_web_search: Option<Arc<nomifun_ai_agent::local_web_search::BrowserSearchProvider>>,
@@ -776,6 +778,8 @@ impl DesktopServer {
         )
             .await
             .map_err(DesktopStartError::verified)?;
+        #[cfg(test)]
+        let test_routes = host_services.test_routes.clone();
         let services = match AppServices::try_from_config_with_host(database, &config, host_services).await {
             Ok(services) => services,
             Err(failure) => {
@@ -853,6 +857,11 @@ impl DesktopServer {
                 let keep_alive = DesktopKeepAlive::from_parts(env, services);
                 return Err(cleanup_start_failure(keep_alive, error).await);
             }
+        };
+        #[cfg(test)]
+        let router = match test_routes {
+            Some(routes) => router.merge(routes),
+            None => router,
         };
         let application =
             crate::bootstrap::NomiCoreApplication::from_parts(services, router);
@@ -1100,11 +1109,22 @@ impl DesktopServer {
         }
     }
 
-    async fn stop_listeners_and_wait(&self) -> anyhow::Result<()> {
+    async fn request_listener_shutdown(&self) {
         self.listener_lifecycle
             .loopback_termination
             .request_stop();
         self.loopback_shutdown.send_replace(true);
+        for listeners in [&self.lan, &self.relay] {
+            let listener = listeners.lock().await;
+            if let Some(listener) = listener.as_ref() {
+                listener.termination.request_stop();
+                listener.shutdown.send_replace(true);
+            }
+        }
+    }
+
+    async fn stop_listeners_and_wait(&self) -> anyhow::Result<()> {
+        self.request_listener_shutdown().await;
         let lan_completion = {
             let lan = self.lan.lock().await;
             if let Some(listener) = lan.as_ref() {
@@ -1197,39 +1217,41 @@ impl DesktopServer {
     }
 
     async fn perform_shutdown(&self) -> anyhow::Result<()> {
-        // Stop ingress first so no new request can race terminal/browser or
-        // database teardown. Each stage runs even when an earlier stage fails;
-        // the final error retains every cleanup diagnostic.
+        // Fence every listener before asking the original resource owners to
+        // close. HTTP drain must not delay those owners' cancellation, while
+        // storage still requires both the resource and listener proofs.
         let mut errors = Vec::new();
         self.ingress_closing.store(true, Ordering::Release);
-        let relay_shutdown = self.relay_shutdown.lock().map_err(|_| anyhow::anyhow!("Relay shutdown registration lock poisoned"))?.clone();
-        if let Some(shutdown) = relay_shutdown {
-            if let Err(error) = shutdown().await { errors.push(format!("Relay agent shutdown was not confirmed: {error:#}")); }
-        }
-
-        self._keep_alive.request_background_shutdown();
-        // Signal HTTP ingress first, but cancel hosted preparation before
-        // waiting for graceful drain: an install request otherwise keeps that
-        // drain open and prevents the same application's stop from ever running.
-        self.listener_lifecycle.loopback_termination.request_stop();
-        self.loopback_shutdown.send_replace(true);
-        {
-            let lan = self.lan.lock().await;
-            if let Some(listener) = lan.as_ref() {
-                listener.termination.request_stop();
-                listener.shutdown.send_replace(true);
+        self.request_listener_shutdown().await;
+        let relay_shutdown = match self.relay_shutdown.lock() {
+            Ok(shutdown) => shutdown.clone(),
+            Err(_) => {
+                errors.push("Relay shutdown registration lock poisoned".to_owned());
+                None
             }
-        }
-        let hosted_cleanup = if let Some(application) = &self.nomi_core_application {
-            application.stop_hosted_applications_for_shutdown().await
-        } else if let Some(services) = self._keep_alive.services() {
-            services.app_hosting.shutdown().await.map_err(anyhow::Error::from)
-        } else {
-            Ok(())
         };
-        if let Err(error) = hosted_cleanup {
-            errors.push(format!("hosted application cleanup failed: {error:#}"));
+        self._keep_alive.request_background_shutdown();
+        let resource_cleanup = async {
+            if let Some(application) = &self.nomi_core_application {
+                application.quiesce_for_shutdown().await
+            } else if let Some(services) = self._keep_alive.services() {
+                services.quiesce_nomi_core_host().await
+            } else {
+                Ok(())
+            }
+        };
+        let relay_cleanup = async {
+            if let Some(shutdown) = relay_shutdown { shutdown().await } else { Ok(()) }
+        };
+        let (resource_cleanup, relay_cleanup) = tokio::join!(resource_cleanup, relay_cleanup);
+        if let Err(error) = resource_cleanup {
+            errors.push(format!("Nomi-core resource cleanup failed: {error:#}"));
         }
+        if let Err(error) = relay_cleanup {
+            errors.push(format!("Relay agent shutdown was not confirmed: {error:#}"));
+        }
+        // This bounded observer starts after resources were told to close, so
+        // a request waiting on their cancellation can actually reach its end.
         if let Err(error) = self.stop_listeners_and_wait().await {
             errors.push(format!("listener cleanup failed: {error:#}"));
         }
@@ -1808,8 +1830,8 @@ impl DesktopServer {
     /// Synchronously perform the complete application shutdown on the backend
     /// runtime. This is called from the Tauri main thread, so it schedules the
     /// async single-flight cleanup and waits without calling `Handle::block_on`.
-    /// Cleanup is ordered: listeners, terminal sessions, browser owners, then
-    /// the database.
+    /// Cleanup fences listeners, joins resource owners and HTTP drain, then
+    /// closes storage.
     pub fn shutdown_all_blocking(self: &Arc<Self>) -> anyhow::Result<()> {
         if self.shutdown_success.get().is_some() {
             tracing::info!(
@@ -2216,6 +2238,91 @@ fn strip_port(host: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn accepted_http_drain_does_not_delay_resource_shutdown_or_allow_early_storage_close() {
+        use clap::Parser as _;
+        use std::sync::atomic::AtomicUsize;
+        use nomifun_browser_platform::runtime::{BrowserRuntime, BrowserRuntimeFactory, CreateBrowserRuntime, WorkspaceError};
+
+        struct NativeShutdown {
+            closed: Arc<tokio::sync::Notify>,
+            calls: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl BrowserRuntimeFactory for NativeShutdown {
+            async fn create(&self, _: CreateBrowserRuntime) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError> {
+                panic!("shutdown regression must not create a native Browser");
+            }
+            async fn shutdown(&self) -> Result<(), WorkspaceError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.closed.notify_one();
+                Ok(())
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let data = root.join("data");
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let handler_entered = entered.clone();
+        let handler_release = release.clone();
+        let routes = Router::new().route("/__shutdown-held-http", axum::routing::get(move || {
+            let entered = handler_entered.clone();
+            let release = handler_release.clone();
+            async move {
+                entered.notify_one();
+                release.acquire().await.unwrap().forget();
+                "original request joined"
+            }
+        }));
+        let closed = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cli = Cli::parse_from(["desktop-http-shutdown-test", "--data-dir", data.to_str().unwrap(),
+            "--work-dir", work.to_str().unwrap()]);
+        let (server, keep_alive) = DesktopServer::start_with_outcome(&cli, "", None, None, None,
+            DesktopHostServices {
+                test_routes: Some(routes),
+                browser_resources: Some(Arc::new(nomifun_browser_platform::workspace::BrowserResourceService::new(
+                    Arc::new(NativeShutdown {closed: closed.clone(), calls: calls.clone()})))),
+                ..Default::default()
+            }).await.unwrap();
+        let database = server.database.as_ref().unwrap().clone();
+        let url = format!("http://127.0.0.1:{}/__shutdown-held-http", server.loopback_port());
+        let request = tokio::spawn(async move {
+            reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(15)).build().unwrap()
+                .get(url).send().await.unwrap().text().await.unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified()).await.unwrap();
+        let closing = server.clone();
+        let shutdown = tokio::spawn(async move {closing.shutdown_all().await});
+        let resource_before_http = tokio::time::timeout(Duration::from_secs(2), closed.notified()).await.is_ok();
+        let storage_still_open = !database.pool().is_closed();
+        let database_read = if storage_still_open {
+            sqlx::query_scalar::<_,i64>("SELECT 1").fetch_one(database.pool()).await.ok()
+        } else {None};
+        let http_still_pending = !request.is_finished();
+        let shutdown_still_pending = !shutdown.is_finished();
+        // Release and join this exact request even when the regression fails;
+        // an assertion must not turn its own held handler into a test leak.
+        release.add_permits(1);
+        let response = request.await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(10), shutdown).await.unwrap().unwrap();
+        result.unwrap();
+        assert!(resource_before_http, "an accepted HTTP request delayed cancellation of unrelated resource owners");
+        assert!(storage_still_open && database_read == Some(1), "storage closed before the original HTTP handler joined");
+        assert!(http_still_pending && shutdown_still_pending, "resource proof cannot substitute for listener drain");
+        assert_eq!(response, "original request joined");
+        assert!(database.pool().is_closed());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.shutdown_all().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(server);
+        drop(keep_alive);
+    }
 
     #[test]
     fn host_guard_allows_ip_and_localhost() {

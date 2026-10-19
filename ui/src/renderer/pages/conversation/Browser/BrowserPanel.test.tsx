@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import BrowserPanel, { browserFailure } from './BrowserPanel';
-import { navigationUrl, newerSnapshot, type BrowserClient, type BrowserCommand, type BrowserDialog, type BrowserSnapshot, type BrowserViewEvent, type BrowserShortcut, type BrowserLoadSummary } from './client';
+import { navigationUrl, newerSnapshot, type BrowserClient, type BrowserCommand, type BrowserDialog, type BrowserSnapshot, type BrowserViewEvent, type BrowserShortcut, type BrowserLoadSummary, type BrowserSurfaceSource } from './client';
 import words from '../../../services/i18n/locales/en-US/browserWorkspace.json';
 import type { BrowserLinkRequest } from './BrowserLinkContext';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
@@ -52,8 +52,10 @@ test('does not present WK limitations for other runtime facts', async () => {
   expect(screen.queryByText(words.semanticActionsTitle)).toBeNull();
 });
 
-function fixture(overrides: Partial<BrowserClient> = {}, linkRequest?: BrowserLinkRequest, onClose: () => void = () => {}, hostSurfaceAvailable = true) {
+function fixture(overrides: Partial<BrowserClient> = {}, linkRequest?: BrowserLinkRequest, onClose: () => void = () => {}, hostSurfaceAvailable = true, surfaceSource?: BrowserSurfaceSource) {
   const commands: BrowserCommand[] = [], detached: number[] = [];
+  const attachments: Array<BrowserSurfaceSource | undefined> = [];
+  const layouts: Array<{ id: number; visible: boolean; source: BrowserSurfaceSource | undefined }> = [];
   const consumedLinks: Array<[number, boolean]> = [];
   let emit: (event: BrowserViewEvent) => void = () => {};
   let attached = false;
@@ -65,13 +67,100 @@ function fixture(overrides: Partial<BrowserClient> = {}, linkRequest?: BrowserLi
     async ensure() { return initial; },
     async command(_id, command) { commands.push(command); return initial; },
     async diagnostics() { return { coverage: 'main_document_navigation', events: [], dropped: 0 }; },
-    async attach(_id, _bounds, onEvent) { emit = onEvent; attached = true; return 1; },
-    async update() {}, async detach(id) { detached.push(id); }, async scaleFactor() { return 1; },
+    async attach(_id, _bounds, onEvent, source) { attachments.push(source); emit = onEvent; attached = true; return 1; },
+    async update(id, _sequence, _bounds, visible, source) { layouts.push({ id, visible, source }); }, async detach(id) { detached.push(id); }, async scaleFactor() { return 1; },
     ...overrides,
   };
-  const screen = render(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-1' onClose={onClose} client={client} linkRequest={linkRequest} onLinkConsumed={(id, handled) => consumedLinks.push([id, handled])} hostSurfaceAvailable={hostSurfaceAvailable} /></I18nextProvider>);
-  return { ...screen, client, commands, consumedLinks, detached, shortcut: (event: BrowserShortcut) => shortcut(event), emit: (event: BrowserViewEvent) => emit(event), ready: () => waitFor(() => expect(attached).toBe(true)) };
+  const screen = render(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-1' onClose={onClose} client={client} linkRequest={linkRequest} onLinkConsumed={(id, handled) => consumedLinks.push([id, handled])} hostSurfaceAvailable={hostSurfaceAvailable} surfaceSource={surfaceSource} /></I18nextProvider>);
+  return { ...screen, client, commands, consumedLinks, detached, attachments, layouts, shortcut: (event: BrowserShortcut) => shortcut(event), emit: (event: BrowserViewEvent) => emit(event), ready: () => waitFor(() => expect(attached).toBe(true)) };
 }
+
+test.each([undefined, 'agent_auto'] as const)('surface provenance %s survives overlay hide and reveal', async source => {
+  const screen = fixture({}, undefined, () => {}, true, source);
+  await screen.ready();
+  await waitFor(() => expect(screen.layouts.at(-1)?.visible).toBe(true));
+  const expected = source ?? 'user';
+  expect(screen.attachments).toEqual([expected]);
+  const overlay = document.createElement('div'); overlay.setAttribute('role', 'dialog');
+  try {
+    await act(async () => { document.body.append(overlay); });
+    await waitFor(() => expect(screen.layouts.at(-1)?.visible).toBe(false));
+    await act(async () => overlay.remove());
+    await waitFor(() => expect(screen.layouts.at(-1)?.visible).toBe(true));
+    expect(screen.layouts.every(layout => layout.source === expected)).toBe(true);
+    expect(screen.detached).toEqual([]);
+  } finally { overlay.remove(); }
+});
+
+test('manual takeover pins the existing surface while its next measurement is pending', async () => {
+  let measured = 0, release!: (scale: number) => void;
+  const delayed = new Promise<number>(resolve => { release = resolve; });
+  const screen = fixture({ async scaleFactor() { return ++measured === 1 ? 1 : delayed; } }, undefined, () => {}, true, 'agent_auto');
+  await screen.ready();
+  await waitFor(() => expect(measured).toBeGreaterThan(1));
+  screen.rerender(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-1' onClose={() => {}} client={screen.client} surfaceSource='user' /></I18nextProvider>);
+  await waitFor(() => expect(screen.layouts.at(-1)?.source).toBe('user'));
+  expect(screen.layouts.at(-1)?.id).toBe(1);
+  expect(screen.attachments).toEqual(['agent_auto']);
+  expect(screen.detached).toEqual([]);
+  await act(async () => release(1));
+});
+
+test('manual takeover during attach is sent to that attachment before another measurement', async () => {
+  let finish!: (id: number) => void;
+  const sources: Array<BrowserSurfaceSource | undefined> = [];
+  const screen = fixture({ async attach(_id, _bounds, _event, source) {
+    sources.push(source); return new Promise<number>(resolve => { finish = resolve; });
+  }, async scaleFactor() { if (sources.length) return new Promise<number>(() => {}); return 1; } }, undefined, () => {}, true, 'agent_auto');
+  await waitFor(() => expect(sources).toEqual(['agent_auto']));
+  fireEvent.pointerDown(screen.getByRole('textbox', { name: words.address }));
+  await act(async () => finish(19));
+  await waitFor(() => expect(screen.layouts.at(-1)).toEqual({ id: 19, visible: false, source: 'user' }));
+  expect(screen.detached).toEqual([]);
+});
+
+test.each(['chrome', 'shortcut'] as const)('a user %s interaction promotes an automatic panel without a command and cannot be downgraded', async interaction => {
+  const screen = fixture({}, undefined, () => {}, true, 'agent_auto');
+  await screen.ready();
+  if (interaction === 'chrome') fireEvent.click(screen.getByRole('button', { name: words.newTab }));
+  else await act(async () => screen.shortcut({ agent_session_id: 'session-1', target, expected_navigation_sequence: 1, action: 'address' }));
+  await waitFor(() => expect(screen.layouts.at(-1)?.source).toBe('user'));
+  screen.rerender(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-1' onClose={() => {}} client={screen.client} surfaceSource='agent_auto' /></I18nextProvider>);
+  fireEvent(window, new Event('resize'));
+  await waitFor(() => expect(screen.layouts.at(-1)?.source).toBe('user'));
+  expect(screen.commands).toEqual([]);
+  expect(screen.attachments).toEqual(['agent_auto']);
+});
+
+test.each(['close', 'escape'] as const)('dismissing an automatic panel with %s does not claim user page use', async dismissal => {
+  let closed = 0;
+  const screen = fixture({}, undefined, () => { closed++; }, true, 'agent_auto');
+  await screen.ready();
+  if (dismissal === 'close') fireEvent.click(screen.getByRole('button', { name: words.closePanel }));
+  else fireEvent.keyDown(screen.getByRole('region', { name: 'Browser' }), { key: 'Escape' });
+  expect(closed).toBe(1);
+  expect(screen.layouts.every(layout => layout.source === 'agent_auto')).toBe(true);
+});
+
+test('a new Session does not inherit a prior Session user takeover', async () => {
+  const screen = fixture({ async ensure(id) { return { ...initial, agent_session_id: id }; } }, undefined, () => {}, true, 'agent_auto');
+  await screen.ready();
+  fireEvent.click(screen.getByRole('button', { name: words.newTab }));
+  await waitFor(() => expect(screen.layouts.at(-1)?.source).toBe('user'));
+  screen.rerender(<I18nextProvider i18n={i18n}><BrowserPanel agentSessionId='session-2' onClose={() => {}} client={screen.client} surfaceSource='agent_auto' /></I18nextProvider>);
+  await waitFor(() => expect(screen.attachments).toEqual(['agent_auto', 'agent_auto']));
+  await waitFor(() => expect(screen.layouts.at(-1)?.source).toBe('agent_auto'));
+  expect(screen.detached).toEqual([1]);
+});
+
+test('explicit retry of an automatic panel attaches with user provenance', async () => {
+  let attempts = 0;
+  const screen = fixture({ async ensure() { if (++attempts === 1) throw new Error('transport'); return initial; } }, undefined, () => {}, true, 'agent_auto');
+  fireEvent.click(await screen.findByRole('button', { name: words.retry }));
+  await screen.ready();
+  expect(attempts).toBe(2);
+  expect(screen.attachments).toEqual(['user']);
+});
 
 const websitePrompt: BrowserDialog = { target, request_id: 'website-dialog-1', kind: 'prompt', message: 'Enter a project name', default_text: '默认项目', origin: 'http://localhost:3000', text_truncated: false };
 test('the user side browser has navigation and page controls without Agent grants or an attached provider', async () => {

@@ -4,35 +4,52 @@
 // the normal authenticated APIs. The external driver owns exit observations.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { readFile, writeFile, mkdir, realpath, stat, rename, access } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, realpath, stat, rename, access, readdir } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { delimiter, dirname, isAbsolute, join, resolve, basename } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve, basename, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 
 const option = (key) => { const index = process.argv.indexOf(key); return index < 0 ? undefined : process.argv[index + 1]; };
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 const started = Date.now();
+const windows = process.platform === 'win32';
+const retirementObserveMs = Number(option('--retirement-observe-ms') ?? 0);
+assert(Number.isSafeInteger(retirementObserveMs) && (retirementObserveMs === 0
+  || (!windows && retirementObserveMs >= 70_000 && retirementObserveMs <= 180_000)),
+'The optional macOS read-only fixture observation must be 70000–180000 ms; it is not a product task TTL');
+const physicalPath = async (path) => { const physical = await realpath(path); return windows ? physical.toLowerCase() : physical; };
 const rootArgument = option('--root');
 assert(rootArgument && isAbsolute(rootArgument), 'Pass the exact absolute --root of the isolated Desktop lifecycle fixture');
 const root = await realpath(rootArgument);
 const sentinel = (await readFile(join(root, 'fixture-sentinel'), 'utf8')).trim();
 assert.equal(basename(root), `nomifun-lifecycle-${sentinel}`);
-assert.equal((await realpath(dirname(root))).toLowerCase(), (await realpath(tmpdir())).toLowerCase());
+assert.equal(await physicalPath(dirname(root)), await physicalPath(tmpdir()));
 assert.match(sentinel, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 const ready = JSON.parse(await readFile(join(root, 'ready.json'), 'utf8'));
 assert.equal(ready.token, sentinel);
 assert(Number.isSafeInteger(ready.host_pid) && ready.host_pid > 0);
 assert(Number.isSafeInteger(ready.backend_port) && ready.backend_port > 0 && ready.backend_port < 65536);
 assert.equal(ready.agent_resources, true, 'The original native fixture must opt into normal owner setup before readiness');
-assert.equal((await realpath(ready.data_root)).toLowerCase(), (await realpath(join(root, 'data'))).toLowerCase());
-assert.equal(process.platform, 'win32', 'This fixture exercises actual Windows pipe/ConPTY and PowerShell owners');
+assert.equal(await physicalPath(ready.data_root), await physicalPath(join(root, 'data')));
+assert(['win32', 'darwin'].includes(process.platform), 'This fixture exercises actual Desktop pipe/PTY owners on Windows or macOS');
 const base = `http://127.0.0.1:${ready.backend_port}`;
 const artifacts = join(root, 'agent-resource-fixtures');
 await mkdir(artifacts, { recursive: false });
 const evidence = { schema: 'nomifun.desktop-agent-resources.v1', token: sentinel, host_pid: ready.host_pid,
   started_at: new Date().toISOString(), passed: false, stage: 'owner-auth', model_requests: [], api_calls: [] };
-const journal = async () => writeFile(join(root, 'agent-resources-progress.json'), `${JSON.stringify(evidence, null, 2)}\n`);
+let journalWrites = Promise.resolve();
+const journal = () => {
+  const bytes = `${JSON.stringify(evidence, null, 2)}\n`;
+  // Keep the existing Windows driver's sharing behavior. The macOS reader
+  // consumes this live file, so only that path needs an atomic snapshot.
+  if (windows) return writeFile(join(root, 'agent-resources-progress.json'), bytes);
+  journalWrites = journalWrites.then(async () => {
+    await writeFile(join(root, 'agent-resources-progress.json.tmp'), bytes);
+    await rename(join(root, 'agent-resources-progress.json.tmp'), join(root, 'agent-resources-progress.json'));
+  });
+  return journalWrites;
+};
 const until = async (check, label, budget = 30_000) => {
   const end = Date.now() + budget;
   while (Date.now() < end) { const value = await check(); if (value) return value; await delay(50); }
@@ -96,29 +113,33 @@ process.once('SIGTERM', () => { void stopServer(); });
 process.once('SIGINT', () => { void stopServer(); });
 
 try {
-  // Desktop setup requires the original native host's trust. The debug-only
-  // fixture may supply a JWT only after normal owner setup/password login;
-  // neither a loopback Origin nor this fixture token is an auth credential.
+  // Windows performs first-run setup inside its isolated native debug host.
+  // macOS instead uses the existing preparer's fresh owner dataset. Both
+  // supply only a normal password-login JWT; local trust never leaves its
+  // owner, and neither a loopback Origin nor this marker is a credential.
   const ownerFile = resolve(option('--owner-token-file') ?? join(root, 'agent-resources-owner.jwt'));
-  assert(ownerFile.toLowerCase().startsWith(`${root.toLowerCase()}\\`), 'Owner credential must stay inside this exact private fixture');
+  const ownerRelative = relative(root, ownerFile);
+  assert(ownerRelative && !ownerRelative.startsWith('..') && !isAbsolute(ownerRelative), 'Owner credential must stay inside this exact private fixture');
   jwt = await until(async () => {
     try { return (await readFile(ownerFile, 'utf8')).trim() || undefined; }
     catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
   }, 'the original native owner login credential', 25_000);
   assert.equal(jwt.split('.').length, 3, 'Expected a normal owner login JWT');
   const owner = await api('GET', '/api/auth/user');
-  evidence.owner = { user_id: owner.user?.user_id ?? owner.user_id ?? owner.id, authenticated: true, credential_source: 'normal-native-host-password-login' };
+  evidence.owner = { user_id: owner.user?.user_id ?? owner.user_id ?? owner.id, authenticated: true,
+    credential_source: windows ? 'normal-native-host-password-login' : 'isolated-preparer-and-normal-desktop-password-login' };
   assert.equal(typeof evidence.owner.user_id, 'string', 'The real authenticated owner identity must be available');
   const auth = JSON.parse(await readFile(join(root, 'agent-resources-auth.json'), 'utf8'));
   assert.equal(auth.token, sentinel); assert.equal(auth.owner_id, evidence.owner.user_id);
-  assert.equal(auth.authenticated, true); assert.equal(auth.host_local_setup, true); assert.equal(auth.password_login, true);
+  assert.equal(auth.authenticated, true); assert.equal(auth.host_local_setup, windows); assert.equal(auth.password_login, true);
+  if (!windows) assert.equal(auth.isolated_preparer_setup, true);
   assert.equal(auth.local_trust_exported, false);
-  const bun = await existingExecutable('bun.exe', option('--bun-exe') ?? process.env.NOMIFUN_BUN_PATH);
-  const powershell = await existingExecutable('powershell.exe', join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'));
+  const bun = await existingExecutable(windows ? 'bun.exe' : 'bun', option('--bun-exe') ?? process.env.NOMIFUN_BUN_PATH);
+  const powershell = windows ? await existingExecutable('powershell.exe', join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')) : undefined;
   const processScript = join(artifacts, 'held-agent-process.mjs');
   await writeFile(processScript, `import {writeFileSync,renameSync,appendFileSync} from 'node:fs';
 const [marker,token,host,kind]=process.argv.slice(2);
-const proof=JSON.stringify({token,host_pid:Number(host),pid:process.pid,kind,image:process.execPath});
+const proof=JSON.stringify({token,host_pid:Number(host),pid:process.pid,kind,image:process.execPath,...(process.platform==='darwin'?{parent_pid:process.ppid}:{})});
 appendFileSync(marker+'.launches.jsonl',proof+'\\n');
 writeFileSync(marker+'.tmp',proof,{flag:'wx'});
 renameSync(marker+'.tmp',marker);
@@ -127,10 +148,10 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data',input=>process.stdout.write('RESOURCE_INPUT:'+input));
 process.stdin.resume();setInterval(()=>{},1000);
 `, { flag: 'wx' });
-  const mcpScript = join(artifacts, 'held-stdio-mcp.ps1');
+  const mcpScript = join(artifacts, windows ? 'held-stdio-mcp.ps1' : 'held-stdio-mcp.mjs');
   const mcpMarker = join(artifacts, 'mcp-pid.json');
   const mcpDescription = `Desktop lifecycle resource hold ${sentinel}`;
-  await writeFile(mcpScript, `$ErrorActionPreference='Stop'
+  await writeFile(mcpScript, windows ? `$ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 [Console]::InputEncoding=New-Object Text.UTF8Encoding($false)
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
@@ -169,9 +190,28 @@ while($null-ne($line=[Console]::ReadLine())){
     'ping' {Reply @{jsonrpc='2.0';id=$request.id;result=@{}}}
   }
 }
+` : `import {createInterface} from 'node:readline';
+import {appendFileSync,writeFileSync,renameSync} from 'node:fs';
+let pending,called=false;
+const reply=value=>process.stdout.write(JSON.stringify(value)+'\\n');
+for await(const line of createInterface({input:process.stdin,terminal:false})){
+ const request=JSON.parse(line);
+ if(request.method==='initialize')reply({jsonrpc:'2.0',id:request.id,result:{protocolVersion:request.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'desktop-lifecycle-fixture',version:'1'}}});
+ else if(request.method==='tools/list')reply({jsonrpc:'2.0',id:request.id,result:{tools:[{name:'lifecycle_hold',description:process.env.NOMI_FIXTURE_DESCRIPTION,inputSchema:{type:'object',additionalProperties:false,required:['nonce'],properties:{nonce:{type:'string',enum:[process.env.NOMI_FIXTURE_TOKEN]}}}}]}});
+ else if(request.method==='tools/call'){
+  if(called||request.params.name!=='lifecycle_hold'||request.params.arguments.nonce!==process.env.NOMI_FIXTURE_TOKEN)throw Error('Unexpected or repeated fixture invocation');
+  called=true;pending=request.id;
+  const marker=JSON.stringify({token:process.env.NOMI_FIXTURE_TOKEN,host_pid:Number(process.env.NOMI_FIXTURE_HOST),pid:process.pid,kind:'mcp',request_id:request.id,method:request.method,tool:request.params.name,image:process.execPath});
+  appendFileSync(process.env.NOMI_FIXTURE_MARKER+'.launches.jsonl',marker+'\\n');
+  writeFileSync(process.env.NOMI_FIXTURE_MARKER+'.tmp',marker,{flag:'wx'});renameSync(process.env.NOMI_FIXTURE_MARKER+'.tmp',process.env.NOMI_FIXTURE_MARKER);
+ }else if(request.method==='notifications/cancelled'&&pending!==undefined&&String(request.params.requestId)===String(pending)){
+  reply({jsonrpc:'2.0',id:pending,error:{code:-32800,message:'Original fixture request cancelled'}});pending=undefined;
+ }else if(request.method==='ping')reply({jsonrpc:'2.0',id:request.id,result:{}});
+}
 `, { flag: 'wx' });
-  const transport = { type: 'stdio', command: powershell,
-    args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', mcpScript],
+  const mcpExecutable = windows ? powershell : bun;
+  const transport = { type: 'stdio', command: mcpExecutable,
+    args: windows ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', mcpScript] : [mcpScript],
     env: { NOMI_FIXTURE_TOKEN: sentinel, NOMI_FIXTURE_HOST: String(ready.host_pid), NOMI_FIXTURE_MARKER: mcpMarker, NOMI_FIXTURE_DESCRIPTION: mcpDescription } };
   evidence.stage = 'mcp-configure'; await journal();
   let mcp = await api('POST', '/api/mcp/servers', { name: `Desktop lifecycle ${sentinel}`, transport });
@@ -220,6 +260,11 @@ while($null-ne($line=[Console]::ReadLine())){
       await journal(); sendStream(response, delta, count);
     } catch (error) {
       failure ??= error;
+      if (!windows) {
+        process.exitCode = 1;
+        evidence.failure = { name: error.name, message: String(error.message).replaceAll(jwt ?? '\0', '[REDACTED]') };
+        await journal();
+      }
       if (!response.headersSent) response.writeHead(500, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ error: { message: 'Strict Desktop resource fixture failed; inspect its private evidence' } }));
     }
@@ -255,15 +300,25 @@ while($null-ne($line=[Console]::ReadLine())){
     assert.deepEqual(launches[0], nativeMarker);
     assert.equal(nativeMarker.token, sentinel); assert.equal(nativeMarker.host_pid, ready.host_pid); assert.equal(nativeMarker.kind, kind);
     assert(Number.isSafeInteger(nativeMarker.pid) && nativeMarker.pid > 0);
-    if (kind !== 'mcp') assert.equal(nativeMarker.pid, resources.get(kind).pid, 'The ToolResult and native marker must identify the same process');
+    if (kind !== 'mcp') {
+      if (!windows && kind === 'pty') {
+        const launcher = resources.get(kind).pid;
+        assert.equal(nativeMarker.parent_pid, launcher, 'The actual macOS PTY payload must remain the exact original session launcher child');
+        assert.notEqual(nativeMarker.pid, launcher, 'Darwin PTY ToolResult identifies its retained session launcher, not its forked payload');
+        assert(isAbsolute(ready.host_program ?? ''), 'The original Darwin launcher executable identity is required');
+        processes.push({ pid: launcher, kind: 'pty_launcher', expected_image: await realpath(ready.host_program),
+          process_id: resources.get(kind).process_id, payload_pid: nativeMarker.pid,
+          native_tool_result: resources.get(kind), identity_source: 'original-tool-result-and-payload-direct-parent-marker' });
+      } else assert.equal(nativeMarker.pid, resources.get(kind).pid, 'The ToolResult and native marker must identify the same process');
+    }
     else { assert.equal(nativeMarker.method, 'tools/call'); assert.equal(nativeMarker.tool, 'lifecycle_hold'); assert.notEqual(nativeMarker.request_id, undefined); }
-    const expected = kind === 'mcp' ? powershell : bun;
-    assert.equal((await realpath(nativeMarker.image)).toLowerCase(), expected.toLowerCase());
+    const expected = kind === 'mcp' ? mcpExecutable : bun;
+    assert.equal(await physicalPath(nativeMarker.image), await physicalPath(expected));
     processes.push({ pid: nativeMarker.pid, kind, marker_path: path, expected_image: expected,
       call_id: `desktop-resource-${kind}`, ...(kind === 'mcp' ? { mcp_request_id: nativeMarker.request_id } : { process_id: resources.get(kind).process_id }),
       native_tool_result: kind === 'mcp' ? undefined : resources.get(kind) });
   }
-  assert.equal(new Set(processes.map((item) => item.pid)).size, 3);
+  assert.equal(new Set(processes.map((item) => item.pid)).size, windows ? 3 : 4);
   const canonical = await api('GET', `/api/agent-sessions/${session}`);
   assert(canonical.head.active_turn_id, 'The real Agent and its original MCP call must still be inflight');
   const execution = await api('GET', `/api/agent-sessions/${session}/execution`);
@@ -283,7 +338,7 @@ while($null-ne($line=[Console]::ReadLine())){
   await journal();
   await writeFile(join(root, 'agent-resources-ready.json.tmp'), `${JSON.stringify(evidence, null, 2)}\n`, { flag: 'wx' });
   await rename(join(root, 'agent-resources-ready.json.tmp'), join(root, 'agent-resources-ready.json'));
-  console.log(`NOMIFUN_DESKTOP_AGENT_RESOURCES READY native=3 model_calls=${evidence.model_requests.length} elapsed_ms=${evidence.prepared_in_ms}`);
+  console.log(`NOMIFUN_DESKTOP_AGENT_RESOURCES READY native=${processes.length} model_calls=${evidence.model_requests.length} elapsed_ms=${evidence.prepared_in_ms}`);
   const activitySnapshot = async () => {
     const activity = await api('GET', '/api/agent-activities?limit=100');
     return activity.items.filter((item) => item.agent_session_id === session);
@@ -310,6 +365,140 @@ while($null-ne($line=[Console]::ReadLine())){
     }
     return counts;
   };
+  const observeOriginalRetirement = async ({ settled, targetsBefore, launchesBefore, modelBefore, requestedAt }) => {
+    assert.equal(modelBefore, 5, 'The long observation starts after the same original five model requests');
+    assert.equal(settled.state.execution_generation, execution.execution_generation);
+    const observation = { schema: 'nomifun.macos-original-runtime-retirement-observation.v1',
+      session_id: session, operation_id: operation, requested_at: requestedAt,
+      fixture_observation_ms: retirementObserveMs, product_timeout_changed: false,
+      authority: 'Original registry teardown success plus exact completed-retirement owner native_teardown_proven=true; public APIs and original kernel registrations supply consistency checks',
+      instance_identity_scope: 'The original strong retirement handle is bound by Session and operation. The public API exposes no pre-Stop Runtime instance UUID; the single registry instance UUID is associated within this fresh same-generation no-new-Turn case, not claimed as a pre-bound external UUID witness',
+      passed: false, samples: [] };
+    evidence.retirement_observation = observation;
+    const persist = async () => {
+      await writeFile(join(root, 'retirement-observation.json.tmp'), `${JSON.stringify(observation, null, 2)}\n`);
+      await rename(join(root, 'retirement-observation.json.tmp'), join(root, 'retirement-observation.json'));
+      await journal();
+    };
+    const originalNative = processes.filter(process => process.kind !== 'mcp');
+    assert.equal(originalNative.length, 3);
+    let nativeIdentities;
+    const nativeProof = async () => {
+      const text = await readFile(join(root, 'native-observer.jsonl'), 'utf8');
+      const frames = text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(line => JSON.parse(line));
+      const identities = originalNative.map(process => {
+        const registered = frames.filter(frame => frame.event === 'registered' && frame.pid === process.pid);
+        assert.equal(registered.length, 1, 'Each retained native generation needs its original kernel registration');
+        assert(!frames.some(frame => frame.event === 'exit' && frame.index === registered[0].index),
+          'Original Session pipe/PTY generations must stay live throughout the read-only observation');
+        return { kind: process.kind, ...registered[0] };
+      });
+      if (nativeIdentities) assert.deepEqual(identities, nativeIdentities);
+      else { nativeIdentities = identities; observation.original_native_generations = identities; }
+    };
+    const retirementLogs = async () => {
+      const records = [];
+      for (const name of (await readdir(join(ready.data_root, 'logs'))).filter(name => name.endsWith('.nomicore.log')).sort()) {
+        const text = await readFile(join(ready.data_root, 'logs', name), 'utf8');
+        for (const line of text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean)) {
+          const value = JSON.parse(line), fields = value.fields ?? {};
+          if ((fields.conversation_id === session || (fields.session_id === session && fields.operation_id === operation))
+            && Date.parse(value.timestamp) >= Date.parse(requestedAt)) records.push({ file: name, ...value });
+        }
+      }
+      const registry = records.filter(value => value.target === 'nomifun_ai_agent::runtime_sessions'
+        && value.fields.message === 'Agent Runtime carrier retired after proven native teardown');
+      const owners = records.filter(value => value.target?.endsWith('completed_runtime_retirement')
+        && value.fields.message === 'completed Runtime retirement owner settled');
+      assert(owners.every(value => value.fields.native_teardown_proven === true),
+        'Every settlement observer for this unchanged original operation must retain its proven native teardown');
+      const warnings = records.filter(value => value.fields.message === 'completed Runtime retirement remains unconfirmed; exact owner retained');
+      const missingOwner = records.filter(value => /Original effect resource cleanup owner is unavailable|Runtime retirement has no original resource owner|original Runtime retirement was not confirmed/i.test(JSON.stringify(value.fields)));
+      assert.equal(missingOwner.length, 0, 'The exact original retirement must not lose its cleanup owner');
+      if (observation.owner_settled) {
+        assert.deepEqual(registry, [observation.carrier_retired], 'The bound original carrier retirement proof must remain unique');
+        // Terminal relay and direct user Stop can each own an original
+        // retirement observer. They may both join the same retained native
+        // teardown result; the registry carrier and business calls stay unique.
+        assert(owners.length >= observation.owner_settlements.length);
+        assert.deepEqual(owners.slice(0, observation.owner_settlements.length), observation.owner_settlements,
+          'Previously observed original retirement settlements must remain unchanged');
+        observation.owner_settlements = owners;
+        assert(!warnings.some(value => Date.parse(value.timestamp) >= Date.parse(observation.owner_settled.timestamp)),
+          'The exact original retirement must not become unconfirmed again after successful teardown');
+        assert.equal(warnings.length, observation.early_unconfirmed.length, 'No late unconfirmed retry may grow after the original success');
+      }
+      return { registry, owners, warnings };
+    };
+    const sample = async () => {
+      if (failure) throw failure;
+      assert(!closing, 'The observation must complete before fixture shutdown');
+      assert.equal(evidence.model_requests.length, modelBefore);
+      assert.deepEqual(await launchCounts(), launchesBefore);
+      await nativeProof();
+      const [observed, state, activity, appended] = await Promise.all([
+        api('GET', `/api/agent-sessions/${session}`), api('GET', `/api/agent-sessions/${session}/execution`),
+        activitySnapshot(), api('GET', `/api/agent-sessions/${session}/events?after_seq=${settled.observed.head.last_seq}&limit=500`),
+      ]);
+      assert.equal(observed.head.active_turn_id, undefined);
+      assert.equal(state.operation_id, operation); assert.equal(state.execution_generation, execution.execution_generation);
+      assert.equal(state.state, 'cancelled'); assert.equal(state.producer_lease_live, false);
+      assert.equal(state.pending_effects, 0); assert.equal(state.unknown_effects, 1);
+      assert.equal(state.automatic_replay_authorized, false);
+      assert.equal(state.model_progress.used_model_steps, settled.state.model_progress.used_model_steps);
+      assert(appended.events.length < 500, 'A truncated event page cannot prove the absence of a new Turn or MCP reconciliation');
+      assert(!appended.events.some(event => event.kind === 'turn/started'), 'Read-only observation must not create a new Turn');
+      assert(!appended.events.some(event => event.correlation_id === evidence.mcp_effect_id && event.kind === 'effect/reconciled'),
+        'Local cleanup does not reconcile the original MCP Unknown business outcome');
+      const runtime = activity.flatMap(item => item.resources).filter(resource => resource.kind === 'runtime');
+      assert(runtime.length && runtime.every(resource => resource.state === 'released'));
+      assert.deepEqual(processTargets(activity), targetsBefore);
+      const live = activity.flatMap(item => item.resources).filter(resource => targetsBefore.some(target =>
+        resource.target?.kind === 'process_instance' && resource.target.process_id === target.process_id));
+      assert(live.length >= 2 && live.every(resource => ['active', 'held_for_user'].includes(resource.state)));
+      await nativeProof();
+      assert.deepEqual(await launchCounts(), launchesBefore);
+      assert.equal(evidence.model_requests.length, modelBefore);
+      return { observed_at: new Date().toISOString(), monotonic_ns: process.hrtime.bigint().toString(),
+        session_last_seq: observed.head.last_seq, execution_generation: state.execution_generation,
+        runtime_released: true, original_native_generations_live: 3, original_process_targets_preserved: true,
+        model_requests: modelBefore, launches: launchesBefore, mcp_unknown: 1, automatic_replay_authorized: false };
+    };
+    try {
+      await persist();
+      await until(async () => {
+        const logs = await retirementLogs(); await sample();
+        observation.early_unconfirmed = logs.warnings;
+        if (!logs.registry.length || !logs.owners.length) return undefined;
+        assert.equal(logs.registry.length, 1, 'Exactly one original initialized Runtime carrier must retire');
+        assert(logs.owners.length >= 1, 'At least one original completed-retirement observer must settle after proven native teardown');
+        assert.equal(typeof logs.registry[0].fields.instance_id, 'string');
+        assert(Date.parse(logs.registry[0].timestamp) <= Date.parse(logs.owners[0].timestamp));
+        observation.carrier_retired = logs.registry[0]; observation.owner_settled = logs.owners[0];
+        observation.owner_settlements = logs.owners;
+        // Recheck warnings against the newly bound original success before
+        // beginning the fixture window, which crosses the 60s retry backoff.
+        await retirementLogs(); return true;
+      }, 'the exact original Runtime native teardown and retirement-owner success logs', 45_000);
+      observation.observation_started_at = new Date().toISOString();
+      const began = process.hrtime.bigint();
+      for (;;) {
+        observation.samples.push(await sample()); await retirementLogs(); await persist();
+        const elapsed = Number(process.hrtime.bigint() - began) / 1_000_000;
+        if (elapsed >= retirementObserveMs) break;
+        await delay(Math.min(1_000, retirementObserveMs - elapsed));
+      }
+      // A slow persistence write may cross the deadline. Read the original
+      // authorities again after that boundary before claiming the full window.
+      observation.samples.push({ ...await sample(), deadline_final_sample: true });
+      await retirementLogs();
+      observation.elapsed_ms = Number(process.hrtime.bigint() - began) / 1_000_000;
+      observation.passed = true; observation.completed_at = new Date().toISOString(); await persist();
+      return observation;
+    } catch (error) {
+      observation.failure = { name: error.name, message: error.message }; await persist(); throw error;
+    }
+  };
   const stopOriginalAgent = async (request) => {
     for (const [key, expected] of Object.entries({ token: sentinel, host_pid: ready.host_pid, session_id: session, operation_id: operation })) {
       assert.equal(request[key], expected, `Stop request ${key} must name this exact original fixture owner`);
@@ -321,6 +510,7 @@ while($null-ne($line=[Console]::ReadLine())){
     assert(current, 'The user must have a normal host-side Stop target for the exact active Turn');
     const modelBefore = evidence.model_requests.length;
     const launchesBefore = await launchCounts();
+    const requestedAt = new Date().toISOString();
     const receipt = await api('POST', '/api/agent-activities/stop', {
       target: current.target, idempotency_key: `stop-original-desktop-resource-agent-${sentinel}`,
     });
@@ -369,6 +559,8 @@ while($null-ne($line=[Console]::ReadLine())){
       unknown_effects: settled.unknown, observed_at: new Date().toISOString() };
     await writeFile(join(root, 'agent-stop-observation.json'), `${JSON.stringify({ ...result, receipt,
       before, after: settled }, null, 2)}\n`, { flag: 'wx' });
+    if (retirementObserveMs) result.retirement_observation = await observeOriginalRetirement({
+      settled, targetsBefore, launchesBefore, modelBefore, requestedAt });
     await writeFile(join(root, 'stop-agent-ready.json.tmp'), `${JSON.stringify(result, null, 2)}\n`, { flag: 'wx' });
     await rename(join(root, 'stop-agent-ready.json.tmp'), join(root, 'stop-agent-ready.json'));
     console.log(`NOMIFUN_DESKTOP_AGENT_RESOURCES STOP_READY runtime=released original_processes=2 model_calls=${modelBefore} mcp_business=unknown`);
@@ -379,6 +571,7 @@ while($null-ne($line=[Console]::ReadLine())){
   let stopObserved = false;
   while (!closing) {
     await delay(250);
+    if (!windows && failure) throw failure;
     if (!hostClosed) {
       if (!stopObserved) {
         const request = await optionalJson(join(root, 'stop-agent.request'));

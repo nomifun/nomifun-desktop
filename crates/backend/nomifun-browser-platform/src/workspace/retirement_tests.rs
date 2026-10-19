@@ -8,6 +8,13 @@ struct WatchedFactory {
     last: std::sync::Mutex<Option<std::sync::Weak<WatchedRuntime>>>,
     close_gate: std::sync::Mutex<Option<Arc<CloseGate>>>,
     hide_gate: std::sync::Mutex<Option<Arc<CloseGate>>>,
+    show_gate: std::sync::Mutex<Option<Arc<CloseGate>>>,
+    lock_gate: std::sync::Mutex<Option<Arc<CloseGate>>>,
+    unlock_gate: std::sync::Mutex<Option<Arc<CloseGate>>>,
+    fail_lock_once: Arc<AtomicBool>,
+    fail_unlock_once: Arc<AtomicBool>,
+    panic_operation_once: Arc<AtomicBool>,
+    lock_calls: Arc<AtomicUsize>,
 }
 
 struct CloseGate {
@@ -22,6 +29,13 @@ struct WatchedRuntime {
     closes: Arc<AtomicUsize>,
     close_gate: Option<Arc<CloseGate>>,
     hide_gate: Option<Arc<CloseGate>>,
+    show_gate: Option<Arc<CloseGate>>,
+    lock_gate: Option<Arc<CloseGate>>,
+    unlock_gate: Option<Arc<CloseGate>>,
+    fail_lock_once: Arc<AtomicBool>,
+    fail_unlock_once: Arc<AtomicBool>,
+    panic_operation_once: Arc<AtomicBool>,
+    lock_calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -38,6 +52,13 @@ impl BrowserRuntimeFactory for WatchedFactory {
             closes: self.closes.clone(),
             close_gate: self.close_gate.lock().unwrap().clone(),
             hide_gate: self.hide_gate.lock().unwrap().clone(),
+            show_gate: self.show_gate.lock().unwrap().clone(),
+            lock_gate: self.lock_gate.lock().unwrap().clone(),
+            unlock_gate: self.unlock_gate.lock().unwrap().clone(),
+            fail_lock_once: self.fail_lock_once.clone(),
+            fail_unlock_once: self.fail_unlock_once.clone(),
+            panic_operation_once: self.panic_operation_once.clone(),
+            lock_calls: self.lock_calls.clone(),
         });
         *self.last.lock().unwrap() = Some(Arc::downgrade(&runtime));
         Ok(runtime)
@@ -46,14 +67,42 @@ impl BrowserRuntimeFactory for WatchedFactory {
 
 #[async_trait]
 impl NativeInputGate for WatchedRuntime {
-    async fn lock_user_input(&self) -> Result<(), RunAdmissionError> { self.base.lock_user_input().await }
+    async fn lock_user_input(&self) -> Result<(), RunAdmissionError> {
+        self.lock_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = &self.lock_gate {
+            if gate.first.swap(false, Ordering::SeqCst) {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
+        }
+        if self.fail_lock_once.swap(false, Ordering::SeqCst) { return Err(RunAdmissionError::InputGateFailed); }
+        self.base.lock_user_input().await
+    }
     async fn release_pressed_input(&self) -> Result<(), RunAdmissionError> { self.base.release_pressed_input().await }
-    async fn unlock_user_input(&self) -> Result<(), RunAdmissionError> { self.base.unlock_user_input().await }
+    async fn unlock_user_input(&self) -> Result<(), RunAdmissionError> {
+        if let Some(gate) = &self.unlock_gate {
+            if gate.first.swap(false, Ordering::SeqCst) {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
+        }
+        self.base.unlock_user_input().await?;
+        if self.fail_unlock_once.swap(false, Ordering::SeqCst) { return Err(RunAdmissionError::InputGateFailed); }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl BrowserNativeSurfacePort for WatchedRuntime {
     async fn set_surface(&self, _: BrowserSurfaceBounds, visible: bool, _: CancellationToken) -> Result<(), WorkspaceError> {
+        if visible {
+            if let Some(gate) = &self.show_gate {
+                if gate.first.swap(false, Ordering::SeqCst) {
+                    gate.entered.notify_one();
+                    gate.release.notified().await;
+                }
+            }
+        }
         if !visible {
             if let Some(gate) = &self.hide_gate {
                 if gate.first.swap(false, Ordering::SeqCst) {
@@ -72,6 +121,7 @@ impl BrowserRuntime for WatchedRuntime {
     fn surface(&self) -> Option<&dyn BrowserNativeSurfacePort> { Some(self) }
     async fn snapshot(&self) -> Result<BrowserRuntimeSnapshot, WorkspaceError> { self.base.snapshot().await }
     async fn execute(&self, command: BrowserTabCommand, cancel: CancellationToken) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
+        assert!(!self.panic_operation_once.swap(false, Ordering::SeqCst), "fixture native worker failed");
         let result = self.base.execute(command, cancel).await;
         self.changes.send_modify(|revision| *revision += 1);
         result
@@ -165,6 +215,269 @@ async fn completed_agent_only_carrier_retires_and_reopens_lazily_without_deletin
     fresh.agent_command(&run, create()).await.unwrap();
     fresh.finish_run(&run).await.unwrap();
     assert_eq!(factory.creates.load(Ordering::SeqCst), 2, "explicit new use creates one fresh carrier");
+    service.shutdown().await.unwrap();
+}
+
+fn native_barrier() -> Arc<CloseGate> {
+    Arc::new(CloseGate { first: AtomicBool::new(true), entered: Default::default(), release: Default::default() })
+}
+
+fn desktop_bounds() -> BrowserSurfaceBounds {
+    BrowserSurfaceBounds { x: 0., y: 0., width: 880., height: 600. }
+}
+
+async fn running_agent_page(service: &BrowserResourceService, session: &str) -> (Arc<BrowserResource>, BrowserRunGuard) {
+    let resource = service.ensure(authority("alice", session, "managed", all_actions()), BrowserProfile::Ephemeral).await.unwrap();
+    resource.retain_task("task").await.unwrap();
+    let run = resource.begin_run().await.unwrap();
+    resource.agent_command(&run, create()).await.unwrap();
+    (resource, run)
+}
+
+#[tokio::test]
+async fn agent_only_locked_presentation_retires_nonempty_after_exact_hide_and_detach() {
+    let factory = Arc::new(WatchedFactory::default());
+    let service = BrowserResourceService::new(factory.clone());
+    let (resource, run) = running_agent_page(&service, "locked-presentation").await;
+    assert_eq!(factory.lock_calls.load(Ordering::SeqCst), 1, "first locked creation must acquire a real native ACK");
+    resource.retain_surface_attachment(41).await.unwrap();
+    resource.set_agent_surface(desktop_bounds(), true, CancellationToken::new()).await.unwrap();
+    resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await.unwrap();
+    resource.release_surface_attachment(41).await;
+    resource.finish_interaction(&run).await.unwrap();
+    assert_eq!(resource.snapshot().await.unwrap().runtime.unwrap().tabs.len(), 1);
+    resource.workspace().try_retire_after_task("task").await.unwrap();
+    retired(&service, "locked-presentation").await;
+    assert!(resource.native_close_proven().await);
+    assert_eq!(factory.closes.load(Ordering::SeqCst), 1);
+    assert!(matches!(resource.retain_user_page_use().await, Err(WorkspaceError::WorkspaceClosed)), "a late human request must not reopen a closing generation");
+}
+
+#[tokio::test]
+async fn agent_auto_source_without_current_native_lock_cannot_erase_human_exposure() {
+    let factory = Arc::new(WatchedFactory::default());
+    let service = BrowserResourceService::new(factory.clone());
+    let resource = agent_page(&service, "auto-without-lock", "task", BrowserProfile::Ephemeral).await;
+    resource.set_agent_surface(desktop_bounds(), true, CancellationToken::new()).await.unwrap();
+    resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await.unwrap();
+    assert!(!resource.workspace().try_retire_after_task("task").await.unwrap());
+    assert_eq!(retention(&service, "auto-without-lock").await, BrowserRetentionReason::UserPageStateUnknown);
+    assert_eq!(factory.closes.load(Ordering::SeqCst), 0);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn manual_open_or_default_surface_under_agent_lock_remains_a_human_purpose() {
+    for explicit_open in [false, true] {
+        let factory = Arc::new(WatchedFactory::default());
+        let service = BrowserResourceService::new(factory.clone());
+        let (resource, run) = running_agent_page(&service, "human-under-lock").await;
+        if explicit_open {
+            resource.retain_user_page_use().await.unwrap();
+            resource.set_agent_surface(desktop_bounds(), true, CancellationToken::new()).await.unwrap();
+        } else {
+            resource.set_surface(desktop_bounds(), true, CancellationToken::new()).await.unwrap();
+        }
+        resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await.unwrap();
+        resource.finish_interaction(&run).await.unwrap();
+        assert!(!resource.workspace().try_retire_after_task("task").await.unwrap());
+        assert_eq!(retention(&service, "human-under-lock").await, BrowserRetentionReason::UserPageStateUnknown);
+        assert_eq!(factory.closes.load(Ordering::SeqCst), 0);
+        service.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn visible_handoff_pins_before_native_enable_even_when_enable_partially_fails() {
+    let factory = Arc::new(WatchedFactory::default());
+    let service = BrowserResourceService::new(factory.clone());
+    let (resource, run) = running_agent_page(&service, "partial-enable").await;
+    resource.set_agent_surface(desktop_bounds(), true, CancellationToken::new()).await.unwrap();
+    factory.fail_unlock_once.store(true, Ordering::SeqCst);
+    assert!(resource.finish_interaction(&run).await.is_err());
+    let native = factory.last.lock().unwrap().as_ref().unwrap().upgrade().unwrap();
+    assert!(!native.base.locked.load(Ordering::SeqCst), "the native fixture applied enable before reporting its failure");
+    resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await.unwrap();
+    resource.finish_run(&run).await.unwrap();
+    assert!(!resource.workspace().try_retire_after_task("task").await.unwrap());
+    assert_eq!(retention(&service, "partial-enable").await, BrowserRetentionReason::UserPageStateUnknown);
+    assert_eq!(factory.closes.load(Ordering::SeqCst), 0);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn retained_attachment_pins_handoff_even_after_native_hide_acknowledges() {
+    let factory = Arc::new(WatchedFactory::default());
+    let service = BrowserResourceService::new(factory.clone());
+    let (resource, run) = running_agent_page(&service, "retained-attachment").await;
+    resource.retain_surface_attachment(41).await.unwrap();
+    resource.set_agent_surface(desktop_bounds(), true, CancellationToken::new()).await.unwrap();
+    resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await.unwrap();
+    resource.finish_interaction(&run).await.unwrap();
+    resource.release_surface_attachment(41).await;
+    assert!(!resource.workspace().try_retire_after_task("task").await.unwrap());
+    assert_eq!(retention(&service, "retained-attachment").await, BrowserRetentionReason::UserPageStateUnknown);
+    assert_eq!(factory.closes.load(Ordering::SeqCst), 0);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_unconfirmed_agent_show_remains_possible_exposure_at_handoff() {
+    let shown = native_barrier();
+    let factory = Arc::new(WatchedFactory::default());
+    *factory.show_gate.lock().unwrap() = Some(shown.clone());
+    let service = BrowserResourceService::new(factory.clone());
+    let (resource, run) = running_agent_page(&service, "cancelled-show").await;
+    let cancel = CancellationToken::new();
+    let show = tokio::spawn({ let resource = resource.clone(); let cancel = cancel.clone(); async move {
+        resource.set_agent_surface(desktop_bounds(), true, cancel).await
+    }});
+    shown.entered.notified().await;
+    cancel.cancel();
+    resource.finish_interaction(&run).await.unwrap();
+    shown.release.notify_one();
+    show.await.unwrap().unwrap();
+    resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await.unwrap();
+    assert!(!resource.workspace().try_retire_after_task("task").await.unwrap());
+    assert_eq!(retention(&service, "cancelled-show").await, BrowserRetentionReason::UserPageStateUnknown);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn hide_posted_before_handoff_does_not_replace_its_original_native_ack() {
+    let hidden = native_barrier();
+    let factory = Arc::new(WatchedFactory::default());
+    *factory.hide_gate.lock().unwrap() = Some(hidden.clone());
+    let service = BrowserResourceService::new(factory.clone());
+    let (resource, run) = running_agent_page(&service, "pending-hide").await;
+    resource.set_agent_surface(desktop_bounds(), true, CancellationToken::new()).await.unwrap();
+    let hide = tokio::spawn({ let resource = resource.clone(); async move {
+        resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await
+    }});
+    hidden.entered.notified().await;
+    resource.finish_interaction(&run).await.unwrap();
+    hidden.release.notify_one();
+    hide.await.unwrap().unwrap();
+    assert!(!resource.workspace().try_retire_after_task("task").await.unwrap());
+    assert_eq!(retention(&service, "pending-hide").await, BrowserRetentionReason::UserPageStateUnknown);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_lock_failure_cannot_turn_auto_source_into_a_task_only_proof() {
+    let factory = Arc::new(WatchedFactory::default());
+    let service = BrowserResourceService::new(factory.clone());
+    let resource = agent_page(&service, "failed-lock", "task", BrowserProfile::Ephemeral).await;
+    factory.fail_lock_once.store(true, Ordering::SeqCst);
+    assert!(resource.begin_run().await.is_err());
+    resource.set_agent_surface(desktop_bounds(), true, CancellationToken::new()).await.unwrap();
+    resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await.unwrap();
+    resource.workspace().recover_failed_start().await.unwrap();
+    assert!(!resource.workspace().try_retire_after_task("task").await.unwrap());
+    assert_eq!(retention(&service, "failed-lock").await, BrowserRetentionReason::UserPageStateUnknown);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn locked_creation_waits_for_original_native_ack_before_auto_presentation() {
+    let locked = native_barrier();
+    let factory = Arc::new(WatchedFactory::default());
+    *factory.lock_gate.lock().unwrap() = Some(locked.clone());
+    let service = BrowserResourceService::new(factory.clone());
+    let resource = service.ensure(authority("alice", "creating-ack", "managed", all_actions()), BrowserProfile::Ephemeral).await.unwrap();
+    resource.retain_task("task").await.unwrap();
+    let run = resource.begin_run().await.unwrap();
+    let creating = tokio::spawn({ let resource = resource.clone(); let run = run.clone(); async move { resource.agent_command(&run, create()).await }});
+    locked.entered.notified().await;
+    assert!(!creating.is_finished());
+    let show = tokio::spawn({ let resource = resource.clone(); async move { resource.set_agent_surface(desktop_bounds(), true, CancellationToken::new()).await }});
+    locked.release.notify_one();
+    creating.await.unwrap().unwrap();
+    show.await.unwrap().unwrap();
+    resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await.unwrap();
+    resource.finish_interaction(&run).await.unwrap();
+    resource.workspace().try_retire_after_task("task").await.unwrap();
+    retired(&service, "creating-ack").await;
+    assert_eq!(factory.lock_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.closes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_show_during_native_enable_pins_without_waiting_for_that_native_owner() {
+    let enabling = native_barrier();
+    let factory = Arc::new(WatchedFactory::default());
+    *factory.unlock_gate.lock().unwrap() = Some(enabling.clone());
+    let service = BrowserResourceService::new(factory.clone());
+    let (resource, run) = running_agent_page(&service, "show-during-enable").await;
+    let finish = tokio::spawn({ let resource = resource.clone(); async move { resource.finish_interaction(&run).await }});
+    enabling.entered.notified().await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), resource.set_agent_surface(desktop_bounds(), true, CancellationToken::new()))
+        .await.expect("layout must not wait for an in-flight native input handoff").unwrap();
+    resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await.unwrap();
+    enabling.release.notify_one();
+    finish.await.unwrap().unwrap();
+    assert!(!resource.workspace().try_retire_after_task("task").await.unwrap());
+    assert_eq!(retention(&service, "show-during-enable").await, BrowserRetentionReason::UserPageStateUnknown);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn late_agent_hide_cannot_erase_a_successor_show_before_user_handoff() {
+    let hidden = native_barrier();
+    let factory = Arc::new(WatchedFactory::default());
+    *factory.hide_gate.lock().unwrap() = Some(hidden.clone());
+    let service = BrowserResourceService::new(factory.clone());
+    let (resource, run) = running_agent_page(&service, "agent-late-hide").await;
+    resource.set_agent_surface(desktop_bounds(), true, CancellationToken::new()).await.unwrap();
+    let hide = tokio::spawn({ let resource = resource.clone(); async move { resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await }});
+    hidden.entered.notified().await;
+    resource.set_agent_surface(desktop_bounds(), true, CancellationToken::new()).await.unwrap();
+    hidden.release.notify_one();
+    hide.await.unwrap().unwrap();
+    resource.finish_interaction(&run).await.unwrap();
+    resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await.unwrap();
+    assert!(!resource.workspace().try_retire_after_task("task").await.unwrap());
+    assert_eq!(retention(&service, "agent-late-hide").await, BrowserRetentionReason::UserPageStateUnknown);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn first_native_lock_failure_keeps_the_created_owner_for_exact_shutdown() {
+    let factory = Arc::new(WatchedFactory::default());
+    factory.fail_lock_once.store(true, Ordering::SeqCst);
+    let service = BrowserResourceService::new(factory.clone());
+    let resource = service.ensure(authority("alice", "first-lock-failure", "managed", all_actions()), BrowserProfile::Ephemeral).await.unwrap();
+    resource.retain_task("task").await.unwrap();
+    let run = resource.begin_run().await.unwrap();
+    assert!(resource.agent_command(&run, create()).await.is_err());
+    assert!(matches!(resource.agent_command(&run, create()).await,
+        Err(WorkspaceError::Admission(RunAdmissionError::InputGateFailed))), "a retained handle is not a successful native lock ACK");
+    assert!(resource.snapshot().await.unwrap().runtime.is_some(), "an acquired native owner cannot disappear when its lock ACK fails");
+    assert!(resource.snapshot().await.unwrap().runtime.unwrap().tabs.is_empty(), "failed admission must not dispatch later native page creation");
+    assert_eq!(factory.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.lock_calls.load(Ordering::SeqCst), 1);
+    resource.set_agent_surface(desktop_bounds(), true, CancellationToken::new()).await.unwrap();
+    resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await.unwrap();
+    resource.finish_run(&run).await.unwrap();
+    service.shutdown().await.unwrap();
+    assert!(resource.native_close_proven().await);
+    assert_eq!(factory.closes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failed_native_worker_cannot_reuse_an_earlier_lock_ack_as_human_use_proof() {
+    let factory = Arc::new(WatchedFactory::default());
+    let service = BrowserResourceService::new(factory.clone());
+    let (resource, run) = running_agent_page(&service, "failed-worker").await;
+    factory.panic_operation_once.store(true, Ordering::SeqCst);
+    assert!(matches!(resource.agent_command(&run, create()).await,
+        Err(WorkspaceError::Admission(RunAdmissionError::WorkerFailed))));
+    resource.set_agent_surface(desktop_bounds(), true, CancellationToken::new()).await.unwrap();
+    resource.set_agent_surface(desktop_bounds(), false, CancellationToken::new()).await.unwrap();
+    resource.finish_run(&run).await.unwrap();
+    assert!(!resource.workspace().try_retire_after_task("task").await.unwrap());
+    assert_eq!(retention(&service, "failed-worker").await, BrowserRetentionReason::UserPageStateUnknown);
+    assert_eq!(resource.snapshot().await.unwrap().runtime.unwrap().tabs.len(), 1, "no native command was replayed after the failed worker");
     service.shutdown().await.unwrap();
 }
 

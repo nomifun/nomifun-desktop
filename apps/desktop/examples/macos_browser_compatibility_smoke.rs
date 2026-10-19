@@ -1,6 +1,7 @@
 //! Real WKWebView compatibility smoke with disposable loopback pages.
 //! Package the exact build with package-macos-native-fixture.mjs and launch its
 //! plan through LaunchServices; a bare executable has no audit admission.
+//! --lifecycle-case empty|nonempty runs a separate resource-owner component case.
 //! --hold-ui waits for a physical click on the popup link with user input unlocked.
 //! --live-sites observes Baidu homepage/search and Bilibili for 60s each.
 //! --manual-sites adds physical page input and host Back/Reload/show/hide steps.
@@ -38,6 +39,9 @@ mod identity_ab;
 #[path = "support/macos_browser_compatibility_permissions.rs"]
 mod permissions;
 #[cfg(target_os = "macos")]
+#[path = "support/macos_browser_lifecycle_probe.rs"]
+mod lifecycle_probe;
+#[cfg(target_os = "macos")]
 #[path = "../src/macos_development_launch.rs"]
 mod application_launch;
 
@@ -50,11 +54,17 @@ fn main() {
     let mut compare_identity = false;
     let mut media_permissions = false;
     let mut media_user_ready = false;
+    let mut lifecycle_case = None;
     let mut evidence_dir = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--hold-ui" => hold_ui = true,
+            "--lifecycle-case" => lifecycle_case = Some(match arguments.next().as_deref() {
+                Some("nonempty") => lifecycle_probe::Selection::Nonempty,
+                Some("empty") => lifecycle_probe::Selection::Empty,
+                _ => panic!("--lifecycle-case requires nonempty or empty"),
+            }),
             "--live-sites" => live_sites = true,
             "--manual-sites" => { manual_sites = true; live_sites = true; }
             "--identity-ab" => compare_identity = true,
@@ -78,6 +88,10 @@ fn main() {
     }
     if compare_identity && media_permissions {
         eprintln!("--identity-ab and --media-permissions use separate audit runs; run each explicitly");
+        std::process::exit(2);
+    }
+    if lifecycle_case.is_some() && (compare_identity || media_permissions || hold_ui || live_sites || manual_sites) {
+        eprintln!("Lifecycle component cases use an independent fixed compatibility audit");
         std::process::exit(2);
     }
     // The fixed audit scope admits LaunchServices before the loopback worker,
@@ -136,6 +150,10 @@ fn main() {
                     // host and disposable persistent store have settled.
                     if result.is_ok() { completed_cleanup.store(true, Ordering::SeqCst); }
                     result
+                } else if let Some(selection) = lifecycle_case {
+                    let result = lifecycle_probe::verify(&handle, &worker_fixture, evidence_dir.as_deref(), selection).await;
+                    if result.is_ok() { completed_cleanup.store(true, Ordering::SeqCst); }
+                    result
                 } else {
                     probe::verify(&handle, &worker_fixture, hold_ui, live_sites, manual_sites,
                         evidence_dir.as_deref(), media_permissions, media_user_ready, &completed_cleanup).await
@@ -181,7 +199,7 @@ fn main() {
         report["disposable_evidence_cleanup"] = serde_json::json!(true);
         report["native_cleanup_verified"] = serde_json::json!(true);
         report["evidence_directory_retained"] = serde_json::json!(retained_report_path.is_some());
-        let fixture_passed = if compare_identity { report["fixture_checks_passed"] == true } else { report["core_checks_passed"] == true };
+        let fixture_passed = if compare_identity { report["fixture_checks_passed"] == true } else if lifecycle_case.is_some() { report["component_checks_passed"] == true } else { report["core_checks_passed"] == true };
         let live_passed = !live_sites || if compare_identity { report["live_checks_passed"] == true }
             else { report["live_sites"]["entry_checks_passed"] == true };
         if !fixture_passed || !live_passed { code = 2; }

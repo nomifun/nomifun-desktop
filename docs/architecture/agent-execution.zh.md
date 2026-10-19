@@ -73,6 +73,11 @@ AutoWork 原 Requirement claim 的显式取消在原 writer 内围住 Execution 
 兄弟和后继不受影响。初始规划恢复保持同一在途 owner。取消本地模型流不构造替代计划、失败回退或新 Attempt，
 也不代表远端供应商已经撤回计算；模型结果提交仍受原 SQLite CAS 与来源围栏约束。
 任务取消受理、原生执行停止与资源退休分别确认；取消事件或 inactive link 本身不证明 Runtime 已释放。
+迟到的完成退休仍持原 Runtime handle，只读该实例原有完整 teardown flight 的成功结果。
+此证明可在 Kernel 弱缓存已按原 Arc 正确移除后复用，避免要求已退出的 owner 再次参与；
+缺失、pending 或失败的 flight，以及 registry／缓存条目缺席都不构成成功证明。
+这只结束原资源责任，不清除 canonical Unknown Effect、不授予重跑或后继准入，
+也不处置仍由独立 owner 保留的用户页面、后台进程和合法回写。
 原 cleanup owner 携带 Attempt 的原操作引用到 exact Session owner，不临时选择当前 Turn；
 它独立于普通控制队列向宿主发出停止，不能让挂起的 Steer 延误用户 Stop。
 清理 outbox 按原 Session、Execution、Step、Attempt 作为责任单元，只合并同一 Attempt 的重复
@@ -150,7 +155,7 @@ Step spec 是任务输入；完成要求交给唯一 Runtime 的 typed requireme
 - [engine.rs](../../crates/backend/nomifun-agent-execution/src/engine.rs)、[scheduler.rs](../../crates/backend/nomifun-agent-execution/src/scheduler.rs)：命令、版本与派发。
 - [conversation_effect.rs](../../crates/backend/nomifun-agent-execution/src/conversation_effect.rs)、[canonical_output.rs](../../crates/backend/nomifun-agent-execution/src/canonical_output.rs)：精确取消、输出与结算。
 - [agent_activities.rs](../../crates/backend/nomifun-app/src/router/agent_activities.rs)、[活动 DTO](../../crates/backend/nomifun-api-types/src/agent_activity.rs)：只读跨域发现、瞬态停止快照与原 owner 命令分流。
-- [桌面活动控制 browser smoke](../../scripts/validation/agent-activities-browser.mjs)：传入本轮已编译的 `nomifun-app` lib test 可执行文件 `--backend-test` 和已安装 Playwright 的 `--playwright-module` 绝对路径。脚本只在带随机 sentinel 的新临时目录启动显式 ignored `activity_browser_fixture`，使用真实 Store、HTTP 和原输入准备 owner 的屏障；1280×800 与 880×600 的全新 Edge context 点击工作入口、单项停止和全部停止，分别核对受理／原 owner 收束，保存临时证据后关闭本次浏览器、Vite 与后端。任何模型请求均使验收失败；它不证明供应商或其他平台原生验收。
+- [桌面活动控制 browser smoke](../../scripts/validation/agent-activities-browser.mjs)：传入本轮已编译的 `nomifun-app` lib test 可执行文件 `--backend-test` 和已安装 Playwright 的 `--playwright-module` 绝对路径。默认使用已安装 Edge；macOS 可用 `--browser-executable` 或 `NOMIFUN_CHROME_BINARY` 显式指定已安装 Chrome 的绝对可执行文件路径，不下载浏览器。脚本只在带随机 sentinel 的新临时目录启动显式 ignored `activity_browser_fixture`，使用真实 Store、HTTP 和原输入准备 owner 的屏障；1280×800 与 880×600 的全新 browser context 点击工作入口、单项停止和全部停止，分别核对受理／原 owner 收束，保存临时证据后关闭本次浏览器、Vite 与后端。报告记录所选浏览器路径或 channel 及实际版本。任何模型请求均使验收失败；它不证明供应商或其他平台原生验收。
 - [IDMM service](../../crates/backend/nomifun-idmm/src/service.rs)、[detector](../../crates/backend/nomifun-idmm/src/detector.rs)：规则、旁路与故障边界。
 - [IDMM e2e](../../crates/backend/nomifun-app/tests/idmm_e2e.rs)：认证接口、默认值、幂等与 canonical 来源。
 
