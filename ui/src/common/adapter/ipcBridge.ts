@@ -1965,15 +1965,23 @@ export const mcpService = {
       needs_auth?: boolean;
       authMethod?: 'oauth' | 'basic';
       auth_method?: 'oauth' | 'basic';
-      wwwAuthenticate?: string;
-      www_authenticate?: string;
     },
     McpConnectionTestRequest
   >('/api/mcp/test-connection'),
-  checkOAuthStatus: httpPost<{ authenticated: boolean }, { server_url: string }>('/api/mcp/oauth/check-status'),
-  loginMcpOAuth: httpPost<{ success: boolean; error?: string }, { server_url: string }>('/api/mcp/oauth/login'),
-  logoutMcpOAuth: httpPost<void, { server_url: string }>('/api/mcp/oauth/logout'),
-  getAuthenticatedServers: httpGet<string[], void>('/api/mcp/oauth/authenticated'),
+  getMcpAuth: httpGet<import('../types/mcpAuth').McpAuthStatus, { mcp_server_id: McpServerId }>(
+    (p) => `/api/mcp/servers/${p.mcp_server_id}/auth`
+  ),
+  startMcpOAuth: httpPost<import('../types/mcpAuth').McpOAuthAttempt, { mcp_server_id: McpServerId } & import('../types/mcpAuth').McpOAuthStartRequest>(
+    (p) => `/api/mcp/servers/${p.mcp_server_id}/auth/attempts`,
+    ({ client }) => ({ client })
+  ),
+  getMcpOAuthAttempt: httpGet<import('../types/mcpAuth').McpOAuthAttempt, { mcp_server_id: McpServerId; attempt_id: string }>(
+    (p) => `/api/mcp/servers/${p.mcp_server_id}/auth/attempts/${encodeURIComponent(p.attempt_id)}`
+  ),
+  cancelMcpOAuth: httpDelete<void, { mcp_server_id: McpServerId; attempt_id: string }>(
+    (p) => `/api/mcp/servers/${p.mcp_server_id}/auth/attempts/${encodeURIComponent(p.attempt_id)}`
+  ),
+  logoutMcpOAuth: httpDelete<void, { mcp_server_id: McpServerId }>((p) => `/api/mcp/servers/${p.mcp_server_id}/auth`),
 };
 
 // ---------------------------------------------------------------------------
@@ -4797,7 +4805,7 @@ export interface ICompanionProfile {
   /** Positive dataset-local display ordinal. */
   seq: number;
   name: string;
-  /** Character id (mochi/ink/roux/pixel/bolt/boo); unknown → default. */
+  /** Character id (mochi/bolt/custom); unknown → default. */
   character: string;
   /** Manual emotion held until cleared; null follows the latest learned mood. */
   mood_override: ICompanionMood | null;

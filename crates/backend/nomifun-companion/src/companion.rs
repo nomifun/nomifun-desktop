@@ -211,7 +211,7 @@ mod workspace_path_tests {
     use std::path::Path;
 
     fn profile(seq: u64, name: &str) -> CompanionProfileConfig {
-        CompanionProfileConfig::new(name, "ink", seq)
+        CompanionProfileConfig::new(name, "mochi", seq)
     }
 
     #[test]
@@ -716,7 +716,7 @@ mod skill_resolution_tests {
     }
 
     fn profile_with_enabled(enabled: &[&str]) -> CompanionProfileConfig {
-        let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         profile.skills = CompanionSkillConfig {
             enabled: enabled.iter().map(|name| (*name).to_owned()).collect(),
             disabled_auto: Vec::new(),
@@ -794,7 +794,7 @@ mod tests {
     #[tokio::test]
     async fn every_companion_persona_ends_with_non_overridable_spoken_reply_rules() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         // Existing custom settings may still request the old style. Keep the
         // setting as user data while the final product rule remains explicit.
         profile.persona.custom = "每句都加颜文字、emoji 和表情包，先写括号动作".into();
@@ -821,7 +821,7 @@ mod tests {
         // nomifun-ai-agent::factory::nomi, so baking it here would freeze it
         // into the persisted prompt and reintroduce the bug.
         let store = CompanionStore::open_memory().await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         for platform in [None, Some("telegram")] {
             let prompt = build_companion_system_prompt(&store, &profile, platform, false).await;
             assert!(
@@ -840,7 +840,7 @@ mod tests {
             .insert_memory("preference", "主人喜欢中文回复", &[], 0.9, "learn")
             .await
             .unwrap();
-        let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         profile.persona = PersonaConfig {
             preset: "calm".into(),
             custom: "叫主人「老大」".into(),
@@ -874,7 +874,7 @@ mod tests {
     #[tokio::test]
     async fn companion_system_prompt_never_freezes_old_day_digests() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         // Seed one archived day-digest for this companion.
         let w = store.ensure_open_window(&profile.companion_id, &conversation_fixture(5), 0).await.unwrap();
         store
@@ -902,7 +902,7 @@ mod tests {
     #[tokio::test]
     async fn companion_system_prompt_smart_collaboration_nudge_local_only() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
 
         // Off → no collaboration nudge.
         let off = build_companion_system_prompt(&store, &profile, None, false).await;
@@ -927,7 +927,7 @@ mod tests {
         // resources and Skill/MCP selections. Its product settings cannot
         // establish any of those permissions or pin old calling conventions.
         let store = CompanionStore::open_memory().await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         for platform in [None, Some("wecom")] {
             for smart_collaboration in [false, true] {
                 let prompt = build_companion_system_prompt(
@@ -963,7 +963,7 @@ mod tests {
     #[tokio::test]
     async fn companion_system_prompt_teaches_knowledge_curation() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         // Knowledge curation is strategy, not a capability grant. It must stay
         // useful with either read-only or writable knowledge tools and cannot
         // promise platform creation/binding actions absent from the Runtime.
@@ -989,7 +989,7 @@ mod tests {
         store.insert_memory("episode", "昨天聊了部署", &[], 0.9, "learn").await.unwrap();
         store.insert_memory("preference", "主人喜欢中文回复", &[], 0.9, "learn").await.unwrap();
         store.insert_memory("profile", "主人是 Rust 工程师", &[], 0.9, "learn").await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
 
         let remote = build_companion_system_prompt(&store, &profile, Some("telegram"), false).await;
         // No proactive-dispatch framing.
@@ -1014,7 +1014,7 @@ mod tests {
     #[tokio::test]
     async fn physical_persona_uses_ordinary_tools_and_optional_background_work_without_role_handoffs() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         let prompt = build_companion_system_prompt(&store, &profile, Some("robot"), true).await;
         assert!(prompt.contains("物理机器人"));
         assert!(prompt.contains("在当前会话按本轮实际授权直接使用"));
@@ -1035,7 +1035,7 @@ mod tests {
     #[tokio::test]
     async fn robot_persona_preserves_shared_spoken_rules_and_authored_settings() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         for preset in ["lively", "calm", "sassy", "unrecognized"] {
             profile.persona.preset = preset.into();
             let robot = build_companion_system_prompt(&store, &profile, Some("robot"), false).await;
@@ -1054,7 +1054,7 @@ mod tests {
     #[tokio::test]
     async fn physical_persona_preserves_identity_with_a_bounded_host_contribution() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        let mut profile = CompanionProfileConfig::new("毛球", "mochi", 1);
         profile.persona.preset = "calm".into();
         let desktop = build_companion_system_prompt(&store, &profile, None, true).await;
         let robot = build_companion_system_prompt(&store, &profile, Some("robot"), true).await;
@@ -1278,7 +1278,7 @@ pub(crate) mod thread_management_tests {
         async fn new() -> Self {
             let root = tempfile::tempdir().unwrap();
             let registry = Arc::new(CompanionRegistry::scan(root.path().join("companions"), root.path().join("shared")).unwrap());
-            let companion_id = registry.create("毛球", "ink").await.unwrap().companion_id;
+            let companion_id = registry.create("毛球", "mochi").await.unwrap().companion_id;
             let model = ProviderWithModel { provider_id: ProviderId::new().into_string(), model: "desktop-model".into(), use_model: None };
             registry.patch(&companion_id, serde_json::json!({ "model": model })).await.unwrap();
             let skill_paths = nomifun_skill_library::SkillPaths {

@@ -6705,7 +6705,6 @@ dependencies = [
  "nomifun-net",
  "nomifun-runtime",
  "oauth2",
- "open",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -6716,6 +6715,7 @@ dependencies = [
  "tokio-util",
  "toml 0.8.2",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

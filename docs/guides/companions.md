@@ -54,7 +54,7 @@ inserts a companion row in the work Session tree.
 ## Creating and managing companions
 
 1. Click **New companion** on the switcher bar, pick a name and one of the
-   six characters (mochi / ink / roux / pixel / bolt / boo).
+   two official characters, Mochi (`mochi`) or Bolt (`bolt`), or create/import a custom figure.
 2. **The first companion automatically becomes the default companion** (its card
    carries a "default" badge). Channels still require an explicit binding and do not acquire the default companion automatically.
 3. In **Manage → Overview** you can rename it, swap its character, tune its
@@ -72,9 +72,14 @@ inserts a companion row in the work Session tree.
    companion), so events simply accumulate until you create one.
 
 Each companion's configuration is saved at
-`{data_dir}/companion/companions/{companion_id}/config.json`. Its bundle exports
-and imports that identity. Canonical Session facts own session affiliation and
+`{data_dir}/companion/companions/{companion_id}/config.json`. A companion package
+exports one companion and imports it as a new companion. Canonical Session facts own session affiliation and
 history; directory names do not establish ownership.
+
+An existing companion with a retired or unrecognized character ID uses Mochi
+while keeping its identity, settings, memories and conversations. Imported
+packages use the same appearance fallback and retain the usual cloning rules:
+they create a new companion ID and do not import the original conversations.
 
 ### Changing a companion's Agent
 

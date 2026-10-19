@@ -355,7 +355,7 @@ impl PhysicalEntryFixture {
         let shared_model = model(router,server).await;
         let preset = if process {shared_preset_with_process(router,&shared_model,research,true).await}
             else {shared_preset(router,&shared_model,research).await};
-        let companion = api(router,"/api/companion/companions",json!({"name":scenario,"character":"ink"})).await;
+        let companion = api(router,"/api/companion/companions",json!({"name":scenario,"character":"mochi"})).await;
         let companion_id = companion["companion_id"].as_str().unwrap().to_owned();
         request(router,"PATCH",&format!("/api/companion/companions/{companion_id}"),json!({"model":shared_model})).await;
         request(router,"PUT",&format!("/api/product-agent-bindings/companion/{companion_id}"),json!({
@@ -808,7 +808,7 @@ async fn installed_companion_memory_create_query_cas_and_stale_revision_use_real
     nomifun_skill_library::materialize_if_needed(&fixture.services.data_dir,nomifun_skill_library::builtin_skills_corpus(),&corpus_version).await.unwrap();
     let owner = fixture.services.authoritative_user_id.to_string(); let router = &fixture._router;
     let selected_model = model(router,&server).await; let preset = shared_preset(router,&selected_model,false).await;
-    let companion = api(router,"/api/companion/companions",json!({"name":"Real SDK memory CRUD","character":"ink"})).await;
+    let companion = api(router,"/api/companion/companions",json!({"name":"Real SDK memory CRUD","character":"mochi"})).await;
     let companion_id = companion["companion_id"].as_str().unwrap().to_owned();
     request(router,"PATCH",&format!("/api/companion/companions/{companion_id}"),json!({"model":selected_model})).await;
     request(router,"PUT",&format!("/api/product-agent-bindings/companion/{companion_id}"),json!({

@@ -77,11 +77,46 @@ These are read by the backend regardless of which host embeds it.
 | `NOMIFUN_WORK_DIR` | `nomicore` | Fallback for `--work-dir` (per-conversation workspace root). Ranked below the work-root binding persisted in `dir-config.json`; inherited values that name a default data-root location or a directory that no longer exists are ignored (protection against stale self-exports across auto-update restarts). |
 | `JWT_SECRET` | `nomifun-app` | Secret used to sign session JWTs. See [Auth secret resolution](#auth-secret-resolution) for the resolution order. |
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | When truthy, session and CSRF cookies get the `Secure` flag and `SameSite=Strict`. Set it whenever the app is reached over HTTPS (TLS reverse proxy, etc.). Default is `false` → no `Secure` flag, `SameSite=Lax`. |
+| `NOMIFUN_MCP_OAUTH_CALLBACK_URL` | `nomifun-app::AppServices` / `nomifun-mcp::McpAuthService` | Optional externally reachable HTTPS callback for remote WebUI OAuth. The path must be exactly `/api/mcp/oauth/callback`; credentials, query, and fragment are rejected. Missing or invalid configuration produces an actionable login error. Native desktop uses its own loopback callback. |
+| `NOMIFUN_MCP_OAUTH_CLIENT_METADATA_URL` | `nomifun-app::AppServices` / `nomifun-mcp::oauth_protocol` | Optional product-controlled HTTPS Client ID Metadata Document URL used when the authorization server advertises CIMD support. It must publish the real client's metadata; there is no built-in universal client ID. |
 | `SHELL` | agent engine (Linux/macOS) | Shell used when the agent engine spawns child processes. On Linux servers under systemd, set this explicitly (the system account often has no `$SHELL`). |
 | `NOMIFUN_URL` | `nomicore remote` | Base URL for a running instance when using canonical Remote operations. |
 | `NOMIFUN_ACCESS_TOKEN` | backend startup, `nomicore remote` | Installation-scoped token for `/mcp` and `/api/remote/*`; startup values seed/rotate the stored verifier and never bind a companion. |
 
 There is no `SENTRY_DSN` integration: the codebase does not read that environment variable.
+
+## MCP OAuth
+
+Sources: [service composition](../../crates/backend/nomifun-app/src/services.rs),
+[authentication authority](../../crates/backend/nomifun-mcp/src/auth_service.rs), and
+[OAuth protocol](../../crates/backend/nomifun-mcp/src/oauth_protocol.rs).
+These variables are read when the backend starts and are shared by its hosts.
+They do not add URL overrides to individual login requests.
+
+Native desktop authentication uses a temporary callback bound to `127.0.0.1`
+on the backend machine. For remote WebUI, configure a public HTTPS callback
+that routes to the same running backend, for example:
+
+```sh
+NOMIFUN_MCP_OAUTH_CALLBACK_URL=https://nomifun.example/api/mcp/oauth/callback
+```
+
+Register this exact redirect with a pre-registered OAuth client and forward its
+GET requests through the reverse proxy to the backend. The callback has no
+query or fragment in configuration; the authorization server supplies one-use
+state and code when redirecting. NomiFun never infers this URL from Host or
+Origin and never substitutes the remote browser's loopback. Without a usable
+callback, WebUI login returns configuration guidance.
+
+Set `NOMIFUN_MCP_OAUTH_CLIENT_METADATA_URL` only when a product-controlled
+HTTPS URL publishes the corresponding Client ID Metadata Document. NomiFun
+uses it with servers advertising CIMD; otherwise it uses supported dynamic
+registration or asks for a pre-registered client. Client IDs, redirect rules,
+and service-provider access approval still belong to that provider.
+
+See [MCP OAuth login](../guides/mcp-and-skills.md#oauth-login) for the server-ID
+API and attempt lifecycle. Token refresh and re-login reuse the current
+connection without changing Agent Session selection or permissions.
 
 ## Backend constants
 

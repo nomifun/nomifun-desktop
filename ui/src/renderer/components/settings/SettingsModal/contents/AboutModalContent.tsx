@@ -51,7 +51,7 @@ const AboutModalContent: React.FC = () => {
     </div>
     {isDesktop && <div className='about-page__updates'>
       <Button type='primary' onClick={checkUpdate} icon={<Refresh theme='outline' size={14} />}>{t('settings.checkForUpdates')}</Button>
-      <Button onClick={() => void openLink(NOMIFUN_PUBLIC_LINKS.baiduPan)} icon={<Download theme='outline' size={14} />}>{t('settings.baiduManualDownload')}</Button>
+      <Button onClick={() => void openLink(NOMIFUN_PUBLIC_LINKS.download)} icon={<Download theme='outline' size={14} />}>{t('settings.officialDownload')}</Button>
     </div>}
     <Divider className='my-12px' />
     <div className='about-page__links'>

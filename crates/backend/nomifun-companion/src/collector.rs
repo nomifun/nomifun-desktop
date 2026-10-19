@@ -2075,7 +2075,7 @@ mod tests {
     }
 
     fn profile_fixture(name: &str) -> CompanionProfileConfig {
-        CompanionProfileConfig::new(name, "ink", 1)
+        CompanionProfileConfig::new(name, "mochi", 1)
     }
 
     #[tokio::test]

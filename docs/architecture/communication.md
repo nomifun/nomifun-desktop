@@ -122,6 +122,41 @@ inside the parent process; they are not serialized into runtime DTOs, database
 rows, or child configuration. Public capability fronts use their own
 installation-token boundary and do not inherit the internal host claim.
 
+### MCP authentication ownership
+
+`AppServices` owns one `nomifun-mcp::McpAuthService`. Saved settings probes and
+Runtime `McpOwner` calls share this authority, resolving credentials against the
+server ID, installation owner, and exact connection configuration. Configured
+headers use the same dispatch boundary; OAuth tokens are not copied into
+configuration headers or Agent Session state. Discovery follows the real Bearer
+challenge, Protected Resource Metadata, and the advertised authorization-server
+metadata. The verified issuer/resource/client context remains bound during
+refresh; a mutable MCP URL cannot select a different token destination.
+
+Authentication status and logout use `/api/mcp/servers/{id}/auth`; its
+`/attempts` subresources create, query, and cancel one-use attempts. State, PKCE,
+callback listeners, and cancellation live in one bounded process-local attempt.
+The frontend opens the returned authorization URL in the user's browser rather
+than waiting on a blocking login POST. Native desktop uses a temporary loopback
+callback. Remote WebUI uses the explicitly configured HTTPS
+`NOMIFUN_MCP_OAUTH_CALLBACK_URL` with path `/api/mcp/oauth/callback`. The public
+callback only completes the original state-bound attempt; it cannot select an
+owner, server, issuer, or token endpoint. Redirects are not inferred from Host or
+Origin. A product-controlled CIMD URL can be set with
+`NOMIFUN_MCP_OAUTH_CLIENT_METADATA_URL`; see
+[configuration](../reference/configuration.md#mcp-oauth).
+
+`mcp_oauth_clients` stores registrations and encrypted client secrets;
+`mcp_oauth_grants` stores each server's current grant and AES-GCM token envelope.
+`IMcpOAuthRepository` owns these tables and reuses the dataset encryption key.
+No OAuth Session or second conversation ledger is created. Refresh CAS-updates
+the current grant; re-login, logout, deletion, and connection replacement share
+per-server admission gates so late callbacks cannot recreate revoked grants.
+Probe publication checks the authentication observation within the same gate.
+Ordinary token rotation does not change Agent Snapshots. Failures carry safe
+stages and user actions without credentials, authorization codes, or upstream
+response bodies.
+
 ## Canonical Remote Ingress
 
 The canonical Nomi host mounts two projections of the same installation-token

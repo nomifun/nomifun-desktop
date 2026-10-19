@@ -1,11 +1,12 @@
 .page { height: 100%; overflow: auto; padding: 18px 24px; color: var(--color-text-1); box-sizing: border-box; }
 .modal :global(.arco-modal-content) { max-height: calc(100vh - 180px); overflow: auto; }
-.header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 14px; }
-.header h1 { margin: 0; font-size: 20px; line-height: 1.4; }
-.header h1 span { padding: 0 12px; font-weight: 400; color: var(--color-text-4); }
-.header p, .settings p { margin: 0; color: var(--color-text-2); line-height: 1.6; }
-.toolbar { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(190px, 440px) minmax(160px, 1fr); align-items: center; gap: 16px; margin-bottom: 12px; }
-.toolbar > :last-child { width: 100%; }
+.header { align-items: center; margin-bottom: 14px; }
+.header :global(.page-header__copy) { flex-shrink: 0; }
+.header :global(.page-header__actions) { flex: 1; min-width: 0; justify-content: flex-end; }
+.header :global(.page-header__actions) > :global(.arco-btn) { flex-shrink: 0; }
+.titleSeparator { padding: 0 12px; font-weight: 400; color: var(--color-text-4); }
+.settings p { margin: 0; color: var(--color-text-2); line-height: 1.6; }
+.appSearch { flex: 0 1 280px; min-width: 110px; }
 .appSearch :global(.arco-input-inner-wrapper) { height: 32px; padding: 0 10px; border: 1px solid var(--color-border-2); border-radius: 8px; background-color: var(--color-fill-1) !important; }
 .appSearch :global(.arco-input) { padding-top: 4px; padding-bottom: 4px; background: transparent; font-size: 13px; line-height: 20px; }
 .appSearch :global(.arco-input-inner-wrapper:hover) { border-color: var(--color-border-3); }

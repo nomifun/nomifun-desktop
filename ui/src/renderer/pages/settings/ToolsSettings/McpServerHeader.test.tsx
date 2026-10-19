@@ -37,6 +37,36 @@ function fixture(enabled = false, isTogglingEnabled = false, isTestingConnection
 }
 
 describe('MCP management enabled control', () => {
+  test('authorization and connection results remain separate', () => {
+    const current = server({ transport: { type: 'http', url: 'https://mcp.example.test/mcp' }, last_test_status: 'error' });
+    const view = render(<I18nextProvider i18n={locale}>
+      <McpServerHeader server={current} isTestingConnection={false}
+        oauthStatus={{ auth: { state: 'authorized', granted_scopes: [] }, isChecking: false }}
+        onTestConnection={() => {}} onToggleEnabled={() => {}} onEditServer={() => {}} onDeleteServer={() => {}} />
+    </I18nextProvider>);
+    expect(view.getByTestId('mcp-auth-authorized').textContent).toBe(settings.mcpAuthenticated);
+    expect(view.getByRole('img', { name: settings.mcpCheckFailedSimple })).toBeTruthy();
+  });
+
+  test('an in-progress login offers cancellation and browser continuation without marking a connection', () => {
+    const current = server({ transport: { type: 'http', url: 'https://mcp.example.test/mcp' } });
+    const cancel = mock();
+    const resume = mock();
+    const view = render(<I18nextProvider i18n={locale}>
+      <McpServerHeader server={current} isTestingConnection={false} isLoggingIn
+        oauthAttempt={{ attempt_id: 'fixture', status: 'waiting_for_user', authorization_url: 'https://auth.example.test/authorize' }}
+        onOAuthCancel={cancel} onOAuthContinue={resume}
+        onTestConnection={() => {}} onToggleEnabled={() => {}} onEditServer={() => {}} onDeleteServer={() => {}} />
+    </I18nextProvider>);
+    expect(view.getByText(settings.mcpOAuthWaiting)).toBeTruthy();
+    expect(view.getByRole('img', { name: settings.mcpDisconnected })).toBeTruthy();
+    fireEvent.click(view.getByRole('button', { name: settings.mcpOAuthContinue }));
+    expect(resume).toHaveBeenCalledWith(current);
+    const cancelButton = view.getAllByRole('button').find((button) => button.textContent?.includes('common.cancel') || button.textContent?.includes('Cancel'))!;
+    fireEvent.click(cancelButton);
+    expect(cancel).toHaveBeenCalledWith(current);
+  });
+
   test.each([false, true])('shows enabled=%s with an accessible separate toggle', (enabled) => {
     const view = fixture(enabled);
     const control = view.getByRole('switch', { name: `${enabled ? 'Disable' : 'Enable'} alpha` });

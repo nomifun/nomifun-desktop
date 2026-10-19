@@ -152,8 +152,9 @@ pub use mcp::{
     BatchImportMcpServersRequest, CreateMcpServerRequest, DetectedMcpServerEntry,
     DetectedMcpServerResponse, ImportMcpServerRequest, McpAuthMethod, McpConnectionTestErrorCode,
     McpConnectionTestResult, McpServerId, McpServerResponse, McpToolResponse, McpTransport,
-    OAuthCheckStatusRequest, OAuthLoginRequest, OAuthLoginResponse, OAuthLogoutRequest,
-    OAuthStatusResponse, TestMcpConnectionRequest, UpdateMcpServerRequest,
+    McpAuthDiagnostic, McpAuthErrorCode, McpAuthStage, McpAuthState, McpAuthStatus, McpAuthUserAction,
+    McpOAuthAttempt, McpOAuthAttemptStatus, McpOAuthClientConfig, McpOAuthStartRequest,
+    TestMcpConnectionRequest, UpdateMcpServerRequest,
 };
 pub use mcp_bridge::{
     GATEWAY_CALL_TOOL_OPERATION, GATEWAY_CAPABILITY_DOMAIN, GATEWAY_CREATE_CONVERSATION_TOOL,

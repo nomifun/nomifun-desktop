@@ -28,7 +28,7 @@ pub(crate) async fn protect_before_retirement(conn: &mut SqliteConnection) -> Re
     let metadata: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schema_metadata WHERE singleton_key='canonical'")
         .fetch_one(&mut *conn).await?;
     if metadata != 1 { return Err(file_error("canonical generation metadata is incomplete")); }
-    crate::agent_store_clean_cut::ensure_schema_metadata(conn).await?;
+    crate::agent_store_clean_cut::validate_metadata_before_plugin_retirement(conn).await?;
     let root = Path::new(filename).parent().ok_or_else(|| file_error("database has no parent"))?;
     let protected_root = root.join("preserved-plugin-works");
     fs::create_dir_all(&protected_root).map_err(file_error)?;

@@ -16,6 +16,16 @@
 - Run `bun run check:desktop-ui-boundary` after renderer or UI-rule changes.
   Changing this target contract requires an explicit product decision.
 
+## Page headings
+
+- New pages with a visible page title must use the shared `PageHeader` (or
+  `HubPageShell`) and its `app-page-title` style. Keep the shared title tokens
+  (`--page-title-size`, `--page-title-line-height`), weight and color consistent;
+  do not introduce page-specific title typography.
+- Place page-level actions such as create/import and search in the header's
+  `actions` area, aligned to the right on the same row as the title when
+  applicable. Keep content filters in the page body.
+
 ## Efficient validation
 
 - Choose the smallest checks that directly cover the files and behavior being

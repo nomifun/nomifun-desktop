@@ -107,6 +107,67 @@ async fn assert_terminal_admission_closed(services: &AppServices, root: &Path) {
         "the original service admission must already be fenced: {rejected}");
 }
 
+#[cfg(feature = "browser-use")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn blocked_original_mcp_auth_owner_does_not_delay_terminal_or_browser_cleanup() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = nomifun_db::init_database_memory().await.unwrap();
+    let mut services = AppServices::from_config(database, &test_config(directory.path())).await.unwrap();
+    let hook = Arc::new(DeleteBarrier::default());
+    add_deferred_terminal(&services, directory.path(), &hook).await;
+    let browser = Arc::new(BrowserResourceShutdownProbe::default());
+    browser.allow_close.store(true, Ordering::Release);
+    let _workspace = install_shutdown_browser(&mut services, browser.clone()).await;
+
+    // Hold the real authority's existing per-connection observation guard.
+    // The original logout is admitted, then waits on that exact guard; its
+    // activity token makes the actual McpAuthService::shutdown remain pending.
+    let server = uuid::Uuid::now_v7().to_string();
+    let revision = services.mcp_auth.binding_revision(&server).await.unwrap();
+    let observation = services.mcp_auth.acquire_observation_guard(&server, &revision).await.unwrap();
+    let auth = services.mcp_auth.clone();
+    let mut logout = Box::pin(async move { auth.logout(&server).await });
+    let initial = std::future::poll_fn(|context| std::task::Poll::Ready(
+        std::future::Future::poll(logout.as_mut(), context),
+    )).await;
+    assert!(initial.is_pending(), "the original logout must already own its activity token");
+    let logout = tokio::spawn(logout);
+    let services = Arc::new(services);
+    let closing = services.clone();
+    let shutdown = tokio::spawn(async move { closing.shutdown_nomi_core_host().await });
+    tokio::time::timeout(Duration::from_secs(5), hook.entered.notified()).await
+        .expect("the real Terminal delete hook must run while authentication still joins");
+    tokio::time::timeout(Duration::from_secs(5), browser.close_entered.notified()).await
+        .expect("the original Browser Resource must close independently of authentication");
+    assert_terminal_admission_closed(&services, directory.path()).await;
+    assert!(!logout.is_finished());
+    assert!(!shutdown.is_finished());
+    assert!(services.mcp_auth.binding_revision("after-auth-fence").await.is_err());
+    assert_eq!(browser.closes.load(Ordering::Acquire), 1);
+    assert_eq!(browser.native_shutdowns.load(Ordering::Acquire), 0);
+    assert!(!services.database.pool().is_closed());
+    hook.release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), hook.released.notified()).await.unwrap();
+
+    // Dropping the host waiter must preserve the same auth shutdown worker,
+    // not run another shutdown that can lose the first service's task handles.
+    shutdown.abort();
+    assert!(shutdown.await.unwrap_err().is_cancelled());
+    let original = services.host_shutdown_stage.lock().await.mcp_auth_task.as_ref().unwrap().id();
+    assert!(!services.host_shutdown_stage.lock().await.mcp_auth_task.as_ref().unwrap().is_finished());
+    drop(observation);
+    assert!(logout.await.unwrap().is_err(), "shutdown rejects the late logout's nested admission");
+    services.shutdown_nomi_core_host().await.unwrap();
+    let stage = services.host_shutdown_stage.lock().await;
+    assert!(stage.mcp_auth_closed);
+    assert!(stage.mcp_auth_task.is_none(), "the original worker {original:?} was joined");
+    assert_eq!(hook.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(hook.cancelled.load(Ordering::SeqCst), 0);
+    assert_eq!(browser.closes.load(Ordering::Acquire), 1);
+    assert_eq!(browser.native_shutdowns.load(Ordering::Acquire), 1);
+    assert!(services.database.pool().is_closed());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn host_terminal_cleanup_reaches_real_delete_hook_before_a_blocked_runtime_owner_finishes() {
     let directory = tempfile::tempdir().unwrap();

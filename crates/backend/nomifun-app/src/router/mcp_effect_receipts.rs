@@ -204,7 +204,6 @@ impl McpEffectReceipts {
         } else {
             EffectTerminalState::Uncertain
         };
-        let diagnostic = |error: &nomifun_mcp::McpOwnerError| json!({"code":error.code(),"message":error.message()});
         let payload = json!({
             "observation": observation,
             "execution": {
@@ -212,12 +211,12 @@ impl McpEffectReceipts {
                 "local_process_started":outcome.execution.local_process_started,
                 "cancellation_requested":outcome.execution.cancellation_requested,
                 "returned":outcome.result.is_ok(),
-                "error":outcome.result.as_ref().err().map(diagnostic),
+                "error":outcome.result.as_ref().err().map(owner_error_projection),
             },
             "cleanup": {
                 "local":cleanup_status(outcome.cleanup.local),
                 "remote":cleanup_status(outcome.cleanup.remote),
-                "error":outcome.cleanup.error.as_ref().map(diagnostic),
+                "error":outcome.cleanup.error.as_ref().map(owner_error_projection),
             },
         });
         if serde_json::to_vec(&payload).map_err(|_| unavailable())?.len() > 8192 {
@@ -305,8 +304,20 @@ pub(super) fn original_mcp_resources_closed(effect: &AgentEffectRecord) -> Resul
     // never a fabricated successful business return or pre-dispatch rejection.
     if boolean("returned")? || (!dispatched && !local_started) { return Ok(false); }
     let error = execution.get("error").and_then(Value::as_object).ok_or_else(unavailable)?;
-    if error.len() != 2 || !error.get("code").is_some_and(Value::is_string)
+    if !matches!(error.len(), 2 | 3) || error.keys().any(|key| !matches!(key.as_str(), "code" | "message" | "details"))
+        || !error.get("code").is_some_and(Value::is_string)
         || !error.get("message").is_some_and(Value::is_string) { return Err(unavailable()); }
+    if let Some(details) = error.get("details") {
+        let details = details.as_object().ok_or_else(unavailable)?;
+        if details.len() != 1 { return Err(unavailable()); }
+        let diagnostic = details.get("auth_diagnostic").ok_or_else(unavailable)?;
+        let typed: nomifun_api_types::McpAuthDiagnostic = serde_json::from_value(diagnostic.clone()).map_err(|_| unavailable())?;
+        // The formal projection is the only additional shape. Round-trip
+        // equality rejects foreign keys the public DTO would otherwise ignore.
+        if serde_json::to_value(typed).map_err(|_| unavailable())? != *diagnostic {
+            return Err(unavailable());
+        }
+    }
     let cleanup = payload.get("cleanup").and_then(Value::as_object).ok_or_else(unavailable)?;
     if cleanup.len() != 3 || cleanup.keys().any(|key| !matches!(key.as_str(), "local" | "remote" | "error"))
         || !cleanup.get("error").is_some_and(Value::is_null) { return Err(unavailable()); }
@@ -319,6 +330,14 @@ pub(super) fn original_mcp_resources_closed(effect: &AgentEffectRecord) -> Resul
     // Unsupported remote protocol close remains unsupported in the original
     // receipt. It owns no local process and is not business rollback proof.
     Ok((local == "confirmed" || (!local_started && local == "not_required")) && remote != "unproven")
+}
+
+fn owner_error_projection(error: &nomifun_mcp::McpOwnerError) -> Value {
+    let mut projected = json!({ "code": error.code(), "message": error.message() });
+    if let Some(diagnostic) = error.auth_diagnostic() {
+        projected["details"] = json!({ "auth_diagnostic": diagnostic });
+    }
+    projected
 }
 
 fn bounded_observation(value: &Value, full_limit: usize) -> Result<Value, AppError> {
@@ -349,6 +368,23 @@ fn valid_effect_identity(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_diagnostic_remains_in_the_original_effect_error_projection() {
+        let diagnostic = nomifun_api_types::McpAuthDiagnostic {
+            code: nomifun_api_types::McpAuthErrorCode::ReauthorizationRequired,
+            stage: nomifun_api_types::McpAuthStage::Refresh,
+            retryable: false, user_action: nomifun_api_types::McpAuthUserAction::Reauthorize,
+            trace_id: "effect-auth-trace".into(), message: "Sign in again".into(), details: None,
+        };
+        let error = nomifun_mcp::McpOwnerError::new("MCP_CREDENTIAL_EXPIRED", "Sign in again")
+            .with_auth_diagnostic(diagnostic);
+        let projection = owner_error_projection(&error);
+        assert_eq!(projection["code"], "MCP_CREDENTIAL_EXPIRED");
+        assert_eq!(projection["details"]["auth_diagnostic"]["stage"], "refresh");
+        assert_eq!(projection["details"]["auth_diagnostic"]["trace_id"], "effect-auth-trace");
+        assert!(projection.get("authentication_challenge").is_none());
+    }
 
     #[test]
     fn effect_receipts_accept_only_binding_resources_or_namespaced_tools() {

@@ -672,6 +672,9 @@ async fn await_browser_shutdown_step(step: Option<BrowserShutdownStep>) -> Resul
 
 #[derive(Default)]
 struct HostShutdownStage {
+    mcp_auth_task: Option<JoinHandle<()>>,
+    mcp_auth_closed: bool,
+    mcp_auth_failure: Option<String>,
     terminal_task: Option<JoinHandle<Result<u64, String>>>,
     terminal_closed: bool,
     terminal_unreported_failure: Option<String>,
@@ -682,6 +685,39 @@ struct HostShutdownStage {
 }
 
 impl HostShutdownStage {
+    async fn start_mcp_auth_cleanup(&mut self, auth: Arc<nomifun_mcp::McpAuthService>) {
+        if self.mcp_auth_closed || self.mcp_auth_task.is_some() || self.mcp_auth_failure.is_some() { return; }
+        let mut cleanup = Box::pin(async move { auth.shutdown().await });
+        // Fence the shared credential authority before any producer drain,
+        // then retain the exact shutdown future while its active owners join.
+        let initial = std::future::poll_fn(|context| std::task::Poll::Ready(
+            std::future::Future::poll(cleanup.as_mut(), context),
+        )).await;
+        self.mcp_auth_task = Some(tokio::spawn(async move {
+            if initial.is_pending() { cleanup.await; }
+        }));
+    }
+
+    async fn wait_mcp_auth_cleanup(&mut self) -> Result<(), String> {
+        if self.mcp_auth_closed { return Ok(()); }
+        if let Some(error) = &self.mcp_auth_failure { return Err(error.clone()); }
+        let task = self.mcp_auth_task.as_mut()
+            .ok_or_else(|| "MCP authentication cleanup has no retained owner".to_owned())?;
+        let result = match tokio::time::timeout(Duration::from_secs(5), task).await {
+            Ok(result) => result,
+            Err(_) => return Err("MCP authentication cleanup timed out after 5 seconds; the original worker is retained for retry".into()),
+        };
+        self.mcp_auth_task = None;
+        match result {
+            Ok(()) => { self.mcp_auth_closed = true; Ok(()) }
+            Err(error) => {
+                let error = format!("MCP authentication cleanup worker failed: {error}");
+                self.mcp_auth_failure = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+
     async fn start_terminal_cleanup(&mut self, terminal: Arc<TerminalService>) {
         if self.terminal_closed || self.terminal_task.is_some() || self.terminal_unreported_failure.is_some() { return; }
         let mut cleanup = Box::pin(async move {
@@ -728,6 +764,8 @@ pub struct AppServices {
     /// Process-owned handle to the one immutable official Runtime provider.
     pub(crate) official_runtime: Arc<crate::router::official_runtime::OfficialRuntimeHost>,
     pub database: Database,
+    /// One installation-owned credential lifecycle for settings and execution.
+    pub(crate) mcp_auth: Arc<nomifun_mcp::McpAuthService>,
     host_shutdown_stage: tokio::sync::Mutex<HostShutdownStage>,
     /// Process-lifetime cancellation shared by background domain tasks that
     /// must stop before the database is closed.
@@ -1434,11 +1472,12 @@ impl AppServices {
         // Fence runtime admission immediately, before awaiting any producer or
         // resource owner. Its owned flight runs while these owners wind down.
         let engine_shutdown = self.agent_runtime_sessions.shutdown_and_wait();
+        stage.start_mcp_auth_cleanup(self.mcp_auth.clone()).await;
         stage.start_terminal_cleanup(self.terminal_service.clone()).await;
         // Resource owners close admission while producers drain. A failed
         // producer may retain native infrastructure and storage, but must not
         // skip cancellation and exact view/connection cleanup in other domains.
-        let ((mut errors, runtimes_stopped, producers_stopped), browser_resources, mut terminal_resources) = tokio::join!(async {
+        let ((mut errors, runtimes_stopped, producers_stopped), browser_resources, (mut terminal_resources, mut mcp_auth_resources)) = tokio::join!(async {
             let mut errors = Vec::new();
             if let Err(error) = self.app_hosting.shutdown().await {
                 errors.push(format!("Hosted application cleanup failed: {error}"));
@@ -1503,14 +1542,24 @@ impl AppServices {
                 errors.push(format!("Knowledge source cleanup failed: {error}"));
             }
             (errors, runtimes_stopped, producers_stopped)
-        }, self.shutdown_browser_resources(), stage.wait_terminal_cleanup());
+        }, self.shutdown_browser_resources(), async {
+            let terminal = stage.wait_terminal_cleanup().await;
+            let mcp_auth = stage.wait_mcp_auth_cleanup().await;
+            (terminal, mcp_auth)
+        });
         // The five-second observer may have finished before another domain.
         // Consume this exact worker's now-settled result before reporting an
         // old timeout or deciding whether native infrastructure can close.
         if stage.terminal_task.as_ref().is_some_and(JoinHandle::is_finished) {
             terminal_resources = stage.wait_terminal_cleanup().await;
         }
+        if stage.mcp_auth_task.as_ref().is_some_and(JoinHandle::is_finished) {
+            mcp_auth_resources = stage.wait_mcp_auth_cleanup().await;
+        }
         if let Err(error) = terminal_resources {
+            errors.push(error);
+        }
+        if let Err(error) = mcp_auth_resources {
             errors.push(error);
         }
         if let Err(error) = browser_resources {
@@ -2259,6 +2308,17 @@ impl AppServices {
         let app_mcp_sources = crate::router::app_mcp_sources::AppMcpSources::new(
             app_hosting.clone(), Arc::new(nomifun_db::SqliteMcpServerRepository::new(database.pool().clone())),
         );
+        let mcp_auth = Arc::new(nomifun_mcp::McpAuthService::new_dynamic(
+            Arc::new(nomifun_db::SqliteMcpOAuthRepository::new(database.pool().clone())),
+            app_mcp_sources.clone(),
+            authoritative_user_id.clone(), encryption_key,
+            nomifun_mcp::McpAuthOptions {
+                callback_url: std::env::var("NOMIFUN_MCP_OAUTH_CALLBACK_URL").ok(),
+                cimd_client_id: std::env::var("NOMIFUN_MCP_OAUTH_CLIENT_METADATA_URL").ok(),
+                ..Default::default()
+            },
+        ));
+        app_mcp_sources.set_auth_service(&mcp_auth)?;
 
         // SSH remote sessions: ONE process-level connection pool, built here
         // because the agent factory below is its first consumer and the host-book
@@ -2326,6 +2386,7 @@ impl AppServices {
         let services = Self {
             official_runtime,
             database,
+            mcp_auth,
             host_shutdown_stage: Default::default(),
             background_shutdown,
             background_tasks,

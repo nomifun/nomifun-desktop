@@ -28,7 +28,7 @@ ipcBridge.systemPermissions.get.invoke = async () => ({
 });
 const { default: AgentResourcePicker } = await import('../src/renderer/components/agent/AgentResourcePicker');
 const loadInventory: AgentResourceInventoryLoader = async () => ({ options: {
-  companion: [{ value: 'companion-1', label: '团团', description: '#1', avatar: { character: 'mochi' } }, { value: 'companion-2', label: '毛球', description: '#2', avatar: { character: 'ink' } }],
+  companion: [{ value: 'companion-1', label: '团团', description: '#1', avatar: { character: 'mochi' } }, { value: 'companion-2', label: '波特', description: '#2', avatar: { character: 'bolt' } }],
   channel: [{ value: 'channel-1', label: '测试渠道', ownerDomain: 'companion' }],
   robot: [{ value: 'robot-1', label: '测试机器人', selectable: true, robotPhase: 'idle',
     robotRequiredPermissions: ['vision'], robotDisabledPermissions: [], robotUnsupportedPermissions: [] }],

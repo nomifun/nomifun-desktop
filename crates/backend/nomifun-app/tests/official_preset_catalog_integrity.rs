@@ -676,7 +676,7 @@ async fn assert_official_preset_catalog_integrity(
     let companion: serde_json::Value = post_data(
         router,
         "/api/companion/companions",
-        &serde_json::json!({"name": "Catalog companion", "character": "ink"}),
+        &serde_json::json!({"name": "Catalog companion", "character": "mochi"}),
     )
     .await;
     let companion_id = companion["companion_id"].as_str().expect("fixture companion id");

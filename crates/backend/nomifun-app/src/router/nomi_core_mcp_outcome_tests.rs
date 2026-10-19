@@ -180,6 +180,57 @@ async fn cleanup_uncertainty_keeps_the_observed_result_in_the_original_effect() 
 }
 
 #[tokio::test]
+async fn exact_auth_diagnostic_allows_original_resource_proof_without_settling_business() {
+    let f = Fixture::new().await;
+    let context = f.call("auth-diagnostic-unknown").await;
+    let receipt = f.begin(&context).await;
+    let diagnostic = nomifun_api_types::McpAuthDiagnostic {
+        code: nomifun_api_types::McpAuthErrorCode::ReauthorizationRequired,
+        stage: nomifun_api_types::McpAuthStage::Refresh,
+        retryable: false,
+        user_action: nomifun_api_types::McpAuthUserAction::Reauthorize,
+        trace_id: "original-auth-resource-proof".into(),
+        message: "Sign in again".into(),
+        details: None,
+    };
+    let error = McpOwnerError::new("MCP_CREDENTIAL_EXPIRED", "The original request outcome is unknown")
+        .with_auth_diagnostic(diagnostic);
+    f.host.receipts.settle(receipt, &outcome(Err(error), true, McpCleanupStatus::Confirmed)).await.unwrap();
+    let effects = f.store.list_effects(&f.session.agent_session_id).await.unwrap();
+    assert_eq!(effects.len(), 1);
+    assert_eq!(effects[0].state, AgentEffectState::Unknown);
+    let cursor = f.store.current_cursor(&f.session.agent_session_id).await.unwrap();
+    f.host.ensure_shutdown_resources_closed(&f.session.owner_ref.principal_id, f.session.agent_session_id.as_ref()).await.unwrap();
+    assert!(f.host.ensure_settled(&f.session.owner_ref.principal_id, f.session.agent_session_id.as_ref()).await.is_err());
+    let projected = effects[0].bounded_observation.as_ref().unwrap()["execution"]["error"].clone();
+    assert_eq!(projected.as_object().unwrap().len(), 3);
+    let mut invalid = Vec::new();
+    let mut extra_error = projected.clone();
+    extra_error["foreign"] = json!(true);
+    invalid.push(extra_error);
+    let mut extra_details = projected.clone();
+    extra_details["details"]["foreign"] = json!(true);
+    invalid.push(extra_details);
+    let mut extra_diagnostic = projected.clone();
+    extra_diagnostic["details"]["auth_diagnostic"]["foreign"] = json!(true);
+    invalid.push(extra_diagnostic);
+    let mut malformed_diagnostic = projected.clone();
+    malformed_diagnostic["details"]["auth_diagnostic"]["retryable"] = json!("false");
+    invalid.push(malformed_diagnostic);
+    let mut missing_diagnostic = projected.clone();
+    missing_diagnostic["details"] = json!({"other_diagnostic":{}});
+    invalid.push(missing_diagnostic);
+    for value in invalid {
+        let mut corrupt = effects[0].clone();
+        corrupt.bounded_observation.as_mut().unwrap()["execution"]["error"] = value;
+        assert!(super::super::mcp_effect_receipts::original_mcp_resources_closed(&corrupt).is_err(),
+            "foreign or malformed diagnostics cannot supply original resource proof");
+    }
+    assert_eq!(f.store.current_cursor(&f.session.agent_session_id).await.unwrap(), cursor);
+    assert_eq!(f.store.list_effects(&f.session.agent_session_id).await.unwrap(), effects);
+}
+
+#[tokio::test]
 async fn known_business_failure_is_returned_and_late_settlement_keeps_its_original_turn() {
     let f = Fixture::new().await;
     let context = f.call("returned-business-failure").await;

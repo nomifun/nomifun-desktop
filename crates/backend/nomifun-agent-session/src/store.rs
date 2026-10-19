@@ -398,7 +398,8 @@ impl AgentSessionStore {
         sqlx::raw_sql(include_str!("../../nomifun-db/migrations/007_retire_terminal_content_mirrors.sql")).execute(&pool).await?;
         sqlx::raw_sql(include_str!("../../nomifun-db/migrations/008_retire_payload_object_placeholder.sql")).execute(&pool).await?;
         sqlx::raw_sql(include_str!("../../nomifun-db/migrations/009_cron_input_handoff.sql")).execute(&pool).await?;
-        sqlx::raw_sql(include_str!("../../nomifun-db/migrations/010_cron_run_cancellation.sql")).execute(&pool).await?;
+        sqlx::raw_sql(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).execute(&pool).await?;
+        sqlx::raw_sql(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).execute(&pool).await?;
         seed_test_schema_metadata(&pool).await?;
         Self::from_pool(pool).await
     }

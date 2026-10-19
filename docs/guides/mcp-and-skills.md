@@ -20,7 +20,7 @@ Legacy settings URLs redirect to these pages.
 
 ## MCP Servers
 
-Open `/mcp` to add, import, test, enable, disable, and sync MCP servers.
+Open `/mcp` to add, import, test, enable, and disable MCP servers.
 
 ![MCP page](../images/mcp-01-capabilities.png)
 
@@ -45,14 +45,45 @@ tools. Testing does not enable a server, and toggling does not launch a test. Af
 either operation completes, mounted Session MCP lists re-read the backend catalog
 without replacing the user's selection draft.
 
-OAuth-backed HTTP/SSE servers use the `/api/mcp/oauth/*` flow.
-
 The canonical owner currently supports Streamable HTTP/stdio at `2025-03-26`
 and explicit legacy SSE at `2024-11-05`. It does not silently convert between
 transports and does not yet claim the `2026-07-28` `server/discover` lifecycle
 without `initialize`; a server that only supports that lifecycle returns a
 typed protocol error. That is a separate owner and security-model migration,
 not part of market configuration import.
+
+### OAuth login
+
+OAuth-backed HTTP/SSE connections authenticate by their saved server ID. The
+backend reads the Bearer challenge and Protected Resource Metadata, then
+follows the advertised authorization-server issuer. Client identity comes from
+a pre-registered client, supported CIMD, or dynamic registration, rather than a
+fixed universal client ID. The settings page creates a one-use attempt, opens
+its authorization URL in the user's browser, and queries the attempt result.
+Cancellation, timeout, denial, and token-exchange failures carry safe diagnostics
+with a stage, code, retry guidance, and trace ID.
+
+The native desktop entry binds a temporary `127.0.0.1` loopback callback on the
+backend machine. Remote WebUI requires an operator-configured
+`NOMIFUN_MCP_OAUTH_CALLBACK_URL`: an externally reachable HTTPS URL whose path
+is exactly `/api/mcp/oauth/callback`, registered with the OAuth client. It does
+not redirect to the remote user's loopback. A product-controlled CIMD URL can
+be configured with `NOMIFUN_MCP_OAUTH_CLIENT_METADATA_URL`; see
+[configuration](../reference/configuration.md#mcp-oauth).
+
+Saved connection tests and Runtime calls use the same installation-owned
+authentication service and reuse or refresh the saved grant after login.
+Tokens are not copied into MCP JSON. Authentication and connection-test status
+remain separate. Changing the connection, logging out, or deleting it cancels
+pending authorization and invalidates its grant. Metadata edits, an unchanged
+save, enable toggles, and ordinary probes retain authorization. OAuth refresh
+or re-login does not require rebuilding Agent Sessions.
+
+Upgrades clear previous URL-only OAuth credentials whose issuer, resource,
+and client ownership cannot be proven, so those connections require re-login.
+MCP configuration, other non-Agent configuration, and current Session history
+are preserved.
+
 
 ### MCP market boundary
 
@@ -117,14 +148,12 @@ therefore reports the host and port and asks the user to start that prerequisite
 service; it no longer presents every runtime or service failure as malformed
 MCP JSON.
 
-## Importing and Syncing Agent Configs
+## Importing Agent Configs
 
-`GET /api/mcp/agent-configs` detects MCP config files from supported local agent
-CLIs. The UI lets you import detected servers into NomiFun and push the NomiFun
-list back to selected agent configs when an adapter supports writing.
-
-This sync is config management only. A conversation still decides which MCP
-servers are visible for that session.
+`GET /api/mcp/agent-configs` performs read-only detection of supported local
+agent CLI and NomiFun MCP configurations. The UI can import detected servers;
+this endpoint does not write external CLI configurations. A Session still
+chooses which MCP servers it uses.
 
 ## Global capabilities and Session selection
 
@@ -150,8 +179,10 @@ Selections compile into the existing immutable Revision/Snapshot and apply throu
 transitions. Running or paused Turns, unsettled effects, Remote bindings, and read-only Attempts cannot
 change selection. Agent switches retain selection; workspace and other resources remain intact.
 Accepted input and native checkpoints are not rewritten. An unchanged connection test or metadata
-update keeps the same MCP connection identity; actual configuration, credential, or schema changes
-require reapplying selection.
+update keeps the same MCP connection identity; actual transport configuration or tool schema changes
+require reapplying selection. OAuth grants and tokens belong to the current connection's credential
+lifecycle, not its Session Snapshot. Ordinary refresh and re-login do not change frozen Agent
+permissions or MCP selections.
 
 ## MCP API
 
@@ -163,7 +194,10 @@ require reapplying selection.
 | Toggle | `POST /api/mcp/servers/{id}/toggle` |
 | Test connection | `POST /api/mcp/test-connection` |
 | Detect agent configs | `GET /api/mcp/agent-configs` |
-| OAuth | `POST /api/mcp/oauth/check-status`, `/login`, `/logout`; `GET /api/mcp/oauth/authenticated` |
+| Authentication status / logout | `GET`, `DELETE /api/mcp/servers/{id}/auth` |
+| Start OAuth attempt | `POST /api/mcp/servers/{id}/auth/attempts` |
+| Query / cancel attempt | `GET`, `DELETE /api/mcp/servers/{id}/auth/attempts/{attempt_id}` |
+| OAuth callback | `GET /api/mcp/oauth/callback`, bound to the original attempt by one-use state |
 
 ## Skills
 

@@ -477,7 +477,8 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-db/migrations/007_retire_terminal_content_mirrors.sql"),
                     include_str!("../../../nomifun-db/migrations/008_retire_payload_object_placeholder.sql"),
                     include_str!("../../../nomifun-db/migrations/009_cron_input_handoff.sql"),
-                    include_str!("../../../nomifun-db/migrations/010_cron_run_cancellation.sql"),
+                    include_str!("../../../nomifun-db/migrations/010_mcp_oauth_authority.sql"),
+                    include_str!("../../../nomifun-db/migrations/011_cron_run_cancellation.sql"),
                     include_str!("engine_mcp_resources.rs"),
                     include_str!("engine_mcp_media.rs"),
                     include_str!("engine_workspace_media.rs"),
@@ -1907,7 +1908,8 @@ mod build_identity_tests {
             "../../../nomifun-db/migrations/007_retire_terminal_content_mirrors.sql",
             "../../../nomifun-db/migrations/008_retire_payload_object_placeholder.sql",
             "../../../nomifun-db/migrations/009_cron_input_handoff.sql",
-            "../../../nomifun-db/migrations/010_cron_run_cancellation.sql",
+            "../../../nomifun-db/migrations/010_mcp_oauth_authority.sql",
+            "../../../nomifun-db/migrations/011_cron_run_cancellation.sql",
         ] {
             assert!(
                 source.contains(&format!("include_str!(\"{required}\")")),

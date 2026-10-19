@@ -393,7 +393,7 @@ mod tests {
             CompanionRegistry::scan(dir.join("companions"), dir.join("shared"))
                 .unwrap(),
         );
-        let companion = registry.create("测试宠", "ink").await.unwrap();
+        let companion = registry.create("测试宠", "mochi").await.unwrap();
         // The archiver summarises with the companion's OWN 学习 model.
         registry
             .patch(

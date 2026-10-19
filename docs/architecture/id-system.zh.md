@@ -26,8 +26,9 @@ v3 明确区分五类概念：
    id INTEGER PRIMARY KEY AUTOINCREMENT
    ```
 
-   canonical Agent Store 表是当前冻结例外，按基线
-   声明使用 TEXT/复合主键。
+   canonical Agent Store 按基线声明使用 TEXT/复合主键。
+   已登记的 MCP OAuth authority 两表按迁移 010 使用 UUIDv7 TEXT 主键，
+   不再增加未被使用的整数身份。
 
 2. 需要跨数据库、跨设备、跨文件、API、事件或受管 store 稳定定位的实体，
    增加 `user_id`、`conversation_id`、`message_id`、`mcp_server_id`、
@@ -36,7 +37,7 @@ v3 明确区分五类概念：
 3. 从不离开所属持久化子系统的关系、单例、缓存和事件行只使用整数 `id`
    作为内部技术身份，不为形式统一而额外生成 UUID，也不把该值升级为产品
    wire locator。
-4. 表间关系由 Repository/Service 维护为逻辑外键；Agent Store 冻结例外之外的
+4. 表间关系由 Repository/Service 维护为逻辑外键；canonical Agent Store 与已登记 MCP OAuth 例外之外的
    产品 schema 不包含物理外键、`REFERENCES` 或数据库级联；除基线已注册
    的 guard/validator trigger 外不存在数据库触发器。
 5. v3 是新的数据集代际。历史数据集整体重置，不迁移旧行和旧 ID 格式。
@@ -50,6 +51,8 @@ id INTEGER PRIMARY KEY AUTOINCREMENT
 ```
 
 canonical Agent Store 表改用基线冻结的 TEXT/复合主键。
+`mcp_oauth_clients.client_ref` 与 `mcp_oauth_grants.grant_id` 使用已登记的 UUIDv7
+TEXT 主键，owner/server/client 归属以物理外键和已有 orphan-audit registry 校验。
 SQLite 内部表、migration metadata 和临时表不属于产品持久表。
 
 技术 `id` 的语义是：
@@ -62,7 +65,7 @@ SQLite 内部表、migration metadata 和临时表不属于产品持久表。
   事件或文件引用；
 - 不得依赖整数连续。
 
-`AUTOINCREMENT` 用于固定所有产品表的结构，并防止已经签发过的正整数行 ID
+`AUTOINCREMENT` 用于固定采用整数技术主键的产品表结构，并防止已经签发过的正整数行 ID
 被复用；它不会让该整数自动成为稳定业务 ID。
 
 ## 稳定业务 ID
@@ -146,9 +149,9 @@ Session Window、Collected Event、Skill 与 Skill Pattern 同样使用
 
 ## 逻辑外键
 
-v3 在 Agent Store 冻结例外（canonical Agent Store 表，基线中
-保留了物理 `FOREIGN KEY`/`ON DELETE` 声明）之外移除产品 schema 的物理
-外键。基线还在少数领域携带已注册的 guard/validator trigger；新增领域
+v3 在明确的 schema 契约例外之外使用逻辑关联：canonical Agent Store 表保留
+基线中的物理声明；MCP OAuth 两表通过迁移 010 的物理外键校验 client/owner/issuer
+一致性及 server/grant 归属。基线还在少数领域携带已注册的 guard/validator trigger；新增领域
 不得在未更新 schema 契约的情况下引入 trigger 或物理约束。其余产品 DDL
 不得出现：
 
@@ -291,7 +294,7 @@ portable graph identity；它仍只属于当前数据集。
 
 新增表或实体时：
 
-1. 产品表必须增加 `id INTEGER PRIMARY KEY AUTOINCREMENT`；
+1. 产品表增加 `id INTEGER PRIMARY KEY AUTOINCREMENT`；只有明确的 schema 契约例外可使用 canonical TEXT/复合身份；
 2. 判断该实体是否确实需要跨数据集身份；
 3. 需要时增加一个具名、唯一的裸 UUIDv7 业务字段和领域 newtype；
 4. 不需要时让 `id` 保持内部；必要定位使用 owner + sequence、自然键或复合条件；

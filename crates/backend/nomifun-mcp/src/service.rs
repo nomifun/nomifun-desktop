@@ -9,6 +9,7 @@ use nomifun_db::{CreateMcpServerParams, IMcpServerRepository, UpdateMcpServerPar
 use tracing::{info, warn};
 
 use crate::error::McpError;
+use crate::auth_service::McpAuthService;
 use crate::types::{McpServer, McpServerTransport};
 
 
@@ -43,12 +44,28 @@ pub struct McpProbeRevision {
 pub struct McpConfigService {
     repo: Arc<dyn IMcpServerRepository>,
     catalog: Option<Arc<dyn McpCatalogPublisher>>,
+    auth: Option<Arc<McpAuthService>>,
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl McpConfigService {
     pub fn new(repo: Arc<dyn IMcpServerRepository>) -> Self {
-        Self { repo, catalog: None, mutation_lock: Arc::new(tokio::sync::Mutex::new(())) }
+        Self { repo, catalog: None, auth: None, mutation_lock: Arc::new(tokio::sync::Mutex::new(())) }
+    }
+
+    pub fn with_auth_service(mut self, auth: Arc<McpAuthService>) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// Callers already hold mutation_lock. Acquire the authority's per-server
+    /// gate in that order, and retain it until the saved mutation completes.
+    /// No OAuth HTTP operation is performed within this critical section.
+    async fn invalidate_auth(&self, server_id: &str) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, McpError> {
+        let Some(auth) = &self.auth else { return Ok(None); };
+        let guard = auth.gate(server_id).await.lock_owned().await;
+        auth.invalidate_locked(server_id).await.map_err(McpError::Auth)?;
+        Ok(Some(guard))
     }
 
     pub fn with_catalog_publisher(mut self, catalog: Arc<dyn McpCatalogPublisher>) -> Self {
@@ -134,6 +151,11 @@ impl McpConfigService {
             .transport
             .map(McpServerTransport::from);
         let config_json = transport.as_ref().map(McpServerTransport::to_config_json).transpose()?;
+        let connection_changed = transport.as_ref().is_some_and(|next| {
+            McpServerTransport::from_db(&existing_server.transport_type, &existing_server.transport_config)
+                .map_or(true, |previous| previous != *next)
+        });
+        let auth_guard = if connection_changed { self.invalidate_auth(mcp_server_id.as_str()).await? } else { None };
 
         let params = UpdateMcpServerParams {
             name: req.name.as_deref(),
@@ -148,6 +170,7 @@ impl McpConfigService {
         };
 
         let row = self.repo.update(mcp_server_id.as_str(), params).await?;
+        drop(auth_guard);
         self.publish_catalog().await?;
         let server = McpServer::from_row(row)?;
         Ok(server.into_response())
@@ -164,7 +187,9 @@ impl McpConfigService {
             .await?
             .ok_or_else(|| McpError::NotFound(mcp_server_id.to_string()))?;
         let was_enabled = row.enabled;
+        let auth_guard = self.invalidate_auth(mcp_server_id.as_str()).await?;
         self.repo.delete(mcp_server_id.as_str()).await?;
+        drop(auth_guard);
         self.publish_catalog().await?;
         Ok(was_enabled)
     }
@@ -258,10 +283,39 @@ impl McpConfigService {
         probe: McpProbeRevision,
         result: &McpConnectionTestResult,
     ) -> Result<(), McpError> {
+        self.finish_probe_inner(probe, result, None).await
+    }
+
+    /// Save only the result observed under the exact credential authority
+    /// revision captured before discovery. The auth gate closes the comparison
+    /// to database-write race with login, logout and connection replacement.
+    pub async fn finish_authenticated_probe(
+        &self,
+        probe: McpProbeRevision,
+        result: &McpConnectionTestResult,
+        expected_auth_revision: String,
+    ) -> Result<(), McpError> {
+        self.finish_probe_inner(probe, result, Some(&expected_auth_revision)).await
+    }
+
+    async fn finish_probe_inner(
+        &self,
+        probe: McpProbeRevision,
+        result: &McpConnectionTestResult,
+        expected_auth_revision: Option<&str>,
+    ) -> Result<(), McpError> {
         if crate::connection_test::is_local_runtime_failure(result) {
             return Ok(());
         }
         let _guard = self.mutation_lock.lock().await;
+        let auth_guard = if let Some(expected) = expected_auth_revision {
+            let auth = self.auth.as_ref().ok_or(McpError::StaleProbe)?;
+            let guard = auth.gate(probe.server_id.as_str()).await.lock_owned().await;
+            if auth.binding_revision(probe.server_id.as_str()).await.map_err(McpError::Auth)? != expected {
+                return Err(McpError::StaleProbe);
+            }
+            Some(guard)
+        } else { None };
         // A failed availability probe did not withdraw the last complete tool
         // contract. Preserve it; config edits still explicitly invalidate it.
         let tools_json = if result.success {
@@ -278,6 +332,17 @@ impl McpConfigService {
         if !applied {
             return Err(McpError::StaleProbe);
         }
+        if expected_auth_revision.is_some()
+            && let Some(auth) = &self.auth
+        {
+            auth.observe_probe(
+                probe.server_id.as_str(),
+                result.needs_auth == Some(true)
+                    && matches!(result.auth_method, Some(nomifun_api_types::McpAuthMethod::Oauth)),
+                result.success,
+            ).await;
+        }
+        drop(auth_guard);
         self.publish_catalog().await
     }
 
@@ -300,6 +365,11 @@ impl McpConfigService {
                 )));
             }
 
+            let connection_changed = existing.deleted_at.is_some()
+                || McpServerTransport::from_db(&existing.transport_type, &existing.transport_config)
+                    .map_or(true, |previous| previous != *transport);
+            let auth_guard = if connection_changed { self.invalidate_auth(&existing.mcp_server_id).await? } else { None };
+
             let params = UpdateMcpServerParams {
                 description: Some(description),
                 enabled: Some(enabled),
@@ -312,6 +382,7 @@ impl McpConfigService {
                 ..Default::default()
             };
             let updated = self.repo.update(&existing.mcp_server_id, params).await?;
+            drop(auth_guard);
             self.publish_catalog().await?;
             let server = McpServer::from_row(updated)?;
             return Ok(server.into_response());
@@ -1132,7 +1203,6 @@ mod tests {
             details: None,
             needs_auth: None,
             auth_method: None,
-            www_authenticate: None,
         };
 
         finish_current_probe(&svc, &created.mcp_server_id, &result).await.unwrap();
@@ -1160,7 +1230,6 @@ mod tests {
             details: None,
             needs_auth: None,
             auth_method: None,
-            www_authenticate: None,
         };
         finish_current_probe(&svc, &created.mcp_server_id, &success).await.unwrap();
 
@@ -1172,7 +1241,6 @@ mod tests {
             details: None,
             needs_auth: None,
             auth_method: None,
-            www_authenticate: None,
         };
         finish_current_probe(&svc, &created.mcp_server_id, &failure).await.unwrap();
 
@@ -1192,7 +1260,7 @@ mod tests {
                 name: "existing_tool".into(), description: None, input_schema: None,
             }]),
             error: None, code: None, details: None, needs_auth: None,
-            auth_method: None, www_authenticate: None,
+            auth_method: None,
         };
         finish_current_probe(&svc, &created.mcp_server_id, &success).await.unwrap();
         let before = svc.get_server(&created.mcp_server_id).await.unwrap();
@@ -1206,7 +1274,7 @@ mod tests {
                 "owner_code": "MCP_RUNTIME_UNAVAILABLE",
                 "phase": "runtime_resolution", "runtime": "bun",
             })),
-            needs_auth: None, auth_method: None, www_authenticate: None,
+            needs_auth: None, auth_method: None,
         };
         svc.finish_probe(probe, &missing).await.unwrap();
         let after = svc.get_server(&created.mcp_server_id).await.unwrap();

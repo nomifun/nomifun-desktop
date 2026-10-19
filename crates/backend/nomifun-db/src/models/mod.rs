@@ -13,7 +13,7 @@ mod knowledge;
 mod knowledge_source;
 mod knowledge_tree_operation;
 mod mcp_server;
-mod oauth_token;
+mod mcp_oauth;
 mod provider;
 mod provider_connection;
 mod provider_model;
@@ -74,7 +74,7 @@ pub use knowledge_tree_operation::{
     KnowledgeTreeEventStatus, KnowledgeTreeOperationRow, KnowledgeTreeOperationState,
 };
 pub use mcp_server::McpServerRow;
-pub use oauth_token::OAuthTokenRow;
+pub use mcp_oauth::{McpOAuthClientRow, McpOAuthGrantRow};
 pub use provider::Provider;
 pub use provider_connection::{ProviderConnectionRow, UpsertProviderConnectionParams};
 pub use provider_model::{

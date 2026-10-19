@@ -66,17 +66,18 @@ Runtime 自然注销、原 Session 后台进程继续存活，再正常退出应
 MCP Unknown 与无自动重放的事实，`agent-stop-native-observation.json` 另记原 pipe/ConPTY 句柄仍存活。
 MCP 资源是否已经退出按实记录，业务 Unknown 保留；最后仍须检查最初捕获的全部退出句柄。
 
-2026-10-19，冻结源码后重新构建的隔离 Windows debug Desktop（SHA256
-`f3d100e5db2e1080bb6b5ff1dadc5d3916525203d43600eb03ac26e57770e0d4`，
-构建输出修改时间 UTC `2026-10-19T05:25:48.9634042Z`，340693504 bytes）通过以下三个真实组合用例。
+2026-10-19，checkpoint `a9c41c38fa` 与 `origin/main@084c7dc8d0` 整合并冻结源码后，重新构建的隔离 Windows debug Desktop（SHA256
+`661681a63e3b15fa4190ebefcf78268940b533c4b4f69cd36809426193bdf84a`，
+构建输出修改时间 UTC `2026-10-19T06:14:41.4297828Z`，341702144 bytes）通过以下三个真实组合用例。
+三轮均使用全新 Temp 数据集及 Profile，包含原 OAuth 010 和调整后的 Cron 011，不续用旧 Cron 010 数据库。
 每轮动作前持有原 shell/managed 的 10 个 browser、renderer、GPU、utility 进程句柄，
 以及真实 Agent 启动的 Bun pipe、Bun ConPTY 和在途 stdio MCP 进程句柄，共 13 个；退出后这批原句柄全部结束。
 
 | 用例 | 宿主结果 | 原 pipe / ConPTY / MCP PID | 树外 sentinel | 原始回执目录（位于 `%TEMP%`） |
 | --- | --- | --- | --- | --- |
-| 活动 Agent 正常 Quit | 53060，exit 0，coordinator 清理通过 | 11428 / 43744 / 53348 | 45064 存活 | `nomifun-lifecycle-01a152a0-4b73-753a-a0b1-897cab010d84` |
-| 活动 Agent parent-death | 仅终止原宿主 22092，exit -1，无 coordinator 证明 | 39744 / 19656 / 1468 | 53344 存活 | `nomifun-lifecycle-01a152a0-9fee-7efa-a771-1fbfcd38a28a` |
-| Stop → Runtime 注销 → Quit | 8704，exit 0，coordinator 清理通过 | 39132 / 47508 / 42400 | 18216 存活 | `nomifun-lifecycle-01a152a0-f059-7174-99f4-05dc59d5de45` |
+| 活动 Agent 正常 Quit | 41888，exit 0，coordinator 清理通过 | 27480 / 45836 / 40880 | 41292 存活 | `nomifun-lifecycle-01a152cc-6c76-7435-8361-bacad5b56870` |
+| 活动 Agent parent-death | 仅终止原宿主 10864，exit -1，无 coordinator 证明 | 47560 / 20940 / 28920 | 36192 存活 | `nomifun-lifecycle-01a152cc-cf06-7f4e-a97b-e5657662f37e` |
+| Stop → Runtime 注销 → Quit | 7392，exit 0，coordinator 清理通过 | 4540 / 22236 / 20760 | 37880 存活 | `nomifun-lifecycle-01a152cd-2021-76e2-a06a-d2d591afa954` |
 
 三个目录的 `native-exit-proof.json` 均保存各自完整的 10 个 WebView2 原生库存及三个 Agent 进程身份，
 并保留 `ready.json`、`binary-identity.json`、`driver-identity.json`、日志及隔离 data/Profile；
@@ -84,7 +85,7 @@ MCP 资源是否已经退出按实记录，业务 Unknown 保留；最后仍须�
 三轮均核对原 loopback 关闭、持久数据保留、树外 sentinel 存活和私有 JWT 已删除。
 各目录另存 `post-run-audit.json`：只后查原 13 个原生 PID 及本次 host、侧车、sentinel，
 每轮这 16 个 PID 均已不存在；该后查补充原句柄证明，不替代它。保留的三个数据库分别为
-3776512、3575808、3776512 bytes，shell Profile 和 fixture sentinel 均仍存在。
+3805184、3604480、3805184 bytes，shell Profile 和 fixture sentinel 均仍存在。
 
 第三轮使用原 138-byte operation target，用户 Stop 后实际 Runtime 为 `released`，
 原两条 ProcessInstance 的六个身份字段保持一致，pipe/ConPTY 的原句柄仍存活；原 MCP 进程已经结束。
@@ -92,7 +93,8 @@ MCP 资源是否已经退出按实记录，业务 Unknown 保留；最后仍须�
 MCP 调用始终为 1。随后 Quit 才回收两条 Session 后台进程，并取得全部 13 个原生句柄的退出证明。
 driver SHA256 为 `a738477db0427c40f725389a559cf38aaf37f4d42cb4bc62c9705df569995a70`，
 资源侧车 SHA256 为 `f4ce30a7fd57a2e8cad601289dd09280d8cfbf44cba7a08759f87cd6fd538c56`。
-本次构建包含 owned Execution 按原 ID 取消时的 CAS 重试、正式 Step／Attempt 结束与 Cron／Remote 来源结束的 Browser 退休交接。
+本次构建包含 owned Execution 按原 ID 取消时的 CAS 重试、正式 Step／Attempt 与 Cron／Remote 来源结束的 Browser 退休交接，
+并包含整合后的 MCP authentication 独立 retained shutdown worker。本入口不替代 OAuth 回调竞争的独立定向验收。
 三轮均另以只读 CIM 观察现有
 `LanmanServer` 服务：三轮各自的动作前后均为 Running，PID 5436、创建时间 UTC
 `2026-10-17T02:50:20.4820180Z` 保持一致，证据为各目录的 `os-service-observation.json`。

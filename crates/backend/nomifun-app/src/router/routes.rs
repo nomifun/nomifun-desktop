@@ -887,8 +887,18 @@ fn create_nomi_core_router_with_all_state(
     );
 
     // MCP routes protected by auth middleware
+    let mcp_callback = nomifun_mcp::routes::oauth_callback_routes(states.mcp.auth_service.clone());
+    let native_mcp_callback = services.auth_policy == nomifun_auth::AuthPolicy::TrustLocalToken;
+    let mcp_control = mcp_routes(states.mcp).layer(middleware::from_fn(
+        move |mut request: axum::extract::Request, next: middleware::Next| async move {
+            if native_mcp_callback && request.extensions().get::<nomifun_auth::LocalTrusted>().is_some() {
+                request.extensions_mut().insert(nomifun_mcp::routes::McpNativeCallback);
+            }
+            next.run(request).await
+        },
+    ));
     let mcp_authenticated = protect_instance_owner(
-        mcp_routes(states.mcp),
+        mcp_control,
         &auth_mw_state,
         &instance_owner_state,
     );
@@ -1132,7 +1142,8 @@ fn create_nomi_core_router_with_all_state(
         .merge(model_failover_authenticated)
         .merge(connection_test_authenticated)
         .merge(file_authenticated)
-        .merge(mcp_authenticated);
+        .merge(mcp_authenticated)
+        .merge(mcp_callback);
     let router=match states.mobile_voice{
         Some(mut mobile_voice)=>{
             mobile_voice.allowed_origins=ws_state.allowed_origins.clone();

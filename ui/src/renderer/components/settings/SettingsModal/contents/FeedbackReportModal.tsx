@@ -18,7 +18,7 @@ export const NOMIFUN_PUBLIC_LINKS = {
   contact: 'https://www.nomifun.com/contact',
   issues: 'https://github.com/nomifun/nomifun-tauri/issues',
   releases: 'https://github.com/nomifun/nomifun-tauri/releases',
-  baiduPan: 'https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA',
+  download: 'https://www.nomifun.com/download',
 } as const;
 
 const COPYRIGHT = '© 2025-2026 NomiFun · www.nomifun.com';

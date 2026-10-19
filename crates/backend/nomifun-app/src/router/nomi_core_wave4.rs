@@ -1375,7 +1375,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let service = companion_service(dir.path()).await;
         let selected = service
-            .create_companion("Selected", "ink")
+            .create_companion("Selected", "mochi")
             .await
             .unwrap();
         let other = service
@@ -1415,7 +1415,7 @@ mod tests {
         let service = companion_service(dir.path()).await;
         let database = nomifun_db::init_database_memory().await.unwrap();
         let companion = service
-            .create_companion("Learner", "ink")
+            .create_companion("Learner", "mochi")
             .await
             .unwrap();
         let owner = nomifun_companion::CompanionAgentCapabilityOwner::new(
@@ -1449,7 +1449,7 @@ mod tests {
         let companion_dir = tempfile::tempdir().unwrap();
         let companion_service = companion_service(companion_dir.path()).await;
         let companion = companion_service
-            .create_companion("Bound", "ink")
+            .create_companion("Bound", "mochi")
             .await
             .unwrap();
         let repository: Arc<dyn nomifun_db::IChannelRepository> = Arc::new(

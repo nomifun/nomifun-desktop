@@ -17,7 +17,7 @@ pub mod knowledge_entry;
 pub mod knowledge_source;
 pub mod knowledge_tree_operation;
 pub mod mcp_server;
-pub mod oauth_token;
+pub mod mcp_oauth;
 mod pagination;
 pub mod provider;
 pub mod provider_connection;
@@ -44,7 +44,7 @@ mod sqlite_knowledge_entry;
 mod sqlite_knowledge_source;
 mod sqlite_knowledge_tree_operation;
 mod sqlite_mcp_server;
-mod sqlite_oauth_token;
+mod sqlite_mcp_oauth;
 mod sqlite_provider;
 mod sqlite_provider_connection;
 mod sqlite_provider_model;
@@ -103,7 +103,7 @@ pub use knowledge_tree_operation::{
     PrepareKnowledgeTreeOperationParams, PreparedKnowledgeTreeOperation,
 };
 pub use mcp_server::IMcpServerRepository;
-pub use oauth_token::IOAuthTokenRepository;
+pub use mcp_oauth::IMcpOAuthRepository;
 pub use provider::IProviderRepository;
 pub use provider_connection::IProviderConnectionRepository;
 pub use provider_model::{
@@ -135,7 +135,7 @@ pub use sqlite_instance_token::SqliteInstanceTokenRepository;
 pub use sqlite_knowledge::SqliteKnowledgeRepository;
 pub use sqlite_knowledge_tree_operation::SqliteKnowledgeTreeOperationRepository;
 pub use sqlite_mcp_server::SqliteMcpServerRepository;
-pub use sqlite_oauth_token::SqliteOAuthTokenRepository;
+pub use sqlite_mcp_oauth::SqliteMcpOAuthRepository;
 pub use sqlite_provider::SqliteProviderRepository;
 pub use sqlite_provider_connection::SqliteProviderConnectionRepository;
 pub use sqlite_provider_model::SqliteProviderModelRepository;

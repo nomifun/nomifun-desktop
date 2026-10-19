@@ -155,8 +155,7 @@ const PromptCard: React.FC<{
               </time>
             ) : null}
           </div>
-          {item.description ? <p className={styles.cardDescription}>{item.description}</p> : null}
-          <p className={styles.promptPreview}>{item.prompt}</p>
+          <p className={styles.cardDescription}>{item.description || item.prompt}</p>
           {item.tags.length > 0 ? (
             <div
               className={styles.cardTags}

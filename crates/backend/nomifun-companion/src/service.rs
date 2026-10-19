@@ -2418,8 +2418,8 @@ mod tests {
     async fn bound_persona_context_preserves_identity_without_advertising_tool_grants() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let selected = svc.create_companion("Selected", "ink").await.unwrap();
-        let other = svc.create_companion("Other", "ink").await.unwrap();
+        let selected = svc.create_companion("Selected", "mochi").await.unwrap();
+        let other = svc.create_companion("Other", "mochi").await.unwrap();
         svc.patch_companion(
             &selected.companion_id,
             serde_json::json!({"persona": {"preset": "calm", "custom": "叫主人老大"}}),
@@ -2464,7 +2464,7 @@ mod tests {
     async fn agent_recall_keeps_short_facts_with_large_durable_lineage() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let companion = svc.create_companion("Lineage", "ink").await.unwrap();
+        let companion = svc.create_companion("Lineage", "mochi").await.unwrap();
         let memory = svc.add_memory("preference", "Use lineageproof coffee.", &[],
             Some(&companion.companion_id)).await.unwrap();
         let source_session = nomifun_common::ConversationId::new().into_string();
@@ -2507,8 +2507,8 @@ mod tests {
     async fn agent_memory_owner_recalls_writes_merges_evolves_and_survives_restart() {
         let dir = tempfile::tempdir().unwrap();
         let first_service = service(dir.path()).await;
-        let primary = first_service.create_companion("Primary", "ink").await.unwrap();
-        let other = first_service.create_companion("Other", "ink").await.unwrap();
+        let primary = first_service.create_companion("Primary", "mochi").await.unwrap();
+        let other = first_service.create_companion("Other", "mochi").await.unwrap();
         let first = first_service
             .add_memory(
                 "preference",
@@ -2617,7 +2617,7 @@ mod tests {
         let companions_dir = dir.path().join(crate::COMPANION_COMPANIONS_REL_DIR);
         let mut ids = Vec::new();
         for (index, name) in ["甲", "乙"].iter().enumerate() {
-            let profile = CompanionProfileConfig::new(name, "ink", index as u64 + 1);
+            let profile = CompanionProfileConfig::new(name, "mochi", index as u64 + 1);
             let mut raw = serde_json::to_value(&profile).unwrap();
             let object = raw.as_object_mut().unwrap();
             object.remove("learn");
@@ -2742,7 +2742,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
         let before = nomifun_common::now_ms();
-        let companion = svc.create_companion("新来的", "ink").await.unwrap();
+        let companion = svc.create_companion("新来的", "mochi").await.unwrap();
         for key in [collector::LEARN_CURSOR_KEY, collector::EVOLVE_CURSOR_KEY] {
             let cursor = svc
                 .store
@@ -2775,7 +2775,7 @@ mod tests {
     async fn providers_in_use_detects_companion_chat_model() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let cid = svc.registry.create("大聪明", "ink").await.unwrap().companion_id;
+        let cid = svc.registry.create("大聪明", "mochi").await.unwrap().companion_id;
         let provider_id = provider_fixture(1);
         svc.patch_companion(&cid, serde_json::json!({"model":{"provider_id": provider_id,"model":"m"}})).await.unwrap();
 
@@ -2789,7 +2789,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
         let provider_id = provider_fixture(2);
-        let companion = svc.create_companion("学习者", "ink").await.unwrap();
+        let companion = svc.create_companion("学习者", "mochi").await.unwrap();
         svc.patch_companion(
             &companion.companion_id,
             serde_json::json!({"learn":{"model":{"provider_id": provider_id,"model":"m"}}}),
@@ -2810,7 +2810,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
         let provider_id = provider_fixture(3);
-        let companion = svc.create_companion("进化者", "ink").await.unwrap();
+        let companion = svc.create_companion("进化者", "mochi").await.unwrap();
         svc.patch_companion(
             &companion.companion_id,
             serde_json::json!({"evolve":{"model":{"provider_id": provider_id,"model":"m"}}}),
@@ -2828,7 +2828,7 @@ mod tests {
     async fn providers_in_use_rejects_malformed_provider_id() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        svc.registry.create("未配置", "ink").await.unwrap();
+        svc.registry.create("未配置", "mochi").await.unwrap();
         for malformed in ["", MALFORMED_PROVIDER_ID] {
             assert!(svc.providers_in_use(malformed).await.is_empty());
         }
@@ -2875,8 +2875,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (svc, barrier, bus) = model_detachment_service(dir.path()).await;
-        let selected = svc.create_companion("Selected", "ink").await.unwrap();
-        let untouched = svc.create_companion("Untouched", "boo").await.unwrap();
+        let selected = svc.create_companion("Selected", "mochi").await.unwrap();
+        let untouched = svc.create_companion("Untouched", "bolt").await.unwrap();
         let provider_id = provider_fixture(20);
         let model = serde_json::json!({"provider_id": provider_id, "model": "removed"});
         let before = svc.patch_companion(&selected.companion_id, serde_json::json!({
@@ -2939,7 +2939,7 @@ mod tests {
     async fn model_detachment_matches_the_exact_provider_and_model_without_replacing_siblings() {
         let dir = tempfile::tempdir().unwrap();
         let (svc, barrier, _) = model_detachment_service(dir.path()).await;
-        let profile = svc.create_companion("Exact", "ink").await.unwrap();
+        let profile = svc.create_companion("Exact", "mochi").await.unwrap();
         let provider_id = provider_fixture(21);
         let other_provider = provider_fixture(22);
         let before = svc.patch_companion(&profile.companion_id, serde_json::json!({
@@ -2973,7 +2973,7 @@ mod tests {
     async fn model_detachment_failed_save_preserves_all_selections_and_emits_no_update() {
         let dir = tempfile::tempdir().unwrap();
         let (svc, barrier, bus) = model_detachment_service(dir.path()).await;
-        let profile = svc.create_companion("Fail closed", "ink").await.unwrap();
+        let profile = svc.create_companion("Fail closed", "mochi").await.unwrap();
         let provider_id = provider_fixture(23);
         let before = svc.patch_companion(&profile.companion_id, serde_json::json!({
             "model": {"provider_id": provider_id, "model": "removed"},
@@ -3006,7 +3006,7 @@ mod tests {
     async fn model_detachment_rejects_invalid_identifiers_without_mutation() {
         let dir = tempfile::tempdir().unwrap();
         let (svc, barrier, bus) = model_detachment_service(dir.path()).await;
-        let profile = svc.create_companion("Keep", "ink").await.unwrap();
+        let profile = svc.create_companion("Keep", "mochi").await.unwrap();
         let mut events = bus.subscribe_user();
         let provider_id = provider_fixture(24);
         let _write_guard = barrier.write().await;
@@ -3021,7 +3021,7 @@ mod tests {
     async fn accepting_create_skill_promotes_draft_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let companion = svc.registry.create("测试", "ink").await.unwrap();
+        let companion = svc.registry.create("测试", "mochi").await.unwrap();
         let cid = companion.companion_id;
 
         // A reviewed draft: SKILL.md on disk (draft dir) + a draft registry row.
@@ -3076,7 +3076,7 @@ mod tests {
     async fn delete_companion_removes_active_and_draft_skill_trees() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let cid = svc.registry.create("测试", "ink").await.unwrap().companion_id;
+        let cid = svc.registry.create("测试", "mochi").await.unwrap().companion_id;
         let input = nomifun_skill_library::skill_service::SkillDraftInput {
             name: "cleanup".into(),
             description: "删除测试".into(),
@@ -3144,7 +3144,7 @@ mod tests {
     async fn list_companion_skills_fails_closed_on_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let cid = svc.registry.create("测试", "ink").await.unwrap().companion_id;
+        let cid = svc.registry.create("测试", "mochi").await.unwrap().companion_id;
         seed_draft_skill(&svc, &cid, "alpha").await; // SKILL.md on disk
         // beta: registry row only, NO SKILL.md → fail closed.
         let now = nomifun_common::now_ms();
@@ -3175,7 +3175,7 @@ mod tests {
     async fn list_companion_skill_page_enriches_only_current_page() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let cid = svc.registry.create("测试", "ink").await.unwrap().companion_id;
+        let cid = svc.registry.create("测试", "mochi").await.unwrap().companion_id;
         seed_draft_skill(&svc, &cid, "alpha").await;
         seed_draft_skill(&svc, &cid, "beta").await;
 
@@ -3193,7 +3193,7 @@ mod tests {
     async fn get_and_write_skill_content_roundtrip_and_validate() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let cid = svc.registry.create("测试", "ink").await.unwrap().companion_id;
+        let cid = svc.registry.create("测试", "mochi").await.unwrap().companion_id;
         seed_draft_skill(&svc, &cid, "demo").await;
 
         assert!(svc.get_companion_skill_content(&cid, &svc.store.find_owned_skill_by_name(&cid, "demo").await.unwrap().unwrap().companion_skill_id).await.unwrap().content.contains("原始描述"));
@@ -3210,7 +3210,7 @@ mod tests {
     async fn decide_companion_skill_accept_reject_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let cid = svc.registry.create("测试", "ink").await.unwrap().companion_id;
+        let cid = svc.registry.create("测试", "mochi").await.unwrap().companion_id;
 
         seed_draft_skill(&svc, &cid, "acc").await;
         let r = svc.decide_companion_skill(&cid, &svc.store.find_owned_skill_by_name(&cid, "acc").await.unwrap().unwrap().companion_skill_id, true, None).await.unwrap();
@@ -3245,7 +3245,7 @@ mod tests {
     async fn rejecting_skill_suppresses_its_originating_pattern() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let cid = svc.registry.create("测试", "ink").await.unwrap().companion_id;
+        let cid = svc.registry.create("测试", "mochi").await.unwrap().companion_id;
         let input = nomifun_skill_library::skill_service::SkillDraftInput {
             name: "rej-sig".into(),
             description: "d".into(),
@@ -3288,7 +3288,7 @@ mod tests {
     async fn weekly_digest_counts_recent_skills() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let cid = svc.registry.create("测试", "ink").await.unwrap().companion_id;
+        let cid = svc.registry.create("测试", "mochi").await.unwrap().companion_id;
         let now = nomifun_common::now_ms();
         svc.store
             .insert_skill(&CompanionSkill {
@@ -3319,7 +3319,7 @@ mod tests {
     async fn draft_from_session_requires_activity() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let cid = svc.registry.create("测试", "ink").await.unwrap().companion_id;
+        let cid = svc.registry.create("测试", "mochi").await.unwrap().companion_id;
         // No collected tool-call activity for this conversation → BadRequest, not a panic.
         assert!(svc.draft_skill_from_session(&cid, &conversation_fixture(90)).await.is_err());
     }
@@ -3332,8 +3332,8 @@ mod tests {
     async fn a_companions_skill_list_is_exactly_its_own() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let a = svc.registry.create("A", "ink").await.unwrap().companion_id;
-        let b = svc.registry.create("B", "ink").await.unwrap().companion_id;
+        let a = svc.registry.create("A", "mochi").await.unwrap().companion_id;
+        let b = svc.registry.create("B", "mochi").await.unwrap().companion_id;
         let input = nomifun_skill_library::skill_service::SkillDraftInput {
             name: "mine".into(),
             description: "d".into(),
@@ -3390,7 +3390,7 @@ mod tests {
         .unwrap();
         let mut ids = Vec::new();
         for name in ["甲", "乙"] {
-            let companion = svc.create_companion(name, "ink").await.unwrap();
+            let companion = svc.create_companion(name, "mochi").await.unwrap();
             svc.patch_companion(
                 &companion.companion_id,
                 serde_json::json!({
@@ -3438,7 +3438,7 @@ mod tests {
         .unwrap();
         let mut ids = Vec::new();
         for name in ["甲", "乙", "丙"] {
-            let companion = svc.create_companion(name, "ink").await.unwrap();
+            let companion = svc.create_companion(name, "mochi").await.unwrap();
             svc.patch_companion(
                 &companion.companion_id,
                 serde_json::json!({"learn": { "enabled": true }, "evolve": { "enabled": true }}),
@@ -3502,7 +3502,7 @@ mod tests {
     async fn consent_applies_once_and_never_reenables_after_disable() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let companion = svc.create_companion("甲", "ink").await.unwrap().companion_id;
+        let companion = svc.create_companion("甲", "mochi").await.unwrap().companion_id;
         // fresh: work sources + learn + evolve all off (Default untouched)
         assert!(!svc.config.read().await.collect.tool_calls);
         assert!(!svc.get_companion(&companion).await.unwrap().learn.enabled);
@@ -3536,8 +3536,8 @@ mod tests {
     async fn config_writes_cannot_reset_seq_watermark() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let a = svc.create_companion("甲", "ink").await.unwrap();
-        let b = svc.create_companion("乙", "boo").await.unwrap();
+        let a = svc.create_companion("甲", "mochi").await.unwrap();
+        let b = svc.create_companion("乙", "bolt").await.unwrap();
         assert_eq!(b.seq, 2);
         svc.delete_companion(&b.companion_id).await.unwrap();
 
@@ -3667,13 +3667,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn removed_appearance_survives_restart_with_identity_memory_and_state_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        let profile = svc.create_companion("原来的伙伴", "mochi").await.unwrap();
+        let profile = svc.patch_companion(&profile.companion_id, serde_json::json!({
+            "persona": {"custom": "保留原来的人格"},
+            "model": {"provider_id": provider_fixture(1), "model": "existing-model"},
+            "control_robot_id": "existing-device",
+            "skills": {"enabled": ["mermaid"]},
+            "mcp_servers": ["existing-server"],
+            "appearance": {"companion_enabled": true, "companion_x": 42},
+        })).await.unwrap();
+        let memory = svc.add_memory("preference", "主人喜欢深色主题", &[], Some(&profile.companion_id)).await.unwrap();
+        svc.store.add_companion_xp(&profile.companion_id, 57).await.unwrap();
+        svc.store.set_companion_state(&profile.companion_id, crate::store::MOOD_KEY, "happy").await.unwrap();
+        let workspace = svc.companion_workspace_path(&profile.companion_id).await.unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("existing.txt"), "existing work").unwrap();
+        let config_path = CompanionProfileConfig::config_path(
+            &svc.registry.companions_dir().join(&profile.companion_id),
+        );
+        let mut old = serde_json::to_value(&profile).unwrap();
+        old["character"] = serde_json::json!("ink");
+        std::fs::write(&config_path, serde_json::to_vec(&old).unwrap()).unwrap();
+        drop(svc);
+
+        let again = service(dir.path()).await;
+        assert_eq!(again.get_companion(&profile.companion_id).await.unwrap(), profile);
+        assert_eq!(again.default_companion_id().await.as_deref(), Some(profile.companion_id.as_str()));
+        assert_eq!(again.companion_workspace_path(&profile.companion_id).await.unwrap(), workspace);
+        assert_eq!(std::fs::read_to_string(workspace.join("existing.txt")).unwrap(), "existing work");
+        assert_eq!(again.store.get_companion_state_i64(&profile.companion_id, "xp").await.unwrap(), 57);
+        assert_eq!(again.store.get_companion_state(&profile.companion_id, crate::store::MOOD_KEY).await.unwrap().as_deref(), Some("happy"));
+        let recalled = again.recall_memories_for_agent(&profile.companion_id, 20, 48 * 1024).await.unwrap();
+        assert!(recalled.iter().any(|item| item.memory_id == memory.memory_id && item.content == memory.content));
+
+        let renamed = again.patch_companion(&profile.companion_id, serde_json::json!({"name": "新名字"})).await.unwrap();
+        assert_eq!(renamed.companion_id, profile.companion_id);
+        assert_eq!(renamed.character, "mochi");
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        assert_eq!(saved["character"], "mochi");
+        let changed = again.patch_companion(&profile.companion_id, serde_json::json!({"character": "bolt"})).await.unwrap();
+        assert_eq!(changed.character, "bolt");
+        let fallback = again.patch_companion(&profile.companion_id, serde_json::json!({"character": "ink"})).await.unwrap();
+        assert_eq!(fallback.character, "mochi");
+        assert_eq!(fallback.persona, profile.persona);
+        assert_eq!(fallback.model, profile.model);
+        assert_eq!(fallback.skills, profile.skills);
+    }
+
+    #[tokio::test]
     async fn create_companion_first_becomes_default() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
         assert!(svc.list_companions().await.is_empty());
         assert_eq!(svc.default_companion_id().await, None);
 
-        let first = svc.create_companion("毛球", "ink").await.unwrap();
+        let first = svc.create_companion("毛球", "mochi").await.unwrap();
         assert_eq!(svc.get_config().await.default_companion_id.as_deref(), Some(first.companion_id.as_str()));
         assert_eq!(svc.default_companion_id().await.as_deref(), Some(first.companion_id.as_str()));
         // Persisted, not just in memory.
@@ -3682,7 +3733,7 @@ mod tests {
         assert_eq!(on_disk.default_companion_id.as_deref(), Some(first.companion_id.as_str()));
 
         // A second companion never steals the default.
-        let second = svc.create_companion("墨墨", "boo").await.unwrap();
+        let second = svc.create_companion("伙伴乙", "bolt").await.unwrap();
         assert_eq!(svc.get_config().await.default_companion_id.as_deref(), Some(first.companion_id.as_str()));
         assert_ne!(first.companion_id, second.companion_id);
         assert_eq!(svc.list_companions().await.len(), 2);
@@ -3692,8 +3743,8 @@ mod tests {
     async fn delete_companion_repoints_default_and_clears_rows() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let a = svc.create_companion("甲", "ink").await.unwrap();
-        let b = svc.create_companion("乙", "boo").await.unwrap();
+        let a = svc.create_companion("甲", "mochi").await.unwrap();
+        let b = svc.create_companion("乙", "bolt").await.unwrap();
         let sessions = attach_canonical_test_host(&svc);
         let mut canonical_ids = Vec::new();
         for (companion_id, key) in [(&a.companion_id, "a-chat"), (&a.companion_id, "a-associated"), (&b.companion_id, "b-chat")] {
@@ -3739,7 +3790,7 @@ mod tests {
     async fn rename_then_new_session_keeps_stable_identity_and_delete_cleans_old_frozen_roots() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let profile = svc.create_companion("名字A", "ink").await.unwrap();
+        let profile = svc.create_companion("名字A", "mochi").await.unwrap();
         let sessions = attach_canonical_test_host(&svc);
         let legacy_root = svc.companion_workspaces_root().join(format!("{}_名字A", profile.seq));
         std::fs::create_dir_all(&legacy_root).unwrap();
@@ -3800,7 +3851,7 @@ mod tests {
         let hook = Arc::new(RecordingHook(std::sync::Mutex::new(Vec::new())));
         svc.set_cleanup_hooks(vec![hook.clone() as Arc<dyn CompanionCleanupHook>]);
 
-        let p = svc.create_companion("丙", "ink").await.unwrap();
+        let p = svc.create_companion("丙", "mochi").await.unwrap();
         svc.delete_companion(&p.companion_id).await.unwrap();
         assert_eq!(hook.0.lock().unwrap().as_slice(), &[p.companion_id.clone()]);
 
@@ -3821,7 +3872,7 @@ mod tests {
         assert_eq!(empty.level, 1);
         assert!(!empty.model_configured);
 
-        let a = svc.create_companion("甲", "ink").await.unwrap();
+        let a = svc.create_companion("甲", "mochi").await.unwrap();
         svc.store.add_companion_xp(&a.companion_id, 150).await.unwrap();
         let status = svc.status().await.unwrap();
         assert_eq!(status.companion_id.as_deref(), Some(a.companion_id.as_str()));
@@ -3829,7 +3880,7 @@ mod tests {
         assert_eq!(status.level, 2);
 
         // Per-companion status for a second companion reads its own xp.
-        let b = svc.create_companion("乙", "boo").await.unwrap();
+        let b = svc.create_companion("乙", "bolt").await.unwrap();
         let sb = svc.companion_status(&b.companion_id).await.unwrap();
         assert_eq!(sb.companion_id.as_deref(), Some(b.companion_id.as_str()));
         assert_eq!(sb.xp, 0);
@@ -3840,8 +3891,8 @@ mod tests {
     async fn start_rejects_dangling_default_companion_reference() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let _a = svc.create_companion("甲", "ink").await.unwrap();
-        let _b = svc.create_companion("乙", "boo").await.unwrap();
+        let _a = svc.create_companion("甲", "mochi").await.unwrap();
+        let _b = svc.create_companion("乙", "bolt").await.unwrap();
 
         let shared_dir = dir.path().join(crate::COMPANION_SHARED_REL_DIR);
         let mut corrupt = svc.get_config().await;
@@ -3868,7 +3919,7 @@ mod tests {
     async fn patch_companion_emits_and_persists() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let a = svc.create_companion("甲", "ink").await.unwrap();
+        let a = svc.create_companion("甲", "mochi").await.unwrap();
         let patched = svc
             .patch_companion(&a.companion_id, serde_json::json!({"name": "新名", "appearance": {"companion_enabled": true}}))
             .await
@@ -3882,8 +3933,8 @@ mod tests {
     async fn mood_override_survives_restart_and_clearing_restores_latest_automatic_mood() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let a = svc.create_companion("甲", "ink").await.unwrap();
-        let b = svc.create_companion("乙", "ink").await.unwrap();
+        let a = svc.create_companion("甲", "mochi").await.unwrap();
+        let b = svc.create_companion("乙", "mochi").await.unwrap();
         svc.store.set_companion_state(&a.companion_id, crate::store::MOOD_KEY, "sleepy").await.unwrap();
         let patched = svc.patch_companion(&a.companion_id, serde_json::json!({"mood_override": "happy"})).await.unwrap();
         assert_eq!(patched.mood_override, Some(crate::profile::CompanionMood::Happy));
@@ -3916,7 +3967,7 @@ mod tests {
     async fn invalid_mood_override_patch_preserves_the_entire_profile() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let a = svc.create_companion("甲", "ink").await.unwrap();
+        let a = svc.create_companion("甲", "mochi").await.unwrap();
         let profile_dir = dir.path().join(crate::COMPANION_COMPANIONS_REL_DIR).join(&a.companion_id);
         let before = std::fs::read(CompanionProfileConfig::config_path(&profile_dir)).unwrap();
         for invalid in [serde_json::json!("auto"), serde_json::json!("angry"), serde_json::json!(1), serde_json::json!({})] {
@@ -3931,7 +3982,7 @@ mod tests {
     async fn mood_override_patch_fails_before_saving_when_runtime_store_cannot_be_read() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let a = svc.create_companion("甲", "ink").await.unwrap();
+        let a = svc.create_companion("甲", "mochi").await.unwrap();
         svc.close_storage().await;
         assert!(svc.patch_companion(&a.companion_id, serde_json::json!({"mood_override": "happy"})).await.is_err());
         assert_eq!(svc.get_companion(&a.companion_id).await.unwrap(), a);
@@ -3947,7 +3998,7 @@ mod tests {
         // model唯一事实源 (profile.model) is always written regardless.
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        let a = svc.create_companion("甲", "ink").await.unwrap();
+        let a = svc.create_companion("甲", "mochi").await.unwrap();
         assert!(a.model.is_none());
         let provider_id = provider_fixture(5);
 
@@ -3978,8 +4029,8 @@ mod tests {
             "{ownerless:?}"
         );
 
-        let a = svc.create_companion("甲", "ink").await.unwrap().companion_id;
-        let b = svc.create_companion("乙", "ink").await.unwrap().companion_id;
+        let a = svc.create_companion("甲", "mochi").await.unwrap().companion_id;
+        let b = svc.create_companion("乙", "mochi").await.unwrap().companion_id;
 
         let first = svc
             .add_memory("preference", "主人喜欢深色主题", &["ui".into()], Some(&a))
@@ -4166,7 +4217,7 @@ mod tests {
         assert!(svc.list_figures().await.unwrap().iter().any(|f| f.figure_id == fig.figure_id));
 
         // Re-point the companion to a built-in character → figure is now unused → deletable.
-        svc.patch_companion(&companion.companion_id, serde_json::json!({"character": "ink", "appearance": {"custom_figure": null}}))
+        svc.patch_companion(&companion.companion_id, serde_json::json!({"character": "mochi", "appearance": {"custom_figure": null}}))
             .await
             .unwrap();
         svc.delete_figure(&fig.figure_id).await.unwrap();
@@ -4204,7 +4255,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let companion = svc.create_companion("墨墨", "custom").await.unwrap();
+        let companion = svc.create_companion("伙伴乙", "custom").await.unwrap();
         svc.patch_companion(&companion.companion_id, link_patch(&fig)).await.unwrap();
         assert!(matches!(svc.delete_figure(&fig.figure_id).await, Err(AppError::Conflict(_))));
 
@@ -4229,14 +4280,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let companion = svc.create_companion("墨墨", "custom").await.unwrap();
+        let companion = svc.create_companion("伙伴乙", "custom").await.unwrap();
         svc.patch_companion(&companion.companion_id, link_patch(&fig)).await.unwrap();
         // While the companion's character is `custom`, the figure is genuinely in use.
         assert!(matches!(svc.delete_figure(&fig.figure_id).await, Err(AppError::Conflict(_))));
 
         // Switching render mode alone does not erase the durable logical
         // reference, so deletion remains blocked.
-        svc.patch_companion(&companion.companion_id, serde_json::json!({"character": "ink"}))
+        svc.patch_companion(&companion.companion_id, serde_json::json!({"character": "mochi"}))
             .await
             .unwrap();
         assert!(matches!(svc.delete_figure(&fig.figure_id).await, Err(AppError::Conflict(_))));

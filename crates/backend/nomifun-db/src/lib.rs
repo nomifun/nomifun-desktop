@@ -82,7 +82,8 @@ pub use repository::cron::{
     UpdateCronJobParams,
 };
 pub use repository::mcp_server::{CreateMcpServerParams, UpdateMcpServerParams};
-pub use repository::oauth_token::UpsertOAuthTokenParams;
+pub use models::{McpOAuthClientRow, McpOAuthGrantRow};
+pub use repository::mcp_oauth::{McpOAuthClientParams, McpOAuthGrantParams, McpOAuthGrantRefreshParams};
 pub use repository::provider::{CreateProviderParams, UpdateProviderParams};
 pub use repository::ssh_host::{
     CreateSshHostParams, ISshHostRepository, UpdateSshHostParams,
@@ -116,7 +117,7 @@ pub use repository::{
     KnowledgeEntryMutation,
     KnowledgeProjectionReplacement,
     RelocateKnowledgeEntryProjectionParams, UpsertKnowledgeEntryParams,
-    IMcpServerRepository, IOAuthTokenRepository,
+    IMcpServerRepository, IMcpOAuthRepository,
     CoordinatedProviderDelete, CoordinatedProviderModelDelete, IProviderConnectionRepository,
     IProviderModelCapabilityRepository, IProviderModelRepository, IProviderRepository,
     IRequirementRepository, ISettingsRepository, ISkillTagRepository,
@@ -129,7 +130,7 @@ pub use repository::{
     SqliteCronRepository,
     SqliteKnowledgeRepository,
     SqliteKnowledgeTreeOperationRepository, SqliteMcpServerRepository,
-    SqliteOAuthTokenRepository,
+    SqliteMcpOAuthRepository,
     SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
     ProviderAgentRevisionCleanup, ProviderModelCleanupPlan, ProviderModelProjectCleanup, ProviderModelTemplateCleanup,
     SqliteProviderModelRepository, SqliteProviderRepository,

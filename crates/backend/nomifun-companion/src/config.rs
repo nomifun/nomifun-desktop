@@ -5,8 +5,31 @@
 use nomifun_common::ProviderWithModel;
 use serde::{Deserialize, Serialize};
 
-/// The roster character every companion falls back to when none is configured.
+/// The roster character used when a saved appearance is no longer available.
 pub(crate) const DEFAULT_CHARACTER: &str = "mochi";
+
+/// Appearance never establishes Companion identity. Removed or unknown roster
+/// entries use the default without invalidating the Companion or its resources.
+pub(crate) fn normalize_character(character: &str) -> &str {
+    match character {
+        "mochi" | "bolt" | "custom" => character,
+        _ => DEFAULT_CHARACTER,
+    }
+}
+
+pub(crate) fn deserialize_character<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let character = String::deserialize(deserializer)?;
+    Ok(normalize_character(&character).to_owned())
+}
+
+pub(crate) fn serialize_character<S: serde::Serializer>(
+    character: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(normalize_character(character))
+}
 
 pub const DEFAULT_EVENT_RETENTION_DAYS: u32 = 30;
 pub const MIN_EVENT_RETENTION_DAYS: u32 = 7;

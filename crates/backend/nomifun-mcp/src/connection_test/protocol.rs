@@ -57,7 +57,6 @@ pub(super) fn success_result(tools_value: Option<serde_json::Value>) -> McpConne
         details: None,
         needs_auth: None,
         auth_method: None,
-        www_authenticate: None,
     }
 }
 
@@ -74,7 +73,6 @@ pub(super) fn error_result(
         details,
         needs_auth: None,
         auth_method: None,
-        www_authenticate: None,
     }
 }
 
@@ -136,12 +134,8 @@ pub(super) fn command_runtime(command: &str) -> &'static str {
 }
 
 pub(super) fn auth_result(headers: &reqwest::header::HeaderMap) -> McpConnectionTestResult {
-    let www_authenticate = headers
-        .get("www-authenticate")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
-
-    let auth_method = www_authenticate.as_deref().map(detect_auth_method);
+    let challenges = crate::oauth_protocol::parse_www_authenticate(headers);
+    let auth_method = detect_auth_method(&challenges);
 
     McpConnectionTestResult {
         success: false,
@@ -151,17 +145,16 @@ pub(super) fn auth_result(headers: &reqwest::header::HeaderMap) -> McpConnection
         details: None,
         needs_auth: Some(true),
         auth_method,
-        www_authenticate,
     }
 }
 
-fn detect_auth_method(www_authenticate: &str) -> McpAuthMethod {
-    let lower = www_authenticate.to_lowercase();
-    if lower.contains("bearer") || lower.contains("oauth") {
-        McpAuthMethod::Oauth
-    } else {
-        McpAuthMethod::Basic
-    }
+fn detect_auth_method(challenges: &[crate::oauth_protocol::AuthenticateChallenge]) -> Option<McpAuthMethod> {
+    if challenges.iter().any(|challenge| challenge.scheme == "bearer"
+        && ["resource_metadata", "authorization_uri"].iter().any(|parameter|
+            challenge.parameters.get(*parameter).is_some_and(|value| !value.is_empty())))
+    { Some(McpAuthMethod::Oauth) }
+    else if challenges.iter().any(|challenge| challenge.scheme == "basic") { Some(McpAuthMethod::Basic) }
+    else { None }
 }
 
 // ---------------------------------------------------------------------------
@@ -176,26 +169,24 @@ mod tests {
     // -- Auth detection ---------------------------------------------------
 
     #[test]
-    fn detect_bearer_as_oauth() {
-        assert!(matches!(
-            detect_auth_method("Bearer realm=\"mcp\""),
-            McpAuthMethod::Oauth
-        ));
+    fn bearer_requires_an_explicit_discovery_hint() {
+        assert!(detect_auth_method(&crate::oauth_protocol::parse_challenges("Bearer realm=\"mcp\"")).is_none());
+        assert!(matches!(detect_auth_method(&crate::oauth_protocol::parse_challenges(
+            "Bearer resource_metadata=\"https://server.example/meta\"")),Some(McpAuthMethod::Oauth)));
     }
 
     #[test]
-    fn detect_oauth_keyword() {
-        assert!(matches!(
-            detect_auth_method("OAuth realm=\"mcp\""),
-            McpAuthMethod::Oauth
-        ));
+    fn schemes_are_not_inferred_from_realm_or_substrings() {
+        for header in ["OAuth realm=\"mcp\"", "Digest realm=\"oauth bearer\"", "Bearerish realm=\"mcp\""] {
+            assert!(detect_auth_method(&crate::oauth_protocol::parse_challenges(header)).is_none());
+        }
     }
 
     #[test]
     fn detect_basic_auth() {
         assert!(matches!(
-            detect_auth_method("Basic realm=\"mcp\""),
-            McpAuthMethod::Basic
+            detect_auth_method(&crate::oauth_protocol::parse_challenges("Basic realm=\"mcp\"")),
+            Some(McpAuthMethod::Basic)
         ));
     }
 
@@ -383,15 +374,27 @@ mod tests {
     }
 
     #[test]
-    fn auth_result_with_bearer() {
+    fn auth_result_with_bearer_preserves_unknown_credential_type() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("www-authenticate", "Bearer realm=\"mcp\"".parse().unwrap());
         let result = auth_result(&headers);
         assert!(!result.success);
         assert_eq!(result.needs_auth, Some(true));
-        assert!(matches!(result.auth_method, Some(McpAuthMethod::Oauth)));
-        assert!(result.www_authenticate.is_some());
+        assert!(result.auth_method.is_none());
         assert!(result.code.is_none());
+    }
+
+    #[test]
+    fn auth_result_reads_all_challenges_without_exposing_provider_headers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append("www-authenticate", "Basic realm=\"reflected-private-credential\"".parse().unwrap());
+        headers.append("www-authenticate", "Bearer resource_metadata=\"https://server.example/meta?token=private-fixture-value\"".parse().unwrap());
+        let result = auth_result(&headers);
+        assert!(matches!(result.auth_method, Some(McpAuthMethod::Oauth)));
+        let projection = serde_json::to_string(&result).unwrap();
+        assert!(!projection.contains("reflected-private-credential"));
+        assert!(!projection.contains("private-fixture-value"));
+        assert!(!projection.contains("www_authenticate"));
     }
 
     #[test]
@@ -400,6 +403,5 @@ mod tests {
         let result = auth_result(&headers);
         assert_eq!(result.needs_auth, Some(true));
         assert!(result.auth_method.is_none());
-        assert!(result.www_authenticate.is_none());
     }
 }

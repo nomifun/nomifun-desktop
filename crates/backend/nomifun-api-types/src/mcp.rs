@@ -180,7 +180,7 @@ pub struct TestMcpConnectionRequest {
 }
 
 /// Authentication method detected during connection test.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum McpAuthMethod {
     Oauth,
@@ -232,47 +232,164 @@ pub struct McpConnectionTestResult {
     pub needs_auth: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_method: Option<McpAuthMethod>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub www_authenticate: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
 // G. OAuth
 // ---------------------------------------------------------------------------
 
-/// Request body for `POST /api/mcp/oauth/check-status`.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OAuthCheckStatusRequest {
-    pub server_url: String,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum McpAuthErrorCode {
+    InvalidConfiguration,
+    ResourceMetadataUnavailable,
+    MetadataInvalid,
+    IssuerMismatch,
+    ResourceMismatch,
+    PkceUnsupported,
+    ClientRegistrationRequired,
+    ClientRegistrationRejected,
+    ClientAuthenticationUnsupported,
+    RedirectUnavailable,
+    UserDenied,
+    CallbackTimeout,
+    StateMismatch,
+    CallbackInvalid,
+    TokenExchangeRejected,
+    ReauthorizationRequired,
+    InsufficientScope,
+    UpstreamUnavailable,
+    ConnectionChanged,
+    Cancelled,
+    SecretStorageFailed,
+    Internal,
 }
 
-/// Response for OAuth status check.
-#[derive(Debug, Serialize)]
-pub struct OAuthStatusResponse {
-    pub authenticated: bool,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAuthStage {
+    Discovery,
+    ClientRegistration,
+    Authorization,
+    Callback,
+    TokenExchange,
+    Refresh,
+    Storage,
+    Connection,
 }
 
-/// Request body for `POST /api/mcp/oauth/login`.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OAuthLoginRequest {
-    pub server_url: String,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAuthUserAction {
+    None,
+    Retry,
+    ConfigureClient,
+    Reauthorize,
+    GrantScope,
 }
 
-/// Response for OAuth login initiation.
-#[derive(Debug, Serialize)]
-pub struct OAuthLoginResponse {
-    pub success: bool,
+/// Safe diagnostics only: credentials and arbitrary upstream response bodies
+/// must never be copied into these owner-visible fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpAuthDiagnostic {
+    pub code: McpAuthErrorCode,
+    pub stage: McpAuthStage,
+    pub retryable: bool,
+    pub user_action: McpAuthUserAction,
+    pub trace_id: String,
+    pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub details: Option<serde_json::Value>,
 }
 
-/// Request body for `POST /api/mcp/oauth/logout`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAuthState {
+    Anonymous,
+    Required,
+    Authorized,
+    ReauthorizationRequired,
+    ConfigurationRequired,
+    Failed,
+}
+
+/// Authentication state is independent of connection/probe success.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpAuthStatus {
+    pub state: McpAuthState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<TimestampMs>,
+    #[serde(default)]
+    pub granted_scopes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<McpAuthDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOAuthAttemptStatus {
+    WaitingForUser,
+    Exchanging,
+    Authorized,
+    Failed,
+    Cancelled,
+    Expired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpOAuthAttempt {
+    pub attempt_id: String,
+    pub status: McpOAuthAttemptStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<McpAuthDiagnostic>,
+}
+
+/// Write-only login input. Client secrets never belong to MCP configuration
+/// JSON, its original-text mirror, or an authentication status response.
+#[derive(Clone, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum McpOAuthClientConfig {
+    // An empty struct variant deliberately rejects extra JSON fields. Serde
+    // unit variants discard them even with enum-level deny_unknown_fields.
+    Auto {},
+    PreRegistered {
+        client_id: String,
+        client_secret: Option<String>,
+        token_endpoint_auth_method: Option<String>,
+        redirect_uri: Option<String>,
+    },
+    Cimd {
+        client_id: String,
+    },
+}
+
+impl Default for McpOAuthClientConfig {
+    fn default() -> Self { Self::Auto {} }
+}
+
+impl std::fmt::Debug for McpOAuthClientConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto {} => formatter.write_str("Auto"),
+            Self::PreRegistered { client_id, client_secret, token_endpoint_auth_method, redirect_uri } => formatter
+                .debug_struct("PreRegistered")
+                .field("client_id", client_id)
+                .field("client_secret", &client_secret.as_ref().map(|_| "[REDACTED]"))
+                .field("token_endpoint_auth_method", token_endpoint_auth_method)
+                .field("redirect_uri", redirect_uri)
+                .finish(),
+            Self::Cimd { client_id } => formatter.debug_struct("Cimd").field("client_id", client_id).finish(),
+        }
+    }
+}
+
+/// The saved server identity comes exclusively from the route path.
+#[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub struct OAuthLogoutRequest {
-    pub server_url: String,
+pub struct McpOAuthStartRequest {
+    pub client: Option<McpOAuthClientConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -521,7 +638,6 @@ mod tests {
             details: None,
             needs_auth: None,
             auth_method: None,
-            www_authenticate: None,
         };
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["success"], true);
@@ -540,12 +656,11 @@ mod tests {
             details: None,
             needs_auth: Some(true),
             auth_method: Some(McpAuthMethod::Oauth),
-            www_authenticate: Some("Bearer realm=\"mcp\"".into()),
         };
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["needs_auth"], true);
         assert_eq!(json["auth_method"], "oauth");
-        assert_eq!(json["www_authenticate"], "Bearer realm=\"mcp\"");
+        assert!(json.get("www_authenticate").is_none());
     }
 
     #[test]
@@ -558,7 +673,6 @@ mod tests {
             details: Some(serde_json::json!({ "command": "npx", "runtime": "node" })),
             needs_auth: None,
             auth_method: None,
-            www_authenticate: None,
         };
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["code"], "COMMAND_NOT_FOUND");
@@ -612,23 +726,49 @@ mod tests {
     // -- OAuth DTOs -----------------------------------------------------------
 
     #[test]
-    fn test_oauth_status_response() {
-        let resp = OAuthStatusResponse {
-            authenticated: true,
+    fn oauth_authorization_does_not_claim_connection_success() {
+        let resp = McpAuthStatus {
+            state: McpAuthState::Authorized,
+            expires_at: None,
+            granted_scopes: vec!["mcp:connect".into()],
+            diagnostic: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["authenticated"], true);
+        assert_eq!(json["state"], "authorized");
+        assert!(json.get("success").is_none());
+        assert!(json.get("authenticated").is_none());
     }
 
     #[test]
-    fn test_oauth_login_response() {
-        let resp = OAuthLoginResponse {
-            success: false,
-            error: Some("discovery failed".into()),
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["success"], false);
-        assert_eq!(json["error"], "discovery failed");
+    fn oauth_start_rejects_url_owner_and_callback_overrides() {
+        for input in [
+            serde_json::json!({"server_url":"https://other.test/mcp"}),
+            serde_json::json!({"owner_id":"other"}),
+            serde_json::json!({"callback_base_url":"https://attacker.test"}),
+        ] {
+            assert!(serde_json::from_value::<McpOAuthStartRequest>(input).is_err());
+        }
+        assert!(serde_json::from_value::<McpOAuthStartRequest>(serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn oauth_auto_client_rejects_unknown_fields_instead_of_discarding_them() {
+        for key in ["unknown_secret", "client_secret", "owner_id", "callback_base_url"] {
+            let input = serde_json::json!({"client":{"mode":"auto",(key):"fixture-private-value"}});
+            assert!(serde_json::from_value::<McpOAuthStartRequest>(input).is_err(), "Auto must reject {key}");
+        }
+        let input = serde_json::json!({"client":{"mode":"auto"}});
+        assert!(serde_json::from_value::<McpOAuthStartRequest>(input).is_ok());
+    }
+
+    #[test]
+    fn oauth_client_debug_redacts_the_write_only_secret() {
+        let client: McpOAuthClientConfig = serde_json::from_value(serde_json::json!({
+            "mode":"pre_registered","client_id":"registered-id","client_secret":"fixture-private-secret"
+        })).unwrap();
+        let debug = format!("{client:?}");
+        assert!(!debug.contains("fixture-private-secret"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     // -- DetectedMcpServerResponse --------------------------------------------
