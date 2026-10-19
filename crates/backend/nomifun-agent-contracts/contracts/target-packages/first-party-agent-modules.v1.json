@@ -273,7 +273,7 @@
               "capability": {
                 "id": "browser"
               },
-              "capability_manifest_digest": "549956c1d2bcfabe7113fce99f5299da05002172d35953776a4b812a7a9039a8",
+              "capability_manifest_digest": "658ddf7c69388dfc7273b37f8062d15298c71d89f227a5907cfebb531da3098c",
               "requirement": "required"
             }
           ],
@@ -287,7 +287,7 @@
               "role_id": "system.browser_use",
               "contract_version": "2.0.0"
             },
-            "contract_digest": "aade2aee4dd642c5d14e46baf383f8b7dd2e8a054ee24af098467a06b8c6eff9"
+            "contract_digest": "1beb49a8bba88f1d22b46cb54e2af088318a4b2a2ac0f5536ec8c5aa35245928"
           },
           "display": {
             "name": "Browser Use",
@@ -375,7 +375,8 @@
                   "host_targets": [
                     "aarch64-apple-darwin",
                     "x86_64-apple-darwin",
-                    "x86_64-pc-windows-msvc"
+                    "x86_64-pc-windows-msvc",
+                    "x86_64-unknown-linux-gnu"
                   ],
                   "host_surfaces": [
                     "desktop"
