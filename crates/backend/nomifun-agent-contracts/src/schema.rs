@@ -59,6 +59,46 @@ pub fn agent_store_schema_manifest_payload() -> AgentStoreSchemaManifestPayload 
             .collect(),
     }
 }
+
+/// Prove the one current-generation schema change that preserves Agent facts.
+/// Migration 010 only adds the two OAuth configuration owners. Their exact
+/// predecessor is derived from the formal manifest; neither unknown manifests
+/// nor reverse transitions obtain execution-binding evolution authority.
+pub fn agent_store_schema_manifest_evolution_compatible(
+    source: &crate::DigestHex,
+    target: &crate::DigestHex,
+) -> bool {
+    let current = agent_store_schema_manifest_payload();
+    let Ok(current_digest) = crate::digest_payload(&current) else { return false; };
+    if target != &current_digest { return false; }
+    if source == target { return true; }
+    oauth_authority_predecessor_manifest(&current)
+        .and_then(|previous| crate::digest_payload(&previous).ok())
+        .is_some_and(|previous_digest| source == &previous_digest)
+}
+
+fn oauth_authority_predecessor_manifest(
+    current: &AgentStoreSchemaManifestPayload,
+) -> Option<AgentStoreSchemaManifestPayload> {
+    // This is migration 010's declared generation, not a general rule allowing
+    // new tables or a future destructive baseline to inherit old authority.
+    if current.schema_version != "1.0.0" || current.data_generation != 7
+        || current.migration_head != 1 || current.projection_schema_version != 1 {
+        return None;
+    }
+    let oauth_tables = ["mcp_oauth_clients", "mcp_oauth_grants"];
+    for name in oauth_tables {
+        let matches = current.tables.iter().filter(|table| table.table_name == name).collect::<Vec<_>>();
+        if matches.len() != 1 || matches[0].owner != "plugin.mcp-connectors"
+            || matches[0].fact_class != "configuration" || matches[0].reset_scope != SchemaResetScope::Preserve {
+            return None;
+        }
+    }
+    let mut previous = current.clone();
+    previous.tables.retain(|table| !oauth_tables.contains(&table.table_name.as_str()));
+    Some(previous)
+}
+
 const TABLES: &[(&str, &str, &str, SchemaResetScope)] = &[
     ("schema_metadata", "platform.schema", "fact", SchemaResetScope::Preserve),
     ("plugins", "platform.plugin-manager", "fact", SchemaResetScope::Preserve),
@@ -223,10 +263,47 @@ mod tests {
         let migration = include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql");
         let current = agent_store_schema_manifest_payload();
         let digest = crate::digest_payload(&current).unwrap();
-        assert!(migration.contains(digest.as_ref()), "migration must install the current manifest digest");
-        let mut previous = current;
-        previous.tables.retain(|table| !matches!(table.table_name.as_str(), "mcp_oauth_clients" | "mcp_oauth_grants"));
-        assert!(migration.contains(crate::digest_payload(&previous).unwrap().as_ref()), "migration must recognize only the exact previous manifest");
+        assert!(migration.contains(&format!("SET canonical_schema_manifest_digest='{}'", digest.as_ref())),
+            "migration must install the current manifest digest");
+        let previous = oauth_authority_predecessor_manifest(&current).unwrap();
+        let previous_digest = crate::digest_payload(&previous).unwrap();
+        assert!(migration.contains(&format!("AND canonical_schema_manifest_digest='{}'", previous_digest.as_ref())),
+            "migration must recognize only the exact previous manifest");
+        assert!(migration.contains(&format!("AND data_generation={} AND migration_head={} AND projection_schema_version={}",
+            current.data_generation, current.migration_head, current.projection_schema_version)),
+            "the supported manifest transition must retain migration 010's generation guards");
+    }
+
+    #[test]
+    fn schema_manifest_evolution_accepts_only_current_identity_and_exact_oauth_forward_transition() {
+        let current = agent_store_schema_manifest_payload();
+        let current_digest = crate::digest_payload(&current).unwrap();
+        let previous = oauth_authority_predecessor_manifest(&current).unwrap();
+        let previous_digest = crate::digest_payload(&previous).unwrap();
+        assert!(agent_store_schema_manifest_evolution_compatible(&current_digest, &current_digest));
+        assert!(agent_store_schema_manifest_evolution_compatible(&previous_digest, &current_digest));
+        assert!(!agent_store_schema_manifest_evolution_compatible(&current_digest, &previous_digest));
+        assert!(!agent_store_schema_manifest_evolution_compatible(&previous_digest, &previous_digest));
+        let unknown = crate::DigestHex::from("a".repeat(64));
+        assert!(!agent_store_schema_manifest_evolution_compatible(&unknown, &current_digest));
+        assert!(!agent_store_schema_manifest_evolution_compatible(&current_digest, &unknown));
+        assert!(!agent_store_schema_manifest_evolution_compatible(&unknown, &unknown));
+        for change in 0..5 {
+            let mut unsupported = previous.clone();
+            match change {
+                0 => unsupported.data_generation += 1,
+                1 => unsupported.migration_head += 1,
+                2 => unsupported.projection_schema_version += 1,
+                3 => unsupported.tables[0].reset_scope = SchemaResetScope::AgentData,
+                _ => unsupported.forbidden_table_names.push("unknown_schema_lineage".into()),
+            }
+            let digest = crate::digest_payload(&unsupported).unwrap();
+            assert!(!agent_store_schema_manifest_evolution_compatible(&digest, &current_digest), "case {change}");
+            assert!(!agent_store_schema_manifest_evolution_compatible(&previous_digest, &digest), "case {change}");
+        }
+        let mut future = current;
+        future.data_generation += 1;
+        assert!(oauth_authority_predecessor_manifest(&future).is_none());
     }
 
     #[test]

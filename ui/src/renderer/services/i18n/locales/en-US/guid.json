@@ -25,6 +25,7 @@
       "targetNotFound": "The model to configure was not found. The provider and model list is open instead."
     },
     "capabilitiesNeeded": "Some capabilities required by this official Agent are not implemented in this build. Your message and selection have been kept. Choose another Agent or adjust capabilities in Manage Agents.",
+    "contractChanged": "This Agent's tool permissions, sources or execution requirements have changed, so its saved configuration cannot be reused automatically. Review and save it in Manage Agents, or choose another Agent. Your message and selection have been kept.",
     "launchFailed": "This official Agent could not start. Check the service and retry. Your message and selection have been kept."
   },
   "noAgentAvailable": "No Main Agent is available. Please login to Google or install Claude/Codex CLI. Go to settings?",

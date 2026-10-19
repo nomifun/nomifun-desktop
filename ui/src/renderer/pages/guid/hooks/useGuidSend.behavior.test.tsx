@@ -6,7 +6,7 @@
 
 import '../../../../../test/setup-dom.ts';
 
-import { act, cleanup, renderHook } from '@testing-library/react';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import type { TFunction } from 'i18next';
 import type { Dispatch, SetStateAction } from 'react';
@@ -15,6 +15,8 @@ import { mutate, useSWRConfig } from 'swr';
 
 import type { TProviderWithModel } from '@/common/config/storage';
 import { ipcBridge } from '@/common';
+import { BackendHttpError } from '@/common/adapter/httpBridge';
+import { Message } from '@arco-design/web-react';
 import {
   conversationTarget,
   parseAgentPresetId,
@@ -659,6 +661,87 @@ describe('useGuidSend HTTP behavior', () => {
     expect(calls).toBe(1);
     expect(navigations).toEqual([]);
     expect(sessionStorage.length).toBe(0);
+  });
+
+  test('official preparation preserves the original structured backend failure', async () => {
+    resetBrowserStorage();
+    const failure = new BackendHttpError({
+      method: 'POST', path: '/api/agent-presets/from-template/assistant.general', status: 409,
+      body: { code: 'AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED', error: 'The saved process contract changed.',
+        details: { diagnostics: [{ code: 'PROCESS_CONTRACT_CHANGED', subject: 'workspace.process' }] } },
+    });
+    const prepare = spyOn(ipcBridge.agentPlatform.createFromTemplate, 'invoke').mockRejectedValue(failure);
+    const createSession = spyOn(ipcBridge.agentPlatform.sessions.create, 'invoke');
+    const navigations: string[] = [];
+    const deps = createDeps({ selection: { kind: 'template', templateKey: 'assistant.general' }, navigations });
+    deps.selectedTemplate = { template_key: 'assistant.general' } as OfficialPresetTemplate;
+    const input = spyOn(deps, 'setInput');
+    const files = spyOn(deps, 'setFiles');
+    const directory = spyOn(deps, 'setDir');
+    try {
+      const hook = renderHook(() => useGuidSend(deps));
+      let rejected: unknown;
+      await act(async () => { try { await hook.result.current.handleSend(); } catch (error) { rejected = error; } });
+      expect(rejected).toBe(failure);
+      expect(failure.code).toBe('AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED');
+      expect(failure.details).toEqual({ diagnostics: [{ code: 'PROCESS_CONTRACT_CHANGED', subject: 'workspace.process' }] });
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(createSession).not.toHaveBeenCalled();
+      expect(input).not.toHaveBeenCalled();
+      expect(files).not.toHaveBeenCalled();
+      expect(directory).not.toHaveBeenCalled();
+      expect(deps.selection).toEqual({ kind: 'template', templateKey: 'assistant.general' });
+      expect(navigations).toEqual([]);
+      expect(sessionStorage.length).toBe(0);
+    } finally {
+      prepare.mockRestore();createSession.mockRestore();input.mockRestore();files.mockRestore();directory.mockRestore();
+    }
+  });
+
+  test.each(['AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED', 'CONFLICT'])('official preparation toast preserves %s and concrete diagnostics without clearing composer input', async code => {
+    resetBrowserStorage();
+    const requests: string[] = [];
+    const reason = 'capability workspace.process changed authority, effects, resources, dependencies or provenance';
+    globalThis.fetch = (async input => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({ success: false,
+        code, error: code === 'CONFLICT' ? `Conflict: AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED: ${reason}` : reason,
+        details: { raw: 'Do not render arbitrary details', credential: 'private-credential', diagnostics: [{
+          code: 'PROCESS_CONTRACT_CHANGED', subject: 'workspace.process', message: 'The launch execution effect changed.',
+        }] },
+      }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const toast = spyOn(Message, 'error').mockReturnValue(() => {});
+    const log = spyOn(console, 'error').mockImplementation(() => {});
+    const navigations: string[] = [];
+    const deps = createDeps({ selection: { kind: 'template', templateKey: 'assistant.general' }, navigations });
+    deps.selectedTemplate = { template_key: 'assistant.general' } as OfficialPresetTemplate;
+    const input = spyOn(deps, 'setInput');
+    const files = spyOn(deps, 'setFiles');
+    const directory = spyOn(deps, 'setDir');
+    try {
+      const hook = renderHook(() => useGuidSend(deps));
+      await act(async () => { hook.result.current.sendMessageHandler(); });
+      await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
+      const message = toast.mock.calls[0][0] as string;
+      expect(message).toContain('guid.agentEntries.contractChanged');
+      expect(message).toContain(`[${code}]`);
+      expect(message).toContain(reason);
+      expect(message).toContain('PROCESS_CONTRACT_CHANGED: workspace.process: The launch execution effect changed.');
+      expect(message).not.toContain('guid.agentEntries.launchFailed');
+      expect(message).not.toContain('Do not render arbitrary details');
+      expect(message).not.toContain('private-credential');
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toEndWith('/api/agent-presets/from-template/assistant.general');
+      expect(input).not.toHaveBeenCalled();
+      expect(files).not.toHaveBeenCalled();
+      expect(directory).not.toHaveBeenCalled();
+      expect(deps.selection).toEqual({ kind: 'template', templateKey: 'assistant.general' });
+      expect(navigations).toEqual([]);
+      expect(sessionStorage.length).toBe(0);
+    } finally {
+      toast.mockRestore();log.mockRestore();input.mockRestore();files.mockRestore();directory.mockRestore();
+    }
   });
 
   test('personal Agent launch freezes the selected session model without changing the preset', async () => {

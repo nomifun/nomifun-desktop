@@ -146,13 +146,15 @@ pub fn validate_bundled_contract_evolution(
     }
     let left = &source.content;
     let right = &target.content;
+    if !schema_manifest_matches_or_evolves(left, right) {
+        return Err(rejected("contract evolution changed an unsupported canonical_schema_manifest_digest"));
+    }
     if left.schema_version != right.schema_version
         || left.resolver_version != right.resolver_version
         || left.required_runtime_protocol_version != right.required_runtime_protocol_version
         || left.required_runtime_profile != right.required_runtime_profile
         || left.runtime_feature_inventory_digest != right.runtime_feature_inventory_digest
         || left.required_runtime_features != right.required_runtime_features
-        || left.canonical_schema_manifest_digest != right.canonical_schema_manifest_digest
         || left.context_order != right.context_order
         || left.middleware_order != right.middleware_order
         || left.required_resource_kinds != right.required_resource_kinds
@@ -211,6 +213,7 @@ pub fn validate_bundled_contract_evolution(
     }
     normalized.compiled_runtime_profile_digest = left.compiled_runtime_profile_digest.clone();
     normalized.target_contribution_manifest_digest = left.target_contribution_manifest_digest.clone();
+    normalized.canonical_schema_manifest_digest = left.canonical_schema_manifest_digest.clone();
     if &normalized != left {
         return Err(rejected("contract evolution changed an unproven global execution requirement"));
     }
@@ -261,6 +264,9 @@ pub fn validate_session_extension_derivation(
 ) -> Result<(), PresetContractViolation> {
     validate_artifacts(source_revision, source)?;
     validate_artifacts(target_revision, target)?;
+    if !schema_manifest_matches_or_evolves(&source.content, &target.content) {
+        return Err(rejected("extension selection changed an unsupported canonical_schema_manifest_digest"));
+    }
     let source_roots = direct_roots(source_revision, source)?;
     let target_roots = direct_roots(target_revision, target)?;
     let available_roots = source_roots.union(&target_roots).cloned().collect::<BTreeSet<_>>();
@@ -356,12 +362,23 @@ pub fn validate_session_extension_derivation(
     }
     normalized.compiled_runtime_profile_digest = left.compiled_runtime_profile_digest.clone();
     normalized.target_contribution_manifest_digest = left.target_contribution_manifest_digest.clone();
+    normalized.canonical_schema_manifest_digest = left.canonical_schema_manifest_digest.clone();
     if &normalized != left || source.actor != target.actor || source.scene != target.scene
         || source.surface != target.surface || source.audience != target.audience
     {
         return Err(rejected("extension selection changed a frozen global execution requirement"));
     }
     Ok(())
+}
+
+fn schema_manifest_matches_or_evolves(
+    source: &crate::ResolvedSnapshotContent,
+    target: &crate::ResolvedSnapshotContent,
+) -> bool {
+    source.canonical_schema_manifest_digest == target.canonical_schema_manifest_digest
+        || crate::agent_store_schema_manifest_evolution_compatible(
+            &source.canonical_schema_manifest_digest, &target.canonical_schema_manifest_digest,
+        )
 }
 
 fn capability_nodes(snapshot: &ResolvedSnapshotEnvelope) -> BTreeMap<CapabilityId, &ResolvedCapability> {
@@ -666,5 +683,146 @@ mod tests {
                 assert!(validate_capability_evolution(&original,&invalid).is_err(),"case {change}");
             }
         }
+    }
+
+    fn manifest_digests() -> (DigestHex, DigestHex) {
+        let current = crate::agent_store_schema_manifest_payload();
+        let current_digest = crate::digest_payload(&current).unwrap();
+        let mut previous = current;
+        previous.tables.retain(|table| !matches!(table.table_name.as_str(), "mcp_oauth_clients" | "mcp_oauth_grants"));
+        (crate::digest_payload(&previous).unwrap(), current_digest)
+    }
+
+    fn binding_artifacts(
+        id: &str,
+        capabilities: Vec<ResolvedCapability>,
+        schema_digest: DigestHex,
+    ) -> (AgentPresetRevision, ResolvedSnapshotEnvelope) {
+        let mut revision = AgentPresetRevision {
+            reference: crate::PresetRevisionRef { preset_id: id.into(), revision: 1, revision_digest: "pending".into() },
+            payload: crate::AgentPresetRevisionPayload {
+                context_order: Vec::new(), middleware_order: Vec::new(), schema_version: "1.0.0".into(),
+                model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
+                enabled_capabilities: capabilities.iter().map(|capability| crate::CapabilitySelection {
+                    capability: capability.capability.clone(), action_allowlist: capability.action_allowlist.clone(),
+                }).collect(),
+                skill_bindings: Vec::new(), system_role_provider_overrides: BTreeMap::new(),
+                persona: "Retain my persona".into(), instructions: "Retain my instructions".into(),
+                starter_prompts: Vec::new(), runtime_policy: Default::default(),
+            },
+            contribution_locks: capabilities.iter().map(|capability| capability.contribution_lock.clone()).collect(),
+            created_by: "owner".into(), created_at_ms: 1, reason: None,
+        };
+        revision.reference.revision_digest = revision.revision_digest().unwrap();
+        let content = crate::ResolvedSnapshotContent {
+            context_order: Vec::new(), middleware_order: Vec::new(), schema_version: "1.0.0".into(),
+            resolver_version: "1.0.0".into(), preset_revision_ref: revision.reference.clone(),
+            required_runtime_protocol_version: "1.0.0".into(), required_runtime_profile: crate::RuntimeProfileKind::ManagedMinimal,
+            runtime_feature_inventory_digest: "c".repeat(64).into(), required_runtime_features: BTreeSet::new(),
+            compiled_runtime_profile_digest: "d".repeat(64).into(), model_route_refs: BTreeMap::new(), chat_route_identity: None,
+            required_resource_kinds: capabilities.iter().flat_map(|capability| capability.required_resource_kinds.iter().cloned()).collect(),
+            capability_allowlist: capabilities.iter().map(|capability| capability.capability.id.clone()).collect(),
+            enabled_capabilities: capabilities, skill_locks: Vec::new(), mcp_tool_locks: Vec::new(),
+            resolved_role_providers: BTreeMap::new(), canonical_schema_manifest_digest: schema_digest,
+            target_contribution_manifest_digest: "e".repeat(64).into(),
+        };
+        let snapshot = ResolvedSnapshotEnvelope {
+            snapshot_ref: crate::ResolvedSnapshotRef { snapshot_id: format!("snapshot:{id}").into(), snapshot_digest: crate::digest_payload(&content).unwrap() },
+            content, actor: crate::PrincipalRef { principal_kind: "user".into(), principal_id: "owner".into() },
+            scene: "agent_settings".into(), surface: "desktop".into(), audience: "owner".into(),
+            created_at_ms: 1, resolver_run_id: format!("resolve:{id}").into(), availability_evidence_revision: "1".into(),
+        };
+        validate_artifacts(&revision, &snapshot).unwrap();
+        (revision, snapshot)
+    }
+
+    fn refresh_snapshot_digest(snapshot: &mut ResolvedSnapshotEnvelope) {
+        snapshot.snapshot_ref.snapshot_digest = crate::digest_payload(&snapshot.content).unwrap();
+    }
+
+    #[test]
+    fn bundled_evolution_accepts_the_preserved_schema_transition_without_relaxing_authority() {
+        let (previous, current) = manifest_digests();
+        let original = process_source(&["workspace.process/exec", "workspace.process/start", "workspace.process/poll"]);
+        let mut replacement = original.clone();
+        replacement.actions.retain(|action| action.action_id.as_ref() != "workspace.process/exec");
+        replacement.action_allowlist.remove(&"workspace.process/exec".into());
+        let (source_revision, source_snapshot) = binding_artifacts("old-general", vec![original], previous);
+        let (target_revision, target_snapshot) = binding_artifacts("current-general", vec![replacement], current);
+        let original_bytes = serde_json::to_vec(&source_snapshot).unwrap();
+        validate_bundled_contract_evolution(&source_revision, &source_snapshot, &target_revision, &target_snapshot).unwrap();
+        assert_eq!(serde_json::to_vec(&source_snapshot).unwrap(), original_bytes);
+
+        for change in 0..6 {
+            let mut invalid = target_snapshot.clone();
+            match change {
+                0 => { invalid.content.enabled_capabilities[0].action_allowlist.insert("workspace.process/input".into()); },
+                1 => invalid.content.enabled_capabilities[0].actions[0].effect_class = EffectClass::Destructive,
+                2 => { invalid.content.required_resource_kinds.insert("another-resource".into()); },
+                3 => invalid.content.runtime_feature_inventory_digest = "f".repeat(64).into(),
+                4 => invalid.content.schema_version = "2.0.0".into(),
+                _ => invalid.content.enabled_capabilities[0].resolved_source.source_identity = "another-publisher".into(),
+            }
+            refresh_snapshot_digest(&mut invalid);
+            assert!(validate_bundled_contract_evolution(&source_revision, &source_snapshot, &target_revision, &invalid).is_err(), "case {change}");
+        }
+    }
+
+    #[test]
+    fn binding_evolution_rejects_unknown_reverse_and_other_generation_schema_transitions() {
+        let (previous, current) = manifest_digests();
+        let mut future = crate::agent_store_schema_manifest_payload();
+        future.data_generation += 1;
+        let future = crate::digest_payload(&future).unwrap();
+        for (source_digest, target_digest) in [
+            ("f".repeat(64).into(), current.clone()), (current.clone(), previous),
+            (future.clone(), current.clone()), (current, future),
+        ] {
+            let (source_revision, source_snapshot) = binding_artifacts("source", vec![source()], source_digest);
+            let (target_revision, target_snapshot) = binding_artifacts("target", vec![source()], target_digest);
+            assert!(validate_bundled_contract_evolution(&source_revision, &source_snapshot, &target_revision, &target_snapshot).is_err());
+            assert!(validate_session_extension_derivation(&source_revision, &source_snapshot, &target_revision, &target_snapshot,
+                &BTreeSet::new(), &BTreeSet::new()).is_err());
+        }
+    }
+
+    #[test]
+    fn extension_and_default_os_derivations_accept_only_the_proved_schema_change() {
+        let (previous, current) = manifest_digests();
+        let mut extension = source();
+        extension.capability.id = "extension".into();
+        extension.dependency_path = vec!["extension".into()];
+        extension.contribution_id = "capability:extension".into();
+        extension.contribution_lock.contribution_id = extension.contribution_id.clone();
+        extension.actions = vec![descriptor("extension/read")];
+        extension.action_allowlist = BTreeSet::from(["extension/read".into()]);
+        let (source_revision, source_snapshot) = binding_artifacts("source", vec![source()], previous.clone());
+        let (target_revision, target_snapshot) = binding_artifacts("target", vec![source(), extension], current.clone());
+        let roots = BTreeSet::from(["extension".into()]);
+        validate_session_extension_derivation(&source_revision, &source_snapshot, &target_revision, &target_snapshot,
+            &roots, &BTreeSet::new()).unwrap();
+        let mut invalid = target_snapshot.clone();
+        invalid.content.enabled_capabilities[0].actions[0].effect_class = EffectClass::Destructive;
+        refresh_snapshot_digest(&mut invalid);
+        assert!(validate_session_extension_derivation(&source_revision, &source_snapshot, &target_revision, &invalid,
+            &roots, &BTreeSet::new()).is_err(), "an explicit extension cannot change retained core authority");
+
+        let (empty_revision, empty_snapshot) = binding_artifacts("old-empty-default", Vec::new(), previous);
+        let defaults = crate::default_local_os_capability_selections().into_iter().map(|selection| {
+            let mut capability = source();
+            capability.capability = selection.capability;
+            capability.dependency_path = vec![capability.capability.id.clone()];
+            capability.contribution_id = format!("capability:{}", capability.capability.id.as_ref()).into();
+            capability.contribution_lock.contribution_id = capability.contribution_id.clone();
+            capability.actions = selection.action_allowlist.iter().map(|action| descriptor(action.as_ref())).collect();
+            capability.action_allowlist = selection.action_allowlist;
+            capability
+        }).collect();
+        let (default_revision, default_snapshot) = binding_artifacts("current-default", defaults, current);
+        validate_default_local_os_evolution(&empty_revision, &empty_snapshot, &default_revision, &default_snapshot).unwrap();
+        let mut invalid = default_snapshot;
+        invalid.content.canonical_schema_manifest_digest = "f".repeat(64).into();
+        refresh_snapshot_digest(&mut invalid);
+        assert!(validate_default_local_os_evolution(&empty_revision, &empty_snapshot, &default_revision, &invalid).is_err());
     }
 }

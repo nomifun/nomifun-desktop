@@ -143,8 +143,10 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     onConversationCreated,
   } = deps;
   const sendingRef = useRef(false);
+  const officialPreparationRef = useRef(false);
 
   const handleSend = useCallback(async () => {
+    officialPreparationRef.current = false;
     const entryPlan = planGuidEntry(input, autoWork);
     if (!current_model) throw new Error('MODEL_REQUIRED');
     if (!resourceResolutionReady) throw new Error('RESOURCE_SELECTION_REQUIRED');
@@ -166,14 +168,12 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       if (!selectedTemplate || selectedTemplate.template_key !== selection.templateKey) {
         throw new Error('AGENT_PRESET_REQUIRED');
       }
-      try {
-        launchPreset = await prepareOfficialAgent(
-          selectedTemplate,
-          current_model,
-        );
-      } catch (error) {
-        throw new Error(officialAgentLaunchError(error, t));
-      }
+      officialPreparationRef.current = true;
+      launchPreset = await prepareOfficialAgent(
+        selectedTemplate,
+        current_model,
+      );
+      officialPreparationRef.current = false;
     }
     if (!createConversation && (
       !launchPreset?.current_stable_revision ||
@@ -336,10 +336,13 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         Message.error(
           error instanceof WorkspaceDirectoryUnavailableError
             ? t('guid.workspace.unavailable', { workspacePath: error.workspacePath })
-            : getConversationCreateErrorMessage(error, t)
+            : officialPreparationRef.current
+              ? officialAgentLaunchError(error, t)
+              : getConversationCreateErrorMessage(error, t)
         );
       })
       .finally(() => {
+        officialPreparationRef.current = false;
         sendingRef.current = false;
         setLoading(false);
       });

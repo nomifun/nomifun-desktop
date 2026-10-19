@@ -34,6 +34,9 @@ use uuid::Uuid;
 
 const LOCAL_TRUST_SECRET: &str = "official-preset-catalog-integrity";
 
+#[path = "support/previous_full_general_release.rs"]
+mod previous_full_general_release;
+
 struct CatalogGateBrowserFactory;
 
 #[async_trait]

@@ -17,6 +17,7 @@ use nomifun_agent_session::{
 };
 use nomifun_agent_kernel::{AgentPresetCompiler, CompileRequest};
 use nomifun_app::compatibility::AppServices;
+use nomifun_db::{GetOrCreateRemoteSessionParams, IRemoteBindingRepository, RemoteOpenResult, SqliteRemoteBindingRepository};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
@@ -24,6 +25,12 @@ use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
 const TRUST: &str = "session-contract-evolution";
 const OLD_INPUT: &str = "PREVIOUS_BUNDLED_RELEASE_INPUT";
 const REPLY: &str = "FORWARD_EXECUTION_OK";
+const DISCOVER_START: &str = "discover-evolved-process-start";
+
+fn has_start_discovery_result(body: &Value) -> bool {
+    body["messages"].as_array().is_some_and(|messages| messages.iter().any(|message|
+        message["role"] == "tool" && message["tool_call_id"] == DISCOVER_START))
+}
 
 async fn response(router: &Router, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
     let response = router.clone().oneshot(Request::builder().method(method).uri(uri)
@@ -63,10 +70,21 @@ impl Fixture {
         let captured = requests.clone();
         Mock::given(method("POST")).and(path("/v1/chat/completions"))
             .respond_with(move |request: &wiremock::Request| {
-                captured.lock().unwrap().push(request.body_json::<Value>().unwrap());
+                let body = request.body_json::<Value>().unwrap();
+                captured.lock().unwrap().push(body.clone());
+                let (delta, reason) = if start_only_defaults && !has_start_discovery_result(&body) {
+                    assert!(body["tools"].as_array().unwrap().iter()
+                        .any(|tool| tool["function"]["name"] == "ToolSearch"),
+                        "the fixture must use the granted discovery owner before inspecting a deferred schema");
+                    (json!({"tool_calls":[{"index":0,"id":DISCOVER_START,"type":"function","function":{
+                        "name":"ToolSearch","arguments":json!({"query":"workspace.process/start"}).to_string()
+                    }}]}), "tool_calls")
+                } else { (json!({"content":REPLY}), "stop") };
                 ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
                     .set_body_string(format!(
-                        "data: {{\"id\":\"forward-contract\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{REPLY}\"}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":\"forward-contract\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+                        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                        json!({"id":"forward-contract","choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
+                        json!({"id":"forward-contract","choices":[{"index":0,"delta":{},"finish_reason":reason}]}),
                     ))
             }).mount(&upstream).await;
         let (router, services) = super::common::build_local_trust_app(TRUST).await;
@@ -224,12 +242,30 @@ impl Fixture {
         let mut session = self.seed.clone();
         session.agent_session_id = id.clone();
         session.agent_binding = self.old_binding.clone();
-        session.remote_binding_provenance = remote;
+        session.remote_binding_provenance = remote.clone();
         session.next_seq = 1;
         let mut create = CreateSessionRequest::new(session, nomifun_common::now_ms(), OperationId::from(format!("open:{session_id}")),
             EventProducerId::from("session_api"), IdempotencyKey::from(format!("open:{session_id}")), CorrelationId::from(format!("open:{session_id}")));
         create.initial_active_capability_ids = self.previous.content.capability_allowlist.iter().map(|id| id.as_ref().to_owned()).collect();
         let created = self.store.create_session(create).await.unwrap();
+        if let Some(remote) = remote {
+            // The original Remote owner projection is required for admission;
+            // a bare canonical provenance field cannot impersonate its state.
+            let repository = SqliteRemoteBindingRepository::new(self.services.database.pool().clone());
+            let binding = repository.get_binding(&self.services.authoritative_user_id, remote.remote_binding_id.as_ref())
+                .await.unwrap().unwrap();
+            let projection = repository.get_or_create_session(GetOrCreateRemoteSessionParams {
+                owner_user_id: self.services.authoritative_user_id.to_string(),
+                remote_binding_id: remote.remote_binding_id.as_ref().to_owned(),
+                expected_binding_version: i64::try_from(remote.binding_version).unwrap(),
+                expected_agent_binding_digest: binding.agent_binding_digest.clone(),
+                open_idempotency_key: format!("remote-open:{session_id}"),
+                agent_session_id: session_id.to_owned(), initial_input_digest: None,
+            }).await.unwrap();
+            let RemoteOpenResult::Created(projection) = projection else { panic!("a new fixture Remote Session must have its own original projection"); };
+            assert_eq!(projection.agent_session_id, session_id);
+            assert_eq!(projection.agent_binding_json, binding.agent_binding_json);
+        }
         self.store.append_event(&self.event(&id, "session/ready", "ready", Some(created.opening_ack.event_id), json!({}))).await.unwrap();
         let key = format!("old-turn:{session_id}");
         let scoped_key = format!("user:{}:{session_id}:{key}", self.services.authoritative_user_id);
@@ -404,7 +440,9 @@ async fn prior_start_schema_defaults_evolve_only_at_idle_and_leave_authority_and
         assert_eq!(start.effect_class,old_start.effect_class);
         assert_eq!(start.required_resource_operations,old_start.required_resource_operations);
         let requests=fixture.requests.lock().unwrap();
-        let starts=requests[before..].iter().flat_map(|request|request["tools"].as_array().into_iter().flatten())
+        let discovered=requests[before..].iter().filter(|request|has_start_discovery_result(request)).collect::<Vec<_>>();
+        assert!(!discovered.is_empty(),"the actual model request must consume the real ToolSearch result");
+        let starts=discovered.iter().flat_map(|request|request["tools"].as_array().into_iter().flatten())
             .filter(|tool|tool["function"]["name"]=="start_process").collect::<Vec<_>>();
         assert!(!starts.is_empty(),"the evolved launch definition must reach the actual model boundary");
         for tool in starts {

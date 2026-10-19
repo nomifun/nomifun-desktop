@@ -3716,6 +3716,7 @@ export type I18nKey =
   | 'guid.advanced.willMount'
   | 'guid.agentEntries.capabilitiesNeeded'
   | 'guid.agentEntries.choose'
+  | 'guid.agentEntries.contractChanged'
   | 'guid.agentEntries.empty'
   | 'guid.agentEntries.fromTemplate'
   | 'guid.agentEntries.launchFailed'

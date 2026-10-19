@@ -329,7 +329,13 @@ The compiler starts from the saved authorial configuration and the frozen role c
 then proves that action IDs and grants, effect classes, resources, dependencies, runtime requirements and publisher
 identity stay unchanged. Display metadata and exact schema/artifact digests may evolve; this is a forward binding
 to the newly published contract, not evidence that old inputs are compatible. Managed packages, MCP tools and Skill
-content remain exact. There are no per-release, capability-name or digest compatibility exceptions.
+content remain exact. Arbitrary release, capability-name or digest exceptions do not grant compatibility.
+
+Migration 010 preserves the same Agent data generation, baseline, projection and all Agent facts while
+adding two OAuth configuration tables. The formal schema manifest proves that exact predecessor-to-current
+relationship for bundled contract evolution and Session extension derivation. Unknown manifests, reverse
+transitions and different generations remain rejected. Old Revisions, Snapshots and events stay immutable;
+official Agent launch failures retain their backend error code and diagnostic reason for display.
 
 The owner serializes preparation with admission, proves teardown of the previous Runtime and settled effects, and
 uses the existing canonical `session/agent-binding-changed` transaction. The Session identity, typed resource

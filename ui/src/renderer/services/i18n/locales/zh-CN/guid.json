@@ -25,6 +25,7 @@
       "targetNotFound": "没有找到要配置的模型，已为你打开供应商与模型列表。"
     },
     "capabilitiesNeeded": "这个官方 Agent 所需的部分能力尚未接入当前版本。当前输入和选择已保留，你可以选择其他 Agent，或在管理中调整能力。",
+    "contractChanged": "此 Agent 的工具权限、来源或执行要求已变化，无法自动沿用已保存配置。请在 Agent 管理中检查并重新保存，或选择其他 Agent。当前输入和选择已保留。",
     "launchFailed": "暂时无法启动这个官方 Agent，请检查服务状态后重试。当前输入和选择已保留。"
   },
   "noAgentAvailable": "没有可用的 Main Agent。请登录 Google 或安装 Claude/Codex CLI。是否前往设置？",

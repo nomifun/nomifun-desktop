@@ -6,6 +6,7 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
+import { isConversationAgentTemplateKey } from '../../components/agent/conversationAgentCatalog';
 
 const readSource = (url: URL): string =>
   readFileSync(url, 'utf8').replace(/\r\n/g, '\n');
@@ -176,11 +177,8 @@ describe('Guid workbench Agent launch behavior', () => {
 
   test('routes Companion through its product-owned conversation instead of Guid resources', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
-    const catalog = readSource(
-      new URL('../../components/agent/conversationAgentCatalog.ts', import.meta.url)
-    );
-
-    expect(catalog.includes("value !== COMPANION_TEMPLATE_KEY")).toBe(true);
+    expect(isConversationAgentTemplateKey('companion.default')).toBe(false);
+    expect(isConversationAgentTemplateKey('assistant.general')).toBe(true);
     expect(page.includes('isCompanionAgent')).toBe(false);
     expect(page.includes('companionBindings=')).toBe(false);
   });

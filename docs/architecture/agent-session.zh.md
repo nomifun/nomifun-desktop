@@ -170,6 +170,8 @@ Action schema 和实际组装结果。Runtime 只消费现役 ToolPlan，不依�
 
 当前代旧发布未声明 Action 的 `required_resource_operations` 时，执行使用整个所属模块的资源槽准入。补充精确操作合同只有在新 map 的键完整保留新旧相同的 `required_resource_kinds` 时才可自动演进：原资源绑定身份和准入仍存在，新操作检查仅增加限制。无资源动作的缺省声明与空 map 同样成立。删除或新增资源槽、改变或移除已有精确 map，以及效果、权限、依赖和来源变化仍拒绝；失败通过确切 `AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED` 错误码传到发送界面，不泛化为未知发送失败。
 
+数据库的非 Agent 配置扩展不等于 Agent 数据换代。迁移 010 保留同一代、同一 baseline、同一投影和全部 Agent 事实，只加入两张 OAuth 配置表；契约演进从正式 schema manifest 验证这个精确前后继关系，允许旧配置绑定到现役执行合同。该证明同时用于内置契约和会话扩展派生，不改写旧 Revision、Snapshot 或事件；未知 manifest、逆向转换及不同代际仍拒绝。官方 Agent 启动失败保留原后端错误及诊断，界面展示确切错误码与原因。
+
 ### 模型提案验证与有界纠正
 
 模型参数尚未形成合法 JSON 对象时，记录的是未准入提案，不是工具执行失败。各协议 Adapter
@@ -512,8 +514,8 @@ Turn 在排队期间提交的完整结果。关闭回合与领域 DATA 也按实
 内置发布可以产生新的精确 Schema、产物和角色贡献身份。普通本地新 Turn、模型选择与 warmup 之前，同一个 Session owner
 在空闲边界准备新的执行契约。编译器沿用冻结的创作配置、角色合同 key 与 Provider mount，证明 Action 身份与授权、效果类型、
 资源要求、依赖图、Runtime 要求和发布来源没有变化。展示元数据和精确 Schema/产物摘要允许演进；这表示绑定到新发布的
-执行契约，不证明旧参数可以由新工具执行。Managed package、MCP 工具和 Skill 内容仍须精确一致，不设置版本、能力名称或
-摘要的兼容例外。
+执行契约，不证明旧参数可以由新工具执行。Managed package、MCP 工具和 Skill 内容仍须精确一致，不以任意版本、能力名称或
+摘要例外授予兼容性。
 
 Owner 将准备与准入串行化，证明旧 Runtime 完整退出且效果已结算，再通过已有 canonical `session/agent-binding-changed`
 事务提交。Session 身份、typed resource 定义和活动能力选择保留；旧 Revision/Snapshot 与历史事件不可改写。转换边界之前的
