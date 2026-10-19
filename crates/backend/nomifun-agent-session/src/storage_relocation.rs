@@ -763,7 +763,7 @@ pub(super) async fn require_native_storage_quiescent_tx(tx: &mut Transaction<'_,
                 let witness: NativeProcessWitness = serde_json::from_value(native.clone())?;
                 witness.validate().map_err(|error| SessionStoreError::InvalidPayload(error.into()))?;
                 match witness {
-                    NativeProcessWitness::Dispatch { operation_id, ordinal } => {
+                    NativeProcessWitness::Dispatch { operation_id, ordinal, .. } => {
                         scope.latest_process = Some((operation_id, ordinal));
                     }
                     NativeProcessWitness::Quiescent { operation_id, ordinal, .. } => {

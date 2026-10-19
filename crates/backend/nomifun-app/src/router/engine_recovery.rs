@@ -10,6 +10,13 @@ use tokio_util::sync::CancellationToken;
 
 fn error(message: impl std::fmt::Display) -> AppError { AppError::Conflict(format!("Native recovery: {message}")) }
 
+fn claim_error(error: nomifun_agent_session::SessionStoreError) -> AppError {
+    match error {
+        nomifun_agent_session::SessionStoreError::ExecutionCapacityPending => AppError::ExecutionAdmissionPending,
+        error => self::error(error),
+    }
+}
+
 fn require_no_orphaned_live_wait<'a>(events: impl IntoIterator<Item=&'a AgentEngineEvent>) -> Result<(), AppError> {
     let mut waiting = false;
     for event in events {
@@ -40,7 +47,7 @@ impl EngineSessionHost {
                 owner: receipt.session().principal().clone(), agent_session_id: session_id, operation_id: operation,
                 snapshot: receipt.session().snapshot().snapshot_ref.clone(), active_set_generation: receipt.session().active_set_generation(),
                 holder: self.execution_instance_id.clone(), expected_fence: facts.execution_fence, checkpoint: None,
-            }).await.map_err(error)?;
+            }).await.map_err(claim_error)?;
             let result = self.bootstrap_empty_recovery(&store, receipt, cancellation, &lease).await;
             if result.is_err() { let _ = store.release_unattached_native_claim(&lease).await; }
             return result;
@@ -99,7 +106,7 @@ impl EngineSessionHost {
             snapshot: receipt.session().snapshot().snapshot_ref.clone(), active_set_generation: receipt.session().active_set_generation(),
             holder: self.execution_instance_id.clone(), expected_fence: saved.execution_fence,
             checkpoint: Some((saved.revision, saved.digest.clone(), saved.through_seq)),
-        }).await.map_err(error)?;
+        }).await.map_err(claim_error)?;
         // A model-only prefix could have arrived during preparation. The CAS
         // fenced it; reread the now-stable native tail before choosing IDs.
         let result = async {

@@ -156,6 +156,7 @@ impl Fixture {
         }).await.unwrap();
         Wave2TypedHostRequest {
             context: Wave2HostContext {
+                control: Default::default(),
                 principal: self.admission.principal.clone(), agent_session_id: self.admission.key.agent_session_id.clone().into(),
                 turn_id: self.admission.key.turn_id.clone().into(), operation_id: operation,
                 idempotency_key: IdempotencyKey::from(format!("browser-invoke-{key}")), correlation_id: CorrelationId::from(key),

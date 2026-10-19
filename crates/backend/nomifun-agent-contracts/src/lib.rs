@@ -19,6 +19,8 @@ pub mod channel_input_delivery;
 pub use channel_input_delivery::*;
 pub mod session_process_owner;
 pub use session_process_owner::*;
+pub mod session_ssh_link;
+pub use session_ssh_link::*;
 pub mod turn_outcome;
 pub use turn_outcome::*;
 pub mod turn_files;

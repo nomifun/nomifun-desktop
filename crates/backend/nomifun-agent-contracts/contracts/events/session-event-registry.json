@@ -1096,6 +1096,30 @@
       "replay_rule": "rebuild_projection"
     },
     {
+      "kind": "turn/resume-requested",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-resume-requested/v1",
+      "producer": { "allowed": ["runtime_supervisor"] },
+      "predecessor": { "mode": "any_of", "kinds": ["turn/paused"] },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": { "required": false, "reducers": [] },
+      "replay_rule": "rebuild_projection"
+    },
+    {
+      "kind": "turn/resume-blocked",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/turn-resume-blocked/v1",
+      "producer": { "allowed": ["runtime_supervisor"] },
+      "predecessor": { "mode": "any_of", "kinds": ["turn/resume-requested"] },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": { "required": false, "reducers": [] },
+      "replay_rule": "rebuild_projection"
+    },
+    {
       "kind": "turn/resume-authorized",
       "version": 1,
       "persistence": "persistent",
@@ -1330,6 +1354,42 @@
       "producer": { "allowed": ["session_api"] },
       "predecessor": { "mode": "any_of", "kinds": ["message/user-accepted"] },
       "correlation": "turn",
+      "idempotency": "producer_scoped_required",
+      "projector": { "required": false, "reducers": [] },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "session/ssh-link-close-requested",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/session-ssh-link-close-requested/v1",
+      "producer": { "allowed": ["session_api"] },
+      "predecessor": { "mode": "any_of", "kinds": ["session/opening"] },
+      "correlation": "session",
+      "idempotency": "producer_scoped_required",
+      "projector": { "required": false, "reducers": [] },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "session/ssh-link-closed",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/session-ssh-link-closed/v1",
+      "producer": { "allowed": ["session_api"] },
+      "predecessor": { "mode": "any_of", "kinds": ["session/ssh-link-close-requested"] },
+      "correlation": "session",
+      "idempotency": "producer_scoped_required",
+      "projector": { "required": false, "reducers": [] },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "session/process-reaped",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/session-process-reaped/v1",
+      "producer": { "allowed": ["session_api"] },
+      "predecessor": { "mode": "any_of", "kinds": ["runtime/progress-recorded"] },
+      "correlation": "session",
       "idempotency": "producer_scoped_required",
       "projector": { "required": false, "reducers": [] },
       "replay_rule": "no_effect"

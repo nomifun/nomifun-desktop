@@ -75,6 +75,10 @@ pub enum SshError {
     /// so the pool must redial rather than wait.
     #[error("ssh link disconnected: {0}")]
     Disconnected(String),
+    /// The original shell owner interrupted this operation. Partial output is
+    /// retained; without its own terminal sentinel the command stays unknown.
+    #[error("remote shell was retired by its owner; command outcome is unknown; retained output: {output}")]
+    Retired { output:String },
 }
 
 impl From<russh::Error> for SshError {

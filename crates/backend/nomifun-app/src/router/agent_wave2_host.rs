@@ -43,6 +43,7 @@ const MAX_WAVE2_IDEMPOTENCY_KEY_BYTES: usize = 128;
 
 #[derive(Clone)]
 pub(crate) struct Wave2ApplicationHost {
+    cache_retirement_running:Arc<std::sync::atomic::AtomicBool>,
     files: Arc<FileService>,
     artifacts: Result<Arc<WorkspaceArtifactStore>, Arc<str>>,
     workspace_write_lock: Arc<tokio::sync::Mutex<()>>,
@@ -105,6 +106,10 @@ fn patch_failure_error(
 }
 
 impl Wave2ApplicationHost {
+    pub(crate) fn try_begin_cache_retirement(&self)->bool {
+        self.cache_retirement_running.compare_exchange(false,true,std::sync::atomic::Ordering::AcqRel,std::sync::atomic::Ordering::Acquire).is_ok()
+    }
+    pub(crate) fn finish_cache_retirement(&self) {self.cache_retirement_running.store(false,std::sync::atomic::Ordering::Release);}
     /// Application imports share the same physical workspace mutation lock
     /// as file, artifact and VCS owners. A retained tool invocation keeps its
     /// existing lock; imports never wait while holding Session admission.
@@ -145,6 +150,7 @@ impl Wave2ApplicationHost {
             .map(Arc::new)
             .map_err(|error| Arc::<str>::from(error.to_string()));
         Self {
+            cache_retirement_running:Arc::new(false.into()),
             files: Arc::new(FileService::with_inventory_cache(
                 user_events,
                 vec![workspace_root.clone()],
@@ -3324,6 +3330,7 @@ pub(super) mod tests {
     fn context(root: &std::path::Path) -> Wave2HostContext {
         let agent_session_id = AgentSessionId::from(nomifun_common::generate_id());
         Wave2HostContext {
+            control: Default::default(),
             principal: PrincipalRef {
                 principal_kind: "user".to_owned(),
                 principal_id: "owner-1".to_owned(),

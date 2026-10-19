@@ -44,7 +44,7 @@ use crate::types::{
     ForkResult, MessageProjection, ResourceCleanupUncertainty,
     SessionCreateResult, SessionEventAppendResult, SessionEventPage,
     ReplaceSessionAgentBinding, SessionAgentBindingTransitionResult, SessionHeadProjection,
-    SessionObservation, SessionRehydrationInput, TurnReceipt, TurnReceiptStatus,
+    SessionObservation, SessionRehydrationInput, TurnProgressObservation, TurnReceipt, TurnReceiptStatus,
     UpdateAgentSessionMetadata,
 };
 
@@ -82,6 +82,8 @@ mod turn_files;
 mod history_transition_projection;
 #[path = "history_turn_outcome.rs"]
 mod history_turn_outcome;
+#[path = "turn_progress.rs"]
+mod turn_progress;
 #[path = "session_input.rs"]
 mod session_input;
 pub use session_input::{PendingSessionInput,SessionInputClaim,SessionInputBlockedReason,canonical_steering_input,is_session_input_event,session_input_namespace};
@@ -114,6 +116,10 @@ mod channel_input_observation;
 pub use channel_input_observation::{ChannelInputDeliveryDisposition,RecoverableChannelInput};
 #[path = "session_process_owner.rs"]
 mod session_process_owner;
+#[path = "session_process_archive.rs"]
+mod session_process_archive;
+#[path = "session_ssh_link.rs"]
+mod session_ssh_link;
 #[path = "session_process_retirement.rs"]
 mod session_process_retirement;
 
@@ -123,6 +129,9 @@ pub use native_recovery::{NativeExecutionInspection, NATIVE_RECOVERY_BLOCKED};
 #[path = "native_pause.rs"]
 mod native_pause;
 pub use native_pause::{NativePauseState, NativeResumeRequest, NativeOwnerEvidence, NativeResumeReceipt, NativeResumePreparation};
+#[path = "native_resume_queue.rs"]
+mod native_resume_queue;
+pub use native_resume_queue::{NativeResumeRequestReceipt, PendingNativeResumeRequest, NativeResumeCommandReceipt};
 #[path = "native_effect_reconciliation.rs"]
 mod native_effect_reconciliation;
 pub use native_effect_reconciliation::{NativeVerifiedOutcome, NativeEffectReconciliationRequest, NativeEffectReconciliationCandidate, NativeEffectReconciliationCandidates};
@@ -334,6 +343,7 @@ enum AppendSessionStatePolicy {
     EffectSettlement,
     KnowledgeWritebackSettlement,
     ProcessOwnerRelease,
+    SshLinkClose,
     DeleteCleanupUncertainty,
 }
 
@@ -387,6 +397,8 @@ impl AgentSessionStore {
         sqlx::raw_sql(AGENT_STORE_BASELINE_SQL).execute(&pool).await?;
         sqlx::raw_sql(include_str!("../../nomifun-db/migrations/007_retire_terminal_content_mirrors.sql")).execute(&pool).await?;
         sqlx::raw_sql(include_str!("../../nomifun-db/migrations/008_retire_payload_object_placeholder.sql")).execute(&pool).await?;
+        sqlx::raw_sql(include_str!("../../nomifun-db/migrations/009_cron_input_handoff.sql")).execute(&pool).await?;
+        sqlx::raw_sql(include_str!("../../nomifun-db/migrations/010_cron_run_cancellation.sql")).execute(&pool).await?;
         seed_test_schema_metadata(&pool).await?;
         Self::from_pool(pool).await
     }
@@ -584,6 +596,9 @@ impl AgentSessionStore {
             || append.semantic_event.kind.0 == nomifun_agent_contracts::CHANNEL_INPUT_QUESTION_DELIVERED
             || append.semantic_event.kind.0 == nomifun_agent_contracts::CHANNEL_INPUT_DELIVERY_STATE
             || append.semantic_event.kind.0 == nomifun_agent_contracts::SESSION_PROCESS_OWNER_RELEASED
+            || append.semantic_event.kind.0 == nomifun_agent_contracts::SESSION_PROCESS_REAPED
+            || append.semantic_event.kind.0 == nomifun_agent_contracts::SESSION_SSH_LINK_CLOSE_REQUESTED
+            || append.semantic_event.kind.0 == nomifun_agent_contracts::SESSION_SSH_LINK_CLOSED
             || append.semantic_event.kind.0 == "context/cleared"
             || knowledge_writeback::is_event(&append.semantic_event.kind.0) {
             return Err(SessionStoreError::ExecutionFenced);
@@ -2936,6 +2951,7 @@ impl AgentSessionStore {
         let mut tx = self.pool.begin().await?;
         native_execution::check_native_lease_tx(&mut tx, lease, false).await?;
         let id = format!("model-input-admitted:{}:{}", request.agent_session_id.as_ref(), request.operation_id.as_ref());
+        native_execution::check_domain_work_admission_tx(&mut tx,&request.agent_session_id,&request.turn_operation_id).await?;
         let row = event_by_event_id_tx(&mut tx, &id).await?.ok_or(SessionStoreError::ExecutionFenced)?;
         let event = event_from_row(row)?;
         let payload = payload_value_for_event_tx(&mut tx, &event).await?;
@@ -5051,12 +5067,20 @@ impl AgentSessionStore {
                 &["live", "deleting"]
             }
             AppendSessionStatePolicy::ProcessOwnerRelease => {
-                if append.semantic_event.kind.0!=nomifun_agent_contracts::SESSION_PROCESS_OWNER_RELEASED {return Err(SessionStoreError::ExecutionFenced);}
+                if !matches!(append.semantic_event.kind.0.as_str(),nomifun_agent_contracts::SESSION_PROCESS_OWNER_RELEASED|nomifun_agent_contracts::SESSION_PROCESS_REAPED) {return Err(SessionStoreError::ExecutionFenced);}
                 match session_row.state.as_str() {
                     "live" | "deleting"=>{},
                     "deleted"=>return Err(SessionStoreError::Deleted(append.agent_session_id.0.clone())),
                     other=>return Err(SessionStoreError::InvalidSession(format!("unknown AgentSession state {other}"))),
                 }
+                &["live","deleting"]
+            }
+            AppendSessionStatePolicy::SshLinkClose => {
+                if !matches!(append.semantic_event.kind.0.as_str(),nomifun_agent_contracts::SESSION_SSH_LINK_CLOSE_REQUESTED|nomifun_agent_contracts::SESSION_SSH_LINK_CLOSED) {
+                    return Err(SessionStoreError::ExecutionFenced);
+                }
+                match session_row.state.as_str() {"live"|"deleting"=>{},"deleted"=>return Err(SessionStoreError::Deleted(append.agent_session_id.0.clone())),
+                    other=>return Err(SessionStoreError::InvalidSession(format!("unknown AgentSession state {other}")))}
                 &["live","deleting"]
             }
             AppendSessionStatePolicy::DeleteCleanupUncertainty => {
@@ -5147,7 +5171,25 @@ impl AgentSessionStore {
                 duplicate: true,
             });
         }
+        if matches!(append.semantic_event.kind.0.as_str(),"message/user-accepted"|"turn/started"|"turn/steer-accepted") {
+            // This is the original canonical writer shared by initial input,
+            // queued input and steering. A Remote request that passed an HTTP
+            // preflight cannot enter work after its domain cancellation fence.
+            nomifun_db::ensure_remote_session_admitted_tx(tx,append.agent_session_id.as_ref()).await
+                .map_err(native_resume_queue::admission_error)?;
+        }
         let head = head_by_id_tx(tx, append.agent_session_id.as_ref()).await?;
+        if append.semantic_event.kind.0 == "context/model-visible-applied" {
+            native_execution::check_domain_work_admission_tx(tx,&append.agent_session_id,
+                &OperationId::from(append.semantic_event.correlation_id.as_ref())).await?;
+        }
+        if append.semantic_event.kind.0 == "tool/call-started" {
+            let operation:Option<String>=sqlx::query_scalar("SELECT operation_id FROM agent_turns WHERE session_id=? AND started_event_id=?")
+                .bind(append.agent_session_id.as_ref()).bind(append.semantic_event.causation_event_id.as_ref().map(EventId::as_ref))
+                .fetch_optional(&mut **tx).await?;
+            let operation=operation.ok_or_else(||SessionStoreError::InvalidEvent("tool admission has no original Turn".into()))?;
+            native_execution::check_domain_work_admission_tx(tx,&append.agent_session_id,&OperationId::from(operation)).await?;
+        }
         validate_session_event_transition(&head, append)?;
         validate_turn_lifecycle_tx(tx, &head, append).await?;
         validate_predecessor_tx(tx, append, &registry_entry).await?;
@@ -6113,7 +6155,17 @@ async fn insert_payload_tx(
     tx: &mut Transaction<'_, Sqlite>,
     payload: &SessionPayloadRecord,
 ) -> Result<(), SessionStoreError> {
+    insert_payload_with_policy_tx(tx,payload,false).await
+}
+
+// Only the original native owner receipt writer may store archive carriers.
+// Public Payload callers cannot disguise model content as native observation.
+async fn insert_payload_with_policy_tx(tx:&mut Transaction<'_,Sqlite>,payload:&SessionPayloadRecord,native_archive:bool)
+    ->Result<(),SessionStoreError> {
     validate_payload_contents(payload)?;
+    if session_process_archive::is_archive_media(&payload.media_type)!=native_archive {
+        return Err(SessionStoreError::InvalidPayload("native process archive Payloads require their original owner writer".into()));
+    }
 
     if let Some(existing) = payload_by_id_tx(tx, payload.payload_id.as_ref()).await? {
         let existing = payload_from_row(existing)?;
@@ -6126,15 +6178,10 @@ async fn insert_payload_tx(
         )));
     }
 
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(byte_len), 0) FROM agent_payloads WHERE session_id = ?",
-    )
-    .bind(payload.agent_session_id.as_ref())
-    .fetch_one(&mut **tx)
-    .await?;
+    let total=session_process_archive::model_payload_bytes_tx(tx,&payload.agent_session_id).await?;
     let projected_total = as_u64(total, "payload budget")?.saturating_add(payload.byte_len);
     let capacity = native_pause::native_payload_capacity_tx(tx, &payload.agent_session_id).await?;
-    if projected_total > capacity {
+    if !native_archive && projected_total > capacity {
         return Err(SessionStoreError::InvalidPayload(format!(
             "session payload budget exceeds its authorized {capacity} bytes"
         )));
@@ -6227,6 +6274,7 @@ async fn validate_semantic_event_tx(
     payload: &Value,
 ) -> Result<(), SessionStoreError> {
     knowledge_writeback::validate_event_tx(tx, event, payload).await?;
+    session_ssh_link::validate_event_tx(tx,event,payload).await?;
     if event.kind.0=="runtime/progress-recorded" && payload.pointer("/event/event").and_then(Value::as_str)==Some("host_cleanup_proven")
         && let Some(value)=payload.pointer("/event/session_process_retention") {
         let retention=serde_json::from_value::<nomifun_agent_contracts::NativeSessionProcessRetention>(value.clone())?;
@@ -6235,6 +6283,10 @@ async fn validate_semantic_event_tx(
     if event.kind.0 == nomifun_agent_contracts::SESSION_PROCESS_OWNER_RELEASED {
         let receipt=serde_json::from_value::<nomifun_agent_contracts::SessionProcessOwnerReleasedV1>(payload.clone())?;
         session_process_owner::validate_release_tx(tx,event,&receipt).await?;
+    }
+    if event.kind.0 == nomifun_agent_contracts::SESSION_PROCESS_REAPED {
+        let receipt=serde_json::from_value::<nomifun_agent_contracts::SessionProcessReapedV1>(payload.clone())?;
+        session_process_owner::validate_reaped_tx(tx,event,&receipt).await?;
     }
     if event.kind.0 == nomifun_agent_contracts::CHANNEL_INPUT_QUESTION_DELIVERED {
         let delivery=serde_json::from_value::<nomifun_agent_contracts::ChannelInputQuestionDeliveredV1>(payload.clone())?;
@@ -6337,6 +6389,7 @@ async fn validate_payload_reference_tx(
             "stored payload belongs to another AgentSession".to_owned(),
         ));
     }
+    session_process_archive::validate_direct_reference(&append.semantic_event.kind.0,&row.media_type)?;
     Ok(Some(payload_body_to_value(&payload_from_row(row)?.body)?))
 }
 
@@ -6631,6 +6684,7 @@ async fn validate_effect_started_causation_tx(
 
     let payload = effect_payload_from_append(append)?;
     let turn_id = effect_required_string(payload, "turn_id")?;
+    native_execution::check_domain_work_admission_tx(tx,&append.agent_session_id,&OperationId::from(turn_id)).await?;
     let operation_id = effect_required_string(payload, "operation_id")?;
     let capability_module = effect_required_string(payload, "capability_module")?;
     let action_id = effect_required_string(payload, "action_id")?;
@@ -7799,6 +7853,7 @@ async fn payload_value_for_event_tx(
                     ))
                 })?;
             let payload = payload_from_row(row)?;
+            session_process_archive::validate_direct_reference(&event.kind.0,&payload.media_type)?;
             if payload.agent_session_id != event.agent_session_id {
                 return Err(SessionStoreError::InvalidPayload(
                     "event payload belongs to another AgentSession".into(),

@@ -114,7 +114,9 @@ fn browser(conn: Connection) -> Arc<AttachedBrowser> {
             pending: Default::default(),
             retirement_pause: None,
         })),
-        operations: Arc::new(tokio::sync::Mutex::new(())),
+        operations: Arc::new(tokio::sync::RwLock::new(())),
+        targets: Mutex::new(Default::default()),
+        inputs: Arc::new(tokio::sync::Mutex::new(())),
         incarnation: "receipt-fixture".into(),
         browser_identity: [0; 32],
         chromium_major: 144,
@@ -167,7 +169,7 @@ async fn disconnect_joins_original_receipts(pending_work: bool) {
         );
     }
     assert!(
-        browser.operations.try_lock().is_ok(),
+        browser.operations.try_write().is_ok(),
         "the original operation gate is already empty"
     );
     let mut first = tokio::spawn({

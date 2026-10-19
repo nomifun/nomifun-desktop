@@ -259,7 +259,9 @@ pub(crate) fn attempt(
 }
 
 pub(crate) fn detail(rows: AgentExecutionDetailRows) -> Result<AgentExecutionDetail, AppError> {
+    let automation_control=crate::engine::automation_control_from_rows(&rows)?;
     Ok(AgentExecutionDetail {
+        automation_control,
         execution: execution(rows.execution, rows.lead_conversation_id)?,
         participants: rows
             .participants

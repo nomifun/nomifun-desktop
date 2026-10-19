@@ -32,7 +32,7 @@ pub fn canonical_turn_outcome(facts: &ChatCausalityFacts, receipt: &TurnReceipt)
 
 /// An exact active Turn's parked state at an observed canonical cursor. This
 /// projection grants no process ownership, input or recovery authorization.
-fn canonical_turn_waiting_outcome(events: &[SessionEventRecord], payloads: &BTreeMap<String, Value>,
+pub(crate) fn canonical_turn_waiting_outcome(events: &[SessionEventRecord], payloads: &BTreeMap<String, Value>,
     operation: &OperationId, through_seq: u64) -> Result<Option<AgentTurnOutcome>, SessionStoreError> {
     let mut pending_request = None;
     let mut waiting = None;

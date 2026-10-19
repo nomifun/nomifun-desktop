@@ -108,3 +108,13 @@ pub struct AgentExecutionTurnOutput {
     pub output_files: Vec<String>,
     pub integrity_ok: bool,
 }
+
+/// Read-only progress of one exact canonical operation. The cursor is only a
+/// wakeup hint; a terminal output must still pass the canonical output reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentExecutionTurnProgress {
+    pub found: bool,
+    pub terminal: bool,
+    pub cursor: u64,
+    pub suspended: bool,
+}

@@ -29,6 +29,10 @@ impl AgentExecutionLifecycle {
         self.cancellation.cancelled().await;
     }
 
+    pub(crate) fn cancellation_child(&self) -> CancellationToken {
+        self.cancellation.child_token()
+    }
+
     pub(crate) fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
@@ -36,6 +40,9 @@ impl AgentExecutionLifecycle {
     {
         self.tasks.spawn(future)
     }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_count(&self)->usize {self.tasks.len()}
 
     /// Stop new work, wake every tracked task, and wait for bounded cleanup.
     pub async fn shutdown(&self) -> Result<(), AppError> {

@@ -6,6 +6,7 @@ use super::super::engine_session_host::EngineSessionHost;
 
 impl NomiCoreSessionOwner {
     pub(super) async fn schedule_native_recovery(self: &Arc<Self>, engines: Arc<EngineSessionHost>) -> Result<usize, AppError> {
+        self.schedule_requested_native_resumes().await?;
         let candidates: Vec<(String, String)> = sqlx::query_as(
             "SELECT h.session_id,h.active_turn_id FROM agent_session_heads h JOIN agent_sessions s ON s.agent_session_id=h.session_id \
              JOIN agent_turns t ON t.session_id=h.session_id AND t.operation_id=h.active_turn_id \
@@ -39,6 +40,7 @@ impl NomiCoreSessionOwner {
                     if until <= now_ms() {
                         match owner.recover_native_turn(engines, &session, &operation, None).await {
                             Ok(()) => return,
+                            Err(AppError::ExecutionAdmissionPending) => { failures = 0; }
                             Err(error) => {
                                 failures = failures.saturating_add(1);
                                 tracing::warn!(session_id = session.as_ref(), error = %error, "native recovery not admitted");

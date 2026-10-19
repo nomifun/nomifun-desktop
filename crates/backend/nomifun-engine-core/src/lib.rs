@@ -27,7 +27,8 @@ pub use nomifun_chat_model_broker::{BrokerEngineModelPort, EngineModelPort, Engi
 pub use nomi_process_runtime::MAX_PTY_DIMENSION;
 pub use process::{
     EngineCleanupReport, EngineExecutionIdentity, EngineProcessOutput, EngineProcessPoll, EngineProcessRequest,
-    EngineProcessSession, EngineProcessStartError, EngineProcessTransport, ManagedEngineProcessOwner,
+    EngineProcessSession, EngineProcessStartError, EngineProcessTransport, ManagedEngineProcessOwner, EngineProcessCancellation, EngineProcessCancellationReceipt, EngineProcessOutputReplay,
+    EngineProcessTerminalMetadata,
 };
 pub use tool::{
     EngineEffectClass, EngineToolBinding, EngineToolInvocation, EngineToolInvoker, EngineToolPlan,

@@ -163,6 +163,88 @@ pub struct EngineProcessSession {
     pub(super) cursor: OutputCursor,
 }
 
+/// A narrow signal capability captured from the original native owner. It
+/// changes neither the process cursor nor the Session's other processes and
+/// can preempt a poll/stdin waiter that holds its ordinary interaction lock.
+#[derive(Clone)]
+pub struct EngineProcessCancellation {
+    target: ProcessCancellationTarget,
+}
+
+#[derive(Clone,Debug)]
+pub struct EngineProcessCancellationReceipt {pub reaped:bool,pub cleanup_confirmed:bool,pub terminal:Option<EngineProcessPoll>}
+
+pub use nomi_process_runtime::FrozenOutput as EngineProcessOutputReplay;
+
+#[derive(Clone)]
+enum ProcessCancellationTarget {
+    Local { supervisor: Arc<ProcessSupervisor>, owner: ProcessOwner, session: SessionId, terminal:Option<ProcessTerminalWitness> },
+    System(crate::system_process::SystemProcessCancellation),
+}
+
+impl EngineProcessCancellation {
+    /// Called only after the complete original terminal/output was committed.
+    /// An empty native registry alone cannot supply the required reap proof.
+    pub async fn release_terminal(&self)->Result<bool,EngineProcessError> {
+        if self.frozen_output().is_none()||!self.terminal_if_ready().is_some_and(|receipt|receipt.cleanup_confirmed) {return Ok(false);}
+        match &self.target {
+            ProcessCancellationTarget::Local {supervisor,owner,session,..}=>supervisor.release_terminal(owner,session).map_err(process_error),
+            ProcessCancellationTarget::System(control)=>control.release_terminal().await,
+        }
+    }
+    /// One read-only original native terminal subscription. Transport rounds
+    /// may re-arm their listener; they do not poll a process or renew its lease.
+    pub async fn wait_for_terminal(&self)->Result<EngineProcessCancellationReceipt,EngineProcessError> {
+        match &self.target {
+            ProcessCancellationTarget::Local {terminal:Some(terminal),..}=>{
+                let mut changes=terminal.subscribe();
+                loop {
+                    if let Some(receipt)=self.terminal_if_ready() {return Ok(receipt);}
+                    changes.changed().await.map_err(|_|EngineProcessError::Process("original process lifecycle closed without terminal".into()))?;
+                }
+            },
+            ProcessCancellationTarget::Local {terminal:None,..}=>Err(EngineProcessError::Process("original native terminal witness unavailable".into())),
+            ProcessCancellationTarget::System(control)=>control.wait_for_terminal().await,
+        }
+    }
+    pub fn frozen_output(&self)->Option<EngineProcessOutputReplay> {
+        match &self.target {ProcessCancellationTarget::Local {terminal,..}=>terminal.as_ref().and_then(ProcessTerminalWitness::frozen_output),
+            ProcessCancellationTarget::System(control)=>control.frozen_output()}
+    }
+    pub fn terminal_changes(&self)->Option<tokio::sync::watch::Receiver<u64>> {
+        match &self.target {ProcessCancellationTarget::Local {terminal,..}=>terminal.as_ref().map(ProcessTerminalWitness::subscribe),
+            ProcessCancellationTarget::System(control)=>Some(control.terminal_changes())}
+    }
+
+    pub fn terminal_if_ready(&self)->Option<EngineProcessCancellationReceipt> {
+        match &self.target {ProcessCancellationTarget::Local {terminal,..}=>terminal.as_ref()
+            .and_then(|terminal|terminal.terminal(OutputCursor::START)).map(process_cancellation_receipt),
+            ProcessCancellationTarget::System(control)=>control.terminal_if_ready()}
+    }
+
+    pub async fn cancel(&self) -> Result<EngineProcessCancellationReceipt, EngineProcessError> {
+        if let Some(receipt)=self.terminal_if_ready() {return Ok(receipt);}
+        match &self.target {
+            ProcessCancellationTarget::Local {supervisor,owner,session,..} => {
+                let outcome=supervisor.cancel(owner,session).await.map_err(process_error)?;
+                Ok(process_cancellation_receipt(outcome))
+            }
+            ProcessCancellationTarget::System(control)=>control.cancel().await,
+        }
+    }
+}
+
+fn process_cancellation_receipt(outcome:ProcessOutcome)->EngineProcessCancellationReceipt {
+    cancellation_receipt(process_terminal_poll(outcome))
+}
+
+pub(crate) fn cancellation_receipt(poll:EngineProcessPoll)->EngineProcessCancellationReceipt {
+    let (reaped,cleanup_confirmed)=match &poll {EngineProcessPoll::Exited {cleanup,..}|EngineProcessPoll::Cancelled {cleanup,..}
+        |EngineProcessPoll::TimedOut {cleanup,..}=>(cleanup.reaped,cleanup.reaped&&cleanup.errors.is_empty()),
+        EngineProcessPoll::Lost {cleanup,..}=>(cleanup.reaped,false),_=>(false,false)};
+    EngineProcessCancellationReceipt {reaped,cleanup_confirmed,terminal:poll.is_terminal().then_some(poll)}
+}
+
 impl EngineProcessSession {
     pub fn pid(&self) -> u32 {
         self.pid
@@ -225,7 +307,70 @@ pub enum EngineProcessPoll {
     },
 }
 
+/// The original terminal's metadata without a second copy of stdout. It has
+/// no process owner, I/O handle or execution authority. FrozenOutput keeps the
+/// original raw chunks, stream decoders and cursor measurements separately.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EngineProcessTerminalMetadata {
+    Exited { exit_code: Option<i32>, signal: Option<i32>, cleanup: EngineCleanupReport },
+    Cancelled { cleanup: EngineCleanupReport },
+    TimedOut { cleanup: EngineCleanupReport },
+}
+
+impl EngineProcessTerminalMetadata {
+    pub fn is_confirmed_reaped(&self) -> bool {
+        match self { Self::Exited { cleanup, .. } | Self::Cancelled { cleanup } | Self::TimedOut { cleanup } => cleanup.is_confirmed_reaped() }
+    }
+
+    /// Reconstruct only a read-only observation using the original frozen raw
+    /// bytes. Neither an unconfirmed native outcome nor textual stdout can
+    /// supply the missing cleanup/cursor proof.
+    pub fn with_output(&self, replay: &EngineProcessOutputReplay, cursor: u64) -> Result<EngineProcessPoll, EngineProcessError> {
+        if !self.is_confirmed_reaped() {
+            return Err(EngineProcessError::Process("terminal metadata has no confirmed original reap receipt".into()));
+        }
+        let output = frozen_output_at(replay, cursor)?;
+        Ok(match self {
+            Self::Exited { exit_code, signal, cleanup } => EngineProcessPoll::Exited {
+                exit_code: *exit_code, signal: *signal, output, cleanup: cleanup.clone(),
+            },
+            Self::Cancelled { cleanup } => EngineProcessPoll::Cancelled { output, cleanup: cleanup.clone() },
+            Self::TimedOut { cleanup } => EngineProcessPoll::TimedOut { output, cleanup: cleanup.clone() },
+        })
+    }
+}
+
+fn frozen_output_at(replay: &EngineProcessOutputReplay, cursor: u64) -> Result<EngineProcessOutput, EngineProcessError> {
+    replay.validate().map_err(|error| EngineProcessError::Process(error.to_string()))?;
+    Ok(convert_output(replay.snapshot_from(OutputCursor::new(cursor))))
+}
+
 impl EngineProcessPoll {
+    /// Only these three confirmed native outcomes can retire a process owner.
+    /// Lost remains unknown even if a lower layer reported a reaped leader.
+    pub fn terminal_metadata(&self) -> Option<EngineProcessTerminalMetadata> {
+        let metadata = match self {
+            Self::Exited { exit_code, signal, cleanup, .. } => EngineProcessTerminalMetadata::Exited {
+                exit_code: *exit_code, signal: *signal, cleanup: cleanup.clone(),
+            },
+            Self::Cancelled { cleanup, .. } => EngineProcessTerminalMetadata::Cancelled { cleanup: cleanup.clone() },
+            Self::TimedOut { cleanup, .. } => EngineProcessTerminalMetadata::TimedOut { cleanup: cleanup.clone() },
+            _ => return None,
+        };
+        metadata.is_confirmed_reaped().then_some(metadata)
+    }
+
+    /// Replace only the observation cursor from the original frozen bytes.
+    /// This never restores a native process or permits any input/control.
+    pub fn replay_output(&self,replay:&EngineProcessOutputReplay,cursor:u64)->Result<Self,EngineProcessError> {
+        let output=frozen_output_at(replay,cursor)?;
+        let mut poll=self.clone();
+        match &mut poll {Self::Exited {output:target,..}|Self::Cancelled {output:target,..}|Self::TimedOut {output:target,..}
+            |Self::Lost {output:target,..}=>*target=output,
+            _=>return Err(EngineProcessError::Process("output replay requires original process terminal".into()))}
+        Ok(poll)
+    }
     pub fn is_terminal(&self) -> bool {
         !matches!(self, Self::Running { .. })
     }
@@ -241,6 +386,14 @@ pub struct EngineCleanupReport {
     pub elapsed_ms: u64,
     pub errors: Vec<String>,
 }
+
+impl EngineCleanupReport {
+    pub fn is_confirmed_reaped(&self) -> bool { self.reaped && self.errors.is_empty() }
+}
+
+#[cfg(test)]
+#[path = "process_terminal_metadata_tests.rs"]
+mod terminal_metadata_tests;
 
 pub struct ManagedEngineProcessOwner {
     workspace_root: PathBuf,
@@ -262,6 +415,13 @@ pub struct EngineProcessStartError {
 }
 
 impl ManagedEngineProcessOwner {
+    pub fn cancellation_handle(&self,session:&EngineProcessSession)->EngineProcessCancellation {
+        let target=match &session.system {
+            Some(system)=>ProcessCancellationTarget::System(system.cancellation_handle(session.pid)),
+            None=>ProcessCancellationTarget::Local {supervisor:self.supervisor.clone(),owner:session.owner.clone(),session:session.session_id,terminal:session.terminal.clone()},
+        };
+        EngineProcessCancellation {target}
+    }
     pub fn new(
         workspace_root: impl AsRef<Path>,
         config: SupervisorConfig,
@@ -393,11 +553,23 @@ impl ManagedEngineProcessOwner {
         if session.system.is_some() {
             return crate::system_process::initial_observation(session, wait.min(MAX_POLL_WAIT), cancellation).await;
         }
+        if let Some(outcome)=session.terminal.as_ref().and_then(|witness|witness.terminal(OutputCursor::START)) {
+            return Ok(self.convert_outcome(session,outcome));
+        }
         if cancellation.is_cancelled() { return self.cancel(session).await; }
         let poll = self.supervisor.poll(&session.owner, &session.session_id, OutputCursor::START, Instant::now() + wait.min(MAX_POLL_WAIT));
         let result = tokio::select! {
             _ = cancellation.cancelled() => return self.cancel(session).await,
-            result = poll => result.map_err(process_error)?,
+            result = poll => match result {
+                Ok(result)=>result,
+                Err(nomi_process_runtime::ProcessError::SessionNotFound {..})=>{
+                    if let Some(outcome)=session.terminal.as_ref().and_then(|witness|witness.terminal(OutputCursor::START)) {
+                        return Ok(self.convert_outcome(session,outcome));
+                    }
+                    return Err(EngineProcessError::Process("original native process registration is unavailable without a terminal witness".into()));
+                },
+                Err(error)=>return Err(process_error(error)),
+            },
         };
         Ok(self.convert_poll(session, result))
     }
@@ -412,6 +584,9 @@ impl ManagedEngineProcessOwner {
         if session.system.is_some() {
             return crate::system_process::poll(session, cursor, wait, cancellation).await;
         }
+        if let Some(outcome)=session.terminal.as_ref().and_then(|witness|witness.terminal(OutputCursor::new(cursor))) {
+            return Ok(self.convert_outcome(session,outcome));
+        }
         if cancellation.is_cancelled() {
             return self.cancel(session).await;
         }
@@ -424,7 +599,16 @@ impl ManagedEngineProcessOwner {
         );
         let result = tokio::select! {
             _ = cancellation.cancelled() => return self.cancel(session).await,
-            result = poll => result.map_err(process_error)?,
+            result = poll => match result {
+                Ok(result)=>result,
+                Err(nomi_process_runtime::ProcessError::SessionNotFound {..})=>{
+                    if let Some(outcome)=session.terminal.as_ref().and_then(|witness|witness.terminal(OutputCursor::new(cursor))) {
+                        return Ok(self.convert_outcome(session,outcome));
+                    }
+                    return Err(EngineProcessError::Process("original native process registration is unavailable without a terminal witness".into()));
+                },
+                Err(error)=>return Err(process_error(error)),
+            },
         };
         Ok(self.convert_poll(session, result))
     }
@@ -500,7 +684,7 @@ impl ManagedEngineProcessOwner {
         &self,
         session: &mut EngineProcessSession,
     ) -> Result<Option<EngineProcessPoll>, EngineProcessError> {
-        if let Some(system) = &session.system { return Ok(system.terminal.clone()); }
+        if let Some(system) = &session.system { return system.terminal(session.cursor.offset()); }
         let outcome = session.terminal.as_ref().and_then(|terminal| terminal.terminal(session.cursor));
         let cursor = session.cursor;
         let result = outcome.map(|outcome| self.convert_outcome(session, outcome));
@@ -666,6 +850,17 @@ impl ManagedEngineProcessOwner {
         session: &mut EngineProcessSession,
         outcome: ProcessOutcome,
     ) -> EngineProcessPoll {
+        let poll=process_terminal_poll(outcome);
+        match &poll {
+            EngineProcessPoll::Exited {output,..}|EngineProcessPoll::Cancelled {output,..}|EngineProcessPoll::TimedOut {output,..}
+                |EngineProcessPoll::Lost {output,..}=>session.cursor=OutputCursor::new(output.next_cursor),
+            _=>{},
+        }
+        poll
+    }
+}
+
+fn process_terminal_poll(outcome:ProcessOutcome)->EngineProcessPoll {
         match outcome {
             ProcessOutcome::Exited {
                 code,
@@ -673,7 +868,6 @@ impl ManagedEngineProcessOwner {
                 output,
                 cleanup,
             } => {
-                session.cursor = output.next_cursor;
                 EngineProcessPoll::Exited {
                     exit_code: code,
                     signal,
@@ -682,14 +876,12 @@ impl ManagedEngineProcessOwner {
                 }
             }
             ProcessOutcome::Cancelled { output, cleanup } => {
-                session.cursor = output.next_cursor;
                 EngineProcessPoll::Cancelled {
                     output: convert_output(output),
                     cleanup: convert_cleanup(cleanup),
                 }
             }
             ProcessOutcome::TimedOut { output, cleanup } => {
-                session.cursor = output.next_cursor;
                 EngineProcessPoll::TimedOut {
                     output: convert_output(output),
                     cleanup: convert_cleanup(cleanup),
@@ -700,7 +892,6 @@ impl ManagedEngineProcessOwner {
                 output,
                 cleanup,
             } => {
-                session.cursor = output.next_cursor;
                 EngineProcessPoll::Lost {
                     pid: last_known.pid,
                     output: convert_output(output),
@@ -712,7 +903,6 @@ impl ManagedEngineProcessOwner {
                 message: failure.message,
             },
         }
-    }
 }
 
 fn settle_pending_starts_from_fence(pending: &mut HashMap<ProcessOwner, bool>, report: &nomi_process_runtime::QuiesceReport) -> bool {
@@ -770,6 +960,24 @@ const fn default_output_limit_bytes() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn released_native_registry_keeps_existing_session_terminal_poll_cursor_readable() {
+        let root=tempfile::tempdir().unwrap();let owner=ManagedEngineProcessOwner::new(root.path(),Default::default()).unwrap();
+        let mut request=EngineProcessRequest::pipe(if cfg!(windows){"powershell.exe"}else{"/bin/sh"});
+        request.args=if cfg!(windows){vec!["-NoProfile".into(),"-NonInteractive".into(),"-Command".into(),"[Console]::Write('beforeafter')".into()]}
+            else {vec!["-c".into(),"printf beforeafter".into()]};
+        let mut session=owner.start(request,CancellationToken::new()).await.unwrap();let control=owner.cancellation_handle(&session);
+        let terminal=tokio::time::timeout(Duration::from_secs(15),control.wait_for_terminal()).await.unwrap().unwrap();
+        assert!(terminal.cleanup_confirmed);assert!(control.release_terminal().await.unwrap());
+        // This is the race before the host map entry is removed: the existing
+        // Session still owns its original witness, not a newly-created process.
+        let full=owner.initial_observation(&mut session,Duration::ZERO,CancellationToken::new()).await.unwrap();
+        let tail=owner.poll_from(&mut session,6,Duration::ZERO,CancellationToken::new()).await.unwrap();
+        let full=serde_json::to_value(full).unwrap();let tail=serde_json::to_value(tail).unwrap();
+        assert_eq!(full["output"]["text"],"beforeafter");assert_eq!(tail["output"]["text"],"after");
+        assert_eq!(full["cleanup"],tail["cleanup"]);assert_eq!(full["output"]["source_encoding"],tail["output"]["source_encoding"]);
+    }
 
     #[test]
     fn session_process_policy_has_no_implicit_deadline_or_idle_expiry() {

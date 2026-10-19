@@ -1,4 +1,6 @@
 use super::*;
+#[path = "native_resume_queue_tests.rs"]
+mod native_resume_queue_tests;
 use crate::{NativeOwnerEvidence, NativeResumePreparation, NativeResumeRequest,
     NativeEffectReconciliationRequest, NativeVerifiedOutcome};
 

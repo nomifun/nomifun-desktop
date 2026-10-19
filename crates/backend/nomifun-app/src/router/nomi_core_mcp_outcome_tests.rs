@@ -40,6 +40,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_transport("http", r#"{"url":"http://127.0.0.1:1/mcp"}"#).await
+    }
+
+    async fn with_transport(transport: &str, configuration: &str) -> Self {
         let owner = uuid::Uuid::now_v7().to_string();
         let database = nomifun_db::init_database_memory_with_owner(
             nomifun_common::UserId::parse(owner.clone()).unwrap(),
@@ -49,8 +53,8 @@ impl Fixture {
         let tools = json!([{"name":"echo","description":"Echo one input",
             "input_schema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]).to_string();
         let row = repository.create(CreateMcpServerParams {
-            name:"outcome-fixture", description:None, enabled:true, transport_type:"http",
-            transport_config:r#"{"url":"http://127.0.0.1:1/mcp"}"#,
+            name:"outcome-fixture", description:None, enabled:true, transport_type:transport,
+            transport_config:configuration,
             tools:Some(&tools), original_json:None, builtin:false,
         }).await.unwrap();
         let tool = super::super::nomi_core_mcp_catalog::server_tools(row).unwrap().remove(0);
@@ -171,6 +175,8 @@ async fn cleanup_uncertainty_keeps_the_observed_result_in_the_original_effect() 
     assert_eq!(payload["cleanup"]["remote"],"unproven");
     assert_eq!(project_owner_outcome(outcome).unwrap_err().canonical_code().as_ref(),"MCP_SESSION_CLEANUP_FAILED");
     assert!(f.host.ensure_settled(&f.session.owner_ref.principal_id,f.session.agent_session_id.as_ref()).await.is_err());
+    assert!(f.host.ensure_shutdown_resources_closed(&f.session.owner_ref.principal_id,f.session.agent_session_id.as_ref()).await.is_err(),
+        "a returned business observation is not proof of the original native cleanup");
 }
 
 #[tokio::test]
@@ -293,6 +299,8 @@ async fn pending_mcp_reconciliation_requires_cleanup_attestation_and_keeps_the_l
     });
     f.store.reconcile_native_effect_by_owner(&f.session.owner_ref,&f.session.agent_session_id,&request).await.unwrap();
     assert!(!f.store.has_unsettled_effects(&f.session.agent_session_id).await.unwrap());
+    assert!(f.host.ensure_shutdown_resources_closed(&f.session.owner_ref.principal_id,f.session.agent_session_id.as_ref()).await.is_err(),
+        "an independent receipt cannot release the original still-live invocation guard");
     assert!(f.host.ensure_settled(&f.session.owner_ref.principal_id,f.session.agent_session_id.as_ref()).await.is_err());
     drop(guard);
     f.host.ensure_settled(&f.session.owner_ref.principal_id,f.session.agent_session_id.as_ref()).await.unwrap();
@@ -317,6 +325,8 @@ async fn historical_missing_cleanup_needs_attestation_and_malformed_cleanup_fail
             correlation_id:effect.effect_id.clone().into(),strategy:effect.strategy,causation_event_id:Some(effect.started_event_id),
             payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(payload)),
         },nomifun_agent_session::EffectTerminalState::Uncertain).await.unwrap();
+        assert!(f.host.ensure_shutdown_resources_closed(&f.session.owner_ref.principal_id,f.session.agent_session_id.as_ref()).await.is_err(),
+            "a historical/malformed receipt is not an original cleanup return");
         f.store.cancel_exact_turn(&f.session.agent_session_id,&f.turn,"cancel-historical-cleanup".into(),"session_api".into()).await.unwrap();
         let mut request = nomifun_agent_session::NativeEffectReconciliationRequest {
             operation_id:f.turn.clone(),expected_pause_revision:0,idempotency_key:"historical-cleanup-confirmation".into(),
@@ -338,4 +348,116 @@ async fn historical_missing_cleanup_needs_attestation_and_malformed_cleanup_fail
             f.host.ensure_settled(&f.session.owner_ref.principal_id,f.session.agent_session_id.as_ref()).await.unwrap();
         }
     }
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_stdio_cancellation_proves_resource_closure_without_authorizing_dispatch_or_resume() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("original-mcp-request.json");
+    let script = root.path().join("original-pending-mcp.ps1");
+    std::fs::write(&script, r#"$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
+$pending=$null
+while($null-ne($line=[Console]::ReadLine())) {
+  $request=ConvertFrom-Json -InputObject $line
+  switch([string]$request.method) {
+    'initialize' {[Console]::WriteLine((@{jsonrpc='2.0';id=$request.id;result=@{protocolVersion=$request.params.protocolVersion;capabilities=@{tools=@{}};serverInfo=@{name='original-owner';version='1'}}}|ConvertTo-Json -Depth 20 -Compress))}
+    'tools/list' {[Console]::WriteLine((@{jsonrpc='2.0';id=$request.id;result=@{tools=@(@{name='echo';inputSchema=@{type='object';properties=@{text=@{type='string'}};required=@('text')}})}}|ConvertTo-Json -Depth 20 -Compress))}
+    'tools/call' {
+      if($null-ne$pending){throw 'Only one original business call is authorized'}
+      $pending=$request.id
+      [IO.File]::WriteAllText($env:NOMI_MCP_ORIGINAL_MARKER,(@{pid=$PID;request_id=$pending;text=$request.params.arguments.text}|ConvertTo-Json -Compress))
+    }
+    'notifications/cancelled' {
+      if([string]$request.params.requestId-eq[string]$pending){
+        [Console]::WriteLine((@{jsonrpc='2.0';id=$pending;error=@{code=-32800;message='Original request cancelled'}}|ConvertTo-Json -Depth 20 -Compress))
+        $pending=$null
+      }
+    }
+  }
+  [Console]::Out.Flush()
+}
+"#).unwrap();
+    let powershell = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    assert!(powershell.is_file());
+    let configuration = json!({"command":powershell,"args":["-NoLogo","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",script],
+        "env":{"NOMI_MCP_ORIGINAL_MARKER":marker}}).to_string();
+    let mut fixture = Fixture::with_transport("stdio", &configuration).await;
+    fixture.host.owner = McpOwnerAdapter::new(Arc::new(McpOwner::new(
+        Arc::new(nomifun_mcp::AnonymousMcpCredentialAuthority),
+        reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build().unwrap(),
+    )));
+    let f = Arc::new(fixture);
+    let checkpoint_state = StrictJsonValue(json!({"version":1,"model_steps":0,"turn_operation_id":f.turn,
+        "active_set_generation":0,"binding":{"agent_session_id":f.session.agent_session_id,
+            "resolved_snapshot_ref":f.session.agent_binding.resolved_snapshot_ref}}));
+    let checkpoint_digest = digest_payload(&checkpoint_state.0).unwrap();
+    let mut checkpoint_event = event(&f.session.agent_session_id, "native-resource-checkpoint", "runtime/progress-recorded", f.turn.as_ref(),
+        Some(f.started.clone()), json!({"producer_seq":1,"event":{"event":"execution_checkpoint_saved","step":0,"revision":1,"digest":checkpoint_digest}}));
+    checkpoint_event.producer_id = "runtime_supervisor".into();
+    let checkpoint = f.store.save_native_checkpoint(&checkpoint_event, nomifun_agent_session::NativeCheckpointWrite {
+        owner:f.session.owner_ref.clone(),operation_id:f.turn.clone(),snapshot:f.session.agent_binding.resolved_snapshot_ref.clone(),
+        active_set_generation:0,expected_revision:0,execution_fence:f.lease.fence(),lease:Some(f.lease.clone()),state:checkpoint_state.clone(),
+    }).await.unwrap();
+    let context = f.call("native-pending").await;
+    let next = f.call("must-not-redispatch").await;
+    let cancellation = context.control.cancellation();
+    let owner = f.clone();
+    let invocation = tokio::spawn(async move {
+        owner.host.invoke(context, StrictJsonValue(json!({"text":"original-native-pending"}))).await
+    });
+    let observed: Value = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if let Ok(bytes) = std::fs::read(&marker) {
+                if let Ok(value) = serde_json::from_slice(&bytes) { break value; }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("the actual stdio child must receive the original tools/call");
+    assert!(observed["pid"].as_u64().unwrap() > 0);
+    assert_eq!(observed["text"], "original-native-pending");
+    assert!(f.host.ensure_shutdown_resources_closed(&f.session.owner_ref.principal_id, f.session.agent_session_id.as_ref()).await.is_err(),
+        "the original live invocation and pending receipt still own cleanup");
+    cancellation.cancel();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(15), invocation).await.unwrap().unwrap().unwrap_err();
+    assert_eq!(error.canonical_code().as_ref(), "MCP_REQUEST_CANCELLED");
+    let effects = f.store.list_effects(&f.session.agent_session_id).await.unwrap();
+    assert_eq!(effects.len(), 1);
+    assert_eq!(effects[0].state, AgentEffectState::Unknown);
+    let payload = effects[0].bounded_observation.as_ref().unwrap();
+    assert_eq!(payload["execution"]["local_process_started"], true);
+    assert_eq!(payload["execution"]["returned"], false);
+    assert_eq!(payload["cleanup"], json!({"local":"confirmed","remote":"not_required","error":null}));
+    let cursor = f.store.current_cursor(&f.session.agent_session_id).await.unwrap();
+    f.host.ensure_shutdown_resources_closed(&f.session.owner_ref.principal_id, f.session.agent_session_id.as_ref()).await.unwrap();
+    let hosted = super::super::hosted_effect_receipts::HostedEffectReceipts::new(f._database.pool().clone());
+    hosted.ensure_shutdown_resources_closed(&f.session.owner_ref.principal_id, f.session.agent_session_id.as_ref()).await.unwrap();
+    assert!(f.host.ensure_settled(&f.session.owner_ref.principal_id, f.session.agent_session_id.as_ref()).await.is_err());
+    assert!(hosted.ensure_settled(&f.session.owner_ref.principal_id, f.session.agent_session_id.as_ref()).await.is_err());
+    let blocked = f.host.invoke(next, StrictJsonValue(json!({"text":"must not restart"}))).await.unwrap_err();
+    assert_eq!(blocked.canonical_code().as_ref(), "MCP_SESSION_UNCERTAIN");
+    assert_eq!(f.store.current_cursor(&f.session.agent_session_id).await.unwrap(), cursor,
+        "physical shutdown observations never settle, reconcile or replay business state");
+    assert_eq!(f.store.list_effects(&f.session.agent_session_id).await.unwrap(), effects);
+    let pause = f.store.pause_native_execution(&f.lease, "NATIVE_RECOVERY_RECONCILIATION_REQUIRED", true).await.unwrap();
+    let head = f.store.head(&f.session.agent_session_id).await.unwrap();
+    let paused_cursor = f.store.current_cursor(&f.session.agent_session_id).await.unwrap();
+    f.host.ensure_shutdown_resources_closed(&f.session.owner_ref.principal_id, f.session.agent_session_id.as_ref()).await.unwrap();
+    let request = nomifun_agent_session::NativeResumeRequest {
+        operation_id:f.turn.clone(),idempotency_key:"do-not-resume-unknown-business".into(),
+        expected_pause_revision:pause.revision,expected_checkpoint_revision:checkpoint.revision,
+        expected_checkpoint_digest:checkpoint.digest,budget:Default::default(),cleanup_attestation:None,
+    };
+    let resumed = f.store.commit_native_resume(&f.session.owner_ref,&f.session.agent_session_id,&request,
+        nomifun_agent_session::NativeResumePreparation {
+            expected_head_seq:head.last_seq,expected_fence:pause.execution_fence,
+            snapshot:f.session.agent_binding.resolved_snapshot_ref.clone(),active_set_generation:head.active_set_generation,
+            checkpoint_state,observations:vec![],
+        }).await;
+    assert!(matches!(resumed, Err(nomifun_agent_session::SessionStoreError::RecoveryRequiresReconciliation)),
+        "native resource cleanup cannot authorize replay of an unknown business operation: {resumed:?}");
+    assert_eq!(f.store.current_cursor(&f.session.agent_session_id).await.unwrap(), paused_cursor);
+    assert_eq!(f.store.list_effects(&f.session.agent_session_id).await.unwrap(), effects);
 }

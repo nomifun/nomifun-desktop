@@ -49,33 +49,28 @@ fn stream_body(tool: Option<(&str, &str, Value)>, text: &str) -> String {
     format!("data: {data}\n\ndata: {done}\n\ndata: [DONE]\n\n")
 }
 
-fn long_helper_command() -> (String, Vec<String>) {
-    if cfg!(windows) {
-        (
-            "powershell.exe".into(),
-            vec![
-                "-NoProfile".into(),
-                "-Command".into(),
-                "[IO.File]::WriteAllText('helper.pid',[string]$PID,[Text.Encoding]::ASCII); Start-Sleep -Seconds 60".into(),
-            ],
-        )
-    } else {
-        (
-            "/bin/sh".into(),
-            vec!["-c".into(), "printf %s $$ > helper.pid; sleep 60".into()],
-        )
+struct HelperRelease(std::path::PathBuf);
+impl Drop for HelperRelease {
+    fn drop(&mut self) {
+        // A failed assertion releases only this fixture's native program.
+        // Production cleanup and the successful path use the exact owner.
+        let _ = std::fs::write(&self.0, b"release");
     }
 }
 
-fn process_exists(pid: u32) -> bool {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
-    let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing(),
-    );
-    system.process(sysinfo::Pid::from_u32(pid)).is_some()
+fn process_tool_result(body: &Value, call_id: &str) -> Option<Value> {
+    body["messages"].as_array()?.iter().rev()
+        .find(|message| message["role"] == "tool" && message["tool_call_id"] == call_id)
+        .map(|message| serde_json::from_str(message["content"].as_str().unwrap()).unwrap())
+}
+
+async fn original_process_resource(router: &Router, session: &str) -> Value {
+    let activities = call(router, "GET", "/api/agent-activities", Value::Null).await;
+    activities["items"].as_array().unwrap().iter()
+        .filter(|item| item["agent_session_id"] == session)
+        .flat_map(|item| item["resources"].as_array().unwrap())
+        .find(|resource| resource["target"]["kind"] == "process_instance")
+        .unwrap_or_else(|| panic!("original live process resource missing: {activities}")).clone()
 }
 
 async fn seed_pending_external_push(
@@ -374,22 +369,34 @@ async fn owner_pause_resume(with_input: bool) {
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
-async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
+async fn pause_retains_the_original_background_process_and_resume_controls_it_without_restart() {
     let root = tempfile::tempdir().unwrap();
     let fixture_root = root.path().canonicalize().unwrap();
     let project = fixture_root.join("project");
     std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("pause-helper.mjs"), r#"import fs from 'node:fs';
+fs.appendFileSync('helper.starts', 'once\n');
+await new Promise(resolve => process.stdout.write(`ORIGINAL_HELPER:${process.pid}\n`, resolve));
+fs.writeFileSync('helper.pid', String(process.pid));
+while (!fs.existsSync('release-helper')) await Bun.sleep(10);
+"#).unwrap();
+    let _helper_release = HelperRelease(project.join("release-helper"));
     let config = AppConfig { data_dir: fixture_root.join("data"), work_dir: fixture_root.join("work"),
         auth_policy: AuthPolicy::TrustLocalToken, local_trust_secret: Some(TRUST.into()), ..Default::default() };
     std::fs::create_dir_all(&config.data_dir).unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let (helper_command, helper_args) = long_helper_command();
+    let original = Arc::new(std::sync::OnceLock::<Value>::new());
+    let resumed = Arc::new(tokio::sync::Notify::new());
+    let finish = Arc::new(tokio::sync::Notify::new());
     let handler_requests = requests.clone(); let handler_entered = entered.clone(); let handler_release = release.clone();
+    let handler_original = original.clone();
+    let handler_resumed = resumed.clone(); let handler_finish = finish.clone();
     let provider = Router::new().route("/v1/chat/completions", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
         let requests = handler_requests.clone(); let entered = handler_entered.clone(); let release = handler_release.clone();
-        let helper_command = helper_command.clone(); let helper_args = helper_args.clone();
+        let original = handler_original.clone();
+        let resumed = handler_resumed.clone(); let finish = handler_finish.clone();
         async move {
             let round = requests.fetch_add(1,Ordering::SeqCst);
             let data = match round {
@@ -398,10 +405,13 @@ async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
                     assert!(body["tools"].as_array().unwrap().iter().any(|tool|tool.pointer("/function/name").and_then(Value::as_str)==Some("start_process")),
                         "the deferred process schema must be discovered before the helper can start");
                     stream_body(Some(("start-helper","start_process",json!({
-                        "command":helper_command,"args":helper_args,"wait_ms":0
+                        "command":"bun","args":["pause-helper.mjs"],"wait_ms":0
                     }))),"")
                 },
                 2 => {
+                    let started = process_tool_result(&body, "start-helper").unwrap();
+                    assert_eq!(started["state"], "running");
+                    original.set(started).unwrap();
                     entered.notify_one();
                     release.notified().await;
                     stream_body(Some(("read-before-pause","read_file",json!({"path":"helper.pid"}))),"")
@@ -410,15 +420,36 @@ async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
                     let encoded = body.to_string();
                     assert!(encoded.contains("start-helper") && encoded.contains("read-before-pause"),
                         "resume lost reconciled process/read history");
-                    stream_body(Some(("replan","update_plan",json!({"explanation":"Verify the marker after pause cleanup",
+                    stream_body(Some(("replan","update_plan",json!({"explanation":"Verify the original live helper after resuming",
                         "plan":[{"step":"Verify helper marker","status":"in_progress"}]}))),"")
                 },
-                4 => stream_body(Some(("read-marker","read_file",json!({"path":"helper.pid"}))),""),
-                5 => stream_body(Some(("close-plan","update_plan",json!({"explanation":"Fresh marker read complete",
+                4 => stream_body(Some(("discover-poll","ToolSearch",json!({"query":"workspace.process/poll"}))),""),
+                5 => stream_body(Some(("poll-original","poll_process",json!({"process_id":original.get().unwrap()["process_id"],"cursor":0,"wait_ms":0}))),""),
+                6 => {
+                    let poll = process_tool_result(&body, "poll-original").unwrap();
+                    let started = original.get().unwrap();
+                    assert_eq!(poll["state"], "running", "pause cannot kill a legitimate background program: {poll}");
+                    assert_eq!(poll["process_id"], started["process_id"]);
+                    assert_eq!(poll["pid"], started["pid"]);
+                    assert!(poll["output"]["text"].as_str().unwrap().contains(&format!("ORIGINAL_HELPER:{}", started["pid"])));
+                    resumed.notify_one();
+                    finish.notified().await;
+                    stream_body(Some(("poll-stopped","poll_process",json!({"process_id":started["process_id"],"cursor":0,"wait_ms":0}))),"")
+                },
+                7 => {
+                    let poll = process_tool_result(&body, "poll-stopped").unwrap();
+                    assert_eq!(poll["process_id"], original.get().unwrap()["process_id"]);
+                    assert_eq!(poll["state"], "cancelled", "only exact user resource Stop ends the helper: {poll}");
+                    assert_eq!(poll["cleanup"]["reaped"], true);
+                    stream_body(Some(("read-marker","read_file",json!({"path":"helper.pid"}))),"")
+                },
+                8 => stream_body(Some(("close-plan","update_plan",json!({"explanation":"Fresh original process and marker observations complete",
                     "plan":[{"step":"Verify helper marker","status":"completed"}]}))),""),
-                6 => stream_body(Some(("report","report_completion",json!({"summary":"Helper marker verified after pause cleanup",
+                9 => stream_body(Some(("report","report_completion",json!({"summary":"Earlier original process observations showed the same helper alive after resume and reaped after the user's Stop. The final marker read confirms its original PID.",
                     "criteria":[{"step":"Verify helper marker","disposition":"supported","evidence_call_ids":["read-marker"],
-                        "requirement_ids":["input_0"],"rationale":"Fresh marker read confirms the helper started before pause"}]}))),""),
+                        "requirement_ids":["input_0"],"rationale":"The fresh marker read confirms the helper's recorded PID"},
+                        {"step":"Original helper lifecycle observations","disposition":"unverified","requirement_ids":["input_0"],
+                        "rationale":"Earlier original process and cleanup observations are reported in the summary; no separate eligible current lifecycle evidence is claimed"}]}))),""),
                 _ => panic!("unexpected process recovery model request {round}"),
             };
             ([(axum::http::header::CONTENT_TYPE,"text/event-stream")], data)
@@ -440,7 +471,7 @@ async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
     let id = session["agent_session_id"].as_str().unwrap();
     let execution = format!("/api/agent-sessions/{id}/execution");
     call(&router,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({"idempotency_key":"process-task",
-        "input":{"content":"Start one helper that writes its PID to helper.pid, then verify the marker and report. Never start it twice."}})).await;
+        "input":{"content":"Start one helper that writes its PID to helper.pid. Keep that exact helper alive across pause and resume, verify its original output, then let the user stop that process and verify the marker. Report after its cleanup is confirmed. Never start it twice."}})).await;
     tokio::time::timeout(Duration::from_secs(30),entered.notified()).await.unwrap();
     let running = call(&router,"GET",&execution,Value::Null).await;
     let marker = project.join("helper.pid");
@@ -462,8 +493,13 @@ async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
             panic!("helper PID marker was never written; original start_process observations: {diagnostics:?}");
         },
     };
-    assert!(process_exists(pid),"managed helper must be live before pause cleanup");
-    let pause = json!({"operation_id":running["operation_id"],"idempotency_key":"pause-process","reason":"inspect cleanup"});
+    assert_eq!(original.get().unwrap()["pid"], pid);
+    let original_resource = original_process_resource(&router, id).await;
+    assert_eq!(original_resource["state"], "active");
+    let original_target = original_resource["target"].clone();
+    assert_eq!(original_target["process_id"], original.get().unwrap()["process_id"]);
+    assert_eq!(original_target["creator_turn_id"], running["operation_id"]);
+    let pause = json!({"operation_id":running["operation_id"],"idempotency_key":"pause-process","reason":"inspect original helper without stopping it"});
     call(&router,"POST",&format!("{execution}/pause"),pause).await;
     release.notify_one();
     let paused = tokio::time::timeout(Duration::from_secs(30),async {
@@ -475,19 +511,53 @@ async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
         }
     }).await.unwrap();
     assert_eq!(paused["pause"]["cleanup_proven"],true);
-    tokio::time::timeout(Duration::from_secs(10),async {
-        while process_exists(pid) { tokio::time::sleep(Duration::from_millis(50)).await; }
-    }).await.expect("pause must reap the managed process tree");
-    let cleanup_seq:i64 = sqlx::query_scalar("SELECT seq FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='host_cleanup_proven'")
+    assert_eq!(paused["checkpoint_retained"], true);
+    let retained_resource = original_process_resource(&router, id).await;
+    assert_eq!(retained_resource["target"], original_target);
+    assert_eq!(retained_resource["state"], "active", "a parked computation is not a reaped Session program");
+    let store = AgentSessionStore::from_pool(app.database.pool().clone()).await.unwrap();
+    let (cleanup_seq, cleanup_id):(i64,String) = sqlx::query_as("SELECT seq,event_id FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='host_cleanup_proven'")
         .bind(id).bind(paused["operation_id"].as_str().unwrap()).fetch_one(app.database.pool()).await.unwrap();
+    let cleanup = store.resolved_event_payloads(&id.to_owned().into(), &[cleanup_id.clone().into()]).await.unwrap();
+    let cleanup = &cleanup[&cleanup_id];
+    let retention: nomifun_agent_contracts::NativeSessionProcessRetention = serde_json::from_value(cleanup["event"]["session_process_retention"].clone()).unwrap();
+    retention.validate().unwrap();
+    assert_eq!(retention.owner_generation, original_target["owner_generation"].as_str().unwrap());
+    assert_eq!(retention.processes.len(), 1);
+    assert_eq!(retention.processes[0].process_id, original_target["process_id"].as_str().unwrap());
+    assert_eq!(retention.processes[0].pid, pid);
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='session/process-reaped'")
+        .bind(id).fetch_one(app.database.pool()).await.unwrap(), 0, "no physical reap may be invented for pause");
     let pause_seq:i64 = sqlx::query_scalar("SELECT seq FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='turn/paused'")
         .bind(id).bind(paused["operation_id"].as_str().unwrap()).fetch_one(app.database.pool()).await.unwrap();
-    assert!(cleanup_seq < pause_seq,"cleanup proof must precede the pause state");
+    assert!(cleanup_seq < pause_seq,"the exact computation cleanup and retained owner handoff must precede pause");
 
     let resume = json!({"operation_id":paused["operation_id"],"idempotency_key":"resume-process",
         "expected_pause_revision":paused["pause"]["revision"],"expected_checkpoint_revision":paused["checkpoint_revision"],
         "expected_checkpoint_digest":paused["checkpoint_digest"],"budget":{}});
     call(&router,"POST",&format!("{execution}/resume"),resume).await;
+    tokio::time::timeout(Duration::from_secs(30), resumed.notified()).await.unwrap();
+    let resumed_resource = original_process_resource(&router, id).await;
+    assert_eq!(resumed_resource["target"], original_target, "resume must retain the original process owner generation and creator");
+    assert_eq!(resumed_resource["state"], "active");
+    let stop = call(&router,"POST","/api/agent-activities/stop",json!({"target":original_target,
+        "idempotency_key":"stop-original-helper-only"})).await;
+    assert_eq!(stop["accepted"], true);
+    let reaped = tokio::time::timeout(Duration::from_secs(30),async {
+        loop {
+            let receipt: Option<String> = sqlx::query_scalar("SELECT event_id FROM agent_events WHERE session_id=? AND kind='session/process-reaped'")
+                .bind(id).fetch_optional(app.database.pool()).await.unwrap();
+            if let Some(event) = receipt {
+                let payloads = store.resolved_event_payloads(&id.to_owned().into(), &[event.clone().into()]).await.unwrap();
+                break serde_json::from_value::<nomifun_agent_contracts::SessionProcessReapedV1>(payloads[&event].clone()).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("the original native capability must prove this resource's actual cleanup");
+    reaped.validate().unwrap();
+    assert_eq!(reaped.retention, retention);
+    assert_eq!(reaped.output_archive.as_ref().unwrap().terminal.0["cleanup"]["reaped"], true);
+    finish.notify_one();
     let completed = tokio::time::timeout(Duration::from_secs(30),async {
         loop {
             let state = call(&router,"GET",&execution,Value::Null).await;
@@ -496,12 +566,13 @@ async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }).await.unwrap();
+    assert_eq!(completed["operation_id"], paused["operation_id"]);
     assert!(completed["execution_generation"].as_u64().unwrap() > paused["execution_generation"].as_u64().unwrap());
-    assert!(!process_exists(pid));
     let starts:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='tool_started' AND json_extract(inline_json,'$.event.action_id')='workspace.process/start'")
         .bind(id).fetch_one(app.database.pool()).await.unwrap();
     assert_eq!(starts,1,"resume must not replay the completed process start");
-    assert_eq!(requests.load(Ordering::SeqCst),7);
+    assert_eq!(std::fs::read_to_string(project.join("helper.starts")).unwrap(), "once\n");
+    assert_eq!(requests.load(Ordering::SeqCst),10);
     for (kind,count) in [("turn/started",1i64),("turn/paused",1),("turn/resume-authorized",1),("turn/completed",1),("turn/failed",0)] {
         let actual:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind=?")
             .bind(id).bind(kind).fetch_one(app.database.pool()).await.unwrap();

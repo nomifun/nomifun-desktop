@@ -37,4 +37,6 @@ pub struct CronRunReservationRow {
     /// job before settling this row without persisting the applied run id.
     pub job_projection_state: String,
     pub job_projected_at_ms: Option<TimestampMs>,
+    /// Durable fence on this exact occurrence, including before Turn claim.
+    pub cancel_requested_at_ms: Option<TimestampMs>,
 }

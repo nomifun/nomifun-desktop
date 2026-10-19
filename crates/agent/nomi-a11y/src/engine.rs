@@ -184,6 +184,8 @@ impl Default for ObserveOpts {
 /// silent no-op.
 #[derive(Debug, thiserror::Error)]
 pub enum A11yError {
+    #[error("accessibility operation cancelled before native dispatch")]
+    CancelledBeforeDispatch,
     /// The requested capability/action is unavailable before any mutation was
     /// admitted. Only this explicit rejection can authorize a guarded input
     /// fallback; an arbitrary backend error does not prove zero effect.
@@ -239,6 +241,14 @@ pub trait A11yEngine: Send + Sync {
         generation: SnapshotGen,
         action: ElementAction,
     ) -> Result<Effect, A11yError>;
+
+    /// Retain the same request/result owner. A queued mutator may be withdrawn
+    /// before its actor begins native work; an admitted request is still joined.
+    fn invoke_controlled(&self, target: &Target, generation: SnapshotGen, action: ElementAction,
+        cancellation: &tokio_util::sync::CancellationToken) -> Result<Effect, A11yError> {
+        if cancellation.is_cancelled() { return Err(A11yError::CancelledBeforeDispatch); }
+        self.invoke(target, generation, action)
+    }
 
     /// Raise/activate a window by its owning process id.
     fn focus_window(&self, pid: i32) -> Result<Effect, A11yError>;

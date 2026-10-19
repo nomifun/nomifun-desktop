@@ -3,9 +3,11 @@ import { Loading, Pause } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { ExecutionId } from '@/common/types/ids';
+import type { TExecutionAutomationControl } from '@/common/types/agentExecution/agentExecutionTypes';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { isTerminalExecutionStatus } from './executionStatusMeta';
 import { refreshOnVersionConflict } from './refreshOnVersionConflict';
+import AutomationRunStopControl from './AutomationRunStopControl';
 
 /** Cancels the exact collaboration, including queued or suspended attempts. */
 const ExecutionStopControl: React.FC<{
@@ -15,12 +17,15 @@ const ExecutionStopControl: React.FC<{
   refetch: () => Promise<void>;
   disabled?: boolean;
   onBusyChange?: (busy: boolean) => void;
-}> = ({ executionId, executionVersion, status, refetch, disabled = false, onBusyChange }) => {
+  automationControl?: TExecutionAutomationControl | null;
+}> = ({ executionId, executionVersion, status, refetch, disabled = false, onBusyChange, automationControl }) => {
   const { t } = useTranslation();
   const [message, messageContext] = useArcoMessage();
   const [stopping, setStopping] = useState(false);
   const [confirmedCancelledId, setConfirmedCancelledId] = useState<ExecutionId | null>(null);
   const inFlight = useRef(false);
+  if (automationControl) return <AutomationRunStopControl key={executionId} control={automationControl}
+    status={status} refetch={refetch} disabled={disabled} onBusyChange={onBusyChange} />;
   if (!status || isTerminalExecutionStatus(status) || confirmedCancelledId === executionId) return <>{messageContext}</>;
 
   const stop = async () => {

@@ -77,6 +77,24 @@ fn failure() -> AppError {
     )
 }
 
+/// Canonical resource proof shared by Runtime and Browser retirement. This
+/// only separates an exact MCP owner's closed resources from Unknown business
+/// state; every other pending/unknown Effect remains a fence.
+pub(super) async fn ensure_original_effect_resource_cleanup(
+    store: &AgentSessionStore, session: &AgentSessionId,
+) -> Result<(), AppError> {
+    if !store.has_unsettled_effects(session).await.map_err(|_| failure())? {
+        return Ok(());
+    }
+    for effect in store.list_effects(session).await.map_err(|_| failure())? {
+        if matches!(effect.state, nomifun_agent_session::AgentEffectState::Pending | nomifun_agent_session::AgentEffectState::Unknown)
+            && !super::mcp_effect_receipts::original_mcp_resources_closed(&effect)? {
+            return Err(failure());
+        }
+    }
+    Ok(())
+}
+
 fn admission_failure(stage: &'static str) -> AppError {
     // Stage names identify the failed authority check without exposing model
     // arguments, paths, connection proofs, credentials or Session payloads.
@@ -486,6 +504,15 @@ impl HostedEffectReceipts {
         Ok(())
     }
 
+    /// Resource-owner teardown can separate an original MCP owner's
+    /// proven resource cleanup from its still-unknown external business result.
+    /// Admission, context reconstruction and checkpoint resume remain strict.
+    pub(crate) async fn ensure_shutdown_resources_closed(&self, user: &str, session: &str) -> Result<(), AppError> {
+        let store = self.store().await?;
+        let session_id = self.owned_session(&store, user, session).await?;
+        ensure_original_effect_resource_cleanup(&store, &session_id).await
+    }
+
     pub(crate) async fn context(
         &self,
         user: &str,
@@ -883,6 +910,8 @@ mod tests {
         let receipt = fixture.begin().await.unwrap();
         drop(receipt);
         assert!(fixture.receipts.ensure_settled(&fixture.session.owner_ref.principal_id, fixture.session.agent_session_id.as_ref()).await.is_err());
+        assert!(fixture.receipts.ensure_shutdown_resources_closed(&fixture.session.owner_ref.principal_id, fixture.session.agent_session_id.as_ref()).await.is_err(),
+            "a missing original owner return cannot be replaced by an empty native map");
         assert!(fixture.begin().await.is_err());
         let effect = fixture.store.list_effects(&fixture.session.agent_session_id).await.unwrap().pop().unwrap();
         assert_eq!(effect.state, AgentEffectState::Pending);
@@ -981,6 +1010,31 @@ mod tests {
         assert_eq!(receipt.request.strategy,EffectStrategy::ExternalUncertainEffect);
         fixture.receipts.returned(receipt,&json!({"acknowledged":true})).await.unwrap();
         assert!(fixture.receipts.context(&fixture.session.owner_ref.principal_id,fixture.session.agent_session_id.as_ref()).await.unwrap().unwrap().contains("robot/move"));
+        fixture.database.close().await;
+    }
+
+    #[tokio::test]
+    async fn hard_shutdown_cannot_borrow_mcp_cleanup_fields_for_another_effect_owner() {
+        let fixture = fixture("robot/move").await;
+        let operation = OperationId::from("original-unknown-robot-operation");
+        let started = fixture.store.read_events(&fixture.session.agent_session_id,None,100).await.unwrap().events
+            .into_iter().find(|event| event.kind.0 == "turn/started").unwrap().event_id;
+        fixture.store.append_event(&event(&fixture.session.agent_session_id,"unknown-robot-tool","tool/call-started",
+            operation.as_ref(),Some(started),json!({"operation_id":operation,"capability_id":"robot","action_id":"robot/move"}))).await.unwrap();
+        let receipt = fixture.receipts.begin(&fixture.session.owner_ref.principal_id,fixture.session.agent_session_id.as_ref(),
+            operation.as_ref(),"robot","robot/move",&json!({}),Domain::Robot).await.unwrap();
+        fixture.receipts.finish(receipt, EffectTerminalState::Uncertain, json!({
+            "execution":{"request_dispatched":true,"local_process_started":true,"cancellation_requested":true,
+                "returned":false,"error":{"code":"ORIGINAL_OWNER_UNKNOWN","message":"Unresolved original application operation"}},
+            "cleanup":{"local":"confirmed","remote":"not_required","error":null},
+        })).await.unwrap();
+        let before = fixture.store.list_effects(&fixture.session.agent_session_id).await.unwrap();
+        assert_eq!(before[0].state, AgentEffectState::Unknown);
+        assert!(fixture.receipts.ensure_shutdown_resources_closed(&fixture.session.owner_ref.principal_id,
+            fixture.session.agent_session_id.as_ref()).await.is_err());
+        assert!(fixture.receipts.ensure_settled(&fixture.session.owner_ref.principal_id,
+            fixture.session.agent_session_id.as_ref()).await.is_err());
+        assert_eq!(fixture.store.list_effects(&fixture.session.agent_session_id).await.unwrap(), before);
         fixture.database.close().await;
     }
 

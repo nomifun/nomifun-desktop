@@ -32,7 +32,7 @@ pub use case_convert::{camel_to_snake, normalize_keys_to_snake_case};
 pub use constants::NOMI_AGENT_ID;
 pub use idempotency::{MAX_IDEMPOTENCY_KEY_LEN, is_visible_ascii_key, required_idempotency_key};
 pub use agent_execution::{
-    AdaptationPolicy, AgentExecutionActor, AgentExecutionActorType, AgentExecutionEventKind,
+    AdaptationPolicy, AgentExecutionActor, AgentExecutionActorType, AgentExecutionCancellationScope, AgentExecutionEventKind,
     AgentExecutionReceipt, AgentExecutionStatus, AgentStepMode, AgentToolPolicy, ConversationExecutionRelation, DecisionPolicy,
     DelegationPolicy, ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus,
     ParticipantAssignmentSource, StepFailurePolicy, UnknownAgentExecutionValue,

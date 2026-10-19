@@ -62,10 +62,13 @@ impl ConversationEffects for ProductionConversationEffects {
             attempt_id:request.attempt_id.clone().ok_or_else(||AppError::Conflict("input request has no Attempt".into()))?};
         self.session.notify_execution_input_required_idempotent(owner_id,&input).await
     }
-    async fn cancel_attempt(&self, owner_id: &str, conversation_id: &str) -> Result<(), AppError> {
-        self.session
-            .cancel_for_execution(owner_id, conversation_id)
-            .await
+    async fn cancel_attempt(&self, cleanup: &nomifun_db::PendingConversationCleanup) -> Result<(), AppError> {
+        let target=match &cleanup.target {
+            nomifun_db::ConversationCleanupTurnTarget::Exact {operation_id}=>operation_id,
+            nomifun_db::ConversationCleanupTurnTarget::Unconfirmed {reason}=>return Err(AppError::Conflict(reason.clone())),
+        };
+        self.session.cancel_attempt_for_execution(&cleanup.user_id, &cleanup.conversation_id,
+            &cleanup.attempt_id, target).await
     }
     async fn steer_attempt(
         &self,
@@ -230,7 +233,7 @@ impl AgentExecutionEngine {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
     use nomifun_api_types::{
@@ -252,6 +255,27 @@ mod tests {
         reads: Mutex<Vec<(String, String, Option<String>)>>,
         reports: Mutex<Vec<(String, String, String, String, AgentExecutionReport)>>,
         inputs: Mutex<Vec<(String, AgentExecutionInput)>>,
+    }
+
+    pub(crate) fn planning_engine(pool: nomifun_db::SqlitePool, planner: Arc<dyn PlanProducer>,
+        lifecycle: AgentExecutionLifecycle, data_dir: PathBuf) -> AgentExecutionEngine {
+        struct Sink;
+        impl UserEventSink for Sink {
+            fn send_to_user(&self, _: &str, _: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+        }
+        let repository = Arc::new(SqliteAgentExecutionRepository::new(pool.clone()));
+        let session = Arc::new(RecordingSessionPort::default());
+        AgentExecutionEngine::from_dependencies(AgentExecutionEngineDeps::new(
+            repository.clone(),
+            Arc::new(nomifun_db::SqliteAgentExecutionTemplateRepository::new(pool.clone())),
+            Arc::new(nomifun_db::SqliteProviderRepository::new(pool.clone())),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone())),
+            Arc::new(nomifun_db::SqliteProviderModelCapabilityRepository::new(pool)),
+            planner, Arc::new(AgentSessionAttemptRunner::new(session.clone())),
+            Arc::new(ProductionConversationEffects { session: session.clone(), repository }),
+            AgentExecutionEventPublisher::new(Arc::new(Sink)).with_lifecycle(lifecycle.clone()),
+            data_dir, lifecycle, session,
+        ))
     }
 
     #[async_trait]
@@ -279,7 +303,7 @@ mod tests {
             panic!("report must not read mutable Session configuration")
         }
         fn take_turn_tokens(&self, _: &str) -> Option<i64> { panic!("report must not consume runtime state") }
-        async fn cancel_for_execution(&self, _: &str, _: &str) -> Result<(), AppError> {
+        async fn cancel_attempt_for_execution(&self, _: &str, _: &str, _: &str, _: &str) -> Result<(), AppError> {
             panic!("report must not cancel a successor Turn")
         }
         async fn cancel_turn_for_execution(&self, _: &str, _: &str, _: &str,
@@ -342,6 +366,7 @@ mod tests {
         let repository = Arc::new(SqliteAgentExecutionRepository::new(database.pool().clone()));
         let row = repository.get_execution(&owner, &execution).await.unwrap().unwrap();
         let detail = AgentExecutionDetail {
+            automation_control:None,
             execution: crate::domain_mapper::execution(row, Some(source.agent_session_id.clone())).unwrap(),
             participants: vec![], steps: vec![], dependencies: vec![],
             attempts: vec![ExecutionAttempt {

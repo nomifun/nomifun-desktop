@@ -16,6 +16,7 @@ pub mod linux_wayland_input;
 #[cfg(target_os = "linux")]
 pub mod linux_pipewire;
 mod macos_main;
+mod native_control;
 pub mod permissions;
 pub mod scale;
 pub mod screen;

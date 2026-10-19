@@ -26,10 +26,11 @@ import { DESKTOP_SCHEDULED_TASK_COLUMNS } from './scheduledTaskLayout';
 import ScheduledTaskActions from './ScheduledTaskActions';
 import { getConversationCreateErrorMessage } from '@renderer/pages/conversation/utils/conversationCreateError';
 import NomiPagination from '@/renderer/components/base/NomiPagination';
+import AgentActivities from './AgentActivities';
 
 const DEFAULT_PAGE_SIZE = 20;
 
-const ScheduledTasksPage: React.FC = () => {
+const ScheduledPlansPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -53,6 +54,7 @@ const ScheduledTasksPage: React.FC = () => {
     const next = new URLSearchParams(searchParams);
     next.delete('create');
     next.delete('conversation_id');
+    next.set('view', 'scheduled');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
@@ -376,6 +378,27 @@ const ScheduledTasksPage: React.FC = () => {
       </div>
     </div>
   );
+};
+
+const ScheduledTasksPage: React.FC = () => {
+  const { t } = useTranslation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const plans = searchParams.get('view') === 'scheduled' || searchParams.has('create');
+  const select = (view: 'activity' | 'scheduled') => {
+    const next = new URLSearchParams(searchParams);
+    next.set('view', view);
+    setSearchParams(next);
+  };
+  return <div className='w-full min-h-full overflow-y-auto'>
+    <div className='mx-auto flex max-w-800px gap-8px px-40px pt-24px box-border' role='tablist'>
+      <Button role='tab' aria-selected={!plans} type={plans ? 'secondary' : 'primary'} onClick={() => select('activity')}>{t('cron.activity.tab')}</Button>
+      <Button role='tab' aria-selected={plans} type={plans ? 'primary' : 'secondary'} onClick={() => select('scheduled')}>{t('cron.activity.plans')}</Button>
+    </div>
+    {plans ? <ScheduledPlansPage /> : <div className='mx-auto max-w-800px box-border px-40px py-24px'>
+      <h1 className={HUB_PAGE_TITLE_CLASS}>{t('cron.activity.title')}</h1>
+      <AgentActivities />
+    </div>}
+  </div>;
 };
 
 export default ScheduledTasksPage;

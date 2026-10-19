@@ -2,8 +2,9 @@
 //!
 //! The store attaches to the shared canonical Agent Store SQLite root and owns
 //! Session, Turn, Event, Effect, Payload and Resource facts plus rebuildable projections.
-//! It depends only on the frozen `nomifun-agent-contracts` vocabulary and
-//! general-purpose infrastructure crates.
+//! It uses the frozen `nomifun-agent-contracts` vocabulary and the existing
+//! database transaction guards for linked Execution admission. Neither side
+//! copies the other's execution facts or creates another runtime loop.
 
 #![forbid(unsafe_code)]
 
@@ -34,6 +35,7 @@ pub use store::{
     CommittedNativeToolCallCausation, CommittedToolCallCausation, NativeExecutionScope,
     NativeExecutionInspection, NATIVE_RECOVERY_BLOCKED,
     NativePauseState, NativeResumeRequest, NativeOwnerEvidence, NativeResumeReceipt, NativeResumePreparation,
+    NativeResumeRequestReceipt, PendingNativeResumeRequest, NativeResumeCommandReceipt,
     NativeVerifiedOutcome, NativeEffectReconciliationRequest, NativeEffectReconciliationCandidate, NativeEffectReconciliationCandidates,
 };
 pub use types::*;

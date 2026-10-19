@@ -47,7 +47,11 @@ pub enum AttachError {
 /// invalidate and dispose our socket. Disconnect is terminal for this object.
 pub struct AttachedBrowser {
     state: std::sync::Arc<Mutex<AttachedState>>,
-    operations: std::sync::Arc<tokio::sync::Mutex<()>>,
+    // Readers are exact native operations; the disconnect writer joins all
+    // of them before disposing the transport. Target/input locks are separate.
+    operations: std::sync::Arc<tokio::sync::RwLock<()>>,
+    targets: Mutex<std::collections::BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    inputs: std::sync::Arc<tokio::sync::Mutex<()>>,
     incarnation: String,
     browser_identity: [u8; 32],
     chromium_major: u32,
@@ -145,7 +149,9 @@ impl AttachedBrowser {
                     #[cfg(test)]
                     retirement_pause: None,
                 })),
-                operations: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                operations: std::sync::Arc::new(tokio::sync::RwLock::new(())),
+                targets: Mutex::new(Default::default()),
+                inputs: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 incarnation: nomifun_common::generate_id(),
                 browser_identity: {
                     use sha2::Digest;
@@ -167,6 +173,15 @@ impl AttachedBrowser {
 
     pub fn chromium_major(&self) -> u32 {
         self.chromium_major
+    }
+
+    fn target_operation(&self, target: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut targets = self.targets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        targets.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = targets.get(target).and_then(std::sync::Weak::upgrade) { return gate; }
+        let gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        targets.insert(target.to_owned(), std::sync::Arc::downgrade(&gate));
+        gate
     }
 
     pub fn is_connected(&self) -> bool {
@@ -232,7 +247,7 @@ impl AttachedBrowser {
                     }
                     // Input/preparation owns the gate; reply-drain and dialog
                     // observers also retain explicit receipts beyond that gate.
-                    let _operations = operations.lock().await;
+                    let _operations = operations.write().await;
                     connection.shutdown().await;
                     // Dispose the sink even without a WebSocket Close ACK.
                     drop(connection);

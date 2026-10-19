@@ -184,12 +184,21 @@ export type TExecutionAttempt = {
   updated_at: number;
 };
 
+/** Read-only identity from the original AutoWork source; never infers source state. */
+export type TExecutionAutomationControl = {
+  root_step_id: ExecutionStepId | null;
+  lead_conversation_id: ConversationId;
+  requirement_id: string;
+  claim_generation: number;
+};
+
 export type TAgentExecutionDetail = {
   execution: TAgentExecution;
   participants: TExecutionParticipant[];
   steps: TExecutionStep[];
   dependencies: TExecutionStepDependency[];
   attempts: TExecutionAttempt[];
+  automation_control?: TExecutionAutomationControl | null;
 };
 
 export type TAgentExecutionEvent = {
@@ -250,6 +259,8 @@ export type TVersionedExecutionStepCommand = {
   expected_step_version: number;
 };
 export type TRetryExecutionStep = TVersionedExecutionStepCommand;
+export type TExecutionCancellationScope = 'task' | 'delegated_work' | 'task_and_delegated';
+export type TCancelExecutionStep = TVersionedExecutionStepCommand & { scope: TExecutionCancellationScope };
 export type TAdoptExecutionStepOutput = TVersionedExecutionStepCommand;
 export type TReassignExecutionStep = TVersionedExecutionStepCommand & {
   participant_id: ExecutionParticipantId;

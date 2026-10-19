@@ -282,8 +282,7 @@ impl NomiCoreSessionOwner {
     }
 
     pub(super) fn companion_lifecycle_lock(&self, companion_id: &str) -> Arc<tokio::sync::RwLock<()>> {
-        self.companion_lifecycle_locks.entry(companion_id.to_owned())
-            .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(()))).clone()
+        self.companion_lifecycle_locks.get(companion_id)
     }
 
     pub(super) async fn canonical_companion_session_ids(&self, owner_id: &str, companion_id: &str,

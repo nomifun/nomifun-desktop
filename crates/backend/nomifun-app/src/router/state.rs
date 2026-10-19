@@ -1124,6 +1124,9 @@ fn build_system_state_with_agent_cleanup(
 }
 
 impl nomifun_cron::CronBackgroundTaskRegistrar for BackgroundTaskRegistry {
+    fn shutdown_signal(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        nomifun_conversation::BackgroundTaskRegistrar::shutdown_signal(self)
+    }
     fn register(&self, task: tokio::task::JoinHandle<()>) {
         BackgroundTaskRegistry::register(self, task);
     }

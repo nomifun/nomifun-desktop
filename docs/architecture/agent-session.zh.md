@@ -99,8 +99,10 @@ Windows 显式 native 文件修改的目标证明保存在原 Effect started 的
 
 回写状态从原 operation 的 canonical Turn summary 投影，实时帧只更新该原回合的展示；它
 不发布第二次 `turn.completed`，不改变后继回合的忙碌状态。精确取消只命中原取消收据的
-operation。清空上下文在原 Session 操作围栏内取消并等待回写退出；Session 绑定切换、删除、
-淘汰和关闭通过统一 session teardown 取消、join 全部回写后才释放资源。文件原子发布已经
+operation。清空上下文在原 Session 操作围栏内取消并等待回写退出；Session 绑定切换、删除及
+明确关闭通过统一 session teardown 取消、join 全部回写后才释放资源。保留 Session 后台责任的
+软 Runtime 退休关闭该载体的新回写准入，等待原回写自然结算，不因主 Turn 完成或释放 Runtime
+而取消它。文件原子发布已经
 开始时等待真实结果，不能把取消请求当作“未写入”证明。启动在开放 routes 前把前进程
 未结算的回写标记为中断、保留已确认结果，不自动重放提炼或文件写入。
 
@@ -259,7 +261,9 @@ receipt 的重试中核对原事实、当前绑定和上下文边界，模型或
 初始 `wait_ms` 只限定一次观察，观察结束返回原句柄，不杀进程或重跑命令。
 `timeout_ms` 为可选的真实任务执行期限，省略时没有默认的 5/10 分钟期限或用户静默租约。
 显式期限继续生效；第三方授权码、程序自身期限与用户回复时间分开，不能承诺外部链接永久有效。
-Turn 结算关闭本轮准入并等待已派发调用，Session teardown 才真正取消、join 与 reap 后台进程。
+Turn 结算关闭本轮准入并等待已派发调用，保留合法后台进程；用户还可从宿主按原 owner generation、
+process ID 与 creator Turn/call 精确结束单个进程。该信号使用 spawn 时捕获的原 native capability，
+不等待另一进程的长 poll 所持业务锁，不升级成 Session 或整个 Execution 取消。
 保留 Session 资源以原 `host_cleanup_proven` 中的 typed retention 明确区分于 reap；
 真实 owner 清理后才追加同一事实链的 `session/process-owner-released`，核验完整原资源集合、
 代次及真实 reap 回执。该事实仅结算对应资源围栏，不授予重放权限，也不增加资源生命周期表。
@@ -267,8 +271,64 @@ Turn 结算关闭本轮准入并等待已派发调用，Session teardown 才真�
 
 Session 的 64 个进程上限只约束仍活动或尚无清理证明的句柄。原 first-party launch 与同一事实链
 已提交的终态、真实 reap 回执共同证明结束后，才可释放内存句柄配额；历史结果保留，旧句柄不重建。
+原 Supervisor 的 terminal watch 唤醒 Session 资源 owner，在主 Turn／Runtime 之外结算
+`session/process-reaped`，只扣除同代际的单个原进程，不把部分 reap 当作 whole-owner release。
+原 first-party ToolResult 已有终态时只引用其 Event；否则保存原 native terminal。
+活动 Turn 尚未提交 retention 时，原 `host_process_dispatch` 的 typed `process_owner` 可提供
+spawn 时冻结的 owner generation 与 resource binding digest；它必须与原返回的 start ToolResult、
+Effect、creator、Turn Snapshot 和 native FrozenOutput 精确一致，才允许真实结束后的归档。
+旧 dispatch 缺少该字段时仍须原 retention 或终态 ToolResult，不从当前绑定、PID 或时间推断。
+释放最后句柄之前，原 Event/Payload 链保存原 bounded raw output、逐流 decoder 和 cursor 状态；后继 Runtime 按当前与创建权限
+只读原输出，不重建进程或重放输入。写入失败保留原 witness 与重试；自然结束后空 Scope 仅释放
+确切缓存实例，不永久关闭 Session 准入。应用 Quit 即使已关闭 background watch，也由原 cleanup
+完成输出归档后才确认释放，不能丢失最后 stdout。
+归档后还消费原 Supervisor 的 exact terminal release：核对原 owner、真实终态和零原生在途操作，
+只移除这个已结束的 native registry owner，不等下一次容量淘汰，也不关闭同 Scope 的合法长兄弟。
+原 witness／FrozenOutput 仍可只读；native 登记已无本身不替代真实 reap 证明。
+已封口的 reap、creator 与原因果链按 portable 事实校验；本机不能解码另一平台的原输出时，
+不把物理资源重新判为未释放，也不阻断清理／迁移。具体字节回放继续要求原 decoder，明确失败，
+不以 flattened text 切片或重启命令替代。
+纯 native 输出归档使用同一 `agent_payloads` 的原始字节块：`session/process-reaped` 保存
+原终态元数据、完整归档摘要和有序 Payload 引用，每块保持原单 Payload 大小上限。
+完整文本由原 FrozenOutput 按原 cursor 解码，不在根回执中重复保存。
+只有原 reap writer 在核验 creator、Snapshot、实际 terminal／cleanup 后，才能在同一事务中写入
+专用归档 carrier 与 manifest；普通 Payload 请求不能凭 media type 绕过预算。
+这些纯观察字节与回执元数据不消耗模型／上下文 allowance，原 ToolResult 和模型内容仍消费原预算。
+显式输出读取核验同 Session、原块身份、次序、长度与完整摘要；缺块或损坏拒绝回放。
+物理 reap 的 portable 证明仍来自原终态和原因果，不因归档字节缺失而复活 native owner。
+归档块随原 Session 一起参与清除／删除、数据库快照备份及 dataset reset；不另建文件账本或运行权限。
 Session 删除与应用关闭直接清理共享资源 owner，即使当前没有 Runtime；重启后原 owner 无法证明时，
 拒绝新的进程操作而不妨碍普通聊天，不接管旧 PID、不自动重启命令。
+
+MCP 的外部业务结果与本机资源清理分别核验。原调用已 join，原 MCP owner 不再持有在途工作，
+且同一 canonical Effect 的原 cleanup 明确证明本机资源关闭时，Turn／Runtime teardown 可完成；
+外部结果仍保持 Unknown，`host_cleanup_proven` 不表示结果已知或已回滚。
+派发、上下文与 checkpoint resume 继续拒绝该未知效果，缓存和退休均不得触发重跑。
+缺失、损坏、未返回的清理证明及其他 domain 的未知效果不能借用此 MCP 证明。
+取消终态使用专门的原生结算入口：在同一 writer 事务内核验原 holder、fence、generation、
+原 Turn start 和本代 `host_cleanup_proven`，允许原 active Turn 从 reconciliation 收束为取消。
+它不经过新工作准入，也不放宽通用事件／观察入口；未知效果保持原样，写失败仍由原 journal 重试同一终态。
+宿主活动控制按原 Operation 的 1024 UTF-8 字节合同保留精确身份（含合法 Unicode），
+不能误用控制请求幂等键的 128 字节上限，或截短目标去停止另一个任务。
+
+独立 SSH 资源关闭按原 Session／host、pool instance UUID 与 link instance 捕获原 capability，
+先在同一事实链写 `session/ssh-link-close-requested`，再关闭精确链接准入并由原 pool drain／close。
+用户关闭还向原 shell 发单调退休信号；原 run 保留自己的 channel/receiver，发送 INT／ETX 并排空
+到新的内部 sentinel，再把原 receiver 留给 close 收真实退出证明。等待命令锁、发送窗口或输出时
+不需排在长命令预算之后；未知命令结果保留原 partial output，不能用请求中断或探针成功补造业务成功。
+退休后的链接不能经自动 recovery 创建新 shell；已在途的开通和被替换的旧 shell 仍由同一链接登记，
+只有各原 native close 的真实证明都成立，才确认该链接已释放。dial／SFTP 等仍由各原操作结算，
+原库没有中断证明时保留真实 pending／unknown。
+临时 sudo shell 在实际创建时登记到原 handle，退出时仅凭真实 close proof 自动退休；用户关闭会
+通知主 shell 和全部临时 shell。Session／Quit 批量关闭先关准入并发出这些精确信号，再等待原
+producer drain 和在途 dial 的真实交接。被动 supervisor 等待可唤醒，真实连接／开通 Future 则由
+原 owner join；不使用 abort 丢弃它们。旧通道、失败初始化和此前 Lost 责任都保留在原 pool，
+不能以新连接的成功或空 live map 覆盖。批量 observer 离开后原 close／最终 inventory sweep 仍收束，
+同一次关闭的重试读取原结果。
+原 native 的 Reaped、Lost、AlreadyDown 分别写入 `session/ssh-link-closed`，只有 Reaped 证明远端
+shell 退出。重启后旧 pool 不存在时，pending／unknown 仍可见，不拨新连接来冒充旧清理；
+原请求不关闭整个 Session，也不影响后继链接。cwd、env 与打开文件是合法跨 Turn SSH 责任，
+不能仅以零 active action、一次 Turn 结束或闲置把连接判为可重建。
 
 ### 用户输入交接
 
@@ -306,6 +366,12 @@ AgentExecution、Cron、IDMM 和普通界面消费同一 typed 交接。确切�
 不转成失败或重试。领域取消与直接取消原关联 Session 沿同一 canonical 取消事实收敛；
 仍在原 Turn 等待资源时保持非终态。
 Cron 原后台收据消费者贯穿等待及暂停，冻结已剩余的观察时限，直到原确切 Turn 结算。
+定时任务的“仅停本次”由原 Cron owner 接收 owner/job/run，持久记录该原 reservation 的取消时间；
+不从 job 的最新 Session 或最新配置推断目标，也不禁用或重写后续计划。Stop 不排在普通 job 控制 FIFO 后，
+原 host task 在调用者离开后仍向精确 keyed Turn 发出 canonical 取消及 native 信号。
+同一取消事实在 attach、正式 Turn 准入和最终 native claim/resume writer 中封住后续执行；
+重启只接续原收据消费与清理，不再次发送输入。未准入的本次按 cancelled 结算，已准入的本次等待原 Turn 收据；
+调用已接受、Turn 终态与原 native owner 已退出分别报告，不能从取消请求推断物理资源已释放。
 重启从原 reservation 与 active-runs 围栏重挂只读收据消费者，不新建 invocation、Turn 或账本，
 不重新 prepare/send；终态继续通过原 CAS 只结算一次并恢复正常调度。
 宿主重启后不能以等待事件证明进程存活；原 owner 无法验证时进入恢复或对账，
@@ -406,6 +472,21 @@ Host 从同一 canonical 事件链派生未消费输入；活动 Turn 在安全�
 活动 Turn，后台进程停止由原资源 owner 独立处理。关闭回合不删除 Session 上下文。
 公开技术暂停仍受原 Operation、checkpoint、build、Snapshot 与观察 cursor 限定，
 不从展示原因或用户文字补造清理证明、额外预算及恢复权限。
+用户 native pause 只收束计算边界与已派发调用，不取消已交由原独立 Session owner 的合法后台进程。
+`host_cleanup_proven` 携带原 typed process retention 时，证明本轮调用已收束且原句柄责任仍在，
+不证明进程已退出或 Session 资源已物理释放；继续沿原 owner generation、process ID 和创建权限控制同一进程。
+未登记的启动、清理 panic 和未证实的原生清理仍阻止清理证明；未结算 Effect 继续阻止业务执行与恢复。
+原 MCP 资源关闭证明只允许资源收束，不解除外部业务 Unknown。
+明确资源 Stop、Session 删除及应用退出继续由原 owner 精确取消、join 和提交真实 reap。
+
+技术暂停的继续在清除原 pause 的同一 canonical writer 事务内重新验证原 Execution／Participant
+预约和委派停止围栏。容量暂不可用时，原 `turn/resume-requested` 保存确切继续请求；响应为
+`queued`，Turn 仍暂停，checkpoint、模型进度和预算额度不变。原 Session owner 等待既有容量后
+重新准备和校验，仅 `turn/resume-authorized` 提交成功才报告 `authorized` 并交回原 native owner。
+查询和重启补读只消费该明确继续意图，不发送原输入、不新建 Attempt，也不使缓存获得恢复权限。
+失效的控制请求通过 `turn/resume-blocked` 说明原因，业务 Turn 保留原暂停；用户停止或新 pause
+使旧排队意图失效。最后一道 native claim 同样在原 writer 验证领域归属和持久停止围栏，旧授权
+回执不能绕过停止；原预约仍由有效任务持有时，调度暂停不阻止它继续被准确监督。
 
 合法且仍属当前轮的 blocked 报告也不能提供完成许可。模型在必须交接用户输入时只输出
 普通文字，仍由现有 `ModelResponseRejected` 与 `ProtocolRecovery` 的有界预算处理；
@@ -617,6 +698,22 @@ Runtime SDK 对同一已发表终态的重试，只能在原 root、delivery、S
 完整 Runtime teardown 后，资源上下文按 exact 实例退出宿主 Weak cache；保留旧 handle 不会复活已关闭上下文，
 迟到的旧 cleanup 也不会释放或驱逐后继实例。
 
+专用 Execution Attempt 的 inactive link 由原 cleanup worker 携带原 Attempt 的确切 Turn 处理。
+停止确认与 Runtime 退休分开：闭轮 relay 确认正式终态并释放原 Turn admission 后，由现役
+Session owner 调度原实例退休。原生暂停已结束 relay 时，后续精确取消也在原持久取消／信号任务内
+交给同一退休路径，不能等待不存在的第二次终态流；原 Operation、实例、后继准入及 Effect 校验仍适用。
+后台 task owner 在 Session 锁外等待原知识回写，再在 Session 操作围栏内复核原最新 Turn、
+无活动 Turn 和无 pending/unknown Effect。原 registry 在自己的生命周期围栏内验证同一个
+Runtime Arc 和无新准入后，通过原 awaitable teardown 退休该载体、注销原 Host 上下文。
+不要求用户关闭历史会话，原 canonical 历史保留。失败保留原 quarantine 并只重试退休；
+真正退出时转交原应用 shutdown，不重开业务。
+文件、产物和 VCS 的 Workspace Host 强缓存同时使用原准入时的 canonical root 捕获 Weak 实例票据。
+原生 teardown 证明后，只在原缓存锁内确认同一实例、无能力调用强引用且 Git 已结算才移除；
+不重新解析目录，不影响后继实例或共享在途调用。暂时仍有责任时，原后台 owner 只持 Weak 票据
+退避收束，同一缓存实例只有一个清理任务，不继续保活已退休 Runtime/Kernel，也不重跑文件或模型工作。
+Session process owner 与用户 BrowserWorkspace 的责任分别保留，Runtime 退休本身不证明这些资源
+已经释放，不能把这条路径当作用户网页或后台服务的自动关闭许可。
+
 ### 推理强度
 
 Session 只持久化一个 native `reasoning_effort`，取值由共享 `ReasoningEffort` 合同定义。写入与读取使用同一字段，不维护有损镜像，不从旧字段回退。数据库 schema 更新不得从已退役的 Agent 字段重建会话内容。
@@ -757,6 +854,12 @@ Context、资源、Skill 和 MCP 均为空；旧宽授权 guest 仅在 idle、CA
 模型纠错或 adaptive ToolHistory 的 LOAD/SEARCH/READ；普通 approved/minimal 保持原合同。
 
 Cron、Companion、Requirements、AutoWork、IDMM 和 AgentExecution 可以保留各自业务配置及监督状态，但会话输入、准入、取消与终态必须引用 canonical Turn receipt。Conversation 名称不代表另一个存储源。
+
+Cron 私有 dispatcher 将已由服务端验证的 job／run／Session 引用作为 typed
+`cron_runtime_overlay` 随原 `message/user-accepted` 保存。普通消息请求不能声明这份来源，
+来源不从文本、可同名的 operation key、可变任务配置或消息投影推断；旧输入不补写该字段。
+它不改变 AgentInputSource、Robot 交付规则或模型权限。独立新会话的资源结束交接同时保留原
+创建与正式终结回执，计划／运行历史被合法删除后也不丢失已经取得的清理责任；持久事实仍只在原链和原领域记录中。
 
 伙伴统一选择官方 `companion.default` 或具备伙伴身份、记忆核心和所需资源的个人 Agent。完整能力目录与用户显式选择保留，资源解析使用确切目标伙伴，不能借另一伙伴的身份或记忆资源。产品 Session 由 owner-scoped canonical opening 识别；入口类型、设备和连接来自 typed origin 与 binding。普通 Agent 仅挂载伙伴资源不成为产品会话。各入口 Session 并存，当前浏览选择不改变输入目标。
 

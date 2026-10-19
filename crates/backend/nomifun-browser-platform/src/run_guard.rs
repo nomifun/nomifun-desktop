@@ -135,6 +135,33 @@ pub struct BrowserRunCoordinator {
 }
 
 impl BrowserRunCoordinator {
+    /// Read-only owner activity, including retained cleanup. This observes the
+    /// original operation gate; it does not claim OS-thread or process liveness.
+    pub(crate) fn operation_in_flight(&self) -> bool {
+        self.operation.try_lock().is_err()
+    }
+
+    /// Resource retirement only inspects a proven idle owner. It does not
+    /// cancel a run or grant the user-confirmed rebuild semantics. The domain
+    /// closure must prove its remaining use responsibilities before closing.
+    pub(crate) async fn idle_retirement<T, F, Fut>(self: &Arc<Self>, work: F)
+        -> Result<Option<T>, RunAdmissionError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
+        let coordinator = self.clone();
+        tokio::spawn(async move {
+            let _transition = coordinator.transition.lock().await;
+            let _operation = coordinator.operation.lock().await;
+            let state = coordinator.state.lock().await;
+            if state.active.is_some() || state.gate_failed { return None; }
+            drop(state);
+            Some(work().await)
+        }).await.map_err(|_| RunAdmissionError::WorkerFailed)
+    }
+
     /// An explicit human close must never cancel or take ownership from a run.
     /// Keep the transition lock through the close, including native failure.
     pub async fn close_idle_runtime<T,F,Fut>(self: &Arc<Self>,close:F)->Result<T,RunAdmissionError>

@@ -71,7 +71,8 @@ fn with_selected_window<T>(target: &SelfWindowTarget, operation: impl FnOnce(&NS
     operation(&app, &window)
 }
 
-pub(super) fn focus(target: SelfWindowTarget) -> Result<Effect, String> {
+pub(super) fn focus(target: SelfWindowTarget, cancellation: &tokio_util::sync::CancellationToken) -> Result<Effect, String> {
+    crate::native_control::require_open(cancellation)?;
     if u32::try_from(target.pid).ok() != Some(std::process::id()) {
         return Err("Current-process AppKit focus rejected another process before dispatch".into());
     }
@@ -81,9 +82,11 @@ pub(super) fn focus(target: SelfWindowTarget) -> Result<Effect, String> {
     let submitted = Arc::new(AtomicBool::new(false));
     let submitted_on_main = submitted.clone();
     let selected = target.clone();
-    let unchanged = crate::macos_main::run_blocking(move || with_selected_window(&selected, |app, window| {
+    let native_cancellation = cancellation.clone();
+    let unchanged = crate::macos_main::run_blocking_controlled(cancellation, move || with_selected_window(&selected, |app, window| {
         verify_current_metadata(&selected)?;
         if has_exact_focus(app, window, &selected) { return Ok(true); }
+        crate::native_control::require_open(&native_cancellation)?;
         // Record before the first native mutation, including restore. A lost
         // dispatcher reply must not turn an admitted request into no-effect.
         submitted_on_main.store(true, Ordering::Release);
@@ -93,6 +96,8 @@ pub(super) fn focus(target: SelfWindowTarget) -> Result<Effect, String> {
         Ok(false)
     })).map_err(|error| if submitted.load(Ordering::Acquire) {
         format!("Current-process focus effect is uncertain after AppKit dispatch: {error}")
+    } else if error == crate::native_control::CANCELLED_BEFORE_DISPATCH {
+        error
     } else {
         format!("Current-process focus rejected before AppKit mutation: {error}")
     })?;
@@ -153,6 +158,6 @@ mod tests {
     fn other_process_is_rejected_before_main_queue_or_any_window_access() {
         let mut target = target();
         target.pid = -1;
-        assert!(focus(target).unwrap_err().contains("another process before dispatch"));
+        assert!(focus(target, &tokio_util::sync::CancellationToken::new()).unwrap_err().contains("another process before dispatch"));
     }
 }

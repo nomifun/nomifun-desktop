@@ -3,6 +3,44 @@
 use super::*;
 use nomifun_agent_contracts::EventId;
 
+/// Cancellation transport for the original input-drain owner. Durable input
+/// state remains solely in the canonical Event chain; this owns no queue or
+/// retry decision, and never acquires a Runtime when queried or stopped.
+#[derive(Default)]
+pub(super) struct InputPreparationControls {
+    slots:std::sync::Mutex<std::collections::HashMap<String,InputPreparation>>,
+}
+struct InputPreparation {nonce:Uuid,input:EventId,cancel:tokio_util::sync::CancellationToken}
+struct InputPreparationGuard<'a> {owner:&'a InputPreparationControls,session:String,nonce:Uuid,cancel:tokio_util::sync::CancellationToken}
+impl InputPreparationControls {
+    fn observations(&self,session:&AgentSessionId)->Result<Vec<(EventId,bool)>,AppError> {
+        let slots=self.slots.lock().map_err(|_|AppError::Conflict("input preparation ownership is unconfirmed".into()))?;
+        Ok(slots.get(session.as_ref()).map(|slot|(slot.input.clone(),slot.cancel.is_cancelled())).into_iter().collect())
+    }
+    fn sessions(&self)->Result<Vec<String>,AppError> {
+        Ok(self.slots.lock().map_err(|_|AppError::Conflict("input preparation ownership is unconfirmed".into()))?.keys().cloned().collect())
+    }
+    fn register(&self,session:&AgentSessionId,input:&EventId)->Result<InputPreparationGuard<'_>,AppError> {
+        let mut slots=self.slots.lock().map_err(|_|AppError::Conflict("input preparation ownership is unconfirmed".into()))?;
+        if slots.contains_key(session.as_ref()) {return Err(AppError::Conflict("original input preparation still owns this Session".into()));}
+        let nonce=Uuid::now_v7();let cancel=tokio_util::sync::CancellationToken::new();
+        slots.insert(session.as_ref().into(),InputPreparation {nonce,input:input.clone(),cancel:cancel.clone()});
+        Ok(InputPreparationGuard {owner:self,session:session.as_ref().into(),nonce,cancel})
+    }
+    fn cancel(&self,session:&AgentSessionId,input:&EventId)->Result<bool,AppError> {
+        let token=self.slots.lock().map_err(|_|AppError::Conflict("input preparation ownership is unconfirmed".into()))?
+            .get(session.as_ref()).filter(|slot|slot.input==*input).map(|slot|slot.cancel.clone());
+        if let Some(token)=token {token.cancel();Ok(true)} else {Ok(false)}
+    }
+}
+impl Drop for InputPreparationGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut slots)=self.owner.slots.lock() {
+            if slots.get(&self.session).is_some_and(|slot|slot.nonce==self.nonce) {slots.remove(&self.session);}
+        }
+    }
+}
+
 fn accepted_delivery(message_id:String,replayed:bool)->IdempotentMessageDelivery {
     IdempotentMessageDelivery {message_id,replayed,completed:false,result_ok:None,result_text:None,result_error:None,
         result_error_code:None,result_error_retryable:None,user_input_request:None,turn_outcome:None}
@@ -84,6 +122,20 @@ fn original_pending_question(events:&[(u64,AgentEngineEvent)],source:&EventId)
 }
 
 impl NomiCoreSessionOwner {
+    pub(crate) fn cancel_input_preparation(&self,session:&AgentSessionId,input:&EventId)->Result<bool,AppError> {
+        self.input_preparations.cancel(session,input)
+    }
+    pub(crate) fn input_preparation_observations(&self,session:&AgentSessionId)->Result<Vec<(EventId,bool)>,AppError> {
+        self.input_preparations.observations(session)
+    }
+    pub(crate) fn registered_input_preparation_sessions(&self)->Result<Vec<String>,AppError> {
+        self.input_preparations.sessions()
+    }
+    #[cfg(test)]
+    pub(in crate::router) fn hold_input_preparation_for_test(&self,session:&AgentSessionId,input:&EventId)
+        ->Result<impl Drop+Send+'_,AppError> {
+        self.input_preparations.register(session,input)
+    }
     pub(in crate::router) async fn publish_session_input_delivery(&self,owner_id:&str,session:&AgentSessionId,input:&EventId)->Result<(),AppError> {
         let original=self.canonical.store().session_input(session,input).await.map_err(agent_session_store_error)?;
         let mut content=original.input.0;
@@ -235,6 +287,14 @@ impl NomiCoreSessionOwner {
             || self.runtime_sessions.active_turn_generation(session.as_ref()).is_some() {return Ok(());}
         let inputs=self.canonical.store().pending_session_inputs(session,retry_input.as_ref()).await.map_err(agent_session_store_error)?;
         for original in inputs {
+            let preparing=self.input_preparations.register(session,&original.event.event_id)?;
+            // Publish the exact token before this reread. Stop on either side
+            // of registration is therefore consumed before construction or
+            // signalled to the original factory owner, without the Session gate.
+            let delivery=self.canonical.store().session_input_delivery(session,&original.event.event_id).await.map_err(agent_session_store_error)?;
+            if matches!(delivery.get("state").and_then(Value::as_str),Some("cancelled"|"discarded"|"claimed")) {
+                preparing.cancel.cancel();continue;
+            }
             let request=runtime_message_request(&original.input)?;
             let operation=OperationId::from(format!("turn:session-input:{}",original.event.event_id.as_ref()));
             let preparation=async {
@@ -242,8 +302,10 @@ impl NomiCoreSessionOwner {
                 let projection=self.canonical_conversation_projection(owner_id,session).await?
                     .ok_or_else(||AppError::NotFound("Session input target disappeared".into()))?;
                 let options=self.runtime_options_for_projection(owner_id,session,projection).await?;
-                let runtime=self.runtime_sessions.get_or_create_runtime_for_preparation(session.as_ref(),tokio_util::sync::CancellationToken::new(),options).await?;
+                let runtime=self.runtime_sessions.get_or_create_runtime_for_preparation(session.as_ref(),preparing.cancel.clone(),options).await?;
+                if preparing.cancel.is_cancelled() {return Err(AppError::Conflict("original Session input preparation was stopped".into()));}
                 runtime.validate_session_input(request.files.clone(),request.inject_skills.clone()).await?;
+                if preparing.cancel.is_cancelled() {return Err(AppError::Conflict("original Session input preparation was stopped".into()));}
                 Ok::<_,AppError>(admitted)
             }.await;
             let admitted=match preparation {
@@ -292,6 +354,24 @@ pub(super) async fn accept_message(State(state):State<NomiCoreAgentApiState>,Ext
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_preparation_stop_signals_only_the_captured_source_and_never_a_successor() {
+        let controls=InputPreparationControls::default();
+        let session=AgentSessionId::from(Uuid::now_v7().to_string());
+        let first=EventId::from("first-accepted-input");let next=EventId::from("next-accepted-input");
+        let original=controls.register(&session,&first).unwrap();
+        assert!(!controls.cancel(&session,&next).unwrap());
+        assert!(!original.cancel.is_cancelled());
+        assert!(controls.cancel(&session,&first).unwrap());
+        assert!(original.cancel.is_cancelled());
+        drop(original);
+        let successor=controls.register(&session,&next).unwrap();
+        assert!(!controls.cancel(&session,&first).unwrap());
+        assert!(!successor.cancel.is_cancelled());
+        drop(successor);
+        assert!(controls.slots.lock().unwrap().is_empty(),"completed preparation retains no control/Runtime references");
+    }
 
     #[test]
     fn unavailable_input_read_causes_preserve_cancel_clear_and_repairable_blocks() {

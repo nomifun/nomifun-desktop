@@ -2,6 +2,56 @@ use super::protocol_tests::{connect_observed_peer, finish_peer};
 use super::*;
 use tokio::time::timeout;
 
+#[tokio::test(flavor="multi_thread",worker_threads=3)]
+async fn owner_retirement_interrupts_original_run_preserves_output_and_leaves_sibling_channel_usable() {
+    let(connection,task,_,_,received)=super::protocol_tests::connect_fenced_peer(0,2*1024*1024,true,0).await;
+    let original=connection.open_shell(".").await.unwrap();let sibling=connection.open_shell(".").await.unwrap();
+    let running=original.clone();
+    let run=tokio::spawn(async move {running.run("fixture_prompt",Duration::from_secs(60)).await});
+    timeout(Duration::from_secs(3),async {loop {
+        if received.lock().unwrap().windows(b"fixture_prompt".len()).any(|bytes|bytes==b"fixture_prompt"){break;}
+        tokio::task::yield_now().await;
+    }}).await.unwrap();
+    assert_eq!(sibling.run("fixture_success",Duration::from_secs(1)).await.unwrap().exit_code,0);
+    let start=Instant::now();original.request_retirement();
+    let result=timeout(Duration::from_secs(5),run).await.unwrap().unwrap();
+    assert!(start.elapsed()<Duration::from_secs(5),"retirement cannot wait the command's sixty-second execution budget");
+    assert!(matches!(result,Err(SshError::Retired {ref output}) if output.contains("Password:")),"original partial output remains an unknown outcome: {result:?}");
+    assert!(!original.is_reusable().await);
+    let before=received.lock().unwrap().len();
+    assert!(matches!(original.run("MUST_NOT_RUN",Duration::from_secs(1)).await,Err(SshError::Retired {..})));
+    assert_eq!(received.lock().unwrap().len(),before,"a retired original shell cannot admit another command");
+    let proof=original.close(Duration::from_secs(1)).await;assert!(proof.is_reaped(),"{proof:?}");
+    assert!(sibling.is_reusable().await,"one channel retirement cannot disconnect the shared native SSH connection");
+    assert_eq!(sibling.run("explicit-successor",Duration::from_secs(1)).await.unwrap().exit_code,0);
+    sibling.close(Duration::from_secs(1)).await;
+    finish_peer(&connection,task).await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn owner_retirement_preempts_partial_submission_and_original_close_uses_actual_peer_exit() {
+    let(connection,task,_,_,received,reported)=super::protocol_tests::connect_recorded_peer(0,1024,true,0).await;
+    let shell=connection.open_shell(".").await.unwrap();let running=shell.clone();
+    let run=tokio::spawn(async move {running.run(&"x".repeat(64*1024),Duration::from_secs(60)).await});
+    timeout(Duration::from_secs(3),async {loop {
+        // The actual peer has received only a prefix. Do not equate this
+        // count with russh's internal send-window state: a real fresh drain
+        // may still complete and allow the original closer's explicit exit.
+        if received.lock().unwrap().len()>=1024 {break;}
+        tokio::task::yield_now().await;
+    }}).await.unwrap();
+    let prefix=received.lock().unwrap().iter().filter(|byte|**byte==b'x').count();
+    assert!(prefix>0&&prefix<64*1024,"the fixture must preempt a real partial submission");
+    assert!(!run.is_finished());
+    shell.request_retirement();let result=timeout(Duration::from_secs(5),run).await.unwrap().unwrap();
+    assert!(matches!(result,Err(SshError::Retired {..})),"a partial submission cannot become command success: {result:?}");
+    let proof=shell.close(Duration::from_secs(1)).await;
+    assert!(proof.channel_closed&&proof.is_reaped(),"original receiver retained native remote proof: {proof:?}");
+    let actual=reported.lock().unwrap().last().copied().expect("peer must actually report its original exit status");
+    assert_eq!(proof.exit_status,Some(actual),"the exact received close proof must match the peer's actual TERM or explicit-exit branch");
+    finish_peer(&connection,task).await;
+}
+
 #[tokio::test]
 async fn cancelling_a_partial_write_can_still_close_the_channel() {
     let (connection, task, closed) = connect_observed_peer(0, 1024).await;
@@ -18,7 +68,7 @@ async fn cancelling_a_partial_write_can_still_close_the_channel() {
     assert!(!reusable);
     assert!(
         observed.is_ok(),
-        "close must bypass exhausted data window; connection remains alive during observation"
+        "original channel close must settle after partial submission retirement; connection remains alive during observation"
     );
 }
 

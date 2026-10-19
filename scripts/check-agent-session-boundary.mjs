@@ -85,11 +85,18 @@ const uploadForwardMigration = 'crates/backend/nomifun-db/migrations/006_retire_
 const terminalForwardMigration = 'crates/backend/nomifun-db/migrations/007_retire_terminal_content_mirrors.sql';
 const payloadForwardMigration = 'crates/backend/nomifun-db/migrations/008_retire_payload_object_placeholder.sql';
 const cronInputForwardMigration = 'crates/backend/nomifun-db/migrations/009_cron_input_handoff.sql';
-if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration].includes(path))) {
+const cronCancellationForwardMigration = 'crates/backend/nomifun-db/migrations/010_cron_run_cancellation.sql';
+if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration, cronCancellationForwardMigration].includes(path))) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward migrations');
 }
 const migrationStatements = (path) => readFileSync(resolve(ROOT, path), 'utf8')
   .replace(/--[^\r\n]*/g, '').split(';').map((statement) => statement.replace(/\s+/g, ' ').trim()).filter(Boolean);
+if (migrations.includes(cronCancellationForwardMigration)
+  && JSON.stringify(migrationStatements(cronCancellationForwardMigration)) !== JSON.stringify([
+    'ALTER TABLE cron_run_reservations ADD COLUMN cancel_requested_at_ms INTEGER',
+  ])) {
+  failures.push('Cron cancellation migration may only add the original reservation cancellation fence');
+}
 if (migrations.includes(cronInputForwardMigration)) {
   const original = migrationStatements(baseline);
   const tables = ['cron_job_runs', 'cron_jobs', 'cron_run_reservations'];

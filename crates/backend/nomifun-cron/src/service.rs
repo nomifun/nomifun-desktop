@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
@@ -19,7 +20,7 @@ use nomifun_common::paths::{
     WorkspaceDirectoryCheck, canonical_existing_workspace_directory,
 };
 use crate::session_port::{
-    CronSessionProjection, CronTurnReceiptState, CronTurnReconciliation,
+    CronRunResourceRetirement, CronSessionProjection, CronTurnReceiptState, CronTurnReconciliation,
 };
 use nomifun_db::{
     AdvanceCronOccurrenceParams, CRON_RUN_HISTORY_LIMIT, CronJobRunRow, ICronRepository,
@@ -63,6 +64,11 @@ const PLACEHOLDER_PATTERNS: &[&str] = &[
 /// its process-wide background-task registry to this trait.
 pub trait CronBackgroundTaskRegistrar: Send + Sync {
     fn register(&self, task: JoinHandle<()>);
+    /// Application shutdown takes over physical resources. A domain retry
+    /// must not keep that shutdown waiting through its backoff.
+    fn shutdown_signal(&self) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        Box::pin(std::future::pending())
+    }
 }
 
 /// Host-owned resolver for a saved AgentPreset.
@@ -242,6 +248,13 @@ pub struct CronService {
     embedded_mutations: Arc<DashMap<String, Arc<EmbeddedMutationEntry>>>,
     background_task_registrar: Arc<RwLock<Option<Arc<dyn CronBackgroundTaskRegistrar>>>>,
     agent_preset_resolver: Arc<RwLock<Option<Arc<dyn CronAgentPresetResolver>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronRunCancellationReceipt {
+    pub accepted: bool,
+    pub execution_stopped: bool,
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -1431,6 +1444,18 @@ impl CronService {
             {
                 Ok(Some(row)) => row,
                 Ok(None) => {
+                    if reservation.cancel_requested_at_ms.is_some() {
+                        match self.repo.attached_run_owner_for_scheduler(&reservation.cron_job_run_id).await {
+                            Ok(Some(owner))=>{
+                                if let Err(error)=self.settle_cancelled_run_without_job(&owner,&reservation).await {
+                                    warn!(run_id=%reservation.cron_job_run_id,%error,"cancelled attached Cron source without job remains unconfirmed");
+                                }
+                                continue;
+                            }
+                            Ok(None)=>{},
+                            Err(error)=>{warn!(run_id=%reservation.cron_job_run_id,%error,"original Cron source owner cannot be read");continue;}
+                        }
+                    }
                     warn!(
                         job_id = %reservation.cron_job_id,
                         run_id = %reservation.cron_job_run_id,
@@ -1448,7 +1473,7 @@ impl CronService {
                     continue;
                 }
             };
-            let job = match cron_job_from_row(row) {
+            let mut job = match cron_job_from_row(row) {
                 Ok(job) => job,
                 Err(error) => {
                     error!(
@@ -1460,6 +1485,7 @@ impl CronService {
                     continue;
                 }
             };
+            if let Some(revision) = reservation.schedule_revision { job.schedule_revision = revision; }
             let gate = self.job_gate(&job.cron_job_id);
             let _job_guard = gate.lock().await;
 
@@ -1508,10 +1534,10 @@ impl CronService {
             let result = service.executor.observe_reserved_turn(&job, &run_id, &conversation_id).await;
             if scheduled {
                 if let Some(planned_at) = planned_at {
-                    service.handle_execution_result(job, &run_id, planned_at, result).await;
+                    service.handle_execution_result(job, &run_id, planned_at, result, Some(&conversation_id)).await;
                 }
             } else {
-                service.handle_run_now_result(&job, &run_id, result).await;
+                service.handle_run_now_result(&job, &run_id, result, Some(&conversation_id)).await;
             }
         });
         self.register_background_task(task);
@@ -1522,6 +1548,18 @@ impl CronService {
         job: &CronJob,
         reservation: &nomifun_db::models::CronRunReservationRow,
     ) -> Option<(&'static str, Option<String>)> {
+        if reservation.cancel_requested_at_ms.is_some() {
+            if let Some(session) = reservation.conversation_id.as_deref() {
+                if let Err(error) = self.executor.cancel_reserved_turn(&job.user_id, &reservation.cron_job_id,
+                    &reservation.cron_job_run_id, session).await {
+                    warn!(run_id=%reservation.cron_job_run_id,%error,"exact cancelled Cron owner remains unconfirmed");
+                    return None;
+                }
+            } else {
+                return self.finalize_run_once(job, &reservation.cron_job_run_id, "cancelled", None, None,
+                    cancelled_run_projection()).await.then_some(("cancelled", None));
+            }
+        }
         let Some(conversation_id) = reservation.conversation_id.as_deref() else {
             // Current-protocol execution attaches its Conversation before the
             // first send call. An unattached `pending` row therefore proves
@@ -1626,6 +1664,10 @@ impl CronService {
 
         match state {
             CronTurnReceiptState::Missing => {
+                if reservation.cancel_requested_at_ms.is_some() {
+                    return self.finalize_run_once(job, &reservation.cron_job_run_id, "cancelled",
+                        Some(conversation_id), None, cancelled_run_projection()).await.then_some(("cancelled", None));
+                }
                 // Attachment precedes the send call. Missing receipt after a
                 // process restart is exact proof that the receiver never
                 // accepted this occurrence.
@@ -2078,6 +2120,7 @@ impl CronService {
                     ExecutionResult::Error {
                         message: error.to_string(),
                     },
+                    None,
                 )
                 .await;
                 return;
@@ -2101,16 +2144,20 @@ impl CronService {
                 ExecutionResult::Error {
                     message: error.to_string(),
                 },
+                Some(&conversation_id),
             )
             .await;
             return;
         }
+        let resource_retirement = prepared.resource_retirement.clone();
         let result = self.executor.execute_prepared(&job, prepared).await;
-        self.handle_execution_result(
+        self.complete_prepared_run(
             job,
-            &reservation.cron_job_run_id,
-            planned_at_ms,
+            reservation.cron_job_run_id,
+            Some(planned_at_ms),
+            conversation_id,
             result,
+            resource_retirement,
         )
         .await;
     }
@@ -2318,6 +2365,98 @@ impl CronService {
         info!("System resume: all cron timers rescheduled");
     }
 
+    /// Stop only this immutable occurrence. Persist and signal outside the
+    /// ordinary job FIFO: a stalled preparation/control cannot delay Stop.
+    /// The retained host task keeps responsibility when the HTTP waiter leaves.
+    pub async fn cancel_run(&self, user_id: &str, job_id: &str, run_id: &str)
+        -> Result<CronRunCancellationReceipt, CronError> {
+        let owner = validate_cron_user_id(user_id)?.to_owned();
+        let job = validate_cron_job_id(job_id)?;
+        let run = CronJobRunId::parse(run_id).map_err(|error| CronError::App(
+            AppError::BadRequest(format!("invalid cron run id: {error}"))))?.into_string();
+        let service = self.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let result = service.cancel_run_owned(&owner, &job, &run).await;
+            let _ = sender.send(result);
+        });
+        self.register_background_task(task);
+        receiver.await.map_err(|_| CronError::OutcomeUnknown("exact Cron cancellation owner ended without a receipt".into()))?
+    }
+
+    async fn cancel_run_owned(&self, owner: &str, job_id: &str, run_id: &str)
+        -> Result<CronRunCancellationReceipt, CronError> {
+        let reservation = self.repo.request_run_cancellation(owner, job_id, run_id, now_ms()).await?;
+        if reservation.status != "reserved" {
+            // Preserve an earlier delivered/error outcome. A terminal Cron
+            // summary alone is not proof that all native cleanup has finished.
+            return Ok(CronRunCancellationReceipt { accepted: true,
+                execution_stopped: reservation.conversation_id.is_none(), conversation_id: reservation.conversation_id });
+        }
+        let execution_stopped = match reservation.conversation_id.as_deref() {
+            Some(session) => self.executor.cancel_reserved_turn(owner, job_id, run_id, session).await.map(|receipt| receipt.execution_stopped),
+            None => Ok(true), // The same durable writer now fences attachment.
+        };
+        // Settlement/advancement uses its original reservation source. It may
+        // wait for ordinary job mutations; the cancellation fence and exact
+        // native signal above never wait for that gate.
+        let service = self.clone();
+        let owner = owner.to_owned();
+        let job_id = job_id.to_owned();
+        let run_id = run_id.to_owned();
+        let task = tokio::spawn(async move {
+            let gate = service.job_gate(&job_id);
+            let _guard = gate.lock().await;
+            let settle = async {
+                let Some(reservation) = service.repo.get_run_reservation(&owner, &job_id, &run_id).await? else { return Ok::<(),CronError>(()); };
+                if reservation.status != "reserved" || reservation.cancel_requested_at_ms.is_none() { return Ok(()); }
+                let Some(row)=service.repo.get_by_cron_job_id(&owner, &job_id).await? else {
+                    return service.settle_cancelled_run_without_job(&owner,&reservation).await;
+                };
+                let mut job = cron_job_from_row(row)?;
+                // A subsequent job edit must never grant this old occurrence
+                // the current configuration's schedule advancement authority.
+                if let Some(revision) = reservation.schedule_revision { job.schedule_revision = revision; }
+                if let Some((status, result_error)) = service.recover_exact_reserved_run(&job, &reservation).await {
+                    if reservation.trigger_kind == "scheduled" {
+                        if let Some(planned) = reservation.planned_at_ms {
+                            service.advance_after_terminal_occurrence(&job, &run_id, planned).await;
+                        }
+                    }
+                    service.emit_persisted_job_updated_for(&job).await;
+                    service.emit_job_executed_for(&job, status, result_error.as_deref()).await;
+                }
+                Ok(())
+            }.await;
+            if let Err(error) = settle { warn!(%run_id,%error,"cancelled Cron settlement retains its original reservation for retry"); }
+        });
+        self.register_background_task(task);
+        Ok(CronRunCancellationReceipt { accepted: true, execution_stopped: execution_stopped?, conversation_id: reservation.conversation_id })
+    }
+
+    async fn settle_cancelled_run_without_job(&self,owner:&str,reservation:&nomifun_db::CronRunReservationRow)->Result<(),CronError> {
+        let Some(session)=reservation.conversation_id.as_deref() else {
+            return Err(CronError::OutcomeUnknown("a missing job cannot authorize its unattached reservation".into()));
+        };
+        self.executor.cancel_reserved_turn(owner,&reservation.cron_job_id,&reservation.cron_job_run_id,session).await?;
+        let state=self.executor.public_turn_delivery_state(owner,session,&reservation.cron_job_run_id).await?;
+        let (status,error)=match state {
+            CronTurnReceiptState::Missing=>("cancelled",None),
+            CronTurnReceiptState::Completed(delivery)=>match delivery.disposition() {
+                Some(crate::session_port::CronTurnDisposition::Cancelled)=>("cancelled",None),
+                Some(crate::session_port::CronTurnDisposition::Delivered)=>("ok",None),
+                Some(crate::session_port::CronTurnDisposition::InputRequired)=>("input_required",None),
+                Some(crate::session_port::CronTurnDisposition::Failed(error))=>("error",Some(error)),
+                None=>return Ok(()),
+            },
+            _=>return Ok(()),
+        };
+        self.repo.finalize_run_with_job_projection(owner,&FinalizeCronRunParams {cron_job_run_id:reservation.cron_job_run_id.clone(),
+            status:status.into(),conversation_id:Some(session.into()),result_error:error,now:now_ms(),last_run_at:None,last_status:None,last_error:None,
+            increment_run_count:false,reset_retry_count:false,bind_job_conversation_if_unbound:false}).await?;
+        Ok(())
+    }
+
     pub async fn run_now(
         &self,
         user_id: &str,
@@ -2434,13 +2573,15 @@ impl CronService {
         }
         let service = self.clone();
         let run_id = reservation.cron_job_run_id;
+        let resource_retirement = prepared.resource_retirement.clone();
+        let prepared_conversation_id = conversation_id.clone();
         let active_run = self.mark_run_active(&job.cron_job_id, &run_id);
         drop(job_guard);
 
         let task = tokio::spawn(async move {
             let _active_run = active_run;
             let result = service.executor.execute_prepared(&job, prepared).await;
-            service.handle_run_now_result(&job, &run_id, result).await;
+            service.complete_prepared_run(job, run_id, None, prepared_conversation_id, result, resource_retirement).await;
         });
         self.register_background_task(task);
 
@@ -2668,6 +2809,86 @@ impl CronService {
         Ok(())
     }
 
+    /// Retain the formal finalizer and its resource handoff together. The
+    /// caller observes business settlement without waiting for resource
+    /// observation/retry, and dropping that observer cannot lose the handoff
+    /// after the durable terminal commit.
+    async fn complete_prepared_run(
+        &self,
+        job: CronJob,
+        run_id: String,
+        planned_at_ms: Option<i64>,
+        conversation_id: String,
+        result: ExecutionResult,
+        resource_retirement: Option<CronRunResourceRetirement>,
+    ) {
+        let service = self.clone();
+        let (settled, observer) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let request = service.finalize_prepared_run(job, run_id, planned_at_ms,
+                conversation_id, result, resource_retirement).await;
+            // Seal the original writer's immutable authority before releasing
+            // its business observer. A legal subsequent delete may remove
+            // both job and run rows; it cannot revoke this accepted handoff.
+            let _ = settled.send(());
+            if let Some(request) = request {
+                service.handoff_finished_run_resources(request).await;
+            }
+        });
+        self.register_background_task(task);
+        let _ = observer.await;
+    }
+
+    async fn finalize_prepared_run(
+        &self,
+        job: CronJob,
+        run_id: String,
+        planned_at_ms: Option<i64>,
+        conversation_id: String,
+        result: ExecutionResult,
+        resource_retirement: Option<CronRunResourceRetirement>,
+    ) -> Option<CronRunResourceRetirement> {
+        let terminal_mission = matches!(&result, ExecutionResult::Success { .. }
+            | ExecutionResult::Error { .. } | ExecutionResult::Cancelled { .. });
+        let finalized = if let Some(planned_at) = planned_at_ms {
+            self.handle_execution_result(job.clone(), &run_id, planned_at, result, Some(&conversation_id)).await
+        } else {
+            self.handle_run_now_result(&job, &run_id, result, Some(&conversation_id)).await
+        };
+        finalized.filter(|_| terminal_mission).and_then(|status|
+            resource_retirement.filter(|request|
+                request.owner_id == job.user_id && request.cron_job_id == job.cron_job_id
+                && request.cron_job_run_id == run_id && request.agent_session_id.as_ref() == conversation_id)
+                .and_then(|request| request.seal_finalized(status)))
+    }
+
+    async fn handoff_finished_run_resources(&self, request: CronRunResourceRetirement) {
+        if request.finalized_status().is_none() { return; }
+        let shutdown = self.background_task_registrar.read().ok().and_then(|slot| slot.clone())
+            .map(|registrar| registrar.shutdown_signal())
+            .unwrap_or_else(|| Box::pin(std::future::pending()));
+        let handoff = async {
+            let mut delay = std::time::Duration::from_millis(100);
+            loop {
+                // The formal writer's live receipt remains authoritative
+                // after legal job/run deletion. This retries only the same
+                // resource handoff, never preparation or business delivery.
+                match self.executor.retire_new_conversation_run_resources(&request).await {
+                    Ok(()) => return,
+                    Err(error) => warn!(run_id = %request.cron_job_run_id, %error,
+                        "Finished Cron run resource handoff remains owned for retry"),
+                }
+                tokio::time::sleep(delay).await;
+                delay = delay.saturating_mul(2).min(std::time::Duration::from_secs(30));
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = shutdown => {},
+            _ = handoff => {},
+        }
+    }
+
     async fn finalize_run_once(
         &self,
         job: &CronJob,
@@ -2677,6 +2898,20 @@ impl CronService {
         result_error: Option<&str>,
         projection: CronJobRunProjection,
     ) -> bool {
+        self.finalize_run_outcome(job, run_id, status, conversation_id, result_error, projection).await == Some(true)
+    }
+
+    /// `Some(false)` preserves an exact AlreadyApplied receipt without
+    /// repeating projection/events. `None` grants no retirement authority.
+    async fn finalize_run_outcome(
+        &self,
+        job: &CronJob,
+        run_id: &str,
+        status: &str,
+        conversation_id: Option<&str>,
+        result_error: Option<&str>,
+        projection: CronJobRunProjection,
+    ) -> Option<bool> {
         match self
             .repo
             .finalize_run_with_job_projection(
@@ -2698,8 +2933,8 @@ impl CronService {
             )
             .await
         {
-            Ok(FinalizeCronRunOutcome::Applied) => true,
-            Ok(FinalizeCronRunOutcome::AlreadyApplied) => false,
+            Ok(FinalizeCronRunOutcome::Applied) => Some(true),
+            Ok(FinalizeCronRunOutcome::AlreadyApplied) => Some(false),
             Ok(FinalizeCronRunOutcome::LegacyProjectionUnknown) => {
                 warn!(
                     job_id = %job.cron_job_id,
@@ -2707,7 +2942,7 @@ impl CronService {
                     status,
                     "Refusing to guess whether a legacy Cron run already updated its job projection"
                 );
-                false
+                None
             }
             Err(error) => {
                 error!(
@@ -2717,7 +2952,7 @@ impl CronService {
                     error = %error,
                     "Failed to atomically finalize durable cron run and job projection"
                 );
-                false
+                None
             }
         }
     }
@@ -2728,22 +2963,25 @@ impl CronService {
         run_id: &str,
         expected_planned_at_ms: i64,
         result: ExecutionResult,
-    ) {
+        prepared_conversation_id: Option<&str>,
+    ) -> Option<&'static str> {
         let gate = self.job_gate(&job.cron_job_id);
         let _job_guard = gate.lock().await;
 
         match result {
             ExecutionResult::Cancelled { conversation_id } => {
-                if !self.finalize_run_once(&job, run_id, "cancelled", Some(&conversation_id), None,
-                    cancelled_run_projection()).await { return; }
+                let finalized = self.finalize_run_outcome(&job, run_id, "cancelled", Some(&conversation_id), None,
+                    cancelled_run_projection()).await;
+                if finalized != Some(true) { return finalized.map(|_| "cancelled"); }
                 self.advance_after_terminal_occurrence(&job, run_id, expected_planned_at_ms).await;
                 self.emit_persisted_job_updated_for(&job).await;
                 self.emit_job_executed_for(&job, "cancelled", None).await;
+                return Some("cancelled");
             }
             ExecutionResult::InputRequired { conversation_id } => {
-                let Some(projection) = self.input_handoff_run_projection(&job, &conversation_id).await else { return; };
+                let Some(projection) = self.input_handoff_run_projection(&job, &conversation_id).await else { return None; };
                 if !self.finalize_run_once(&job, run_id, "input_required", Some(&conversation_id), None,
-                    projection).await { return; }
+                    projection).await { return None; }
                 self.advance_after_terminal_occurrence(&job, run_id, expected_planned_at_ms).await;
                 self.emit_persisted_job_updated_for(&job).await;
                 self.emit_job_executed_for(&job, "input_required", None).await;
@@ -2757,8 +2995,8 @@ impl CronService {
                             ("error", Some(message), projection)
                         }
                     };
-                if !self
-                    .finalize_run_once(
+                let finalized = self
+                    .finalize_run_outcome(
                         &job,
                         run_id,
                         status,
@@ -2766,10 +3004,8 @@ impl CronService {
                         error.as_deref(),
                         projection,
                     )
-                    .await
-                {
-                    return;
-                }
+                    .await;
+                if finalized != Some(true) { return finalized.map(|_| status); }
                 self.advance_after_terminal_occurrence(
                     &job,
                     run_id,
@@ -2779,6 +3015,7 @@ impl CronService {
                 self.emit_persisted_job_updated_for(&job).await;
                 self.emit_job_executed_for(&job, status, error.as_deref())
                     .await;
+                return Some(status);
             }
             ExecutionResult::Retrying { attempt } => {
                 // Busy is observed before this occurrence starts any model
@@ -2803,7 +3040,7 @@ impl CronService {
                     )
                     .await
                 {
-                    return;
+                    return None;
                 }
                 self.advance_after_terminal_occurrence(
                     &job,
@@ -2826,7 +3063,7 @@ impl CronService {
                     )
                     .await
                 {
-                    return;
+                    return None;
                 }
                 self.advance_after_terminal_occurrence(
                     &job,
@@ -2838,19 +3075,17 @@ impl CronService {
                 self.emit_job_executed_for(&job, "skipped", None).await;
             }
             ExecutionResult::Error { message } => {
-                if !self
-                    .finalize_run_once(
+                let finalized = self
+                    .finalize_run_outcome(
                         &job,
                         run_id,
                         "error",
-                        job.conversation_id.as_deref(),
+                        prepared_conversation_id.or(job.conversation_id.as_deref()),
                         Some(&message),
                         error_run_projection(&message),
                     )
-                    .await
-                {
-                    return;
-                }
+                    .await;
+                if finalized != Some(true) { return finalized.map(|_| "error"); }
                 self.advance_after_terminal_occurrence(
                     &job,
                     run_id,
@@ -2860,6 +3095,7 @@ impl CronService {
                 self.emit_persisted_job_updated_for(&job).await;
                 self.emit_job_executed_for(&job, "error", Some(&message))
                     .await;
+                return Some("error");
             }
             ExecutionResult::Quarantined { message } => {
                 warn!(
@@ -2870,6 +3106,7 @@ impl CronService {
                 );
             }
         }
+        None
     }
 
     async fn handle_run_now_result(
@@ -2877,20 +3114,23 @@ impl CronService {
         job: &CronJob,
         run_id: &str,
         result: ExecutionResult,
-    ) {
+        prepared_conversation_id: Option<&str>,
+    ) -> Option<&'static str> {
         let gate = self.job_gate(&job.cron_job_id);
         let _job_guard = gate.lock().await;
         match result {
             ExecutionResult::Cancelled { conversation_id } => {
-                if !self.finalize_run_once(job, run_id, "cancelled", Some(&conversation_id), None,
-                    cancelled_run_projection()).await { return; }
+                let finalized = self.finalize_run_outcome(job, run_id, "cancelled", Some(&conversation_id), None,
+                    cancelled_run_projection()).await;
+                if finalized != Some(true) { return finalized.map(|_| "cancelled"); }
                 self.emit_persisted_job_updated_for(job).await;
                 self.emit_job_executed_for(job, "cancelled", None).await;
+                return Some("cancelled");
             }
             ExecutionResult::InputRequired { conversation_id } => {
-                let Some(projection) = self.input_handoff_run_projection(job, &conversation_id).await else { return; };
+                let Some(projection) = self.input_handoff_run_projection(job, &conversation_id).await else { return None; };
                 if !self.finalize_run_once(job, run_id, "input_required", Some(&conversation_id), None,
-                    projection).await { return; }
+                    projection).await { return None; }
                 self.emit_persisted_job_updated_for(job).await;
                 self.emit_job_executed_for(job, "input_required", None).await;
             }
@@ -2903,8 +3143,8 @@ impl CronService {
                             ("error", Some(message), projection)
                         }
                     };
-                if !self
-                    .finalize_run_once(
+                let finalized = self
+                    .finalize_run_outcome(
                         job,
                         run_id,
                         status,
@@ -2912,31 +3152,29 @@ impl CronService {
                         error.as_deref(),
                         projection,
                     )
-                    .await
-                {
-                    return;
-                }
+                    .await;
+                if finalized != Some(true) { return finalized.map(|_| status); }
                 self.emit_persisted_job_updated_for(job).await;
                 self.emit_job_executed_for(job, status, error.as_deref())
                     .await;
+                return Some(status);
             }
             ExecutionResult::Error { message } => {
-                if !self
-                    .finalize_run_once(
+                let finalized = self
+                    .finalize_run_outcome(
                         job,
                         run_id,
                         "error",
-                        job.conversation_id.as_deref(),
+                        prepared_conversation_id.or(job.conversation_id.as_deref()),
                         Some(&message),
                         error_run_projection(&message),
                     )
-                    .await
-                {
-                    return;
-                }
+                    .await;
+                if finalized != Some(true) { return finalized.map(|_| "error"); }
                 self.emit_persisted_job_updated_for(job).await;
                 self.emit_job_executed_for(job, "error", Some(&message))
                     .await;
+                return Some("error");
             }
             ExecutionResult::Retrying { attempt } => {
                 warn!(
@@ -2956,7 +3194,7 @@ impl CronService {
                     )
                     .await
                 {
-                    return;
+                    return None;
                 }
                 self.emit_persisted_job_updated_for(job).await;
                 self.emit_job_executed_for(job, "skipped", None).await;
@@ -2973,7 +3211,7 @@ impl CronService {
                     )
                     .await
                 {
-                    return;
+                    return None;
                 }
                 self.emit_persisted_job_updated_for(job).await;
                 self.emit_job_executed_for(job, "skipped", None).await;
@@ -2987,6 +3225,7 @@ impl CronService {
                 );
             }
         }
+        None
     }
 
     async fn input_handoff_run_projection(&self, job: &CronJob, conversation_id: &str) -> Option<CronJobRunProjection> {
@@ -4482,6 +4721,14 @@ mod tests {
         assert_eq!(desc.as_deref(), Some("hourly"));
     }
 }
+
+#[cfg(test)]
+#[path = "run_cancellation_tests.rs"]
+mod run_cancellation_tests;
+
+#[cfg(test)]
+#[path = "run_resource_retirement_tests.rs"]
+mod run_resource_retirement_tests;
 
 #[cfg(test)]
 mod reserved_receipt_worker_tests {

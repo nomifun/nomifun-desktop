@@ -154,7 +154,13 @@ pub fn capture_screen(display: Option<usize>, max_edge: u32) -> Result<CapturedS
     #[cfg(target_os = "linux")]
     return capture_screen_cancellable(display, max_edge, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     #[cfg(not(target_os = "linux"))]
-    crate::macos_main::run_blocking(move || capture_screen_inner(display, max_edge))
+    capture_screen_controlled(&tokio_util::sync::CancellationToken::new(), display, max_edge)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn capture_screen_controlled(cancellation: &tokio_util::sync::CancellationToken,
+    display: Option<usize>, max_edge: u32) -> Result<CapturedScreen, String> {
+    crate::macos_main::run_blocking_controlled(cancellation, move || capture_screen_inner(display, max_edge))
 }
 
 #[cfg(target_os = "linux")]
@@ -178,10 +184,10 @@ fn capture_wayland(display: Option<usize>, max_edge: u32, cancel: std::sync::Arc
         .map_err(|error| error.to_string())?;
     let check_cancelled = || -> Result<(), String> {
         if !cancel.load(std::sync::atomic::Ordering::Acquire) { return Ok(()); }
-        let cancelled_session = session.clone();
-        crate::linux_wayland::run_blocking(async move { cancelled_session.close().await })
-            .map_err(|error| error.to_string())?;
-        Err("COMPUTER_CAPTURE_CANCELLED: capture was cancelled and its exact native desktop session was closed".to_owned())
+        // session_cancellable already closes this capture's unpublished
+        // creation attempt. A returned session belongs to the shared native
+        // owner; withdrawing one frame must not revoke another borrower's grant.
+        Err("COMPUTER_CAPTURE_CANCELLED: this capture was cancelled; the established shared desktop grant was retained".to_owned())
     };
     check_cancelled()?;
     let index = display.unwrap_or(0);

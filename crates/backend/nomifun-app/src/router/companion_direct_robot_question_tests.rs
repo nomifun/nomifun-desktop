@@ -111,3 +111,41 @@ async fn direct_robot_question_dispatch_preserves_presented_source_natural_reply
     record_fixture_cost("physical_direct_question",&server.state.requests.lock().unwrap(),&flow);
     flow.finish().await;server.close().await;
 }
+
+#[tokio::test]
+async fn robot_completed_delivery_refreshes_original_source_when_terminal_commits_between_snapshots() {
+    use nomifun_robot::services::TurnEvent;
+    let server=CompanionFlowModelServer::with_held_work().await;
+    let flow=PhysicalEntryFixture::new(&server,"robot-terminal-between-snapshots").await;
+    let backend=flow.fixture.services.robot.as_ref().unwrap().conversation_backend_for_test();
+    let mut request=flow.request("original-two-snapshot-request",HELD_INPUT);capture_recording(&backend,&mut request).await;
+    let key=crate::robot_wiring::robot_turn_idempotency_key(&request);
+    let accepted=flow.fixture.owner.send_robot_session_message_idempotent(&flow.owner,&request,&key,robot_message(HELD_INPUT)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(20),server.state.held_entered.notified()).await.expect("the original real model request reaches its response barrier");
+    let store=flow.fixture.owner.canonical().store();let root=nomifun_agent_contracts::EventId::from(accepted.message_id);
+    let operation=store.session_input_claim(&flow.robot_id,&root).await.unwrap().unwrap().operation_id;
+    let mut delivered=std::collections::BTreeMap::new();
+    let before=flow.fixture.owner.robot_public_output(&flow.owner,flow.robot_id.as_ref(),&key,0,&mut delivered).await.unwrap();
+    assert!(before.segments.is_empty()&&delivered.is_empty(),"snapshot A precedes the original final publication");
+    assert!(matches!(flow.fixture.owner.session_turn_delivery_state(&flow.owner,flow.robot_id.as_ref(),&key).await.unwrap(),
+        nomifun_conversation::PublicTurnDeliveryState::Accepted {..}));
+    server.state.held_release.notify_one();
+    let terminal=wait_for_completed_turn(&flow.fixture,&flow.robot_id,&operation).await;
+    let nomifun_conversation::PublicTurnDeliveryState::Completed(receipt)=flow.fixture.owner
+        .session_turn_delivery_state(&flow.owner,flow.robot_id.as_ref(),&key).await.unwrap() else {panic!("snapshot B must observe the actual committed terminal");};
+    assert!(before.through_seq<terminal.terminal_event.as_ref().unwrap().seq);
+    assert!(matches!(receipt.turn_outcome,Some(nomifun_agent_contracts::AgentTurnOutcome::Answered {..})));
+    let cursor=store.current_cursor(&flow.robot_id).await.unwrap();let calls=server.state.requests.lock().unwrap().len();assert_eq!(calls,1);
+    let events=crate::robot_wiring::completed_robot_public_delivery_events(&flow.fixture.owner,&flow.owner,&request,&key,
+        &receipt,before.through_seq,&mut delivered).await.unwrap();
+    let [TurnEvent::PublicSpeech {source,text},TurnEvent::Done]=events.as_slice() else {panic!("the completed refresh must deliver the original source before Done: {events:?}");};
+    assert_eq!(text,"The independent message is answered.");assert_eq!(source.through_seq,terminal.terminal_event.as_ref().unwrap().seq);
+    let facts=store.turn_output_facts(&flow.robot_id,&operation).await.unwrap();
+    let source_event=facts.events.iter().find(|event|event.event_id.as_ref()==source.message_id).expect("the speech reference names the original committed canonical event");
+    assert_eq!(source_event.kind.0,"message/completed");assert_eq!(source.revision,source_event.seq);
+    let repeated=crate::robot_wiring::completed_robot_public_delivery_events(&flow.fixture.owner,&flow.owner,&request,&key,
+        &receipt,before.through_seq,&mut delivered).await.unwrap();assert_eq!(repeated,vec![TurnEvent::Done],"the refresh cannot replay an already delivered prefix");
+    assert_eq!(store.current_cursor(&flow.robot_id).await.unwrap(),cursor);assert_eq!(server.state.requests.lock().unwrap().len(),calls);
+    let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_turns WHERE session_id=?").bind(flow.robot_id.as_ref()).fetch_one(flow.fixture.pool()).await.unwrap();assert_eq!(count,1);
+    flow.finish().await;server.close().await;
+}

@@ -1,5 +1,6 @@
 pub mod agent_metadata;
 pub mod agent_execution;
+pub mod agent_execution_admission;
 pub mod agent_execution_template;
 mod agent_preset_lineage;
 mod bind;
@@ -24,6 +25,7 @@ pub mod provider_model;
 pub mod provider_model_capability;
 pub mod requirement;
 pub mod remote_binding;
+pub mod remote_session_admission;
 mod settings;
 pub mod skill_tag;
 pub mod ssh_host;

@@ -50,12 +50,17 @@ pub(super) struct TabAutomation {
     frames: frame_documents::Documents,
     dialogs: Option<Arc<script_dialogs::Dialogs>>,
     rendering: Option<rendering::Rendering>,
+    // Keep the physical focus/input sequence owned through an uncertain
+    // pressed-key/button result until exact release, without pinning reads.
+    input: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 struct ReturnState {
     owner: Arc<Mutex<super::AttachedState>>,
     target: String,
     value: Option<TabAutomation>,
+    // Drop returns the target state before either gate is released.
+    _operation: (tokio::sync::OwnedRwLockReadGuard<()>, tokio::sync::OwnedMutexGuard<()>),
 }
 impl Drop for ReturnState {
     fn drop(&mut self) {
@@ -65,7 +70,8 @@ impl Drop for ReturnState {
             .as_ref()
             .is_some_and(|conn| !conn.registry().is_connection_closed())
         {
-            if let Some(value) = self.value.take() {
+            if let Some(mut value) = self.value.take() {
+                if value.pressed.is_none() && value.keys.is_empty() { value.input.take(); }
                 state.automation.insert(self.target.clone(), value);
             }
         }
@@ -307,6 +313,12 @@ impl AttachedBrowser {
             return Err(Error::TabDenied);
         }
         validate_input(&command)?;
+        check(cancel, &self.current_connection().map_err(|_| Error::Disconnected)?)?;
+        let connection_operation = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(Error::Cancelled),
+            operation = self.operations.clone().read_owned() => operation,
+        };
         let prior = self.pending(&grant.target_id);
         if let Command::Dialog {
             dialog_id,
@@ -348,7 +360,7 @@ impl AttachedBrowser {
             if let Some(work) = prior {
                 return self.wait_pending(grant, work).await;
             }
-            let _operation = self.operations.lock().await;
+            let _operation = self.target_operation(&grant.target_id).lock_owned().await;
             if let Some(state) = self
                 .state
                 .lock()
@@ -369,9 +381,7 @@ impl AttachedBrowser {
             }
             return Err(Error::Busy);
         }
-        let operation = self
-            .operations
-            .clone()
+        let operation = self.target_operation(&grant.target_id)
             .try_lock_owned()
             .map_err(|_| Error::Busy)?;
         let conn = self.current_connection().map_err(|_| Error::Disconnected)?;
@@ -390,12 +400,11 @@ impl AttachedBrowser {
             ReturnState {
                 owner: self.state.clone(),
                 target: grant.target_id.clone(),
-                value: Some(
-                    state
-                        .automation
-                        .remove(&grant.target_id)
-                        .unwrap_or_default(),
-                ),
+                _operation: (connection_operation, operation),
+                // Keep the existing target slot reserved while its native
+                // owner holds the value. The original capacity includes
+                // concurrent preparations, not just idle returned states.
+                value: Some(std::mem::take(state.automation.entry(grant.target_id.clone()).or_default())),
             }
         };
         let state = saved.value.as_mut().unwrap();
@@ -459,8 +468,8 @@ impl AttachedBrowser {
         let owned_grant = grant.clone();
         let rendering_cleanup = conn.clone();
         let paused = conn.with_response_pause(dialogs.response_pause());
+        let inputs = self.inputs.clone();
         let work = async move {
-            let _operation = operation;
             let state = saved.value.as_mut().unwrap();
             let conn = paused;
             let cancel = &owned_cancel;
@@ -489,9 +498,20 @@ impl AttachedBrowser {
                 state.rendering = Some(rendering::Rendering::begin(&conn, &state.session, rendering_cleanup).await?);
             }
             check(cancel, &conn)?;
+            // CDP input is target-addressed, but BringToFront and keyboard
+            // focus are shared by this browser. Preserve that real sequence
+            // mutex while allowing independent target reads and preparation.
+            let input = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(Error::Cancelled),
+                input = inputs.lock_owned() => input,
+            };
+            let mut input = Some(input);
+            if active { state.input = input.take(); }
             conn.send(&state.session, &BringToFrontParams::default())
                 .await
                 .map_err(|_| Error::ExecutionFailed)?;
+            drop(input);
             if let Command::Navigate { url, .. } = &command {
                 let url = url::Url::parse(url).map_err(|_| Error::InvalidInput)?;
                 if !matches!(url.scheme(), "http" | "https")
@@ -754,11 +774,21 @@ impl AttachedBrowser {
             )
         };
         let pending = pending::spawn(work, dialogs, conn, cancel.clone(), active);
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pending
-            .insert(grant.target_id.clone(), pending.clone());
+        let admitted = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.connection.as_ref().is_some_and(|conn| !conn.registry().is_connection_closed()) {
+                state.pending.insert(grant.target_id.clone(), pending.clone());
+                true
+            } else { false }
+        };
+        if !admitted {
+            // Disconnect may have snapshotted receipts just before this
+            // native owner was ready. Keep this caller joining the same work
+            // and dialog cleanup instead of publishing a late unowned job.
+            pending.cancel.cancel();
+            pending.retirement().await;
+            return Err(Error::Disconnected);
+        }
         self.wait_pending(grant, pending).await
     }
 
@@ -793,11 +823,13 @@ impl AttachedBrowser {
                 }
             }
         }
-        let _operation = self.operations.lock().await;
+        let connection_operation = self.operations.clone().read_owned().await;
+        let operation = self.target_operation(&grant.target_id).lock_owned().await;
         let conn = match self.current_connection() {
             Ok(connection) => connection,
             Err(_) => {
-                drop(_operation);
+                drop(operation);
+                drop(connection_operation);
                 self.disconnect()
                     .await
                     .map_err(|_| Error::ExecutionFailed)?;
@@ -814,9 +846,14 @@ impl AttachedBrowser {
             owner: self.state.clone(),
             target: grant.target_id.clone(),
             value: state,
+            _operation: (connection_operation, operation),
         };
         if let Some(state) = saved.value.as_mut() {
+            if state.input.is_none() && (state.pressed.is_some() || !state.keys.is_empty()) {
+                state.input = Some(self.inputs.clone().lock_owned().await);
+            }
             release_inputs(&conn, state).await?;
+            state.input.take();
             state.frames.clear(&conn).await?;
             if !state.object.is_empty() {
                 clear_instrumentation(&conn, state).await?;

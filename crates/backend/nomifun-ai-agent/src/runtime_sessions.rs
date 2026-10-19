@@ -56,16 +56,51 @@ pub type RuntimeModelConfigResolver = Arc<
         + Sync,
 >;
 
-/// Manages the lifecycle of active official Runtime Sessions.
-///
-/// Each conversation has at most one live runtime. Concurrent creation is
-/// single-flight and every returned [`AgentRuntimeHandle`] references that same
-/// runtime until it is terminated or evicted.
-/// The trait is object-safe for dependency injection.
+/// Point-in-time carrier ownership, never a Session resource-release proof.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeCarrierObservation {
+    pub supported: bool,
+    pub instance_id: Option<String>,
+    pub registered: bool,
+    pub initialized: bool,
+    pub teardown_pending: bool,
+    pub active_generation: Option<u64>,
+    pub constructing_generation: Option<u64>,
+    pub uncertain_acquisition: bool,
+    pub stop_requested: bool,
+}
+
+/// Manages the existing registry's exact Runtime instances and turn admission.
+/// Concurrent construction is single-flight; teardown remains owned until proven.
 #[async_trait]
 pub trait AgentRuntimeSessions: Send + Sync {
     /// Get an existing runtime by conversation ID.
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle>;
+
+    /// A read-only view of this process's original registry, including cold
+    /// constructors and quarantined carriers hidden from ordinary acquisition.
+    /// Absence says nothing about independent Session processes or browsers.
+    fn observe_runtime_carrier(&self, _conversation_id: &str) -> RuntimeCarrierObservation {
+        RuntimeCarrierObservation::default()
+    }
+
+    /// Discover retained carriers even after their canonical Turn closed.
+    /// Callers still authorize each Session through its canonical owner.
+    fn registered_runtime_sessions(&self) -> Option<Vec<String>> { None }
+
+    /// Fence an exact carrier immediately, independently of a constructor or
+    /// long native teardown. Acceptance is not a completed cleanup receipt.
+    fn request_runtime_stop(&self, _conversation_id: &str, _instance_id: &str,
+        _expected_generation: Option<u64>) -> Result<bool, AppError> {
+        Err(AppError::Conflict("exact Runtime carrier control is unavailable".into()))
+    }
+
+    /// Join the original carrier after request_runtime_stop. The caller owns
+    /// this wait through its existing background task group.
+    async fn finish_runtime_stop(&self, _conversation_id: &str, _instance_id: &str)
+        -> Result<(), AppError> {
+        Err(AppError::Conflict("exact Runtime carrier cleanup is unavailable".into()))
+    }
 
     /// Exact local admission still held by a driver/relay. A finished stream
     /// alone does not prove that the reusable slot has released this owner.
@@ -141,6 +176,13 @@ pub trait AgentRuntimeSessions: Send + Sync {
         Ok(())
     }
 
+    /// Retire only the original completed carrier. A successor or an active
+    /// admission is an absorbing no-op; unknown ownership never authorizes kill.
+    async fn retire_runtime_if_matches(&self, _conversation_id: &str,
+        _expected: &AgentRuntimeHandle) -> Result<bool, AppError> {
+        Err(AppError::Conflict("exact completed Runtime retirement is unavailable".into()))
+    }
+
     /// Tombstone and terminate one Conversation turn generation. A newer turn
     /// uses a different generation and can never be hit by this cancellation.
     fn cancel_runtime_turn(
@@ -212,7 +254,29 @@ pub trait AgentRuntimeSessions: Send + Sync {
 /// initialises by running the factory, and that every subsequent caller
 /// awaits. Failed initialisations leave the cell empty so the next caller
 /// may retry; the slot itself is only removed by explicit termination.
-type RuntimeSlot = Arc<OnceCell<AgentRuntimeHandle>>;
+struct RuntimeCell {
+    instance_id: String,
+    cell: OnceCell<AgentRuntimeHandle>,
+    stop: CancellationToken,
+    /// Serializes only admission identity and user Stop, never native awaits.
+    control: std::sync::Mutex<()>,
+    constructing_generation: std::sync::atomic::AtomicU64,
+}
+
+impl RuntimeCell {
+    fn new() -> Self {
+        Self { instance_id: nomifun_common::generate_id(), cell: OnceCell::new(),
+            stop: CancellationToken::new(), control: std::sync::Mutex::new(()),
+            constructing_generation: std::sync::atomic::AtomicU64::new(0) }
+    }
+}
+
+impl std::ops::Deref for RuntimeCell {
+    type Target = OnceCell<AgentRuntimeHandle>;
+    fn deref(&self) -> &Self::Target { &self.cell }
+}
+
+type RuntimeSlot = Arc<RuntimeCell>;
 
 #[derive(Clone)]
 struct RuntimeTurnAdmission {
@@ -472,7 +536,7 @@ pub struct InMemoryAgentRuntimeSessions {
     /// overlapping teardown requests for the same slot (e.g.
     /// `terminate_runtime_until_confirmed`'s retry loop over a stuck
     /// quarantined runtime) must consume exactly one unit of restart budget.
-    counted_crash_slots: Arc<DashMap<String, Weak<OnceCell<AgentRuntimeHandle>>>>,
+    counted_crash_slots: Arc<DashMap<String, Weak<RuntimeCell>>>,
 }
 
 impl InMemoryAgentRuntimeSessions {
@@ -606,7 +670,10 @@ impl InMemoryAgentRuntimeSessions {
         generation: u64,
         slot: &RuntimeSlot,
     ) -> Result<(), AppError> {
+        let _control = slot.control.lock().map_err(|_| AppError::Conflict("Runtime admission identity is unconfirmed".into()))?;
+        if slot.stop.is_cancelled() { return Err(AppError::Conflict("the exact Runtime carrier was stopped".into())); }
         self.ensure_turn_generation_available(conversation_id, generation)?;
+        slot.constructing_generation.store(0, std::sync::atomic::Ordering::Release);
         match self.turn_admissions.entry(conversation_id.to_owned()) {
             dashmap::mapref::entry::Entry::Occupied(entry)
                 if entry.get().generation == generation
@@ -836,6 +903,7 @@ impl InMemoryAgentRuntimeSessions {
 
         match result {
             Ok(()) => {
+                let _control = slot.control.lock().map_err(|_| AppError::Conflict("Runtime cleanup identity is unconfirmed".into()))?;
                 self.runtimes
                     .remove_if(conversation_id, |_, current| Arc::ptr_eq(current, &slot));
                 self.clear_quarantine_if_matches(conversation_id, &slot);
@@ -1061,7 +1129,7 @@ impl InMemoryAgentRuntimeSessions {
             let slot = self
                 .runtimes
                 .entry(conversation_id.to_owned())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .or_insert_with(|| Arc::new(RuntimeCell::new()))
                 .clone();
             let Some(runtime) = slot.get().cloned() else {
                 break slot;
@@ -1193,6 +1261,12 @@ impl InMemoryAgentRuntimeSessions {
             false,
         )?;
 
+        {
+            let _control = slot.control.lock().map_err(|_| AppError::Conflict("Runtime construction identity is unconfirmed".into()))?;
+            if slot.stop.is_cancelled() { return Err(AppError::Conflict("the exact Runtime constructor was stopped".into())); }
+            slot.constructing_generation.store(turn_generation.unwrap_or(0), std::sync::atomic::Ordering::Release);
+        }
+
         match self.governor.gate(conversation_id, now_ms()) {
             Ok(0) => {}
             Ok(backoff_ms) => {
@@ -1253,6 +1327,9 @@ impl InMemoryAgentRuntimeSessions {
         // check itself races nothing (the closure runs serially per slot).
         let governor = Arc::clone(&self.governor);
         let gated_conversation_id = conversation_id.to_owned();
+        let constructing_slot = slot.clone();
+        let build_cancellation = cancellation.clone();
+        let build_shutdown = self.shutdown.closed.clone();
         let build = slot.get_or_try_init(|| async move {
             // When the last builds failed back-to-back (e.g. the agent CLI
             // cannot finish its startup handshake), refuse fast during the
@@ -1270,7 +1347,18 @@ impl InMemoryAgentRuntimeSessions {
                      error for the underlying cause)."
                 )));
             }
-            let factory_result = factory(options).await;
+            let factory_future = {
+                let _control = constructing_slot.control.lock()
+                    .map_err(|_| AppError::Conflict("Runtime factory admission is unconfirmed".into()))?;
+                if constructing_slot.stop.is_cancelled() || build_shutdown.is_cancelled()
+                    || build_cancellation.as_ref().is_some_and(CancellationToken::is_cancelled) {
+                    return Err(AppError::Conflict("Runtime factory was cancelled before dispatch".into()));
+                }
+                // Transfer ownership while the short admission boundary is
+                // held, then poll the original constructor outside it.
+                factory(options)
+            };
+            let factory_result = factory_future.await;
             match factory_result {
                 Ok(runtime) => {
                     governor.record_build_success(&gated_conversation_id);
@@ -1290,10 +1378,19 @@ impl InMemoryAgentRuntimeSessions {
             }
         });
         tokio::pin!(build);
-        let build_result = if let Some(cancellation) = cancellation.as_ref() {
+        let build_result = {
+            let cancelled = async {
+                match cancellation.as_ref() {
+                    Some(cancellation) => { tokio::select! {
+                        _ = cancellation.cancelled() => {},
+                        _ = slot.stop.cancelled() => {},
+                    } },
+                    None => slot.stop.cancelled().await,
+                }
+            };
             tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => {
+                _ = cancelled => {
                     // Once a factory starts, dropping its future cannot prove
                     // that no subprocess escaped.  Drive it to a result while
                     // retaining workspace authority; if it produced a runtime,
@@ -1321,8 +1418,6 @@ impl InMemoryAgentRuntimeSessions {
                 }
                 result = &mut build => result,
             }
-        } else {
-            build.await
         };
         let runtime = match build_result {
             Ok(runtime) => runtime.clone(),
@@ -1337,7 +1432,7 @@ impl InMemoryAgentRuntimeSessions {
             .runtimes
             .get(conversation_id)
             .is_some_and(|entry| Arc::ptr_eq(entry.value(), &slot));
-        let user_cancelled = cancellation.as_ref().is_some_and(CancellationToken::is_cancelled);
+        let user_cancelled = slot.stop.is_cancelled() || cancellation.as_ref().is_some_and(CancellationToken::is_cancelled);
         let cancelled = user_cancelled || self.shutdown.closed.is_cancelled();
         let teardown_requested = self.slot_is_quarantined(conversation_id, &slot);
         if cancelled || !slot_is_current || teardown_requested || self.shutdown.closed.is_cancelled() {
@@ -1416,7 +1511,7 @@ impl InMemoryAgentRuntimeSessions {
         // Configuration confirmation above is asynchronous. Cancellation or
         // host shutdown during it must not publish a newly built runtime.
         if cancellation.as_ref().is_some_and(CancellationToken::is_cancelled)
-            || self.shutdown.closed.is_cancelled()
+            || slot.stop.is_cancelled() || self.shutdown.closed.is_cancelled()
         {
             self.teardown_slot_under_gate(
                 conversation_id, Arc::clone(&slot), Some(AgentKillReason::UserCancelled), None,
@@ -1436,6 +1531,69 @@ impl AgentRuntimeSessions for InMemoryAgentRuntimeSessions {
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle> {
         if self.shutdown.closed.is_cancelled() { return None; }
         self.initialized_runtime(conversation_id)
+    }
+
+    fn observe_runtime_carrier(&self, conversation_id: &str) -> RuntimeCarrierObservation {
+        let current = self.runtimes.get(conversation_id).map(|entry| entry.value().clone());
+        let quarantined = self.quarantined_slot(conversation_id);
+        let slot = quarantined.as_ref().or(current.as_ref());
+        RuntimeCarrierObservation {
+            supported: true,
+            instance_id: slot.map(|slot| slot.instance_id.clone()),
+            registered: slot.is_some(),
+            initialized: slot.is_some_and(|slot| slot.get().is_some()),
+            teardown_pending: quarantined.is_some(),
+            active_generation: self.active_turn_generation(conversation_id),
+            constructing_generation: slot.and_then(|slot| {
+                let generation = slot.constructing_generation.load(std::sync::atomic::Ordering::Acquire);
+                (generation != 0).then_some(generation)
+            }),
+            uncertain_acquisition: self.shutdown.uncertain_acquisition.load(std::sync::atomic::Ordering::Acquire),
+            stop_requested: slot.is_some_and(|slot| slot.stop.is_cancelled()),
+        }
+    }
+
+    fn registered_runtime_sessions(&self) -> Option<Vec<String>> {
+        let mut ids = std::collections::BTreeSet::new();
+        ids.extend(self.runtimes.iter().map(|entry| entry.key().clone()));
+        ids.extend(self.teardown_quarantine.iter().map(|entry| entry.key().clone()));
+        ids.extend(self.turn_admissions.iter().map(|entry| entry.key().clone()));
+        Some(ids.into_iter().collect())
+    }
+
+    fn request_runtime_stop(&self, conversation_id: &str, instance_id: &str,
+        expected_generation: Option<u64>) -> Result<bool, AppError> {
+        let slot = self.quarantined_slot(conversation_id).or_else(||
+            self.runtimes.get(conversation_id).map(|entry| entry.value().clone()));
+        let Some(slot) = slot else { return Ok(false); };
+        let _control = slot.control.lock().map_err(|_| AppError::Conflict("Runtime control identity is unconfirmed".into()))?;
+        if slot.instance_id != instance_id { return Ok(false); }
+        let constructing = slot.constructing_generation.load(std::sync::atomic::Ordering::Acquire);
+        let current_generation = self.active_turn_generation(conversation_id).or((constructing != 0).then_some(constructing));
+        if current_generation != expected_generation {
+            return Err(AppError::Conflict("Runtime carrier has a different active Turn; refresh the exact target".into()));
+        }
+        let still_current = self.runtimes.get(conversation_id).is_some_and(|current| Arc::ptr_eq(current.value(), &slot))
+            || self.slot_is_quarantined(conversation_id, &slot);
+        if !still_current { return Ok(false); }
+        slot.stop.cancel();
+        self.quarantine_teardown_slot(conversation_id, &slot);
+        if let Some(runtime) = slot.get()
+            && let Err(error) = runtime.kill(Some(AgentKillReason::UserCancelled)) {
+            warn!(%conversation_id, %error, "carrier Stop accepted; original owner cleanup remains unconfirmed");
+        }
+        Ok(true)
+    }
+
+    async fn finish_runtime_stop(&self, conversation_id: &str, instance_id: &str) -> Result<(), AppError> {
+        let lifecycle_gate = self.lifecycle_gate(conversation_id);
+        let _lifecycle = lifecycle_gate.lock().await;
+        let slot = self.quarantined_slot(conversation_id).or_else(||
+            self.runtimes.get(conversation_id).map(|entry| entry.value().clone()));
+        let Some(slot) = slot else { return Ok(()); };
+        if slot.instance_id != instance_id { return Ok(()); }
+        if !slot.stop.is_cancelled() { return Err(AppError::Conflict("Runtime cleanup has no accepted exact stop".into())); }
+        self.teardown_slot_under_gate(conversation_id, slot, Some(AgentKillReason::UserCancelled), None).await
     }
 
     async fn get_or_create_runtime(
@@ -1503,42 +1661,51 @@ impl AgentRuntimeSessions for InMemoryAgentRuntimeSessions {
         Ok(())
     }
 
+    async fn retire_runtime_if_matches(&self, conversation_id: &str,
+        expected: &AgentRuntimeHandle) -> Result<bool, AppError> {
+        let lifecycle_gate = self.lifecycle_gate(conversation_id);
+        let _lifecycle = lifecycle_gate.lock().await;
+        let slot = self.quarantined_slot(conversation_id).or_else(||
+            self.runtimes.get(conversation_id).map(|entry| entry.value().clone()));
+        let Some(slot) = slot else { return Ok(false); };
+        let Some(runtime) = slot.get() else { return Ok(false); };
+        if !std::ptr::eq(runtime.as_runtime(), expected.as_runtime())
+            || self.slot_has_active_turn(conversation_id, &slot) {
+            return Ok(false);
+        }
+        self.teardown_slot_under_gate(conversation_id, slot,
+            Some(AgentKillReason::TurnBoundaryRecycle), None).await?;
+        Ok(true)
+    }
+
     fn cancel_runtime_turn(
         &self,
         conversation_id: &str,
         turn_generation: u64,
         reason: Option<AgentKillReason>,
     ) -> Result<(), AppError> {
-        let lifecycle_gate = self.lifecycle_gate(conversation_id);
-        let _lifecycle = lifecycle_gate.try_lock().map_err(|_| {
-            AppError::Conflict(format!(
-                "Agent runtime lifecycle for conversation {conversation_id} is busy; refusing an unfenced turn cancellation"
-            ))
-        })?;
-        let Some(admission) = self
-            .turn_admissions
-            .get(conversation_id)
-            .map(|entry| entry.value().clone())
-        else {
-            return Ok(());
-        };
-        if admission.generation != turn_generation {
-            return Ok(());
-        }
-
+        let slot = self.turn_admissions.get(conversation_id).map(|entry| entry.slot.clone())
+            .or_else(|| self.quarantined_slot(conversation_id))
+            .or_else(|| self.runtimes.get(conversation_id).map(|entry| entry.value().clone()));
+        let Some(slot) = slot else { return Ok(()); };
+        // User Stop never queues behind a cold constructor, Steer or native
+        // teardown. Admission transfers share only this short identity lock.
+        let _control = slot.control.lock().map_err(|_| AppError::Conflict("native cancellation identity is unconfirmed".into()))?;
+        let constructing = slot.constructing_generation.load(std::sync::atomic::Ordering::Acquire);
+        let current_generation = self.active_turn_generation(conversation_id).or((constructing != 0).then_some(constructing));
+        if current_generation != Some(turn_generation) { return Ok(()); }
         let exact_slot_is_current = self
             .runtimes
             .get(conversation_id)
-            .is_some_and(|current| Arc::ptr_eq(current.value(), &admission.slot))
-            || self.slot_is_quarantined(conversation_id, &admission.slot);
+            .is_some_and(|current| Arc::ptr_eq(current.value(), &slot))
+            || self.slot_is_quarantined(conversation_id, &slot);
         if !exact_slot_is_current {
-            self.clear_turn_admission_if_matches(conversation_id, &admission.slot);
             return Ok(());
         }
-
-        self.note_termination_for_governor(conversation_id, reason, Some(&admission.slot));
-        self.quarantine_teardown_slot(conversation_id, &admission.slot);
-        if let Some(agent) = admission.slot.get() {
+        slot.stop.cancel();
+        self.note_termination_for_governor(conversation_id, reason, Some(&slot));
+        self.quarantine_teardown_slot(conversation_id, &slot);
+        if let Some(agent) = slot.get() {
             agent.kill(reason)?;
         }
         Ok(())
@@ -1646,6 +1813,7 @@ mod tests {
         kill_started: Option<Arc<Semaphore>>,
         kill_release: Option<Arc<Semaphore>>,
         kill_error: Option<String>,
+        kill_failures: Option<Arc<AtomicUsize>>,
         kill_reasons: Option<Arc<std::sync::Mutex<Vec<Option<AgentKillReason>>>>>,
     }
 
@@ -1664,6 +1832,7 @@ mod tests {
                 kill_started: None,
                 kill_release: None,
                 kill_error: None,
+                kill_failures: None,
                 kill_reasons: None,
             }
         }
@@ -1676,6 +1845,11 @@ mod tests {
 
         fn with_kill_error(mut self, error: impl Into<String>) -> Self {
             self.kill_error = Some(error.into());
+            self
+        }
+
+        fn with_kill_failures(mut self, failures: Arc<AtomicUsize>) -> Self {
+            self.kill_failures = Some(failures);
             self
         }
 
@@ -1760,6 +1934,7 @@ mod tests {
             let started = self.kill_started.clone();
             let release = self.kill_release.clone();
             let kill_error = self.kill_error.clone();
+            let kill_failures = self.kill_failures.clone();
             Box::pin(async move {
                 kill_result?;
                 if let Some(started) = started {
@@ -1770,6 +1945,10 @@ mod tests {
                 }
                 if let Some(error) = kill_error {
                     return Err(AppError::Internal(error));
+                }
+                if let Some(failures) = kill_failures
+                    && failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| remaining.checked_sub(1)).is_ok() {
+                    return Err(AppError::Conflict("original cleanup is still unconfirmed".into()));
                 }
                 Ok(())
             })
@@ -1874,6 +2053,84 @@ mod tests {
     fn get_runtime_returns_none_when_empty() {
         let registry = make_registry();
         assert!(registry.get_runtime("nonexistent").is_none());
+    }
+
+    #[tokio::test]
+    async fn completed_retirement_removes_the_exact_slot_without_recreating_work() {
+        let registry = make_registry();
+        let original = registry.get_or_create_runtime("retire-completed", make_runtime_options("retire-completed")).await.unwrap();
+        assert!(registry.retire_runtime_if_matches("retire-completed", &original).await.unwrap());
+        assert!(registry.get_runtime("retire-completed").is_none());
+        assert!(!registry.has_owned_runtime("retire-completed"));
+        assert!(registry.quarantined_slot("retire-completed").is_none());
+        assert!(!registry.retire_runtime_if_matches("retire-completed", &original).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn completed_retirement_cannot_select_a_replacement_runtime() {
+        let registry = make_registry();
+        let original = registry.get_or_create_runtime("retire-successor", make_runtime_options("retire-successor")).await.unwrap();
+        assert!(registry.retire_runtime_if_matches("retire-successor", &original).await.unwrap());
+        let successor = registry.get_or_create_runtime("retire-successor", make_runtime_options("retire-successor")).await.unwrap();
+        assert!(!same_mock(&original, &successor));
+        assert!(!registry.retire_runtime_if_matches("retire-successor", &original).await.unwrap());
+        assert!(same_mock(&registry.get_runtime("retire-successor").unwrap(), &successor));
+        assert!(registry.has_owned_runtime("retire-successor"));
+        assert!(registry.quarantined_slot("retire-successor").is_none());
+    }
+
+    #[tokio::test]
+    async fn completed_retirement_preserves_an_active_turn_on_the_same_runtime() {
+        let registry = make_registry();
+        let cancellation = CancellationToken::new();
+        let original = registry.get_or_create_runtime_for_turn("retire-active", 41,
+            cancellation.clone(), make_runtime_options("retire-active")).await.unwrap();
+        assert!(!registry.retire_runtime_if_matches("retire-active", &original).await.unwrap());
+        assert_eq!(registry.active_turn_generation("retire-active"), Some(41));
+        assert_eq!(registry.observe_runtime_carrier("retire-active"), RuntimeCarrierObservation {
+            supported: true, instance_id: registry.observe_runtime_carrier("retire-active").instance_id,
+            registered: true, initialized: true, teardown_pending: false,
+            active_generation: Some(41), constructing_generation: None, uncertain_acquisition: false, stop_requested: false,
+        });
+        assert!(!cancellation.is_cancelled());
+        assert!(same_mock(&registry.get_runtime("retire-active").unwrap(), &original));
+        registry.release_runtime_turn("retire-active", 41).await.unwrap();
+        assert!(registry.retire_runtime_if_matches("retire-active", &original).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn completed_retirement_failure_retains_quarantine_and_retries_the_original_instance() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let failures = Arc::new(AtomicUsize::new(2));
+        let reasons = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let factory: OfficialRuntimeOpener = {
+            let calls = calls.clone(); let failures = failures.clone(); let reasons = reasons.clone();
+            Arc::new(move |options| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let agent = MockAgent::new(&options.conversation_id, Some(ConversationStatus::Finished))
+                    .with_kill_failures(failures.clone()).with_kill_reasons(reasons.clone());
+                async move { Ok(mock_runtime(agent)) }.boxed()
+            })
+        };
+        let registry = InMemoryAgentRuntimeSessions::new(factory);
+        let original = registry.get_or_create_runtime("retire-retry", make_runtime_options("retire-retry")).await.unwrap();
+        assert!(registry.retire_runtime_if_matches("retire-retry", &original).await.is_err());
+        assert!(registry.get_runtime("retire-retry").is_none());
+        let pending = registry.observe_runtime_carrier("retire-retry");
+        assert!(pending.supported && pending.registered && pending.initialized && pending.teardown_pending,
+            "quarantine must remain discoverable while ordinary acquisition hides it");
+        assert!(registry.has_owned_runtime("retire-retry"));
+        let quarantined = registry.quarantined_slot("retire-retry").unwrap();
+        assert!(same_mock(quarantined.get().unwrap(), &original));
+        assert!(registry.get_or_create_runtime("retire-retry", make_runtime_options("retire-retry")).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(registry.retire_runtime_if_matches("retire-retry", &original).await.unwrap());
+        assert!(!registry.has_owned_runtime("retire-retry"));
+        assert!(registry.quarantined_slot("retire-retry").is_none());
+        assert!(!registry.observe_runtime_carrier("retire-retry").registered);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "cleanup retry cannot open a replacement worker");
+        assert_eq!(*reasons.lock().unwrap(), vec![Some(AgentKillReason::TurnBoundaryRecycle),
+            Some(AgentKillReason::AgentErrorRecovery), Some(AgentKillReason::TurnBoundaryRecycle)]);
     }
 
     #[tokio::test]
@@ -2178,7 +2435,7 @@ mod tests {
         // Simulate a corrupt/legacy in-memory slot that predates mandatory
         // workspace authority. The public registry path can no longer create
         // this state, but it must still refuse after-the-fact adoption.
-        let legacy_slot = Arc::new(OnceCell::new());
+        let legacy_slot = Arc::new(RuntimeCell::new());
         assert!(
             legacy_slot
                 .set(mock_runtime(MockAgent::new("conv-unknown-binding", None)))
@@ -2824,6 +3081,65 @@ mod tests {
             while registry.has_owned_runtime("shutdown-owned") {tokio::task::yield_now().await;}
         }).await.unwrap();
         registry.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exact_carrier_stop_preempts_cold_construction_and_joins_its_original_owner() {
+        for generation in [None, Some(41)] {
+            let entered = Arc::new(Semaphore::new(0));
+            let release = Arc::new(Semaphore::new(0));
+            let kills = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let registry = InMemoryAgentRuntimeSessions::new(Arc::new({
+                let entered=entered.clone();let release=release.clone();let kills=kills.clone();
+                move |options| { let entered=entered.clone();let release=release.clone();let kills=kills.clone();
+                    async move {
+                        entered.add_permits(1);release.acquire().await.unwrap().forget();
+                        Ok(mock_runtime(MockAgent::new(&options.conversation_id,Some(ConversationStatus::Pending)).with_kill_reasons(kills)))
+                    }.boxed()
+                }
+            }));
+            let build = tokio::spawn({ let registry=registry.clone(); async move {
+                if let Some(generation) = generation {
+                    registry.get_or_create_runtime_for_turn("cold-control",generation,CancellationToken::new(),make_runtime_options("cold-control")).await
+                } else { registry.get_or_create_runtime("cold-control",make_runtime_options("cold-control")).await }
+            }});
+            entered.acquire().await.unwrap().forget();
+            let observed = registry.observe_runtime_carrier("cold-control");
+            assert!(observed.registered && !observed.initialized);
+            assert_eq!(observed.constructing_generation,generation);
+            let id = observed.instance_id.unwrap();
+            if let Some(generation) = generation {
+                registry.cancel_runtime_turn("cold-control",generation,Some(AgentKillReason::UserCancelled)).unwrap();
+            } else { assert!(registry.request_runtime_stop("cold-control",&id,None).unwrap()); }
+            let stopped = registry.observe_runtime_carrier("cold-control");
+            assert!(stopped.stop_requested && stopped.teardown_pending);
+            let cleanup = tokio::spawn({ let registry=registry.clone();let id=id.clone();async move {
+                registry.finish_runtime_stop("cold-control",&id).await
+            }});
+            assert!(!build.is_finished() && !cleanup.is_finished(),"acceptance cannot pretend the constructor already exited");
+            release.add_permits(1);
+            assert!(build.await.unwrap().is_err());
+            cleanup.await.unwrap().unwrap();
+            assert!(!registry.observe_runtime_carrier("cold-control").registered);
+            assert_eq!(*kills.lock().unwrap(),vec![Some(AgentKillReason::UserCancelled)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_carrier_stop_rejects_a_successor_generation_and_an_old_instance() {
+        let registry = make_registry();
+        let old = registry.get_or_create_runtime("carrier-successor",make_runtime_options("carrier-successor")).await.unwrap();
+        let id = registry.observe_runtime_carrier("carrier-successor").instance_id.unwrap();
+        let current = registry.get_or_create_runtime_for_turn("carrier-successor",73,CancellationToken::new(),make_runtime_options("carrier-successor")).await.unwrap();
+        assert!(registry.request_runtime_stop("carrier-successor",&id,None).is_err());
+        assert!(!registry.observe_runtime_carrier("carrier-successor").stop_requested);
+        registry.release_runtime_turn("carrier-successor",73).await.unwrap();
+        assert!(registry.retire_runtime_if_matches("carrier-successor",&old).await.unwrap());
+        let replacement = registry.get_or_create_runtime("carrier-successor",make_runtime_options("carrier-successor")).await.unwrap();
+        assert!(!registry.request_runtime_stop("carrier-successor",&id,None).unwrap());
+        registry.finish_runtime_stop("carrier-successor",&id).await.unwrap();
+        assert!(!same_mock(&current,&replacement));
+        assert!(same_mock(&registry.get_runtime("carrier-successor").unwrap(),&replacement));
     }
 
     #[tokio::test]

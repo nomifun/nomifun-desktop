@@ -26,6 +26,7 @@ pub use agent_schedule::{
 };
 pub use routes::cron_routes;
 pub use session_port::{
+    CronRunResourceRetirement,
     CronRuntimePreparationRequest, CronScheduledSessionLookup,
     CronSessionAgentBinding,
     CronSessionCronBindingRequest, CronSessionHandle, CronSessionLookup, CronSessionPort,
@@ -33,10 +34,12 @@ pub use session_port::{
     CronTurnMessage, CronTurnReceiptState, CronTurnReconciliation,
     CronTurnReconciliationRequest, CronTurnReceiptQuery, CronTurnRequest,
     CronTurnRuntimeOverlay, CronTurnRuntimePreparation,
+    CronTurnCancellationRequest, CronTurnCancellationReceipt,
 };
 pub use service::{
     CronAgentPresetResolver, CronBackgroundTaskRegistrar, CronEmbeddedCommandResult,
     CronEmbeddedCreateCommand, CronEmbeddedDeleteCommand, CronEmbeddedMutationRequest,
     CronEmbeddedMutationWaiter, CronEmbeddedUpdateCommand,
+    CronRunCancellationReceipt,
 };
 pub use state::CronRouterState;

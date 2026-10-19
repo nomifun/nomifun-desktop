@@ -266,6 +266,107 @@ async fn delayed_exact_cancel_stops_only_the_original_writeback_while_the_succes
 }
 
 #[tokio::test]
+async fn soft_runtime_retirement_waits_for_the_original_writeback_without_cancelling_success() {
+    let server = ModelServer::new(0).await;
+    let fixture = Fixture::with_knowledge("knowledge-soft-runtime-retirement", &server.url).await;
+    let completer = ControlledCompleter::install(&fixture, true, false);
+    send_original(&fixture).await;
+    completer.wait_entered().await;
+    let before = wait_writeback(&fixture, ORIGINAL, "running").await;
+    let mut retiring = fixture.runtime.kill_and_wait(Some(nomifun_common::AgentKillReason::TurnBoundaryRecycle));
+    assert!(futures_util::poll!(retiring.as_mut()).is_pending());
+    assert_eq!(wait_writeback(&fixture, ORIGINAL, "running").await["finished_seq"], before["finished_seq"]);
+    completer.release.add_permits(1);
+    retiring.await.unwrap();
+    let after = wait_writeback(&fixture, ORIGINAL, "written").await;
+    assert_eq!(after["state"], "completed");
+    assert_eq!(after["finished_at_ms"], before["finished_at_ms"]);
+    assert!(fixture.host.resources.teardown_proven().unwrap());
+    assert!(std::fs::read_to_string(note_path(&fixture)).unwrap().contains("original completed Turn"));
+    assert_eq!(completer.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+    fixture.finish().await;
+    server.close().await;
+}
+
+#[tokio::test]
+async fn completed_attempt_cleanup_retires_the_actual_runtime_after_writeback_without_cancelling_it() {
+    let server = ModelServer::new(0).await;
+    let fixture = Fixture::with_knowledge("knowledge-completed-attempt-cleanup", &server.url).await;
+    let completer = ControlledCompleter::install(&fixture, true, false);
+    send_original(&fixture).await;
+    completer.wait_entered().await;
+    let before = wait_writeback(&fixture, ORIGINAL, "running").await;
+    let session = fixture.host.options.conversation_id.clone();
+    let owner = fixture.host.options.user_id.clone();
+    let attempt = nomifun_common::generate_id();
+    nomifun_agent_execution::AgentExecutionSessionPort::cancel_attempt_for_execution(
+        fixture.owner.as_ref(), &owner, &session, &attempt, ORIGINAL,
+    ).await.unwrap();
+    let session_id = session.clone().into();
+    let operation = ORIGINAL.into();
+    let mut retirement = Box::pin(fixture.owner.retire_completed_runtime(&owner, &session_id,
+        &operation, &fixture.runtime));
+    assert!(futures_util::poll!(&mut retirement).is_pending());
+    let still_running = wait_writeback(&fixture, ORIGINAL, "running").await;
+    assert_eq!(still_running["finished_at_ms"], before["finished_at_ms"]);
+    assert!(fixture.services.agent_runtime_sessions.get_runtime(&session).is_some(),
+        "a pending native cleanup must retain its original registry witness");
+    completer.release.add_permits(1);
+    retirement.await.unwrap();
+    let settled = wait_writeback(&fixture, ORIGINAL, "written").await;
+    assert_eq!(settled["state"], "completed");
+    assert_eq!(settled["finished_at_ms"], before["finished_at_ms"]);
+    assert!(fixture.services.agent_runtime_sessions.get_runtime(&session).is_none(),
+        "cleanup must retire the actual Runtime, not just acknowledge an inactive Turn");
+    assert!(fixture.host.resources.teardown_proven().unwrap());
+    assert!(std::fs::read_to_string(note_path(&fixture)).unwrap().contains("original completed Turn"));
+    assert_eq!(completer.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+    fixture.finish().await;
+    server.close().await;
+}
+
+#[tokio::test]
+async fn completed_attempt_cleanup_preserves_a_successor_and_the_original_pending_writeback() {
+    let server = ModelServer::new(2).await;
+    let fixture = Fixture::with_knowledge("knowledge-completed-cleanup-successor", &server.url).await;
+    let completer = ControlledCompleter::install(&fixture, true, false);
+    send_original(&fixture).await;
+    completer.wait_entered().await;
+    let (next, events) = successor(&fixture, "completed-cleanup-successor").await;
+    let next_operation = next["operation_id"].as_str().unwrap();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while server.calls.load(Ordering::SeqCst) < 2 { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    let session = fixture.host.options.conversation_id.clone();
+    let generation = fixture.services.agent_runtime_sessions.active_turn_generation(&session);
+    assert!(generation.is_some());
+    nomifun_agent_execution::AgentExecutionSessionPort::cancel_attempt_for_execution(
+        fixture.owner.as_ref(), &fixture.host.options.user_id, &session,
+        &nomifun_common::generate_id(), ORIGINAL,
+    ).await.unwrap();
+    assert_eq!(fixture.services.agent_runtime_sessions.active_turn_generation(&session), generation);
+    assert_eq!(fixture.owner.canonical().store().head(&session.clone().into()).await.unwrap().active_turn_id.as_deref(), Some(next_operation));
+    assert_eq!(wait_writeback(&fixture, ORIGINAL, "running").await["state"], "completed");
+    let session_id = session.clone().into();
+    let operation = ORIGINAL.into();
+    let mut retirement = Box::pin(fixture.owner.retire_completed_runtime(&fixture.host.options.user_id,
+        &session_id, &operation, &fixture.runtime));
+    assert!(futures_util::poll!(&mut retirement).is_pending());
+    completer.release.add_permits(1);
+    assert_eq!(wait_writeback(&fixture, ORIGINAL, "written").await["state"], "completed");
+    retirement.await.unwrap();
+    assert_eq!(fixture.services.agent_runtime_sessions.active_turn_generation(&session), generation);
+    server.gate.add_permits(1);
+    wait_finish(events).await;
+    wait_writeback(&fixture, next_operation, "no_candidate").await;
+    assert_eq!(completer.calls.load(Ordering::SeqCst), 2);
+    fixture.finish().await;
+    server.close().await;
+}
+
+#[tokio::test]
 async fn session_teardown_joins_the_cancelled_extractor_and_prevents_a_late_write() {
     let server = ModelServer::new(0).await;
     let fixture = Fixture::with_knowledge("knowledge-session-teardown", &server.url).await;

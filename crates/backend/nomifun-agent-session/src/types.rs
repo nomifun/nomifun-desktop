@@ -211,6 +211,15 @@ pub enum TurnReceiptStatus {
     Cancelled,
 }
 
+/// Bounded metadata for observing one existing Turn. This view grants no
+/// execution authority and does not hydrate transcript or public output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TurnProgressObservation {
+    pub status: TurnReceiptStatus,
+    pub cursor: u64,
+    pub suspended: bool,
+}
+
 /// A bounded, read-only view of the canonical turn facts for one
 /// `(AgentSessionId, OperationId)` pair.
 ///

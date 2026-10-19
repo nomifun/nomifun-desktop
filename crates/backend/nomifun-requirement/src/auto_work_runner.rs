@@ -170,6 +170,12 @@ pub enum AutoWorkStopOutcome {
     CleanupPending,
 }
 
+#[derive(Debug)]
+pub struct AutoWorkCurrentStopOutcome {
+    pub execution_stopped: bool,
+    pub cleanup_error: Option<String>,
+}
+
 fn start_outcome_failure(
     kind: AutoWorkTargetKind,
     target_id: &str,
@@ -280,7 +286,7 @@ impl Drop for HandleGuard {
             // start/stop transition barrier. Once handed off, this background
             // task must not release a replacement execution generation.
             if !cleanup_handoff.load(Ordering::SeqCst) && !process_shutdown.is_cancelled() {
-                cleanup_abandoned_loop_claim(&deps, key.0, &key.1, &tag).await;
+                cleanup_abandoned_loop_claim(&deps, key.0, &key.1, &tag,&process_shutdown).await;
             }
             handles.remove_if(&key, |_, h| h.generation == generation);
         });
@@ -344,6 +350,28 @@ impl AutoWorkRunner {
         self.handles
             .get(&(kind, target_id.to_string()))
             .map(|h| (h.progress.current(), h.progress.completed()))
+    }
+
+    /// Stop one captured claim. This neither stops the persistent loop nor
+    /// changes its tag, configuration, retry budget or future work.
+    pub async fn stop_current_claim(&self, owner_id: &str, kind: AutoWorkTargetKind,
+        target_id: &str, requirement_id: &str, claim_generation: i64,
+    ) -> Result<AutoWorkCurrentStopOutcome, AppError> {
+        if owner_id != self.deps.authoritative_user_id.as_ref() {
+            return Err(AppError::Forbidden("AutoWork belongs to the installation owner".into()));
+        }
+        if kind != AutoWorkTargetKind::Conversation {
+            return Err(AppError::BadRequest("Terminal AutoWork was retired".into()));
+        }
+        // No Session control/config lock: the original Requirement CAS must
+        // preempt a stalled business-control or workspace preparation future.
+        let source = self.deps.service.cancel_current_claim_exact(requirement_id, target_id, claim_generation).await?;
+        self.deps.wake.notify_waiters();
+        let result = self.deps.execution.cancel_automation(owner_id, &source).await;
+        Ok(match result {
+            Ok(_) => AutoWorkCurrentStopOutcome { execution_stopped: true, cleanup_error: None },
+            Err(error) => AutoWorkCurrentStopOutcome { execution_stopped: false, cleanup_error: Some(error.to_string()) },
+        })
     }
 
     /// Atomically reconcile persisted config and the live loop under the same
@@ -1584,15 +1612,51 @@ async fn pause_and_resolve_user_interruption(
     .await
 }
 
+async fn cleanup_cancelled_loop_claims(deps:&AutoWorkRunnerDeps,target_id:&str,tag:&str,
+    cancelled:Option<&AtomicBool>,shutdown:Option<&CancellationToken>)->bool {
+    // A user Stop may have committed before an owner future dropped, so an
+    // in_progress-only recovery query cannot find that responsibility. Read
+    // the original terminal claims; every cancellation below is bound to its
+    // existing generation/token and never allocates or replays work.
+    let mut page=1;
+    loop {
+        let rows=loop {
+            if cancelled.is_some_and(|flag|flag.load(Ordering::SeqCst)) || shutdown.is_some_and(CancellationToken::is_cancelled) {return false;}
+            match deps.service.repo().list(&nomifun_db::ListRequirementsParams {tag:Some(tag.into()),status:Some("cancelled".into()),
+                owner_conversation_id:Some(target_id.into()),order_by:Some("display_no".into()),order:Some("asc".into()),page:Some(page),page_size:Some(100),
+                ..Default::default()}).await {
+                Ok(rows)=>break rows,
+                Err(error)=>{
+                    warn!(target_id,%error,"cancelled AutoWork claim cleanup remains owned after read failure");
+                    if let Some(shutdown)=shutdown {tokio::select! {_=shutdown.cancelled()=>return false,_=sleep(Duration::from_secs(1))=>{}}}
+                    else {tokio::select! {_=deps.wake.notified()=>{},_=sleep(Duration::from_secs(1))=>{}}}
+                }
+            }
+        };
+        for row in &rows.0 {
+            if row.claim_generation<=0 {continue;}
+            let Some(token)=row.claim_token.as_deref() else {continue;};
+            if let Err(error)=crate::service::validate_claim_token(token) {
+                warn!(target_id,requirement_id=%row.requirement_id,%error,"cancelled claim has unconfirmed original cleanup capability");
+                return false;
+            }
+            let claim=LiveClaim {requirement_id:row.requirement_id.clone(),claim_generation:row.claim_generation,claim_token:token.into()};
+            if !finish_current_cancelled_claim(deps,&claim,cancelled,shutdown).await {return false;}
+        }
+        if rows.0.len()<100 {break;}
+        page+=1;
+    }
+    true
+}
+
 /// Independent custodian for a loop task that ended without going through
 /// `stop_locked` (panic, external abort, or owner future drop). Recovery reads
-/// only an already-active typed owner; it never allocates new work.
+/// only original typed owners; it never allocates new work.
 async fn cleanup_abandoned_loop_claim(
-    deps: &AutoWorkRunnerDeps,
-    kind: AutoWorkTargetKind,
-    target_id: &str,
-    tag: &str,
+    deps:&AutoWorkRunnerDeps,kind:AutoWorkTargetKind,target_id:&str,tag:&str,shutdown:&CancellationToken,
 ) {
+    if kind!=AutoWorkTargetKind::Conversation {return;}
+    if !cleanup_cancelled_loop_claims(deps,target_id,tag,None,Some(shutdown)).await {return;}
     let claim = match deps
         .service
         .recover_active_claim_for_runner(tag, target_id, kind, DEFAULT_LEASE_MS)
@@ -1643,6 +1707,26 @@ async fn cleanup_abandoned_loop_claim(
     }
 }
 
+/// Keep the original exact cancellation responsibility until its owner proves
+/// stopped. Neither a failed API waiter nor a queue lease expiry can permit a
+/// successor claim while this old Execution remains live.
+async fn finish_current_cancelled_claim(deps:&AutoWorkRunnerDeps,claim:&LiveClaim,
+    cancelled:Option<&AtomicBool>,shutdown:Option<&CancellationToken>)->bool {
+    let mut retry=Duration::from_secs(1);
+    loop {
+        if cancelled.is_some_and(|flag|flag.load(Ordering::SeqCst)) || shutdown.is_some_and(CancellationToken::is_cancelled) {return false;}
+        match deps.execution.cancel_automation(&deps.authoritative_user_id,&claim.execution_source()).await {
+            Ok(_)=>return true,
+            Err(error)=>warn!(requirement_id=%claim.requirement_id,claim_generation=claim.claim_generation,%error,
+                "current-only AutoWork Stop remains accepted; original Execution cleanup will retry"),
+        }
+        let wait=async {sleep(retry).await;};
+        if let Some(shutdown)=shutdown {tokio::select! {_=shutdown.cancelled()=>return false,_=wait=>{}}}
+        else {tokio::select! {_=deps.wake.notified()=>{},_=wait=>{}}}
+        retry=(retry*2).min(Duration::from_secs(30));
+    }
+}
+
 enum TurnResult {
     /// Turn finished and finalized as done.
     Done,
@@ -1653,6 +1737,9 @@ enum TurnResult {
     /// an attempt —the loop idles until the user resumes the tag. NOT a
     /// failure and never manufactures another execution generation.
     UserInterrupted,
+    /// The user cancelled this exact Requirement generation. Its durable
+    /// terminal state is absorbing; continue the enabled queue without pause.
+    CurrentCancelled,
     /// The exact claim verdict/cleanup could not be committed or proven.
     /// Stop this loop rather than claiming another requirement under
     /// authority uncertainty.
@@ -1728,6 +1815,7 @@ async fn run_loop(
         warn!(target_id, %error, "AutoWork AgentSession is not installation-owner owned");
         return;
     }
+    if !cleanup_cancelled_loop_claims(&deps,target_id,tag,Some(&cancelled),None).await {return;}
     // Count of back-to-back failed/busy turns, driving the failure backoff so a
     // deterministic failure cannot spin into claim at millisecond speed. Reset on
     // a clean done or when the tag drains (idle).
@@ -1793,7 +1881,7 @@ async fn run_loop(
         // 2. Inject + wait for the turn to finish (per target kind).
         let result = match kind {
             AutoWorkTargetKind::Conversation => {
-                match execute_requirement(
+                let receipt = execute_requirement(
                     &deps,
                     target_id,
                     tag,
@@ -1801,8 +1889,15 @@ async fn run_loop(
                     claim_generation,
                     &claim_token,
                 )
-                .await
-                {
+                .await;
+                match deps.service.confirm_claim_verdict_exact(&req_id, claim_generation, &claim_token,
+                    owner_id, AutoWorkTargetKind::Conversation, RequirementStatus::Cancelled).await {
+                    Err(error) => {
+                        error!(target_id, requirement_id=%req_id, %error, "AutoWork cancellation authority could not be read");
+                        TurnResult::Blocked
+                    }
+                    Ok(true) => TurnResult::CurrentCancelled,
+                    Ok(false) => match receipt {
                     Ok(AutoWorkExecutionReceipt::Completed {
                         execution_id,
                         summary,
@@ -2019,7 +2114,7 @@ async fn run_loop(
                                 "Disappeared execution claim could not be parked"
                             );
                         }
-                        break;
+                        TurnResult::Blocked
                     }
                     Err(e) => {
                         error!(target_id, requirement_id = %req_id, error = %e, "AutoWork AgentExecution dispatch failed");
@@ -2055,7 +2150,7 @@ async fn run_loop(
                             }
                         }
                     }
-                }
+                } }
             }
             AutoWorkTargetKind::Terminal => {
                 unreachable!("Terminal AutoWork is rejected before queue execution")
@@ -2064,6 +2159,15 @@ async fn run_loop(
 
         // Re-read the final Requirement status after AgentExecution settlement.
         let final_status = deps.service.get(&req_id).await.ok().map(|detail| detail.status);
+        // Stop may win after the receipt check but before a competing verdict
+        // CAS. That CAS cannot rewrite Cancelled, and this loop stays enabled.
+        let result = if final_status == Some(RequirementStatus::Cancelled) {
+            TurnResult::CurrentCancelled
+        } else { result };
+        if matches!(result,TurnResult::CurrentCancelled) {
+            let claim=LiveClaim {requirement_id:req_id.clone(),claim_generation,claim_token:claim_token.clone()};
+            if !finish_current_cancelled_claim(&deps,&claim,Some(&cancelled),None).await {return;}
+        }
         progress.set_current(None);
 
         if final_status == Some(RequirementStatus::Done) {
@@ -2114,7 +2218,7 @@ async fn run_loop(
         // A user interrupt also resets: the tag is paused, the loop will idle on
         // the next claim (None), and the user's resume must not inherit a backoff.
         match result {
-            TurnResult::Done | TurnResult::UserInterrupted => consecutive_failures = 0,
+            TurnResult::Done | TurnResult::UserInterrupted | TurnResult::CurrentCancelled => consecutive_failures = 0,
             TurnResult::Blocked => {
                 cancelled.store(true, Ordering::SeqCst);
             }
@@ -2339,3 +2443,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "auto_work_current_stop_tests.rs"]
+mod current_stop_tests;

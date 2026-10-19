@@ -751,8 +751,8 @@ async fn execution_cleanup_retries_a_canonical_cancelled_turn_that_still_has_a_l
     assert!(store.head(&session).await.unwrap().active_turn_id.is_none());
     assert!(flow.fixture.services.agent_runtime_sessions.active_turn_generation(session.as_ref()).is_some());
     tokio::time::timeout(Duration::from_secs(15),async { loop {
-        match nomifun_agent_execution::AgentExecutionSessionPort::cancel_for_execution(flow.fixture.owner.as_ref(),
-            &flow.owner,session.as_ref()).await {
+        match nomifun_agent_execution::AgentExecutionSessionPort::cancel_attempt_for_execution(flow.fixture.owner.as_ref(),
+            &flow.owner,session.as_ref(),"fixture-attempt",operation.as_ref()).await {
             Ok(()) => break,
             Err(nomifun_common::AppError::Conflict(_)) => tokio::time::sleep(Duration::from_millis(10)).await,
             Err(error) => panic!("exact native cleanup failed unexpectedly: {error}"),
@@ -760,7 +760,42 @@ async fn execution_cleanup_retries_a_canonical_cancelled_turn_that_still_has_a_l
     }}).await.expect("cleanup must retry the closed exact Turn instead of acknowledging its empty canonical head");
     assert!(flow.fixture.services.agent_runtime_sessions.active_turn_generation(session.as_ref()).is_none(),
         "cleanup acknowledgement requires retirement of the original native generation");
+    assert!(flow.fixture.services.agent_runtime_sessions.get_runtime(session.as_ref()).is_none(),
+        "a completed Attempt cleanup must retire the exact Runtime without closing its history");
     assert_eq!(store.read_turn_receipt(&session,&operation).await.unwrap().status,nomifun_agent_session::TurnReceiptStatus::Cancelled);
+    server.state.held_release.notify_one();
+    flow.fixture.finish().await; server.close().await;
+}
+
+#[tokio::test]
+async fn retired_attempt_cleanup_never_selects_the_successor_turn() {
+    let server = CompanionFlowModelServer::with_held_work().await;
+    let flow = PhysicalEntryFixture::new(&server,"companion-exact-cleanup-successor").await;
+    let original_key = "k".repeat(nomifun_common::MAX_IDEMPOTENCY_KEY_LEN);
+    let (session, original) = start_held_interactive_turn(&flow,&server,&original_key).await;
+    let port = flow.fixture.owner.as_ref();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match nomifun_agent_execution::AgentExecutionSessionPort::cancel_attempt_for_execution(
+                port,&flow.owner,session.as_ref(),"original-attempt",original.as_ref()).await {
+                Ok(()) => break,
+                Err(nomifun_common::AppError::Conflict(_)) => tokio::task::yield_now().await,
+                Err(error) => panic!("original cleanup failed: {error}"),
+            }
+        }
+    }).await.unwrap();
+    server.state.held_release.notify_one();
+    let (_, successor) = start_held_interactive_turn(&flow,&server,"cleanup-successor").await;
+    let successor_generation = flow.fixture.services.agent_runtime_sessions.active_turn_generation(session.as_ref());
+    assert!(successor_generation.is_some());
+    nomifun_agent_execution::AgentExecutionSessionPort::cancel_attempt_for_execution(
+        port,&flow.owner,session.as_ref(),"original-attempt",original.as_ref()).await.unwrap();
+    let store = flow.fixture.owner.canonical().store();
+    assert_eq!(store.head(&session).await.unwrap().active_turn_id.as_deref(),Some(successor.as_ref()));
+    assert_eq!(flow.fixture.services.agent_runtime_sessions.active_turn_generation(session.as_ref()),successor_generation);
+    assert_eq!(store.read_turn_receipt(&session,&original).await.unwrap().status,nomifun_agent_session::TurnReceiptStatus::Cancelled);
+    nomifun_agent_execution::AgentExecutionSessionPort::cancel_turn_for_execution(
+        port,&flow.owner,session.as_ref(),"successor-fixture-cleanup",successor.as_ref()).await.unwrap();
     server.state.held_release.notify_one();
     flow.fixture.finish().await; server.close().await;
 }

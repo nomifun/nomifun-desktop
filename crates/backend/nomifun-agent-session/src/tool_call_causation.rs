@@ -169,6 +169,7 @@ impl AgentSessionStore {
     ) -> Result<CommittedNativeToolCallCausation, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
         let session = require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        native_execution::check_domain_work_admission_tx(&mut tx,session_id,turn_id).await?;
         let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
         if session.owner_ref != *owner || head.status != "running"
             || head.active_turn_id.as_deref() != Some(turn_id.as_ref()) {

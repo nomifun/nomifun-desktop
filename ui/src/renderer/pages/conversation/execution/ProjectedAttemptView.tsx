@@ -25,6 +25,7 @@ import { refreshOnVersionConflict } from './refreshOnVersionConflict';
 import { canSteerExecutionAttempt, isTerminalExecutionStatus } from './executionStatusMeta';
 import { useExecutionLive } from './useExecutionLive';
 import ExecutionStopControl from './ExecutionStopControl';
+import ExecutionStepStopControl from './ExecutionStepStopControl';
 import { attemptRecoveryReview } from './attemptRecoveryReview';
 
 type ProjectedAttemptViewProps = { payload: OpenStepPayload };
@@ -82,15 +83,16 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
     setDecisionAnswer('');
     setSteerText('');
   }, [attempt?.attempt_id]);
-  const canConfigure = detail !== null && step.kind === 'agent' && step.status === 'pending';
+  const automationControl = detail?.automation_control;
+  const canConfigure = detail !== null && !automationControl && step.kind === 'agent' && step.status === 'pending';
   const attemptActive = attempt ? ['queued', 'running', 'waiting_input'].includes(attempt.status) : false;
   const canSteer = detail !== null && canSteerExecutionAttempt(attempt?.status, detail.execution.status);
   const executionCancelled = detail?.execution.status === 'cancelled';
   const canRetry =
-    detail !== null && !executionCancelled &&
+    detail !== null && !automationControl && !executionCancelled &&
     (['completed', 'failed', 'skipped'].includes(step.status) || (step.status === 'pending' && step.dispatch_after != null));
   const canAdopt =
-    conversationId != null && Boolean(detail?.execution) && !executionCancelled && step.status !== 'cancelled' && !attemptActive;
+    conversationId != null && Boolean(detail?.execution) && !automationControl && !executionCancelled && step.status !== 'cancelled' && !attemptActive;
 
   const projectReplacementStep = useCallback(
     (replacement: TExecutionStep) => {
@@ -384,8 +386,13 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
           <span className={styles.bannerTitle}>{step.title}</span>
         </div>
         <div className={styles.bannerActions}>
+          {detail && <ExecutionStepStopControl key={step.step_id} executionId={payload.executionId}
+            executionVersion={detail.execution.version} executionStatus={detail.execution.status}
+            stepId={step.step_id} stepVersion={step.version} stepStatus={step.status}
+            delegatedOnly={automationControl?.root_step_id === step.step_id} refetch={refetch} />}
           {detail && <ExecutionStopControl key={payload.executionId} executionId={payload.executionId}
-            executionVersion={detail.execution.version} status={detail.execution.status} refetch={refetch} />}
+            executionVersion={detail.execution.version} status={detail.execution.status} refetch={refetch}
+            automationControl={automationControl} />}
           {canConfigure && assignableParticipants.length > 1 && (
             <Dropdown trigger='click' position='br' droplist={participantMenu}>
               <div

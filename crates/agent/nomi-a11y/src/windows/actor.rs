@@ -1425,6 +1425,7 @@ enum Cmd {
         Target,
         SnapshotGen,
         ElementAction,
+        crate::controlled::MutationAdmission,
         Sender<Result<Effect, A11yError>>,
     ),
     Focus(i32, Sender<Result<Effect, A11yError>>),
@@ -1485,8 +1486,10 @@ impl ActorHandle {
                         Cmd::ResolvePixelTarget(target, generation, reply) => {
                             let _ = reply.send(do_resolve_pixel_target(&target, generation, &state));
                         }
-                        Cmd::Invoke(target, generation, action, reply) => {
-                            let _ = reply.send(do_invoke(&target, generation, &action, &state));
+                        Cmd::Invoke(target, generation, action, admission, reply) => {
+                            let result = if !admission.begin() { Err(A11yError::CancelledBeforeDispatch) }
+                                else { do_invoke(&target, generation, &action, &state) };
+                            let _ = reply.send(result);
                         }
                         Cmd::Focus(pid, reply) => {
                             let _ = reply.send(do_focus(pid));
@@ -1524,10 +1527,16 @@ impl ActorHandle {
         generation: SnapshotGen,
         action: ElementAction,
     ) -> Result<Effect, A11yError> {
+        self.invoke_controlled(target, generation, action, tokio_util::sync::CancellationToken::new())
+    }
+
+    pub fn invoke_controlled(&self, target: Target, generation: SnapshotGen, action: ElementAction,
+        cancellation: tokio_util::sync::CancellationToken) -> Result<Effect, A11yError> {
+        if cancellation.is_cancelled() { return Err(A11yError::CancelledBeforeDispatch); }
         let (tx, rx) = channel();
-        self.send(Cmd::Invoke(target, generation, action, tx))?;
-        rx.recv()
-            .map_err(|_| lost_mutating_reply("invoke"))?
+        let admission = crate::controlled::MutationAdmission::new(cancellation);
+        self.send(Cmd::Invoke(target, generation, action, admission.clone(), tx))?;
+        admission.receive(rx, || lost_mutating_reply("invoke"))
     }
 
     pub fn resolve_pixel_target(

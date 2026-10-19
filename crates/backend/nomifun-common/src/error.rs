@@ -51,6 +51,9 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Agent execution continuation is waiting for its original reservation")]
+    ExecutionAdmissionPending,
+
     /// A safe forward contract transition could not preserve frozen authority.
     #[error("{message}")]
     SessionContractEvolutionRejected {
@@ -158,7 +161,7 @@ impl AppError {
                 "NATIVE_FILE_ACQUIRE_UNAVAILABLE" => StatusCode::UNPROCESSABLE_ENTITY,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
-            Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Conflict(_) | Self::ExecutionAdmissionPending => StatusCode::CONFLICT,
             Self::SessionContractEvolutionRejected { .. } => StatusCode::CONFLICT,
             Self::ComponentUnavailable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::SessionConfigurationChanged(_) => StatusCode::CONFLICT,
@@ -204,6 +207,7 @@ impl AppError {
                 }
             }
             Self::Conflict(_) => "CONFLICT",
+            Self::ExecutionAdmissionPending => "AGENT_EXECUTION_ADMISSION_PENDING",
             Self::SessionContractEvolutionRejected { .. } => "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED",
             Self::ComponentUnavailable { .. } => "COMPONENT_UNAVAILABLE",
             Self::SessionConfigurationChanged(_) => "NOMIFUN_SESSION_CONFIGURATION_CHANGED",

@@ -7,6 +7,9 @@ use crate::run_guard::BrowserInputState;
 use crate::runtime::*;
 use std::sync::atomic::AtomicUsize;
 
+#[path = "retirement_tests.rs"]
+mod retirement;
+
 #[derive(Default)]
 struct Factory {
     creates: AtomicUsize,
@@ -18,6 +21,7 @@ struct Factory {
     clear: Option<Arc<DelayedClear>>,
     deleted_profiles: Mutex<Vec<BrowserProfile>>,
     fail_profile_delete_once: AtomicBool,
+    profile_delete: Option<Arc<DelayedShutdown>>,
 }
 
 #[derive(Default)]
@@ -45,6 +49,10 @@ struct Runtime {
 #[async_trait]
 impl BrowserRuntimeFactory for Factory {
     async fn delete_persistent_profile(&self, profile: &BrowserProfile) -> Result<(), WorkspaceError> {
+        if let Some(cleanup) = &self.profile_delete {
+            cleanup.started.notify_one();
+            cleanup.release.notified().await;
+        }
         if self.fail_profile_delete_once.swap(false, Ordering::SeqCst) {
             return Err(WorkspaceError::ProfileCleanupFailed);
         }
@@ -337,6 +345,67 @@ async fn webkit_native_close_and_profile_removal_failures_block_deletion_until_r
     assert!(factory.deleted_profiles.lock().await.is_empty());
     service.delete_agent_session("alice", "session").await.unwrap();
     assert_eq!(*factory.deleted_profiles.lock().await, vec![profile]);
+}
+
+#[tokio::test]
+async fn session_profile_cleanup_does_not_block_other_session_admission_and_keeps_global_barrier() {
+    let root = tempfile::tempdir().unwrap();
+    let cleanup = Arc::new(DelayedShutdown::default());
+    let factory = Arc::new(Factory { profile_delete: Some(cleanup.clone()), ..Default::default() });
+    let (service, store) = service_with_profiles(factory.clone(), root.path());
+    let service = Arc::new(service);
+    let key = managed_workspace_key("alice", "removed").unwrap();
+    let profile = store.profile_for(&key, BrowserProfilePersistence::Persistent).unwrap();
+    let workspace = service.ensure_user("alice", "removed", profile.clone()).await.unwrap();
+    workspace.user_command(create()).await.unwrap();
+    let started = cleanup.started.notified();
+    let delete = tokio::spawn({ let service = service.clone(); async move {
+        service.delete_agent_session("alice", "removed").await
+    }});
+    started.await;
+    delete.abort();
+    let next = tokio::time::timeout(std::time::Duration::from_secs(1),
+        service.ensure_user("alice", "other", BrowserProfile::Ephemeral)).await
+        .expect("unrelated admission must not wait for Profile cleanup").unwrap();
+    next.user_command(create()).await.unwrap();
+    assert!(matches!(service.ensure_user("alice", "removed", profile).await, Err(WorkspaceError::WorkspaceClosed)));
+    assert!(workspace.native_close_proven().await, "native close and Profile cleanup have distinct receipts");
+    let mut shutdown = tokio::spawn({ let service = service.clone(); async move { service.shutdown().await }});
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut shutdown).await.is_err());
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 0, "the global native barrier must join the retained deletion owner");
+    cleanup.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), shutdown).await.unwrap().unwrap().unwrap();
+    assert_eq!(*factory.deleted_profiles.lock().await, vec![store.profile_for(&key, BrowserProfilePersistence::Persistent).unwrap()]);
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failed_profile_cleanup_retains_original_profile_and_permanent_session_fence() {
+    let factory = Arc::new(Factory::default());
+    let service = Arc::new(BrowserResourceService::new(factory.clone()));
+    let root = tempfile::tempdir().unwrap();
+    let profile = BrowserProfile::Persistent(root.path().join("exact-owned-profile"));
+    let workspace = service.ensure_user("alice", "removed", profile.clone()).await.unwrap();
+    workspace.user_command(create()).await.unwrap();
+    assert_eq!(service.delete_agent_session("alice", "removed").await, Err(WorkspaceError::ProfileCleanupUnavailable));
+    assert!(workspace.native_close_proven().await);
+    assert!(service.get_for_agent_session("alice", "removed").await.unwrap().is_none());
+    let next = service.ensure_user("alice", "other", BrowserProfile::Ephemeral).await.unwrap();
+    next.user_command(create()).await.unwrap();
+    assert!(matches!(service.ensure_user("alice", "removed", profile).await, Err(WorkspaceError::WorkspaceClosed)));
+    assert_eq!(service.delete_agent_session("alice", "removed").await, Err(WorkspaceError::ProfileCleanupUnavailable),
+        "losing the live native registry entry cannot erase failed Profile responsibility");
+    let observed = service.observe_workspace("alice","removed").await.unwrap();
+    assert_eq!(observed.close_confirmed,Some(true));
+    assert_eq!(observed.native_registered,Some(false));
+    assert!(observed.cleanup_unconfirmed,"native destruction is not a Profile deletion receipt");
+    assert!(service.registered_workspace_sessions("alice").await.unwrap().contains(&"removed".into()));
+    let key=managed_workspace_key("alice","removed").unwrap();
+    assert_eq!(service.close_idle(key.clone(),workspace.runtime_generation()+1).await,Err(WorkspaceError::StaleTarget));
+    assert_eq!(service.close_idle(key,workspace.runtime_generation()).await,Err(WorkspaceError::ProfileCleanupUnavailable));
+    assert_eq!(service.close_resources().await, Err(WorkspaceError::ProfileCleanupUnavailable));
+    assert_eq!(service.close_native_runtime().await, Err(WorkspaceError::NativeCommandFailed));
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

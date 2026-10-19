@@ -13,6 +13,7 @@ nomi-a11y.workspace     = true
 
 tracing.workspace     = true
 tokio.workspace       = true
+tokio-util.workspace  = true
 serde_json.workspace  = true
 serde.workspace       = true
 

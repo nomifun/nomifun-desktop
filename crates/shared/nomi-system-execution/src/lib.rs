@@ -2,7 +2,7 @@
 //! It adds no Agent state, authorization store, shell wrapper, or retry policy.
 use nomi_process_runtime::{
     CleanupReport, CommandSpec, OutputCursor, OutputSnapshot, PollResult, ProcessOutcome,
-    ProcessOwner, ProcessPolicy, ProcessRequest, ProcessSupervisor, SessionId, ShellKind,
+    ProcessOwner, ProcessPolicy, ProcessRequest, ProcessSupervisor, ProcessTerminalWitness, SessionId, ShellKind,
     SupervisorConfig, Transport, normalize_request,
 };
 use serde_json::{Value, json};
@@ -18,11 +18,13 @@ use std::ffi::CStr;
 use uuid::Uuid;
 
 mod readonly;
+#[cfg(test)]
+mod output_archive_tests;
 pub use readonly::{SystemReadReceipt, nomifun_system_readonly_worker};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{helper_entry, install_windows_extension_handler, WindowsExecutionExtension};
+pub use windows::{helper_entry, install_windows_extension_handler, WindowsExecutionExtension, WindowsCancellation};
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
@@ -257,6 +259,45 @@ impl SystemExecutionClient {
         }
     }
 
+    /// One original Windows Computer RPC carries its own native cancellation
+    /// Event through authenticated ingress and the original reply/ACK worker.
+    /// Stop never waits for a second RPC or closes another logical client.
+    #[cfg(windows)]
+    pub async fn call_windows_controlled(&self, request: Value,
+        cancellation: &tokio_util::sync::CancellationToken) -> Result<Value, SystemExecutionError> {
+        if request["op"] != "extension" {
+            return Err(SystemExecutionError { code: "invalid_system_request".into(),
+                message: "Controlled Windows calls require the original native extension request".into(),
+                details: json!({"user_code_not_started":true,"cleanup_proven":true}) });
+        }
+        let admission = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(windows::cancelled_before_dispatch()),
+            guard = self.admission.clone().read_owned() => guard,
+        };
+        let native = self.native.clone();
+        let source = Arc::new(native.cancellation_source()?);
+        struct SignalOnDrop(Arc<windows::CancellationSource>);
+        impl Drop for SignalOnDrop { fn drop(&mut self) { let _ = self.0.signal(); } }
+        let _signal = SignalOnDrop(source.clone());
+        let worker_source = source.clone();
+        let mut worker = tokio::task::spawn_blocking(move || {
+            let _admission = admission;
+            native.call_controlled(request, &worker_source)
+        });
+        let mut delivery_error = None;
+        let result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => { delivery_error = source.signal().err(); worker.await }
+            result = &mut worker => result,
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => Err(windows::unknown(format!("Native administrator RPC worker stopped: {error}"))),
+        };
+        windows::retain_control_delivery_error(result, delivery_error)
+    }
+
     /// Called by the application's uninstall action, while its signed bundle
     /// still exists. This removes the operating-system registration itself.
     pub fn unregister() -> Result<(), SystemExecutionError> {
@@ -377,6 +418,22 @@ fn outcome(value: &ProcessOutcome) -> Value {
     }
 }
 
+fn frozen_output(witness: &ProcessTerminalWitness) -> Result<Value, (String, String, Value)> {
+    serde_json::to_value(witness.frozen_output()).map_err(|error| (
+        "system_output_archive_invalid".into(), error.to_string(),
+        json!({"user_code_not_started":false,"cleanup_proven":false}),
+    ))
+}
+
+fn archived_outcome(value: &ProcessOutcome, witness: &ProcessTerminalWitness, include: bool)
+    -> Result<Value, (String, String, Value)> {
+    let mut result = outcome(value);
+    if include {
+        result["output_replay"] = frozen_output(witness)?;
+    }
+    Ok(result)
+}
+
 impl Runner {
     fn new() -> Self {
         Self {
@@ -394,7 +451,13 @@ impl Runner {
             extension_closed: std::sync::atomic::AtomicBool::new(false),
         }
     }
+    #[cfg(not(windows))]
     async fn perform(&self, request: Value) -> Result<Value, (String, String, Value)> {
+        self.perform_with_cancellation(request, #[cfg(windows)] WindowsCancellation::default()).await
+    }
+
+    async fn perform_with_cancellation(&self, request: Value,
+        #[cfg(windows)] cancellation: WindowsCancellation) -> Result<Value, (String, String, Value)> {
         let invalid = |message: String| {
             (
                 "invalid_system_request".into(),
@@ -438,14 +501,21 @@ impl Runner {
                 let Some(extension) = self.extension.clone() else {
                     return Err(("SYSTEM_EXECUTION_NOT_AVAILABLE".into(),"This native host has no extension handler".into(),json!({"user_code_not_started":true,"cleanup_proven":true})));
                 };
-                let admission = self.extension_admission.clone().read_owned().await;
+                let admission = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        let error = windows::cancelled_before_dispatch();
+                        return Err((error.code, error.message, error.details));
+                    }
+                    guard = self.extension_admission.clone().read_owned() => guard,
+                };
                 if self.extension_closed.load(std::sync::atomic::Ordering::Acquire) {
                     return Err(("SYSTEM_EXECUTION_CONNECTION_CLOSED".into(),"Native extension admission is closed".into(),json!({"user_code_not_started":true,"cleanup_proven":true})));
                 }
                 let request = request["request"].clone();
                 tokio::task::spawn_blocking(move || {
                     let _admission = admission;
-                    extension.call(request).map_err(|error|(error.code,error.message,error.details))
+                    extension.call_controlled(request, cancellation).map_err(|error|(error.code,error.message,error.details))
                 }).await.map_err(|error|("SYSTEM_EXECUTION_RESULT_UNKNOWN".into(),error.to_string(),json!({"cleanup_proven":false,"user_code_not_started":false})))?
             }
             "acquire_read" => {
@@ -579,16 +649,42 @@ impl Runner {
             op => {
                 let owner = owner(&request).map_err(invalid)?;
                 let session = session(&request).map_err(invalid)?;
+                let witness = if matches!(op, "observe" | "terminal" | "wait_terminal" | "poll" | "cancel" | "terminate" | "timeout" | "output_archive") {
+                    Some(self.supervisor.terminal_witness(&owner, &session).map_err(process_error)?)
+                } else { None };
+                let include_archive = request["include_output_replay"].as_bool().unwrap_or(false);
                 match op {
+                    "release_terminal"=>Ok(json!({"released":self.supervisor.release_terminal(&owner,&session).map_err(process_error)?})),
+                    "wait_terminal" => {
+                        let witness=witness.as_ref().expect("terminal wait witness captured");
+                        // Subscribe before the first inspection. This waits on
+                        // the original native lifecycle, not process polling or
+                        // a renewed task lease. A bounded observation round fits
+                        // the existing transport budget; its timeout only asks
+                        // the caller to re-arm this same read-only subscription.
+                        let mut changes=witness.subscribe();
+                        let budget=Duration::from_millis(request["observation_ms"].as_u64().unwrap_or(30_000).clamp(1,30_000));
+                        let terminal=match tokio::time::timeout(budget,async {
+                            loop {
+                                if let Some(terminal)=witness.terminal(cursor(&request)) {return Ok::<_,(String,String,Value)>(terminal);}
+                                changes.changed().await.map_err(|_|invalid("original process lifecycle closed without a terminal receipt".into()))?;
+                            }
+                        }).await {Ok(terminal)=>Some(terminal?),Err(_)=>None};
+                        let terminal=terminal.as_ref().map(|terminal|archived_outcome(terminal,witness,include_archive)).transpose()?;
+                        Ok(json!({"terminal":terminal}))
+                    }
+                    // A pure observation of the original admitted owner's
+                    // terminal. It starts no process, reader, task or input.
+                    "output_archive" => Ok(json!({"output_replay":frozen_output(witness.as_ref().expect("archive witness captured"))?})),
                     "observe" => {
                         let observation = self.supervisor.observe_if_changed(
                             &owner, &session, cursor(&request), request["include_output"].as_bool().unwrap_or(false),
                         ).map_err(process_error)?;
                         let observation = observation.map(|value| match value {
                             PollResult::Running { snapshot, output: out } =>
-                                json!({"state":"running","pid":snapshot.pid,"output":output(&out)}),
-                            PollResult::Finished(value) => outcome(&value),
-                        });
+                                Ok(json!({"state":"running","pid":snapshot.pid,"output":output(&out)})),
+                            PollResult::Finished(value) => archived_outcome(&value, witness.as_ref().expect("observe witness captured"), include_archive),
+                        }).transpose()?;
                         Ok(json!({"observation":observation}))
                     }
                     "terminal" => {
@@ -596,7 +692,9 @@ impl Runner {
                             .supervisor
                             .terminal_outcome_if_ready(&owner, &session, cursor(&request))
                             .map_err(process_error)?;
-                        Ok(json!({"terminal":terminal.as_ref().map(outcome)}))
+                        let terminal = terminal.as_ref().map(|value| archived_outcome(value,
+                            witness.as_ref().expect("terminal witness captured"), include_archive)).transpose()?;
+                        Ok(json!({"terminal":terminal}))
                     }
                     "poll" => {
                         let until = Instant::now()
@@ -615,7 +713,8 @@ impl Runner {
                             } => Ok(
                                 json!({"state":"running","pid":snapshot.pid,"output":output(&out)}),
                             ),
-                            PollResult::Finished(value) => Ok(outcome(&value)),
+                            PollResult::Finished(value) => archived_outcome(&value,
+                                witness.as_ref().expect("poll witness captured"), include_archive),
                         }
                     }
                     "write" => {
@@ -652,27 +751,30 @@ impl Runner {
                             .map_err(process_error)?;
                         Ok(json!({}))
                     }
-                    "cancel" => Ok(outcome(
+                    "cancel" => archived_outcome(
                         &self
                             .supervisor
                             .cancel(&owner, &session)
                             .await
                             .map_err(process_error)?,
-                    )),
-                    "terminate" => Ok(outcome(
+                        witness.as_ref().expect("cancel witness captured"), include_archive,
+                    ),
+                    "terminate" => archived_outcome(
                         &self
                             .supervisor
                             .terminate(&owner, &session)
                             .await
                             .map_err(process_error)?,
-                    )),
-                    "timeout" => Ok(outcome(
+                        witness.as_ref().expect("terminate witness captured"), include_archive,
+                    ),
+                    "timeout" => archived_outcome(
                         &self
                             .supervisor
                             .timeout(&owner, &session)
                             .await
                             .map_err(process_error)?,
-                    )),
+                        witness.as_ref().expect("timeout witness captured"), include_archive,
+                    ),
                     _ => Err(invalid(format!(
                         "unsupported native system execution operation {op}"
                     ))),
@@ -681,13 +783,17 @@ impl Runner {
         }
     }
     fn call(&self, bytes: &[u8]) -> Value {
+        self.call_with_cancellation(bytes, #[cfg(windows)] WindowsCancellation::default())
+    }
+
+    fn call_with_cancellation(&self, bytes: &[u8], #[cfg(windows)] cancellation: WindowsCancellation) -> Value {
         let request: Value = match serde_json::from_slice(bytes) {
             Ok(value) => value,
             Err(error) => {
                 return json!({"ok":false,"error":{"code":"invalid_system_request","message":error.to_string(),"details":{"user_code_not_started":true,"cleanup_proven":true}}});
             }
         };
-        match self.runtime.block_on(self.perform(request)) {
+        match self.runtime.block_on(self.perform_with_cancellation(request, #[cfg(windows)] cancellation)) {
             Ok(result) => json!({"ok":true,"result":result}),
             Err((code, message, details)) => {
                 json!({"ok":false,"error":{"code":code,"message":message,"details":details}})
