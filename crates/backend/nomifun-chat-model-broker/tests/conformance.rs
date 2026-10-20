@@ -698,6 +698,59 @@ fn openai_chat_raw_sse_shape_decodes_text_tools_usage_and_finish() {
 }
 
 #[test]
+fn reasoning_alias_raw_decoder_skips_empty_null_and_absent_placeholders() {
+    for (delta, expected) in [
+        (serde_json::json!({"reasoning_content":"","reasoning":"fallback"}), Some("fallback")),
+        (serde_json::json!({"reasoning_content":null,"reasoning":"fallback"}), Some("fallback")),
+        (serde_json::json!({"reasoning":"fallback"}), Some("fallback")),
+        (serde_json::json!({"reasoning_content":"preferred","reasoning":"alternate"}), Some("preferred")),
+        (serde_json::json!({"reasoning_content":".","reasoning":"alternate"}), Some(".")),
+        (serde_json::json!({"reasoning_content":" \n","reasoning":"alternate"}), Some(" \n")),
+        (serde_json::json!({"reasoning_content":"","reasoning":""}), None),
+        (serde_json::json!({"reasoning_content":null,"reasoning":null}), None),
+        (serde_json::json!({}), None),
+    ] {
+        let mut decoder = nomifun_chat_model_broker::new_verification_frame_decoder(ChatProtocol::OpenaiChat);
+        let events = decoder.decode_frame(ProviderWireFrame { diagnostic:None,event:"message".into(),
+            data:serde_json::json!({"id":"reasoning_alias_raw","choices":[{"index":0,"delta":delta}]}) }).unwrap();
+        let reasoning = events.iter().filter_map(|event| match event {ChatModelEvent::ReasoningDelta {text}=>Some(text.as_str()),_=>None}).collect::<Vec<_>>();
+        assert_eq!(reasoning,expected.into_iter().collect::<Vec<_>>(),"delta={delta}");
+    }
+}
+
+#[test]
+fn reasoning_alias_generic_decoder_preserves_its_existing_nonempty_priority() {
+    for (delta, expected) in [
+        (serde_json::json!({"reasoning":"","reasoning_content":"fallback"}), Some("fallback")),
+        (serde_json::json!({"reasoning":null,"reasoning_content":"fallback"}), Some("fallback")),
+        (serde_json::json!({"reasoning_content":"fallback"}), Some("fallback")),
+        (serde_json::json!({"reasoning":"preferred","reasoning_content":"alternate"}), Some("preferred")),
+        (serde_json::json!({"reasoning":"","reasoning_content":"","thinking":"。"}), Some("。")),
+        (serde_json::json!({"delta":{"reasoning":"","reasoning_content":" now."}}), Some(" now.")),
+        (serde_json::json!({"reasoning":" \n","reasoning_content":"alternate"}), Some(" \n")),
+        (serde_json::json!({"reasoning":"","reasoning_content":"","thinking":""}), None),
+    ] {
+        let mut decoder = nomifun_chat_model_broker::new_verification_frame_decoder(ChatProtocol::OpenaiChat);
+        decoder.decode_frame(ProviderWireFrame {diagnostic:None,event:"start".into(),data:serde_json::json!({"id":"reasoning_alias_generic"})}).unwrap();
+        let events = decoder.decode_frame(ProviderWireFrame {diagnostic:None,event:"message.delta".into(),data:delta.clone()}).unwrap();
+        let reasoning = events.iter().filter_map(|event| match event {ChatModelEvent::ReasoningDelta {text}=>Some(text.as_str()),_=>None}).collect::<Vec<_>>();
+        assert_eq!(reasoning,expected.into_iter().collect::<Vec<_>>(),"delta={delta}");
+    }
+}
+
+#[test]
+fn reasoning_alias_mixed_frame_preserves_both_channels_and_their_existing_event_order() {
+    let mut decoder = nomifun_chat_model_broker::new_verification_frame_decoder(ChatProtocol::OpenaiChat);
+    decoder.decode_frame(ProviderWireFrame {diagnostic:None,event:"message".into(),
+        data:serde_json::json!({"id":"mixed_alias","choices":[{"index":0,"delta":{"reasoning_content":"Complete reasoning"}}]})}).unwrap();
+    let events=decoder.decode_frame(ProviderWireFrame {diagnostic:None,event:"message".into(),
+        data:serde_json::json!({"id":"mixed_alias","choices":[{"index":0,"delta":{
+            "content":"Visible answer.","reasoning_content":"","reasoning":" now."}}]})}).unwrap();
+    assert!(matches!(events.as_slice(),[ChatModelEvent::OutputTextDelta {text:answer,source:None},
+        ChatModelEvent::ReasoningDelta {text:reasoning}] if answer=="Visible answer." && reasoning==" now."));
+}
+
+#[test]
 fn chat_content_and_reasoning_in_one_frame_share_the_response_text_source() {
     let transports = transport_map(std::iter::empty::<(ChatProtocol, Arc<dyn ProviderTransport>)>());
     let adapter = OpenAiChatAdapter::new(transports[&ChatProtocol::OpenaiChat].clone());

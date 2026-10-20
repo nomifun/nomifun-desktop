@@ -27,6 +27,60 @@ fn timeline(row: &crate::MessageProjection) -> MessageTimeline {
 }
 
 #[tokio::test]
+async fn interleaved_reasoning_suffix_keeps_one_live_cold_and_paged_source_without_future_leakage() {
+    for suffix in [" now.", "."] {
+        let store=AgentSessionStore::open_in_memory().await.unwrap();
+        let f=timeline_fixture(&store,"reasoning-suffix").await;
+        let thought=Uuid::now_v7().to_string();
+        let answer=nomifun_agent_contracts::canonical_assistant_step_message_id(f.root.as_ref(),1).unwrap();
+        let prefix="Let me make the call😀";
+        timeline_progress(&store,&f,"reasoning-prefix",json!({"event":"reasoning_delta","step":1,"text":prefix})).await;
+        let first=timeline_part(&store,&f,"thought-prefix","thinking/content-part",&thought,prefix).await;
+        timeline_progress(&store,&f,"answer-prefix",json!({"event":"output_text_delta","step":1,"text":"好的"})).await;
+        timeline_part(&store,&f,"answer-part","message/content-part",&answer,"好的").await;
+        let mut old=store.message_by_id(&f.session,&thought).await.unwrap().unwrap();
+        let old_timeline=timeline(&old);
+        assert_eq!(old_timeline.segments.len(),1);
+        assert_eq!(old_timeline.segments[0].state,TimelineSegmentState::Running,"public text cannot seal the retained thinking range");
+        assert_eq!(old_timeline.segments[0].end_utf16,Some(prefix.encode_utf16().count() as u64));
+        timeline_progress(&store,&f,"reasoning-suffix",json!({"event":"reasoning_delta","step":1,"text":suffix})).await;
+        timeline_part(&store,&f,"thought-suffix","thinking/content-part",&thought,suffix).await;
+        let updates=store.message_timeline_updates_for_turn(&f.session,f.root.as_ref()).await.unwrap();
+        let live=&updates.iter().find(|update|update.source_message_id==thought).unwrap().timeline;
+        assert_eq!(live.segments.len(),1);
+        assert_eq!(live.segments[0].first_seq,first);
+        assert_eq!(live.segments[0].state,TimelineSegmentState::Running);
+        let fresh=store.message_by_id(&f.session,&thought).await.unwrap().unwrap();
+        assert_eq!(fresh.projection["content"],format!("{prefix}{suffix}"));
+        assert_eq!(&timeline(&fresh),live);
+        store.test_hydrate_message_history_metadata(&f.session,std::slice::from_mut(&mut old)).await.unwrap();
+        assert_eq!(timeline(&old),old_timeline,"an old body retains its old exact cursor and prefix range");
+        assert_eq!(old.projection["content"],prefix);
+        timeline_progress(&store,&f,"tool-boundary",json!({"event":"tool_call_delta","step":1,"call_id":"call",
+            "name":"read_file","arguments_delta":""})).await;
+        store.cancel_active_turn(&f.session,"reasoning-suffix-close".into(),"session_api".into()).await.unwrap();
+        let closed=store.message_timeline_updates_for_turn(&f.session,f.root.as_ref()).await.unwrap();
+        let expected=&closed.iter().find(|update|update.source_message_id==thought).unwrap().timeline;
+        assert_eq!(expected.segments.len(),1);assert_eq!(expected.segments[0].state,TimelineSegmentState::Completed);
+        let events=store.read_events(&f.session,None,100).await.unwrap();
+        let cold=AgentSessionStore::from_pool(store.test_pool().clone()).await.unwrap();
+        for rebuild in [false,true] {
+            if rebuild {cold.rebuild_projections(&f.session).await.unwrap();}
+            let mut cursor=None;let mut seen=false;
+            loop {
+                let (rows,more,_,next)=cold.message_history_with_turns_before(&f.session,cursor,1).await.unwrap();
+                for row in rows.iter().filter(|row|row.projection["correlation_id"]==thought) {
+                    seen=true;assert_eq!(row.projection["content"],format!("{prefix}{suffix}"));assert_eq!(&timeline(row),expected);
+                }
+                if !more {break;}assert_ne!(cursor,next);cursor=next;
+            }
+            assert!(seen);
+        }
+        assert_eq!(cold.read_events(&f.session,None,100).await.unwrap(),events,"all display reads and rebuilds preserve the original facts");
+    }
+}
+
+#[tokio::test]
 async fn silent_finish_is_audit_only_in_live_timeline_and_cold_tool_history() {
     let store=AgentSessionStore::open_in_memory().await.unwrap();let f=timeline_fixture(&store,"silent-finish-history").await;
     for (call,name,failed) in [

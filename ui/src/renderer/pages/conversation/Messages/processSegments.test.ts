@@ -7,16 +7,42 @@ const source = (type: 'thinking' | 'text', content: string, segments: unknown[])
 const segment = (id: string, seq: number, kind: 'reasoning' | 'narration', start: number, end: number, group = 'first') => ({
   segment_id: id, group_id: group, first_seq: seq, last_seq: seq, kind, state: 'completed', start_utf16: start, end_utf16: end,
 });
-test('canonical narration spans interleaved reasoning and preserves one complete Markdown body', () => {
-  const thought = source('thinking', '甲😀乙', [segment('r1', 4, 'reasoning', 0, 3), segment('r2', 6, 'reasoning', 3, 4)]);
+test('canonical reasoning and narration each retain their complete source body through interleaving', () => {
+  const thought = source('thinking', '甲😀乙', [{ ...segment('r1', 4, 'reasoning', 0, 4), last_seq: 6 }]);
   const text = '我将安装 **CLI**。';
   const narration = source('text', text, [{ ...segment('t1', 2, 'narration', 0, text.length), last_seq: 8 }]);
   const rows = orderProcessSegments(projectProcessSegments([thought, narration], new Set()));
-  expect(rows.map(row => row.id)).toEqual(['t1', 'r1', 'r2']);
-  expect(rows.map(textOf)).toEqual([text, '甲😀', '乙']);
-  expect(rows.map(row => row.processGroupId)).toEqual([undefined, 'first', 'first']);
-  expect(rows[1].msg_id).toBe(rows[2].msg_id);
+  expect(rows.map(row => row.id)).toEqual(['t1', 'r1']);
+  expect(rows.map(textOf)).toEqual([text, '甲😀乙']);
+  expect(rows.map(row => row.processGroupId)).toEqual([undefined, 'first']);
   expect(textOf(thought)).toBe('甲😀乙');
+});
+
+test.each(['Let me make the call now.', 'Inspect the handler.', '检查😀处理器，现在。'])(
+  'one canonical reasoning range retains the whole sentence across distinct narration sources: %s', content => {
+    const thought = source('thinking', content, [{ ...segment('reasoning', 2, 'reasoning', 0, content.length), last_seq: 10 }]);
+    const first = source('text', '好的', [segment('first-output', 4, 'narration', 0, 2)]);
+    const later = { ...source('text', '继续正文', [segment('later-output', 8, 'narration', 0, 4)]), id: 'later-text', msg_id: 'later-text' } as TMessage;
+    const rows = orderProcessSegments(projectProcessSegments([thought, first, later], new Set()));
+    expect(rows.map(row => row.id)).toEqual(['reasoning', 'first-output', 'later-output']);
+    expect(rows.map(textOf)).toEqual([content, '好的', '继续正文']);
+    expect(rows.filter(row => row.type === 'thinking')).toHaveLength(1);
+    expect(textOf(thought)).toBe(content);
+  }
+);
+
+test('distinct canonical reasoning ranges remain distinct even when their source and process anchor match', () => {
+  const thought = source('thinking', 'First.Second.', [segment('boundary-first', 2, 'reasoning', 0, 6),
+    segment('boundary-second', 4, 'reasoning', 6, 13)]);
+  const rows = projectProcessSegments([thought], new Set());
+  expect(rows.map(row => row.id)).toEqual(['boundary-first', 'boundary-second']);
+  expect(rows.map(textOf)).toEqual(['First.', 'Second.']);
+  expect(rows.map(row => row.msg_id)).toEqual([thought.msg_id, thought.msg_id]);
+});
+
+test.each(['now.', '.', '。'])('a genuinely short canonical reasoning source %j remains visible', content => {
+  const thought = source('thinking', content, [segment('short-source', 2, 'reasoning', 0, content.length)]);
+  expect(projectProcessSegments([thought], new Set()).map(textOf)).toEqual([content]);
 });
 test('partial pages retain backend group anchors and missing metadata stays unclassified', () => {
   const tail = source('thinking', 'abcdef', [segment('tail', 8, 'reasoning', 3, 6, 'earlier-page-anchor')]);

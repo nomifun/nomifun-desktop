@@ -370,33 +370,56 @@ pub enum AgentEngineEvent {
 }
 
 impl AgentEngineEvent {
-    /// Display-only reasoning lifecycle. `None` leaves the current phase alone;
-    /// `Some(None)` closes it, and `Some(Some(step))` starts or resumes that step.
+    /// Display-only reasoning body ownership. Narration is independent; `None`
+    /// preserves the body, `Some(None)` closes it, and `Some(Some(step))` owns it.
     /// Live publication and canonical history use the same typed transitions.
     pub fn reasoning_display_transition(&self) -> Option<Option<u16>> {
-        match self {
-            Self::ReasoningDelta { step, .. } => Some(Some(*step)),
-            Self::ModelStepStarted { .. }
-            | Self::ExecutionResumed { .. }
-            | Self::OutputTextDelta { .. }
-            | Self::CompletionDelivered { .. }
-            | Self::ToolCallDelta { .. }
-            | Self::ToolCallCompleted { .. }
-            | Self::ToolStarted { .. }
-            | Self::ModelOutputTruncated { .. }
-            | Self::ModelResponseRejected { .. }
-            | Self::DeliveryReviewSuperseded { .. }
-            | Self::VoiceModelStepSuperseded { .. }
-            | Self::SilentCompletion { .. }
-            | Self::TurnCompleted { .. }
-            | Self::UserInputRequested { .. }
-            | Self::TurnWaiting { .. }
-            | Self::TurnInputRequired { .. }
-            | Self::TurnCancelled { .. }
-            | Self::TurnPaused { .. }
-            | Self::TurnFailed { .. } => Some(None),
-            _ => None,
+        let kind = match self {
+            Self::ReasoningDelta { .. } => "reasoning_delta",
+            Self::OutputTextDelta { .. } => "output_text_delta",
+            Self::ModelStepStarted { .. } => "model_step_started",
+            Self::ExecutionResumed { .. } => "execution_resumed",
+            Self::CompletionDelivered { .. } => "completion_delivered",
+            Self::ToolCallDelta { .. } => "tool_call_delta",
+            Self::ToolCallCompleted { .. } => "tool_call_completed",
+            Self::ToolStarted { .. } => "tool_started",
+            Self::ModelOutputTruncated { .. } => "model_output_truncated",
+            Self::ModelResponseRejected { .. } => "model_response_rejected",
+            Self::DeliveryReviewSuperseded { .. } => "delivery_review_superseded",
+            Self::VoiceModelStepSuperseded { .. } => "voice_model_step_superseded",
+            Self::SilentCompletion { .. } => "silent_completion",
+            Self::TurnCompleted { .. } => "turn_completed",
+            Self::UserInputRequested { .. } => "user_input_requested",
+            Self::TurnWaiting { .. } => "turn_waiting",
+            Self::TurnInputRequired { .. } => "turn_input_required",
+            Self::TurnCancelled { .. } => "turn_cancelled",
+            Self::TurnPaused { .. } => "turn_paused",
+            Self::TurnFailed { .. } => "turn_failed",
+            _ => return None,
+        };
+        use nomifun_agent_contracts::{reasoning_display_event, ReasoningDisplayEvent};
+        match reasoning_display_event(kind) {
+            ReasoningDisplayEvent::Reasoning => match self { Self::ReasoningDelta { step, .. } => Some(Some(*step)), _ => unreachable!() },
+            ReasoningDisplayEvent::Boundary | ReasoningDisplayEvent::Invocation => Some(None),
+            ReasoningDisplayEvent::Narration | ReasoningDisplayEvent::Other => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod reasoning_display_tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_display_ownership_uses_the_shared_content_classifier() {
+        assert_eq!(AgentEngineEvent::ReasoningDelta {step:1,text:"Call".into()}.reasoning_display_transition(),Some(Some(1)));
+        for text in ["", "好的", "Public body"] {
+            assert_eq!(AgentEngineEvent::OutputTextDelta {step:1,text:text.into(),source:None}.reasoning_display_transition(),None);
+        }
+        assert_eq!(AgentEngineEvent::ToolCompleted {step:1,runtime_hold:None,
+            result:AgentToolResult::text("old".into(),"late",false)}.reasoning_display_transition(),None);
+        assert_eq!(AgentEngineEvent::ToolCallDelta {step:1,call_id:"call".into(),name:"read_file".into(),arguments_delta:String::new()}
+            .reasoning_display_transition(),Some(None));
     }
 }
 

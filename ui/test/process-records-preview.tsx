@@ -10,11 +10,12 @@ import '../src/renderer/styles/arco-override.css';
 import '../src/renderer/styles/themes/index.css';
 import '../src/renderer/pages/conversation/Messages/messages.css';
 import zh from '../src/renderer/services/i18n/locales/zh-CN';
-import type { IMessageThinking, IMessageToolCall } from '../src/common/chat/chatLib';
+import type { IMessageThinking, IMessageToolCall, IMessageText } from '../src/common/chat/chatLib';
 import { parseConversationId, parseExecutionAttemptId } from '../src/common/types/ids';
 import { insertDelegationRecords } from '../src/renderer/pages/conversation/Messages/delegationProcessModel';
 import { compactFileActivityItems } from '../src/renderer/pages/conversation/Messages/fileActivityModel';
 import { isTaskControlReceipt } from '../src/renderer/pages/conversation/Messages/toolMessageVisibility';
+import { orderProcessSegments, projectProcessSegments } from '../src/renderer/pages/conversation/Messages/processSegments';
 
 globalThis.fetch = (async input => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.href);
@@ -99,9 +100,9 @@ const tools: IMessageToolCall[] = [
   ['command', 'start_process', '检查改动并验证桌面交互边界'], ['file-read', 'read_file', 'src/CanvasSurface.tsx'],
   ['file-read-part2', 'read_file', 'src/CanvasSurface.tsx'], ['file-read-input', 'read_file', 'src/input.ts'],
   ['file-write', 'apply_patch', 'src/CanvasSurface.test.tsx'], ['generic', 'mcp__design__search_documents__abcdefghijklmnop', '查找下拉菜单交互规范'],
-].map(([call_id, name, description]) => ({ id: call_id, type: 'tool_call', conversation_id: leadConversationId,
+].map(([call_id, name, description], index) => ({ id: call_id, type: 'tool_call', conversation_id: leadConversationId,
   turn_id: requestId, position: 'left', content: { call_id, name, description, status: 'completed', result_seq: 45,
-    timeline: { through_seq: 50, segments: [{ segment_id: call_id, group_id: 'canonical', kind: 'tool', call_id, first_seq: 5, last_seq: 45, state: 'completed' }] } } }));
+    timeline: { through_seq: 50, segments: [{ segment_id: call_id, group_id: 'canonical', kind: 'tool', call_id, first_seq: 20 + index * 4, last_seq: 45, state: 'completed' }] } } }));
 for (const tool of tools) {
   if (tool.content.name === 'read_file') Object.assign(tool.content, { capability_id: 'workspace.files', action_id: 'workspace.files/read',
     file_summary: { operation: 'read', files: [{ path: tool.content.description! }] } });
@@ -117,22 +118,32 @@ const records = [
     title: steps[index].title, step_id: attempt.step_id, attempt_id: attempt.attempt_id, execution_event_sequence: index + 2,
     anchor: { agent_session_id: leadConversationId, event_id: 'completion-anchor', seq: 50 } })),
 ];
-const thinking: IMessageThinking & { processSequence: number } = { id: 'preview-thinking', type: 'thinking',
-  conversation_id: leadConversationId, turn_id: requestId, processSequence: 2,
-  content: { content: '先明确任务边界，再协调并行工作并核验结果。', status: 'done' } };
-const processItems: Array<(IMessageThinking | IMessageToolCall) & { processSequence: number }> =
-  [thinking, ...tools.filter(tool => !isTaskControlReceipt(tool)).map((tool, index) => ({ ...tool, processGroupId: 'canonical', processSequence: 20 + index * 4 }))];
+// One reasoning source spans the narration's arrival, including its late suffix.
+// Keep punctuation and Unicode intact; production timeline references own cuts.
+const thinkingText = 'Let me make the call now.\n\n先明确任务边界，再协调并行工作并核验结果。😀';
+const thinking: IMessageThinking = { id: 'preview-thinking', type: 'thinking',
+  conversation_id: leadConversationId, turn_id: requestId,
+  content: { content: thinkingText, status: 'done', timeline: { through_seq: 50, segments: [{
+    segment_id: 'preview-thinking-first-part', group_id: 'canonical', kind: 'reasoning',
+    first_seq: 2, last_seq: 8, state: 'completed', start_utf16: 0, end_utf16: thinkingText.length,
+  }] } } };
+const narrationText = '我会并行完成游戏策划、交互设计、开发和架构，再汇总验证结果。';
+const narration: IMessageText = { id: 'preview-narration', type: 'text', position: 'left',
+  conversation_id: leadConversationId, turn_id: requestId, content: { content: narrationText, timeline: { through_seq: 50, segments: [{
+    segment_id: 'preview-narration-first-part', group_id: 'canonical', kind: 'narration',
+    first_seq: 4, last_seq: 10, state: 'completed', start_utf16: 0, end_utf16: narrationText.length,
+  }] } } };
+const processItems = orderProcessSegments(projectProcessSegments([thinking, narration, ...tools.filter(tool => !isTaskControlReceipt(tool))], new Set()));
 const items = compactFileActivityItems(insertDelegationRecords(processItems, records));
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: zh } }, interpolation: { escapeValue: false } });
 
 function Preview() {
   return <main style={{ width: '100%', maxWidth: 980, boxSizing: 'border-box', margin: '0 auto', padding: '30px 34px', color: 'var(--color-text-1)', fontSize: 14, lineHeight: '22px' }}>
-    <p style={{ margin: '0 0 22px' }}>我会并行完成游戏策划、交互设计、开发和架构，再汇总验证结果。</p>
     <ToolDetailsProvider scope={leadConversationId}><TurnProcessDisclosure
       item={{ id: 'preview-turn', processItems: items, startAt: 1_000, endAt: 223_000, state: 'completed', running: false, defaultCollapsed: false }}
       renderProcessItem={item => item.type === 'delegation_record' ? <DelegationRecordRow records={item.records} /> : <ProcessTraceItem item={item} />}
-      getProcessItemKey={item => item.id} getProcessItemState={() => 'completed'} getProcessItemLayoutKind={item => item.type === 'delegation_record' ? 'delegation' : item.type === 'thinking' ? 'thinking' : 'tool'} />
+      getProcessItemKey={item => item.id} getProcessItemState={() => 'completed'} getProcessItemLayoutKind={item => item.type === 'delegation_record' ? 'delegation' : item.type === 'thinking' ? 'thinking' : item.type === 'text' ? 'narration' : 'tool'} />
     </ToolDetailsProvider>
     <p style={{ marginTop: 24 }}>{publicResult}</p>
   </main>;

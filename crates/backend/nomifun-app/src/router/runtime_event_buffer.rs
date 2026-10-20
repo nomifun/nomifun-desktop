@@ -4,7 +4,7 @@ use nomifun_chat_model_broker::{ChatContentPart, ChatToolCall, ToolCallId};
 use nomifun_agent_contracts::ChatOutputTextSource;
 use nomifun_agent_runtime::{AgentCompactedItem, AgentEngineEvent, AgentToolResult};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const FLUSH_BYTES: usize = 16 * 1024;
 const MAX_THINKING_BYTES_PER_TURN: usize = 512 * 1024;
@@ -17,29 +17,40 @@ pub(super) struct AgentEventBuffer {
     narration_source: Option<(u16, Option<ChatOutputTextSource>)>,
     thinking_step: Option<u16>,
     instruction_reads: BTreeSet<ToolCallId>,
-    proposal_ids: BTreeSet<ToolCallId>,
+    // Reuse proposal identities through this Turn, including older steps. Late
+    // confirmations are physical flushes, never new content boundaries.
+    proposal_ids: BTreeMap<u16, BTreeSet<ToolCallId>>,
 }
 
 impl AgentEventBuffer {
     /// The owner may commit steering while the same model stream is active.
     /// Its next fragment must expose the new canonical boundary before live
     /// publication, even though the model's text source has not changed.
-    pub(super) fn narration_boundary(&mut self) {
+    pub(super) fn content_boundary(&mut self) {
         self.narration_source = None;
+        self.thinking_step = None;
     }
 
     pub(super) fn project(&mut self, event: &AgentEngineEvent) -> Vec<AgentEngineEvent> {
         let mut records = Vec::new();
-        // Reasoning activity and text ownership are independent. A late
-        // reasoning fragment must not manufacture another narration boundary.
-        let transition = match event {
-            AgentEngineEvent::OutputTextDelta { text, .. } if text.is_empty() => None,
-            _ => event.reasoning_display_transition(),
+        // Body ownership is independent of the physical text/thinking buffers.
+        // Interleaved narration cannot manufacture another reasoning body.
+        let invocation = match event {
+            AgentEngineEvent::ToolCallDelta { step, call_id, .. }
+            | AgentEngineEvent::ToolStarted { step, call_id, .. } => Some((*step, call_id)),
+            AgentEngineEvent::ToolCallCompleted { step, call } => Some((*step, &call.call_id)),
+            _ => None,
         };
-        let closes_content = transition == Some(None)
-            && !matches!(event, AgentEngineEvent::OutputTextDelta { .. });
-        let closes_phase = closes_content
-            && (self.narration_source.is_some() || self.thinking_step.is_some());
+        let first_invocation = invocation.is_some_and(|(step, call)| {
+            if call.as_ref().starts_with("agent-instructions:") { return false; }
+            let seen = self.proposal_ids.entry(step).or_default();
+            // Runtime rejects the 65th identity before publishing it. Keep the
+            // same bound without evicting earlier identities or older steps.
+            seen.len() < 64 && seen.insert(call.clone())
+        });
+        let transition = if invocation.is_some() && !first_invocation { None }
+            else { event.reasoning_display_transition() };
+        let closes_content = transition == Some(None);
         if closes_content {
             self.narration_source = None;
         }
@@ -72,7 +83,6 @@ impl AgentEventBuffer {
                 records.push(projected);
             }
             AgentEngineEvent::ModelStepStarted { .. } => {
-                self.proposal_ids.clear();
                 self.flush(&mut records);
                 records.push(event.clone());
             }
@@ -92,8 +102,7 @@ impl AgentEventBuffer {
                 // Truncated calls may never reach ToolCallCompleted. Keep
                 // one identity-only proposal fact, not private/partial JSON,
                 // so replay can corroborate ModelOutputTruncated exactly.
-                let new_proposal = self.proposal_ids.len() < 64 && self.proposal_ids.insert(call_id.clone());
-                if closes_phase || new_proposal {
+                if first_invocation {
                     self.flush(&mut records);
                     records.push(AgentEngineEvent::ToolCallDelta {
                         step: *step,
@@ -342,7 +351,7 @@ mod content_lifecycle_tests {
     }
 
     #[test]
-    fn repeated_proposals_cannot_swallow_a_resumed_narration_boundary_or_private_arguments() {
+    fn repeated_parameter_fragments_cannot_create_narration_boundaries_or_publish_private_arguments() {
         let mut buffer = AgentEventBuffer::default();
         let proposal = AgentEngineEvent::ToolCallDelta { step: 1, call_id: "same-call".into(), name: "read_file".into(), arguments_delta: "PRIVATE_ARGUMENTS".into() };
         buffer.project(&proposal);
@@ -350,12 +359,12 @@ mod content_lifecycle_tests {
         let suffix = AgentEngineEvent::OutputTextDelta { step: 1, text: "Buffered suffix.".into(), source: None, };
         assert!(buffer.project(&suffix).is_empty());
         let committed = buffer.project(&proposal);
-        assert_eq!(committed.len(), 2);
-        assert_eq!(committed[0], suffix);
-        assert!(matches!(&committed[1], AgentEngineEvent::ToolCallDelta { arguments_delta, .. } if arguments_delta.is_empty()));
+        assert!(committed.is_empty());
         assert!(!serde_json::to_string(&committed).unwrap().contains("PRIVATE_ARGUMENTS"));
         let resumed = AgentEngineEvent::OutputTextDelta { step: 1, text: "Resumed.".into(), source: None, };
-        assert_eq!(buffer.project(&resumed), vec![resumed]);
+        assert!(buffer.project(&resumed).is_empty());
+        let mut pending=Vec::new();buffer.flush(&mut pending);
+        assert_eq!(pending,vec![AgentEngineEvent::OutputTextDelta {step:1,text:"Buffered suffix.Resumed.".into(),source:None}]);
     }
 
     #[test]
@@ -422,7 +431,7 @@ mod content_lifecycle_tests {
     }
 
     #[test]
-    fn reasoning_phase_boundaries_commit_before_publication_and_keep_intermediate_chunks_buffered() {
+    fn independent_reasoning_body_keeps_interleaved_suffixes_buffered_until_a_real_boundary() {
         let mut buffer = AgentEventBuffer::default();
         let first = AgentEngineEvent::ReasoningDelta { step: 1, text: "Inspect. ".into() };
         assert_eq!(buffer.project(&first), vec![first]);
@@ -431,11 +440,12 @@ mod content_lifecycle_tests {
         let handoff = AgentEngineEvent::OutputTextDelta { step: 1, text: "Reading the file.".into(), source: None, };
         assert_eq!(buffer.project(&handoff), vec![suffix, handoff]);
         let resumed = AgentEngineEvent::ReasoningDelta { step: 1, text: "Verify. ".into() };
-        assert_eq!(buffer.project(&resumed), vec![resumed]);
+        assert!(buffer.project(&resumed).is_empty(), "narration did not end this reasoning body");
         let suffix = AgentEngineEvent::ReasoningDelta { step: 1, text: "Check the result.".into() };
         assert!(buffer.project(&suffix).is_empty());
         let next = AgentEngineEvent::ModelStepStarted { step: 2, operation_id: "model:2".into(), correction_source: None };
-        assert_eq!(buffer.project(&next), vec![suffix, next]);
+        let combined = AgentEngineEvent::ReasoningDelta { step: 1, text: "Verify. Check the result.".into() };
+        assert_eq!(buffer.project(&next), vec![combined, next]);
         let reasoning = AgentEngineEvent::ReasoningDelta { step: 2, text: "Next step.".into() };
         assert_eq!(buffer.project(&reasoning), vec![reasoning]);
         let mut tail = Vec::new();
@@ -479,27 +489,84 @@ mod content_lifecycle_tests {
         let mut buffer = AgentEventBuffer::default();
         buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "Before".into(), source: None });
         assert!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: " pending".into(), source: None }).is_empty());
-        buffer.narration_boundary();
+        buffer.content_boundary();
         assert_eq!(buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: " after".into(), source: None }),
             vec![AgentEngineEvent::OutputTextDelta { step: 1, text: " pending after".into(), source: None }]);
     }
 
     #[test]
-    fn an_exhausted_reasoning_body_budget_still_records_a_reopened_phase() {
+    fn exhausted_reasoning_budget_preserves_only_real_new_body_anchors() {
         let mut buffer = AgentEventBuffer::default();
         let first = AgentEngineEvent::ReasoningDelta { step: 1, text: "x".repeat(MAX_THINKING_BYTES_PER_TURN) };
         assert_eq!(buffer.project(&first), vec![first]);
         let handoff = AgentEngineEvent::OutputTextDelta { step: 1, text: "Reading.".into(), source: None, };
         assert_eq!(buffer.project(&handoff), vec![handoff]);
         let resumed = AgentEngineEvent::ReasoningDelta { step: 1, text: "Visible live suffix".into() };
+        assert!(buffer.project(&resumed).is_empty(), "interleaved narration cannot open an empty reasoning body");
+        let proposal = AgentEngineEvent::ToolCallDelta { step: 1, call_id: "call".into(), name: "read_file".into(), arguments_delta: String::new() };
+        assert_eq!(buffer.project(&proposal), vec![proposal]);
         assert_eq!(buffer.project(&resumed), vec![AgentEngineEvent::ReasoningDelta { step: 1, text: String::new() }]);
         assert_eq!(buffer.thinking_bytes, MAX_THINKING_BYTES_PER_TURN);
         assert!(buffer.project(&resumed).is_empty(), "budget exhaustion does not write per-delta lifecycle records");
     }
 
     #[test]
-    fn repeated_tool_argument_fragments_still_commit_a_reasoning_handoff() {
+    fn content_boundary_preserves_pending_bytes_and_anchors_the_next_reasoning_fragment() {
         let mut buffer = AgentEventBuffer::default();
+        buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: "First".into() });
+        assert!(buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: " pending".into() }).is_empty());
+        buffer.content_boundary();
+        assert_eq!(buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: " after steering".into() }),
+            vec![AgentEngineEvent::ReasoningDelta { step: 1, text: " pending after steering".into() }]);
+        let mut remaining = Vec::new(); buffer.flush(&mut remaining);
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn interleaved_reasoning_keeps_the_original_byte_flush_and_turn_budget() {
+        let mut buffer = AgentEventBuffer::default();
+        buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: "The".into() });
+        buffer.project(&AgentEngineEvent::OutputTextDelta { step: 1, text: "好的".into(), source: None });
+        assert!(buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: "x".repeat(FLUSH_BYTES - 1) }).is_empty());
+        assert_eq!(buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: ".".into() }),
+            vec![AgentEngineEvent::ReasoningDelta { step: 1, text: format!("{}.", "x".repeat(FLUSH_BYTES - 1)) }]);
+        let retained = MAX_THINKING_BYTES_PER_TURN - buffer.thinking_bytes;
+        let events = buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: "界".repeat(retained) });
+        let body = events.iter().filter_map(|event| match event { AgentEngineEvent::ReasoningDelta { text, .. } => Some(text.as_str()), _ => None }).collect::<String>();
+        assert!(body.len() <= retained && retained - body.len() < 3);
+        assert!(buffer.thinking_bytes <= MAX_THINKING_BYTES_PER_TURN);
+    }
+
+    #[test]
+    fn late_results_and_duplicate_starts_only_flush_existing_reasoning_bytes() {
+        let mut buffer = AgentEventBuffer::default();
+        let start = AgentEngineEvent::ToolStarted { step: 1, call_id: "old".into(),
+            capability_id: "workspace.files".into(), action_id: "workspace.files/read".into() };
+        let mut records = buffer.project(&start);
+        records.extend(buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: "Let me".into() }));
+        assert!(buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: " make the call".into() }).is_empty());
+        records.extend(buffer.project(&AgentEngineEvent::ToolCompleted { step: 1, runtime_hold: None,
+            result: AgentToolResult::text("old".into(), "done", false) }));
+        assert!(buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: " now".into() }).is_empty(),
+            "late result did not reset reasoning ownership");
+        records.extend(buffer.project(&start));
+        records.extend(buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: ".".into() }));
+        buffer.flush(&mut records);
+        let body = records.iter().filter_map(|event| match event { AgentEngineEvent::ReasoningDelta { text, .. } => Some(text.as_str()), _ => None }).collect::<String>();
+        assert_eq!(body,"Let me make the call now.");
+        assert_eq!(records.iter().filter(|event| matches!(event, AgentEngineEvent::ToolStarted { .. })).count(),2);
+        assert_eq!(buffer.thinking_step,Some(1),"duplicate admission did not close the current reasoning body");
+    }
+
+    #[test]
+    fn one_invocation_has_one_boundary_across_fragments_completion_admission_and_old_steps() {
+        let mut buffer = AgentEventBuffer::default();
+        let internal=AgentEngineEvent::ToolCallCompleted {step:0,call:ChatToolCall {call_id:"agent-instructions:1".into(),name:"read_file".into(),
+            arguments:nomifun_agent_contracts::StrictJsonValue(serde_json::json!({"path":"AGENTS.md"})),provider_metadata:None}};
+        buffer.project(&AgentEngineEvent::ReasoningDelta {step:1,text:"Current reasoning.".into()});
+        buffer.project(&internal);
+        assert!(buffer.proposal_ids.is_empty(),"reserved host reads do not consume model proposal slots");
+        assert_eq!(buffer.thinking_step,Some(1),"internal instruction observations do not own displayed content");
         let call = AgentEngineEvent::ToolCallDelta { step: 1, call_id: "call-a".into(), name: "read_file".into(), arguments_delta: "PRIVATE_PARTIAL_ARGUMENTS".into() };
         let mut expected = call.clone();
         if let AgentEngineEvent::ToolCallDelta { arguments_delta, .. } = &mut expected { arguments_delta.clear(); }
@@ -507,11 +574,25 @@ mod content_lifecycle_tests {
         assert_eq!(buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: "Inspect. ".into() }).len(), 1);
         let suffix = AgentEngineEvent::ReasoningDelta { step: 1, text: "Check. ".into() };
         assert!(buffer.project(&suffix).is_empty());
-        assert_eq!(buffer.project(&call), vec![suffix, expected.clone()]);
-        // The proposal bound also cannot swallow a real phase boundary.
-        buffer.proposal_ids = (0..64).map(|index| ToolCallId::from(format!("call-{index}"))).collect();
-        assert_eq!(buffer.project(&AgentEngineEvent::ReasoningDelta { step: 1, text: "Review again.".into() }).len(), 1);
-        assert_eq!(buffer.project(&call), vec![expected]);
+        assert!(buffer.project(&call).is_empty());
+        let completed=AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"call-a".into(),name:"read_file".into(),
+            arguments:nomifun_agent_contracts::StrictJsonValue(serde_json::json!({"path":"file"})),provider_metadata:None}};
+        assert_eq!(buffer.project(&completed),vec![suffix,completed.clone()]);
+        assert!(buffer.project(&AgentEngineEvent::ReasoningDelta {step:1,text:"Same body.".into()}).is_empty());
+        assert_eq!(buffer.thinking_step,Some(1));
+        buffer.project(&AgentEngineEvent::ModelStepStarted {step:2,operation_id:"step-2".into(),correction_source:None});
+        buffer.project(&AgentEngineEvent::ReasoningDelta {step:2,text:"New step.".into()});
+        assert!(buffer.project(&call).is_empty(),"old-step parameter fragments are still recognized");
+        buffer.project(&completed);
+        assert_eq!(buffer.thinking_step,Some(2),"old-step confirmation cannot reset the current body");
         assert!(buffer.project(&call).is_empty(), "ordinary repeated argument fragments remain transient");
+        for index in 1..64 {
+            buffer.project(&AgentEngineEvent::ToolCallDelta {step:1,call_id:format!("other-{index}").into(),name:"read_file".into(),arguments_delta:String::new()});
+        }
+        assert_eq!(buffer.proposal_ids[&1].len(),64);
+        buffer.project(&AgentEngineEvent::ReasoningDelta {step:2,text:"Current.".into()});
+        let overflow=AgentEngineEvent::ToolCallDelta {step:1,call_id:"rejected-65th".into(),name:"read_file".into(),arguments_delta:String::new()};
+        assert!(buffer.project(&overflow).is_empty(),"the Runtime-invalid 65th identity cannot evict a real proposal");
+        assert!(buffer.project(&call).is_empty());assert_eq!(buffer.thinking_step,Some(2));
     }
 }

@@ -2910,11 +2910,14 @@ fn decode_gemini_raw_frame(
 }
 
 fn extract_openai_raw_reasoning(delta: &Map<String, Value>) -> Option<String> {
-    ["reasoning_content", "reasoning"]
-        .iter()
-        .find_map(|key| delta.get(*key).and_then(Value::as_str))
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
+    first_nonempty_text(["reasoning_content", "reasoning"].iter()
+        .map(|key| delta.get(*key).and_then(Value::as_str)))
+}
+
+/// Compatible aliases can coexist with empty placeholders. Skip only empty
+/// values before selecting an alias; whitespace and punctuation remain exact.
+fn first_nonempty_text<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
+    values.into_iter().flatten().find(|text| !text.is_empty()).map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -3027,13 +3030,13 @@ fn raw_argument_string(value: &Value) -> Option<String> {
 }
 
 fn string_at(value: &Value, paths: &[&str]) -> Option<String> {
-    paths.iter().find_map(|path| {
-        let mut current = value;
-        for component in path.split('.') {
-            current = current.get(component)?;
-        }
-        current.as_str().map(str::to_owned)
-    })
+    paths.iter().find_map(|path| string_ref_at(value, path)).map(str::to_owned)
+}
+
+fn string_ref_at<'a>(value: &'a Value, path: &str) -> Option<&'a str> {
+    let mut current = value;
+    for component in path.split('.') { current = current.get(component)?; }
+    current.as_str()
 }
 
 fn text_delta(value: &Value) -> Option<String> {
@@ -3052,17 +3055,14 @@ fn text_delta(value: &Value) -> Option<String> {
 }
 
 fn reasoning_delta(value: &Value) -> Option<String> {
-    string_at(
-        value,
-        &[
+    first_nonempty_text([
             "reasoning",
             "reasoning_content",
             "thinking",
             "delta.reasoning",
             "delta.reasoning_content",
             "delta.thinking",
-        ],
-    )
+        ].iter().map(|path| string_ref_at(value, path)))
 }
 
 fn parse_tool_call(value: &Value, argument_parser: &dyn ToolArgumentParser) -> Result<ChatModelEvent, ChatModelError> {

@@ -171,7 +171,7 @@ impl ConversationRuntimeHost {
             turn.steering.prepared_skill_bytes=prepared.next_skill_bytes;
             turn.steering.seen.insert(input.receipt_operation_id.clone(),input.journal_record());
             turn.steering.pending.push(input);
-            turn.event_buffer.narration_boundary();
+            turn.event_buffer.content_boundary();
             #[cfg(test)]
             super::reliability_tests::session_input_claim_cutpoint(&self.options.conversation_id).await;
         }
@@ -548,7 +548,7 @@ impl ConversationRuntimeHost {
             .seen
             .insert(input.receipt_operation_id.clone(), recorded);
         turn.steering.pending.push(input);
-        turn.event_buffer.narration_boundary();
+        turn.event_buffer.content_boundary();
         turn.steering.changed.notify_waiters();
         if turn.voice_control.is_some()&&facts.event_payloads.get(steering.event_id.as_ref()).and_then(|payload|payload.get("voice_model_step_supersede")).and_then(serde_json::Value::as_bool)==Some(true) {
             turn.steering.immediate_receipts.insert(steering.event_id.as_ref().to_owned());

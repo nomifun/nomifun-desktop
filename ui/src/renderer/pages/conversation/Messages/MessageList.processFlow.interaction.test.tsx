@@ -995,6 +995,86 @@ test('flat canonical rows retain identity through model waits, narration and ter
   expect(staleTool.content.status).toBe('running');
 });
 
+test.each([
+  { prefix: 'Let me make the call', suffix: ' now.' },
+  { prefix: 'Inspect the handler', suffix: '.' },
+  { prefix: '检查😀处理器', suffix: '，现在。' },
+])('one canonical reasoning body retains its suffix and manual disclosure through narration and completion: %j', async ({ prefix, suffix }) => {
+  const reasoningId = messageId(9301);
+  const finalId = messageId(9303);
+  const complete = prefix + suffix;
+  const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
+  const timeline = (through_seq: number, end: number, state: 'running' | 'completed'): MessageTimeline => ({
+    through_seq, segments: [{ segment_id: 'continuous-reasoning', group_id: `process:${turnId}`, first_seq: 20,
+      last_seq: through_seq, kind: 'reasoning', state, start_utf16: 0, end_utf16: end }],
+  });
+  const initial: TMessage[] = [
+    { ...base, id: 'continuous-user', type: 'text', position: 'right', msg_id: turnId, created_at: 1,
+      content: { content: 'Inspect the handler.' } },
+    { ...base, id: 'continuous-source', type: 'thinking', msg_id: reasoningId, created_at: 2,
+      content: { content: prefix, status: 'thinking', timeline: timeline(20, prefix.length, 'running') } },
+  ];
+  const Stream = () => {
+    const add = useAddOrUpdateMessage();
+    return <>
+      <button onClick={() => add({ ...base, id: 'continuous-narration', type: 'text', msg_id: messageId(9302), created_at: 3,
+        content: { content: '好的', timeline: { through_seq: 22, segments: [{ segment_id: 'interleaved-narration',
+          group_id: `process:${turnId}`, first_seq: 21, last_seq: 22, kind: 'narration', state: 'completed', start_utf16: 0, end_utf16: 2 }] } } })}>Deliver interleaved narration</button>
+      <button onClick={() => {
+        add({ ...base, id: 'continuous-delta', type: 'thinking', msg_id: reasoningId, created_at: 4,
+          content: { content: suffix, status: 'thinking' } });
+        add({ type: 'canonical_timeline', conversation_id: conversationId, turn_id: turnId,
+          updates: [{ source_message_id: reasoningId, timeline: timeline(24, complete.length, 'running') }] });
+      }}>Deliver reasoning suffix</button>
+      <button onClick={() => {
+        add({ ...base, id: 'continuous-done', type: 'thinking', msg_id: reasoningId, created_at: 5,
+          content: { content: '', status: 'done' } });
+        add({ type: 'canonical_timeline', conversation_id: conversationId, turn_id: turnId,
+          updates: [{ source_message_id: reasoningId, timeline: timeline(26, complete.length, 'completed') }] });
+        add({ ...base, id: 'continuous-final', type: 'text', msg_id: finalId, created_at: 6,
+          content: { content: 'Final deliverable remains outside the process.' } });
+        add({ ...base, id: 'continuous-terminal', type: 'agent_status', msg_id: messageId(9304), created_at: 7,
+          content: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed',
+            started_at_ms: 1, finished_at_ms: 7, turn_outcome: { kind: 'answered', message_ids: [finalId] } } });
+      }}>Finish continuous reasoning</button>
+    </>;
+  };
+  const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+    <PreviewProvider persistNamespace='continuous-reasoning-stream' subscribeGlobalOpen={false}>
+      <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', readOnly: true, isProcessing: true,
+        isTurnStateHydrated: true, activeTurnId: turnId, activeRequestMessageId: turnId }}>
+        <MessageListProvider initialValue={initial}><MessageList /><Stream /></MessageListProvider>
+      </ConversationProvider>
+    </PreviewProvider>
+  </I18nextProvider></MemoryRouter>);
+  const reasoning = page.container.querySelector('[data-process-segment-id="continuous-reasoning"]')!;
+  const header = reasoning.querySelector('[data-thinking-process-header]')!;
+  const bodyText = () => reasoning.querySelector('.markdown-shadow')?.shadowRoot?.querySelector('.markdown-shadow-body')?.textContent;
+  expect(header.getAttribute('aria-expanded')).toBe('true');
+  fireEvent.click(header);
+  expect(header.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(page.getByRole('button', { name: 'Deliver interleaved narration' }));
+  await waitFor(() => expect(Boolean(page.container.querySelector('[data-process-segment-id="interleaved-narration"]'))).toBe(true));
+  fireEvent.click(page.getByRole('button', { name: 'Deliver reasoning suffix' }));
+  await waitFor(() => expect(bodyText()).toBe(complete));
+  expect(page.container.querySelectorAll('[data-thinking-process-header]')).toHaveLength(1);
+  expect(Boolean(page.container.querySelector('[data-process-segment-id="continuous-reasoning"]') === reasoning)).toBe(true);
+  expect(header.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(header);
+  fireEvent.click(page.getByRole('button', { name: 'Finish continuous reasoning' }));
+  await waitFor(() => expect(Boolean(page.container.querySelector('.turn-process-disclosure--live'))).toBe(false));
+  fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.expand }));
+  expect(header.getAttribute('aria-expanded')).toBe('true');
+  expect(bodyText()).toBe(complete);
+  expect(page.container.querySelectorAll('[data-thinking-process-header]')).toHaveLength(1);
+  fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.collapse }));
+  fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.expand }));
+  expect(header.getAttribute('aria-expanded')).toBe('true');
+  expect(Boolean(page.container.querySelector('[data-process-segment-id="continuous-reasoning"]') === reasoning)).toBe(true);
+  expect(bodyText()).toBe(complete);
+  expect(Boolean(page.container.querySelector('#message-continuous-final')?.closest('.turn-process-disclosure'))).toBe(false);
+});
+
 test('canonical ranges stay flat and preserve row-level reasoning choices around narration', () => {
   const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
   const timeline = (segments: MessageTimelineSegment[]): MessageTimeline => ({ through_seq: 30, segments });
