@@ -103,7 +103,7 @@ Terminal合法leading-space cwd与recursive entry scope中的命名指令链接�
 | 管理员只读/指令 | ordinary ACL真实拒绝，administrator text/hash/page/image/scope同投影、缓存隔离、cwd新规则延期/freshcall、batch effect→read；取消/断联/unavailable不ordinary fallback。 |
 | 应用安装 | 唯一NSIS variant实际canonical install/uninstall同Session新Turn，以及独立打包bootstrap、安装后正常setup/login/退出/uninstall；严格唯一product/id/protocol/mainBinary/currentUser、资源/registry/进程与数据保留。host直接installer不冒充默认Agent能力，exit0还须独立读回，unknown不重装；另需真实可回滚的系统权限操作证据。 |
 | 配置、服务/任务与网络 | UUID HKCU恢复、SCM或Task Scheduler注册/运行/查询/停止/卸载、本机/局域网访问，App真正退出后的同一任务/PID存续与原owner重连清理。阶段完成/等待checkpoint不等于整体成功；失败在原链清理，不留任务等构建。 |
-| 普通/高完整性桌面 | 分别截图/UIA/freshref/focus/click/type/独立结果/关闭自有应用、多屏与登录桌面；委托mock不代替焦点，runner成功不代替高UIA/input；安全桌面准确交接。 |
+| Computer桌面边界 | 普通目标沿冻结能力验证定向观察、新element_token操作、窗口/应用管理与真实后置条件，记录实际登录桌面和多屏范围，正常关闭仅本轮自有窗口。高完整性目标的只读观察按实际结果记录；受限输入/操作保留驱动结构化拒绝，不自动改走管理员或前台重试；安全桌面准确交回用户。 |
 | Browser | WebView2真file input/原生chooser，外部绝对/相对../UNC/reparse/卷、ACL/race、name/bytes/mtime/retained File/dispose/异常关闭；上传、原unlink失败与Entry修后canonical cleanup分别按实际binary记账，不能互相追认。macOS WKWebView既有UnsupportedAction不借此改引擎。 |
 | UAC与账号 | 允许/拒绝/取消/无管理员/设施缺失/over-the-shoulder不同账号/认证中断；真实token/SID/HKCU与原登录环境，凭据只进系统UI，不循环认证或重放部分安装。 |
 | 媒体设备 | 用户选择保持设备状态；实际库存缺可用输入，WebView2 audio/video均NotFound、无track，清理有证。**采集、相机及拒绝/撤回/恢复隐私矩阵未覆盖**；不启用禁用设备或替用户改隐私，不把无设备/unknown写成granted或拒绝。 |

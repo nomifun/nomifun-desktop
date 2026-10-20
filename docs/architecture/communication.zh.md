@@ -155,9 +155,11 @@ MCP 服务器对外暴露引擎可调用的工具与资源。当前 `nomifun-app
 - 用户配置的 MCP 行与 OAuth HTTP MCP 服务器由 `nomifun-mcp` 管理；
 - Requirement 与 Knowledge 服务器是有作用域的内部 MCP 服务器；
 - 平台 Gateway 工具通过 `nomifun-gateway` 传输；
-- Browser / Computer 桥按 feature gate 启用；
+- Browser 桥按 feature gate 启用；
 - 公开 `/mcp` 由 `nomifun-public` 提供，是安装令牌认证的 canonical Remote
   AgentSession 入口。
+
+Computer 由 App 的第一方 Module 接入 `nomifun-computer`，启动独立 worker 并通过继承的私有 stdio 调用，不注册 MCP server。详见[Computer 架构](computer-use.zh.md)。
 
 内部 stdio bridge 不信任调用方提交的 user id 或 Conversation 持久标记。宿主在
 服务端派生精确作用域，只向子进程签发带作用域、有效期和签名的能力声明。签名根

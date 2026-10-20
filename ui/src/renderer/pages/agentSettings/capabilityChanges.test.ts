@@ -7,6 +7,7 @@ import {
   type CapabilityModuleCatalogItem,
 } from '@/common/types/agentPlatform';
 import { planModuleChange, setModuleActions } from './capabilityChanges';
+import computer from '../../../../../crates/backend/nomifun-agent-contracts/contracts/computer-tools.v1.json';
 
 const moduleItem = (
   id: string,
@@ -43,6 +44,37 @@ test('an enable plan validates dependency closure without authoring dependency r
     capability: work.module,
     action_allowlist: ['workspace.edit/run'],
   }]);
+});
+
+test('enabling Computer selects its entire frozen action set without changing other Module defaults', () => {
+  const module = moduleItem('computer');
+  module.actions = computer.tools.map((tool) => ({
+    action_id: tool.action_id, effect_class: tool.effect_class, presentation: 'function_tool',
+  }));
+  const plan = planModuleChange(empty, catalog([...modules, module]), [module.module, work.module], true);
+  expect(plan.blocked).toEqual([]);
+  expect(plan.document.enabled_capabilities).toEqual([{
+    capability: module.module,
+    action_allowlist: computer.tools.map((tool) => tool.action_id).sort((left, right) => left.localeCompare(right)),
+  }, {
+    capability: work.module,
+    action_allowlist: ['workspace.edit/run'],
+  }]);
+  expect(plan.document.enabled_capabilities[0].action_allowlist).toHaveLength(22);
+});
+
+test('enabling an already selected Computer preserves the explicit action selection', () => {
+  const module = moduleItem('computer');
+  module.actions = computer.tools.map((tool) => ({
+    action_id: tool.action_id, effect_class: tool.effect_class, presentation: 'function_tool',
+  }));
+  for (const action_allowlist of [[], [computer.tools[0].action_id]]) {
+    const document = {
+      ...empty,
+      enabled_capabilities: [{ capability: module.module, action_allowlist }],
+    };
+    expect(planModuleChange(document, catalog([module]), [module.module], true).document).toBe(document);
+  }
 });
 
 test('a missing dependency blocks the whole Module edit', () => {

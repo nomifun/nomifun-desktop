@@ -2,6 +2,7 @@
 // The private worker startup is adapted from trycua/cua's main.rs at
 // 4d959bbfa57f0c89f310330e849500b222084194.
 
+mod native_status;
 mod private_worker;
 mod probe;
 

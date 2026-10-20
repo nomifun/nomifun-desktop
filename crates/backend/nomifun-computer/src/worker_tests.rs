@@ -86,9 +86,56 @@ async fn empty_status_and_close_do_not_start_a_process() {
     let (_root, config) = fixture();
     let computer = Computer::new(config);
     assert!(!computer.status().running);
+    assert!(computer.status().backend.is_none());
+    assert!(computer.status().atspi.is_none());
     computer.close_session("none").await.unwrap();
     assert!(!computer.status().running);
     computer.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn native_diagnostics_are_cached_only_for_their_live_generation() {
+    let (root, mut config) = fixture();
+    config.idle_timeout = Duration::from_millis(40);
+    let source = include_str!("../tests/fake-worker.mjs");
+    let diagnosed = source.replace(
+        "metadata:{driver_version:'fake-1'}",
+        "metadata:{driver_version:'fake-1'},diagnostics:{backend:'fixture-native',atspi:false}",
+    );
+    assert_ne!(diagnosed, source);
+    let script = root.path().join("status-worker.mjs");
+    std::fs::write(&script, diagnosed).unwrap();
+    config.prefix_args = vec![script.clone().into_os_string()];
+    let computer = Arc::new(Computer::new(config));
+    let first = call(
+        computer.clone(),
+        "a",
+        json!({}),
+        InvocationControl::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(computer.status().backend.as_deref(), Some("fixture-native"));
+    assert_eq!(computer.status().atspi, Some(false));
+    computer.close_session("a").await.unwrap();
+    until(|| !computer.status().running).await;
+    assert!(computer.status().backend.is_none());
+    assert!(computer.status().atspi.is_none());
+
+    // The next current-protocol worker omits diagnostics. Unknown values must
+    // stay unknown rather than inheriting the prior generation's result.
+    std::fs::write(&script, source).unwrap();
+    let next = call(
+        computer.clone(),
+        "a",
+        json!({}),
+        InvocationControl::default(),
+    )
+    .await
+    .unwrap();
+    assert_ne!(next.generation, first.generation);
+    assert!(computer.status().backend.is_none());
+    assert!(computer.status().atspi.is_none());
+    bounded(computer.shutdown()).await.unwrap();
 }
 #[tokio::test]
 async fn sessions_rotate_while_preserving_each_sessions_order() {

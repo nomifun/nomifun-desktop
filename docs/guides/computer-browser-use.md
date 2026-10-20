@@ -116,16 +116,24 @@ Verify the requested postcondition; a delivered, partial or unverifiable action 
 ## Image And Token Hygiene
 
 - The host supplies the driver image-size budget. Coordinates must use the actual fresh image for the same target.
-- The conversation keeps only the most recent `max_recent_images` individual
-  tool-result images, with a provider-compatible ceiling of 20 per request and
-  a cumulative encoded-payload budget. Excess attachments are stripped while
-  their text and an omission note remain. Provider errors also remove replayed
-  screenshots before the conversation is persisted for recovery.
-- OpenAI-compatible tool messages cannot carry images directly; image data is
-  sent as a following user message with a source call id. Anthropic, Bedrock,
-  and Vertex use native image blocks where supported.
-- External MCP image results pass through the same image pipeline with a
-  per-image size cap.
+- Tool images enter the current model context as image parts with a media type.
+  They follow the actual route's image-input capability, tool-result size limit,
+  and context token, byte and message-count budgets. When older context is
+  compacted, the latest tool images that have not yet preceded another model
+  response remain with required inputs. If they cannot fit, the request fails
+  instead of silently discarding them.
+- History replay, compaction records and summaries omit original pixels while
+  retaining relevant text or media descriptions. A descriptor does not mean
+  the model still sees the image. Observe the same target again when current
+  interface state or pixel-based input needs fresh visual evidence.
+- Model-request failures retain their actual error and original operation
+  receipts. Recovery does not clear screenshots to rewrite history or
+  automatically repeat desktop actions, including actions with unknown results.
+- OpenAI Chat tool messages carry text; images follow that tool batch in a user
+  attachment message associated with their source call id. Responses and other
+  protocols encode image parts through their respective adapters.
+- External MCP images also require the current route and typed image pipeline,
+  with the actual tool-result and context budgets applied.
 
 ## Related Docs
 

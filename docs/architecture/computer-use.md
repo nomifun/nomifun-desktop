@@ -38,6 +38,8 @@ The Broker projects tools and instructions again for each actual route and adapt
 
 Frozen `system_permissions` metadata determines live per-call checks. Missing access uses the existing `SYSTEM_PERMISSION_REQUIRED` carrier and does not report execution. Driver status is `GET /api/computer/status`. System access remains under `/api/system/permissions` and its request/open-settings endpoints; old Computer permission aliases are removed.
 
+Status reads the current generation's cache without starting a worker or retrying a probe. `backend` identifies the initialized native dispatch family, not permission, UIA, capture or universal action readiness. Linux `atspi` comes from that worker's read-only accessibility-bus probe at initialization. Missing or failed diagnostics stay unknown and retire with the generation; each action still relies on its current checks and native result.
+
 macOS targets 14+ with direct App-to-worker spawning and the same distribution signing identity. Actual TCC attribution and installed behavior still require platform verification. Windows uses the current login session at ordinary integrity; elevated targets retain structured driver refusal rather than an administrator desktop bridge. Linux currently uses X11/XWayland and AT-SPI. Native Wayland capture remains disabled; portal support, desktop backends and the GNOME helper require their own evidence.
 
 The vendor source is pinned to commit `4d959bbfa57f0c89f310330e849500b222084194`. Changes are applied through the [registered patches](../../vendor/CUA-DRIVER-PATCHES.md) and sync script. The Linux input guardian is internal native resource ownership in the worker, not host desktop code or a second execution ledger. Its final failure matrix still requires separate acceptance.

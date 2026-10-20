@@ -2,9 +2,11 @@
 
 将本文件全文作为新会话的任务要求执行。先识别目标 Linux checkout、发行版、桌面和认证设施，核实源码后直接实施并完成原生产品验收；不要停在方案报告，也不要再次等待产品方案确认。本交接不是 Linux 已实现或已验证的证明。
 
-2026-10-17 已在 WSL Ubuntu 26.04 接续实现。当前源码、默认目录删除后同 Session 绝对文件/外部 cwd 闭环、原生管理员与 user/system 服务、AX/GUI clipboard、Node/MCP/reset、debug 及正式 release-profile deb、release-lock、安装替换卸载的证据见[Linux 总验证记录](../validation/global-os-linux-2026-10-17.zh.md)和[Computer worker 架构](../architecture/computer-use.zh.md)。macOS 报告与 source-review 恢复步骤保留原始历史身份；接续使用当前 Git 源码，不重建已接通的 Linux adapter。系统认证、实际登录桌面与完整产品验收按当前记录的分层证据判断。
+2026-10-17 已在 WSL Ubuntu 26.04 接续实现。默认目录删除后同 Session 绝对文件/外部 cwd 闭环、原生管理员与 user/system 服务、Node/MCP/reset、debug 及正式 release-profile deb、release-lock、安装替换卸载的原始证据见[Linux 总验证记录](../validation/global-os-linux-2026-10-17.zh.md)。macOS 报告与 source-review 恢复步骤保留原始历史身份；接续使用当前 Git 源码，系统认证、实际登录桌面与完整产品验收按对应源码的分层证据判断。
 
 本轮最后的 Node 补验已通过实际正式 release App 的 3 个真实 Turn 与正常重启：安装、后继 Turn、重启后同一 CLI 调用及卸载清理。自动准备与 cached-reuse 主体验证按不同原件计证，MCP/reset 仍保持组件层级；详见[Node 验证](../validation/global-os-linux-node-2026-10-17.zh.md)与[正式构建记录](../validation/global-os-linux-release-2026-10-17.zh.md)。源码审查包最终为 `source-review-linux-final-v3`；先前首版/v2 和正式源码快照保持原件。
+
+Computer 已整体替换为 vendored Cua Driver 与 NomiFun 私有 worker。Linux 接续以[唯一实施方案的 Linux prompt](computer-use-rebuild.start-prompt.zh.md#linux-并行补验-prompt)、[Computer 架构](../architecture/computer-use.zh.md)及[方案第 12 节](computer-use-rebuild.zh.md#12-单份执行进展)为准；原自研 Computer 的源码路径、契约、测试和桌面验收不再作为施工输入。保留的历史报告只证明其原始源码，不证明新 worker 的 Linux 原生行为。
 
 ## 产品合同
 
@@ -158,27 +160,26 @@ runner 用隔离 App 正常 owner 登录 JWT，选择实际默认聊天 `chat.mi
 | 原生服务/网络/偏好 | 当前新唯一夹具system四阶段32业务步骤完整通过：安装/配置13、服务8、loopback网络6、恢复卸载5，各阶段answered、pending/unknown0与cleanup证明成立。历史App退出同PID存续、原owner重连和新Turn清理独立通过仍保留；旧completion step长748被正式512上限拒绝的失败及cleanup不被本次成功覆盖 |
 | 管理员 | 当前最终App的完整7业务步骤通过：root0700/ordinary拒绝、root0600写读、root cwd AGENTS管理员只读预检及新规则延期后freshcall、UID0/cwd/登录HOME、独立running poll、XPC取消/terminal/确切PID退出与夹具清理；answered、pending/unknown0及cleanup证明成立。requiresApproval/rootcwd/空JSON旧失败保留，旧root夹具清理也另有成功回执，不改写failed历史 |
 | 原生退出与系统组件卸载 | App69753产品SIGTERM observer协调退出/open-W0/7条runtime cleanup，签名App unregister0且原生回调完成，launchctl113服务absent，root helper70107/UID0与App退出。后续App85132补验后经CUA正常super+q退出/open-W0，媒体server85373 close0、两attempt保留，helper仍absent；日常App与旧未知状态不动 |
-| 桌面 | 当前最终e4 App/PID85132的默认assistant.general直接完整桌面闭环通过：截图、AX/fresh ref点击、键盘12+34、独立结果46、退出本次Calculator、canonical answered/cleanup。此前自身主线程AppKit与远端双向背景focus成功和首AXRaise未知保留，不再把current full Desktop写待验 |
+| 原e4桌面历史 | 原e4 App/PID85132的默认assistant.general桌面闭环通过：截图、AX点击、键盘12+34、独立结果46、退出本次Calculator、canonical answered/cleanup。原AppKit、背景focus成功和首AXRaise未知保持原身份；该Computer实现已退役，本行不证明私有worker的macOS或Linux原生行为 |
 | 媒体 | 用户允许麦克风/解锁后，当前正式WK页1audio track/48000Hz真实采集通过，graph connected/running/time advance，all tracks ended/AudioContext closed，App探针microphone=granted。新video独立OverconstrainedError/43ms/0track，同时普通只读库存camera_suspended1/lidclosedtrue、App camera=not_determined；摄像头采集和拒绝/撤回/恢复矩阵仍未覆盖，旧拒绝/锁屏/合盖失败保留 |
 | 交叉检查 | 较早readonly freeze的Intel Rust/Swift client、Windows共享core/process cfg通过，最后flush后未以旧日志冒充新重跑；无Linux原生编译、桌面或系统认证支持证明 |
 
 管理员7项报告 `administrator-continuation-assistant.general-1792180035898-04f53e8d-4696-4bb4-9529-0bda448754ae.json` 的SHA-256为 `a1051dd77fe2979b1e4efe86eb921901f7504fecafa811f6ad6aed6a5ac3ae85`，在原Session `01a145f4-894d-73c3-ac2a-27d4d2918f87` 的新Turn完成。旧root夹具清理报告 `prior-administrator-fixture-cleanup-1792180318419-c09b7a47-7e68-4357-a08e-dc7484dcff89.json` 亦通过。当前完整system报告 `system-assistant.general-1792180741624-559a3c40-b6f3-4c11-aceb-d84034641ecc.json` 的SHA-256为 `6445b9a8d94d48f86a9227f87e6df6d51c99775435dc4daf01052e2bdbd0637e`，Session `01a1464b-eb69-7282-b763-8c1c2abf9227`、驱动任务37939退出0。driver修复20 tests/173 expectations通过，未放宽产品合同且无需App重建。以上是验收报告身份，不是source-review摘要；交付位置与最终矩阵以总验证记录为准。
 
-当前完整Desktop报告 `desktop-assistant.general-1792199279748-e3fa2d37-8dae-423a-860f-2acbe7744fff.json` 的SHA-256为 `85899b7465379571aed89b598ca41fd9de8a631cf4836288f69fa743137f5a01`。媒体原生UI/身份确认 `media-native-v3-ui-confirmation.json` 的SHA-256为 `1aa2f13fb0230c1c1ee9b0de4c68f4fe26cd0d614bcdcf80af9afdb10e3f5c0e`，正式App许可探针为 `media-v3-after-capture-permissions.json`；attempt1音频成功、attempt2视频失败分开保留。只观察轨道/graph/生命周期/许可元数据，未读取、录制、保存或上传内容/样本，麦克风采集不冒充ASR/模型服务成功。
+上述原e4源码的Desktop报告 `desktop-assistant.general-1792199279748-e3fa2d37-8dae-423a-860f-2acbe7744fff.json` 的SHA-256为 `85899b7465379571aed89b598ca41fd9de8a631cf4836288f69fa743137f5a01`。媒体原生UI/身份确认 `media-native-v3-ui-confirmation.json` 的SHA-256为 `1aa2f13fb0230c1c1ee9b0de4c68f4fe26cd0d614bcdcf80af9afdb10e3f5c0e`，正式App许可探针为 `media-v3-after-capture-permissions.json`；attempt1音频成功、attempt2视频失败分开保留。只观察轨道/graph/生命周期/许可元数据，未读取、录制、保存或上传内容/样本，麦克风采集不冒充ASR/模型服务成功。
 
 原生卸载报告 `native-helper-uninstall-verification.json` 的SHA-256为 `d13ac2d15ea10a933bd19197ff9273540f3516a3c5d69b4251104a2c75624deb`；补验页面关闭、App85132正常退出、server85373正常关闭、helper仍absent见 `media-v3-fixture-teardown.json`（SHA-256 `78665c752e2f43fe8835e538ea3bd4870da9eaedbcd0f8c8c73c7da3df96e13c`）。最终验收App已再次停止，仅保存仓库外 `accepted-final-stdio-app.app`，日常App未动、用户mic grant未重置；Linux接续分配新唯一fixture和本平台App，不假设旧Mac PID/API仍活跃。旧crash dataset pending=1原样，不因本次成功抹证据、新建dataset或放宽unknown；摄像头/完整隐私变更矩阵/外接卷/Linux原生缺口仍按真实矩阵承接。
 
-以下是 2026-10-17 Linux 接续后的当前状态；此前 macOS 主机审查发现的工程缺口已由对应现役 owner 接通，不能继续按旧基线重复设计：
+以下文件、进程、系统执行等条目保留 2026-10-17 Linux 接续的源码范围；对应 owner 已接通的能力不按旧基线重复设计。Computer 行使用当前私有 worker 架构，其实际构建、协议和原生证据只在专项第 12 节维护：
 
 | 能力 | 已有事实 | Linux 接续状态 |
 | --- | --- | --- |
 | 普通 Pipe/PTY、输出与进程组管理 | `nomi-process-runtime` 的 Unix 后端、Linux watchdog/recovery、exact identity | 完整 Linux process-runtime 281 passed / 1 ignored，Terminal 155 passed / 1 ignored；默认 General/Minimal 外部 cwd/Pipe 取消与精确 PID 回收通过，手工压力测试另计 |
 | 本机系统认证/管理员执行 | 固定 `pkexec` runner、stdio RPC 与现役 ProcessSupervisor 结果/取消链已接通，deb/rpm 与 AppImage 安装资产已有 | 当前 WSL 以真实 per-process TTY agent 完成用户 polkit 认证，默认 General 管理员 7 正式步骤通过；修复 pkexec 创建线程寿命并保留原生保护；SSH sudo 仍是另一远程域 |
 | 管理员只读文件/指令 | Linux typed `acquire_read` 已接原 native-files 与同 FileService 投影，不 ordinary fallback | runner/root 协议与默认 Agent 管理员 source/AGENTS identity、规则延期、UID/HOME、取消回收通过；认证拒绝/取消 fixture 与真实授予分别计证，完整系统许可矩阵按总验证记录 |
-| Computer 产品入口 | Wave2 desktop metadata、本机 resource resolver 与 Linux availability 已接通；AT-SPI 独立，X11 与 Wayland 分后端 | 源码/编译/协议、隔离 X11 工具及默认 General 34 checks / 18 正式步骤通过；实际登录桌面/Wayland/多屏未覆盖，完整退出清理另有证明 |
-| AT-SPI | `nomi-a11y/src/linux/actor.rs` 有 tree/semantic actions；`dev/` 有私有 D-Bus/Xvfb smoke | 低层既有实现；不等于默认 Agent Computer 全链可用 |
-| X11 输入与聚焦 | 原生 X server/XTEST/EWMH 探测，拒绝把 XWAYLAND 当完整桌面；xcap/Enigo 与 EWMH `_NET_ACTIVE_WINDOW` 请求及精确结果验证，已删除点击窗口中心 focus | 私有 Xvfb/Openbox/Xauthority、禁用 TCP 的环境已验证工具截图、精确 focus、无 focus 点击及目标键盘 press-release；实体登录桌面与多屏另验 |
-| Wayland | 合并 RemoteDesktop/ScreenCast session owner、系统 Request/Session 生命周期、Notify 输入、OpenPipeWireRemote 与 GStreamer 单帧管线已接现役 Computer；v6 serial 优先，输入不重新授权 | 私有 D-Bus 协议、取消/回收与真实 GStreamer buffer 回归已有；WSLg portal 无 RemoteDesktop/ScreenCast 接口，完整 compositor 授权/帧/输入仍待原生验收；无可移植窗口列表、focus 和真实 cursor 查询 |
+| Computer 产品入口 | `nomifun-app/src/router/computer_host.rs` → `nomifun-computer` → 独立 `apps/computer-worker`；22个Action与平台schema从冻结清单派生，宿主不链接桌面驱动 | Linux构建、真实协议及新worker原生证据按[专项进展](computer-use-rebuild.zh.md#12-单份执行进展)判断；旧默认General或自研驱动计数不沿用 |
+| AT-SPI与X11 | `vendor/cua-driver/crates/platform-linux/src/{atspi,input,x11}`及对应工具实现提供原生观察与动作；本地修改只能走登记补丁 | 在目标登录桌面核对真实D-Bus/AT-SPI、窗口与输入结果；WSL、私有Xvfb和实体桌面分别计证，不能由源码或环境变量推断可用 |
+| Wayland | worker编译`portal-input`，宿主当前固定`CUA_DRIVER_RS_ENABLE_WAYLAND=0`且未启用`portal-capture`；实现位于vendored `platform-linux/src/wayland` | 真实GNOME Wayland/portal及D12启用规则仍待专项验证；不恢复旧Notify/GStreamer实现或用XWayland单窗成功替代原生Wayland证据 |
 | 服务与系统安装 | 系统任务沿现役 Linux runner；固定 runner/polkit 资产与安装/卸载/检查入口已有 | 默认 General/Minimal 各完成真实 systemd user service、配置与 loopback HTTP 闭环；真实 polkit 管理员通过。正式 release-profile deb、自动/补充 release-lock、App-exit 持久服务与本地安装回归结果按总验证记录，不把打包 fixture 当正式 Host |
 | 媒体/网络/设备 | 语音 renderer 沿 `getUserMedia`/MediaRecorder，设置麦克风测试立即 stop tracks；Linux 后端不伪造 camera/microphone 全局 grant；Browser 宿主仍缺 | 正式 WebKit Settings 已通过 native Cancel/Allow、真实 audio track live→stop→ended；Pulse 后端 AUTHORIZING/图观察未证明真实声音链，物理来源/摄像头未覆盖，主机无 `/dev/video*`；Browser 宿主独立边界不变 |
 | 既有 Browser 宿主 | `apps/desktop/src/main.rs` 在非 Windows/macOS 设置 `browser_resources=None`、`attached_chrome=None`；attached discovery 同样仅 Windows/macOS | 现有 Linux 产品实现缺口，不能归因为系统隐私拒绝；记录真实状态，不借本任务无关重写 Browser 引擎 |
@@ -191,8 +192,8 @@ runner 用隔离 App 正常 owner 登录 JWT，选择实际默认聊天 `chat.mi
 2. **确认统一启动和环境。** 检查 `crates/backend/nomifun-runtime/src/{resolver,managed,shell_env}.rs`、`nomifun-terminal/src/{types,pty}.rs`、`nomifun-mcp/src/owner_stdio.rs`、`crates/shared/nomi-process-runtime/src/{request,command_builder}.rs`、`platform/unix.rs`、`platform/linux_{watchdog,recovery}.rs`。Agent Pipe/PTY、Terminal、MCP、component 复用同一准备规则；native executable + literal argv 与明确 shell 分开。每次启动组合 PATH/代理/证书/工具根，保留 HOME、XDG 和用户显式配置，不反复改多线程宿主全局环境。
 3. **验证现役系统认证链。** 复核 `nomi-system-execution/src/linux.rs`、固定 `nomifun-system-runner`、polkit action 与打包资产，沿既有 stdio RPC 和 ProcessSupervisor 完成本机认证验收，不新增第二套 runner 或 `sudo` shell 路径。认证仅使用系统原生交互，复用平台允许保留的认证上下文；拒绝、取消、无管理员、无 agent/DBus、headless 等分开返回，不循环弹窗。保留真实 UID/GID、登录用户、HOME/cwd/文件属主和用户工具配置，root 任务不能误写管理员 HOME。SSH sudo 不可当本机路径复用证明。
 4. **验证受管进程、只读 acquire 与结果。** 使用现役 Session/Turn/Effect 和 process owner，提权侧负责 literal 命令、输出、exit、timeout、cancel、host disconnect、后代清理和部分效果，同时接通 typed `acquire_read` 的原生 transport/source/instruction-scope adapter 与同 FileService 投影。文件工具的真实系统拒绝沿同任务选择正确身份；read_file 管理员分支不能退 ordinary、shell cat、跳过 EACCES 或凭空补 absence。不要对所有 permission denied 自动提权/整段重放。保留 Linux watchdog/recovery 的进程身份和清理证据，不能给高权限进程返回假 PID/假清理。
-5. **验收现役 X11 产品链。** 先核对 `nomi-computer/src/linux_x11.rs` 的真实 server/EWMH 探测与精确 focus，再沿下述现役入口验证。 从 `crates/agent/nomi-computer/src/{capability,input,fallback_backend,screen,launch,permissions}.rs`、`crates/agent/nomi-a11y/src/linux/actor.rs`、`nomi-a11y/src/engine.rs`、`crates/backend/nomifun-agent-domain-wave2/src/lib.rs` 的 Computer 平台元数据、`nomifun-app/src/router/{engine_computer_media,computer_permissions}.rs`、`nomifun-app/src/router/nomi_core_resource_bindings.rs::resolve_computer`、现役 Provider 和 renderer 入口接通。以实际登录 session、DISPLAY/XAUTHORITY/D-Bus/AT-SPI 和窗口管理器探测状态。补可靠聚焦与结果核验，不能把点击窗口中心并可能触发业务动作当成正式 focus。
-6. **验收现役 Wayland adapter。** 当前 owner 位于 `nomi-computer/src/linux_wayland.rs`、`linux_wayland_input.rs`、`linux_pipewire.rs` 与只读 `linux_portal.rs`；沿原合并 session 和 Notify 输入接续，不重复搭建 session 或输入后端。 按目标 compositor/portal 版本采用适用 RemoteDesktop+ScreenCast/PipeWire、EIS/libei 等原生机制，将观察、输入、剪贴板/已支持跨应用和 AT-SPI 接入同一 canonical 操作链。探测真实接口版本、可用设备/流、portal backend 与 session；授权由系统 UI 完成。按平台支持复用 portal session/restore token，处理单次 token 更新、撤回、失效、断连、显示变化、用户切换、App 重启及结果未知。不能仅改 `InputKind`、环境变量或 supported 列表宣称 Wayland 已实现；不能用 XWayland 某个窗口成功代表 Wayland 全局支持。聚焦/窗口管理按 compositor 正式能力分别说明，缺口是工程未接/系统边界需区分。
+5. **验收现役 Computer 的 X11 产品链。** 沿 `crates/backend/nomifun-app/src/router/computer_host.rs`、`crates/backend/nomifun-computer/src/{protocol,worker,result,surface,permissions}.rs`、`apps/computer-worker/src/private_worker.rs` 和固定vendored `platform-linux`核对实际调用。动作与schema只从 `crates/backend/nomifun-agent-contracts/contracts/computer-tools.v1.json`及精简覆盖派生，通过 `scripts/computer/generate-contracts.mjs`和正式契约生成器更新，不复制手写Action表。使用新测试会话、专用窗口和临时数据验证AT-SPI、截图、输入、窗口与用户App生命周期；后台不可用或unknown保持实际结果，不切前台假成功、不重放。worker写入按宿主私有HOME/XDG/CUA环境隔离，不能读取旧Computer配置或用户已有Cua配置。
+6. **按专项D12补验原生Wayland。** 先核对 `apps/computer-worker/Cargo.toml`、`crates/backend/nomifun-computer/src/worker.rs`与vendored `platform-linux/src/wayland`，沿现役私有worker完成POC，不恢复自研portal/输入后端。记录真实compositor、portal/AT-SPI版本、授权/拒绝、后台动作、前台输入、session撤销与原生清理证据，再按[专项Linux接续](computer-use-rebuild.start-prompt.zh.md#linux-并行补验-prompt)得出固定启用规则。GNOME Shell helper仅手动安装说明；不新增设置项、自动安装或用Xvfb/WSLg/XWayland冒充原生Wayland。vendor变更仅通过 `vendor/CUA-DRIVER-PATCHES.md`登记和 `scripts/vendor/sync-cua-driver.mjs`应用。
 7. **构建、发行与服务闭环。** 检查 `apps/desktop/{Cargo.toml,build.rs,tauri.conf.json}`、`scripts/desktop-build-linux.sh`、`scripts/release-linux.sh`、`scripts/run-linux-release.mjs`、release lock 和现役包配置。必要 polkit action/service/runner、D-Bus 或 systemd unit、桌面文件/portal app identity 随目标架构正确安装、升级、卸载。`.deb/.rpm/AppImage` 的支持与安装位置不能模糊；AppImage 未接系统组件不能伪称有同等管理员路径。system/user systemd、timer、发行版原生安装器/包管理器沿现役执行能力使用，不新建通用服务平台。
 8. **审计现有网络/媒体和 Browser 宿主。** 跟踪现役麦克风 renderer、系统权限 router、桌面 WebView、Browser/媒体设备的真实 caller。Linux 桌面 Browser 产品边界与本任务分开说明，不借此重写已确定引擎结构。缺设备/会话、portal 未实现、独立许可拒绝和网络/证书失败分别记录；unknown 不等于 granted。系统服务不冒充交互桌面，无桌面时仍能完成的系统任务继续可用。
 9. **退役与同步。** 删除被替代生产代码、DTO、状态/UI、生成项、旧 tests 和当前指导，更新正式 schema、模型说明与当前架构。调整旧 confinement/no-admin 断言为新行为，不能禁用仍有价值的 canonical、identity、atomicity、cleanup 测试制造 PASS。活动 Turn/冻结 Skill 快照不热替换；CLI 带 Skill 需导入 NomiFun 现有库/刷新路径，写入其他 Agent 产品目录不算可用。
@@ -205,9 +206,9 @@ runner 用隔离 App 正常 owner 登录 JWT，选择实际默认聊天 `chat.mi
 
 ## 原生环境与当前真实阻塞
 
-当前接续主机为 Windows 上的 WSL Ubuntu 26.04，有 systemd、D-Bus、GTK/WebKit、WSLg 和可连接的 AT-SPI。WSLg 的 X server 真实暴露 XWAYLAND extension；portal frontend 的 Introspect XML 未导出 RemoteDesktop/ScreenCast/Clipboard，因此不是完整 Wayland 全局桌面验收环境。私有 Xvfb/Openbox 只覆盖隔离原生 X11 工具/产品路径；不代替实际登录桌面、多屏、系统原生认证 UI 或实体设备。后继验收仍需可回滚测试用户、可完成 polkit 交互的管理员，以及明确 compositor/portal 版本的真实 X11、Wayland 环境。最初 macOS 缺目标平台设施的交接原因是历史事实，不再表示当前 Linux adapter 未实现。
+2026-10-17原始接续主机为 Windows 上的 WSL Ubuntu 26.04，有 systemd、D-Bus、GTK/WebKit、WSLg 和可连接的 AT-SPI。该轮WSLg的X server暴露XWAYLAND extension，portal frontend未导出RemoteDesktop/ScreenCast/Clipboard，因此不是完整Wayland全局桌面验收环境。这些是原环境身份；接续应重新核对目标主机。当前用户桌面的专用窗口和临时数据可用于Computer验证，隔离账户/私有显示服务/虚拟机按需要选用，不是开发前置条件。系统认证另需可完成polkit交互的实际环境，缺失项按领域记录，不阻塞独立的构建、协议或其他已具备条件的验证。
 
-`nomi-a11y/dev` 的容器+Xvfb+私有 D-Bus 能验证低层 AT-SPI 行为，不能验证 Wayland、实际用户桌面、系统认证或默认 Agent 产品。Linux `.deb/.AppImage/.rpm` 链接/打包要求目标架构 sysroot 与系统依赖，仅 `rustup target add` 或 macOS cargo check 不证明发行包可用。无系统认证 agent、无 systemd、无可用网络卷或设备时保留准确的环境阻塞和可运行测试入口，不标 OS 不支持。
+Computer的真实worker协议测试位于 `apps/computer-worker/tests/protocol.rs`，只管理协议/会话和读取指南，不做桌面动作；私有Xvfb/D-Bus可按需要验证专用窗口，但不证明原生Wayland、系统认证或实体设备。Linux `.deb/.AppImage/.rpm`链接/打包要求目标架构sysroot与系统依赖；仅添加target或交叉check不证明发行包可用。worker依赖及打包方式见[构建说明](../contributing/building-and-packaging.zh.md#computer-worker)，不恢复旧Computer的GStreamer依赖或已删除测试脚本。
 
 真实系统配置、服务、网络、证书等变更只在隔离机器/测试用户或明确可回滚环境验证，不修改开发者日常配置凑验收。密码仅在系统原生 UI 输入，不新增密码字段或日志。不要修改 SELinux/AppArmor 策略为 permissive、全盘 chmod/chown 或弱化系统保护来制造通过。
 
@@ -224,15 +225,14 @@ cargo test --locked -p nomi-native-files
 cargo test --locked -p nomifun-engine-core
 cargo test --locked -p nomifun-file
 cargo test --locked -p nomifun-runtime
-cargo test --locked -p nomi-computer
-cargo test --locked -p nomi-a11y
+cargo test --locked -p nomifun-computer
 bun run check:process-runtime-boundary
 bun run check:external-tools
 bun run check:agent-session-boundary
 bun run check:docs
 ```
 
-另运行受影响 app/terminal/mcp、canonical history/reset/consumer、native recovery/取消/cleanup 测试；为新增认证 runner/portal 会话加入协议与生命周期确定性测试，并跑真实 native cases。renderer 改动运行定向 UI 测试、`bun run typecheck`、`bun run check:desktop-ui-boundary`。原生包用 `bun run build:linux` 与已有 release lock 入口构建并实际安装/升级/卸载；先核对脚本当前依赖和目标架构。AT-SPI 可用 `crates/agent/nomi-a11y/dev/run-linux-a11y.sh`，但要在证据中明确它只覆盖低层 X11 smoke。
+另运行受影响 app/terminal/mcp、canonical history/reset/consumer、native recovery/取消/cleanup 测试；renderer改动运行定向UI、typecheck与桌面边界。Computer在独立工作区构建/测试，先用 `bun scripts/computer/build-worker.mjs --target x86_64-unknown-linux-gnu --profile release`取得实际worker，再运行其 `--self-check`和 `bun scripts/computer/freeze-tools.mjs --worker <该实物绝对路径> --check`；独立协议使用 `cargo test --locked --manifest-path apps/computer-worker/Cargo.toml --target x86_64-unknown-linux-gnu --release --test protocol`。按目标OS分离target/build目录，复用专项已通过的同源证据；这些命令不证明桌面操作。新增或改变Computer接线时运行 `bun run check:computer-boundary`及受影响App/契约检查。原生包用 `bun run build:linux`与现役release lock入口验证worker、依赖和安装/卸载，先核对实际脚本与架构；原生场景和真实模型按专项第9节、发布范围及可用环境选择，不再调用退役crate/dev脚本。
 
 ## 完整产品验收
 

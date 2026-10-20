@@ -21,7 +21,7 @@ UI or domain command
 
 ## Primitives and ownership
 
-Agent crates supply shared provider, message, compaction, MCP, Skill, Browser and Computer primitives. Platform domains execute Module Actions and interpret resource and effect results. Runtime does not own another Session store, effect ledger or product authority.
+Agent crates supply shared provider, message, compaction, MCP, Skill and Browser primitives. Computer uses the backend `crates/backend/nomifun-computer` and independent `apps/computer-worker` workspace. Platform domains execute Module Actions and interpret resource and effect results. Runtime does not own another Session store, effect ledger or product authority.
 
 Immutable Agent revisions and Snapshots freeze the selected execution closure. Tool descriptions may be expanded on demand; the Kernel and frozen binding continue to govern authorization.
 

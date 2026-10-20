@@ -19,6 +19,9 @@ use std::{
     sync::Mutex,
 };
 
+#[path = "native_computer_stop.rs"]
+mod runtime_stop;
+
 const MARKER: &str = "OWNED_COMPUTER_CHAIN_VERIFIED";
 struct CloseOwnedWindow(PathBuf);
 impl Drop for CloseOwnedWindow {

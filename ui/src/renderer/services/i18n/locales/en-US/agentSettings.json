@@ -215,7 +215,7 @@
     },
     "computer": {
       "name": "Computer",
-      "description": "Observe the desktop and interact with apps and the clipboard. Some actions use the foreground desktop; system permissions are checked when actions run."
+      "description": "Use background interaction first for desktop, app, and clipboard tasks. Foreground interaction may be needed; available actions depend on the platform, app, and system permissions."
     },
     "creationMedia": {
       "name": "Media creation",

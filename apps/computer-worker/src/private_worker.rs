@@ -128,6 +128,7 @@ async fn run_async(
     };
     initialized.ready();
     let metadata = driver.metadata().await?;
+    let diagnostics = crate::native_status::collect(&driver, metadata.embedded).await;
     write_response(
         &mut writer,
         &ChannelResponse::ok(
@@ -138,6 +139,7 @@ async fn run_async(
                 "pid": std::process::id(),
                 "host_bundle_id": initialization.host_bundle_id,
                 "metadata": metadata,
+                "diagnostics": diagnostics,
             }),
         ),
     )?;

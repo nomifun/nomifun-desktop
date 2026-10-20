@@ -8,7 +8,8 @@ import { moduleIsAvailable, type ModuleReference } from './capabilityGroups';
 
 const defaultActions = (module: CapabilityModuleCatalogItem): string[] =>
   module.actions
-    .filter((action) => ['pure', 'read_local', 'read_sensitive'].includes(action.effect_class))
+    .filter((action) => String(module.module.id) === 'computer' ||
+      ['pure', 'read_local', 'read_sensitive'].includes(action.effect_class))
     .map((action) => action.action_id)
     .sort((left, right) => left.localeCompare(right));
 

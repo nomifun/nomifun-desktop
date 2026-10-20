@@ -417,6 +417,10 @@ impl Actor {
             status.process_id = self.live.as_ref().and_then(|live| live.owner.id());
             status.generation = self.live.as_ref().map(|live| live.generation.clone());
             status.running = self.live.is_some();
+            if self.live.is_none() {
+                status.backend = None;
+                status.atspi = None;
+            }
             status.bound_sessions = self.sessions.len();
             status.queued = self.queues.values().map(VecDeque::len).sum();
             if error.is_some() {
@@ -699,9 +703,17 @@ impl Actor {
         match response {
             Ok(Ok(response)) if response.ok => {
                 self.status.send_modify(|status| {
-                    status.metadata = response
-                        .result
-                        .and_then(|result| result.get("metadata").cloned());
+                    let result = response.result.as_ref();
+                    status.metadata = result.and_then(|result| result.get("metadata").cloned());
+                    let diagnostics = result.and_then(|result| result.get("diagnostics"));
+                    status.backend = diagnostics
+                        .and_then(|diagnostics| diagnostics.get("backend"))
+                        .and_then(Value::as_str)
+                        .filter(|backend| !backend.is_empty())
+                        .map(str::to_owned);
+                    status.atspi = diagnostics
+                        .and_then(|diagnostics| diagnostics.get("atspi"))
+                        .and_then(Value::as_bool);
                     status.worker_version = status
                         .metadata
                         .as_ref()

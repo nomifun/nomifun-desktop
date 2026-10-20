@@ -38,6 +38,8 @@ Broker 按每次实际尝试的路由与适配器能力重新投影工具和提�
 
 许可由冻结的 `system_permissions` 元数据派生，在实际调用时检查。缺权沿现有 `SYSTEM_PERMISSION_REQUIRED` 载体返回，未执行不是动作成功。状态入口为 `GET /api/computer/status`；系统许可继续使用 `/api/system/permissions` 及其 request/open-settings 入口，没有旧 Computer 权限别名。
 
+状态读取只返回当前代际的缓存，不启动 worker 或重试探针。`backend` 标识已经初始化的原生分派家族，不证明权限、UIA、抓图或所有动作均可用；Linux `atspi` 来自该 worker 初始化时对真实 accessibility bus 的只读探测。缺失或失败的诊断保持未知，代际退休后清除；具体动作仍依据本次实际检查与原生结果。
+
 macOS 目标为 14+，worker 由 App 直接启动并与 App 使用相同正式签名身份；TCC 归属和安装包行为需要在该平台实际验证。Windows 使用当前登录会话和普通完整性，提权窗口保留驱动的结构化拒绝，不借管理员执行设施绕过 UIPI。Linux 当前路径为 X11/XWayland 与 AT-SPI；原生 Wayland capture 尚未启用，portal、桌面 backend 与 GNOME helper 不能仅靠源码或 Xvfb 证明可用。
 
 vendor 固定 commit `4d959bbfa57f0c89f310330e849500b222084194`；本地变更仅通过[登记补丁](../../vendor/CUA-DRIVER-PATCHES.md)和同步脚本应用。Linux 输入清理的 guardian 属于 worker 内部原生资源责任，不是宿主桌面实现或第二执行账本；其最终平台异常矩阵仍须独立验收。

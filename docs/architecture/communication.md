@@ -111,9 +111,11 @@ MCP injection differs by session and by caller:
 - user MCP rows and OAuth-backed HTTP servers come from `nomifun-mcp`,
 - requirement and knowledge servers are scoped internal MCP servers,
 - platform Gateway tools are transported through `nomifun-gateway`,
-- browser/computer bridges are feature-gated,
+- browser bridges are feature-gated,
 - public `/mcp` is the installation-token authenticated canonical Remote
   AgentSession front from `nomifun-public`.
+
+Computer uses the App's first-party Module and `nomifun-computer` to launch an independent worker and communicate over inherited private stdio. It does not register an MCP server. See [Computer Use](computer-use.md).
 
 Internal stdio bridges do not trust caller-supplied user ids or persisted
 Conversation flags. The host derives an exact server-side scope and gives a

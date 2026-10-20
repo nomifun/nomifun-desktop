@@ -21,6 +21,23 @@ fn initialized() -> WorkerProbe {
     assert_eq!(ready.completion, ActionCompletion::Completed);
     assert_eq!(ready.result.as_ref().unwrap()["ready"], true);
     assert_ne!(ready.result.as_ref().unwrap()["pid"], std::process::id());
+    let result = ready.result.as_ref().unwrap();
+    assert_eq!(result["metadata"]["embedded"], true);
+    let diagnostics = result["diagnostics"].as_object().unwrap();
+    assert_eq!(diagnostics.len(), 2);
+    #[cfg(target_os = "windows")]
+    assert_eq!(diagnostics["backend"], "win32");
+    #[cfg(target_os = "macos")]
+    assert_eq!(diagnostics["backend"], "macos");
+    #[cfg(target_os = "linux")]
+    {
+        // WorkerProbe disables Wayland and supplies an unreachable private
+        // session bus: false must come from the real probe, not an env guess.
+        assert_eq!(diagnostics["backend"], "x11");
+        assert_eq!(diagnostics["atspi"], false);
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(diagnostics["atspi"].is_null());
     worker
 }
 

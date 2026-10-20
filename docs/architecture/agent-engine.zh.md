@@ -21,7 +21,7 @@ UI 或领域命令
 
 ## 引擎原语与平台所有权
 
-`crates/agent/` 提供 provider、模型消息、压缩、MCP、Skill、Browser 与 Computer 等共享原语。平台领域通过 Module 和 Action 接口执行资源操作，由各自 owner 解释结果。Runtime 不拥有第二套 Session、效果台账或产品权限。
+`crates/agent/` 提供 provider、模型消息、压缩、MCP、Skill、Browser 等共享原语。Computer 由后端的 `crates/backend/nomifun-computer` 与独立工作区 `apps/computer-worker` 承担。平台领域通过 Module 和 Action 接口执行资源操作，由各自 owner 解释结果。Runtime 不拥有第二套 Session、效果台账或产品权限。
 
 Agent revision 与 Snapshot 冻结选中的执行闭包。可见工具描述可以按需展开；授权仍由冻结 binding 和 Kernel 校验。Skill、MCP 和 Provider 不因为它们参与模型上下文就合并成新的 Agent 身份。
 
