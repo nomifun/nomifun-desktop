@@ -8,12 +8,10 @@ import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 import type { AgentPresetId, ProviderId } from '@/common/types/ids';
 import { configService } from '@/common/config/configService';
 import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
+import { DEFAULT_AGENT_SELECTION } from '@/renderer/components/agent/types';
 import { isConversationAgentTemplateKey } from '@/renderer/components/agent/conversationAgentCatalog';
 
-export const DEFAULT_GUID_AGENT_SELECTION: GuidAgentSelection = {
-  kind: 'template',
-  templateKey: 'assistant.general',
-};
+export const DEFAULT_GUID_AGENT_SELECTION: GuidAgentSelection = DEFAULT_AGENT_SELECTION;
 
 /** Normalize persisted/unknown selection state to a workbench catalog identity. */
 export const normalizeGuidAgentSelection = (

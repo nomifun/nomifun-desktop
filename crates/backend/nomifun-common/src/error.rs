@@ -67,6 +67,15 @@ pub enum AppError {
     #[error("Session configuration changed: {0}")]
     SessionConfigurationChanged(String),
 
+    /// A host prepared an Agent candidate without its required logical grants.
+    /// This is a local configuration defect, before model/tool dispatch.
+    #[error("{message}")]
+    AgentResourceBindingIncomplete {
+        message: String,
+        missing_resource_kinds: Vec<String>,
+        missing_resource_operations: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    },
+
     /// A compare-and-swap write used a stale authoritative revision.
     #[error("Revision conflict: {0}")]
     RevisionConflict(String),
@@ -165,6 +174,7 @@ impl AppError {
             Self::SessionContractEvolutionRejected { .. } => StatusCode::CONFLICT,
             Self::ComponentUnavailable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::SessionConfigurationChanged(_) => StatusCode::CONFLICT,
+            Self::AgentResourceBindingIncomplete { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::RevisionConflict(_) => StatusCode::CONFLICT,
             Self::ProviderInUse(_) => StatusCode::CONFLICT,
             Self::ProviderUnavailable(_) => StatusCode::BAD_REQUEST,
@@ -211,6 +221,7 @@ impl AppError {
             Self::SessionContractEvolutionRejected { .. } => "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED",
             Self::ComponentUnavailable { .. } => "COMPONENT_UNAVAILABLE",
             Self::SessionConfigurationChanged(_) => "NOMIFUN_SESSION_CONFIGURATION_CHANGED",
+            Self::AgentResourceBindingIncomplete { .. } => "NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE",
             Self::RevisionConflict(_) => "REVISION_CONFLICT",
             Self::ProviderInUse(_) => "PROVIDER_IN_USE",
             Self::ProviderUnavailable(_) => "PROVIDER_UNAVAILABLE",
@@ -242,6 +253,14 @@ impl AppError {
     pub fn error_details(&self) -> Option<Value> {
         match self {
             Self::SystemExecution(failure) => Some(json!({"system_execution_error": failure})),
+            Self::AgentResourceBindingIncomplete { missing_resource_kinds, missing_resource_operations, .. } => Some(json!({
+                "stage": "resource_preparation",
+                "ownership": "nomifun",
+                "model_request_started": false,
+                "retryable": false,
+                "missing_resource_kinds": missing_resource_kinds,
+                "missing_resource_operations": missing_resource_operations,
+            })),
             Self::NativeFileAcquisition { code, message, kind, raw_os_error, .. } => Some(json!({
                 "native_file_error": { "code": code, "message": message, "kind": kind, "raw_os_error": raw_os_error },
             })),
@@ -379,6 +398,27 @@ impl std::fmt::Display for ErrorChain<'_> {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn incomplete_agent_resources_are_a_typed_local_preparation_failure() {
+        let error=AppError::AgentResourceBindingIncomplete {
+            message:"The local Agent configuration is missing its required resources".into(),
+            missing_resource_kinds:vec!["workspace".into(),"process_session".into()],
+            missing_resource_operations:std::collections::BTreeMap::from([
+                ("workspace".into(),std::collections::BTreeSet::from(["read".into(),"write".into()])),
+            ]),
+        };
+        let response=error.into_response();
+        assert_eq!(response.status(),StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes=to_bytes(response.into_body(),8192).await.unwrap();
+        let body:Value=serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"],"NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE");
+        assert_eq!(body["details"]["ownership"],"nomifun");
+        assert_eq!(body["details"]["model_request_started"],false);
+        assert_eq!(body["details"]["retryable"],false);
+        assert_eq!(body["details"]["missing_resource_kinds"],json!(["workspace","process_session"]));
+        assert_eq!(body["details"]["missing_resource_operations"]["workspace"],json!(["read","write"]));
+    }
 
     #[tokio::test]
     async fn system_execution_http_errors_keep_typed_native_and_unknown_facts() {

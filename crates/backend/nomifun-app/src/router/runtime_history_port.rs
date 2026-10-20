@@ -38,6 +38,30 @@ impl HistoryPort {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_only_closed_turn_retains_its_original_selection_as_history_data() {
+        let window=|input:Value|super::super::super::engine_history::EngineHistoryWindow {
+            turns:vec![super::super::super::engine_history::EngineHistoryTurn {
+                claim_seq:1,unstarted_terminal:true,operation_id:"original-skill-turn".into(),receipt_status:"failed".into(),
+                root_content_json:input.to_string(),records:Vec::new(),serialized_bytes:input.to_string().len(),
+            }],context_messages:Vec::new(),has_older:false,
+        };
+        let accepted=serde_json::json!({"content":"", "files":[],"inject_skills":["original-frozen-skill"]});
+        let page=HistoryPort::project(window(accepted.clone())).unwrap();
+        let turn=page.turn.unwrap();
+        assert_eq!(turn.operation_id,"original-skill-turn");
+        let [ChatContentPart::Text {text}]=turn.requirement.content.as_slice() else {panic!("one original selection reference")};
+        assert!(text.contains("Historical user-selected Skill references")&&text.contains("original-frozen-skill"));
+        assert_eq!(accepted["content"],"");
+        assert!(HistoryPort::project(window(serde_json::json!({"content":"", "files":[],"inject_skills":[]}))).is_err(),
+            "ordinary empty content does not become a historical task");
+    }
+}
+
 #[async_trait::async_trait]
 impl AgentHistoryPort for HistoryPort {
     async fn model_snapshot_compatible(
@@ -114,6 +138,10 @@ impl HistoryPort {
         let mut content = Vec::new();
         if !text.is_empty() {
             content.push(ChatContentPart::Text { text: text.into() });
+        }
+        if text.trim().is_empty() {
+            if let Some(description) = super::super::runtime_attachments::skill_selection_description(
+                &super::super::runtime_attachments::selected_skills(&root).map_err(|_| invalid())?, true) { content.push(description); }
         }
         if let Some(description) = super::super::runtime_attachments::description(&files, true) {
             content.push(description);

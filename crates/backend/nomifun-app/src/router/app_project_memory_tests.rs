@@ -41,6 +41,29 @@ async fn new_session_after_verified_application_relocation_reuses_current_logica
             session_capabilities: Some(Default::default()), required_modules: BTreeSet::new() })).await.unwrap();
     let next = store.get_live_session(&parse_agent_session_id(&created.data.unwrap().agent_session_id).unwrap()).await.unwrap();
     assert_eq!(next.agent_binding.typed_resource_bindings.iter().find(|resource| resource.resource_kind.as_ref() == "project_memory").unwrap().resource_id, old_memory);
+    let (_, revision, _) = fixture.state.control_plane.saved_binding_artifacts(
+        &UserId::from(fixture.principal.principal_id.clone()), &agent_binding_dto(&moved.agent_binding).unwrap(),
+    ).await.unwrap();
+    let route = &revision.payload.chat_route_records[nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT];
+    let same_model = AgentChatModelSelectionDto { provider_id:route.primary.provider_id.clone(), model:route.primary.model.clone() };
+    let scheduled = fixture.state.product_agent_resolver.prepare_new_binding(
+        &fixture.principal.principal_id,
+        &nomifun_api_types::ProductAgentSelectionDto::Template { template_key:"app.developer".into() },
+        Some(&same_model), Some(project.to_str().unwrap()), &[],
+    ).await.unwrap();
+    assert_eq!(scheduled.typed_resource_bindings.iter().find(|resource| resource.resource_kind == "project_memory").unwrap().resource_id,
+        old_memory.as_ref(), "automatic preparation reuses the same verified project namespace as interactive creation");
+    let revised = fixture.state.product_agent_resolver.revise_binding(&fixture.principal.principal_id,
+        &scheduled, Some(&same_model), None, None).await.unwrap();
+    assert_eq!(revised, scheduled, "a model-only no-op preserves every exact resource definition");
+    let cleared = fixture.state.product_agent_resolver.revise_binding(&fixture.principal.principal_id,
+        &scheduled, None, Some(""), None).await.unwrap();
+    assert_eq!(cleared.preset_revision_ref, scheduled.preset_revision_ref);
+    assert_eq!(cleared.resolved_snapshot_ref, scheduled.resolved_snapshot_ref);
+    assert!(cleared.typed_resource_bindings.iter().filter(|resource| matches!(resource.resource_kind.as_str(), "workspace" | "process_session"))
+        .all(|resource| resource.typed_parameters == nomifun_agent_contracts::managed_workspace_parameters()));
+    assert_eq!(cleared.typed_resource_bindings.iter().find(|resource| resource.resource_kind == "project_memory").unwrap().resource_id,
+        super::super::nomi_core_resource_bindings::DEFAULT_PROJECT_MEMORY_RESOURCE_ID);
     assert_eq!(store.get_live_session(&fixture.session).await.unwrap(), moved, "new-session admission cannot rewrite the relocated Session");
     fixture.finish().await;
 }

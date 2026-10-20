@@ -282,7 +282,7 @@ pub async fn read_builtin_rule(
 /// Read a built-in skill file by name.
 ///
 /// `file_name` is a relative path inside the built-in skills corpus
-/// (e.g. `"auto-inject/cron/SKILL.md"` or
+/// (e.g. `"auto-inject/nomifun-skills/SKILL.md"` or
 /// `"planning-with-files/SKILL.md"`). Returns
 /// the file content as a string, or an empty string if the file does not
 /// exist (preserves the legacy graceful-degradation contract consumed by
@@ -322,7 +322,7 @@ pub enum SkillSource {
 /// SKILL.md under `paths.builtin_skills_dir` (populated at startup by
 /// [`crate::startup_materialize::materialize_if_needed`]). The
 /// `relative_location` carries the relative path suitable for
-/// `POST /api/skills/builtin-skill` (e.g. `"auto-inject/cron/SKILL.md"`
+/// `POST /api/skills/builtin-skill` (e.g. `"auto-inject/nomifun-skills/SKILL.md"`
 /// or `"planning-with-files/SKILL.md"`). Other sources leave
 /// `relative_location` `None`.
 #[derive(Debug, Clone, PartialEq)]
@@ -468,7 +468,7 @@ pub struct ScannedSkill {
 ///
 /// Returned by `GET /api/skills/builtin-auto`. `location` is the
 /// relative path the frontend passes back into
-/// `POST /api/skills/builtin-skill`, e.g. `"auto-inject/cron/SKILL.md"`.
+/// `POST /api/skills/builtin-skill`, e.g. `"auto-inject/nomifun-skills/SKILL.md"`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BuiltinAutoSkillItem {
     pub name: String,
@@ -1240,7 +1240,7 @@ fn validate_filename(name: &str) -> Result<(), SkillError> {
 }
 
 /// Validate a relative path inside the built-in skill corpus. Allows
-/// forward slashes (paths like `"auto-inject/cron/SKILL.md"` are
+/// forward slashes (paths like `"auto-inject/nomifun-skills/SKILL.md"` are
 /// normal) but forbids empty segments, backslashes, leading slash,
 /// absolute paths, and any `..` component.
 /// Rejects `':'` in any segment for the reasons given on [`validate_filename`]
@@ -2646,11 +2646,9 @@ mod tests {
         let paths = make_embedded_paths(tmp.path()).await;
 
         let autos = list_builtin_auto_skills(&paths).await.unwrap();
-        assert!(
-            autos.len() >= 3,
-            "expected ≥3 auto-inject entries, got {}",
-            autos.len()
-        );
+        let names=autos.iter().map(|item|item.name.as_str()).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(names,std::collections::BTreeSet::from(["nomifun-skills","skill-creator"]));
+        assert!(!names.contains("cron"),"retired text-command protocol must not be injected");
         assert!(
             !autos.iter().any(|item| item.name == "officecli"),
             "officecli must remain an opt-in builtin skill"
@@ -2671,10 +2669,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
 
-        let content = read_builtin_skill(&paths, "auto-inject/cron/SKILL.md")
+        let content = read_builtin_skill(&paths, "auto-inject/nomifun-skills/SKILL.md")
             .await
             .unwrap();
-        assert!(!content.is_empty(), "embedded cron SKILL.md is empty");
+        assert!(!content.is_empty(), "embedded builtin SKILL.md is empty");
         assert!(
             content.trim_start().starts_with("---"),
             "expected frontmatter, got: {}",
@@ -2719,9 +2717,9 @@ mod tests {
             names.contains(&"fixture-only"),
             "disk override should reflect seeded skill; got {names:?}"
         );
-        // Embedded skills (e.g. `cron`) must NOT leak into the disk view.
+        // Embedded skills (e.g. `nomifun-skills`) must NOT leak into the disk view.
         assert!(
-            !names.contains(&"cron"),
+            !names.contains(&"nomifun-skills"),
             "disk override must not include embedded skills"
         );
     }
@@ -2795,16 +2793,16 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
 
-        let resolved = resolve_skill_sources(&paths, "conv-named", &["cron".to_owned()])
+        let resolved = resolve_skill_sources(&paths, "conv-named", &["nomifun-skills".to_owned()])
             .await
             .unwrap();
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].name, "cron");
+        assert_eq!(resolved[0].name, "nomifun-skills");
         // source_path points at the real on-disk auto-inject directory.
         let expected = paths
             .builtin_skills_dir
             .join(BUILTIN_AUTO_SKILLS_SUBDIR)
-            .join("cron");
+            .join("nomifun-skills");
         assert_eq!(resolved[0].source_path, expected);
         assert!(resolved[0].source_path.is_dir());
         assert!(resolved[0].source_path.join(SKILL_MANIFEST_FILE).exists());
@@ -2893,13 +2891,13 @@ mod tests {
                 "".to_owned(),
                 "../evil".to_owned(),
                 "foo/bar".to_owned(),
-                "cron".to_owned(),
+                "nomifun-skills".to_owned(),
             ],
         )
         .await
         .unwrap();
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].name, "cron");
+        assert_eq!(resolved[0].name, "nomifun-skills");
     }
 
     #[tokio::test]
@@ -2912,12 +2910,12 @@ mod tests {
         let resolved = resolve_skill_sources(
             &paths,
             "conv-sorted",
-            &["planning-with-files".to_owned(), "cron".to_owned()],
+            &["planning-with-files".to_owned(), "nomifun-skills".to_owned()],
         )
         .await
         .unwrap();
         assert_eq!(resolved.len(), 2);
-        assert_eq!(resolved[0].name, "cron");
+        assert_eq!(resolved[0].name, "nomifun-skills");
         assert_eq!(resolved[1].name, "planning-with-files");
         for entry in &resolved {
             assert!(entry.source_path.is_absolute());
@@ -2944,7 +2942,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = make_embedded_paths(tmp.path()).await;
 
-        let _ = resolve_skill_sources(&paths, "conv-pure", &["cron".to_owned()])
+        let _ = resolve_skill_sources(&paths, "conv-pure", &["nomifun-skills".to_owned()])
             .await
             .unwrap();
         assert!(!paths.data_dir.join("agent-skills").exists());

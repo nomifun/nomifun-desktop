@@ -70,6 +70,7 @@ fn migration_directory_contains_the_canonical_forward_migration_chain() {
         "009_cron_input_handoff.sql",
         "010_mcp_oauth_authority.sql",
         "011_cron_run_cancellation.sql",
+        "012_unify_cron_agent_binding.sql",
     ]);
 }
 

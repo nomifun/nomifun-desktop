@@ -26,6 +26,38 @@ async fn model_calls(model: &wiremock::MockServer) -> usize {
         request.method.as_str() == "POST" && request.url.path() == "/v1/chat/completions").count()
 }
 
+#[tokio::test]
+async fn cron_failure_projection_keeps_exact_original_diagnosis_after_a_successor_starts() {
+    let root = tempfile::tempdir().unwrap();
+    let (services, _, state, session, principal) = fixture_in(root.path(), "http://127.0.0.1:9/v1").await;
+    let original_key = "cron:original-failure:turn";
+    let original = state.session_owner.canonical.start_turn(&principal, &session, original_key,
+        json!({"content":"original","files":[],"inject_skills":[]})).await.unwrap();
+    let mut diagnosis = nomifun_ai_agent::AgentSendError::from_app_error(AppError::AgentResourceBindingIncomplete {
+        message:"Original host resource admission failed".into(),
+        missing_resource_kinds:vec!["workspace".into()],
+        missing_resource_operations:BTreeMap::from([("workspace".into(),BTreeSet::from(["write".into()]))]),
+    }).into_stream_error();
+    diagnosis.agent_label=Some("Original frozen Agent".into());
+    diagnosis.model_name=Some("original-model".into());
+    diagnosis.workspace_path=Some("/original/owned/workspace".into());
+    state.session_owner.settle_dispatch_failure(&principal.principal_id, &session, &original.operation_id,
+        "original dispatch failed", diagnosis.clone()).await.unwrap().unwrap();
+    state.session_owner.canonical.start_turn(&principal, &session, "successor",
+        json!({"content":"successor","files":[],"inject_skills":[]})).await.unwrap();
+    let cursor=state.session_owner.canonical.store().current_cursor(&session).await.unwrap();
+    let query=CronTurnReceiptQuery {owner_id:principal.principal_id.clone(),agent_session_id:session.clone(),idempotency_key:original_key.into()};
+    let projected=CronSessionPort::read_turn_failure(state.session_owner.as_ref(),&query).await.unwrap().unwrap();
+    assert_eq!(projected,diagnosis);
+    assert!(CronSessionPort::read_turn_failure(state.session_owner.as_ref(),&CronTurnReceiptQuery {
+        idempotency_key:"successor".into(),..query
+    }).await.unwrap().is_none());
+    assert_eq!(state.session_owner.canonical.store().current_cursor(&session).await.unwrap(),cursor,
+        "viewing the original failure cannot write facts or start work");
+    services.shutdown_nomi_core_host().await.unwrap();
+    services.database.close().await;
+}
+
 async fn wait_completed_original(owner: &NomiCoreSessionOwner, session: &AgentSessionId, operation: &OperationId) {
     tokio::time::timeout(Duration::from_secs(15), async { loop {
         let receipt = owner.canonical.store().read_turn_receipt(session,operation).await.unwrap();
@@ -83,18 +115,18 @@ impl CronSessionPort for CronBridge {
     async fn list_conversation_responses_for_cron(&self, query: &CronScheduledSessionLookup) -> Result<Vec<ConversationResponse>, AppError> {
         CronSessionPort::list_conversation_responses_for_cron(self.owner.as_ref(), query).await
     }
-    async fn bind_cron_relation(&self, request: &CronSessionCronBindingRequest) -> Result<(), AppError> {
-        CronSessionPort::bind_cron_relation(self.owner.as_ref(), request).await
-    }
     async fn read_turn_receipt(&self, query: &CronTurnReceiptQuery) -> Result<CronTurnReceiptState, AppError> {
         CronSessionPort::read_turn_receipt(self.owner.as_ref(), query).await
     }
     async fn reconcile_turn_receipt(&self, request: &CronTurnReconciliationRequest) -> Result<CronTurnReconciliation, AppError> {
         CronSessionPort::reconcile_turn_receipt(self.owner.as_ref(), request).await
     }
-    async fn create_idempotent(&self, owner: &str, request: nomifun_api_types::CreateConversationRequest,
-        binding: CronSessionAgentBinding, key: &str) -> Result<CronSessionHandle, AppError> {
-        CronSessionPort::create_idempotent(self.owner.as_ref(), owner, request, binding, key).await
+    async fn read_turn_failure(&self, query: &CronTurnReceiptQuery) -> Result<Option<nomifun_api_types::AgentStreamErrorData>, AppError> {
+        CronSessionPort::read_turn_failure(self.owner.as_ref(), query).await
+    }
+    async fn create_idempotent(&self, owner: &str, name: &str,
+        binding: nomifun_api_types::AgentBindingValueDto, key: &str, job_id: &str) -> Result<CronSessionHandle, AppError> {
+        CronSessionPort::create_idempotent(self.owner.as_ref(), owner, name, binding, key, job_id).await
     }
     async fn prepare_runtime_and_send(&self, request: CronRuntimePreparationRequest) -> Result<CronPreparedTurnDelivery, AppError> {
         if self.plant_ordinary_input.swap(false, Ordering::SeqCst) {
@@ -131,9 +163,11 @@ async fn source_browser_cron_finalization_handoff_survives_legal_job_deletion_wi
             Arc::new(nomifun_cron::busy_guard::CronBusyGuard::new()), services.data_dir.clone())),
         CronEventEmitter::new(services.event_bus.clone()), services.data_dir.clone());
     service.with_cron_background_task_registrar(services.background_tasks.clone());
+    service.with_agent_binding_resolver(state.product_agent_resolver.clone());
     let job = service.add_job(owner, serde_json::from_value(json!({"name":"Original isolated run","schedule":{"kind":"every","every_ms":60000},
-        "message":"Finish the original scheduled task.","execution_mode":"new_conversation","agent_type":"nomi","created_by":"user",
-        "agent_config":{"name":"Nomi","provider_id":selected.provider_id,"model":selected.model,"agent_snapshot":frozen}})).unwrap()).await.unwrap();
+        "message":"Finish the original scheduled task.","execution_mode":"new_conversation","created_by":"user",
+        "agent_selection":{"kind":"preset","preset_id":frozen.preset_id},
+        "model":{"provider_id":selected.provider_id,"model":selected.model}})).unwrap()).await.unwrap();
     let result = service.run_now(owner, &job.cron_job_id, "source-retirement-original-run").await.unwrap();
     tokio::time::timeout(Duration::from_secs(15), bridge.entered.notified()).await.unwrap();
     let proof = bridge.proof.lock().unwrap().clone().unwrap();
@@ -144,6 +178,7 @@ async fn source_browser_cron_finalization_handoff_survives_legal_job_deletion_wi
         "the frozen, authorized original Cron task must complete: {:?}",
         state.session_owner.canonical.store().turn_outcome(&proof.agent_session_id,&operation).await.unwrap());
     let (_, original_input) = state.session_owner.canonical.store().turn_accepted_input(&proof.agent_session_id, &operation).await.unwrap();
+    assert_eq!(original_input.0["content"],job.message,"scheduled framing cannot become accepted task text");
     let source: nomifun_agent_contracts::CronRunRuntimeSource = serde_json::from_value(original_input.0["cron_runtime_overlay"].clone()).unwrap();
     assert_eq!((source.cron_job_id.as_str(),source.cron_job_run_id.as_str(),source.agent_session_id.as_ref()),
         (proof.cron_job_id.as_str(),proof.cron_job_run_id.as_str(),proof.agent_session_id.as_ref()));
@@ -151,10 +186,20 @@ async fn source_browser_cron_finalization_handoff_survives_legal_job_deletion_wi
     let cursor = state.session_owner.canonical.store().current_cursor(&proof.agent_session_id).await.unwrap();
     let calls = model_calls(&model).await;
     assert!(calls > 0, "the normal source really invoked the configured model");
+    let requests=model.received_requests().await.unwrap();
+    let first=requests.iter().find(|request|request.method.as_str()=="POST"&&request.url.path()=="/v1/chat/completions").unwrap();
+    let body:Value=serde_json::from_slice(&first.body).unwrap();
+    let messages=body["messages"].as_array().unwrap();
+    assert!(messages.iter().any(|message|message["role"]=="system"&&message["content"].as_str()
+        .is_some_and(|text|text.contains("automatically triggered scheduled task"))));
+    assert!(messages.iter().any(|message|message["role"]=="user"&&message["content"]==job.message),
+        "the model receives original task bytes in the user lane");
     // The original authorized repository delete is legal after finalization;
     // cleanup must not turn its now-removable run row into a new prerequisite.
     repository.delete(owner, &job.cron_job_id).await.unwrap();
     assert!(repository.get_run_reservation(owner, &job.cron_job_id, &proof.cron_job_run_id).await.unwrap().is_none());
+    assert!(super::scheduled_turn_instructions(&principal,&proof.agent_session_id,
+        operation.as_ref(),&original_input.0).unwrap().is_some(),"replay policy is independent of later job/reservation deletion");
     bridge.release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(5), bridge.finished.notified()).await.unwrap();
     assert!(bridge.accepted.load(Ordering::SeqCst));
@@ -197,9 +242,11 @@ async fn source_browser_cron_same_named_ordinary_input_never_acquires_source_ret
             Arc::new(nomifun_cron::busy_guard::CronBusyGuard::new()), services.data_dir.clone())),
         CronEventEmitter::new(services.event_bus.clone()), services.data_dir.clone());
     service.with_cron_background_task_registrar(services.background_tasks.clone());
+    service.with_agent_binding_resolver(state.product_agent_resolver.clone());
     let job = service.add_job(owner, serde_json::from_value(json!({"name":"Literal key collision","schedule":{"kind":"every","every_ms":60000},
-        "message":"This literal key was taken by another legitimate input.","execution_mode":"new_conversation","agent_type":"nomi","created_by":"user",
-        "agent_config":{"name":"Nomi","provider_id":selected.provider_id,"model":selected.model,"agent_snapshot":frozen}})).unwrap()).await.unwrap();
+        "message":"This literal key was taken by another legitimate input.","execution_mode":"new_conversation","created_by":"user",
+        "agent_selection":{"kind":"preset","preset_id":frozen.preset_id},
+        "model":{"provider_id":selected.provider_id,"model":selected.model}})).unwrap()).await.unwrap();
     let result = service.run_now(owner,&job.cron_job_id,"source-retirement-collision").await.unwrap();
     tokio::time::timeout(Duration::from_secs(15),bridge.entered.notified()).await.unwrap();
     let proof = bridge.proof.lock().unwrap().clone().unwrap();

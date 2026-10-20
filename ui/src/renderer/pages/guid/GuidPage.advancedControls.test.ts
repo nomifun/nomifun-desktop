@@ -58,7 +58,7 @@ describe('GuidPage advanced controls', () => {
   test('exposes target resource controls from the capability contract while preserving explicit project context', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
     const capabilityHook = readSource(
-      new URL('./hooks/useGuidPresetCapabilities.ts', import.meta.url)
+      new URL('../../components/agent/useAgentPresetCapabilities.ts', import.meta.url)
     );
 
     expect(page.includes('const workspaceEnabled =')).toBe(true);

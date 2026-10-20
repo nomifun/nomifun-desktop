@@ -1,4 +1,4 @@
-import '../../../../../test/setup-dom.ts';
+import '../../../../test/setup-dom.ts';
 
 import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -9,8 +9,8 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import guid from '@/renderer/services/i18n/locales/en-US/guid.json';
 import agentSettings from '@/renderer/services/i18n/locales/en-US/agentSettings.json';
-import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
-import GuidAgentSelector, { type GuidAgentSelectorProps } from './GuidAgentSelector';
+import type { ExecutableAgentPreset, AgentSelection } from './types';
+import AgentSelector, { type AgentSelectorProps } from './AgentSelector';
 import BrowserResourceField from '@/renderer/components/agent/BrowserResourceField';
 
 const i18n = createInstance();
@@ -41,15 +41,15 @@ const LocationProbe = () => {
   const location = useLocation();
   return <output data-testid='location'>{location.pathname}{location.search}</output>;
 };
-const renderSelector = (props: Partial<GuidAgentSelectorProps> = {}) => {
-  const selections: GuidAgentSelection[] = [];
+const renderSelector = (props: Partial<AgentSelectorProps> = {}) => {
+  const selections: AgentSelection[] = [];
   const Harness = () => {
-    const [selection, setSelection] = useState<GuidAgentSelection>(props.selection ?? { kind: 'template', templateKey: 'chat.minimal' });
-    const choose = (next: GuidAgentSelection) => { selections.push(next); setSelection(next); };
-    return <GuidAgentSelector presets={[saved]} officialTemplates={templates} draftPresets={[draft]} {...props} selection={selection} onSelectTemplate={(templateKey) => choose({ kind: 'template', templateKey })} onSelectPreset={(presetId) => choose({ kind: 'preset', presetId })} />;
+    const [selection, setSelection] = useState<AgentSelection>(props.selection ?? { kind: 'template', templateKey: 'chat.minimal' });
+    const choose = (next: AgentSelection) => { selections.push(next); setSelection(next); };
+    return <AgentSelector presets={[saved]} officialTemplates={templates} draftPresets={[draft]} {...props} selection={selection} onSelectTemplate={(templateKey) => choose({ kind: 'template', templateKey })} onSelectPreset={(presetId) => choose({ kind: 'preset', presetId })} />;
   };
   const page = render(<I18nextProvider i18n={i18n}><MemoryRouter initialEntries={['/guid']}><Harness /><LocationProbe /></MemoryRouter></I18nextProvider>);
-  const open = async () => { await act(async () => { fireEvent.click(page.getByTestId('guid-agent-selector')); }); };
+  const open = async () => { await act(async () => { fireEvent.click(page.getByTestId('agent-selector')); }); };
   return { page, open, selections };
 };
 afterEach(cleanup);
@@ -61,7 +61,7 @@ describe('Guid Agent selector', () => {
       switchingLabel: 'Switching Agent…',
       selectedLabelOverride: 'Current Agent',
     });
-    const trigger = page.getByTestId('guid-agent-selector') as HTMLButtonElement;
+    const trigger = page.getByTestId('agent-selector') as HTMLButtonElement;
     expect(trigger.textContent).toBe('Current Agent');
     expect(trigger.disabled).toBe(true);
     expect(trigger.getAttribute('aria-busy')).toBe('true');
@@ -75,7 +75,7 @@ describe('Guid Agent selector', () => {
       disabledReason: 'Wait for the current Turn',
       selectedLabelOverride: '当前会话 Agent',
     });
-    const trigger = page.getByTestId('guid-agent-selector') as HTMLButtonElement;
+    const trigger = page.getByTestId('agent-selector') as HTMLButtonElement;
     expect(trigger.textContent?.includes('当前会话 Agent')).toBe(true);
     expect(trigger.disabled).toBe(true);
     expect(trigger.title).toBe('Wait for the current Turn');
@@ -83,7 +83,7 @@ describe('Guid Agent selector', () => {
 
   test('keeps the collection hidden until the current Agent is opened', async () => {
     const { page, open } = renderSelector();
-    expect(page.getByTestId('guid-agent-selector').textContent).toBe(agentSettings.template.chat.minimal.name);
+    expect(page.getByTestId('agent-selector').textContent).toBe(agentSettings.template.chat.minimal.name);
     expect(page.queryByText('Nomi Agent')).toBeNull();
     expect(page.queryByRole('dialog')).toBeNull();
     expect(page.queryByText(saved.display_name)).toBeNull();
@@ -135,7 +135,7 @@ describe('Guid Agent selector', () => {
     await open();
     await act(async () => { fireEvent.click(page.getByRole('button', { name: /Release reviewer/ })); });
     expect(selections).toEqual([{ kind: 'preset', presetId: saved.preset_id }]);
-    expect(page.getByTestId('guid-agent-selector').textContent).toBe(saved.display_name);
+    expect(page.getByTestId('agent-selector').textContent).toBe(saved.display_name);
     expect(page.queryByRole('dialog')).toBeNull();
     await open();
     expect(within(page.getByRole('dialog')).getByRole('button', { name: /Release reviewer/ }).getAttribute('aria-pressed')).toBe('true');
@@ -196,7 +196,7 @@ describe('Guid Agent selector', () => {
     await act(async () => { fireEvent.click(page.getByRole('button', { name: agentSettings.template.assistant.general.name })); });
     expect(page.getByTestId('location').textContent).toBe('/guid');
     expect(selections).toEqual([{ kind: 'template', templateKey: 'assistant.general' }]);
-    expect(page.getByTestId('guid-agent-selector').textContent).toBe(agentSettings.template.assistant.general.name);
+    expect(page.getByTestId('agent-selector').textContent).toBe(agentSettings.template.assistant.general.name);
     expect(page.queryByRole('dialog')).toBeNull();
     await open();
     expect(within(page.getByRole('dialog')).getByRole('button', { name: agentSettings.template.assistant.general.name }).getAttribute('aria-pressed')).toBe('true');

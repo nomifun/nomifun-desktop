@@ -631,3 +631,25 @@ macOS 复用现有 darwin_registered／darwin_application 与 WK／AppKit fixtur
 | 后端验证 | Session 328 项、Execution 161 项、Execution repository 59 项、Activity 相关 18 项、工具详情 HTTP 1 项和展示／持久 schema 隔离 1 项通过；Activity 原有手工原生浏览器用例 1 项未运行。生成器 check、边界规则 6 项及精确 Attempt／伙伴投影相关回归通过，不以此宣称全部产品／原生生命周期场景完成 |
 | 实模与测试驱动 | `step-5-preview` coding 烟测最终通过：真实写入 1 次、读取 1 次，无工具错误，并通过新只读 API 核验原调用参数和结果。曾暴露测试驱动栈溢出；场景 Future 分配及 HTTP 请求分派现有明确边界，不增线程栈、不改生产 Runtime；16 项无凭据证据测试通过，包含请求超时后实际析构证明 |
 | 凭据与数据 | 用户提供的 StepFun 凭据仅允许临时测试输入，不写入源码、命令日志或产物；现役隔离测试 runner 保留 Cargo／工具子进程环境清除与 stdin 交接边界 |
+
+
+### 10.8 定时任务统一工作台接续（2026-10-20，已实施并验证）
+
+用户已明确授权完整实施。起点 `1d385e072` 工作区干净；本节记录实施与验证结果，提交及推送遵循后续用户授权。现行合同已同步至 `agent-session.zh.md` 和中英文定时任务指南。
+
+本轮确认并根治两条独立故障链：旧 Cron 未准备 Agent 所需资源，导致模型请求之前失败；宿主把编号后台规则拼入用户正文，又会误触真实编号任务的 exact-action 保护，让写入提案反复在 dispatch 前被挡。现在 Cron 使用工作台 Agent，默认 `assistant.general`；原文进入 canonical accepted content，固定后台规则从原 typed source 注入既有 native instructions。未修改 runtime 的多步骤判断、授权、效果保护或时限。
+
+| 范围 | 最终行为与验证 |
+| --- | --- |
+| 选择与资源 | 共享工作台选择器，独立保留已配置模型。显式重选 Agent 才读取其当前作者配置；仅换模型/项目沿原 exact binding 派生并保留合法资源。新建、Product、Gateway 共用宿主准备；恢复只校验原冻结授权。API Cron35、HTTP 本地错误1、AI typed 分类1通过 |
+| 数据与调度 | Cron全目标 **136/136**（130 lib＋6 skill-file），DB相关 **74/74**（Cron repository24＋迁移/reset/ID/provider50）。012前向归一不修改既有迁移或原Agent工件；缺授权保留定义/模型并停用。reserve事务推进下一轮，终态不推进；持续Session在首次Turn前固定。历史来自原reservation；last_run_id只索引确切summary来源。CLI配置、重复快照/历史表、伪重试和成功后绑定死分支均退役 |
+| 原始输入与历史 | 原Skill-only空/空白正文及inject_skills保真；当前模型输入、关闭历史、鉴权历史与跨Agent/fork上下文仅从原选择派生引用数据，不读最新Skill或补权。Session整包 **336/336**，Contracts整包 **123/123**；Skill library **128通过/3原有外网ignored**。已有历史不改写 |
+| 宿主与贯通回归 | 前轮宿主/认证/provider/typed错误/digest分组51项；本轮source、Skill和历史分组14项通过（集合有重叠，不累加为总数）。Cron HTTP最终 **36/36**，含新建/持续模式真实原生文件写入、原用户正文/系统通道分离、末尾LF字节保真、模型局部修改不换Agent/挂载及幂等派发 |
+| 界面与检查 | 最终受影响19文件 **230/230**；完整 `bun run check`、UI生产构建、正式contract write/check、live runner自检、diff空白检查通过。真实隔离浏览器在880×600和1280×800验收默认通用、个人预设、独立模型和菜单/页脚；旧CLI截图及旧文本调度Skill/prompt wrapper已删除 |
+| 实际模型/定时器 | 最终隔离生产Nomi-core图，StepFun Step Plan `step-5-preview` **1/1通过，42.75s**。实际write_file与start_process（exit0/reaped）、磁盘固定内容、原生提案/dispatch/result因果、重复key不重复执行、真实At定时器触发并停用、持续2轮同Session、作者默认不变全部证明。运行时build digest为 `ee6983382cecbe4f3fbcb0f2cbdec1d3a2d462d93ab327f4dcbfb9c10ab3d93c` |
+| 实模证据边界 | 早期一次通过不能替代最终图；复测曾复现24/25步空转与18个未派发write提案，推动上述原文/系统通道修复。修复后5步完成真实文件/进程，但模型两次省略样本LF；实模任务因此改用严格固定无LF标记，LF保真由受控模型经过相同生产HTTP/原生文件路径单独验证。未更改deadline、模型调用预算、runtime gate或工具参数来迎合样本 |
+| 数据与凭据 | 所有执行/迁移实验使用内存或临时数据库、隔离目录；没有在真实用户库上试验。实模密钥只经无回显stdin交给临时Profile，正常关闭与明文落盘审计通过，不进入源码/命令参数/报告。真实用户历史与配置的升级由现役012合同处理 |
+
+本轮未执行Windows/Linux原生打包、物理Tauri设备/TCC/浏览器验收或发布；不把本机隔离renderer/Nomi-core验证当作这些平台证明。缺授权旧启动配置须明确重新选择工作台Agent后启用；已有Session的Agent/项目修复仍走其显式配置切换，不自动改写原授权。
+
+构建同时使用 `--target-dir /tmp/nomifun-cron-workbench-validation-target` 与 `--config 'build.build-dir="/tmp/nomifun-cron-workbench-validation-target/build.noindex"'`。只精确中断本任务自身误排图的Cargo，未中断用户桌面开发进程。

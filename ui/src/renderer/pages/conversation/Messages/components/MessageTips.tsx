@@ -73,7 +73,7 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
     if (message.content.type !== 'error') return null;
     if (message.content.idmm_notice) return null;
     if (message.content.recovery || message.content.execution_pause || conversationContext?.executionPause) return null;
-    if (message.content.error?.retryable === false) return null;
+    if (message.content.error?.retryable === false || message.content.error?.code === 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE') return null;
     if (conversationContext?.type !== 'nomi') return null;
     if (conversationContext.readOnly === true) return null;
     if (conversationContext.isProcessing === true) return null;

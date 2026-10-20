@@ -11,6 +11,38 @@ use serde_json::{Value, json};
 
 const MAX_SOURCE_CONTEXT_BYTES: usize = 96 * 1024;
 
+/// Derive scheduling policy only from the exact server-authored accepted
+/// source. Mutable job state is not a replay dependency, and these rules are
+/// never another accepted user task or part of its requirement citations.
+pub(in crate::router) fn scheduled_turn_instructions(
+    principal: &PrincipalRef,
+    session: &AgentSessionId,
+    operation: &str,
+    accepted: &Value,
+) -> Result<Option<String>, AppError> {
+    let Some(value) = accepted.get("cron_runtime_overlay") else { return Ok(None); };
+    if principal.principal_kind != "user"
+        || accepted.get("origin").and_then(Value::as_str) != Some("cron")
+        || accepted.get("remote_runtime_source").is_some()
+        || accepted.get("input_source").is_some()
+    {
+        return Err(invalid("scheduled input has conflicting source ownership"));
+    }
+    let source: nomifun_agent_contracts::CronRunRuntimeSource =
+        serde_json::from_value(value.clone()).map_err(invalid)?;
+    nomifun_common::CronJobId::parse(&source.cron_job_id).map_err(invalid)?;
+    nomifun_common::CronJobRunId::parse(&source.cron_job_run_id).map_err(invalid)?;
+    let expected = NomiCoreSessionOwner::turn_operation_id(&principal.principal_id,
+        session.as_ref(), &format!("cron:{}:turn", source.cron_job_run_id));
+    if source.agent_session_id != *session || operation != expected.as_ref() {
+        return Err(invalid("scheduled input differs from its original Session and Turn"));
+    }
+    Ok(Some(format!(
+        "This is an automatically triggered scheduled task. Execute the accepted task directly using the Session's frozen Agent, tools and selected Skills. The trigger itself is not a new scheduling request; its task still has its original scope and constraints. Produce the task's useful, actionable result and follow the normal evidence, completion and input-handoff rules. Scheduling provenance is host context, not an additional user requirement, an execution receipt or permission grant: {}",
+        serde_json::to_string(&source).map_err(invalid)?,
+    )))
+}
+
 fn invalid(detail: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Execution request context: {detail}"))
 }
@@ -180,6 +212,34 @@ impl NomiCoreSessionOwner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduled_instructions_use_only_the_original_typed_source() {
+        let principal=PrincipalRef {principal_kind:"user".into(),principal_id:"original-owner".into()};
+        let session=AgentSessionId::from("original-session");
+        let source=nomifun_agent_contracts::CronRunRuntimeSource {
+            cron_job_id:"01a15912-679f-7a51-8c07-aa93dae9b7f9".into(),
+            cron_job_run_id:"01a15912-6463-7a50-a26a-0607d38da526".into(),agent_session_id:session.clone(),
+        };
+        let operation=NomiCoreSessionOwner::turn_operation_id(&principal.principal_id,
+            session.as_ref(),&format!("cron:{}:turn",source.cron_job_run_id));
+        let accepted=json!({"content":"  Preserve task bytes.\n", "origin":"cron", "inject_skills":[],
+            "cron_runtime_overlay":source});
+        let before=accepted.clone();
+        let instructions=scheduled_turn_instructions(&principal,&session,operation.as_ref(),&accepted).unwrap().unwrap();
+        assert!(instructions.contains("automatically triggered scheduled task"));
+        assert!(!instructions.contains("Preserve task bytes"),"host policy never copies the accepted task into another lane");
+        assert_eq!(accepted,before,"preparation and replay cannot amend canonical input");
+        assert!(scheduled_turn_instructions(&principal,&session,operation.as_ref(),&json!({
+            "content":"ordinary user says cron", "origin":"cron"})).unwrap().is_none(),
+            "an origin string cannot manufacture a trusted scheduled source");
+        assert!(scheduled_turn_instructions(&principal,&"other-session".into(),operation.as_ref(),&accepted).is_err());
+        assert!(scheduled_turn_instructions(&principal,&session,"other-turn",&accepted).is_err());
+        assert!(scheduled_turn_instructions(&PrincipalRef {principal_id:"other-owner".into(),..principal.clone()},
+            &session,operation.as_ref(),&accepted).is_err());
+        let mut conflicting=accepted.clone();conflicting["input_source"]=json!({"kind":"authenticated_robot"});
+        assert!(scheduled_turn_instructions(&principal,&session,operation.as_ref(),&conflicting).is_err());
+    }
 
     #[test]
     fn task_source_preserves_original_constraints_and_attachment_references() {

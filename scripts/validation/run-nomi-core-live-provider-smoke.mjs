@@ -16,6 +16,7 @@
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser --compile-only
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser-gui --data-dir C:/new-disposable-gui-data
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --cron-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --model-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --file-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --component-smoke --report .tmp-component-smoke.json
@@ -85,6 +86,7 @@ const NATIVE_FIXTURE_MARKER = 'NOMIFUN_LIVE_SMOKE_NATIVE_FIXTURE ';
 const MODEL_ENVIRONMENT_NAME = 'NOMIFUN_LIVE_STEPFUN_MODEL';
 const DEFAULT_MODEL = 'step-3.7-flash';
 const ALLOWED_MODELS = new Set([DEFAULT_MODEL, 'step-5-preview']);
+const CRON_TEST_NAME = 'nomi_core_scheduled_tasks_reach_live_stepfun';
 const MODEL_TEST_NAME = 'nomi_core_selected_model_reaches_live_stepfun';
 const FILE_TEST_NAME = 'nomi_core_workspace_file_reaches_live_stepfun';
 const COMPONENT_TEST_NAME = 'nomi_core_managed_component_reaches_live_stepfun';
@@ -116,6 +118,7 @@ const FAILURE_SENTINEL =
   /^NOMIFUN_LIVE_SMOKE_FAILURE phase=([a-z0-9_.-]+) code=([A-Z0-9_]+) status=([0-9]{3})$/;
 const compileOnly = process.argv.includes('--compile-only');
 const selfTest = process.argv.includes('--self-test');
+const cronSmoke = process.argv.includes('--cron-smoke');
 const modelSmoke = process.argv.includes('--model-smoke');
 const fileSmoke = process.argv.includes('--file-smoke');
 const componentSmoke = process.argv.includes('--component-smoke');
@@ -138,13 +141,13 @@ const artifactIndex = process.argv.indexOf('--artifact-dir');
 const artifactDir = artifactIndex >= 0 && process.argv[artifactIndex + 1] ? resolve(process.argv[artifactIndex + 1]) : null;
 const reportIndex = process.argv.indexOf('--report');
 const reportPath = reportIndex >= 0 && process.argv[reportIndex + 1] ? resolve(process.argv[reportIndex + 1]) : null;
-const selectedSmokeTest = appWorkspaceUiFixture ? APP_WORKSPACE_UI_TEST_NAME : appHostingSmoke ? APP_HOSTING_TEST_NAME : reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : componentSmoke ? COMPONENT_TEST_NAME : resourceWaitSmoke ? RESOURCE_WAIT_TEST_NAME : inputHandoffSmoke ? INPUT_HANDOFF_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
-const selectedSmokeMode = appWorkspaceUiFixture ? 'app_workspace_ui_host' : appHostingSmoke ? 'app_workspace_generation' : reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : componentSmoke ? 'managed_component' : resourceWaitSmoke ? 'resource_wait' : inputHandoffSmoke ? 'user_input_handoff' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
+const selectedSmokeTest = cronSmoke ? CRON_TEST_NAME : appWorkspaceUiFixture ? APP_WORKSPACE_UI_TEST_NAME : appHostingSmoke ? APP_HOSTING_TEST_NAME : reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : componentSmoke ? COMPONENT_TEST_NAME : resourceWaitSmoke ? RESOURCE_WAIT_TEST_NAME : inputHandoffSmoke ? INPUT_HANDOFF_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
+const selectedSmokeMode = cronSmoke ? 'scheduled_tasks' : appWorkspaceUiFixture ? 'app_workspace_ui_host' : appHostingSmoke ? 'app_workspace_generation' : reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : componentSmoke ? 'managed_component' : resourceWaitSmoke ? 'resource_wait' : inputHandoffSmoke ? 'user_input_handoff' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
 const retainNativeFixture = process.argv.includes('--retain-native-fixture');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
 
 function selectedSmokeModel(value) {
-  return value ?? (componentSmoke || inputHandoffSmoke || resourceWaitSmoke ? 'step-5-preview' : DEFAULT_MODEL);
+  return value ?? (cronSmoke || componentSmoke || inputHandoffSmoke || resourceWaitSmoke ? 'step-5-preview' : DEFAULT_MODEL);
 }
 
 function cargoFailureCode(stderr) {
@@ -619,7 +622,7 @@ function managedComponentEvidence(stderr) {
 
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--component-smoke', '--input-handoff-smoke', '--resource-wait-smoke', '--reasoning-smoke', '--reasoning-navigation', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture', '--app-hosting-smoke', '--app-hosting-browser-hold', '--app-workspace-ui-fixture'];
+  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--cron-smoke', '--model-smoke', '--file-smoke', '--component-smoke', '--input-handoff-smoke', '--resource-wait-smoke', '--reasoning-smoke', '--reasoning-navigation', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture', '--app-hosting-smoke', '--app-hosting-browser-hold', '--app-workspace-ui-fixture'];
   if (userArgs.some((arg, index) => {
     if (arg === '--report') return (!idmmSmoke && !appHostingSmoke && !componentSmoke) || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--report') return false;
@@ -635,7 +638,7 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, modelSmoke, fileSmoke, componentSmoke, inputHandoffSmoke, resourceWaitSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke, appHostingSmoke, appWorkspaceUiFixture].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke) || (reasoningNavigation && !reasoningSmoke) || (appHostingBrowserHold && !appHostingSmoke)) {
+  if (([browser, browserGui, cronSmoke, modelSmoke, fileSmoke, componentSmoke, inputHandoffSmoke, resourceWaitSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke, appHostingSmoke, appWorkspaceUiFixture].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke) || (reasoningNavigation && !reasoningSmoke) || (appHostingBrowserHold && !appHostingSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_MODE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -652,7 +655,7 @@ async function main() {
   const model = selectedSmokeModel(process.env[MODEL_ENVIRONMENT_NAME]);
   // The separate native-browser fixture still pins its own provider model.
   // Never label that existing acceptance path as a different selected model.
-  if (!ALLOWED_MODELS.has(model) || (browser && model !== DEFAULT_MODEL) || (componentSmoke && model !== 'step-5-preview')) {
+  if (!ALLOWED_MODELS.has(model) || (browser && model !== DEFAULT_MODEL) || ((componentSmoke || cronSmoke) && model !== 'step-5-preview')) {
     emitFailure('live_smoke_status=not_run', 'LIVE_MODEL_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -700,7 +703,7 @@ async function main() {
       'nomifun-app',
       '--test',
       TEST_TARGET,
-      ...(resourceWaitSmoke ? ['--no-default-features'] : []),
+      ...((resourceWaitSmoke || cronSmoke) ? ['--no-default-features'] : []),
       ...(generalDesktopSmoke ? ['--features', 'browser-use,computer-use'] : []),
       '--no-run',
       '--message-format=json-render-diagnostics',
@@ -1226,7 +1229,7 @@ function runSelfTest() {
     throw new Error('model allowlist self-test failed');
   }
   if (!ALLOWED_MODELS.has('step-5-preview')) throw new Error('model allowlist self-test failed');
-  if (selectedSmokeModel(undefined) !== (componentSmoke || inputHandoffSmoke || resourceWaitSmoke ? 'step-5-preview' : DEFAULT_MODEL)
+  if (selectedSmokeModel(undefined) !== (cronSmoke || componentSmoke || inputHandoffSmoke || resourceWaitSmoke ? 'step-5-preview' : DEFAULT_MODEL)
       || selectedSmokeModel(DEFAULT_MODEL) !== DEFAULT_MODEL || selectedSmokeModel('step-5-preview') !== 'step-5-preview'
       || inputHandoffSmoke && (selectedSmokeTest !== INPUT_HANDOFF_TEST_NAME || selectedSmokeMode !== 'user_input_handoff'
         || !selectedTestPassed(`test ${INPUT_HANDOFF_TEST_NAME} ... ok\n`, selectedSmokeTest))

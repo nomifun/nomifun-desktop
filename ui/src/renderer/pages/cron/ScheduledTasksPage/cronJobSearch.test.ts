@@ -24,16 +24,15 @@ function job(overrides: Partial<ICronJob>): ICronJob {
     metadata: {
       conversation_id: parseConversationId('0190f5fe-7c00-7a00-8000-000000000101'),
       conversation_title: 'Engineering Room',
-      agent_type: 'claude',
+      clear_context_each_run: false,
       created_by: 'user',
       created_at: 1,
       updated_at: 1,
-      agent_config: { backend: 'claude', name: 'Claude Code' },
+      agent_label: 'Code reviewer',
+      agent_selection: { kind: 'template', template_key: 'coding.codex' },
     },
     state: {
       run_count: 0,
-      retry_count: 0,
-      max_retries: 0,
     },
     ...overrides,
   };
@@ -52,14 +51,13 @@ describe('filterCronJobsByQuery', () => {
       metadata: {
         conversation_id: parseConversationId('0190f5fe-7c00-7a00-8000-000000000102'),
         conversation_title: 'Launch Plan',
-        agent_type: 'nomi',
+        clear_context_each_run: false,
         created_by: 'user',
         created_at: 2,
         updated_at: 2,
-        agent_config: {
+        model: {
           provider_id: parseProviderId('0190f5fe-7c00-7a00-8000-000000000201'),
           model: 'nomi-model',
-          name: 'Nomi',
         },
       },
     }),

@@ -18,7 +18,7 @@ import { repairCronJobTimeZones } from '@renderer/pages/cron/repairCronJobTimeZo
 import { agentBrowserStorageGenerationKey } from '@/common/utils/browserStorageKey';
 
 const isJobErrorLike = (job: ICronJob): boolean => {
-  return job.state.last_status === 'error' || job.state.last_status === 'missed';
+  return Boolean(job.state.configuration_error) || job.state.last_status === 'error' || job.state.last_status === 'missed';
 };
 
 // Only retain events received during the current GET (including timezone

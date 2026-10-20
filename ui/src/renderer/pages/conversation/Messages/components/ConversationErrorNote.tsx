@@ -43,7 +43,7 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
   const detailsId = useId();
   const detailsLabel = t(detailsExpanded ? 'conversation.agentError.collapseDetails' : 'conversation.agentError.expandDetails');
   const code = error?.code;
-  const diagnostic = normalizeModelFailureDiagnostic(error?.providerDiagnostic);
+  const diagnostic = error?.code === 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE' ? undefined : normalizeModelFailureDiagnostic(error?.providerDiagnostic);
   const systemError = normalizeSystemExecutionFailure(error?.systemExecutionError);
   const reason = code === 'NOMIFUN_TASK_INCOMPLETE' ? error?.taskIncompleteReason : undefined;
   const copyKey = diagnostic
@@ -82,6 +82,10 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
       [t('conversation.agentError.details.nativeOsError'), systemError.raw_os_error?.toString()],
       [t('conversation.agentError.details.userCodeNotStarted'), systemError.user_code_not_started?.toString()],
       [t('conversation.agentError.details.cleanupProven'), systemError.cleanup_proven?.toString()],
+    ] as DiagnosticMetadataRow[] : []),
+    ...(error?.resourceBindingFailure ? [
+      [t('conversation.agentError.details.missingResourceKinds'), error.resourceBindingFailure.missing_resource_kinds.join(', ')],
+      [t('conversation.agentError.details.missingResourceOperations'), Object.entries(error.resourceBindingFailure.missing_resource_operations).map(([kind, operations]) => `${kind}: ${operations.join(', ')}`).join('; ')],
     ] as DiagnosticMetadataRow[] : []),
     [t('conversation.agentError.details.timestamp'), date && Number.isFinite(date.getTime()) ? date.toISOString() : undefined],
     [t('conversation.agentError.details.turn'), turnId],

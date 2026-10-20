@@ -3,39 +3,90 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nomifun_agent_contracts::AgentSessionId;
-use nomifun_api_types::CreateConversationRequest;
+use nomifun_common::paths::{WorkspaceDirectoryCheck, canonical_existing_workspace_directory};
 use nomifun_common::{
-    AgentType, AppError, ConversationId, ExecutionAuthority, ProviderWithModel, UserId,
+    AppError, ConversationId, ExecutionAuthority, UserId,
     workspace_path_has_edge_whitespace_segment,
-};
-use nomifun_common::paths::{
-    WorkspaceDirectoryCheck, canonical_existing_workspace_directory,
 };
 use tracing::{error, info, warn};
 
 use crate::busy_guard::CronBusyGuard;
 use crate::error::CronError;
-use crate::prompt::{
-    build_existing_conversation_prompt, build_new_conversation_prompt,
-    build_new_conversation_with_skill_prompt,
-};
 use crate::session_port::{
-    CronRunResourceRetirement, CronRuntimePreparationRequest, CronScheduledSessionLookup, CronSessionAgentBinding,
-    CronSessionCronBindingRequest, CronSessionHandle, CronSessionLookup, CronSessionPort,
-    CronSessionProjection, CronTurnDelivery, CronTurnDeliveryQuery, CronTurnMessage,
-    CronTurnReceiptQuery, CronTurnReceiptState, CronTurnReconciliation,
-    CronTurnReconciliationRequest, CronTurnRequest, CronTurnRuntimeOverlay,
+    CronRunResourceRetirement, CronRuntimePreparationRequest, CronScheduledSessionLookup,
+    CronSessionHandle, CronSessionLookup, CronSessionPort, CronSessionProjection, CronTurnDelivery,
+    CronTurnDeliveryQuery, CronTurnMessage, CronTurnReceiptQuery, CronTurnReceiptState,
+    CronTurnReconciliation, CronTurnReconciliationRequest, CronTurnRequest, CronTurnRuntimeOverlay,
     CronTurnRuntimePreparation,
 };
-use crate::skill_file::{
-    cron_skill_name, validate_skill_content, write_raw_skill_file,
-};
+use crate::skill_file::{cron_skill_name, validate_skill_content, write_raw_skill_file};
 use crate::types::{CronJob, ExecutionMode, cron_job_to_row};
 
 const DURABLE_RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DURABLE_RECEIPT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const DURABLE_RECEIPT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 const DURABLE_RECEIPT_WAIT_TIMEOUT: Duration = Duration::from_secs(3600);
+pub(crate) fn app_failure(error: &AppError) -> nomifun_api_types::AgentStreamErrorData {
+    let code = serde_json::from_value(serde_json::Value::String(error.error_code().into())).ok();
+    let mut failure = nomifun_api_types::AgentStreamErrorData::legacy(error.to_string(), code);
+    if let AppError::AgentResourceBindingIncomplete {
+        missing_resource_kinds,
+        missing_resource_operations,
+        ..
+    } = error
+    {
+        failure.ownership = Some(nomifun_api_types::AgentErrorOwnership::Nomifun);
+        failure.retryable = Some(false);
+        failure.resource_binding_failure = Some(nomifun_api_types::AgentResourceBindingFailure {
+            missing_resource_kinds: missing_resource_kinds.clone(),
+            missing_resource_operations: missing_resource_operations.clone(),
+        });
+    }
+    failure
+}
+
+pub(crate) fn preparation_context(
+    mut failure: nomifun_api_types::AgentStreamErrorData,
+    job: &CronJob,
+    session: Option<&CronSessionProjection>,
+) -> nomifun_api_types::AgentStreamErrorData {
+    if let Some(nomifun_api_types::ProductAgentSelectionDto::Template { template_key }) =
+        job.agent_selection.as_ref()
+    {
+        failure.agent_template_key = Some(template_key.clone());
+    }
+    failure.model_name = session
+        .and_then(|session| session.model.as_ref())
+        .or(job.model.as_ref())
+        .map(|model| model.model.clone());
+    failure.agent_label = session
+        .and_then(|session| session.agent_label.clone())
+        .or_else(|| job.agent_label.clone());
+    failure.workspace_path = session
+        .map(|session| session.workspace.clone())
+        .or_else(|| {
+            job.agent_binding
+                .as_ref()
+                .and_then(|binding| {
+                    binding
+                        .typed_resource_bindings
+                        .iter()
+                        .find(|resource| resource.resource_kind == "workspace")
+                })
+                .and_then(|resource| resource.typed_parameters.get("workspace_root"))
+                .cloned()
+        });
+    failure
+}
+
+pub(crate) fn domain_failure(error: &CronError) -> nomifun_api_types::AgentStreamErrorData {
+    let failure = match error {
+        CronError::App(error) => app_failure(error),
+        _ => nomifun_api_types::AgentStreamErrorData::legacy(error.to_string(), None),
+    };
+    failure
+}
+
 fn parse_conversation_id(id: &str) -> Result<&str, AppError> {
     ConversationId::try_from(id)
         .map(|_| id)
@@ -59,19 +110,33 @@ fn background_reconciliation_error_is_retryable(error: &AppError) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionResult {
-    Success { conversation_id: String },
+    Success {
+        conversation_id: String,
+    },
     /// This invocation normally handed control to a person in its Session.
-    InputRequired { conversation_id: String },
-    Cancelled { conversation_id: String },
-    Retrying { attempt: i64 },
+    InputRequired {
+        conversation_id: String,
+    },
+    Cancelled {
+        conversation_id: String,
+    },
     Skipped,
-    Error { message: String },
+    Error {
+        failure: nomifun_api_types::AgentStreamErrorData,
+    },
+    /// Its failure is read from the exact canonical terminal, never copied to
+    /// a Cron-owned second transcript or failure ledger.
+    TurnFailed {
+        conversation_id: String,
+    },
     /// Exact Conversation authority exists but cannot safely be terminalized.
     ///
     /// The Cron reservation must remain `reserved`: service handlers may log
     /// this result, but must not update the job, advance its timer, or settle
     /// the run independently of the accepted Conversation receipt.
-    Quarantined { message: String },
+    Quarantined {
+        message: String,
+    },
 }
 
 #[derive(Debug)]
@@ -90,17 +155,30 @@ pub struct JobExecutor {
 }
 
 impl JobExecutor {
-    pub(crate) async fn retire_new_conversation_run_resources(&self, request: &CronRunResourceRetirement)
-        -> Result<(), AppError> {
-        self.sessions.retire_new_conversation_run_resources(request).await
+    pub(crate) async fn retire_new_conversation_run_resources(
+        &self,
+        request: &CronRunResourceRetirement,
+    ) -> Result<(), AppError> {
+        self.sessions
+            .retire_new_conversation_run_resources(request)
+            .await
     }
 
-    pub(crate) async fn cancel_reserved_turn(&self, owner_id: &str, job_id: &str, run_id: &str, session_id: &str)
-        -> Result<crate::session_port::CronTurnCancellationReceipt, AppError> {
-        self.sessions.cancel_reserved_turn(&crate::session_port::CronTurnCancellationRequest {
-            owner_id: owner_id.to_owned(), agent_session_id: session_id.into(),
-            cron_job_id: job_id.to_owned(), cron_job_run_id: run_id.to_owned(),
-        }).await
+    pub(crate) async fn cancel_reserved_turn(
+        &self,
+        owner_id: &str,
+        job_id: &str,
+        run_id: &str,
+        session_id: &str,
+    ) -> Result<crate::session_port::CronTurnCancellationReceipt, AppError> {
+        self.sessions
+            .cancel_reserved_turn(&crate::session_port::CronTurnCancellationRequest {
+                owner_id: owner_id.to_owned(),
+                agent_session_id: session_id.into(),
+                cron_job_id: job_id.to_owned(),
+                cron_job_run_id: run_id.to_owned(),
+            })
+            .await
     }
     pub fn new(
         authoritative_user_id: Arc<str>,
@@ -117,8 +195,7 @@ impl JobExecutor {
     }
 
     fn controls_host(&self, user_id: &str) -> bool {
-        ExecutionAuthority::resolve(user_id, self.authoritative_user_id.as_ref())
-            .controls_host()
+        ExecutionAuthority::resolve(user_id, self.authoritative_user_id.as_ref()).controls_host()
     }
 
     pub(crate) async fn list_conversations_by_cron_job(
@@ -146,17 +223,6 @@ impl JobExecutor {
                 agent_session_id: session_id.into(),
             })
             .await
-    }
-
-    /// Normalize the job's persisted `agent_type` selector to its canonical
-    /// serde name, rejecting a selector the executor cannot run.
-    pub(crate) fn canonicalize_new_conversation_agent(
-        &self,
-        job: &mut CronJob,
-    ) -> Result<(), CronError> {
-        let agent_type = resolve_new_conversation_agent_type(job)?;
-        job.agent_type = agent_type.serde_name().to_owned();
-        Ok(())
     }
 
     async fn prepare_authorized_saved_skill(
@@ -201,9 +267,16 @@ impl JobExecutor {
             // this run's creation key. A later job edit cannot change the
             // lifetime of the Session this invocation created. Existing's
             // lazy first Session remains a continuing workspace.
-            resource_retirement: matches!(job.execution_mode, ExecutionMode::NewConversation)
-                .then(|| CronRunResourceRetirement::capture(job.user_id.clone(), job.cron_job_id.clone(),
-                    run_id.to_owned(), conversation_id.as_str().into())),
+            resource_retirement: matches!(job.execution_mode, ExecutionMode::NewConversation).then(
+                || {
+                    CronRunResourceRetirement::capture(
+                        job.user_id.clone(),
+                        job.cron_job_id.clone(),
+                        run_id.to_owned(),
+                        conversation_id.as_str().into(),
+                    )
+                },
+            ),
             conversation_id,
             run_id: run_id.to_owned(),
             saved_skill,
@@ -292,33 +365,6 @@ impl JobExecutor {
             .map_err(CronError::App)
     }
 
-    /// Validate the durable relation between a canonical Session and its Cron
-    /// job before the Cron repository commits a lazy job binding.
-    ///
-    /// Canonical AgentSession no longer stores a second Cron-owned relation.
-    /// The Session adapter validates either the already-bound job row or the
-    /// exact reserved run that created this Session; the Cron repository then
-    /// atomically settles that run and persists the continuing-session link.
-    pub async fn bind_cron_job_to_conversation(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-        cron_job_id: &str,
-    ) -> Result<(), CronError> {
-        UserId::try_from(owner_id)
-            .map_err(|error| CronError::Scheduler(format!("invalid cron owner id: {error}")))?;
-        nomifun_common::CronJobId::parse(cron_job_id)
-            .map_err(|error| CronError::Scheduler(format!("invalid cron job id: {error}")))?;
-        self.sessions
-            .bind_cron_relation(&CronSessionCronBindingRequest {
-                owner_id: owner_id.to_owned(),
-                agent_session_id: conversation_id.into(),
-                cron_job_id: cron_job_id.to_owned(),
-            })
-            .await
-            .map_err(CronError::from)
-    }
-
     /// Read the exact Conversation receipt for one durably admitted Cron run.
     ///
     /// The Conversation service owns the private receipt namespace; Cron owns
@@ -338,12 +384,37 @@ impl JobExecutor {
             .await
     }
 
+    pub(crate) async fn turn_failure(
+        &self,
+        owner: &str,
+        session: &str,
+        run: &str,
+    ) -> Result<Option<nomifun_api_types::AgentStreamErrorData>, AppError> {
+        self.sessions
+            .read_turn_failure(&CronTurnReceiptQuery {
+                owner_id: owner.into(),
+                agent_session_id: session.into(),
+                idempotency_key: cron_turn_key(run),
+            })
+            .await
+    }
+
     /// Reattach only the receipt consumer for an already-admitted invocation.
     /// This path never prepares a Runtime, submits input or replays tools.
-    pub(crate) async fn observe_reserved_turn(&self, job: &CronJob, run_id: &str, conversation_id: &str) -> ExecutionResult {
-        match self.await_durable_turn_completion(job, run_id, conversation_id, &cron_turn_key(run_id)).await {
+    pub(crate) async fn observe_reserved_turn(
+        &self,
+        job: &CronJob,
+        run_id: &str,
+        conversation_id: &str,
+    ) -> ExecutionResult {
+        match self
+            .await_durable_turn_completion(job, run_id, conversation_id, &cron_turn_key(run_id))
+            .await
+        {
             Ok(delivery) => replayed_delivery_result(run_id, conversation_id, delivery),
-            Err(error) => ExecutionResult::Quarantined { message: error.to_string() },
+            Err(error) => ExecutionResult::Quarantined {
+                message: error.to_string(),
+            },
         }
     }
 
@@ -366,27 +437,8 @@ impl JobExecutor {
 }
 
 impl JobExecutor {
-    fn handle_busy(&self, job: &CronJob) -> ExecutionResult {
-        let max_retries = job.max_retries;
-        let current_retry = job.retry_count;
-
-        if current_retry >= max_retries {
-            warn!(
-                job_id = %job.cron_job_id,
-                retries = current_retry,
-                "Max retries exceeded, skipping"
-            );
-            return ExecutionResult::Skipped;
-        }
-
-        let attempt = current_retry + 1;
-        info!(
-            job_id = %job.cron_job_id,
-            attempt,
-            max_retries,
-            "Conversation busy before cron side effects"
-        );
-        ExecutionResult::Retrying { attempt }
+    fn handle_busy(&self, _job: &CronJob) -> ExecutionResult {
+        ExecutionResult::Skipped
     }
 
     async fn resolve_conversation(
@@ -404,11 +456,10 @@ impl JobExecutor {
                 // conversation; the service layer then persists the new id
                 // back onto the job so subsequent runs reuse it.
                 let Some(conversation_id) = job.conversation_id.as_deref() else {
-                    return self
-                        .create_new_conversation(job, saved_skill, run_id)
-                        .await;
+                    return self.create_new_conversation(job, saved_skill, run_id).await;
                 };
-                self.verify_target_conversation_owner(job, conversation_id).await?;
+                self.verify_target_conversation_owner(job, conversation_id)
+                    .await?;
                 Ok(conversation_id.to_owned())
             }
             ExecutionMode::NewConversation => {
@@ -423,33 +474,26 @@ impl JobExecutor {
         saved_skill: Option<&SavedSkillContext>,
         run_id: &str,
     ) -> Result<String, CronError> {
-        let agent_type = resolve_new_conversation_agent_type(job)?;
-        let model = resolve_model(job);
-
-        let extra = build_conversation_extra(job, saved_skill);
-
-        let req = CreateConversationRequest {
-            r#type: agent_type,
-            name: Some(job.name.clone()),
-            model,
-            source: None,
-            channel_chat_id: None,
-            // The Agent snapshot is passed through the typed Session port
-            // below. Cron must not forward a preset id for a second
-            // resolution pass.
-            preset_id: None,
-            delegation_policy: Default::default(),
-            execution_model_pool: None,
-            decision_policy: Default::default(),
-            execution_template_id: None,
-            extra,
+        let _ = saved_skill;
+        let creation_key = if job.execution_mode == ExecutionMode::Existing {
+            format!("cron:{}:continuing-conversation", job.cron_job_id)
+        } else {
+            format!("cron:{run_id}:conversation")
         };
-
-        let creation_key = format!("cron:{run_id}:conversation");
-        let agent_binding = cron_session_agent_binding(job)?;
+        let binding = job.agent_binding.clone().ok_or_else(|| {
+            CronError::InvalidAgentConfig(
+                "Scheduled Session requires a canonical Agent binding".into(),
+            )
+        })?;
         let session = self
             .sessions
-            .create_idempotent(&job.user_id, req, agent_binding, &creation_key)
+            .create_idempotent(
+                &job.user_id,
+                &job.name,
+                binding,
+                &creation_key,
+                &job.cron_job_id,
+            )
             .await
             .map_err(CronError::from_conversation_create)?;
         let CronSessionHandle {
@@ -491,9 +535,12 @@ impl JobExecutor {
             }
             Ok(_) => {
                 return ExecutionResult::Error {
-                    message: format!(
-                        "AgentSession {conversation_id} authority does not match cron job {}",
-                        job.cron_job_id
+                    failure: nomifun_api_types::AgentStreamErrorData::legacy(
+                        format!(
+                            "AgentSession {conversation_id} authority does not match cron job {}",
+                            job.cron_job_id
+                        ),
+                        None,
                     ),
                 };
             }
@@ -505,7 +552,7 @@ impl JobExecutor {
                     "Failed to load canonical Session projection for Cron execution"
                 );
                 return ExecutionResult::Error {
-                    message: e.to_string(),
+                    failure: preparation_context(app_failure(&e), job, None),
                 };
             }
         };
@@ -514,11 +561,13 @@ impl JobExecutor {
         } else {
             Vec::new()
         };
-        let prompt = build_prompt(job, saved_skill, self.controls_host(&job.user_id));
         // Materialize the full request before runtime/knowledge/session
         // mutation. An accepted or completed durable receipt is absorbing and
         // must return without rebuilding or clearing the Conversation runtime.
-        let turn_message = build_cron_turn_message(&prompt, &skill_names);
+        // The canonical user input is the original task, byte for byte. The
+        // authenticated host derives scheduled execution instructions from
+        // the typed run source in the mandatory instruction lane.
+        let turn_message = build_cron_turn_message(&job.message, &skill_names);
         let turn_key = cron_turn_key(run_id);
         let preflight = match self
             .probe_durable_turn_delivery_until_known(
@@ -535,51 +584,38 @@ impl JobExecutor {
             Err(quarantined) => return quarantined,
         };
         if let Some(delivery) = preflight {
-                info!(
-                    job_id = %job.cron_job_id,
-                    run_id,
-                    conversation_id,
-                    "Cron turn replay absorbed before runtime preparation"
-                );
-                let delivery = if delivery.completed {
-                    delivery
-                } else {
-                    if let Err(quarantined) = self
-                        .reconcile_accepted_turn_before_wait(
-                            job,
-                            run_id,
-                            conversation_id,
-                            &turn_key,
-                        )
-                        .await
-                    {
-                        return quarantined;
+            info!(
+                job_id = %job.cron_job_id,
+                run_id,
+                conversation_id,
+                "Cron turn replay absorbed before runtime preparation"
+            );
+            let delivery = if delivery.completed {
+                delivery
+            } else {
+                if let Err(quarantined) = self
+                    .reconcile_accepted_turn_before_wait(job, run_id, conversation_id, &turn_key)
+                    .await
+                {
+                    return quarantined;
+                }
+                match self
+                    .await_durable_turn_completion(job, run_id, conversation_id, &turn_key)
+                    .await
+                {
+                    Ok(delivery) => delivery,
+                    Err(error) => {
+                        return ExecutionResult::Quarantined {
+                            message: error.to_string(),
+                        };
                     }
-                    match self
-                        .await_durable_turn_completion(
-                            job,
-                            run_id,
-                            conversation_id,
-                            &turn_key,
-                        )
-                        .await
-                    {
-                        Ok(delivery) => delivery,
-                        Err(error) => {
-                            return ExecutionResult::Quarantined {
-                                message: error.to_string(),
-                            };
-                        }
-                    }
-                };
-                return replayed_delivery_result(run_id, conversation_id, delivery);
+                }
+            };
+            return replayed_delivery_result(run_id, conversation_id, delivery);
         }
 
-        let clear_context = matches!(job.execution_mode, ExecutionMode::Existing)
-            && job
-                .agent_config
-                .as_ref()
-                .is_some_and(|config| config.clear_context_each_run);
+        let clear_context =
+            job.execution_mode == ExecutionMode::Existing && job.clear_context_each_run;
         // The Session port owns the preparation lease and legacy runtime
         // translation. Cron only submits one immutable turn request.
         let observed = match self
@@ -626,7 +662,7 @@ impl JobExecutor {
                     Ok(Some(delivery)) => delivery,
                     Ok(None) => {
                         return ExecutionResult::Error {
-                            message: e.to_string(),
+                            failure: preparation_context(app_failure(&e), job, Some(&session)),
                         };
                     }
                     Err(quarantined) => return quarantined,
@@ -646,12 +682,7 @@ impl JobExecutor {
                         return quarantined;
                     }
                     match self
-                        .await_durable_turn_completion(
-                            job,
-                            run_id,
-                            conversation_id,
-                            &turn_key,
-                        )
+                        .await_durable_turn_completion(job, run_id, conversation_id, &turn_key)
                         .await
                     {
                         Ok(delivery) => delivery,
@@ -677,23 +708,13 @@ impl JobExecutor {
                 delivery
             } else {
                 if let Err(quarantined) = self
-                    .reconcile_accepted_turn_before_wait(
-                        job,
-                        run_id,
-                        conversation_id,
-                        &turn_key,
-                    )
+                    .reconcile_accepted_turn_before_wait(job, run_id, conversation_id, &turn_key)
                     .await
                 {
                     return quarantined;
                 }
                 match self
-                    .await_durable_turn_completion(
-                        job,
-                        run_id,
-                        conversation_id,
-                        &turn_key,
-                    )
+                    .await_durable_turn_completion(job, run_id, conversation_id, &turn_key)
                     .await
                 {
                     Ok(delivery) => delivery,
@@ -711,13 +732,7 @@ impl JobExecutor {
             delivery
         } else {
             match self
-                .await_durable_turn_completion(
-                    job,
-                    run_id,
-                    conversation_id,
-                    &turn_key,
-
-                )
+                .await_durable_turn_completion(job, run_id, conversation_id, &turn_key)
                 .await
             {
                 Ok(delivery) => delivery,
@@ -775,40 +790,40 @@ impl JobExecutor {
         timeout: Duration,
     ) -> Result<Option<CronTurnDelivery>, ExecutionResult> {
         let probe = async {
-        let mut retry_delay = Duration::from_millis(25);
-        loop {
-            match self
-                .sessions
-                .delivery_result(&CronTurnDeliveryQuery {
-                    owner_id: job.user_id.clone(),
-                    agent_session_id: conversation_id.into(),
-                    idempotency_key: turn_key.to_owned(),
-                    message: message.clone(),
-                })
-                .await
-            {
-                Ok(delivery) => return Ok(delivery),
-                Err(error) if background_reconciliation_error_is_retryable(&error) => {
-                    warn!(
-                        job_id = %job.cron_job_id,
-                        run_id,
-                        conversation_id,
-                        phase,
-                        error = %error,
-                        "Cron cannot yet prove its exact durable turn receipt state; retaining the run as non-terminal"
-                    );
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-                }
-                Err(error) => {
-                    return Err(ExecutionResult::Quarantined {
-                        message: format!(
-                            "cron run {run_id} exact turn receipt is quarantined {phase}: {error}"
-                        ),
-                    });
+            let mut retry_delay = Duration::from_millis(25);
+            loop {
+                match self
+                    .sessions
+                    .delivery_result(&CronTurnDeliveryQuery {
+                        owner_id: job.user_id.clone(),
+                        agent_session_id: conversation_id.into(),
+                        idempotency_key: turn_key.to_owned(),
+                        message: message.clone(),
+                    })
+                    .await
+                {
+                    Ok(delivery) => return Ok(delivery),
+                    Err(error) if background_reconciliation_error_is_retryable(&error) => {
+                        warn!(
+                            job_id = %job.cron_job_id,
+                            run_id,
+                            conversation_id,
+                            phase,
+                            error = %error,
+                            "Cron cannot yet prove its exact durable turn receipt state; retaining the run as non-terminal"
+                        );
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
+                    }
+                    Err(error) => {
+                        return Err(ExecutionResult::Quarantined {
+                            message: format!(
+                                "cron run {run_id} exact turn receipt is quarantined {phase}: {error}"
+                            ),
+                        });
+                    }
                 }
             }
-        }
         };
         match tokio::time::timeout(timeout, probe).await {
             Ok(result) => result,
@@ -848,57 +863,55 @@ impl JobExecutor {
         timeout: Duration,
     ) -> Result<(), ExecutionResult> {
         let reconcile = async {
-        let mut retry_delay = Duration::from_millis(25);
-        loop {
-            match self
-                .sessions
-                .reconcile_turn_receipt(&CronTurnReconciliationRequest {
-                    owner_id: job.user_id.clone(),
-                    agent_session_id: conversation_id.into(),
-                    idempotency_key: turn_key.to_owned(),
-                })
-                .await
-            {
-                Ok(
-                    CronTurnReconciliation::LiveExactOwnerWait
-                    | CronTurnReconciliation::ReconciledOrTerminalReRead,
-                ) => return Ok(()),
-                Ok(
-                    CronTurnReconciliation::ExternalProofRequiredFailClosed,
-                ) => {
-                    return Err(ExecutionResult::Quarantined {
-                        message: format!(
-                            "cron run {run_id} has an accepted external Conversation turn whose terminal state is not proven"
-                        ),
-                    });
-                }
-                Ok(CronTurnReconciliation::StaleConflict) => {
-                    return Err(ExecutionResult::Quarantined {
-                        message: format!(
-                            "cron run {run_id} has an accepted Conversation receipt that no longer matches the exact active turn generation"
-                        ),
-                    });
-                }
-                Err(error) if background_reconciliation_error_is_retryable(&error) => {
-                    warn!(
-                        job_id = %job.cron_job_id,
-                        run_id,
-                        conversation_id,
-                        error = %error,
-                        "Accepted Cron turn reconciliation failed transiently; retaining the Cron run as non-terminal"
-                    );
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-                }
-                Err(error) => {
-                    return Err(ExecutionResult::Quarantined {
-                        message: format!(
-                            "cron run {run_id} accepted turn reconciliation was quarantined: {error}"
-                        ),
-                    });
+            let mut retry_delay = Duration::from_millis(25);
+            loop {
+                match self
+                    .sessions
+                    .reconcile_turn_receipt(&CronTurnReconciliationRequest {
+                        owner_id: job.user_id.clone(),
+                        agent_session_id: conversation_id.into(),
+                        idempotency_key: turn_key.to_owned(),
+                    })
+                    .await
+                {
+                    Ok(
+                        CronTurnReconciliation::LiveExactOwnerWait
+                        | CronTurnReconciliation::ReconciledOrTerminalReRead,
+                    ) => return Ok(()),
+                    Ok(CronTurnReconciliation::ExternalProofRequiredFailClosed) => {
+                        return Err(ExecutionResult::Quarantined {
+                            message: format!(
+                                "cron run {run_id} has an accepted external Conversation turn whose terminal state is not proven"
+                            ),
+                        });
+                    }
+                    Ok(CronTurnReconciliation::StaleConflict) => {
+                        return Err(ExecutionResult::Quarantined {
+                            message: format!(
+                                "cron run {run_id} has an accepted Conversation receipt that no longer matches the exact active turn generation"
+                            ),
+                        });
+                    }
+                    Err(error) if background_reconciliation_error_is_retryable(&error) => {
+                        warn!(
+                            job_id = %job.cron_job_id,
+                            run_id,
+                            conversation_id,
+                            error = %error,
+                            "Accepted Cron turn reconciliation failed transiently; retaining the Cron run as non-terminal"
+                        );
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
+                    }
+                    Err(error) => {
+                        return Err(ExecutionResult::Quarantined {
+                            message: format!(
+                                "cron run {run_id} accepted turn reconciliation was quarantined: {error}"
+                            ),
+                        });
+                    }
                 }
             }
-        }
         };
         match tokio::time::timeout(timeout, reconcile).await {
             Ok(result) => result,
@@ -943,21 +956,39 @@ impl JobExecutor {
         let mut consecutive_probe_failures = 0_u64;
         loop {
             let query = CronTurnReceiptQuery {
-                owner_id: job.user_id.clone(), agent_session_id: conversation_id.into(),
+                owner_id: job.user_id.clone(),
+                agent_session_id: conversation_id.into(),
                 idempotency_key: turn_key.to_owned(),
             };
-            let receipt = tokio::time::timeout(DURABLE_RECEIPT_PROBE_TIMEOUT,
-                self.sessions.read_turn_receipt(&query)).await.unwrap_or_else(|_| Err(AppError::Timeout(
-                    format!("cron run {run_id} exact receipt query exceeded its deadline"))));
+            let receipt = tokio::time::timeout(
+                DURABLE_RECEIPT_PROBE_TIMEOUT,
+                self.sessions.read_turn_receipt(&query),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(AppError::Timeout(format!(
+                    "cron run {run_id} exact receipt query exceeded its deadline"
+                )))
+            });
             let now = tokio::time::Instant::now();
-            if suspended { deadline += now.saturating_duration_since(observed_at); }
+            if suspended {
+                deadline += now.saturating_duration_since(observed_at);
+            }
             observed_at = now;
             match receipt {
                 Ok(CronTurnReceiptState::Suspended(delivery)) => {
-                    if delivery.completed || !matches!(delivery.turn_outcome,
-                        Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { .. }
-                            | nomifun_agent_contracts::AgentTurnOutcome::Paused { .. })) {
-                        return Err(AppError::Conflict("Cron suspended receipt has no exact nonterminal disposition".into()));
+                    if delivery.completed
+                        || !matches!(
+                            delivery.turn_outcome,
+                            Some(
+                                nomifun_agent_contracts::AgentTurnOutcome::Waiting { .. }
+                                    | nomifun_agent_contracts::AgentTurnOutcome::Paused { .. }
+                            )
+                        )
+                    {
+                        return Err(AppError::Conflict(
+                            "Cron suspended receipt has no exact nonterminal disposition".into(),
+                        ));
                     }
                     suspended = true;
                     consecutive_probe_failures = 0;
@@ -965,7 +996,8 @@ impl JobExecutor {
                 Ok(CronTurnReceiptState::Completed(delivery)) => {
                     if !delivery.completed {
                         return Err(AppError::Conflict(format!(
-                            "cron run {run_id} received a completed turn state without terminal delivery proof")));
+                            "cron run {run_id} received a completed turn state without terminal delivery proof"
+                        )));
                     }
                     return Ok(delivery);
                 }
@@ -975,11 +1007,14 @@ impl JobExecutor {
                 }
                 Ok(CronTurnReceiptState::Missing) => {
                     return Err(AppError::Conflict(format!(
-                        "cron run {run_id} lost its accepted exact durable turn receipt")));
+                        "cron run {run_id} lost its accepted exact durable turn receipt"
+                    )));
                 }
                 Err(error) if background_reconciliation_error_is_retryable(&error) => {
                     consecutive_probe_failures = consecutive_probe_failures.saturating_add(1);
-                    if consecutive_probe_failures == 1 || consecutive_probe_failures.is_multiple_of(100) {
+                    if consecutive_probe_failures == 1
+                        || consecutive_probe_failures.is_multiple_of(100)
+                    {
                         warn!(job_id = %job.cron_job_id, run_id, conversation_id, consecutive_probe_failures,
                             error = %error, "Failed to re-read the exact Cron receipt; retaining its reservation");
                     }
@@ -989,7 +1024,8 @@ impl JobExecutor {
             if !suspended && now >= deadline {
                 return Err(AppError::Timeout(format!(
                     "cron run {run_id} exceeded its durable turn receipt deadline of {} seconds; terminal outcome remains unknown and the run must be reviewed",
-                    timeout.as_secs())));
+                    timeout.as_secs()
+                )));
             }
             tokio::time::sleep(DURABLE_RECEIPT_POLL_INTERVAL).await;
         }
@@ -1004,9 +1040,7 @@ impl JobExecutor {
             .get_session_projection(&job.user_id, conversation_id)
             .await
             .map_err(CronError::from)?;
-        if session.owner_id != job.user_id
-            || session.agent_session_id.as_ref() != conversation_id
-        {
+        if session.owner_id != job.user_id || session.agent_session_id.as_ref() != conversation_id {
             return Err(CronError::Scheduler(format!(
                 "AgentSession {conversation_id} authority does not match cron job {}",
                 job.cron_job_id
@@ -1022,18 +1056,23 @@ impl JobExecutor {
     ) -> Result<String, CronError> {
         let Some(conversation_id) = conversation_id else {
             return Ok(job
-                .agent_config
+                .agent_binding
                 .as_ref()
-                .and_then(|config| config.workspace.clone())
+                .and_then(|binding| {
+                    binding
+                        .typed_resource_bindings
+                        .iter()
+                        .find(|resource| resource.resource_kind == "workspace")
+                })
+                .and_then(|resource| resource.typed_parameters.get("workspace_root"))
+                .cloned()
                 .unwrap_or_default());
         };
         let session = self
             .get_session_projection(&job.user_id, conversation_id)
             .await
             .map_err(CronError::from)?;
-        if session.owner_id != job.user_id
-            || session.agent_session_id.as_ref() != conversation_id
-        {
+        if session.owner_id != job.user_id || session.agent_session_id.as_ref() != conversation_id {
             return Err(CronError::Scheduler(format!(
                 "AgentSession {conversation_id} authority does not match cron job {}",
                 job.cron_job_id
@@ -1068,7 +1107,6 @@ impl JobExecutor {
             name: cron_skill_name(&job.cron_job_id)?,
         }))
     }
-
 }
 
 fn resolve_task_skill_names(
@@ -1090,73 +1128,9 @@ fn resolve_task_skill_names(
     skills
 }
 
-fn resolve_new_conversation_agent_type(job: &CronJob) -> Result<AgentType, CronError> {
-    let raw = job.agent_type.trim();
-    serde_json::from_value::<AgentType>(serde_json::Value::String(raw.to_owned())).map_err(|_| {
-        CronError::InvalidAgentConfig(format!(
-            "cron job {} has unknown agent selector '{raw}'",
-            job.cron_job_id
-        ))
-    })
-}
-
-/// Only nomi conversations carry meaningful model info in `conversations.model`,
-/// and nomi is the only agent type, so a job that fails any of the checks below
-/// is an invalid in-memory value rather than another engine's shape. Returning
-/// `None` lets `CreateConversationRequest.model` stay `None`.
-///
-/// `agent_config.provider_id` holds the Provider UUIDv7;
-/// `agent_config.backend` must be unset.
-/// `CronService::add_job`/`update_job` already rejects Nomi
-/// jobs lacking a canonical provider ID, so the `None` return here is a
-/// defensive check for invalid in-memory values.
-fn resolve_model(job: &CronJob) -> Option<ProviderWithModel> {
-    if job.agent_type != "nomi" {
-        return None;
-    }
-    let config = job.agent_config.as_ref()?;
-    if config.backend.is_some() {
-        return None;
-    }
-    let provider_id = config.provider_id.as_deref()?;
-    if nomifun_common::ProviderId::try_from(provider_id).is_err() {
-        return None;
-    }
-    Some(ProviderWithModel {
-        provider_id: provider_id.to_owned(),
-        model: config
-            .model
-            .clone()
-            .filter(|model| !model.is_empty() && model.trim() == model)?,
-        use_model: None,
-    })
-}
-
-fn build_prompt(
-    job: &CronJob,
-    saved_skill: Option<&SavedSkillContext>,
-    allow_skill_suggest: bool,
-) -> String {
-    let schedule_desc = schedule_description_text(&job.schedule);
-
-    match job.execution_mode {
-        ExecutionMode::Existing => {
-            build_existing_conversation_prompt(&job.name, &schedule_desc, &job.message)
-        }
-        ExecutionMode::NewConversation => {
-            if saved_skill.is_some() {
-                build_new_conversation_with_skill_prompt(&job.name, &job.message)
-            } else {
-                let _ = allow_skill_suggest;
-                build_new_conversation_prompt(&job.name, &schedule_desc, &job.message)
-            }
-        }
-    }
-}
-
-fn build_cron_turn_message(prompt: &str, skill_names: &[String]) -> CronTurnMessage {
+fn build_cron_turn_message(content: &str, skill_names: &[String]) -> CronTurnMessage {
     CronTurnMessage {
-        content: prompt.to_owned(),
+        content: content.to_owned(),
         files: Vec::new(),
         inject_skills: skill_names.to_vec(),
         hidden: true,
@@ -1181,9 +1155,17 @@ fn replayed_delivery_result(
         Some(crate::session_port::CronTurnDisposition::Delivered) => ExecutionResult::Success {
             conversation_id: conversation_id.to_owned(),
         },
-        Some(crate::session_port::CronTurnDisposition::Failed(message)) => ExecutionResult::Error { message },
-        Some(crate::session_port::CronTurnDisposition::Cancelled) => ExecutionResult::Cancelled { conversation_id: conversation_id.to_owned() },
-        Some(crate::session_port::CronTurnDisposition::InputRequired) => ExecutionResult::InputRequired { conversation_id: conversation_id.to_owned() },
+        Some(crate::session_port::CronTurnDisposition::Failed(_)) => ExecutionResult::TurnFailed {
+            conversation_id: conversation_id.into(),
+        },
+        Some(crate::session_port::CronTurnDisposition::Cancelled) => ExecutionResult::Cancelled {
+            conversation_id: conversation_id.to_owned(),
+        },
+        Some(crate::session_port::CronTurnDisposition::InputRequired) => {
+            ExecutionResult::InputRequired {
+                conversation_id: conversation_id.to_owned(),
+            }
+        }
         None => ExecutionResult::Quarantined {
             message: format!(
                 "cron run {run_id} completed without an exact durable terminal result"
@@ -1197,190 +1179,44 @@ struct SavedSkillContext {
     name: String,
 }
 
-fn build_conversation_extra(
-    job: &CronJob,
-    saved_skill: Option<&SavedSkillContext>,
-) -> serde_json::Value {
-    let mut extra = serde_json::Map::new();
-    extra.insert(
-        "cron_job_id".to_owned(),
-        serde_json::Value::String(job.cron_job_id.clone()),
-    );
-    extra.insert(
-        "exclude_auto_inject_skills".to_owned(),
-        serde_json::Value::Array(vec![serde_json::Value::String("cron".to_owned())]),
-    );
-
-    if let Some(saved_skill) = saved_skill {
-        extra.insert(
-            "preset_enabled_skills".to_owned(),
-            serde_json::Value::Array(vec![serde_json::Value::String(saved_skill.name.clone())]),
-        );
-    }
-
-    if let Some(config) = &job.agent_config {
-        if let Some(cli_path) = &config.cli_path {
-            extra.insert(
-                "cli_path".to_owned(),
-                serde_json::Value::String(cli_path.clone()),
-            );
-        }
-        if !config.name.is_empty() {
-            extra.insert(
-                "agent_name".to_owned(),
-                serde_json::Value::String(config.name.clone()),
-            );
-        }
-        if let Some(custom_agent_id) = &config.custom_agent_id {
-            extra.insert(
-                "custom_agent_id".to_owned(),
-                serde_json::Value::String(custom_agent_id.clone()),
-            );
-        }
-        if let Some(workspace) = &config.workspace
-            && !workspace.trim().is_empty()
-        {
-            extra.insert(
-                "workspace".to_owned(),
-                serde_json::Value::String(workspace.clone()),
-            );
-        }
-    }
-
-    serde_json::Value::Object(extra)
-}
-
-fn cron_session_agent_binding(job: &CronJob) -> Result<CronSessionAgentBinding, CronError> {
-    let config = job.agent_config.as_ref().ok_or_else(|| {
-        CronError::InvalidAgentConfig(format!(
-            "cron job {} has no Agent configuration for a new Session",
-            job.cron_job_id
-        ))
-    })?;
-    if let Some(snapshot) = config.agent_snapshot.clone() {
-        return Ok(CronSessionAgentBinding::Frozen(snapshot));
-    }
-    let model_only = job.agent_type == AgentType::Nomi.serde_name()
-        && {
-            config.agent_snapshot.is_none()
-                && config.preset_id.is_none()
-                && config.preset_revision.is_none()
-                && config.backend.is_none()
-                && config.cli_path.is_none()
-                && config.custom_agent_id.is_none()
-                && config.config_options.is_none()
-                && config
-                    .provider_id
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-                && config
-                    .model
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-        };
-    if model_only {
-        Ok(CronSessionAgentBinding::ModelOnly)
-    } else {
-        Err(CronError::InvalidAgentConfig(format!(
-            "cron job {} cannot create an AgentSession without a frozen Agent binding",
-            job.cron_job_id
-        )))
-    }
-}
-
-fn schedule_description_text(schedule: &crate::types::CronSchedule) -> String {
-    match schedule {
-        crate::types::CronSchedule::At { at_ms, description } => {
-            description.clone().unwrap_or_else(|| format!("At {at_ms}"))
-        }
-        crate::types::CronSchedule::Every {
-            every_ms,
-            description,
-        } => description
-            .clone()
-            .unwrap_or_else(|| format!("Every {every_ms} ms")),
-        crate::types::CronSchedule::Cron {
-            expr,
-            tz,
-            description,
-        } => description.clone().unwrap_or_else(|| match tz {
-            Some(tz) => format!("{expr} ({tz})"),
-            None => expr.clone(),
-        }),
-    }
-}
-
 #[cfg(test)]
-mod model_only_binding_tests {
+mod binding_tests {
     use super::*;
-    use crate::types::{CreatedBy, CronAgentConfig, CronSchedule, ExecutionMode};
-
-    const JOB_ID: &str = "0190f5fe-7c00-7a00-8000-000000000101";
-    const OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000102";
-    const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000103";
-
     pub(super) fn job(execution_mode: ExecutionMode) -> CronJob {
         CronJob {
-            cron_job_id: JOB_ID.to_owned(),
-            user_id: OWNER_ID.to_owned(),
-            name: "Model-only schedule".to_owned(),
+            cron_job_id: "0190f5fe-7c00-7a00-8000-000000000101".into(),
+            user_id: "0190f5fe-7c00-7a00-8000-000000000102".into(),
+            name: "Scheduled".into(),
             enabled: true,
             schedule_revision: 1,
-            schedule: CronSchedule::Every {
-                every_ms: 60_000,
+            schedule: crate::types::CronSchedule::Every {
+                every_ms: 60000,
                 description: None,
             },
-            message: "run".to_owned(),
+            message: "original".into(),
             execution_mode,
-            agent_config: Some(CronAgentConfig {
-                backend: None,
-                name: "Nomi".to_owned(),
-                cli_path: None,
-                custom_agent_id: None,
-                preset_id: None,
-                preset_revision: None,
-                agent_snapshot: None,
-                model: Some("test-model".to_owned()),
-                provider_id: Some(PROVIDER_ID.to_owned()),
-                config_options: None,
-                workspace: None,
-                clear_context_each_run: false,
-            }),
+            agent_selection: None,
+            model: None,
+            agent_binding: None,
+            agent_label: None,
+            effective_model: None,
+            clear_context_each_run: false,
+            configuration_error: None,
+            last_failure: None,
             conversation_id: None,
             conversation_title: None,
-            agent_type: AgentType::Nomi.serde_name().to_owned(),
-            created_by: CreatedBy::User,
+            created_by: crate::types::CreatedBy::User,
             skill_content: None,
             description: None,
             created_at: 1,
             updated_at: 1,
-            next_run_at: None,
+            next_run_at: Some(60001),
             last_run_at: None,
+            last_run_id: None,
             last_status: None,
             last_error: None,
             run_count: 0,
-            retry_count: 0,
-            max_retries: 3,
         }
-    }
-
-    #[test]
-    fn both_lazy_session_modes_request_host_materialized_model_only_bindings() {
-        for execution_mode in [ExecutionMode::NewConversation, ExecutionMode::Existing] {
-            assert_eq!(
-                cron_session_agent_binding(&job(execution_mode)).unwrap(),
-                CronSessionAgentBinding::ModelOnly
-            );
-        }
-    }
-
-    #[test]
-    fn non_model_only_legacy_config_is_not_silently_reinterpreted() {
-        let mut job = job(ExecutionMode::NewConversation);
-        job.agent_config.as_mut().unwrap().custom_agent_id =
-            Some("0190f5fe-7c00-7a00-8000-000000000104".to_owned());
-        let error = cron_session_agent_binding(&job).unwrap_err();
-        assert!(error.to_string().contains("frozen Agent binding"));
     }
 }
 
@@ -1390,24 +1226,54 @@ mod public_delivery_tests {
     use nomifun_agent_contracts::{AgentTurnOutcome, AgentUserInputRequest};
 
     fn delivery(outcome: AgentTurnOutcome) -> CronTurnDelivery {
-        CronTurnDelivery { message_id:"input".into(),replayed:true,completed:true,
-            turn_outcome:Some(outcome),user_input_request:None,result_ok:Some(true),result_text:None,
-            result_error:None,result_error_code:None,result_error_retryable:Some(false) }
+        CronTurnDelivery {
+            message_id: "input".into(),
+            replayed: true,
+            completed: true,
+            turn_outcome: Some(outcome),
+            user_input_request: None,
+            result_ok: Some(true),
+            result_text: None,
+            result_error: None,
+            result_error_code: None,
+            result_error_retryable: Some(false),
+        }
     }
 
     #[tokio::test(start_paused = true)]
     async fn original_receipt_worker_survives_wait_and_pause_past_its_execution_deadline() {
         use crate::session_port::test_support::ReceiptOnlySessions;
         use std::sync::atomic::Ordering;
-        for outcome in [AgentTurnOutcome::Waiting { wait_seq: 41, request_id: None,
-            reason: nomifun_agent_contracts::AgentWaitReason::ExternalResource }, AgentTurnOutcome::Paused { message_ids: vec![] }] {
+        for outcome in [
+            AgentTurnOutcome::Waiting {
+                wait_seq: 41,
+                request_id: None,
+                reason: nomifun_agent_contracts::AgentWaitReason::ExternalResource,
+            },
+            AgentTurnOutcome::Paused {
+                message_ids: vec![],
+            },
+        ] {
             let mut active = delivery(outcome);
             active.completed = false;
             active.result_ok = None;
-            let sessions = Arc::new(ReceiptOnlySessions::new(CronTurnReceiptState::Suspended(active)));
-            let executor = JobExecutor::new(Arc::from("owner"), sessions.clone(), Arc::new(CronBusyGuard::new()), PathBuf::new());
-            let job = super::model_only_binding_tests::job(ExecutionMode::Existing);
-            let wait = executor.await_durable_turn_completion_timed(&job, "original-run", "session", "exact-key", Duration::from_millis(5));
+            let sessions = Arc::new(ReceiptOnlySessions::new(CronTurnReceiptState::Suspended(
+                active,
+            )));
+            let executor = JobExecutor::new(
+                Arc::from("owner"),
+                sessions.clone(),
+                Arc::new(CronBusyGuard::new()),
+                PathBuf::new(),
+            );
+            let job = super::binding_tests::job(ExecutionMode::Existing);
+            let wait = executor.await_durable_turn_completion_timed(
+                &job,
+                "original-run",
+                "session",
+                "exact-key",
+                Duration::from_millis(5),
+            );
             tokio::pin!(wait);
             tokio::select! {
                 result = &mut wait => panic!("nonterminal wait must retain its original consumer: {result:?}"),
@@ -1419,30 +1285,107 @@ mod public_delivery_tests {
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {},
             }
             sessions.transient_failures.store(0, Ordering::SeqCst);
-            let cancelled = delivery(AgentTurnOutcome::Cancelled { message_ids: vec![] });
+            let cancelled = delivery(AgentTurnOutcome::Cancelled {
+                message_ids: vec![],
+            });
             *sessions.receipt.lock().unwrap() = CronTurnReceiptState::Completed(cancelled.clone());
-            let observed = tokio::time::timeout(Duration::from_secs(1), &mut wait).await.unwrap().unwrap();
+            let observed = tokio::time::timeout(Duration::from_secs(1), &mut wait)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(observed, cancelled);
             assert!(sessions.reads.load(Ordering::SeqCst) > 2);
-            assert!(matches!(replayed_delivery_result("original-run", "session", observed), ExecutionResult::Cancelled { .. }));
+            assert!(matches!(
+                replayed_delivery_result("original-run", "session", observed),
+                ExecutionResult::Cancelled { .. }
+            ));
         }
     }
 
     #[test]
     fn scheduled_input_handoff_and_missing_public_result_cannot_become_success() {
-        let mut question=delivery(AgentTurnOutcome::InputRequired {request_id:"ask-name".into()});
-        question.user_input_request=Some(AgentUserInputRequest {request_id:"ask-name".into(),
-            question:"请提供姓名。".into(),remaining_work:"生成 PPT。".into()});
-        assert!(matches!(replayed_delivery_result("run","session",question.clone()),
-            ExecutionResult::InputRequired {conversation_id} if conversation_id == "session"));
-        question.user_input_request.as_mut().unwrap().request_id="different-question".into();
-        assert!(matches!(replayed_delivery_result("run","session",question),ExecutionResult::Error {..}));
-        for outcome in [AgentTurnOutcome::Unavailable,AgentTurnOutcome::Silent {},AgentTurnOutcome::Failed {message_ids:vec![]}] {
-            assert!(matches!(replayed_delivery_result("run","session",delivery(outcome)),ExecutionResult::Error {..}));
+        let mut question = delivery(AgentTurnOutcome::InputRequired {
+            request_id: "ask-name".into(),
+        });
+        question.user_input_request = Some(AgentUserInputRequest {
+            request_id: "ask-name".into(),
+            question: "请提供姓名。".into(),
+            remaining_work: "生成 PPT。".into(),
+        });
+        assert!(
+            matches!(replayed_delivery_result("run","session",question.clone()),
+            ExecutionResult::InputRequired {conversation_id} if conversation_id == "session")
+        );
+        question.user_input_request.as_mut().unwrap().request_id = "different-question".into();
+        assert!(matches!(
+            replayed_delivery_result("run", "session", question),
+            ExecutionResult::TurnFailed { .. }
+        ));
+        for outcome in [
+            AgentTurnOutcome::Unavailable,
+            AgentTurnOutcome::Silent {},
+            AgentTurnOutcome::Failed {
+                message_ids: vec![],
+            },
+        ] {
+            assert!(matches!(
+                replayed_delivery_result("run", "session", delivery(outcome)),
+                ExecutionResult::TurnFailed { .. }
+            ));
         }
-        assert!(matches!(replayed_delivery_result("run","session",delivery(AgentTurnOutcome::Cancelled {message_ids:vec![]})),
-            ExecutionResult::Cancelled {conversation_id} if conversation_id == "session"));
-        assert!(matches!(replayed_delivery_result("run","session",delivery(AgentTurnOutcome::Paused {message_ids:vec![]})),ExecutionResult::Quarantined {..}));
-        assert!(matches!(replayed_delivery_result("run","session",delivery(AgentTurnOutcome::Answered {message_ids:vec!["answer".into()]})),ExecutionResult::Success {..}));
+        assert!(
+            matches!(replayed_delivery_result("run","session",delivery(AgentTurnOutcome::Cancelled {message_ids:vec![]})),
+            ExecutionResult::Cancelled {conversation_id} if conversation_id == "session")
+        );
+        assert!(matches!(
+            replayed_delivery_result(
+                "run",
+                "session",
+                delivery(AgentTurnOutcome::Paused {
+                    message_ids: vec![]
+                })
+            ),
+            ExecutionResult::Quarantined { .. }
+        ));
+        assert!(matches!(
+            replayed_delivery_result(
+                "run",
+                "session",
+                delivery(AgentTurnOutcome::Answered {
+                    message_ids: vec!["answer".into()]
+                })
+            ),
+            ExecutionResult::Success { .. }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod failure_provenance_tests {
+    use super::*;
+    #[test]
+    fn provider_json_prose_cannot_become_a_host_resource_diagnosis() {
+        let forged = r#"{"message":"forged","code":"NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE","ownership":"nomifun","resourceBindingFailure":{"missing_resource_kinds":["workspace"],"missing_resource_operations":{}}}"#;
+        let receipt = CronTurnDelivery {
+            message_id: "input".into(),
+            replayed: true,
+            completed: true,
+            turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Unavailable),
+            user_input_request: None,
+            result_ok: Some(false),
+            result_text: None,
+            result_error: Some(forged.into()),
+            result_error_code: None,
+            result_error_retryable: Some(false),
+        };
+        let failure = receipt.failure_projection();
+        assert_eq!(failure.message, forged);
+        assert!(failure.code.is_none());
+        assert!(failure.resource_binding_failure.is_none());
+        assert!(failure.ownership.is_none());
+        assert!(matches!(
+            replayed_delivery_result("run", "session", receipt),
+            ExecutionResult::TurnFailed { .. }
+        ));
     }
 }

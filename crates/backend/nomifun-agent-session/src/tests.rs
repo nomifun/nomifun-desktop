@@ -2442,6 +2442,31 @@ async fn initial_turn_is_atomic_replayable_and_cannot_be_admitted_twice() {
 }
 
 #[tokio::test]
+async fn skill_only_turn_preserves_empty_user_text_and_rejects_invalid_or_absent_task_data() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();
+    let(session,_)=create_ready(&store,"skill-only-raw-input").await;
+    let sid=&session.agent_session_id;
+    for input in [json!({"content":""}),json!({"content":" ","inject_skills":[]}),
+        json!({"content":"","inject_skills":[1]}),json!({"content":"","inject_skills":[" "]}),
+        json!({"content":"","inject_skills":["bad\u{0000}reference"]}),
+        json!({"content":"","inject_skills":vec!["skill";17]}),json!({"inject_skills":["selected-skill"]})] {
+        assert!(matches!(store.start_turn(sid,"session_api".into(),"invalid-skill-input".into(),
+            "invalid-skill-turn".into(),StrictJsonValue(input)).await,Err(SessionStoreError::InvalidPayload(_))));
+    }
+    let input=StrictJsonValue(json!({"content":"","files":[],"inject_skills":["selected-skill"]}));
+    let(first,turn)=store.start_initial_turn(sid,"session_api".into(),"skill-only".into(),"skill-only-turn".into(),input.clone()).await.unwrap();
+    assert!(!first.duplicate && !turn.duplicate);
+    let before=store.current_cursor(sid).await.unwrap();
+    let replay=store.start_initial_turn(sid,"session_api".into(),"skill-only".into(),"skill-only-turn".into(),input.clone()).await.unwrap();
+    assert!(replay.0.duplicate && replay.1.duplicate);
+    assert_eq!(store.current_cursor(sid).await.unwrap(),before);
+    assert_eq!(store.turn_accepted_input(sid,&"skill-only-turn".into()).await.unwrap().1,input);
+    assert!(matches!(store.start_initial_turn(sid,"session_api".into(),"skill-only".into(),"skill-only-turn".into(),
+        StrictJsonValue(json!({"content":" ","files":[],"inject_skills":["selected-skill"]}))).await,
+        Err(SessionStoreError::IdempotencyConflict(_))));
+}
+
+#[tokio::test]
 async fn turn_receipt_is_running_without_a_terminal_fact_and_does_not_infer_from_text() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     let (session, turn_event) = create_turn(&store, "turn-receipt-running", "turn-running").await;

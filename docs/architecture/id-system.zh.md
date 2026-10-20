@@ -171,20 +171,7 @@ ON UPDATE CASCADE
   确定作用域，不把技术 `id` 传播到其他表；
 - 值由外部系统签发：保存能说明来源和用途的不透明外部 ID。
 
-当前 v3 baseline 不存在指向其他表技术 `id` 的 `INTEGER` 关系。
-
-稳定父实体示例：
-
-```sql
-CREATE TABLE messages (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id      TEXT NOT NULL UNIQUE,
-    conversation_id TEXT NOT NULL
-);
-
-CREATE INDEX idx_messages_conversation_id
-    ON messages(conversation_id);
-```
+现役 baseline 及明确前向迁移不使用指向其他表技术 `id` 的 `INTEGER` 关系。
 
 稳定 Cron 父实体示例：
 
@@ -194,20 +181,22 @@ CREATE TABLE cron_jobs (
     cron_job_id TEXT NOT NULL UNIQUE
 );
 
-CREATE TABLE cron_job_runs (
+CREATE TABLE cron_run_reservations (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     cron_job_run_id TEXT NOT NULL UNIQUE,
-    cron_job_id     TEXT NOT NULL
+    cron_job_id     TEXT NOT NULL,
+    settled_at_ms   INTEGER,
+    status          TEXT NOT NULL
 );
 
-CREATE INDEX idx_cron_job_runs_cron_job_id
-    ON cron_job_runs(cron_job_id);
+CREATE INDEX idx_cron_run_reservations_cron_job_id
+    ON cron_run_reservations(cron_job_id, settled_at_ms DESC, id DESC, status);
 ```
 
-`messages.conversation_id` 逻辑指向 `conversations.conversation_id`；
-`cron_job_runs.cron_job_id` 逻辑指向 `cron_jobs.cron_job_id`。两者都不向
-SQLite 声明物理关系。（Agent Store 例外组内 `agent_messages.session_id`
-是真实的 `FOREIGN KEY` —— 该物理图是有意冻结的。）
+`cron_run_reservations.cron_job_id` 逻辑指向 `cron_jobs.cron_job_id`，
+`conversation_id` 指向同一 canonical AgentSession。它们不向 SQLite 声明物理关系。
+运行历史从原 reservation 投影，不再维护独立的重复运行历史表。
+Agent Store 例外组内 `agent_messages.session_id` 是真实 `FOREIGN KEY`；该物理图保持冻结。
 
 同一关系禁止同时保存 `conversation_id` 与 `conversation_row_id`，也禁止任何
 等价的业务 ID/行 ID 双轨字段。

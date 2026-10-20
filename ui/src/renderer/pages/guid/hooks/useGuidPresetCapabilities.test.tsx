@@ -17,7 +17,7 @@ import { createDefaultIdmmConfig } from '@/common/types/idmm';
 import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import { resolveAgentResourceSelections } from '@/renderer/hooks/agent/agentResourceSelection';
 import { useGuidAgentSelection } from './useGuidAgentSelection';
-import { useGuidPresetCapabilities } from './useGuidPresetCapabilities';
+import { useAgentPresetCapabilities } from '@/renderer/components/agent/useAgentPresetCapabilities';
 
 const officialId = parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000108');
 const personalId = parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000109');
@@ -88,7 +88,7 @@ function mount(preset: AgentPresetSummary) {
   return renderHook(() => {
     const selection = useGuidAgentSelection({ selectedAgentTemplateKey: 'assistant.general' });
     const configured = selection.selectedOfficialPreset ?? selection.selectedPreset;
-    const capabilities = useGuidPresetCapabilities(configured?.preset_id, configured?.current_stable_revision?.revision_digest);
+    const capabilities = useAgentPresetCapabilities(configured?.preset_id, configured?.current_stable_revision?.revision_digest);
     return { selection, capabilities };
   }, { wrapper });
 }
@@ -190,7 +190,7 @@ test('a saved personal Agent uses the host current contract while retaining its 
   });
   const prepare = spyOn(agentPlatform.createFromTemplate, 'invoke');
   const save = spyOn(agentPlatform.saveRevision, 'invoke');
-  const hook = renderHook(() => useGuidPresetCapabilities(personalId, preset.current_stable_revision?.revision_digest));
+  const hook = renderHook(() => useAgentPresetCapabilities(personalId, preset.current_stable_revision?.revision_digest));
   await waitFor(() => expect(hook.result.current.isLoading).toBe(false));
   expect(hook.result.current.actionIds).toEqual(new Set(['workspace.process/start']));
   expect(hook.result.current.requiredResourceKinds).toEqual(new Set(['process_session']));
@@ -208,7 +208,7 @@ test('late model defaults from another Agent or Revision cannot replace the curr
   const pending: ((response: AgentPresetEditorResponse) => void)[] = [];
   spyOn(agentPlatform.getEditor, 'invoke').mockImplementation(() => new Promise(resolve => { pending.push(resolve); }));
   const initial = summary(1);
-  const hook = renderHook(({ id, digest }) => useGuidPresetCapabilities(id, digest), {
+  const hook = renderHook(({ id, digest }) => useAgentPresetCapabilities(id, digest), {
     initialProps: { id: officialId, digest: initial.current_stable_revision!.revision_digest },
   });
   const next = { ...summary(2), preset_id: personalId };

@@ -6,6 +6,7 @@
 
 import type { ICronJob } from '@/common/adapter/ipcBridge';
 import { shortSessionId } from '@renderer/utils/ui/shortId';
+import { scheduledWorkspace } from './scheduledAgentPresentation';
 
 export type CronJobStatusFilter = 'all' | 'active' | 'paused';
 
@@ -35,12 +36,12 @@ function buildCronJobSearchText(job: ICronJob): string {
     pushSearchValue(parts, shortSessionId(job.metadata.conversation_id));
   }
   pushSearchValue(parts, job.metadata.conversation_title);
-  pushSearchValue(parts, job.metadata.agent_type);
-  pushSearchValue(parts, job.metadata.agent_config?.backend);
-  pushSearchValue(parts, job.metadata.agent_config?.provider_id);
-  pushSearchValue(parts, job.metadata.agent_config?.name);
-  pushSearchValue(parts, job.metadata.agent_config?.model);
-  pushSearchValue(parts, job.metadata.agent_config?.workspace);
+  pushSearchValue(parts, job.metadata.agent_label);
+  const selection = job.metadata.agent_selection;
+  pushSearchValue(parts, selection?.kind === 'template' ? selection.template_key : selection?.preset_id);
+  pushSearchValue(parts, job.metadata.model?.provider_id);
+  pushSearchValue(parts, job.metadata.model?.model);
+  pushSearchValue(parts, scheduledWorkspace(job));
 
   return parts.join(' ');
 }

@@ -98,6 +98,10 @@ pub(super) async fn load(
         if !text.is_empty() {
             content.push(ChatContentPart::Text { text: text.into() });
         }
+        if text.trim().is_empty() {
+            if let Some(description) = super::runtime_attachments::skill_selection_description(
+                &super::runtime_attachments::selected_skills(&root)?, true) { content.push(description); }
+        }
         if let Some(description) = super::runtime_attachments::description(&files, true) {
             content.push(description);
         }

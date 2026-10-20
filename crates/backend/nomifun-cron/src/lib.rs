@@ -4,7 +4,6 @@ pub mod busy_guard;
 pub mod error;
 pub mod events;
 pub mod executor;
-pub mod prompt;
 pub mod routes;
 pub mod scheduler;
 mod session_port;
@@ -28,8 +27,7 @@ pub use routes::cron_routes;
 pub use session_port::{
     CronRunResourceRetirement,
     CronRuntimePreparationRequest, CronScheduledSessionLookup,
-    CronSessionAgentBinding,
-    CronSessionCronBindingRequest, CronSessionHandle, CronSessionLookup, CronSessionPort,
+    CronSessionHandle, CronSessionLookup, CronSessionPort,
     CronSessionProjection, CronPreparedTurnDelivery, CronTurnDelivery, CronTurnDeliveryQuery,
     CronTurnMessage, CronTurnReceiptState, CronTurnReconciliation,
     CronTurnReconciliationRequest, CronTurnReceiptQuery, CronTurnRequest,
@@ -37,7 +35,7 @@ pub use session_port::{
     CronTurnCancellationRequest, CronTurnCancellationReceipt,
 };
 pub use service::{
-    CronAgentPresetResolver, CronBackgroundTaskRegistrar, CronEmbeddedCommandResult,
+    CronAgentBindingResolver, CronAgentBindingPresentation, CronBackgroundTaskRegistrar, CronEmbeddedCommandResult,
     CronEmbeddedCreateCommand, CronEmbeddedDeleteCommand, CronEmbeddedMutationRequest,
     CronEmbeddedMutationWaiter, CronEmbeddedUpdateCommand,
     CronRunCancellationReceipt,

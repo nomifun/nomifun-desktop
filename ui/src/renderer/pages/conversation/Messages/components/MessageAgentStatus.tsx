@@ -10,7 +10,7 @@ import { Badge, Typography } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import ConversationErrorNote from './ConversationErrorNote';
-import { useConversationAgents } from '@/renderer/pages/conversation/hooks/useConversationAgents';
+import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 
 const { Text } = Typography;
 
@@ -24,14 +24,14 @@ interface MessageAgentStatusProps {
 const MessageAgentStatus: React.FC<MessageAgentStatusProps> = ({ message }) => {
   const { t } = useTranslation();
   const { backend, status, agent_name } = message.content;
-  const { cliAgents } = useConversationAgents();
+  const conversation = useConversationContextSafe();
   const backendText = toDisplayText(backend, 'agent');
   const agentNameText = toDisplayText(agent_name);
 
-  // Resolve display name: agent_name (extension/custom) > detected agent name > capitalized backend
+  // Historical labels come from the message or canonical conversation context, never the live runtime registry.
   const display_name =
     agentNameText ||
-    cliAgents.find((a) => a.backend === backendText || a.agent_type === backendText)?.name ||
+    conversation?.currentAgent?.label ||
     backendText.charAt(0).toUpperCase() + backendText.slice(1);
 
   // Hide disconnected status from historical messages (no longer emitted but may exist in DB)

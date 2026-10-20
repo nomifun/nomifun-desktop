@@ -50,7 +50,7 @@ async fn missing_frozen_workspace_keeps_owner_binding_read_fence_and_unbound_run
         &fixture.principal.principal_id, &frozen).try_write_owned().is_err(), "the original root's read fence must remain held");
     let projection = fixture.state.session_owner.canonical_conversation_projection(
         &fixture.principal.principal_id, &fixture.session).await.unwrap().unwrap();
-    let options = runtime_options_from_session(&fixture.principal.principal_id, projection, None).unwrap().0;
+    let options = runtime_options_from_session(&fixture.principal.principal_id, projection).unwrap().0;
     assert_eq!(std::path::Path::new(&options.workspace), frozen);
     assert!(options.workspace_binding_lease.as_ref().unwrap().matches_workspace(&frozen).unwrap());
     assert!(!frozen.exists(), "preflight cannot repair the missing directory on the user's behalf");

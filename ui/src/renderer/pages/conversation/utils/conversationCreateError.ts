@@ -141,6 +141,7 @@ const normalizeConversationRuntimeWorkspaceErrorCode = (
 export const getConversationCreateErrorMessage = (error: unknown, t: TFunction): string => {
   const normalizedCode = normalizeConversationCreateErrorCode(error);
   const payload = getWorkspacePathErrorPayload(error);
+  if (payload?.code === 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE') return t('conversation.agentError.codes.NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE.body');
   const configurationKey = getConversationConfigurationErrorKey(payload);
   if (configurationKey) {
     return t(configurationKey);
@@ -160,6 +161,7 @@ export const getConversationCreateErrorMessage = (error: unknown, t: TFunction):
 
 export const getConversationRuntimeWorkspaceErrorMessage = (error: unknown, t: TFunction): string => {
   const payload = getWorkspacePathErrorPayload(error);
+  if (payload?.code === 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE') return t('conversation.agentError.codes.NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE.body');
   const configurationKey = getConversationConfigurationErrorKey(payload);
   if (configurationKey) {
     return t(configurationKey);

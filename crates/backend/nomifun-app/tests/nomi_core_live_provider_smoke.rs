@@ -39,6 +39,9 @@ mod live_user_input;
 #[path = "support/live_resource_wait.rs"]
 mod live_resource_wait;
 
+#[path = "support/live_scheduled_tasks.rs"]
+mod live_scheduled_tasks;
+
 #[cfg(all(feature = "browser-use", feature = "computer-use"))]
 #[path = "support/live_general_desktop.rs"]
 mod live_general_desktop;
@@ -80,6 +83,7 @@ struct LiveFixture {
 
 #[derive(Clone, Copy)]
 enum LiveCase {
+    ScheduledTasks,
     SelectedModel,
     WorkspaceFile,
     ManagedComponent,
@@ -234,9 +238,14 @@ fn live_model() -> Result<String, SmokeFailure> {
 }
 
 async fn build_fixture(root: &TempDir, local_proof: Option<&str>) -> Result<LiveFixture, SmokeFailure> {
-    let data_dir = root.path().join("data");
-    let work_dir = root.path().join("work");
-    let log_dir = root.path().join("logs");
+    // macOS temp roots are often spelled /var while their canonical owner is
+    // /private/var. Exercise the production storage gate with a real directory,
+    // never a platform alias that traverses a symlink.
+    let canonical_root = nomifun_common::paths::canonicalize_simplified(root.path())
+        .map_err(|_| SmokeFailure::new("bootstrap", "TEMP_ROOT_CANONICALIZATION_FAILED", 500))?;
+    let data_dir = canonical_root.join("data");
+    let work_dir = canonical_root.join("work");
+    let log_dir = canonical_root.join("logs");
     for directory in [&data_dir, &work_dir, &log_dir] {
         std::fs::create_dir_all(directory).map_err(|_| {
             SmokeFailure::new(
@@ -1358,13 +1367,23 @@ fn collaboration_argument_shape(arguments: &Value) -> String {
 
 async fn emit_live_runtime_progress_trace(root: &Path) {
     let db_path = root.join("data").join("nomifun-backend.db");
-    let Ok(pool) = nomifun_db::sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path.display())).await else {
+    let Ok(pool) = nomifun_db::sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+        .connect_with(nomifun_db::sqlx::sqlite::SqliteConnectOptions::new().filename(db_path).read_only(true)).await else {
         return;
     };
-    let rows: Result<Vec<Option<String>>, _> = nomifun_db::sqlx::query_scalar(
-        "SELECT inline_json FROM agent_events WHERE kind = 'runtime/progress-recorded' ORDER BY seq"
+    let rows: Result<Vec<(String,String)>, _> = nomifun_db::sqlx::query_as(
+        "SELECT session_id,event_id FROM agent_events WHERE kind = 'runtime/progress-recorded' ORDER BY session_id,seq"
     ).fetch_all(&pool).await;
     if let Ok(rows) = rows {
+        let Ok(store) = nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await else { pool.close().await; return; };
+        let mut grouped = std::collections::BTreeMap::<String,Vec<nomifun_agent_contracts::EventId>>::new();
+        for (session,event) in rows { grouped.entry(session).or_default().push(event.into()); }
+        let mut rows = Vec::new();
+        for (session,ids) in grouped {
+            let Ok(payloads) = store.resolved_event_payloads(&session.into(),&ids).await else { continue; };
+            rows.extend(ids.into_iter().filter_map(|id|payloads.get(id.as_ref()).cloned()));
+        }
+        drop(store);
         let mut steps = 0_u32;
         let mut compact_calls = 0_u32;
         let mut compacted = 0_u32;
@@ -1378,13 +1397,25 @@ async fn emit_live_runtime_progress_trace(root: &Path) {
         let mut kernel_rejections = 0_u32;
         let mut delegations = 0_u32;
         let mut text_events = 0_u32;
+        let mut event_counts = std::collections::BTreeMap::<String,u32>::new();
+        let mut proposed_tools = std::collections::BTreeMap::<&'static str,u32>::new();
+        let mut rejections = std::collections::BTreeMap::<String,u32>::new();
+        let mut runtime_gate_prefixes = std::collections::BTreeMap::<&'static str,u32>::new();
         let mut control_calls = std::collections::BTreeMap::<String, &'static str>::new();
         let mut control_errors = Vec::<String>::new();
         let mut proposed_shapes = std::collections::BTreeMap::<String, String>::new();
         let mut rejected_shapes = Vec::new();
-        for row in rows {
-            let Some(value) = row.and_then(|row| serde_json::from_str::<Value>(&row).ok()) else { continue };
+        for value in rows {
             let event = value.pointer("/event/event").and_then(Value::as_str).unwrap_or_default();
+            if !event.is_empty() && event.len() <= 64 && event.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_') {
+                *event_counts.entry(event.to_owned()).or_default() += 1;
+            }
+            if event == "model_response_rejected" {
+                if let Some(reason) = value.pointer("/event/rejection/kind").and_then(Value::as_str)
+                    .filter(|reason| reason.len()<=64 && reason.bytes().all(|byte|byte.is_ascii_lowercase() || byte==b'_')) {
+                    *rejections.entry(reason.to_owned()).or_default() += 1;
+                }
+            }
             match event {
                 "model_step_started" => steps += 1,
                 "compaction_started" => compact_calls += 1,
@@ -1399,6 +1430,14 @@ async fn emit_live_runtime_progress_trace(root: &Path) {
                 "output_text_delta" => text_events += 1,
                 "tool_call_completed" => {
                     let name = value.pointer("/event/call/name").and_then(Value::as_str);
+                    let label = match name {
+                        Some("ToolSearch") => "tool_search",
+                        Some("read_file") => "read_file", Some("write_file") => "write_file",
+                        Some("start_process") => "start_process", Some("update_plan") => "update_plan",
+                        Some("report_completion") => "report_completion", Some("request_user_input") => "request_user_input",
+                        Some("finish_turn") => "finish_turn", _ => "other",
+                    };
+                    *proposed_tools.entry(label).or_default() += 1;
                     let call_id = value.pointer("/event/call/call_id").and_then(Value::as_str);
                     if let (Some(name @ ("update_plan" | "report_completion")), Some(call_id)) = (name, call_id) {
                         control_calls.insert(call_id.to_owned(), if name == "update_plan" { "PLAN" } else { "REPORT" });
@@ -1412,6 +1451,10 @@ async fn emit_live_runtime_progress_trace(root: &Path) {
                     let call_id = value.pointer("/event/result/call_id").and_then(Value::as_str);
                     if value.pointer("/event/result/is_error").and_then(Value::as_bool) == Some(true) {
                         let response = value.pointer("/event/result/output/0/text").and_then(Value::as_str).unwrap_or_default();
+                        let prefix = if response.starts_with("Not executed: declare the NEXT source-bound exact_actions commitment") { Some("next_exact_action_required") }
+                            else if response.starts_with("Not executed: this explicit multi-item task") { Some("numbered_task_plan_required") }
+                            else { None };
+                        if let Some(prefix) = prefix { *runtime_gate_prefixes.entry(prefix).or_default() += 1; }
                         if response.contains("INVALID_TOOL_ARGUMENTS") {
                             invalid_arguments += 1;
                             if let Some(shape) = call_id.and_then(|id| proposed_shapes.get(id))
@@ -1443,6 +1486,8 @@ async fn emit_live_runtime_progress_trace(root: &Path) {
         eprintln!("NOMIFUN_LIVE_SMOKE_TOOL_REJECTIONS invalid_arguments={invalid_arguments} unavailable_names={unavailable_names} kernel_rejections={kernel_rejections} delegations={delegations} text_events={text_events}");
         eprintln!("NOMIFUN_LIVE_SMOKE_COLLAB_ARGUMENT_SHAPES sequence={}",
             if rejected_shapes.is_empty() { "NONE".into() } else { rejected_shapes.join(",") });
+        eprintln!("NOMIFUN_LIVE_SMOKE_CANONICAL_COUNTS events={} proposals={} rejections={} observed_gate_prefixes={}",
+            json!(event_counts),json!(proposed_tools),json!(rejections),json!(runtime_gate_prefixes));
     }
     pool.close().await;
 }
@@ -3200,6 +3245,7 @@ fn live_case_future<'a>(case: LiveCase, router: &'a Router, api_key: &'a str,
     application: &'a NomiCoreApplication, local_proof: Option<&'a str>,
 ) -> futures_util::future::LocalBoxFuture<'a, Result<(), SmokeFailure>> {
     match case {
+        LiveCase::ScheduledTasks => live_scheduled_tasks::run(router, api_key, model, root, work_dir).boxed_local(),
         LiveCase::WorkspaceFile | LiveCase::CodingPreset | LiveCase::SnakeGame => run_live_workspace_file_chain(
             router, api_key, model, work_dir,
             matches!(case, LiveCase::CodingPreset | LiveCase::SnakeGame), matches!(case, LiveCase::SnakeGame),
@@ -3244,13 +3290,17 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
             }
         }))
     } else { fixture.application.router() };
-    let work_dir = root.path().join("work");
+    let work_dir = nomifun_common::paths::canonicalize_simplified(&root.path().join("work"))
+        .map_err(|_| SmokeFailure::new("bootstrap", "TEMP_WORKSPACE_CANONICALIZATION_FAILED", 500))?;
     let result = AssertUnwindSafe(async {
         official_runtime_build(&router).await?;
         live_case_future(case, &router, api_key.as_str(), &model, root.path(), &work_dir,
             &fixture.application, local_proof.as_deref()).await
     }).catch_unwind().await.unwrap_or_else(|_| Err(SmokeFailure::new(
         "live.case", "LIVE_CASE_PANICKED", 500)));
+    if let Err(error) = &result {
+        eprintln!("NOMIFUN_LIVE_SMOKE_CASE_FAILURE {error}");
+    }
     let shutdown_files = if matches!(case, LiveCase::AppWorkspaceUiFixture) {
         Some(snapshot_ui_fixture_shutdown_files(&router, root.path()).await)
     } else { None };
@@ -3264,7 +3314,17 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
         "APPLICATION_SHUTDOWN_DEADLINE_EXCEEDED",
         SHUTDOWN_DEADLINE,
         async {
-            application.close().await.map_err(|_| {
+            application.close().await.map_err(|error| {
+                // A bounded category is enough to identify the shutdown owner;
+                // never print arbitrary service/provider error text here.
+                let text = error.to_string().to_ascii_lowercase();
+                let owner = if text.contains("storage") { "storage" }
+                    else if text.contains("mcp") { "mcp_auth" }
+                    else if text.contains("terminal") { "terminal" }
+                    else if text.contains("background") { "background" }
+                    else if text.contains("runtime") { "agent_runtime" }
+                    else { "unknown" };
+                eprintln!("NOMIFUN_LIVE_SMOKE_SHUTDOWN_OWNER owner={owner}");
                 SmokeFailure::new(
                     "shutdown",
                     "APPLICATION_SHUTDOWN_FAILED",
@@ -3277,7 +3337,9 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
     // `ServerEnvironment` owns the tracing flush guard. Drop it before the
     // credential audit so no buffered log write can occur after a clean scan.
     drop(environment);
-    close_result?;
+    if let Err(error) = &close_result {
+        eprintln!("NOMIFUN_LIVE_SMOKE_CLOSE_FAILURE {error}");
+    }
     if let Some(snapshot) = shutdown_files { assert_ui_fixture_shutdown_files(snapshot?)?; }
     if result.is_err() || matches!(case, LiveCase::LongCoding) {
         emit_live_runtime_progress_trace(root.path()).await;
@@ -3295,7 +3357,17 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
     if let Some(proof) = local_proof {
         ensure_secret_not_persisted(root.path(), proof.as_bytes()).await?;
     }
-    result
+    result?;
+    close_result
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --cron-smoke"]
+async fn nomi_core_scheduled_tasks_reach_live_stepfun() {
+    if let Err(error)=run_live_provider_smoke(LiveCase::ScheduledTasks).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {error}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

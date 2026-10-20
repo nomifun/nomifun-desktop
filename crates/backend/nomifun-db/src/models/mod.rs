@@ -49,7 +49,7 @@ pub use channel::{
 pub use client_preference::ClientPreference;
 pub use instance_token::InstanceApiTokenRow;
 pub use cron_job::CronJobRow;
-pub use cron_job_run::{CronJobRunRow, CronRunReservationRow};
+pub use cron_job_run::{CronRunHistoryRow, CronRunReservationRow};
 pub use customer_service::{
     CS_HANDOFF_STATUS_CANCELLED, CS_HANDOFF_STATUS_CLAIMED, CS_HANDOFF_STATUS_PENDING,
     CS_HANDOFF_STATUS_RESOLVED, CsAgentCapabilityReceiptRow, CsAgentRow, CsAuditEventRow,

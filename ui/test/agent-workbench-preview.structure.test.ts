@@ -7,7 +7,7 @@ const canonicalActions = JSON.parse(readFileSync(new URL('../../crates/backend/n
   action_id: string;
   capability_id: string;
 }>;
-const selector = readFileSync(new URL('./GuidAgentSelectorPreview.tsx', import.meta.url), 'utf8');
+const selector = readFileSync(new URL('./AgentSelectorPreview.tsx', import.meta.url), 'utf8');
 const workspaceCss = readFileSync(new URL('../src/renderer/pages/agentSettings/AgentCapabilityWorkspace.module.css', import.meta.url), 'utf8');
 
 describe('Agent Workbench visual acceptance harness', () => {

@@ -166,6 +166,7 @@ fn canvas_operation_error(error: AppError) -> String {
     match error {
         AppError::ExecutionAdmissionPending => "Agent continuation is waiting for execution capacity".to_owned(),
         AppError::SessionConfigurationChanged(_) => "Agent session configuration changed".to_owned(),
+        AppError::AgentResourceBindingIncomplete { .. } => "The local Agent resource configuration is incomplete".to_owned(),
         AppError::SessionContractEvolutionRejected { .. } => {
             "Agent session execution contract cannot be safely updated".to_owned()
         }

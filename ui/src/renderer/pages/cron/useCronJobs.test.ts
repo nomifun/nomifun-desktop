@@ -20,8 +20,8 @@ const job = (n: number, conversation_id: ConversationId | undefined = first): IC
   cron_job_id: jobId(n), name: 'job-' + n, enabled: true,
   schedule: { kind: 'cron', expr: '0 0 9 * * ?', tz: 'UTC', description: 'Daily' },
   message: '', execution_mode: 'existing',
-  metadata: { conversation_id, agent_type: 'claude', created_by: 'user', created_at: 1, updated_at: 1 },
-  state: { run_count: 0, retry_count: 0, max_retries: 3 },
+  metadata: { conversation_id, clear_context_each_run: false, created_by: 'user', created_at: 1, updated_at: 1 },
+  state: { run_count: 0,  },
 });
 const run = (n: number): ICronJobRun => ({
   cron_job_run_id: parseCronJobRunId('019b0000-0000-7000-8000-' + String(n).padStart(12, '0')),

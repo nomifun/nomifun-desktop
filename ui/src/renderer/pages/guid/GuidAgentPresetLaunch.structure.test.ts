@@ -89,13 +89,11 @@ describe('Guid workbench Agent launch behavior', () => {
     ).toBe(true);
     expect(
       types.includes(
-        'export type GuidAgentSelection = GuidAgentSelectionPreference;'
+        'export type GuidAgentSelection = AgentSelection;'
       )
     ).toBe(true);
     expect(
-      selectionUtils.includes(
-        "templateKey: 'assistant.general',"
-      )
+      selectionUtils.includes('DEFAULT_AGENT_SELECTION')
     ).toBe(true);
     expect(selectionUtils.includes("kind: 'template',")).toBe(true);
     expect(selection.includes('presets[0]')).toBe(false);

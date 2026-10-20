@@ -17,6 +17,8 @@ pub enum AgentErrorCode {
     NomifunConversationBusy,
     NomifunStreamBroken,
     NomifunStateInconsistent,
+    /// The local host did not assemble the Agent's required resource grants.
+    NomifunAgentResourceBindingIncomplete,
     /// Current capability/Skill provenance differs from the frozen Session.
     /// Admission refuses execution; repeating the same request cannot fix it.
     NomifunSessionConfigurationChanged,
@@ -152,6 +154,13 @@ impl AgentErrorResolution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentResourceBindingFailure {
+    pub missing_resource_kinds: Vec<String>,
+    pub missing_resource_operations: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentStreamErrorData {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,6 +195,9 @@ pub struct AgentStreamErrorData {
     /// Original native error; missing OS/dispatch/cleanup facts stay unknown.
     #[serde(default, rename = "systemExecutionError", skip_serializing_if = "Option::is_none")]
     pub system_execution_error: Option<SystemExecutionFailure>,
+    /// Host-owned diagnosis; arbitrary provider text cannot select this class.
+    #[serde(default, rename = "resourceBindingFailure", skip_serializing_if = "Option::is_none")]
+    pub resource_binding_failure: Option<AgentResourceBindingFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -208,6 +220,7 @@ impl AgentStreamErrorData {
             task_incomplete_reason: None,
             provider_diagnostic: None,
             system_execution_error: None,
+            resource_binding_failure: None,
             retryable: None,
             feedback_recommended: None,
             resolution: None,
@@ -235,6 +248,7 @@ impl AgentStreamErrorData {
             task_incomplete_reason: None,
             provider_diagnostic: None,
             system_execution_error: None,
+            resource_binding_failure: None,
             retryable: Some(retryable),
             feedback_recommended: Some(feedback_recommended),
             resolution,
@@ -417,6 +431,7 @@ mod tests {
             provider_diagnostic: None,
             retryable: Some(false),
             system_execution_error: None,
+            resource_binding_failure: None,
             feedback_recommended: Some(false),
             resolution: None,
         };

@@ -958,9 +958,9 @@ async fn delete_fails_closed_on_malformed_cron_provider_json() {
     sqlx::query(
         "INSERT INTO cron_jobs (\
             cron_job_id, user_id, name, schedule_kind, schedule_value, payload_message, \
-            agent_type, agent_config, created_by, created_at, updated_at\
+            model_selection, created_by, created_at, updated_at\
          ) VALUES (?, ?, 'malformed provider binding', 'every', '60000', '', \
-                   'nomi', '{', 'user', 1, 1)",
+                   '{', 'user', 1, 1)",
     )
     .bind(nomifun_common::CronJobId::new().as_str())
     .bind(owner)
@@ -982,7 +982,7 @@ async fn delete_fails_closed_on_malformed_cron_provider_json() {
             .is_some()
     );
     let cron_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM cron_jobs WHERE agent_config = '{'")
+        sqlx::query_scalar("SELECT COUNT(*) FROM cron_jobs WHERE model_selection = '{'")
             .fetch_one(db.pool())
             .await
             .unwrap();

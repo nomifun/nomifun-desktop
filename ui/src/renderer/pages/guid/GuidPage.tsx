@@ -43,7 +43,7 @@ import React, {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import GuidAgentSelector from './components/GuidAgentSelector';
+import AgentSelector from '@/renderer/components/agent/AgentSelector';
 import GuidCompanionShowcase from './components/GuidCompanionShowcase';
 import ChatModelSelector from '@/renderer/components/chat/ChatModelSelector';
 import MentionDropdown, {
@@ -63,7 +63,7 @@ import { useGuidInput } from './hooks/useGuidInput';
 import { GuidDraftScopeContext } from './hooks/useGuidDraftState';
 import { useGuidMention } from './hooks/useGuidMention';
 import { useGuidModelSelection } from './hooks/useGuidModelSelection';
-import { useGuidPresetCapabilities } from './hooks/useGuidPresetCapabilities';
+import { useAgentPresetCapabilities } from '@/renderer/components/agent/useAgentPresetCapabilities';
 import { useGuidSend, type GuidSendDeps } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
 import type { GuidAgentSelection } from './types';
@@ -159,7 +159,7 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
   }, [guidInput.setInput, guidInput.setFiles, guidInput.setDir]);
   const selectedCapabilityPreset = agentSelection.selectedOfficialPreset ?? agentSelection.selectedPreset;
   const selectedCapabilityRevisionDigest = selectedCapabilityPreset?.current_stable_revision?.revision_digest;
-  const presetCapabilities = useGuidPresetCapabilities(
+  const presetCapabilities = useAgentPresetCapabilities(
     selectedCapabilityPreset?.preset_id,
     selectedCapabilityRevisionDigest,
   );
@@ -823,7 +823,7 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
                 dragHandlers={guidInput.dragHandlers}
                 overlayOpen={commands.isOpen || mention.mentionOpen}
                 header={<ComposerSceneHeader sceneSelectionEnabled={!productEntry} agent={
-                  productEntry ? <span data-testid='fixed-app-agent'>{productEntry.agentLabel}</span> : <GuidAgentSelector
+                  productEntry ? <span data-testid='fixed-app-agent'>{productEntry.agentLabel}</span> : <AgentSelector
                     presets={agentSelection.presets}
                     draftPresets={agentSelection.draftPresets}
                     officialTemplates={agentSelection.officialTemplates}

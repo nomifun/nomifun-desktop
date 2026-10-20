@@ -402,6 +402,7 @@ impl AgentSessionStore {
         sqlx::raw_sql(include_str!("../../nomifun-db/migrations/009_cron_input_handoff.sql")).execute(&pool).await?;
         sqlx::raw_sql(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).execute(&pool).await?;
         sqlx::raw_sql(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).execute(&pool).await?;
+        sqlx::raw_sql(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).execute(&pool).await?;
         seed_test_schema_metadata(&pool).await?;
         Self::from_pool(pool).await
     }
@@ -689,14 +690,18 @@ impl AgentSessionStore {
             decision.validate().map_err(|error| SessionStoreError::InvalidPayload(error.into()))?;
             Ok::<_, SessionStoreError>(decision)
         }).transpose()?;
-        if input
-            .0
-            .get("content")
-            .and_then(Value::as_str)
-            .is_none_or(|content| content.trim().is_empty())
-        {
+        // A private task may consist solely of an explicitly selected Skill.
+        // Preserve its empty user text as a fact instead of inventing a host
+        // prompt. Skill references are data; resource/Skill authority remains
+        // with normal exact binding and runtime preparation.
+        let skill_task = input.0.get("inject_skills")
+            .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
+            .is_some_and(|ids| !ids.is_empty() && ids.len() <= 16 && ids.iter().all(|id|
+                !id.trim().is_empty() && id.len() <= 1024 && !id.contains('\0')));
+        if input.0.get("content").and_then(Value::as_str)
+            .is_none_or(|content| content.trim().is_empty() && !skill_task) {
             return Err(SessionStoreError::InvalidPayload(
-                "accepted turn input requires non-empty content".to_owned(),
+                "accepted turn input requires text or valid selected Skill references".to_owned(),
             ));
         }
 

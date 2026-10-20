@@ -4,11 +4,10 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{TimeZone, Utc};
 use cron::Schedule;
-use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tokio::time::MissedTickBehavior;
 
 use nomifun_common::{CronJobId, TimestampMs, UserId, now_ms};
 
@@ -34,7 +33,8 @@ pub(crate) fn normalize_cron_expr(expr: &str) -> String {
 
 pub fn validate_cron_expression(expr: &str) -> Result<Schedule, CronError> {
     let normalized = normalize_cron_expr(expr);
-    Schedule::from_str(&normalized).map_err(|e| CronError::InvalidCronExpression(format!("{expr}: {e}")))
+    Schedule::from_str(&normalized)
+        .map_err(|e| CronError::InvalidCronExpression(format!("{expr}: {e}")))
 }
 
 pub fn validate_timezone(tz: &str) -> Result<chrono_tz::Tz, CronError> {
@@ -56,6 +56,30 @@ pub fn compute_next_run(schedule: &CronSchedule, now: TimestampMs) -> Option<Tim
             now.checked_add(*every_ms)
         }
         CronSchedule::Cron { expr, tz, .. } => compute_cron_next_run(expr, tz.as_deref(), now),
+    }
+}
+
+/// First future occurrence on the persisted cadence. Long execution does not
+/// move this cursor, and a resume never creates an execution backlog.
+pub(crate) fn compute_occurrence_successor(
+    schedule: &CronSchedule,
+    planned: TimestampMs,
+    now: TimestampMs,
+) -> Option<TimestampMs> {
+    match schedule {
+        CronSchedule::At { .. } => None,
+        CronSchedule::Every { every_ms, .. } if *every_ms > 0 => {
+            let steps = now
+                .saturating_sub(planned)
+                .max(0)
+                .checked_div(*every_ms)?
+                .checked_add(1)?;
+            planned
+                .checked_add(steps.checked_mul(*every_ms)?)
+                .filter(|next| *next > planned && *next > now)
+        }
+        CronSchedule::Every { .. } => None,
+        CronSchedule::Cron { .. } => compute_next_run(schedule, planned.max(now)),
     }
 }
 
@@ -84,7 +108,9 @@ pub fn validate_schedule(schedule: &CronSchedule) -> Result<(), CronError> {
         CronSchedule::At { .. } => Ok(()),
         CronSchedule::Every { every_ms, .. } => {
             if *every_ms <= 0 {
-                return Err(CronError::InvalidSchedule("every_ms must be positive".into()));
+                return Err(CronError::InvalidSchedule(
+                    "every_ms must be positive".into(),
+                ));
             }
             if now_ms().checked_add(*every_ms).is_none() {
                 return Err(CronError::InvalidSchedule(
@@ -123,8 +149,7 @@ pub fn validate_schedule(schedule: &CronSchedule) -> Result<(), CronError> {
 /// the exact planned instant captured by the timer. `CronService` re-verifies
 /// all four values before reserving an occurrence, closing stale-timer and
 /// process-replay races without relying on wall-clock timing.
-pub type TickCallback =
-    Arc<dyn Fn(String, String, i64, TimestampMs, u64) + Send + Sync>;
+pub type TickCallback = Arc<dyn Fn(String, String, i64, TimestampMs, u64) + Send + Sync>;
 
 struct ScheduledHandle {
     user_id: String,
@@ -197,52 +222,20 @@ impl CronScheduler {
         let user_id = job.user_id.clone();
         let handle_owner = user_id.clone();
         let schedule_revision = job.schedule_revision;
-        let schedule = job.schedule.clone();
         let callback = Arc::clone(&self.tick_callback);
         let handles = Arc::clone(&self.handles);
         let (start_tx, start_rx) = oneshot::channel();
 
-        let handle = match &schedule {
-            CronSchedule::At { .. } => {
-                spawn_at_timer(
-                    job_id,
-                    user_id,
-                    schedule_revision,
-                    next_run_at,
-                    generation,
-                    callback,
-                    handles,
-                    start_rx,
-                )
-            }
-            CronSchedule::Every { every_ms, .. } => {
-                spawn_every_timer(
-                    job_id,
-                    user_id,
-                    schedule_revision,
-                    next_run_at,
-                    *every_ms,
-                    generation,
-                    callback,
-                    handles,
-                    start_rx,
-                )
-            }
-            CronSchedule::Cron { expr, tz, .. } => {
-                spawn_cron_timer(
-                    job_id,
-                    user_id,
-                    schedule_revision,
-                    next_run_at,
-                    expr.clone(),
-                    tz.clone(),
-                    generation,
-                    callback,
-                    handles,
-                    start_rx,
-                )
-            }
-        };
+        let handle = spawn_at_timer(
+            job_id,
+            user_id,
+            schedule_revision,
+            next_run_at,
+            generation,
+            callback,
+            handles,
+            start_rx,
+        );
 
         let incoming = ScheduledHandle {
             user_id: handle_owner,
@@ -276,6 +269,43 @@ impl CronScheduler {
             // in `handles`; otherwise an immediate/past-due timer can race its
             // own installation and be lost.
             let _ = start_tx.send(());
+        }
+    }
+
+    /// Retry only observation/admission of the already-installed occurrence
+    /// after a database fault. The original generation/planned identity stays
+    /// fixed; durable reservation replay remains absorbing before any effects.
+    pub(crate) fn retry_current_occurrence(
+        &self,
+        job_id: &str,
+        owner: &str,
+        revision: i64,
+        planned: i64,
+        generation: u64,
+    ) {
+        let _gate = self
+            .mutation_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.shutdown.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(mut installed) = self.handles.get_mut(job_id)
+            && installed.user_id == owner
+            && installed.generation == generation
+        {
+            let handles = self.handles.clone();
+            let callback = self.tick_callback.clone();
+            let job = job_id.to_owned();
+            let owner = owner.to_owned();
+            let task = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                dispatch_if_current(
+                    &handles, callback, job, owner, revision, planned, generation,
+                );
+            });
+            installed.task.abort();
+            installed.task = task;
         }
     }
 
@@ -375,11 +405,9 @@ impl CronScheduler {
             .mutation_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.handles
-            .get(job_id)
-            .is_some_and(|scheduled| {
-                scheduled.user_id == user_id && scheduled.generation == generation
-            })
+        self.handles.get(job_id).is_some_and(|scheduled| {
+            scheduled.user_id == user_id && scheduled.generation == generation
+        })
     }
 
     /// Linearize the final process-local admission step with timer
@@ -406,12 +434,9 @@ impl CronScheduler {
             .mutation_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let current = self
-            .handles
-            .get(job_id)
-            .is_some_and(|scheduled| {
-                scheduled.user_id == user_id && scheduled.generation == generation
-            });
+        let current = self.handles.get(job_id).is_some_and(|scheduled| {
+            scheduled.user_id == user_id && scheduled.generation == generation
+        });
         current.then(commit)
     }
 
@@ -483,122 +508,6 @@ fn spawn_at_timer(
             run_at,
             generation,
         );
-    })
-}
-
-fn spawn_every_timer(
-    job_id: String,
-    user_id: String,
-    schedule_revision: i64,
-    first_run_at: TimestampMs,
-    every_ms: i64,
-    generation: u64,
-    callback: TickCallback,
-    handles: Arc<DashMap<String, ScheduledHandle>>,
-    start_rx: oneshot::Receiver<()>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        if start_rx.await.is_err() {
-            return;
-        }
-        let initial_delay = delay_until(first_run_at);
-        if initial_delay > 0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(initial_delay as u64)).await;
-        }
-        let mut planned_at = first_run_at;
-        dispatch_if_current(
-            &handles,
-            Arc::clone(&callback),
-            job_id.clone(),
-            user_id.clone(),
-            schedule_revision,
-            planned_at,
-            generation,
-        );
-
-        let interval_duration = tokio::time::Duration::from_millis(every_ms as u64);
-        let mut interval = tokio::time::interval(interval_duration);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        interval.tick().await; // first tick fires immediately, skip it
-        loop {
-            interval.tick().await;
-            let Some(next_planned_at) = planned_at.checked_add(every_ms) else {
-                tracing::error!(
-                    job_id = %job_id,
-                    schedule_revision,
-                    "Cron every schedule planned time overflowed"
-                );
-                break;
-            };
-            planned_at = next_planned_at;
-            dispatch_if_current(
-                &handles,
-                Arc::clone(&callback),
-                job_id.clone(),
-                user_id.clone(),
-                schedule_revision,
-                planned_at,
-                generation,
-            );
-        }
-    })
-}
-
-fn spawn_cron_timer(
-    job_id: String,
-    user_id: String,
-    schedule_revision: i64,
-    first_run_at: TimestampMs,
-    expr: String,
-    tz: Option<String>,
-    generation: u64,
-    callback: TickCallback,
-    handles: Arc<DashMap<String, ScheduledHandle>>,
-    start_rx: oneshot::Receiver<()>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        if start_rx.await.is_err() {
-            return;
-        }
-        let initial_delay = delay_until(first_run_at);
-        if initial_delay > 0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(initial_delay as u64)).await;
-        }
-        let mut planned_at = first_run_at;
-        dispatch_if_current(
-            &handles,
-            Arc::clone(&callback),
-            job_id.clone(),
-            user_id.clone(),
-            schedule_revision,
-            planned_at,
-            generation,
-        );
-
-        loop {
-            let next = compute_cron_next_run(
-                &expr,
-                tz.as_deref(),
-                planned_at.max(now_ms()),
-            );
-            let Some(next_at) = next else {
-                break;
-            };
-            let delay = delay_until(next_at);
-            if delay > 0 {
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay as u64)).await;
-            }
-            planned_at = next_at;
-            dispatch_if_current(
-                &handles,
-                Arc::clone(&callback),
-                job_id.clone(),
-                user_id.clone(),
-                schedule_revision,
-                planned_at,
-                generation,
-            );
-        }
     })
 }
 
@@ -676,7 +585,10 @@ mod tests {
             description: None,
         };
         assert_eq!(compute_next_run(&schedule, 1000), Some(61000));
-        assert_eq!(compute_next_run(&schedule, i64::MAX - 60000), Some(i64::MAX));
+        assert_eq!(
+            compute_next_run(&schedule, i64::MAX - 60000),
+            Some(i64::MAX)
+        );
         assert_eq!(compute_next_run(&schedule, i64::MAX - 59999), None);
     }
 
@@ -888,7 +800,10 @@ mod tests {
     #[test]
     fn normalize_cron_expr_promotes_five_field() {
         assert_eq!(normalize_cron_expr("0 9 * * *"), "0 0 9 * * *");
-        assert_eq!(normalize_cron_expr("  30 14 * * MON-FRI  "), "0 30 14 * * MON-FRI");
+        assert_eq!(
+            normalize_cron_expr("  30 14 * * MON-FRI  "),
+            "0 30 14 * * MON-FRI"
+        );
     }
 
     #[test]
@@ -1051,7 +966,10 @@ mod tests {
         scheduler.cancel_job(JOB_EVERY);
 
         let count = counter.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(count >= 2, "expected at least 2 ticks, got {count}");
+        assert_eq!(
+            count, 1,
+            "a timer must not invent successor occurrences before the database claims them"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1075,25 +993,18 @@ mod tests {
         tokio::time::advance(tokio::time::Duration::from_secs(2)).await;
         let first = rx.recv().await.expect("initial planned callback");
         assert_eq!(first, first_run_at);
-        // Let the timer arm its recurring interval before simulating a long
-        // suspension. `Skip` must emit one callback, never a burst for every
-        // elapsed interval.
         tokio::task::yield_now().await;
         tokio::time::advance(tokio::time::Duration::from_secs(10)).await;
         tokio::task::yield_now().await;
-
-        let after_resume = rx.recv().await.expect("one post-resume callback");
-        assert_eq!(after_resume, first_run_at + 1_000);
         assert!(
             rx.try_recv().is_err(),
-            "missed Tokio interval ticks must not be replayed as a backlog"
+            "only the persisted successor may arm another timer"
         );
     }
 
     #[tokio::test(start_paused = true)]
     async fn callback_dispatched_before_resume_barrier_loses_install_generation() {
-        let (tx, mut rx) =
-            tokio::sync::mpsc::unbounded_channel::<(TimestampMs, u64)>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(TimestampMs, u64)>();
         let scheduler = CronScheduler::new(Arc::new(move |_, _, _, planned_at, generation| {
             let _ = tx.send((planned_at, generation));
         }));
@@ -1176,16 +1087,11 @@ mod tests {
         let admission_active = Arc::clone(&active);
         let admission_release = Arc::clone(&release_commit);
         let admission = std::thread::spawn(move || {
-            admission_scheduler.commit_if_current_generation(
-                JOB_AT,
-                USER_ID,
-                generation,
-                || {
-                    admission_active.store(true, Ordering::SeqCst);
-                    entered_tx.send(()).unwrap();
-                    admission_release.wait();
-                },
-            )
+            admission_scheduler.commit_if_current_generation(JOB_AT, USER_ID, generation, || {
+                admission_active.store(true, Ordering::SeqCst);
+                entered_tx.send(()).unwrap();
+                admission_release.wait();
+            })
         });
         entered_rx.recv().unwrap();
 
@@ -1205,12 +1111,9 @@ mod tests {
         // Cancellation wins: the same exact generation can no longer register
         // an active owner, and its closure is never invoked.
         let stale_commit_ran = AtomicBool::new(false);
-        let stale = scheduler.commit_if_current_generation(
-            JOB_AT,
-            USER_ID,
-            generation,
-            || stale_commit_ran.store(true, Ordering::SeqCst),
-        );
+        let stale = scheduler.commit_if_current_generation(JOB_AT, USER_ID, generation, || {
+            stale_commit_ran.store(true, Ordering::SeqCst)
+        });
         assert_eq!(stale, None);
         assert!(!stale_commit_ran.load(Ordering::SeqCst));
     }
@@ -1231,10 +1134,17 @@ mod tests {
             },
             message: "test message".into(),
             execution_mode: ExecutionMode::Existing,
-            agent_config: None,
+            agent_selection: None,
+            model: None,
+            agent_binding: None,
+            agent_label: None,
+            effective_model: None,
+            clear_context_each_run: false,
+            configuration_error: None,
+            last_failure: None,
             conversation_id: Some(CONVERSATION_ID.into()),
             conversation_title: None,
-            agent_type: "nomi".into(),
+
             created_by: CreatedBy::User,
             skill_content: None,
             description: None,
@@ -1242,11 +1152,33 @@ mod tests {
             updated_at: 1000,
             next_run_at,
             last_run_at: None,
+            last_run_id: None,
             last_status: None,
             last_error: None,
             run_count: 0,
-            retry_count: 0,
-            max_retries: 3,
         }
+    }
+    #[test]
+    fn successor_stays_on_the_original_cadence_and_skips_only_past_instants() {
+        let schedule = CronSchedule::Every {
+            every_ms: 60000,
+            description: None,
+        };
+        assert_eq!(
+            compute_occurrence_successor(&schedule, 60000, 60005),
+            Some(120000)
+        );
+        assert_eq!(
+            compute_occurrence_successor(&schedule, 60000, 125000),
+            Some(180000)
+        );
+        assert_eq!(
+            compute_occurrence_successor(&schedule, 60000, 10000),
+            Some(120000)
+        );
+        assert_eq!(
+            compute_occurrence_successor(&schedule, i64::MAX - 1, i64::MAX),
+            None
+        );
     }
 }

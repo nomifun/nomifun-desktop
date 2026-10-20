@@ -1,15 +1,12 @@
 use nomifun_common::{ConversationId, CronJobId, CronJobRunId, UserId, now_ms};
-use serde_json::Value;
 use sqlx::SqlitePool;
 
 use crate::error::DbError;
-use crate::models::{CronJobRow, CronJobRunRow, CronRunReservationRow};
-use crate::repository::agent_preset_lineage::validate_and_lock_agent_preset_lineage;
+use crate::models::{CronJobRow, CronRunHistoryRow, CronRunReservationRow};
 use crate::repository::bind::{BindValue, bind_value};
 use crate::repository::cron::{
-    AdvanceCronOccurrenceParams, CRON_RUN_HISTORY_LIMIT, FinalizeCronRunOutcome,
-    FinalizeCronRunParams, ICronRepository, ReserveCronRunParams,
-    UpdateCronJobParams,
+    CRON_RUN_HISTORY_LIMIT, FinalizeCronRunOutcome, FinalizeCronRunParams, ICronRepository,
+    ReserveCronRunParams, UpdateCronJobParams,
 };
 
 #[derive(Clone, Debug)]
@@ -29,9 +26,9 @@ impl SqliteCronRepository {
     ) -> Result<(), DbError> {
         nomifun_common::CronJobId::parse(&row.cron_job_id)
             .map_err(|error| DbError::Conflict(format!("invalid cron_job_id: {error}")))?;
-        if row.max_retries < 0 {
+        if row.last_run_id.is_some() {
             return Err(DbError::Conflict(
-                "cron job max_retries must be non-negative".into(),
+                "new Cron definitions cannot author runtime summary provenance".into(),
             ));
         }
         if bind_session_relation && row.conversation_id.is_none() {
@@ -39,28 +36,14 @@ impl SqliteCronRepository {
                 "atomic Cron/Session relation insertion requires a conversation_id".into(),
             ));
         }
-        validate_cron_agent_config_shape(&row.agent_type, row.agent_config.as_deref(), row.enabled)?;
         let mut tx = self.pool.begin().await?;
-        lock_nomi_provider(&mut tx, &row.agent_type, row.agent_config.as_deref()).await?;
-        validate_and_lock_agent_preset_lineage(
-            &mut tx,
-            row.preset_id.as_deref(),
-            row.preset_revision,
-            row.agent_snapshot.as_deref(),
-            "Cron job",
-        )
-        .await?;
-        validate_cron_authority(
+        validate_cron_binding(
             &mut tx,
             &row.user_id,
             row.enabled,
             &row.execution_mode,
             row.conversation_id.as_deref(),
-            &row.agent_type,
-            row.agent_config.as_deref(),
-            row.preset_id.as_deref(),
-            row.preset_revision,
-            row.agent_snapshot.as_deref(),
+            row.agent_binding.as_deref(),
             row.skill_content.as_deref(),
         )
         .await?;
@@ -75,224 +58,150 @@ impl SqliteCronRepository {
             )
             .await?;
         }
-        sqlx::query(
-            "INSERT INTO cron_jobs (\
-                cron_job_id, user_id, name, enabled, schedule_revision, schedule_kind, schedule_value, schedule_tz, \
-                schedule_description, payload_message, execution_mode, agent_config, \
-                preset_id, preset_revision, agent_snapshot, \
-                conversation_id, conversation_title, agent_type, created_by, \
-                skill_content, description, created_at, updated_at, next_run_at, last_run_at, \
-                last_status, last_error, run_count, retry_count, max_retries\
-            ) VALUES (\
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?\
-            )",
-        )
-        .bind(&row.cron_job_id)
-        .bind(&row.user_id)
-        .bind(&row.name)
-        .bind(row.enabled)
-        .bind(row.schedule_revision)
-        .bind(&row.schedule_kind)
-        .bind(&row.schedule_value)
-        .bind(&row.schedule_tz)
-        .bind(&row.schedule_description)
-        .bind(&row.payload_message)
-        .bind(&row.execution_mode)
-        .bind(&row.agent_config)
-        .bind(&row.preset_id)
-        .bind(row.preset_revision)
-        .bind(&row.agent_snapshot)
-        .bind(&row.conversation_id)
-        .bind(&row.conversation_title)
-        .bind(&row.agent_type)
-        .bind(&row.created_by)
-        .bind(&row.skill_content)
-        .bind(&row.description)
-        .bind(row.created_at)
-        .bind(row.updated_at)
-        .bind(row.next_run_at)
-        .bind(row.last_run_at)
-        .bind(&row.last_status)
-        .bind(&row.last_error)
-        .bind(row.run_count)
-        .bind(row.retry_count)
-        .bind(row.max_retries)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("INSERT INTO cron_jobs (cron_job_id, user_id, name, enabled, schedule_revision, schedule_kind, schedule_value, schedule_tz, schedule_description, payload_message, execution_mode, agent_selection, model_selection, agent_binding, clear_context_each_run, configuration_error, conversation_id, conversation_title, created_by, skill_content, description, created_at, updated_at, next_run_at, last_run_at, last_run_id, last_status, last_error, run_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(&row.cron_job_id)
+            .bind(&row.user_id)
+            .bind(&row.name)
+            .bind(&row.enabled)
+            .bind(&row.schedule_revision)
+            .bind(&row.schedule_kind)
+            .bind(&row.schedule_value)
+            .bind(&row.schedule_tz)
+            .bind(&row.schedule_description)
+            .bind(&row.payload_message)
+            .bind(&row.execution_mode)
+            .bind(&row.agent_selection)
+            .bind(&row.model_selection)
+            .bind(&row.agent_binding)
+            .bind(&row.clear_context_each_run)
+            .bind(&row.configuration_error)
+            .bind(&row.conversation_id)
+            .bind(&row.conversation_title)
+            .bind(&row.created_by)
+            .bind(&row.skill_content)
+            .bind(&row.description)
+            .bind(&row.created_at)
+            .bind(&row.updated_at)
+            .bind(&row.next_run_at)
+            .bind(&row.last_run_at)
+            .bind(&row.last_run_id)
+            .bind(&row.last_status)
+            .bind(&row.last_error)
+            .bind(&row.run_count)
+            .execute(&mut *tx).await?;
 
         tx.commit().await?;
         Ok(())
     }
 }
 
-fn validate_cron_agent_config_shape(
-    agent_type: &str,
-    agent_config: Option<&str>,
-    enabled: bool,
-) -> Result<(), DbError> {
-    let Some(agent_config) = agent_config else {
-        return Ok(());
-    };
-    let config: Value = serde_json::from_str(agent_config)
-        .map_err(|error| DbError::Conflict(format!("invalid cron agent_config JSON: {error}")))?;
-    let object = config
-        .as_object()
-        .ok_or_else(|| DbError::Conflict("cron agent_config must be a JSON object".into()))?;
-    const ALLOWED_FIELDS: &[&str] = &[
-        "backend",
-        "name",
-        "cli_path",
-        "custom_agent_id",
-        "preset_id",
-        "preset_revision",
-        "agent_snapshot",
-        "mode",
-        "model",
-        "provider_id",
-        "config_options",
-        "workspace",
-        "clear_context_each_run",
-    ];
-    if let Some(field) = object
-        .keys()
-        .find(|field| !ALLOWED_FIELDS.contains(&field.as_str()))
-    {
-        return Err(DbError::Conflict(format!(
-            "cron agent_config contains unknown field '{field}'"
-        )));
-    }
-    if object.get("name").and_then(Value::as_str).is_none() {
-        return Err(DbError::Conflict(
-            "cron agent_config.name must be a string".into(),
-        ));
-    }
-    for field in ["backend", "model", "provider_id"] {
-        if object
-            .get(field)
-            .is_some_and(|value| !value.is_string() && !value.is_null())
-        {
-            return Err(DbError::Conflict(format!(
-                "cron agent_config.{field} must be a string"
-            )));
-        }
-    }
-    if let Some(model) = object.get("model").and_then(Value::as_str)
-        && (model.is_empty() || model.trim() != model)
-    {
-        return Err(DbError::Conflict(
-            "cron agent_config.model must be a non-empty trimmed model key".into(),
-        ));
-    }
-
-    if agent_type == "nomi" {
-        if object.contains_key("backend") {
-            return Err(DbError::Conflict(
-                "cron Nomi agent_config.backend is forbidden; use provider_id".into(),
-            ));
-        }
-        match (
-            object.get("provider_id").and_then(Value::as_str),
-            object.get("model").and_then(Value::as_str),
-        ) {
-            (None, None) if !enabled => {}
-            (Some(provider_id), Some(_)) => {
-                nomifun_common::ProviderId::parse(provider_id).map_err(|error| {
-                    DbError::Conflict(format!(
-                        "cron Nomi agent_config.provider_id is not a canonical UUIDv7: {error}"
-                    ))
-                })?;
-            }
-            _ => return Err(DbError::Conflict(
-                "cron Nomi agent_config.provider_id and model are required together for enabled jobs".into(),
-            )),
-        }
-    } else if object.contains_key("provider_id") {
-        return Err(DbError::Conflict(
-            "cron agent_config.provider_id is only valid for Nomi jobs".into(),
-        ));
-    }
-    Ok(())
-}
-
-/// Replaces the former database trigger guard for non-installation cron
-/// callers. This is deliberately repository-owned logical validation: the
-/// caller cannot smuggle a host-agent cron row through a lower-level write
-/// path, while the schema remains trigger/FK-free.
-async fn validate_cron_authority(
+/// Database writes validate the standard immutable reference chain, never a
+/// Cron-specific Agent mirror. Missing configuration is a disabled draft.
+async fn validate_cron_binding(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user_id: &str,
     enabled: bool,
     execution_mode: &str,
     conversation_id: Option<&str>,
-    agent_type: &str,
-    agent_config: Option<&str>,
-    preset_id: Option<&str>,
-    preset_revision: Option<i64>,
-    agent_snapshot: Option<&str>,
+    binding: Option<&str>,
     skill_content: Option<&str>,
 ) -> Result<(), DbError> {
-    if let Some(agent_session_id) = conversation_id {
-        lock_owned_session_relation(tx, user_id, agent_session_id).await?;
+    if execution_mode == "new_conversation" && conversation_id.is_some() {
+        return Err(DbError::Conflict(
+            "per-occurrence Cron definitions cannot own an anchor Session".into(),
+        ));
     }
-
-    let owner: String = sqlx::query_scalar(
-        "SELECT owner_user_id FROM installation_identity \
-         WHERE singleton_key = 'installation'",
+    if let Some(session) = conversation_id {
+        lock_owned_session_relation(tx, user_id, session).await?;
+    }
+    let installation_owner: String = sqlx::query_scalar(
+        "SELECT owner_user_id FROM installation_identity WHERE singleton_key='installation'",
     )
     .fetch_one(&mut **tx)
     .await?;
-    if user_id == owner {
-        return Ok(());
-    }
-
-    let model_only_error = || {
-        DbError::Conflict("non-owner cron job must be model-only".into())
-    };
-    if agent_type != "nomi"
-        || preset_id.is_some()
-        || preset_revision.is_some()
-        || agent_snapshot.is_some()
-        || skill_content.is_some()
-    {
-        return Err(model_only_error());
-    }
-
-    let Some(agent_config) = agent_config else {
-        if enabled && (execution_mode != "existing" || conversation_id.is_none()) {
-            return Err(model_only_error());
+    if let Some(raw) = binding {
+        let binding: nomifun_agent_contracts::AgentBindingValue = serde_json::from_str(raw)
+            .map_err(|error| DbError::Conflict(format!("invalid Cron Agent binding: {error}")))?;
+        if binding
+            .typed_resource_bindings
+            .iter()
+            .any(|resource| resource.owner_id != user_id)
+        {
+            return Err(DbError::Conflict(
+                "Cron Agent resource owner mismatch".into(),
+            ));
         }
-        return Ok(());
-    };
-
-    let config: Value = serde_json::from_str(agent_config)
-        .map_err(|_| model_only_error())?;
-    let Some(object) = config.as_object() else {
-        return Err(model_only_error());
-    };
-    let allowed = [
-        "provider_id",
-        "name",
-        "model",
-        "clear_context_each_run",
-    ];
-    let unconfigured = !enabled
-        && object.get("provider_id").is_none_or(Value::is_null)
-        && object.get("model").is_none_or(Value::is_null);
-    if object.keys().any(|key| !allowed.contains(&key.as_str()))
-        || (!unconfigured && (object
-            .get("provider_id")
-            .and_then(Value::as_str)
-            .is_none_or(|value| value.trim().is_empty())
-        || object
-            .get("model")
-            .and_then(Value::as_str)
-            .is_none_or(|value| value.is_empty() || value.trim() != value)))
-        || object.get("name").and_then(Value::as_str).is_none()
-        || object
-            .get("clear_context_each_run")
-            .is_some_and(|value| !value.is_boolean())
-    {
-        return Err(model_only_error());
+        if binding.binding_version == 0 {
+            return Err(DbError::Conflict(
+                "Cron Agent binding version is invalid".into(),
+            ));
+        }
+        for resource in &binding.typed_resource_bindings {
+            let expected = nomifun_agent_contracts::resource_definition_id(resource)
+                .map_err(|error| DbError::Conflict(error.to_string()))?;
+            if expected != resource.binding_id {
+                return Err(DbError::Conflict(
+                    "Cron resource definition digest differs".into(),
+                ));
+            }
+        }
+        let revision =
+            crate::provider_cleanup::revision_artifact_tx(tx, &binding.preset_revision_ref).await?;
+        if revision.created_by.as_ref() != user_id {
+            return Err(DbError::Conflict(
+                "Cron Agent Revision owner mismatch".into(),
+            ));
+        }
+        let raw:Option<String>=sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=? AND snapshot_digest=?")
+            .bind(binding.resolved_snapshot_ref.snapshot_id.as_ref()).bind(binding.resolved_snapshot_ref.snapshot_digest.as_ref()).fetch_optional(&mut **tx).await?;
+        let snapshot: nomifun_agent_contracts::ResolvedSnapshotEnvelope = serde_json::from_str(
+            &raw.ok_or_else(|| DbError::Conflict("Cron exact Snapshot is missing".into()))?,
+        )
+        .map_err(|error| DbError::Conflict(error.to_string()))?;
+        snapshot
+            .validate()
+            .map_err(|error| DbError::Conflict(error.message))?;
+        if snapshot.content.preset_revision_ref != binding.preset_revision_ref
+            || snapshot.snapshot_ref != binding.resolved_snapshot_ref
+            || snapshot.actor.principal_kind != "user"
+            || snapshot.actor.principal_id != user_id
+        {
+            return Err(DbError::Conflict(
+                "Cron Agent immutable identity or owner differs".into(),
+            ));
+        }
+        if enabled {
+            let route = revision
+                .payload
+                .chat_route_records
+                .get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
+                .ok_or_else(|| {
+                    DbError::Conflict("Scheduled Agent has no exact Chat route".into())
+                })?;
+            let available:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers provider JOIN provider_models model ON model.provider_id=provider.provider_id WHERE provider.provider_id=? AND provider.enabled=1 AND model.model=? AND model.enabled=1)")
+                .bind(&route.primary.provider_id).bind(&route.primary.model).fetch_one(&mut **tx).await?;
+            if !available {
+                return Err(DbError::Conflict(
+                    "Select a model again: the frozen scheduled model is unavailable".into(),
+                ));
+            }
+        }
+        if !crate::cron_binding_normalization::complete_resources(&binding, &snapshot, user_id) {
+            return Err(DbError::Conflict(
+                "Cron Agent has incomplete frozen resource operation grants".into(),
+            ));
+        }
+        if user_id != installation_owner
+            && (!binding.typed_resource_bindings.is_empty() || skill_content.is_some())
+        {
+            return Err(DbError::Conflict(
+                "non-owner scheduled Agent cannot obtain host resources".into(),
+            ));
+        }
+    } else if enabled && !(execution_mode == "existing" && conversation_id.is_some()) {
+        return Err(DbError::Conflict(
+            "enabled Cron job requires a canonical Agent binding or bound Session".into(),
+        ));
     }
     Ok(())
 }
@@ -354,47 +263,6 @@ async fn ensure_session_relation_available(
     Ok(())
 }
 
-fn nomi_provider_id(agent_type: &str, agent_config: Option<&str>) -> Result<Option<String>, DbError> {
-    if agent_type != "nomi" {
-        return Ok(None);
-    }
-    let Some(agent_config) = agent_config else {
-        return Ok(None);
-    };
-    let config: Value = serde_json::from_str(agent_config)
-        .map_err(|error| DbError::Conflict(format!("invalid cron agent_config JSON: {error}")))?;
-    let Some(provider_id) = config.get("provider_id") else {
-        return Ok(None);
-    };
-    if provider_id.is_null() {
-        return Ok(None);
-    }
-    let provider_id = provider_id.as_str().ok_or_else(|| {
-        DbError::Conflict("cron Nomi agent_config.provider_id must be a string".into())
-    })?;
-    let provider_id = nomifun_common::ProviderId::parse(provider_id).map_err(|error| {
-        DbError::Conflict(format!(
-            "cron Nomi agent_config.provider_id is not a canonical UUIDv7: {error}"
-        ))
-    })?;
-    Ok(Some(provider_id.into_string()))
-}
-
-async fn lock_nomi_provider(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    agent_type: &str,
-    agent_config: Option<&str>,
-) -> Result<(), DbError> {
-    let Some(provider_id) = nomi_provider_id(agent_type, agent_config)? else {
-        return Ok(());
-    };
-    let config: Value = serde_json::from_str(agent_config.expect("selected Nomi provider has a config"))
-        .map_err(|error| DbError::Conflict(format!("invalid cron agent_config JSON: {error}")))?;
-    crate::provider_cleanup::lock_provider_model_choice_tx(
-        tx, &provider_id, config.get("model").and_then(Value::as_str),
-    ).await
-}
-
 #[async_trait::async_trait]
 impl ICronRepository for SqliteCronRepository {
     async fn insert(&self, row: &CronJobRow) -> Result<(), DbError> {
@@ -411,11 +279,6 @@ impl ICronRepository for SqliteCronRepository {
         cron_job_id: &str,
         params: &UpdateCronJobParams,
     ) -> Result<(), DbError> {
-        if params.max_retries.is_some_and(|value| value < 0) {
-            return Err(DbError::Conflict(
-                "cron job max_retries must be non-negative".into(),
-            ));
-        }
         let mut tx = self.pool.begin().await?;
         let existing = sqlx::query_as::<_, CronJobRow>(
             "SELECT * FROM cron_jobs WHERE cron_job_id = ? AND user_id = ?",
@@ -487,13 +350,16 @@ impl ICronRepository for SqliteCronRepository {
         push_opt_str!(schedule_description);
         push_str!(payload_message);
         push_str!(execution_mode);
-        push_opt_str!(agent_config);
-        push_opt_str!(preset_id);
-        push_opt_i64!(preset_revision);
-        push_opt_str!(agent_snapshot);
+        push_opt_str!(agent_selection);
+        push_opt_str!(model_selection);
+        push_opt_str!(agent_binding);
+        push_opt_str!(configuration_error);
+        if let Some(value) = params.clear_context_each_run {
+            set_parts.push("clear_context_each_run = ?".into());
+            binds.push(BindValue::Bool(value));
+        }
         push_opt_str!(conversation_id);
         push_opt_str!(conversation_title);
-        push_str!(agent_type);
         push_opt_str!(skill_content);
         push_opt_str!(description);
         push_opt_i64!(next_run_at);
@@ -501,66 +367,38 @@ impl ICronRepository for SqliteCronRepository {
         push_opt_str!(last_status);
         push_opt_str!(last_error);
         push_i64!(run_count);
-        push_i64!(retry_count);
-        push_i64!(max_retries);
 
         if set_parts.is_empty() {
             tx.commit().await?;
             return Ok(());
         }
 
-        let final_agent_config = match params.agent_config.as_ref() {
-            Some(value) => value.as_deref(),
-            None => existing.agent_config.as_deref(),
-        };
-        let final_preset_id = match params.preset_id.as_ref() {
-            Some(value) => value.as_deref(),
-            None => existing.preset_id.as_deref(),
-        };
-        let final_preset_revision = match params.preset_revision {
-            Some(value) => value,
-            None => existing.preset_revision,
-        };
-        let final_agent_snapshot = match params.agent_snapshot.as_ref() {
-            Some(value) => value.as_deref(),
-            None => existing.agent_snapshot.as_deref(),
-        };
-        let final_skill_content = match params.skill_content.as_ref() {
-            Some(value) => value.as_deref(),
-            None => existing.skill_content.as_deref(),
-        };
-        let final_conversation_id = match params.conversation_id.as_ref() {
-            Some(value) => value.as_deref(),
-            None => existing.conversation_id.as_deref(),
-        };
-        let final_execution_mode = params
-            .execution_mode
-            .as_deref()
-            .unwrap_or(&existing.execution_mode);
-        let final_agent_type = params.agent_type.as_deref().unwrap_or(&existing.agent_type);
-        let final_enabled = params.enabled.unwrap_or(existing.enabled);
-        validate_cron_agent_config_shape(final_agent_type, final_agent_config, final_enabled)?;
-        validate_cron_authority(
+        let final_binding = params
+            .agent_binding
+            .as_ref()
+            .map(|value| value.as_deref())
+            .unwrap_or(existing.agent_binding.as_deref());
+        let final_session = params
+            .conversation_id
+            .as_ref()
+            .map(|value| value.as_deref())
+            .unwrap_or(existing.conversation_id.as_deref());
+        let final_skill = params
+            .skill_content
+            .as_ref()
+            .map(|value| value.as_deref())
+            .unwrap_or(existing.skill_content.as_deref());
+        validate_cron_binding(
             &mut tx,
             user_id,
-            final_enabled,
-            final_execution_mode,
-            final_conversation_id,
-            final_agent_type,
-            final_agent_config,
-            final_preset_id,
-            final_preset_revision,
-            final_agent_snapshot,
-            final_skill_content,
-        )
-        .await?;
-        lock_nomi_provider(&mut tx, final_agent_type, final_agent_config).await?;
-        validate_and_lock_agent_preset_lineage(
-            &mut tx,
-            final_preset_id,
-            final_preset_revision,
-            final_agent_snapshot,
-            "Cron job",
+            params.enabled.unwrap_or(existing.enabled),
+            params
+                .execution_mode
+                .as_deref()
+                .unwrap_or(&existing.execution_mode),
+            final_session,
+            final_binding,
+            final_skill,
         )
         .await?;
 
@@ -609,10 +447,10 @@ impl ICronRepository for SqliteCronRepository {
              SET updated_at = updated_at \
              WHERE cron_job_id = ? AND user_id = ?",
         )
-            .bind(cron_job_id)
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
+        .bind(cron_job_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
         if locked.rows_affected() == 0 {
             return Err(DbError::NotFound(format!("cron job '{cron_job_id}'")));
         }
@@ -636,10 +474,6 @@ impl ICronRepository for SqliteCronRepository {
             .bind(cron_job_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM cron_job_runs WHERE cron_job_id = ?")
-            .bind(cron_job_id)
-            .execute(&mut *tx)
-            .await?;
 
         sqlx::query("DELETE FROM cron_jobs WHERE cron_job_id = ? AND user_id = ?")
             .bind(cron_job_id)
@@ -658,10 +492,10 @@ impl ICronRepository for SqliteCronRepository {
         let row = sqlx::query_as::<_, CronJobRow>(
             "SELECT * FROM cron_jobs WHERE cron_job_id = ? AND user_id = ?",
         )
-            .bind(cron_job_id)
-            .bind(user_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        .bind(cron_job_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row)
     }
 
@@ -679,8 +513,7 @@ impl ICronRepository for SqliteCronRepository {
         &self,
         cron_job_id: &str,
     ) -> Result<Option<CronJobRow>, DbError> {
-        let row =
-            sqlx::query_as::<_, CronJobRow>("SELECT * FROM cron_jobs WHERE cron_job_id = ?")
+        let row = sqlx::query_as::<_, CronJobRow>("SELECT * FROM cron_jobs WHERE cron_job_id = ?")
             .bind(cron_job_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -770,21 +603,8 @@ impl ICronRepository for SqliteCronRepository {
         .bind(conversation_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "DELETE FROM cron_job_runs \
-             WHERE cron_job_id IN (\
-                 SELECT cron_job_id FROM cron_jobs \
-                 WHERE user_id = ? AND conversation_id = ?\
-             )",
-        )
-        .bind(user_id)
-        .bind(conversation_id)
-        .execute(&mut *tx)
-        .await?;
 
-        let result = sqlx::query(
-            "DELETE FROM cron_jobs WHERE user_id = ? AND conversation_id = ?",
-        )
+        let result = sqlx::query("DELETE FROM cron_jobs WHERE user_id = ? AND conversation_id = ?")
             .bind(user_id)
             .bind(conversation_id)
             .execute(&mut *tx)
@@ -798,71 +618,14 @@ impl ICronRepository for SqliteCronRepository {
         Ok(job_ids)
     }
 
-    async fn insert_run_pruned(
-        &self,
-        user_id: &str,
-        row: &CronJobRunRow,
-    ) -> Result<(), DbError> {
-        let mut tx = self.pool.begin().await?;
-
-        let owned = sqlx::query(
-            "UPDATE cron_jobs SET updated_at = updated_at WHERE cron_job_id = ? AND user_id = ?",
-        )
-        .bind(&row.cron_job_id)
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-        if owned.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!("cron job '{}'", row.cron_job_id)));
-        }
-
-        sqlx::query(
-            "INSERT INTO cron_job_runs \
-                (cron_job_run_id, cron_job_id, executed_at_ms, status, created_at_ms) \
-             VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(&row.cron_job_run_id)
-        .bind(&row.cron_job_id)
-        .bind(row.executed_at_ms)
-        .bind(&row.status)
-        .bind(row.created_at_ms)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "DELETE FROM cron_job_runs \
-             WHERE cron_job_id = ? \
-             AND id NOT IN (\
-                 SELECT id FROM cron_job_runs \
-                 WHERE cron_job_id = ? \
-                 ORDER BY executed_at_ms DESC, created_at_ms DESC, id DESC \
-                 LIMIT ?\
-             )",
-        )
-        .bind(&row.cron_job_id)
-        .bind(&row.cron_job_id)
-        .bind(CRON_RUN_HISTORY_LIMIT)
-        .execute(&mut *tx)
-        .await?;
-
-        tx.commit().await?;
-        Ok(())
-    }
-
     async fn list_runs_by_job(
         &self,
         user_id: &str,
         cron_job_id: &str,
         limit: i64,
-    ) -> Result<Vec<CronJobRunRow>, DbError> {
+    ) -> Result<Vec<CronRunHistoryRow>, DbError> {
         let limit = limit.clamp(0, CRON_RUN_HISTORY_LIMIT);
-        let rows = sqlx::query_as::<_, CronJobRunRow>(
-            "SELECT run.* FROM cron_job_runs run \
-             JOIN cron_jobs job ON job.cron_job_id = run.cron_job_id \
-             WHERE run.cron_job_id = ? AND job.user_id = ? \
-             ORDER BY run.executed_at_ms DESC, run.created_at_ms DESC, run.id DESC \
-             LIMIT ?",
-        )
+        let rows=sqlx::query_as::<_,CronRunHistoryRow>("SELECT reservation.id,reservation.cron_job_run_id,reservation.cron_job_id,reservation.settled_at_ms AS executed_at_ms,reservation.status,reservation.settled_at_ms AS created_at_ms,reservation.conversation_id,reservation.result_error,reservation.domain_failure_json FROM cron_run_reservations reservation JOIN cron_jobs job ON job.cron_job_id=reservation.cron_job_id WHERE reservation.cron_job_id=? AND job.user_id=? AND reservation.status<>'reserved' ORDER BY reservation.settled_at_ms DESC,reservation.id DESC LIMIT ?")
         .bind(cron_job_id)
         .bind(user_id)
         .bind(limit)
@@ -889,10 +652,11 @@ impl ICronRepository for SqliteCronRepository {
         }
         match params.trigger_kind.as_str() {
             "scheduled"
-                if params.schedule_revision.is_some_and(|revision| revision > 0)
+                if params
+                    .schedule_revision
+                    .is_some_and(|revision| revision > 0)
                     && params.planned_at_ms.is_some() => {}
-            "run_now"
-                if params.schedule_revision.is_none() && params.planned_at_ms.is_none() => {}
+            "run_now" if params.schedule_revision.is_none() && params.planned_at_ms.is_none() => {}
             _ => {
                 return Err(DbError::Conflict(
                     "cron run trigger fields are inconsistent".to_owned(),
@@ -900,6 +664,21 @@ impl ICronRepository for SqliteCronRepository {
             }
         }
 
+        if params.trigger_kind == "scheduled"
+            && params
+                .next_run_at
+                .zip(params.planned_at_ms)
+                .is_some_and(|(next, planned)| next <= planned)
+        {
+            return Err(DbError::Conflict(
+                "scheduled successor must advance beyond the claimed occurrence".into(),
+            ));
+        }
+        if params.trigger_kind == "scheduled" && params.disable == params.next_run_at.is_some() {
+            return Err(DbError::Conflict(
+                "scheduled reservation requires exactly a successor or disable".into(),
+            ));
+        }
         let mut tx = self.pool.begin().await?;
         // The first statement is a writer and is also the authority proof.
         // For scheduled callbacks the immutable reservation can only be
@@ -1033,8 +812,67 @@ impl ICronRepository for SqliteCronRepository {
                 "cron run idempotency key was reused with a different request".to_owned(),
             ));
         }
+        if params.trigger_kind == "scheduled" {
+            sqlx::query("UPDATE cron_jobs SET next_run_at=?, enabled=CASE WHEN ? THEN 0 ELSE enabled END, updated_at=? WHERE cron_job_id=? AND user_id=? AND enabled=1 AND schedule_revision=? AND next_run_at=?")
+                .bind(params.next_run_at).bind(params.disable).bind(params.now).bind(&params.cron_job_id)
+                .bind(user_id).bind(params.schedule_revision).bind(params.planned_at_ms).execute(&mut *tx).await?;
+        }
         tx.commit().await?;
         Ok((row, inserted))
+    }
+
+    async fn attach_continuing_session(
+        &self,
+        user_id: &str,
+        run_id: &str,
+        session: &str,
+        now: i64,
+    ) -> Result<CronRunReservationRow, DbError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE cron_run_reservations SET updated_at_ms=updated_at_ms WHERE cron_job_run_id=?",
+        )
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
+        let run: CronRunReservationRow=sqlx::query_as("SELECT reservation.* FROM cron_run_reservations reservation JOIN cron_jobs job ON job.cron_job_id=reservation.cron_job_id WHERE reservation.cron_job_run_id=? AND job.user_id=? AND job.execution_mode='existing'")
+            .bind(run_id).bind(user_id).fetch_optional(&mut *tx).await?.ok_or_else(||DbError::NotFound("continuing Cron reservation".into()))?;
+        if run.status != "reserved"
+            || run.cancel_requested_at_ms.is_some()
+            || run
+                .conversation_id
+                .as_deref()
+                .is_some_and(|value| value != session)
+        {
+            return Err(DbError::Conflict(
+                "continuing Cron reservation cannot acquire this Session".into(),
+            ));
+        }
+        lock_owned_session_relation(&mut tx, user_id, session).await?;
+        ensure_session_relation_available(&mut tx, user_id, session, Some(&run.cron_job_id))
+            .await?;
+        let current: Option<String> = sqlx::query_scalar(
+            "SELECT conversation_id FROM cron_jobs WHERE cron_job_id=? AND user_id=?",
+        )
+        .bind(&run.cron_job_id)
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if current.as_deref().is_some_and(|value| value != session) {
+            return Err(DbError::Conflict(
+                "continuing Cron already owns another Session".into(),
+            ));
+        }
+        sqlx::query("UPDATE cron_run_reservations SET conversation_id=COALESCE(conversation_id,?),updated_at_ms=? WHERE cron_job_run_id=?")
+            .bind(session).bind(now).bind(run_id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE cron_jobs SET conversation_id=COALESCE(conversation_id,?),agent_binding=NULL,agent_selection=NULL,model_selection=NULL,updated_at=? WHERE cron_job_id=? AND user_id=?")
+            .bind(session).bind(now).bind(&run.cron_job_id).bind(user_id).execute(&mut *tx).await?;
+        let result = sqlx::query_as("SELECT * FROM cron_run_reservations WHERE cron_job_run_id=?")
+            .bind(run_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(result)
     }
 
     async fn attach_run_conversation(
@@ -1075,7 +913,9 @@ impl ICronRepository for SqliteCronRepository {
             ));
         }
         if current.cancel_requested_at_ms.is_some() && current.conversation_id.is_none() {
-            return Err(DbError::Conflict("cancelled cron run cannot acquire a conversation".into()));
+            return Err(DbError::Conflict(
+                "cancelled cron run cannot acquire a conversation".into(),
+            ));
         }
 
         sqlx::query(
@@ -1098,11 +938,18 @@ impl ICronRepository for SqliteCronRepository {
         Ok(row)
     }
 
-    async fn get_run_reservation(&self, user_id: &str, cron_job_id: &str, cron_job_run_id: &str)
-        -> Result<Option<CronRunReservationRow>, DbError> {
-        UserId::parse(user_id).map_err(|error| DbError::Conflict(format!("invalid cron owner id: {error}")))?;
-        CronJobId::parse(cron_job_id).map_err(|error| DbError::Conflict(format!("invalid cron job id: {error}")))?;
-        CronJobRunId::parse(cron_job_run_id).map_err(|error| DbError::Conflict(format!("invalid cron run id: {error}")))?;
+    async fn get_run_reservation(
+        &self,
+        user_id: &str,
+        cron_job_id: &str,
+        cron_job_run_id: &str,
+    ) -> Result<Option<CronRunReservationRow>, DbError> {
+        UserId::parse(user_id)
+            .map_err(|error| DbError::Conflict(format!("invalid cron owner id: {error}")))?;
+        CronJobId::parse(cron_job_id)
+            .map_err(|error| DbError::Conflict(format!("invalid cron job id: {error}")))?;
+        CronJobRunId::parse(cron_job_run_id)
+            .map_err(|error| DbError::Conflict(format!("invalid cron run id: {error}")))?;
         Ok(sqlx::query_as::<_, CronRunReservationRow>(
             "SELECT reservation.* FROM cron_run_reservations reservation \
              LEFT JOIN cron_jobs job ON job.cron_job_id=reservation.cron_job_id \
@@ -1112,11 +959,19 @@ impl ICronRepository for SqliteCronRepository {
             .bind(user_id).bind(user_id).bind(cron_job_id).bind(cron_job_run_id).fetch_optional(&self.pool).await?)
     }
 
-    async fn request_run_cancellation(&self, user_id: &str, cron_job_id: &str, cron_job_run_id: &str, now: i64)
-        -> Result<CronRunReservationRow, DbError> {
-        UserId::parse(user_id).map_err(|error| DbError::Conflict(format!("invalid cron owner id: {error}")))?;
-        CronJobId::parse(cron_job_id).map_err(|error| DbError::Conflict(format!("invalid cron job id: {error}")))?;
-        CronJobRunId::parse(cron_job_run_id).map_err(|error| DbError::Conflict(format!("invalid cron run id: {error}")))?;
+    async fn request_run_cancellation(
+        &self,
+        user_id: &str,
+        cron_job_id: &str,
+        cron_job_run_id: &str,
+        now: i64,
+    ) -> Result<CronRunReservationRow, DbError> {
+        UserId::parse(user_id)
+            .map_err(|error| DbError::Conflict(format!("invalid cron owner id: {error}")))?;
+        CronJobId::parse(cron_job_id)
+            .map_err(|error| DbError::Conflict(format!("invalid cron job id: {error}")))?;
+        CronJobRunId::parse(cron_job_run_id)
+            .map_err(|error| DbError::Conflict(format!("invalid cron run id: {error}")))?;
         let mut tx = self.pool.begin().await?;
         // Acquire the writer before reading: attachment/terminalization and
         // cancellation must have one SQLite winner even across processes.
@@ -1139,7 +994,10 @@ impl ICronRepository for SqliteCronRepository {
         Ok(row)
     }
 
-    async fn attached_run_owner_for_scheduler(&self, cron_job_run_id:&str)->Result<Option<String>,DbError> {
+    async fn attached_run_owner_for_scheduler(
+        &self,
+        cron_job_run_id: &str,
+    ) -> Result<Option<String>, DbError> {
         let owner:Option<Option<String>>=sqlx::query_scalar("SELECT CASE WHEN job.cron_job_id IS NOT NULL THEN job.user_id \
             WHEN json_extract(session.owner_ref_json,'$.principal_kind')='user' THEN json_extract(session.owner_ref_json,'$.principal_id') ELSE NULL END \
             FROM cron_run_reservations reservation LEFT JOIN cron_jobs job ON job.cron_job_id=reservation.cron_job_id \
@@ -1157,14 +1015,20 @@ impl ICronRepository for SqliteCronRepository {
             .map_err(|error| DbError::Conflict(format!("invalid cron owner id: {error}")))?;
         CronJobRunId::parse(&params.cron_job_run_id)
             .map_err(|error| DbError::Conflict(format!("invalid cron run id: {error}")))?;
-        if !matches!(params.status.as_str(), "ok" | "error" | "skipped" | "missed" | "input_required" | "cancelled") {
+        if !matches!(
+            params.status.as_str(),
+            "ok" | "error" | "skipped" | "missed" | "input_required" | "cancelled"
+        ) {
             return Err(DbError::Conflict(format!(
                 "invalid cron run terminal status '{}'",
                 params.status
             )));
         }
         if let Some(last_status) = params.last_status.as_deref()
-            && !matches!(last_status, "ok" | "error" | "skipped" | "missed" | "input_required" | "cancelled")
+            && !matches!(
+                last_status,
+                "ok" | "error" | "skipped" | "missed" | "input_required" | "cancelled"
+            )
         {
             return Err(DbError::Conflict(format!(
                 "invalid cron job projected status '{last_status}'"
@@ -1173,11 +1037,6 @@ impl ICronRepository for SqliteCronRepository {
         if let Some(conversation_id) = params.conversation_id.as_deref() {
             ConversationId::parse(conversation_id)
                 .map_err(|error| DbError::Conflict(format!("invalid conversation id: {error}")))?;
-        }
-        if params.bind_job_conversation_if_unbound && params.conversation_id.is_none() {
-            return Err(DbError::Conflict(
-                "Cron job conversation binding requires an exact run conversation".to_owned(),
-            ));
         }
 
         let mut tx = self.pool.begin().await?;
@@ -1203,7 +1062,8 @@ impl ICronRepository for SqliteCronRepository {
                     .is_none_or(|conversation_id| {
                         current.conversation_id.as_ref() == Some(conversation_id)
                     })
-                && current.result_error == params.result_error;
+                && current.result_error == params.result_error
+                && current.domain_failure_json == params.domain_failure_json;
             if !same_terminal_outcome {
                 return Err(DbError::Conflict(
                     "cron run was already finalized with a different durable outcome".to_owned(),
@@ -1224,7 +1084,11 @@ impl ICronRepository for SqliteCronRepository {
                   AND turn.state IN ('completed','failed','cancelled'))")
                 .bind(&current.conversation_id).bind(user_id)
                 .bind(&current.cron_job_run_id).fetch_one(&mut *tx).await?;
-            if !terminal { return Err(DbError::Conflict("cancelled Cron admission awaits its exact cancellation settlement".into())); }
+            if !terminal {
+                return Err(DbError::Conflict(
+                    "cancelled Cron admission awaits its exact cancellation settlement".into(),
+                ));
+            }
         }
         if let (Some(existing), Some(requested)) = (
             current.conversation_id.as_deref(),
@@ -1235,42 +1099,11 @@ impl ICronRepository for SqliteCronRepository {
                 "cron run finalization targets a different conversation".to_owned(),
             ));
         }
-        if params.bind_job_conversation_if_unbound {
-            let requested_conversation_id = params
-                .conversation_id
-                .as_deref()
-                .expect("validated exact run conversation");
-            let existing_job_conversation: Option<String> = sqlx::query_scalar(
-                "SELECT conversation_id FROM cron_jobs \
-                 WHERE cron_job_id = ? AND user_id = ?",
-            )
-            .bind(&current.cron_job_id)
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            if let (Some(existing), Some(requested)) = (
-                existing_job_conversation.as_deref(),
-                params.conversation_id.as_deref(),
-            ) && existing != requested
-            {
-                return Err(DbError::Conflict(
-                    "cron job is already bound to a different conversation".to_owned(),
-                ));
-            }
-            lock_owned_session_relation(&mut tx, user_id, requested_conversation_id).await?;
-            ensure_session_relation_available(
-                &mut tx,
-                user_id,
-                requested_conversation_id,
-                Some(&current.cron_job_id),
-            )
-            .await?;
-        }
 
         let settled = sqlx::query(
             "UPDATE cron_run_reservations \
              SET status = ?, conversation_id = COALESCE(conversation_id, ?), \
-                 result_error = ?, updated_at_ms = ?, settled_at_ms = ?, \
+                 result_error = ?, domain_failure_json = ?, updated_at_ms = ?, settled_at_ms = ?, \
                  job_projection_state = 'applied', job_projected_at_ms = ? \
              WHERE cron_job_run_id = ? AND status = 'reserved' \
                AND job_projection_state = 'pending'",
@@ -1278,6 +1111,7 @@ impl ICronRepository for SqliteCronRepository {
         .bind(&params.status)
         .bind(&params.conversation_id)
         .bind(&params.result_error)
+        .bind(&params.domain_failure_json)
         .bind(params.now)
         .bind(params.now)
         .bind(params.now)
@@ -1290,8 +1124,11 @@ impl ICronRepository for SqliteCronRepository {
             tx.rollback().await?;
             return Ok(FinalizeCronRunOutcome::AlreadyApplied);
         }
-        let job_exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cron_jobs WHERE cron_job_id=?)")
-            .bind(&current.cron_job_id).fetch_one(&mut *tx).await?;
+        let job_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cron_jobs WHERE cron_job_id=?)")
+                .bind(&current.cron_job_id)
+                .fetch_one(&mut *tx)
+                .await?;
         if !job_exists {
             // Only the exact attached Session supplied ownership above. No
             // deleted job is recreated and no later schedule is projected.
@@ -1307,11 +1144,9 @@ impl ICronRepository for SqliteCronRepository {
             "UPDATE cron_jobs \
              SET last_run_at = CASE WHEN ? THEN ? ELSE last_run_at END, \
                  last_status = CASE WHEN ? THEN ? ELSE last_status END, \
+                 last_run_id = CASE WHEN ? THEN ? ELSE last_run_id END, \
                  last_error = CASE WHEN ? THEN ? ELSE last_error END, \
-                 retry_count = CASE WHEN ? THEN 0 ELSE retry_count END, \
                  run_count = run_count + ?, \
-                 conversation_id = CASE WHEN ? \
-                     THEN COALESCE(conversation_id, ?) ELSE conversation_id END, \
                  updated_at = ? \
              WHERE cron_job_id = ? AND user_id = ?",
         )
@@ -1319,12 +1154,11 @@ impl ICronRepository for SqliteCronRepository {
         .bind(params.last_run_at)
         .bind(project_last_status)
         .bind(&params.last_status)
+        .bind(project_last_status || project_last_run_at)
+        .bind(&params.cron_job_run_id)
         .bind(project_last_error)
         .bind(last_error)
-        .bind(params.reset_retry_count)
         .bind(i64::from(params.increment_run_count))
-        .bind(params.bind_job_conversation_if_unbound)
-        .bind(&params.conversation_id)
         .bind(params.now)
         .bind(&current.cron_job_id)
         .bind(user_id)
@@ -1338,110 +1172,8 @@ impl ICronRepository for SqliteCronRepository {
             )));
         }
 
-        sqlx::query(
-            "INSERT INTO cron_job_runs \
-                (cron_job_run_id, cron_job_id, executed_at_ms, status, created_at_ms) \
-             VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(&params.cron_job_run_id)
-        .bind(&current.cron_job_id)
-        .bind(params.now)
-        .bind(&params.status)
-        .bind(params.now)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "DELETE FROM cron_job_runs \
-             WHERE cron_job_id = ? \
-               AND id NOT IN (\
-                   SELECT id FROM cron_job_runs \
-                   WHERE cron_job_id = ? \
-                   ORDER BY executed_at_ms DESC, created_at_ms DESC, id DESC \
-                   LIMIT ?\
-               )",
-        )
-        .bind(&current.cron_job_id)
-        .bind(&current.cron_job_id)
-        .bind(CRON_RUN_HISTORY_LIMIT)
-        .execute(&mut *tx)
-        .await?;
         tx.commit().await?;
         Ok(FinalizeCronRunOutcome::Applied)
-    }
-
-    async fn advance_scheduled_occurrence(
-        &self,
-        user_id: &str,
-        params: &AdvanceCronOccurrenceParams,
-    ) -> Result<Option<CronJobRow>, DbError> {
-        UserId::parse(user_id)
-            .map_err(|error| DbError::Conflict(format!("invalid cron owner id: {error}")))?;
-        CronJobId::parse(&params.cron_job_id)
-            .map_err(|error| DbError::Conflict(format!("invalid cron job id: {error}")))?;
-        CronJobRunId::parse(&params.cron_job_run_id)
-            .map_err(|error| DbError::Conflict(format!("invalid cron run id: {error}")))?;
-        if params.expected_schedule_revision <= 0 {
-            return Err(DbError::Conflict(
-                "cron occurrence schedule revision must be positive".to_owned(),
-            ));
-        }
-        if params.disable == params.next_run_at.is_some() {
-            return Err(DbError::Conflict(
-                "disabled cron occurrence advancement must clear next_run_at; \
-                 enabled advancement must provide next_run_at"
-                    .to_owned(),
-            ));
-        }
-
-        let mut tx = self.pool.begin().await?;
-        // This single writer statement is both the terminal-reservation proof
-        // and the schedule-generation CAS. In particular, an old completion
-        // cannot disable an updated At job, overwrite a replacement
-        // `next_run_at`, or authorize a stale process-local timer.
-        let advanced = sqlx::query(
-            "UPDATE cron_jobs \
-             SET enabled = CASE WHEN ? THEN 0 ELSE enabled END, \
-                 next_run_at = ?, updated_at = ? \
-             WHERE cron_job_id = ? AND user_id = ? AND enabled = 1 \
-               AND schedule_revision = ? AND next_run_at = ? \
-               AND EXISTS (\
-                   SELECT 1 FROM cron_run_reservations reservation \
-                   WHERE reservation.cron_job_run_id = ? \
-                     AND reservation.cron_job_id = cron_jobs.cron_job_id \
-                     AND reservation.trigger_kind = 'scheduled' \
-                     AND reservation.schedule_revision = cron_jobs.schedule_revision \
-                     AND reservation.planned_at_ms = cron_jobs.next_run_at \
-                     AND reservation.status <> 'reserved'\
-               )",
-        )
-        .bind(params.disable)
-        .bind(params.next_run_at)
-        .bind(params.now)
-        .bind(&params.cron_job_id)
-        .bind(user_id)
-        .bind(params.expected_schedule_revision)
-        .bind(params.expected_planned_at_ms)
-        .bind(&params.cron_job_run_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-            == 1;
-
-        let row = if advanced {
-            Some(
-                sqlx::query_as::<_, CronJobRow>(
-                    "SELECT * FROM cron_jobs WHERE cron_job_id = ? AND user_id = ?",
-                )
-                .bind(&params.cron_job_id)
-                .bind(user_id)
-                .fetch_one(&mut *tx)
-                .await?,
-            )
-        } else {
-            None
-        };
-        tx.commit().await?;
-        Ok(row)
     }
 
     async fn list_reserved_runs_for_scheduler(
@@ -1484,21 +1216,10 @@ impl ICronRepository for SqliteCronRepository {
 mod tests {
     use super::*;
     use crate::init_database_memory;
-    use crate::models::CronJobRunRow;
-
-    fn encrypted_bearer_credentials() -> String {
-        nomifun_common::encrypt_string(
-            r#"{"api_keys":["test-only"]}"#,
-            &[0x42; 32],
-        )
-        .expect("typed test credentials should encrypt")
-    }
 
     const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
     const OTHER_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678902";
     const MISSING_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678903";
-    const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678904";
-    const MISSING_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678905";
     const CANONICAL_SESSION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678906";
     const DELETED_CANONICAL_SESSION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678907";
     const MISSING_CRON_JOB_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678999";
@@ -1530,13 +1251,15 @@ mod tests {
             schedule_description: Some("Every minute".into()),
             payload_message: "ping".into(),
             execution_mode: "existing".into(),
-            agent_config: None,
-            preset_id: None,
-            preset_revision: None,
-            agent_snapshot: None,
+            agent_selection: None,
+            model_selection: None,
+            agent_binding: None,
+            clear_context_each_run: false,
+            configuration_error: None,
+
             conversation_id: Some(CONVERSATION_ID.into()),
             conversation_title: Some("Test Conv".into()),
-            agent_type: "acp".into(),
+
             created_by: "user".into(),
             skill_content: None,
             description: None,
@@ -1544,22 +1267,10 @@ mod tests {
             updated_at: now,
             next_run_at: Some(now + 60_000),
             last_run_at: None,
+            last_run_id: None,
             last_status: None,
             last_error: None,
             run_count: 0,
-            retry_count: 0,
-            max_retries: 3,
-        }
-    }
-
-    fn make_run(cron_job_id: &str, index: i64) -> CronJobRunRow {
-        CronJobRunRow {
-            id: 0,
-            cron_job_run_id: nomifun_common::CronJobRunId::new().into_string(),
-            cron_job_id: cron_job_id.to_owned(),
-            executed_at_ms: 1_000 + index,
-            status: if index % 2 == 0 { "ok" } else { "error" }.to_owned(),
-            created_at_ms: 2_000 + index,
         }
     }
 
@@ -1651,13 +1362,7 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("owner mismatch"));
 
-        insert_canonical_session(
-            &db,
-            DELETED_CANONICAL_SESSION_ID,
-            &owner,
-            "deleted",
-        )
-        .await;
+        insert_canonical_session(&db, DELETED_CANONICAL_SESSION_ID, &owner, "deleted").await;
         let mut deleted = make_row(&owner);
         deleted.conversation_id = Some(DELETED_CANONICAL_SESSION_ID.into());
         let error = repo
@@ -1667,303 +1372,229 @@ mod tests {
         assert!(error.to_string().contains("not live"));
     }
 
-    async fn insert_provider(db: &crate::Database, provider_id: &str) {
-        let credentials_encrypted = encrypted_bearer_credentials();
-        sqlx::query(
-            "INSERT INTO providers (\
-                provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
-                created_at, updated_at\
-             ) VALUES (?, 'openai', ?, 'https://example.invalid', 'bearer', ?, \
-                        1, 1, 1)",
-        )
-        .bind(provider_id)
-        .bind(provider_id)
-        .bind(credentials_encrypted)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO provider_models (provider_id,model,created_at,updated_at) VALUES (?,'model',1,1)")
-            .bind(provider_id).execute(db.pool()).await.unwrap();
-    }
-
     #[tokio::test]
-    async fn nomi_insert_rejects_missing_or_noncanonical_provider() {
-        let (repo, _db, owner) = setup().await;
-
-        let mut missing = make_row(&owner);
-        missing.agent_type = "nomi".into();
-        missing.agent_config = Some(
-            serde_json::json!({
-                "provider_id": MISSING_PROVIDER_ID,
-                "name": "Nomi",
-                "model": "model"
-            })
-            .to_string(),
-        );
-        let error = repo.insert(&missing).await.unwrap_err();
-        assert!(
-            matches!(error, DbError::Conflict(ref message) if message.contains("selected provider no longer exists")),
-            "unexpected missing-provider error: {error:?}"
-        );
-
-        let mut noncanonical = make_row(&owner);
-        noncanonical.agent_type = "nomi".into();
-        noncanonical.agent_config = Some(
-            serde_json::json!({
-                "provider_id": format!("provider_{PROVIDER_ID}"),
-                "name": "Nomi",
-                "model": "model"
-            })
-            .to_string(),
-        );
-        let error = repo.insert(&noncanonical).await.unwrap_err();
-        assert!(
-            matches!(error, DbError::Conflict(ref message) if message.contains("not a canonical UUIDv7")),
-            "unexpected noncanonical-provider error: {error:?}"
-        );
-
-        assert!(repo.list_all(&owner).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn nomi_update_rejects_missing_provider_without_partial_write() {
-        let (repo, _db, owner) = setup().await;
-        let row = make_row(&owner);
-        let cron_job_id = row.cron_job_id.clone();
-        repo.insert(&row).await.unwrap();
-
-        let error = repo
-            .update(
-                &owner,
-                &cron_job_id,
-                &UpdateCronJobParams {
-                    name: Some("must roll back".into()),
-                    agent_type: Some("nomi".into()),
-                    agent_config: Some(Some(
-                        serde_json::json!({
-                            "provider_id": MISSING_PROVIDER_ID,
-                            "name": "Nomi",
-                            "model": "model"
-                        })
-                        .to_string(),
-                    )),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(error, DbError::Conflict(ref message) if message.contains("selected provider no longer exists")),
-            "unexpected update error: {error:?}"
-        );
-
-        let row = repo
-            .get_by_cron_job_id(&owner, &cron_job_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.name, "Test Job");
-        assert_eq!(row.agent_type, "acp");
-        assert!(row.agent_config.is_none());
-    }
-
-    #[tokio::test]
-    async fn provider_delete_clears_the_model_and_disables_nomi_cron_without_deleting_the_job() {
-        use crate::{IProviderRepository, SqliteProviderRepository};
-
-        let (repo, db, owner) = setup().await;
-        insert_provider(&db, PROVIDER_ID).await;
-        let mut row = make_row(&owner);
-        row.agent_type = "nomi".into();
-        row.agent_config = Some(
-            serde_json::json!({
-                "provider_id": PROVIDER_ID,
-                "name": "Nomi",
-                "model": "model"
-            })
-            .to_string(),
-        );
-        let cron_job_id = row.cron_job_id.clone();
-        repo.insert(&row).await.unwrap();
-
-        let providers = SqliteProviderRepository::new(db.pool().clone());
-        providers.delete(PROVIDER_ID).await.unwrap();
-        assert!(providers.find_by_id(PROVIDER_ID).await.unwrap().is_none());
-        let remaining = repo.get_by_cron_job_id(&owner, &cron_job_id).await.unwrap().unwrap();
-        assert!(!remaining.enabled);
-        let config: serde_json::Value = serde_json::from_str(remaining.agent_config.as_deref().unwrap()).unwrap();
-        assert!(config.get("provider_id").is_none_or(serde_json::Value::is_null));
-        assert!(config.get("model").is_none_or(serde_json::Value::is_null));
-    }
-
-    #[tokio::test]
-    async fn catalog_detached_nomi_jobs_remain_editable_without_restoring_removed_models() {
-        use crate::{CoordinatedProviderModelDelete, IProviderModelRepository, IProviderRepository,
-            SqliteProviderModelRepository, SqliteProviderRepository};
-        for whole_provider in [false, true] {
-            for secondary_user in [false, true] {
-                let (repo, db, owner) = setup().await;
-                insert_provider(&db, PROVIDER_ID).await;
-                let mut user = owner.clone();
-                if secondary_user {
-                    user = "0190f5fe-7c00-7a00-8000-000000000002".into();
-                    sqlx::query("INSERT INTO users (user_id,username,password_hash,created_at,updated_at) VALUES (?,'detached_cron','hash',1,1)")
-                        .bind(&user).execute(db.pool()).await.unwrap();
-                }
-                let selected = serde_json::json!({"name":"Nomi","provider_id":PROVIDER_ID,"model":"model"}).to_string();
-                let mut row = make_row(&user);
-                row.agent_type = "nomi".into();
-                row.execution_mode = "new_conversation".into();
-                row.conversation_id = None;
-                row.agent_config = Some(selected.clone());
-                repo.insert(&row).await.unwrap();
-                if whole_provider {
-                    SqliteProviderRepository::new(db.pool().clone()).delete(PROVIDER_ID).await.unwrap();
-                } else {
-                    SqliteProviderModelRepository::new(db.pool().clone()).delete_coordinated(&CoordinatedProviderModelDelete {
-                        provider_id: PROVIDER_ID.into(), model: "model".into(),
-                        expected_config_revision: 0, cleanup: Default::default(),
-                    }).await.unwrap();
-                }
-                repo.update(&user, &row.cron_job_id, &UpdateCronJobParams {
-                    name: Some("Still editable".into()), ..Default::default()
-                }).await.unwrap();
-                let empty_config = serde_json::json!({"name":"Edited Nomi","provider_id":null,"model":null}).to_string();
-                repo.update(&user, &row.cron_job_id, &UpdateCronJobParams {
-                    agent_config: Some(Some(empty_config.clone())), ..Default::default()
-                }).await.unwrap();
-                for params in [
-                    UpdateCronJobParams {enabled:Some(true), ..Default::default()},
-                    UpdateCronJobParams {name:Some("Must roll back".into()),agent_config:Some(Some(selected.clone())),..Default::default()},
-                    UpdateCronJobParams {agent_config:Some(Some(serde_json::json!({"name":"Nomi","provider_id":PROVIDER_ID,"model":null}).to_string())),..Default::default()},
-                ] {
-                    assert!(repo.update(&user, &row.cron_job_id, &params).await.is_err());
-                }
-                let saved = repo.get_by_cron_job_id(&user, &row.cron_job_id).await.unwrap().unwrap();
-                assert!(!saved.enabled);
-                assert_eq!(saved.name, "Still editable");
-                assert_eq!(saved.agent_config.as_deref(), Some(empty_config.as_str()));
-                assert_eq!(saved.schedule_revision, 2);
-                assert_eq!(saved.next_run_at, None);
-                assert_eq!(saved.preset_id, row.preset_id);
-                assert_eq!(saved.agent_snapshot, row.agent_snapshot);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn input_handoff_and_cancellation_settle_once_without_failure_or_a_permanent_reservation() {
+    async fn input_handoff_and_cancellation_settle_once_without_failure_or_a_permanent_reservation()
+    {
         for status in ["input_required", "cancelled"] {
             let (repo, _db, owner) = setup().await;
             let job = make_row(&owner);
             repo.insert(&job).await.unwrap();
             let run = nomifun_common::CronJobRunId::new().into_string();
-            let params = ReserveCronRunParams { cron_job_run_id: run.clone(), cron_job_id: job.cron_job_id.clone(),
-                trigger_kind: "run_now".into(), operation_key: format!("handoff:{run}"), request_fingerprint: "exact-input".into(),
-                schedule_revision: None, planned_at_ms: None, now: 1_000 };
+            let params = ReserveCronRunParams {
+                cron_job_run_id: run.clone(),
+                cron_job_id: job.cron_job_id.clone(),
+                trigger_kind: "run_now".into(),
+                operation_key: format!("handoff:{run}"),
+                request_fingerprint: "exact-input".into(),
+                schedule_revision: None,
+                planned_at_ms: None,
+                next_run_at: None,
+                disable: false,
+                now: 1_000,
+            };
             repo.reserve_run(&owner, &params).await.unwrap();
             assert!(repo.delete(&owner, &job.cron_job_id).await.is_err());
-            let terminal = FinalizeCronRunParams { cron_job_run_id: run, status: status.into(),
-                conversation_id: None, result_error: None, now: 1_001, last_run_at: Some(1_001),
-                last_status: Some(status.into()), last_error: Some(None), increment_run_count: true,
-                reset_retry_count: true, bind_job_conversation_if_unbound: false };
-            assert_eq!(repo.finalize_run_with_job_projection(&owner, &terminal).await.unwrap(), FinalizeCronRunOutcome::Applied);
-            assert_eq!(repo.finalize_run_with_job_projection(&owner, &terminal).await.unwrap(), FinalizeCronRunOutcome::AlreadyApplied);
-            let saved = repo.get_by_cron_job_id(&owner, &job.cron_job_id).await.unwrap().unwrap();
+            let terminal = FinalizeCronRunParams {
+                cron_job_run_id: run,
+                status: status.into(),
+                conversation_id: None,
+                result_error: None,
+                domain_failure_json: None,
+                now: 1_001,
+                last_run_at: Some(1_001),
+                last_status: Some(status.into()),
+                last_error: Some(None),
+                increment_run_count: true,
+            };
+            assert_eq!(
+                repo.finalize_run_with_job_projection(&owner, &terminal)
+                    .await
+                    .unwrap(),
+                FinalizeCronRunOutcome::Applied
+            );
+            assert_eq!(
+                repo.finalize_run_with_job_projection(&owner, &terminal)
+                    .await
+                    .unwrap(),
+                FinalizeCronRunOutcome::AlreadyApplied
+            );
+            let saved = repo
+                .get_by_cron_job_id(&owner, &job.cron_job_id)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(saved.last_status.as_deref(), Some(status));
             assert_eq!(saved.last_error, None);
             assert_eq!(saved.run_count, 1);
-            assert_eq!(saved.retry_count, 0);
-            assert_eq!(repo.list_runs_by_job(&owner, &job.cron_job_id, 7).await.unwrap()[0].status, status);
-            assert!(repo.list_reserved_runs_for_scheduler().await.unwrap().is_empty());
+            assert_eq!(
+                repo.list_runs_by_job(&owner, &job.cron_job_id, 7)
+                    .await
+                    .unwrap()[0]
+                    .status,
+                status
+            );
+            assert!(
+                repo.list_reserved_runs_for_scheduler()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
             repo.delete(&owner, &job.cron_job_id).await.unwrap();
         }
     }
 
     #[tokio::test]
-    async fn exact_run_cancellation_preserves_source_and_fences_attachment_claim_resume_and_old_callbacks() {
+    async fn exact_run_cancellation_preserves_source_and_fences_attachment_claim_resume_and_old_callbacks()
+     {
         let (repo, db, owner) = setup().await;
         let job = make_row(&owner);
         repo.insert(&job).await.unwrap();
         let other = make_row(&owner);
         repo.insert(&other).await.unwrap();
         let run = CronJobRunId::new().into_string();
-        let original = ReserveCronRunParams { cron_job_run_id: run.clone(), cron_job_id: job.cron_job_id.clone(),
-            trigger_kind: "run_now".into(), operation_key: format!("cancel-source:{run}"), request_fingerprint: "immutable-source".into(),
-            schedule_revision: None, planned_at_ms: None, now: 1_000 };
+        let original = ReserveCronRunParams {
+            cron_job_run_id: run.clone(),
+            cron_job_id: job.cron_job_id.clone(),
+            trigger_kind: "run_now".into(),
+            operation_key: format!("cancel-source:{run}"),
+            request_fingerprint: "immutable-source".into(),
+            schedule_revision: None,
+            planned_at_ms: None,
+            next_run_at: None,
+            disable: false,
+            now: 1_000,
+        };
         repo.reserve_run(&owner, &original).await.unwrap();
         let foreign = CronJobRunId::new().into_string();
-        assert!(repo.request_run_cancellation(&foreign, &job.cron_job_id, &run, 1_001).await.is_err());
-        assert!(repo.request_run_cancellation(&owner, &other.cron_job_id, &run, 1_001).await.is_err());
-        assert_eq!(repo.get_run_reservation(&owner, &job.cron_job_id, &run).await.unwrap().unwrap().cancel_requested_at_ms, None);
-        let stopped = repo.request_run_cancellation(&owner, &job.cron_job_id, &run, 1_002).await.unwrap();
+        assert!(
+            repo.request_run_cancellation(&foreign, &job.cron_job_id, &run, 1_001)
+                .await
+                .is_err()
+        );
+        assert!(
+            repo.request_run_cancellation(&owner, &other.cron_job_id, &run, 1_001)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            repo.get_run_reservation(&owner, &job.cron_job_id, &run)
+                .await
+                .unwrap()
+                .unwrap()
+                .cancel_requested_at_ms,
+            None
+        );
+        let stopped = repo
+            .request_run_cancellation(&owner, &job.cron_job_id, &run, 1_002)
+            .await
+            .unwrap();
         assert_eq!(stopped.cancel_requested_at_ms, Some(1_002));
         assert_eq!(stopped.request_fingerprint, original.request_fingerprint);
         assert_eq!(stopped.operation_key, original.operation_key);
-        assert_eq!(repo.request_run_cancellation(&owner, &job.cron_job_id, &run, 1_003).await.unwrap().cancel_requested_at_ms, Some(1_002));
-        assert!(repo.attach_run_conversation(&owner, &run, CONVERSATION_ID, 1_004).await.is_err());
-        let error = FinalizeCronRunParams { cron_job_run_id: run.clone(), status: "error".into(), conversation_id: None,
-            result_error: Some("late old preparation error".into()), now: 1_005, last_run_at: Some(1_005), last_status: Some("error".into()),
-            last_error: Some(Some("late old preparation error".into())), increment_run_count: true, reset_retry_count: false,
-            bind_job_conversation_if_unbound: false };
-        assert!(repo.finalize_run_with_job_projection(&owner, &error).await.is_err());
+        assert_eq!(
+            repo.request_run_cancellation(&owner, &job.cron_job_id, &run, 1_003)
+                .await
+                .unwrap()
+                .cancel_requested_at_ms,
+            Some(1_002)
+        );
+        assert!(
+            repo.attach_run_conversation(&owner, &run, CONVERSATION_ID, 1_004)
+                .await
+                .is_err()
+        );
+        let error = FinalizeCronRunParams {
+            cron_job_run_id: run.clone(),
+            status: "error".into(),
+            conversation_id: None,
+            result_error: Some("late old preparation error".into()),
+            domain_failure_json: None,
+            now: 1_005,
+            last_run_at: Some(1_005),
+            last_status: Some("error".into()),
+            last_error: Some(Some("late old preparation error".into())),
+            increment_run_count: true,
+        };
+        assert!(
+            repo.finalize_run_with_job_projection(&owner, &error)
+                .await
+                .is_err()
+        );
         // An already-attached sibling proves the last native writer, not just
         // a Cron preflight read, consumes the same durable cancellation fact.
         let sibling = CronJobRunId::new().into_string();
-        let original_sibling = ReserveCronRunParams { cron_job_run_id: sibling.clone(), operation_key: format!("cancel-source:{sibling}"), ..original.clone() };
+        let original_sibling = ReserveCronRunParams {
+            cron_job_run_id: sibling.clone(),
+            operation_key: format!("cancel-source:{sibling}"),
+            ..original.clone()
+        };
         repo.reserve_run(&owner, &original_sibling).await.unwrap();
-        repo.attach_run_conversation(&owner, &sibling, CONVERSATION_ID, 1_006).await.unwrap();
+        repo.attach_run_conversation(&owner, &sibling, CONVERSATION_ID, 1_006)
+            .await
+            .unwrap();
         let operation = format!("turn:user:{owner}:{CONVERSATION_ID}:cron:{sibling}:turn");
         let mut tx = db.pool().begin().await.unwrap();
-        assert!(crate::native_execution_claim_admitted_tx(&mut tx,&owner,CONVERSATION_ID,&operation).await.unwrap());
+        assert!(
+            crate::native_execution_claim_admitted_tx(&mut tx, &owner, CONVERSATION_ID, &operation)
+                .await
+                .unwrap()
+        );
         tx.commit().await.unwrap();
-        repo.request_run_cancellation(&owner, &job.cron_job_id, &sibling, 1_007).await.unwrap();
+        repo.request_run_cancellation(&owner, &job.cron_job_id, &sibling, 1_007)
+            .await
+            .unwrap();
         let restarted = SqliteCronRepository::new(db.pool().clone());
-        assert_eq!(restarted.get_run_reservation(&owner, &job.cron_job_id, &sibling).await.unwrap().unwrap().cancel_requested_at_ms, Some(1_007));
+        assert_eq!(
+            restarted
+                .get_run_reservation(&owner, &job.cron_job_id, &sibling)
+                .await
+                .unwrap()
+                .unwrap()
+                .cancel_requested_at_ms,
+            Some(1_007)
+        );
         let mut tx = db.pool().begin().await.unwrap();
-        assert!(crate::native_execution_claim_admitted_tx(&mut tx,&owner,CONVERSATION_ID,&operation).await.is_err());
-        assert!(crate::native_resume_capacity_available_tx(&mut tx,&owner,CONVERSATION_ID,&operation).await.is_err());
-        assert!(!crate::native_resume_target_eligible_tx(&mut tx,&owner,CONVERSATION_ID,&operation).await.unwrap());
-        assert!(crate::native_execution_claim_admitted_tx(&mut tx,&owner,CONVERSATION_ID,"ordinary-turn").await.unwrap());
+        assert!(
+            crate::native_execution_claim_admitted_tx(&mut tx, &owner, CONVERSATION_ID, &operation)
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::native_resume_capacity_available_tx(
+                &mut tx,
+                &owner,
+                CONVERSATION_ID,
+                &operation
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            !crate::native_resume_target_eligible_tx(&mut tx, &owner, CONVERSATION_ID, &operation)
+                .await
+                .unwrap()
+        );
+        assert!(
+            crate::native_execution_claim_admitted_tx(
+                &mut tx,
+                &owner,
+                CONVERSATION_ID,
+                "ordinary-turn"
+            )
+            .await
+            .unwrap()
+        );
         tx.commit().await.unwrap();
-        let saved = repo.get_by_cron_job_id(&owner, &job.cron_job_id).await.unwrap().unwrap();
+        let saved = repo
+            .get_by_cron_job_id(&owner, &job.cron_job_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(saved.enabled);
-        assert_eq!((saved.schedule_revision,saved.next_run_at,saved.run_count,saved.retry_count),
-            (job.schedule_revision,job.next_run_at,job.run_count,job.retry_count));
-    }
-
-    #[tokio::test]
-    async fn insert_run_pruned_keeps_latest_seven_per_job() {
-        let (repo, _db, owner) = setup().await;
-        let row_a = make_row(&owner);
-        let job_a = row_a.cron_job_id.clone();
-        repo.insert(&row_a).await.unwrap();
-        let row_b = make_row(&owner);
-        let job_b = row_b.cron_job_id.clone();
-        repo.insert(&row_b).await.unwrap();
-
-        for index in 0..10 {
-            repo.insert_run_pruned(&owner, &make_run(&job_a, index))
-                .await
-                .unwrap();
-        }
-        for index in 0..3 {
-            repo.insert_run_pruned(&owner, &make_run(&job_b, index))
-                .await
-                .unwrap();
-        }
-
-        let runs_a = repo.list_runs_by_job(&owner, &job_a, 20).await.unwrap();
-        let runs_b = repo.list_runs_by_job(&owner, &job_b, 20).await.unwrap();
-
-        assert_eq!(runs_a.len(), 7);
-        assert_eq!(runs_a[0].executed_at_ms, 1_009);
-        assert_eq!(runs_a[6].executed_at_ms, 1_003);
-        assert!(runs_a.iter().all(|run| run.cron_job_id == job_a));
-
-        assert_eq!(runs_b.len(), 3);
-        assert_eq!(runs_b[0].executed_at_ms, 1_002);
-        assert_eq!(runs_b[2].executed_at_ms, 1_000);
+        assert_eq!(
+            (saved.schedule_revision, saved.next_run_at, saved.run_count),
+            (job.schedule_revision, job.next_run_at, job.run_count)
+        );
     }
 
     #[tokio::test]
@@ -2165,18 +1796,12 @@ mod tests {
         let row = make_row(&owner);
         let cron_job_id = row.cron_job_id.clone();
         repo.insert(&row).await.unwrap();
-        repo.insert_run_pruned(&owner, &make_run(&cron_job_id, 1))
-            .await
-            .unwrap();
 
         repo.delete(&owner, &cron_job_id).await.unwrap();
-        let result = repo
-            .get_by_cron_job_id(&owner, &cron_job_id)
-            .await
-            .unwrap();
+        let result = repo.get_by_cron_job_id(&owner, &cron_job_id).await.unwrap();
         assert!(result.is_none());
         let run_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM cron_job_runs WHERE cron_job_id = ?")
+            sqlx::query_scalar("SELECT COUNT(*) FROM cron_run_reservations WHERE cron_job_id = ?")
                 .bind(&cron_job_id)
                 .fetch_one(db.pool())
                 .await
@@ -2187,10 +1812,7 @@ mod tests {
     #[tokio::test]
     async fn delete_nonexistent_returns_not_found() {
         let (repo, _db, owner) = setup().await;
-        let err = repo
-            .delete(&owner, MISSING_CRON_JOB_ID)
-            .await
-            .unwrap_err();
+        let err = repo.delete(&owner, MISSING_CRON_JOB_ID).await.unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
     }
 
@@ -2284,69 +1906,312 @@ mod tests {
         assert!(found.skill_content.unwrap().contains("My Skill"));
     }
 
-    #[tokio::test]
-    async fn insert_with_agent_config_json() {
-        let (repo, _db, owner) = setup().await;
-        let mut row = make_row(&owner);
-        row.agent_config = Some(r#"{"backend":"openai","name":"GPT","model":"gpt-4"}"#.into());
-        let cron_job_id = row.cron_job_id.clone();
-        repo.insert(&row).await.unwrap();
+    fn scheduled(job: &CronJobRow, planned: i64) -> ReserveCronRunParams {
+        ReserveCronRunParams {
+            cron_job_run_id: CronJobRunId::new().into_string(),
+            cron_job_id: job.cron_job_id.clone(),
+            trigger_kind: "scheduled".into(),
+            operation_key: format!(
+                "cron:scheduled:{}:{}:{planned}",
+                job.cron_job_id, job.schedule_revision
+            ),
+            request_fingerprint: format!(
+                "scheduled:v1:{}:{}:{planned}",
+                job.cron_job_id, job.schedule_revision
+            ),
+            schedule_revision: Some(job.schedule_revision),
+            planned_at_ms: Some(planned),
+            next_run_at: Some(planned + 60000),
+            disable: false,
+            now: planned,
+        }
+    }
 
-        let found = repo
-            .get_by_cron_job_id(&owner, &cron_job_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let config = found.agent_config.unwrap();
-        assert!(config.contains("openai"));
-        assert!(config.contains("gpt-4"));
+    fn completed(run: &str, now: i64) -> FinalizeCronRunParams {
+        FinalizeCronRunParams {
+            cron_job_run_id: run.into(),
+            status: "ok".into(),
+            conversation_id: None,
+            result_error: None,
+            domain_failure_json: None,
+            now,
+            last_run_at: Some(now),
+            last_status: Some("ok".into()),
+            last_error: Some(None),
+            increment_run_count: true,
+        }
     }
 
     #[tokio::test]
-    async fn secondary_user_cron_accepts_model_only_shape_and_rejects_host_agent() {
+    async fn scheduled_claim_advances_atomically_while_the_original_run_is_still_reserved() {
         let (repo, db, owner) = setup().await;
-        const SECONDARY_USER: &str = "0190f5fe-7c00-7a00-8000-000000000002";
-        const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000003";
+        let mut job = make_row(&owner);
+        job.next_run_at = Some(60000);
+        repo.insert(&job).await.unwrap();
+        let first = scheduled(&job, 60000);
+        let (original, inserted) = repo.reserve_run(&owner, &first).await.unwrap();
+        assert!(inserted);
+        assert_eq!(
+            repo.get_by_cron_job_id(&owner, &job.cron_job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .next_run_at,
+            Some(120000)
+        );
+        let second = scheduled(&job, 120000);
+        let (_, inserted) = repo.reserve_run(&owner, &second).await.unwrap();
+        assert!(inserted);
+        assert_eq!(
+            repo.get_run_reservation(&owner, &job.cron_job_id, &original.cron_job_run_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "reserved"
+        );
+        repo.finalize_run_with_job_projection(&owner, &completed(&first.cron_job_run_id, 125000))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_by_cron_job_id(&owner, &job.cron_job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .next_run_at,
+            Some(180000),
+            "late terminal cannot move a successor schedule"
+        );
+        assert!(!repo.reserve_run(&owner, &first).await.unwrap().1);
+        assert_eq!(
+            repo.get_by_cron_job_id(&owner, &job.cron_job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .next_run_at,
+            Some(180000)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM cron_run_reservations")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            2
+        );
+    }
 
-        sqlx::query(
-            "INSERT INTO users (user_id, username, password_hash, created_at, updated_at) \
-             VALUES (?1, 'cron_secondary', 'hash', 0, 0)",
-        )
-        .bind(SECONDARY_USER)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        let credentials_encrypted = encrypted_bearer_credentials();
-        sqlx::query(
-            "INSERT INTO providers (\
-                provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
-                created_at, updated_at\
-             ) VALUES (\
-                ?1, 'openai', 'Provider Test', 'https://example.invalid', \
-                'bearer', ?2, 1, 0, 0\
-             )",
-        )
-        .bind(PROVIDER_ID)
-        .bind(credentials_encrypted)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        insert_canonical_session(&db, OTHER_CONVERSATION_ID, SECONDARY_USER, "live").await;
+    #[tokio::test]
+    async fn terminal_history_is_bounded_without_pruning_idempotency_evidence() {
+        let (repo, db, owner) = setup().await;
+        let job = make_row(&owner);
+        repo.insert(&job).await.unwrap();
+        for index in 0..10 {
+            let id = CronJobRunId::new().into_string();
+            repo.reserve_run(
+                &owner,
+                &ReserveCronRunParams {
+                    cron_job_run_id: id.clone(),
+                    cron_job_id: job.cron_job_id.clone(),
+                    trigger_kind: "run_now".into(),
+                    operation_key: format!("history:{index}"),
+                    request_fingerprint: "history".into(),
+                    schedule_revision: None,
+                    planned_at_ms: None,
+                    next_run_at: None,
+                    disable: false,
+                    now: index,
+                },
+            )
+            .await
+            .unwrap();
+            let finalizer = completed(&id, index + 100);
+            repo.finalize_run_with_job_projection(&owner, &finalizer)
+                .await
+                .unwrap();
+            assert_eq!(
+                repo.finalize_run_with_job_projection(&owner, &finalizer)
+                    .await
+                    .unwrap(),
+                FinalizeCronRunOutcome::AlreadyApplied
+            );
+        }
+        let history = repo
+            .list_runs_by_job(&owner, &job.cron_job_id, 100)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 7);
+        assert_eq!(history[0].executed_at_ms, 109);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM cron_run_reservations")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            10
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='cron_job_runs'"
+            )
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            repo.get_by_cron_job_id(&owner, &job.cron_job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .run_count,
+            10
+        );
+    }
 
-        let mut allowed = make_row(&owner);
-        allowed.user_id = SECONDARY_USER.into();
-        allowed.conversation_id = Some(OTHER_CONVERSATION_ID.into());
-        allowed.conversation_title = Some("Model-only target".into());
-        allowed.agent_type = "nomi".into();
-        repo.insert(&allowed).await.unwrap();
-        assert_eq!(repo.list_all(SECONDARY_USER).await.unwrap().len(), 1);
-
-        let mut rejected = allowed;
-        rejected.agent_type = "acp".into();
-        let err = repo.insert(&rejected).await.unwrap_err();
+    #[tokio::test]
+    async fn continuing_session_is_fixed_before_turn_and_cannot_be_replaced_or_attached_after_stop()
+    {
+        let (repo, db, owner) = setup().await;
+        let mut job = make_row(&owner);
+        job.enabled = false;
+        job.conversation_id = None;
+        repo.insert(&job).await.unwrap();
+        let id = CronJobRunId::new().into_string();
+        let request = ReserveCronRunParams {
+            cron_job_run_id: id.clone(),
+            cron_job_id: job.cron_job_id.clone(),
+            trigger_kind: "run_now".into(),
+            operation_key: "first-opening".into(),
+            request_fingerprint: "first".into(),
+            schedule_revision: None,
+            planned_at_ms: None,
+            next_run_at: None,
+            disable: false,
+            now: 1,
+        };
+        repo.reserve_run(&owner, &request).await.unwrap();
+        repo.attach_continuing_session(&owner, &id, CONVERSATION_ID, 2)
+            .await
+            .unwrap();
+        let bound = repo
+            .get_by_cron_job_id(&owner, &job.cron_job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bound.conversation_id.as_deref(), Some(CONVERSATION_ID));
+        assert!(bound.agent_binding.is_none());
+        insert_canonical_session(&db, OTHER_CONVERSATION_ID, &owner, "live").await;
         assert!(
-            err.to_string().contains("non-owner cron job must be model-only"),
-            "unexpected authority error: {err}"
+            repo.attach_continuing_session(&owner, &id, OTHER_CONVERSATION_ID, 3)
+                .await
+                .is_err()
+        );
+        let stopped = CronJobRunId::new().into_string();
+        repo.reserve_run(
+            &owner,
+            &ReserveCronRunParams {
+                cron_job_run_id: stopped.clone(),
+                operation_key: "stopped-opening".into(),
+                ..request
+            },
+        )
+        .await
+        .unwrap();
+        repo.request_run_cancellation(&owner, &job.cron_job_id, &stopped, 4)
+            .await
+            .unwrap();
+        assert!(
+            repo.attach_continuing_session(&owner, &stopped, CONVERSATION_ID, 5)
+                .await
+                .is_err()
+        );
+        assert!(
+            repo.get_run_reservation(&owner, &job.cron_job_id, &stopped)
+                .await
+                .unwrap()
+                .unwrap()
+                .conversation_id
+                .is_none()
+        );
+    }
+    #[tokio::test]
+    async fn same_millisecond_late_terminal_keeps_its_exact_summary_source() {
+        let (repo, _db, owner) = setup().await;
+        let job = make_row(&owner);
+        repo.insert(&job).await.unwrap();
+        let mut ids = vec![];
+        for index in 0..3 {
+            let id = CronJobRunId::new().into_string();
+            repo.reserve_run(
+                &owner,
+                &ReserveCronRunParams {
+                    cron_job_run_id: id.clone(),
+                    cron_job_id: job.cron_job_id.clone(),
+                    trigger_kind: "run_now".into(),
+                    operation_key: format!("same-time:{index}"),
+                    request_fingerprint: "same-time".into(),
+                    schedule_revision: None,
+                    planned_at_ms: None,
+                    next_run_at: None,
+                    disable: false,
+                    now: 1,
+                },
+            )
+            .await
+            .unwrap();
+            ids.push(id);
+        }
+        repo.finalize_run_with_job_projection(&owner, &completed(&ids[1], 100))
+            .await
+            .unwrap();
+        let mut late = completed(&ids[0], 100);
+        late.status = "error".into();
+        late.last_status = Some("error".into());
+        late.domain_failure_json=Some(serde_json::json!({"message":"original late failure","code":"NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE"}).to_string());
+        repo.finalize_run_with_job_projection(&owner, &late)
+            .await
+            .unwrap();
+        let current = repo
+            .get_by_cron_job_id(&owner, &job.cron_job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.last_run_id.as_deref(), Some(ids[0].as_str()));
+        assert_eq!(current.last_status.as_deref(), Some("error"));
+        let history = repo
+            .list_runs_by_job(&owner, &job.cron_job_id, 7)
+            .await
+            .unwrap();
+        assert_eq!(
+            history[0].cron_job_run_id, ids[1],
+            "history sorting must not become summary authority"
+        );
+        let no_summary = FinalizeCronRunParams {
+            cron_job_run_id: ids[2].clone(),
+            status: "cancelled".into(),
+            conversation_id: None,
+            result_error: None,
+            domain_failure_json: None,
+            now: 100,
+            last_run_at: None,
+            last_status: None,
+            last_error: None,
+            increment_run_count: false,
+        };
+        repo.finalize_run_with_job_projection(&owner, &no_summary)
+            .await
+            .unwrap();
+        repo.finalize_run_with_job_projection(&owner, &completed(&ids[1], 100))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_by_cron_job_id(&owner, &job.cron_job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_run_id
+                .as_deref(),
+            Some(ids[0].as_str()),
+            "no-summary cancellation and old replay cannot borrow the source pointer"
         );
     }
 }

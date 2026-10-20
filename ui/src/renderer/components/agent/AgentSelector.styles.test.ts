@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
-const css = readFileSync(new URL('./GuidAgentSelector.module.css', import.meta.url), 'utf8');
+const css = readFileSync(new URL('./AgentSelector.module.css', import.meta.url), 'utf8');
 
 const rule = (selector: string): string =>
   css.match(new RegExp(`\\.${selector}\\s*\\{([\\s\\S]*?)\\}`))?.[1] ?? '';
 
-describe('GuidAgentSelector styles', () => {
+describe('AgentSelector styles', () => {
   test('keeps the homepage trigger compact and centers its icon with the label', () => {
     expect(rule('trigger').includes('align-items: center;')).toBe(true);
     expect(rule('trigger').includes('font-size: 14px;')).toBe(true);

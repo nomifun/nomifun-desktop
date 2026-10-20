@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { OfficialPresetTemplate } from '../src/common/types/agentPlatform';
 import type { GuidAgentSelection } from '../src/renderer/pages/guid/types';
-import GuidAgentSelector from '../src/renderer/pages/guid/components/GuidAgentSelector';
+import AgentSelector from '../src/renderer/components/agent/AgentSelector';
 import ChatModelSelector from '../src/renderer/components/chat/ChatModelSelector';
 import { SWRConfig } from 'swr';
 import type { IProvider, TProviderWithModel } from '../src/common/config/storage';
@@ -17,7 +17,7 @@ const provider = {
 } as IProvider;
 const modelCache = { provider: () => new Map(), revalidateOnMount: false, fallback: { providers: [provider] } };
 /** Uses the production selector, with no conversation or model transport. */
-export default function GuidAgentSelectorPreview({ templates }: { templates: OfficialPresetTemplate[] }) {
+export default function AgentSelectorPreview({ templates }: { templates: OfficialPresetTemplate[] }) {
   const { library, presets, isLoading, error, refresh } = useAgentPresets();
   const personalAgents = presets.filter(isExecutableAgentPreset) as ExecutableAgentPreset[];
   const [selection, setSelection] = useState<GuidAgentSelection>({ kind: 'template', templateKey: 'chat.minimal' });
@@ -25,7 +25,7 @@ export default function GuidAgentSelectorPreview({ templates }: { templates: Off
   const [model, setModel] = useState<TProviderWithModel>({ ...provider, use_model: '模型 A' });
   return <SWRConfig value={modelCache}><main style={{ maxWidth: 760, margin: '64px auto', padding: 24 }}>
     <div style={{ border: '1px solid var(--color-border-2)', borderRadius: 20, padding: 24, background: 'var(--color-bg-2)' }}>
-      <GuidAgentSelector presets={personalAgents} officialTemplates={library?.official_templates ?? templates} selection={selection}
+      <AgentSelector presets={personalAgents} officialTemplates={library?.official_templates ?? templates} selection={selection}
         isLoading={isLoading} loadError={error} onRetry={refresh}
         onSelectPreset={(presetId) => setSelection({ kind: 'preset', presetId })}
         onSelectTemplate={(templateKey) => setSelection({ kind: 'template', templateKey })} />

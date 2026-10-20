@@ -1010,6 +1010,10 @@ pub enum AgentSwitchSelectionDto {
     },
 }
 
+/// The same workbench selection contract is used for opening and scheduling
+/// Sessions as for an explicit Agent switch; it does not identify a CLI.
+pub type ProductAgentSelectionDto = AgentSwitchSelectionDto;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewAgentSessionSwitchRequestDto {

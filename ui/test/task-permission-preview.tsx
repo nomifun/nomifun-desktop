@@ -87,7 +87,7 @@ const { MessageListProvider, useUpdateMessageList } = await import('../src/rende
 const { ConversationProvider } = await import('../src/renderer/hooks/context/ConversationContext');
 const { PreviewProvider } = await import('../src/renderer/pages/conversation/Preview');
 const { default: CapabilityPermissionsContent } = await import('../src/renderer/components/settings/SettingsModal/contents/CapabilityPermissionsContent');
-const { default: GuidAgentSelector } = await import('../src/renderer/pages/guid/components/GuidAgentSelector');
+const { default: AgentSelector } = await import('../src/renderer/components/agent/AgentSelector');
 const { default: AgentResourcePicker } = await import('../src/renderer/components/agent/AgentResourcePicker');
 const officialTemplates = Object.entries(seed.templates).map(([key, value]) => ({ template_key: key, seed: value,
   role_coverage: seed.role_coverage[key as keyof typeof seed.role_coverage], immutable: true, forkable: true })) as OfficialPresetTemplate[];
@@ -161,7 +161,7 @@ function Preview() {
         <div className='permission-preview-composer'>
           <div className='permission-preview-project'><FolderOpen size={15} />选择项目</div>
           <div className='permission-preview-input'><div className='permission-preview-input-tabs'>
-            <GuidAgentSelector presets={[]} officialTemplates={officialTemplates} selection={agentSelection}
+            <AgentSelector presets={[]} officialTemplates={officialTemplates} selection={agentSelection}
               onSelectTemplate={templateKey => setAgentSelection({ kind: 'template', templateKey })}
               onSelectPreset={presetId => setAgentSelection({ kind: 'preset', presetId })}
               resourceConfiguration={<AgentResourcePicker requiredKinds={['computer', 'browser']}

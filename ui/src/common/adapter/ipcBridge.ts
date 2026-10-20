@@ -13,6 +13,7 @@
  */
 
 import { bridge } from '@/platform';
+import { normalizeAgentStreamError, type AgentStreamErrorInfo } from '@/common/chat/chatLib';
 import type { ToolDetailPage, ToolDetailRequest } from '../chat/toolDetails';
 import type { DelegationRecordsPage } from '../chat/delegationRecords';
 import type { AgentActivitiesResponse, AgentActivityCommandReceipt, AgentActivityStopSnapshot, StopAgentActivityRequest } from '../types/agentExecution/agentActivity';
@@ -169,7 +170,6 @@ import type {
   AgentPresetRecommendedCapabilitiesResponse,
   AgentPresetLibraryResponse,
   AgentPresetRevision,
-  AgentResolvedSnapshot,
   AgentSessionKnowledgeBinding,
   AgentSessionContinuationView,
   AgentSessionId,
@@ -207,6 +207,8 @@ import type {
   SelectProductAgentBindingRequest,
   ProductAgentOptions,
   ProductAgentSelectionResult,
+  ProductAgentSelection,
+  AgentResourceSelection,
   PreviewAgentSessionSwitchRequest,
   PreviewAgentSessionSwitchResponse,
   RevokeInstallationTokenResponse,
@@ -294,7 +296,6 @@ import {
   parseTerminalId,
   parseUserId,
   parseWebhookId,
-  type AgentId,
   type AttachmentId,
   type ChannelPluginId,
   type ConversationId,
@@ -2845,40 +2846,16 @@ export const relayPairing = {
 // ---------------------------------------------------------------------------
 
 function fromApiCronJob(job: ICronJob): ICronJob {
-  if (job.metadata.agent_type === 'nomi' && job.metadata.agent_config?.backend != null) {
-    throw new TypeError(
-      'Nomi cron agent_config.backend is not accepted; use agent_config.provider_id'
-    );
-  }
+  const selection = job.metadata.agent_selection;
   return {
     ...job,
     cron_job_id: parseCronJobId(job.cron_job_id),
+    state: { ...job.state, last_failure: normalizeAgentStreamError(job.state.last_failure) },
     metadata: {
       ...job.metadata,
       conversation_id: parseOptionalEntityId('conversation', job.metadata.conversation_id),
-      ...(job.metadata.agent_config == null
-        ? {}
-        : {
-            agent_config: {
-              ...job.metadata.agent_config,
-              custom_agent_id:
-                job.metadata.agent_config.custom_agent_id == null
-                  ? undefined
-                  : parseAgentId(job.metadata.agent_config.custom_agent_id),
-              preset_id:
-                job.metadata.agent_config.preset_id == null
-                  ? undefined
-                  : parseAgentPresetId(job.metadata.agent_config.preset_id),
-              agent_snapshot:
-                job.metadata.agent_config.agent_snapshot == null
-                  ? undefined
-                  : fromApiAgentSnapshot(job.metadata.agent_config.agent_snapshot),
-              provider_id:
-                job.metadata.agent_config.provider_id == null
-                  ? undefined
-                  : parseProviderId(job.metadata.agent_config.provider_id),
-            },
-          }),
+      ...(selection?.kind === 'preset' ? { agent_selection: { ...selection, preset_id: parseAgentPresetId(selection.preset_id) } } : {}),
+      ...(job.metadata.model ? { model: { ...job.metadata.model, provider_id: parseProviderId(job.metadata.model.provider_id) } } : {}),
     },
   };
 }
@@ -2887,6 +2864,8 @@ function fromApiCronJobRun(run: ICronJobRun): ICronJobRun {
   return {
     ...run,
     cron_job_run_id: parseCronJobRunId(run.cron_job_run_id),
+    conversation_id: parseOptionalEntityId('conversation', run.conversation_id),
+    failure: normalizeAgentStreamError(run.failure),
     cron_job_id: parseCronJobId(run.cron_job_id),
   };
 }
@@ -2909,9 +2888,12 @@ export const cron = {
       enabled: p.updates.enabled,
       schedule: p.updates.schedule,
       message: p.updates.message,
-      agent_config: p.updates.agent_config,
+      agent_selection: p.updates.agent_selection,
+      model: p.updates.model,
+      workspace: p.updates.workspace,
+      resource_selections: p.updates.resource_selections,
+      clear_context_each_run: p.updates.clear_context_each_run,
       conversation_title: p.updates.conversation_title,
-      max_retries: p.updates.max_retries,
     })
   ), fromApiCronJob),
   removeJob: httpDelete<void, { cron_job_id: CronJobId }>((p) => `/api/cron/jobs/${p.cron_job_id}`),
@@ -2974,80 +2956,65 @@ export interface ICronJob {
     /** Absent until an unbound task materializes its first conversation. */
     conversation_id?: ConversationId;
     conversation_title?: string;
-    agent_type: string;
     created_by: 'user' | 'agent';
     created_at: number;
     updated_at: number;
-    agent_config?: ICronAgentConfig;
+    agent_selection?: ProductAgentSelection;
+    model?: { provider_id: ProviderId; model: string };
+    agent_binding?: AgentBindingValue;
+    agent_label?: string;
+    clear_context_each_run: boolean;
   };
   state: {
     next_run_at_ms?: number;
     last_run_at_ms?: number;
     last_status?: ICronJobRunStatus;
     last_error?: string;
+    last_failure?: AgentStreamErrorInfo;
     run_count: number;
-    retry_count: number;
-    max_retries: number;
+    configuration_error?: string;
   };
 }
 
 export interface ICronJobRun {
+  conversation_id?: ConversationId;
+  failure?: AgentStreamErrorInfo;
   cron_job_run_id: CronJobRunId;
   cron_job_id: CronJobId;
   executed_at_ms: number;
   status: ICronJobRunStatus;
 }
 
-export interface ICronAgentConfig {
-  /** Agent backend label; absent for jobs without one. */
-  backend?: string;
-  name: string;
-  cli_path?: string;
-  /** Stable AgentRegistry identity required for every non-Nomi new conversation. */
-  custom_agent_id?: AgentId;
-  preset_id?: AgentPresetId;
-  /** Frozen server-owned preset lineage returned by the API. */
-  preset_revision?: number;
-  agent_snapshot?: AgentResolvedSnapshot;
-  model?: string;
-  /** Nomi logical reference to the provider business entity. */
-  provider_id?: ProviderId;
-  config_options?: Record<string, string>;
-  workspace?: string;
-  /** Clear the agent context before each scheduled run (existing-conversation jobs only). */
-  clear_context_each_run?: boolean;
-}
-
 export interface ICreateCronJobParams {
   name: string;
   description?: string;
   schedule: ICronSchedule;
-  prompt?: string;
   message?: string;
-  /** Only specified-conversation creation supplies this; other modes start unbound. */
+  /** Specified conversations inherit their canonical Agent and model. */
   conversation_id?: ConversationId;
   conversation_title?: string;
-  agent_type: string;
   created_by: 'user' | 'agent';
   execution_mode?: 'existing' | 'new_conversation';
-  agent_config?: ICronAgentConfig;
+  agent_selection?: ProductAgentSelection;
+  model?: { provider_id: ProviderId; model: string };
+  workspace?: string;
+  resource_selections?: AgentResourceSelection[];
+  clear_context_each_run?: boolean;
 }
 
-/**
- * Mutable fields accepted by PUT /api/cron/jobs/{cron_job_id}.
- *
- * Keep this separate from ICronJob: response-only and creation-only fields
- * (especially execution_mode) must never leak into the strict update DTO.
- */
+/** Authoring changes are resolved and frozen by the host; clients never send a binding. */
 export interface IUpdateCronJobParams {
   name?: string;
   description?: string;
   enabled?: boolean;
   schedule?: ICronSchedule;
   message?: string;
-  agent_config?: ICronAgentConfig;
+  agent_selection?: ProductAgentSelection;
+  model?: { provider_id: ProviderId; model: string };
+  workspace?: string;
+  resource_selections?: AgentResourceSelection[];
+  clear_context_each_run?: boolean;
   conversation_title?: string;
-  max_retries?: number;
 }
 
 // ---------------------------------------------------------------------------

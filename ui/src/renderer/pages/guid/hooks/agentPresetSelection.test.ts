@@ -7,6 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 import type { AgentPresetSummary } from '@/common/types/agentPlatform';
+import { DEFAULT_AGENT_SELECTION } from '@/renderer/components/agent/types';
 import {
   DEFAULT_GUID_AGENT_SELECTION,
   isExecutableAgentPreset,
@@ -70,8 +71,10 @@ describe('Guid Agent selection contract', () => {
 
     expect(library.includes('presets: data?.user_presets ?? []')).toBe(true);
     expect(library.includes('presets: data?.official_templates')).toBe(false);
-    expect(selection.includes('useAgentPresets()')).toBe(true);
-    expect(/\.filter\(\s*isExecutableAgentPreset\s*\)/.test(selection)).toBe(true);
+    expect(selection.includes('useConversationAgentCatalog()')).toBe(true);
+    const catalog = readSource(new URL('../../../components/agent/useConversationAgentCatalog.ts', import.meta.url));
+    expect(catalog.includes('useAgentPresets()')).toBe(true);
+    expect(catalog.includes('Boolean(preset.current_stable_revision)')).toBe(true);
     expect(selection.includes('const isLoaded = library !== undefined;')).toBe(true);
     expect(selection.includes('if (isLoading || !isLoaded) return;')).toBe(true);
     expect(selection.includes('if (selectedAgentTemplateKey)')).toBe(true);
@@ -125,11 +128,7 @@ describe('Guid Agent selection contract', () => {
         "'guid.defaultAgentSelection': GuidAgentSelectionPreference | undefined;"
       )
     ).toBe(true);
-    expect(
-      selectionUtils.includes(
-        "templateKey: 'assistant.general',"
-      )
-    ).toBe(true);
+    expect(DEFAULT_GUID_AGENT_SELECTION).toBe(DEFAULT_AGENT_SELECTION);
     expect(configKeys.includes("| { kind: 'default' }")).toBe(false);
     expect(
       selectionUtils.includes("configService.get('guid.defaultAgentSelection')")

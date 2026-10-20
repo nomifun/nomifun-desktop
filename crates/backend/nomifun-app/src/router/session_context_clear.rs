@@ -273,7 +273,7 @@ mod tests {
         f.seed_prior_turn("prior").await;
         let job = Uuid::now_v7().to_string();
         let run = Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO cron_jobs(cron_job_id,user_id,name,schedule_kind,schedule_value,payload_message,agent_type,created_by,created_at,updated_at,conversation_id) VALUES(?,?,'fixture','every','60000','scheduled','nomi','user',1,1,?)")
+        sqlx::query("INSERT INTO cron_jobs(cron_job_id,user_id,name,schedule_kind,schedule_value,payload_message,created_by,created_at,updated_at,conversation_id) VALUES(?,?,'fixture','every','60000','scheduled','user',1,1,?)")
             .bind(&job).bind(&f.principal.principal_id).bind(f.session.as_ref()).execute(&f.owner.pool).await.unwrap();
         sqlx::query("INSERT INTO cron_run_reservations(cron_job_run_id,cron_job_id,trigger_kind,operation_key,request_fingerprint,conversation_id,created_at_ms,updated_at_ms) VALUES(?,?,'run_now',?,'fixture',?,1,1)")
             .bind(&run).bind(&job).bind(&run).bind(f.session.as_ref()).execute(&f.owner.pool).await.unwrap();

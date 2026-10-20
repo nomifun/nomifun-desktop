@@ -17,7 +17,7 @@ import agentSettings from '../src/renderer/services/i18n/locales/zh-CN/agentSett
 import common from '../src/renderer/services/i18n/locales/zh-CN/common.json';
 import guid from '../src/renderer/services/i18n/locales/zh-CN/guid.json';
 import settings from '../src/renderer/services/i18n/locales/zh-CN/settings.json';
-import GuidAgentSelectorPreview from './GuidAgentSelectorPreview';
+import AgentSelectorPreview from './AgentSelectorPreview';
 import catalogDefinitions from './fixtures/agent-workbench-catalog.json';
 import seed from '../../crates/backend/nomifun-agent-contracts/contracts/presets/official-agent-seed-manifest.payload.json';
 import { createEmptyAgentPresetDocument } from '../src/common/types/agentPlatform';
@@ -191,4 +191,4 @@ const ensurePreviewTheme = () => {
 };
 ensurePreviewTheme();
 new MutationObserver(ensurePreviewTheme).observe(document.head, { childList: true });
-createRoot(document.getElementById('root')!).render(<I18nextProvider i18n={i18n}><AuthProvider><ConfigProvider locale={zhCN}><HashRouter><div className='preview-note'>交互预览 · 仅使用测试数据，不连接后台或执行 Agent</div><div className='preview-frame'><Routes><Route path='/model-editor' element={<ModelAliasEditorPreview />} /><Route path='/selector' element={<GuidAgentSelectorPreview templates={library().official_templates as any} />} /><Route path='/agent' element={<AgentSettingsPage />} /><Route path='*' element={<div className='preview-destination'>此预览只验证工作台交互。<br /><Link to='/agent'>返回 Agent 工作台</Link></div>} /></Routes></div></HashRouter></ConfigProvider></AuthProvider></I18nextProvider>);
+createRoot(document.getElementById('root')!).render(<I18nextProvider i18n={i18n}><AuthProvider><ConfigProvider locale={zhCN}><HashRouter><div className='preview-note'>交互预览 · 仅使用测试数据，不连接后台或执行 Agent</div><div className='preview-frame'><Routes><Route path='/model-editor' element={<ModelAliasEditorPreview />} /><Route path='/selector' element={<AgentSelectorPreview templates={library().official_templates as any} />} /><Route path='/agent' element={<AgentSettingsPage />} /><Route path='*' element={<div className='preview-destination'>此预览只验证工作台交互。<br /><Link to='/agent'>返回 Agent 工作台</Link></div>} /></Routes></div></HashRouter></ConfigProvider></AuthProvider></I18nextProvider>);

@@ -459,9 +459,9 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
         );
     }
 
-    // Secondary users retain useful model-only scheduling. The service keeps
-    // provider/model selection but strips every process/path/preset field, and
-    // the skill subresource remains installation-owner only.
+    // A secondary user cannot turn the workbench default into host authority.
+    // Configuration is rejected explicitly instead of stripping unsafe fields
+    // and silently changing the selected Agent's capabilities.
     let credentials_encrypted = nomifun_common::encrypt_string(
         r#"{"api_keys":["test-only"]}"#,
         &[0x42; 32],
@@ -504,20 +504,15 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
         .oneshot(post_json_with_csrf(
             "/api/cron/jobs",
             r#"{
-                "name":"model-only schedule",
+                "name":"secondary cannot acquire host grants",
                 "schedule":{"kind":"every","every_ms":60000},
                 "message":"summarize",
-                "conversation_id":null,
-                "agent_type":"nomi",
                 "created_by":"user",
                 "execution_mode":"new_conversation",
-                "agent_config":{
+                "agent_selection":{"kind":"template","template_key":"assistant.general"},
+                "model":{
                     "provider_id":"0190f5fe-7c00-7a00-8000-000000000015",
-                    "name":"Nomi",
-                    "model":"model-safe",
-                    "cli_path":"/bin/sh",
-                    "workspace":"/",
-                    "config_options":{"host":"true"}
+                    "model":"model-safe"
                 }
             }"#,
             &secondary_token,
@@ -527,24 +522,21 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
         .unwrap();
     let cron_status = cron.status();
     let cron = body_json(cron).await;
-    assert_eq!(
-        cron_status,
-        StatusCode::CREATED,
-        "model-only Cron creation failed: {cron}"
-    );
-    let cron_id = cron["data"]["cron_job_id"].as_str().unwrap();
-    let cron_config = &cron["data"]["metadata"]["agent_config"];
-    assert_eq!(
-        cron_config["provider_id"],
-        "0190f5fe-7c00-7a00-8000-000000000015"
-    );
-    assert_eq!(cron_config["model"], "model-safe");
-    for key in ["cli_path", "workspace", "mode", "config_options", "preset_id"] {
-        assert!(
-            cron_config.get(key).is_none() || cron_config[key].is_null(),
-            "model-only cron retained host field {key}: {cron_config}"
-        );
-    }
+    assert_eq!(cron_status, StatusCode::FORBIDDEN, "host grants must remain installation-owned: {cron}");
+    let response = app.clone().oneshot(get_with_token("/api/cron/jobs", &secondary_token)).await.unwrap();
+    assert!(body_json(response).await["data"].as_array().unwrap().is_empty());
+
+    // An owned, disabled draft has no execution authority. Seed that aggregate
+    // only to exercise private reads and the separate skill-management gate.
+    let secondary = services.user_repo.find_by_username("secondary").await.unwrap().unwrap();
+    let cron_id = nomifun_common::CronJobId::new().into_string();
+    sqlx::query("INSERT INTO cron_jobs(cron_job_id,user_id,name,enabled,schedule_kind,schedule_value,payload_message,created_by,created_at,updated_at,configuration_error) VALUES(?,?,'Secondary disabled draft',0,'every','60000','summarize','user',1,1,'Select an executable Agent')")
+        .bind(&cron_id).bind(secondary.user_id.as_str()).execute(services.database.pool()).await.unwrap();
+    let owned = app.clone().oneshot(get_with_token(&format!("/api/cron/jobs/{cron_id}"), &secondary_token)).await.unwrap();
+    assert_eq!(owned.status(), StatusCode::OK);
+    let owned = body_json(owned).await;
+    assert_eq!(owned["data"]["enabled"], false);
+    assert!(owned["data"]["metadata"]["agent_binding"].is_null());
 
     let cron_skill = app
         .clone()

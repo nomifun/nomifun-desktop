@@ -26,12 +26,12 @@ function job(sequence: number, conversation_id?: ReturnType<typeof parseConversa
     execution_mode: 'existing',
     metadata: {
       conversation_id,
-      agent_type: 'claude',
+      clear_context_each_run: false,
       created_by: 'user',
       created_at: 1,
       updated_at: 1,
     },
-    state: { run_count: 0, retry_count: 0, max_retries: 3 },
+    state: { run_count: 0,  },
   };
 }
 

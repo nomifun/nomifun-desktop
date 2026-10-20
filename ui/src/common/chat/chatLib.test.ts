@@ -610,3 +610,11 @@ describe('transformMessage runtime field normalization', () => {
     expect(transformUserCreatedEvent({ ...baseEvent, hidden: true }, parseConversationId('0190f5fe-7c00-7a00-8000-000000000002'))).toBeUndefined();
   });
 });
+
+test('resource failure wire evidence survives normalization and cannot accidentally become retryable', () => {
+  const resourceBindingFailure = { missing_resource_kinds: ['workspace'], missing_resource_operations: { workspace: ['write'] } };
+  const normalized = normalizeAgentStreamError({ code: 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE', message: 'Local preparation failed', ownership: 'nomifun', retryable: true, resourceBindingFailure });
+  expect(normalized?.resourceBindingFailure).toEqual(resourceBindingFailure);
+  expect(normalized?.ownership).toBe('nomifun');
+  expect(normalized?.retryable).toBe(false);
+});

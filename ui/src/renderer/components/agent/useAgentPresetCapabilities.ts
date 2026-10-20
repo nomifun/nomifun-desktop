@@ -17,7 +17,7 @@ import { createDefaultIdmmConfig } from '@/common/types/idmm';
 import { requiredResourceKindsForCapabilitySelections } from '@/renderer/hooks/agent/useAgentCapabilityResources';
 import { useCallback, useEffect, useState } from 'react';
 
-export type GuidPresetCapabilityState = {
+export type AgentPresetCapabilityState = {
   capabilityIds: ReadonlySet<string>;
   actionIds: ReadonlySet<string>;
   requiredResourceKinds: ReadonlySet<string>;
@@ -27,7 +27,7 @@ export type GuidPresetCapabilityState = {
   error: Error | undefined;
 };
 
-const emptyState = (): GuidPresetCapabilityState => ({
+const emptyState = (): AgentPresetCapabilityState => ({
   capabilityIds: new Set<string>(),
   actionIds: new Set<string>(),
   requiredResourceKinds: new Set<string>(),
@@ -52,17 +52,17 @@ export const requiredResourceKindsForDocument = (
   );
 
 /** Load the saved capability and resource defaults used by Guid. */
-export const useGuidPresetCapabilities = (
+export const useAgentPresetCapabilities = (
   presetId: AgentPresetId | undefined,
   revisionDigest?: string,
-): GuidPresetCapabilityState & { refresh: () => void } => {
+): AgentPresetCapabilityState & { refresh: () => void } => {
   const sourceKey = presetId ? `${presetId}:${revisionDigest ?? 'draft'}` : undefined;
   const [requestVersion, setRequestVersion] = useState(0);
   const requestKey = sourceKey ? `${sourceKey}:${requestVersion}` : undefined;
   const refresh = useCallback(() => setRequestVersion(version => version + 1), []);
   const [state, setState] = useState<{
     requestKey: string | undefined;
-    value: GuidPresetCapabilityState;
+    value: AgentPresetCapabilityState;
   }>(() => ({ requestKey: undefined, value: emptyState() }));
 
   useEffect(() => {

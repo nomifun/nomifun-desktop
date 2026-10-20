@@ -23,10 +23,9 @@ import ExecutionConversationLayout from '../execution/ExecutionConversationLayou
 import ReadOnlyConversationView from '../execution/ReadOnlyConversationView';
 import SshHostStatusPill from './SshHostStatusPill';
 import { useWorkspaceExtraTabs } from '../hooks/useWorkspaceExtraTabs';
-import GuidAgentSelector from '@/renderer/pages/guid/components/GuidAgentSelector';
-import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
+import AgentSelector from '@/renderer/components/agent/AgentSelector';
+import { useConversationAgentCatalog } from '@/renderer/components/agent/useConversationAgentCatalog';
 import {
-  isExecutableAgentPreset,
   saveNomiDefaultModel,
 } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
 import type { GuidAgentSelection } from '@/renderer/pages/guid/types';
@@ -34,10 +33,6 @@ import { refreshConversationCache } from '@/renderer/pages/conversation/utils/co
 import { CreationComposerContext } from '@/renderer/creation/CreationComposerContext';
 import { useCreationDraft } from '@/renderer/creation/useCreationDraft';
 import type { CreationMode } from '@/renderer/creation/types';
-import {
-  filterConversationAgentPresets,
-  isConversationAgentTemplate,
-} from '@/renderer/components/agent/conversationAgentCatalog';
 import { useConversationAgentSwitch } from './useConversationAgentSwitch';
 import { officialConversationTemplateKey } from './conversationAgentIdentity';
 import {
@@ -128,19 +123,7 @@ const NomiConversationPanel: React.FC<{
       console.error('[ChatConversation] Failed to refresh switched Agent:', error);
     });
   }), [conversation.id]);
-  const { library: agentLibrary, presets: savedAgentPresets, isLoading: agentsLoading, error: agentsError, refresh: refreshAgents } = useAgentPresets();
-  const conversationAgentPresets = useMemo(
-    () => filterConversationAgentPresets(savedAgentPresets, agentLibrary?.active_bindings ?? []),
-    [agentLibrary?.active_bindings, savedAgentPresets],
-  );
-  const executableAgentPresets = useMemo(
-    () => conversationAgentPresets.filter(isExecutableAgentPreset),
-    [conversationAgentPresets],
-  );
-  const conversationOfficialTemplates = useMemo(
-    () => (agentLibrary?.official_templates ?? []).filter(isConversationAgentTemplate),
-    [agentLibrary?.official_templates],
-  );
+  const { presets: executableAgentPresets, officialTemplates: conversationOfficialTemplates, isLoading: agentsLoading, error: agentsError, refresh: refreshAgents } = useConversationAgentCatalog();
   const officialTemplateKey = officialConversationTemplateKey(conversation.extra);
   const frozenAgentSelection = useMemo<GuidAgentSelection>(() =>
     officialTemplateKey
@@ -265,7 +248,7 @@ const NomiConversationPanel: React.FC<{
   const exitCreation = () => creation.setMode(null);
   const currentAgentLabel = fixedAgentLabel ?? presetPresetInfo?.name ?? 'Agent';
   const agentSelectorNode = fixedAgentLabel ? <span data-testid='fixed-app-agent'>{fixedAgentLabel}</span> : (
-    <GuidAgentSelector
+    <AgentSelector
       presets={executableAgentPresets}
       officialTemplates={conversationOfficialTemplates}
       selection={frozenAgentSelection}

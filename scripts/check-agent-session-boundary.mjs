@@ -87,11 +87,36 @@ const payloadForwardMigration = 'crates/backend/nomifun-db/migrations/008_retire
 const cronInputForwardMigration = 'crates/backend/nomifun-db/migrations/009_cron_input_handoff.sql';
 const mcpOAuthForwardMigration = 'crates/backend/nomifun-db/migrations/010_mcp_oauth_authority.sql';
 const cronCancellationForwardMigration = 'crates/backend/nomifun-db/migrations/011_cron_run_cancellation.sql';
-if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration, mcpOAuthForwardMigration, cronCancellationForwardMigration].includes(path))) {
+const cronWorkbenchForwardMigration = 'crates/backend/nomifun-db/migrations/012_unify_cron_agent_binding.sql';
+if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration, mcpOAuthForwardMigration, cronCancellationForwardMigration, cronWorkbenchForwardMigration].includes(path))) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward migrations');
 }
 const migrationStatements = (path) => readFileSync(resolve(ROOT, path), 'utf8')
   .replace(/--[^\r\n]*/g, '').split(';').map((statement) => statement.replace(/\s+/g, ' ').trim()).filter(Boolean);
+if (migrations.includes(cronWorkbenchForwardMigration)) {
+  const allowed = [
+    /^CREATE TEMP TABLE cron_binding_(?:json_proof|sequence)\b/,
+    /^INSERT INTO cron_binding_json_proof\b/,
+    /^DROP TABLE cron_binding_(?:json_proof|sequence)$/,
+    /^ALTER TABLE cron_jobs ADD COLUMN (?:agent_selection|model_selection|agent_binding|clear_context_each_run|configuration_error|last_run_id)\b/,
+    /^UPDATE cron_jobs\b/,
+    /^CREATE TABLE cron_jobs_binding_next\b/,
+    /^INSERT INTO cron_jobs_binding_next\b/,
+    /^DROP TABLE cron_jobs$/,
+    /^ALTER TABLE cron_jobs_binding_next RENAME TO cron_jobs$/,
+    /^UPDATE sqlite_sequence SET seq=MAX\(seq,COALESCE\(\(SELECT seq FROM cron_binding_sequence\),0\)\) WHERE name='cron_jobs'$/,
+    /^CREATE INDEX idx_cron_jobs_(?:next_run|owner_conversation) ON cron_jobs\b/,
+    /^ALTER TABLE cron_run_reservations ADD COLUMN domain_failure_json\b/,
+    /^DROP TABLE cron_job_runs$/,
+    /^DROP INDEX idx_cron_run_reservations_cron_job_id$/,
+    /^CREATE INDEX idx_cron_run_reservations_cron_job_id ON cron_run_reservations\b/,
+  ];
+  for (const statement of migrationStatements(cronWorkbenchForwardMigration)) {
+    if (!allowed.some(rule => rule.test(statement))) {
+      failures.push(`${cronWorkbenchForwardMigration}: may only normalize the existing Cron definition/history; canonical Agent facts are read-only (${statement.slice(0, 100)})`);
+    }
+  }
+}
 if (migrations.includes(cronCancellationForwardMigration)
   && JSON.stringify(migrationStatements(cronCancellationForwardMigration)) !== JSON.stringify([
     'ALTER TABLE cron_run_reservations ADD COLUMN cancel_requested_at_ms INTEGER',
