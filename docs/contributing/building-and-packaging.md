@@ -37,7 +37,7 @@ Platform builds first run `scripts/computer/build-worker.mjs` in the independent
 
 macOS signs the worker before the enclosing App. Windows --signed signs and verifies the worker with the same certificate before Tauri packaging. Real certificates, notarization, installation and package self-check remain separate release acceptance.
 
-Current Linux worker build dependencies are X11, Xi and xkbcommon (Debian/Ubuntu: libx11-dev, libxi-dev, libxkbcommon-dev); runtime packages are libx11-6, libxi6 and libxkbcommon0, or libX11, libXi and libxkbcommon on RPM systems. Old Computer GStreamer preflights and dedicated plugins are removed. Existing Browser, audio, portal and system-execution dependencies remain. AppImage includes the worker but its libraries and backend still need target-desktop verification. Native Wayland capture remains disabled.
+Current Linux worker build dependencies are X11, Xi, XTest and xkbcommon (Debian/Ubuntu: libx11-dev, libxi-dev, libxtst-dev, libxkbcommon-dev); runtime packages are libx11-6, libxi6 and libxkbcommon0, or libX11, libXi and libxkbcommon on RPM systems. Old Computer GStreamer preflights and dedicated plugins are removed. Existing Browser, audio, portal and system-execution dependencies remain. AppImage includes the worker but its libraries and backend still need target-desktop verification. Native Wayland capture remains disabled.
 
 `bun run check:computer-boundary` checks vendor/patch identity, frozen generation, retired references and workspace isolation. License texts and worker dependency attribution ship through the existing component-notices resource.
 

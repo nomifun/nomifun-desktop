@@ -555,6 +555,13 @@ worker 环境变量白名单以私有运行时目录收敛写入：`CUA_DRIVER_R
 - **真实桌面阻断与隐私**：URI后UI工具能返回Settings窗口对象，但辅助功能树为空；仅为定位查看一次窗口画面时实际出现Windows安全权限弹窗，立即停止GUI操作。未允许/取消该安全请求，未修改缩放、权限、真实文件或生产数据，也未将安全弹窗或背景画面存为验收artifact/提交；本轮临时窗口/截图变量已清除。现有computer-use工具规则明确禁止代操作安全/隐私许可，已请求用户手动处理此实际弹窗；无需额外账户或VM。后续收到处理完成信息后重新选择当前窗口，不使用旧句柄/坐标、不重发本轮URI。
 - **证据和下一动作**：根`%TEMP%/nomifun-settings-uri-probe-a048b64c136f45eaa786f5d5de5cbd5c`保存两版源/EXE身份；`native-1/report.json` SHA256 `336b93a936f35ed9240b121455750ffa49ca05263542472a29d23ff1d14c579e`、`native-2/report.json` `9f81976832534f5054f5f8176f5915c41800d98e3540a37aedac4f99e5bce661`、`poc-summary.json` `0eec28c9b3954c86e3a0fcb4fe912d9fa803555fc5c6fac283a797289c7feda7`分别保留失败边界、一次URI真实回执与分类。两个探针均已终止，无本轮遗留的探针或worker等待项；临时仓库源已移除。收尾只运行docscheck/diffcheck，不重建未变产品。当前签名证书仍 **0**、指纹/TSA配置仍缺，原生macOS/Linux入口及原Keyboard自启偏好信息也未补齐；这些待验不改写为通过，S5入口保留。
 
+### Linux构建预检XTest遗漏修正（2026-10-21，S4本机增量）
+
+- **基线与缺陷**：干净main `e9ca9b30b58194f31c507e1edcc3a7bf4bf29a66`检查status/branch/HEAD并`git pull --ff-only`，已最新。只读核对当前锁定的`x11 2.21.0`：`xtest=["xtst"]`，其build.rs按已启用feature强制`pkg-config xtst`；Linux构建脚本却只预检x11/xi/xkbcommon，缺Xtst开发包的机器会通过Computer预检后才编译失败。仅补`scripts/desktop-build-linux.sh`的xtst预检、`libxtst-dev`建议与构建说明，同步两种语言构建文档；不改vendor、lock、运行依赖或产品实现。脚本保持UTF-8无BOM/LF，**11,384B/SHA256 `cdadd4772bb3a00d516bd70cdc4842422a675c59066fb52f5d1b62f78362f150`**。
+- **只读实物依赖复核**：WSL Ubuntu/rika（UID1000）对既有`/tmp/nomifun-computer-worker-s1-target/debug/nomifun-computer-worker`运行`sha256sum`、`readelf -d`、`ldd`，均exit0，SHA256仍`c784d9e9362f4e487a1507fb4c1ebea8857f0fe46e5bf29c393088769ddea2cf`。当前7项NEEDED与此前实证相同：libX11.so.6、libXi.so.6、libxkbcommon.so.0、libgcc_s.so.1、libm.so.6、libc.so.6、ld-linux-x86-64.so.2；ldd解析 **13个库文件、缺库0**。XTest是本次补齐的构建要求，不据此增加当前实物没有的libXtst运行依赖；没有重建或执行桌面动作。
+- **最小验证**：`wsl.exe -d Ubuntu -u rika -- bash -n /mnt/c/Users/rika0/code/nomifun/main/nomifun-desktop/scripts/desktop-build-linux.sh`及`wsl.exe -d Ubuntu -u rika -- pkg-config --exists x11 xi xtst xkbcommon`均exit0，**4个Computer构建模块可用**。`bun --no-env-file run check:computer-boundary` **exit0、458份vendor/3补丁/22动作/6020路径**；`bun --no-env-file run check:docs` **exit0、145文件/1468引用**，`git diff --check`通过。本轮未改Rust/UI，不新增或机械重跑测试，复用前轮非零测试与Windows开发包证据；未运行会安装target、构建或改系统的完整Linux入口。
+- **待验保持**：这次是构建预检修复和既有worker库解析，不是完整LinuxApp包、AppImage最终库集合、GNOME/Wayland或跨架构原生验收。当前安全弹窗仍待用户手动处理，Windows正式签名/TSA与macOS/原生Linux入口仍未补齐；不对其自动操作，也不将待验记为通过，S5专项入口保留。
+
 ### 未执行项与下一动作
 
 1. 本机S2完整替换与S3已通过上述门槛，源码与进展文档已同步origin/main并核对身份；后续按发布范围补S4。旧Computer专测直接删除，受影响混合验证保留非Computer部分，未保留旧实现兜底。

@@ -72,7 +72,7 @@ require_linux_build_deps() {
     pkg-config --exists gbm || missing+=("libgbm-dev (pkg-config: gbm)")
     pkg-config --exists librsvg-2.0 || missing+=("librsvg2-dev (pkg-config: librsvg-2.0)")
     pkg-config --exists alsa || missing+=("libasound2-dev (pkg-config: alsa)")
-    pkg-config --exists x11 xi xkbcommon || missing+=("libx11-dev libxi-dev libxkbcommon-dev (Computer worker)")
+    pkg-config --exists x11 xi xtst xkbcommon || missing+=("libx11-dev libxi-dev libxtst-dev libxkbcommon-dev (Computer worker 构建)")
     if ! pkg-config --exists ayatana-appindicator3-0.1 && ! pkg-config --exists appindicator3-0.1; then
       missing+=("libayatana-appindicator3-dev 或 libappindicator3-dev (pkg-config: *appindicator3-0.1)")
     fi
@@ -87,13 +87,13 @@ require_linux_build_deps() {
     cat >&2 <<'EOF'
 
 Debian/Ubuntu 可先安装:
-  sudo apt-get install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libgbm-dev libayatana-appindicator3-dev librsvg2-dev libx11-dev libxi-dev libxkbcommon-dev libasound2-dev patchelf
+  sudo apt-get install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libgbm-dev libayatana-appindicator3-dev librsvg2-dev libx11-dev libxi-dev libxtst-dev libxkbcommon-dev libasound2-dev patchelf
 
 说明:
   - libgbm-dev 提供 -lgbm 链接名与 gbm.pc。
   - libayatana-appindicator3-dev 提供 Tauri 托盘/AppIndicator 打包探测。
   - librsvg2-dev 提供 linuxdeploy GTK 插件需要的 librsvg-2.0.pc。
-  - Computer worker 独立链接 X11、Xi 与 xkbcommon；不依赖 GStreamer。
+  - Computer worker 构建需要 X11、Xi、XTest（xtst）与 xkbcommon 开发库；不依赖 GStreamer。
   - 本脚本会设置 APPIMAGE_EXTRACT_AND_RUN=1，让 linuxdeploy AppImage 在无 FUSE2 的构建机上也能运行。
 EOF
     exit 1

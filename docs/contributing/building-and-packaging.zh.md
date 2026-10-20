@@ -33,7 +33,7 @@ deb/rpm 将 runner 和 polkit action 安装到固定系统路径；AppImage 携�
 
 macOS 先签 worker 再封 App；Windows --signed 先用相同证书签并验证 worker，再交 Tauri。实际证书、公证、安装与 self-check 是单独的发布验收，不由构建脚本的存在证明。
 
-Linux worker 的当前构建依赖为 X11、Xi、xkbcommon（Debian/Ubuntu：libx11-dev、libxi-dev、libxkbcommon-dev）；运行依赖为 libx11-6、libxi6、libxkbcommon0，RPM 使用 libX11、libXi、libxkbcommon。旧 Computer 的 GStreamer 预检和专用插件依赖已删除；Browser、音频、portal 与系统执行的既有依赖保留。AppImage 含 worker，但仍须在目标桌面验证动态库和实际 backend；原生 Wayland capture 未启用。
+Linux worker 的当前构建依赖为 X11、Xi、XTest、xkbcommon（Debian/Ubuntu：libx11-dev、libxi-dev、libxtst-dev、libxkbcommon-dev）；运行依赖为 libx11-6、libxi6、libxkbcommon0，RPM 使用 libX11、libXi、libxkbcommon。旧 Computer 的 GStreamer 预检和专用插件依赖已删除；Browser、音频、portal 与系统执行的既有依赖保留。AppImage 含 worker，但仍须在目标桌面验证动态库和实际 backend；原生 Wayland capture 未启用。
 
 `bun run check:computer-boundary` 核对 vendor/补丁、冻结派生、旧引用零残留与主 workspace 不链接驱动。许可原文和 worker 依赖署名随现有 component-notices 资源一起打包。
 
