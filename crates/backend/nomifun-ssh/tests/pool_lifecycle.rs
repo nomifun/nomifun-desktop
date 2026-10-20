@@ -393,7 +393,7 @@ async fn concurrent_close_waiters_share_the_process_owned_receipt_after_cancella
     let backend = harness.pool.backend_for(&link);
     let marker = format!("/tmp/nomifun-ssh-close-{}", nomifun_common::generate_id());
     let command = format!(
-        "printf started > {marker}; sleep 2; printf done >> {marker}",
+        "trap 'sleep 2; exit 130' INT; printf admitted-output; printf started > {marker}; sleep 60; printf done >> {marker}",
         marker = shell_path(&marker),
     );
     let execution = {
@@ -417,31 +417,41 @@ async fn concurrent_close_waiters_share_the_process_owned_receipt_after_cancella
     }
 
     let link_key = key("close-race", &id);
-    let mut cancelled_waiter = {
+    let cancelled_waiter = {
         let pool = harness.pool.clone();
         let key = link_key.clone();
         tokio::spawn(async move { pool.close_link(&key).await })
     };
-    let concurrent_waiter = {
+    let mut concurrent_waiter = {
         let pool = harness.pool.clone();
         let key = link_key.clone();
         tokio::spawn(async move { pool.close_link(&key).await })
     };
+    // Abort only once teardown is observably running and while the admitted
+    // command has not settled, so both waiters are pending inside the same
+    // mid-teardown window.
+    let teardown_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if harness.pool.resource_instances(&harness.user_id).iter()
+            .any(|resource| resource.closing || resource.close_in_flight)
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < teardown_deadline,
+            "link teardown never became observable"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
     assert!(
-        tokio::time::timeout(Duration::from_millis(150), &mut cancelled_waiter)
-            .await
-            .is_err(),
-        "teardown must wait for the admitted action"
+        !execution.is_finished(),
+        "teardown must still be interrupting the admitted command when the waiter is cancelled"
     );
     cancelled_waiter.abort();
     cancelled_waiter
         .await
-        .expect_err("cancelling one request waiter must not own teardown");
+        .expect_err("cancelling one request waiter must not cancel teardown");
 
-    execution
-        .await
-        .expect("the command task should not panic")
-        .expect("the admitted command should complete");
     let teardown = tokio::time::timeout(SETTLE, concurrent_waiter)
         .await
         .expect("the concurrent waiter should observe terminal teardown")
@@ -450,6 +460,29 @@ async fn concurrent_close_waiters_share_the_process_owned_receipt_after_cancella
         matches!(teardown, SshTeardown::Reaped { .. }),
         "all live waiters must receive the process-owned close receipt: {teardown:?}"
     );
+    assert!(
+        execution.is_finished(),
+        "the shared close receipt is only published after the admitted command's real settlement"
+    );
+
+    let output = execution
+        .await
+        .expect("the command task should not panic");
+    match output {
+        Ok(output) => {
+            assert!(!output.timed_out && output.stdout.contains("admitted-output"),
+                "a proven original terminal keeps its actual status and output: {output:?}");
+            assert_eq!(output.exit_code, 130, "the retired command must exit through its own post-interrupt trap");
+        }
+        Err(error) => assert!(error.contains("retired") && error.contains("admitted-output"),
+            "without its original sentinel the interrupted command stays unknown with its partial output: {error}"),
+    }
+    let marker_body = std::fs::read(&marker).expect("the admitted command wrote its marker");
+    assert!(
+        marker_body.starts_with(b"started") && !marker_body.windows(4).any(|w| w == b"done"),
+        "the interrupted command must never append its completion marker: {marker_body:?}"
+    );
+    let _ = std::fs::remove_file(&marker);
     assert_eq!(harness.pool.active_link_count(), 0);
 }
 
@@ -528,11 +561,16 @@ async fn close_link_on_an_already_dropped_link_is_not_reaped() {
     support::collect_phases_until(&mut rx, SshLinkPhase::Reconnecting, SETTLE).await;
 
     let teardown = harness.pool.close_link(&link_key).await;
-    assert!(
-        matches!(teardown, SshTeardown::AlreadyDown { .. }),
-        "there was nothing left to reap, and pretending otherwise is the one lie \
-         teardown reporting must never tell: {teardown:?}"
-    );
+    match &teardown {
+        SshTeardown::Lost { detail } => assert!(
+            detail.contains("exit_status: None"),
+            "transport loss without exit proof stays Lost and is never upgraded: {detail}"
+        ),
+        other => panic!(
+            "a dropped link's dead owner keeps its Lost receipt; pretending it was \
+             reaped is the one lie teardown reporting must never tell: {other:?}"
+        ),
+    }
     assert_eq!(harness.pool.active_link_count(), 0);
 }
 

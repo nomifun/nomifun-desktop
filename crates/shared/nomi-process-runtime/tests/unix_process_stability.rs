@@ -1,12 +1,13 @@
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    mem::{size_of, size_of_val},
     sync::Arc,
     time::{Duration, Instant},
 };
+#[cfg(target_os = "macos")]
+use std::mem::{size_of, size_of_val};
 
 use nomi_process_runtime::{
     CommandSpec, NormalizedProcessRequest, OutputCursor, PlatformLifecycleMetrics, PollResult,
@@ -123,6 +124,7 @@ struct Resources {
     lifecycle: PlatformLifecycleMetrics,
 }
 
+#[cfg(target_os = "macos")]
 fn resources() -> Resources {
     let pid = std::process::id() as libc::pid_t;
     let mut descriptors: Vec<libc::proc_fdinfo> = (0..256)
@@ -205,6 +207,52 @@ fn resources() -> Resources {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn resources() -> Resources {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) }, 0);
+    let cpu_ns = [usage.ru_utime, usage.ru_stime].into_iter().map(|time| {
+        u64::try_from(time.tv_sec).expect("CPU seconds must be nonnegative") * 1_000_000_000
+            + u64::try_from(time.tv_usec).expect("CPU microseconds must be nonnegative") * 1_000
+    }).sum();
+    let fds = std::fs::read_dir("/proc/self/fd")
+        .expect("native FD inventory failed").count();
+    let tasks: Vec<std::path::PathBuf> = std::fs::read_dir("/proc/self/task")
+        .expect("native task inventory failed")
+        .map(|entry| entry.expect("native task entry readable").path())
+        .collect();
+    let status = std::fs::read_to_string("/proc/self/status")
+        .expect("native status inventory failed");
+    let rss = status.lines().find_map(|line| line.strip_prefix("VmRSS:")
+        .and_then(|value| value.trim().strip_suffix(" kB"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|kib| kib * 1024))
+        .expect("native RSS inventory missing");
+    let mut children = BTreeSet::new();
+    for task in &tasks {
+        match std::fs::read_to_string(task.join("children")) {
+            Ok(list) => {
+                for token in list.split_whitespace() {
+                    let child: libc::pid_t = token.parse().expect("native child inventory is numeric");
+                    if child > 1 { children.insert(child); }
+                }
+            }
+            Err(error) => {
+                assert!(!task.exists() && error.kind() == std::io::ErrorKind::NotFound,
+                    "native child inventory failed for a still-present task: {error}");
+            }
+        }
+    }
+    Resources {
+        fds,
+        threads: i32::try_from(tasks.len()).expect("thread count fits"),
+        rss,
+        cpu_ns,
+        lifecycle: platform_lifecycle_metrics(),
+        children,
+    }
+}
+
 async fn settled_initial_resources() -> Resources {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -264,7 +312,8 @@ async fn repeated_pipe_and_pty_retirement_preserves_the_original_long_process_an
     let baseline = resources();
     let mut retained_history = Vec::new();
     eprintln!(
-        "macOS resource baseline: before_long={before_long:?}, with_long={baseline:?}, long_identity={long_identity:?}"
+        "{} resource baseline: before_long={before_long:?}, with_long={baseline:?}, long_identity={long_identity:?}",
+        std::env::consts::OS
     );
     for round in 1..=3 {
         retained_history.extend(short_round(&supervisor).await);
@@ -286,7 +335,8 @@ async fn repeated_pipe_and_pty_retirement_preserves_the_original_long_process_an
             "retired native workers accumulated: baseline={baseline:?}, actual={snapshot:?}"
         );
         eprintln!(
-            "macOS resource round={round}, short_reaped={}, retained_history={}, resources={snapshot:?}, rss_delta={}, cpu_delta_ns={}",
+            "{} resource round={round}, short_reaped={}, retained_history={}, resources={snapshot:?}, rss_delta={}, cpu_delta_ns={}",
+            std::env::consts::OS,
             round * 4,
             retained_history.len(),
             snapshot.rss.saturating_sub(baseline.rss),
@@ -336,7 +386,8 @@ async fn repeated_pipe_and_pty_retirement_preserves_the_original_long_process_an
     let after = settled_resources(&before_long).await;
     assert!(after.threads <= before_long.threads + 2);
     eprintln!(
-        "macOS resource final: resources={after:?}, original_long_reaped=true, retained_history={}",
+        "{} resource final: resources={after:?}, original_long_reaped=true, retained_history={}",
+        std::env::consts::OS,
         retained_history.len()
     );
 }

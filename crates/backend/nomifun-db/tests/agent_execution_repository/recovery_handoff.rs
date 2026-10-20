@@ -1,7 +1,7 @@
 use super::*;
 
 async fn ongoing_fixture(
-    head_status: &str, native_lease_until: i64,
+    head_status: &str, native_live: bool,
 ) -> (nomifun_db::Database, SqliteAgentExecutionRepository, String, nomifun_db::AgentExecutionStepDetailRow, RecoveredAgentExecutionAttemptOutput) {
     let db = database().await;
     let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
@@ -11,7 +11,7 @@ async fn ongoing_fixture(
     nomifun_db::sqlx::query("UPDATE agent_events SET kind='turn/started',inline_json='{}' WHERE event_id=?")
         .bind(&output.terminal_event_id).execute(db.pool()).await.unwrap();
     nomifun_db::sqlx::query("UPDATE agent_turns SET state='running',started_event_id=terminal_event_id,terminal_event_id=NULL,finished_at=NULL,execution_owner='native-original-owner',execution_generation=17,execution_lease_until=? WHERE operation_id=?")
-        .bind(native_lease_until).bind(&output.canonical_operation_id).execute(db.pool()).await.unwrap();
+        .bind(if native_live { nomifun_common::now_ms() + 90_000 } else { 0 }).bind(&output.canonical_operation_id).execute(db.pool()).await.unwrap();
     nomifun_db::sqlx::query("INSERT INTO agent_session_heads(session_id,status,active_turn_id,active_set_generation,last_seq,unread_count) VALUES(?,?,?,0,1,0)")
         .bind(&output.conversation_id).bind(head_status).bind(&output.canonical_operation_id).execute(db.pool()).await.unwrap();
     (db, repository, execution, running, output)
@@ -21,11 +21,9 @@ async fn ongoing_fixture(
 async fn recovery_handoff_preserves_original_turn_across_all_four_lease_combinations() {
     for execution_live in [true, false] {
         for native_live in [true, false] {
-            let now = nomifun_common::now_ms();
-            let (db, repository, execution_id, running, original) = ongoing_fixture("running",
-                if native_live { now + 90_000 } else { 0 }).await;
+            let (db, repository, execution_id, running, original) = ongoing_fixture("running", native_live).await;
             nomifun_db::sqlx::query("UPDATE agent_executions SET lease_owner='original-execution-owner',lease_expires_at=? WHERE execution_id=?")
-                .bind(if execution_live { now + 30_000 } else { 0 }).bind(&execution_id).execute(db.pool()).await.unwrap();
+                .bind(if execution_live { nomifun_common::now_ms() + 30_000 } else { 0 }).bind(&execution_id).execute(db.pool()).await.unwrap();
             let before = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
             let lease = AgentExecutionLeaseToken::new("replacement-execution-owner".into());
             let claimed = repository.try_acquire_lease(&execution_id, before.version, lease.owner(),
@@ -62,7 +60,7 @@ async fn recovery_handoff_preserves_original_turn_across_all_four_lease_combinat
 #[tokio::test]
 async fn recovery_handoff_keeps_native_pause_and_reconciliation_attached_without_cleanup() {
     for status in ["paused", "reconciliation"] {
-        let (db, repository, execution_id, running, original) = ongoing_fixture(status, 0).await;
+        let (db, repository, execution_id, running, original) = ongoing_fixture(status, false).await;
         let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
         let lease = AgentExecutionLeaseToken::new("handoff-observer".into());
         repository.try_acquire_lease(&execution_id, execution.version, lease.owner(), nomifun_common::now_ms() + 30_000)
@@ -82,7 +80,7 @@ async fn recovery_handoff_keeps_native_pause_and_reconciliation_attached_without
 
 #[tokio::test]
 async fn recovery_handoff_cannot_attach_after_a_user_stop_fence() {
-    let (_db, repository, execution_id, running, _) = ongoing_fixture("running", 0).await;
+    let (_db, repository, execution_id, running, _) = ongoing_fixture("running", false).await;
     let execution = repository.get_execution(OWNER_ID, &execution_id).await.unwrap().unwrap();
     let lease = AgentExecutionLeaseToken::new("stopped-handoff".into());
     repository.try_acquire_lease(&execution_id, execution.version, lease.owner(), nomifun_common::now_ms() + 30_000)

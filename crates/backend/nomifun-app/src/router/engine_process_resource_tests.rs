@@ -19,7 +19,7 @@ fn waiting_file()->serde_json::Value {
     #[cfg(not(windows))] {json!({"operation":"start","cmd":"printf before; printf ready > started-original; while [ ! -f release-original ]; do sleep .01; done; printf after","wait_ms":0})}
 }
 
-async fn formal_launch(scope:&EngineProcessScope,journal:&EngineTurnJournal,input:serde_json::Value)->StrictJsonValue {
+pub(super) async fn formal_launch(scope:&EngineProcessScope,journal:&EngineTurnJournal,input:serde_json::Value)->StrictJsonValue {
     journal.append(json!({"event":"host_tool_dispatch","dispatch":{"operation_id":"original-launch","call_id":"original-call",
         "capability_id":"workspace.process","action_id":"workspace.process/start","model_name":"start_process"}}).to_string(),None,EngineJournalWrite::Progress).await.unwrap();
     let output=scope.invoke_for_turn(StrictJsonValue(input),"original-launch",Some("turn")).await.unwrap();
@@ -28,12 +28,26 @@ async fn formal_launch(scope:&EngineProcessScope,journal:&EngineTurnJournal,inpu
     output
 }
 
-async fn finish(scope:&EngineProcessScope,journal:&EngineTurnJournal) {
+pub(super) async fn finish(scope:&EngineProcessScope,journal:&EngineTurnJournal) {
     let retained=scope.retention().await.unwrap();
     journal.append(json!({"event":"host_cleanup_proven","session_process_retention":retained}).to_string(),None,EngineJournalWrite::Cleanup).await.unwrap();
     journal.append(serde_json::to_string(&nomifun_agent_runtime::AgentEngineEvent::TurnCompleted {model_steps:0,
         finish_reason:nomifun_chat_model_broker::ChatFinishReason::Completed}).unwrap(),None,EngineJournalWrite::Terminal).await.unwrap();
     scope.finish_turn("turn").unwrap();
+}
+
+/// Formal canonical control: dispatch before the host call and settle it
+/// afterwards, exactly as the Runtime path records every process control.
+#[cfg(unix)]
+pub(super) async fn formal_control(scope:&EngineProcessScope,journal:&EngineTurnJournal,operation:&str,call:&str,
+    action:&str,turn:&str,input:serde_json::Value)->StrictJsonValue {
+    journal.append(json!({"event":"host_tool_dispatch","dispatch":{"operation_id":operation,"call_id":call,
+        "capability_id":"workspace.process","action_id":action,"model_name":action.rsplit('/').next().unwrap_or(action)}}).to_string(),
+        None,EngineJournalWrite::Progress).await.unwrap();
+    let output=scope.invoke_for_turn(StrictJsonValue(input),operation,Some(turn)).await.unwrap();
+    journal.append(json!({"event":"host_tool_settled","operation_id":operation,"call_id":call,"error":null,
+        "result":nomifun_engine_core::EngineToolResult::text(call.into(),output.0.to_string(),false)}).to_string(),None,EngineJournalWrite::Settlement).await.unwrap();
+    output
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=3)]

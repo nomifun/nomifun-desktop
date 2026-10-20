@@ -1008,8 +1008,9 @@ impl SshConnectionPool {
 
     fn request_exact_link_close(&self, link: &Arc<SshLink>) {
         // Retire while the exact map entry is still published. An action that
-        // acquired its lease first is allowed to finish and cleanup waits; an
-        // action arriving now is rejected before it can read a handle.
+        // acquired its lease first receives the retirement interrupt and cleanup
+        // waits for its real settlement; an action arriving now is rejected
+        // before it can read a handle.
         link.actions.retire();
         if let Ok(handle) = link.handle.try_read() && let Some(handle) = handle.as_ref() {
             handle.request_retirement();

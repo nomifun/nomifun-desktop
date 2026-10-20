@@ -9,6 +9,8 @@ import { constants } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, resolve, basename, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { sourceIdentity } from '../lib/source-identity.mjs';
 
 const option = (key) => { const index = process.argv.indexOf(key); return index < 0 ? undefined : process.argv[index + 1]; };
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -23,21 +25,27 @@ const rootArgument = option('--root');
 assert(rootArgument && isAbsolute(rootArgument), 'Pass the exact absolute --root of the isolated Desktop lifecycle fixture');
 const root = await realpath(rootArgument);
 const sentinel = (await readFile(join(root, 'fixture-sentinel'), 'utf8')).trim();
-assert.equal(basename(root), `nomifun-lifecycle-${sentinel}`);
-assert.equal(await physicalPath(dirname(root)), await physicalPath(tmpdir()));
+
 assert.match(sentinel, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 const ready = JSON.parse(await readFile(join(root, 'ready.json'), 'utf8'));
+const assertLinuxFixtureKind = (value) => { const kind = value?.fixture_kind; assert.equal(kind, 'nomifun-global-os-owner', 'A Linux fixture must declare the global-os owner kind'); return kind; };
 assert.equal(ready.token, sentinel);
+assert.equal(basename(root), `${process.platform === 'linux' ? assertLinuxFixtureKind(ready) : (ready.fixture_kind ?? 'nomifun-lifecycle')}-${sentinel}`);
+assert.equal(await physicalPath(dirname(root)), await physicalPath(tmpdir()));
 assert(Number.isSafeInteger(ready.host_pid) && ready.host_pid > 0);
 assert(Number.isSafeInteger(ready.backend_port) && ready.backend_port > 0 && ready.backend_port < 65536);
 assert.equal(ready.agent_resources, true, 'The original native fixture must opt into normal owner setup before readiness');
 assert.equal(await physicalPath(ready.data_root), await physicalPath(join(root, 'data')));
-assert(['win32', 'darwin'].includes(process.platform), 'This fixture exercises actual Desktop pipe/PTY owners on Windows or macOS');
+assert(['win32', 'darwin', 'linux'].includes(process.platform), 'This fixture exercises actual Desktop pipe/PTY owners on Windows, macOS or Linux');
 const base = `http://127.0.0.1:${ready.backend_port}`;
 const artifacts = join(root, 'agent-resource-fixtures');
 await mkdir(artifacts, { recursive: false });
+const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+let source;
+try { source = await sourceIdentity(repository); } catch (error) { source = { error: String(error?.message ?? error) }; }
 const evidence = { schema: 'nomifun.desktop-agent-resources.v1', token: sentinel, host_pid: ready.host_pid,
-  started_at: new Date().toISOString(), passed: false, stage: 'owner-auth', model_requests: [], api_calls: [] };
+  started_at: new Date().toISOString(), passed: false, stage: 'owner-auth', model_requests: [], api_calls: [],
+  source };
 let journalWrites = Promise.resolve();
 const journal = () => {
   const bytes = `${JSON.stringify(evidence, null, 2)}\n`;
@@ -301,7 +309,7 @@ for await(const line of createInterface({input:process.stdin,terminal:false})){
     assert.equal(nativeMarker.token, sentinel); assert.equal(nativeMarker.host_pid, ready.host_pid); assert.equal(nativeMarker.kind, kind);
     assert(Number.isSafeInteger(nativeMarker.pid) && nativeMarker.pid > 0);
     if (kind !== 'mcp') {
-      if (!windows && kind === 'pty') {
+      if (process.platform === 'darwin' && kind === 'pty') {
         const launcher = resources.get(kind).pid;
         assert.equal(nativeMarker.parent_pid, launcher, 'The actual macOS PTY payload must remain the exact original session launcher child');
         assert.notEqual(nativeMarker.pid, launcher, 'Darwin PTY ToolResult identifies its retained session launcher, not its forked payload');
@@ -318,7 +326,7 @@ for await(const line of createInterface({input:process.stdin,terminal:false})){
       call_id: `desktop-resource-${kind}`, ...(kind === 'mcp' ? { mcp_request_id: nativeMarker.request_id } : { process_id: resources.get(kind).process_id }),
       native_tool_result: kind === 'mcp' ? undefined : resources.get(kind) });
   }
-  assert.equal(new Set(processes.map((item) => item.pid)).size, windows ? 3 : 4);
+  assert.equal(new Set(processes.map((item) => item.pid)).size, process.platform === 'darwin' ? 4 : 3);
   const canonical = await api('GET', `/api/agent-sessions/${session}`);
   assert(canonical.head.active_turn_id, 'The real Agent and its original MCP call must still be inflight');
   const execution = await api('GET', `/api/agent-sessions/${session}/execution`);
@@ -505,6 +513,7 @@ for await(const line of createInterface({input:process.stdin,terminal:false})){
     }
     const before = await activitySnapshot();
     const targetsBefore = processTargets(before);
+    stopTargets = targetsBefore;
     assert.equal(targetsBefore.length, 2, 'The original two Session-owned processes must be discoverable before Stop');
     const current = before.find((item) => item.target.kind === 'session_turn' && item.target.operation_id === operation && item.can_stop);
     assert(current, 'The user must have a normal host-side Stop target for the exact active Turn');
@@ -567,8 +576,50 @@ for await(const line of createInterface({input:process.stdin,terminal:false})){
   };
   // Keep only the original model server alive until the driver ends this exact
   // host. This observation never sends user input, resumes or restarts work.
+  const stopPipeProcess = async (request, targetsBefore) => {
+    for (const [key, expected] of Object.entries({ token: sentinel, host_pid: ready.host_pid, session_id: session, operation_id: operation })) {
+      assert.equal(request[key], expected, `Process Stop request ${key} must name this exact original fixture owner`);
+    }
+    const before = await activitySnapshot();
+    const targetsNow = processTargets(before);
+    assert.deepEqual(targetsNow, targetsBefore, 'The original pipe and pty process targets must persist after Turn Stop');
+    const pipe = targetsNow.find((target) => target.process_id === resources.get('pipe').process_id);
+    const pipeItem = before.find((item) => item.target?.kind === 'process_instance' && item.target.process_id === resources.get('pipe').process_id && item.can_stop);
+    assert(pipe && pipeItem, 'The original pipe process must still expose its exact ordinary Stop target');
+    const modelBefore = evidence.model_requests.length;
+    const launchesBefore = await launchCounts();
+    const receipt = await api('POST', '/api/agent-activities/stop', {
+      target: pipeItem.target, idempotency_key: `stop-original-desktop-resource-pipe-${sentinel}`,
+    });
+    assert.equal(receipt.accepted, true);
+    const settled = await until(async () => {
+      if (failure) throw failure;
+      const items = await activitySnapshot();
+      const rows = items.flatMap((item) => item.resources).filter((resource) => resource.target?.kind === 'process_instance');
+      const pipeRows = rows.filter((resource) => resource.target.process_id === resources.get('pipe').process_id);
+      const ptyRows = rows.filter((resource) => resource.target.process_id === resources.get('pty').process_id);
+      if (pipeRows.some((resource) => resource.state !== 'released')) return undefined;
+      assert(ptyRows.length && ptyRows.every((resource) => ['active', 'held_for_user'].includes(resource.state)),
+        'Stopping one process must not stop its sibling');
+      return { rows, pipe: pipeRows, pty: ptyRows };
+    }, 'the exact pipe process release', 45_000);
+    const launchesAfter = await launchCounts();
+    assert.deepEqual(launchesAfter, launchesBefore); assert.equal(evidence.model_requests.length, modelBefore);
+    const after = await activitySnapshot();
+    const result = { passed: true, token: sentinel, host_pid: ready.host_pid, session_id: session, operation_id: operation,
+      pipe_target: pipe, remaining_process_targets: processTargets(after), pty_state: 'active',
+      model_requests_before: modelBefore, model_requests_after: evidence.model_requests.length,
+      launch_count_before: launchesBefore.pipe + launchesBefore.pty, launch_count_after: launchesAfter.pipe + launchesAfter.pty,
+      observed_at: new Date().toISOString() };
+    await writeFile(join(root, 'stop-process-observation.json'), `${JSON.stringify({ ...result, receipt, before, after: settled }, null, 2)}\n`, { flag: 'wx' });
+    await writeFile(join(root, 'stop-process-ready.json.tmp'), `${JSON.stringify(result, null, 2)}\n`, { flag: 'wx' });
+    await rename(join(root, 'stop-process-ready.json.tmp'), join(root, 'stop-process-ready.json'));
+    console.log(`NOMIFUN_DESKTOP_AGENT_RESOURCES PROCESS_STOP_READY pipe=released pty=active model_calls=${modelBefore}`);
+  };
   let hostClosed = false;
   let stopObserved = false;
+  let stopTargets;
+  let stopProcessObserved = false;
   while (!closing) {
     await delay(250);
     if (!windows && failure) throw failure;
@@ -576,6 +627,9 @@ for await(const line of createInterface({input:process.stdin,terminal:false})){
       if (!stopObserved) {
         const request = await optionalJson(join(root, 'stop-agent.request'));
         if (request) { await stopOriginalAgent(request); stopObserved = true; }
+      } else if (!stopProcessObserved) {
+        const request = await optionalJson(join(root, 'stop-process.request'));
+        if (request) { await stopPipeProcess(request, stopTargets); stopProcessObserved = true; }
       }
       try { await fetch(`${base}/api/auth/status`, { signal: AbortSignal.timeout(1000) }); }
       catch { hostClosed = true; evidence.host_connection_closed_at = new Date().toISOString(); await journal(); }

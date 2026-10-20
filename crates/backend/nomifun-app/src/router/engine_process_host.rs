@@ -1404,34 +1404,36 @@ mod tests {
         let (first, first_pool) = super::super::engine_journal::test_fixture().await;
         let scope = EngineProcessScope::new_session(root.path(),"0190f5fe-7c00-7a00-8000-000000000001","0190f5fe-7c00-7a00-8000-000000000002").unwrap();
         let authority = session_process_authority(&["start", "poll", "input", "cancel"]);
-        scope.open_turn("first", first, Some(authority.clone())).unwrap();
-        let launched = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({
+        scope.open_turn("turn", first.clone(), Some(authority.clone())).unwrap();
+        let launched = super::resource_tests::formal_launch(&scope, &first, serde_json::json!({
             "operation":"start", "cmd":"printf 'READY\\n'; IFS= read -r answer; printf 'ANSWER:%s\\n' \"$answer\"", "wait_ms":0
-        })), "original-launch", Some("first")).await.unwrap().0;
+        })).await.0;
         let id = launched["process_id"].as_str().unwrap().to_owned();
         let pid = launched["pid"].as_u64().unwrap();
-        scope.finish_turn("first").unwrap();
+        super::resource_tests::finish(&scope, &first).await;
         scope.ensure_retained().await.unwrap();
         assert!(!scope.state.lock().await.is_quiescent());
         assert!(scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"cancel","process_id":id})),
-            "late-old-call", Some("first")).await.is_err());
-        let (second, second_pool) = super::super::engine_journal::test_fixture().await;
-        scope.open_turn("second", second, Some(authority)).unwrap();
-        let observed = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"poll","process_id":id})),
-            "successor-observation", Some("second")).await.unwrap().0;
+            "late-old-call", Some("turn")).await.is_err());
+        let (second, _) = super::super::engine_journal::test_fixture_for_operation(first_pool.clone(), "second", "second-key").await;
+        scope.open_turn("second", second.clone(), Some(authority)).unwrap();
+        let observed = super::resource_tests::formal_control(&scope, &second, "successor-observation", "successor-observation-call",
+            "workspace.process/poll", "second", serde_json::json!({"operation":"poll","process_id":id})).await.0;
         assert_eq!(observed["process_id"], id);
         assert_eq!(observed["pid"], pid);
         assert_eq!(observed["state"], "running");
-        let sent = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"stdin","process_id":id,
-            "input":"accepted", "append_newline":true})), "successor-answer", Some("second")).await.unwrap().0;
+        let sent = super::resource_tests::formal_control(&scope, &second, "successor-answer", "successor-answer-call",
+            "workspace.process/input", "second", serde_json::json!({"operation":"stdin","process_id":id,
+            "input":"accepted", "append_newline":true})).await.0;
         let (terminal,text)=tokio::time::timeout(Duration::from_secs(5),async {
             let mut observed=sent;let mut text=String::new();let mut ordinal=0;
             loop {
                 text.push_str(observed["output"]["text"].as_str().unwrap());
                 if observed["state"]!="running" {break (observed,text);}
                 let cursor=observed["output"]["next_cursor"].as_u64().unwrap();
-                observed=scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"poll","process_id":id,"cursor":cursor,"wait_ms":1000})),
-                    &format!("successor-terminal-{ordinal}"),Some("second")).await.unwrap().0;
+                observed=super::resource_tests::formal_control(&scope,&second,&format!("successor-terminal-{ordinal}"),
+                    &format!("successor-terminal-call-{ordinal}"),"workspace.process/poll","second",
+                    serde_json::json!({"operation":"poll","process_id":id,"cursor":cursor,"wait_ms":1000})).await.0;
                 ordinal+=1;
             }
         }).await.unwrap();
@@ -1439,11 +1441,11 @@ mod tests {
         assert!(text.contains("ANSWER:accepted"));
         let state = scope.state.lock().await;
         assert_eq!(state.sessions.len(), 1, "a successor must never relaunch the command");
-        assert_eq!(state.sessions[&id].creator_operation, "first");
+        assert_eq!(state.sessions[&id].creator_operation, "turn");
         assert_eq!(state.sessions[&id].creator_call, "original-launch");
         drop(state);
         scope.cleanup().await.unwrap();
-        drop(scope); first_pool.close().await; second_pool.close().await;
+        drop(scope); drop(second); first_pool.close().await;
     }
 
     #[cfg(unix)]
@@ -1454,12 +1456,12 @@ mod tests {
         let (first, first_pool) = super::super::engine_journal::test_fixture().await;
         let scope = EngineProcessScope::new_session(root.path(),"0190f5fe-7c00-7a00-8000-000000000001","0190f5fe-7c00-7a00-8000-000000000002").unwrap();
         let creator = session_process_authority(if rejected_ceiling == "creator_grant" { &["start"] } else { &["start","input"] });
-        scope.open_turn("first", first, Some(creator.clone())).unwrap();
-        let launched = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"start", "cmd":"IFS= read -r answer", "wait_ms":0})),
-            "launch-grant-only", Some("first")).await.unwrap().0;
+        scope.open_turn("turn", first.clone(), Some(creator.clone())).unwrap();
+        let launched = super::resource_tests::formal_launch(&scope, &first,
+            serde_json::json!({"operation":"start", "cmd":"IFS= read -r answer", "wait_ms":0})).await.0;
         let id = launched["process_id"].as_str().unwrap().to_owned();
-        scope.finish_turn("first").unwrap();
-        let (second, second_pool) = super::super::engine_journal::test_fixture().await;
+        super::resource_tests::finish(&scope, &first).await;
+        let (second, _) = super::super::engine_journal::test_fixture_for_operation(first_pool.clone(), "second", "second-key").await;
         let mut current = session_process_authority(if rejected_ceiling == "current_grant" { &["start","poll"] } else { &["start","poll","input","cancel"] });
         if rejected_ceiling == "resource" { current.resources[0].resource_id = "different-process-resource".into(); }
         scope.open_turn("second", second, Some(current)).unwrap();
@@ -1471,7 +1473,7 @@ mod tests {
         let state = scope.state.lock().await;
         assert!(state.is_quiescent());
         assert!(matches!(state.sessions[&id].terminal, Some(EngineProcessPoll::Cancelled { .. })));
-        drop(state); drop(scope); first_pool.close().await; second_pool.close().await;
+        drop(state); drop(scope); first_pool.close().await;
         }
     }
 
@@ -1482,23 +1484,24 @@ mod tests {
         let (first, first_pool) = super::super::engine_journal::test_fixture().await;
         let scope = EngineProcessScope::new_session(root.path(),"0190f5fe-7c00-7a00-8000-000000000001","0190f5fe-7c00-7a00-8000-000000000002").unwrap();
         let authority = session_process_authority(&["start","poll"]);
-        scope.open_turn("first", first, Some(authority.clone())).unwrap();
-        let launched = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"start", "cmd":"sleep 0.1; printf 'BACKGROUND_DONE'", "wait_ms":0})),
-            "finite-third-party-work", Some("first")).await.unwrap().0;
+        scope.open_turn("turn", first.clone(), Some(authority.clone())).unwrap();
+        let launched = super::resource_tests::formal_launch(&scope, &first,
+            serde_json::json!({"operation":"start", "cmd":"sleep 0.1; printf 'BACKGROUND_DONE'", "wait_ms":0})).await.0;
         let id = launched["process_id"].as_str().unwrap().to_owned();
-        scope.finish_turn("first").unwrap();
+        super::resource_tests::finish(&scope, &first).await;
         let original_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events").fetch_one(&first_pool).await.unwrap();
         tokio::time::sleep(Duration::from_millis(250)).await;
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events").fetch_one(&first_pool).await.unwrap(), original_count,
             "background output and exit cannot synthesize a Turn/model event");
-        let (second, second_pool) = super::super::engine_journal::test_fixture().await;
-        scope.open_turn("second", second, Some(authority)).unwrap();
-        let observed = scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"poll","process_id":id,"wait_ms":1000})),
-            "observe-real-terminal", Some("second")).await.unwrap().0;
+        let (second, _) = super::super::engine_journal::test_fixture_for_operation(first_pool.clone(), "second", "second-key").await;
+        scope.open_turn("second", second.clone(), Some(authority)).unwrap();
+        let observed = super::resource_tests::formal_control(&scope, &second, "observe-real-terminal", "observe-real-terminal-call",
+            "workspace.process/poll", "second",
+            serde_json::json!({"operation":"poll","process_id":id,"wait_ms":1000})).await.0;
         assert_eq!(observed["state"], "exited");
         assert_eq!(observed["output"]["text"], "BACKGROUND_DONE");
         assert_eq!(observed["cleanup"]["reaped"], true);
-        scope.cleanup().await.unwrap(); drop(scope); first_pool.close().await; second_pool.close().await;
+        scope.cleanup().await.unwrap(); drop(scope); drop(second); first_pool.close().await;
     }
     use nomifun_engine_core::{EngineCleanupReport, EngineProcessOutput};
     include!("engine_process_component_tests.rs");

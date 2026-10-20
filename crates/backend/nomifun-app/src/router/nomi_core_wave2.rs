@@ -574,18 +574,9 @@ impl NomiCoreWave2Host {
         for (key, scope) in scopes {
             match scope.cleanup().await {
                 Ok(()) => {
-                    let mut receipt=scope.release_receipt().await.map_err(|error|AppError::Conflict(error.to_string()))?;
+                    let receipt=scope.release_receipt().await.map_err(|error|AppError::Conflict(error.to_string()))?;
                     if !receipt.retention.processes.is_empty() {
-                        let store=self.effect_store.as_ref().ok_or_else(||AppError::Conflict("Session process owner release has no canonical Store".into()))?;
-                        if let Some(original)=store.session_process_owner_retention(&receipt.retention.owner_ref,&receipt.retention.agent_session_id,
-                            &receipt.retention.owner_generation).await.map_err(|error|AppError::Conflict(error.to_string()))? {
-                            if original.processes.iter().any(|process| !receipt.retention.processes.contains(process)) {
-                                return Err(AppError::Conflict("Session process release lost its original retained creator authority".into()));
-                            }
-                            receipt.retention=original;
-                            store.record_session_process_owner_released(&receipt.retention.owner_ref,receipt.clone()).await
-                                .map_err(|error|AppError::Conflict(error.to_string()))?;
-                        }
+                        return Err(AppError::Conflict("Session process cleanup left retained processes without canonical reaps".into()));
                     }
                     let mut owners=self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?;
                     match owners.get(&key) {
@@ -1406,9 +1397,16 @@ mod tests {
             };
             host.open_runtime_turn(owner,session,"turn",root.path().to_str().unwrap(),journal.clone(),authority.clone()).unwrap();
             let scope=host.processes.lock().unwrap().get(&(owner.into(),session.into())).unwrap().clone();
+            journal.append(serde_json::json!({"event":"host_tool_dispatch","dispatch":{
+                "operation_id":"original-owned-start","call_id":"original-owned-start-call","capability_id":"workspace.process",
+                "action_id":"workspace.process/start","model_name":"start_process"}}).to_string(),None,
+                super::super::engine_journal::EngineJournalWrite::Progress).await.unwrap();
             let launched=scope.invoke_for_turn(StrictJsonValue(serde_json::json!({"operation":"start","cmd":"IFS= read -r answer","wait_ms":0})),
                 "original-owned-start",Some("turn")).await.unwrap();
             assert_eq!(launched.0["state"],"running");
+            journal.append(serde_json::json!({"event":"host_tool_settled","operation_id":"original-owned-start",
+                "call_id":"original-owned-start-call","result":nomifun_engine_core::EngineToolResult::text("original-owned-start-call".into(), launched.0.to_string(), false),
+                "error":null}).to_string(),None,super::super::engine_journal::EngineJournalWrite::Settlement).await.unwrap();
             host.finish_runtime_process_turn(owner,session,"turn").unwrap();
             let retention=scope.retention().await.unwrap();
             journal.append(serde_json::json!({"event":"host_cleanup_proven","session_process_retention":retention}).to_string(),None,
@@ -1434,7 +1432,30 @@ mod tests {
             assert!(host.processes.lock().unwrap().is_empty());
             assert!(scope.release_receipt().await.unwrap().reaped);
             let facts=store.read_events(&session.into(),None,500).await.unwrap();
-            assert_eq!(facts.events.iter().filter(|event|event.kind.0==nomifun_agent_contracts::SESSION_PROCESS_OWNER_RELEASED).count(),1);
+            assert_eq!(facts.events.iter().filter(|event|event.kind.0==nomifun_agent_contracts::SESSION_PROCESS_OWNER_RELEASED).count(),0,
+                "every retained process already carries its own canonical reap; an owner release must not rewrite that history");
+            let reaped_rows:Vec<(Option<String>,Option<String>)>=sqlx::query_as(
+                "SELECT e.inline_json, CAST(p.body AS TEXT) FROM agent_events e LEFT JOIN agent_payloads p ON p.payload_id=e.payload_id AND p.session_id=e.session_id WHERE e.session_id=? AND e.kind='session/process-reaped' ORDER BY e.seq")
+                .bind(session).fetch_all(&pool).await.unwrap();
+            let reaped:Vec<nomifun_agent_contracts::SessionProcessReapedV1>=reaped_rows.iter().map(|(inline,body)|{
+                let value=inline.as_deref().map(|text|serde_json::from_str::<serde_json::Value>(text).unwrap())
+                    .or_else(||body.as_deref().map(|text|serde_json::from_str::<serde_json::Value>(text).unwrap()["value"].clone()))
+                    .expect("canonical process reap payload");
+                serde_json::from_value(value).expect("canonical process reap receipt")
+            }).collect();
+            assert_eq!(reaped.len(),retention.processes.len(),"each originally retained process has exactly one canonical reap");
+            for receipt in &reaped {
+                assert_eq!(receipt.retention.owner_generation,retention.owner_generation);
+                assert!(retention.processes.iter().any(|process|process.process_id==receipt.retention.processes[0].process_id),
+                    "reap receipt must cover an originally retained process");
+                let terminal=receipt.terminal.clone().map(|terminal|terminal.0)
+                    .or_else(||receipt.output_archive.as_ref().map(|archive|archive.terminal.0.clone()))
+                    .expect("reap carries its original terminal metadata");
+                assert_eq!(terminal["cleanup"]["reaped"],true,"canonical reap must carry proven native cleanup");
+                assert_eq!(terminal["cleanup"]["errors"],serde_json::json!([]),"canonical reap must carry proven native cleanup");
+            }
+            assert!(store.unreleased_session_process_generations(&principal,&session.into()).await.unwrap().is_empty(),
+                "the released owner generation must not remain outstanding");
             if shutdown {assert!(host.open_runtime_turn(owner,session,"successor",root.path().to_str().unwrap(),journal,authority).is_err());}
             drop(scope);drop(host);pool.close().await;
         }

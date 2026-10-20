@@ -319,6 +319,12 @@ enum SchedulerLoopExit {
     LeaseLost,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchedulerFailureAuthority {
+    Exit,
+    Retry,
+}
+
 impl ExecutionScheduler {
     pub fn new(deps: ExecutionSchedulerDeps) -> Self {
         Self {
@@ -1193,25 +1199,10 @@ impl ExecutionScheduler {
                     }
                     continue;
                 }
-                if detail.attempts.iter().any(|attempt| {
-                    attempt.status == ExecutionAttemptStatus::WaitingInput
-                }) {
-                    if let Err(error)=self.reconcile_lead_report(owner_id,&detail).await {
-                        tracing::warn!(%execution_id,%error,"execution input notice remains in its existing outbox");
-                    }
-                    // WaitingInput is an aggregate attention signal.  All
-                    // independent runnable work above has been exhausted, so
-                    // release the lease until a durable answer wakes us.
-                    return Ok(SchedulerLoopExit::Normal);
+                if let Some(exit)=self.idle_snapshot_exit(owner_id,execution_id,&detail,&lease).await {
+                    return Ok(exit);
                 }
-                self.fail_if_active(
-                    owner_id,
-                    execution_id,
-                    "no schedulable active step",
-                    &lease,
-                )
-                .await;
-                return Ok(SchedulerLoopExit::Normal);
+                continue;
             }
         }
         .await;
@@ -1425,7 +1416,7 @@ impl ExecutionScheduler {
                 ).await?.is_some() { self.publish().await; return Ok(true); }
                 continue;
             }
-            if !effects.pending_conversation_effects.is_empty() {
+            if owns_deliverable_write_ahead(&detail, attempt) {
                 candidate = Some((step.clone(), attempt.clone(), effects));
                 break;
             }
@@ -1623,6 +1614,7 @@ impl ExecutionScheduler {
                 matches!(attempt.status, ExecutionAttemptStatus::Queued | ExecutionAttemptStatus::Running)
                     && !in_flight_step_ids.contains(&attempt.step_id)
                     && !self.inner.conversation_controls.contains_key(&attempt.attempt_id)
+                    && !owns_recoverable_pending_effects(&detail, attempt)
             }) else {
                 return Ok(());
             };
@@ -2696,6 +2688,105 @@ impl ExecutionScheduler {
         Ok(true)
     }
 
+    async fn scheduler_failure_authority(
+        &self,
+        owner_id: &str,
+        execution_id: &str,
+        expected_version: i64,
+        lease: &AgentExecutionLeaseToken,
+    ) -> SchedulerFailureAuthority {
+        let current = match self.inner.deps.repository.get_execution(owner_id, execution_id).await {
+            Ok(Some(current)) => current,
+            Ok(None) => return SchedulerFailureAuthority::Exit,
+            Err(load_error) => {
+                tracing::warn!(%execution_id, %load_error, "failed to reload scheduler failure conflict");
+                return SchedulerFailureAuthority::Exit;
+            }
+        };
+        let status = match current.status.parse::<AgentExecutionStatus>() {
+            Ok(status) => status,
+            Err(status_error) => {
+                tracing::warn!(%execution_id, %status_error, "scheduler failure reload found an invalid aggregate status");
+                return SchedulerFailureAuthority::Exit;
+            }
+        };
+        if !status_is_active_for_scheduler_failure(status) {
+            return SchedulerFailureAuthority::Exit;
+        }
+        if current.lease_owner.as_deref() != Some(lease.owner())
+            || current.lease_expires_at.is_none_or(|expires_at| expires_at <= now_ms()) {
+            tracing::warn!(%execution_id, "scheduler failure lost lease authority before commit");
+            return SchedulerFailureAuthority::Exit;
+        }
+        if current.version == expected_version {
+            tracing::warn!(%execution_id, "scheduler failure conflicted without aggregate version drift");
+            return SchedulerFailureAuthority::Exit;
+        }
+        tracing::debug!(
+            %execution_id,
+            old_version = expected_version,
+            new_version = current.version,
+            "retrying scheduler failure after concurrent active aggregate update"
+        );
+        SchedulerFailureAuthority::Retry
+    }
+
+    async fn idle_snapshot_exit(
+        &self,
+        owner_id: &str,
+        execution_id: &str,
+        detail: &AgentExecutionDetail,
+        lease: &AgentExecutionLeaseToken,
+    ) -> Option<SchedulerLoopExit> {
+        if detail.attempts.iter().any(|attempt| owns_deliverable_write_ahead(detail, attempt)) {
+            return None;
+        }
+        if detail.attempts.iter().any(|attempt| attempt.status == ExecutionAttemptStatus::WaitingInput) {
+            if let Err(error)=self.reconcile_lead_report(owner_id,&detail).await {
+                tracing::warn!(%execution_id,%error,"execution input notice remains in its existing outbox");
+            }
+            // WaitingInput is an aggregate attention signal.  All
+            // independent runnable work above has been exhausted, so
+            // release the lease until a durable answer wakes us.
+            return Some(SchedulerLoopExit::Normal);
+        }
+        if self.fail_unschedulable_snapshot(owner_id, execution_id, detail, lease).await {
+            return Some(SchedulerLoopExit::Normal);
+        }
+        None
+    }
+
+    async fn fail_unschedulable_snapshot(
+        &self,
+        owner_id: &str,
+        execution_id: &str,
+        detail: &AgentExecutionDetail,
+        lease: &AgentExecutionLeaseToken,
+    ) -> bool {
+        const REASON: &str = "no schedulable active step";
+        if !status_is_active_for_scheduler_failure(detail.execution.status) {
+            return true;
+        }
+        let event = system_event(AgentExecutionEventKind::StatusChanged, None, None,
+            terminal_transition_payload(&detail.execution, AgentExecutionStatus::Failed, Some(REASON)));
+        match self.inner.deps.repository
+            .fail_active_execution(owner_id, execution_id, detail.execution.version, lease, REASON, &event).await
+        {
+            Ok(_) => {
+                self.after_terminal_commit(owner_id, execution_id).await;
+                true
+            }
+            Err(nomifun_db::DbError::Conflict(_)) => !matches!(
+                self.scheduler_failure_authority(owner_id, execution_id, detail.execution.version, lease).await,
+                SchedulerFailureAuthority::Retry
+            ),
+            Err(error) => {
+                tracing::warn!(%execution_id, %error, "failed to persist scheduler failure");
+                true
+            }
+        }
+    }
+
     async fn fail_if_active(
         &self,
         owner_id: &str,
@@ -2738,64 +2829,11 @@ impl ExecutionScheduler {
                 .await
             {
                 Ok(_) => break,
-                Err(nomifun_db::DbError::Conflict(error)) => {
-                    let current = match self
-                        .inner
-                        .deps
-                        .repository
-                        .get_execution(owner_id, execution_id)
-                        .await
-                    {
-                        Ok(Some(current)) => current,
-                        Ok(None) => return,
-                        Err(load_error) => {
-                            tracing::warn!(
-                                %execution_id,
-                                %load_error,
-                                "failed to reload scheduler failure conflict"
-                            );
-                            return;
-                        }
-                    };
-                    let status = match current.status.parse::<AgentExecutionStatus>() {
-                        Ok(status) => status,
-                        Err(status_error) => {
-                            tracing::warn!(
-                                %execution_id,
-                                %status_error,
-                                "scheduler failure reload found an invalid aggregate status"
-                            );
-                            return;
-                        }
-                    };
-                    if !status_is_active_for_scheduler_failure(status) {
-                        return;
+                Err(nomifun_db::DbError::Conflict(_)) => {
+                    match self.scheduler_failure_authority(owner_id, execution_id, detail.execution.version, lease).await {
+                        SchedulerFailureAuthority::Exit => return,
+                        SchedulerFailureAuthority::Retry => {}
                     }
-                    if current.lease_owner.as_deref() != Some(lease.owner())
-                        || current
-                            .lease_expires_at
-                            .is_none_or(|expires_at| expires_at <= now_ms())
-                    {
-                        tracing::warn!(
-                            %execution_id,
-                            "scheduler failure lost lease authority before commit"
-                        );
-                        return;
-                    }
-                    if current.version == detail.execution.version {
-                        tracing::warn!(
-                            %execution_id,
-                            %error,
-                            "scheduler failure conflicted without aggregate version drift"
-                        );
-                        return;
-                    }
-                    tracing::debug!(
-                        %execution_id,
-                        old_version = detail.execution.version,
-                        new_version = current.version,
-                        "retrying scheduler failure after concurrent active aggregate update"
-                    );
                 }
                 Err(error) => {
                     tracing::warn!(%execution_id, %error, "failed to persist scheduler failure");
@@ -2924,6 +2962,32 @@ fn status_is_active_for_scheduler_failure(status: AgentExecutionStatus) -> bool 
         status,
         AgentExecutionStatus::Running | AgentExecutionStatus::WaitingInput
     )
+}
+
+fn current_agent_effects(detail: &AgentExecutionDetail, attempt: &nomifun_api_types::ExecutionAttempt) -> Option<AttemptConversationEffects> {
+    detail.steps.iter().any(|step| step.step_id == attempt.step_id
+        && step.superseded_in_revision.is_none() && step.kind == ExecutionStepKind::Agent)
+        .then(|| attempt.runtime_state.clone()
+            .and_then(|raw| serde_json::from_value::<AttemptConversationEffects>(raw).ok()))
+        .flatten()
+}
+
+fn owns_deliverable_write_ahead(detail: &AgentExecutionDetail, attempt: &nomifun_api_types::ExecutionAttempt) -> bool {
+    matches!(attempt.status, ExecutionAttemptStatus::Running | ExecutionAttemptStatus::WaitingInput)
+        && current_agent_effects(detail, attempt)
+            .is_some_and(|effects| effects.review_blocked.is_none() && match effects.pending_conversation_effects.first() {
+                None => false,
+                Some(PendingConversationEffect::DecisionInput { .. }) => attempt.status == ExecutionAttemptStatus::Running
+                    && detail.execution.status != AgentExecutionStatus::Paused,
+                Some(_) => true,
+            })
+}
+
+fn owns_recoverable_pending_effects(detail: &AgentExecutionDetail, attempt: &nomifun_api_types::ExecutionAttempt) -> bool {
+    attempt.status == ExecutionAttemptStatus::Running
+        && current_agent_effects(detail, attempt)
+            .is_some_and(|effects| effects.review_blocked.is_none()
+                && !effects.pending_conversation_effects.is_empty())
 }
 
 fn attempt_error_transition(
@@ -5962,6 +6026,201 @@ mod tests {
             assert_eq!(runner.call_count("introduction"),1);
             scheduler.shutdown().await.unwrap();
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn answer_admitted_after_scheduler_snapshots_is_delivered_not_reconciled_or_failed() {
+        let mut mode = HarnessAttemptRunner::overlap_probe();
+        mode.mode = HarnessRunnerMode::UserInputHandoff;
+        let runner = Arc::new(mode);
+        let (mut scheduler,repository,execution_id,_dir,owner) = make_scheduler_harness(
+            runner.clone(),&["introduction"],&[],1,AdaptationPolicy::Adaptive,None,
+        ).await;
+        Arc::get_mut(&mut scheduler.inner).unwrap().deps.conversation_effects=Arc::new(NoopConversationEffects::default());
+        let pool=runner.pool.lock().unwrap().clone().unwrap();
+        scheduler.start(owner.clone(),execution_id.clone());
+        let waiting=tokio::time::timeout(Duration::from_secs(15),async { loop {
+            let rows=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+            if rows.execution.status=="waiting_input" && scheduler.inner.active.get(&execution_id).is_none() { break rows; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.unwrap();
+        let stale=scheduler.detail(&owner,&execution_id).await.unwrap();
+        let (step,attempt)=(waiting.steps[0].clone(),waiting.attempts[0].attempt.clone());
+        let mut pending=AttemptConversationEffects::default();
+        pending.push_decision(generate_id(),"小明".into()).unwrap();
+        let encoded=pending.encode().unwrap();
+        repository.resume_waiting_attempt(&owner,&execution_id,waiting.execution.version,&step.step_id,step.version,
+            &attempt.attempt_id,attempt.version,&AttemptConversationEffectParams {runtime_state:Some(encoded.clone())},
+            &system_event(AgentExecutionEventKind::DecisionAnswered,Some(&step.step_id),Some(&attempt.attempt_id),json!({})),
+        ).await.unwrap();
+        let admitted=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+        let lease=AgentExecutionLeaseToken::new("snapshot-race-owner".into());
+        repository.try_acquire_lease(&execution_id,admitted.execution.version,lease.owner(),now_ms()+30_000).await.unwrap().unwrap();
+        let current=scheduler.detail(&owner,&execution_id).await.unwrap();
+        assert!(owns_deliverable_write_ahead(&current,&current.attempts[0]));
+        let (mut jobs,mut in_flight)=(ScheduledAgentJobs::new(),HashSet::new());
+        scheduler.recover_interrupted(&owner,&execution_id,&lease,&mut jobs,&mut in_flight).await.unwrap();
+        assert!(jobs.is_empty() && in_flight.is_empty(),"an admitted answer is not an interrupted invocation");
+        assert!(!scheduler.fail_unschedulable_snapshot(&owner,&execution_id,&stale,&lease).await,
+            "a snapshot taken before the answer cannot fail the Execution");
+        let unchanged=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+        assert_eq!(unchanged.execution.status,"running");
+        assert_eq!(unchanged.attempts[0].attempt.status,"running");
+        assert_eq!(unchanged.attempts[0].attempt.version,admitted.attempts[0].attempt.version);
+        assert_eq!(unchanged.attempts[0].attempt.runtime_state.as_deref(),Some(encoded.as_str()));
+        sqlx::query("UPDATE agent_executions SET lease_owner=NULL,lease_expires_at=NULL WHERE execution_id=?")
+            .bind(&execution_id).execute(&pool).await.unwrap();
+        scheduler.start(owner.clone(),execution_id.clone());
+        let delivered=tokio::time::timeout(Duration::from_secs(15),async { loop {
+            let rows=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+            assert!(!matches!(rows.execution.status.as_str(),"failed"|"cancelled"),"the admitted answer must continue: {:?}",rows.execution);
+            if rows.execution.status=="waiting_input" && rows.attempts[0].attempt.question.as_deref()==Some("请提供班级。") { break rows; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.unwrap();
+        assert_eq!(delivered.attempts.len(),1);
+        assert_eq!(delivered.attempts[0].attempt.attempt_id,attempt.attempt_id);
+        assert_eq!(runner.calls.lock().unwrap().iter().filter(|call|call.starts_with("answer:")).count(),1);
+        assert_eq!(runner.call_count("introduction"),1);
+        scheduler.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn paused_admitted_answer_is_not_reconciled_and_resumes_exactly_once() {
+        let mut mode = HarnessAttemptRunner::overlap_probe();
+        mode.mode = HarnessRunnerMode::UserInputHandoff;
+        let runner = Arc::new(mode);
+        let (mut scheduler,repository,execution_id,_dir,owner) = make_scheduler_harness(
+            runner.clone(),&["introduction"],&[],1,AdaptationPolicy::Adaptive,None,
+        ).await;
+        Arc::get_mut(&mut scheduler.inner).unwrap().deps.conversation_effects=Arc::new(NoopConversationEffects::default());
+        let pool=runner.pool.lock().unwrap().clone().unwrap();
+        scheduler.start(owner.clone(),execution_id.clone());
+        let waiting=tokio::time::timeout(Duration::from_secs(15),async { loop {
+            let rows=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+            if rows.execution.status=="waiting_input" && scheduler.inner.active.get(&execution_id).is_none() { break rows; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.unwrap();
+        let (step,attempt)=(waiting.steps[0].clone(),waiting.attempts[0].attempt.clone());
+        let conversation_id=waiting.attempts[0].conversation_id.clone();
+        let mut pending=AttemptConversationEffects::default();
+        pending.push_decision(generate_id(),"小明".into()).unwrap();
+        let encoded=pending.encode().unwrap();
+        repository.resume_waiting_attempt(&owner,&execution_id,waiting.execution.version,&step.step_id,step.version,
+            &attempt.attempt_id,attempt.version,&AttemptConversationEffectParams {runtime_state:Some(encoded.clone())},
+            &system_event(AgentExecutionEventKind::DecisionAnswered,Some(&step.step_id),Some(&attempt.attempt_id),json!({})),
+        ).await.unwrap();
+        let admitted=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+        repository.pause_execution(&owner,&execution_id,admitted.execution.version,
+            &system_event(AgentExecutionEventKind::StatusChanged,None,None,json!({"status":"paused"})),
+        ).await.unwrap();
+        let paused=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+        assert_eq!(paused.execution.status,"paused");
+        let lease=AgentExecutionLeaseToken::new("paused-recovery-owner".into());
+        repository.try_acquire_lease(&execution_id,paused.execution.version,lease.owner(),now_ms()+30_000).await.unwrap().unwrap();
+        let (mut jobs,mut in_flight)=(ScheduledAgentJobs::new(),HashSet::new());
+        scheduler.recover_interrupted(&owner,&execution_id,&lease,&mut jobs,&mut in_flight).await.unwrap();
+        assert!(jobs.is_empty() && in_flight.is_empty(),"a paused admitted answer is not an interrupted invocation");
+        sqlx::query("UPDATE agent_executions SET lease_owner=NULL,lease_expires_at=NULL WHERE execution_id=?")
+            .bind(&execution_id).execute(&pool).await.unwrap();
+        scheduler.start(owner.clone(),execution_id.clone());
+        tokio::time::timeout(Duration::from_secs(15),async { loop {
+            if scheduler.inner.active.get(&execution_id).is_none() { break; }
+            let rows=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+            assert_eq!(rows.attempts[0].attempt.status.as_str(),"running","pause recovery must not reconcile the admitted answer");
+            assert_eq!(rows.attempts[0].attempt.runtime_state.as_deref(),Some(encoded.as_str()));
+            assert!(!matches!(rows.execution.status.as_str(),"failed"|"cancelled"));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.expect("the paused scheduler generation should settle");
+        let held=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+        assert_eq!(held.execution.status,"paused");
+        let held_effects=serde_json::from_str::<AttemptConversationEffects>(held.attempts[0].attempt.runtime_state.as_deref().unwrap()).unwrap();
+        assert!(held_effects.review_blocked.is_none(),"recovery must not mark the admitted answer missing");
+        let links:i64=sqlx::query_scalar("SELECT COUNT(*) FROM conversation_execution_links WHERE execution_id=? AND active=1")
+            .bind(&execution_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(links,1,"recovery must not deactivate the original Session link");
+        repository.resume_execution(&owner,&execution_id,held.execution.version,
+            &system_event(AgentExecutionEventKind::StatusChanged,None,None,json!({"status":"running"})),
+        ).await.unwrap();
+        scheduler.start(owner.clone(),execution_id.clone());
+        let delivered=tokio::time::timeout(Duration::from_secs(15),async { loop {
+            let rows=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+            assert!(!matches!(rows.execution.status.as_str(),"failed"|"cancelled"),"the admitted answer must continue: {:?}",rows.execution);
+            if rows.execution.status=="waiting_input" && rows.attempts[0].attempt.question.as_deref()==Some("请提供班级。") { break rows; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.unwrap();
+        assert_eq!(delivered.attempts.len(),1);
+        assert_eq!(delivered.attempts[0].attempt.attempt_id,attempt.attempt_id);
+        assert_eq!(delivered.attempts[0].conversation_id,conversation_id);
+        assert_eq!(runner.calls.lock().unwrap().iter().filter(|call|call.starts_with("answer:")).count(),1);
+        assert_eq!(runner.call_count("introduction"),1);
+        scheduler.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn idle_snapshot_continues_while_an_admitted_answer_is_deliverable() {
+        let mut mode = HarnessAttemptRunner::overlap_probe();
+        mode.mode = HarnessRunnerMode::UserInputHandoff;
+        let runner = Arc::new(mode);
+        let (mut scheduler,repository,execution_id,_dir,owner) = make_scheduler_harness(
+            runner.clone(),&["introduction"],&[],1,AdaptationPolicy::Adaptive,None,
+        ).await;
+        Arc::get_mut(&mut scheduler.inner).unwrap().deps.conversation_effects=Arc::new(NoopConversationEffects::default());
+        scheduler.start(owner.clone(),execution_id.clone());
+        let waiting=tokio::time::timeout(Duration::from_secs(15),async { loop {
+            let rows=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+            if rows.execution.status=="waiting_input" && scheduler.inner.active.get(&execution_id).is_none() { break rows; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.unwrap();
+        let (step,attempt)=(waiting.steps[0].clone(),waiting.attempts[0].attempt.clone());
+        let mut pending=AttemptConversationEffects::default();
+        pending.push_decision(generate_id(),"小明".into()).unwrap();
+        let encoded=pending.encode().unwrap();
+        repository.resume_waiting_attempt(&owner,&execution_id,waiting.execution.version,&step.step_id,step.version,
+            &attempt.attempt_id,attempt.version,&AttemptConversationEffectParams {runtime_state:Some(encoded.clone())},
+            &system_event(AgentExecutionEventKind::DecisionAnswered,Some(&step.step_id),Some(&attempt.attempt_id),json!({})),
+        ).await.unwrap();
+        let admitted=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+        let lease=AgentExecutionLeaseToken::new("idle-snapshot-owner".into());
+        repository.try_acquire_lease(&execution_id,admitted.execution.version,lease.owner(),now_ms()+30_000).await.unwrap().unwrap();
+        let current=scheduler.detail(&owner,&execution_id).await.unwrap();
+        assert_eq!(scheduler.idle_snapshot_exit(&owner,&execution_id,&current,&lease).await,None,
+            "a Running attempt holding an admitted answer must keep the loop");
+        let unchanged=repository.get_execution_detail(&owner,&execution_id).await.unwrap().unwrap();
+        assert_eq!(unchanged.execution.status,"running");
+        assert_eq!(unchanged.attempts[0].attempt.status,"running");
+        assert_eq!(unchanged.attempts[0].attempt.runtime_state.as_deref(),Some(encoded.as_str()));
+        scheduler.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn unschedulable_snapshot_fails_only_while_the_aggregate_is_unchanged() {
+        let runner=Arc::new(HarnessAttemptRunner::overlap_probe());
+        let (scheduler,repository,execution_id,_dir,owner)=make_scheduler_harness(
+            runner.clone(),&["stuck"],&[],1,AdaptationPolicy::Adaptive,None,
+        ).await;
+        let pool=runner.pool.lock().unwrap().clone().unwrap();
+        sqlx::query("UPDATE agent_execution_steps SET status='running' WHERE execution_id=?")
+            .bind(&execution_id).execute(&pool).await.unwrap();
+        let before=repository.get_execution(&owner,&execution_id).await.unwrap().unwrap();
+        let lease=AgentExecutionLeaseToken::new("stuck-owner".into());
+        repository.try_acquire_lease(&execution_id,before.version,lease.owner(),now_ms()+30_000).await.unwrap().unwrap();
+        let stale=scheduler.detail(&owner,&execution_id).await.unwrap();
+        sqlx::query("UPDATE agent_executions SET version=version+1 WHERE execution_id=?")
+            .bind(&execution_id).execute(&pool).await.unwrap();
+        assert!(!scheduler.fail_unschedulable_snapshot(&owner,&execution_id,&stale,&lease).await);
+        assert_eq!(repository.get_execution(&owner,&execution_id).await.unwrap().unwrap().status,"running");
+        sqlx::query("UPDATE agent_executions SET lease_owner='other-live-owner',version=version+1 WHERE execution_id=?")
+            .bind(&execution_id).execute(&pool).await.unwrap();
+        assert!(scheduler.fail_unschedulable_snapshot(&owner,&execution_id,&stale,&lease).await,
+            "a conflict under a foreign live lease exits without failing");
+        assert_eq!(repository.get_execution(&owner,&execution_id).await.unwrap().unwrap().status,"running");
+        sqlx::query("UPDATE agent_executions SET lease_owner='stuck-owner' WHERE execution_id=?")
+            .bind(&execution_id).execute(&pool).await.unwrap();
+        let fresh=scheduler.detail(&owner,&execution_id).await.unwrap();
+        assert!(scheduler.fail_unschedulable_snapshot(&owner,&execution_id,&fresh,&lease).await);
+        let failed=repository.get_execution(&owner,&execution_id).await.unwrap().unwrap();
+        assert_eq!(failed.status,"failed");
+        assert_eq!(failed.summary.as_deref(),Some("no schedulable active step"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

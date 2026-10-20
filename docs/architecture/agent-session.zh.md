@@ -267,8 +267,9 @@ Turn 结算关闭本轮准入并等待已派发调用，保留合法后台进程
 process ID 与 creator Turn/call 精确结束单个进程。该信号使用 spawn 时捕获的原 native capability，
 不等待另一进程的长 poll 所持业务锁，不升级成 Session 或整个 Execution 取消。
 保留 Session 资源以原 `host_cleanup_proven` 中的 typed retention 明确区分于 reap；
-真实 owner 清理后才追加同一事实链的 `session/process-owner-released`，核验完整原资源集合、
-代次及真实 reap 回执。该事实仅结算对应资源围栏，不授予重放权限，也不增加资源生命周期表。
+真实 owner 清理逐个以同一事实链的 `session/process-reaped` 结算原保留进程；清理后仍有未结算的
+保留进程则失败关闭，不追加 `session/process-owner-released`。既有该事实只作为已提交历史读取和核验，
+仅结算对应资源围栏，不授予重放权限，也不增加资源生命周期表。
 未知效果、配置切换、工作区迁移和重启仍受原 owner 围栏约束。
 
 Session 的 64 个进程上限只约束仍活动或尚无清理证明的句柄。原 first-party launch 与同一事实链
