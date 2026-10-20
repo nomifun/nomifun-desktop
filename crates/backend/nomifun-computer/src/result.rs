@@ -102,6 +102,18 @@ pub fn normalize(raw: &Value, image_enabled: bool) -> NormalizedResult {
         Some("refused" | "not_started") => ResultEffectOutcome::Failed,
         Some("unknown") => ResultEffectOutcome::Unknown,
         _ if evidence.get("refusal").is_some() => ResultEffectOutcome::Failed,
+        // The pinned vendor's LaunchAppTool foreground-lock guard returns this
+        // exact tuple before every target-start branch (platform-windows/src/
+        // tools/impl_.rs:2532). Other background errors can follow delivery.
+        _ if is_error
+            && evidence.get("effect").is_none()
+            && evidence.get("status").is_none()
+            && evidence.get("code").and_then(Value::as_str) == Some("background_unavailable")
+            && evidence.get("event_kind").and_then(Value::as_str) == Some("app_launch")
+            && evidence.get("delivery_mode").and_then(Value::as_str) == Some("background") =>
+        {
+            ResultEffectOutcome::Failed
+        }
         _ if evidence.get("code").and_then(Value::as_str) == Some("invalid_batch")
             && evidence.get("executed").and_then(Value::as_u64) == Some(0) =>
         {
@@ -300,5 +312,54 @@ mod tests {
         let result = normalize(&delivered, true);
         assert_eq!(result.effect, ResultEffectOutcome::Succeeded);
         assert!(result.is_error);
+    }
+
+    #[test]
+    fn background_launch_before_start_is_failed_without_any_text() {
+        let raw = json!({"isError":true,"structuredContent":{
+            "code":"background_unavailable","event_kind":"app_launch","delivery_mode":"background"}});
+        let projected = normalize(&raw, false);
+        assert_eq!(projected.effect, ResultEffectOutcome::Failed);
+        assert!(projected.is_error);
+    }
+
+    #[test]
+    fn other_background_errors_do_not_claim_zero_effect() {
+        let original = json!({"isError":true,"structuredContent":{
+            "code":"background_unavailable","event_kind":"app_launch","delivery_mode":"background"}});
+        for (field, other) in [("code", json!("background_uipi_blocked")),
+            ("event_kind", json!("mouse_click")), ("delivery_mode", json!("foreground"))] {
+            for replacement in [None, Some(other), Some(json!(null)), Some(json!(false))] {
+                let mut raw = original.clone();
+                let fields = raw["structuredContent"].as_object_mut().unwrap();
+                match replacement { Some(value) => { fields.insert(field.into(), value); }, None => { fields.remove(field); } }
+                assert_eq!(normalize(&raw, false).effect, ResultEffectOutcome::Unknown, "{field}: {raw}");
+            }
+        }
+        let generic = json!({"isError":true,"structuredContent":{"code":"background_unavailable","delivery_mode":"background"}});
+        assert_eq!(normalize(&generic, false).effect, ResultEffectOutcome::Unknown);
+        let only_prose = json!({"isError":true,"content":[{"type":"text","text":"No process was started."}]});
+        assert_eq!(normalize(&only_prose, false).effect, ResultEffectOutcome::Unknown);
+        let mut not_an_error = original;
+        not_an_error["isError"] = json!(false);
+        assert_eq!(normalize(&not_an_error, false).effect, ResultEffectOutcome::Succeeded);
+    }
+
+    #[test]
+    fn launch_tuple_does_not_override_explicit_or_malformed_markers() {
+        for field in ["effect", "status"] {
+            for (marker, expected) in [(json!("unknown"), ResultEffectOutcome::Unknown),
+                (json!("partial"), ResultEffectOutcome::Succeeded),
+                (json!("refused"), ResultEffectOutcome::Failed),
+                (json!("unexpected"), ResultEffectOutcome::Unknown),
+                (json!(null), ResultEffectOutcome::Unknown), (json!(false), ResultEffectOutcome::Unknown),
+                (json!(17), ResultEffectOutcome::Unknown), (json!({}), ResultEffectOutcome::Unknown),
+                (json!([]), ResultEffectOutcome::Unknown)] {
+                let mut raw = json!({"isError":true,"structuredContent":{
+                    "code":"background_unavailable","event_kind":"app_launch","delivery_mode":"background"}});
+                raw["structuredContent"][field] = marker;
+                assert_eq!(normalize(&raw, false).effect, expected, "{field}: {raw}");
+            }
+        }
     }
 }

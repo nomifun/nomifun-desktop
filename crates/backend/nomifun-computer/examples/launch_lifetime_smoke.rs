@@ -53,6 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let outcome=async{
         let launched=computer.call("owned-launch-test","Owned launch test","computer/launch_app",json!({"launch_path":PathBuf::from(&args[1]),"additional_arguments":["gui",root],"start_minimized":direct}),&authorized,false,InvocationControl::default()).await?;
         let result=result::normalize(&launched.result,false);
+        publish(&root,"launch-response.json",json!({"completion":launched.completion,"generation":launched.generation,"foreground":launched.foreground,"is_error":result.is_error,"effect":result.effect,"result":launched.result}))?;
         if result.is_error{return Err::<(),Box<dyn std::error::Error>>("fixture launch was refused".into());}
         wait_file(root.join("ready.json")).await?;
         publish(&root,"launched.json",json!({"host_pid":std::process::id(),"worker_pid":computer.status().process_id,"generation":launched.generation,"worker_version":computer.status().worker_version,"idle_timeout_ms":250,"launch_mode":if direct{"direct"}else{"shell"},"forced_stop":false}))?;
