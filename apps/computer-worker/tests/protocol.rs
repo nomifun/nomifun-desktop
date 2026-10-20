@@ -32,6 +32,85 @@ fn shutdown(mut worker: WorkerProbe) {
     assert!(worker.wait().unwrap().success());
 }
 
+fn bind(worker: &mut WorkerProbe, label: &str) -> String {
+    let request = worker.request(
+        "bind_session",
+        Some(json!({
+            "public_session":label, "mode":"standard",
+            "ttl_seconds":3600, "idle_ttl_seconds":600,
+            "capability_manifest_path":null, "bounded_manifest_path":null,
+        })),
+        None,
+        None,
+    );
+    let response = worker.exchange(&request).unwrap();
+    assert!(response.ok, "{:?}", response.error);
+    response.result.unwrap()["session_handle"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn session_call(worker: &mut WorkerProbe, handle: &str, name: &str) -> Value {
+    let request = worker.request("call", Some(json!({})), Some(name), Some(handle));
+    let response = worker.exchange(&request).unwrap();
+    assert!(response.ok, "{name}: {:?}", response.error);
+    let result = response.result.unwrap();
+    assert_ne!(result["isError"], true, "{name}: {result}");
+    result
+}
+
+fn close(worker: &mut WorkerProbe, handle: &str) {
+    let request = worker.request("close_session", None, None, Some(handle));
+    let response = worker.exchange(&request).unwrap();
+    assert!(response.ok, "{:?}", response.error);
+    assert_eq!(response.result.unwrap()["closed"], true);
+}
+
+#[test]
+fn same_label_close_rebind_starts_a_fresh_native_lifecycle() {
+    let mut worker = initialized();
+    let label = "Repeated Agent name";
+    let first = bind(&mut worker, label);
+    let first_state = session_call(&mut worker, &first, "get_session");
+    assert_eq!(first_state["structuredContent"]["state"], "active");
+    assert!(first_state["structuredContent"]["session"].as_str().unwrap().starts_with(label));
+    session_call(&mut worker, &first, "get_guide");
+    close(&mut worker, &first);
+
+    let second = bind(&mut worker, label);
+    assert_ne!(first, second);
+    let second_state = session_call(&mut worker, &second, "get_session");
+    assert_eq!(second_state["structuredContent"]["state"], "active");
+    assert_ne!(first_state["structuredContent"]["session"], second_state["structuredContent"]["session"]);
+    session_call(&mut worker, &second, "get_guide");
+    close(&mut worker, &second);
+    shutdown(worker);
+}
+
+#[test]
+fn same_label_live_handles_have_independent_native_owners() {
+    let mut worker = initialized();
+    let first = bind(&mut worker, "Concurrent Agent name");
+    let second = bind(&mut worker, "Concurrent Agent name");
+    assert_ne!(first, second);
+    let first_state = session_call(&mut worker, &first, "get_session");
+    let second_state = session_call(&mut worker, &second, "get_session");
+    assert_eq!(first_state["structuredContent"]["state"], "active");
+    assert_eq!(second_state["structuredContent"]["state"], "active");
+    assert_ne!(first_state["structuredContent"]["session"], second_state["structuredContent"]["session"]);
+    close(&mut worker, &first);
+    assert_eq!(session_call(&mut worker, &second, "get_session")["structuredContent"]["state"], "active");
+    session_call(&mut worker, &second, "get_guide");
+    assert_eq!(session_call(&mut worker, &second, "end_session")["structuredContent"]["active"], false);
+    close(&mut worker, &second);
+    let request = worker.request("call", Some(json!({})), Some("get_session"), Some(&second));
+    let response = worker.exchange(&request).unwrap();
+    assert_eq!(response.error_code.as_deref(), Some("session_not_bound"));
+    assert_eq!(response.completion, ActionCompletion::NotStarted);
+    shutdown(worker);
+}
+
 #[test]
 fn initialize_metadata_list_bind_close_shutdown() {
     let mut worker = initialized();

@@ -4,11 +4,12 @@
 //! Build the owned fixture from the repository root with the existing .NET
 //! Framework compiler (no installation); choose an output in your test Temp root:
 //! ```powershell
-//! & "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /target:winexe /out:PATH_TO_TEST_TEMP/NomiFunLifetimeFixture.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll crates/backend/nomifun-app/tests/fixtures/owned-computer-window.cs
+//! $fixtureSource = (Resolve-Path 'crates/backend/nomifun-app/tests/fixtures/owned-computer-window.cs').Path
+//! & "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /target:winexe /out:PATH_TO_TEST_TEMP/NomiFunLifetimeFixture.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll "$fixtureSource"
 //! ```
 //! Set NOMIFUN_COMPUTER_FIXTURE_EXE to that executable, NOMIFUN_COMPUTER_WORKER
 //! to the test worker, and NOMIFUN_COMPUTER_ARTIFACT_DIR to a fresh directory.
-//! Fixture source SHA-256: fa1087933afe899e07f02f612b732d2afb236286c7d4f19334f4fde5bb7b2144.
+//! Fixture source SHA-256: a97e59db3d52a57ad00dca582b3700c66fbba09baecc3385fbefeff2f222579f.
 use super::*;
 use futures_util::FutureExt;
 use nomifun_agent_session::{AgentEffectState, AgentSessionStore, TurnReceiptStatus};

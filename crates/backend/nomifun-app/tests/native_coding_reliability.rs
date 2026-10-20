@@ -21,6 +21,10 @@ mod live_tool_reliability;
 #[path="support/native_computer_chain.rs"]
 mod native_computer_chain;
 
+#[cfg(all(target_os="windows", feature="browser-use", feature="computer-use"))]
+#[path="support/live_computer_chain.rs"]
+mod live_computer_chain;
+
 #[cfg(feature="browser-use")]
 struct BindingOnlyBrowser(Arc<AtomicUsize>);
 

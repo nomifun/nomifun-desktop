@@ -356,10 +356,10 @@ worker 环境变量白名单以私有运行时目录收敛写入：`CUA_DRIVER_R
 
 | 阶段 | 状态 | 证据与说明 | 下一动作 |
 | --- | --- | --- | --- |
-| S1 | 本机内核交付完成，其余平台原生项待补 | Windows/Linux独立构建、真实协议11/11与10/10、自检60/63、22动作冻结及3个登记补丁一致性通过；Windows真实普通应用与输入已验，具体身份以本节最后的交付记录为准 | 发布范围内补其他平台与故障原生证据 |
+| S1 | 本机内核交付完成，其余平台原生项待补 | Windows/Linux独立构建、真实协议13/13与12/12、自检60/63、22动作冻结及3个登记补丁一致性通过；Windows真实普通应用与输入已验，具体身份以本节最后的交付记录为准 | 发布范围内补其他平台与故障原生证据 |
 | S2 | 本机完整替换已在main提交 | 源码提交d63d3833791a099931bd53dd2cf7fc39e11283d1；旧路径删除、新五模块/ComputerHost/22动作/每请求分档/UI/API43/构建签名脚本完整接入；计算与文本保存、产品链路/关闭、Rust/UI/全量/契约及89MB未签名开发包通过 | 按发布范围补S4，含真实模型 |
 | S3 | 本机UI、i18n和文档已完成 | 驱动状态API与卡片、四分组、typed前台标记、新建会话文案及实际错误返回链已接入，保留HEAD新展示结构 | 随S4可得平台证据修正文档事实 |
-| S4 | 正式发布验收待补 | 当前桌面100%普通原生及未签名开发包已有证据；无正式签名、公证、安装或发布操作，当前任务未提供可用受控模型凭据/Windows签名配置 | 按发布平台补真实模型、签名/公证/安装与原生验收；缺失项不阻塞本机实现 |
+| S4 | Windows Full实模已补，正式发布验收待补 | 当前桌面100%下Step Plan/step-5-preview真实计算、文本保存及随机码视觉验收1/1通过；会话与无图窗口排布缺陷已修，开发包已重建。尚无正式签名、公证、安装或发布操作 | 接入用户已确认的模型接口输入约束及真实无图档；按发布平台补其余验收，缺失项不阻塞本机实现 |
 | S5 | 升级说明草稿已备，入口保留 | CHANGELOG Unreleased已写升级影响，架构文档已落；尚未发布，保留专项入口承接S4 | 完成发布范围内S4后定稿并退役入口 |
 
 ### S1收尾历史快照（2026-10-20；授权依然有效，最终身份见后文）
@@ -427,7 +427,7 @@ worker 环境变量白名单以私有运行时目录收敛写入：`CUA_DRIVER_R
 - **Unknown与资源责任**：Computer的resource_key为空，因此原调用不重放，但不会占跨Session桌面唯一索引；canonical Session自身的Unknown准入/恢复围栏按原规则保留，不改Store。Computer业务未知不等于其精确native资源未关闭，退休仍经Computer.close_session/shutdown与原有stderr/进程owner证明。新增App测试首轮夹具虚构binding触发FK、0项通过，已改合法请求，待最终重跑；不将首轮失败计入通过数。新五模块最终假worker测试 **22/22**，含无图verify_state默认截图禁用；测试预算调度修正只作用fixture，产品动作预算未改。
 - **署名**：真实locked Cargo metadata派生Windows305/macOS308/Linux369个依赖的许可清单（本体另列MIT），对应190/192/239份去重许可证文本；macOS只采源码metadata，不冒充编译/原生。9份NOTICE输入及worker lock哈希由边界守门，当前3patch/458源记录、22动作检查通过；最终源码身份继续随必要登记补丁修订记录。
 
-#### 本机交付最终记录（2026-10-20，S2/S3）
+#### 本机首批交付记录（2026-10-20，S2/S3；后续修正见下文）
 
 - **源码提交**：完整S1/S2/S3源码与首次交付进展已提交main：`d63d3833791a099931bd53dd2cf7fc39e11283d1`。该提交包括原样许可/manifest的Git字节保护，不包含编译产物与私有证据；此后的交付身份更新为文档改动。源码提交`d63d3833791a099931bd53dd2cf7fc39e11283d1`与进展文档提交`5021ba0a718b9f431504cc6a3cc31e8bbaee5ad4`已一起正常推送至origin/main；2026-10-20核验本机与远端HEAD均为`5021ba0a718b9f431504cc6a3cc31e8bbaee5ad4`。当前用户代码签名证书只读计数为0，Windows签名thumbprint与受控模型测试凭据环境均未配置，已请求获授权配置的入口，不因此阻塞本机源码交付。
 - **同步与保护**：交付前再次核对main/status/HEAD并执行`git pull --ff-only`，仍为`1d385e072571b2f71b90e7406aa3ab335aa8dd1c`且Already up to date。未stash/reset/clean或覆盖无关改动。保留该HEAD的ToolDetails、FileSummary、MessageTimeline与既有生命周期合同。源码与migration manifest复核为零diff：`src/schema.rs`、`001_canonical_baseline.sql`、`agent-store-migration-manifest.envelope.json`；未改canonical存储。
@@ -441,8 +441,20 @@ worker 环境变量白名单以私有运行时目录收敛写入：`CUA_DRIVER_R
 - **可复现测试窗口**：新建`tests/fixtures/owned-computer-window.cs`是本轮实际编译源码原字节，10,151B/SHA256 `fa1087933afe899e07f02f612b732d2afb236286c7d4f19334f4fde5bb7b2144`；opt-in测试头部记录已用csc及3个系统程序集引用、3个显式环境路径。未携带用户绝对路径、凭据或本轮实例ID。测试EXE SHA256 `6d21efc9fb9bf4cc046014facfda687252f922f0f6d8a6dacf67fc8e51ae0baf`。新fixture不读旧Computer格式或真实用户资料。
 - **暂存核对**：新文件首次进入index时，原样许可证的尾空格与unified diff空上下文的必需空格被检查命中；仅对登记patch、原样许可/Windows manifest设置精确Git属性，代码继续检查。另发现Git LF转换会改变4份许可文本的SHA，已对原样许可及资源manifest设置`-text`并重新入index，保留原字节，未修改许可证或补丁内容。对720份vendor/冻结/许可/原生fixture等受保护输入逐一比较工作区原字节Git blob SHA与index，**零差异**；最终cached/worktree diffcheck均0。开发包、PDB、日志和本机验收数据均未暂存。
 
+### Windows真实模型与生命周期修正（2026-10-20，S4本机增量）
+
+- **来源与授权**：进入本轮已检查main/status/HEAD并`git pull --ff-only`；收尾`git fetch origin`仍为`add2284fc91c9bd0207dd89d4651c3c869a4a68c`，保护无关改动。用户已提供并授权StepFun Coding Plan测试凭据及`step-5-preview`，凭据经SecureString转测试进程stdin，不进argv、环境变量、仓库、报告或应用日志。固定`https://api.stepfun.com/step_plan/v1`的模型列表认证200、真实函数调用预检200/1次tool call/268 tokens；这是模型传输预检，不是桌面验收。
+- **已修的生产缺陷**：NoImage投影误删`set_window_frame`的必填x/y，并在执行前误判为截图寻址；现在仅保留该动作顶层原生frame坐标，输入像素与批量范围限制保持。真实模型随后证实同名驱动会话跨Turn重绑失败：SDK的close只撤授权，未结束Core生命周期；同名并发也发生绑定冲突。自有private worker现以“Agent名+完整handle UUID”隔离原生身份，bind显式start_session，close/EOF/shutdown先成功end_session再撤权，失败保留精确清理责任；不重试业务动作。未改vendor、未追加补丁、未改canonical存储。
+- **独立构建与协议**：`bun scripts/computer/build-worker.mjs --target x86_64-pc-windows-msvc --profile debug` **exit0/16.51s**；同target/build-dir下`cargo test --locked --manifest-path apps/computer-worker/Cargo.toml --target x86_64-pc-windows-msvc --test protocol` **13/13**（2.19s构建/1.41s测试）。WSL普通用户隔离target/build-dir对应命令 **12/12**（12.96s构建/0.83s测试）。新增协议用例直接验证bind后Core active、同名close/rebind与并存隔离，只管理会话/读取指南，不做桌面动作。两端自检60/63、实际worker冻结22复验均通过；Windows stage/artifact SHA256均`07d50d7a69635139af31fb7725731a727b1ca648b3db7e68795858e64b4f54d4`，Linux worker为`aa2006f5606ab2f5a92483e266888333f910ff772c688ac06ce839031ee05558`。WSL协议不冒充Linux原生桌面验收。
+- **自动化回归**：`cargo test -p nomifun-computer --lib no_image_` **5/5**，完整`cargo test -p nomifun-computer` **24/24**（3.11s构建/2.36s测试）；`cargo check -p nomifun-app --features computer-use` **exit0/7.58s**；两feature的App `--lib computer_` **18/18**（19.51s构建/1.01s测试）。`bun run check`本轮末次完整exit0，包含Computer、desktop UI、Agent Session及全部现役边界。冻结与生成契约未变，未为本轮重复无关平台/模型排列组合。
+- **真实Full最终验收**：先`cargo test -p nomifun-app --features browser-use,computer-use --test native_coding_reliability --no-run`，再仅运行实际测试二进制的`live_computer_chain::stepfun_full_route_ax_then_window_image --exact --ignored --nocapture --test-threads=1`，凭据单行stdin。**1/1通过，39.56s**；报告`%TEMP%/nomifun-computer-live-visual-8454b5b3e3e9482f9d2faa35afb0a476/full-5/live-computer-report.json`。使用新建chat.minimal测试配置，只授权冻结的get_window_state/click/type_text，无Shell/File/Browser/剪贴板/全桌面权限；真实生产HTTP→provider→Session/Runtime→Kernel→Computer→worker，非脚本模型。Session`01a159c6-fd93-7c92-bff4-d120c2fe29c7`，自有WinForms PID41084/HWND26479480、96 DPI：模型实际点击2、+、3、=得5，输入并保存固定中英文两行文本，文件与新AX值精确核验 **2/2任务通过**；AX阶段 **11/11调用、12模型步、32.953s**，6个Effect均Returned。随后同Session下一Turn **1/1调用、2模型步、5.429s**，请求同窗image/png **510×330**并在更晚步骤正确读出随机绘制8位码；码不在两Turn的prompt或AX label/value中。两Turn typed finish_reason均Completed，read-only调用不建Effect。截图元数据、call_id/Turn与公开视觉答案因果核验；现役历史按合同省略原图，`canonical_raw_images=0`，不将描述符冒充图片字节或编造图像哈希。
+- **保留失败与修正事实**：full-1因测试提示JSON换行歧义输入了字面转义，自动用例0/1；full-2计算/文本已2/2但图片请求命中上述session_ended，整体0/1；修worker后的full-3实际读码成功，但测试错误要求历史保留原图，整体0/1；full-4实际9次调用、文件与效果均成功，测试又误把过滤AX快照未列出的有效索引当成越界，整体0/1。最终按驱动真实snapshot归属及成功accessibility回执核验，不猜隐藏label、不放松已执行越界或unknown；保留真实文件、计算按钮序列、typed完成与关闭门槛。上述早轮不改报自动通过。最终测试记录正常host shutdown、worker stopped、exact Child wait退出及同PID graceful回执均true；递归检查该临时目录未发现明文凭据，不提交任何截图或私有验收数据。
+- **源码与实物身份**：SOURCE仍`da303c0b0d57eed26fd9abb55452ddef350e56a21ec585ae7186f99571aaf92e`，3个vendor补丁与冻结清单保持。private_worker源码`d989c994a7a1ff12014490b9eb6f6c1361969453588e58560f9c2281182717c7`，live测试源码`6f0c3529c53d9e72c939b9e20a3e305afb133a872c26ac611d0242a1333ca7a2`，测试二进制`be8ad7801a78d343fe010d9ac65a99abad6d1b6101be038101c5500aa5f5ac5f`；fixture源码`a97e59db3d52a57ad00dca582b3700c66fbba09baecc3385fbefeff2f222579f`、实物`b978d76623b2ecf96ff57cd7b8e6124c3677367fa15c8f29b946338aebc5e3b3`。7个源文件及构建摘要在同临时根`build-identity-full5.json`，SHA256`758ef24c1f85cc52bde888df7e3cfe3c2f89c994d6ff6d5fddce79f30081a2e6`。fixture随机码只在functional窗口Paint，不添加AX字段；csc需绝对源路径，复现说明已修正。
+- **开发包复验**：使用上述未改UI的dev临时配置，再运行前述`bun x tauri build --debug --bundles nsis ...` **exit0**，Rust构建23.90s。`target/debug/nomifun-desktop.exe` **364,561,920B**、SHA256`93a4e0fb304a65dc2b71576001d75c603f26f95e4d6aa365e32dfeddca7d9cee`；NSIS开发包 **89,161,683B**、SHA256`f2eedb53eee9d44c4442e92acf66f7b741dc33a448ebce58c0207b43465acf0c`，使用同一07d50d7a worker。仍为NotSigned，未安装或发布。
+- **用户新增产品决定与下一动作**：现役模型traits是建议元数据，缺vision_input不能禁图；六种生产Chat adapter均能编码图片，因此不能用删标签伪造真实NoImage路由。用户已明确选择“增加显式模型输入能力约束（推荐）”。下一步在通用、task-scoped模型接口增加`input_constraints.image_input`，缺省保持原行为、false仅收窄图片输入，冻结进每个实际候选并在转换后保持约束；不放入traits/机器health/transport/provider_params，不新增Computer开关或canonical事件。该配置与真实无图档验收尚未落地，继续推进。
+
 ### 未执行项与下一动作
 
 1. 本机S2完整替换与S3已通过上述门槛，源码与进展文档已同步origin/main并核对身份；后续按发布范围补S4。旧Computer专测直接删除，受影响混合验证保留非Computer部分，未保留旧实现兜底。
 2. macOS arm64/x64构建、自检、冻结采集、签名App TCC；Windows当前桌面专用测试应用与可得DPI；真实Linux X11/GNOME Wayland、portal/helper与D12规则均按可得环境补验。缺失项不阻塞本机实施，WSL/Xvfb不得冒充原生Wayland。
-3. 真实模型任务使用明确提供的测试凭据，缺凭据不阻塞代码实现；当前专项的测试凭据及Windows签名环境配置为空，未读取其他任务或生产配置。正式签名/公证、安装验证、系统许可修改和发布未执行；CHANGELOG升级草稿与架构已备，S4完成前保留专项入口。
+3. 用户提供的Step Plan凭据已用于上述真实Full验收，未读取其他任务或生产配置；继续完成新确认的接口输入约束与真实NoImage验收。Windows正式签名配置仍缺；正式签名/公证、安装验证、系统许可修改和发布未执行，其他平台/架构/应用种类按发布范围补证。CHANGELOG升级草稿与架构已备，S4完成前保留专项入口。

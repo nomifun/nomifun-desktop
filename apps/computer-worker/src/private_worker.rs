@@ -11,7 +11,7 @@ use cua_driver_sdk::worker::{
     ActionCompletion, ChannelRequest, ChannelResponse, PRIVATE_WORKER_PROTOCOL_VERSION,
     WorkerInitialization,
 };
-use cua_driver_sdk::{CuaDriver, CuaDriverSession, DriverHostOptions};
+use cua_driver_sdk::{CuaDriver, CuaDriverSession, DriverHostOptions, TrustedSessionOptions};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -193,8 +193,10 @@ async fn run_async(
         }
     }
 
-    sessions.clear();
-    driver.shutdown().await?;
+    let session_cleanup = close_sessions(&mut sessions).await;
+    let runtime_cleanup = driver.shutdown().await;
+    session_cleanup.map_err(anyhow::Error::msg)?;
+    runtime_cleanup?;
     Ok(())
 }
 
@@ -247,26 +249,50 @@ async fn handle_request(
             } else {
                 driver.call_tool_from_trusted_adapter(name, arguments).await
             };
-            invocation
-                .map_err(|error| error.to_string())
-                .and_then(|result| {
-                    serde_json::from_str(&result.raw_json).map_err(|error| error.to_string())
-                })
+            invocation.map_err(|error| error.to_string()).and_then(|result| {
+                if name == "end_session" && !result.is_error {
+                    if let Some(handle) = request.session_handle.as_deref() {
+                        if let Some(session) = sessions.remove(handle) {
+                            session.close();
+                        }
+                    }
+                }
+                serde_json::from_str(&result.raw_json).map_err(|error| error.to_string())
+            })
         }
         "bind_session" => {
             let options = request
                 .arguments
                 .ok_or_else(|| "bind_session omitted options".to_owned())
-                .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()));
+                .and_then(|value| {
+                    serde_json::from_value::<TrustedSessionOptions>(value)
+                        .map_err(|error| error.to_string())
+                });
             match options {
-                Ok(options) => match driver.create_trusted_session(options) {
+                Ok(mut options) if !options.public_session.trim().is_empty() => {
+                    let handle = uuid::Uuid::new_v4().to_string();
+                    // A public label also keys Core lifecycle state. Reusing an
+                    // Agent name would collide with another transport, including
+                    // the next Turn after the old SDK authorization was revoked.
+                    // Keep the visible name first, but never reuse its native ID.
+                    options.public_session = format!("{} [{handle}]", options.public_session);
+                    match driver.create_trusted_session(options) {
                     Ok(session) => {
-                        let handle = uuid::Uuid::new_v4().to_string();
-                        sessions.insert(handle.clone(), session);
-                        Ok(serde_json::json!({"session_handle": handle}))
+                        sessions.insert(handle.clone(), session.clone());
+                        match session.call_tool("start_session".into(), "{}".into()).await {
+                            Ok(result) if !result.is_error => {
+                                Ok(serde_json::json!({"session_handle": handle}))
+                            }
+                            // Retain the exact native owner until explicit
+                            // cleanup, even if initialization partially failed.
+                            Ok(result) => Err(format!("start native session: {}", result.text)),
+                            Err(error) => Err(error.to_string()),
+                        }
                     }
                     Err(error) => Err(error.to_string()),
-                },
+                    }
+                }
+                Ok(_) => Err("public_session must not be empty".into()),
                 Err(error) => Err(error),
             }
         }
@@ -280,16 +306,17 @@ async fn handle_request(
                     ActionCompletion::NotStarted,
                 );
             };
-            if let Some(session) = sessions.remove(handle) {
-                session.close();
-            }
-            Ok(serde_json::json!({"closed": true}))
+            close_session(sessions, handle)
+                .await
+                .map(|()| serde_json::json!({"closed": true}))
         }
         "shutdown" => {
-            sessions.clear();
-            match driver.shutdown().await {
-                Ok(()) => Ok(serde_json::json!({"shutdown": true})),
-                Err(error) => Err(error.to_string()),
+            match close_sessions(sessions).await {
+                Ok(()) => match driver.shutdown().await {
+                    Ok(()) => Ok(serde_json::json!({"shutdown": true})),
+                    Err(error) => Err(error.to_string()),
+                },
+                Err(error) => Err(error),
             }
         }
         other => Err(format!("unknown private worker operation: {other}")),
@@ -305,6 +332,41 @@ async fn handle_request(
             ActionCompletion::Completed,
         ),
     }
+}
+
+async fn close_session(
+    sessions: &mut HashMap<String, Arc<CuaDriverSession>>,
+    handle: &str,
+) -> Result<(), String> {
+    let Some(session) = sessions.get(handle).cloned() else {
+        return Ok(());
+    };
+    // SDK close only revokes authorization. End Core lifecycle resources while
+    // the exact transport is still authorized, and retain it if cleanup fails.
+    // The SDK's typed end_session closes even on failure, so use call_tool here.
+    let result = session
+        .call_tool("end_session".into(), "{}".into())
+        .await
+        .map_err(|error| error.to_string())?;
+    if result.is_error {
+        return Err(format!("end native session: {}", result.text));
+    }
+    session.close();
+    sessions.remove(handle);
+    Ok(())
+}
+
+async fn close_sessions(
+    sessions: &mut HashMap<String, Arc<CuaDriverSession>>,
+) -> Result<(), String> {
+    let handles = sessions.keys().cloned().collect::<Vec<_>>();
+    let mut failure = None;
+    for handle in handles {
+        if let Err(error) = close_session(sessions, &handle).await {
+            failure.get_or_insert(error);
+        }
+    }
+    failure.map_or(Ok(()), Err)
 }
 
 fn write_response(writer: &mut impl Write, response: &ChannelResponse) -> anyhow::Result<()> {

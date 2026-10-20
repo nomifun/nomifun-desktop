@@ -123,7 +123,9 @@ pub fn tools_for_tier(tier: RouteTier, locale: &str) -> Vec<ModelTool> {
             let definition = tool.platforms.get(platform())?;
             let mut input_schema = definition.input_schema.clone();
             if tier == RouteTier::NoImage {
-                project_no_image_schema(&mut input_schema);
+                // Frame x/y place a native window in list_windows units;
+                // they do not address an input point in a screenshot.
+                project_no_image_schema(&mut input_schema, tool.driver_tool == "set_window_frame");
             }
             if tier == RouteTier::NoImage && tool.no_image == "element_token" {
                 let required = input_schema
@@ -177,7 +179,7 @@ pub fn instructions(tier: RouteTier, locale: &str) -> String {
     }
     text
 }
-fn project_no_image_schema(schema: &mut Value) {
+fn project_no_image_schema(schema: &mut Value, window_frame_coordinates: bool) {
     if let Some(values) = schema.get_mut("enum").and_then(Value::as_array_mut) {
         values.retain(|value| {
             value != "desktop"
@@ -198,6 +200,9 @@ fn project_no_image_schema(schema: &mut Value) {
             "capture_id",
             "from_zoom",
         ] {
+            if window_frame_coordinates && matches!(key, "x" | "y") {
+                continue;
+            }
             properties.remove(key);
         }
         if properties.contains_key("include_screenshot") {
@@ -207,11 +212,11 @@ fn project_no_image_schema(schema: &mut Value) {
             );
         }
         for value in properties.values_mut() {
-            project_no_image_schema(value);
+            project_no_image_schema(value, false);
         }
     }
     if let Some(items) = schema.get_mut("items") {
-        project_no_image_schema(items);
+        project_no_image_schema(items, false);
     }
 }
 
@@ -337,7 +342,7 @@ fn prepare_inner(
         {
             return Err(denied("Use a fresh element_token without image input"));
         }
-        if contains_pixel_address(args) {
+        if contains_pixel_address(args, selected.driver_tool == "set_window_frame") {
             return Err(denied(
                 "Pixel addressing is unavailable without image input",
             ));
@@ -415,16 +420,17 @@ fn prepare_inner(
     }
     Ok(())
 }
-fn contains_pixel_address(value: &Value) -> bool {
+fn contains_pixel_address(value: &Value, window_frame_coordinates: bool) -> bool {
     match value {
         Value::Object(object) => object.iter().any(|(key, value)| {
-            matches!(
+            (matches!(
                 key.as_str(),
                 "x" | "y" | "from_x" | "from_y" | "to_x" | "to_y" | "capture_id" | "from_zoom"
-            ) || (key == "kind" && value == "desktop")
-                || contains_pixel_address(value)
+            ) && !(window_frame_coordinates && matches!(key.as_str(), "x" | "y")))
+                || (key == "kind" && value == "desktop")
+                || contains_pixel_address(value, false)
         }),
-        Value::Array(items) => items.iter().any(contains_pixel_address),
+        Value::Array(items) => items.iter().any(|value| contains_pixel_address(value, false)),
         _ => false,
     }
 }
@@ -568,6 +574,46 @@ mod tests {
             &prepared.arguments
         ));
     }
+
+    #[test]
+    fn no_image_window_frame_coordinates_remain_valid_native_arguments() {
+        let selected = tool("computer/set_window_frame").unwrap();
+        let definition = tools_for_tier(RouteTier::NoImage, "en-US").into_iter()
+            .find(|definition| definition.action_id == selected.action_id).unwrap();
+        for required in definition.input_schema["required"].as_array().unwrap() {
+            assert!(definition.input_schema["properties"].get(required.as_str().unwrap()).is_some(),
+                "the projected strict object must retain each required native frame field");
+        }
+        let args = json!({"pid":1,"window_id":2,"x":-20,"y":12,"width":400,"height":300});
+        assert!(jsonschema::is_valid(&definition.input_schema, &args));
+        let prepared = prepare(&selected.action_id, args.clone(), &all(), RouteTier::NoImage).unwrap();
+        assert_eq!(prepared.arguments, args);
+        assert!(jsonschema::is_valid(&selected.platforms[platform()].input_schema, &prepared.arguments));
+    }
+
+    #[test]
+    fn no_image_pixels_remain_rejected_for_input_actions_and_batches() {
+        for (action, args) in [
+            ("computer/click", json!({"element_token":"s0000002a:11","x":5,"y":3})),
+            ("computer/type_text", json!({"element_token":"s0000002a:11","text":"owned text","x":5,"y":3})),
+            ("computer/drag", json!({"from_x":5,"from_y":3,"to_x":10,"to_y":8})),
+            ("computer/run_steps", json!({"steps":[{"tool":"computer_click","args":{"element_token":"s0000002a:11","x":5,"y":3}}]})),
+        ] {
+            assert!(prepare(action, args, &all(), RouteTier::NoImage).is_err(), "{action}");
+        }
+        let click = tools_for_tier(RouteTier::NoImage, "en-US").into_iter()
+            .find(|definition| definition.action_id == tool("computer/click").unwrap().action_id).unwrap();
+        assert!(click.input_schema["properties"].get("x").is_none());
+        assert!(click.input_schema["properties"].get("y").is_none());
+        assert!(!tools_for_tier(RouteTier::NoImage, "en-US").iter()
+            .any(|definition| definition.action_id == tool("computer/drag").unwrap().action_id));
+        let batch = tool("computer/run_steps").unwrap();
+        let frame = tool("computer/set_window_frame").unwrap();
+        assert!(!batch.platforms[platform()].input_schema["properties"]["steps"]["items"]["properties"]["tool"]["enum"]
+            .as_array().unwrap().iter().any(|name| name == &frame.model_tool),
+            "the upstream batchable-tool contract is unchanged");
+    }
+
     #[test]
     fn batch_steps_are_authorized_before_dispatch_and_names_change_only_at_wire() {
         let input = json!({"steps":[{"tool":"computer_click","args":{"element_token":"s0000002a:11"}}],"observe":{}});

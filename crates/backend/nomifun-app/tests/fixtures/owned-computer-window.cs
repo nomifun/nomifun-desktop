@@ -51,6 +51,11 @@ internal static class Program {
     private static void Gui(string root,bool visible){
         Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
         var form=new DedicatedForm();form.Text="NomiFun Lifetime Test "+Path.GetFileName(root);form.ClientSize=new Size(510,300);form.WindowState=visible?FormWindowState.Normal:FormWindowState.Minimized;
+        if(visible){
+            string visualCode=Guid.NewGuid().ToString("N").Substring(0,8).ToUpperInvariant();
+            Write(root,"visual-marker.json",new {code=visualCode,pid=Process.GetCurrentProcess().Id});
+            form.Paint+=delegate(object sender,PaintEventArgs paint){using(var font=new Font(FontFamily.GenericMonospace,12,FontStyle.Bold)){paint.Graphics.DrawString(visualCode,font,Brushes.Black,new PointF(260,245));}};
+        }
         form.Controls.Add(new Label {Text="Dedicated Computer Use test. Closes automatically.",Location=new Point(12,10),Size=new Size(480,30)});
         var display=new TextBox {Name="OwnedCalculation",AccessibleName="Owned calculation",ReadOnly=true,Text="0",Location=new Point(12,45),Size=new Size(470,28)};form.Controls.Add(display);
         string[] labels={"2","+","3","="},names={"Owned two","Owned add","Owned three","Owned equals"};
