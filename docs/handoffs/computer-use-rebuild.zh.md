@@ -357,7 +357,7 @@ worker 环境变量白名单以私有运行时目录收敛写入：`CUA_DRIVER_R
 | 阶段 | 状态 | 证据与说明 | 下一动作 |
 | --- | --- | --- | --- |
 | S1 | 本机内核交付完成，其余平台原生项待补 | Windows/Linux独立构建、真实协议11/11与10/10、自检60/63、22动作冻结及3个登记补丁一致性通过；Windows真实普通应用与输入已验，具体身份以本节最后的交付记录为准 | 发布范围内补其他平台与故障原生证据 |
-| S2 | 本机完整替换与门槛通过，待main提交身份核对 | 旧路径删除、新五模块/ComputerHost/22动作/每请求分档/UI/API43/构建签名脚本已完整接入；计算与文本保存、新HTTP/Runtime/Kernel产品链路及正常关闭通过；Rust/UI/全量check/契约门槛和89MB未签名开发安装包通过 | 提交与同步本机交付；真实模型留S4 |
+| S2 | 本机完整替换已在main提交 | 源码提交d63d3833791a099931bd53dd2cf7fc39e11283d1；旧路径删除、新五模块/ComputerHost/22动作/每请求分档/UI/API43/构建签名脚本完整接入；计算与文本保存、产品链路/关闭、Rust/UI/全量/契约及89MB未签名开发包通过 | 本机交付同步；真实模型留S4 |
 | S3 | 本机UI、i18n和文档已完成 | 驱动状态API与卡片、四分组、typed前台标记、新建会话文案及实际错误返回链已接入，保留HEAD新展示结构 | 随S4可得平台证据修正文档事实 |
 | S4 | 正式发布验收待补 | 当前桌面100%普通原生及未签名开发包已有证据；无正式签名、公证、安装或发布操作，当前任务未提供可用受控模型凭据/Windows签名配置 | 按发布平台补真实模型、签名/公证/安装与原生验收；缺失项不阻塞本机实现 |
 | S5 | 升级说明草稿已备，入口保留 | CHANGELOG Unreleased已写升级影响，架构文档已落；尚未发布，保留专项入口承接S4 | 完成发布范围内S4后定稿并退役入口 |
@@ -429,6 +429,7 @@ worker 环境变量白名单以私有运行时目录收敛写入：`CUA_DRIVER_R
 
 #### 本机交付最终记录（2026-10-20，S2/S3）
 
+- **源码提交**：完整S1/S2/S3源码与首次交付进展已提交main：`d63d3833791a099931bd53dd2cf7fc39e11283d1`。该提交包括原样许可/manifest的Git字节保护，不包含编译产物与私有证据；此后的交付身份更新为文档改动。当前用户代码签名证书只读计数为0，Windows签名thumbprint与受控模型测试凭据环境均未配置，已请求获授权配置的入口，不因此阻塞本机源码交付。
 - **同步与保护**：交付前再次核对main/status/HEAD并执行`git pull --ff-only`，仍为`1d385e072571b2f71b90e7406aa3ab335aa8dd1c`且Already up to date。未stash/reset/clean或覆盖无关改动。保留该HEAD的ToolDetails、FileSummary、MessageTimeline与既有生命周期合同。源码与migration manifest复核为零diff：`src/schema.rs`、`001_canonical_baseline.sql`、`agent-store-migration-manifest.envelope.json`；未改canonical存储。
 - **冻结的最终源与worker**：SOURCE SHA256 `da303c0b0d57eed26fd9abb55452ddef350e56a21ec585ae7186f99571aaf92e`；0003 SHA256 `6700e4d1a822ca63b61eca5d716e3770470943398c5bd4c6b78656365b35e5fa`；worker锁仍`cf23a506c957d94c11a43c6fe1ac8619fdf761206045beba76278ed7a6602c30`。最后登记修订使one-shot helper在启动前持有精确worker stderr的非继承duplicate、二次核活，沿宿主已有EOF保留清理责任；原生Wait父死/13s只自退，不把句柄带给用户App；短命ShellExecute设置SEE_MASK_NOASYNC。该修订经独立源码复核与上游重建零差异，不冒充故障注入通过。
 - **打包流水线的实物worker**：`bun scripts/computer/build-worker.mjs --target x86_64-pc-windows-msvc --profile debug`通过（1m51s）；实际stage与artifact均SHA256 `3a51f1dbc139355c86808cd7a1cfa0622d04a54ba92d609c2794b6fa46da1929`。同构建目录真实协议 **11/11**（2.58s build/1.22s测试），该stage实物`--self-check`为protocol1/tool_count60/固定4d959bbf commit。最终冻结清单SHA256 `feb910d741bfb2dc1f142ae0b9fe492c42159878f9c8cb2e76b06758e3c004cb`；`drag.steps`仅按真实两端SDK恢复integer计数文案，批量array描述保留，脚本 **16/16** 通过。
