@@ -25,11 +25,13 @@ const rootArgument = option('--root');
 assert(rootArgument && isAbsolute(rootArgument), 'Pass the exact absolute --root of the isolated Desktop lifecycle fixture');
 const root = await realpath(rootArgument);
 const sentinel = (await readFile(join(root, 'fixture-sentinel'), 'utf8')).trim();
-assert.equal(basename(root), process.platform === 'linux' ? `nomifun-global-os-owner-${sentinel}` : `nomifun-lifecycle-${sentinel}`);
-assert.equal(await physicalPath(dirname(root)), await physicalPath(tmpdir()));
+
 assert.match(sentinel, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 const ready = JSON.parse(await readFile(join(root, 'ready.json'), 'utf8'));
+const assertLinuxFixtureKind = (value) => { const kind = value?.fixture_kind; assert.equal(kind, 'nomifun-global-os-owner', 'A Linux fixture must declare the global-os owner kind'); return kind; };
 assert.equal(ready.token, sentinel);
+assert.equal(basename(root), `${process.platform === 'linux' ? assertLinuxFixtureKind(ready) : (ready.fixture_kind ?? 'nomifun-lifecycle')}-${sentinel}`);
+assert.equal(await physicalPath(dirname(root)), await physicalPath(tmpdir()));
 assert(Number.isSafeInteger(ready.host_pid) && ready.host_pid > 0);
 assert(Number.isSafeInteger(ready.backend_port) && ready.backend_port > 0 && ready.backend_port < 65536);
 assert.equal(ready.agent_resources, true, 'The original native fixture must opt into normal owner setup before readiness');
@@ -511,6 +513,7 @@ for await(const line of createInterface({input:process.stdin,terminal:false})){
     }
     const before = await activitySnapshot();
     const targetsBefore = processTargets(before);
+    stopTargets = targetsBefore;
     assert.equal(targetsBefore.length, 2, 'The original two Session-owned processes must be discoverable before Stop');
     const current = before.find((item) => item.target.kind === 'session_turn' && item.target.operation_id === operation && item.can_stop);
     assert(current, 'The user must have a normal host-side Stop target for the exact active Turn');
@@ -573,8 +576,50 @@ for await(const line of createInterface({input:process.stdin,terminal:false})){
   };
   // Keep only the original model server alive until the driver ends this exact
   // host. This observation never sends user input, resumes or restarts work.
+  const stopPipeProcess = async (request, targetsBefore) => {
+    for (const [key, expected] of Object.entries({ token: sentinel, host_pid: ready.host_pid, session_id: session, operation_id: operation })) {
+      assert.equal(request[key], expected, `Process Stop request ${key} must name this exact original fixture owner`);
+    }
+    const before = await activitySnapshot();
+    const targetsNow = processTargets(before);
+    assert.deepEqual(targetsNow, targetsBefore, 'The original pipe and pty process targets must persist after Turn Stop');
+    const pipe = targetsNow.find((target) => target.process_id === resources.get('pipe').process_id);
+    const pipeItem = before.find((item) => item.target?.kind === 'process_instance' && item.target.process_id === resources.get('pipe').process_id && item.can_stop);
+    assert(pipe && pipeItem, 'The original pipe process must still expose its exact ordinary Stop target');
+    const modelBefore = evidence.model_requests.length;
+    const launchesBefore = await launchCounts();
+    const receipt = await api('POST', '/api/agent-activities/stop', {
+      target: pipeItem.target, idempotency_key: `stop-original-desktop-resource-pipe-${sentinel}`,
+    });
+    assert.equal(receipt.accepted, true);
+    const settled = await until(async () => {
+      if (failure) throw failure;
+      const items = await activitySnapshot();
+      const rows = items.flatMap((item) => item.resources).filter((resource) => resource.target?.kind === 'process_instance');
+      const pipeRows = rows.filter((resource) => resource.target.process_id === resources.get('pipe').process_id);
+      const ptyRows = rows.filter((resource) => resource.target.process_id === resources.get('pty').process_id);
+      if (pipeRows.some((resource) => resource.state !== 'released')) return undefined;
+      assert(ptyRows.length && ptyRows.every((resource) => ['active', 'held_for_user'].includes(resource.state)),
+        'Stopping one process must not stop its sibling');
+      return { rows, pipe: pipeRows, pty: ptyRows };
+    }, 'the exact pipe process release', 45_000);
+    const launchesAfter = await launchCounts();
+    assert.deepEqual(launchesAfter, launchesBefore); assert.equal(evidence.model_requests.length, modelBefore);
+    const after = await activitySnapshot();
+    const result = { passed: true, token: sentinel, host_pid: ready.host_pid, session_id: session, operation_id: operation,
+      pipe_target: pipe, remaining_process_targets: processTargets(after), pty_state: 'active',
+      model_requests_before: modelBefore, model_requests_after: evidence.model_requests.length,
+      launch_count_before: launchesBefore.pipe + launchesBefore.pty, launch_count_after: launchesAfter.pipe + launchesAfter.pty,
+      observed_at: new Date().toISOString() };
+    await writeFile(join(root, 'stop-process-observation.json'), `${JSON.stringify({ ...result, receipt, before, after: settled }, null, 2)}\n`, { flag: 'wx' });
+    await writeFile(join(root, 'stop-process-ready.json.tmp'), `${JSON.stringify(result, null, 2)}\n`, { flag: 'wx' });
+    await rename(join(root, 'stop-process-ready.json.tmp'), join(root, 'stop-process-ready.json'));
+    console.log(`NOMIFUN_DESKTOP_AGENT_RESOURCES PROCESS_STOP_READY pipe=released pty=active model_calls=${modelBefore}`);
+  };
   let hostClosed = false;
   let stopObserved = false;
+  let stopTargets;
+  let stopProcessObserved = false;
   while (!closing) {
     await delay(250);
     if (!windows && failure) throw failure;
@@ -582,6 +627,9 @@ for await(const line of createInterface({input:process.stdin,terminal:false})){
       if (!stopObserved) {
         const request = await optionalJson(join(root, 'stop-agent.request'));
         if (request) { await stopOriginalAgent(request); stopObserved = true; }
+      } else if (!stopProcessObserved) {
+        const request = await optionalJson(join(root, 'stop-process.request'));
+        if (request) { await stopPipeProcess(request, stopTargets); stopProcessObserved = true; }
       }
       try { await fetch(`${base}/api/auth/status`, { signal: AbortSignal.timeout(1000) }); }
       catch { hostClosed = true; evidence.host_connection_closed_at = new Date().toISOString(); await journal(); }

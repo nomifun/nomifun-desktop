@@ -73,6 +73,15 @@ const existingExecutable = async (name) => {
 };
 
 
+const SERVICE_CLOSE = `import os, signal, sys
+pid, started, exe = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+fd = os.pidfd_open(pid, 0)
+fields = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
+assert int(fields[19]) == started and os.readlink(f"/proc/{pid}/exe") == exe and os.stat(f"/proc/{pid}").st_uid == os.getuid()
+assert b"--keyboard-service" in open(f"/proc/{pid}/cmdline", "rb").read()
+signal.pidfd_send_signal(fd, signal.SIGTERM)
+`;
+
 async function main() {
   assert.equal(process.platform, 'linux', 'Run on the actual Linux native App host');
   assert(process.getuid() > 0, 'Run as the ordinary native App user');
@@ -95,6 +104,7 @@ async function main() {
   const optionalJson = async (path) => { try { return JSON.parse(await readFile(path, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return undefined; throw error; } };
   const jsonRequired = async (path) => { const value = await optionalJson(path); assert(value, `${path} must exist`); return value; };
   let launcher, launcherExit, sentinel, jwt, sidecar, sidecarExit;
+  let services = [];
   const launcherLines = []; const sidecarErrors = [];
   try {
     evidence.owner_prepare = JSON.parse((await execute(ownerTool, ['--prepare-empty-fixture', data])).stdout.trim());
@@ -142,7 +152,7 @@ async function main() {
       host_local_setup: false, isolated_preparer_setup: true, password_login: true, local_trust_exported: false,
       credential_source: 'isolated-preparer-and-normal-desktop-password-login' }), { flag: 'wx', mode: 0o600 });
     await writeFile(join(root, 'ready.json'), JSON.stringify({ token, host_pid: hostPid, backend_port: announcement.port,
-      host_program: app, data_root: data, agent_resources: true, mode }), { flag: 'wx', mode: 0o600 });
+      host_program: app, data_root: data, agent_resources: true, mode, fixture_kind: 'nomifun-global-os-owner' }), { flag: 'wx', mode: 0o600 });
     sidecar = spawn(process.execPath, [join(here, 'desktop-agent-resources.mjs'), '--root', root, '--bun-exe', bun],
       { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
     sidecarExit = new Promise((done) => sidecar.once('exit', (code, signal) => done({ code, signal })));
@@ -167,10 +177,14 @@ async function main() {
     }
     for (const kind of ['pipe', 'pty', 'mcp']) assert(native[kind], `The sidecar must publish the original ${kind} process`);
     const all = await Promise.all(descendants(table, hostPid).map(withIdentity));
+    const servicePids = new Set((await Promise.all(all.map(async (row) =>
+      row.exe === app && (await readFile(`/proc/${row.pid}/cmdline`, 'utf8').catch(() => '')).includes('--keyboard-service') ? row.pid : null))).filter(Boolean));
     const agentPids = new Set(Object.values(native).flatMap((item) => item.chain.map((row) => row.pid)));
     const groups = new Set(Object.values(native).map((item) => item.pid));
     const tree = all.map((row) => ({ ...row, class: agentPids.has(row.pid) ? 'agent' : row.comm.startsWith('WebKit') ? 'webkit'
+      : servicePids.has(row.pid) ? 'service'
       : row.exe === app && row.ppid === hostPid && (groups.has(row.pgrp) || row.pgrp === hostPid) ? 'watchdog' : 'other' }));
+    services = tree.filter((row) => row.class === 'service');
     const watchdogs = tree.filter((row) => row.class === 'watchdog');
     assert.equal(watchdogs.length, 3, 'Each original Session process must have exactly one forked process-runtime watchdog');
     for (const kind of ['pipe', 'mcp']) {
@@ -197,8 +211,11 @@ async function main() {
     const watchRow = (row, label, expect) => ({ label, pid: row.pid, start_time: row.start_time, exe: row.exe ?? undefined, expect });
     const hostEntry = (signal) => ({ label: 'app', pid: hostPid, start_time: hostStat.start_time, exe: app, signal });
     const observe = async (label, spec, afterGo) => {
+      const satisfied = [];
+      spec.watch = (await Promise.all(spec.watch.map(async (row) =>
+        row.expect === 'exit' && !(await stillOriginal(row)) ? (satisfied.push(row), null) : row))).filter(Boolean);
       const specPath = join(evidenceRoot, `${label}-spec.json`), reportPath = join(evidenceRoot, `${label}-observation.json`);
-      await writeFile(specPath, `${JSON.stringify(spec, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+      await writeFile(specPath, `${JSON.stringify({ ...spec, satisfied }, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
       const observer = spawn('python3', [join(here, 'linux-process-exit-observer.py'), '--spec', specPath, '--report', reportPath], { stdio: ['pipe', 'pipe', 'inherit'] });
       const done = new Promise((resolve) => observer.once('exit', resolve));
       const lines = createInterface({ input: observer.stdout })[Symbol.asyncIterator]();
@@ -211,37 +228,75 @@ async function main() {
     };
     const quitAll = async (label, signal, remaining) => {
       const report = await observe(label, { host: hostEntry(signal), deadline_ms: 90_000,
-        watch: [...remaining.map((row) => watchRow(row, `${row.class}:${row.comm}:${row.pid}`, 'exit')), watchRow(sentinelRow, 'sentinel', 'alive')] });
+        watch: [...remaining.map((row) => watchRow(row, `${row.class}:${row.comm}:${row.pid}`, row.class === 'service' ? 'alive' : 'exit')), watchRow(sentinelRow, 'sentinel', 'alive')] });
       assert(report.pass, `${label}: an app-owned process did not exit or the tree-external sentinel did not survive`);
     };
 
     if (mode === 'stop') {
       const stopReport = await observe('stop-agent', { deadline_ms: 90_000, watch: [watchRow(hostStat, 'app', 'alive'),
         ...owned('mcp').map((row) => watchRow(row, `mcp:${row.comm}:${row.pid}`, 'exit')),
-        ...owned('pipe').map((row) => watchRow(row, `pipe:${row.comm}:${row.pid}`, 'alive')),
-        ...owned('pty').map((row) => watchRow(row, `pty:${row.comm}:${row.pid}`, 'alive')), watchRow(sentinelRow, 'sentinel', 'alive')] }, async () => {
+        ...owned('pipe').map((row) => watchRow(row, `pipe:${row.comm}:${row.pid}`, 'exit')),
+        ...owned('pty').map((row) => watchRow(row, `pty:${row.comm}:${row.pid}`, 'alive')),
+        ...tree.filter((row) => row.class === 'service').map((row) => watchRow(row, `service:${row.comm}:${row.pid}`, 'alive')),
+        watchRow(sentinelRow, 'sentinel', 'alive')] }, async () => {
         await writeFile(join(root, 'stop-agent.request'), JSON.stringify({ token, host_pid: hostPid, session_id: session, operation_id: operation }), { flag: 'wx' });
         return await until(async () => {
           const progress = await optionalJson(join(root, 'agent-resources-progress.json'));
           if (progress?.failure) throw new Error(progress.failure.message);
           if (sidecar.exitCode !== null && sidecar.exitCode !== 0) throw new Error(`Sidecar failed while verifying original Stop: ${sidecarErrors.join(' | ')}`);
-          return await optionalJson(join(root, 'stop-agent-ready.json'));
-        }, 'original Turn Stop, process Stop and automatic Runtime retirement', 60_000);
+          const stopped = await optionalJson(join(root, 'stop-agent-ready.json'));
+          if (!stopped) return undefined;
+          const requestPath = join(root, 'stop-process.request');
+          if (!(await optionalJson(requestPath))) {
+            await writeFile(requestPath, JSON.stringify({ token, host_pid: hostPid, session_id: session, operation_id: operation }), { flag: 'wx' });
+            return undefined;
+          }
+          return await optionalJson(join(root, 'stop-process-ready.json'));
+        }, 'original Turn Stop, exact pipe process Stop and automatic Runtime retirement', 60_000);
       });
       assert(stopReport.pass, 'Stop must retire only its exact owners while the original sibling processes remain');
-      const stopped = new Set(owned('mcp').map((row) => row.pid));
+      const stopped = new Set([...owned('mcp'), ...owned('pipe')].map((row) => row.pid));
       await quitAll('quit-after-stop', 'SIGTERM', tree.filter((row) => !stopped.has(row.pid)));
     } else {
       await quitAll(mode, MODES[mode], tree);
     }
     evidence.stage = 'host-exited'; await journal();
+    const infraPids = new Set();
+    for (const file of [join(sessionRoot, 'environment.json'), join(sessionRoot, 'cleanup.json')]) {
+      const doc = await optionalJson(file);
+      const collect = (value) => { if (Number.isSafeInteger(value) && value > 0) infraPids.add(value); else if (value && typeof value === 'object') for (const item of Object.values(value)) collect(item); };
+      collect(doc);
+    }
+    const orphanTable = await processTable();
+    const childrenOf = new Map();
+    for (const row of orphanTable.values()) {
+      if (!childrenOf.has(row.ppid)) childrenOf.set(row.ppid, []);
+      childrenOf.get(row.ppid).push(row);
+    }
+    const infraEnv = await optionalJson(join(sessionRoot, 'environment.json')) ?? {};
+    const infraSessions = new Set([infraEnv.xvfb_pid, infraEnv.window_manager_pid, infraEnv.session_bus_pid].filter((pid) => Number.isSafeInteger(pid)));
+    const orphans = [];
+    const seen = new Set();
+    const queue = [launcher.pid, hostPid].filter((pid) => Number.isSafeInteger(pid));
+    while (queue.length) {
+      const pid = queue.shift();
+      for (const child of childrenOf.get(pid) ?? []) {
+        if (seen.has(child.pid) || infraPids.has(child.pid) || infraSessions.has(child.session) || infraSessions.has(child.pgrp)) continue;
+        seen.add(child.pid); orphans.push(child); queue.push(child.pid);
+      }
+    }
+    const unexpected = orphans.filter((row) => row.pid !== sentinel.pid && row.state !== 'Z' && !servicePids.has(row.pid));
+    evidence.orphan_scan = { launcher_pid: launcher.pid, infra_pids: [...infraPids].sort((left, right) => left - right),
+      orphans: await Promise.all(unexpected.map(async (row) => ({ ...row, original: await stillOriginal(row) }))) };
+    assert.equal(unexpected.length, 0, `Orphans must not survive the original App host: ${JSON.stringify(unexpected.map((row) => [row.pid, row.comm]))}`);
     const exited = await Promise.race([launcherExit, delay(120_000).then(() => { throw new Error('The private launcher did not finish after the App exit'); })]);
     const final = launcherLines.findLast((line) => line.status === 'exited');
     evidence.launcher = { exit: exited, final, cleanup: JSON.parse(await readFile(join(sessionRoot, 'cleanup.json'), 'utf8')) };
     const expectedCode = mode === 'parent-death' ? -9 : 0;
     assert.equal(final?.app_exit_code, expectedCode, `The App exit code must be ${expectedCode} for ${mode}`);
     assert.equal(evidence.launcher.cleanup.status, 'complete', 'The private launcher must reap its own X11/bus infrastructure');
-    evidence.after_exit = { remaining_original: (await Promise.all(tree.map(async (row) => (await stillOriginal(row)) ? row.pid : null))).filter(Boolean),
+    evidence.after_exit = { remaining_original: (await Promise.all(tree.filter((row) => row.class !== 'service').map(async (row) => (await stillOriginal(row)) ? row.pid : null))).filter(Boolean),
+      service_survivors: (await Promise.all(tree.filter((row) => row.class === 'service').map(async (row) => (await stillOriginal(row)) ? row.pid : null))).filter(Boolean),
       sentinel_alive: await stillOriginal(sentinelRow), model_requests: evidence.model_requests.length, launches: await launchCounts(),
       database_bytes: (await stat(join(data, 'nomifun-backend.db'))).size };
     assert.deepEqual(evidence.after_exit.remaining_original, [], 'No original app-owned process may survive the host');
@@ -268,6 +323,12 @@ async function main() {
       const ended = await Promise.race([gone.then(() => true), delay(30_000).then(() => false)]);
       if (ended) evidence.sentinel_closed_by_its_own_owner = true;
       else evidence.sentinel_close_timeout = { exit: sentinel.exitCode, signal: sentinel.signalCode };
+    }
+    for (const row of services) {
+      if (!(await stillOriginal(row))) continue;
+      const closed = await execute('python3', ['-c', SERVICE_CLOSE, String(row.pid), String(row.start_time), app]).then(() => true, () => false);
+      const gone = closed && await until(async () => !(await stillOriginal(row)), 'the run-owned keyboard service', 10_000).then(() => true, () => false);
+      (evidence.services_closed ??= []).push({ pid: row.pid, signalled: closed, exited: gone });
     }
     for (const secret of ['owner-jwt', 'credential.json', 'agent-resources-owner.jwt']) {
       await rm(join(root, secret), { force: true });
