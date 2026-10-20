@@ -357,27 +357,27 @@ worker 环境变量白名单以私有运行时目录收敛写入：`CUA_DRIVER_R
 | 阶段 | 状态 | 证据与说明 | 下一动作 |
 | --- | --- | --- | --- |
 | S1 | 本机内核交付完成，其余平台原生项待补 | Windows/Linux独立构建、真实协议11/11与10/10、自检60/63、22动作冻结及3个登记补丁一致性通过；Windows真实普通应用与输入已验，具体身份以本节最后的交付记录为准 | 发布范围内补其他平台与故障原生证据 |
-| S2 | 本机完整替换已在main提交 | 源码提交d63d3833791a099931bd53dd2cf7fc39e11283d1；旧路径删除、新五模块/ComputerHost/22动作/每请求分档/UI/API43/构建签名脚本完整接入；计算与文本保存、产品链路/关闭、Rust/UI/全量/契约及89MB未签名开发包通过 | 本机交付同步；真实模型留S4 |
+| S2 | 本机完整替换已在main提交 | 源码提交d63d3833791a099931bd53dd2cf7fc39e11283d1；旧路径删除、新五模块/ComputerHost/22动作/每请求分档/UI/API43/构建签名脚本完整接入；计算与文本保存、产品链路/关闭、Rust/UI/全量/契约及89MB未签名开发包通过 | 按发布范围补S4，含真实模型 |
 | S3 | 本机UI、i18n和文档已完成 | 驱动状态API与卡片、四分组、typed前台标记、新建会话文案及实际错误返回链已接入，保留HEAD新展示结构 | 随S4可得平台证据修正文档事实 |
 | S4 | 正式发布验收待补 | 当前桌面100%普通原生及未签名开发包已有证据；无正式签名、公证、安装或发布操作，当前任务未提供可用受控模型凭据/Windows签名配置 | 按发布平台补真实模型、签名/公证/安装与原生验收；缺失项不阻塞本机实现 |
 | S5 | 升级说明草稿已备，入口保留 | CHANGELOG Unreleased已写升级影响，架构文档已落；尚未发布，保留专项入口承接S4 | 完成发布范围内S4后定稿并退役入口 |
 
-### 最新授权与构建身份（2026-10-20）
+### S1收尾历史快照（2026-10-20；授权依然有效，最终身份见后文）
 
 - 用户最新明确允许当前真实桌面开发测试，并要求修改AI方案中妨碍快速实施的不合理限制。已同步修订第1–11节、启动prompt与AGENTS专项入口：Windows先贯通，Mac/Linux/Wayland/其他DPI/凭据缺失只记待验；专用测试窗口与临时数据可在当前桌面使用，不读写无关真实文件、凭据或已登录浏览器。原生与实模事实仍不得由模拟替代，发布按平台验收。
 - 本次进入S2前再次检查status/main/HEAD并执行`git pull --ff-only`，从c3e750542快进到`1d385e072571b2f71b90e7406aa3ab335aa8dd1c`。实际UI/API已为42，本项将升43，未覆盖他人的42及其会话展示代码。
-- 末版S1静态源：SOURCE SHA256 `f3d3427c14f64c3668aafd28746d230d77aeb8a8601206e2ba6f3846ce10ab68`；0002 SHA256 `da2c04b7d7d128d225d0ed695601448a136106dd20e2a7fe05581d89f8740b25`；owned_xtest源 `1e915494d350988dee25142b803e1640f96f103550385e84995907c621479b17`；457源记录，另SOURCE共458文件/13,163,242B。`--check`及固定来源`--verify-upstream`零差异。
+- 该S1轮末版静态源：SOURCE SHA256 `f3d3427c14f64c3668aafd28746d230d77aeb8a8601206e2ba6f3846ce10ab68`；0002 SHA256 `da2c04b7d7d128d225d0ed695601448a136106dd20e2a7fe05581d89f8740b25`；owned_xtest源 `1e915494d350988dee25142b803e1640f96f103550385e84995907c621479b17`；457源记录，另SOURCE共458文件/13,163,242B。`--check`及固定来源`--verify-upstream`零差异。
 - sync脚本SHA256 `40e8e93873fceb426aa508bcd45169fa4c0225072fb467e51933bd8635837835`：逐命令`git -c core.autocrlf=false -c core.eol=lf apply`，输入文本规范LF，登记raw patch SHA保持，SOURCE记录`git-apply-text-lf`；临时文本补丁实验证明默认Git设置会写CRLF，修后raw源=Git clean源，未修改任何全局Git配置。
-- Windows末版：默认nested-target流水线build11.33s、真实协议 **10/10**（0 ignored/filtered，0.61s），独立self-check **60**工具，真实list冻结复验通过；worker SHA256 `e8470067f9a654bfceeea26662d85e6deedf6f7b0295b2a1d486182010d9f7c3`。证据`%TEMP%/nomifun-vendor-final-static-windows-94Z9yS/{report.json,pipeline.log,self-check.log}`。
-- Linux末版：独立target/build-dir下`cargo build --locked`18.40s、`cargo test --locked`真实协议 **10/10**（0 ignored/filtered，0.61s），独立self-check **63**工具；Bun执行freeze `--check`通过。binary SHA256 `577020c9ab69fc6de4e52961704d303e20e85d6eda33b9173588089d53fd0f58`；日志`%TEMP%/nomifun-computer-worker-final-linux-{build,test}.log`。
-- 末版已按源码审查闭合清理责任：core row恢复与park独立尝试，observer/readback/ACK/Remove错误保留同一native owner；已恢复original的row可解责；popup不能遮蔽同client的PING窗口；创建成功但回读失败按保留name重识别四设备及attachments，None不允许绕过drain删除真实pair。Linux在guard前复用既有Xauthority准备；macOS初始化失败等待协议线程，避免主线程抢先以0退出。此段是实现/编译证据，尚非末版原生验证。
+- 该S1轮Windows末版：默认nested-target流水线build11.33s、真实协议 **10/10**（0 ignored/filtered，0.61s），独立self-check **60**工具，真实list冻结复验通过；worker SHA256 `e8470067f9a654bfceeea26662d85e6deedf6f7b0295b2a1d486182010d9f7c3`。证据`%TEMP%/nomifun-vendor-final-static-windows-94Z9yS/{report.json,pipeline.log,self-check.log}`。
+- 该S1轮Linux末版：独立target/build-dir下`cargo build --locked`18.40s、`cargo test --locked`真实协议 **10/10**（0 ignored/filtered，0.61s），独立self-check **63**工具；Bun执行freeze `--check`通过。binary SHA256 `577020c9ab69fc6de4e52961704d303e20e85d6eda33b9173588089d53fd0f58`；日志`%TEMP%/nomifun-computer-worker-final-linux-{build,test}.log`。
+- 该S1轮末版已按源码审查闭合清理责任：core row恢复与park独立尝试，observer/readback/ACK/Remove错误保留同一native owner；已恢复original的row可解责；popup不能遮蔽同client的PING窗口；创建成功但回读失败按保留name重识别四设备及attachments，None不允许绕过drain删除真实pair。Linux在guard前复用既有Xauthority准备；macOS初始化失败等待协议线程，避免主线程抢先以0退出。此段是实现/编译证据，尚非末版原生验证。
 - 自动安全审查中止了后续原生故障注入子任务，提示“可能涉及网络安全风险”；该子任务未通过改写请求或换途径重试。末版原生故障项明确未执行。之后继续了安全的源码修正、只读审查、构建与无桌面协议；用户后来对当前桌面的新授权用于普通功能验证，不把未运行故障项改成通过。
 
 以下是S1分轮证据与发现过程；其中“该轮待修”只描述当时源码，不代表末版仍未修正，也不把早轮原生成功归给末版。
 ### S1 源码、授权与环境
 
 - **固定源码身份**：已实跑 `git clone --filter=blob:none --sparse`。当前远端 `cua-driver-rs-v0.37.0` 是 commit `2d2f99228d4d2508dc6fcc84c176b296e146714a`（非 annotated tag），与 D01 的 SHA 不同；按用户指定不可变 commit `4d959bbfa57f0c89f310330e849500b222084194` 锁定，不随 tag 漂移。仅按 D03 提取九个 crate 与编译资源；保留 5 份 Cargo 显式 target 声明所需源文件，未导入其测试夹具。
-- **用户授权的 D04 例外**：2026-10-20，真实 worker 的 X11 强杀 POC 证明核心 XTEST 持键残留后，用户回复“允许为该缺陷追加最小登记补丁（推荐）”。只为输入崩溃清理追加 `0002-x11-owned-input-crash-cleanup.patch`；其他 C/D 合同保持。所有源码变化由登记补丁与 sync 应用，未直接改 vendor 源码；后续修正合并到同一 0002，没有第三补丁。
+- **用户授权的 D04 例外**：2026-10-20，真实 worker 的 X11 强杀 POC 证明核心 XTEST 持键残留后，用户回复“允许为该缺陷追加最小登记补丁（推荐）”。只为输入崩溃清理追加 `0002-x11-owned-input-crash-cleanup.patch`；其他 C/D 合同保持。所有源码变化由登记补丁与 sync 应用，未直接改 vendor 源码；截至当轮，后续修正合并到同一 0002，尚无第三补丁；后续必要修复见下文 0003。
 - **第二轮快照（历史身份，0002 v2）**：457 源记录，另 SOURCE 共 458 文件/13,157,510B；SOURCE SHA256 `8c9fd43d17b5f2cc37d1dbafd2bf70e86563bcf56e3ce5cc2b3642ff4d0d3d73`；0002 `057b8f97172d51d6ec5ab8683193f9bcf614feac0c7518273d8988c2bffbe9f9`；worker lock `009e0ced6224f52b88de8f85110fc0e61a6be85158aebe9269a1310264392035`。此身份已验证早期崩溃窗口，但迟答 App 问题仍在下述修订中，尚非最终交付。
 - **环境与隔离**：Windows x64，rustc/cargo 1.97.1、Bun 1.3.14；Ubuntu WSL2 普通 uid 1000、同版 Rust、内核 6.18.33.2-microsoft-standard-WSL2。原生 POC 仅在已有 Xvfb/Openbox/GTK 3.24.41、私有 D-Bus、独立 HOME/XDG/Xauthority、禁 TCP 的测试桌面；无真实用户会话、已登录浏览器、生产根或凭据。未安装组件、提权或改系统许可。
 - **运行位置审计**：上游还读取 `HOME`/`USERPROFILE/.cua-driver/config.json`；libei restore token 使用 `XDG_CONFIG_HOME/cua-driver/libei-persistent.token`，不能只设 `CUA_DRIVER_RS_HOME`/`XDG_STATE_HOME`。probe/freeze 已清空环境并隔离全部 HOME/XDG/CUA 目录，省略 DISPLAY，且显式不可达 `DBUS_SESSION_BUS_ADDRESS` 防止上游扫描真实 bus。X11 POC 观察到的运行文件仅在本次测试根；未执行 portal token 路径，不能据源码审计声称它已原生验证。
@@ -408,7 +408,7 @@ worker 环境变量白名单以私有运行时目录收敛写入：`CUA_DRIVER_R
 - **Rust consumer**：最新 `/tmp/nomifun-rust-xtest-guardian-6y3g8tfe/report.json` **12** 项通过，包括同 GTK30代正常/worker强杀/PG强杀、30代无效按键零输入收尾、30代最早 Ready-read 强杀、前/后台临时 Unicode、de layout 刷新、后来作者覆盖保留、无 DISPLAY。consumer SHA256 `83939ccbbeea8037794bcf73c285bc1c5f22f7371b598e87faacc13da7f573f2`。原 GTK 崩溃样本 `…-m_mi8wbf` 与早期窗口在第11代失败 `…-wdo61oai` 均保留；修正增加原 core hover/focus client 的只读采集进入同一 drain。早期的7/7只说明该轮输入，不是 App 跨代证据。
 - **清理边界**：fork 仅在 fresh worker 初始单线程、SDK/Tokio 前；guardian 先 setsid/清父死信号再建资源，关无关 FD（不持 protocol stdin/stdout），仅私有 lifetime pipe EOF 触发清理；精确 owner+nonce+guardian 原生身份，不建 DB/文件账本。正常 worker finish 等真实 guardian 状态。worker 与 guardian 同时意外死亡的恢复未证明，不以误伤用户输入的 release-all 或猜旧 map 所有权兜底；S2 宿主仍须对真实清理状态与 unknown 效果负责。
 
-### S2/S3 本机完整替换与普通功能验证（实施中）
+### S2/S3 本机完整替换与普通功能验证（历史轮次）
 
 - **代码与契约**：删除旧 `nomi-computer`、`nomi-a11y`、旧RoleHost、Windows桥、Computer专测/夹具/脚本；混合验证保留其他域。新 `nomifun-computer` 仅包含 protocol/worker/result/surface/permissions，真实worker由宿主直接持有。22个Wave2动作与官方模板、标题、schema由冻结输入生成，UI/API为43；未修改canonical存储代际或基线SQL。
 - **已执行的确定性检查**：`cargo check -p nomifun-app --features computer-use`通过（3m11s，日志 `%TEMP%/nomifun-computer-s2-app-check-2.log`）；此后仍有模型分档/前台投影/Unknown等改动，需最终重跑。新Computer五模块假worker测试当前 **21/21**，覆盖慢请求、崩溃、半包、超时、公平队列、排队/在途Stop、Quit抢占、stderr/native清理责任及空闲退休；真实worker的宿主protocol_smoke只执行guide/init/bind/close/shutdown，desktop_actions=0。Runtime T11新测 **2/2** 与既有普通并行回归 **1/1** 通过，证明Computer两观察仍串行、拒绝与Unknown均停止后续调用；foreground helper **3/3**、实时投影 **4/4** 通过。
@@ -416,7 +416,7 @@ worker 环境变量白名单以私有运行时目录收敛写入：`CUA_DRIVER_R
 - **真实Windows普通启动发现失败**：当前桌面仅使用临时专用WinForms测试App，通过新Computer→worker→`launch_app`启动，未输入、未截图、未故障强杀。精确保留App PID75796/worker PID79144及创建时间handle：close_session后App仍存活，正常250ms测试idle退休后worker与App一起退出，App退出码`0xC000013A`，没有自有graceful exit回执；host/observer均exit0，`survived_worker_retirement=false`。证据 `%TEMP%/nomifun-launch-lifetime-1735aba167c14bb1a8ecb8dfe7aff1a7/observer-report.json`；该轮worker SHA256为`e8470067f9a654bfceeea26662d85e6deedf6f7b0295b2a1d486182010d9f7c3`。此失败正以局部登记补丁修复，不能将编译或协议通过记为用户App生命周期通过。
 - **本轮待完成**：按实际模型候选在每次wire请求和其对应工具执行中使用同一受信分档；保留历史图片资格要求。Windows修复保持用户启动应用独立于worker Job，不放宽通用进程树清理。完成后重新验证源码/worker身份、最终全量门槛和开发包；真实模型因当前任务尚无可用受控凭据未运行，不阻塞实施。
 
-#### S2 本轮增量证据（2026-10-20，未提交）
+#### S2 增量证据（2026-10-20历史轮次，当时未提交）
 
 - `bun run check`第二轮完整exit0，含全部现役边界（日志 `%TEMP%/nomifun-computer-s2-full-check-2.log`）；UI/API43、现有桌面880×600合同和canonical基线保持。后续D08/patch3修订仍需最终复验，不用本轮替代最终包身份。
 - **Windows普通应用存活缺陷的登记修复**：0003第一轮SHA256 `f16ee24ffcceb08c549558cb34f9a8c76b43236fc9eebe2808cfd4207b08caa5`，SOURCE `ca234f81d2dfe8fdd3abd0acd8bb777049c43f3c5b2d10b7f81021833399473c`，worker锁 `cf23a506c957d94c11a43c6fe1ac8619fdf761206045beba76278ed7a6602c30`，Windows worker `cc5c8180673eafa104723040b5edf14d6a3f0ac899238546b324b8cecb402c75`。只经登记补丁与sync改源码；用户应用通过交互shell精确parent与用户token环境启动，不继承worker Job、私有HOME/XDG/CUA或stdio句柄，不更改通用进程树策略。该轮Windows真实协议 **11/11**、self-check60、冻结22复验通过。其后为helper资源退休证明复用已有stderr EOF的修订仍进行中，以上不是修订后的最终身份。
@@ -429,7 +429,7 @@ worker 环境变量白名单以私有运行时目录收敛写入：`CUA_DRIVER_R
 
 #### 本机交付最终记录（2026-10-20，S2/S3）
 
-- **源码提交**：完整S1/S2/S3源码与首次交付进展已提交main：`d63d3833791a099931bd53dd2cf7fc39e11283d1`。该提交包括原样许可/manifest的Git字节保护，不包含编译产物与私有证据；此后的交付身份更新为文档改动。当前用户代码签名证书只读计数为0，Windows签名thumbprint与受控模型测试凭据环境均未配置，已请求获授权配置的入口，不因此阻塞本机源码交付。
+- **源码提交**：完整S1/S2/S3源码与首次交付进展已提交main：`d63d3833791a099931bd53dd2cf7fc39e11283d1`。该提交包括原样许可/manifest的Git字节保护，不包含编译产物与私有证据；此后的交付身份更新为文档改动。源码提交`d63d3833791a099931bd53dd2cf7fc39e11283d1`与进展文档提交`5021ba0a718b9f431504cc6a3cc31e8bbaee5ad4`已一起正常推送至origin/main；2026-10-20核验本机与远端HEAD均为`5021ba0a718b9f431504cc6a3cc31e8bbaee5ad4`。当前用户代码签名证书只读计数为0，Windows签名thumbprint与受控模型测试凭据环境均未配置，已请求获授权配置的入口，不因此阻塞本机源码交付。
 - **同步与保护**：交付前再次核对main/status/HEAD并执行`git pull --ff-only`，仍为`1d385e072571b2f71b90e7406aa3ab335aa8dd1c`且Already up to date。未stash/reset/clean或覆盖无关改动。保留该HEAD的ToolDetails、FileSummary、MessageTimeline与既有生命周期合同。源码与migration manifest复核为零diff：`src/schema.rs`、`001_canonical_baseline.sql`、`agent-store-migration-manifest.envelope.json`；未改canonical存储。
 - **冻结的最终源与worker**：SOURCE SHA256 `da303c0b0d57eed26fd9abb55452ddef350e56a21ec585ae7186f99571aaf92e`；0003 SHA256 `6700e4d1a822ca63b61eca5d716e3770470943398c5bd4c6b78656365b35e5fa`；worker锁仍`cf23a506c957d94c11a43c6fe1ac8619fdf761206045beba76278ed7a6602c30`。最后登记修订使one-shot helper在启动前持有精确worker stderr的非继承duplicate、二次核活，沿宿主已有EOF保留清理责任；原生Wait父死/13s只自退，不把句柄带给用户App；短命ShellExecute设置SEE_MASK_NOASYNC。该修订经独立源码复核与上游重建零差异，不冒充故障注入通过。
 - **打包流水线的实物worker**：`bun scripts/computer/build-worker.mjs --target x86_64-pc-windows-msvc --profile debug`通过（1m51s）；实际stage与artifact均SHA256 `3a51f1dbc139355c86808cd7a1cfa0622d04a54ba92d609c2794b6fa46da1929`。同构建目录真实协议 **11/11**（2.58s build/1.22s测试），该stage实物`--self-check`为protocol1/tool_count60/固定4d959bbf commit。最终冻结清单SHA256 `feb910d741bfb2dc1f142ae0b9fe492c42159878f9c8cb2e76b06758e3c004cb`；`drag.steps`仅按真实两端SDK恢复integer计数文案，批量array描述保留，脚本 **16/16** 通过。
@@ -443,6 +443,6 @@ worker 环境变量白名单以私有运行时目录收敛写入：`CUA_DRIVER_R
 
 ### 未执行项与下一动作
 
-1. 本机S2完整替换与S3已通过上述门槛；保持main同步并核对提交/推送身份。旧Computer专测直接删除，受影响混合验证保留非Computer部分，未保留旧实现兜底。
+1. 本机S2完整替换与S3已通过上述门槛，源码与进展文档已同步origin/main并核对身份；后续按发布范围补S4。旧Computer专测直接删除，受影响混合验证保留非Computer部分，未保留旧实现兜底。
 2. macOS arm64/x64构建、自检、冻结采集、签名App TCC；Windows当前桌面专用测试应用与可得DPI；真实Linux X11/GNOME Wayland、portal/helper与D12规则均按可得环境补验。缺失项不阻塞本机实施，WSL/Xvfb不得冒充原生Wayland。
 3. 真实模型任务使用明确提供的测试凭据，缺凭据不阻塞代码实现；当前专项的测试凭据及Windows签名环境配置为空，未读取其他任务或生产配置。正式签名/公证、安装验证、系统许可修改和发布未执行；CHANGELOG升级草稿与架构已备，S4完成前保留专项入口。
