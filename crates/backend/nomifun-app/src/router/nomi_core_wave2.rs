@@ -574,18 +574,9 @@ impl NomiCoreWave2Host {
         for (key, scope) in scopes {
             match scope.cleanup().await {
                 Ok(()) => {
-                    let mut receipt=scope.release_receipt().await.map_err(|error|AppError::Conflict(error.to_string()))?;
+                    let receipt=scope.release_receipt().await.map_err(|error|AppError::Conflict(error.to_string()))?;
                     if !receipt.retention.processes.is_empty() {
-                        let store=self.effect_store.as_ref().ok_or_else(||AppError::Conflict("Session process owner release has no canonical Store".into()))?;
-                        if let Some(original)=store.session_process_owner_retention(&receipt.retention.owner_ref,&receipt.retention.agent_session_id,
-                            &receipt.retention.owner_generation).await.map_err(|error|AppError::Conflict(error.to_string()))? {
-                            if original.processes.iter().any(|process| !receipt.retention.processes.contains(process)) {
-                                return Err(AppError::Conflict("Session process release lost its original retained creator authority".into()));
-                            }
-                            receipt.retention=original;
-                            store.record_session_process_owner_released(&receipt.retention.owner_ref,receipt.clone()).await
-                                .map_err(|error|AppError::Conflict(error.to_string()))?;
-                        }
+                        return Err(AppError::Conflict("Session process cleanup left retained processes without canonical reaps".into()));
                     }
                     let mut owners=self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?;
                     match owners.get(&key) {
