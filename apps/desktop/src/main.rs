@@ -1006,9 +1006,11 @@ async fn install_update(
         Err(error) => return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: {}", error.message())),
     };
 
-    if let Err(error) = keyboard::prepare_update(&app).await {
-        downloaded.restore_before_handoff(&requested_version, package);
-        return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: 键盘服务停止预检失败，安装包仍保留：{error}"));
+    if !lifecycle_quit_fixture_active() {
+        if let Err(error) = keyboard::prepare_update(&app).await {
+            downloaded.restore_before_handoff(&requested_version, package);
+            return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: 键盘服务停止预检失败，安装包仍保留：{error}"));
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -2700,7 +2702,11 @@ fn complete_main_thread_setup(
         let owner = relay_shutdown_owner.clone();
         let native_app = native_shutdown_app.clone();
         async move {
-            let keyboard = keyboard::shutdown_main(&native_app).await;
+            let keyboard = if lifecycle_quit_fixture_active() {
+                Ok(())
+            } else {
+                keyboard::shutdown_main(&native_app).await
+            };
             let relay = owner.shutdown().await;
             keyboard.map_err(anyhow::Error::msg)?;
             relay
@@ -2811,7 +2817,11 @@ fn complete_main_thread_setup(
         ));
     }
     let main_window = win_builder.build()?;
-    keyboard::start(app.clone(), server.clone(), pairing_data_dir)?;
+    // The verified lifecycle fixture owns no shared Keyboard registration,
+    // login item, hardware service or microphone lifecycle.
+    if !lifecycle_quit_fixture_active() {
+        keyboard::start(app.clone(), server.clone(), pairing_data_dir)?;
+    }
     #[cfg(target_os = "linux")]
     linux_media::install(&main_window)?;
     #[cfg(not(target_os = "linux"))]
@@ -3307,7 +3317,14 @@ fn reconcile_companion_windows(
 }
 
 fn main() -> std::process::ExitCode {
-    if let Some(code) = keyboard::early_entry() { return code; }
+    #[cfg(all(windows,debug_assertions))]
+    if let Err(error)=lifecycle_quit_fixture::prepare_launch() {
+        eprintln!("LIFECYCLE_FIXTURE_REFUSED: {error}");
+        return std::process::ExitCode::FAILURE;
+    }
+    if !lifecycle_quit_fixture_active() {
+        if let Some(code) = keyboard::early_entry() { return code; }
+    }
     #[cfg(windows)]
     if let Some(code) = nomifun_app::windows_system_execution_entry() { return code; }
     // Remove the native daemon registration from its own signed App identity
@@ -3324,11 +3341,6 @@ fn main() -> std::process::ExitCode {
     }
     #[cfg(windows)]
     if let Some(code)=browser_surface::windows::user_file_picker::helper_entry() {return code;}
-    #[cfg(all(windows,debug_assertions))]
-    if let Err(error)=lifecycle_quit_fixture::prepare_launch() {
-        eprintln!("LIFECYCLE_FIXTURE_REFUSED: {error}");
-        return std::process::ExitCode::FAILURE;
-    }
     // If a terminal agent CLI spawned this shell as an MCP stdio bridge
     // (`current_exe() mcp-requirement-stdio` etc.), run that helper and exit
     // BEFORE any runtime init, single-instance handling, or window creation.

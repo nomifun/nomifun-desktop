@@ -3,6 +3,7 @@ param(
     [ValidateSet('quit', 'parent-death')][string]$Mode = 'quit',
     [switch]$KeepArtifacts,
     [switch]$WithAgentResources,
+    [switch]$WithComputer,
     [switch]$StopAgentBeforeQuit,
     [string]$NodeExe = 'node'
 )
@@ -11,11 +12,21 @@ if ($env:OS -ne 'Windows_NT') { throw 'A real Windows Desktop host is required.'
 if ($StopAgentBeforeQuit -and (-not $WithAgentResources -or $Mode -ne 'quit')) {
     throw 'StopAgentBeforeQuit requires WithAgentResources and the normal Quit mode.'
 }
+if ($WithComputer -and (-not $WithAgentResources -or $Mode -ne 'quit' -or $StopAgentBeforeQuit)) {
+    throw 'WithComputer requires WithAgentResources and normal Quit without StopAgentBeforeQuit.'
+}
 $executable = (Resolve-Path -LiteralPath $DesktopExe).ProviderPath
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw 'Desktop executable is missing.' }
 $executableFile = Get-Item -LiteralPath $executable
 $executableIdentity = @{path=$executable; sha256=(Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant();
     modified_at_utc=$executableFile.LastWriteTimeUtc.ToString('o'); length_bytes=[long]$executableFile.Length}
+$computerBinaryIdentity = $null
+if ($WithComputer) {
+    $computerBinary = Join-Path ([IO.Path]::GetDirectoryName($executable)) 'nomifun-computer-worker.exe'
+    if (-not (Test-Path -LiteralPath $computerBinary -PathType Leaf)) { throw 'The Desktop-adjacent Computer worker is missing.' }
+    $computerBinary = (Resolve-Path -LiteralPath $computerBinary).ProviderPath
+    $computerBinaryIdentity = @{path=$computerBinary; sha256=(Get-FileHash -LiteralPath $computerBinary -Algorithm SHA256).Hash.ToLowerInvariant()}
+}
 $agentSidecarScript = $null
 $nodeExecutable = $null
 $sidecarIdentity = $null
@@ -24,7 +35,7 @@ if ($WithAgentResources) {
     $agentSidecarScript = Join-Path $PSScriptRoot 'desktop-agent-resources.mjs'
     if (-not (Test-Path -LiteralPath $agentSidecarScript -PathType Leaf)) { throw 'The dedicated Agent resource sidecar is missing.' }
     $agentSidecarScript = (Resolve-Path -LiteralPath $agentSidecarScript).ProviderPath
-    $nodeExecutable = (Get-Command -Name $NodeExe -CommandType Application -ErrorAction Stop).Source
+    $nodeExecutable = (Get-Command -Name $NodeExe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $nodeExecutable = (Resolve-Path -LiteralPath $nodeExecutable).ProviderPath
     if ($agentSidecarScript.Contains('"') -or $nodeExecutable.Contains('"')) { throw 'Native fixture executable paths cannot contain a quote.' }
     $sidecarIdentity = @{path=$agentSidecarScript; sha256=(Get-FileHash -LiteralPath $agentSidecarScript -Algorithm SHA256).Hash.ToLowerInvariant();
@@ -68,10 +79,116 @@ public static class NomiLifecycleProcessWitness {
     [DllImport("kernel32.dll", SetLastError=true)]
     public static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
     [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool GetExitCodeProcess(IntPtr handle, out uint exitCode);
+    [DllImport("kernel32.dll", SetLastError=true)]
     public static extern bool CloseHandle(IntPtr handle);
 }
 '@
 }
+if ($WithComputer -and -not ('NomiLifecycleKeyboardMetadata' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
+public static class NomiLifecycleKeyboardMetadata {
+    [DllImport("advapi32.dll", CharSet=CharSet.Unicode, EntryPoint="RegQueryValueExW")]
+    private static extern int QueryValue(SafeRegistryHandle key, string name, IntPtr reserved,
+        out uint type, [Out] byte[] data, ref uint length);
+    private static string Hex(byte[] digest) { return BitConverter.ToString(digest).Replace("-", "").ToLowerInvariant(); }
+    public static object RunValue(RegistryView view) {
+        using (var currentUser=RegistryKey.OpenBaseKey(RegistryHive.CurrentUser,view))
+        using (var run=currentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run",false)) {
+            var missing=new Dictionary<string,object>{{"exists",false},{"kind",null},{"value_sha256",null}};
+            if (run==null) return missing;
+            uint kind, length=0;
+            int status=QueryValue(run.Handle,"NomiFunKeyboard",IntPtr.Zero,out kind,null,ref length);
+            if (status==2) return missing;
+            if (status!=0) throw new IOException("Keyboard Run value metadata is unavailable.");
+            byte[] bytes=new byte[checked((int)length)];
+            try {
+                uint readLength=length, readKind;
+                status=QueryValue(run.Handle,"NomiFunKeyboard",IntPtr.Zero,out readKind,bytes,ref readLength);
+                if (status!=0 || readKind!=kind || readLength!=length)
+                    throw new IOException("Keyboard Run value changed or could not be read consistently.");
+                using (var sha=SHA256.Create()) {
+                    // Native REG_* kind and raw bytes, including string terminators.
+                    // No string expansion, original value or parsed contents escape.
+                    return new Dictionary<string,object>{{"exists",true},{"kind",kind},{"value_sha256",Hex(sha.ComputeHash(bytes))}};
+                }
+            } finally { Array.Clear(bytes,0,bytes.Length); }
+        }
+    }
+    private static bool PlainFileExists(string path) {
+        string full=Path.GetFullPath(path), prefix=Path.GetPathRoot(full);
+        var parts=full.Substring(prefix.Length).Split(new[]{Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar},StringSplitOptions.RemoveEmptyEntries);
+        string cursor=prefix;
+        for (int i=0;i<parts.Length;i++) {
+            cursor=Path.Combine(cursor,parts[i]);
+            FileAttributes attributes;
+            try { attributes=File.GetAttributes(cursor); }
+            catch (FileNotFoundException) { return false; }
+            catch (DirectoryNotFoundException) { return false; }
+            if ((attributes&FileAttributes.ReparsePoint)!=0)
+                throw new IOException("Keyboard shared metadata path is a reparse point.");
+            bool directory=(attributes&FileAttributes.Directory)!=0;
+            if (directory!=(i<parts.Length-1)) throw new IOException("Keyboard shared metadata path has an unexpected kind.");
+        }
+        return true;
+    }
+    public static object FileMetadata(string path) {
+        if (!PlainFileExists(path))
+            return new Dictionary<string,object>{{"exists",false},{"size",null},{"sha256",null}};
+        // Read-only, deny concurrent write/delete while hashing this exact file.
+        using (var stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read))
+        using (var sha=SHA256.Create()) {
+            if (!PlainFileExists(path)) throw new IOException("Keyboard shared metadata path changed before reading.");
+            long length=stream.Length;
+            string digest=Hex(sha.ComputeHash(stream));
+            if (stream.Position!=length || stream.Length!=length || !PlainFileExists(path))
+                throw new IOException("Keyboard shared metadata changed while reading.");
+            return new Dictionary<string,object>{{"exists",true},{"size",length},{"sha256",digest}};
+        }
+    }
+}
+'@
+}
+function Read-KeyboardSharedMetadata {
+    # Only the explicitly authorized current-user value and two opaque files.
+    # Do not parse JSON, output registry data, or open any database/profile.
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -or -not [IO.Path]::IsPathRooted($env:LOCALAPPDATA)) {
+        throw 'Current-user LOCALAPPDATA cannot be established for Keyboard metadata observation.'
+    }
+    $keyboardMetadataRoot = Join-Path $env:LOCALAPPDATA 'NomiFun\keyboard-service'
+    try {
+        return [ordered]@{
+            run_32=[NomiLifecycleKeyboardMetadata]::RunValue([Microsoft.Win32.RegistryView]::Registry32)
+            run_64=[NomiLifecycleKeyboardMetadata]::RunValue([Microsoft.Win32.RegistryView]::Registry64)
+            owner_file=[NomiLifecycleKeyboardMetadata]::FileMetadata((Join-Path $keyboardMetadataRoot 'owner.json'))
+            desktop_file=[NomiLifecycleKeyboardMetadata]::FileMetadata((Join-Path $keyboardMetadataRoot 'desktop.json'))
+        }
+    } catch {
+        throw 'Keyboard shared metadata could not be read safely; refusing an unchanged-state claim.'
+    }
+}
+function Write-KeyboardSharedEvidence([bool]$Unchanged) {
+    $evidence = [ordered]@{before=$keyboardSharedBefore; ready=$keyboardSharedReady; after=$keyboardSharedAfter; unchanged=$Unchanged}
+    [IO.File]::WriteAllText((Join-Path $root 'keyboard-shared.json'),($evidence | ConvertTo-Json -Depth 8 -Compress))
+}
+function Assert-KeyboardSharedUnchanged($Observed,[string]$Phase) {
+    $beforeJson = $keyboardSharedBefore | ConvertTo-Json -Depth 8 -Compress
+    $observedJson = $Observed | ConvertTo-Json -Depth 8 -Compress
+    if (-not [string]::Equals($beforeJson,$observedJson,[StringComparison]::Ordinal)) {
+        throw "Keyboard shared metadata changed at $Phase; no restoration or registration is attempted."
+    }
+}
+$keyboardSharedBefore = $null
+$keyboardSharedReady = $null
+$keyboardSharedAfter = $null
+$keyboardSharedUnchanged = $false
 $hostProcess = $null
 $externalOwnerProcess = $null
 $externalOwnerHandle = [IntPtr]::Zero
@@ -80,6 +197,9 @@ $externalOwnerAliveAfterExit = $false
 $browserHandles = @()
 $agentHandles = @()
 $agentWitnesses = @()
+$computerWitness = $null
+$computerHandle = [IntPtr]::Zero
+$computerExitCode = $null
 $agentReceipt = $null
 $agentStopReceipt = $null
 $agentStopObservation = $null
@@ -177,6 +297,11 @@ try { [void]$held.WaitOne() } finally { $held.Dispose() }
             $start.EnvironmentVariables.Remove($name)
         }
     }
+    if ($WithComputer) {
+        $start.EnvironmentVariables.Remove('NOMIFUN_COMPUTER_WORKER')
+        $keyboardSharedBefore = Read-KeyboardSharedMetadata
+        Write-KeyboardSharedEvidence $false
+    }
     $hostProcess = [Diagnostics.Process]::Start($start)
     # Bind to the newly created exact OS process before any Quit/crash action.
     $exactHostHandle = $hostProcess.Handle
@@ -196,6 +321,13 @@ try { [void]$held.WaitOne() } finally { $held.Dispose() }
         throw 'Native fixture readiness does not belong to this exact isolated host.'
     }
     if ($WithAgentResources -and $ready.agent_resources -ne $true) { throw 'The original host did not prepare the explicitly requested Agent resource fixture owner.' }
+    if ($WithComputer) {
+        # Catch startup mutation before the model sidecar or eventual Quit can
+        # conceal it by removing the same value/files again during shutdown.
+        $keyboardSharedReady = Read-KeyboardSharedMetadata
+        Write-KeyboardSharedEvidence $false
+        Assert-KeyboardSharedUnchanged $keyboardSharedReady 'ready'
+    }
     # SYNCHRONIZE only: no termination/write authority over the native browser.
     if (@($ready.browser_pids).Count -lt 1 -or @($ready.browser_pids) -notcontains $ready.browser_pid) { throw 'Exact shell/managed native process inventory is missing.' }
     $environments = @($ready.native_environments)
@@ -233,6 +365,7 @@ try { [void]$held.WaitOne() } finally { $held.Dispose() }
         # ProcessStartInfo invokes Node directly, without a shell. These two
         # known absolute file paths cannot contain quotes or end in a slash.
         $agentStart.Arguments = '"{0}" --root "{1}"' -f $agentSidecarScript, $root
+        if ($WithComputer) { $agentStart.Arguments += ' --with-computer' }
         $agentStart.WorkingDirectory = $root
         $agentStart.UseShellExecute = $false
         $agentStart.CreateNoWindow = $true
@@ -310,6 +443,52 @@ try { [void]$held.WaitOne() } finally { $held.Dispose() }
                 marker_path=$markerPath; process_id=$resource.process_id; call_id=$resource.call_id; mcp_request_id=$resource.mcp_request_id}
         }
         if ($agentSidecar.HasExited) { throw 'The original model sidecar ended before the Desktop exit action.' }
+        if ($WithComputer) {
+            $computer = $agentReceipt.computer
+            $status = $computer.status
+            [uint32]$computerId = 0
+            [guid]$computerGeneration = [guid]::Empty
+            if ($computer.enabled -ne $true -or $computer.canonical_call.is_error -ne $false -or $computer.canonical_call.image_parts -ne 0 -or
+                $computer.canonical_call.topic_count -lt 1 -or $status.running -ne $true -or $status.phase -ne 'ready' -or
+                $status.bound_sessions -ne 1 -or -not [string]::IsNullOrEmpty($status.last_error) -or
+                -not [uint32]::TryParse([string]$status.process_id, [ref]$computerId) -or $computerId -eq 0 -or
+                -not [guid]::TryParse([string]$status.generation, [ref]$computerGeneration) -or
+                $nativeProcessIds -contains $computerId -or $seenAgentIds.ContainsKey($computerId) -or
+                @($hostProcess.Id,$agentSidecar.Id,$externalOwnerProcess.Id) -contains $computerId) {
+                throw 'Computer readiness lacks one successful canonical guide call and its live bound worker generation.'
+            }
+            # SYNCHRONIZE | QUERY_LIMITED_INFORMATION; never PROCESS_TERMINATE.
+            $computerHandle = [NomiLifecycleProcessWitness]::OpenProcess(0x00101000, $false, $computerId)
+            if ($computerHandle -eq [IntPtr]::Zero -or [NomiLifecycleProcessWitness]::WaitForSingleObject($computerHandle, 0) -ne 258) {
+                throw 'The exact internal Computer worker was not observed alive.'
+            }
+            $native = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $computerId)
+            if (-not $native -or [string]::IsNullOrWhiteSpace($native.ExecutablePath) -or
+                -not [string]::Equals((Canonical-FixturePath $native.ExecutablePath), (Canonical-FixturePath $computerBinaryIdentity.path), [StringComparison]::OrdinalIgnoreCase) -or
+                $native.CreationDate.ToUniversalTime() -lt $agentSidecar.StartTime.ToUniversalTime() -or
+                $native.CreationDate -gt [DateTime]::Now -or
+                $native.CommandLine -notmatch ('(?:^|\s)__private-worker(?:\s|$)') -or
+                $native.CommandLine -notmatch ('--generation\s+' + [regex]::Escape([string]$status.generation) + '(?:\s|$)')) {
+                throw 'The Computer image, creation time or private generation command line differs from the original Desktop receipt.'
+            }
+            Assert-OriginalHostAncestor $native $hostProcess
+            # Re-read the ordinary status API after binding the native handle.
+            # Keep the ephemeral owner JWT in memory only; never put it in evidence.
+            $ownerJwt = [IO.File]::ReadAllText((Join-Path $root 'agent-resources-owner.jwt')).Trim()
+            try {
+                $response = Invoke-RestMethod -Method Get -Uri ('http://127.0.0.1:' + $ready.backend_port + '/api/computer/status') -Headers @{Authorization=('Bearer ' + $ownerJwt)} -TimeoutSec 10
+            } finally { $ownerJwt = $null }
+            $confirmed = $response.data
+            if ($confirmed.running -ne $true -or $confirmed.phase -ne 'ready' -or $confirmed.process_id -ne $computerId -or
+                $confirmed.generation -ne $status.generation -or $confirmed.bound_sessions -ne 1 -or
+                [NomiLifecycleProcessWitness]::WaitForSingleObject($computerHandle, 0) -ne 258) {
+                throw 'The original internal worker generation changed or retired before normal Quit.'
+            }
+            $computerWitness = [pscustomobject]@{pid=$computerId; generation=$status.generation; image=$computerBinaryIdentity;
+                created_at_utc=$native.CreationDate.ToUniversalTime().ToString('o'); parent_pid=$native.ParentProcessId;
+                status_before_quit=$confirmed; canonical_call=$computer.canonical_call; frozen_definition=$computer.definition;
+                identity_source='normal authenticated API plus retained SYNCHRONIZE/QUERY_LIMITED_INFORMATION OS handle and original Desktop ancestry'}
+        }
     }
     if ($StopAgentBeforeQuit) {
         $stopRequest = @{token=$token; host_pid=$hostProcess.Id; session_id=$agentReceipt.session_id; operation_id=$agentReceipt.operation_id}
@@ -386,6 +565,18 @@ try { [void]$held.WaitOne() } finally { $held.Dispose() }
             throw "Original Agent $($witness.kind) process $($witness.pid) is still alive; exact native cleanup is not proven."
         }
     }
+    if ($WithComputer) {
+        $remaining = [uint32][Math]::Max(0, ($nativeExitDeadline - [DateTime]::UtcNow).TotalMilliseconds)
+        if ([NomiLifecycleProcessWitness]::WaitForSingleObject($computerHandle, $remaining) -ne 0) {
+            throw 'The original internal Computer worker is still alive after normal Desktop Quit.'
+        }
+        [uint32]$observedComputerExitCode = 0
+        if (-not [NomiLifecycleProcessWitness]::GetExitCodeProcess($computerHandle, [ref]$observedComputerExitCode)) {
+            throw 'The original internal Computer worker exit code could not be read from its retained handle.'
+        }
+        $computerExitCode = $observedComputerExitCode
+        if ($computerExitCode -ne 0) { throw "The original internal Computer worker did not exit normally (code $computerExitCode)." }
+    }
     $externalOwnerAliveAfterExit = [NomiLifecycleProcessWitness]::WaitForSingleObject($externalOwnerHandle, 0) -eq 258
     if (-not $externalOwnerAliveAfterExit) { throw 'Desktop retirement killed the independent driver-owned process; shared-owner protection is not proven.' }
     if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) { throw 'Isolated child output handles did not close after its native process exit.' }
@@ -410,10 +601,17 @@ try { [void]$held.WaitOne() } finally { $held.Dispose() }
     }
     if ([NomiLifecycleProcessWitness]::WaitForSingleObject($externalOwnerHandle, 0) -ne 258) { throw 'The independent owner did not survive the complete Desktop shutdown observation.' }
     if ($WithAgentResources -and $agentSidecar.HasExited) { throw 'The model sidecar ended before the complete native shutdown observation.' }
+    if ($WithComputer) {
+        $keyboardSharedAfter = Read-KeyboardSharedMetadata
+        Write-KeyboardSharedEvidence $false
+        Assert-KeyboardSharedUnchanged $keyboardSharedAfter 'after normal native exit'
+        $keyboardSharedUnchanged = $true
+        Write-KeyboardSharedEvidence $true
+    }
     $passed = $true
-    $passReceipt = (@{mode=$Mode; desktop_binary=$executableIdentity; driver=$driverIdentity; host_pid=$ready.host_pid; browser_pid=$ready.browser_pid; browser_pids=@($ready.browser_pids);
-        native_process_pids=@($nativeProcessIds)+@($agentWitnesses | ForEach-Object {$_.pid}); native_environments=$environments;
-        exact_native_inventory_exited=$true; native_witness_count=$browserHandles.Count+$agentHandles.Count; webview_witness_count=$browserHandles.Count;
+    $passReceiptValue = @{mode=$Mode; desktop_binary=$executableIdentity; driver=$driverIdentity; host_pid=$ready.host_pid; browser_pid=$ready.browser_pid; browser_pids=@($ready.browser_pids);
+        native_process_pids=@($nativeProcessIds)+@($agentWitnesses | ForEach-Object {$_.pid})+@($computerWitness | Where-Object {$_} | ForEach-Object {$_.pid}); native_environments=$environments;
+        exact_native_inventory_exited=$true; native_witness_count=$browserHandles.Count+$agentHandles.Count+[int][bool]$WithComputer; webview_witness_count=$browserHandles.Count;
         agent_resources=@{enabled=[bool]$WithAgentResources; native_witness_count=$agentHandles.Count;
             sidecar_identity=$sidecarIdentity;
             sidecar_pid=if($agentSidecar){$agentSidecar.Id}else{$null};
@@ -421,12 +619,19 @@ try { [void]$held.WaitOne() } finally { $held.Dispose() }
             original_launch_count=$agentReceipt.original_launch_count; original_mcp_call_count=$agentReceipt.original_mcp_call_count;
             processes=@($agentWitnesses | Select-Object pid,kind,image,created_at_utc,parent_pid,marker_path,process_id,call_id,mcp_request_id)};
         agent_stop_before_quit=@{enabled=[bool]$StopAgentBeforeQuit; observation=$agentStopObservation; receipt=$agentStopReceipt};
+        computer=@{enabled=[bool]$WithComputer; internal_desktop_worker=$computerWitness; exact_handle_exited=[bool]$WithComputer;
+            worker_exit_code=$computerExitCode; input_calls=0; screenshot_calls=0; model='local scripted provider'; ordinary_quit_only=[bool]$WithComputer};
         exact_browser_exited=$true; coordinator_cleanup_verified=$coordinatorVerified; exit_code=$hostProcess.ExitCode;
         external_owner=@{pid=$externalOwnerProcess.Id; driver_owned_sentinel=$true; alive_before_exit=$externalOwnerAliveBeforeExit;
             alive_after_native_exit=$externalOwnerAliveAfterExit; registered_os_service=$false};
-        scope=if($WithAgentResources){'exact isolated shell/managed WebView2 plus real Agent pipe, ConPTY and in-flight stdio MCP; independent driver-owned sentinel is not an OS service'}
+        scope=if($WithComputer){'exact isolated shell/managed WebView2 plus real Agent pipe, ConPTY, in-flight stdio MCP and internal Computer worker; only the model is scripted; independent driver-owned sentinel is not an OS service'}
+            elseif($WithAgentResources){'exact isolated shell/managed WebView2 plus real Agent pipe, ConPTY and in-flight stdio MCP; independent driver-owned sentinel is not an OS service'}
             else{'exact isolated shell and managed WebView2 Environment ProcessInfos, real desktop host, and independent driver-owned sentinel (not an OS service)'};
-        artifacts=$root} | ConvertTo-Json -Depth 8 -Compress)
+        artifacts=$root}
+    if ($WithComputer) {
+        $passReceiptValue.keyboard_shared = [ordered]@{before=$keyboardSharedBefore; ready=$keyboardSharedReady; after=$keyboardSharedAfter; unchanged=$keyboardSharedUnchanged}
+    }
+    $passReceipt = ($passReceiptValue | ConvertTo-Json -Depth 8 -Compress)
     [IO.File]::WriteAllText((Join-Path $root 'native-exit-proof.json'), $passReceipt)
 } finally {
     try {
@@ -477,6 +682,7 @@ try { [void]$held.WaitOne() } finally { $held.Dispose() }
     }
     foreach ($handle in $browserHandles) { [void][NomiLifecycleProcessWitness]::CloseHandle($handle) }
     foreach ($handle in $agentHandles) { [void][NomiLifecycleProcessWitness]::CloseHandle($handle) }
+    if ($computerHandle -ne [IntPtr]::Zero) { [void][NomiLifecycleProcessWitness]::CloseHandle($computerHandle) }
     if ($hostProcess) { $hostProcess.Dispose() }
     if ($externalOwnerProcess) {
         try {

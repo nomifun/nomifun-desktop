@@ -601,9 +601,9 @@ Store 在同一事务中更新当前 binding 并保留必要的历史引用；�
 
 普通新建和产品入口从目标冻结授权补齐宿主可提供的确定性资源：Workspace、Process Session、项目记忆、素材库、Scheduler，以及适用的 Terminal、Browser 和 Computer。伙伴、客户、Canvas 等产品身份只取真实目标 ID；Workspace 和 Process 使用同一工作根。Browser/Computer 的已发布 Role 合同可以冻结而设备环境仍未绑定，宿主环境不可用时省略该可选资源。知识库、渠道、SSH 主机和机器人只继承实际选项，不补造连接或凭证。真实 owner 不匹配、存储 I/O/损坏、合同或 Provider 不一致，以及 native checkpoint 和未知效果等执行安全问题继续拒绝操作。
 
-同一物理 ComputerTool 的各 Session Host 共用设备操作锁与当前观察授权，不能各自保留可消费同一个 ref/截图缓存的独立授权。输入所需 `generation` 来自这次 Observe 精确已提交的 `tool/call-started.seq`；Store 在同一读取事务中核验当前 Session/Turn、原生租约与 typed claim、确切调用身份和未结算状态，并返回完整 canonical Snapshot，由 Host 在共享操作锁内与当前调用 context 精确比对。首次 execution fence 为零仍合法，恢复前的事实、已完成调用和已有 native settlement 不能重新产生观察授权。不以内存计数、时间戳、随机数或 head cursor 替代该事实来源。
+Computer 调用经 Kernel、Wave2 和 `nomifun-computer` 进入私有 worker。宿主使用 `native_tool_call_causation` 验证当前 Session/Turn、原生执行租约与 typed claim、确切未结算调用，并将返回 execution scope 的 `resolved_snapshot_ref` 与本次 context 比对；冻结 Action、Provider、principal 和资源 binding/operation 继续通过原准入检查。首次 native execution fence 为零仍合法。观察不建立 Effect，输入和启动沿原 canonical Effect 结算；历史结果和展示信息不授予新调用权限。
 
-观察授权同时绑定当前 Session、Turn、原生 execution generation/fence、完整 Snapshot、Provider、principal 和资源 binding。旧请求或其他 Session 猜测当前数字都会在执行器前拒绝，且不撤销合法持有者的观察。被准入的新观察在设备调用前撤销旧授权与缓存，失败不恢复；Input/Launch 在调用前撤销授权，设备调用返回后清理纯运行时缓存。当前 Input 的截图几何保留到该次已准入调用结束，效果结果不生成下一次输入凭据。缓存及授权只约束当前原生设备调用，不是新的 Session、绑定、checkpoint 或持久账本，也不能从历史 ToolResult 恢复。
+App 共用的 Computer owner 公平串行调度各 Session。worker 协议代际由宿主为新进程产生，原生 session、snapshot 和 `element_token` 由私有 worker 与 Cua Driver 管理，不来自 canonical Observe 事件序号。宿主不保存 ref/截图消费缓存或观察授权，Store 不发布观察凭据。每次实际模型尝试的表面回执仅核对该次 schema 投影，不能代替 Kernel 权限，也不是观察或恢复账本。未知效果不自动重放。生命周期、模型分档与平台边界见[Computer Use](computer-use.zh.md)。
 
 已保存官方预设不会因发布 seed 被覆盖。owner-scoped `GET /api/agent-presets/{preset_id}/recommended-capabilities` 只返回缺失能力、Action 和 Package Skill 的合并草稿与差异；它保留人格、指令、模型、Runtime 配置、已有扩展及 Skill 固定版本，不写入新 Revision。界面先展示新增项，再通过现有 SaveRevision 的 `expected_current_revision` CAS 保存；未保存编辑不能被补齐覆盖。保存不改变现有 Session；伙伴显式“应用最新设定”经空闲、已结算边界复用 canonical Agent switch，在同一 Session 操作围栏与 binding version 校验内准备并提交当前 owner 已保存的配置。直接 Session preview/apply 还须验证此前预览的精确目标 Snapshot。两者均保留 Session 与旧历史，不增加配置升级或绑定账本。
 
@@ -689,9 +689,9 @@ Workspace、Process Session 和 scoped project-memory 位置参数。它们的�
 
 ### 按操作检查系统权限
 
-Computer 的系统权限是执行环境前提，不能因为未授权而阻断普通会话、撤下已冻结的工具，或在首页、会话 Header 常驻授权提示。每次真正的原生操作在冻结能力、资源、canonical 调用因果与观察授权校验后、设备执行前静默检查；截图只检查屏幕录制，AX 观察及输入只检查辅助功能，启动应用与不消费这些权限的观察不要求补齐无关授权。
+Computer 的系统权限是执行环境前提，不能因为未授权而阻断普通会话、撤下已冻结的工具，或在首页、会话 Header 常驻授权提示。每次原生工具派发前，在冻结能力、资源和 canonical 调用因果校验后，按同一冻结 `system_permissions` 与本次准备后的实际参数静默检查所需权限。复合操作可同时要求辅助功能与屏幕录制；不消费这些权限的操作不要求补齐无关授权。
 
-只有确认缺失的权限返回 `SYSTEM_PERMISSION_REQUIRED` 和 `system-permission-required.v1` 结构化的 `not_executed` 结果，沿原 canonical 工具结果事实传输并派生实时、历史展示。检查失败、未知状态和普通原生错误不从诊断文字补造权限请求。输入在原 Effect 中拒绝结算，并撤销旧观察授权；授权恢复后仍需重新观察，不重放旧物理输入。
+只有确认缺失的权限返回 `SYSTEM_PERMISSION_REQUIRED` 和 `system-permission-required.v1` 结构化的 `not_executed` 结果，沿原 canonical 工具结果事实传输并派生实时、历史展示。检查失败、未知状态和普通原生错误不从诊断文字补造权限请求。派发前缺权在原 Effect 中按零效果拒绝结算；宿主在后续调用发现许可状态变化时按需退役并重新绑定驱动代际，需要观察的输入先取得新 snapshot，不自动重放旧输入或 unknown。
 
 消息流仅从确切 Turn 的未解决工具拒绝派生紧凑授权操作，合并相同缺失条件，普通输入与首页不触发。用户返回窗口时重新读取当前权限；通过后收起提示，后续操作静默通过。提示隐藏、点击稍后及授权成功都不改写历史工具结果、Session binding 或 Agent 能力范围，也不创建权限账本。任务未完成摘要可以紧凑展示，但不能仅凭权限工具失败推断或删掉其他受阻条件。Browser 的资源连接与网站授权沿各自原生边界处理，不能混用 Computer 的系统授权。
 

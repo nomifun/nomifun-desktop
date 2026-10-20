@@ -193,10 +193,11 @@ mod windows {
         let entries=state["elements"].as_array()?;
         if !entries.iter().any(|entry|entry["role"]=="Document" &&
             entry["value"].as_str().is_some_and(|value|value.ends_with("#/guid"))) { return None; }
+        // The owned Guid document has one actionable editor. Its animated
+        // placeholder is presentation text; it is not a stable locator.
         let matches=entries.iter().filter(|entry|entry["in_web_content"]==true && entry["role"]=="Edit"
             && has_action(entry,"set_value") && has_action(entry,"text") && entry["element_token"].is_string()
-            && (entry["label"].as_str().is_some_and(|label|label.contains("发消息") || label.to_ascii_lowercase().contains("send a message"))
-                || expected.is_some_and(|value|entry["value"]==value))).collect::<Vec<_>>();
+            && expected.is_none_or(|value|entry["value"]==value)).collect::<Vec<_>>();
         (matches.len()==1).then(||matches[0])
     }
 

@@ -8,7 +8,7 @@ import { readFile, writeFile, mkdir, realpath, stat, rename, access, readdir } f
 import { constants } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, resolve, basename, relative } from 'node:path';
 import { tmpdir } from 'node:os';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { sourceIdentity } from '../lib/source-identity.mjs';
 
@@ -16,6 +16,7 @@ const option = (key) => { const index = process.argv.indexOf(key); return index 
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 const started = Date.now();
 const windows = process.platform === 'win32';
+const withComputer = process.argv.includes('--with-computer');
 const retirementObserveMs = Number(option('--retirement-observe-ms') ?? 0);
 assert(Number.isSafeInteger(retirementObserveMs) && (retirementObserveMs === 0
   || (!windows && retirementObserveMs >= 70_000 && retirementObserveMs <= 180_000)),
@@ -41,6 +42,22 @@ const base = `http://127.0.0.1:${ready.backend_port}`;
 const artifacts = join(root, 'agent-resource-fixtures');
 await mkdir(artifacts, { recursive: false });
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+let computerGuide, computerDefinition;
+if (withComputer) {
+  assert(windows && ready.mode === 'quit', 'Computer resource observation is only enabled for normal Windows Quit');
+  const path = join(repository, 'crates/backend/nomifun-agent-contracts/contracts/computer-tools.v1.json');
+  const bytes = await readFile(path);
+  const tools = JSON.parse(bytes).tools.filter((tool) => tool.driver_tool === 'get_guide');
+  assert.equal(tools.length, 1, 'The guide must have one frozen definition');
+  computerGuide = tools[0];
+  const schema = computerGuide.platforms.windows.input_schema;
+  assert.equal(schema.type, 'object'); assert.equal((schema.required ?? []).length, 0, 'The guide must accept an empty object');
+  assert.equal(computerGuide.effect_class, 'Pure');
+  assert.equal(computerGuide.system_permissions.accessibility, false);
+  assert.equal(computerGuide.system_permissions.screen_recording, 'never');
+  computerDefinition = { path, sha256: createHash('sha256').update(bytes).digest('hex'),
+    action_id: computerGuide.action_id, model_tool: computerGuide.model_tool, arguments: {} };
+}
 let source;
 try { source = await sourceIdentity(repository); } catch (error) { source = { error: String(error?.message ?? error) }; }
 const evidence = { schema: 'nomifun.desktop-agent-resources.v1', token: sentinel, host_pid: ready.host_pid,
@@ -90,6 +107,29 @@ const api = async (method, path, body) => {
 };
 const toolResult = (body, id) => body.messages?.findLast((message) => message.role === 'tool' && message.tool_call_id === id);
 const namedTool = (body, name) => body.tools?.find((tool) => tool.function?.name === name);
+const jsonPayload = (value, field) => {
+  if (value && typeof value === 'object' && Object.hasOwn(value, field)) return value;
+  if (value?.structuredContent && Object.hasOwn(value.structuredContent, field)) return value.structuredContent;
+  if (typeof value === 'string') {
+    for (const line of value.split('\n').reverse()) {
+      let parsed; try { parsed = JSON.parse(line); } catch { continue; }
+      const found = jsonPayload(parsed, field); if (found) return found;
+    }
+  } else if (Array.isArray(value)) {
+    for (const part of [...value].reverse()) { const found = jsonPayload(part, field); if (found) return found; }
+  } else if (value && typeof value === 'object') return jsonPayload(value.text, field);
+  return undefined;
+};
+const requireComputerGuide = (body) => {
+  const result = toolResult(body, 'desktop-resource-computer');
+  if (!result) return false;
+  const native = jsonPayload(result.content, 'topics');
+  assert(native && Array.isArray(native.topics) && native.topics.length > 0, 'The real guide result must expose its structured topic index');
+  assert(native.topics.every((topic) => typeof topic.name === 'string' && typeof topic.summary === 'string'));
+  assert(calls.has('computer'), 'A guide result requires the original dispatched call');
+  evidence.computer_guide_result = { call_id: 'desktop-resource-computer', topics: native.topics, frozen: computerDefinition };
+  return true;
+};
 const toolCall = (name, id, args) => ({ role: 'assistant', tool_calls: [
   { index: 0, id, type: 'function', function: { name, arguments: JSON.stringify(args) } },
 ] });
@@ -255,6 +295,13 @@ for await(const line of createInterface({input:process.stdin,terminal:false})){
         } else delta = toolCall('ToolSearch', `find-desktop-resource-${kind}`, { query: 'workspace.process/start' });
         break;
       }
+      if (!delta && withComputer && !requireComputerGuide(body)) {
+        if (namedTool(body, computerGuide.model_tool)) {
+          assert(!calls.has('computer'), 'The original Computer guide call must be dispatched only once');
+          calls.set('computer', count);
+          delta = toolCall(computerGuide.model_tool, 'desktop-resource-computer', computerDefinition.arguments);
+        } else delta = toolCall('ToolSearch', 'find-desktop-resource-computer', { query: computerGuide.action_id });
+      }
       if (!delta) {
         assert(!toolResult(body, 'desktop-resource-mcp'), 'The intentionally pending original MCP request must not finish before host exit');
         const tool = body.tools?.find((item) => item.function?.parameters?.properties?.nonce?.enum?.includes(sentinel)
@@ -286,12 +333,26 @@ for await(const line of createInterface({input:process.stdin,terminal:false})){
     ] } });
   const model = { provider_id: provider.provider_id, model: 'desktop-lifecycle-fixture' };
   const preset = await api('POST', '/api/agent-presets/from-template/coding.codex', { reuse_existing: false, display_name: 'Desktop lifecycle owned resources', model });
+  if (withComputer) {
+    const draft = structuredClone(preset.draft);
+    const selections = draft.document.enabled_capabilities;
+    assert(!selections.some((selection) => selection.capability.id === 'computer'), 'The fixture must not inherit broader Computer authority');
+    selections.push({ capability: { id: 'computer' }, action_allowlist: [computerGuide.action_id] });
+    const saved = await api('POST', `/api/agent-presets/${preset.preset.preset_id}/revisions`, {
+      expected_current_revision: preset.revision.reference, draft, reason: 'Isolated normal-Quit Computer resource observation',
+    });
+    assert.deepEqual(saved.revision.document.enabled_capabilities.find((selection) => selection.capability.id === 'computer').action_allowlist,
+      [computerGuide.action_id]);
+  }
   const opened = await api('POST', '/api/agent-sessions', { preset_id: preset.preset.preset_id, model, workspace: join(root, 'work'),
     session_capabilities: { skill_names: [], mcp_server_ids: [mcp.mcp_server_id] },
-    resource_selections: [{ resource_kind: 'workspace', resource_id: 'default-workspace' }, { resource_kind: 'process_session', resource_id: 'managed-process-session' }] });
+    resource_selections: [{ resource_kind: 'workspace', resource_id: 'default-workspace' }, { resource_kind: 'process_session', resource_id: 'managed-process-session' },
+      ...(withComputer ? [{ resource_kind: 'computer', resource_id: 'local-desktop' }] : [])] });
   session = opened.agent_session_id; evidence.session_id = session;
   const accepted = await api('POST', `/api/agent-sessions/${session}/turns`, { idempotency_key: `desktop-resources-${sentinel}`,
-    input: { content: 'This is the isolated lifecycle validation. Start the two approved fixture programs exactly once, keep both alive without a task deadline, then invoke the selected lifecycle_hold MCP tool once. Keep its original request pending until the real host exits. Do not complete, retry, cancel, or invent any native result.' } });
+    input: { content: 'This is the isolated lifecycle validation. Start the two approved fixture programs exactly once, keep both alive without a task deadline, '
+      + (withComputer ? `then call the authorized ${computerGuide.model_tool} once with an empty object (no desktop observation or input), ` : '')
+      + 'then invoke the selected lifecycle_hold MCP tool once. Keep its original request pending until the real host exits. Do not complete, retry, cancel, or invent any native result.' } });
   operation = accepted.operation_id; evidence.operation_id = operation;
   evidence.stage = 'original-native-resources-inflight'; await journal();
   const marker = await until(async () => {
@@ -340,6 +401,33 @@ for await(const line of createInterface({input:process.stdin,terminal:false})){
     && event.payload.value.turn_id === operation && event.payload.value.operation_id.endsWith(':tool:desktop-resource-mcp'));
   assert.equal(originalMcp.length, 1, 'Read the original canonical MCP Effect identity, never infer a new owner from a tool name');
   evidence.mcp_effect_id = originalMcp[0].payload.value.effect_id;
+  if (withComputer) {
+    assert(events.events.length < 500, 'A truncated page cannot prove one canonical Computer call');
+    assert(evidence.computer_guide_result, 'The actual guide result must reach the next model request');
+    const progress = events.events.filter((event) => event.kind === 'runtime/progress-recorded'
+      && event.producer_id === 'runtime_supervisor' && event.correlation_id === operation)
+      .map((event) => { assert.equal(event.payload?.storage, 'inline_json'); return { seq: event.seq, value: event.payload.value.event }; });
+    const proposed = progress.filter(({ value }) => value.event === 'tool_call_completed' && value.call.call_id === 'desktop-resource-computer');
+    const invoked = progress.filter(({ value }) => value.event === 'tool_started' && value.capability_id === 'computer');
+    const completed = progress.filter(({ value }) => value.event === 'tool_completed' && value.result.call_id === 'desktop-resource-computer');
+    assert.equal(proposed.length, 1); assert.equal(invoked.length, 1); assert.equal(completed.length, 1);
+    assert.equal(proposed[0].value.call.name, computerGuide.model_tool);
+    assert.deepEqual(proposed[0].value.call.arguments, computerDefinition.arguments);
+    assert.equal(invoked[0].value.call_id, 'desktop-resource-computer'); assert.equal(invoked[0].value.action_id, computerGuide.action_id);
+    assert(proposed[0].seq < invoked[0].seq && invoked[0].seq < completed[0].seq);
+    assert.equal(completed[0].value.result.is_error, false); assert.equal(completed[0].value.runtime_hold ?? null, null);
+    assert(completed[0].value.result.output.length > 0 && completed[0].value.result.output.every((part) => part.type === 'text'), 'This call must not capture an image');
+    const native = jsonPayload(completed[0].value.result.output, 'topics');
+    assert.deepEqual(native?.topics, evidence.computer_guide_result.topics);
+    const status = await api('GET', '/api/computer/status');
+    assert.equal(status.running, true); assert.equal(status.phase, 'ready'); assert.equal(status.bound_sessions, 1);
+    assert(Number.isSafeInteger(status.process_id) && status.process_id > 0 && typeof status.generation === 'string');
+    assert.equal(status.last_error, null);
+    evidence.computer = { enabled: true, definition: computerDefinition, status, canonical_call: {
+      call_id: 'desktop-resource-computer', action_id: computerGuide.action_id,
+      proposal_seq: proposed[0].seq, started_seq: invoked[0].seq, completed_seq: completed[0].seq,
+      is_error: false, image_parts: 0, topic_count: native.topics.length } };
+  }
   Object.assign(evidence, { passed: true, stage: 'ready', processes, prepared_in_ms: Date.now() - started,
     ready_at: new Date().toISOString(), canonical_operation_id: canonical.head.active_turn_id,
     agent_binding: canonical.session.agent_binding, original_launch_count: 2, original_mcp_call_count: 1 });

@@ -40,7 +40,7 @@ cargo test --locked -p nomifun-app --features browser-conformance --test native_
 cargo build --locked -p nomifun-desktop --bin nomifun-desktop --features nomifun-app/browser-conformance
 cargo test --locked -p nomi-process-runtime --test parent_death --test pty_contract --test process_contract
 
-选择适用Session／Execution／App／Cron与资源回归，核对cfg、features和非零测试数量。复用bash scripts/validation/linux-computer-native.sh及现役global-os-linux-native.mjs和X11 launcher，但先读各脚本参数、隔离数据与认证协议：前者只证明私有Xvfb／Openbox中的ComputerTool；后者desktop场景需真实X11 session root和隔离App／owner JWT，不是Wayland证明。不要默认调用会准备系统依赖或产出安装包的build:linux。
+选择适用Session／Execution／App／Cron与资源回归，核对cfg、features和非零测试数量。Computer按docs/handoffs/computer-use-rebuild.zh.md第12节及独立apps/computer-worker工作区接续，使用固定vendor与当前协议，旧原生脚本和观察授权合同已退役。现役global-os-linux-native.mjs仅覆盖files-process／system／missing-default，先读当前参数、隔离数据与owner JWT认证协议。需要桌面的其他原生验收单独核验其现役入口与真实X11／Wayland环境，私有显示或XWayland不等于Wayland证明。不要默认调用会准备系统依赖或产出安装包的build:linux。
 
 补验pipe／PTY、leader先退出、watchdog／父死／reaping、精确Stop、共享worker／client隔离、SIGINT／SIGTERM／Quit、FD／进程／PTY稳定性及Desktop／桌面WebUI控制。X11与真实Wayland portal授权、拒绝、撤销分别记录；WSLg／XWayland、私有D-Bus或mock不替代真实Wayland。涉及不同GNOME／KDE后端时分别取证。核对当前Desktop无managed／Attached Browser provider时列源码依据及N/A，不为本专项新增后端。
 
