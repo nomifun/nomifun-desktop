@@ -142,6 +142,71 @@ async fn stop_during_dispatched_drag_joins_the_original_input_and_releases_its_b
     println!("native X11 Stop during dispatched drag: original worker joined, button released once, real result retained, no late input");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an isolated native X11 server and EWMH window manager"]
+async fn queued_input_cancelled_before_dispatch_produces_no_native_effect() {
+    let _display = exclusive_display();
+    assert!(matches!(nomi_computer::linux_x11::desktop_state(), nomi_computer::linux_x11::DesktopState::X11 { input: true, window_management: true }));
+    let (connection, screen_index) = x11rb::connect(None).unwrap();
+    let tool = Arc::new(ComputerTool::new(&ComputerConfig { enabled: true, max_screenshot_edge: 800 }));
+    let (window, x, y) = focused_target(&connection, screen_index, &tool).await;
+    drain(&connection);
+    let stop = CancellationToken::new();
+    let drag = tokio::spawn({
+        let (tool, stop) = (tool.clone(), stop.clone());
+        async move { tool.execute_authorized_controlled(ComputerAction::Input.id(),
+            json!({"action":"left_click_drag","start_x":x + 30,"start_y":y + 30,"end_x":x + 200,"end_y":y + 150}), &stop).await }
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut pressed, mut released, mut motions) = (0, 0, 0);
+    while Instant::now() < deadline && pressed == 0 {
+        for event in drain(&connection) {
+            match event {
+                Event::ButtonPress(event) => { assert_eq!(event.event, window); pressed += 1; }
+                Event::ButtonRelease(_) => released += 1,
+                Event::MotionNotify(_) => motions += 1,
+                _ => {}
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(pressed, 1, "the drag must be dispatched with the button held before the queued input is admitted");
+    assert_eq!(released, 0, "the drag must still be in flight when the queued input is admitted");
+
+    let stop2 = CancellationToken::new();
+    let queued = {
+        let (tool, stop2) = (tool.clone(), stop2.clone());
+        tokio::spawn(async move {
+            stop2.cancelled().await;
+            tool.execute_authorized_controlled(ComputerAction::Input.id(),
+                json!({"action":"key","key":"q"}), &stop2).await
+        })
+    };
+    stop2.cancel();
+    let withdrawn = queued.await.unwrap();
+    assert!(is_proven_cancelled_before_dispatch(&withdrawn),
+        "the queued input must return the product's cancelled-before-dispatch result: {}", withdrawn.content);
+
+    stop.cancel();
+    let drag_result = drag.await.unwrap();
+    assert!(!drag_result.is_error && !is_proven_cancelled_before_dispatch(&drag_result),
+        "the admitted drag keeps its real result: {}", drag_result.content);
+    for event in drain(&connection) {
+        match event {
+            Event::ButtonRelease(event) => { assert_eq!(event.event, window); released += 1; }
+            Event::ButtonPress(_) => pressed += 1,
+            Event::MotionNotify(_) => motions += 1,
+            Event::KeyPress(_) | Event::KeyRelease(_) => panic!("the withdrawn queued input must not reach the target: {event:?}"),
+            _ => {}
+        }
+    }
+    assert_eq!((pressed, released), (1, 1), "the original press must be released exactly once");
+    assert!(motions > 0, "the admitted drag effect is real");
+    assert_only_barrier_input(&connection, &tool, window).await;
+    connection.destroy_window(window).unwrap().check().unwrap();
+    println!("native X11 queued input withdrawn before dispatch: no key event, drag completed, barrier key is the only key");
+}
+
 #[tokio::test]
 #[ignore = "requires an isolated native X11 server and EWMH window manager"]
 async fn exact_focus_capture_and_input_use_product_tool_without_focus_clicks() {
