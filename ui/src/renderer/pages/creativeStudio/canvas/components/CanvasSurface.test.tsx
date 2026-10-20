@@ -44,7 +44,7 @@ describe('Creative Studio canvas surface', () => {
 
     expect(html.includes('data-canvas-surface="true"')).toBe(true);
     expect(html.includes('data-canvas-background="dots"')).toBe(true);
-    expect(html.includes('--creative-canvas-grid-size:40px')).toBe(true);
+    expect(html.includes('--creative-canvas-grid-size:22.5px')).toBe(true);
     expect(html.includes('data-canvas-world="true"')).toBe(true);
     expect(html.includes('translate3d(120px, -80px, 0) scale(1.25)')).toBe(true);
     expect(html.includes('data-canvas-layer="edges"')).toBe(true);

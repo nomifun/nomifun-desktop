@@ -14,7 +14,7 @@ import styles from './CanvasSurface.module.css';
 
 export type CanvasBackgroundMode = 'dots' | 'lines' | 'blank';
 export type CanvasInteractionTool = 'select' | 'pan';
-const DEFAULT_CANVAS_GRID_STEP = 32;
+const DEFAULT_CANVAS_GRID_STEP = 18;
 
 interface CanvasSurfaceViewport {
   x: number;
