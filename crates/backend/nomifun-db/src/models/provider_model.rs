@@ -28,6 +28,7 @@ pub struct ProviderModelCapabilityRow {
     pub model: String,
     pub task: String,
     pub traits: String,
+    pub input_constraints: Option<String>,
     pub protocol: String,
     pub connection_role: String,
     pub base_url_override: Option<String>,
@@ -53,6 +54,7 @@ pub struct ProviderModelCapabilityRow {
 pub struct NewProviderModelCapability<'a> {
     pub task: &'a str,
     pub traits: &'a str,
+    pub input_constraints: Option<&'a str>,
     pub protocol: &'a str,
     pub connection_role: &'a str,
     pub base_url_override: Option<&'a str>,

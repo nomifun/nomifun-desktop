@@ -95,7 +95,7 @@ impl ModelManagementService {
                             "model":m.model, "display_name":m.display_name, "enabled":m.enabled,
                             "capabilities":m.capabilities.into_iter().map(|c| json!({
                                 "task":c.task, "protocol":c.protocol, "connection_role":c.connection_role,
-                                "traits":c.traits, "context_limit":c.context_limit, "output_limit":c.output_limit
+                                "traits":c.traits, "context_limit":c.context_limit, "output_limit":c.output_limit, "input_constraints":c.input_constraints
                             })).collect::<Vec<_>>()
                         })).collect::<Vec<_>>();
                         result.push(json!({"provider_id":provider.provider_id,"name":provider.name,

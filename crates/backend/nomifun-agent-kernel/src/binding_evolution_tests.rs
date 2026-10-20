@@ -18,6 +18,7 @@ fn chat_route(route: &str) -> ChatRouteRecord {
             config_revision_digest: DigestHex::from("a".repeat(64)),
             credential_ref: "credential".into(),
             features: BTreeSet::from([ChatRouteFeature::TextInput, ChatRouteFeature::TextOutput]),
+            input_constraints: None,
             activation_features: BTreeSet::new(),
         },
         failovers: Vec::new(),

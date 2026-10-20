@@ -77,6 +77,7 @@ async fn seed_provider(
     let capabilities = [NewProviderModelCapability {
         task: "speech_recognition",
         traits: "[]",
+        input_constraints: None,
         protocol,
         connection_role: "default",
         base_url_override: None,

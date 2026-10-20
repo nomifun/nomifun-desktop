@@ -371,6 +371,15 @@ pub(crate) fn validate_positive_token_limit(
     Ok(())
 }
 
+pub(crate) fn validate_input_constraints(capability: &ProviderModelCapabilityInput) -> Result<(), AppError> {
+    if capability.task != ModelTask::Chat
+        && capability.input_constraints.and_then(nomifun_agent_contracts::ModelInputConstraints::normalize).is_some()
+    {
+        return Err(AppError::BadRequest("input_constraints are supported only for Chat".into()));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_compaction_threshold(
     capability: &ProviderModelCapabilityInput,
 ) -> Result<(), AppError> {
@@ -388,6 +397,7 @@ pub(crate) fn validate_protocol(
     platform: &str,
     capability: &ProviderModelCapabilityInput,
 ) -> Result<(), AppError> {
+    validate_input_constraints(capability)?;
     let protocol = capability.protocol.trim();
     if protocol.is_empty() {
         return Err(AppError::BadRequest(
@@ -744,6 +754,7 @@ fn resolve_relative_url(base: &Url, value: &str, field: &str) -> Result<Url, App
 pub(crate) struct SerializedCapability {
     task: String,
     traits: String,
+    input_constraints: Option<String>,
     protocol: String,
     connection_role: String,
     base_url_override: Option<String>,
@@ -763,6 +774,7 @@ impl SerializedCapability {
         NewProviderModelCapability {
             task: &self.task,
             traits: &self.traits,
+            input_constraints: self.input_constraints.as_deref(),
             protocol: &self.protocol,
             connection_role: &self.connection_role,
             base_url_override: self.base_url_override.as_deref(),
@@ -785,11 +797,18 @@ pub(crate) fn serialize_capabilities(
     capabilities
         .iter()
         .map(|capability| {
+            validate_input_constraints(capability)?;
+            let input_constraints = capability.input_constraints
+                .and_then(nomifun_agent_contracts::ModelInputConstraints::normalize)
+                .map(|value| serde_json::to_string(&value)
+                    .map_err(|error| AppError::Internal(format!("failed to serialize input_constraints: {error}"))))
+                .transpose()?;
             Ok(SerializedCapability {
                 task: task_wire(capability.task)?,
                 traits: serde_json::to_string(&capability.traits).map_err(|error| {
                     AppError::Internal(format!("failed to serialize capability traits: {error}"))
                 })?,
+                input_constraints,
                 protocol: capability.protocol.trim().to_owned(),
                 connection_role: capability.connection_role.trim().to_owned(),
                 base_url_override: capability.base_url_override.clone(),
@@ -905,8 +924,16 @@ pub(crate) fn capability_row_to_input(
             row.provider_id, row.model
         ))
     })?;
+    let input_constraints = row.input_constraints.as_deref()
+        .map(serde_json::from_str::<Option<nomifun_agent_contracts::ModelInputConstraints>>)
+        .transpose().map_err(|error| AppError::Internal(format!("stored input_constraints are invalid: {error}")))?
+        .flatten().and_then(nomifun_agent_contracts::ModelInputConstraints::normalize);
+    if task != ModelTask::Chat && input_constraints.is_some() {
+        return Err(AppError::Internal("stored input_constraints are supported only for Chat".into()));
+    }
     Ok(ProviderModelCapabilityInput {
         task,
+        input_constraints,
         traits,
         protocol: row.protocol.clone(),
         connection_role: row.connection_role.clone(),
@@ -942,6 +969,7 @@ pub(crate) fn capability_row_to_response(
     Ok(ProviderModelCapabilityResponse {
         task: input.task,
         traits: input.traits,
+        input_constraints: input.input_constraints,
         protocol: input.protocol,
         connection_role: input.connection_role,
         base_url_override: input.base_url_override,
@@ -981,7 +1009,20 @@ mod tests {
             context_limit: None,
             output_limit: None,
             compaction_threshold_pct: None,
+            input_constraints: None,
         }
+    }
+
+    #[test]
+    fn programmatic_capabilities_normalize_empty_constraints_and_reject_other_tasks() {
+        let mut chat = capability(ModelTask::Chat,"openai.chat_text");
+        chat.input_constraints = Some(nomifun_agent_contracts::ModelInputConstraints {image_input:Some(false)});
+        assert_eq!(serialize_capabilities(&[chat]).unwrap()[0].as_db().input_constraints,Some(r#"{"image_input":false}"#));
+        let mut other = capability(ModelTask::ImageGeneration,"openai.images");
+        other.input_constraints = Some(nomifun_agent_contracts::ModelInputConstraints::default());
+        assert!(serialize_capabilities(&[other.clone()]).unwrap()[0].as_db().input_constraints.is_none());
+        other.input_constraints = Some(nomifun_agent_contracts::ModelInputConstraints {image_input:Some(false)});
+        assert!(serialize_capabilities(&[other]).is_err());
     }
 
     #[test]

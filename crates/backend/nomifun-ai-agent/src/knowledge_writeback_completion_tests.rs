@@ -6,7 +6,7 @@ use serde_json::json;
 fn configuration(base_url:&str)->ResolvedTaskConfig {
     ResolvedTaskConfig {
         provider_id:"0190f5fe-7c00-7a00-8000-000000000001".into(),config_revision:3,platform:"custom".into(),
-        model:"arbitrary-chat-model".into(),task:ModelTask::Chat,traits:Vec::new(),protocol:"openai.chat_text".into(),
+        model:"arbitrary-chat-model".into(),task:ModelTask::Chat,traits:Vec::new(), input_constraints: None,protocol:"openai.chat_text".into(),
         connection:ResolvedConnection {role:"default".into(),base_url:base_url.into(),
             auth:AuthMaterial {scheme:AuthScheme::Bearer,credentials:json!({"api_keys":["local-test-key"]})},extra:json!({})},
         transport:ResolvedTaskTransport {endpoint:Some("/chat/completions".into()),..Default::default()},

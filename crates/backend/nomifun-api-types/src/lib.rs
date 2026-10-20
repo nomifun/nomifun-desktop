@@ -201,6 +201,7 @@ pub use provider_connection::{
     ProviderConnectionInput, ProviderConnectionResponse, SaveProviderConnectionRequest,
 };
 pub use provider_model::{
+    ModelInputConstraints,
     CapabilityHealth, MODEL_CONTEXT_LIMIT_KIND_PARAM, ProviderModelCapabilityInput, ProviderModelCapabilityResponse,
     ProviderModelInput, ProviderModelKeyRequest, ProviderModelResponse, SaveProviderModelRequest,
     validate_model_traits_unique,

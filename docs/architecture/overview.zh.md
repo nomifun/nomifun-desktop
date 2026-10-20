@@ -142,4 +142,4 @@ nomifun-desktop/
 
 ## Computer Use 接缝
 
-Computer 的 `nomifun.computer` 模块由 `nomifun-app` 的 `computer_host` 持有，调用 `nomifun-computer` 五个单一职责模块和独立 Cua worker；Gateway 不注册桌面工具。UI 按冻结元数据展示观察/操作/应用/剪贴板分组、同源标题及前台标记，状态来自 `/api/computer/status`，系统许可使用现役 `/api/system/permissions`。UI/API 版本为 43，旧 Computer 会话提示新建，历史保留。架构与未完成平台验收见[Computer Use](computer-use.zh.md)。
+Computer 的 `nomifun.computer` 模块由 `nomifun-app` 的 `computer_host` 持有，调用 `nomifun-computer` 五个单一职责模块和独立 Cua worker；Gateway 不注册桌面工具。UI 按冻结元数据展示观察/操作/应用/剪贴板分组、同源标题及前台标记，状态来自 `/api/computer/status`，系统许可使用现役 `/api/system/permissions`。UI/API 版本为 44，旧 Computer 会话提示新建，历史保留。架构与未完成平台验收见[Computer Use](computer-use.zh.md)。

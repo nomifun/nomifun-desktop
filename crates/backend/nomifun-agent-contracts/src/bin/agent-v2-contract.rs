@@ -25,7 +25,7 @@ use nomifun_agent_contracts::{
     PluginRegistrationMetadata,
     RemoteBinding,
     ResolvedSnapshotEnvelope, SessionEventRegistryPayload, TargetPackageInventoryPayload,
-    VersionString, digest_bytes, digest_payload,
+    VersionString, chat_route_record_json_schema, digest_bytes, digest_payload,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
@@ -49,6 +49,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let contracts = root.join("contracts");
     let generated = contracts.join("generated");
+    let chat_route_schema_path = root.join("schema/chat-route-record.v1.json");
+    let chat_route_schema = chat_route_record_json_schema();
 
     let closure_path = contracts.join("closure/contract-closure.v1.json");
     let inventory_path = contracts.join("target-packages/first-party-agent-modules.v1.json");
@@ -328,6 +330,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     });
     if mode == "write" {
         fs::create_dir_all(&generated)?;
+        write_json(&chat_route_schema_path, &chat_route_schema)?;
         write_json(&seed_path, &seed)?;
         write_json(&platform_path, &platform)?;
         for (name, contents) in &outputs {
@@ -337,6 +340,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         fs::write(&system_error_binding_path, &system_error_binding)?;
         for (path, binding) in &presentation_bindings { fs::write(path, binding)?; }
     } else {
+        check_json(&chat_route_schema_path, &chat_route_schema)?;
         check_json(&seed_path, &seed)?;
         check_json(&platform_path, &platform)?;
         for (name, contents) in &outputs {

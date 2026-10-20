@@ -82,6 +82,7 @@ pub use schema::{
     AGENT_STORE_BASELINE_SQL, AGENT_STORE_DATA_GENERATION, AGENT_STORE_MIGRATION_HEAD,
     AGENT_STORE_PROJECTION_SCHEMA_VERSION, AgentStoreSchemaManifestPayload,
     CHAT_ROUTE_RECORD_JSON_SCHEMA, SchemaResetScope, SchemaTableContract,
+    chat_route_record_json_schema,
     agent_store_schema_manifest_payload, agent_store_schema_manifest_evolution_compatible,
 };
 pub use session::*;

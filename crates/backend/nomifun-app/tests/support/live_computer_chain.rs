@@ -5,8 +5,9 @@
 //! NOMIFUN_COMPUTER_ARTIFACT_DIR (fresh). The owned fixture source/compilation
 //! recipe is documented beside native_computer_chain.rs.
 //!
-//! Both phases use a Full route. Phase one's AX-only instruction is not a
-//! NoImage route: advisory traits cannot disable the OpenAI image serializer.
+//! The Full case uses two phases; its AX-only instruction is not a NoImage
+//! route. The NoImage case keeps advisory vision metadata and uses an explicit
+//! model-interface input constraint, verified against the frozen actual route.
 use super::*;
 use futures_util::FutureExt;
 use nomifun_agent_runtime::AgentEngineEvent;
@@ -142,7 +143,7 @@ async fn api(router: &Router, method: &str, path: &str, body: Value) -> LiveResu
         .cloned()
         .ok_or_else(|| "local response envelope missing".into())
 }
-async fn restricted_preset(router: &Router, provider: &str) -> LiveResult<String> {
+async fn restricted_preset(router: &Router, provider: &str) -> LiveResult<(String, Value)> {
     let model = json!({"provider_id":provider,"model":MODEL});
     let editor = api(
         router,
@@ -185,7 +186,20 @@ async fn restricted_preset(router: &Router, provider: &str) -> LiveResult<String
     if selected.len() != 1 || selected[0]["capability"]["id"] != "computer" {
         return Err("saved preset authority differs".into());
     }
-    Ok(id)
+    let route = saved
+        .pointer("/revision/document/chat_route_records/agent_chat")
+        .ok_or("saved Chat route missing")?;
+    if route["failovers"]
+        .as_array()
+        .is_none_or(|items| !items.is_empty())
+    {
+        return Err("controlled route unexpectedly has failovers".into());
+    }
+    let primary = &route["primary"];
+    Ok((
+        id,
+        json!({"route_id":primary["model_route_id"],"route_revision":primary["model_route_revision"],"input_constraints":primary["input_constraints"],"features":primary["features"]}),
+    ))
 }
 async fn turn(
     router: &Router,
@@ -274,9 +288,25 @@ async fn evidence(
     let mut public_text = BTreeMap::<u16, String>::new();
     let mut last_capture_step = 0;
     let mut marker_absent_from_ax = true;
+    let mut used_routes = BTreeMap::<String, Value>::new();
     for event in &facts.events {
         if event.kind.0 == "context/model-visible-applied" {
             model_steps += 1;
+            let identity = facts
+                .event_payloads
+                .get(event.event_id.as_ref())
+                .and_then(|payload| payload.get("route_identity"))
+                .ok_or("actual model route identity missing")?;
+            let id = identity["route_id"]
+                .as_str()
+                .ok_or("actual model route ID missing")?;
+            let revision = identity["route_revision"]
+                .as_u64()
+                .ok_or("actual model route revision missing")?;
+            used_routes.insert(
+                format!("{id}@{revision}"),
+                json!({"route_id":id,"route_revision":revision}),
+            );
         }
         if event.kind.0 != "runtime/progress-recorded"
             || event.producer_id.as_ref() != "runtime_supervisor"
@@ -552,9 +582,9 @@ async fn evidence(
                 .any(|token| token == visual_code))
         .then_some(*step)
     });
-    Ok(
-        json!({"operation_id":operation,"computer_calls":calls.len(),"successful_computer_calls":succeeded,"computer_call_success_rate":if calls.is_empty(){0.0}else{succeeded as f64/calls.len() as f64},"model_steps":model_steps,"typed_turn_completed":typed_terminal,"marker_absent_from_ax":marker_absent_from_ax,"visual_code_match":visual_step.is_some(),"public_visual_reading_step":visual_step,"last_capture_step":last_capture_step,"calls":calls,"effects":effect_rows,"all_effects_returned":effects.iter().all(|effect|effect.state==AgentEffectState::Returned),"ax_observations":observations,"ax_verified_five":verified_five,"ax_verified_text":verified_text,"clicked_controls":clicked,"successful_owned_window_clicks":successful_owned_window_clicks,"canonical_raw_images":canonical_raw_images,"canonical_media_policy":"binary images omitted from bounded replay history","native_window_captures":captures,"read_only_call_latency_ms":null,"read_only_latency_note":"canonical tool events contain sequences, not wall-clock timestamps"}),
-    )
+    let mut evidence = json!({"operation_id":operation,"computer_calls":calls.len(),"successful_computer_calls":succeeded,"computer_call_success_rate":if calls.is_empty(){0.0}else{succeeded as f64/calls.len() as f64},"model_steps":model_steps,"typed_turn_completed":typed_terminal,"marker_absent_from_ax":marker_absent_from_ax,"visual_code_match":visual_step.is_some(),"public_visual_reading_step":visual_step,"last_capture_step":last_capture_step,"calls":calls,"effects":effect_rows,"all_effects_returned":effects.iter().all(|effect|effect.state==AgentEffectState::Returned),"ax_observations":observations,"ax_verified_five":verified_five,"ax_verified_text":verified_text,"clicked_controls":clicked,"successful_owned_window_clicks":successful_owned_window_clicks,"canonical_raw_images":canonical_raw_images,"canonical_media_policy":"binary images omitted from bounded replay history","native_window_captures":captures,"read_only_call_latency_ms":null,"read_only_latency_note":"canonical tool events contain sequences, not wall-clock timestamps"});
+    evidence["used_route_identities"] = json!(used_routes.into_values().collect::<Vec<_>>());
+    Ok(evidence)
 }
 fn no_plaintext_secret(root: &Path, secret: &[u8]) -> LiveResult<()> {
     let mut pending = vec![root.to_owned()];
@@ -587,6 +617,17 @@ fn no_plaintext_secret(root: &Path, secret: &[u8]) -> LiveResult<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "real Step Plan usage and an owned native window; credential only on stdin; run one exact test"]
 async fn stepfun_full_route_ax_then_window_image() {
+    run_case(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "real Step Plan usage and an owned native window; credential only on stdin; run one exact test"]
+async fn stepfun_explicit_no_image_route_completes_ax_tasks() {
+    run_case(true).await;
+}
+
+async fn run_case(no_image: bool) {
+    let route_name = if no_image { "NoImage" } else { "Full" };
     let secret = secret_line().expect("one bounded credential line is required on stdin");
     let root = PathBuf::from(
         std::env::var_os("NOMIFUN_COMPUTER_ARTIFACT_DIR").expect("new isolated artifact directory"),
@@ -626,11 +667,22 @@ async fn stepfun_full_route_ax_then_window_image() {
         )),
     ));
     let router = create_router(&app).await;
-    let mut report = json!({"ok":false,"evidence_kind":"real_model_product_computer","provider":"stepfun-plan","model":MODEL,"route":"Full","preset_template":"chat.minimal","authority":"Computer only: frozen get_window_state/click/type_text","model_was_scripted":false,"task_total":2,"task_success_count":0});
+    let mut report = json!({"ok":false,"evidence_kind":"real_model_product_computer","provider":"stepfun-plan","model":MODEL,"route":route_name,"preset_template":"chat.minimal","authority":"Computer only: frozen get_window_state/click/type_text","model_was_scripted":false,"task_total":2,"task_success_count":0});
     let outcome=std::panic::AssertUnwindSafe(async{
-        let provider=api(&router,"POST","/api/providers",json!({"platform":"stepfun-plan","name":"Controlled Computer real model","base_url":BASE_URL,"auth_scheme":"bearer","credentials":{"api_keys":[secret.as_str()]},"enabled":true,"initial_model":{"model":MODEL,"enabled":true,"capabilities":[{"task":"chat","traits":["vision_input"],"protocol":"openai.chat_text","connection_role":"default","provider_params":{"temperature":0.0},"context_limit":1048576,"output_limit":8192}]}})).await?;
+        let mut capability=json!({"task":"chat","traits":["vision_input"],"protocol":"openai.chat_text","connection_role":"default","provider_params":{"temperature":0.0},"context_limit":1048576,"output_limit":8192});
+        if no_image { capability["input_constraints"]=json!({"image_input":false}); }
+        let provider=api(&router,"POST","/api/providers",json!({"platform":"stepfun-plan","name":"Controlled Computer real model","base_url":BASE_URL,"auth_scheme":"bearer","credentials":{"api_keys":[secret.as_str()]},"enabled":true,"initial_model":{"model":MODEL,"enabled":true,"capabilities":[capability]}})).await?;
         let provider_id=provider["provider_id"].as_str().ok_or("provider identity missing")?;
-        let preset=restricted_preset(&router,provider_id).await?;
+        let (preset,frozen_route)=restricted_preset(&router,provider_id).await?;
+        let features=frozen_route["features"].as_array().ok_or("frozen model features missing")?;
+        if !features.iter().any(|feature|feature=="tool_calls")||features.iter().any(|feature|feature=="image_input")==no_image {
+            return Err("frozen model features did not enforce the declared input contract".into());
+        }
+        if no_image&&frozen_route.pointer("/input_constraints/image_input")!=Some(&json!(false)) {
+            return Err("explicit image denial did not reach the frozen candidate".into());
+        }
+        let expected_identity=json!({"route_id":frozen_route["route_id"],"route_revision":frozen_route["route_revision"]});
+        report["frozen_model_route"]=frozen_route;
         owned.child=Some(Command::new(&fixture).arg("functional").arg(&root).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|_|"owned fixture spawn failed")?);
         wait_file(&root.join("ready.json")).await?;
         let ready=read_json(&root.join("ready.json"))?;
@@ -645,11 +697,14 @@ async fn stepfun_full_route_ax_then_window_image() {
         report["session_id"]=json!(sid);
         let store=AgentSessionStore::from_pool(app.database.pool().clone()).await.map_err(|_|"canonical store unavailable")?;
         let common=format!("This is an authorized controlled Computer Use acceptance. The only allowed application is an already running dedicated WinForms test window, exact pid={pid}, window_id={window}. Never launch/find/list other applications, never use desktop capture, browser, clipboard, filesystem or shell. Every get_window_state must use precisely that pid and window_id. Use only fresh AX element_token inputs with delivery_mode background. ToolSearch may load an authorized schema if needed. Do not claim success from your own text; take fresh AX observations to verify final values.");
-        let prompt=format!("{common}\nPhase 1 of the same Full-capable route: operate using AX only. Always set include_screenshot:false, tree_format:elements. Click the actual calculator buttons Owned two, Owned add, Owned three, Owned equals in order so the Owned calculation display is 5. Then use type_text on the Owned editor token to enter exactly the two raw text lines between the markers below. There is one actual line break between these lines. Do not type the markers, a code fence, quotation marks, or literal backslash escape characters. Click Save owned test text afterwards.\nBEGIN_OWNED_TEXT\n{TEXT}\nEND_OWNED_TEXT\nDo not use pixel coordinates. Read a fresh AX snapshot after saving and verify calculation 5 and the complete editor text. Finish only after these actual actions and observations.");
+        let prompt=format!("{common}\nThis interface uses the {route_name} route. Complete the following task using AX only. Always set include_screenshot:false, tree_format:elements. Click the actual calculator buttons Owned two, Owned add, Owned three, Owned equals in order so the Owned calculation display is 5. Then use type_text on the Owned editor token to enter exactly the two raw text lines between the markers below. There is one actual line break between these lines. Do not type the markers, a code fence, quotation marks, or literal backslash escape characters. Click Save owned test text afterwards.\nBEGIN_OWNED_TEXT\n{TEXT}\nEND_OWNED_TEXT\nDo not use pixel coordinates. Read a fresh AX snapshot after saving and verify calculation 5 and the complete editor text. Finish only after these actual actions and observations.");
         if prompt.to_ascii_uppercase().contains(visual_code){return Err("visual marker accidentally appeared in AX prompt".into())}
         let (first,timing)=turn(&router,&store,&sid,"real-computer-ax-phase",prompt).await?;
         let ax=evidence(&store,&sid,&first,pid,window,false,visual_code).await?;
-        report["ax_phase"]=json!({"route":"Full","instruction":"AX-only; not a NoImage route","timing":timing,"canonical":ax});
+        report["ax_phase"]=json!({"route":route_name,"instruction":if no_image{"explicit interface image denial; genuine NoImage candidate"}else{"AX-only instruction on a Full route"},"timing":timing,"canonical":ax});
+        if report.pointer("/ax_phase/canonical/used_route_identities")!=Some(&json!([expected_identity.clone()])) {
+            return Err("actual model route differs from the frozen controlled candidate".into());
+        }
         let calculation=read_json(&root.join("calculation.json")).ok();
         let calc_ok=calculation.as_ref().is_some_and(|value|value["expression"]=="2+3"&&value["result"]=="5")&&report.pointer("/ax_phase/canonical/ax_verified_five")==Some(&json!(true));
         let text_ok=std::fs::read_to_string(root.join("saved.txt")).is_ok_and(|text|clean_newlines(&text)==clean_newlines(TEXT))&&report.pointer("/ax_phase/canonical/ax_verified_text")==Some(&json!(true));
@@ -660,16 +715,24 @@ async fn stepfun_full_route_ax_then_window_image() {
         let clicked=report.pointer("/ax_phase/canonical/clicked_controls").and_then(Value::as_array).ok_or("clicked-control evidence missing")?;
         let expected=["Owned two","Owned add","Owned three","Owned equals"];let mut next=0;for label in clicked{if next<expected.len()&&label==expected[next]{next+=1;}}
         if next!=expected.len()||report.pointer("/ax_phase/canonical/successful_owned_window_clicks").and_then(Value::as_u64).unwrap_or(0)<5{return Err("actual calculator sequence and native Save click were not proven".into())}
+        if no_image {
+            report["image_phase"]=json!({"skipped":true,"reason":"the model interface explicitly disallows image input"});
+            report["marker_absent_from_prompts"]=json!(true);
+        } else {
         let image_prompt=format!("{common}\nPhase 2: the task values must remain unchanged. Use get_window_state for only pid={pid}, window_id={window}, with include_screenshot:true and tree_format:elements. Inspect the returned image: read the random eight-character code painted in the lower-right corner, which is deliberately absent from the AX tree. Your final public answer must contain that exact code. Also verify calculation 5 and saved editor text. Do not click, type or capture the desktop. Read the code from the actual window image; do not guess it or use files.");
         if image_prompt.to_ascii_uppercase().contains(visual_code){return Err("visual marker accidentally appeared in image prompt".into())}
         report["marker_absent_from_prompts"]=json!(true);
         let (second,timing)=turn(&router,&store,&sid,"real-computer-image-phase",image_prompt).await?;
         let image=evidence(&store,&sid,&second,pid,window,true,visual_code).await?;
         report["image_phase"]=json!({"route":"Full","timing":timing,"canonical":image});
+        if report.pointer("/image_phase/canonical/used_route_identities")!=Some(&json!([expected_identity])) {
+            return Err("image Turn used a different model candidate".into());
+        }
         if report.pointer("/image_phase/timing/terminal")!=Some(&json!("completed")){return Err("image real-model Turn did not complete".into())}
         if report.pointer("/image_phase/canonical/typed_turn_completed/finish_reason")!=Some(&json!("completed"))||report.pointer("/image_phase/canonical/visual_code_match")!=Some(&json!(true))||report.pointer("/image_phase/canonical/marker_absent_from_ax")!=Some(&json!(true)){return Err("image Turn lacked normal completion or independently verified visual reading".into())}
         if report.pointer("/image_phase/canonical/native_window_captures").and_then(Value::as_array).is_none_or(Vec::is_empty)||report.pointer("/image_phase/canonical/computer_calls").and_then(Value::as_u64).unwrap_or(0)==0{return Err("Full route produced no successful native window capture".into())}
         report["image_evidence"]=json!("real_provider_visual_challenge_after_native_window_capture");
+        }
         let status=api(&router,"GET","/api/computer/status",Value::Null).await?;
         report["worker_status_before_shutdown"]=json!({"running":status["running"],"process_id":status["process_id"],"worker_version":status["worker_version"],"phase":status["phase"]});
         report["worker_sha256"]=json!(file_sha(&worker)?);report["fixture_sha256"]=json!(file_sha(&fixture)?);report["source_sha256"]=json!(file_sha(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../vendor/cua-driver/SOURCE.json"))?);

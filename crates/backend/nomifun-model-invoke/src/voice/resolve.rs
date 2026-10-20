@@ -304,6 +304,8 @@ impl ModelInvokeService {
                     model: model.model.clone(),
                     task: ModelTask::RealtimeConversation,
                     traits,
+                    input_constraints: crate::resolve::parse_capability_input_constraints(
+                        capability.input_constraints.as_deref(), ModelTask::RealtimeConversation)?,
                     protocol,
                     connection,
                     provider_params: params,

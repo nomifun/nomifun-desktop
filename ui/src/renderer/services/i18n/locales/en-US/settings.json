@@ -1735,6 +1735,11 @@
     "draftOnly": "Suspended settings are available during this edit only and can be restored when switching back. They are discarded when saving or closing the editor."
   },
   "modelAdvanced": {
+    "imageInputLabel": "Image input",
+    "imageInputDefault": "Use interface capability",
+    "imageInputAllow": "Allow images",
+    "imageInputDeny": "Do not accept images",
+    "imageInputHint": "Applies only to this Chat interface. Allowing images still requires interface support; audio input is unchanged.",
     "trigger": "Advanced",
     "title": "Advanced settings",
     "tokenLimits": "Token limits",

@@ -1558,3 +1558,35 @@ describe('openai.responses round chaining provider param', () => {
     expect(withProviderParamChainRounds(malformed, false)).toBe(malformed);
   });
 });
+
+
+describe('explicit task input constraints', () => {
+  test('round-trips default, denied and allowed image input independently of catalog traits', () => {
+    for (const imageInput of [undefined, false, true]) {
+      const capability = capabilityDraftFromResponse({
+        task: 'chat', traits: ['vision_input'], protocol: 'openai.chat_text', connection_role: 'default',
+        ...(imageInput === undefined ? {} : { input_constraints: { image_input: imageInput } }),
+      });
+      const saved = capabilityInputsFromDefinition({ model: 'test-model', capabilities: [capability] })![0];
+      expect(saved.traits).toEqual(['vision_input']);
+      if (imageInput === undefined) expect(saved).not.toHaveProperty('input_constraints');
+      else expect(saved.input_constraints).toEqual({ image_input: imageInput });
+      expect(saved.provider_params ?? {}).not.toHaveProperty('input_constraints');
+    }
+    expect(capabilityInputsFromDefinition({ model: 'new-model', capabilities: [{
+      ...emptyCapabilityDraft('chat'), protocol: 'openai.chat_text',
+    }] })![0]).not.toHaveProperty('input_constraints');
+  });
+
+  test('keeps an explicit image denial through recommendations, catalog hints and protocol switches', () => {
+    const authored = patchCapabilityDraft(emptyCapabilityDraft('chat'), { inputConstraints: { image_input: false } });
+    const [recommended] = reconcileCapabilityRecommendations([authored], { chat: manifest('chat', 'openai.chat_text') });
+    const switched = changeCapabilityProtocol(recommended, 'openai.responses', manifest('chat', 'openai.responses'));
+    const definition = applyCatalogSuggestion({ model: 'test-model', capabilities: [switched] }, {
+      model: 'test-model', tasks: ['chat'], tasksSource: 'provider_declared', traits: ['vision_input'],
+    });
+    expect(capabilityInputsFromDefinition(definition)![0]).toMatchObject({
+      protocol: 'openai.responses', input_constraints: { image_input: false },
+    });
+  });
+});

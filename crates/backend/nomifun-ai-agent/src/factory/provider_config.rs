@@ -112,7 +112,9 @@ fn resolve_bedrock_config(
 /// advisory; the exact protocol declares the supported input modalities.
 pub(crate) fn capability_supports_image(
     protocol_id: &str,
+    constraints: Option<nomifun_agent_contracts::ModelInputConstraints>,
 ) -> bool {
+    if constraints.is_some_and(|constraints| !constraints.allows_image_input()) { return false; }
     nomifun_chat_model_broker::chat_protocol_for_id(protocol_id)
         .is_some_and(|protocol| {
             nomifun_chat_model_broker::protocol_features(protocol)
@@ -412,7 +414,7 @@ async fn resolve_provider_fields_at_revision(
     let compat_overrides = NomiCompatOverrides {
         // The resolver passes Nomi a complete task endpoint.
         api_path: base_url.as_ref().map(|_| String::new()),
-        supports_image: Some(capability_supports_image(&task.protocol)),
+        supports_image: Some(capability_supports_image(&task.protocol, task.input_constraints)),
         max_tokens_field,
         require_reasoning_content,
         chain_rounds,
@@ -633,6 +635,10 @@ fn completion_request(
     messages: Vec<Message>,
     requested_output_limit: Option<u32>,
 ) -> Result<LlmRequest, AppError> {
+    if cfg.compat.supports_image == Some(false) && messages.iter().flat_map(|message| &message.content).any(|part|
+        matches!(part, ContentBlock::Image { .. }) || matches!(part, ContentBlock::ToolResult { images, .. } if !images.is_empty())) {
+        return Err(AppError::BadRequest("selected model interface does not accept image input".into()));
+    }
     if requested_output_limit == Some(0) || cfg.output_max_tokens == Some(0) {
         return Err(AppError::BadRequest(
             "Chat completion output limit must be positive".into(),
@@ -855,9 +861,11 @@ mod image_override_tests {
     fn image_input_uses_exact_protocol_support() {
         for protocol in ["openai.chat_text", "openai.responses", "anthropic.messages",
             "gemini.generate_text", "bedrock.anthropic_messages", "vertex.anthropic_messages"] {
-            assert!(capability_supports_image(protocol));
+            assert!(capability_supports_image(protocol, None));
+            assert!(!capability_supports_image(protocol, Some(nomifun_agent_contracts::ModelInputConstraints {image_input:Some(false)})));
         }
-        assert!(!capability_supports_image("openai.images"));
+        assert!(!capability_supports_image("openai.images", None));
+        assert!(!capability_supports_image("openai.images", Some(nomifun_agent_contracts::ModelInputConstraints {image_input:Some(true)})));
 
     }
 }
@@ -1320,6 +1328,20 @@ mode = "local"
             let saved = completion_request(&config, "system", vec![user_message("user")], None)
                 .unwrap();
             assert_eq!(saved.max_tokens, Some(100_000));
+        }
+    }
+
+    #[test]
+    fn explicit_no_image_rejects_user_and_tool_images_before_provider_creation() {
+        let workspace=tempfile::tempdir().unwrap();
+        let mut config=provider_config_from_fields(fields(None),workspace.path()).unwrap();
+        config.compat.supports_image=Some(false);
+        for content in [ContentBlock::Image {media_type:"image/png".into(),data:"aW1hZ2U=".into()},
+            ContentBlock::ToolResult {tool_use_id:"owned".into(),content:"receipt".into(),is_error:false,
+                images:vec![nomi_types::tool::ToolImage {media_type:"image/png".into(),data:"aW1hZ2U=".into()}]}] {
+            let messages=vec![Message::new(Role::User,vec![content])];
+            assert!(matches!(completion_request(&config,"test",messages,Some(64)),Err(AppError::BadRequest(message))
+                if message.contains("does not accept image input")));
         }
     }
 

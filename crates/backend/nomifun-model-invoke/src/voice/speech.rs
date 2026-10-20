@@ -460,7 +460,7 @@ mod tests {
         ResolvedTaskConfig {
             provider_id: "018f0000-0000-7000-8000-000000000001".into(), config_revision: 1,
             platform: "deepgram".into(), model: "nova-3".into(), task: ModelTask::SpeechRecognition,
-            traits: vec![], protocol: DEEPGRAM_INCREMENTAL_ASR_PROTOCOL.into(),
+            traits: vec![], input_constraints: None, protocol: DEEPGRAM_INCREMENTAL_ASR_PROTOCOL.into(),
             connection: ResolvedConnection { role: "default".into(), base_url: base.into(),
                 auth: AuthMaterial { scheme: AuthScheme::TokenHeader, credentials: json!({"api_keys":["test-key"]}) }, extra: json!({}) },
             transport: ResolvedTaskTransport { realtime_endpoint: Some("/v1/listen".into()), ..Default::default() },

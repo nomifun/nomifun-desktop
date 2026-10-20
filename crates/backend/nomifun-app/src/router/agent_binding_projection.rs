@@ -348,6 +348,7 @@ mod tests {
                 config_revision_digest: DigestHex::from(DIGEST),
                 credential_ref: "credential-1".to_owned(),
                 features: BTreeSet::from([ChatRouteFeature::TextOutput]),
+                input_constraints: None,
                 activation_features: BTreeSet::new(),
             },
             failovers: Vec::new(),

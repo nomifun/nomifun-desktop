@@ -63,6 +63,7 @@ async fn fixture() -> (nomifun_db::Database, CanonicalChatRouteRecord, ResolvedC
         config_revision_digest: provider_model_config_digest(pool, &PROVIDER.into(), "current").await.unwrap(),
         credential_ref: "opaque-test-reference".into(),
         features: BTreeSet::from([ChatRouteFeature::TextInput, ChatRouteFeature::TextOutput, ChatRouteFeature::Reasoning]),
+        input_constraints: None,
         activation_features: BTreeSet::new(),
     };
     let route = convert_chat_route_candidate(&primary).unwrap();
@@ -262,4 +263,39 @@ async fn production_host_route_expresses_signed_anthropic_continuation_and_cache
     assert!(protocol_features(resolved.protocol).is_superset(&required));
     assert_eq!(record.primary.features, stored_features, "immutable route facts are not rewritten");
     assert!(registry.leases.read().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn explicit_input_constraints_are_frozen_and_enter_every_configuration_digest_scope() {
+    let (database, mut record, route)=fixture().await; let pool=database.pool();
+    let provider=ProviderIdRef::from(PROVIDER);
+    let scopes=[ProviderConfigurationScope::ModelV2,ProviderConfigurationScope::ModelV1,ProviderConfigurationScope::ProviderV1];
+    let mut original=Vec::new();
+    for scope in scopes { original.push(provider_config_digest_inner(pool,&provider,
+        if scope==ProviderConfigurationScope::ProviderV1 {None} else {Some("current")},scope).await.unwrap()); }
+    let view=TurnModelConfiguration::default(); view.capture(pool,"original-turn",&record).await.unwrap();
+    sqlx::query("UPDATE provider_model_capabilities SET input_constraints='{}' WHERE provider_id=?")
+        .bind(PROVIDER).execute(pool).await.unwrap();
+    for (scope,expected) in scopes.into_iter().zip(&original) { assert_eq!(provider_config_digest_inner(pool,&provider,
+        if scope==ProviderConfigurationScope::ProviderV1 {None} else {Some("current")},scope).await.unwrap(),*expected); }
+    sqlx::query("UPDATE provider_model_capabilities SET input_constraints=? WHERE provider_id=?")
+        .bind(r#"{"image_input":false}"#).bind(PROVIDER).execute(pool).await.unwrap();
+    for (scope,expected) in scopes.into_iter().zip(&original) { assert_ne!(provider_config_digest_inner(pool,&provider,
+        if scope==ProviderConfigurationScope::ProviderV1 {None} else {Some("current")},scope).await.unwrap(),*expected); }
+    assert_eq!(view.digest_for_route(pool,&route).await.unwrap(),route.config_revision_digest);
+    assert!(!route_config_matches(pool,&route).await.unwrap());
+    assert!(TurnModelConfiguration::default().capture(pool,"stale-wide-route",&record).await.is_err());
+    view.clear("original-turn").unwrap();
+    record.primary.input_constraints=Some(nomifun_agent_contracts::ModelInputConstraints {image_input:Some(false)});
+    record.primary.features.remove(&ChatRouteFeature::ImageInput);
+    record.primary.config_revision_digest=provider_model_config_digest(pool,&provider,"current").await.unwrap();
+    let constrained=convert_chat_route_candidate(&record.primary).unwrap();
+    assert!(!constrained.features.contains(&ChatModelFeature::ImageInput));
+    view.capture(pool,"constrained-turn",&record).await.unwrap();
+    let saved=view.candidate(&constrained).unwrap();
+    assert_eq!(saved.capabilities.iter().find(|capability|capability.task=="chat").unwrap().input_constraints.as_deref(),Some(r#"{"image_input":false}"#));
+    sqlx::query("UPDATE provider_model_capabilities SET input_constraints=NULL WHERE provider_id=?")
+        .bind(PROVIDER).execute(pool).await.unwrap();
+    assert_eq!(view.digest_for_route(pool,&constrained).await.unwrap(),constrained.config_revision_digest);
+    assert!(!route_config_matches(pool,&constrained).await.unwrap());
 }

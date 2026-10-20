@@ -1672,7 +1672,7 @@ mod tests {
             Ok(Some(nomifun_model_invoke::voice::speech::create_transcription_session(ResolvedTaskConfig {
                 provider_id:"018f0000-0000-7000-8000-000000000001".into(),config_revision:1,
                 platform:"deepgram".into(),model:"nova-3".into(),task:nomifun_api_types::ModelTask::SpeechRecognition,
-                traits:vec![],protocol:nomifun_model_invoke::voice::speech::DEEPGRAM_INCREMENTAL_ASR_PROTOCOL.into(),
+                traits:vec![], input_constraints: None,protocol:nomifun_model_invoke::voice::speech::DEEPGRAM_INCREMENTAL_ASR_PROTOCOL.into(),
                 connection:ResolvedConnection {role:"default".into(),base_url:self.endpoint.clone(),
                     auth:AuthMaterial {scheme:AuthScheme::TokenHeader,credentials:serde_json::json!({"api_keys":["fixture"]})},extra:serde_json::json!({})},
                 transport:ResolvedTaskTransport {realtime_endpoint:Some("/v1/listen".into()),..Default::default()},

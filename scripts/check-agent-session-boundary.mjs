@@ -88,11 +88,18 @@ const cronInputForwardMigration = 'crates/backend/nomifun-db/migrations/009_cron
 const mcpOAuthForwardMigration = 'crates/backend/nomifun-db/migrations/010_mcp_oauth_authority.sql';
 const cronCancellationForwardMigration = 'crates/backend/nomifun-db/migrations/011_cron_run_cancellation.sql';
 const cronWorkbenchForwardMigration = 'crates/backend/nomifun-db/migrations/012_unify_cron_agent_binding.sql';
-if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration, mcpOAuthForwardMigration, cronCancellationForwardMigration, cronWorkbenchForwardMigration].includes(path))) {
+const modelInputConstraintsForwardMigration = 'crates/backend/nomifun-db/migrations/013_model_input_constraints.sql';
+if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration, mcpOAuthForwardMigration, cronCancellationForwardMigration, cronWorkbenchForwardMigration, modelInputConstraintsForwardMigration].includes(path))) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward migrations');
 }
 const migrationStatements = (path) => readFileSync(resolve(ROOT, path), 'utf8')
   .replace(/--[^\r\n]*/g, '').split(';').map((statement) => statement.replace(/\s+/g, ' ').trim()).filter(Boolean);
+if (migrations.includes(modelInputConstraintsForwardMigration)
+  && JSON.stringify(migrationStatements(modelInputConstraintsForwardMigration)) !== JSON.stringify([
+    'ALTER TABLE provider_model_capabilities ADD COLUMN input_constraints TEXT',
+  ])) {
+  failures.push('Model input constraints migration may only add nullable provider configuration; canonical Agent facts and schema metadata stay unchanged');
+}
 if (migrations.includes(cronWorkbenchForwardMigration)) {
   const allowed = [
     /^CREATE TEMP TABLE cron_binding_(?:json_proof|sequence)\b/,

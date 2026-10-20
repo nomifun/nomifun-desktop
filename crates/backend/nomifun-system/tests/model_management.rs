@@ -238,3 +238,25 @@ async fn simultaneous_conversation_additions_do_not_replace_models() {
         2
     );
 }
+
+#[tokio::test]
+async fn model_management_preserves_and_reports_explicit_chat_input_constraints() {
+    let db = init_database_memory().await.unwrap();
+    let (service, state) = services(&db);
+    let mut input = provider();
+    input["initial_model"]["capabilities"][0]["input_constraints"] = json!({"image_input":false});
+    let created = service.execute(CREATE_PROVIDER,input).await.unwrap();
+    let id = created["provider_id"].as_str().unwrap();
+    let mut second = model("chat-two");
+    second["capabilities"][0]["input_constraints"] = json!({"image_input":true});
+    service.execute(ADD_MODEL,json!({"provider_id":id,"model":second})).await.unwrap();
+    let list = service.execute(INSPECT,json!({"operation":"list","provider_id":id})).await.unwrap();
+    let models = list["providers"][0]["models"].as_array().unwrap();
+    for (name,expected) in [("chat-one",false),("chat-two",true)] {
+        let model = models.iter().find(|model|model["model"]==name).unwrap();
+        assert_eq!(model["capabilities"][0]["input_constraints"]["image_input"],expected);
+    }
+    let saved = state.provider_model_service.get(id,"chat-one").await.unwrap().unwrap();
+    assert_eq!(saved.capabilities[0].input_constraints.unwrap().image_input,Some(false));
+    assert!(!list.to_string().contains("arbitrary-secret"));
+}

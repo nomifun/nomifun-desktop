@@ -186,6 +186,7 @@ impl ProviderConnectionService {
             let capability = ProviderModelCapabilityInput {
                 task: response.task,
                 traits: response.traits,
+                input_constraints: response.input_constraints,
                 protocol: response.protocol,
                 connection_role: response.connection_role,
                 base_url_override: response.base_url_override,

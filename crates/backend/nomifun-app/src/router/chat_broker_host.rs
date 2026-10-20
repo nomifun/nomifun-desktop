@@ -113,6 +113,9 @@ fn convert_chat_route_candidate(
             .into_iter()
             .filter(is_serializer_feature),
     );
+    if candidate.input_constraints.is_some_and(|constraints| !constraints.allows_image_input()) {
+        features.remove(&ChatModelFeature::ImageInput);
+    }
     let activation_features = candidate
         .activation_features
         .iter()
@@ -448,6 +451,7 @@ async fn provider_config_observation(
             if capability.model != frozen.route.model { continue; }
             if let Some(saved) = frozen.capabilities.iter().find(|saved| saved.task == capability.task) {
                 capability.traits = saved.traits.clone();
+                capability.input_constraints = saved.input_constraints.clone();
                 capability.provider_params = saved.provider_params.clone();
                 capability.context_limit = saved.context_limit;
                 capability.output_limit = saved.output_limit;
@@ -489,6 +493,8 @@ async fn provider_config_observation(
     #[derive(Serialize)]
     #[serde(deny_unknown_fields)]
     struct ProviderDigestCapability {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_constraints: Option<nomifun_agent_contracts::ModelInputConstraints>,
         provider_id: String,
         model: String,
         task: String,
@@ -518,6 +524,13 @@ async fn provider_config_observation(
         extra: String,
     }
 
+    let constraints_by_capability = capabilities.iter().map(|capability| {
+        let constraints = capability.input_constraints.as_deref()
+            .map(serde_json::from_str::<nomifun_agent_contracts::ModelInputConstraints>)
+            .transpose().map_err(|_| ProductionRepositoryError::InvalidData)?
+            .and_then(nomifun_agent_contracts::ModelInputConstraints::normalize);
+        Ok(((capability.model.clone(), capability.task.clone()), constraints))
+    }).collect::<Result<BTreeMap<_, _>, ProductionRepositoryError>>()?;
     let input = DigestInput {
         schema: match scope {
             ProviderConfigurationScope::ProviderV1 => "nomifun.provider-invocation-graph.v1",
@@ -544,6 +557,7 @@ async fn provider_config_observation(
         capabilities: capabilities
             .into_iter()
             .map(|capability| ProviderDigestCapability {
+                input_constraints: constraints_by_capability[&(capability.model.clone(), capability.task.clone())],
                 provider_id: capability.provider_id,
                 model: capability.model,
                 task: capability.task,
@@ -585,6 +599,7 @@ struct FrozenCapabilityConfiguration {
     model: String,
     task: String,
     traits: String,
+    input_constraints: Option<String>,
     provider_params: String,
     context_limit: Option<i64>,
     output_limit: Option<i64>,
@@ -594,6 +609,7 @@ struct FrozenCapabilityConfiguration {
 impl FrozenCapabilityConfiguration {
     fn from_row(row: &nomifun_db::models::ProviderModelCapabilityRow) -> Self {
         Self { model: row.model.clone(), task: row.task.clone(), traits: row.traits.clone(),
+            input_constraints: row.input_constraints.clone(),
             provider_params: row.provider_params.clone(), context_limit: row.context_limit,
             output_limit: row.output_limit, compaction_threshold_pct: row.compaction_threshold_pct }
     }
@@ -2348,6 +2364,7 @@ mod tests {
                 ChatRouteFeature::TextInput,
                 ChatRouteFeature::TextOutput,
             ]),
+            input_constraints: None,
             activation_features: BTreeSet::new(),
         }
     }
@@ -2405,6 +2422,21 @@ mod tests {
         anthropic.protocol = ChatRouteProtocol::Anthropic;
         anthropic.features.insert(ChatRouteFeature::AudioInput);
         let resolved = convert_chat_route_candidate(&anthropic).unwrap();
+        assert!(resolved.features.contains(&ChatModelFeature::ImageInput));
+        assert!(!resolved.features.contains(&ChatModelFeature::AudioInput));
+    }
+
+    #[test]
+    fn explicit_image_input_constraint_survives_serializer_feature_rebuilding() {
+        let mut saved = candidate();
+        saved.input_constraints = Some(nomifun_agent_contracts::ModelInputConstraints { image_input: Some(false) });
+        saved.features.insert(ChatRouteFeature::ImageInput);
+        let resolved = convert_chat_route_candidate(&saved).unwrap();
+        assert!(!resolved.features.contains(&ChatModelFeature::ImageInput));
+        assert!(resolved.features.contains(&ChatModelFeature::AudioInput));
+        saved.input_constraints = Some(nomifun_agent_contracts::ModelInputConstraints { image_input: Some(true) });
+        saved.protocol = ChatRouteProtocol::Anthropic;
+        let resolved = convert_chat_route_candidate(&saved).unwrap();
         assert!(resolved.features.contains(&ChatModelFeature::ImageInput));
         assert!(!resolved.features.contains(&ChatModelFeature::AudioInput));
     }

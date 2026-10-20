@@ -14,7 +14,7 @@ use nomifun_api_types::{
     KnowledgeEntryOrigin, KnowledgeEntrySourceInfo, KnowledgeEntrySourceRelationship,
     KnowledgeRerankConfig, KnowledgeRetrievalConfig, KnowledgeSourceSyncStatus,
     KnowledgeTreeAccess, ModelInfo, ModelCatalogSource, ModelContextLimitKind, ModelTaskSource, ModelTokenLimitSources,
-    ModelConfigurationDefaults, ModelProtocolManifestResponse, ModelTask, ModelTechnicalCapability, ModelTrait,
+    ModelConfigurationDefaults, ModelInputConstraints, ModelProtocolManifestResponse, ModelTask, ModelTechnicalCapability, ModelTrait,
     PlatformPresetDescriptor,
     ProtocolDefaultConnection, ProtocolDescriptor, ProtocolEndpointDescriptor,
     ProtocolEndpointPurpose, ProtocolExecutorKind, ProtocolRecommendation, ProtocolScope,
@@ -78,6 +78,7 @@ fn export_storage_relocation_bindings() {
 
 #[test]
 fn export_provider_domain_bindings() {
+    export_binding_if_changed::<ModelInputConstraints>("ModelInputConstraints.ts");
     export_binding_if_changed::<ModelConfigurationDefaults>("ModelConfigurationDefaults.ts");
     export_binding_if_changed::<ModelGatewayOperator>("ModelGatewayOperator.ts");
     export_binding_if_changed::<ModelGatewayMetaResponse>("ModelGatewayMetaResponse.ts");

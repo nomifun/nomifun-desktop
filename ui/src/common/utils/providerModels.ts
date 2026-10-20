@@ -42,7 +42,8 @@ export const modelHealthOf = (
 /**
  * Input/search representation supplied by the configured Chat adapter. Saved
  * catalog traits are descriptive metadata; an omitted trait never disables a
- * native model feature. Unknown model IDs may use any supported adapter, while
+ * native model feature. Explicit input constraints only narrow that support.
+ * Unknown model IDs may use any supported adapter, while
  * unknown adapters cannot claim to encode inputs they do not implement.
  *
  * Keep the input protocol facts aligned with
@@ -57,7 +58,7 @@ export const capabilitySupportsTrait = (
   const protocol = capability.protocol;
   switch (trait) {
     case 'vision_input':
-      return [
+      return capability.input_constraints?.image_input !== false && [
         'openai.chat_text',
         'openai.responses',
         'anthropic.messages',
@@ -106,6 +107,7 @@ const toProviderModelCapabilityInput = (
 ): ProviderModelCapabilityInput => ({
   task: capability.task,
   traits: capability.traits,
+  ...(capability.input_constraints ? { input_constraints: { ...capability.input_constraints } } : {}),
   protocol: capability.protocol,
   connection_role: capability.connection_role,
   base_url_override: capability.base_url_override,

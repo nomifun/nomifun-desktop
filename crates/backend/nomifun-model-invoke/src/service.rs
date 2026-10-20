@@ -931,6 +931,7 @@ mod tests {
         NewProviderModelCapability {
             task: &seed.task,
             traits: "[]",
+            input_constraints: None,
             protocol: seed.protocol,
             connection_role: seed.connection_role,
             base_url_override: None,

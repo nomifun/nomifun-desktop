@@ -8,6 +8,27 @@ pub const AGENT_STORE_BASELINE_SQL: &str = include_str!("../../nomifun-db/migrat
 pub const CHAT_ROUTE_RECORD_JSON_SCHEMA: &str =
     include_str!("../schema/chat-route-record.v1.json");
 
+/// Generate the route wire schema from its typed fields, retaining the stricter
+/// natural-key and feature invariants enforced by the canonical contract.
+pub fn chat_route_record_json_schema() -> serde_json::Value {
+    let mut schema = serde_json::to_value(schemars::schema_for!(crate::ChatRouteRecord))
+        .expect("Chat route schema serializes");
+    schema["$id"] = serde_json::json!(crate::CHAT_ROUTE_RECORD_SCHEMA_V1);
+    let properties = schema.pointer_mut("/$defs/ChatRouteCandidate/properties")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("typed Chat route candidate properties");
+    for field in ["model_route_id", "provider_id", "model", "connection_config_ref", "credential_ref"] {
+        properties.get_mut(field).expect("typed route natural key")["minLength"] = serde_json::json!(1);
+    }
+    properties.get_mut("model_route_revision").expect("typed route revision")["minimum"] = serde_json::json!(1);
+    properties.get_mut("config_revision_digest").expect("typed route digest")["pattern"] =
+        serde_json::json!("^[0-9a-f]{64}$");
+    let features = properties.get_mut("features").expect("typed route features");
+    features["uniqueItems"] = serde_json::json!(true);
+    features["contains"] = serde_json::json!({"const":"text_output"});
+    schema
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SchemaTableContract {
@@ -499,6 +520,7 @@ mod tests {
     fn chat_route_record_schema_is_strict_and_compilable() {
         let schema: serde_json::Value =
             serde_json::from_str(CHAT_ROUTE_RECORD_JSON_SCHEMA).expect("route JSON schema");
+        assert_eq!(schema, chat_route_record_json_schema(), "run agent-v2-contract write");
         let validator = jsonschema::options()
             .build(&schema)
             .expect("route JSON schema must compile");
@@ -519,6 +541,21 @@ mod tests {
             "failovers": []
         });
         assert!(validator.is_valid(&record));
+        let mut constrained = record.clone();
+        constrained["primary"]["input_constraints"] = serde_json::json!({"image_input":false});
+        assert!(validator.is_valid(&constrained));
+        constrained["primary"]["input_constraints"]["unexpected"] = serde_json::json!(true);
+        assert!(!validator.is_valid(&constrained));
+        for field in ["model_route_id", "provider_id", "model", "connection_config_ref", "credential_ref"] {
+            let mut invalid = record.clone(); invalid["primary"][field] = serde_json::json!("");
+            assert!(!validator.is_valid(&invalid));
+        }
+        let mut invalid = record.clone(); invalid["primary"]["model_route_revision"] = serde_json::json!(0);
+        assert!(!validator.is_valid(&invalid));
+        invalid = record.clone(); invalid["primary"]["features"] = serde_json::json!(["text_input"]);
+        assert!(!validator.is_valid(&invalid));
+        invalid = record.clone(); invalid["primary"]["config_revision_digest"] = serde_json::json!("bad");
+        assert!(!validator.is_valid(&invalid));
         let mut with_web_search = record.clone();
         with_web_search["primary"]["features"]
             .as_array_mut()

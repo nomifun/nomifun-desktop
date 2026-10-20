@@ -190,7 +190,7 @@ fn artifacts(owner: &str) -> (AgentPresetRevision,ResolvedSnapshotEnvelope,Provi
     let route = ChatRouteRecord {schema:ChatRouteRecordSchema::V1,task:ChatRouteTask::AgentChat,
         primary:ChatRouteCandidate {model_route_id:route_id.clone(),model_route_revision:1,provider_id:PROVIDER.into(),model:"remove".into(),
             protocol:ChatRouteProtocol::OpenaiChat,connection_config_ref:"default".into(),config_revision_digest:"a".repeat(64).into(),credential_ref:"fixture-credential".into(),
-            features:[ChatRouteFeature::TextInput,ChatRouteFeature::TextOutput,ChatRouteFeature::ToolCalls].into_iter().collect(),activation_features:BTreeSet::new()},failovers:vec![]};
+            features:[ChatRouteFeature::TextInput,ChatRouteFeature::TextOutput,ChatRouteFeature::ToolCalls].into_iter().collect(),activation_features:BTreeSet::new(),input_constraints:None},failovers:vec![]};
     let mut revision = AgentPresetRevision {reference:PresetRevisionRef {preset_id:PRESET.into(),revision:1,revision_digest:"".into()},
         payload:AgentPresetRevisionPayload {schema_version:"1.0.0".into(),model_route_refs:BTreeMap::from([(CHAT_MODEL_TASK_AGENT_CHAT.into(),route_id)]),
             chat_route_records:BTreeMap::from([(CHAT_MODEL_TASK_AGENT_CHAT.into(),route)]),enabled_capabilities:vec![],skill_bindings:vec![],

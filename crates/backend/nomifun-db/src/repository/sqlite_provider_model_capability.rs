@@ -98,6 +98,19 @@ impl SqliteProviderModelCapabilityRepository {
     }
 }
 
+fn normalized_input_constraints(capability: &NewProviderModelCapability<'_>) -> Result<Option<String>, DbError> {
+    let value = capability.input_constraints.map(|value| {
+        serde_json::from_str::<Option<nomifun_agent_contracts::ModelInputConstraints>>(value)
+            .map_err(|error| DbError::Conflict(format!("invalid input_constraints: {error}")))
+    }).transpose()?.flatten().and_then(nomifun_agent_contracts::ModelInputConstraints::normalize);
+    if value.is_some() && capability.task.trim() != "chat" {
+        return Err(DbError::Conflict("input_constraints are supported only for Chat".into()));
+    }
+    value.map(|value| serde_json::to_string(&value)
+        .map_err(|error| DbError::Conflict(format!("invalid input_constraints: {error}"))))
+        .transpose()
+}
+
 fn validate_capabilities(capabilities: &[NewProviderModelCapability<'_>]) -> Result<(), DbError> {
     if capabilities.is_empty() {
         return Err(DbError::Conflict(
@@ -128,6 +141,7 @@ fn validate_capabilities(capabilities: &[NewProviderModelCapability<'_>]) -> Res
                 "capability '{task}' connection_role must not be blank"
             )));
         }
+        normalized_input_constraints(capability)?;
         if let Some(pct) = capability.compaction_threshold_pct {
             if task != "chat" || !(50..=95).contains(&pct) {
                 return Err(DbError::Conflict(
@@ -187,13 +201,14 @@ pub(crate) async fn replace_for_model_tx(
     }
 
     for capability in capabilities {
+        let input_constraints = normalized_input_constraints(capability)?;
         let result = sqlx::query(
             "INSERT INTO provider_model_capabilities \
                 (provider_id, model, task, traits, protocol, connection_role, \
                  base_url_override, endpoint, poll_endpoint, content_endpoint, \
                  realtime_endpoint, allow_cross_origin_credentials, provider_params, \
-                 context_limit, output_limit, compaction_threshold_pct, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 context_limit, output_limit, compaction_threshold_pct, input_constraints, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(provider_id, model, task) DO UPDATE SET \
                  health = NULL, \
                  health_checked_at = NULL, \
@@ -210,6 +225,7 @@ pub(crate) async fn replace_for_model_tx(
                  context_limit = excluded.context_limit, \
                  output_limit = excluded.output_limit, \
                  compaction_threshold_pct = excluded.compaction_threshold_pct, \
+                 input_constraints = excluded.input_constraints, \
                  updated_at = excluded.updated_at \
              WHERE NOT ( \
                  provider_model_capabilities.traits IS excluded.traits AND \
@@ -225,7 +241,8 @@ pub(crate) async fn replace_for_model_tx(
                  provider_model_capabilities.provider_params IS excluded.provider_params AND \
                  provider_model_capabilities.context_limit IS excluded.context_limit AND \
                  provider_model_capabilities.output_limit IS excluded.output_limit AND \
-                 provider_model_capabilities.compaction_threshold_pct IS excluded.compaction_threshold_pct \
+                 provider_model_capabilities.compaction_threshold_pct IS excluded.compaction_threshold_pct AND \
+                 provider_model_capabilities.input_constraints IS excluded.input_constraints \
              )",
         )
         .bind(provider_id)
@@ -244,6 +261,7 @@ pub(crate) async fn replace_for_model_tx(
         .bind(capability.context_limit)
         .bind(capability.output_limit)
         .bind(capability.compaction_threshold_pct)
+        .bind(input_constraints)
         .bind(now)
         .bind(now)
         .execute(&mut **transaction)

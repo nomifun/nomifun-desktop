@@ -76,6 +76,8 @@ export const applyDiscoveredModelProtocol = (
       protocolParameterTransition: transitioned.protocolParameterTransition,
       modelDefaults,
       ...draft,
+      // Protocol detection cannot author or clear the user's task input limits.
+      inputConstraints: capability.inputConstraints,
       routeSource: capability.routeSource,
       transportSource: 'user',
       providerParamsSource: 'user',

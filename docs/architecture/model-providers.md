@@ -9,7 +9,7 @@ Current code owns configuration and invocation contracts. Vendor catalogs, accou
 | `providers` | Provider identity, enabled state, configuration revision and default connection |
 | `provider_connections` | Named connection URLs, authentication and encrypted credentials |
 | `provider_models` | Model IDs, display, ordering and enabled state |
-| `provider_model_capabilities` | Exact `(provider_id, model, task)` protocol, connection role, transport, parameters, limits and health |
+| `provider_model_capabilities` | Exact `(provider_id, model, task)` protocol, connection role, transport, parameters, input constraints, limits and health |
 
 Model IDs remain manually editable when discovery fails. Only provider-declared tasks or an exact official-document profile may automatically suggest interfaces. Model names and the existence of a provider adapter do not prove that a particular model supports a task. Background refresh never rewrites saved interfaces. Input understanding belongs to Chat and grants no generation or speech route.
 
@@ -71,6 +71,16 @@ are expressed in result text; images and audio follow the complete tool-result
 batch as user attachments, keeping the tool messages themselves text-only.
 
 “OpenAI compatible” does not prove compatibility across modalities. Ark versus Volcengine voice, native DashScope and MiniMax regional connections are expressed by their adapters and manifests, without a duplicate endpoint matrix. Provider changes update the registry, serializer and focused contract tests, then require actual-account verification. Local substitutes do not prove cloud permissions or model experience.
+
+## Model input constraints and Agent routes
+
+A Chat capability can explicitly save `input_constraints: { image_input: false }` to prohibit image input on that interface. The shared `ModelInputConstraints` type derives the API, TypeScript and model-management tool schema. Constraints live in a separate nullable JSON configuration column and never enter `provider_params` or upstream requests. Omission, `null` and an empty `{}` normalize to `None`, preserving protocol defaults without adding empty fields to frozen records. Other tasks reject nonempty constraints.
+
+`image_input: false` removes `ImageInput` from effective features. `true` permits only image input already supported by the protocol, route candidate and adapter; it cannot add a missing capability. Model `traits` remain advisory metadata: omitting `vision_input` does not disable images, and declaring it cannot override an explicit prohibition. Catalog refresh, health checks and protocol verification do not infer input constraints from labels or observations.
+
+Save, read, clone, connection changes, protocol drafts and model-management tools preserve constraints. A save whose normalized configuration is unchanged preserves its revision and health observations. An invocation-configuration change uses the existing transaction to advance the revision and invalidate stale health observations. The database change adds only a model configuration column, leaving canonical Agent tables, data generation and schema metadata unchanged.
+
+Agents freeze each candidate's own constraints and features. For every actual attempt, the Broker still intersects route and adapter support, including retries and failover. [Computer Use](computer-use.md) derives Full or NoImage from those effective features; editor labels or prompt instructions alone do not establish a no-image route. Existing image inputs must still satisfy the actual route's input contract.
 
 ## Documented recommendations and catalogs
 

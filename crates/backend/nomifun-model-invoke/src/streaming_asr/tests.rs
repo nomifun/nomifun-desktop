@@ -657,7 +657,7 @@ fn local_stepfun_call(address: std::net::SocketAddr) -> ResolvedTaskConfig {
         platform: "stepfun".into(),
         model: "stepaudio-2.5-asr-stream".into(),
         task: ModelTask::SpeechRecognition,
-        traits: vec![],
+        traits: vec![], input_constraints: None,
         protocol: "stepfun.asr_stream".into(),
         connection: crate::ResolvedConnection {
             role: "default".into(),

@@ -63,3 +63,24 @@ test('late defaults fill the form, keep references collapsed, and preserve exact
   fireEvent.click(page.getByRole('button', { name: 'Load model defaults' }));
   await waitFor(() => expect(saved().context_limit).toBe(200_000));
 });
+
+
+test('the Chat image input choice survives late defaults and can return to the interface default', async () => {
+  const page = render(<Harness />);
+  const saved = () => JSON.parse(page.getByTestId('serialized').textContent!)[0];
+  await waitFor(() => expect(saved()?.protocol).toBe('openai.chat_text'));
+  expect(saved()).not.toHaveProperty('input_constraints');
+  const select = () => page.container.querySelector<HTMLElement>('[data-model-image-input]')!;
+  fireEvent.click(select());
+  fireEvent.click(await page.findByRole('option', { name: zhSettings.modelAdvanced.imageInputDeny }));
+  expect(saved().input_constraints).toEqual({ image_input: false });
+  fireEvent.click(page.getByRole('button', { name: 'Load model defaults' }));
+  await waitFor(() => expect(saved().context_limit).toBe(100_000));
+  expect(saved().input_constraints).toEqual({ image_input: false });
+  fireEvent.click(select());
+  fireEvent.click(await page.findByRole('option', { name: zhSettings.modelAdvanced.imageInputAllow }));
+  expect(saved().input_constraints).toEqual({ image_input: true });
+  fireEvent.click(select());
+  fireEvent.click(await page.findByRole('option', { name: zhSettings.modelAdvanced.imageInputDefault }));
+  expect(saved()).not.toHaveProperty('input_constraints');
+});

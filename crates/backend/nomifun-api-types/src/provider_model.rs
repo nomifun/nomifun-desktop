@@ -9,6 +9,8 @@
 
 use std::collections::HashSet;
 
+pub use nomifun_agent_contracts::ModelInputConstraints;
+
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::model_task::{ModelTask, ModelTechnicalCapability, ModelTrait};
@@ -98,6 +100,9 @@ where
                     .unwrap_or_else(|| "unknown".to_owned())
             )));
         }
+        if capability.task != ModelTask::Chat && capability.input_constraints.is_some() {
+            return Err(D::Error::custom("input_constraints are supported only for Chat"));
+        }
         if capability.task != ModelTask::Chat && !capability.traits.is_empty() {
             return Err(D::Error::custom(format!(
                 "provider model capability task '{}' cannot declare Chat input/search traits",
@@ -124,6 +129,10 @@ pub struct ProviderModelCapabilityInput {
     #[serde(default, deserialize_with = "deserialize_unique_traits")]
     #[ts(optional = nullable)]
     pub traits: Vec<ModelTrait>,
+    /// User-authored Chat input limits. Omission uses the protocol defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "nomifun_agent_contracts::deserialize_model_input_constraints")]
+    #[ts(optional)]
+    pub input_constraints: Option<ModelInputConstraints>,
     #[serde(deserialize_with = "crate::serde_util::deserialize_non_empty_string")]
     pub protocol: String,
     #[serde(deserialize_with = "crate::serde_util::deserialize_non_empty_string")]
@@ -223,6 +232,10 @@ pub struct CapabilityHealth {
 pub struct ProviderModelCapabilityResponse {
     pub task: ModelTask,
     pub traits: Vec<ModelTrait>,
+    /// User-authored Chat input limits. Omission uses the protocol defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "nomifun_agent_contracts::deserialize_model_input_constraints")]
+    #[ts(optional)]
+    pub input_constraints: Option<ModelInputConstraints>,
     pub protocol: String,
     pub connection_role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -356,6 +369,32 @@ mod tests {
             "endpoint": "/audio/speech",
             "provider_params": {"voice": "cixingnansheng"}
         })
+    }
+
+    #[test]
+    fn input_constraints_are_typed_normalized_and_chat_only() {
+        for (wire, expected) in [(json!(null), None), (json!({}), None),
+            (json!({"image_input": false}), Some(false)), (json!({"image_input": true}), Some(true))]
+        {
+            let input: ProviderModelCapabilityInput = serde_json::from_value(json!({
+                "task":"chat", "protocol":"openai.chat_text", "connection_role":"default",
+                "traits":["vision_input"], "input_constraints":wire
+            })).unwrap();
+            assert_eq!(input.input_constraints.and_then(|value| value.image_input), expected);
+            assert_eq!(input.traits, vec![ModelTrait::VisionInput]);
+            assert_eq!(serde_json::to_value(&input).unwrap().get("input_constraints").is_some(), expected.is_some());
+        }
+        for invalid in [json!({"image_input":"false"}), json!({"unknown":false}), json!([])] {
+            assert!(serde_json::from_value::<ProviderModelCapabilityInput>(json!({
+                "task":"chat", "protocol":"openai.chat_text", "connection_role":"default",
+                "input_constraints":invalid
+            })).is_err());
+        }
+        let mut non_chat = capability();
+        non_chat["input_constraints"] = json!({"image_input":false});
+        assert!(serde_json::from_value::<ProviderModelInput>(json!({"model":"tts","capabilities":[non_chat.clone()]})).is_err());
+        non_chat["input_constraints"] = json!({});
+        assert!(serde_json::from_value::<ProviderModelInput>(json!({"model":"tts","capabilities":[non_chat]})).is_ok());
     }
 
     #[test]

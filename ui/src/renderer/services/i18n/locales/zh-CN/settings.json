@@ -1735,6 +1735,11 @@
     "draftOnly": "暂存仅在本次编辑中有效，切回原协议可恢复；保存或关闭编辑后不再保留。"
   },
   "modelAdvanced": {
+    "imageInputLabel": "图片输入",
+    "imageInputDefault": "跟随接口能力",
+    "imageInputAllow": "允许接收图片",
+    "imageInputDeny": "不接收图片",
+    "imageInputHint": "此设置只影响当前对话接口。允许接收图片仍需接口本身支持，音频输入不受影响。",
     "trigger": "高级",
     "title": "高级设置",
     "tokenLimits": "Token 上限",

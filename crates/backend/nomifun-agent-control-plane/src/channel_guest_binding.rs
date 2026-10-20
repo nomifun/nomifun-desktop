@@ -188,6 +188,7 @@ mod tests {
                     ChatRouteFeature::TextInput,
                     ChatRouteFeature::TextOutput,
                 ]),
+                input_constraints: None,
                 activation_features: BTreeSet::new(),
             },
             failovers: Vec::new(),

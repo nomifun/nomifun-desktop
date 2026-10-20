@@ -155,3 +155,27 @@ describe('nested provider models', () => {
     expect(toProviderModelInput(row('unknown')).capabilities[0]?.context_limit).toBeUndefined();
   });
 });
+
+
+test('an authored image denial narrows vision choices without changing audio or Chat availability', () => {
+  const model = row('text-and-audio');
+  model.capabilities[0] = { ...model.capabilities[0]!, input_constraints: { image_input: false } };
+  expect(modelSupportsTask(model, 'chat')).toBe(true);
+  expect(modelSupportsTask(model, 'chat', ['vision_input'])).toBe(false);
+  expect(modelSupportsTask(model, 'chat', ['audio_input'])).toBe(true);
+  expect(modelSupportsTask(model, 'chat', [], ['function_calling'])).toBe(true);
+  model.capabilities[0] = { ...model.capabilities[0]!, protocol: 'unknown.chat', input_constraints: { image_input: true } };
+  expect(modelSupportsTask(model, 'chat', ['vision_input'])).toBe(false);
+});
+
+test('full replacement saves retain explicit input constraints during unrelated model edits', () => {
+  for (const imageInput of [false, true]) {
+    const model = row('configured', { display_name: 'Renamed', enabled: false, sort_order: 4 });
+    model.capabilities[0] = { ...model.capabilities[0]!, input_constraints: { image_input: imageInput } };
+    expect(toProviderModelInput(model)).toMatchObject({
+      model: 'configured', display_name: 'Renamed', enabled: false, sort_order: 4,
+      capabilities: [{ input_constraints: { image_input: imageInput } }],
+    });
+    expect(toProviderModelInput(model).capabilities[0]).not.toHaveProperty('health');
+  }
+});

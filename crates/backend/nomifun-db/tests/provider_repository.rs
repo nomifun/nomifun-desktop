@@ -29,6 +29,7 @@ const fn capability(task: &'static str, protocol: &'static str) -> NewProviderMo
         context_limit: None,
         output_limit: None,
         compaction_threshold_pct: None,
+        input_constraints: None,
     }
 }
 
@@ -1686,4 +1687,47 @@ async fn graph_model_sync_rolls_back_earlier_model_and_rejects_deleted_parent() 
     ).await.unwrap_err();
     assert!(matches!(error, DbError::NotFound(_)));
     assert!(models.get(PROVIDER_ID, "resurrection").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn input_constraints_round_trip_normalize_noop_health_and_clone() {
+    let constrained = [NewProviderModelCapability { input_constraints: Some(r#"{ "image_input" : false }"#), ..CHAT_CAPABILITIES[0] }];
+    let (db, providers) = provider_with_model("constrained", &constrained).await;
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    let get = || capabilities.get(PROVIDER_ID, "constrained", "chat");
+    assert_eq!(get().await.unwrap().unwrap().input_constraints.as_deref(), Some(r#"{"image_input":false}"#));
+    capabilities.set_health(PROVIDER_ID, 0, "constrained", "chat", Some(r#"{"status":"healthy"}"#)).await.unwrap();
+    let canonical = [NewProviderModelCapability { input_constraints: Some(r#"{"image_input":false}"#), ..CHAT_CAPABILITIES[0] }];
+    models.save(PROVIDER_ID, 0, &model("constrained", &canonical)).await.unwrap();
+    assert_eq!(providers.find_by_id(PROVIDER_ID).await.unwrap().unwrap().config_revision, 0);
+    assert!(get().await.unwrap().unwrap().health.is_some());
+    let cloned = providers.clone_graph(PROVIDER_ID, "Constraint clone").await.unwrap();
+    let cloned = capabilities.get(&cloned.provider_id, "constrained", "chat").await.unwrap().unwrap();
+    assert_eq!(cloned.input_constraints, get().await.unwrap().unwrap().input_constraints);
+    assert!(cloned.health.is_none());
+    let changed = [NewProviderModelCapability { input_constraints: Some(r#"{"image_input":true}"#), ..CHAT_CAPABILITIES[0] }];
+    models.save(PROVIDER_ID, 0, &model("constrained", &changed)).await.unwrap();
+    assert_eq!(providers.find_by_id(PROVIDER_ID).await.unwrap().unwrap().config_revision, 1);
+    assert!(get().await.unwrap().unwrap().health.is_none());
+    let empty = [NewProviderModelCapability { input_constraints: Some("{}"), ..CHAT_CAPABILITIES[0] }];
+    models.save(PROVIDER_ID, 1, &model("constrained", &empty)).await.unwrap();
+    assert!(get().await.unwrap().unwrap().input_constraints.is_none());
+    models.save(PROVIDER_ID, 2, &model("constrained", &CHAT_CAPABILITIES)).await.unwrap();
+    assert_eq!(providers.find_by_id(PROVIDER_ID).await.unwrap().unwrap().config_revision, 2);
+}
+
+#[tokio::test]
+async fn repository_rejects_non_chat_or_malformed_input_constraints_atomically() {
+    for (task, protocol, constraints) in [
+        ("image_generation", "ark.images", r#"{"image_input":false}"#),
+        ("chat", "openai.chat_text", r#"{"image_input":"false"}"#),
+        ("chat", "openai.chat_text", r#"{"unknown":false}"#),
+    ] {
+        let db = init_database_memory().await.unwrap();
+        let providers = SqliteProviderRepository::new(db.pool().clone());
+        let capabilities = [NewProviderModelCapability { input_constraints:Some(constraints), ..capability(task, protocol) }];
+        assert!(providers.create(provider_params(Some(PROVIDER_ID)), &model("invalid", &capabilities), &[]).await.is_err());
+        assert!(providers.list().await.unwrap().is_empty());
+    }
 }

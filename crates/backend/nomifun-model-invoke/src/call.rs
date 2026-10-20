@@ -252,6 +252,7 @@ pub struct ResolvedTaskConfig {
     /// Exact refinements declared on this task capability. Callers must not
     /// infer input support from a model name or provider family.
     pub traits: Vec<nomifun_api_types::ModelTrait>,
+    pub input_constraints: Option<nomifun_agent_contracts::ModelInputConstraints>,
     pub protocol: String,
     pub connection: ResolvedConnection,
     pub transport: ResolvedTaskTransport,
@@ -266,6 +267,17 @@ pub struct ResolvedTaskConfig {
 }
 
 impl ResolvedTaskConfig {
+    /// Reject incompatible actual content before a standalone Chat serializer
+    /// or network executor sees it. Historical images are inputs too.
+    pub fn validate_chat_input(&self, input: &nomifun_chat_model_broker::ChatModelInput) -> Result<(), InvokeError> {
+        if self.input_constraints.is_some_and(|constraints| !constraints.allows_image_input())
+            && input.required_features().contains(&nomifun_chat_model_broker::ChatModelFeature::ImageInput) {
+            return Err(InvokeError::new(crate::InvokeErrorKind::InvalidParams,
+                "selected model interface does not accept image input"));
+        }
+        Ok(())
+    }
+
     /// Compare the exact task's effective invocation authority across a
     /// multi-call operation. Provider-wide revisions may change when unrelated
     /// catalog rows change, while credentials, targets and native parameters
@@ -278,6 +290,7 @@ impl ResolvedTaskConfig {
             && self.task == other.task
             && self.platform == other.platform
             && self.protocol == other.protocol
+            && self.input_constraints == other.input_constraints
             && self.connection.role == other.connection.role
             && self.connection.base_url == other.connection.base_url
             && self.connection.auth.scheme == other.connection.auth.scheme
@@ -471,12 +484,15 @@ mod tests {
     fn chat_configuration_pin_compares_context_budget_semantics_but_ignores_unrelated_revisions() {
         let config = ResolvedTaskConfig {
             provider_id:"p".into(), config_revision:1, platform:"custom".into(), model:"m".into(),
-            task:ModelTask::Chat, traits:vec![], protocol:"openai.chat_text".into(),
+            task:ModelTask::Chat, traits:vec![], input_constraints: None, protocol:"openai.chat_text".into(),
             connection:connection("https://api.example/v1"), transport:Default::default(),
             provider_params:json!({"_nomifun_context_limit_kind":"input_only"}),
             context_limit:Some(8192), output_limit:Some(4096), bedrock_config:None,
         };
         let mut changed = config.clone();
+        changed.input_constraints = Some(nomifun_agent_contracts::ModelInputConstraints { image_input: Some(false) });
+        assert!(!config.matches_invocation_configuration(&changed));
+        changed.input_constraints = None;
         changed.config_revision = 2;
         changed.provider_params[nomifun_api_types::MODEL_GATEWAY_CATALOG_BASELINE_PARAM] = json!({"updated":"unrelated"});
         assert!(config.matches_invocation_configuration(&changed));
@@ -511,7 +527,7 @@ mod tests {
             platform: "custom".into(),
             model: "m".into(),
             task: ModelTask::Chat,
-            traits: vec![],
+            traits: vec![], input_constraints: None,
             protocol: "openai.chat_text".into(),
             connection: connection("https://api.example/v1"),
             transport: ResolvedTaskTransport {
@@ -542,7 +558,7 @@ mod tests {
             platform: "custom".into(),
             model: "m".into(),
             task: ModelTask::Chat,
-            traits: vec![],
+            traits: vec![], input_constraints: None,
             protocol: "openai.chat_text".into(),
             connection: connection("https://api.example/v1"),
             transport: ResolvedTaskTransport {
@@ -627,6 +643,33 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("HTTP(S)"));
+    }
+
+    #[test]
+    fn explicit_input_constraints_reject_user_and_historical_tool_images_without_mutating_input() {
+        use nomifun_chat_model_broker::{ChatContentPart, ChatMessage, ChatRole, ChatToolResultPart};
+        let mut config = ResolvedTaskConfig {
+            provider_id:"p".into(), config_revision:1, platform:"custom".into(), model:"m".into(),
+            task:ModelTask::Chat, traits:vec![], input_constraints:None, protocol:"openai.chat_text".into(),
+            connection:connection("https://api.example/v1"), transport:Default::default(),
+            provider_params:json!({}), context_limit:None, output_limit:Some(4096), bedrock_config:None,
+        };
+        let mut input = nomifun_chat_model_broker::recorded_conformance_fixtures().remove(0).request.input;
+        for content in [ChatContentPart::Image { media_type:"image/png".into(),data_base64:"aW1hZ2U=".into() },
+            ChatContentPart::ToolResult { call_id:"native-image".into(), is_error:false,
+                output:vec![ChatToolResultPart::Image {media_type:"image/png".into(),data_base64:"aW1hZ2U=".into()}] }] {
+            input.messages=vec![ChatMessage {role:ChatRole::User,content:vec![content],provider_round_id:None}];
+            let original = input.clone();
+            config.input_constraints=None; assert!(config.validate_chat_input(&input).is_ok());
+            config.input_constraints=Some(nomifun_agent_contracts::ModelInputConstraints {image_input:Some(false)});
+            assert_eq!(config.validate_chat_input(&input).unwrap_err().kind,crate::InvokeErrorKind::InvalidParams);
+            assert_eq!(input,original);
+            config.input_constraints=Some(nomifun_agent_contracts::ModelInputConstraints {image_input:Some(true)});
+            assert!(config.validate_chat_input(&input).is_ok());
+        }
+        config.input_constraints=Some(nomifun_agent_contracts::ModelInputConstraints {image_input:Some(false)});
+        input.messages=vec![ChatMessage {role:ChatRole::User,content:vec![ChatContentPart::Text {text:"owned text".into()}],provider_round_id:None}];
+        assert!(config.validate_chat_input(&input).is_ok());
     }
 
 }

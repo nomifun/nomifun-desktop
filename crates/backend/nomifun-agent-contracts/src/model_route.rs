@@ -81,6 +81,67 @@ pub enum ChatRouteFeature {
     WebSearch,
 }
 
+/// User-authored input limits for one configured model interface. Absence
+/// preserves protocol defaults; explicit support never expands its serializer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, JsonSchema, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(deny_unknown_fields)]
+pub struct ModelInputConstraints {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub image_input: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for ModelInputConstraints {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectOnly;
+        impl<'de> serde::de::Visitor<'de> for ObjectOnly {
+            type Value = ModelInputConstraints;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a model input constraints object")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut image_input = None;
+                let mut seen = false;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key != "image_input" {
+                        return Err(serde::de::Error::unknown_field(&key, &["image_input"]));
+                    }
+                    if seen {
+                        return Err(serde::de::Error::duplicate_field("image_input"));
+                    }
+                    image_input = map.next_value()?;
+                    seen = true;
+                }
+                Ok(ModelInputConstraints { image_input })
+            }
+        }
+        deserializer.deserialize_map(ObjectOnly)
+    }
+}
+
+impl ModelInputConstraints {
+    pub fn normalize(self) -> Option<Self> {
+        self.image_input.is_some().then_some(self)
+    }
+
+    pub fn allows_image_input(&self) -> bool {
+        self.image_input != Some(false)
+    }
+}
+
+pub fn deserialize_model_input_constraints<'de, D>(deserializer: D) -> Result<Option<ModelInputConstraints>, D::Error>
+where D: serde::Deserializer<'de> {
+    Ok(Option::<ModelInputConstraints>::deserialize(deserializer)?.and_then(ModelInputConstraints::normalize))
+}
+
+pub fn model_input_constraints_schema() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(ModelInputConstraints))
+        .expect("model input constraints schema serializes")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChatRouteCandidate {
@@ -93,6 +154,8 @@ pub struct ChatRouteCandidate {
     pub config_revision_digest: DigestHex,
     pub credential_ref: String,
     pub features: BTreeSet<ChatRouteFeature>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_model_input_constraints")]
+    pub input_constraints: Option<ModelInputConstraints>,
     /// Features that must be required by the current request before this
     /// candidate participates. Empty candidates are ordinary primary/failover
     /// routes; an ImageInput-only auxiliary route cannot become a text-chat
@@ -431,6 +494,7 @@ mod tests {
                 ChatRouteFeature::TextInput,
                 ChatRouteFeature::TextOutput,
             ]),
+            input_constraints: None,
             activation_features: BTreeSet::new(),
         }
     }
@@ -559,4 +623,31 @@ mod tests {
             Err(ChatRouteRecordError::ActivationFeatureNotSupported)
         );
     }
+    #[test]
+    fn input_constraints_are_explicit_and_empty_objects_normalize_away() {
+        let original = candidate("route-input", 1);
+        let before = serde_json::to_value(&original).unwrap();
+        assert!(before.get("input_constraints").is_none());
+        for empty in [serde_json::json!(null), serde_json::json!({})] {
+            let mut value = before.clone();
+            value["input_constraints"] = empty;
+            let decoded: ChatRouteCandidate = serde_json::from_value(value).unwrap();
+            assert_eq!(decoded.input_constraints, None);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), before);
+        }
+        for allowed in [false, true] {
+            let mut value = before.clone();
+            value["input_constraints"] = serde_json::json!({"image_input":allowed});
+            let decoded: ChatRouteCandidate = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(decoded.input_constraints.unwrap().allows_image_input(), allowed);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+        }
+        for invalid in [serde_json::json!([]), serde_json::json!(true),
+            serde_json::json!({"image_input":"false"}), serde_json::json!({"images":false})] {
+            let mut value = before.clone(); value["input_constraints"] = invalid;
+            assert!(serde_json::from_value::<ChatRouteCandidate>(value).is_err());
+        }
+        assert!(serde_json::from_str::<ModelInputConstraints>(r#"{"image_input":null,"image_input":false}"#).is_err());
+    }
+
 }

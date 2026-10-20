@@ -200,6 +200,7 @@ fn map_model(model: &ModelGatewayCatalogModel) -> Result<ProviderModelInput, App
             allow_cross_origin_credentials: false, provider_params: json!({}),
             context_limit: model.context_window, output_limit: model.max_output_tokens,
             compaction_threshold_pct: None,
+            input_constraints: None,
         });
     }
     if tasks.is_empty() || model.task_endpoints.len() != tasks.len() { return Err(invalid("tasks and task_endpoints must match exactly")); }
@@ -331,7 +332,7 @@ impl crate::provider::ProviderService {
         let models = crate::provider_model::rows_to_model_responses(self.model_repo.list_for_provider(provider_id).await?, self.capability_repo.list_for_provider(provider_id).await?)?;
         for model in &models {
             for cap in &model.capabilities {
-                let input: ProviderModelCapabilityInput = decode(json!({"task":cap.task,"traits":cap.traits,"protocol":cap.protocol,"connection_role":cap.connection_role,"base_url_override":cap.base_url_override,"endpoint":cap.endpoint,"poll_endpoint":cap.poll_endpoint,"content_endpoint":cap.content_endpoint,"realtime_endpoint":cap.realtime_endpoint,"allow_cross_origin_credentials":cap.allow_cross_origin_credentials,"provider_params":cap.provider_params,"context_limit":cap.context_limit,"output_limit":cap.output_limit,"compaction_threshold_pct":cap.compaction_threshold_pct}))?;
+                let input: ProviderModelCapabilityInput = decode(json!({"task":cap.task,"traits":cap.traits,"protocol":cap.protocol,"connection_role":cap.connection_role,"base_url_override":cap.base_url_override,"endpoint":cap.endpoint,"poll_endpoint":cap.poll_endpoint,"content_endpoint":cap.content_endpoint,"realtime_endpoint":cap.realtime_endpoint,"allow_cross_origin_credentials":cap.allow_cross_origin_credentials,"provider_params":cap.provider_params,"context_limit":cap.context_limit,"output_limit":cap.output_limit,"compaction_threshold_pct":cap.compaction_threshold_pct,"input_constraints":cap.input_constraints}))?;
                 crate::provider::validate_capability(PLATFORM, &default_url, "bearer", &targets, &input)?;
             }
         }
@@ -414,7 +415,7 @@ pub fn merge_import(existing: &ProviderModelResponse, incoming: &ProviderModelIn
     let mut current: ProviderModelInput = decode(json!({"model":existing.model,"display_name":existing.display_name,"enabled":existing.enabled,"description":existing.description,"sort_order":existing.sort_order,"capabilities":existing.capabilities.iter().map(|cap| json!({
         "task":cap.task,"traits":cap.traits,"protocol":cap.protocol,"connection_role":cap.connection_role,
         "base_url_override":cap.base_url_override,"endpoint":cap.endpoint,"poll_endpoint":cap.poll_endpoint,"content_endpoint":cap.content_endpoint,"realtime_endpoint":cap.realtime_endpoint,
-        "allow_cross_origin_credentials":cap.allow_cross_origin_credentials,"provider_params":cap.provider_params,"context_limit":cap.context_limit,"output_limit":cap.output_limit,"compaction_threshold_pct":cap.compaction_threshold_pct
+        "allow_cross_origin_credentials":cap.allow_cross_origin_credentials,"provider_params":cap.provider_params,"context_limit":cap.context_limit,"output_limit":cap.output_limit,"compaction_threshold_pct":cap.compaction_threshold_pct,"input_constraints":cap.input_constraints
     })).collect::<Vec<_>>()}))?;
     let before = clean_model_value(&current)?;
     let next = clean_model_value(incoming)?;

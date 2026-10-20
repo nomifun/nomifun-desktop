@@ -122,3 +122,15 @@ describe('shared scenario model text', () => {
     expect(resolveScopedModelTextEdit('new alias', 'original alias', 'new alias')).toEqual({ value: 'new alias', conflict: false });
   });
 });
+
+
+test('editing another task keeps the latest explicit Chat input constraint', () => {
+  const draft = definition();
+  draft.capabilities[1].providerParamsJson = '{"language":"en"}';
+  const latest = capabilities.map(capability => capability.task === 'chat'
+    ? { ...capability, input_constraints: { image_input: false } } : capability);
+  const result = mergeTaskCapabilityEdit(draft, latest, 'speech_recognition', capabilityInputFromResponse(capabilities[1]));
+  expect(result.error).toBeUndefined();
+  expect(result.capabilities?.find(capability => capability.task === 'chat')?.input_constraints).toEqual({ image_input: false });
+  expect(result.capabilities?.find(capability => capability.task === 'speech_recognition')?.provider_params).toEqual({ language: 'en' });
+});

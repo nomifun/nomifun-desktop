@@ -9,7 +9,7 @@
 | `providers` | 供应商身份、启停、配置修订与默认连接 |
 | `provider_connections` | 命名连接的地址、鉴权和加密凭据 |
 | `provider_models` | 模型 ID 与展示、排序、启停 |
-| `provider_model_capabilities` | 精确 `(provider_id, model, task)` 的协议、连接角色、transport、参数、限额和健康状态 |
+| `provider_model_capabilities` | 精确 `(provider_id, model, task)` 的协议、连接角色、transport、参数、输入约束、限额和健康状态 |
 
 模型 ID 可以手工填写；目录失败不能阻止合法配置。只有原生目录明确声明的任务或精确官方文档 profile 能自动建议接口，模型名推断和供应商已有 adapter 均不证明具体模型支持该任务。后台刷新不修改已保存接口。输入理解属于 Chat，不自动授予生成或语音路由。
 
@@ -54,6 +54,16 @@ Chat Completions 不发送本地 round、工具 metadata 或 `is_error` 字段�
 文本表达，图片和音频在整批工具结果之后使用 user 附件消息传递，工具结果本身保持文本格式。
 
 “OpenAI 兼容”不证明所有模态兼容。Ark 与火山语音、DashScope 原生协议、MiniMax 的地区连接等差异由各自 adapter 和 manifest 表达，不复制成另一份手写 endpoint 矩阵。新增或变更供应商时更新 registry、serializer 与定向合同测试，并针对实际账号验证；本地替身测试不代表云端权限或模型体验通过。
+
+## 模型输入约束与 Agent 路由
+
+Chat capability 可显式保存 `input_constraints: { image_input: false }`，限制这个接口接收图片。共享的 `ModelInputConstraints` 同时派生 API、TypeScript 和模型管理工具 schema；约束保存在独立的 nullable JSON 配置列，不进入 `provider_params` 或上游请求。缺省、`null` 和空 `{}` 统一为 `None`，保持原有协议默认行为，也不为冻结记录增加空字段。非 Chat 用途拒绝非空约束。
+
+`image_input: false` 从有效能力中移除 `ImageInput`；`true` 仅允许使用协议、候选路由与 adapter 本来支持的图片输入，不能增加任何一方缺少的能力。`traits` 是建议性模型元数据：缺少 `vision_input` 不等于禁图，存在该 trait 也不能覆盖显式禁图。目录刷新、健康检查和协议验证不从标签或探测结果自动填写输入约束。
+
+配置保存、读取、克隆、连接修改、协议草稿与模型管理工具均保留约束。规范化后无变化的保存保持配置修订和健康观察；实际调用配置变化沿现有事务递增修订并使旧健康观察失效。数据库变更只添加模型配置列，不修改 canonical Agent 表、存储代际或 schema metadata。
+
+Agent 冻结每个候选自己的约束与能力，Broker 在每次实际尝试中继续取路由与 adapter 的交集；主路由、重试和 failover 均按本次有效能力工作。[Computer Use](computer-use.zh.md) 据此选择 Full 或 NoImage，不能仅凭配置界面的标签或提示词宣称已经禁图。已有图片输入仍须通过实际路由的输入合同校验。
 
 ## 文档推荐与模型目录
 

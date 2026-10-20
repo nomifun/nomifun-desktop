@@ -270,6 +270,7 @@ async fn execute(
         .ok_or_else(|| InvokeError::config("selected model has no standalone Chat codec"))?;
     let redactor = config.connection.auth.secret_redactor();
     let input = text_input(config, request);
+    config.validate_chat_input(&input)?;
     let mut body = encode_standalone_chat_input(protocol, &config.model, &input,
         &config.provider_params, config.output_limit)
         .map_err(|error| InvokeError::parse(error.message).redacted(&redactor))?;

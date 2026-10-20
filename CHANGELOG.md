@@ -5,6 +5,9 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- Add per-interface Chat image-input constraints. Disabling images selects the
+  accessibility-only Computer surface; leaving the setting unset preserves
+  defaults, and enabling it never expands protocol support.
 - Rebuild Computer Use around a private Cua Driver worker, with generated
   actions, accessibility tools for models without image input, driver status
   and visible foreground-operation markers. Applications opened by Computer

@@ -75,6 +75,17 @@ fn parse_capability_traits(raw: &str) -> Result<Vec<ModelTrait>, InvokeError> {
     })
 }
 
+pub(crate) fn parse_capability_input_constraints(raw: Option<&str>, task: ModelTask)
+    -> Result<Option<nomifun_agent_contracts::ModelInputConstraints>, InvokeError> {
+    let constraints = raw.map(serde_json::from_str::<nomifun_agent_contracts::ModelInputConstraints>)
+        .transpose().map_err(|_| InvokeError::config("capability input constraints are invalid"))?
+        .and_then(nomifun_agent_contracts::ModelInputConstraints::normalize);
+    if task != ModelTask::Chat && constraints.is_some() {
+        return Err(InvokeError::config("input constraints are supported only for Chat interfaces"));
+    }
+    Ok(constraints)
+}
+
 fn auth_scheme_key(scheme: &AuthScheme) -> String {
     match scheme {
         AuthScheme::Bearer => "bearer".to_owned(),
@@ -379,6 +390,7 @@ impl ModelInvokeService {
         })?;
 
         let traits = parse_capability_traits(&capability.traits)?;
+        let input_constraints = parse_capability_input_constraints(capability.input_constraints.as_deref(), task)?;
         let provider_params = parse_provider_params(&capability.provider_params, protocol, task)?;
         let mut connection = if role == "default" {
             self.default_connection(&provider)?
@@ -451,6 +463,7 @@ impl ModelInvokeService {
             model: model_ref.model.clone(),
             task,
             traits,
+            input_constraints,
             protocol: protocol.to_owned(),
             connection,
             transport,

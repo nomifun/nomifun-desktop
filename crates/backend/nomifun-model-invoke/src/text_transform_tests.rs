@@ -8,7 +8,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 fn config(protocol: &str, url: &str) -> ResolvedTaskConfig {
     ResolvedTaskConfig {
         provider_id: "fixture".into(), config_revision: 1, platform: "stepfun".into(),
-        model: "step-5-preview".into(), task: ModelTask::Chat, traits: vec![],
+        model: "step-5-preview".into(), task: ModelTask::Chat, traits: vec![], input_constraints: None,
         protocol: protocol.into(), connection: ResolvedConnection {
             role: "default".into(), base_url: url.into(), auth: AuthMaterial {
                 scheme: AuthScheme::Bearer, credentials: json!({"api_keys":["fixture-key","unused-key"]}),

@@ -1513,6 +1513,28 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                       })}
                     </div>}
                   </div>
+                  <div className='space-y-6px' data-model-image-input-settings={capability.task}>
+                    <div className='text-12px text-t-secondary'>
+                      {t('settings.modelAdvanced.imageInputLabel')}
+                    </div>
+                    <Select
+                      value={capability.inputConstraints?.image_input === undefined ? 'default' : capability.inputConstraints.image_input ? 'allow' : 'deny'}
+                      options={[
+                        { value: 'default', label: t('settings.modelAdvanced.imageInputDefault') },
+                        { value: 'allow', label: t('settings.modelAdvanced.imageInputAllow') },
+                        { value: 'deny', label: t('settings.modelAdvanced.imageInputDeny') },
+                      ]}
+                      onChange={(choice: 'default' | 'allow' | 'deny') => updateCapability(capability.task, {
+                        inputConstraints: choice === 'default' ? undefined : { image_input: choice === 'allow' },
+                      })}
+                      getPopupContainer={() => document.body}
+                      aria-label={t('settings.modelAdvanced.imageInputLabel')}
+                      data-model-image-input
+                    />
+                    <div className='text-11px leading-4 text-t-secondary'>
+                      {t('settings.modelAdvanced.imageInputHint')}
+                    </div>
+                  </div>
                 </div>
               </div>
             )}

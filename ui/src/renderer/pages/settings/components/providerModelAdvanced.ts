@@ -8,6 +8,7 @@ import { MODEL_TRAIT_ORDER } from '@/common/modelCapabilities';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ModelTaskSource } from '@/common/protocolBindings/ModelTaskSource';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
+import type { ModelInputConstraints } from '@/common/protocolBindings/ModelInputConstraints';
 import type { ModelConfigurationDefaults } from '@/common/protocolBindings/ModelConfigurationDefaults';
 import type {
 EndpointRootShape,
@@ -50,6 +51,8 @@ export type ModelProtocolManifestMap = Partial<Record<ModelTask, ModelProtocolMa
 export interface ModelCapabilityDraft {
   task: ModelTask;
   traits: ModelTrait[];
+  /** Explicit task input limits, independent of advisory catalog traits. */
+  inputConstraints?: ModelInputConstraints;
   /** UI-only ownership: automatic catalog routes may change with model selection. */
   routeSource: 'automatic' | 'user' | 'persisted';
   /**
@@ -333,6 +336,7 @@ export const withCatalogTaskEvidence = (
 export const capabilityDraftFromResponse = (capability: {
   task: ModelTask;
   traits?: ModelTrait[];
+  input_constraints?: ModelInputConstraints | null;
   protocol: string;
   connection_role: string;
   base_url_override?: string | null;
@@ -348,6 +352,7 @@ export const capabilityDraftFromResponse = (capability: {
 }): ModelCapabilityDraft => ({
   task: capability.task,
   traits: capability.traits ?? [],
+  ...(capability.input_constraints ? { inputConstraints: { ...capability.input_constraints } } : {}),
   routeSource: 'persisted',
   transportSource: 'persisted',
   providerParamsSource: 'user',
@@ -1228,6 +1233,7 @@ const capabilityInputFromDraft = (
   return {
     task: capability.task,
     ...(capability.traits.length > 0 ? { traits: capability.traits } : {}),
+    ...(capability.inputConstraints ? { input_constraints: { ...capability.inputConstraints } } : {}),
     protocol: capability.protocol.trim(),
     connection_role: capability.connectionRole.trim(),
     ...(optionalTrimmed(capability.baseUrlOverride)

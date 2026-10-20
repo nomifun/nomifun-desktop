@@ -28,6 +28,7 @@ fn artifacts(
         task: ChatRouteTask::AgentChat,
         primary: ChatRouteCandidate {
             model_route_id: route_id.clone(),
+            input_constraints: None,
             model_route_revision: 1,
             provider_id: PROVIDER.into(),
             model: "remove".into(),

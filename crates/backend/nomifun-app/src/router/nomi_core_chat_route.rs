@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use axum::http::StatusCode;
 use nomifun_agent_contracts::{
     ChatRouteCandidate, ChatRouteFeature, ChatRouteProtocol, ChatRouteRecord,
-    ChatRouteRecordSchema, ChatRouteTask, ConnectionConfigRef, DigestHex, ModelRouteId, UserId,
+    ChatRouteRecordSchema, ChatRouteTask, ConnectionConfigRef, DigestHex, ModelInputConstraints, ModelRouteId, UserId,
 };
 use nomifun_agent_control_plane::{ControlPlaneError, DefaultChatRouteResolver};
 use nomifun_api_types::{
@@ -268,10 +268,12 @@ impl NomiCoreDefaultChatRouteResolver {
                     digest
                 }
             };
-            let features = features_for(
-                protocol,
-                capability.health.as_deref(),
-            )?;
+            let input_constraints = capability.input_constraints.as_deref()
+                .map(serde_json::from_str::<ModelInputConstraints>).transpose()
+                .map_err(|_| ControlPlaneError::canonical("MODEL_ROUTE_RECORD_INVALID",
+                    StatusCode::INTERNAL_SERVER_ERROR, "configured Chat input constraints are invalid"))?
+                .and_then(ModelInputConstraints::normalize);
+            let features = features_for(protocol, capability.health.as_deref(), input_constraints)?;
             candidates.push(ChatRouteCandidate {
                 model_route_id: ModelRouteId::from(Uuid::now_v7().to_string()),
                 model_route_revision: 1,
@@ -282,6 +284,7 @@ impl NomiCoreDefaultChatRouteResolver {
                 config_revision_digest,
                 credential_ref: format!("nomi-core-chat-credential-{}", Uuid::now_v7()),
                 features,
+                input_constraints,
                 activation_features: BTreeSet::new(),
             });
         }
@@ -382,6 +385,7 @@ fn protocol_for(value: &str) -> Option<ChatRouteProtocol> {
 fn features_for(
     protocol: ChatRouteProtocol,
     health: Option<&str>,
+    input_constraints: Option<ModelInputConstraints>,
 ) -> Result<BTreeSet<ChatRouteFeature>, ControlPlaneError> {
     use nomifun_chat_model_broker::{ChatModelFeature, ChatProtocol, protocol_features};
     let adapter_protocol = match protocol {
@@ -433,6 +437,9 @@ fn features_for(
             ModelTechnicalCapability::Streaming => ChatRouteFeature::Streaming,
         });
     }
+    if input_constraints.is_some_and(|constraints| !constraints.allows_image_input()) {
+        features.remove(&ChatRouteFeature::ImageInput);
+    }
     Ok(features)
 }
 
@@ -454,6 +461,7 @@ mod tests {
         let features = features_for(
             ChatRouteProtocol::OpenaiChat,
             None,
+            None,
         )
         .unwrap();
 
@@ -472,6 +480,7 @@ mod tests {
             Some(
                 r#"{"status":"unknown","unsupported_technical_capabilities":["function_calling","streaming"]}"#,
             ),
+            None,
         )
         .unwrap();
         assert!(!features.contains(&ChatRouteFeature::ToolCalls));
@@ -482,13 +491,13 @@ mod tests {
     #[test]
     fn protocol_media_features_preserve_serializer_limits() {
         for protocol in [ChatRouteProtocol::Anthropic, ChatRouteProtocol::Bedrock, ChatRouteProtocol::Vertex] {
-            let features = features_for(protocol, None).unwrap();
+            let features = features_for(protocol, None, None).unwrap();
             assert!(features.contains(&ChatRouteFeature::ImageInput));
             assert!(!features.contains(&ChatRouteFeature::AudioInput));
             assert!(!features.contains(&ChatRouteFeature::WebSearch));
         }
         for protocol in [ChatRouteProtocol::OpenaiChat, ChatRouteProtocol::OpenaiResponses, ChatRouteProtocol::Gemini] {
-            assert!(features_for(protocol, None).unwrap().contains(&ChatRouteFeature::AudioInput));
+            assert!(features_for(protocol, None, None).unwrap().contains(&ChatRouteFeature::AudioInput));
         }
     }
 
@@ -496,22 +505,34 @@ mod tests {
     fn native_continuation_features_follow_protocol_without_catalog_tags() {
         for protocol in [ChatRouteProtocol::Anthropic, ChatRouteProtocol::Gemini,
             ChatRouteProtocol::Bedrock, ChatRouteProtocol::Vertex] {
-            let features = features_for(protocol, None).unwrap();
+            let features = features_for(protocol, None, None).unwrap();
             assert!(features.contains(&ChatRouteFeature::ReasoningSignature));
             assert!(features.contains(&ChatRouteFeature::PromptCache));
         }
-        let responses = features_for(ChatRouteProtocol::OpenaiResponses, None).unwrap();
+        let responses = features_for(ChatRouteProtocol::OpenaiResponses, None, None).unwrap();
         assert!(responses.contains(&ChatRouteFeature::NativeResponsesItems));
         assert!(responses.contains(&ChatRouteFeature::PromptCache));
         assert!(responses.contains(&ChatRouteFeature::StructuredOutput));
-        let chat = features_for(ChatRouteProtocol::OpenaiChat, None).unwrap();
+        let chat = features_for(ChatRouteProtocol::OpenaiChat, None, None).unwrap();
         assert!(!chat.contains(&ChatRouteFeature::ReasoningSignature));
         assert!(!chat.contains(&ChatRouteFeature::PromptCache));
         let unsupported = features_for(ChatRouteProtocol::Anthropic,
-            Some(r#"{"status":"unknown","unsupported_technical_capabilities":["reasoning","function_calling","streaming"]}"#)).unwrap();
+            Some(r#"{"status":"unknown","unsupported_technical_capabilities":["reasoning","function_calling","streaming"]}"#), None).unwrap();
         assert!(!unsupported.contains(&ChatRouteFeature::Reasoning));
         assert!(!unsupported.contains(&ChatRouteFeature::ToolCalls));
         assert!(!unsupported.contains(&ChatRouteFeature::Streaming));
+    }
+
+    #[test]
+    fn explicit_image_input_constraint_only_narrows_protocol_features() {
+        for protocol in [ChatRouteProtocol::OpenaiChat, ChatRouteProtocol::OpenaiResponses,
+            ChatRouteProtocol::Anthropic, ChatRouteProtocol::Gemini, ChatRouteProtocol::Bedrock, ChatRouteProtocol::Vertex] {
+            let original = features_for(protocol, None, None).unwrap();
+            let disabled = features_for(protocol, None, Some(ModelInputConstraints { image_input: Some(false) })).unwrap();
+            let mut expected = original.clone(); expected.remove(&ChatRouteFeature::ImageInput);
+            assert_eq!(disabled, expected);
+            assert_eq!(features_for(protocol, None, Some(ModelInputConstraints { image_input: Some(true) })).unwrap(), original);
+        }
     }
 
     async fn create_chat_provider(
@@ -644,6 +665,26 @@ mod tests {
         assert_eq!(route.failovers.len(), 1);
         assert_eq!(route.failovers[0].provider_id, backup_provider);
         assert_eq!(route.failovers[0].model, "reserve");
+    }
+
+    #[tokio::test]
+    async fn configured_input_constraints_freeze_independently_for_primary_and_failover() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let primary = "0190f5fe-7c00-7a00-8abc-000000000051";
+        let backup = "0190f5fe-7c00-7a00-8abc-000000000052";
+        create_chat_provider(database.pool(), primary, "primary", "text", 0).await;
+        create_chat_provider(database.pool(), backup, "backup", "vision", 1).await;
+        nomifun_db::sqlx::query("UPDATE provider_model_capabilities SET input_constraints=? WHERE provider_id=?")
+            .bind(r#"{"image_input":false}"#).bind(primary).execute(database.pool()).await.unwrap();
+        let failover=serde_json::json!({"enabled":true,"queue":[{"provider_id":backup,"model":"vision"}],"max_switches":1}).to_string();
+        SqliteClientPreferenceRepository::new(database.pool().clone()).upsert_batch(&[("agent.model_failover",failover.as_str())]).await.unwrap();
+        let route=NomiCoreDefaultChatRouteResolver::new(database.pool().clone()).resolve_selected_chat_route(
+            &UserId::from("test-owner"), &nomifun_api_types::AgentChatModelSelectionDto {provider_id:primary.into(),model:"text".into()}).await.unwrap().unwrap();
+        assert_eq!(route.primary.input_constraints,Some(ModelInputConstraints {image_input:Some(false)}));
+        assert!(!route.primary.features.contains(&ChatRouteFeature::ImageInput));
+        assert_eq!(route.failovers.len(),1);
+        assert_eq!(route.failovers[0].input_constraints,None);
+        assert!(route.failovers[0].features.contains(&ChatRouteFeature::ImageInput));
     }
 
     #[tokio::test]

@@ -190,7 +190,8 @@ fn input_schema(action: &str) -> Value {
             "allow_cross_origin_credentials":{"type":"boolean","description":"Default false; only true if the user explicitly authorized sending credentials to a different origin."},
             "provider_params":{"type":"object","description":"Protocol-specific parameters from the supplied configuration; do not invent values."},
             "context_limit":{"type":"integer","minimum":1},"output_limit":{"type":"integer","minimum":1},
-            "compaction_threshold_pct":{"type":"integer","minimum":1,"maximum":100}
+            "compaction_threshold_pct":{"type":"integer","minimum":1,"maximum":100},
+            "input_constraints":model_input_constraints_schema()
         }),
         &["task", "protocol", "connection_role"],
     );
@@ -233,6 +234,17 @@ fn input_schema(action: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn management_input_constraints_use_the_shared_schema() {
+        let schema = input_schema(ADD_MODEL);
+        assert_eq!(schema["properties"]["model"]["properties"]["capabilities"]["items"]["properties"]["input_constraints"],model_input_constraints_schema());
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let mut request = json!({"provider_id":"0190f5fe-7c00-7a00-8abc-012345678901","model":{"model":"owned","capabilities":[{"task":"chat","protocol":"openai.chat_text","connection_role":"default","input_constraints":{"image_input":false}}]}});
+        assert!(validator.is_valid(&request));
+        request["model"]["capabilities"][0]["input_constraints"]["image_input"] = json!("false");
+        assert!(!validator.is_valid(&request));
+    }
 
     #[test]
     fn schemas_are_concrete_and_describe_all_actions() {

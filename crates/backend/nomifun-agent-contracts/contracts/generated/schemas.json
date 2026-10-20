@@ -699,6 +699,16 @@
             "type": "array",
             "uniqueItems": true
           },
+          "input_constraints": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelInputConstraints"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "model": {
             "type": "string"
           },
@@ -1003,6 +1013,19 @@
           "cron"
         ],
         "type": "string"
+      },
+      "ModelInputConstraints": {
+        "additionalProperties": false,
+        "description": "User-authored input limits for one configured model interface. Absence\npreserves protocol defaults; explicit support never expands its serializer.",
+        "properties": {
+          "image_input": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "PresetRevisionRef": {
         "additionalProperties": false,
@@ -1402,6 +1425,16 @@
             "type": "array",
             "uniqueItems": true
           },
+          "input_constraints": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelInputConstraints"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "model": {
             "type": "string"
           },
@@ -1707,6 +1740,19 @@
         ],
         "type": "string"
       },
+      "ModelInputConstraints": {
+        "additionalProperties": false,
+        "description": "User-authored input limits for one configured model interface. Absence\npreserves protocol defaults; explicit support never expands its serializer.",
+        "properties": {
+          "image_input": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "RoleContractKey": {
         "additionalProperties": false,
         "properties": {
@@ -1986,6 +2032,16 @@
             "type": "array",
             "uniqueItems": true
           },
+          "input_constraints": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelInputConstraints"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "model": {
             "type": "string"
           },
@@ -2246,6 +2302,19 @@
           "cron"
         ],
         "type": "string"
+      },
+      "ModelInputConstraints": {
+        "additionalProperties": false,
+        "description": "User-authored input limits for one configured model interface. Absence\npreserves protocol defaults; explicit support never expands its serializer.",
+        "properties": {
+          "image_input": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "RoleContractKey": {
         "additionalProperties": false,

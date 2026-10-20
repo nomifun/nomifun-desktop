@@ -396,7 +396,7 @@ fn read_prefix_lossy(path: &Path, limit: usize) -> Option<String> {
 pub(crate) fn test_writeback_configuration(context: Option<i64>, output: Option<i64>) -> ResolvedTaskConfig {
     ResolvedTaskConfig {
         provider_id: "test-provider".into(), config_revision: 1, platform: "openai".into(), model: "test-model".into(),
-        task: nomifun_api_types::ModelTask::Chat, traits: vec![], protocol: "openai.chat_text".into(),
+        task: nomifun_api_types::ModelTask::Chat, traits: vec![], input_constraints: None, protocol: "openai.chat_text".into(),
         connection: nomifun_model_invoke::ResolvedConnection { role: "default".into(), base_url: "https://unused.invalid".into(),
             auth: nomifun_model_invoke::AuthMaterial { scheme: nomifun_model_invoke::AuthScheme::Bearer, credentials: serde_json::json!({}) },
             extra: serde_json::json!({}) },

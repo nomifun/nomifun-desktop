@@ -236,6 +236,9 @@ async fn complete_resolved(config: ResolvedTaskConfig, unsupported: BTreeSet<Mod
         reasoning:None,prompt_cache:PromptCachePolicy::Disabled,response_format:ChatResponseFormat::Text,
         requested_output_modalities:BTreeSet::new(),provider_round_parent:None,preserve_native_responses_items:false,metadata:BTreeMap::new(),
     };
+    if config.validate_chat_input(&input).is_err() {
+        return Err(observation.failure(Stage::Validate,"INPUT_CONSTRAINT_VIOLATION",None));
+    }
     let mut body = match encode_standalone_chat_input(protocol,&config.model,&input,&config.provider_params,config.output_limit) {
         Ok(body) => body,
         Err(error) => return Err(observation.model_failure(Stage::Validate,error)),

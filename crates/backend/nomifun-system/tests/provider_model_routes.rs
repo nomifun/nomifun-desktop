@@ -1113,3 +1113,37 @@ async fn invalid_capability_graph_and_missing_delete_are_rejected() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn chat_input_constraints_round_trip_preserving_other_task_configuration() {
+    let db = init_database_memory().await.unwrap();
+    let provider_id = create_provider(&db, "custom", "Input contract").await;
+    let app = system_routes(build_state(&db));
+    let image = json!({"task":"image_generation","protocol":"openai.images","connection_role":"default","provider_params":{"size":"1024x1024"}});
+    for (constraints, expected) in [(json!({"image_input":false}), Some(false)), (json!({"image_input":true}), Some(true)), (json!({}), None), (Value::Null, None)] {
+        let mut chat = chat_capability();
+        chat["traits"] = json!(["vision_input"]);
+        chat["input_constraints"] = constraints;
+        let saved = app.clone().oneshot(request("PUT", "/api/provider-models", Some(json!({
+            "provider_id":provider_id,"model":{"model":"input-contract","capabilities":[chat,image.clone()]}
+        })))).await.unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+        let saved = body_json(saved).await;
+        let caps = saved["data"]["capabilities"].as_array().unwrap();
+        let chat = caps.iter().find(|cap|cap["task"]=="chat").unwrap();
+        let image = caps.iter().find(|cap|cap["task"]=="image_generation").unwrap();
+        assert_eq!(chat.pointer("/input_constraints/image_input").and_then(Value::as_bool), expected);
+        assert_eq!(chat["traits"], json!(["vision_input"]));
+        assert_eq!(image["provider_params"], json!({"size":"1024x1024"}));
+        assert!(image.get("input_constraints").is_none());
+        let row = SqliteProviderModelCapabilityRepository::new(db.pool().clone()).get(&provider_id,"input-contract","chat").await.unwrap().unwrap();
+        assert_eq!(row.input_constraints.map(|value|serde_json::from_str::<Value>(&value).unwrap()["image_input"].as_bool().unwrap()), expected);
+    }
+    let mut invalid = image;
+    invalid["input_constraints"] = json!({"image_input":false});
+    let response = app.oneshot(request("PUT", "/api/provider-models", Some(json!({
+        "provider_id":provider_id,"model":{"model":"invalid-input","capabilities":[invalid]}
+    })))).await.unwrap();
+    assert!(response.status().is_client_error());
+    assert!(SqliteProviderModelRepository::new(db.pool().clone()).get(&provider_id,"invalid-input").await.unwrap().is_none());
+}

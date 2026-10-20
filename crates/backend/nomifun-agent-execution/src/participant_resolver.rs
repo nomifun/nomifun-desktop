@@ -658,6 +658,7 @@ mod tests {
             context_limit: None,
             output_limit: None,
             compaction_threshold_pct: None,
+            input_constraints: None,
             health: None,
             health_checked_at: None,
             created_at: 1,
