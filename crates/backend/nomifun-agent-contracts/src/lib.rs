@@ -39,6 +39,8 @@ pub mod tool_middleware;
 pub mod tool_presentation;
 pub mod tool_detail;
 pub use tool_detail::*;
+pub mod tool_file_summary;
+pub use tool_file_summary::*;
 pub mod tool_model_guide;
 pub mod package;
 pub mod patch_recovery;

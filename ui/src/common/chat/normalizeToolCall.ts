@@ -1,6 +1,7 @@
 import type { IMessageToolCall, IMessageToolGroup } from './chatLib';
 import { toDisplayText } from './displayText';
 import { normalizeToolGroupStatus } from './toolGroupStatus';
+import type { ToolFileSummary } from './fileSummary';
 
 export type NormalizedToolStatus = 'pending' | 'running' | 'completed' | 'error' | 'canceled';
 export type NormalizedToolNotExecutedReason = 'invalid_arguments' | 'runtime_preflight' | 'process_reference';
@@ -27,6 +28,7 @@ export interface NormalizedToolCall {
   /** The runtime rejected the call before dispatching it to the tool. */
   notExecutedReason?: NormalizedToolNotExecutedReason;
   description?: string;
+  fileSummary?: ToolFileSummary;
   /** Bounded public diagnostic supplied by the canonical host. */
   error?: string;
 }
@@ -95,8 +97,8 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
     name: toDisplayText(name, 'Tool'),
     status: skipped || invalidArgumentsNotExecuted || runtimePreflightNotExecuted || processReferenceNotExecuted
       ? 'canceled' : normalizeToolCallStatus(status),
-    ...(typeof capability_id === 'string' && capability_id ? { capabilityId: capability_id } : {}),
-    ...(typeof action_id === 'string' && action_id ? { actionId: action_id } : {}),
+    ...(typeof capability_id === 'string' ? { capabilityId: capability_id } : {}),
+    ...(typeof action_id === 'string' ? { actionId: action_id } : {}),
     ...(skipped ? { skipped: true } : {}),
     ...(invalidArgumentsNotExecuted ? { notExecutedReason: 'invalid_arguments' as const } : {}),
     ...(runtimePreflightNotExecuted ? { notExecutedReason: 'runtime_preflight' as const } : {}),
@@ -107,6 +109,7 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
     ...(commandNotStarted ? { commandNotStarted: true } : {}),
     ...(commandTimedOut ? { commandTimedOut: true } : {}),
     description: description ? formatValue(description) : undefined,
+    ...(message.content.file_summary ? { fileSummary: message.content.file_summary } : {}),
     ...(status === 'error' && error ? { error: formatValue(error) } : {}),
   };
 }

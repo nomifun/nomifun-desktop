@@ -5,6 +5,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { database } from '@/common/adapter/ipcBridge';
 import type { IMessageToolCall } from '@/common/chat/chatLib';
 import type { ToolDetailPage, ToolDetailRequest } from '@/common/chat/toolDetails';
+import type { ToolFileSummary } from '@/common/chat/fileSummary';
 import { parseConversationId, parseMessageId } from '@/common/types/ids';
 import messages from '@/renderer/services/i18n/locales/en-US/messages.json';
 import ProcessTraceItem from './ProcessTraceItem';
@@ -22,8 +23,17 @@ const page = (request: ToolDetailRequest, overrides: Partial<ToolDetailPage> = {
   call_event_id: 'canonical-call', through_seq: request.through_seq ?? 10, result_seq: 8, section: request.section,
   availability: 'available', content: request.section === 'arguments' ? 'bun test\nprintf "done"' : '2 tests passed',
   format: 'text', offset: 0, total_bytes: 22, eof: true, non_text_parts: 0, ...overrides });
-const element = (item: IMessageToolCall) => <I18nextProvider i18n={i18n}><ToolDetailsProvider scope={session}><ProcessTraceItem item={item} /></ToolDetailsProvider></I18nextProvider>;
-const show = (item: IMessageToolCall) => render(element(item));
+type ProcessItem = Parameters<typeof ProcessTraceItem>[0]['item'];
+const element = (item: ProcessItem) => <I18nextProvider i18n={i18n}><ToolDetailsProvider scope={session}><ProcessTraceItem item={item} workspaceRoots={['/workspace']} /></ToolDetailsProvider></I18nextProvider>;
+const show = (item: ProcessItem) => render(element(item));
+const file = (call_id: string, operation: ToolFileSummary['operation'], files: ToolFileSummary['files'], overrides: Partial<IMessageToolCall['content']> = {}) => tool({
+  call_id, name: operation === 'patch' ? 'apply_patch' : operation === 'read' ? 'read_file' : operation === 'write' ? 'write_file' : `${operation}_path`,
+  capability_id: 'workspace.files', action_id: `workspace.files/${operation}`, description: files[0]?.path,
+  file_summary: { operation, files }, ...overrides,
+});
+const fileRun = (messages: IMessageToolCall[]): ProcessItem => ({
+  type: 'tool_summary', id: 'file-run', messages, sourceMessageIds: [], created_at: 1,
+});
 let restore = () => {};
 let reconnected: () => void;
 let restoreReconnect = () => {};
@@ -57,15 +67,107 @@ test('command details are lazy, readable, independently paginated and never writ
   expect(JSON.stringify(item)).toBe(saved);
 });
 
-test('read/write files default to summaries while retaining deliberate access to their payloads', async () => {
-  const read = spyOn(database.getToolDetails, 'invoke').mockImplementation(async request => page(request, { content: 'file body' }));
+test('confirmed file reads expand only a path list and never request arguments or file bodies', () => {
+  const read = spyOn(database.getToolDetails, 'invoke').mockRejectedValue(new Error('File payload access must remain unused'));
+  restore = () => read.mockRestore();
+  const item = file('read-call', 'read', [{ path: '/workspace/src/app.ts' }]);
+  Object.assign(item.content, { arguments: { path: '/workspace/src/app.ts', content: 'PRIVATE FILE BODY' }, output: 'PRIVATE FILE BODY' });
+  const before = JSON.stringify(item);
+  const view = show(item);
+  const toggle = view.getByRole('button', { name: 'Read 1 file' });
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  expect(Boolean(view.container.querySelector('.turn-file-activity__list'))).toBe(false);
+  expect(read).not.toHaveBeenCalled();
+  fireEvent.click(toggle);
+  expect(view.getByRole('listitem').textContent).toContain('src/app.ts');
+  expect(view.container.querySelector('.turn-file-activity__path')?.getAttribute('title')).toBe('/workspace/src/app.ts');
+  expect(Boolean(view.container.querySelector('pre'))).toBe(false);
+  expect(view.container.textContent).not.toContain('PRIVATE');
+  expect(read).not.toHaveBeenCalled();
+  expect(JSON.stringify(item)).toBe(before);
+});
+
+test('mixed reads, writes and patches share a file list with unique targets and only proven patch counts', () => {
+  const read = spyOn(database.getToolDetails, 'invoke').mockRejectedValue(new Error('File payload access must remain unused'));
+  restore = () => read.mockRestore();
+  const item = fileRun([
+    file('read-page-one', 'read', [{ path: '/workspace/src/a file.ts' }]),
+    file('read-page-two', 'read', [{ path: '/workspace/src/a file.ts' }]),
+    file('write-new', 'write', [{ path: '/workspace/src/new file.ts' }]),
+    file('patch-call', 'patch', [{ path: '/workspace/src/app.ts', added_lines: 8, removed_lines: 3 }]),
+  ]);
+  const before = JSON.stringify(item);
+  const view = show(item);
+  const toggle = view.getByRole('button', { name: 'Read 1 file, Edited 2 files' });
+  expect(view.queryByRole('list')).toBeNull();
+  fireEvent.click(toggle);
+  const entries = view.getAllByRole('listitem');
+  expect(entries).toHaveLength(3);
+  expect(entries.map(entry => entry.textContent)).toEqual(['Read src/a file.ts', 'Edited src/new file.ts', 'Edited src/app.ts+8 −3']);
+  expect(view.container.querySelectorAll('.turn-file-activity__changes')).toHaveLength(1);
+  expect(Boolean(view.container.querySelector('pre'))).toBe(false);
+  expect(read).not.toHaveBeenCalled();
+  expect(JSON.stringify(item)).toBe(before);
+});
+
+test('a path edited by a write and patch keeps one target without inventing a complete line total', () => {
+  const read = spyOn(database.getToolDetails, 'invoke').mockRejectedValue(new Error('File payload access must remain unused'));
+  restore = () => read.mockRestore();
+  const view = show(fileRun([
+    file('write', 'write', [{ path: '/workspace/src/app.ts' }]),
+    file('patch', 'patch', [{ path: '/workspace/src/app.ts', added_lines: 8, removed_lines: 3 }]),
+  ]));
+  fireEvent.click(view.getByRole('button', { name: 'Edited 1 file' }));
+  expect(view.getAllByRole('listitem')).toHaveLength(1);
+  expect(view.getByRole('listitem').textContent).toContain('src/app.ts');
+  expect(Boolean(view.container.querySelector('.turn-file-activity__changes'))).toBe(false);
+  expect(read).not.toHaveBeenCalled();
+});
+
+test('failed file operations show targets and the public error without applied-change claims or payload requests', () => {
+  const read = spyOn(database.getToolDetails, 'invoke').mockRejectedValue(new Error('File payload access must remain unused'));
+  restore = () => read.mockRestore();
+  const view = show(file('failed-patch', 'patch', [{ path: '/workspace/src/app.ts', added_lines: 8, removed_lines: 3 }],
+    { status: 'error', error: 'The requested patch was rejected.' }));
+  fireEvent.click(view.getByRole('button'));
+  expect(view.getByRole('listitem').textContent).toBe('Target src/app.ts');
+  expect(view.container.textContent).toContain('The requested patch was rejected.');
+  expect(Boolean(view.container.querySelector('.turn-file-activity__changes'))).toBe(false);
+  expect(Boolean(view.container.querySelector('[data-tool-detail-section]'))).toBe(false);
+  expect(read).not.toHaveBeenCalled();
+});
+
+test('file names without verified target metadata do not regain a raw payload inspector', () => {
+  const read = spyOn(database.getToolDetails, 'invoke').mockRejectedValue(new Error('File payload access must remain unused'));
   restore = () => read.mockRestore();
   const view = show(tool({ name: 'read_file', description: '/workspace/src/app.ts' }));
   expect(view.container.textContent).toContain('app.ts');
-  expect(view.container.textContent).not.toContain('file body');
+  expect(view.queryByRole('button')).toBeNull();
+  expect(Boolean(view.container.querySelector('pre'))).toBe(false);
   expect(read).not.toHaveBeenCalled();
+});
+
+test('native failed completion reports show only the public error, without repeated summary or a payload request', () => {
+  const read = spyOn(database.getToolDetails, 'invoke').mockRejectedValue(new Error('Completion payload access must remain unused'));
+  restore = () => read.mockRestore();
+  const view = show(tool({ name: 'report_completion', status: 'error', error: 'Completion review rejected.', description: 'DUPLICATE FINAL SUMMARY' }));
   fireEvent.click(view.getByRole('button'));
-  await waitFor(() => expect(view.container.textContent).toContain('file body'));
+  expect(view.container.textContent).toContain('Completion review rejected.');
+  expect(view.container.textContent).not.toContain('DUPLICATE FINAL SUMMARY');
+  expect(Boolean(view.container.querySelector('[data-tool-detail-section]'))).toBe(false);
+  expect(read).not.toHaveBeenCalled();
+});
+
+test('a typed external tool sharing the completion name retains its original arguments and output inspector', async () => {
+  const read = spyOn(database.getToolDetails, 'invoke').mockImplementation(async request => page(request,
+    { format: 'json', content: request.section === 'arguments' ? '{"value":"ordinary input"}' : '{"value":"ordinary result"}' }));
+  restore = () => read.mockRestore();
+  const view = show(tool({ name: 'report_completion', capability_id: 'external', action_id: 'external/report' }));
+  fireEvent.click(view.getByRole('button'));
+  await waitFor(() => expect(view.container.textContent).toContain('ordinary result'));
+  expect(view.container.textContent).toContain('ordinary input');
+  expect(view.container.querySelectorAll('[data-tool-detail-section]')).toHaveLength(2);
+  expect(read).toHaveBeenCalledTimes(2);
 });
 
 test('a late trusted result supersedes an interrupted observation without inferring success from output JSON', async () => {
@@ -77,6 +179,8 @@ test('a late trusted result supersedes an interrupted observation without inferr
   fireEvent.click(view.getByRole('button'));
   await waitFor(() => expect(view.container.textContent).toContain('"success": false'));
   expect(read.mock.calls[0][0].through_seq).toBe(8);
+  expect(read).toHaveBeenCalledTimes(2);
+  expect(view.container.querySelectorAll('[data-tool-detail-section]')).toHaveLength(2);
   expect(view.container.querySelector('.turn-process-trace__row--failed')).toBeNull();
 });
 

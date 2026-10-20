@@ -15,6 +15,7 @@ import { ToolDetailsProvider } from '@/renderer/pages/conversation/Messages/comp
 import DelegationRecordRow from '@/renderer/pages/conversation/Messages/components/DelegationRecordRow';
 import { useDelegationRecords } from '@/renderer/pages/conversation/Messages/useDelegationRecords';
 import { insertDelegationRecords, withoutRecordedDelegationCalls } from '@/renderer/pages/conversation/Messages/delegationProcessModel';
+import { compactFileActivityItems } from '@/renderer/pages/conversation/Messages/fileActivityModel';
 import { getProcessItemState } from '@/renderer/pages/conversation/Messages/turnProcessState';
 import { creativeAcceptedTurnOwners, creativeMessageTurn, creativeProcessOwnerIds, creativeProcessSegments } from './canonicalProcessModel';
 import type { ProcessSegmentMessage } from '@/renderer/pages/conversation/Messages/processSegments';
@@ -96,10 +97,10 @@ function ProcessProjection({ conversationId, activeTurnId, activeRequestMessageI
       if (!turn) return null;
       const records = delegation.records.filter(record => acceptedOwners.some(owner => owner.role === 'user' && owner.turnId === turn
         && (owner.sourceMessageIds?.includes(record.source.source_message_id) || owner.turnId === record.source.source_message_id)));
-      const items = insertDelegationRecords(segments.filter(source => source.turn_id === turn).flatMap(source => {
+      const items = compactFileActivityItems(insertDelegationRecords(segments.filter(source => source.turn_id === turn).flatMap(source => {
         if (source.type !== 'tool_call' && source.type !== 'tool_group') return [source];
         return withoutRecordedDelegationCalls([source], records).map(tool => ({ ...source, ...tool } as ProcessSegmentMessage));
-      }), records);
+      }), records));
       if (!items.length) return null;
       const summary = canonical.find(source => source.turn_id === turn && source.type === 'agent_status' && source.content.turn_summary);
       const timing = summary?.type === 'agent_status' ? summary.content : undefined;

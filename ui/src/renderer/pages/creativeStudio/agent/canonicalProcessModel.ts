@@ -2,7 +2,7 @@ import type { TMessage } from '@/common/chat/chatLib';
 import type { MessageId } from '@/common/types/ids';
 import type { CreativeStudioAgentMessage } from './types';
 import { projectProcessSegments, orderProcessSegments, type ProcessSegmentMessage } from '@/renderer/pages/conversation/Messages/processSegments';
-import { isInternalInstructionToolCall, isTaskPlanControlReceipt } from '@/renderer/pages/conversation/Messages/toolMessageVisibility';
+import { isInternalInstructionToolCall, isTaskControlReceipt } from '@/renderer/pages/conversation/Messages/toolMessageVisibility';
 import { assignTurnIdsFromUserRequests, type TurnDisclosureInputItem } from '@/renderer/pages/conversation/Messages/turnDisclosureModel';
 
 /** Canvas history proves public prose identity only. Process ownership comes
@@ -40,6 +40,6 @@ export function creativeProcessSegments(canonical: TMessage[], visibleReasoning:
   // Public Canvas prompts and planning responses keep their existing product
   // projection. Never render canonical model-input/planning JSON as prose here.
   return orderProcessSegments(projectProcessSegments(canonical, new Set()).filter(message =>
-    !message.hidden && !isInternalInstructionToolCall(message) && !isTaskPlanControlReceipt(message)
+    !message.hidden && !isInternalInstructionToolCall(message) && !isTaskControlReceipt(message)
     && (message.type === 'tool_call' || message.type === 'tool_group' || (visibleReasoning && message.type === 'thinking'))));
 }

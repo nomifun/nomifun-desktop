@@ -10,6 +10,8 @@ import {
 } from '@/common/chat/normalizeToolCall';
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import { formatToolPresentationLabel, resolveToolPresentation } from '@/common/chat/toolPresentation';
+import type { ToolPresentation } from '@/common/chat/toolPresentation';
+import type { ToolFileSummary } from '@/common/chat/fileSummary';
 
 export type ToolReceiptAction =
   | 'read_files'
@@ -26,6 +28,8 @@ export interface ToolReceiptRow {
   action: ToolReceiptAction;
   state: TurnDisclosureProcessState;
   title: string;
+  detailPolicy: ToolPresentation['detailPolicy'];
+  fileSummary?: ToolFileSummary;
   target?: string;
   error?: string;
   skipped?: boolean;
@@ -56,7 +60,7 @@ const classifyToolForReceipt = (tool: NormalizedToolCall): ToolReceiptAction => 
 };
 
 const getFileTarget = (tool: NormalizedToolCall): string | undefined => {
-  const description = compactToolText(tool.description);
+  const description = tool.description;
   return description && description !== tool.name ? description : undefined;
 };
 
@@ -91,12 +95,14 @@ export const buildToolReceiptRows = (tools: NormalizedToolCall[], language = 'en
     const action = classifyToolForReceipt(tool);
     const presentation = resolveToolPresentation(tool, language);
     const title = presentation.title;
-    const target = getToolReceiptDetailTarget(tool, action, language);
+    const target = presentation.detailPolicy === 'receipt' ? undefined : getToolReceiptDetailTarget(tool, action, language);
     return {
       key: tool.key,
       action,
       state: getToolProcessState(tool),
       title,
+      detailPolicy: presentation.detailPolicy,
+      ...(tool.fileSummary ? { fileSummary: tool.fileSummary } : {}),
       ...(target ? { target } : {}),
       ...(tool.error ? { error: tool.error } : {}),
       ...(tool.skipped ? { skipped: true } : {}),

@@ -51,6 +51,8 @@ pub(crate) fn project_tool_event(calls:&mut BTreeMap<String,PendingToolProjectio
                         call.description = nomifun_engine_core::tool_display_target(
                             Some(capability_id.as_ref()), Some(action_id.as_ref()), &call.name, &pending.arguments);
                         call.identity.display.operation = nomifun_engine_core::tool_display_operation(Some(capability_id.as_ref()), &pending.arguments);
+                        call.identity.display.file_summary = nomifun_engine_core::ToolFileProjection::from_call(
+                            Some(capability_id.as_ref()), Some(action_id.as_ref()), &pending.arguments).map(|projection| projection.summary());
                         call.clone()
                     })
             }
@@ -86,6 +88,9 @@ pub(crate) fn project_tool_event(calls:&mut BTreeMap<String,PendingToolProjectio
                 call.identity.display = nomifun_engine_core::tool_result_display(
                     call.identity.capability_id.as_deref(), call.identity.action_id.as_deref(), &result);
                 call.identity.display.operation = operation;
+                call.identity.display.file_summary = nomifun_engine_core::ToolFileProjection::from_call(
+                    call.identity.capability_id.as_deref(), call.identity.action_id.as_deref(), &pending.arguments)
+                    .map(|projection| projection.settled(&result, runtime_hold.is_some()));
                 if call.identity.runtime_hold.is_some() || call.identity.permission_required.is_some() { call.identity.display.error = None; }
                 if call.identity.display.cancelled { call.status = ToolCallStatus::Canceled; }
                 call.identity.display.denied_stop_conversation_id = nomifun_engine_core::tool_denied_stop_target(
@@ -125,6 +130,32 @@ mod tests {
     use super::*;
     use nomifun_agent_runtime::AgentToolResult;
     const ASSET:&str="0190f5fe-7c00-7a00-8000-000000000081";
+    #[test]
+    fn live_file_summary_uses_original_targets_and_only_successful_native_patch_counts() {
+        let arguments=serde_json::json!({"files":[{"path":" src/one  two.rs ","hunks":[{"lines":[
+            {"kind":"remove","text":"PRIVATE_OLD"},{"kind":"add","text":"PRIVATE_NEW"}]}]}]});
+        let output=serde_json::json!({"file_count":1,"files":[{"path":"src/one  two.rs","hunks_applied":1,
+            "bytes_before":12,"bytes_after":12,"created":false}]}).to_string();
+        for (capability, error, hold, counts) in [
+            ("workspace.files",false,None,true), ("workspace.files",true,None,false),
+            ("workspace.files",false,Some(nomifun_agent_contracts::RuntimeToolHoldReason::ArgumentsRejected),false),
+            ("third.party",false,None,false),
+        ] {
+            let mut calls=BTreeMap::new();
+            project_tool_event(&mut calls,AgentEngineEvent::ToolCallCompleted {step:1,call:nomifun_chat_model_broker::ChatToolCall {
+                call_id:"files".into(),name:"apply_patch".into(),arguments:nomifun_agent_contracts::StrictJsonValue(arguments.clone()),provider_metadata:None}},Some(1)).unwrap();
+            let start=project_tool_event(&mut calls,AgentEngineEvent::ToolStarted {step:1,call_id:"files".into(),
+                capability_id:capability.into(),action_id:"workspace.files/patch".into()},Some(2)).unwrap().unwrap();
+            assert_eq!(start.identity.display.file_summary.is_some(),capability=="workspace.files");
+            assert!(start.identity.display.file_summary.as_ref().is_none_or(|summary|summary.files[0].added_lines.is_none()));
+            let final_call=project_tool_event(&mut calls,AgentEngineEvent::ToolCompleted {step:1,runtime_hold:hold,
+                result:AgentToolResult::text("files".into(),output.clone(),error)},Some(3)).unwrap().unwrap();
+            assert_eq!(final_call.identity.display.file_summary.as_ref().and_then(|summary|summary.files[0].added_lines),counts.then_some(1));
+            if let Some(summary)=&final_call.identity.display.file_summary {assert_eq!(summary.files[0].path," src/one  two.rs ");}
+            let encoded=serde_json::to_string(&final_call).unwrap();
+            assert!(!encoded.contains("PRIVATE_"));assert!(!encoded.contains("hunks_applied"));
+        }
+    }
     fn observations(capability:&str,error:bool)->Vec<(u64,AgentEngineEvent)> {
         vec![(1,AgentEngineEvent::ToolCallCompleted {step:1,call:nomifun_chat_model_broker::ChatToolCall {call_id:"media".into(),name:"generate_media".into(),
             arguments:nomifun_agent_contracts::StrictJsonValue(serde_json::json!({"prompt":"PRIVATE_PROMPT"})),provider_metadata:None}}),

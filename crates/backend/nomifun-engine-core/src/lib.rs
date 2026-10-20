@@ -13,6 +13,8 @@ mod system_process;
 mod system_permission;
 mod tool;
 mod tool_display;
+mod tool_file_display;
+pub use tool_file_display::ToolFileProjection;
 mod tool_schema;
 pub use tool_schema::model_tool_schema;
 pub use tool_display::{ToolDisplayFacts, ToolBoundedResult, WrittenKnowledgeFile, tool_display_target, tool_result_target, tool_result_display, tool_display_operation, tool_denied_stop_target};

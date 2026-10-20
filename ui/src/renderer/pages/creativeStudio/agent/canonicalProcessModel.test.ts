@@ -64,4 +64,23 @@ describe('Canvas canonical process projection', () => {
     expect(JSON.stringify(creativeProcessSegments(original, true))).not.toContain('secret_context');
     expect(original[0]).toBe(rawPlanning);
   });
+
+  test('completion receipt visibility matches chat without hiding same-name tools or the final response', () => {
+    const makeReport = (id: string, extra: object = {}) => source(id, 'tool_call', {
+      call_id: id, name: 'report_completion', status: 'completed', result_seq: 12, ...extra,
+    });
+    const finalText = 'report_completion remains part of this final answer';
+    const final = source(answer, 'text', { content: finalText });
+    const confirmed = makeReport('confirmed', { description: finalText });
+    const pending = makeReport('pending', { result_seq: undefined });
+    const failed = makeReport('failed', { status: 'error', error: 'Rejected account' });
+    const held = makeReport('held', { runtime_hold: 'arguments_rejected' });
+    const external = makeReport('external', { capability_id: 'third.party', action_id: 'third.party/report' });
+    const original = [confirmed, pending, failed, held, external, final];
+    const snapshot = JSON.stringify(original);
+    expect(creativeProcessSegments(original, true).map(message => message.id)).toEqual(['pending', 'failed', 'held', 'external']);
+    expect(creativeProcessSegments([confirmed, final], true)).toEqual([]);
+    expect(JSON.stringify(original)).toBe(snapshot);
+    expect(creativeMessageTurn({ id: answer, role: 'assistant', status: 'complete', text: 'Final response' }, original)).toBe(first);
+  });
 });

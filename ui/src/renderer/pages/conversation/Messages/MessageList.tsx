@@ -54,6 +54,7 @@ import DelegationRecordRow from './components/DelegationRecordRow';
 import { useDelegationRecords } from './useDelegationRecords';
 import { isTerminalExecutionStatus } from '../execution/executionStatusMeta';
 import { insertDelegationRecords, withoutRecordedDelegationCalls, type DelegationProcessItem } from './delegationProcessModel';
+import { compactFileActivityItems } from './fileActivityModel';
 import { isContextCompressionTip } from './processTipModel';
 import {
   selectJournalProcessItems,
@@ -83,7 +84,7 @@ import TurnDeliverablesCard from './components/TurnDeliverablesCard';
 import KnowledgeWritebackNotice from './components/KnowledgeWritebackNotice';
 import { knowledgeWritebackFromMessage, mergeKnowledgeWritebackNotices, type KnowledgeWritebackNotice as KnowledgeNotice } from './knowledgeWritebackNoticeModel';
 import { useTurnFiles } from './useTurnFiles';
-import { isInternalInstructionToolCall, isTaskPlanControlReceipt } from './toolMessageVisibility';
+import { isInternalInstructionToolCall, isTaskControlReceipt } from './toolMessageVisibility';
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import { creationTaskPlacementAfterIndices } from './creationTaskPlacement';
 import { useExecutionSafe } from '../execution/ExecutionContext';
@@ -622,7 +623,7 @@ const MessageList: React.FC<{
     }
     for (const outcome of outcomes.values()) if ('message_ids' in outcome) for (const id of outcome.message_ids) publicSources.add(id);
     for (const message of projectProcessSegments(journalSources, publicSources)) {
-      if (message.hidden || isInternalInstructionToolCall(message) || isTaskPlanControlReceipt(message)) continue;
+      if (message.hidden || isInternalInstructionToolCall(message) || isTaskControlReceipt(message)) continue;
       if (message.type === 'agent_status' && ['connecting', 'connected', 'authenticated', 'session_active'].includes(message.content.status)) continue;
       if (message.type === 'thinking' && !thinkingDisplay.visible) continue;
       if (message.type === 'tool_call' || message.type === 'tool_group') {
@@ -1212,11 +1213,11 @@ const MessageList: React.FC<{
     const turnRecords = delegationRecords.records.filter(record => (record.source.source_message_id === conversationContext?.activeRequestMessageId && item.msg_id === conversationContext?.activeTurnId)
       || delegationOwners.some(owner => owner.role === 'user' && owner.turnId === item.msg_id
         && (owner.sourceMessageIds?.includes(record.source.source_message_id) || owner.turnId === record.source.source_message_id)));
-    const visibleProcessItems = insertDelegationRecords(canonicalProcessItems.flatMap((processItem): IRenderableItem[] => {
+    const visibleProcessItems = compactFileActivityItems(insertDelegationRecords(canonicalProcessItems.flatMap((processItem): IRenderableItem[] => {
       if (processItem.type !== 'tool_summary') return [processItem];
       const messages = withoutRecordedDelegationCalls(processItem.messages, turnRecords);
       return messages.length ? [{ ...processItem, messages }] : [];
-    }), turnRecords);
+    }), turnRecords));
     const renderJournalProcessItem = (processItem: DisplayProcessItem) => {
       if (processItem.type === 'delegation_record') return <DelegationRecordRow records={processItem.records} />;
       const processState = getDisclosureProcessItemState(processItem);

@@ -24,6 +24,8 @@ import MessageThinking from './MessageThinking';
 import ConversationProse from './ConversationProse';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
 import { buildToolReceiptRows, type ToolReceiptRow } from './toolReceiptModel';
+import FileActivitySummary, { FileActivityList } from './FileActivitySummary';
+import { isConfirmedFileActivity } from '../fileActivityModel';
 
 type ToolProcessMessage = IMessageToolGroup | IMessageToolCall;
 export type ProcessTraceRenderableItem = TMessage | {
@@ -111,14 +113,15 @@ const DetailSection: React.FC<{ label: string; value?: string }> = ({ label, val
     <pre className='turn-process-trace-detail__content'>{value}</pre>
   </div> : null;
 
-type ToolObservationRow = ToolReceiptRow & { observationUnconfirmed?: boolean; detailSource?: ToolDetailIdentity };
+type ToolObservationRow = ToolReceiptRow & { observationUnconfirmed?: boolean; detailSource?: ToolDetailIdentity; confirmedFile?: boolean; fileGroupId?: string };
 
 const ToolTraceRow: React.FC<{ row: ToolObservationRow; workspaceRoots: string[] }> = ({ row, workspaceRoots }) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const parentVisible = useContext(ProcessDetailsVisibilityContext);
   const detailId = useId();
-  const hasDetail = Boolean(row.detailSource || row.error);
+  const hasPayload = row.detailPolicy === 'payload' && Boolean(row.detailSource);
+  const hasDetail = Boolean(hasPayload || row.error || row.detailPolicy === 'files' && row.fileSummary);
   const label = row.observationUnconfirmed
     ? `${row.target ?? row.title} · ${t('messages.toolResultUnconfirmed')}`
     : formatToolReceiptDetailLabel(row, t, workspaceRoots);
@@ -141,7 +144,9 @@ const ToolTraceRow: React.FC<{ row: ToolObservationRow; workspaceRoots: string[]
     {expanded && parentVisible && hasDetail && <div id={detailId} className='turn-process-trace-detail'>
       {row.observationUnconfirmed && <div className='turn-process-trace-detail__label'>{t('messages.toolResultUnconfirmed')}</div>}
       <DetailSection label={t('messages.toolDetailError')} value={row.error} />
-      {row.detailSource && <ToolDetails source={row.detailSource} />}
+      {row.detailPolicy === 'files' && row.fileSummary && <FileActivityList items={[{ key: row.key, summary: row.fileSummary }]}
+        workspaceRoots={workspaceRoots} confirmed={row.confirmedFile === true} />}
+      {hasPayload && row.detailSource && <ToolDetails source={row.detailSource} />}
     </div>}
   </div>;
 };
@@ -158,11 +163,23 @@ const ToolProcessTraceRows: React.FC<{ messages: ToolProcessMessage[]; workspace
       ...(source.type === 'tool_call' && source.content.timeline ? { through_seq: Math.max(source.content.timeline.through_seq, source.content.result_seq ?? 0) } : {}),
       ...(source.type === 'tool_call' && source.content.result_seq !== undefined ? { expected_result_seq: source.content.result_seq } : {}),
     } : undefined;
-    const view = { ...row, detailSource };
+    const view = { ...row, detailSource, confirmedFile: source?.type === 'tool_call' && isConfirmedFileActivity(source),
+      fileGroupId: source?.type === 'tool_call' ? source.content.timeline?.segments.find(segment => segment.kind === 'tool' && segment.call_id === row.key)?.group_id : undefined };
     return observationUnconfirmed ? { ...view, state: 'completed', observationUnconfirmed: true }
       : stateOverride && row.state === 'running' ? { ...view, state: stateOverride } : view;
   }), [language, messages, stateOverride]);
-  return <div className='turn-process-trace'>{rows.map(row => <ToolTraceRow key={row.key} row={row} workspaceRoots={workspaceRoots} />)}</div>;
+  const entries: Array<ToolObservationRow | { key: string; files: ToolObservationRow[] }> = [];
+  for (const row of rows) {
+    const previous = entries.at(-1);
+    if (row.confirmedFile && row.fileSummary) {
+      if (previous && 'files' in previous && previous.files[0].detailSource?.conversation_id === row.detailSource?.conversation_id
+        && previous.files[0].detailSource?.turn_id === row.detailSource?.turn_id && previous.files[0].fileGroupId === row.fileGroupId) previous.files.push(row);
+      else entries.push({ key: row.key, files: [row] });
+    } else entries.push(row);
+  }
+  return <div className='turn-process-trace'>{entries.map(entry => 'files' in entry
+    ? <FileActivitySummary key={entry.key} items={entry.files.flatMap(row => row.fileSummary ? [{ key: row.key, summary: row.fileSummary }] : [])} workspaceRoots={workspaceRoots} />
+    : <ToolTraceRow key={entry.key} row={entry} workspaceRoots={workspaceRoots} />)}</div>;
 };
 
 const ProcessTraceItem: React.FC<{ item: ProcessTraceRenderableItem; workspaceRoots?: string[];

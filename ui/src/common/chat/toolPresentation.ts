@@ -14,11 +14,17 @@ export interface ToolPresentation {
   target?: string;
   source?: string;
   receiptAction?: string;
+  /** Which read-only detail the conversation can show for this invocation. */
+  detailPolicy: 'payload' | 'files' | 'receipt';
   /** Exact diagnostics are kept apart from the translated title. */
   name: string;
   capabilityId?: string;
   actionId?: string;
 }
+
+/** The Runtime reserves this name; explicit host/external identities remain tools. */
+export const isNativeCompletionReport = (tool: Pick<ToolPresentationInput, 'name' | 'capabilityId' | 'actionId' | 'origin'>): boolean =>
+  tool.name === 'report_completion' && tool.capabilityId === undefined && tool.actionId === undefined && !tool.origin;
 
 const byName = new Map(catalogue.map((entry) => [entry.name, entry]));
 const byAction = new Map(catalogue.filter((entry) => 'action_id' in entry)
@@ -38,8 +44,9 @@ const humanize = (value: string): string => {
 /** A view of typed facts; never a router, permission check, or retry identity. */
 export const resolveToolPresentation = (tool: ToolPresentationInput, language = 'en-US'): ToolPresentation => {
   const chinese = language.toLowerCase().startsWith('zh');
-  const entry = tool.origin ? undefined : tool.capabilityId && tool.actionId
-    ? byAction.get(`${tool.capabilityId}\0${tool.actionId}`)
+  const explicitIdentity = tool.capabilityId !== undefined || tool.actionId !== undefined;
+  const entry = tool.origin ? undefined : explicitIdentity
+    ? tool.capabilityId && tool.actionId ? byAction.get(`${tool.capabilityId}\0${tool.actionId}`) : undefined
     : byName.get(tool.name);
   let title = entry?.titles[chinese ? 'zh-CN' : 'en-US'];
   let source: string | undefined;
@@ -66,11 +73,15 @@ export const resolveToolPresentation = (tool: ToolPresentationInput, language = 
   const rawDescription = toDisplayText(tool.description).trim();
   const description = rawDescription && ![tool.name, title].includes(rawDescription)
     ? compact(rawDescription) : undefined;
+  const receiptAction = entry && 'receipt_action' in entry ? entry.receipt_action : undefined;
+  const detailPolicy = isNativeCompletionReport(tool) ? 'receipt'
+    : receiptAction === 'read_files' || receiptAction === 'edit_files'
+      || tool.capabilityId === 'ssh' && (tool.actionId === 'ssh/fs.read' || tool.actionId === 'ssh/fs.write') ? 'files' : 'payload';
   return {
-    title, name: tool.name,
+    title, name: tool.name, detailPolicy,
     ...(description ? { target: description } : {}),
     ...(source ? { source } : {}),
-    ...(entry && 'receipt_action' in entry ? { receiptAction: entry.receipt_action } : {}),
+    ...(receiptAction ? { receiptAction } : {}),
     ...(tool.capabilityId ? { capabilityId: tool.capabilityId } : {}),
     ...(tool.actionId ? { actionId: tool.actionId } : {}),
   };

@@ -13,6 +13,29 @@
   "loadEarlierReply": "Load earlier messages",
   "toolDetailError": "Error",
   "toolResultUnconfirmed": "Result unconfirmed",
+  "fileActivity": {
+    "separator": ", ",
+    "target": "Target",
+    "action": {
+      "read": "Read",
+      "edit": "Edited",
+      "delete": "Deleted",
+      "rename": "Renamed",
+      "instructions": "Read directory instructions"
+    },
+    "count": {
+      "read_one": "Read {{count}} file",
+      "read_other": "Read {{count}} files",
+      "edit_one": "Edited {{count}} file",
+      "edit_other": "Edited {{count}} files",
+      "delete_one": "Deleted {{count}} file",
+      "delete_other": "Deleted {{count}} files",
+      "rename_one": "Renamed {{count}} file",
+      "rename_other": "Renamed {{count}} files",
+      "instructions_one": "Read {{count}} directory instruction scope",
+      "instructions_other": "Read {{count}} directory instruction scopes"
+    }
+  },
   "delegation": {
     "action": {
       "delegated": "Delegate subagent",

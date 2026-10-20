@@ -12,6 +12,7 @@ import messages from '@/renderer/services/i18n/locales/en-US/messages.json';
 import CreativeStudioAgentMessages from './CreativeStudioAgentMessages';
 import { CreativeStudioCanonicalProcessProvider } from './CreativeStudioCanonicalProcess';
 import { makeDelegationRecord, makeStep } from '../../../../../test/fixtures/conversationDelegation';
+import { useMessageList } from '@/renderer/pages/conversation/Messages/hooks';
 
 afterEach(() => { cleanup(); mock.restore(); });
 
@@ -27,6 +28,7 @@ test.each([false, true])('Canvas reopens one canonical process with batched dele
   const mapper = createStoredMessageMapper(() => crypto.randomUUID());
   const row = (id: typeof root, type: TMessage['type'], content: object, position = 'left') => mapper({
     message_id: id, msg_id: id, conversation_id: session, type, position, hidden: false, created_at: 100,
+    ...(type === 'tool_call' ? { status: 'finish' } : {}),
     content: { ...content, turn_id: root },
   });
   const canonical = [
@@ -34,6 +36,8 @@ test.each([false, true])('Canvas reopens one canonical process with batched dele
     row(tool, 'tool_call', { call_id: 'canvas-command', name: 'start_process', capability_id: 'workspace.process', action_id: 'workspace.process/start',
       description: 'bun test', status: 'completed', result_seq: 12,
       timeline: { through_seq: 20, segments: [{ segment_id: 'call-event', group_id: `process:${root}`, first_seq: 10, last_seq: 12, kind: 'tool', state: 'completed', call_id: 'canvas-command' }] } }),
+    row(parseMessageId('0190f5fe-7c00-7a00-8000-000000000707'), 'tool_call', {
+      call_id: 'canvas-report', name: 'report_completion', description: 'Canvas result', status: 'completed', result_seq: 18 }),
     row(answer, 'text', { content: 'Canvas result' }), row(second, 'text', { content: 'Second result' }),
     row(summary, 'agent_status', { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed', started_at_ms: 1000, finished_at_ms: 2000 }),
   ];
@@ -73,6 +77,7 @@ test.each([false, true])('Canvas reopens one canonical process with batched dele
     expect(details.mock.calls).toHaveLength(visit * 2);
     expect(page.container.textContent).not.toContain('secret_planning_input');
     fireEvent.click(page.getByRole('button', { name: instance.t('messages.turnProcess.expand') }));
+    expect(Boolean(page.container.querySelector('[data-tool-call-id="canvas-report"]'))).toBe(false);
     fireEvent.click(await page.findByRole('button', { name: /bun test/ }));
     await waitFor(() => expect(page.container.textContent).toContain('verified output'));
     expect(details.mock.calls).toHaveLength((visit + 1) * 2);
@@ -91,4 +96,48 @@ test.each([false, true])('Canvas reopens one canonical process with batched dele
     }
     page.unmount();
   }
+});
+
+test('Canvas with only a confirmed completion receipt keeps its public answer without an empty process', async () => {
+  const session = parseConversationId('0190f5fe-7c00-7a00-8000-000000000721');
+  const root = parseMessageId('0190f5fe-7c00-7a00-8000-000000000722');
+  const answer = parseMessageId('0190f5fe-7c00-7a00-8000-000000000723');
+  const instance = createInstance();
+  await instance.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { messages } } } });
+  const mapper = createStoredMessageMapper(() => crypto.randomUUID());
+  const row = (id: string, type: TMessage['type'], content: object, position = 'left') => mapper({
+    message_id: id, msg_id: id, conversation_id: session, type, position, hidden: false, created_at: 100,
+    ...(type === 'tool_call' ? { status: 'finish' } : {}),
+    content: { ...content, turn_id: root },
+  });
+  const text = 'The report_completion result is delivered once.';
+  const canonical = [row(root, 'text', { content: 'Complete the requested work.' }, 'right'),
+    row('0190f5fe-7c00-7a00-8000-000000000724', 'tool_call', {
+      name: 'report_completion', call_id: 'only-report', status: 'completed', result_seq: 12, description: text }),
+    row(answer, 'text', { content: text }),
+    row('0190f5fe-7c00-7a00-8000-000000000725', 'agent_status', { backend: 'nomi', status: 'prepared', turn_summary: true,
+      turn_state: 'completed', started_at_ms: 1000, finished_at_ms: 2000 })];
+  spyOn(configService, 'get').mockImplementation(() => undefined);
+  spyOn(configService, 'subscribe').mockReturnValue(() => {});
+  for (const name of ['responseStream', 'turnStarted', 'turnCompleted', 'turnPaused', 'userCreated', 'messageAnnotated', 'reconnected', 'listChanged'] as const)
+    spyOn(ipcBridge.conversation[name], 'on').mockReturnValue(() => {});
+  spyOn(ipcBridge.agentPlatform.sessions.onAgentChanged, 'on').mockReturnValue(() => {});
+  spyOn(ipcBridge.agentExecution.events.changed, 'on').mockReturnValue(() => {});
+  spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ id: session, type: 'nomi', status: 'finished', extra: {},
+    runtime: { state: 'idle', is_processing: false, can_send_message: true } } as TChatConversation);
+  const history = spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockResolvedValue({ items: [...canonical].reverse(), total: canonical.length, has_more: false });
+  spyOn(ipcBridge.database.getDelegationRecords, 'invoke').mockResolvedValue({ records: [], through_session_seq: 20 });
+  const details = spyOn(ipcBridge.database.getToolDetails, 'invoke').mockRejectedValue(new Error('Completion payload must not be requested'));
+  const Loaded = () => <output data-testid='loaded-canonical-count'>{useMessageList().length}</output>;
+  const page = render(<I18nextProvider i18n={instance}><CreativeStudioCanonicalProcessProvider conversationId={session}>
+    <Loaded />
+    <CreativeStudioAgentMessages conversationId={session} messages={[{ id: answer, role: 'assistant', status: 'complete', text }]}
+      proposals={[]} proposalApplyDisabled={false} onApplyProposal={() => {}} />
+  </CreativeStudioCanonicalProcessProvider></I18nextProvider>);
+  await waitFor(() => expect(history).toHaveBeenCalled());
+  await waitFor(() => expect(page.getByTestId('loaded-canonical-count').textContent).toBe(String(canonical.length)));
+  await waitFor(() => expect(page.getAllByText(text)).toHaveLength(1));
+  expect(Boolean(page.container.querySelector('.turn-process-disclosure'))).toBe(false);
+  expect(Boolean(page.container.querySelector('[data-tool-call-id="only-report"]'))).toBe(false);
+  expect(details).not.toHaveBeenCalled();
 });

@@ -36,6 +36,7 @@ import type { MessageTimeline } from '../protocolBindings/MessageTimeline';
 import type { RuntimeToolHoldReason } from '../protocolBindings/RuntimeToolHoldReason';
 import { normalizeMessageTimeline, preferMessageTimeline } from './messageTimeline';
 import { normalizeInputDelivery, preferInputDelivery, type InputDelivery } from './inputDelivery';
+import { normalizeToolFileSummary, withoutFileChanges, type ToolFileSummary } from './fileSummary';
 
 export { joinLocalPath as joinPath } from '../utils/localPath';
 
@@ -277,6 +278,8 @@ export type IMessageToolCall = IMessage<
     result_seq?: number;
     status?: 'running' | 'completed' | 'error' | 'canceled';
     description?: string;
+    /** Bounded paths and verified patch counts, without file contents. */
+    file_summary?: ToolFileSummary;
     result_asset_ids?: string[];
     operation?: string;
     written_knowledge_file?: { kb_id: string; rel_path: string };
@@ -322,13 +325,14 @@ export const mergeToolCallContent = (
     bounded_result: evidence.bounded_result,
     non_fatal_failure: evidence.non_fatal_failure,
     written_knowledge_file: evidence.written_knowledge_file,
+    file_summary: evidence.file_summary ?? withoutFileChanges(existing.file_summary),
   };
 
   if (existing.status === 'error' || incoming.status === 'error') {
-    return { ...merged, status: 'error', artifacts: [] };
+    return { ...merged, status: 'error', artifacts: [], file_summary: withoutFileChanges(merged.file_summary) };
   }
   if (existing.status === 'canceled' || incoming.status === 'canceled') {
-    return { ...merged, status: 'canceled', artifacts: [] };
+    return { ...merged, status: 'canceled', artifacts: [], file_summary: withoutFileChanges(merged.file_summary) };
   }
   if (existing.status === 'completed' && incoming.status !== 'completed') {
     return {
@@ -917,6 +921,8 @@ export const normalizeToolCallContent = (
     ...(typeof data.capability_id === 'string' ? { capability_id: data.capability_id } : {}),
     ...(typeof data.action_id === 'string' ? { action_id: data.action_id } : {}),
     ...(typeof data.description === 'string' ? { description: data.description } : {}),
+    file_summary: normalizeToolFileSummary(data.file_summary, data.capability_id, data.action_id,
+      status === 'completed' && Number.isSafeInteger(data.result_seq) && Number(data.result_seq) > 0 && !data.runtime_hold && !data.error),
     ...(typeof data.operation === 'string' ? { operation: data.operation } : {}),
     ...(terminalSuccess && isObject(data.written_knowledge_file)
       && typeof data.written_knowledge_file.kb_id === 'string' && typeof data.written_knowledge_file.rel_path === 'string'

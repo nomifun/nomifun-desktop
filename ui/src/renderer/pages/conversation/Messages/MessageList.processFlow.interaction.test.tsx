@@ -67,6 +67,48 @@ beforeEach(() => {
 
 afterEach(() => { cleanup(); restoreListeners(); });
 
+test.each([false, true])('confirmed completion bookkeeping does not duplicate the answer or leave an empty process, readOnly=%j', async readOnly => {
+  const answerId = messageId(991);
+  const blockedId = messageId(992);
+  const finalText = 'The report_completion account retained the requested blocker.';
+  const initial: TMessage[] = [
+    { id: 'completion-request', type: 'text', position: 'right', conversation_id: conversationId,
+      msg_id: turnId, message_id: turnId, created_at: 1, content: { content: 'Report the blocked work.' } },
+    { id: 'completion-receipt', type: 'tool_call', conversation_id: conversationId, turn_id: turnId, created_at: 2,
+      content: { call_id: 'confirmed-report', name: 'report_completion', status: 'completed', result_seq: 12, description: finalText } },
+    { id: 'completion-answer', type: 'text', position: 'left', conversation_id: conversationId, turn_id: turnId,
+      msg_id: answerId, message_id: answerId, created_at: 3, content: { content: finalText } },
+    { id: 'completion-blocked', type: 'tips', conversation_id: conversationId, turn_id: turnId, created_at: 4,
+      msg_id: blockedId, message_id: blockedId,
+      content: { type: 'error', content: '', error: { message: 'The task has blocked work.', code: 'NOMIFUN_TASK_INCOMPLETE',
+        taskIncompleteReason: 'blocked_work', retryable: false } } },
+    { id: 'completion-summary', type: 'agent_status', conversation_id: conversationId, turn_id: turnId, created_at: 5,
+      content: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'failed', started_at_ms: 1000, finished_at_ms: 2000,
+        turn_outcome: { kind: 'failed', message_ids: [answerId, blockedId] } } },
+  ];
+  const snapshot = JSON.stringify(initial);
+  const details = spyOn(database.getToolDetails, 'invoke').mockRejectedValue(new Error('Completion payload must not be requested'));
+  try {
+    const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+      <PreviewProvider persistNamespace={`completion-bookkeeping-${readOnly}`} subscribeGlobalOpen={false}>
+        <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', readOnly, isProcessing: false, isTurnStateHydrated: true }}>
+          <MessageListProvider initialValue={initial}><MessageList /></MessageListProvider>
+        </ConversationProvider>
+      </PreviewProvider>
+    </I18nextProvider></MemoryRouter>);
+    await waitFor(() => expect([...page.container.querySelectorAll('.markdown-shadow')]
+      .filter(node => node.shadowRoot?.textContent?.includes(finalText))).toHaveLength(1));
+    expect(Boolean(page.container.querySelector('[data-tool-call-id="confirmed-report"]'))).toBe(false);
+    expect(Boolean(page.container.querySelector('.turn-process-disclosure__body'))).toBe(false);
+    expect(Boolean(page.container.querySelector('.turn-process-disclosure [aria-expanded]'))).toBe(false);
+    expect(page.container.querySelector('.turn-process-disclosure__header--static')?.textContent).toContain('1s');
+    expect(page.container.querySelector('.message-error-note')?.textContent)
+      .toContain(conversationLocale.agentError.incompleteReasons.blocked_work.title);
+    expect(details).not.toHaveBeenCalled();
+    expect(JSON.stringify(initial)).toBe(snapshot);
+  } finally { details.mockRestore(); }
+});
+
 test('permission recovery stays outside collapsed process, deduplicates retries, and follows exact accepted roots', async () => {
   const requestId = messageId(601);
   const nextRequestId = messageId(602);
@@ -562,7 +604,7 @@ test('waiting for the first response and running a tool call do not add a duplic
   expect(page.queryByTestId('conversation-current-activity')).toBeNull();
 });
 
-test('a completed journal defaults closed and expands its full reasoning and calls without hiding the final reply', () => {
+test('a completed journal preserves reasoning, file diagnostics and the final reply without raw file payloads', () => {
   const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
   const firstCall: IMessageToolCall = { ...base, id: 'first-call', message_id: messageId(3), msg_id: messageId(3), created_at: 3,
     type: 'tool_call', content: { call_id: 'read-1', name: 'read_file', status: 'error', description: 'src/first.ts',
@@ -610,7 +652,7 @@ test('a completed journal defaults closed and expands its full reasoning and cal
   const calls = page.container.querySelectorAll('[data-tool-call-id]');
   expect(Array.from(calls, (call) => call.getAttribute('data-tool-call-id'))).toEqual(['read-1', 'read-2']);
   fireEvent.click(calls[0].querySelector('button')!);
-  expect(calls[1].querySelector('button')?.getAttribute('aria-expanded')).toBe('false');
+  expect(calls[1].querySelector('button')).toBeNull();
   expect(calls[0].textContent).toContain('First attempt failed');
   expect(calls[1].textContent).toContain('first.ts');
   expect(calls[1].textContent).not.toContain('Second attempt result');
@@ -894,6 +936,8 @@ test('flat canonical rows retain identity through model waits, narration and ter
   const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
   const tool: IMessageToolCall = { ...base, id: 'wait-completed-tool', msg_id: messageId(811), type: 'tool_call', created_at: 10,
     content: { call_id: 'wait-read', name: 'read_file', status: 'completed', description: 'source.ts',
+      capability_id: 'workspace.files', action_id: 'workspace.files/read', result_seq: 20,
+      file_summary: { operation: 'read', files: [{ path: 'source.ts' }] },
       timeline: { through_seq: 20, segments: [{ segment_id: 'wait-read-segment', group_id: groupId, first_seq: 10, last_seq: 20,
         kind: 'tool', state: 'completed', call_id: 'wait-read' }] } } };
   const narration: TMessage = { ...base, id: 'wait-narration', msg_id: messageId(813), type: 'text', created_at: 30,
@@ -931,10 +975,14 @@ test('flat canonical rows retain identity through model waits, narration and ter
   const row = page.container.querySelector(`[data-process-group-id="${groupId}"]`)!;
   const toggle = row.querySelector('button')!;
   expect(toggle.getAttribute('aria-expanded')).toBe('false');
-  expect(row.querySelector('[data-tool-call-id="wait-read"] .turn-process-trace__row--completed')).not.toBeNull();
+  expect(row.querySelector('.turn-file-activity')).not.toBeNull();
+  fireEvent.click(toggle);
+  expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  expect(row.textContent).toContain('source.ts');
   fireEvent.click(page.getByRole('button', { name: 'Refresh completed tool' }));
   expect(page.container.querySelector(`[data-process-group-id="${groupId}"]`)).toBe(row);
-  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  expect(database.getToolDetails.invoke).not.toHaveBeenCalled();
   fireEvent.click(page.getByRole('button', { name: 'Deliver phase narration' }));
   expect(page.container.querySelector('.turn-process-group')).toBeNull();
   expect(page.container.querySelector('.turn-process-disclosure--live')).not.toBeNull();

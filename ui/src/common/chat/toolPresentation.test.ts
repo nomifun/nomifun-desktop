@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { normalizeToolCall } from './normalizeToolCall';
-import { formatToolPresentationLabel, resolveToolPresentation } from './toolPresentation';
+import { formatToolPresentationLabel, isNativeCompletionReport, resolveToolPresentation } from './toolPresentation';
 import type { IMessageToolCall } from './chatLib';
 import { parseConversationId } from '../types/ids';
 
@@ -53,5 +53,42 @@ describe('tool presentation', () => {
       .toBe('工具调用');
     expect(resolveToolPresentation({ name: 'plugin__calendar__create_event__0123456789abcdefabcd' }).title)
       .toBe('Create event');
+  });
+
+  test('only the exact reserved completion control gets receipt-only details', () => {
+    expect(isNativeCompletionReport({ name: 'report_completion' })).toBe(true);
+    expect(resolveToolPresentation({ name: 'report_completion', description: 'Duplicate final answer' }).detailPolicy).toBe('receipt');
+    for (const identity of [{ capabilityId: 'external' }, { actionId: 'external/report' }, { capabilityId: '' },
+      { actionId: '' }, { capabilityId: 'external', actionId: 'external/report' },
+      { origin: { kind: 'mcp' as const, name: 'Server', toolName: 'report_completion' } }]) {
+      const input = { name: 'report_completion', ...identity };
+      expect(isNativeCompletionReport(input)).toBe(false);
+      expect(resolveToolPresentation(input).detailPolicy).toBe('payload');
+    }
+    for (const name of ['mcp__server__report_completion__0123456789abcdefabcd', 'plugin__server__report_completion__0123456789abcdefabcd', 'Report_completion']) {
+      expect(isNativeCompletionReport({ name })).toBe(false);
+      expect(resolveToolPresentation({ name }).detailPolicy).toBe('payload');
+    }
+  });
+
+  test('file operations expose lists while command, search and ordinary tools retain payload details', () => {
+    for (const name of ['read_file', 'write_file', 'apply_patch', 'delete_path', 'rename_path']) {
+      expect(resolveToolPresentation({ name }).detailPolicy).toBe('files');
+    }
+    expect(resolveToolPresentation({ name: 'platform__alias', capabilityId: 'workspace.files', actionId: 'workspace.files/read' }).detailPolicy).toBe('files');
+    for (const actionId of ['ssh/fs.read', 'ssh/fs.write']) {
+      const presentation = resolveToolPresentation({ name: 'platform__remote', capabilityId: 'ssh', actionId });
+      expect(presentation.detailPolicy).toBe('files');
+      expect(presentation.receiptAction).toBeUndefined();
+    }
+    for (const name of ['start_process', 'search_files', 'web_fetch', 'mcp__server__read_file__0123456789abcdefabcd']) {
+      expect(resolveToolPresentation({ name }).detailPolicy).toBe('payload');
+    }
+    for (const identity of [{ capabilityId: 'external' }, { actionId: 'external/read' }, { capabilityId: 'external', actionId: 'external/read' }]) {
+      const presentation = resolveToolPresentation({ name: 'read_file', ...identity });
+      expect(presentation.detailPolicy).toBe('payload');
+      expect(presentation.receiptAction).toBeUndefined();
+    }
+    expect(resolveToolPresentation({ name: 'write_file', origin: { kind: 'plugin', name: 'Writer', toolName: 'write_file' } }).detailPolicy).toBe('payload');
   });
 });

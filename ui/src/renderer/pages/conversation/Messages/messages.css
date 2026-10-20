@@ -865,6 +865,49 @@ button.turn-process-trace__row:focus-visible {
   line-height: 24px;
 }
 
+.turn-file-activity__toggle {
+  width: fit-content;
+  max-width: 100%;
+}
+
+.turn-file-activity__toggle .turn-process-trace__text {
+  flex: 0 1 auto;
+}
+
+.turn-file-activity__list {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+  color: var(--color-text-3, #86909c);
+  font-size: var(--conversation-message-font-size, 14px);
+  line-height: var(--conversation-message-line-height, 22px);
+}
+
+.turn-file-activity__entry {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.turn-file-activity__verb,
+.turn-file-activity__changes {
+  flex: none;
+  white-space: nowrap;
+}
+
+.turn-file-activity__verb {
+  font-weight: 500;
+}
+
+.turn-file-activity__path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .turn-process-trace-delegation__row,
 .turn-process-trace-delegation__task {
   box-sizing: border-box;

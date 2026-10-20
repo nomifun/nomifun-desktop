@@ -456,5 +456,92 @@
     ],
     "title": "ToolDetailPage",
     "type": "object"
+  },
+  "tool_file_summary": {
+    "$defs": {
+      "ToolFileEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "added_lines": {
+            "description": "Applied patch lines for this invocation, never a current workspace diff.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "destination": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Original requested path; preserve legal whitespace and native spelling.",
+            "type": "string"
+          },
+          "removed_lines": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "ToolFileOperation": {
+        "enum": [
+          "read",
+          "write",
+          "patch",
+          "delete",
+          "rename"
+        ],
+        "type": "string"
+      },
+      "ToolFileSummaryKind": {
+        "enum": [
+          "instruction_scope"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "files": {
+        "description": "One target for simple actions; at most the native patch contract's 64.",
+        "items": {
+          "$ref": "#/$defs/ToolFileEntry"
+        },
+        "type": "array"
+      },
+      "kind": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ToolFileSummaryKind"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Directory instruction metadata does not claim to read every file below it."
+      },
+      "operation": {
+        "$ref": "#/$defs/ToolFileOperation"
+      }
+    },
+    "required": [
+      "operation",
+      "files"
+    ],
+    "title": "ToolFileSummary",
+    "type": "object"
   }
 }

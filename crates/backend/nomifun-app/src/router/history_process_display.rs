@@ -23,6 +23,7 @@ pub(super) struct HistoricalToolObservation {
     pub action_id: Option<String>,
     pub result_seq: Option<u64>,
     pub permission_required: Option<nomifun_engine_core::SystemPermissionRequired>,
+    pub(super) file_projection: Option<nomifun_engine_core::ToolFileProjection>,
 }
 
 fn record_result(observation: &mut HistoricalToolObservation, result: &AgentToolResult, event_seq: u64) {
@@ -30,6 +31,8 @@ fn record_result(observation: &mut HistoricalToolObservation, result: &AgentTool
     observation.display = nomifun_engine_core::tool_result_display(
         observation.capability_id.as_deref(), observation.action_id.as_deref(), result);
     observation.display.operation = operation;
+    observation.display.file_summary = observation.file_projection.as_ref()
+        .map(|projection| projection.settled(result, observation.runtime_hold.is_some()));
     if let (Some(name), Some(target)) = (&observation.name, &observation.requested_stop_target) {
         observation.display.denied_stop_conversation_id = nomifun_engine_core::tool_denied_stop_target(
             name, &serde_json::json!({"conversation_id":target}), result);
@@ -51,6 +54,10 @@ fn observe_tool_event(event: &Value, event_seq: u64, observations: &mut HashMap<
             if let (Some(call), Some(capability), Some(action)) = (dispatch.get("call_id").and_then(Value::as_str),
                 dispatch.get("capability_id").and_then(Value::as_str), dispatch.get("action_id").and_then(Value::as_str)) {
                 let observation = observations.entry(call.to_owned()).or_default();
+                if observation.capability_id.as_deref() != Some(capability) || observation.action_id.as_deref() != Some(action) {
+                    observation.file_projection = None;
+                    observation.display.file_summary = None;
+                }
                 observation.capability_id = Some(capability.to_owned());
                 observation.action_id = Some(action.to_owned());
                 if capability != "computer" { observation.display.operation = None; }
@@ -75,12 +82,19 @@ fn observe_tool_event(event: &Value, event_seq: u64, observations: &mut HashMap<
             observation.description = nomifun_engine_core::tool_display_target(
                 observation.capability_id.as_deref(), observation.action_id.as_deref(), &call.name, &call.arguments.0);
             observation.display.operation = nomifun_engine_core::tool_display_operation(observation.capability_id.as_deref(), &call.arguments.0);
+            observation.file_projection = nomifun_engine_core::ToolFileProjection::from_call(
+                observation.capability_id.as_deref(), observation.action_id.as_deref(), &call.arguments.0);
+            observation.display.file_summary = observation.file_projection.as_ref().map(|projection| projection.summary());
             observation.requested_stop_target = call.arguments.0.get("conversation_id").and_then(Value::as_str)
                 .filter(|id| uuid::Uuid::parse_str(id).is_ok_and(|id| id.get_version_num() == 7)).map(str::to_owned);
             observation.name = Some(call.name);
         }
         AgentEngineEvent::ToolStarted { call_id, capability_id, action_id, .. } => {
             let observation = observations.entry(call_id.as_ref().to_owned()).or_default();
+            if observation.capability_id.as_deref() != Some(capability_id.as_ref()) || observation.action_id.as_deref() != Some(action_id.as_ref()) {
+                observation.file_projection = None;
+                observation.display.file_summary = None;
+            }
             observation.capability_id = Some(capability_id.as_ref().to_owned());
             observation.action_id = Some(action_id.as_ref().to_owned());
             if capability_id.as_ref() != "computer" { observation.display.operation = None; }
@@ -250,6 +264,45 @@ mod tests {
         assert!(observations.is_empty());
     }
 
+    #[tokio::test]
+    async fn cold_file_summaries_match_live_projection_without_reading_or_mirroring_content() {
+        let (journal,pool)=test_fixture().await;
+        let session=AgentSessionId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let arguments=json!({"files":[
+            {"path":" dir  one/a.rs ","hunks":[{"lines":[{"kind":"remove","text":"PRIVATE_OLD"},{"kind":"add","text":"PRIVATE_NEW"}]}]},
+            {"path":"b.rs","hunks":[{"lines":[{"kind":"add","text":"PRIVATE_B"}]}]}
+        ]});
+        let output=json!({"file_count":2,"files":[
+            {"path":"/canonical/a.rs","hunks_applied":1,"bytes_before":10,"bytes_after":10,"created":false},
+            {"path":"b.rs","hunks_applied":1,"bytes_before":0,"bytes_after":10,"created":true}
+        ]}).to_string();
+        let proposal=AgentEngineEvent::ToolCallCompleted {step:1,call:nomifun_chat_model_broker::ChatToolCall {
+            call_id:"batch-patch".into(),name:"old_model_alias".into(),
+            arguments:nomifun_agent_contracts::StrictJsonValue(arguments.clone()),provider_metadata:None}};
+        journal.append(serde_json::to_string(&proposal).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
+        journal.append(json!({"event":"host_tool_dispatch","dispatch":{
+            "operation_id":"patch-owner","call_id":"batch-patch","capability_id":"workspace.files",
+            "action_id":"workspace.files/patch","model_name":"old_model_alias"}}).to_string(),None,EngineJournalWrite::Progress).await.unwrap();
+        let result=AgentToolResult::text("batch-patch".into(),output,false);
+        journal.append(json!({"event":"host_tool_settled","operation_id":"patch-owner","call_id":"batch-patch",
+            "result":result,"error":null}).to_string(),None,EngineJournalWrite::Settlement).await.unwrap();
+        journal.append(serde_json::to_string(&AgentEngineEvent::ToolCompleted {step:1,runtime_hold:None,result:result.clone()}).unwrap(),
+            None,EngineJournalWrite::Progress).await.unwrap();
+        let store=AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        let (history,_,_)=store.message_history_before(&session,None,50).await.unwrap();
+        let before:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events").fetch_one(&pool).await.unwrap();
+        let observations=load_historical_tool_observations(&pool,&store,&session,&history).await.unwrap();
+        let tool=history.iter().find(|row|row.projection["tool_summary"]["call_id"]=="batch-patch").unwrap();
+        let observation=observations.get(&tool.projection_id).unwrap();
+        let expected=nomifun_engine_core::ToolFileProjection::from_call(Some("workspace.files"),Some("workspace.files/patch"),&arguments).unwrap().settled(&result,false);
+        assert_eq!(observation.display.file_summary.as_ref(),Some(&expected));
+        assert_eq!(expected.files.len(),2);assert_eq!(expected.files[0].added_lines,Some(1));
+        assert_eq!(expected.files[0].path," dir  one/a.rs ");
+        assert!(!format!("{observation:?}").contains("PRIVATE_"));
+        assert!(history.iter().all(|row|row.projection.get("file_summary").is_none()),"display metadata is derived, not persisted");
+        assert_eq!(before,sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events").fetch_one(&pool).await.unwrap());
+    }
+
     #[test]
     fn completed_runtime_events_restore_target_and_status_without_content() {
         let mut observations = HashMap::new();
@@ -315,7 +368,7 @@ mod tests {
         assert!(detail.display.cancelled);
         assert!(!format!("{detail:?}").contains("STARTED"));
         assert_eq!(detail.is_error, Some(true));
-        assert_eq!(detail.description.as_deref(), Some("bun"));
+        assert_eq!(detail.description.as_deref(), Some("bun wait.mjs"));
     }
 
     #[tokio::test]

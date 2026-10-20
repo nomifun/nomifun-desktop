@@ -10,6 +10,7 @@ use nomifun_agent_contracts::{
     IdmmDecisionExplanation, IdmmDecisionNotice, ContextClearedPayloadV1, AgentTurnOutcome,
     MessageTimeline, MessageTimelineUpdate, RuntimeToolHoldReason, SystemExecutionFailure, ToolDetailPage,
     ToolDetailSection, ToolDetailAvailability, ToolDetailFormat, ToolDetailRetention,
+    ToolFileSummary, ToolFileEntry, ToolFileOperation, ToolFileSummaryKind,
     TurnWorkspaceFilesObservedV1, KnowledgeWritebackStartedV1, KnowledgeWritebackSettledV1,
     CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload, CanonicalHttpMethod,
     CanonicalErrorRegistryPayload,
@@ -310,6 +311,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         ("ToolDetailAvailability", ToolDetailAvailability::export_to_string(&ts_rs::Config::default())?),
         ("ToolDetailFormat", ToolDetailFormat::export_to_string(&ts_rs::Config::default())?),
         ("ToolDetailRetention", ToolDetailRetention::export_to_string(&ts_rs::Config::default())?),
+        ("ToolFileSummary", ToolFileSummary::export_to_string(&ts_rs::Config::default())?),
+        ("ToolFileEntry", ToolFileEntry::export_to_string(&ts_rs::Config::default())?),
+        ("ToolFileOperation", ToolFileOperation::export_to_string(&ts_rs::Config::default())?),
+        ("ToolFileSummaryKind", ToolFileSummaryKind::export_to_string(&ts_rs::Config::default())?),
     ].map(|(name, binding)| {
         let binding = binding.replace("\r\n", "\n").replace('\r', "\n");
         (root.join(format!("../../../ui/src/common/protocolBindings/{name}.ts")),
@@ -653,6 +658,7 @@ fn generated_display_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>
     add_schema::<RuntimeToolHoldReason>(&mut schemas, "runtime_tool_hold_reason")?;
     add_schema::<SystemExecutionFailure>(&mut schemas, "system_execution_failure")?;
     add_schema::<ToolDetailPage>(&mut schemas, "tool_detail_page")?;
+    add_schema::<ToolFileSummary>(&mut schemas, "tool_file_summary")?;
     Ok(schemas)
 }
 
@@ -799,7 +805,8 @@ mod display_schema_tests {
     fn display_views_do_not_change_the_persisted_schema_contract() {
         let storage = generated_schemas().unwrap();
         let display = generated_display_schemas().unwrap();
-        assert_eq!(display.len(), 5);
+        assert_eq!(display.len(), 6);
+        assert!(display.contains_key("tool_file_summary"));
         assert!(display.keys().all(|key| !storage.contains_key(key)));
         let published: Value = serde_json::from_str(include_str!(
             "../../contracts/generated/canonical-agent-store-schema-manifest.envelope.json")).unwrap();

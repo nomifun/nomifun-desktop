@@ -24,6 +24,8 @@ pub struct ToolDisplayFacts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_summary: Option<nomifun_agent_contracts::ToolFileSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub written_knowledge_file: Option<WrittenKnowledgeFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub denied_stop_conversation_id: Option<String>,

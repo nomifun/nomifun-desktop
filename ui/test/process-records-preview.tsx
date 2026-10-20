@@ -13,6 +13,8 @@ import zh from '../src/renderer/services/i18n/locales/zh-CN';
 import type { IMessageThinking, IMessageToolCall } from '../src/common/chat/chatLib';
 import { parseConversationId, parseExecutionAttemptId } from '../src/common/types/ids';
 import { insertDelegationRecords } from '../src/renderer/pages/conversation/Messages/delegationProcessModel';
+import { compactFileActivityItems } from '../src/renderer/pages/conversation/Messages/fileActivityModel';
+import { isTaskControlReceipt } from '../src/renderer/pages/conversation/Messages/toolMessageVisibility';
 
 globalThis.fetch = (async input => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.href);
@@ -95,10 +97,20 @@ const { default: ExecutionContentSwitcher } = await import('../src/renderer/page
 const { ConversationProvider } = await import('../src/renderer/hooks/context/ConversationContext');
 const tools: IMessageToolCall[] = [
   ['command', 'start_process', '检查改动并验证桌面交互边界'], ['file-read', 'read_file', 'src/CanvasSurface.tsx'],
+  ['file-read-part2', 'read_file', 'src/CanvasSurface.tsx'], ['file-read-input', 'read_file', 'src/input.ts'],
   ['file-write', 'apply_patch', 'src/CanvasSurface.test.tsx'], ['generic', 'mcp__design__search_documents__abcdefghijklmnop', '查找下拉菜单交互规范'],
 ].map(([call_id, name, description]) => ({ id: call_id, type: 'tool_call', conversation_id: leadConversationId,
   turn_id: requestId, position: 'left', content: { call_id, name, description, status: 'completed', result_seq: 45,
     timeline: { through_seq: 50, segments: [{ segment_id: call_id, group_id: 'canonical', kind: 'tool', call_id, first_seq: 5, last_seq: 45, state: 'completed' }] } } }));
+for (const tool of tools) {
+  if (tool.content.name === 'read_file') Object.assign(tool.content, { capability_id: 'workspace.files', action_id: 'workspace.files/read',
+    file_summary: { operation: 'read', files: [{ path: tool.content.description! }] } });
+  if (tool.content.name === 'apply_patch') Object.assign(tool.content, { capability_id: 'workspace.files', action_id: 'workspace.files/patch',
+    file_summary: { operation: 'patch', files: [{ path: tool.content.description!, added_lines: 8, removed_lines: 3 }] } });
+}
+const publicResult = '已读取两个文件并更新测试。策划与交互规范已返回，接下来核对开发与架构结果。';
+tools.push({ id: 'completion-receipt', type: 'tool_call', conversation_id: leadConversationId, turn_id: requestId,
+  content: { call_id: 'completion-receipt', name: 'report_completion', description: publicResult, status: 'completed', result_seq: 48 } });
 const records = [
   ...steps.map(step => makeDelegationRecord({ id: `start:${step.step_id}`, title: step.title, step_id: step.step_id })),
   ...attempts.map((attempt, index) => makeDelegationRecord({ id: `done:${attempt.attempt_id}`, kind: 'completed',
@@ -109,8 +121,8 @@ const thinking: IMessageThinking & { processSequence: number } = { id: 'preview-
   conversation_id: leadConversationId, turn_id: requestId, processSequence: 2,
   content: { content: '先明确任务边界，再协调并行工作并核验结果。', status: 'done' } };
 const processItems: Array<(IMessageThinking | IMessageToolCall) & { processSequence: number }> =
-  [thinking, ...tools.map((tool, index) => ({ ...tool, processSequence: 20 + index * 4 }))];
-const items = insertDelegationRecords(processItems, records);
+  [thinking, ...tools.filter(tool => !isTaskControlReceipt(tool)).map((tool, index) => ({ ...tool, processGroupId: 'canonical', processSequence: 20 + index * 4 }))];
+const items = compactFileActivityItems(insertDelegationRecords(processItems, records));
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: zh } }, interpolation: { escapeValue: false } });
 
@@ -122,7 +134,7 @@ function Preview() {
       renderProcessItem={item => item.type === 'delegation_record' ? <DelegationRecordRow records={item.records} /> : <ProcessTraceItem item={item} />}
       getProcessItemKey={item => item.id} getProcessItemState={() => 'completed'} getProcessItemLayoutKind={item => item.type === 'delegation_record' ? 'delegation' : item.type === 'thinking' ? 'thinking' : 'tool'} />
     </ToolDetailsProvider>
-    <p style={{ marginTop: 24 }}>策划与交互规范已返回，接下来核对开发与架构结果。</p>
+    <p style={{ marginTop: 24 }}>{publicResult}</p>
   </main>;
 }
 document.documentElement.dataset.theme = 'light';

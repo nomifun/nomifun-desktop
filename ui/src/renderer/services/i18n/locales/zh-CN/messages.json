@@ -13,6 +13,24 @@
   "loadEarlierReply": "加载更早的消息",
   "toolDetailError": "错误",
   "toolResultUnconfirmed": "结果未确认",
+  "fileActivity": {
+    "separator": "，",
+    "target": "目标",
+    "action": {
+      "read": "已读取",
+      "edit": "已编辑",
+      "delete": "已删除",
+      "rename": "已重命名",
+      "instructions": "已读取目录说明"
+    },
+    "count": {
+      "read_other": "读取了 {{count}} 个文件",
+      "edit_other": "编辑了 {{count}} 个文件",
+      "delete_other": "删除了 {{count}} 个文件",
+      "rename_other": "重命名了 {{count}} 个文件",
+      "instructions_other": "读取了 {{count}} 处目录说明"
+    }
+  },
   "delegation": {
     "action": {
       "delegated": "委派子智能体",
