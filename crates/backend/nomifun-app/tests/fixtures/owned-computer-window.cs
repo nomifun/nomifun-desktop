@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -25,12 +26,49 @@ internal static class Native {
     [DllImport("user32.dll")] internal static extern uint GetDpiForWindow(IntPtr window);
     [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(IntPtr window,out uint pid);
     [DllImport("user32.dll")] internal static extern bool PostMessage(IntPtr window,uint message,IntPtr wparam,IntPtr lparam);
+    [DllImport("user32.dll")] internal static extern IntPtr GetCapture();
     internal static string Creation(IntPtr handle) { FileTime c,e,k,u;if(!GetProcessTimes(handle,out c,out e,out k,out u))throw new Win32Exception();return (((ulong)c.High<<32)|c.Low).ToString(); }
     internal static bool Alive(IntPtr handle){return WaitForSingleObject(handle,0)==258;}
     internal static string Image(IntPtr handle){var path=new StringBuilder(32768);int size=path.Capacity;if(!QueryFullProcessImageName(handle,0,path,ref size))throw new Win32Exception();return path.ToString();}
     internal static bool InJob(IntPtr handle){bool value;if(!IsProcessInJob(handle,IntPtr.Zero,out value))throw new Win32Exception();return value;}
 }
 internal sealed class DedicatedForm:Form { protected override bool ShowWithoutActivation {get{return true;}} }
+// This receiver observes its own genuine messages without delaying, injecting,
+// consuming or redirecting input. It exists only in the explicit input-stop mode.
+internal sealed class ObservedEditor:TextBox {
+    internal const string PublicText="Owned input stop sample. Select these ordinary test words with one drag.";
+    private readonly string root;
+    private readonly Stopwatch clock=Stopwatch.StartNew();
+    private readonly JavaScriptSerializer json=new JavaScriptSerializer();
+    private int downs,ups,moves;
+    private long downAt;
+    private bool active;
+    internal ObservedEditor(string directory){root=directory;}
+    private static string Sha(string value){using(var sha=SHA256.Create()){return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(value))).Replace("-","").ToLowerInvariant();}}
+    private void Once(string name,object value){
+        string path=Path.Combine(root,name),temporary=path+".tmp";
+        using(var file=new FileStream(temporary,FileMode.CreateNew,FileAccess.Write,FileShare.None)){
+            byte[] bytes=new UTF8Encoding(false).GetBytes(json.Serialize(value));file.Write(bytes,0,bytes.Length);file.Flush(true);
+        }
+        File.Move(temporary,path);
+    }
+    protected override void WndProc(ref Message message){
+        int kind=message.Msg;long flags=message.WParam.ToInt64(),point=message.LParam.ToInt64();
+        int x=unchecked((short)(point&65535)),y=unchecked((short)((point>>16)&65535));
+        base.WndProc(ref message);
+        if(kind==0x0201){
+            downs++;active=true;downAt=clock.ElapsedMilliseconds;
+            if(downs==1)Once("drag-down.json",new {mode="input-stop",pid=Process.GetCurrentProcess().Id,window=FindForm().Handle.ToInt64().ToString(),control=Handle.ToInt64().ToString(),downs,ups,moves,x,y,observed_ms=downAt,text_sha256=Sha(Text)});
+        }else if(kind==0x0200&&active&&(flags&1)!=0){
+            moves++;
+            if(moves==1)Once("drag-move.json",new {mode="input-stop",pid=Process.GetCurrentProcess().Id,window=FindForm().Handle.ToInt64().ToString(),control=Handle.ToInt64().ToString(),downs,ups,moves,x,y,observed_ms=clock.ElapsedMilliseconds});
+        }else if(kind==0x0202&&active){
+            ups++;active=false;
+            if(ups==1)Once("drag-up.json",new {mode="input-stop",pid=Process.GetCurrentProcess().Id,window=FindForm().Handle.ToInt64().ToString(),control=Handle.ToInt64().ToString(),downs,ups,moves,x,y,observed_ms=clock.ElapsedMilliseconds,duration_ms=clock.ElapsedMilliseconds-downAt,
+                selection_start=SelectionStart,selection_length=SelectionLength,selected_text_sha256=Sha(SelectedText),text_sha256=Sha(Text),text_unchanged=Text==PublicText,own_capture_released=Native.GetCapture()!=Handle});
+        }
+    }
+}
 internal static class Program {
     private static readonly JavaScriptSerializer Json=new JavaScriptSerializer();
     private static void Write(string root,string name,object data){File.WriteAllText(Path.Combine(root,name),Json.Serialize(data));}
@@ -45,10 +83,10 @@ internal static class Program {
     [STAThread] private static int Main(string[] args){
         if(args.Length!=2)return 2;
         string root=Path.GetFullPath(args[1]);
-        try {if(args[0]=="gui"||args[0]=="functional"){Gui(root,args[0]=="functional");return 0;}if(args[0]=="observe"){Observe(root);return 0;}return 2;}
+        try {if(args[0]=="gui"||args[0]=="functional"||args[0]=="input-stop"){Gui(root,args[0]!="gui",args[0]=="input-stop");return 0;}if(args[0]=="observe"){Observe(root);return 0;}return 2;}
         catch(Exception error){Write(root,"fixture-error.json",new {error=error.Message,mode=args[0]});return 1;}
     }
-    private static void Gui(string root,bool visible){
+    private static void Gui(string root,bool visible,bool inputStop){
         Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
         var form=new DedicatedForm();form.Text="NomiFun Lifetime Test "+Path.GetFileName(root);form.ClientSize=new Size(510,300);form.WindowState=visible?FormWindowState.Normal:FormWindowState.Minimized;
         if(visible){
@@ -60,11 +98,14 @@ internal static class Program {
         var display=new TextBox {Name="OwnedCalculation",AccessibleName="Owned calculation",ReadOnly=true,Text="0",Location=new Point(12,45),Size=new Size(470,28)};form.Controls.Add(display);
         string[] labels={"2","+","3","="},names={"Owned two","Owned add","Owned three","Owned equals"};
         for(int index=0;index<labels.Length;index++){string label=labels[index];var button=new Button {Text=label,AccessibleName=names[index],Location=new Point(12+index*95,82),Size=new Size(85,35)};button.Click+=delegate{if(label=="2")display.Text="2";if(label=="+")display.Text="2+";if(label=="3")display.Text="2+3";if(label=="="){display.Text="5";Write(root,"calculation.json",new {expression="2+3",result=display.Text});}};form.Controls.Add(button);}
-        var editor=new TextBox {Name="OwnedEditor",AccessibleName="Owned editor",Multiline=true,Location=new Point(12,130),Size=new Size(470,95)};form.Controls.Add(editor);
+        TextBox editor=inputStop?(TextBox)new ObservedEditor(root):new TextBox();
+        editor.Name="OwnedEditor";editor.AccessibleName="Owned editor";editor.Multiline=true;editor.Location=new Point(12,130);editor.Size=new Size(470,95);
+        if(inputStop)editor.Text=ObservedEditor.PublicText;
+        form.Controls.Add(editor);
         var save=new Button {Text="Save owned test text",AccessibleName="Save owned test text",Location=new Point(12,240),Size=new Size(230,35)};save.Click+=delegate{File.WriteAllText(Path.Combine(root,"saved.txt"),editor.Text,new UTF8Encoding(false));Write(root,"saved.json",new {characters=editor.Text.Length,path="saved.txt"});};form.Controls.Add(save);
         var timer=new System.Windows.Forms.Timer();timer.Interval=50;
         timer.Tick+=delegate{if(File.Exists(Path.Combine(root,"close.request")))form.Close();};
-        form.Shown+=delegate{using(var process=Process.GetCurrentProcess()){Write(root,"ready.json",new {pid=process.Id,window=form.Handle.ToInt64().ToString(),dpi=Native.GetDpiForWindow(form.Handle),creation_filetime=Native.Creation(process.Handle),executable=Application.ExecutablePath,in_job=Native.InJob(process.Handle),title=form.Text,environment=EnvironmentEvidence(root)});}timer.Start();};
+        form.Shown+=delegate{using(var process=Process.GetCurrentProcess()){Write(root,"ready.json",new {pid=process.Id,window=form.Handle.ToInt64().ToString(),dpi=Native.GetDpiForWindow(form.Handle),creation_filetime=Native.Creation(process.Handle),executable=Application.ExecutablePath,in_job=Native.InJob(process.Handle),title=form.Text,environment=EnvironmentEvidence(root),input_stop=inputStop,editor_window=editor.Handle.ToInt64().ToString(),editor_seed=inputStop?ObservedEditor.PublicText:null});}timer.Start();};
         form.FormClosed+=delegate{timer.Stop();Write(root,"exit.json",new {pid=Process.GetCurrentProcess().Id,graceful=true,control_file=File.Exists(Path.Combine(root,"close.request"))});};
         Application.Run(form);timer.Dispose();form.Dispose();
     }

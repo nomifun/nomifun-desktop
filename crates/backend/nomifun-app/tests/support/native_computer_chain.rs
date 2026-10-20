@@ -9,7 +9,6 @@
 //! ```
 //! Set NOMIFUN_COMPUTER_FIXTURE_EXE to that executable, NOMIFUN_COMPUTER_WORKER
 //! to the test worker, and NOMIFUN_COMPUTER_ARTIFACT_DIR to a fresh directory.
-//! Fixture source SHA-256: a97e59db3d52a57ad00dca582b3700c66fbba09baecc3385fbefeff2f222579f.
 use super::*;
 use futures_util::FutureExt;
 use nomifun_agent_session::{AgentEffectState, AgentSessionStore, TurnReceiptStatus};
