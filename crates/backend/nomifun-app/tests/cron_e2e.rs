@@ -1,9 +1,8 @@
 //! E2E tests for cron job HTTP endpoints.
 //!
-//! Covers test-plan items: CJ-1..CJ-12, SK-1..SK-6, SC-3..SC-8, AU-1..AU-2,
-//! RN-1..RN-2.
-//! Items requiring real AI execution (RN-1, EV-*, SR-*, OC-*, CD-*) are tested
-//! at the service integration level in `nomifun-cron/tests/service_integration.rs`.
+//! Exercises CRUD, workbench binding, model/resource admission, timezone,
+//! skills, ownership and idempotent dispatch through the production router.
+//! Live provider/tool acceptance is in `nomi_core_live_provider_smoke`.
 
 mod common;
 
@@ -11,7 +10,6 @@ use axum::http::{HeaderValue, StatusCode};
 use serde_json::json;
 use tower::ServiceExt;
 
-use nomifun_db::{ICronRepository, SqliteCronRepository};
 
 use common::{
     body_json, build_app, delete_with_token,
@@ -26,10 +24,7 @@ const TEST_CONV_2: &str = "0190f5fe-7c00-7a00-8abc-012345678902";
 const TEST_CONV_3: &str = "0190f5fe-7c00-7a00-8abc-012345678903";
 const MISSING_CRON_JOB_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678999";
 const SECONDARY_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679993";
-const FORGED_CUSTOM_AGENT_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679994";
-/// Provider backing every owner-side nomi cron fixture. A nomi schedule has no
-/// engine to select, so its only remaining execution authority is a canonical
-/// provider/model pair — either on the bound conversation or in `agent_config`.
+/// Provider used by the workbench authoring and exact frozen-binding fixtures.
 const CRON_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679992";
 const CRON_MODEL: &str = "cron-model";
 
@@ -42,7 +37,6 @@ fn create_job_body(name: &str) -> serde_json::Value {
         "message": "test message",
         "conversation_id": TEST_CONV_1,
         "conversation_title": "Test Conv",
-        "agent_type": "nomi",
         "created_by": "user"
     })
 }
@@ -53,7 +47,6 @@ fn create_at_job_body(name: &str, at_ms: i64) -> serde_json::Value {
         "schedule": { "kind": "at", "at_ms": at_ms, "description": "once" },
         "message": "at message",
         "conversation_id": TEST_CONV_1,
-        "agent_type": "nomi",
         "created_by": "user"
     })
 }
@@ -64,7 +57,6 @@ fn create_cron_job_body(name: &str, expr: &str) -> serde_json::Value {
         "schedule": { "kind": "cron", "expr": expr },
         "message": "cron message",
         "conversation_id": TEST_CONV_1,
-        "agent_type": "nomi",
         "created_by": "user"
     })
 }
@@ -115,7 +107,10 @@ fn run_now_request(
 /// Seed the provider/model pair every nomi cron fixture resolves against.
 /// Idempotent so a test may call it once per conversation it seeds.
 async fn seed_cron_provider(services: &nomifun_app::compatibility::AppServices) {
-    let credentials_encrypted = common::encrypted_bearer_credentials();
+    let credentials_encrypted = nomifun_common::encrypt_string(
+        r#"{"api_keys":["cron-fixture-only"]}"#,
+        &services.encryption_key,
+    ).unwrap();
     sqlx::query(
         "INSERT OR IGNORE INTO providers (\
             provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
@@ -264,6 +259,11 @@ async fn seed_conversation(
         })
         .await
         .unwrap();
+    // The fixture opens this deterministic Session directly through the
+    // canonical store. Materialize its default directory just as the host's
+    // normal opening path does; runtime admission must not recreate a missing
+    // existing user's project on a scheduled retry.
+    tokio::fs::create_dir_all(services.work_dir.join("conversations").join(id)).await.unwrap();
 }
 
 // ── AU-1/AU-2: Unauthenticated requests ─────────────────────────────
@@ -390,142 +390,21 @@ async fn au3_authenticated_users_cannot_observe_or_mutate_each_others_cron_jobs(
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
-    // Cron itself is user-scoped rather than installation-owner-only. A
-    // secondary principal may manage its own Nomi model-only schedule; the
-    // service strips every host-capability field before persistence.
-    let credentials_encrypted = common::encrypted_bearer_credentials();
-    sqlx::query(
-        "INSERT INTO providers (\
-            provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
-            created_at, updated_at\
-         ) VALUES (?, 'openai', 'secondary-safe', \
-                   'https://example.invalid', 'bearer', ?, \
-                   1, 1, 1)",
-    )
-    .bind(SECONDARY_PROVIDER_ID)
-    .bind(&credentials_encrypted)
-    .execute(services.database.pool())
-    .await
-    .unwrap();
-    common::seed_openai_chat_model(
-        services.database.pool(),
-        SECONDARY_PROVIDER_ID,
-        "model-secondary",
-    )
-    .await;
-    let response = app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/cron/jobs",
-            json!({
-                "name": "Secondary Model-only Job",
-                "schedule": {
-                    "kind": "every",
-                    "every_ms": 600_000,
-                    "description": "every ten minutes"
-                },
-                "message": "model-only scheduled work",
-                "agent_type": "nomi",
-                "created_by": "user",
-                "execution_mode": "new_conversation",
-                "agent_config": {
-                    "provider_id": SECONDARY_PROVIDER_ID,
-                    "name": "Nomi",
-                    "model": "model-secondary",
-                    "cli_path": "/bin/sh",
-                    "custom_agent_id": FORGED_CUSTOM_AGENT_ID,
-                    "config_options": { "host": "true" },
-                    "workspace": "/unsafe",
-                    "clear_context_each_run": true
-                }
-            }),
-            &foreign_token,
-            &foreign_csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let secondary_job = body_json(response).await["data"].clone();
-    let secondary_job_id = secondary_job["cron_job_id"].as_str().unwrap().to_owned();
-    let config = &secondary_job["metadata"]["agent_config"];
-    assert_eq!(secondary_job["metadata"]["agent_type"], "nomi");
-    assert_eq!(config["provider_id"], SECONDARY_PROVIDER_ID);
-    assert_eq!(config["model"], "model-secondary");
-    for removed in [
-        "cli_path",
-        "custom_agent_id",
-        "mode",
-        "config_options",
-        "workspace",
-    ] {
-        assert!(
-            config.get(removed).is_none(),
-            "model-only cron leaked host field {removed}: {config}"
-        );
-    }
-
-    let response = app
-        .clone()
-        .oneshot(get_with_token("/api/cron/jobs", &foreign_token))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let jobs = body_json(response).await["data"].as_array().unwrap().clone();
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0]["cron_job_id"], json!(secondary_job_id));
-
-    let response = app
-        .clone()
-        .oneshot(json_with_token(
-            "PUT",
-            &format!("/api/cron/jobs/{secondary_job_id}"),
-            json!({ "name": "Secondary Model-only Job Updated" }),
-            &foreign_token,
-            &foreign_csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        body_json(response).await["data"]["name"],
-        "Secondary Model-only Job Updated"
-    );
-
-    // Skill files execute on the host and remain installation-owner-only even
-    // for a secondary user's own otherwise-valid model-only Cron aggregate.
-    for request in [
-        get_with_token(
-            &format!("/api/cron/jobs/{secondary_job_id}/skill"),
-            &foreign_token,
-        ),
-        json_with_token(
-            "POST",
-            &format!("/api/cron/jobs/{secondary_job_id}/skill"),
-            json!({ "content": "---\nname: forbidden\n---\nHost work" }),
-            &foreign_token,
-            &foreign_csrf,
-        ),
-        delete_with_token(
-            &format!("/api/cron/jobs/{secondary_job_id}/skill"),
-            &foreign_token,
-            &foreign_csrf,
-        ),
-    ] {
-        let response = app.clone().oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    }
-
-    let response = app
-        .clone()
-        .oneshot(delete_with_token(
-            &format!("/api/cron/jobs/{secondary_job_id}"),
-            &foreign_token,
-            &foreign_csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    // Workbench defaults cannot grant the secondary principal installation
+    // resources. Reject explicitly rather than silently clamping a CLI bag.
+    let credentials_encrypted=common::encrypted_bearer_credentials();
+    sqlx::query("INSERT INTO providers (provider_id,platform,name,base_url,auth_scheme,credentials_encrypted,enabled,created_at,updated_at) VALUES (?,'openai','secondary-safe','https://example.invalid','bearer',?,1,1,1)")
+        .bind(SECONDARY_PROVIDER_ID).bind(credentials_encrypted).execute(services.database.pool()).await.unwrap();
+    common::seed_openai_chat_model(services.database.pool(),SECONDARY_PROVIDER_ID,"model-secondary").await;
+    let response=app.clone().oneshot(json_with_token("POST","/api/cron/jobs",json!({
+        "name":"Secondary cannot acquire host resources","schedule":{"kind":"every","every_ms":600000},
+        "message":"scheduled work","created_by":"user","execution_mode":"new_conversation",
+        "agent_selection":{"kind":"template","template_key":"assistant.general"},
+        "model":{"provider_id":SECONDARY_PROVIDER_ID,"model":"model-secondary"}
+    }),&foreign_token,&foreign_csrf)).await.unwrap();
+    assert_eq!(response.status(),StatusCode::FORBIDDEN);
+    let response=app.clone().oneshot(get_with_token("/api/cron/jobs",&foreign_token)).await.unwrap();
+    assert!(body_json(response).await["data"].as_array().unwrap().is_empty());
 
     let response = app
         .oneshot(get_with_token(
@@ -562,7 +441,7 @@ async fn cj1_create_cron_job() {
     assert_eq!(data["message"], "test message");
     assert_eq!(data["execution_mode"], "existing");
     assert_eq!(data["metadata"]["conversation_id"], TEST_CONV_1);
-    assert_eq!(data["metadata"]["agent_type"], "nomi");
+    assert!(data["metadata"].get("agent_type").is_none());
     assert_eq!(data["metadata"]["created_by"], "user");
 }
 
@@ -581,8 +460,7 @@ async fn cj1b_agent_preset_is_frozen_by_the_host_before_cron_persistence() {
                 "reuse_existing": false,
                 "display_name": "Cron preset",
                 "description": null,
-                "model_route_refs": {},
-                "chat_route_records": {}
+                "model": {"provider_id": CRON_PROVIDER_ID, "model": CRON_MODEL}
             }),
             &token,
             &csrf,
@@ -607,14 +485,10 @@ async fn cj1b_agent_preset_is_frozen_by_the_host_before_cron_persistence() {
                     "description": "every ten minutes"
                 },
                 "message": "run the saved Agent",
-                "agent_type": "nomi",
-                "created_by": "user",
+                        "created_by": "user",
                 "execution_mode": "new_conversation",
-                "agent_config": {
-                    "name": "Cron preset",
-                    "preset_id": preset_id,
-                    "clear_context_each_run": false
-                }
+                "agent_selection": {"kind":"preset","preset_id":preset_id},
+                "model":{"provider_id":CRON_PROVIDER_ID,"model":CRON_MODEL}
             }),
             &token,
             &csrf,
@@ -623,16 +497,37 @@ async fn cj1b_agent_preset_is_frozen_by_the_host_before_cron_persistence() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     let job = body_json(response).await["data"].clone();
-    let config = &job["metadata"]["agent_config"];
-    assert_eq!(config["preset_id"], preset_id);
-    assert_eq!(
-        config["agent_snapshot"]["preset_id"],
-        preset_id,
-        "Cron must persist the frozen Agent snapshot, not only a preset id"
-    );
-    assert!(config["agent_snapshot"]["preset_revision"].as_i64().unwrap() > 0);
-    assert!(config["provider_id"].as_str().is_some());
-    assert!(config["model"].as_str().is_some());
+    let binding=&job["metadata"]["agent_binding"];
+    assert_eq!(job["metadata"]["agent_selection"]["preset_id"],preset_id);
+    // An independent model selection can use a private execution variant;
+    // the authoring preset remains the original selection above.
+    assert!(serde_json::from_value::<nomifun_api_types::AgentBindingValueDto>(binding.clone()).is_ok());
+    assert!(binding["preset_revision_ref"]["revision"].as_u64().unwrap()>0);
+    let resources=binding["typed_resource_bindings"].as_array().unwrap();
+    assert!(resources.iter().any(|resource|resource["resource_kind"]=="workspace"));
+    assert!(resources.iter().any(|resource|resource["resource_kind"]=="process_session"));
+    assert!(job["metadata"].get("agent_config").is_none());
+
+    // Some current-generation migrated jobs have a valid frozen binding but
+    // no author-selection hint. A model-only edit must not invent General or
+    // reselect the latest authoring preset and drop its existing mounts.
+    let job_id=job["cron_job_id"].as_str().unwrap();
+    sqlx::query("UPDATE cron_jobs SET agent_selection=NULL WHERE cron_job_id=?")
+        .bind(job_id).execute(services.database.pool()).await.unwrap();
+    common::seed_openai_chat_model(services.database.pool(),CRON_PROVIDER_ID,"cron-alternate").await;
+    let response=app.clone().oneshot(json_with_token("PUT",&format!("/api/cron/jobs/{job_id}"),
+        json!({"model":{"provider_id":CRON_PROVIDER_ID,"model":"cron-alternate"}}),&token,&csrf)).await.unwrap();
+    let status=response.status();
+    let updated=body_json(response).await;
+    assert_eq!(status,StatusCode::OK,"model-only exact revision failed: {updated}");
+    assert_eq!(updated["data"]["metadata"]["model"]["model"],"cron-alternate");
+    assert_eq!(updated["data"]["metadata"]["agent_binding"]["typed_resource_bindings"],binding["typed_resource_bindings"]);
+    let source:Option<String>=sqlx::query_scalar("SELECT agent_selection FROM cron_jobs WHERE cron_job_id=?")
+        .bind(job_id).fetch_one(services.database.pool()).await.unwrap();
+    assert!(source.is_none(),"model overrides do not invent an author identity");
+    let author=app.oneshot(get_with_token(&format!("/api/agent-presets/{preset_id}/editor"),&token)).await.unwrap();
+    assert_eq!(author.status(),StatusCode::OK);
+    assert_eq!(body_json(author).await["data"]["preset"]["current_stable_revision"],preset["preset"]["current_stable_revision"]);
 }
 
 // ── CJ-2: Create three schedule types ────────────────────────────────
@@ -691,19 +586,15 @@ async fn cj3_create_missing_required_fields() {
     let invalid_bodies = vec![
         (
             "name",
-            json!({"schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": TEST_CONV_1, "agent_type": "nomi", "created_by": "user"}),
+            json!({"schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": TEST_CONV_1, "created_by": "user"}),
         ),
         (
             "schedule",
-            json!({"name": "X", "conversation_id": TEST_CONV_1, "agent_type": "nomi", "created_by": "user"}),
-        ),
-        (
-            "agent_type",
-            json!({"name": "X", "schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": TEST_CONV_1, "created_by": "user"}),
+            json!({"name": "X", "conversation_id": TEST_CONV_1, "created_by": "user"}),
         ),
         (
             "created_by",
-            json!({"name": "X", "schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": TEST_CONV_1, "agent_type": "nomi"}),
+            json!({"name": "X", "schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": TEST_CONV_1}),
         ),
     ];
 
@@ -723,20 +614,18 @@ async fn cj3b_create_rejects_workspace_with_edge_whitespace_segment() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     seed_cron_provider(&services).await;
+    let workspace = services.work_dir.join("Archive ").join("child");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
 
     let body = json!({
         "name": "Whitespace Workspace",
         "schedule": { "kind": "every", "every_ms": 60000, "description": "every minute" },
         "message": "test message",
-        "agent_type": "nomi",
         "created_by": "user",
         "execution_mode": "new_conversation",
-        "agent_config": {
-            "name": "Nomi",
-            "provider_id": CRON_PROVIDER_ID,
-            "model": CRON_MODEL,
-            "workspace": "/Users/developer/Documents/Archive "
-        }
+        "agent_selection":{"kind":"template","template_key":"assistant.general"},
+        "model":{"provider_id":CRON_PROVIDER_ID,"model":CRON_MODEL},
+        "workspace":workspace
     });
 
     let req = json_with_token("POST", "/api/cron/jobs", body, &token, &csrf);
@@ -787,72 +676,24 @@ async fn cj5_get_nonexistent() {
 }
 
 #[tokio::test]
-async fn cj5b_run_now_legacy_workspace_uses_runtime_edge_whitespace_code() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+async fn cj5b_missing_frozen_binding_fails_before_creating_a_session() {
+    let (mut app, services)=build_app().await;
+    let (token,csrf)=setup_and_login(&mut app,&services,"admin","StrongP@ss1").await;
     seed_cron_provider(&services).await;
-    let cron_repo = SqliteCronRepository::new(services.database.pool().clone());
-    let now = nomifun_common::now_ms();
-
-    let job_id = nomifun_common::CronJobId::new().into_string();
-    cron_repo
-        .insert(&nomifun_db::models::CronJobRow {
-            id: 0,
-            cron_job_id: job_id.clone(),
-            user_id: services.authoritative_user_id.to_string(),
-            name: "Legacy Workspace".into(),
-            enabled: true,
-            schedule_revision: 1,
-            schedule_kind: "every".into(),
-            schedule_value: "60000".into(),
-            schedule_tz: None,
-            schedule_description: Some("every minute".into()),
-            payload_message: "test message".into(),
-            execution_mode: "new_conversation".into(),
-            agent_config: Some(
-                json!({
-                    "name": "Nomi",
-                    "provider_id": CRON_PROVIDER_ID,
-                    "model": CRON_MODEL,
-                    "workspace": "/Users/developer/Documents/Archive "
-                })
-                .to_string(),
-            ),
-            preset_id: None,
-            preset_revision: None,
-            agent_snapshot: None,
-            conversation_id: None,
-            conversation_title: None,
-            agent_type: "nomi".into(),
-            created_by: "user".into(),
-            skill_content: None,
-            description: None,
-            created_at: now,
-            updated_at: now,
-            next_run_at: Some(now + 60_000),
-            last_run_at: None,
-            last_status: None,
-            last_error: None,
-            run_count: 0,
-            retry_count: 0,
-            max_retries: 3,
-        })
-        .await
-        .unwrap();
-
-    let req = run_now_request(&job_id, &token, &csrf);
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["code"], "WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED");
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap()
-            .contains("begins or ends with whitespace")
-    );
-    assert_eq!(json["details"]["operation"], "runtime");
+    let created=create_job(&mut app,&token,&csrf,json!({
+        "name":"Current task","schedule":{"kind":"every","every_ms":600000},"message":"Task",
+        "created_by":"user","execution_mode":"new_conversation",
+        "agent_selection":{"kind":"template","template_key":"assistant.general"},
+        "model":{"provider_id":CRON_PROVIDER_ID,"model":CRON_MODEL}
+    })).await;
+    let job_id=created["cron_job_id"].as_str().unwrap();
+    sqlx::query("UPDATE cron_jobs SET agent_binding=NULL,enabled=0,next_run_at=NULL WHERE cron_job_id=?")
+        .bind(job_id).execute(services.database.pool()).await.unwrap();
+    let count: i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions").fetch_one(services.database.pool()).await.unwrap();
+    let response=app.oneshot(run_now_request(job_id,&token,&csrf)).await.unwrap();
+    assert!(!response.status().is_success());
+    let after:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions").fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(count,after,"an invalid task cannot materialize a ghost Session");
 }
 
 // ── CJ-6: List all jobs ─────────────────────────────────────────────
@@ -975,8 +816,7 @@ async fn cj9b_update_schedule_preserves_existing_timezone_when_omitted() {
             "schedule": { "kind": "cron", "expr": "0 0 9 * * *", "tz": "Asia/Shanghai" },
             "message": "cron message",
             "conversation_id": TEST_CONV_1,
-            "agent_type": "nomi",
-            "created_by": "user"
+                "created_by": "user"
         }),
     )
     .await;
@@ -1072,7 +912,7 @@ async fn rn0_run_now_requires_exactly_one_idempotency_key() {
 }
 
 #[tokio::test]
-async fn rn1_run_now_returns_conversation_id_for_new_conversation_job() {
+async fn rn1_run_now_preserves_a_specified_session_and_its_idempotent_receipt() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     seed_conversation(&mut app, &services, &token, &csrf, TEST_CONV_1).await;
@@ -1086,9 +926,9 @@ async fn rn1_run_now_returns_conversation_id_for_new_conversation_job() {
     let idempotency_key = nomifun_common::generate_id();
     let req = run_now_request_with_key(&job_id, &token, &csrf, &idempotency_key);
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
+    let status = resp.status();
     let body = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "specified-session admission failed: {body}");
     assert_eq!(body["data"]["conversation_id"], json!(conversation_id));
 
     let replay = run_now_request_with_key(&job_id, &token, &csrf, &idempotency_key);
@@ -1137,21 +977,17 @@ async fn rn1b_lazy_session_modes_materialize_an_immutable_agent_binding() {
             &token,
             &csrf,
             json!({
-                "name": format!("Model-only {execution_mode}"),
+                "name": format!("Workbench {execution_mode}"),
                 "schedule": {
                     "kind": "every",
                     "every_ms": 600_000,
                     "description": "every ten minutes"
                 },
-                "message": "run the model-only task",
-                "agent_type": "nomi",
-                "created_by": "user",
+                "message": "run the frozen workbench task",
+                        "created_by": "user",
                 "execution_mode": execution_mode,
-                "agent_config": {
-                    "provider_id": CRON_PROVIDER_ID,
-                    "name": "Nomi",
-                    "model": CRON_MODEL
-                }
+                "agent_selection":{"kind":"template","template_key":"assistant.general"},
+                "model":{"provider_id":CRON_PROVIDER_ID,"model":CRON_MODEL}
             }),
         )
         .await;
@@ -1224,6 +1060,67 @@ async fn rn2_run_now_nonexistent() {
     let req = run_now_request(MISSING_CRON_JOB_ID, &token, &csrf);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn scheduled_system_rules_do_not_turn_a_single_file_action_into_a_numbered_user_plan() {
+    let (mut app,services)=build_app().await;
+    let (token,csrf)=setup_and_login(&mut app,&services,"admin","StrongP@ss1").await;
+    seed_cron_provider(&services).await;
+    let upstream=wiremock::MockServer::start().await;
+    let calls=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen=calls.clone();
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(move |_: &wiremock::Request| {
+            let first=seen.fetch_add(1,std::sync::atomic::Ordering::SeqCst)%2==0;
+            let chunks=if first { vec![
+                json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"raw-cron-write","type":"function","function":{"name":"write_file","arguments":json!({"path":"raw-cron-proof.txt","content":"RAW_CRON_CONTENT\n"}).to_string()}}]},"finish_reason":null}]}),
+                json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]})
+            ] } else { vec![
+                json!({"choices":[{"index":0,"delta":{"content":"RAW_CRON_DONE"},"finish_reason":null}]}),
+                json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})
+            ] };
+            let mut body=chunks.into_iter().map(|chunk|format!("data: {chunk}\n\n")).collect::<String>();
+            body.push_str("data: [DONE]\n\n");
+            wiremock::ResponseTemplate::new(200).insert_header("content-type","text/event-stream").set_body_string(body)
+        }).expect(4).mount(&upstream).await;
+    sqlx::query("UPDATE providers SET base_url=? WHERE provider_id=?")
+        .bind(format!("{}/v1",upstream.uri())).bind(CRON_PROVIDER_ID).execute(services.database.pool()).await.unwrap();
+    let prompt="Use write_file to create raw-cron-proof.txt with exactly RAW_CRON_CONTENT followed by one LF. Then reply RAW_CRON_DONE.";
+    for mode in ["new_conversation","existing"] {
+        let workspace=services.work_dir.join(format!("raw-{mode}"));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let created=create_job(&mut app,&token,&csrf,json!({
+            "name":"Raw canonical scheduled task","created_by":"user","message":prompt,
+            "schedule":{"kind":"every","every_ms":600000},"execution_mode":mode,
+            "model":{"provider_id":CRON_PROVIDER_ID,"model":CRON_MODEL},"workspace":workspace
+        })).await;
+        let job=created["cron_job_id"].as_str().unwrap();
+        let response=app.clone().oneshot(run_now_request(job,&token,&csrf)).await.unwrap();
+        let status=response.status();let body=body_json(response).await;
+        assert_eq!(status,StatusCode::OK,"{mode}: {body}");
+        tokio::time::timeout(std::time::Duration::from_secs(10),async {
+            loop {
+                let response=app.clone().oneshot(get_with_token(&format!("/api/cron/jobs/{job}"),&token)).await.unwrap();
+                let value=body_json(response).await;
+                if value["data"]["state"]["run_count"].as_u64()==Some(1) {
+                    assert_eq!(value["data"]["state"]["last_status"],"ok","{mode}: {value}");break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }).await.expect("a single task must dispatch without a fabricated numbered-action plan");
+        assert_eq!(tokio::fs::read_to_string(workspace.join("raw-cron-proof.txt")).await.unwrap(),"RAW_CRON_CONTENT\n");
+    }
+    let requests=upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(),4,"the raw single-action tasks must not enter a plan/rejection loop");
+    for request in requests.iter().step_by(2) {
+        let body:serde_json::Value=serde_json::from_slice(&request.body).unwrap();
+        let messages=body["messages"].as_array().unwrap();
+        assert!(messages.iter().any(|message|message["role"]=="user" && message["content"]==prompt));
+        assert!(!messages.iter().filter(|message|message["role"]=="user").any(|message|message["content"].to_string().contains("[Scheduled Task")));
+        assert!(messages.iter().filter(|message|message["role"]=="system").any(|message|message["content"].to_string().to_ascii_lowercase().contains("scheduled")));
+    }
 }
 
 // ── SK-1: Save skill ────────────────────────────────────────────────
@@ -1436,7 +1333,6 @@ async fn sc6_cron_with_timezone() {
         "schedule": { "kind": "cron", "expr": "0 0 9 * * *", "tz": "Asia/Shanghai" },
         "message": "hello",
         "conversation_id": TEST_CONV_1,
-        "agent_type": "nomi",
         "created_by": "user"
     });
 
@@ -1458,7 +1354,6 @@ async fn sc7_every_zero_interval() {
         "schedule": { "kind": "every", "every_ms": 0 },
         "message": "x",
         "conversation_id": TEST_CONV_1,
-        "agent_type": "nomi",
         "created_by": "user"
     });
     let req = json_with_token("POST", "/api/cron/jobs", body, &token, &csrf);
@@ -1478,7 +1373,6 @@ async fn sc8_every_negative_interval() {
         "schedule": { "kind": "every", "every_ms": -1000 },
         "message": "x",
         "conversation_id": TEST_CONV_1,
-        "agent_type": "nomi",
         "created_by": "user"
     });
     let req = json_with_token("POST", "/api/cron/jobs", body, &token, &csrf);

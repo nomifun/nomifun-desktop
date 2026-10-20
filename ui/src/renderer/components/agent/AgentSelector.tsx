@@ -12,18 +12,18 @@ import { Check, Code, Down, Edit, Magic, MessageOne, Right, Robot, Search, User 
 import React, { useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
-import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
-import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
+import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
+import type { ExecutableAgentPreset, AgentSelection } from './types';
 import { isConversationAgentTemplate } from '@/renderer/components/agent/conversationAgentCatalog';
-import styles from './GuidAgentSelector.module.css';
+import styles from './AgentSelector.module.css';
 
 const DEFAULT_VISIBLE_PERSONAL_AGENTS = 3;
 
-export type GuidAgentSelectorProps = {
+export type AgentSelectorProps = {
   presets: ExecutableAgentPreset[];
   draftPresets?: AgentPresetSummary[];
   officialTemplates?: OfficialPresetTemplate[];
-  selection: GuidAgentSelection;
+  selection: AgentSelection;
   isLoading?: boolean;
   loadError?: Error;
   onRetry?: () => Promise<void>;
@@ -34,6 +34,8 @@ export type GuidAgentSelectorProps = {
   switchingLabel?: string;
   /** Optional per-launch choices live inside the existing Agent menu. */
   resourceConfiguration?: React.ReactNode;
+  /** Portaled menus must share the containing modal layer. */
+  menuZIndex?: number;
   onSelectTemplate: (templateKey: OfficialPresetKey) => void;
   onSelectPreset: (presetId: AgentPresetId) => void;
 };
@@ -46,7 +48,7 @@ const templateIcon = (key: OfficialPresetKey) => {
   return <Icon theme='outline' size={20} fill='currentColor' />;
 };
 
-const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
+const AgentSelector: React.FC<AgentSelectorProps> = ({
   presets,
   draftPresets = [],
   officialTemplates = [],
@@ -62,6 +64,7 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
   onSelectTemplate,
   onSelectPreset,
   resourceConfiguration,
+  menuZIndex,
 }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -194,7 +197,7 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
         title={switching ? switchingLabel ?? selectedLabel : disabled ? disabledReason ?? selectedLabel : selectedLabel}
         aria-label={selectedLabel}
         aria-busy={switching || undefined}
-        data-testid='guid-agent-selector'
+        data-testid='agent-selector'
         data-agent-identity
         data-agent-name={selectedLabel}
         {...getReferenceProps()}
@@ -209,7 +212,7 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
           <FloatingFocusManager context={context} initialFocus={searchRef} modal={false}>
             <div
               ref={refs.setFloating}
-              style={floatingStyles}
+              style={{ ...floatingStyles, ...(menuZIndex === undefined ? {} : { zIndex: menuZIndex }) }}
               className={styles.panel}
               aria-label={t('guid.agentEntries.choose')}
               {...getFloatingProps({ onKeyDown: onMenuKeyDown })}
@@ -314,4 +317,4 @@ const AgentRow: React.FC<{
   </button>
 );
 
-export default GuidAgentSelector;
+export default AgentSelector;

@@ -144,12 +144,17 @@ async fn deleting_a_model_then_its_provider_detaches_current_defaults_without_re
     let binding_before: String = nomifun_db::sqlx::query_scalar("SELECT agent_binding_json FROM agent_sessions WHERE agent_session_id=?")
         .bind(session_id).fetch_one(services.database.pool()).await.unwrap();
     let job = api(&app, &token, &csrf, "POST", "/api/cron/jobs", json!({
-        "name": "Bound-session schedule", "agent_type": "nomi", "created_by": "user",
+        "name": "Bound-session schedule", "created_by": "user",
         "conversation_id": session_id, "execution_mode": "existing", "message": "Run later",
         "schedule": {"kind": "every", "every_ms": 600000, "description": "Every ten minutes"}
     }), StatusCode::CREATED).await;
     assert_eq!(job["enabled"], true);
-    assert!(job["metadata"]["agent_config"].is_null());
+    assert_eq!(job["metadata"]["model"], selection_a, "display uses the exact Session model");
+    let job_id = job["cron_job_id"].as_str().unwrap();
+    let stored_configuration: (Option<String>, Option<String>, Option<String>) = nomifun_db::sqlx::query_as(
+        "SELECT agent_binding,agent_selection,model_selection FROM cron_jobs WHERE cron_job_id=?"
+    ).bind(job_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(stored_configuration, (None, None, None), "a continuing schedule must not copy Session authority into its row");
     let job_uri = format!("/api/cron/jobs/{}", job["cron_job_id"].as_str().unwrap());
 
     api(&app, &token, &csrf, "DELETE", &format!(

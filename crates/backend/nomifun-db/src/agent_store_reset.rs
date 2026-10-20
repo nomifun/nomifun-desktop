@@ -47,7 +47,6 @@ const SESSION_BOUND_RESET_ORDER: &[&str] = &[
     "creation_tasks",
     "channel_pending_prompts",
     "cron_run_reservations",
-    "cron_job_runs",
     "product_agent_selections",
 ];
 
@@ -119,12 +118,11 @@ pub(crate) async fn reset_agent_data_in_transaction(
     }
     let mut suspended_trigger_sql = Vec::new();
     for trigger in RESET_SUSPENDED_TRIGGERS {
-        let sql: Option<String> = sqlx::query_scalar(
-            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?",
-        )
-        .bind(trigger)
-        .fetch_optional(&mut **tx)
-        .await?;
+        let sql: Option<String> =
+            sqlx::query_scalar("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?")
+                .bind(trigger)
+                .fetch_optional(&mut **tx)
+                .await?;
         if let Some(sql) = sql {
             sqlx::query(&format!("DROP TRIGGER {trigger}"))
                 .execute(&mut **tx)
@@ -139,9 +137,14 @@ pub(crate) async fn reset_agent_data_in_transaction(
     let preserved_before = table_counts(tx, &preserved_tables).await?;
     let removed_agent_selections = if existing_tables.contains("client_preferences") {
         sqlx::query("DELETE FROM client_preferences WHERE key IN (?,?)")
-            .bind(AGENT_SELECTION_PREFERENCES[0]).bind(AGENT_SELECTION_PREFERENCES[1])
-            .execute(&mut **tx).await?.rows_affected()
-    } else { 0 };
+            .bind(AGENT_SELECTION_PREFERENCES[0])
+            .bind(AGENT_SELECTION_PREFERENCES[1])
+            .execute(&mut **tx)
+            .await?
+            .rows_affected()
+    } else {
+        0
+    };
     if existing_tables.contains("requirement_pre_effect_abandon_guards") {
         sqlx::query("DELETE FROM requirement_pre_effect_abandon_guards")
             .execute(&mut **tx)
@@ -173,13 +176,7 @@ pub(crate) async fn reset_agent_data_in_transaction(
     };
     let cron_jobs_detached = if existing_tables.contains("cron_jobs") {
         sqlx::query(
-            "UPDATE cron_jobs SET enabled = 0, conversation_id = NULL, conversation_title = NULL, \
-                preset_id = NULL, preset_revision = NULL, agent_snapshot = NULL, agent_config = NULL, \
-                last_run_at = NULL, last_status = NULL, last_error = NULL, \
-                run_count = 0, retry_count = 0 \
-             WHERE conversation_id IS NOT NULL OR preset_id IS NOT NULL OR agent_snapshot IS NOT NULL OR agent_config IS NOT NULL OR last_run_at IS NOT NULL \
-                OR last_status IS NOT NULL OR last_error IS NOT NULL \
-                OR run_count <> 0 OR retry_count <> 0",
+            "UPDATE cron_jobs SET enabled=0,conversation_id=NULL,conversation_title=NULL,agent_selection=NULL,agent_binding=NULL,configuration_error='CRON_CONFIGURATION_RESELECTION_REQUIRED',next_run_at=NULL,schedule_revision=schedule_revision+1,last_run_at=NULL,last_run_id=NULL,last_status=NULL,last_error=NULL,run_count=0 WHERE conversation_id IS NOT NULL OR agent_binding IS NOT NULL OR agent_selection IS NOT NULL OR last_run_at IS NOT NULL OR last_run_id IS NOT NULL OR last_status IS NOT NULL OR last_error IS NOT NULL OR run_count<>0"
         )
         .execute(&mut **tx)
         .await?
@@ -204,7 +201,10 @@ pub(crate) async fn reset_agent_data_in_transaction(
     };
 
     let mut deleted_rows = BTreeMap::new();
-    deleted_rows.insert("client_preferences.agent_selections".to_owned(), removed_agent_selections);
+    deleted_rows.insert(
+        "client_preferences.agent_selections".to_owned(),
+        removed_agent_selections,
+    );
     deleted_rows.insert(
         "requirements.agent_claims_released".to_owned(),
         requirements_released,
@@ -254,7 +254,10 @@ pub(crate) async fn reset_agent_data_in_transaction(
     } else {
         0
     };
-    deleted_rows.insert("agent_metadata.custom_rows".to_owned(), removed_custom_agents);
+    deleted_rows.insert(
+        "agent_metadata.custom_rows".to_owned(),
+        removed_custom_agents,
+    );
     for trigger_sql in suspended_trigger_sql {
         sqlx::query(&trigger_sql).execute(&mut **tx).await?;
     }
@@ -278,10 +281,14 @@ async fn table_counts(
     for table in tables {
         let sql = if table == "client_preferences" {
             "SELECT COUNT(*) FROM client_preferences WHERE key NOT IN (?,?)".to_owned()
-        } else { format!("SELECT COUNT(*) FROM {table}") };
-        let mut query = sqlx::query_scalar::<_,i64>(&sql);
+        } else {
+            format!("SELECT COUNT(*) FROM {table}")
+        };
+        let mut query = sqlx::query_scalar::<_, i64>(&sql);
         if table == "client_preferences" {
-            query = query.bind(AGENT_SELECTION_PREFERENCES[0]).bind(AGENT_SELECTION_PREFERENCES[1]);
+            query = query
+                .bind(AGENT_SELECTION_PREFERENCES[0])
+                .bind(AGENT_SELECTION_PREFERENCES[1]);
         }
         let count: i64 = query.fetch_one(&mut **tx).await?;
         let count = u64::try_from(count)

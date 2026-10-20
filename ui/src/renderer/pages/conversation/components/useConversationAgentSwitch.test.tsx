@@ -12,7 +12,7 @@ import { parseConversationId } from '@/common/types/ids';
 import conversation from '@/renderer/services/i18n/locales/en-US/conversation.json';
 import agentSettings from '@/renderer/services/i18n/locales/en-US/agentSettings.json';
 import guid from '@/renderer/services/i18n/locales/en-US/guid.json';
-import GuidAgentSelector from '@/renderer/pages/guid/components/GuidAgentSelector';
+import AgentSelector from '@/renderer/components/agent/AgentSelector';
 import type { GuidAgentSelection } from '@/renderer/pages/guid/types';
 import { useConversationAgentSwitch } from './useConversationAgentSwitch';
 
@@ -72,7 +72,7 @@ describe('current conversation Agent switching', () => {
         switchingRef, configurationChangingRef, reasoningUpdatingRef,
       }, ports);
       return <>
-        <GuidAgentSelector presets={[]} selection={minimal}
+        <AgentSelector presets={[]} selection={minimal}
           officialTemplates={['chat.minimal', 'assistant.general'].map((template_key) => ({ template_key }) as OfficialPresetTemplate)}
           switching={switcher.switching} switchingLabel={conversation.chat.agentSwitch.loading}
           onSelectPreset={() => {}} onSelectTemplate={(templateKey) => {
@@ -83,16 +83,16 @@ describe('current conversation Agent switching', () => {
     };
     const page = render(<I18nextProvider i18n={i18n}><MemoryRouter><Harness /></MemoryRouter></I18nextProvider>);
     const draft = page.getByRole('textbox', { name: 'Message draft' }) as HTMLTextAreaElement;
-    await act(async () => { fireEvent.click(page.getByTestId('guid-agent-selector')); });
+    await act(async () => { fireEvent.click(page.getByTestId('agent-selector')); });
     act(() => { fireEvent.click(page.getByRole('button', { name: agentSettings.template.assistant.general.name })); });
     expect(ports.preview).toHaveBeenCalledTimes(1);
     expect(page.queryByRole('dialog')).toBeNull();
-    expect(page.getByTestId('guid-agent-selector').getAttribute('aria-busy')).toBe('true');
+    expect(page.getByTestId('agent-selector').getAttribute('aria-busy')).toBe('true');
     expect(page.getByRole('textbox', { name: 'Message draft' })).toBe(draft);
     expect(draft.value).toBe('Keep this draft');
     await act(async () => { pending.resolve(preview); await completing; });
     expect(ports.apply).toHaveBeenCalledTimes(1);
-    expect(page.getByTestId('guid-agent-selector').hasAttribute('aria-busy')).toBe(false);
+    expect(page.getByTestId('agent-selector').hasAttribute('aria-busy')).toBe(false);
     expect(page.getByRole('textbox', { name: 'Message draft' })).toBe(draft);
     expect(draft.value).toBe('Keep this draft');
   });

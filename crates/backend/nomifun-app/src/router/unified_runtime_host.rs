@@ -479,6 +479,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-db/migrations/009_cron_input_handoff.sql"),
                     include_str!("../../../nomifun-db/migrations/010_mcp_oauth_authority.sql"),
                     include_str!("../../../nomifun-db/migrations/011_cron_run_cancellation.sql"),
+                    include_str!("../../../nomifun-db/migrations/012_unify_cron_agent_binding.sql"),
                     include_str!("engine_mcp_resources.rs"),
                     include_str!("engine_mcp_media.rs"),
                     include_str!("engine_workspace_media.rs"),
@@ -1109,6 +1110,9 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             &self.options.conversation_id.clone().into(),receipt).await?;
         let execution_source_context = self.session_host.read_execution_source_context(
             &self.principal, &self.options.conversation_id.clone().into()).await?;
+        let scheduled_instructions = super::nomi_core_session::scheduled_turn_instructions(
+            &self.principal, &self.options.conversation_id.clone().into(),
+            admitted.operation_id(), receipt)?;
         let channel_guest = receipt.get("origin").and_then(Value::as_str)==Some("channel_guest");
         self.skills.validate_ids(&message.inject_skills)?;
         if self.activation_failed.load(std::sync::atomic::Ordering::Acquire) {
@@ -1177,7 +1181,8 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             .map(|context| robot_interaction::bounded_handoff(context, compact_interaction));
         let handoff_bytes = handoff_context.as_ref().map_or(0, String::len)
             .saturating_add(question_context.as_ref().map_or(0,String::len))
-            .saturating_add(execution_source_context.as_ref().map_or(0,String::len));
+            .saturating_add(execution_source_context.as_ref().map_or(0,String::len))
+            .saturating_add(scheduled_instructions.as_ref().map_or(0,String::len));
         let history_budget = if compact_interaction {
             robot_interaction::history_byte_limit(true).saturating_sub(bytes.saturating_add(handoff_bytes))
         } else {
@@ -1218,6 +1223,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             &admitted.session().revision().payload);
         if let Some(context)=question_context {instructions.push(context);}
         if let Some(context)=execution_source_context {instructions.push(context);}
+        if let Some(context)=scheduled_instructions {instructions.push(context);}
         instructions.push(admitted_workspace_context(admitted.session().workspace())?);
         instructions.extend(self.skills.instructions.iter().cloned());
         instructions.extend(self.skills.turn_instructions(&message.inject_skills)?);
@@ -1910,6 +1916,7 @@ mod build_identity_tests {
             "../../../nomifun-db/migrations/009_cron_input_handoff.sql",
             "../../../nomifun-db/migrations/010_mcp_oauth_authority.sql",
             "../../../nomifun-db/migrations/011_cron_run_cancellation.sql",
+            "../../../nomifun-db/migrations/012_unify_cron_agent_binding.sql",
         ] {
             assert!(
                 source.contains(&format!("include_str!(\"{required}\")")),

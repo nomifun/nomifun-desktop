@@ -4,17 +4,17 @@
     "ledger_version": "1.0.0",
     "artifacts": {
       "canonical_api_inventory": "6addf6ddc6847571816ad3cd67db7d807002d4b843d4de7febcb01eeda7d12d6",
-      "canonical_schema_manifest": "cd1213b42920f2720a94291ee99203a317d0715c30ea09293073a8585cb0f4bf",
+      "canonical_schema_manifest": "1c2ea7a7b8ac78f26f80584e405730522cd8041731e833be63bc8be46e26e34c",
       "capability_catalog_entry": "32b70c1749ef9dcbc73bcc6200b46cd28d90e37e64ae736010c63b6480ce2168",
       "cargo_lock": "79f27cfb0cf554100b92bd1276264b3fe9706c83f75460dd52f1659c1e2af69b",
       "coding_codex_native_contract": "853344a5149eef78e0fc08ff2fac380489775703fd340172f9d49990c5e51d8c",
       "confirmed_decision_contract": "92b3de5b8e46bb769e1af7143555dd3cf65be323ab2a6335e48b0fa01854a6c4",
       "database_schema": "855244c46e97838c4deaee55f3fd5640875c2b87e43ccba2ef6773f23258b4d8",
-      "error_registry": "075ed8b736b67ac4fc8632d2a254e1b28924e36db6a51ab5e7ef821af5cf5db0",
+      "error_registry": "57bcaf2b74f4994e1b2005e105eb53907a8460365c142a9dd7e6411aa92e10bd",
       "official_preset_seed_manifest": "96075d7ba1e03f9102a70843096281e079b82a4083e72d90f979d1cd1e744df3",
       "package_schema": "78633c6aada5d08339172daa0ef7eb11610c48f471dd9ba36f3da0fafc32905a",
       "platform_validation_contract": "5aef0a4ec9b86a353eb2a621f824d31df067bbf7eaa844393bebcd9ab78459c1",
-      "platform_validation_fixture": "5b325a1ea5d8dbcec32d6041df70163482606dec695e92f1d977ef98480c9f02",
+      "platform_validation_fixture": "880dfcbfd8731c2223ba59ae983a056e318a7d47f0f26238b511f59945cb6891",
       "runtime_feature_inventory": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
       "runtime_protocol": "5c7792fb52932933b387984887475a525bedde5c03cd6b5b3fa81e7df614382f",
       "rust_contract_schema": "5e551009c3042724af8435dc68442164a479a441ee7733503a3de9cc935b932b",
@@ -22,5 +22,5 @@
       "target_first_party_inventory": "3821559376ca7af18d35a7b43e5e77cc5190027131224bd53f648775d17c9c43"
     }
   },
-  "payload_digest": "f2f0ffd517c46fb9c5de1ab6c1011f8c11eba6af58fece1b51060500d60f061b"
+  "payload_digest": "fd26ea8c3247c202453235fde672326ee67d1047fea271d90e4a5b2838f5c849"
 }

@@ -19,7 +19,9 @@ const CronStatusTag: React.FC<{ job: ICronJob }> = ({ job }) => {
   let label = t('cron.status.active');
   let tone: StatusTone = 'active';
 
-  if (!job.enabled) {
+  if (job.state.configuration_error) {
+    color = 'orange'; tone = 'input_required'; label = t('cron.status.configurationError');
+  } else if (!job.enabled) {
     color = 'gray';
     tone = 'paused';
     label = t('cron.status.paused');

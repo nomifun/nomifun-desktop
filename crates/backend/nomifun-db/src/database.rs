@@ -509,7 +509,7 @@ async fn run_migrations_with_retry(conn: &mut sqlx::SqliteConnection) -> Result<
 
     loop {
         match DB_MIGRATOR.run(&mut *conn).await {
-            Ok(()) => return Ok(()),
+            Ok(()) => return crate::cron_binding_normalization::finish_pending(conn).await,
             Err(e) if !retried_unique_conflict && is_migrations_table_unique_conflict(&e) => {
                 retried_unique_conflict = true;
                 warn!(

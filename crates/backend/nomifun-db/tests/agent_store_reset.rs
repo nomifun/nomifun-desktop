@@ -93,6 +93,7 @@ async fn main_database_agent_store_tables_match_the_forward_migrated_baseline() 
         include_str!("../migrations/009_cron_input_handoff.sql"),
         include_str!("../migrations/010_mcp_oauth_authority.sql"),
         include_str!("../migrations/011_cron_run_cancellation.sql"),
+        include_str!("../migrations/012_unify_cron_agent_binding.sql"),
     ] {
         sqlx::raw_sql(migration).execute(&baseline).await.unwrap();
     }
@@ -104,20 +105,18 @@ async fn main_database_agent_store_tables_match_the_forward_migrated_baseline() 
         .filter(|table| table.owner == "platform.agent-session")
         .map(|table| table.table_name)
     {
-        let baseline_sql: String = sqlx::query_scalar(
-            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
-        )
-        .bind(&table)
-        .fetch_one(&baseline)
-        .await
-        .unwrap();
-        let main_sql: String = sqlx::query_scalar(
-            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
-        )
-        .bind(&table)
-        .fetch_one(main.pool())
-        .await
-        .unwrap();
+        let baseline_sql: String =
+            sqlx::query_scalar("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
+                .bind(&table)
+                .fetch_one(&baseline)
+                .await
+                .unwrap();
+        let main_sql: String =
+            sqlx::query_scalar("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
+                .bind(&table)
+                .fetch_one(main.pool())
+                .await
+                .unwrap();
         let normalize = |sql: &str| {
             sql.lines()
                 .filter(|line| !line.trim_start().starts_with("--"))
@@ -127,4 +126,32 @@ async fn main_database_agent_store_tables_match_the_forward_migrated_baseline() 
         };
         assert_eq!(normalize(&main_sql), normalize(&baseline_sql), "{table}");
     }
+}
+
+#[tokio::test]
+async fn reset_preserves_cron_definitions_and_author_model_but_retires_agent_authority() {
+    let db = init_database_memory().await.unwrap();
+    let pool = db.pool();
+    let owner = nomifun_db::installation_owner_id(pool).await.unwrap();
+    let provider = "0190f5fe-7c00-7a00-8000-000000000141";
+    let job = "0190f5fe-7c00-7a00-8000-000000000142";
+    sqlx::query("INSERT INTO providers(provider_id,platform,name,base_url,auth_scheme,credentials_encrypted,enabled,created_at,updated_at) VALUES(?,'openai','Preserve model','https://example.invalid','bearer','fixture',1,1,1)").bind(provider).execute(pool).await.unwrap();
+    let model = serde_json::json!({"provider_id":provider,"model":"keep-model"}).to_string();
+    sqlx::query("INSERT INTO cron_jobs(cron_job_id,user_id,name,enabled,schedule_kind,schedule_value,payload_message,agent_selection,model_selection,next_run_at,created_by,created_at,updated_at) VALUES(?,?,'Keep definition',0,'every','60000','Keep user instruction',?,?,60001,'user',1,1)")
+        .bind(job).bind(&owner).bind(serde_json::json!({"kind":"preset","preset_id":"0190f5fe-7c00-7a00-8000-000000000143"}).to_string()).bind(&model).execute(pool).await.unwrap();
+    reset_agent_data(pool).await.unwrap();
+    let (name,message,enabled,selection,binding,retained,error,next):(String,String,bool,Option<String>,Option<String>,String,String,Option<i64>)=sqlx::query_as("SELECT name,payload_message,enabled,agent_selection,agent_binding,model_selection,configuration_error,next_run_at FROM cron_jobs WHERE cron_job_id=?").bind(job).fetch_one(pool).await.unwrap();
+    assert_eq!(name, "Keep definition");
+    assert_eq!(message, "Keep user instruction");
+    assert!(!enabled);
+    assert!(selection.is_none());
+    assert!(binding.is_none());
+    assert_eq!(retained, model);
+    assert_eq!(error, "CRON_CONFIGURATION_RESELECTION_REQUIRED");
+    assert_eq!(next, None);
+    let second = reset_agent_data(pool).await.unwrap();
+    assert_eq!(
+        second.deleted_rows["cron_jobs.agent_runtime_cleared"], 0,
+        "a retained non-Agent model choice is not runtime data to reset repeatedly"
+    );
 }

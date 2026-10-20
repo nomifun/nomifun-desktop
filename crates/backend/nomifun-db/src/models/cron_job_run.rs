@@ -1,21 +1,25 @@
 use nomifun_common::TimestampMs;
 use serde::{Deserialize, Serialize};
 
+/// Read-only terminal reservation projection. No separate history table or writer.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, PartialEq, Eq)]
-pub struct CronJobRunRow {
+pub struct CronRunHistoryRow {
     pub id: i64,
     pub cron_job_run_id: String,
     pub cron_job_id: String,
     pub executed_at_ms: TimestampMs,
     pub status: String,
     pub created_at_ms: TimestampMs,
+    pub conversation_id: Option<String>,
+    pub result_error: Option<String>,
+    pub domain_failure_json: Option<String>,
 }
 
 /// Durable identity and lifecycle of one cron trigger.
 ///
-/// This table is intentionally separate from the seven-row presentation
-/// history: pruning UI history must never erase the evidence that absorbs an
-/// at-least-once scheduler or run-now replay.
+/// Terminal rows also supply the bounded UI history projection. There is no
+/// second presentation table, and limiting a history read never prunes the
+/// evidence that absorbs scheduler or run-now replays.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, PartialEq, Eq)]
 pub struct CronRunReservationRow {
     pub id: i64,
@@ -29,6 +33,7 @@ pub struct CronRunReservationRow {
     pub status: String,
     pub conversation_id: Option<String>,
     pub result_error: Option<String>,
+    pub domain_failure_json: Option<String>,
     pub created_at_ms: TimestampMs,
     pub updated_at_ms: TimestampMs,
     pub settled_at_ms: Option<TimestampMs>,

@@ -201,6 +201,7 @@ export type AgentStreamErrorInfo = {
   taskIncompleteReason?: AgentTaskIncompleteReason;
   providerDiagnostic?: ModelFailureDiagnostic;
   systemExecutionError?: SystemExecutionFailure;
+  resourceBindingFailure?: { missing_resource_kinds: string[]; missing_resource_operations: Record<string, string[]> };
   /** Frozen execution identity supplied by the host, never the current selection. */
   agentLabel?: string;
   agentTemplateKey?: OfficialPresetKey;
@@ -718,11 +719,21 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
   const agentTemplateKey = OFFICIAL_PRESET_KEYS.includes(value.agentTemplateKey as OfficialPresetKey)
     ? value.agentTemplateKey as OfficialPresetKey : undefined;
   const modelName = typeof value.modelName === 'string' ? value.modelName : undefined;
-  const retryable = typeof value.retryable === 'boolean' ? value.retryable : undefined;
+  const retryable = code === 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE' ? false : typeof value.retryable === 'boolean' ? value.retryable : undefined;
   const feedback_recommended = typeof value.feedback_recommended === 'boolean' ? value.feedback_recommended : undefined;
   const resolution = normalizeAgentErrorResolution(value.resolution);
   const providerDiagnostic = normalizeModelFailureDiagnostic(value.providerDiagnostic);
   const systemExecutionError = normalizeSystemExecutionFailure(value.systemExecutionError);
+  const resourceFailure = code === 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE' && isObject(value.resourceBindingFailure)
+    ? value.resourceBindingFailure : undefined;
+  const safeResourceValues = (items: unknown): string[] => Array.isArray(items)
+    ? items.filter((item): item is string => typeof item === 'string' && /^[a-z0-9_.:/-]{1,160}$/i.test(item)).slice(0, 32) : [];
+  const resourceBindingFailure = resourceFailure ? {
+    missing_resource_kinds: safeResourceValues(resourceFailure.missing_resource_kinds),
+    missing_resource_operations: Object.fromEntries(Object.entries(isObject(resourceFailure.missing_resource_operations)
+      ? resourceFailure.missing_resource_operations : {}).slice(0, 32)
+      .filter(([kind]) => /^[a-z0-9_.:/-]{1,160}$/i.test(kind)).map(([kind, operations]) => [kind, safeResourceValues(operations)])),
+  } : undefined;
 
   if (
     !code &&
@@ -751,6 +762,7 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
     ...(taskIncompleteReason ? { taskIncompleteReason } : {}),
     ...(providerDiagnostic ? { providerDiagnostic } : {}),
     ...(systemExecutionError ? { systemExecutionError } : {}),
+    ...(resourceBindingFailure ? { resourceBindingFailure } : {}),
     ...(agentLabel ? { agentLabel } : {}),
     ...(agentTemplateKey ? { agentTemplateKey } : {}),
     ...(modelName ? { modelName } : {}),

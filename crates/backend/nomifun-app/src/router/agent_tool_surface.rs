@@ -18,7 +18,9 @@ use nomifun_agent_contracts::tool_presentation::{
 use nomifun_agent_contracts::tool_model_guide::{ToolModelGuide, tool_model_guide};
 
 fn error(value: impl std::fmt::Display) -> AppError {
-    AppError::Conflict(format!("Nomi tool surface: {value}"))
+    // These failures originate in host-owned preparation, before a model
+    // request. Preserve their source instead of classifying provider prose.
+    AppError::Internal(format!("Nomi tool surface: {value}"))
 }
 
 pub(super) async fn compile(
@@ -124,10 +126,12 @@ pub(super) async fn compile(
                 action.action_id.as_ref(),
                 schema,
             );
-            exposures.push(builtin_tool_exposure(
+            if let Some(exposure) = builtin_tool_exposure(
                 &selected.capability.id, &action.action_id, schema,
                 &capability.manifest.display.name, &capability.manifest.display.description,
-            )?);
+            )? {
+                exposures.push(exposure);
+            }
         }
     }
     for selected in snapshot
@@ -247,7 +251,7 @@ fn builtin_tool_exposure(
     capability_id: &CapabilityId, action_id: &ActionId,
     canonical: nomifun_agent_contracts::StrictJsonValue,
     display_name: &str, display_description: &str,
-) -> Result<AgentToolExposure, AppError> {
+) -> Result<Option<AgentToolExposure>, AppError> {
     let exposure = AgentToolExposure {
         definition: ChatToolDefinition {
             name: platform_tool_name(capability_id.as_ref(), action_id.as_ref()),
@@ -262,13 +266,22 @@ fn builtin_tool_exposure(
     // This does not replace the canonical resolver or Kernel validation.
     #[cfg(feature = "computer-use")]
     let exposure = if capability_id.as_ref() == nomifun_agent_domain_wave2::COMPUTER_MODULE_ID {
-        super::computer_host::project_exposure(exposure, nomifun_computer::surface::RouteTier::Full)
-            .ok_or_else(|| error(format!("Computer action {} has no frozen tool schema for this platform", action_id.as_ref())))?
+        // Use the same exact platform projection as Kernel installation. A
+        // platform without a captured definition exposes no Computer tool;
+        // it must neither borrow another schema nor block unrelated tools.
+        let tool = nomifun_computer::surface::tool(action_id.as_ref())
+            .ok_or_else(|| error(format!("Computer action {} is not frozen", action_id.as_ref())))?;
+        if !tool.platforms.contains_key(nomifun_computer::surface::platform()) {
+            return Ok(None);
+        }
+        super::computer_host::project_exposure(
+            exposure, nomifun_computer::surface::RouteTier::Full,
+        ).ok_or_else(|| error(format!("Computer action {} has an invalid platform projection", action_id.as_ref())))?
     } else { exposure };
     if !concrete_object_schema(&exposure.definition.input_schema.0, true) {
         return Err(error(format!("{} action {} has no strict canonical tool schema", capability_id.as_ref(), action_id.as_ref())));
     }
-    Ok(exposure)
+    Ok(Some(exposure))
 }
 
 fn standard_tool_exposure(
@@ -357,6 +370,17 @@ mod tests {
 
     use super::*;
     use nomifun_agent_contracts::tool_model_guide::tool_model_guides;
+
+    #[test]
+    fn local_tool_preparation_failure_keeps_its_host_origin() {
+        let failure = error("local tool schema preparation failed (401 / 503)");
+        assert!(matches!(&failure, AppError::Internal(_)));
+        let classified = nomifun_ai_agent::AgentSendError::from_app_error_ref(&failure).into_stream_error();
+        assert_eq!(classified.code, Some(nomifun_api_types::AgentErrorCode::NomifunInternalError));
+        assert_eq!(classified.ownership, Some(nomifun_api_types::AgentErrorOwnership::Nomifun));
+        assert!(classified.provider_diagnostic.is_none());
+        assert!(classified.detail.unwrap().contains("local tool schema preparation failed"));
+    }
 
     fn canonical_process_schema(action_id: &str) -> StrictJsonValue {
         let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
@@ -460,13 +484,8 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
         assert!(canonical.values().any(|schema| schema.0.get("anyOf").is_some()), "fixture exercises the cross-platform authorization union");
         let expected = nomifun_computer::surface::tools_for_tier(nomifun_computer::surface::RouteTier::Full, "en-US");
-        let result = compile(&snapshot, &active, &registry, &NoPluginSchemas, &FrozenSchemas, &BTreeSet::new()).await;
-        if expected.is_empty() {
-            assert!(result.is_err(), "a platform without a frozen capture cannot borrow another platform's schema");
-            return;
-        }
-        let plan = result.unwrap();
-        assert_eq!(plan.len(), nomifun_agent_domain_wave2::COMPUTER_ACTION_IDS.len());
+        let plan = compile(&snapshot, &active, &registry, &NoPluginSchemas, &FrozenSchemas, &BTreeSet::new()).await.unwrap();
+        assert_eq!(plan.len(), expected.len(), "only this platform's captured tools may be presented");
         for tool in expected {
             let binding = plan.binding(&tool.name).unwrap();
             let definition = ChatToolDefinition { name: tool.name, description: tool.description,
@@ -484,6 +503,9 @@ mod tests {
         assert!(builtin_tool_exposure(&"other.domain".into(), &"other.domain/read".into(),
             canonical.values().find(|schema| schema.0.get("anyOf").is_some()).unwrap().clone(), "Other", "Other").is_err(),
             "Computer projection must not relax the generic strict-object boundary");
+        assert!(builtin_tool_exposure(&"computer".into(), &"computer/not_frozen".into(),
+            StrictJsonValue(json!({"type":"object","properties":{},"additionalProperties":false})),
+            "Computer", "Computer").is_err(), "an unknown Action must not be silently omitted");
     }
 
     #[cfg(feature = "computer-use")]
@@ -519,14 +541,20 @@ mod tests {
         ], &selected, &["workspace", "computer"]);
         let active = nomifun_agent_kernel::SessionCapabilityState::new(&snapshot).snapshot().unwrap();
         let initial = compile(&snapshot, &active, &registry, &NativeSchemas, &NativeSchemas, &BTreeSet::new()).await.unwrap();
-        let visible = initial.model_definitions().into_iter().filter(|definition| !definition.deferred).collect::<Vec<_>>();
-        assert!(serde_json::to_vec(&visible).unwrap().len() > nomifun_agent_runtime::VISIBLE_TOOL_DEFINITION_BYTE_BUDGET);
         let presented = super::super::agent_tool_presentation::project(initial.clone(), true).unwrap();
-        assert!(initial.model_definitions().iter().any(|definition| {
-            let binding = initial.binding(&definition.name).unwrap();
-            binding.capability_id.as_ref() == "computer" && !definition.deferred
-                && presented.binding(&definition.name).unwrap().definition.deferred
-        }));
+        if nomifun_computer::surface::tools_for_tier(nomifun_computer::surface::RouteTier::Full, "en-US").is_empty() {
+            assert!(initial.len() > 0, "General retains its native workspace tools");
+            assert!(initial.model_definitions().iter().all(|definition|
+                initial.binding(&definition.name).unwrap().capability_id.as_ref() == "workspace.files"));
+        } else {
+            let visible = initial.model_definitions().into_iter().filter(|definition| !definition.deferred).collect::<Vec<_>>();
+            assert!(serde_json::to_vec(&visible).unwrap().len() > nomifun_agent_runtime::VISIBLE_TOOL_DEFINITION_BYTE_BUDGET);
+            assert!(initial.model_definitions().iter().any(|definition| {
+                let binding = initial.binding(&definition.name).unwrap();
+                binding.capability_id.as_ref() == "computer" && !definition.deferred
+                    && presented.binding(&definition.name).unwrap().definition.deferred
+            }));
+        }
         let exposures = presented.model_definitions().into_iter().map(|definition| {
             let binding = presented.binding(&definition.name).unwrap();
             super::super::computer_host::project_exposure(AgentToolExposure { definition,
@@ -990,8 +1018,15 @@ mod tests {
             {
                 let schema = resolve(capability.id.as_ref(), &action.input_schema)
                     .unwrap_or_else(|error| panic!("{family} {}: {error}", action.action_id.as_ref()));
+                // Computer's authorization schema is the union of its real
+                // captured platform inputs. Each member must remain strict;
+                // the model receives the platform projection tested above.
+                let inputs = if capability.id.as_ref() == nomifun_agent_domain_wave2::COMPUTER_MODULE_ID {
+                    schema.0.get("anyOf").and_then(serde_json::Value::as_array)
+                        .map(Vec::as_slice).unwrap_or(std::slice::from_ref(&schema.0))
+                } else { std::slice::from_ref(&schema.0) };
                 assert!(
-                    concrete_object_schema(&schema.0, true),
+                    !inputs.is_empty() && inputs.iter().all(|input| concrete_object_schema(input, true)),
                     "{family} action {} has no strict object input",
                     action.action_id.as_ref(),
                 );
@@ -1000,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn every_bundled_function_action_passes_the_runtime_model_tool_gate() {
+    fn every_bundled_function_action_has_strict_platform_model_inputs() {
         assert_strict_model_tool_inputs(
             "Wave 1",
             nomifun_agent_domain_wave1::registrations().unwrap(),

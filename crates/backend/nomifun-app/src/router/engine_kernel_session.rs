@@ -286,6 +286,12 @@ impl EngineKernelSession {
         }
         let constraints = ExecutionConstraints::from_extra(&session.session().extra)?;
         let snapshot = session.snapshot();
+        // Restored/inherited contracts are checked as frozen facts. Runtime
+        // construction must never repair missing grants or resolve a newer
+        // authoring configuration on their behalf.
+        super::nomi_core_resource_bindings::validate_executable_binding_resources(
+            snapshot, &binding.typed_resource_bindings,
+        )?;
         let session_id = AgentSessionId::from(session.session().conversation_id.clone());
         let principal = session.principal();
         // EngineSessionHost already validated this host-resolved path against

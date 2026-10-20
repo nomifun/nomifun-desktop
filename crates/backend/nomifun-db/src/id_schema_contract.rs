@@ -99,7 +99,6 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "creative_studio_projects",
     "creative_studio_template_runs",
     "creative_studio_templates",
-    "cron_job_runs",
     "cron_run_reservations",
     "cron_jobs",
     "cs_agent_capability_receipts",
@@ -171,7 +170,6 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("creative_studio_projects", "project_id"),
     ("creative_studio_template_runs", "template_run_id"),
     ("creative_studio_templates", "template_id"),
-    ("cron_job_runs", "cron_job_run_id"),
     ("cron_run_reservations", "cron_job_run_id"),
     ("cron_jobs", "cron_job_id"),
     (
@@ -245,7 +243,6 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("channel_sessions", "chat_id"),
     ("channel_users", "channel_user_id"),
     ("channel_users", "platform_user_id"),
-    ("cron_job_runs", "cron_job_run_id"),
     ("cron_run_reservations", "cron_job_run_id"),
     ("cron_jobs", "cron_job_id"),
     ("creation_tasks", "creation_task_id"),
@@ -779,10 +776,9 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
             "parent.execution_id = child.execution_id AND parent.step_id = child.step_id",
         ),
     text_ref!("cron_jobs", "user_id" => "users", "user_id", false, Cascade),
-    text_ref!("cron_jobs", "preset_id" => "agent_presets", "preset_id", true, SetNull)
-        .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
+    text_ref!("cron_jobs", "last_run_id" => "cron_run_reservations", "cron_job_run_id", true, SetNull)
+        .with_aggregate_scope("parent.cron_job_id = child.cron_job_id"),
     text_ref!("cron_jobs", "conversation_id" => "agent_sessions", "agent_session_id", true, Cascade),
-    text_ref!("cron_job_runs", "cron_job_id" => "cron_jobs", "cron_job_id", false, Cascade),
     text_ref!("cron_run_reservations", "cron_job_id" => "cron_jobs", "cron_job_id", false, Cascade),
     text_ref!("cron_run_reservations", "conversation_id" => "agent_sessions", "agent_session_id", true, SetNull),
     external_ref!("channel_plugins", "companion_id", Text, true, CanonicalUuidV7, SetNull),
@@ -913,8 +909,8 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "providers", "provider_id", SetNull, RequireParent
     ),
     json_text_ref!(
-        "cron_jobs", "agent_config", "$.provider_id (agent_type=nomi)",
-        "SELECT json_extract(agent_config, '$.provider_id') AS value FROM cron_jobs WHERE agent_type = 'nomi' AND agent_config IS NOT NULL" =>
+        "cron_jobs", "model_selection", "$.provider_id",
+        "SELECT json_extract(model_selection, '$.provider_id') AS value FROM cron_jobs WHERE model_selection IS NOT NULL" =>
         "providers", "provider_id", SetNull, RequireParent
     ),
     json_text_ref!(

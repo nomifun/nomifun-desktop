@@ -5,7 +5,7 @@ use nomifun_agent_contracts::{
     AGENT_STORE_DATA_GENERATION, AGENT_STORE_MIGRATION_HEAD, AGENT_STORE_PROJECTION_SCHEMA_VERSION,
     agent_store_schema_manifest_payload, digest_payload, official_preset_seed_manifest_payload,
 };
-use nomifun_db::{MigrationLineage, init_database, inspect_migration_lineage};
+use nomifun_db::{MigrationLineage, inspect_migration_lineage};
 use sqlx::{SqlitePool, migrate::Migrator, sqlite::{SqliteConnectOptions, SqlitePoolOptions}};
 
 static MIGRATOR: Migrator = sqlx::migrate!();
@@ -61,9 +61,10 @@ async fn forward_009_preserves_cron_rows_indexes_sequences_and_supported_lineage
     assert_eq!(inspect_migration_lineage(&previous).await.unwrap(), MigrationLineage::KnownPrefix);
     previous.close().await;
     for _ in 0..2 {
-        let current = init_database(&path).await.unwrap();
-        let pool = current.pool();
-        assert_eq!(inspect_migration_lineage(pool).await.unwrap(), MigrationLineage::Current);
+        let current=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path).foreign_keys(false)).await.unwrap();
+        Migrator{migrations:Cow::Owned(MIGRATOR.iter().take(9).cloned().collect()),..Migrator::DEFAULT}.run(&current).await.unwrap();
+        let pool=&current;
+        assert_eq!(inspect_migration_lineage(pool).await.unwrap(), MigrationLineage::KnownPrefix);
         assert_eq!(rows(pool, "cron_jobs").await, job_rows);
         assert_eq!(rows(pool, "cron_job_runs").await, run_rows);
         assert_eq!(rows(pool, "cron_run_reservations").await, reservation_rows);

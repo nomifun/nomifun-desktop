@@ -9,25 +9,27 @@ import { useTranslation } from 'react-i18next';
 import { Form, Input, Select, Message, TimePicker, Radio, Switch } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import NomiModal from '@renderer/components/base/NomiModal';
-import type { ICreateCronJobParams, ICronAgentConfig, ICronJob } from '@/common/adapter/ipcBridge';
-import { useConversationAgents } from '@renderer/pages/conversation/hooks/useConversationAgents';
+import type { ICreateCronJobParams, ICronJob } from '@/common/adapter/ipcBridge';
+import AgentSelector from '@/renderer/components/agent/AgentSelector';
+import { DEFAULT_AGENT_SELECTION, type AgentSelection } from '@/renderer/components/agent/types';
+import { agentSelectionFromWire, agentSelectionToWire } from '@/renderer/components/agent/agentSelection';
+import { useConversationAgentCatalog } from '@/renderer/components/agent/useConversationAgentCatalog';
+import { useAgentPresetCapabilities } from '@/renderer/components/agent/useAgentPresetCapabilities';
+import { useAgentLaunchModel } from '@/renderer/components/agent/useAgentLaunchModel';
+import { scheduledWorkspace, scheduledAgentName } from './scheduledAgentPresentation';
 import dayjs from 'dayjs';
-import type { TProviderWithModel } from '@/common/config/storage';
-import type { ConversationId, ProviderId } from '@/common/types/ids';
-import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
+import type { ConversationId } from '@/common/types/ids';
 import ChatModelSelector from '@renderer/components/chat/ChatModelSelector';
 import {
   WorkspaceDirectoryUnavailableError,
   WorkspaceFolderSelect,
   validateExistingWorkspaceDirectory,
 } from '@renderer/components/workspace';
-import type { AgentMetadata } from '@renderer/utils/model/agentTypes';
 import { createCronSchedule, getCurrentCronTimeZone } from '@renderer/pages/cron/cronUtils';
 import { useAllCronJobs } from '@renderer/pages/cron/useCronJobs';
 import { getConversationCreateErrorMessage } from '@renderer/pages/conversation/utils/conversationCreateError';
 import CronExpressionBuilder, { validateCronExpression } from './CronExpressionBuilder';
 import { useConversationListSync } from '@renderer/pages/conversation/SessionList/hooks/useConversationListSync';
-import { getBackendKeyFromConversation } from '@renderer/pages/conversation/SessionList/utils/exportHelpers';
 import { renderConversationOption } from '@renderer/pages/conversation/components/renderConversationOption';
 import { shortSessionId } from '@renderer/utils/ui/shortId';
 import {
@@ -35,25 +37,10 @@ import {
   resolveCronConversationTarget,
   type ConversationExecutionMode,
 } from './cronConversationTarget';
-import {
-  CronAgentOptionIdentity,
-  CronPresetOptionIdentity,
-  CronUnavailableAgentIdentity,
-} from './CronAgentOptionIdentity';
-import {
-  findCronSelectedAgent,
-  getCronAgentOptionValue,
-  getCronAgentSelectionFromJob,
-  getCronPresetOptionValue,
-  hasCronAgentConfigurationChanged,
-  parseCronAgentSelection,
-  resolveCronAgentDisplayName,
-} from './cronAgentSelection';
 
 const FormItem = Form.Item;
 const TextArea = Input.TextArea;
 const Option = Select.Option;
-const OptGroup = Select.OptGroup;
 
 interface CreateTaskDialogProps {
   visible: boolean;
@@ -140,21 +127,20 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   initialSpecifiedConversationId,
   lockInitialTarget = false,
 }) => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
   const sessionRef = useRef(0);
   const submittingRef = useRef(false);
   const [scheduleChanged, setScheduleChanged] = useState(false);
-  const { cliAgents, agentPresets, isLoading: identitiesLoading } = useConversationAgents();
-  // Provider/model groups with an exact enabled Chat capability.
-  const { groups: chatGroups } = useModelsForTask('chat');
+  const agentCatalog = useConversationAgentCatalog();
   const [frequency, setFrequency] = useState<FrequencyType>('manual');
   const [time, setTime] = useState('09:00');
   const [weekday, setWeekday] = useState('MON');
   const [customCronExpr, setCustomCronExpr] = useState<string>('');
 
   const isEditMode = !!editJob;
+  const isBoundConversation = editJob?.execution_mode === 'existing' && Boolean(editJob.metadata.conversation_id);
   const [execution_mode, setExecutionMode] = useState<ConversationExecutionMode>('new_conversation');
   const [specifiedConversationId, setSpecifiedConversationId] = useState<ConversationId | undefined>(undefined);
   // When reusing an existing conversation, optionally clear the agent context
@@ -176,9 +162,8 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
     const set = new Set<ConversationId>();
     for (const job of allCronJobs) {
       if (editJob && job.cron_job_id === editJob.cron_job_id) continue;
-      // Only 'existing' execution reuses metadata.conversation_id as its bound
-      // target. (new_conversation jobs merely anchor there for UI grouping and
-      // spawn a fresh conversation each run — not a reuse bind, so don't hide it.)
+      // Only continuing execution owns a stable target Session. Each
+      // new-conversation run exposes its own Session through run history.
       if (job.execution_mode === 'existing' && job.metadata.conversation_id) {
         set.add(job.metadata.conversation_id);
       }
@@ -197,31 +182,23 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       ? t('cron.page.form.allConversationsBound', { defaultValue: '所有会话已被其它定时任务绑定' })
       : t('cron.page.form.noConversations', { defaultValue: '暂无可用会话' });
 
-  // Agent settings
-  const [model, setModelId] = useState<string | undefined>(undefined);
-  const [providerId, setProviderId] = useState<ProviderId | undefined>(undefined);
-  const [config_options, setConfigOptions] = useState<Record<string, string> | undefined>(undefined);
   const [workspace, setWorkspace] = useState<string | undefined>(undefined);
-  const [selectedAgent, setSelectedAgent] = useState<string | undefined>(undefined);
-
-  const removedPresetId = useMemo(() => {
-    const presetId = editJob?.metadata.agent_config?.preset_id;
-    if (
-      !presetId ||
-      identitiesLoading ||
-      agentPresets.some((preset) => preset.preset_id === presetId)
-    ) {
-      return undefined;
-    }
-    return presetId;
-  }, [editJob?.metadata.agent_config?.preset_id, identitiesLoading, agentPresets]);
-
-  const removedAgentId = useMemo(() => {
-    const config = editJob?.metadata.agent_config;
-    const agentId = config?.preset_id ? undefined : config?.custom_agent_id;
-    if (!agentId || identitiesLoading || cliAgents.some((agent) => agent.agent_id === agentId)) return undefined;
-    return agentId;
-  }, [identitiesLoading, cliAgents, editJob?.metadata.agent_config]);
+  const [selection, setSelection] = useState<AgentSelection>(DEFAULT_AGENT_SELECTION);
+  const [agentChoiceChanged, setAgentChoiceChanged] = useState(false);
+  const usesAuthoringSelection = !editJob || agentChoiceChanged;
+  const isSpecifiedMode = execution_mode === 'specified';
+  const selectedPreset = selection.kind === 'template'
+    ? agentCatalog.library?.official_presets[selection.templateKey]
+    : agentCatalog.presets.find(preset => preset.preset_id === selection.presetId);
+  const presetCapabilities = useAgentPresetCapabilities(
+    isSpecifiedMode || isBoundConversation || !usesAuthoringSelection ? undefined : selectedPreset?.preset_id,
+    selectedPreset?.current_stable_revision?.revision_digest,
+  );
+  const modelSelection = useAgentLaunchModel({
+    defaultModel: presetCapabilities.defaultModel,
+    ready: usesAuthoringSelection && !presetCapabilities.isLoading && !presetCapabilities.error && !agentCatalog.isLoading,
+    requiresToolCalls: usesAuthoringSelection && presetCapabilities.actionIds.size > 0,
+  });
 
   // A session owns its draft and submission; live updates to the same job do
   // not reinitialize the form. Closing/switching invalidates UI continuations,
@@ -231,6 +208,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
     submittingRef.current = false;
     setSubmitting(false);
     setScheduleChanged(false);
+    setAgentChoiceChanged(false);
     if (!visible) return;
     if (editJob) {
       const cronExpr = editJob.schedule.kind === 'cron' ? editJob.schedule.expr : '';
@@ -242,19 +220,15 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
 
       setExecutionMode(editJob.execution_mode);
       setSpecifiedConversationId(undefined);
-      const agentKey = getCronAgentSelectionFromJob(editJob, cliAgents);
-      setSelectedAgent(agentKey);
+      setSelection(editJob.metadata.agent_selection ? agentSelectionFromWire(editJob.metadata.agent_selection) : DEFAULT_AGENT_SELECTION);
       form.setFieldsValue({
         name: editJob.name,
         description: getDescriptionInitialValue(editJob),
         prompt: editJob.message,
-        agent: agentKey,
       });
-      setModelId(editJob.metadata.agent_config?.model);
-      setProviderId(editJob.metadata.agent_config?.provider_id);
-      setConfigOptions(editJob.metadata.agent_config?.config_options);
-      setWorkspace(editJob.metadata.agent_config?.workspace);
-      setClearContextEachRun(editJob.metadata.agent_config?.clear_context_each_run ?? false);
+      modelSelection.reset(editJob.metadata.model);
+      setWorkspace(scheduledWorkspace(editJob));
+      setClearContextEachRun(editJob.metadata.clear_context_each_run);
     } else {
       form.resetFields();
       setFrequency('manual');
@@ -263,87 +237,14 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       setCustomCronExpr('');
       setExecutionMode(initialSpecifiedConversationId ? 'specified' : 'new_conversation');
       setSpecifiedConversationId(initialSpecifiedConversationId);
-      setModelId(undefined);
-      setProviderId(undefined);
-      setConfigOptions(undefined);
+      modelSelection.reset();
       setWorkspace(undefined);
-      setSelectedAgent(undefined);
+      setSelection(DEFAULT_AGENT_SELECTION);
       setClearContextEachRun(false);
     }
     return () => { sessionRef.current += 1; };
   }, [visible, editJob?.cron_job_id, form, initialSpecifiedConversationId]);
 
-  // Legacy rows do not carry custom_agent_id, so their unique backend fallback
-  // can only be restored after AgentRegistry metadata has arrived.
-  useEffect(() => {
-    if (!visible || !editJob) return;
-    const agentKey = getCronAgentSelectionFromJob(editJob, cliAgents);
-    if (!agentKey || agentKey === selectedAgent) return;
-    if (selectedAgent && parseCronAgentSelection(selectedAgent)?.kind !== 'legacy') return;
-    setSelectedAgent(agentKey);
-    form.setFieldValue('agent', agentKey);
-  }, [visible, editJob, cliAgents, selectedAgent, form]);
-
-  const selectedRuntimeAgent = useMemo<AgentMetadata | undefined>(() => {
-    if (!selectedAgent) return undefined;
-    const selection = parseCronAgentSelection(selectedAgent);
-    if (selection?.kind === 'preset') return undefined;
-    return findCronSelectedAgent(selectedAgent, cliAgents);
-  }, [selectedAgent, cliAgents]);
-
-  const resolvedBackend =
-    parseCronAgentSelection(selectedAgent)?.kind === 'preset'
-      ? 'nomi'
-      : selectedRuntimeAgent?.backend || selectedRuntimeAgent?.agent_type;
-  const isPresetSelection = parseCronAgentSelection(selectedAgent)?.kind === 'preset';
-
-  const isProviderModelMode = resolvedBackend === 'nomi';
-
-  const nomiGroups = useMemo(
-    () => chatGroups.filter((g) => !g.provider.platform?.toLowerCase().includes('gemini-with-google-auth')),
-    [chatGroups]
-  );
-  const hasNomiProvider = nomiGroups.length > 0;
-
-  const filteredGroups = useMemo(
-    () => (resolvedBackend === 'nomi' ? nomiGroups : chatGroups),
-    [resolvedBackend, chatGroups, nomiGroups]
-  );
-  const filteredProviders = useMemo(() => filteredGroups.map((g) => g.provider), [filteredGroups]);
-
-  const geminiCurrentModel = useMemo<TProviderWithModel | undefined>(() => {
-    if (resolvedBackend !== 'nomi' || !model) return undefined;
-    if (providerId) {
-      const byId = filteredGroups.find((g) => g.provider.id === providerId);
-      if (byId && byId.models.includes(model)) {
-        return { ...byId.provider, use_model: model } as TProviderWithModel;
-      }
-    }
-    for (const g of filteredGroups) {
-      if (g.models.includes(model)) {
-        return { ...g.provider, use_model: model } as TProviderWithModel;
-      }
-    }
-    return undefined;
-  }, [resolvedBackend, model, providerId, filteredGroups]);
-
-  const handleGeminiModelSelect = useCallback(async (selection: TProviderWithModel) => {
-    setProviderId(selection.id);
-    setModelId(selection.use_model);
-  }, []);
-
-  useEffect(() => {
-    if (isPresetSelection || resolvedBackend !== 'nomi' || model) return;
-    const firstGroup = nomiGroups[0];
-    if (firstGroup && firstGroup.models.length > 0) {
-      setProviderId(firstGroup.provider.id);
-      setModelId(firstGroup.models[0]);
-    }
-  }, [isPresetSelection, resolvedBackend, model, nomiGroups]);
-
-  // 指定会话：复用一个已存在的会话。该会话的执行 Agent 与项目（workspace）在创建时
-  // 已固化，因此这里不再展示 / 不再要求配置这两项（仅新建模式下可选此模式）。
-  const isSpecifiedMode = execution_mode === 'specified';
   const showTimePicker = frequency === 'daily' || frequency === 'weekdays' || frequency === 'weekly';
   const showWeekdayPicker = frequency === 'weekly';
   const scheduleTimeZone =
@@ -405,8 +306,6 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
     conversationModeOptions.find((o) => o.value === execution_mode) ?? conversationModeOptions[0]
   ).description;
 
-  const showModelSelector = Boolean(!isPresetSelection && resolvedBackend && isProviderModelMode);
-
   const handleFrequencyChange = (value: FrequencyType) => {
     setScheduleChanged(value !== 'preserve');
     setFrequency(value);
@@ -417,76 +316,9 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
     }
   };
 
-  const handleAgentChange = useCallback((value: string) => {
-    setSelectedAgent(value);
-    setModelId(undefined);
-    setProviderId(undefined);
-    setConfigOptions(undefined);
-  }, []);
-
   const handleWorkspaceClear = useCallback(() => {
     setWorkspace(undefined);
   }, []);
-
-  const resolveAgentConfig = (agentValue: string, workspaceForSubmission = workspace) => {
-    const selection = parseCronAgentSelection(agentValue);
-    if (!selection) throw new Error(t('cron.page.form.agentRequired'));
-
-    let agent_config: ICronAgentConfig | undefined;
-    let resolvedAgentType: ICreateCronJobParams['agent_type'] = 'claude';
-    const shouldClearContextEachRun = execution_mode === 'existing' && clearContextEachRun;
-
-    if (selection.kind === 'agent' || selection.kind === 'legacy') {
-      const agent = findCronSelectedAgent(agentValue, cliAgents);
-      if (!agent) throw new Error(t('cron.page.form.removedAgentRequired'));
-      const backend = agent.backend || agent.agent_type;
-
-      if (agent.agent_type === 'nomi' || backend === 'nomi') {
-        if (!providerId || !geminiCurrentModel || !model) {
-          throw new Error(t('cron.page.form.nomiModelRequired'));
-        }
-        resolvedAgentType = 'nomi';
-        agent_config = {
-          provider_id: providerId,
-          name: geminiCurrentModel.name,
-          model,
-          workspace: workspaceForSubmission,
-          clear_context_each_run: shouldClearContextEachRun,
-        };
-      } else {
-        resolvedAgentType = agent.agent_type;
-        agent_config = {
-          ...(agent.backend ? { backend: agent.backend } : {}),
-          custom_agent_id: agent.agent_id,
-          name: resolveCronAgentDisplayName(agent, i18n.language),
-          workspace: workspaceForSubmission,
-          clear_context_each_run: shouldClearContextEachRun,
-        };
-      }
-    } else if (selection.kind === 'preset') {
-      const preset = agentPresets.find((item) => item.preset_id === selection.id);
-      if (!preset) {
-        throw new Error(t('cron.page.form.removedPresetRequired'));
-      }
-      const supportsCron = Boolean(preset.current_stable_revision);
-      if (!supportsCron) {
-        throw new Error(
-          t('cron.page.form.presetCronUnavailable', {
-            defaultValue: 'This Agent has no saved revision that can run yet.',
-          })
-        );
-      }
-      resolvedAgentType = 'nomi';
-      agent_config = {
-        name: preset.display_name,
-        preset_id: preset.preset_id,
-        workspace: workspaceForSubmission,
-        clear_context_each_run: shouldClearContextEachRun,
-      };
-    }
-
-    return { agent_config, resolvedAgentType };
-  };
 
   const handleSubmit = async () => {
     if (!visible || submittingRef.current) return;
@@ -518,7 +350,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
         ? (typeof specifiedWorkspace === 'string' ? specifiedWorkspace : undefined)
         : workspace;
       let workspaceForSubmission = workspace;
-      if (workspaceCandidate?.trim()) {
+      if (!isBoundConversation && workspaceCandidate?.trim()) {
         const canonicalWorkspace = await validateExistingWorkspaceDirectory(workspaceCandidate);
         if (!isCurrent()) return;
         if (conversationTarget.kind !== 'specified') {
@@ -527,90 +359,60 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
         }
       }
 
-      // ─── 指定会话 — 复用已存在的会话 ─────────────────────────────────
-      // 复用的会话已经带有自己的执行 Agent 和项目（workspace），这里不再重复配置，
-      // 也绝不能传 agent_config：否则 agent_config.workspace 会覆盖会话自身的工作目录
-      // （见 nomifun-cron executor::resolve_execution_workspace_raw）。
-      // 指定会话仅在新建模式提供，因此直接构造创建参数并返回。
-      if (conversationTarget.kind === 'specified') {
-        const specifiedConversationId = conversationTarget.conversationId;
-        // Guard against reusing a conversation already bound by another task
-        // (the picker hides bound targets, but a stale value can slip through).
-        if (boundConversationIds.has(specifiedConversationId)) {
-          Message.error(t('cron.page.form.conversationAlreadyBound', { defaultValue: '该会话已被其它定时任务绑定，请另选一个' }));
-          return;
-        }
-        const specifiedAgentType =
-          (selectedConversation && getBackendKeyFromConversation(selectedConversation)) || 'claude';
-
-        setSubmitting(true);
-        const params: ICreateCronJobParams = {
-          name: values.name,
-          description: values.description,
-          schedule,
-          prompt: values.prompt,
-          conversation_title: selectedConversation?.name,
-          agent_type: specifiedAgentType,
-          created_by: 'user',
-          ...buildCronConversationRequestFields(conversationTarget),
-        };
-        await ipcBridge.cron.addJob.invoke(params);
-        if (!isCurrent()) return;
-        Message.success(t('cron.page.createSuccess'));
-        onClose();
-        return;
-      }
-
-      // ─── Agent / conversation target (new_conversation / existing) ───
-      // Both modes intentionally start unbound; the backend materializes their
-      // first conversation and only the continuing mode reuses it later.
-      const agentValue = (values.agent as string | undefined) || selectedAgent;
-      if (!agentValue) throw new Error(t('cron.page.form.agentRequired'));
+      const base = {
+        name: values.name, description: values.description, message: values.prompt,
+      };
       setSubmitting(true);
-
-      if (isEditMode) {
-        // The backend does not support changing agent_type on update. It also
-        // re-resolves any submitted preset_id, so omit an unchanged config to
-        // preserve the task's frozen preset revision/snapshot.
-        const agentConfigChanged = hasCronAgentConfigurationChanged(editJob!, cliAgents, {
-          selection: agentValue,
-          model,
-          providerId,
-          configOptions: config_options,
-          workspace: workspaceForSubmission,
-          clearContextEachRun,
-        });
-        const agent_config = agentConfigChanged
-          ? resolveAgentConfig(agentValue, workspaceForSubmission).agent_config
-          : undefined;
-        await ipcBridge.cron.updateJob.invoke({
-          cron_job_id: editJob!.cron_job_id,
-          updates: {
-            name: values.name,
-            description: values.description,
-            ...(scheduleChanged ? { schedule } : {}),
-            message: values.prompt,
-            ...(agentConfigChanged ? { agent_config } : {}),
-          },
-        });
-        if (!isCurrent()) return;
-        Message.success(t('cron.page.updateSuccess'));
-      } else {
-        const { agent_config, resolvedAgentType } = resolveAgentConfig(agentValue, workspaceForSubmission);
-        const params: ICreateCronJobParams = {
-          name: values.name,
-          description: values.description,
-          schedule,
-          prompt: values.prompt,
-          agent_type: resolvedAgentType,
-          created_by: 'user',
-          agent_config,
+      if (conversationTarget.kind === 'specified') {
+        if (boundConversationIds.has(conversationTarget.conversationId)) {
+          throw new Error(t('cron.page.form.conversationAlreadyBound'));
+        }
+        await ipcBridge.cron.addJob.invoke({
+          ...base, schedule, created_by: 'user', conversation_title: selectedConversation?.name,
           ...buildCronConversationRequestFields(conversationTarget),
-        };
-        await ipcBridge.cron.addJob.invoke(params);
-        if (!isCurrent()) return;
-        Message.success(t('cron.page.createSuccess'));
+        });
+      } else {
+        const wireSelection = agentSelectionToWire(selection);
+        const previous = editJob?.metadata;
+        const agentChanged = !isBoundConversation && usesAuthoringSelection;
+        const modelChanged = !isBoundConversation && (!editJob
+          || modelSelection.selection?.provider_id !== previous?.model?.provider_id
+          || modelSelection.selection?.model !== previous?.model?.model);
+        const workspaceChanged = !isBoundConversation && (!editJob
+          || (workspaceForSubmission || '') !== (scheduledWorkspace(editJob) || ''));
+        const configurationChanged = agentChanged || modelChanged || workspaceChanged;
+        const contextChanged = !editJob || clearContextEachRun !== Boolean(previous?.clear_context_each_run);
+        if (agentChanged) {
+          if (agentCatalog.isLoading || presetCapabilities.isLoading || modelSelection.isLoading) throw new Error(t('guid.agentEntries.loading'));
+          if (presetCapabilities.error) throw presetCapabilities.error;
+          if (selection.kind === 'preset' && !selectedPreset) throw new Error(t('cron.page.form.removedPresetRequired'));
+          if (!modelSelection.compatible) throw new Error(t('cron.page.form.modelIncompatible'));
+        }
+        if (agentChanged || modelChanged) {
+          if (modelSelection.isLoading) throw new Error(t('guid.agentEntries.loading'));
+          if (!modelSelection.selection || !modelSelection.available) throw new Error(t('cron.page.form.modelUnavailable'));
+        }
+        const configuration = configurationChanged ? {
+          ...(agentChanged ? { agent_selection: wireSelection } : {}),
+          ...(modelChanged ? { model: modelSelection.selection } : {}),
+          ...(workspaceChanged ? (workspaceForSubmission ? { workspace: workspaceForSubmission } : editJob ? { workspace: '' } : {}) : {}),
+        } : {};
+        const contextConfiguration = contextChanged ? { clear_context_each_run: execution_mode === 'existing' && clearContextEachRun } : {};
+        if (editJob) {
+          await ipcBridge.cron.updateJob.invoke({
+            cron_job_id: editJob.cron_job_id,
+            updates: { ...base, ...(scheduleChanged ? { schedule } : {}), ...configuration, ...contextConfiguration },
+          });
+        } else {
+          const params: ICreateCronJobParams = {
+            ...base, schedule, created_by: 'user', ...configuration, ...contextConfiguration,
+            ...buildCronConversationRequestFields(conversationTarget),
+          };
+          await ipcBridge.cron.addJob.invoke(params);
+        }
       }
+      if (!isCurrent()) return;
+      Message.success(t(isEditMode ? 'cron.page.updateSuccess' : 'cron.page.createSuccess'));
 
       onClose();
     } catch (err) {
@@ -629,202 +431,26 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
     }
   };
 
-  const selectedIdentity = parseCronAgentSelection(selectedAgent);
-  const unavailableLegacyAgentValue =
-    selectedAgent &&
-    selectedIdentity?.kind === 'legacy' &&
-    !findCronSelectedAgent(selectedAgent, cliAgents)
-      ? selectedAgent
-      : undefined;
-  const selectedIdentityStatus =
-    selectedIdentity?.kind === 'agent' && removedAgentId === selectedIdentity.id
-      ? t('cron.page.form.removedAgentUnavailable')
-      : unavailableLegacyAgentValue && !identitiesLoading
-        ? t('cron.page.form.legacyAgentUnavailable')
-          : selectedIdentity?.kind === 'preset' && removedPresetId === selectedIdentity.id
-            ? t('cron.page.form.removedPresetUnavailable')
-            : undefined;
-
-  // The agent selector is reused in two layouts (alone, or sharing a row with
-  // the model selector), so build it once.
-  const agentFormItem = (
-    <FormItem
-      label={t('cron.page.form.agent')}
-      field='agent'
-      rules={[{ required: true, message: t('cron.page.form.agentRequired') }]}
-      extra={
-        isEditMode ? (
-          <span className='flex flex-col gap-2px text-12px text-t-tertiary'>
-            <span>{t('cron.page.form.agentEditHint')}</span>
-            {selectedIdentityStatus && <span>{selectedIdentityStatus}</span>}
-          </span>
-        ) : undefined
-      }
-    >
-      <Select
-        placeholder={t('cron.page.form.agentPlaceholder')}
-        onChange={handleAgentChange}
-        disabled={isEditMode}
-        renderFormat={(_option, value) => {
-          const strVal = value as unknown as string;
-          if (!strVal) return '';
-          const selection = parseCronAgentSelection(strVal);
-          if (selection?.kind === 'agent' || selection?.kind === 'legacy') {
-            const agent = findCronSelectedAgent(strVal, cliAgents);
-            if (agent) return <CronAgentOptionIdentity agent={agent} language={i18n.language} compact />;
-            if (editJob?.metadata.agent_config?.custom_agent_id === selection.id) {
-              return (
-                <CronUnavailableAgentIdentity
-                  name={editJob.metadata.agent_config.name}
-                  statusLabel={removedAgentId === selection.id ? t('cron.page.form.removedAgentUnavailable') : undefined}
-                  compact
-                />
-              );
-            }
-            if (selection.kind === 'legacy' && editJob && selectedAgent === strVal) {
-              return (
-                <CronUnavailableAgentIdentity
-                  name={editJob.metadata.agent_config?.name || selection.id}
-                  statusLabel={identitiesLoading ? undefined : t('cron.page.form.legacyAgentUnavailable')}
-                  compact
-                />
-              );
-            }
-          } else if (selection?.kind === 'preset') {
-            const preset = agentPresets.find((item) => item.preset_id === selection.id);
-            if (preset) {
-              const supportsCron = Boolean(preset.current_stable_revision);
-              const frozenName =
-                editJob?.metadata.agent_config?.preset_id === preset.preset_id
-                  ? editJob.metadata.agent_config.name
-                  : undefined;
-              return (
-                <CronPresetOptionIdentity
-                  preset={preset}
-                  nameOverride={frozenName}
-                  statusLabel={
-                    supportsCron
-                      ? undefined
-                      : t('cron.page.form.presetCronUnavailable', {
-                          defaultValue: 'No saved revision',
-                        })
-                  }
-                  compact
-                />
-              );
-            }
-            if (removedPresetId === selection.id) {
-              return (
-                <CronUnavailableAgentIdentity
-                  name={editJob?.metadata.agent_config?.name || t('cron.page.form.removedPresetLabel', { id: selection.id })}
-                  statusLabel={t('cron.page.form.removedPresetUnavailable')}
-                  compact
-                />
-              );
-            }
-          }
-          return <CronUnavailableAgentIdentity name={t('cron.page.form.unknownAgentLabel')} compact />;
-        }}
-      >
-        {(cliAgents.length > 0 || removedAgentId || unavailableLegacyAgentValue) && (
-          <OptGroup label={t('conversation.dropdown.cliAgents')}>
-            {unavailableLegacyAgentValue && (
-              <Option
-                key={unavailableLegacyAgentValue}
-                value={unavailableLegacyAgentValue}
-                disabled
-                aria-disabled='true'
-              >
-                <CronUnavailableAgentIdentity
-                  name={editJob?.metadata.agent_config?.name || selectedIdentity?.id || t('cron.page.form.unknownAgentLabel')}
-                  statusLabel={identitiesLoading ? undefined : t('cron.page.form.legacyAgentUnavailable')}
-                />
-              </Option>
-            )}
-            {removedAgentId && (
-              <Option
-                key={getCronAgentOptionValue(removedAgentId)}
-                value={getCronAgentOptionValue(removedAgentId)}
-                disabled
-                aria-disabled='true'
-              >
-                <CronUnavailableAgentIdentity
-                  name={editJob?.metadata.agent_config?.name || t('cron.page.form.unknownAgentLabel')}
-                  statusLabel={t('cron.page.form.removedAgentUnavailable')}
-                />
-              </Option>
-            )}
-            {cliAgents.map((agent) => {
-              const optionValue = getCronAgentOptionValue(agent.agent_id);
-              const disabled = agent.agent_type === 'nomi' && !hasNomiProvider;
-              return (
-                <Option key={optionValue} value={optionValue} disabled={disabled} aria-disabled={disabled || undefined}>
-                  <CronAgentOptionIdentity
-                    agent={agent}
-                    language={i18n.language}
-                    statusLabel={disabled ? t('cron.page.form.nomiNoProvider') : undefined}
-                  />
-                </Option>
-              );
-            })}
-          </OptGroup>
-        )}
-        {(agentPresets.length > 0 || removedPresetId) && (
-          <OptGroup label={t('conversation.dropdown.presetPresets')}>
-            {removedPresetId && (
-              <Option
-                key={getCronPresetOptionValue(removedPresetId)}
-                value={getCronPresetOptionValue(removedPresetId)}
-                disabled
-                aria-disabled='true'
-              >
-                <CronUnavailableAgentIdentity
-                  name={editJob?.metadata.agent_config?.name || t('cron.page.form.removedPresetLabel', { id: removedPresetId })}
-                  statusLabel={t('cron.page.form.removedPresetUnavailable')}
-                />
-              </Option>
-            )}
-            {agentPresets.map((preset) => {
-              const supportsCron = Boolean(preset.current_stable_revision);
-              const optionValue = getCronPresetOptionValue(preset.preset_id);
-              return (
-                <Option
-                  key={optionValue}
-                  value={optionValue}
-                  disabled={!supportsCron}
-                  aria-disabled={!supportsCron || undefined}
-                >
-                  <CronPresetOptionIdentity
-                    preset={preset}
-                    statusLabel={
-                      supportsCron
-                        ? undefined
-                        : t('cron.page.form.presetCronUnavailable', {
-                            defaultValue: 'No saved revision',
-                          })
-                    }
-                  />
-                </Option>
-              );
-            })}
-          </OptGroup>
-        )}
-      </Select>
-    </FormItem>
-  );
-
-  const modelFormItem = showModelSelector ? (
-    <FormItem label={t('cron.page.form.model')}>
-      <ChatModelSelector
-        providers={filteredProviders}
-        currentModel={geminiCurrentModel}
-        getAvailableModels={provider => filteredGroups.find(group => group.provider.id === provider.id)?.models ?? []}
-        onSelectModel={(provider, model) => handleGeminiModelSelect({ ...provider, use_model: model })}
-        disabled={!isProviderModelMode}
-        readOnlyLabel={!isProviderModelMode ? t('conversation.welcome.useCliModel') : undefined}
-      />
-    </FormItem>
-  ) : null;
+  const agentFormItem = <FormItem label={t('cron.page.form.agent')}>
+    <AgentSelector presets={agentCatalog.presets} draftPresets={agentCatalog.draftPresets}
+      officialTemplates={agentCatalog.officialTemplates} selection={selection}
+      isLoading={agentCatalog.isLoading} loadError={agentCatalog.error} onRetry={agentCatalog.refresh}
+      selectedLabelOverride={editJob && (isBoundConversation || !agentChoiceChanged) ? scheduledAgentName(editJob, t) : undefined}
+      disabled={isBoundConversation} disabledReason={t('cron.page.form.boundConversationHint')} menuZIndex={10030}
+      onSelectPreset={presetId => { setSelection({ kind: 'preset', presetId }); setAgentChoiceChanged(true); }}
+      onSelectTemplate={templateKey => { setSelection({ kind: 'template', templateKey }); setAgentChoiceChanged(true); }} />
+  </FormItem>;
+  const modelFormItem = <FormItem label={t('cron.page.form.model')} extra={isBoundConversation ? t('cron.page.form.boundConversationHint') : undefined}>
+    <ChatModelSelector providers={modelSelection.groups.map(group => group.provider)}
+      currentModel={modelSelection.currentModel}
+      readOnlyLabel={!modelSelection.currentModel ? modelSelection.selection?.model : undefined}
+      getAvailableModels={provider => modelSelection.groups.find(group => group.provider.id === provider.id)?.models ?? []}
+      disabled={isBoundConversation}
+      requiredTechnicalCapabilities={presetCapabilities.actionIds.size > 0 ? ['function_calling'] : []}
+      onSelectModel={async (provider, model) => modelSelection.select(provider.id, model)} />
+    {modelSelection.selection && !modelSelection.isLoading && (!modelSelection.available || !modelSelection.compatible) &&
+      <div role='alert' className='text-12px text-t-secondary'>{t(modelSelection.available ? 'cron.page.form.modelIncompatible' : 'cron.page.form.modelUnavailable')}</div>}
+  </FormItem>;
 
   return (
     <NomiModal
@@ -926,23 +552,15 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
             )}
           </FormItem>
 
-          {/* Agent (required) + Model — on the same row when a model is available. */}
-          {/* 指定会话复用已存在会话，其 Agent 已固化，不在此重复选择。 */}
-          {!isSpecifiedMode &&
-            (modelFormItem ? (
-              <div className='grid grid-cols-2 gap-12px items-start'>
-                {agentFormItem}
-                {modelFormItem}
-              </div>
-            ) : (
-              agentFormItem
-            ))}
+          {!isSpecifiedMode && <div className='grid grid-cols-2 gap-12px items-start'>
+            {agentFormItem}{modelFormItem}
+          </div>}
 
           {/* Project (workspace) — agent tasks only. */}
           {/* 指定会话复用已存在会话，其项目已固化，不在此重复配置。 */}
           {!isSpecifiedMode && (
             <FormItem label={t('cron.page.form.workspace')}>
-              <WorkspaceFolderSelect
+              {isBoundConversation ? <div className='text-13px text-t-secondary'>{workspace || '-'}<p>{t('cron.page.form.boundConversationHint')}</p></div> : <WorkspaceFolderSelect
                 value={workspace}
                 onChange={(next) => setWorkspace(next || undefined)}
                 onClear={handleWorkspaceClear}
@@ -955,7 +573,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
                 triggerTestId='cron-workspace-trigger'
                 menuTestId='cron-workspace-menu'
                 menuZIndex={10020}
-              />
+              />}
             </FormItem>
           )}
 

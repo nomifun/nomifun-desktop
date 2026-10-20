@@ -2,6 +2,14 @@
   "registry_version": "canonical-errors-v1",
   "entries": [
     {
+      "code": "NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE",
+      "version": 1,
+      "class": "resource",
+      "retry": "never",
+      "terminal_scope": "request",
+      "http_status": 422
+    },
+    {
       "code": "AGENT_EXECUTION_ADMISSION_PENDING",
       "version": 1,
       "class": "runtime",

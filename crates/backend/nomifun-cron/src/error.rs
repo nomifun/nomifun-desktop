@@ -68,13 +68,7 @@ impl From<CronError> for AppError {
 
 impl CronError {
     pub(crate) fn from_conversation_create(error: AppError) -> Self {
-        match error {
-            AppError::WorkspacePathEdgeWhitespace(_) => Self::App(error),
-            AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(_) => Self::App(error),
-            AppError::WorkspaceDirectoryUnavailable(_) => Self::App(error),
-            AppError::WorkspaceDirectoryRuntimeUnavailable(_) => Self::App(error),
-            other => Self::Scheduler(format!("create conversation: {other}")),
-        }
+        Self::App(error)
     }
 }
 

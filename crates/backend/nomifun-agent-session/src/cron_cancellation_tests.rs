@@ -21,13 +21,13 @@ impl CronFixture {
             "session/ready",key,Some(created.opening_ack.event_id),json!({}))).await.unwrap();
         let job = Uuid::now_v7().to_string();
         let run = Uuid::now_v7().to_string();
-        sqlx::query("INSERT INTO cron_jobs(cron_job_id,user_id,name,schedule_kind,schedule_value,payload_message,conversation_id,agent_type,created_by,created_at,updated_at) \
-            VALUES(?,?,'Exact Cron','every','60000','Original input',?,'nomi','user',1,1)")
+        sqlx::query("INSERT INTO cron_jobs(cron_job_id,user_id,name,schedule_kind,schedule_value,payload_message,conversation_id,created_by,created_at,updated_at) \
+            VALUES(?,?,'Exact Cron','every','60000','Original input',?,'user',1,1)")
             .bind(&job).bind(&user).bind(sid.as_ref()).execute(store.test_pool()).await.unwrap();
         let repository = SqliteCronRepository::new(store.test_pool().clone());
         repository.reserve_run(&user,&ReserveCronRunParams { cron_job_run_id:run.clone(),cron_job_id:job.clone(),
             trigger_kind:"run_now".into(),operation_key:format!("original:{run}"),request_fingerprint:"original".into(),
-            schedule_revision:None,planned_at_ms:None,now:1 }).await.unwrap();
+            schedule_revision:None,planned_at_ms:None,next_run_at:None,disable:false,now:1 }).await.unwrap();
         repository.attach_run_conversation(&user,&run,sid.as_ref(),2).await.unwrap();
         let operation: OperationId = format!("turn:user:{user}:{}:cron:{run}:turn",sid.as_ref()).into();
         let input = append(sid,&format!("input-{key}"),"session-api",&format!("input-{key}"),"message/user-accepted",
@@ -156,7 +156,7 @@ async fn attached_cron_cancellation_keeps_original_owner_after_job_loss_and_neve
     let unclaimed=Uuid::now_v7().to_string();
     repository.reserve_run(&fixture.owner.principal_id,&ReserveCronRunParams {cron_job_run_id:unclaimed.clone(),cron_job_id:fixture.job.clone(),
         trigger_kind:"run_now".into(),operation_key:format!("unclaimed:{unclaimed}"),request_fingerprint:"unclaimed-original".into(),
-        schedule_revision:None,planned_at_ms:None,now:2}).await.unwrap();
+        schedule_revision:None,planned_at_ms:None,next_run_at:None,disable:false,now:2}).await.unwrap();
     // Fault injection only: ordinary configuration deletion rejects reserved
     // runs. A historical/damaged absent job must still not erase their fence.
     sqlx::query("DELETE FROM cron_jobs WHERE cron_job_id=?").bind(&fixture.job).execute(store.test_pool()).await.unwrap();

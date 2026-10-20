@@ -170,20 +170,20 @@ mod tests {
             metadata: CronJobMetadataDto {
                 conversation_id: Some("0190f5fe-7c00-7a00-8abc-012345678901".into()),
                 conversation_title: None,
-                agent_type: "nomi".into(),
+
                 created_by: "user".into(),
                 created_at: 1000,
                 updated_at: 2000,
-                agent_config: None,
+                agent_selection:None,model:None,agent_binding:None,agent_label:None,clear_context_each_run:false,
             },
             state: CronJobStateDto {
                 next_run_at_ms: Some(61000),
                 last_run_at_ms: None,
                 last_status: None,
                 last_error: None,
-                run_count: 0,
-                retry_count: 0,
-                max_retries: 3,
+                run_count: 0,configuration_error:None,last_failure:None,
+
+
             },
         }
     }

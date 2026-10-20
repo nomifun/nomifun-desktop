@@ -142,6 +142,31 @@ Action schema 和实际组装结果。Runtime 只消费现役 ToolPlan，不依�
 进程由原 owner 观察后续变化，不要求模型反复轮询。延迟展示的组件入口短提示读取同一份新说明数据，且只从
 确切授权 ToolPlan 的实际组件字段产生，不改变原可见性预算或授权集合。
 
+### 定时任务与共享宿主准入
+
+Cron 与普通会话从同一工作台选择合同准备 Agent，默认 `assistant.general`，模型作为独立明确输入。
+宿主在新建时先完成模板/作者版本、模型派生和扩展，再用原资源 registry 解析逻辑授权，核验最终
+Snapshot 的必要资源和动作操作后，才提交 canonical opening。候选 binding 的空资源不能冒充
+可执行配置。无工具 guest 的空资源合同仍合法，可选资源继续沿用既有缺省规则。
+
+仅换模型从原精确 Revision/Snapshot 派生，保留原资源；原项目位置改变复用同一工作区/项目记忆
+规则。恢复、重放和已冻结 Cron 运行只校验原事实，不能重新读取最新作者配置或补权。
+默认托管资源先冻结逻辑身份，取得 Session ID 后由原 owner 物化目录，不把展示路径当授权。
+
+未绑定任务只保存一份标准冻结 binding，以及供编辑的作者选择/模型。运行不消费这些展示输入。
+持续会话第一次 opening 后，在首个 Turn 前原子固定 job 与 reservation 的同一 Session；之后只由
+该 Session 管理 Agent、模型及工作区，Cron 不再持有执行配置镜像。显式停止、暂停、输入交接、
+效果收据和运行资源退休继续归原 owner，不沿列表缓存启动或重新执行。
+
+原 reservation 同事务确认确切触发并推进后继计划。计时器不形成第二条时间线，旧运行终结
+不推进后继。历史直接投影 reservation，展示限额不删除幂等/取消/恢复证据。新建会话各轮
+独立准入；持续会话重叠记明确 skipped，睡眠/启动仍保留 missed 策略，不补跑未知输入。
+
+资源装配不完整由宿主产生正式 `NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE`，归属本地应用，
+保留缺失资源和操作；发生在模型派发前且不可原样重试。提供商文字不能选择这个类别。
+会话失败只读其精确 Turn 终态，尚未有 Turn 的准备拒绝由原 reservation 记录宿主 typed 诊断；
+旧自由文本不解析或升级为新诊断，任务页与会话使用同一错误展示，不复制第二份 Session 正文。
+
 ### 默认全局本机能力
 
 现役 canonical 文件和进程工具不以 workspace 限制本机路径或写入。workspace 保留默认目录、项目观察、VCS、应用归属和产物身份；外部写入不伪造为项目相对变更。默认个人聊天具备文件和进程动作，当前代旧官方 exact-empty 配置在原空闲契约演进/CAS边界通过精确 `default_local_os_evolution` 补齐，历史与旧Snapshot不改写，活动/暂停、Remote/Attempt、未知效果和checkpoint边界仍生效。用户明确裁剪及子任务工具裁剪不由本机权限合同替代。
@@ -873,6 +898,12 @@ Cron 私有 dispatcher 将已由服务端验证的 job／run／Session 引用作
 来源不从文本、可同名的 operation key、可变任务配置或消息投影推断；旧输入不补写该字段。
 它不改变 AgentInputSource、Robot 交付规则或模型权限。独立新会话的资源结束交接同时保留原
 创建与正式终结回执，计划／运行历史被合法删除后也不丢失已经取得的清理责任；持久事实仍只在原链和原领域记录中。
+
+定时任务的正文逐字进入 canonical accepted content。后台执行规则由原 typed Cron 来源在
+既有 native `input.instructions` 通道重建，不把任务名称、周期或编号规则拼成用户消息，
+不读取后来修改的任务配置，也不修改旧输入。任务槽、source quote 与 exact-action 检查只
+针对真实用户输入；用户自己提供的编号多步骤任务继续执行原有保护。仅选择 Skill 的空正文
+仍保存原空字符串，模型上下文只从原 accepted Skill 引用派生数据描述，Skill 正文沿既有指令通道装载。
 
 伙伴统一选择官方 `companion.default` 或具备伙伴身份、记忆核心和所需资源的个人 Agent。完整能力目录与用户显式选择保留，资源解析使用确切目标伙伴，不能借另一伙伴的身份或记忆资源。产品 Session 由 owner-scoped canonical opening 识别；入口类型、设备和连接来自 typed origin 与 binding。普通 Agent 仅挂载伙伴资源不成为产品会话。各入口 Session 并存，当前浏览选择不改变输入目标。
 

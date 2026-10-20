@@ -4,6 +4,7 @@ pub mod backup_bundle;
 mod agent_store_reset;
 mod agent_store_clean_cut;
 mod database;
+mod cron_binding_normalization;
 mod storage_relocation;
 pub use storage_relocation::{relocate_storage_domain_paths, relocate_storage_domain_paths_with_app_workspaces, validate_storage_relocation_paths};
 mod error;
@@ -42,7 +43,7 @@ pub use models::{
     AgentExecutionTemplateRow,
     AgentMetadataRow,
     CreateKnowledgeTagParams, CreationTaskRow, CreativeStudioAgentProposalReceiptRow,
-    CreativeStudioProjectRow, CreativeStudioTemplateRow, CreativeStudioTemplateRunRow, CronJobRunRow,
+    CreativeStudioProjectRow, CreativeStudioTemplateRow, CreativeStudioTemplateRunRow, CronRunHistoryRow,
     CronRunReservationRow,
     KNOWLEDGE_ENTRY_KIND_DIRECTORY, KNOWLEDGE_ENTRY_KIND_FILE,
     KNOWLEDGE_ENTRY_ORIGIN_GENERATED, KNOWLEDGE_ENTRY_ORIGIN_URL_SNAPSHOT,
@@ -79,7 +80,7 @@ pub use repository::customer_service_search::{
 };
 pub use repository::SqliteCustomerServiceRepository;
 pub use repository::cron::{
-    AdvanceCronOccurrenceParams, CRON_RUN_HISTORY_LIMIT, FinalizeCronRunOutcome,
+    CRON_RUN_HISTORY_LIMIT, FinalizeCronRunOutcome,
     FinalizeCronRunParams, ReserveCronRunParams,
     UpdateCronJobParams,
 };

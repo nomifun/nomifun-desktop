@@ -146,8 +146,8 @@ async fn deletion_clears_only_matching_mutable_choices_and_preserves_cron_snapsh
         for model in ["remove","sibling"] {
             sqlx::query("INSERT INTO cs_agents (cs_agent_id,name,provider_id,model,created_at,updated_at) VALUES (?,?,?,?,1,1)")
                 .bind(nomifun_common::generate_id()).bind(model).bind(PROVIDER).bind(model).execute(db.pool()).await.unwrap();
-            sqlx::query("INSERT INTO cron_jobs (cron_job_id,user_id,name,schedule_kind,schedule_value,payload_message,agent_type,agent_config,agent_snapshot,next_run_at,created_by,created_at,updated_at) VALUES (?,?,?,'every','60000','','nomi',?,'{\"frozen\":\"keep\"}',10000,'user',1,1)")
-                .bind(nomifun_common::generate_id()).bind(&owner).bind(model).bind(json!({"provider_id":PROVIDER,"model":model,"workspace":"keep"}).to_string())
+            sqlx::query("INSERT INTO cron_jobs (cron_job_id,user_id,name,schedule_kind,schedule_value,payload_message,model_selection,next_run_at,created_by,created_at,updated_at) VALUES (?,?,?,'every','60000','',?,10000,'user',1,1)")
+                .bind(nomifun_common::generate_id()).bind(&owner).bind(model).bind(json!({"provider_id":PROVIDER,"model":model}).to_string())
                 .execute(db.pool()).await.unwrap();
         }
         if whole_provider {
@@ -175,15 +175,11 @@ async fn deletion_clears_only_matching_mutable_choices_and_preserves_cron_snapsh
             if name=="remove" || whole_provider {assert_eq!((provider,model),(None,None));}
             else {assert_eq!((provider.as_deref(),model.as_deref()),(Some(PROVIDER),Some("sibling")));}
         }
-        let jobs: Vec<(String,bool,String,String,i64,Option<i64>)> = sqlx::query_as("SELECT name,enabled,agent_config,agent_snapshot,schedule_revision,next_run_at FROM cron_jobs ORDER BY name")
-            .fetch_all(db.pool()).await.unwrap();
-        assert_eq!(jobs.len(),2,"cron jobs are preserved");
-        for (name,enabled,config,snapshot,revision,next) in jobs {
-            assert_eq!(snapshot,"{\"frozen\":\"keep\"}");
-            let config: Value = serde_json::from_str(&config).unwrap();assert_eq!(config["workspace"],"keep");
-            if name=="remove" || whole_provider {
-                assert!(!enabled);assert!(config["provider_id"].is_null());assert!(config["model"].is_null());assert_eq!(revision,2);assert_eq!(next,None);
-            } else {assert!(enabled);assert_eq!(config,selection("sibling").as_object().map(|object| {let mut object=object.clone();object.insert("workspace".into(),json!("keep"));Value::Object(object)}).unwrap());assert_eq!(revision,1);assert_eq!(next,Some(10000));}
+        let jobs:Vec<(String,bool,Option<String>,i64,Option<i64>)>=sqlx::query_as("SELECT name,enabled,model_selection,schedule_revision,next_run_at FROM cron_jobs ORDER BY name").fetch_all(db.pool()).await.unwrap();
+        assert_eq!(jobs.len(),2,"Cron definitions are retained");
+        for (name,enabled,selection_json,revision,next) in jobs {
+            if name=="remove" || whole_provider {assert!(!enabled);assert!(selection_json.is_none());assert_eq!(revision,2);assert_eq!(next,None);}
+            else {assert!(enabled);assert_eq!(serde_json::from_str::<Value>(&selection_json.unwrap()).unwrap(),selection("sibling"));assert_eq!(revision,1);assert_eq!(next,Some(10000));}
         }
         if !whole_provider {assert!(SqliteProviderModelRepository::new(db.pool().clone()).get(PROVIDER,"sibling").await.unwrap().is_some());}
     }
@@ -291,7 +287,7 @@ async fn bound_existing_cron_uses_the_owned_sessions_exact_revision_and_only_its
             }
             let config=(case=="unrelated-config").then(|| json!({"name":"Nomi","provider_id":PROVIDER,"model":"sibling"}).to_string());
             let job_id=nomifun_common::generate_id();
-            sqlx::query("INSERT INTO cron_jobs (cron_job_id,user_id,name,schedule_kind,schedule_value,payload_message,execution_mode,agent_type,agent_config,conversation_id,next_run_at,created_by,created_at,updated_at) VALUES (?,?,'Bound','every','60000','','existing','nomi',?,?,10000,'user',1,1)")
+            sqlx::query("INSERT INTO cron_jobs (cron_job_id,user_id,name,schedule_kind,schedule_value,payload_message,execution_mode,model_selection,conversation_id,next_run_at,created_by,created_at,updated_at) VALUES (?,?,'Bound','every','60000','','existing',?,?,10000,'user',1,1)")
                 .bind(&job_id).bind(&job_owner).bind(&config).bind(&session_id).execute(db.pool()).await.unwrap();
             let before_revision:(String,String)=sqlx::query_as("SELECT payload_json,revision_digest FROM agent_preset_revisions WHERE revision_no=1")
                 .fetch_one(db.pool()).await.unwrap();
@@ -371,4 +367,19 @@ async fn exact_model_agent_detachment_keeps_siblings_then_history_does_not_restr
     let old:String=sqlx::query_scalar("SELECT payload_json FROM agent_preset_revisions WHERE revision_id=?").bind(source.reference.revision_id()).fetch_one(db.pool()).await.unwrap();
     assert_eq!(old,serde_json::to_string(&source.payload).unwrap());
     assert!(providers.find_by_id(PROVIDER).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn launch_cron_deletion_uses_the_frozen_model_even_when_author_selection_differs() {
+    let db=seeded().await;let owner=installation_owner_id(db.pool()).await.unwrap();
+    let (source,snapshot,_)=seed_artifacts(&db,true).await;
+    let binding=AgentBindingValue{preset_revision_ref:source.reference.clone(),resolved_snapshot_ref:snapshot.snapshot_ref.clone(),typed_resource_bindings:vec![],binding_version:1};
+    let job=nomifun_common::generate_id();let frozen=serde_json::to_string(&binding).unwrap();
+    sqlx::query("INSERT INTO cron_jobs(cron_job_id,user_id,name,schedule_kind,schedule_value,payload_message,execution_mode,model_selection,agent_binding,next_run_at,created_by,created_at,updated_at) VALUES(?,?,'Frozen launch','every','60000','Keep definition','new_conversation',?,?,10000,'user',1,1)")
+        .bind(&job).bind(&owner).bind(json!({"provider_id":PROVIDER,"model":"sibling"}).to_string()).bind(&frozen).execute(db.pool()).await.unwrap();
+    SqliteProviderModelRepository::new(db.pool().clone()).delete_coordinated(&CoordinatedProviderModelDelete{provider_id:PROVIDER.into(),model:"remove".into(),expected_config_revision:1,cleanup:Default::default()}).await.unwrap();
+    let (enabled,retained,error,next):(bool,String,Option<String>,Option<i64>)=sqlx::query_as("SELECT enabled,agent_binding,configuration_error,next_run_at FROM cron_jobs WHERE cron_job_id=?").bind(&job).fetch_one(db.pool()).await.unwrap();
+    assert!(!enabled);assert_eq!(retained,frozen);assert_eq!(error.as_deref(),Some("CRON_MODEL_RESELECTION_REQUIRED"));assert_eq!(next,None);
+    assert!(SqliteCronRepository::new(db.pool().clone()).update(&owner,&job,&UpdateCronJobParams{enabled:Some(true),..Default::default()}).await.is_err(),"a display author choice cannot replace the deleted frozen execution model");
+    let original: String=sqlx::query_scalar("SELECT envelope_json FROM agent_runtime_snapshots WHERE snapshot_id=?").bind(snapshot.snapshot_ref.snapshot_id.as_ref()).fetch_one(db.pool()).await.unwrap();assert_eq!(serde_json::from_str::<ResolvedSnapshotEnvelope>(&original).unwrap(),snapshot);
 }

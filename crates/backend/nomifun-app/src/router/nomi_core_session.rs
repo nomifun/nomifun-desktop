@@ -50,6 +50,7 @@ pub(super) use companion_sessions::canonical_companion_origin;
 mod companion_directed_reports;
 #[path = "execution_source_context.rs"]
 mod execution_source_context;
+pub(super) use execution_source_context::scheduled_turn_instructions;
 #[path = "companion_binding_evolution.rs"]
 mod companion_binding_evolution;
 #[path = "robot_background_control.rs"]
@@ -405,14 +406,14 @@ impl nomifun_companion::evolution::TranscriptSource for CanonicalAgentTranscript
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum ProductAgentSelection {
-    Template { template_key: String },
-    Preset { preset_id: String },
+type ProductAgentSelection = nomifun_api_types::ProductAgentSelectionDto;
+
+trait ProductAgentSelectionExt {
+    fn template_id(&self) -> Option<&str>;
+    fn preset_id(&self) -> Option<&str>;
 }
 
-impl ProductAgentSelection {
+impl ProductAgentSelectionExt for ProductAgentSelection {
     fn template_id(&self) -> Option<&str> {
         match self { Self::Template { template_key } => Some(template_key), _ => None }
     }
@@ -485,17 +486,19 @@ pub(crate) struct NomiCoreProductAgentResolver {
     resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
     owner_id: Arc<str>,
     pool: nomifun_db::SqlitePool,
+    session_owner: std::sync::Weak<NomiCoreSessionOwner>,
     default_binding_lock: tokio::sync::Mutex<()>,
 }
 
 impl NomiCoreProductAgentResolver {
-    pub(crate) fn new(control_plane: Arc<AgentControlPlane>, owner_id: Arc<str>, pool: nomifun_db::SqlitePool, official_runtime: Arc<super::official_runtime::OfficialRuntimeHost>, resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry) -> Self {
+    pub(crate) fn new(control_plane: Arc<AgentControlPlane>, owner_id: Arc<str>, pool: nomifun_db::SqlitePool, official_runtime: Arc<super::official_runtime::OfficialRuntimeHost>, resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry, session_owner: &Arc<NomiCoreSessionOwner>) -> Self {
         Self {
             control_plane,
             official_runtime,
             resource_bindings,
             owner_id,
             pool,
+            session_owner: Arc::downgrade(session_owner),
             default_binding_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -515,7 +518,130 @@ impl NomiCoreProductAgentResolver {
         Ok(())
     }
 
-    async fn materialize(&self, owner: &UserId, selection: &ProductAgentSelection, model: Option<&AgentChatModelSelectionDto>, companion: bool) -> Result<AgentBindingValueDto, AppError> {
+    /// Prepare a new host-owned execution contract, without opening a Session
+    /// or mutating an existing Session/default. Authorial template identity and
+    /// an explicit model remain separate inputs; resources follow the final
+    /// model/extension Snapshot through the ordinary host resolver.
+    pub(crate) async fn prepare_new_binding(
+        &self,
+        owner_id: &str,
+        selection: &nomifun_api_types::ProductAgentSelectionDto,
+        model: Option<&AgentChatModelSelectionDto>,
+        workspace: Option<&str>,
+        resource_selections: &[AgentResourceSelectionDto],
+    ) -> Result<AgentBindingValueDto, AppError> {
+        let owner = UserId::from(owner_id.to_owned());
+        // An explicit empty update clears a previously selected directory.
+        // Nonempty paths retain exact validation, including edge whitespace.
+        let workspace = workspace.filter(|path| !path.trim().is_empty());
+        if owner_id != self.owner_id.as_ref() && workspace.is_some() {
+            return Err(AppError::Forbidden("Only the installation owner may select a host workspace".into()));
+        }
+        let candidate = self.materialize_binding_candidate(&owner, selection, model, false).await?;
+        let mut binding = self.resource_bindings.prepare_new_session_binding(
+            &self.control_plane, &owner, candidate, resource_selections,
+        ).await.map_err(super::nomi_core_resource_bindings::ResourceSelectionResolutionError::into_app_error)?;
+        let session_owner = self.session_owner.upgrade()
+            .ok_or_else(|| AppError::Conflict("Session owner is unavailable".into()))?;
+        let principal = PrincipalRef { principal_kind:"user".into(), principal_id:owner_id.into() };
+        let _project_directory_fence = match workspace {
+            Some(workspace) => prepare_selected_workspace(&session_owner, &principal, &mut binding, workspace).await?,
+            None => None,
+        };
+        let (frozen, _, snapshot) = self.control_plane.saved_binding_artifacts(&owner, &binding)
+            .await.map_err(control_plane_error_to_app)?;
+        self.official_runtime.validate_agent(&snapshot)?;
+        super::nomi_core_resource_bindings::validate_executable_binding_resources(
+            &snapshot, &frozen.typed_resource_bindings,
+        )?;
+        Ok(binding)
+    }
+
+    /// Explicit edits to an already frozen schedule start from that exact
+    /// contract. A model-only edit cannot refresh authoring, extensions, or
+    /// resources, and absent resource/location fields mean preserve them.
+    pub(crate) async fn revise_binding(
+        &self,
+        owner_id: &str,
+        current: &AgentBindingValueDto,
+        model: Option<&AgentChatModelSelectionDto>,
+        workspace: Option<&str>,
+        resource_selections: Option<&[AgentResourceSelectionDto]>,
+    ) -> Result<AgentBindingValueDto, AppError> {
+        let owner = UserId::from(owner_id.to_owned());
+        let mut binding = match model {
+            Some(model) => self.control_plane.resolve_agent_session_model_binding(&owner, current, model)
+                .await.map_err(control_plane_error_to_app)?,
+            None => {
+                self.control_plane.saved_binding_artifacts(&owner, current).await.map_err(control_plane_error_to_app)?;
+                current.clone()
+            }
+        };
+        if let Some(selections) = resource_selections {
+            binding = self.resource_bindings.prepare_new_session_binding(&self.control_plane, &owner, binding, selections)
+                .await.map_err(super::nomi_core_resource_bindings::ResourceSelectionResolutionError::into_app_error)?;
+        }
+        let inherited_workspace = current.typed_resource_bindings.iter()
+            .find(|resource| resource.resource_kind == "workspace")
+            .and_then(|resource| resource.typed_parameters.get("workspace_root")).map(String::as_str);
+        // Re-resolving explicitly changed resources must retain an unchanged
+        // selected project. A model-only edit leaves all bytes untouched.
+        let selected_workspace = workspace.or_else(|| resource_selections.is_some().then_some(inherited_workspace).flatten());
+        let session_owner = self.session_owner.upgrade()
+            .ok_or_else(|| AppError::Conflict("Session owner is unavailable".into()))?;
+        let principal = PrincipalRef { principal_kind:"user".into(), principal_id:owner_id.into() };
+        let _project_directory_fence = match selected_workspace {
+            Some(path) if !path.trim().is_empty() => {
+                if owner_id != self.owner_id.as_ref() {
+                    return Err(AppError::Forbidden("Only the installation owner may select a host workspace".into()));
+                }
+                prepare_selected_workspace(&session_owner, &principal, &mut binding, path).await?
+            }
+            Some(_) => {
+                // Clearing a project changes location definitions only; it
+                // does not recreate or enlarge any operation grant.
+                let (_, _, snapshot) = self.control_plane.saved_binding_artifacts(&owner, &binding)
+                    .await.map_err(control_plane_error_to_app)?;
+                binding.typed_resource_bindings.retain(|resource| resource.resource_kind != "workspace"
+                    || snapshot.content.required_resource_kinds.iter().any(|kind| kind.as_ref() == "workspace"));
+                for resource in &mut binding.typed_resource_bindings {
+                    match resource.resource_kind.as_str() {
+                        "workspace" => {
+                            resource.resource_id = super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID.into();
+                            resource.typed_parameters = nomifun_agent_contracts::managed_workspace_parameters();
+                        }
+                        "process_session" => {
+                            resource.resource_id = super::nomi_core_resource_bindings::MANAGED_PROCESS_SESSION_RESOURCE_ID.into();
+                            resource.typed_parameters = nomifun_agent_contracts::managed_workspace_parameters();
+                        }
+                        "project_memory" if resource.resource_id.starts_with(PROJECT_WORKSPACE_MEMORY_PREFIX) => {
+                            resource.resource_id = super::nomi_core_resource_bindings::DEFAULT_PROJECT_MEMORY_RESOURCE_ID.into();
+                            resource.typed_parameters.remove("workspace_root");
+                        }
+                        _ => continue,
+                    }
+                    super::nomi_core_resource_bindings::freeze_resource_definition_id(resource)?;
+                }
+                binding.typed_resource_bindings.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+                None
+            }
+            None => None,
+        };
+        if binding.typed_resource_bindings != current.typed_resource_bindings
+            && binding.binding_version == current.binding_version {
+            binding.binding_version = current.binding_version.checked_add(1)
+                .ok_or_else(|| AppError::Conflict("Agent binding version overflow".into()))?;
+        }
+        let (frozen, _, snapshot) = self.control_plane.saved_binding_artifacts(&owner, &binding)
+            .await.map_err(control_plane_error_to_app)?;
+        self.official_runtime.validate_agent(&snapshot)?;
+        super::nomi_core_resource_bindings::validate_executable_binding_resources(&snapshot, &frozen.typed_resource_bindings)?;
+        Ok(binding)
+    }
+
+    /// This result is deliberately an unbound candidate. Only the host
+    /// resource preparation lane may turn it into an executable binding.
+    async fn materialize_binding_candidate(&self, owner: &UserId, selection: &ProductAgentSelection, model: Option<&AgentChatModelSelectionDto>, companion: bool) -> Result<AgentBindingValueDto, AppError> {
         self.control_plane.validate_product_selection(owner, selection.template_id(), selection.preset_id(), model).await.map_err(control_plane_error_to_app)?;
         let preset_id = match selection {
             ProductAgentSelection::Preset { preset_id } => preset_id.clone(),
@@ -531,6 +657,40 @@ impl NomiCoreProductAgentResolver {
         } else {
             self.control_plane.resolve_agent_session_binding_with_model(owner, &preset_id, model).await.map_err(control_plane_error_to_app)
         }
+    }
+}
+
+#[async_trait]
+impl nomifun_cron::CronAgentBindingResolver for NomiCoreProductAgentResolver {
+    async fn resolve_binding(
+        &self,
+        owner_id: &str,
+        selection: &nomifun_api_types::ProductAgentSelectionDto,
+        model: Option<&AgentChatModelSelectionDto>,
+        workspace: Option<&str>,
+        resource_selections: &[AgentResourceSelectionDto],
+    ) -> Result<AgentBindingValueDto, AppError> {
+        self.prepare_new_binding(owner_id, selection, model, workspace, resource_selections).await
+    }
+
+    async fn revise_binding(&self, owner_id: &str, current: &AgentBindingValueDto,
+        model: Option<&AgentChatModelSelectionDto>, workspace: Option<&str>,
+        resource_selections: Option<&[AgentResourceSelectionDto]>) -> Result<AgentBindingValueDto, AppError> {
+        NomiCoreProductAgentResolver::revise_binding(self, owner_id, current, model, workspace, resource_selections).await
+    }
+
+    async fn binding_presentation(&self, owner_id: &str, binding: &AgentBindingValueDto)
+        -> Result<nomifun_cron::CronAgentBindingPresentation, AppError> {
+        let owner = UserId::from(owner_id.to_owned());
+        let (_, revision, _) = self.control_plane.saved_binding_artifacts(&owner, binding)
+            .await.map_err(control_plane_error_to_app)?;
+        let (label, _) = self.control_plane.saved_binding_presentation(&owner, binding)
+            .await.map_err(control_plane_error_to_app)?;
+        let model = revision.payload.chat_route_records.get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
+            .map(|route| AgentChatModelSelectionDto {
+                provider_id: route.primary.provider_id.clone(), model: route.primary.model.clone(),
+            });
+        Ok(nomifun_cron::CronAgentBindingPresentation { agent_label: Some(label), model })
     }
 }
 
@@ -570,7 +730,7 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
         }
         let binding = if let Some(selection) = selection {
             let model = requested_model.map(|model| AgentChatModelSelectionDto { provider_id: model.provider_id.clone(), model: model.model.clone() });
-            let mut binding = self.materialize(&owner, &selection, model.as_ref(), target.target_kind == "companion").await?;
+            let mut binding = self.materialize_binding_candidate(&owner, &selection, model.as_ref(), target.target_kind == "companion").await?;
             let (_, _, next_snapshot) = self.control_plane
                 .saved_binding_artifacts(&owner, &binding)
                 .await
@@ -582,7 +742,7 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             let selections = product_agent_resource_selections(
                 target, &required_kinds, previous_resources, None,
             );
-            binding = self.resource_bindings.resolve_for_agent_switch(
+            binding = self.resource_bindings.prepare_new_session_binding(
                 &self.control_plane, &owner, binding, &selections,
             ).await.map_err(|error| AppError::UnprocessableEntity(format!(
                 "{}: {}", error.code(), error.message(),
@@ -609,19 +769,12 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
         } else if let Some(existing) = existing {
             if let Some(model) = requested_model {
                 let model = AgentChatModelSelectionDto { provider_id: model.provider_id.clone(), model: model.model.clone() };
-                if target.target_kind == "companion" {
-                    self.control_plane.resolve_companion_session_binding_with_model(
-                        &owner, &existing.agent_binding.preset_revision_ref.preset_id, Some(&model))
-                        .await.map_err(control_plane_error_to_app)?
-                } else { self
-                    .control_plane
-                    .resolve_agent_session_binding_with_model(
-                        &owner,
-                        &existing.agent_binding.preset_revision_ref.preset_id,
-                        Some(&model),
-                    )
-                    .await
-                    .map_err(control_plane_error_to_app)? }
+                // A model override starts from the saved exact contract. It
+                // cannot replace its selected resources with an unbound
+                // candidate or silently pick up later authoring changes.
+                self.control_plane.resolve_agent_session_model_binding(
+                    &owner, &existing.agent_binding, &model,
+                ).await.map_err(control_plane_error_to_app)?
             } else {
                 existing.agent_binding
             }
@@ -663,7 +816,7 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             let selections = product_agent_resource_selections(target, &required_kinds, &[], None);
             let mut binding = self
                 .resource_bindings
-                .resolve_for_agent_switch(
+                .prepare_new_session_binding(
                     &self.control_plane,
                     &owner,
                     binding,
@@ -695,6 +848,9 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             .saved_binding_artifacts(&owner, &binding)
             .await
             .map_err(control_plane_error_to_app)?;
+        super::nomi_core_resource_bindings::validate_executable_binding_resources(
+            &snapshot, &binding.typed_resource_bindings,
+        )?;
         let target_engine = self.official_runtime.validate_agent(&snapshot)?;
         let editor = self
             .control_plane
@@ -881,22 +1037,21 @@ impl NomiCoreSessionOwner {
         &self,
         owner_id: &str,
         session_id: &AgentSessionId,
-        mut projection: ConversationResponse,
+        projection: ConversationResponse,
     ) -> Result<AgentRuntimeBuildOptions, AppError> {
         if projection.conversation_id != session_id.as_ref() {
             return Err(AppError::Conflict("Runtime projection belongs to another Session".into()));
         }
         self.validate_registered_channel_guest_runtime(owner_id, session_id).await?;
-        if projection.extra.get("workspace").and_then(Value::as_str)
-            .is_none_or(|workspace| workspace.trim().is_empty())
-        {
-            let fallback = materialize_managed_session_workspace(&self.managed_workspace_root, session_id).await?;
-            projection.extra["workspace"] = Value::String(fallback);
-            projection.extra["custom_workspace"] = Value::Bool(false);
-            projection.extra["is_temporary_workspace"] = Value::Bool(true);
-            projection.extra["temp_workspace_id"] = Value::String(session_id.as_ref().to_owned());
-        }
-        runtime_options_from_session(owner_id, projection, None).map(|(options, _)| options)
+        let projected_binding = projection.agent_snapshot.as_ref().and_then(|snapshot| snapshot.canonical_binding.as_ref())
+            .ok_or_else(|| AppError::Conflict("Runtime projection has no canonical Agent binding".into()))?;
+        let control_plane = self.runtime_control_plane.get().and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| AppError::Conflict("Session control plane is unavailable".into()))?;
+        let (binding, _, snapshot) = control_plane.saved_binding_artifacts(&UserId::from(owner_id.to_owned()), projected_binding)
+            .await.map_err(control_plane_error_to_app)?;
+        super::nomi_core_resource_bindings::validate_executable_binding_resources(&snapshot, &binding.typed_resource_bindings)?;
+        let projection = self.ensure_runtime_working_directory_projection(projection).await?;
+        runtime_options_from_session(owner_id, projection).map(|(options, _)| options)
     }
 
     async fn materialize_session_workspace(
@@ -1353,7 +1508,7 @@ impl NomiCoreSessionOwner {
         })?;
         host.validate_agent(&resolved)?;
         host.provider()?.validate_session_extra(&request.extra)?;
-        super::nomi_core_mcp_catalog::validate_product_session_selection(
+        super::nomi_core_resource_bindings::validate_executable_binding_resources(
             &resolved,
             &saved_binding.typed_resource_bindings,
         )?;
@@ -1413,77 +1568,9 @@ impl NomiCoreSessionOwner {
             )))
     }
 
-    /// Turn Cron's explicit provider/model-only selection into the same saved
-    /// immutable binding used by an ordinary minimal AgentSession. This is a
-    /// host application-service operation: Cron never reads Preset/compiler
-    /// storage and the Session owner never accepts provider/model as identity.
-    async fn materialize_cron_model_only_snapshot(
-        &self,
-        owner_id: &str,
-        model: Option<&nomifun_common::ProviderWithModel>,
-    ) -> Result<AgentResolvedSnapshot, AppError> {
-        let model = model.ok_or_else(|| {
-            AppError::Conflict(
-                "model-only Cron AgentSession requires an exact provider/model".to_owned(),
-            )
-        })?;
-        let owner = UserId::from(owner_id.to_owned());
-        let resolver = self
-            .product_agent_resolver
-            .get()
-            .and_then(std::sync::Weak::upgrade)
-            .ok_or_else(|| {
-                AppError::Conflict("Session product Agent resolver is unavailable".to_owned())
-            })?;
-        let selected_model = AgentChatModelSelectionDto {
-            provider_id: model.provider_id.clone(),
-            model: model.model.clone(),
-        };
-        let binding = resolver
-            .materialize(
-                &owner,
-                &ProductAgentSelection::Template {
-                    template_key: "chat.minimal".to_owned(),
-                },
-                Some(&selected_model),
-                false,
-            )
-            .await?;
-        let control_plane = self
-            .runtime_control_plane
-            .get()
-            .and_then(std::sync::Weak::upgrade)
-            .ok_or_else(|| AppError::Conflict("Session control plane is unavailable".to_owned()))?;
-        let (binding, revision, snapshot) = control_plane
-            .saved_binding_artifacts(&owner, &binding)
-            .await
-            .map_err(control_plane_error_to_app)?;
-        let editor = control_plane
-            .editor(
-                &owner,
-                binding.preset_revision_ref.preset_id.as_ref(),
-                Some(binding.preset_revision_ref.revision),
-            )
-            .await
-            .map_err(control_plane_error_to_app)?;
-        let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
-            .map_err(|error| AppError::Forbidden(error.to_string()))?;
-        super::agent_binding_projection::project_saved_artifacts(
-            &common_owner,
-            binding,
-            revision,
-            snapshot,
-            Some(&editor.preset.display_name),
-        )
-        .map(|projected| projected.projection.snapshot)
-    }
-
-    /// Cron historically supplies no project for a model-only task. Keep that
-    /// valid without manufacturing workspace Actions: the path below is only
-    /// a runtime/presentation cwd fallback and is never added to the immutable
-    /// Agent resource binding. Sessions with an explicitly frozen workspace
-    /// continue to use that authoritative resource instead.
-    async fn ensure_cron_workspace_projection(
+    /// A tool-free Agent still needs a cwd. This projection never grants file
+    /// or process authority; executable resources were validated separately.
+    async fn ensure_runtime_working_directory_projection(
         &self,
         mut response: ConversationResponse,
     ) -> Result<ConversationResponse, AppError> {
@@ -1517,7 +1604,7 @@ impl NomiCoreSessionOwner {
         Ok(response)
     }
 
-    fn turn_operation_id(
+    pub(super) fn turn_operation_id(
         owner_id: &str,
         session_id: &str,
         idempotency_key: &str,
@@ -1656,6 +1743,9 @@ impl NomiCoreSessionOwner {
             }
         }
         self.validate_registered_channel_guest_runtime(owner_id, session_id).await?;
+        super::nomi_core_resource_bindings::validate_executable_binding_resources(
+            &snapshot, &saved_binding.typed_resource_bindings,
+        )?;
         self.materialize_workspace_for_binding(owner_id, session_id, &saved_binding)
             .await?;
         let route_identity = snapshot.content.chat_route_identity.clone().ok_or_else(|| {
@@ -3770,7 +3860,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                 "AgentSession {} not found",
                 query.agent_session_id.as_ref(),
             )))?;
-        let response = self.ensure_cron_workspace_projection(response).await?;
+        let response = self.ensure_runtime_working_directory_projection(response).await?;
         let cron_job_id = sqlx::query_scalar::<_, String>(
             "SELECT cron_job_id FROM cron_jobs \
              WHERE user_id = ? AND conversation_id = ? \
@@ -3804,52 +3894,10 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                 .canonical_conversation_projection(&query.owner_id, &session_id)
                 .await?
             {
-                sessions.push(self.ensure_cron_workspace_projection(session).await?);
+                sessions.push(self.ensure_runtime_working_directory_projection(session).await?);
             }
         }
         Ok(sessions)
-    }
-
-    async fn bind_cron_relation(
-        &self,
-        request: &nomifun_cron::CronSessionCronBindingRequest,
-    ) -> Result<(), AppError> {
-        self
-            .canonical_conversation_projection(&request.owner_id, &request.agent_session_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!(
-                "AgentSession {} not found",
-                request.agent_session_id.as_ref(),
-            )))?;
-        let relation_exists: i64 = sqlx::query_scalar(
-            "SELECT EXISTS( \
-                SELECT 1 FROM cron_jobs job \
-                 WHERE job.user_id = ? AND job.cron_job_id = ? \
-                   AND job.conversation_id = ? \
-                UNION ALL \
-                SELECT 1 FROM cron_run_reservations reservation \
-                  JOIN cron_jobs job ON job.cron_job_id = reservation.cron_job_id \
-                 WHERE job.user_id = ? AND reservation.cron_job_id = ? \
-                   AND reservation.conversation_id = ? \
-                   AND reservation.status = 'reserved' \
-            )",
-        )
-        .bind(&request.owner_id)
-        .bind(&request.cron_job_id)
-        .bind(request.agent_session_id.as_ref())
-        .bind(&request.owner_id)
-        .bind(&request.cron_job_id)
-        .bind(request.agent_session_id.as_ref())
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|error| AppError::Internal(error.to_string()))?;
-        if relation_exists == 0 {
-            return Err(AppError::Conflict(
-                "Cron relation was not committed to its job or exact run reservation"
-                    .to_owned(),
-            ));
-        }
-        Ok(())
     }
 
     async fn read_turn_receipt(
@@ -3885,6 +3933,42 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
             }
         }
         cron_turn_state_from_conversation(state)
+    }
+
+    async fn read_turn_failure(
+        &self,
+        query: &nomifun_cron::CronTurnReceiptQuery,
+    ) -> Result<Option<nomifun_api_types::AgentStreamErrorData>, AppError> {
+        self.canonical.get(&PrincipalRef { principal_kind: "user".into(), principal_id: query.owner_id.clone() },
+            &query.agent_session_id).await?;
+        let operation = Self::turn_operation_id(&query.owner_id, query.agent_session_id.as_ref(), &query.idempotency_key);
+        let receipt = self.canonical.store().read_turn_receipt(&query.agent_session_id, &operation)
+            .await.map_err(agent_session_store_error)?;
+        if matches!(receipt.status, nomifun_agent_session::TurnReceiptStatus::NotFound
+            | nomifun_agent_session::TurnReceiptStatus::Running | nomifun_agent_session::TurnReceiptStatus::Cancelled) {
+            return Ok(None);
+        }
+        let facts = self.canonical.store().turn_output_facts(&query.agent_session_id, &operation)
+            .await.map_err(agent_session_store_error)?;
+        let delivery = nomifun_agent_execution::canonical_turn_delivery(&facts, &receipt, true)?;
+        if delivery.result_ok != Some(false) { return Ok(None); }
+        let terminal = receipt.terminal_event.as_ref()
+            .ok_or_else(|| AppError::Conflict("Cron failure has no exact terminal event".into()))?;
+        let payload = facts.event_payloads.get(terminal.event_id.as_ref())
+            .ok_or_else(|| AppError::Conflict("Cron failure has no resolved terminal payload".into()))?;
+        if let Some(error) = payload.get("error").filter(|value| !value.is_null()) {
+            return serde_json::from_value(error.clone()).map(Some)
+                .map_err(|error| AppError::Conflict(format!("Cron terminal failure is invalid: {error}")));
+        }
+        // An older coarse terminal remains coarse. Its own declared code and
+        // retryability may be projected, but current Session settings and
+        // provider prose cannot manufacture an original diagnostic.
+        let code = delivery.result_error_code.and_then(|code| serde_json::from_value(json!(code)).ok());
+        let mut error = nomifun_api_types::AgentStreamErrorData::legacy(
+            delivery.result_error.unwrap_or_else(|| "The scheduled Turn failed".into()), code,
+        );
+        error.retryable = Some(delivery.result_error_retryable.unwrap_or(false));
+        Ok(Some(error))
     }
 
     async fn reconcile_turn_receipt(
@@ -3941,21 +4025,30 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
     async fn create_idempotent(
         &self,
         user_id: &str,
-        request: CreateConversationRequest,
-        agent_binding: nomifun_cron::CronSessionAgentBinding,
+        name: &str,
+        binding: AgentBindingValueDto,
         creation_key: &str,
+        job_id: &str,
     ) -> Result<nomifun_cron::CronSessionHandle, AppError> {
-        let snapshot = match agent_binding {
-            nomifun_cron::CronSessionAgentBinding::Frozen(snapshot) => snapshot,
-            nomifun_cron::CronSessionAgentBinding::ModelOnly => {
-                self.materialize_cron_model_only_snapshot(user_id, request.model.as_ref())
-                    .await?
-            }
-        };
-        let response = self
-            .create_session_idempotent(user_id, request, Some(snapshot), creation_key)
-            .await?;
-        let response = self.ensure_cron_workspace_projection(response).await?;
+        let owner = UserId::from(user_id.to_owned());
+        let control_plane = self.runtime_control_plane.get().and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| AppError::Conflict("Session control plane is unavailable".into()))?;
+        let (frozen, revision, snapshot) = control_plane.saved_binding_artifacts(&owner, &binding)
+            .await.map_err(control_plane_error_to_app)?;
+        super::nomi_core_resource_bindings::validate_executable_binding_resources(
+            &snapshot, &frozen.typed_resource_bindings,
+        )?;
+        let common_owner = nomifun_common::UserId::parse(user_id.to_owned())
+            .map_err(|error| AppError::Forbidden(error.to_string()))?;
+        let mut projected = super::agent_binding_projection::project_saved_artifacts(
+            &common_owner, frozen.clone(), revision, snapshot, Some(name),
+        )?;
+        attach_session_metadata(&mut projected.projection.request.extra, &frozen, None)
+            .map_err(|error| AppError::Conflict(error.message))?;
+        projected.projection.request.extra["cron_job_id"] = json!(job_id);
+        let response = self.create_session_idempotent(user_id, projected.projection.request,
+            Some(projected.projection.snapshot), creation_key).await?;
+        let response = self.ensure_runtime_working_directory_projection(response).await?;
         cron_session_handle_from_response(response)
     }
 
@@ -4006,7 +4099,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
             )));
         }
         let session = self.get_session(&owner_id, session_id).await?;
-        let session = self.ensure_cron_workspace_projection(session).await?;
+        let session = self.ensure_runtime_working_directory_projection(session).await?;
         let workspace = session
             .extra
             .get("workspace")
@@ -4619,7 +4712,7 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
                 selections.push(AgentResourceSelectionDto { resource_kind: "robot".into(), resource_id: robot_id.clone() });
             }
         }
-        binding = resolver.resource_bindings.resolve_for_agent_switch(&resolver.control_plane, &owner, binding, &selections)
+        binding = resolver.resource_bindings.prepare_new_session_binding(&resolver.control_plane, &owner, binding, &selections)
             .await.map_err(|error| AppError::Conflict(format!("{}: {}", error.code(), error.message())))?;
         let mcp = resolver.resource_bindings.resolve_mcp_for_saved_binding(&resolver.control_plane, &owner, &binding).await
             .map_err(|error| AppError::Conflict(format!("{}: {}", error.code(), error.message())))?;
@@ -5577,31 +5670,47 @@ fn freeze_selected_workspace(
     Ok(canonical.to_owned())
 }
 
+/// One project-location preparation for interactive and automatic entries.
+/// The existing directory gate protects both root validation and memory reuse.
+async fn prepare_selected_workspace(
+    owner: &NomiCoreSessionOwner,
+    principal: &PrincipalRef,
+    binding: &mut AgentBindingValueDto,
+    workspace: &str,
+) -> Result<Option<tokio::sync::OwnedRwLockReadGuard<()>>, AppError> {
+    let root = freeze_selected_workspace(binding, &principal.principal_id, workspace, WorkspaceDirectoryCheck::Create)?;
+    let frozen: AgentBindingValue = serde_json::to_value(&binding).and_then(serde_json::from_value)
+        .map_err(|error| AppError::Conflict(format!("Invalid project binding: {error}")))?;
+    let fence = owner.guard_binding_workspace_read(&principal.principal_id, &frozen)?;
+    reuse_current_project_memory(owner, principal, binding, &root).await?;
+    Ok(fence)
+}
+
 /// A verified location transition keeps a project's logical memory resource.
 /// New Sessions reuse only current, exact owner/root scoped bindings; retained
 /// historical definitions and the installation-wide default are not a source.
 async fn reuse_current_project_memory(
-    state: &NomiCoreAgentApiState,
-    owner: &AuthenticatedOwner,
+    owner: &NomiCoreSessionOwner,
+    principal: &PrincipalRef,
     binding: &mut AgentBindingValueDto,
     root: &str,
-) -> Result<(), NomiCoreApiError> {
+) -> Result<(), AppError> {
     if !binding.typed_resource_bindings.iter().any(|resource| resource.resource_kind == "project_memory") {
         return Ok(());
     }
     let mut memory_id = None;
     let mut cursor = None;
     loop {
-        let page = state.session_owner.canonical().store().list_live_sessions_for_workspace(
-            &authenticated_principal(owner), cursor.as_deref(), 1000, root).await.map_err(agent_session_store_error)?;
+        let page = owner.canonical().store().list_live_sessions_for_workspace(
+            principal, cursor.as_deref(), 1000, root).await.map_err(agent_session_store_error)?;
         for session in page.items {
             for resource in session.session.agent_binding.typed_resource_bindings {
-                if resource.resource_kind.as_ref() != "project_memory" || resource.owner_id != owner.as_ref()
+                if resource.resource_kind.as_ref() != "project_memory" || resource.owner_id != principal.principal_id
                     || !resource.resource_id.as_ref().starts_with(PROJECT_WORKSPACE_MEMORY_PREFIX)
                     || resource.typed_parameters.get("workspace_root").is_none_or(|path| path != root) { continue; }
                 let id = resource.resource_id.as_ref().to_owned();
                 if memory_id.as_ref().is_some_and(|previous| previous != &id) {
-                    return Err(AppError::Conflict("The project's current memory identities are inconsistent; preserve its history and resolve the existing bindings before creating another Session".into()).into());
+                    return Err(AppError::Conflict("The project's current memory identities are inconsistent; preserve its history and resolve the existing bindings before creating another Session".into()));
                 }
                 memory_id = Some(id);
             }
@@ -6408,18 +6517,18 @@ fn cron_session_projection_from_response(
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
     };
-    let temp_workspace_id = optional_string("temp_workspace_id");
-    let cli_path = optional_string("cli_path").or_else(|| {
-        response
-            .extra
-            .get("gateway")
-            .and_then(|gateway| gateway.get("cli_path"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
+    // The canonical projection obtained this key from saved_binding_presentation,
+    // after owner/exact-artifact validation. Hidden personal model variants do
+    // not prove their original editable selection, so they remain unspecified.
+    let agent_selection = optional_string("official_template_key")
+        .filter(|key| nomifun_agent_contracts::OfficialPresetKey::ALL.iter().any(|official| official.as_str() == key))
+        .map(|template_key| nomifun_api_types::ProductAgentSelectionDto::Template { template_key });
+    let agent_label = response.agent_snapshot.as_ref().map(|snapshot| snapshot.preset_name.clone());
+    let model = response.model.as_ref().map(|model| AgentChatModelSelectionDto {
+        provider_id: model.provider_id.clone(), model: model.model.clone(),
     });
-    let (skills, agent_name, custom_agent_id, preset_id, preset_revision) =
+    let agent_binding = response.agent_snapshot.as_ref().and_then(|snapshot| snapshot.canonical_binding.clone());
+    let skills =
         match response.agent_snapshot.as_ref() {
             Some(snapshot) => {
                 if response
@@ -6451,13 +6560,7 @@ fn cron_session_projection_from_response(
                         response.conversation_id
                     )));
                 }
-                (
-                    snapshot.included_skills.clone(),
-                    Some(snapshot.preset_name.clone()),
-                    snapshot.resolved_agent_id.clone(),
-                    Some(snapshot.preset_id.clone()),
-                    Some(snapshot.preset_revision),
-                )
+                snapshot.included_skills.clone()
             }
             None => return Err(AppError::Conflict("canonical AgentSession has no frozen Snapshot projection".to_owned())),
         };
@@ -6465,18 +6568,13 @@ fn cron_session_projection_from_response(
         agent_session_id,
         owner_id: owner_id.to_owned(),
         name: response.name,
-        agent_type: response.r#type,
-        model: response.model,
         workspace,
         cron_job_id,
-        temp_workspace_id,
         skills,
-        agent_name,
-        cli_path,
-        custom_agent_id,
-        preset_id,
-        preset_revision,
-        agent_snapshot: response.agent_snapshot,
+        agent_selection,
+        model,
+        agent_label,
+        agent_binding,
     })
 }
 
@@ -6499,7 +6597,6 @@ fn session_workspace(session: &ConversationResponse) -> Result<String, AppError>
 fn runtime_options_from_session(
     user_id: &str,
     session: ConversationResponse,
-    cron_overlay: Option<&nomifun_cron::CronTurnRuntimeOverlay>,
 ) -> Result<(AgentRuntimeBuildOptions, String), AppError> {
     let ConversationResponse {
         conversation_id,
@@ -6511,21 +6608,11 @@ fn runtime_options_from_session(
         ..
     } = session;
 
-    let mut session_extra = session_extra.as_object().cloned().ok_or_else(|| {
+    let session_extra = session_extra.as_object().cloned().ok_or_else(|| {
         AppError::Internal(format!(
             "conversation {conversation_id} extra must be a JSON object"
         ))
     })?;
-    if let Some(overlay) = cron_overlay {
-        nomifun_common::CronJobId::parse(&overlay.cron_job_id).map_err(|error| {
-            AppError::BadRequest(format!("invalid Cron runtime annotation: {error}"))
-        })?;
-        session_extra.insert(
-            "cron_job_id".to_owned(),
-            Value::String(overlay.cron_job_id.clone()),
-        );
-    }
-
     let workspace = session_extra
         .get("workspace")
         .and_then(serde_json::Value::as_str)
@@ -7814,16 +7901,8 @@ mod session_boundary_tests {
         let projection =
             cron_session_projection_from_response(OWNER_ID, response, None).unwrap();
         assert_eq!(projection.skills, vec!["frozen-skill"]);
-        assert_eq!(projection.agent_name.as_deref(), Some("Frozen Agent"));
-        assert_eq!(
-            projection.custom_agent_id.as_deref(),
-            Some("0190f5fe-7c00-7a00-8abc-012345678903")
-        );
-        assert_eq!(
-            projection.model.as_ref().map(|model| model.model.as_str()),
-            Some("step-3.7-flash")
-        );
-        assert_eq!(projection.preset_revision, Some(7));
+        assert_eq!(projection.owner_id, OWNER_ID);
+        assert_eq!(projection.agent_session_id.as_ref(), SESSION_ID);
     }
 
     #[test]
@@ -8111,6 +8190,10 @@ pub(crate) struct NomiCoreAgentApiState {
 }
 
 impl NomiCoreAgentApiState {
+    pub(super) fn cron_agent_binding_resolver(&self) -> Arc<dyn nomifun_cron::CronAgentBindingResolver> {
+        self.product_agent_resolver.clone()
+    }
+
     pub(crate) fn new(
         authoritative_user_id: Arc<str>,
         session_owner: Arc<NomiCoreSessionOwner>,
@@ -8898,31 +8981,9 @@ impl nomifun_gateway::ConversationCapabilityPort for GatewayAgentSessionCapabili
             )
             .await
             .map_err(control_plane_error_to_app)?;
-        let (_, _, snapshot) = self
-            .state
-            .control_plane
-            .saved_binding_artifacts(&owner, &binding)
-            .await
-            .map_err(control_plane_error_to_app)?;
-        let selections = snapshot
-            .content
-            .required_resource_kinds
-            .iter()
-            .filter_map(|kind| {
-                (kind.as_ref() == "workspace").then(|| AgentResourceSelectionDto {
-                    resource_kind: "workspace".to_owned(),
-                    resource_id:
-                        super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID
-                            .to_owned(),
-                })
-            })
-            .collect::<Vec<_>>();
-        binding = self
-            .state
-            .resource_bindings
-            .resolve_for_saved_binding(&self.state.control_plane, &owner, binding, &selections)
-            .await
-            .map_err(|error| AppError::UnprocessableEntity(error.message().to_owned()))?;
+        binding = self.state.resource_bindings.prepare_new_session_binding(
+            &self.state.control_plane, &owner, binding, &[],
+        ).await.map_err(super::nomi_core_resource_bindings::ResourceSelectionResolutionError::into_app_error)?;
         let (_, _, snapshot) = self
             .state
             .control_plane
@@ -8939,6 +9000,9 @@ impl nomifun_gateway::ConversationCapabilityPort for GatewayAgentSessionCapabili
         let binding: AgentBindingValue = serde_json::to_value(binding)
             .and_then(serde_json::from_value)
             .map_err(|error| AppError::Conflict(error.to_string()))?;
+        super::nomi_core_resource_bindings::validate_executable_binding_resources(
+            &snapshot, &binding.typed_resource_bindings,
+        )?;
         let opened = self
             .state
             .session_owner
@@ -9664,7 +9728,7 @@ async fn select_product_agent_binding(
     let mut response = json!({ "selection": selection, "needs_model": model.is_none() });
     let mut prepared_product_binding = None;
     if model.is_some() && update_default {
-        let mut binding = state.product_agent_resolver.materialize(&owner, &selection, model.as_ref(), target_kind == "companion").await?;
+        let mut binding = state.product_agent_resolver.materialize_binding_candidate(&owner, &selection, model.as_ref(), target_kind == "companion").await?;
         let existing = state.control_plane
             .get_agent_binding(&owner, target_kind.clone(), target_id.clone())
             .await?;
@@ -9685,7 +9749,7 @@ async fn select_product_agent_binding(
                 &state.control_plane, &owner, binding, &selections,
             ).await?
         } else {
-            state.product_agent_resolver.resource_bindings.resolve_for_agent_switch(
+            state.product_agent_resolver.resource_bindings.prepare_new_session_binding(
                 &state.control_plane, &owner, binding, &selections,
             ).await?
         };
@@ -12331,37 +12395,23 @@ async fn create_nomi_core_agent_session_owned(
         .control_plane
         .resolve_agent_session_binding_with_capabilities(&owner.0, &request.preset_id, request.model.as_ref(), request.session_capabilities.as_ref())
         .await?;
-    let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner.0, &binding).await?;
-    let required_kinds = snapshot.content.required_resource_kinds.iter()
-        .map(|kind| kind.as_ref().to_owned()).collect::<BTreeSet<_>>();
-    let mut selections = request.resource_selections.clone();
-    complete_automatic_agent_resource_selections(&mut selections, &required_kinds);
     let mut binding = state
         .resource_bindings
-        .resolve_for_agent_switch(
+        .prepare_new_session_binding(
             &state.control_plane,
             &owner.0,
             binding,
-            &selections,
+            &request.resource_selections,
         )
         .await?;
     freeze_agent_session_knowledge_policy(
         &mut binding,
         request.knowledge_policy.as_ref(),
     )?;
-    let _selected_project_fence = if let Some(workspace) = request.workspace.as_deref() {
-        let root = freeze_selected_workspace(
-            &mut binding,
-            owner.as_ref(),
-            workspace,
-            WorkspaceDirectoryCheck::Create,
-        )?;
-        let frozen: AgentBindingValue = serde_json::to_value(&binding).and_then(serde_json::from_value)
-            .map_err(|error| AppError::Conflict(format!("Invalid project binding: {error}")))?;
-        let fence = state.session_owner.guard_binding_workspace_read(owner.as_ref(), &frozen)?;
-        reuse_current_project_memory(&state, &owner, &mut binding, &root).await?;
-        fence
-    } else { None };
+    let _selected_project_fence = match request.workspace.as_deref() {
+        Some(workspace) => prepare_selected_workspace(&state.session_owner, &authenticated_principal(&owner), &mut binding, workspace).await?,
+        None => None,
+    };
     let editor = state
         .control_plane
         .editor(
@@ -12405,6 +12455,10 @@ async fn create_nomi_core_agent_session_owned(
     let binding_contract: AgentBindingValue = serde_json::to_value(&binding)
         .and_then(serde_json::from_value)
         .map_err(|error| AppError::Conflict(format!("Invalid Agent binding: {error}")))?;
+    let (_, _, final_snapshot) = state.control_plane.saved_binding_artifacts(&owner.0, &binding).await?;
+    super::nomi_core_resource_bindings::validate_executable_binding_resources(
+        &final_snapshot, &binding_contract.typed_resource_bindings,
+    )?;
     let _project_directory_fence = state.session_owner.guard_binding_workspace_read(owner.as_ref(), &binding_contract)?;
     let active_capabilities = projection
         .snapshot
@@ -13435,25 +13489,7 @@ async fn deterministic_agent_handoff(
 }
 
 fn automatic_agent_resource_id(kind: &str) -> Option<&'static str> {
-    match kind {
-        "workspace" => Some(super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID),
-        "project_memory" => {
-            Some(super::nomi_core_resource_bindings::DEFAULT_PROJECT_MEMORY_RESOURCE_ID)
-        }
-        "process_session" => {
-            Some(super::nomi_core_resource_bindings::MANAGED_PROCESS_SESSION_RESOURCE_ID)
-        }
-        "terminal" => Some(super::nomi_core_resource_bindings::MANAGED_TERMINAL_RESOURCE_ID),
-        "asset_library" => Some(
-            super::nomi_core_resource_bindings::CREATIVE_ASSET_LIBRARY_RESOURCE_ID,
-        ),
-        "browser" => Some("managed-browser"),
-        "computer" => Some(super::nomi_core_resource_bindings::LOCAL_COMPUTER_RESOURCE_ID),
-        "scheduler" => {
-            Some(super::nomi_core_resource_bindings::INSTALLATION_SCHEDULER_RESOURCE_ID)
-        }
-        _ => None,
-    }
+    super::nomi_core_resource_bindings::automatic_agent_resource_id(kind)
 }
 
 fn missing_agent_switch_resource_kinds(

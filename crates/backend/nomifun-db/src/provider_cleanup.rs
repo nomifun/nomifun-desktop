@@ -44,7 +44,7 @@ pub async fn insert_agent_preset_revision_tx(
     Ok(())
 }
 
-async fn revision_artifact_tx(tx: &mut Transaction<'_,Sqlite>, expected: &PresetRevisionRef)
+pub(crate) async fn revision_artifact_tx(tx: &mut Transaction<'_,Sqlite>, expected: &PresetRevisionRef)
     -> Result<AgentPresetRevision,DbError> {
     let row: Option<(String,String,String,i64,Option<String>)> = sqlx::query_as(
         "SELECT revision.payload_json,revision.revision_digest,revision.created_by,revision.created_at,revision.reason \
@@ -79,14 +79,14 @@ async fn source_artifacts(tx: &mut Transaction<'_,Sqlite>, expected: &PresetRevi
 }
 
 /// Existing Cron jobs execute the exact current Session binding, regardless of
-/// any unused model fields in agent_config. Only their mutable schedule stops.
+/// any authoring model selection on the job. Only the mutable schedule stops.
 async fn disable_bound_session_cron_tx(
     tx: &mut Transaction<'_,Sqlite>, provider_id: &str, model: Option<&str>, now: i64,
 ) -> Result<(),DbError> {
     let rows: Vec<(String,String)> = sqlx::query_as(
         "SELECT job.cron_job_id,session.agent_binding_json FROM cron_jobs job \
          JOIN agent_sessions session ON session.agent_session_id=job.conversation_id \
-         WHERE job.enabled=1 AND job.agent_type='nomi' AND job.execution_mode='existing' AND session.state='live' \
+         WHERE job.enabled=1 AND job.execution_mode='existing' AND session.state='live' \
            AND session.remote_binding_id IS NULL \
            AND json_extract(session.owner_ref_json,'$.principal_kind')='user' \
            AND json_extract(session.owner_ref_json,'$.principal_id')=job.user_id")
@@ -101,6 +101,23 @@ async fn disable_bound_session_cron_tx(
         if matches {
             sqlx::query("UPDATE cron_jobs SET enabled=0,schedule_revision=schedule_revision+1,next_run_at=NULL,updated_at=MAX(updated_at,?) WHERE cron_job_id=?")
                 .bind(now).bind(job_id).execute(&mut **tx).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Launch-mode Cron authority is the frozen binding, independently of its
+/// editable model selection. Catalog deletion never edits immutable artifacts.
+async fn disable_launch_binding_cron_tx(tx:&mut Transaction<'_,Sqlite>,provider_id:&str,model:Option<&str>,now:i64)->Result<(),DbError> {
+    let rows:Vec<(String,String)>=sqlx::query_as("SELECT cron_job_id,agent_binding FROM cron_jobs WHERE enabled=1 AND conversation_id IS NULL AND agent_binding IS NOT NULL")
+        .fetch_all(&mut **tx).await?;
+    for (job,raw) in rows {
+        let binding:AgentBindingValue=decode(&raw)?;
+        let revision=revision_artifact_tx(tx,&binding.preset_revision_ref).await?;
+        if revision.payload.chat_route_records.get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
+            .is_some_and(|route|route.primary.provider_id==provider_id && model.is_none_or(|model|route.primary.model==model)) {
+            sqlx::query("UPDATE cron_jobs SET enabled=0,schedule_revision=schedule_revision+1,next_run_at=NULL,configuration_error='CRON_MODEL_RESELECTION_REQUIRED',updated_at=MAX(updated_at,?) WHERE cron_job_id=?")
+                .bind(now).bind(job).execute(&mut **tx).await?;
         }
     }
     Ok(())
@@ -187,9 +204,9 @@ pub(crate) async fn lock_provider_model_choice_tx(
 
 async fn cleanup_mutable_references_tx(tx: &mut Transaction<'_,Sqlite>, provider_id: &str, model: Option<&str>) -> Result<(),DbError> {
     let now = nomifun_common::now_ms();
-    let malformed_cron: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cron_jobs WHERE agent_type='nomi' AND agent_config IS NOT NULL AND NOT json_valid(agent_config))")
+    let malformed_cron: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cron_jobs WHERE model_selection IS NOT NULL AND NOT json_valid(model_selection))")
         .fetch_one(&mut **tx).await?;
-    if malformed_cron {return Err(invalid("invalid cron agent_config JSON during catalog cleanup"));}
+    if malformed_cron {return Err(invalid("invalid cron model_selection JSON during catalog cleanup"));}
     let rows: Vec<(String,String)> = sqlx::query_as("SELECT key,value FROM client_preferences").fetch_all(&mut **tx).await?;
     for (key,value) in rows {
         let action = if model.is_none() {provider_preference_delete_action(&key,&value,provider_id)?}
@@ -232,8 +249,9 @@ async fn cleanup_mutable_references_tx(tx: &mut Transaction<'_,Sqlite>, provider
         .bind(now).bind(provider_id).bind(model).bind(model).execute(&mut **tx).await?;
     sqlx::query("UPDATE agent_execution_template_participants SET provider_id=NULL,model=NULL,updated_at=MAX(updated_at,?) WHERE provider_id=? AND (? IS NULL OR model=?)")
         .bind(now).bind(provider_id).bind(model).bind(model).execute(&mut **tx).await?;
-    sqlx::query("UPDATE cron_jobs SET enabled=0,schedule_revision=schedule_revision+1,next_run_at=NULL,agent_config=json_set(agent_config,'$.provider_id',NULL,'$.model',NULL),updated_at=MAX(updated_at,?) WHERE agent_type='nomi' AND json_valid(agent_config) AND json_extract(agent_config,'$.provider_id')=? AND (? IS NULL OR json_extract(agent_config,'$.model')=?)")
+    sqlx::query("UPDATE cron_jobs SET enabled=0,schedule_revision=schedule_revision+1,next_run_at=NULL,model_selection=NULL,configuration_error='CRON_MODEL_RESELECTION_REQUIRED',updated_at=MAX(updated_at,?) WHERE json_valid(model_selection) AND json_extract(model_selection,'$.provider_id')=? AND (? IS NULL OR json_extract(model_selection,'$.model')=?)")
         .bind(now).bind(provider_id).bind(model).bind(model).execute(&mut **tx).await?;
     disable_bound_session_cron_tx(tx,provider_id,model,now).await?;
+    disable_launch_binding_cron_tx(tx,provider_id,model,now).await?;
     Ok(())
 }

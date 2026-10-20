@@ -63,7 +63,7 @@ pub use agent_discovery::{
 };
 pub use agent_error::{
     AgentErrorCode, AgentErrorOwnership, AgentErrorResolution, AgentErrorResolutionKind,
-    AgentErrorResolutionTarget, AgentStreamErrorData, AgentTaskIncompleteReason,
+    AgentErrorResolutionTarget, AgentStreamErrorData, AgentTaskIncompleteReason, AgentResourceBindingFailure,
     ModelFailureDiagnostic, ModelFailureReason, SystemExecutionFailure,
 };
 pub use agent_execution::{
@@ -111,7 +111,7 @@ pub use conversation::{
     SendMessageRequest, SendMessageResponse, UpdateConversationRequest,
 };
 pub use cron::{
-    CreateCronJobRequest, CronAgentConfigDto, CronJobExecutedEvent, CronJobMetadataDto,
+    CreateCronJobRequest, CronJobExecutedEvent, CronJobMetadataDto,
     CronJobRemovedPayload, CronJobResponse, CronJobRunResponse, CronJobStateDto, CronScheduleDto,
     HasSkillResponse, ListCronJobsQuery, RunNowResponse, SaveCronSkillRequest,
     UpdateCronJobRequest,

@@ -24,15 +24,13 @@ const rawCronJob = (cron_job_id: unknown) => ({
   message: 'Run boundary test',
   execution_mode: 'existing',
   metadata: {
-    agent_type: 'nomi',
+    clear_context_each_run: false,
     created_by: 'user',
     created_at: 1,
     updated_at: 1,
   },
   state: {
     run_count: 0,
-    retry_count: 0,
-    max_retries: 0,
   },
 });
 
@@ -119,9 +117,10 @@ describe('cron response wire ID contract', () => {
         enabled: false,
         schedule: { kind: 'every', every_ms: 120_000, description: 'Every two minutes' },
         message: 'Run the updated boundary test',
-        agent_config: { name: 'Nomi', clear_context_each_run: true },
+        agent_selection: { kind: 'template', template_key: 'assistant.general' },
+        model: { provider_id: AGENT_ID, model: 'selected-model' },
+        clear_context_each_run: true,
         conversation_title: 'Updated title',
-        max_retries: 5,
         execution_mode: 'new_conversation',
         metadata: { agent_type: 'nomi' },
         state: { run_count: 99 },
@@ -138,43 +137,42 @@ describe('cron response wire ID contract', () => {
         enabled: false,
         schedule: { kind: 'every', every_ms: 120_000, description: 'Every two minutes' },
         message: 'Run the updated boundary test',
-        agent_config: { name: 'Nomi', clear_context_each_run: true },
+        agent_selection: { kind: 'template', template_key: 'assistant.general' },
+        model: { provider_id: AGENT_ID, model: 'selected-model' },
+        clear_context_each_run: true,
         conversation_title: 'Updated title',
-        max_retries: 5,
       });
     } finally {
       globalThis.fetch = realFetch;
     }
   });
 
-  test('parses the stable custom Agent identity returned with scheduled tasks', async () => {
+  test('parses the selected workbench preset identity and rejects malformed IDs', async () => {
     try {
-      respondWith([
-        {
-          ...rawCronJob(CRON_JOB_ID),
-          metadata: {
-            ...rawCronJob(CRON_JOB_ID).metadata,
-            agent_type: 'acp',
-            agent_config: { name: 'Custom reviewer', custom_agent_id: AGENT_ID },
-          },
-        },
-      ]);
-      expect((await cron.listJobs.invoke())[0]?.metadata.agent_config?.custom_agent_id).toBe(AGENT_ID);
-
-      respondWith([
-        {
-          ...rawCronJob(CRON_JOB_ID),
-          metadata: {
-            ...rawCronJob(CRON_JOB_ID).metadata,
-            agent_type: 'acp',
-            agent_config: { name: 'Broken reviewer', custom_agent_id: 'not-a-uuid' },
-          },
-        },
-      ]);
+      respondWith([{ ...rawCronJob(CRON_JOB_ID), metadata: {
+        ...rawCronJob(CRON_JOB_ID).metadata,
+        agent_selection: { kind: 'preset', preset_id: AGENT_ID },
+      } }]);
+      expect((await cron.listJobs.invoke())[0]?.metadata.agent_selection).toEqual({ kind: 'preset', preset_id: AGENT_ID });
+      respondWith([{ ...rawCronJob(CRON_JOB_ID), metadata: {
+        ...rawCronJob(CRON_JOB_ID).metadata,
+        agent_selection: { kind: 'preset', preset_id: 'not-a-uuid' },
+      } }]);
       await expectInvalidEntityId(() => cron.listJobs.invoke());
-    } finally {
-      globalThis.fetch = realFetch;
-    }
+    } finally { globalThis.fetch = realFetch; }
+  });
+
+  test('retains typed task/run failure evidence and the exact run conversation', async () => {
+    const failure = { code: 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE', message: 'Local preparation failed', ownership: 'nomifun', retryable: false,
+      resourceBindingFailure: { missing_resource_kinds: ['workspace'], missing_resource_operations: { workspace: ['write'] } } };
+    try {
+      respondWith([{ ...rawCronJob(CRON_JOB_ID), state: { run_count: 1, last_failure: failure } }]);
+      expect((await cron.listJobs.invoke())[0]?.state.last_failure).toMatchObject(failure);
+      respondWith([{ ...rawCronJobRun(CRON_JOB_RUN_ID), status: 'error', conversation_id: CONVERSATION_ID, failure }]);
+      const run = (await cron.listRuns.invoke({ cron_job_id: parseCronJobId(CRON_JOB_ID) }))[0];
+      expect(run?.conversation_id).toBe(CONVERSATION_ID);
+      expect(run?.failure).toMatchObject(failure);
+    } finally { globalThis.fetch = realFetch; }
   });
 
   test('run-now preserves the caller key across a lost-response retry', async () => {

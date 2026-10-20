@@ -192,21 +192,8 @@ A relationship stores exactly one reference:
 - if the value is issued by another system, store an explicitly named opaque
   external ID.
 
-The current v3 baseline has no `INTEGER` relationship that targets another
-table's technical `id`.
-
-Stable-parent example:
-
-```sql
-CREATE TABLE messages (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id      TEXT NOT NULL UNIQUE,
-    conversation_id TEXT NOT NULL
-);
-
-CREATE INDEX idx_messages_conversation_id
-    ON messages(conversation_id);
-```
+The current baseline and explicit forward migrations do not use `INTEGER`
+relationships targeting another table's technical `id`.
 
 Stable Cron-parent example:
 
@@ -216,21 +203,23 @@ CREATE TABLE cron_jobs (
     cron_job_id TEXT NOT NULL UNIQUE
 );
 
-CREATE TABLE cron_job_runs (
+CREATE TABLE cron_run_reservations (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     cron_job_run_id TEXT NOT NULL UNIQUE,
-    cron_job_id     TEXT NOT NULL
+    cron_job_id     TEXT NOT NULL,
+    settled_at_ms   INTEGER,
+    status          TEXT NOT NULL
 );
 
-CREATE INDEX idx_cron_job_runs_cron_job_id
-    ON cron_job_runs(cron_job_id);
+CREATE INDEX idx_cron_run_reservations_cron_job_id
+    ON cron_run_reservations(cron_job_id, settled_at_ms DESC, id DESC, status);
 ```
 
-`messages.conversation_id` logically targets
-`conversations.conversation_id`; `cron_job_runs.cron_job_id` logically targets
-`cron_jobs.cron_job_id`. Neither relationship is declared to SQLite. (Inside
-the Agent Store exception group, `agent_messages.session_id` is a real
-`FOREIGN KEY` — that physical graph is deliberate and frozen.)
+`cron_run_reservations.cron_job_id` logically targets `cron_jobs.cron_job_id`;
+its `conversation_id` targets the same canonical AgentSession. These relations
+are not physical SQLite foreign keys. History projects the original reservation,
+without a second run-history table. Inside the Agent Store exception group,
+`agent_messages.session_id` is a real `FOREIGN KEY`; that graph stays frozen.
 
 Do not store both `conversation_id` and `conversation_row_id`, or any equivalent
 business-ID/row-ID pair, for the same relationship.

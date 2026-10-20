@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use nomifun_common::TimestampMs;
 use serde::{Deserialize, Serialize};
 
@@ -33,59 +31,7 @@ pub enum CronScheduleDto {
 }
 
 // ---------------------------------------------------------------------------
-// B. Agent configuration
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct CronAgentConfigDto {
-    /// Retired vendor-backend selector. Nomi provider selection is carried by
-     /// `provider_id`; this field must be absent for Nomi jobs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend: Option<String>,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cli_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_agent_id: Option<String>,
-    /// Reusable configuration preset selected for this scheduled task. This is
-    /// deliberately independent from `custom_agent_id`, which identifies a
-    /// custom agent row rather than a preset.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_util::deserialize_optional_preset_id"
-    )]
-    pub preset_id: Option<String>,
-    /// Frozen preset revision used when the task was saved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preset_revision: Option<i64>,
-    /// Frozen resolved Agent payload. Scheduled execution must not silently
-    /// drift when an AgentPreset is edited later.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_snapshot: Option<crate::AgentResolvedSnapshot>,
-    /// Natural model key. This is not an entity ID.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Logical reference to `providers.provider_id`, used only by Nomi jobs.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
-    )]
-    pub provider_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_options: Option<HashMap<String, String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<String>,
-    /// Clear the agent context before each scheduled run (only meaningful when
-    /// the job reuses an existing conversation). Defaults to `false`.
-    #[serde(default)]
-    pub clear_context_each_run: bool,
-}
-
-// ---------------------------------------------------------------------------
-// C. CronJob response — one Agent execution contract
+// Agent authoring metadata and the sole frozen execution contract
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -98,12 +44,24 @@ pub struct CronJobMetadataDto {
     pub conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_title: Option<String>,
-    pub agent_type: String,
     pub created_by: String,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_config: Option<CronAgentConfigDto>,
+    pub agent_selection: Option<crate::ProductAgentSelectionDto>,
+    /// Effective model from the frozen binding or bound Session. Disabled
+    /// definitions without a binding retain their configured authoring choice.
+    /// This display field never selects scheduled execution authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<crate::AgentChatModelSelectionDto>,
+    /// Read-only canonical binding presentation. A continuing Session retains
+    /// its sole authority; this projection is never a second persisted binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_binding: Option<crate::AgentBindingValueDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
+    #[serde(default)]
+    pub clear_context_each_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -116,9 +74,13 @@ pub struct CronJobStateDto {
     pub last_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Read-only projection of the exact run's canonical failure, never a
+    /// second copy of the Session error fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<crate::AgentStreamErrorData>,
     pub run_count: i64,
-    pub retry_count: i64,
-    pub max_retries: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -146,6 +108,10 @@ pub struct CronJobRunResponse {
     pub cron_job_id: String,
     pub executed_at_ms: TimestampMs,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<crate::AgentStreamErrorData>,
 }
 
 // ---------------------------------------------------------------------------
@@ -160,8 +126,6 @@ pub struct CreateCronJobRequest {
     pub description: Option<String>,
     pub schedule: CronScheduleDto,
     #[serde(default)]
-    pub prompt: Option<String>,
-    #[serde(default)]
     pub message: Option<String>,
     #[serde(
         default,
@@ -170,12 +134,19 @@ pub struct CreateCronJobRequest {
     pub conversation_id: Option<String>,
     #[serde(default)]
     pub conversation_title: Option<String>,
-    pub agent_type: String,
     pub created_by: String,
     #[serde(default)]
     pub execution_mode: Option<String>,
     #[serde(default)]
-    pub agent_config: Option<CronAgentConfigDto>,
+    pub agent_selection: Option<crate::ProductAgentSelectionDto>,
+    #[serde(default)]
+    pub model: Option<crate::AgentChatModelSelectionDto>,
+    #[serde(default)]
+    pub workspace: Option<String>,
+    #[serde(default)]
+    pub resource_selections: Vec<crate::AgentResourceSelectionDto>,
+    #[serde(default)]
+    pub clear_context_each_run: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -192,11 +163,17 @@ pub struct UpdateCronJobRequest {
     #[serde(default)]
     pub message: Option<String>,
     #[serde(default)]
-    pub agent_config: Option<CronAgentConfigDto>,
+    pub agent_selection: Option<crate::ProductAgentSelectionDto>,
+    #[serde(default)]
+    pub model: Option<crate::AgentChatModelSelectionDto>,
+    #[serde(default)]
+    pub workspace: Option<String>,
+    #[serde(default)]
+    pub resource_selections: Option<Vec<crate::AgentResourceSelectionDto>>,
+    #[serde(default)]
+    pub clear_context_each_run: Option<bool>,
     #[serde(default)]
     pub conversation_title: Option<String>,
-    #[serde(default)]
-    pub max_retries: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -414,442 +391,88 @@ mod tests {
         }
     }
 
-    // -- B. CronAgentConfigDto ------------------------------------------------
-
-    #[test]
-    fn agent_config_full() {
-        let raw = json!({
-            "backend": "legacy-backend",
-            "name": "Claude Agent",
-            "cli_path": "/usr/bin/claude",
-            "custom_agent_id": "agent-1",
-            "preset_id": "0190f5fe-7c00-7a00-8000-000000000001",
-            "preset_revision": 3,
-            "model": "claude-sonnet-4-6",
-            "config_options": {"key": "value"},
-            "workspace": "/tmp/ws"
-        });
-        let c: CronAgentConfigDto = serde_json::from_value(raw).unwrap();
-        assert_eq!(c.backend.as_deref(), Some("legacy-backend"));
-        assert_eq!(c.name, "Claude Agent");
-        assert_eq!(c.cli_path.as_deref(), Some("/usr/bin/claude"));
-        assert_eq!(c.custom_agent_id.as_deref(), Some("agent-1"));
-        assert_eq!(
-            c.preset_id.as_deref(),
-            Some("0190f5fe-7c00-7a00-8000-000000000001")
-        );
-        assert_eq!(c.preset_revision, Some(3));
-        assert_eq!(c.model.as_deref(), Some("claude-sonnet-4-6"));
-        assert!(c.provider_id.is_none());
-        assert_eq!(c.config_options.as_ref().unwrap()["key"], "value");
+    fn create_body() -> serde_json::Value {
+        json!({
+            "name":"Weather", "schedule":{"kind":"every","every_ms":60000},
+            "message":"Query the weather", "created_by":"user",
+            "agent_selection":{"kind":"template","template_key":"assistant.general"},
+            "model":{"provider_id":"0190f5fe-7c00-7a00-8000-000000000001","model":"step-5-preview"}
+        })
     }
 
     #[test]
-    fn preset_id_rejects_catalog_keys_and_prefixed_ids() {
-        for preset_id in [
-            "word-creator",
-            "preset_7",
-            "preset_0190f5fe-7c00-7a00-8abc-012345678901",
-            " word-creator ",
+    fn workbench_selection_and_model_are_independent_authoring_inputs() {
+        let request: CreateCronJobRequest = serde_json::from_value(create_body()).unwrap();
+        assert!(matches!(request.agent_selection, Some(crate::ProductAgentSelectionDto::Template { ref template_key }) if template_key == "assistant.general"));
+        assert_eq!(request.model.unwrap().model, "step-5-preview");
+        assert!(!request.clear_context_each_run);
+        assert!(request.resource_selections.is_empty());
+    }
+
+    #[test]
+    fn scheduling_cannot_submit_cli_or_frozen_authority_fields() {
+        for (field, value) in [
+            ("agent_type",json!("nomi")), ("agent_config",json!({})),
+            ("prompt",json!("old alias")), ("agent_binding",json!({})),
+            ("max_retries",json!(3)), ("backend",json!("acp")),
         ] {
-            assert!(
-                serde_json::from_value::<CronAgentConfigDto>(json!({
-                    "backend": "legacy-backend",
-                    "name": "Claude",
-                    "preset_id": preset_id
-                }))
-                .is_err()
-            );
+            let mut body = create_body(); body[field] = value;
+            assert!(serde_json::from_value::<CreateCronJobRequest>(body).is_err(), "{field}");
         }
     }
 
     #[test]
-    fn agent_config_minimal() {
-        let raw = json!({"backend": "openai", "name": "GPT"});
-        let c: CronAgentConfigDto = serde_json::from_value(raw).unwrap();
-        assert_eq!(c.backend.as_deref(), Some("openai"));
-        assert_eq!(c.name, "GPT");
-        assert!(c.cli_path.is_none());
-        assert!(c.preset_id.is_none());
-        assert!(c.config_options.is_none());
+    fn specified_session_creation_does_not_require_shadow_agent_configuration() {
+        let mut body = create_body();
+        body.as_object_mut().unwrap().remove("agent_selection");
+        body.as_object_mut().unwrap().remove("model");
+        body["conversation_id"] = json!("0190f5fe-7c00-7a00-8000-000000000002");
+        body["execution_mode"] = json!("existing");
+        let request: CreateCronJobRequest = serde_json::from_value(body).unwrap();
+        assert!(request.agent_selection.is_none()); assert!(request.model.is_none());
+        assert!(request.conversation_id.is_some());
     }
 
     #[test]
-    fn agent_config_serialize_omits_none() {
-        let c = CronAgentConfigDto {
-            backend: Some("acp".into()),
-            name: "Test".into(),
-            cli_path: None,
-            custom_agent_id: None,
-            preset_id: None,
-            preset_revision: None,
-            agent_snapshot: None,
-            model: None,
-            provider_id: None,
-            config_options: None,
-            workspace: None,
-            clear_context_each_run: false,
-        };
-        let json = serde_json::to_value(&c).unwrap();
-        assert!(json.get("cli_path").is_none());
-        assert!(json.get("preset_id").is_none());
-        assert!(json.get("config_options").is_none());
-    }
-
-    #[test]
-    fn agent_config_roundtrip() {
-        let c = CronAgentConfigDto {
-            backend: Some("acp".into()),
-            name: "Agent".into(),
-            cli_path: Some("/bin/x".into()),
-            custom_agent_id: Some("c1".into()),
-            preset_id: Some("0190f5fe-7c00-7a00-8000-000000000001".into()),
-            preset_revision: Some(7),
-            agent_snapshot: None,
-            model: Some("m1".into()),
-            provider_id: None,
-            config_options: Some(HashMap::from([("a".into(), "b".into())])),
-            workspace: Some("/ws".into()),
-            clear_context_each_run: false,
-        };
-        let json = serde_json::to_string(&c).unwrap();
-        let parsed: CronAgentConfigDto = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, c);
-    }
-
-    // -- C. CronJobResponse ---------------------------------------------------
-
-    fn sample_cron_job_response() -> CronJobResponse {
-        CronJobResponse {
-            cron_job_id: JOB_ID.into(),
-            name: "Daily report".into(),
-            description: Some("Daily report description".into()),
-            enabled: true,
-            schedule: CronScheduleDto::Cron {
-                expr: "0 0 9 * * *".into(),
-                tz: Some("Asia/Shanghai".into()),
-                description: Some("Daily at 9am".into()),
-            },
-            message: "Generate report".into(),
-            execution_mode: "new_conversation".into(),
-            metadata: CronJobMetadataDto {
-                conversation_id: Some("0190f5fe-7c00-7a00-8abc-012345678901".into()),
-                conversation_title: Some("Reports".into()),
-                agent_type: "acp".into(),
-                created_by: "user".into(),
-                created_at: 1700000000000,
-                updated_at: 1700001000000,
-                agent_config: Some(CronAgentConfigDto {
-                    backend: Some("acp".into()),
-                    name: "Claude".into(),
-                    cli_path: None,
-                    custom_agent_id: None,
-                    preset_id: None,
-                    preset_revision: None,
-                    agent_snapshot: None,
-                    model: None,
-                    provider_id: None,
-                    config_options: None,
-                    workspace: None,
-                    clear_context_each_run: false,
-                }),
-            },
-            state: CronJobStateDto {
-                next_run_at_ms: Some(1700100000000),
-                last_run_at_ms: Some(1700000000000),
-                last_status: Some("ok".into()),
-                last_error: None,
-                run_count: 5,
-                retry_count: 0,
-                max_retries: 3,
-            },
+    fn partial_updates_preserve_omitted_execution_configuration() {
+        let request: UpdateCronJobRequest = serde_json::from_value(json!({"name":"Renamed"})).unwrap();
+        assert_eq!(request.name.as_deref(), Some("Renamed"));
+        assert!(request.agent_selection.is_none()); assert!(request.model.is_none());
+        assert!(request.resource_selections.is_none()); assert!(request.clear_context_each_run.is_none());
+        for field in ["agent_config","agent_type","max_retries","execution_mode"] {
+            assert!(serde_json::from_value::<UpdateCronJobRequest>(json!({field:"removed"})).is_err());
         }
     }
 
     #[test]
-    fn cron_job_response_serialize_snake_case() {
-        let resp = sample_cron_job_response();
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["cron_job_id"], JOB_ID);
-        assert!(json.get("id").is_none());
-        assert_eq!(json["name"], "Daily report");
-        assert_eq!(json["enabled"], true);
-        assert_eq!(json["schedule"]["kind"], "cron");
-        assert_eq!(json["schedule"]["expr"], "0 0 9 * * *");
-        assert_eq!(json["message"], "Generate report");
-        assert_eq!(json["execution_mode"], "new_conversation");
-        assert_eq!(
-            json["metadata"]["conversation_id"],
-            "0190f5fe-7c00-7a00-8abc-012345678901"
-        );
-        assert_eq!(json["metadata"]["agent_type"], "acp");
-        assert_eq!(json["metadata"]["created_by"], "user");
-        assert_eq!(json["metadata"]["created_at"], 1700000000000_i64);
-        assert_eq!(json["state"]["next_run_at_ms"], 1700100000000_i64);
-        assert_eq!(json["state"]["last_status"], "ok");
-        assert_eq!(json["state"]["run_count"], 5);
-        assert_eq!(json["state"]["retry_count"], 0);
-        assert_eq!(json["state"]["max_retries"], 3);
-        assert!(json["state"].get("last_error").is_none());
+    fn workbench_selection_rejects_malformed_personal_preset_ids() {
+        for id in ["not-an-id", "preset_0190f5fe-7c00-7a00-8000-000000000001"] {
+            let mut body=create_body();body["agent_selection"]=json!({"kind":"preset","preset_id":id});
+            assert!(serde_json::from_value::<CreateCronJobRequest>(body).is_err());
+        }
     }
 
     #[test]
-    fn cron_job_response_roundtrip() {
-        let resp = sample_cron_job_response();
-        let json = serde_json::to_string(&resp).unwrap();
-        let parsed: CronJobResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, resp);
-    }
-
-    #[test]
-    fn cron_job_response_rejects_legacy_id_field() {
-        let mut json = serde_json::to_value(sample_cron_job_response()).unwrap();
-        let object = json.as_object_mut().unwrap();
-        let cron_job_id = object.remove("cron_job_id").unwrap();
-        object.insert("id".into(), cron_job_id);
-        assert!(serde_json::from_value::<CronJobResponse>(json).is_err());
-    }
-
-    #[test]
-    fn cron_job_response_minimal_state() {
-        let resp = CronJobResponse {
-            cron_job_id: JOB_ID_2.into(),
-            name: "Ping".into(),
-            description: None,
-            enabled: false,
-            schedule: CronScheduleDto::Every {
-                every_ms: 60000,
-                description: None,
+    fn disabled_definition_keeps_authored_model_without_fabricating_a_binding() {
+        let response=CronJobResponse {
+            cron_job_id:JOB_ID.into(),name:"Weather".into(),description:None,enabled:false,
+            schedule:CronScheduleDto::Every{every_ms:60000,description:None},message:"Weather".into(),
+            execution_mode:"new_conversation".into(),
+            metadata:CronJobMetadataDto {
+                conversation_id:None,conversation_title:None,created_by:"user".into(),created_at:1,updated_at:2,
+                agent_selection:None,model:Some(crate::AgentChatModelSelectionDto {
+                    provider_id:"0190f5fe-7c00-7a00-8000-000000000001".into(),model:"step-5-preview".into()
+                }),agent_binding:None,agent_label:None,clear_context_each_run:false,
             },
-            message: "ping".into(),
-            execution_mode: "existing".into(),
-            metadata: CronJobMetadataDto {
-                conversation_id: Some("0190f5fe-7c00-7a00-8abc-012345678902".into()),
-                conversation_title: None,
-                agent_type: "gemini".into(),
-                created_by: "agent".into(),
-                created_at: 1000,
-                updated_at: 1000,
-                agent_config: None,
-            },
-            state: CronJobStateDto {
-                next_run_at_ms: None,
-                last_run_at_ms: None,
-                last_status: None,
-                last_error: None,
-                run_count: 0,
-                retry_count: 0,
-                max_retries: 3,
-            },
+            state:CronJobStateDto{next_run_at_ms:None,last_run_at_ms:None,last_status:None,last_error:None,
+                run_count:0,last_failure:None,configuration_error:Some("Select an Agent before enabling this task".into())},
         };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["execution_mode"], "existing");
-        assert!(json["metadata"].get("conversation_title").is_none());
-        assert!(json["metadata"].get("agent_config").is_none());
-        assert!(json["state"].get("next_run_at_ms").is_none());
-        assert!(json["state"].get("last_status").is_none());
-    }
-
-    // -- D. CreateCronJobRequest ----------------------------------------------
-
-    #[test]
-    fn create_request_full() {
-        let raw = json!({
-            "name": "Daily task",
-            "schedule": {"kind": "cron", "expr": "0 0 9 * * *", "tz": "UTC"},
-            "message": "Do the thing",
-            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-            "conversation_title": "Tasks",
-            "agent_type": "acp",
-            "created_by": "user",
-            "execution_mode": "new_conversation",
-            "agent_config": {"backend": "acp", "name": "Claude"}
-        });
-        let req: CreateCronJobRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.name, "Daily task");
-        assert_eq!(req.message.as_deref(), Some("Do the thing"));
-        assert_eq!(
-            req.conversation_id.as_deref(),
-            Some("0190f5fe-7c00-7a00-8abc-012345678901")
-        );
-        assert_eq!(req.agent_type, "acp");
-        assert_eq!(req.created_by, "user");
-        assert_eq!(req.execution_mode.as_deref(), Some("new_conversation"));
-        assert!(req.agent_config.is_some());
-    }
-
-    #[test]
-    fn create_request_minimal() {
-        let raw = json!({
-            "name": "Ping",
-            "schedule": {"kind": "every", "every_ms": 60000},
-            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-            "agent_type": "acp",
-            "created_by": "agent"
-        });
-        let req: CreateCronJobRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.name, "Ping");
-        assert!(req.message.is_none());
-        assert!(req.prompt.is_none());
-        assert!(req.execution_mode.is_none());
-        assert!(req.agent_config.is_none());
-    }
-
-    #[test]
-    fn create_request_with_prompt() {
-        let raw = json!({
-            "name": "Task",
-            "schedule": {"kind": "at", "at_ms": 1000},
-            "prompt": "Do something",
-            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-            "agent_type": "gemini",
-            "created_by": "user"
-        });
-        let req: CreateCronJobRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.prompt.as_deref(), Some("Do something"));
-        assert!(req.message.is_none());
-    }
-
-    #[test]
-    fn create_request_missing_name() {
-        let raw = json!({
-            "schedule": {"kind": "every", "every_ms": 1000},
-            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-            "agent_type": "acp",
-            "created_by": "user"
-        });
-        assert!(serde_json::from_value::<CreateCronJobRequest>(raw).is_err());
-    }
-
-    #[test]
-    fn create_request_missing_schedule() {
-        let raw = json!({
-            "name": "X",
-            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-            "agent_type": "acp",
-            "created_by": "user"
-        });
-        assert!(serde_json::from_value::<CreateCronJobRequest>(raw).is_err());
-    }
-
-    #[test]
-    fn create_request_missing_conversation_id() {
-        let raw = json!({
-            "name": "X",
-            "schedule": {"kind": "every", "every_ms": 1000},
-            "agent_type": "acp",
-            "created_by": "user"
-        });
-        let req = serde_json::from_value::<CreateCronJobRequest>(raw).unwrap();
-        assert!(req.conversation_id.is_none());
-    }
-
-    #[test]
-    fn create_request_missing_agent_type() {
-        let raw = json!({
-            "name": "X",
-            "schedule": {"kind": "every", "every_ms": 1000},
-            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-            "created_by": "user"
-        });
-        assert!(serde_json::from_value::<CreateCronJobRequest>(raw).is_err());
-    }
-
-    #[test]
-    fn create_request_missing_created_by() {
-        let raw = json!({
-            "name": "X",
-            "schedule": {"kind": "every", "every_ms": 1000},
-            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-            "agent_type": "acp"
-        });
-        assert!(serde_json::from_value::<CreateCronJobRequest>(raw).is_err());
-    }
-
-    #[test]
-    fn create_request_rejects_removed_target_discriminator() {
-        let raw = json!({
-            "name": "legacy terminal task",
-            "schedule": {"kind": "every", "every_ms": 1000},
-            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-            "agent_type": "nomi",
-            "created_by": "user",
-            "target_kind": "terminal"
-        });
-        assert!(serde_json::from_value::<CreateCronJobRequest>(raw).is_err());
-    }
-
-    #[test]
-    fn create_request_rejects_noncanonical_conversation_ids() {
-        let base = json!({
-            "name": "invalid",
-            "schedule": {"kind": "every", "every_ms": 1000},
-            "conversation_id": "conv_7",
-            "agent_type": "acp",
-            "created_by": "user"
-        });
-        assert!(serde_json::from_value::<CreateCronJobRequest>(base).is_err());
-    }
-
-    // -- E. UpdateCronJobRequest ----------------------------------------------
-
-    #[test]
-    fn update_request_partial() {
-        let raw = json!({"name": "New name", "enabled": false});
-        let req: UpdateCronJobRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.name.as_deref(), Some("New name"));
-        assert_eq!(req.enabled, Some(false));
-        assert!(req.schedule.is_none());
-        assert!(req.message.is_none());
-        assert!(req.max_retries.is_none());
-    }
-
-    #[test]
-    fn update_request_schedule_change() {
-        let raw = json!({
-            "schedule": {"kind": "cron", "expr": "0 */10 * * * *"}
-        });
-        let req: UpdateCronJobRequest = serde_json::from_value(raw).unwrap();
-        assert!(req.schedule.is_some());
-        assert!(req.name.is_none());
-    }
-
-    #[test]
-    fn update_request_empty() {
-        let raw = json!({});
-        let req: UpdateCronJobRequest = serde_json::from_value(raw).unwrap();
-        assert!(req.name.is_none());
-        assert!(req.enabled.is_none());
-        assert!(req.schedule.is_none());
-        assert!(req.message.is_none());
-        assert!(req.max_retries.is_none());
-    }
-
-    #[test]
-    fn update_request_rejects_execution_mode_changes() {
-        assert!(
-            serde_json::from_value::<UpdateCronJobRequest>(json!({
-                "execution_mode": "new_conversation"
-            }))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn update_request_with_max_retries() {
-        let raw = json!({"max_retries": 5});
-        let req: UpdateCronJobRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.max_retries, Some(5));
-    }
-
-    #[test]
-    fn update_request_rejects_removed_target_discriminator() {
-        assert!(
-            serde_json::from_value::<UpdateCronJobRequest>(json!({
-                "target_kind": "terminal"
-            }))
-            .is_err()
-        );
+        let value=serde_json::to_value(&response).unwrap();
+        assert_eq!(value["metadata"]["model"]["model"],"step-5-preview");
+        assert!(value["metadata"].get("agent_binding").is_none());
+        assert!(value["metadata"].get("agent_config").is_none());
+        assert!(value["state"].get("retry_count").is_none());
+        assert_eq!(serde_json::from_value::<CronJobResponse>(value).unwrap(),response);
     }
 
     // -- F. ListCronJobsQuery -------------------------------------------------
@@ -1025,6 +648,7 @@ mod tests {
             cron_job_id: JOB_ID.into(),
             executed_at_ms: 1_700_000_000_000,
             status: "ok".into(),
+            conversation_id:None, failure:None,
         };
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["cron_job_run_id"], JOB_ID_2);

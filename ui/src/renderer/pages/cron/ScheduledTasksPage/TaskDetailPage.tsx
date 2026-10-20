@@ -13,10 +13,11 @@ import classNames from 'classnames';
 import { ipcBridge } from '@/common';
 import type { ICronJob, ICronJobRunStatus } from '@/common/adapter/ipcBridge';
 import type { TChatConversation } from '@/common/config/storage';
-import { useConversationAgents } from '@renderer/pages/conversation/hooks/useConversationAgents';
 import CronStatusTag from './CronStatusTag';
 import CreateTaskDialog from './CreateTaskDialog';
-import { getJobAgentMeta } from './jobAgentMeta';
+import { scheduledAgentName, scheduledAgentLogo, scheduledWorkspace } from './scheduledAgentPresentation';
+import ConversationErrorNote from '@/renderer/pages/conversation/Messages/components/ConversationErrorNote';
+import { scheduledTaskError } from './scheduledTaskError';
 import { formatSchedule, formatNextRun } from '@renderer/pages/cron/cronUtils';
 import { useCronJobRuns } from '@renderer/pages/cron/useCronJobs';
 import { repairCronJobTimeZone } from '@renderer/pages/cron/repairCronJobTimeZone';
@@ -58,7 +59,6 @@ const TaskDetailPage: React.FC = () => {
   const isNewConversationMode = job?.execution_mode === 'new_conversation';
   const isManualOnly = job?.schedule.kind === 'cron' && !job.schedule.expr;
   const { runs, loading: runHistoryLoading } = useCronJobRuns(cron_job_id);
-  const { cliAgents } = useConversationAgents();
 
   const fetchJob = useCallback(async () => {
     if (cron_job_id == null) {
@@ -301,6 +301,9 @@ const TaskDetailPage: React.FC = () => {
 
         <div className='grid w-full min-w-0 grid-cols-1 gap-28px md:grid-cols-[minmax(0,1fr)_280px] md:items-start md:gap-32px'>
           <div data-testid='task-detail-history-column' className='flex min-w-0 flex-col gap-28px'>
+            {(job.state.last_failure || job.state.configuration_error || job.state.last_error) && <ConversationErrorNote
+              error={job.state.last_failure ?? scheduledTaskError(job.state.last_error || job.state.configuration_error || '', job.state.configuration_error)}
+              timestamp={job.state.last_run_at_ms} feedback={false} />}
             <section className='flex flex-col gap-12px'>
               <h2 className='m-0 text-13px font-medium text-t-secondary'>{t('cron.detail.history')}</h2>
 
@@ -326,6 +329,8 @@ const TaskDetailPage: React.FC = () => {
                           {t(`cron.detail.runStatus.${run.status}`, { defaultValue: run.status })}
                         </span>
                       </div>
+                      {run.failure && <ConversationErrorNote error={run.failure} timestamp={run.executed_at_ms} sessionId={run.conversation_id} feedback={false} compact />}
+                      {run.conversation_id && <Button type='text' size='mini' className='w-fit' onClick={() => navigate(`/conversation/${run.conversation_id}`)}>{t('cron.actions.goTo')}</Button>}
                       {index < runs.length - 1 && <div className='h-1px w-full bg-[var(--color-border-2)]' />}
                     </React.Fragment>
                   ))}
@@ -353,12 +358,13 @@ const TaskDetailPage: React.FC = () => {
               </div>
             </section>
 
-            {job.metadata.agent_type && (
+            {job.metadata.agent_selection && (
               <section className='flex flex-col gap-10px'>
                 <h2 className='m-0 text-13px font-medium text-t-secondary'>{t('cron.detail.agent')}</h2>
                 <div className='flex items-center gap-10px'>
                   {(() => {
-                    const { name: displayName, logo } = getJobAgentMeta(job, cliAgents);
+                    const displayName = scheduledAgentName(job, t);
+                    const logo = scheduledAgentLogo;
                     return (
                       <>
                         {logo ? (
@@ -396,7 +402,7 @@ const TaskDetailPage: React.FC = () => {
                   </p>
                 </div>
               </div>
-              {job.execution_mode === 'existing' && job.metadata.agent_config?.clear_context_each_run && (
+              {job.execution_mode === 'existing' && job.metadata.clear_context_each_run && (
                 <div className='inline-flex items-center gap-4px'>
                   <span className='text-13px leading-20px text-t-secondary'>
                     {t('cron.page.form.clearContextEachRun', { defaultValue: 'Clear context each run' })}
@@ -405,33 +411,24 @@ const TaskDetailPage: React.FC = () => {
               )}
             </section>
 
-            {job.metadata.agent_config?.model && (
+            {job.metadata.model?.model && (
               <section className='flex flex-col gap-10px'>
                 <h2 className='m-0 text-13px font-medium text-t-secondary'>{t('cron.page.form.model')}</h2>
                 <span className='break-words text-14px leading-22px text-t-primary'>
-                  {job.metadata.agent_config.model}
+                  {job.metadata.model.model}
                 </span>
               </section>
             )}
 
-            {job.metadata.agent_config?.workspace && (
+            {scheduledWorkspace(job) && (
               <section className='flex flex-col gap-10px'>
                 <h2 className='m-0 text-13px font-medium text-t-secondary'>{t('cron.page.form.workspace')}</h2>
                 <span className='min-w-0 break-all text-14px leading-22px text-t-primary'>
-                  {job.metadata.agent_config.workspace}
+                  {scheduledWorkspace(job)}
                 </span>
               </section>
             )}
 
-            {job.metadata.agent_config?.config_options &&
-              Object.keys(job.metadata.agent_config.config_options).length > 0 && (
-                <section className='flex flex-col gap-10px'>
-                  <h2 className='m-0 text-13px font-medium text-t-secondary'>{t('agent.config.reasoning_effort')}</h2>
-                  <span className='break-words text-14px leading-22px text-t-primary'>
-                    {Object.values(job.metadata.agent_config.config_options).join(', ')}
-                  </span>
-                </section>
-              )}
           </aside>
         </div>
       </div>

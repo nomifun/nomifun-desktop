@@ -247,7 +247,7 @@ renewable leases are process memory only and are never persisted.
 
 Outside the Agent Store exception group, no product table
 has a physical foreign key. Stable-parent links such as
-`messages.conversation_id` and `cron_job_runs.cron_job_id` store the parent's
+`cron_run_reservations.conversation_id` and `cron_run_reservations.cron_job_id` store the parent's
 bare UUIDv7 business ID. The repository layer validates the target and applies the
 registered `RESTRICT`, application `CASCADE`, `SET_NULL`, or `KEEP_HISTORY`
 delete policy in a transaction. Application `CASCADE` is service/repository

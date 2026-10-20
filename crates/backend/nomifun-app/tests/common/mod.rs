@@ -23,6 +23,7 @@ fn isolated_config(prefix: &str) -> AppConfig {
         .tempdir()
         .unwrap()
         .keep();
+    let root = nomifun_common::paths::canonicalize_simplified(&root).unwrap();
     AppConfig {
         data_dir: root.join("data"),
         work_dir: root.join("work"),
@@ -36,6 +37,10 @@ pub async fn build_app() -> (axum::Router, AppServices) {
         .tempdir()
         .unwrap()
         .keep();
+    let root = nomifun_common::paths::canonicalize_simplified(&root).unwrap();
+    // AppServices fixtures skip the production bootstrap's workspace setup.
+    // Preserve that real precondition before testing automatic resource grants.
+    std::fs::create_dir_all(root.join("work")).unwrap();
     let db = nomifun_db::init_database_memory().await.unwrap();
     let services = AppServices::from_config(
         db,
@@ -57,6 +62,7 @@ pub async fn build_local_trust_app(secret: &str) -> (axum::Router, AppServices) 
         .tempdir()
         .unwrap()
         .keep();
+    let root = nomifun_common::paths::canonicalize_simplified(&root).unwrap();
     let db = nomifun_db::init_database_memory().await.unwrap();
     let services = AppServices::from_config(
         db,
@@ -296,9 +302,9 @@ pub async fn setup_and_login(
         .body(Body::from(body))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "login should succeed");
-
+    let status = resp.status();
     let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "login should succeed: {}", json.get("error").unwrap_or(&serde_json::Value::Null));
     let token = json["token"].as_str().unwrap().to_owned();
 
     (token, csrf)

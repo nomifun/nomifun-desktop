@@ -38,6 +38,87 @@ pub(crate) const ATTACHED_CHROME_RESOURCE_ID: &str = "attached-chrome";
 pub(crate) const LOCAL_COMPUTER_RESOURCE_ID: &str = "local-desktop";
 pub(crate) const INSTALLATION_SCHEDULER_RESOURCE_ID: &str = "installation-scheduler";
 
+/// Installation-owned resources need no additional user selection. Their
+/// logical grants are frozen before opening; Session-specific directories and
+/// live handles are materialized later by their existing owners.
+pub(crate) fn automatic_agent_resource_id(kind: &str) -> Option<&'static str> {
+    match kind {
+        "workspace" => Some(DEFAULT_WORKSPACE_RESOURCE_ID),
+        "project_memory" => Some(DEFAULT_PROJECT_MEMORY_RESOURCE_ID),
+        "process_session" => Some(MANAGED_PROCESS_SESSION_RESOURCE_ID),
+        "terminal" => Some(MANAGED_TERMINAL_RESOURCE_ID),
+        "asset_library" => Some(CREATIVE_ASSET_LIBRARY_RESOURCE_ID),
+        "browser" => Some("managed-browser"),
+        "computer" => Some(LOCAL_COMPUTER_RESOURCE_ID),
+        "scheduler" => Some(INSTALLATION_SCHEDULER_RESOURCE_ID),
+        _ => None,
+    }
+}
+
+/// Validate frozen authority without resolving, repairing, or enlarging it.
+/// This is also used for restored and inherited bindings. Optional enhancement
+/// targets may remain absent; infrastructure required by executable Actions
+/// cannot. Knowledge mounts retain their existing per-target narrowing policy.
+pub(crate) fn validate_executable_binding_resources(
+    snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
+    resources: &[TypedResourceBinding],
+) -> Result<(), nomifun_common::AppError> {
+    validate_frozen_action_resource_contracts(&snapshot.content).map_err(|error|
+        nomifun_common::AppError::Conflict(format!("{}: {}", error.code(), error.message())))?;
+    let capabilities = snapshot.content.enabled_capabilities.iter()
+        .map(|selected| selected.capability.id.as_ref().to_owned()).collect();
+    let actions = snapshot.content.enabled_capabilities.iter()
+        .map(|selected| (selected.capability.id.as_ref().to_owned(), selected.action_allowlist.clone())).collect();
+    let required = required_operations(&capabilities, &actions).map_err(|error|
+        nomifun_common::AppError::Conflict(format!("{}: {}", error.code(), error.message())))?;
+    let derived = required.keys().cloned().map(ResourceKind::from).collect::<BTreeSet<_>>();
+    if derived != snapshot.content.required_resource_kinds {
+        return Err(nomifun_common::AppError::Conflict(
+            "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH: frozen Actions and resource requirements differ".into(),
+        ));
+    }
+    validate_required_resource_operations(&required, resources)?;
+    super::nomi_core_mcp_catalog::validate_product_session_selection(snapshot, resources)
+}
+
+fn validate_required_resource_operations(
+    required: &BTreeMap<String, BTreeSet<String>>,
+    resources: &[TypedResourceBinding],
+) -> Result<(), nomifun_common::AppError> {
+    let mut missing_resource_kinds = Vec::new();
+    let mut missing_resource_operations = BTreeMap::new();
+    for (kind, operations) in required {
+        let bound = resources.iter().filter(|resource| resource.resource_kind.as_ref() == kind).collect::<Vec<_>>();
+        if bound.is_empty() {
+            if !optional_unbound_resource_kind(kind) {
+                missing_resource_kinds.push(kind.clone());
+                missing_resource_operations.insert(kind.clone(), operations.clone());
+            }
+            continue;
+        }
+        if !resource_kind_allows_multiple(kind) && bound.len() != 1 {
+            return Err(nomifun_common::AppError::Conflict(format!("Agent resource kind {kind} must have exactly one frozen binding")));
+        }
+        if matches!(kind.as_str(), "knowledge_base" | "mcp_server") {
+            continue;
+        }
+        for resource in bound {
+            let missing = operations.difference(&resource.operations).cloned().collect::<BTreeSet<_>>();
+            if !missing.is_empty() {
+                missing_resource_operations.entry(kind.clone()).or_insert_with(BTreeSet::new).extend(missing);
+            }
+        }
+    }
+    if !missing_resource_kinds.is_empty() || !missing_resource_operations.is_empty() {
+        return Err(nomifun_common::AppError::AgentResourceBindingIncomplete {
+            message: "The Agent's frozen resource bindings do not satisfy its executable Actions".into(),
+            missing_resource_kinds,
+            missing_resource_operations,
+        });
+    }
+    Ok(())
+}
+
 const MAX_RESOURCE_SELECTIONS: usize = 32;
 const MAX_RESOURCE_FIELD_BYTES: usize = 512;
 // Enhancement Modules remain part of the frozen Agent grant even when a
@@ -108,6 +189,15 @@ impl ResourceSelectionResolutionError {
 
     pub(crate) fn details(&self) -> &Value {
         &self.details
+    }
+
+    pub(crate) fn into_app_error(self) -> nomifun_common::AppError {
+        let message = format!("{}: {}", self.code, self.message);
+        match self.code {
+            "RESOURCE_OWNER_MISMATCH" => nomifun_common::AppError::Forbidden(message),
+            "RESOURCE_SELECTION_NOT_FOUND" => nomifun_common::AppError::NotFound(message),
+            _ => nomifun_common::AppError::UnprocessableEntity(message),
+        }
     }
 
     fn invalid(message: impl Into<String>) -> Self {
@@ -580,6 +670,33 @@ impl NomiCoreResourceBindingResolverRegistry {
         }
         bindings.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
         Ok(bindings)
+    }
+
+    /// Complete a new execution candidate through the one host resource lane.
+    /// The final Snapshot (after model/extension preparation) determines both
+    /// automatic infrastructure and exact MCP resources. Existing Session
+    /// replay and recovery must use validation instead of this method.
+    pub(crate) async fn prepare_new_session_binding(
+        &self,
+        control_plane: &AgentControlPlane,
+        owner: &nomifun_agent_contracts::UserId,
+        candidate: AgentBindingValueDto,
+        selections: &[AgentResourceSelectionDto],
+    ) -> Result<AgentBindingValueDto, ResourceSelectionResolutionError> {
+        let (_, _, snapshot) = control_plane.saved_binding_artifacts(owner, &candidate).await
+            .map_err(|error| ResourceSelectionResolutionError::new(
+                "RESOURCE_BINDING_ARTIFACT_INVALID", "the execution candidate cannot be resolved",
+                json!({"control_plane_code": error.code().as_ref()})))?;
+        let mut selections = selections.to_vec();
+        for kind in &snapshot.content.required_resource_kinds {
+            if !selections.iter().any(|selection| selection.resource_kind == kind.as_ref())
+                && let Some(resource_id) = automatic_agent_resource_id(kind.as_ref()) {
+                selections.push(AgentResourceSelectionDto {
+                    resource_kind: kind.as_ref().to_owned(), resource_id: resource_id.to_owned(),
+                });
+            }
+        }
+        self.resolve_saved_binding(control_plane, owner, candidate, &selections, true).await
     }
 
     /// Attach server-resolved product resources to an already frozen binding.
@@ -1792,6 +1909,44 @@ impl ProductResourceAuthority {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn executable_resource_admission_refuses_incomplete_grants_without_repair() {
+        let required = required_operations(
+            &BTreeSet::from(["workspace.files".into(), "workspace.process".into()]),
+            &BTreeMap::from([
+                ("workspace.files".into(), BTreeSet::from([ActionId::from("workspace.files/write")])),
+                ("workspace.process".into(), BTreeSet::from([ActionId::from("workspace.process/start")])),
+            ]),
+        ).unwrap();
+        let error = validate_required_resource_operations(&required, &[]).unwrap_err();
+        let nomifun_common::AppError::AgentResourceBindingIncomplete {
+            missing_resource_kinds, missing_resource_operations, ..
+        } = error else { panic!("missing grants must retain a typed host diagnosis") };
+        assert_eq!(missing_resource_kinds, ["process_session", "workspace"]);
+        assert_eq!(missing_resource_operations["workspace"], BTreeSet::from(["write".into()]));
+        assert_eq!(missing_resource_operations["process_session"], BTreeSet::from(["execute".into()]));
+
+        let frozen = [TypedResourceBinding {
+            binding_id: "test-workspace".into(), resource_kind: "workspace".into(),
+            resource_id: "default-workspace".into(), owner_id: "owner-1".into(),
+            operations: BTreeSet::from(["read".into()]), connection_config_ref: None,
+            typed_parameters: nomifun_agent_contracts::managed_workspace_parameters(),
+        }];
+        let before = frozen.clone();
+        let error = validate_required_resource_operations(&required, &frozen).unwrap_err();
+        assert!(matches!(error, nomifun_common::AppError::AgentResourceBindingIncomplete { .. }));
+        assert_eq!(frozen, before, "restore/admission must not synthesize authority");
+    }
+
+    #[test]
+    fn tool_free_guests_and_unselected_optional_targets_remain_admissible() {
+        validate_required_resource_operations(&BTreeMap::new(), &[]).unwrap();
+        validate_required_resource_operations(&BTreeMap::from([
+            ("browser".into(), BTreeSet::from(["browse".into()])),
+            ("knowledge_base".into(), BTreeSet::from(["read".into()])),
+        ]), &[]).unwrap();
+    }
 
     const MCP_SERVER_A: &str = "0195f7c0-7b6a-7c21-8f4a-1234567890ab";
     const MCP_SERVER_B: &str = "0195f7c0-7b6a-7c21-8f4a-1234567890ac";

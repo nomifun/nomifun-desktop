@@ -1,11 +1,10 @@
-use std::collections::HashMap;
 use std::str::FromStr;
 
 use nomifun_api_types::{
-    AgentResolvedSnapshot, CronAgentConfigDto, CronJobMetadataDto, CronJobResponse,
-    CronJobStateDto, CronScheduleDto,
+    AgentBindingValueDto, AgentChatModelSelectionDto, CronJobMetadataDto, CronJobResponse,
+    CronJobStateDto, CronScheduleDto, ProductAgentSelectionDto,
 };
-use nomifun_common::{ConversationId, CronJobId, ProviderId, TimestampMs, UserId};
+use nomifun_common::{ConversationId, CronJobId, TimestampMs, UserId};
 use nomifun_db::models::CronJobRow;
 use serde::{Deserialize, Serialize};
 
@@ -126,75 +125,28 @@ impl FromStr for JobStatus {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Agent configuration (domain model)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CronAgentConfig {
-    /// Host-runtime selector. Nomi jobs leave this unset and select their
-    /// model through `provider_id`; other runtime selectors require an
-    /// accompanying frozen Agent snapshot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend: Option<String>,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cli_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_agent_id: Option<String>,
-    /// Canonical AgentPreset lineage derived from `agent_snapshot`. These
-    /// fields are metadata only; Cron never resolves them independently.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preset_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preset_revision: Option<i64>,
-    /// Immutable Agent configuration supplied by the canonical Agent
-    /// application service. Cron never resolves a preset id at runtime.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_snapshot: Option<AgentResolvedSnapshot>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Logical provider reference used by Nomi jobs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_options: Option<HashMap<String, String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<String>,
-    /// When `true` and the job reuses an existing conversation
-    /// (`ExecutionMode::Existing`), the agent's context is cleared before each
-    /// scheduled run so accumulated history does not pile up across ticks.
-    /// Visible message records are kept.
-    #[serde(default)]
-    pub clear_context_each_run: bool,
-}
-
-// ---------------------------------------------------------------------------
-// CronJob — the core domain model
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct CronJob {
-    /// Stable business identity exposed by the API and used by all runtime
-    /// lookups. The SQLite `cron_jobs.id` column remains an internal index only.
     pub cron_job_id: String,
-    /// Immutable aggregate owner and the sole authority for execution,
-    /// Conversation creation, persistence and private events.
     pub user_id: String,
     pub name: String,
     pub enabled: bool,
-    /// Monotonic identity of the installed schedule. Timer callbacks capture
-    /// this value so a callback from a replaced schedule cannot execute the
-    /// new definition or collide with a later occurrence.
     pub schedule_revision: i64,
     pub schedule: CronSchedule,
     pub message: String,
     pub execution_mode: ExecutionMode,
-    pub agent_config: Option<CronAgentConfig>,
+    /// Authoring intent is never consulted to execute an occurrence.
+    pub agent_selection: Option<ProductAgentSelectionDto>,
+    pub model: Option<AgentChatModelSelectionDto>,
+    pub agent_binding: Option<AgentBindingValueDto>,
+    pub agent_label: Option<String>,
+    /// Exact immutable model presentation; never serialized into job storage.
+    pub effective_model: Option<AgentChatModelSelectionDto>,
+    pub clear_context_each_run: bool,
+    pub configuration_error: Option<String>,
+    pub last_failure: Option<nomifun_api_types::AgentStreamErrorData>,
     pub conversation_id: Option<String>,
     pub conversation_title: Option<String>,
-    pub agent_type: String,
     pub created_by: CreatedBy,
     pub skill_content: Option<String>,
     pub description: Option<String>,
@@ -202,138 +154,188 @@ pub struct CronJob {
     pub updated_at: TimestampMs,
     pub next_run_at: Option<TimestampMs>,
     pub last_run_at: Option<TimestampMs>,
+    pub last_run_id: Option<String>,
     pub last_status: Option<JobStatus>,
     pub last_error: Option<String>,
     pub run_count: i64,
-    pub retry_count: i64,
-    pub max_retries: i64,
 }
 
-// ---------------------------------------------------------------------------
-// DB ↔ Domain conversion
-// ---------------------------------------------------------------------------
-
 pub fn cron_job_from_row(row: CronJobRow) -> Result<CronJob, CronError> {
-    CronJobId::parse(&row.cron_job_id).map_err(|error| {
-        CronError::Scheduler(format!("cron job {} has invalid business id: {error}", row.cron_job_id))
-    })?;
-    UserId::parse(&row.user_id).map_err(|error| {
-        CronError::Scheduler(format!("cron job {} has invalid owner: {error}", row.cron_job_id))
-    })?;
-    if let Some(conversation_id) = row.conversation_id.as_deref() {
-        ConversationId::parse(conversation_id).map_err(|error| {
-            CronError::Scheduler(format!(
-                "cron job {} has invalid conversation id: {error}",
-                row.cron_job_id
-            ))
-        })?;
+    CronJobId::parse(&row.cron_job_id).map_err(|error| CronError::Scheduler(error.to_string()))?;
+    UserId::parse(&row.user_id).map_err(|error| CronError::Scheduler(error.to_string()))?;
+    if let Some(session) = row.conversation_id.as_deref() {
+        ConversationId::parse(session).map_err(|error| CronError::Scheduler(error.to_string()))?;
     }
-    let schedule = parse_schedule(
-        &row.schedule_kind,
-        &row.schedule_value,
-        row.schedule_tz.as_deref(),
-        row.schedule_description.as_deref(),
-    )?;
-
-    let execution_mode = ExecutionMode::from_str(&row.execution_mode)?;
-    let created_by = CreatedBy::from_str(&row.created_by)?;
-
-    let mut agent_config = row
-        .agent_config
-        .as_deref()
-        .map(serde_json::from_str::<CronAgentConfig>)
-        .transpose()?;
-    if let Some(config) = agent_config.as_mut() {
-        let inline_snapshot = config.agent_snapshot.take();
-        let persisted_snapshot = row
-            .agent_snapshot
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()?;
-        if inline_snapshot.is_some() && persisted_snapshot.is_none() {
-            return Err(CronError::Scheduler(format!(
-                "cron job {} stores an Agent snapshot only inside agent_config",
-                row.cron_job_id
-            )));
-        }
-        if let (Some(inline), Some(persisted)) =
-            (inline_snapshot.as_ref(), persisted_snapshot.as_ref())
-            && inline != persisted
-        {
-            return Err(CronError::Scheduler(format!(
-                "cron job {} has inconsistent inline and persisted Agent snapshots",
-                row.cron_job_id
-            )));
-        }
-        config.agent_snapshot = persisted_snapshot;
-        if let Some(snapshot) = config.agent_snapshot.as_ref() {
-            if row
-                .preset_id
-                .as_deref()
-                .is_some_and(|value| value != snapshot.preset_id)
-                || row
-                    .preset_revision
-                    .is_some_and(|value| value != snapshot.preset_revision)
-            {
-                return Err(CronError::Scheduler(format!(
-                    "cron job {} has inconsistent Agent snapshot lineage",
-                    row.cron_job_id
-                )));
-            }
-            config.preset_id = Some(snapshot.preset_id.clone());
-            config.preset_revision = Some(snapshot.preset_revision);
-        } else if row.preset_id.is_some()
-            || row.preset_revision.is_some()
-            || row.agent_snapshot.is_some()
-        {
-            return Err(CronError::Scheduler(format!(
-                "cron job {} has preset lineage without a frozen Agent snapshot",
-                row.cron_job_id
-            )));
-        }
-        validate_agent_config_ids(&row.cron_job_id, &row.agent_type, config, !row.enabled)?;
-    } else if row.preset_id.is_some()
-        || row.preset_revision.is_some()
-        || row.agent_snapshot.is_some()
-    {
-        return Err(CronError::Scheduler(format!(
-            "cron job {} has Agent snapshot lineage without agent_config",
-            row.cron_job_id
-        )));
-    }
-
-    let last_status = row
-        .last_status
-        .as_deref()
-        .map(JobStatus::from_str)
-        .transpose()?;
-
     Ok(CronJob {
         cron_job_id: row.cron_job_id,
         user_id: row.user_id,
         name: row.name,
         enabled: row.enabled,
         schedule_revision: row.schedule_revision,
-        schedule,
+        schedule: parse_schedule(
+            &row.schedule_kind,
+            &row.schedule_value,
+            row.schedule_tz.as_deref(),
+            row.schedule_description.as_deref(),
+        )?,
         message: row.payload_message,
-        execution_mode,
-        agent_config,
+        execution_mode: ExecutionMode::from_str(&row.execution_mode)?,
+        agent_selection: row
+            .agent_selection
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?,
+        model: row
+            .model_selection
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?,
+        agent_binding: row
+            .agent_binding
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?,
+        agent_label: None,
+        effective_model: None,
+        clear_context_each_run: row.clear_context_each_run,
+        configuration_error: row.configuration_error,
+        last_failure: None,
         conversation_id: row.conversation_id,
         conversation_title: row.conversation_title,
-        agent_type: row.agent_type,
-        created_by,
+        created_by: CreatedBy::from_str(&row.created_by)?,
         skill_content: row.skill_content,
         description: row.description,
         created_at: row.created_at,
         updated_at: row.updated_at,
         next_run_at: row.next_run_at,
         last_run_at: row.last_run_at,
-        last_status,
+        last_run_id: row.last_run_id,
+        last_status: row
+            .last_status
+            .as_deref()
+            .map(JobStatus::from_str)
+            .transpose()?,
         last_error: row.last_error,
         run_count: row.run_count,
-        retry_count: row.retry_count,
-        max_retries: row.max_retries,
     })
+}
+
+pub fn cron_job_to_row(job: &CronJob) -> Result<CronJobRow, CronError> {
+    CronJobId::parse(&job.cron_job_id).map_err(|error| CronError::Scheduler(error.to_string()))?;
+    UserId::parse(&job.user_id).map_err(|error| CronError::Scheduler(error.to_string()))?;
+    let (schedule_kind, schedule_value, schedule_tz, schedule_description) =
+        schedule_to_row_fields(&job.schedule);
+    Ok(CronJobRow {
+        id: 0,
+        cron_job_id: job.cron_job_id.clone(),
+        user_id: job.user_id.clone(),
+        name: job.name.clone(),
+        enabled: job.enabled,
+        schedule_revision: job.schedule_revision,
+        schedule_kind,
+        schedule_value,
+        schedule_tz,
+        schedule_description,
+        payload_message: job.message.clone(),
+        execution_mode: job.execution_mode.as_str().into(),
+        agent_selection: if job.execution_mode == ExecutionMode::Existing
+            && job.conversation_id.is_some()
+        {
+            None
+        } else {
+            job.agent_selection
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?
+        },
+        model_selection: if job.execution_mode == ExecutionMode::Existing
+            && job.conversation_id.is_some()
+        {
+            None
+        } else {
+            job.model.as_ref().map(serde_json::to_string).transpose()?
+        },
+        agent_binding: if job.execution_mode == ExecutionMode::Existing
+            && job.conversation_id.is_some()
+        {
+            None
+        } else {
+            job.agent_binding
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?
+        },
+        clear_context_each_run: job.clear_context_each_run,
+        configuration_error: job.configuration_error.clone(),
+        conversation_id: job.conversation_id.clone(),
+        conversation_title: job.conversation_title.clone(),
+        created_by: job.created_by.as_str().into(),
+        skill_content: job.skill_content.clone(),
+        description: job.description.clone(),
+        created_at: job.created_at,
+        updated_at: job.updated_at,
+        next_run_at: job.next_run_at,
+        last_run_at: job.last_run_at,
+        last_run_id: job.last_run_id.clone(),
+        last_status: job.last_status.map(|status| status.as_str().into()),
+        last_error: job.last_error.clone(),
+        run_count: job.run_count,
+    })
+}
+
+pub fn cron_job_to_response(job: &CronJob) -> CronJobResponse {
+    let schedule = match &job.schedule {
+        CronSchedule::At { at_ms, description } => CronScheduleDto::At {
+            at_ms: *at_ms,
+            description: description.clone(),
+        },
+        CronSchedule::Every {
+            every_ms,
+            description,
+        } => CronScheduleDto::Every {
+            every_ms: *every_ms,
+            description: description.clone(),
+        },
+        CronSchedule::Cron {
+            expr,
+            tz,
+            description,
+        } => CronScheduleDto::Cron {
+            expr: expr.clone(),
+            tz: tz.clone(),
+            description: description.clone(),
+        },
+    };
+    CronJobResponse {
+        cron_job_id: job.cron_job_id.clone(),
+        name: job.name.clone(),
+        description: job.description.clone(),
+        enabled: job.enabled,
+        schedule,
+        message: job.message.clone(),
+        execution_mode: job.execution_mode.as_str().into(),
+        metadata: CronJobMetadataDto {
+            conversation_id: job.conversation_id.clone(),
+            conversation_title: job.conversation_title.clone(),
+            created_by: job.created_by.as_str().into(),
+            created_at: job.created_at,
+            updated_at: job.updated_at,
+            agent_selection: job.agent_selection.clone(),
+            model: job.effective_model.clone().or(job.model.clone()),
+            agent_binding: job.agent_binding.clone(),
+            agent_label: job.agent_label.clone(),
+            clear_context_each_run: job.clear_context_each_run,
+        },
+        state: CronJobStateDto {
+            next_run_at_ms: job.next_run_at,
+            last_run_at_ms: job.last_run_at,
+            last_status: job.last_status.map(|status| status.as_str().into()),
+            last_error: job.last_error.clone(),
+            run_count: job.run_count,
+            configuration_error: job.configuration_error.clone(),
+            last_failure: job.last_failure.clone(),
+        },
+    }
 }
 
 fn parse_schedule(
@@ -376,143 +378,6 @@ fn parse_schedule(
 // Domain ↔ DB conversion
 // ---------------------------------------------------------------------------
 
-pub fn cron_job_to_row(job: &CronJob) -> Result<CronJobRow, CronError> {
-    CronJobId::parse(&job.cron_job_id).map_err(|error| {
-        CronError::Scheduler(format!("cron job {} has invalid business id: {error}", job.cron_job_id))
-    })?;
-    UserId::parse(&job.user_id).map_err(|error| {
-        CronError::Scheduler(format!("cron job {} has invalid owner: {error}", job.cron_job_id))
-    })?;
-    if let Some(conversation_id) = job.conversation_id.as_deref() {
-        ConversationId::parse(conversation_id).map_err(|error| {
-            CronError::Scheduler(format!(
-                "cron job {} has invalid conversation id: {error}",
-                job.cron_job_id
-            ))
-        })?;
-    }
-    if let Some(config) = job.agent_config.as_ref() {
-        validate_agent_config_ids(&job.cron_job_id, &job.agent_type, config, !job.enabled)?;
-    }
-    let (schedule_kind, schedule_value, schedule_tz, schedule_description) =
-        schedule_to_row_fields(&job.schedule);
-
-    let agent_config_json = job
-        .agent_config
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()?;
-
-    let (preset_id, preset_revision) = job
-        .agent_config
-        .as_ref()
-        .map(|config| {
-            (
-                config
-                    .agent_snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.preset_id.clone()),
-                config
-                    .agent_snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.preset_revision),
-            )
-        })
-        .unwrap_or((None, None));
-
-    Ok(CronJobRow {
-        id: 0,
-        cron_job_id: job.cron_job_id.clone(),
-        user_id: job.user_id.clone(),
-        name: job.name.clone(),
-        enabled: job.enabled,
-        schedule_revision: job.schedule_revision,
-        schedule_kind,
-        schedule_value,
-        schedule_tz,
-        schedule_description,
-        payload_message: job.message.clone(),
-        execution_mode: job.execution_mode.as_str().to_owned(),
-        agent_config: agent_config_json,
-        preset_id,
-        preset_revision,
-        agent_snapshot: job
-            .agent_config
-            .as_ref()
-            .and_then(|config| config.agent_snapshot.as_ref())
-            .map(serde_json::to_string)
-            .transpose()?,
-        conversation_id: job.conversation_id.clone(),
-        conversation_title: job.conversation_title.clone(),
-        agent_type: job.agent_type.clone(),
-        created_by: job.created_by.as_str().to_owned(),
-        skill_content: job.skill_content.clone(),
-        description: job.description.clone(),
-        created_at: job.created_at,
-        updated_at: job.updated_at,
-        next_run_at: job.next_run_at,
-        last_run_at: job.last_run_at,
-        last_status: job.last_status.map(|s| s.as_str().to_owned()),
-        last_error: job.last_error.clone(),
-        run_count: job.run_count,
-        retry_count: job.retry_count,
-        max_retries: job.max_retries,
-    })
-}
-
-fn validate_agent_config_ids(
-    job_id: &str,
-    agent_type: &str,
-    config: &CronAgentConfig,
-    allow_empty_model: bool,
-) -> Result<(), CronError> {
-    if let Some(snapshot) = config.agent_snapshot.as_ref() {
-        if snapshot.preset_revision <= 0 {
-            return Err(CronError::Scheduler(format!(
-                "cron job {job_id} has invalid Agent snapshot revision"
-            )));
-        }
-    } else if config.preset_id.is_some() || config.preset_revision.is_some() {
-        return Err(CronError::Scheduler(format!(
-            "cron job {job_id} has preset lineage without a frozen Agent snapshot"
-        )));
-    }
-    if agent_type == "nomi" {
-        if config.backend.is_some() {
-            return Err(CronError::Scheduler(format!(
-                "cron job {job_id} uses legacy agent_config.backend for a Nomi provider; use provider_id"
-            )));
-        }
-        if allow_empty_model && config.provider_id.is_none() && config.model.is_none() {
-            return Ok(());
-        }
-        let provider_id = config.provider_id.as_deref().ok_or_else(|| {
-            CronError::Scheduler(format!(
-                "cron job {job_id} is missing nomi provider_id"
-            ))
-        })?;
-        ProviderId::try_from(provider_id).map_err(|error| {
-            CronError::Scheduler(format!(
-                "cron job {job_id} has invalid nomi provider id: {error}"
-            ))
-        })?;
-        let model = config
-            .model
-            .as_deref()
-            .ok_or_else(|| {
-                CronError::Scheduler(format!(
-                    "cron job {job_id} is missing nomi model"
-                ))
-            })?;
-        if model.is_empty() || model.trim() != model {
-            return Err(CronError::Scheduler(format!(
-                "cron job {job_id} has invalid nomi model"
-            )));
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn schedule_to_row_fields(
     schedule: &CronSchedule,
 ) -> (String, String, Option<String>, Option<String>) {
@@ -544,88 +409,6 @@ pub(crate) fn schedule_to_row_fields(
         ),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Domain ↔ DTO conversion
-// ---------------------------------------------------------------------------
-
-pub fn cron_job_to_response(job: &CronJob) -> CronJobResponse {
-    let schedule = match &job.schedule {
-        CronSchedule::At { at_ms, description } => CronScheduleDto::At {
-            at_ms: *at_ms,
-            description: description.clone(),
-        },
-        CronSchedule::Every {
-            every_ms,
-            description,
-        } => CronScheduleDto::Every {
-            every_ms: *every_ms,
-            description: description.clone(),
-        },
-        CronSchedule::Cron {
-            expr,
-            tz,
-            description,
-        } => CronScheduleDto::Cron {
-            expr: expr.clone(),
-            tz: tz.clone(),
-            description: description.clone(),
-        },
-    };
-
-    let agent_config_dto = job.agent_config.as_ref().map(|c| CronAgentConfigDto {
-        backend: c.backend.clone(),
-        name: c.name.clone(),
-        cli_path: c.cli_path.clone(),
-        custom_agent_id: c.custom_agent_id.clone(),
-        preset_id: c
-            .agent_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.preset_id.clone()),
-        preset_revision: c
-            .agent_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.preset_revision),
-        agent_snapshot: c.agent_snapshot.clone(),
-        model: c.model.clone(),
-        provider_id: c.provider_id.clone(),
-        config_options: c.config_options.clone(),
-        workspace: c.workspace.clone(),
-        clear_context_each_run: c.clear_context_each_run,
-    });
-
-    CronJobResponse {
-        cron_job_id: job.cron_job_id.clone(),
-        name: job.name.clone(),
-        description: job.description.clone(),
-        enabled: job.enabled,
-        schedule,
-        message: job.message.clone(),
-        execution_mode: job.execution_mode.as_str().to_owned(),
-        metadata: CronJobMetadataDto {
-            conversation_id: job.conversation_id.clone(),
-            conversation_title: job.conversation_title.clone(),
-            agent_type: job.agent_type.clone(),
-            created_by: job.created_by.as_str().to_owned(),
-            created_at: job.created_at,
-            updated_at: job.updated_at,
-            agent_config: agent_config_dto,
-        },
-        state: CronJobStateDto {
-            next_run_at_ms: job.next_run_at,
-            last_run_at_ms: job.last_run_at,
-            last_status: job.last_status.map(|s| s.as_str().to_owned()),
-            last_error: job.last_error.clone(),
-            run_count: job.run_count,
-            retry_count: job.retry_count,
-            max_retries: job.max_retries,
-        },
-    }
-}
-
-// ---------------------------------------------------------------------------
-// DTO ↔ Domain schedule conversion (for create/update)
-// ---------------------------------------------------------------------------
 
 pub fn schedule_from_dto(dto: &CronScheduleDto) -> CronSchedule {
     match dto {
@@ -719,8 +502,14 @@ mod tests {
         assert_eq!(JobStatus::from_str("error").unwrap(), JobStatus::Error);
         assert_eq!(JobStatus::from_str("skipped").unwrap(), JobStatus::Skipped);
         assert_eq!(JobStatus::from_str("missed").unwrap(), JobStatus::Missed);
-        assert_eq!(JobStatus::from_str("input_required").unwrap(), JobStatus::InputRequired);
-        assert_eq!(JobStatus::from_str("cancelled").unwrap(), JobStatus::Cancelled);
+        assert_eq!(
+            JobStatus::from_str("input_required").unwrap(),
+            JobStatus::InputRequired
+        );
+        assert_eq!(
+            JobStatus::from_str("cancelled").unwrap(),
+            JobStatus::Cancelled
+        );
     }
 
     #[test]
@@ -819,547 +608,173 @@ mod tests {
         assert!(matches!(err, CronError::InvalidSchedule(_)));
     }
 
-    // -- DB ↔ Domain roundtrip ------------------------------------------------
-
-    fn sample_row() -> CronJobRow {
-        CronJobRow {
-            id: 1,
-            cron_job_id: JOB_ID.into(),
-            user_id: USER_ID.into(),
-            name: "Test Job".into(),
-            enabled: true,
-            schedule_revision: 1,
-            schedule_kind: "every".into(),
-            schedule_value: "60000".into(),
-            schedule_tz: None,
-            schedule_description: Some("every minute".into()),
-            payload_message: "do something".into(),
-            execution_mode: "existing".into(),
-            agent_config: Some(
-                r#"{"name":"Nomi","model":"gpt-5","provider_id":"0190f5fe-7c00-7a00-8000-000000000002"}"#
-                    .into(),
-            ),
-            preset_id: None,
-            preset_revision: None,
-            agent_snapshot: None,
-            conversation_id: Some("0190f5fe-7c00-7a00-8abc-012345678901".into()),
-            conversation_title: Some("Test Conv".into()),
-            agent_type: "nomi".into(),
-            created_by: "user".into(),
-            skill_content: Some("---\nname: test\n---\nContent".into()),
-            description: None,
-            created_at: 1000,
-            updated_at: 2000,
-            next_run_at: Some(3000),
-            last_run_at: Some(1500),
-            last_status: Some("ok".into()),
-            last_error: None,
-            run_count: 5,
-            retry_count: 0,
-            max_retries: 3,
-        }
-    }
-
-    fn sample_job() -> CronJob {
+    fn launch_job() -> CronJob {
         CronJob {
             cron_job_id: JOB_ID.into(),
             user_id: USER_ID.into(),
-            name: "Test Job".into(),
+            name: "Original task".into(),
             enabled: true,
-            schedule_revision: 1,
+            schedule_revision: 4,
             schedule: CronSchedule::Every {
                 every_ms: 60000,
                 description: Some("every minute".into()),
             },
-            message: "do something".into(),
-            execution_mode: ExecutionMode::Existing,
-            agent_config: Some(CronAgentConfig {
-                backend: None,
-                name: "Nomi".into(),
-                cli_path: None,
-                custom_agent_id: None,
-                preset_id: None,
-                preset_revision: None,
-                agent_snapshot: None,
-                model: Some("gpt-5".into()),
-                provider_id: Some(PROVIDER_ID.into()),
-                config_options: None,
-                workspace: None,
-                clear_context_each_run: false,
+            message: "Original user instruction".into(),
+            execution_mode: ExecutionMode::NewConversation,
+            agent_selection: Some(ProductAgentSelectionDto::Template {
+                template_key: "assistant.general".into(),
             }),
-            conversation_id: Some("0190f5fe-7c00-7a00-8abc-012345678901".into()),
-            conversation_title: Some("Test Conv".into()),
-            agent_type: "nomi".into(),
-            created_by: CreatedBy::User,
-            skill_content: Some("---\nname: test\n---\nContent".into()),
-            description: None,
-            created_at: 1000,
-            updated_at: 2000,
-            next_run_at: Some(3000),
-            last_run_at: Some(1500),
-            last_status: Some(JobStatus::Ok),
-            last_error: None,
-            run_count: 5,
-            retry_count: 0,
-            max_retries: 3,
-        }
-    }
-
-    #[test]
-    fn row_to_domain_roundtrip() {
-        let row = sample_row();
-        let job = cron_job_from_row(row).unwrap();
-        assert_eq!(job.cron_job_id, JOB_ID);
-        assert_eq!(job.name, "Test Job");
-        assert!(job.enabled);
-        assert_eq!(
-            job.schedule,
-            CronSchedule::Every {
-                every_ms: 60000,
-                description: Some("every minute".into()),
-            }
-        );
-        assert_eq!(job.execution_mode, ExecutionMode::Existing);
-        assert_eq!(job.created_by, CreatedBy::User);
-        assert_eq!(job.last_status, Some(JobStatus::Ok));
-        let config = job.agent_config.as_ref().expect("sample agent config");
-        assert_eq!(config.provider_id.as_deref(), Some(PROVIDER_ID));
-        assert_eq!(config.model.as_deref(), Some("gpt-5"));
-        assert_eq!(config.backend, None);
-    }
-
-    #[test]
-    fn domain_to_row_roundtrip() {
-        let job = sample_job();
-        let row = cron_job_to_row(&job).unwrap();
-        assert_eq!(row.id, 0);
-        assert_eq!(row.cron_job_id, JOB_ID);
-        assert_eq!(row.schedule_kind, "every");
-        assert_eq!(row.schedule_value, "60000");
-        assert_eq!(row.execution_mode, "existing");
-        assert_eq!(row.created_by, "user");
-        assert_eq!(row.last_status.as_deref(), Some("ok"));
-        assert!(row.agent_config.is_some());
-
-        let restored = cron_job_from_row(row).unwrap();
-        assert_eq!(restored.cron_job_id, job.cron_job_id);
-        assert_eq!(restored.schedule, job.schedule);
-        assert_eq!(restored.execution_mode, job.execution_mode);
-        assert_eq!(restored.created_by, job.created_by);
-        assert_eq!(restored.last_status, job.last_status);
-    }
-
-    #[test]
-    fn row_to_domain_at_type() {
-        let row = CronJobRow {
-            schedule_kind: "at".into(),
-            schedule_value: "1700000000000".into(),
-            schedule_tz: None,
-            schedule_description: Some("once".into()),
-            ..sample_row()
-        };
-        let job = cron_job_from_row(row).unwrap();
-        assert_eq!(
-            job.schedule,
-            CronSchedule::At {
-                at_ms: 1700000000000,
-                description: Some("once".into()),
-            }
-        );
-    }
-
-    #[test]
-    fn row_to_domain_cron_type_with_tz() {
-        let row = CronJobRow {
-            schedule_kind: "cron".into(),
-            schedule_value: "0 0 9 * * *".into(),
-            schedule_tz: Some("Asia/Shanghai".into()),
-            schedule_description: Some("daily 9am".into()),
-            ..sample_row()
-        };
-        let job = cron_job_from_row(row).unwrap();
-        assert_eq!(
-            job.schedule,
-            CronSchedule::Cron {
-                expr: "0 0 9 * * *".into(),
-                tz: Some("Asia/Shanghai".into()),
-                description: Some("daily 9am".into()),
-            }
-        );
-    }
-
-    #[test]
-    fn row_to_domain_no_optional_fields() {
-        let row = CronJobRow {
-            agent_config: None,
+            model: Some(AgentChatModelSelectionDto {
+                provider_id: PROVIDER_ID.into(),
+                model: "selected-model".into(),
+            }),
+            agent_binding: Some(crate::session_port::test_support::test_binding()),
+            agent_label: None,
+            effective_model: None,
+            clear_context_each_run: false,
+            configuration_error: None,
+            last_failure: None,
+            conversation_id: None,
             conversation_title: None,
+            created_by: CreatedBy::User,
             skill_content: None,
-            next_run_at: None,
+            description: Some("keep description".into()),
+            created_at: 100,
+            updated_at: 200,
+            next_run_at: Some(60100),
             last_run_at: None,
+            last_run_id: None,
             last_status: None,
             last_error: None,
-            ..sample_row()
-        };
-        let job = cron_job_from_row(row).unwrap();
-        assert!(job.agent_config.is_none());
-        assert!(job.conversation_title.is_none());
-        assert!(job.last_status.is_none());
-    }
-
-    #[test]
-    fn row_to_domain_invalid_execution_mode() {
-        let row = CronJobRow {
-            execution_mode: "parallel".into(),
-            ..sample_row()
-        };
-        let err = cron_job_from_row(row).unwrap_err();
-        assert!(matches!(err, CronError::InvalidExecutionMode(_)));
-    }
-
-    #[test]
-    fn row_to_domain_invalid_created_by() {
-        let row = CronJobRow {
-            created_by: "system".into(),
-            ..sample_row()
-        };
-        let err = cron_job_from_row(row).unwrap_err();
-        assert!(matches!(err, CronError::InvalidCreatedBy(_)));
-    }
-
-    #[test]
-    fn row_to_domain_invalid_status() {
-        let row = CronJobRow {
-            last_status: Some("running".into()),
-            ..sample_row()
-        };
-        let err = cron_job_from_row(row).unwrap_err();
-        assert!(matches!(err, CronError::InvalidJobStatus(_)));
-    }
-
-    #[test]
-    fn row_to_domain_invalid_agent_config_json() {
-        let row = CronJobRow {
-            agent_config: Some("not json".into()),
-            ..sample_row()
-        };
-        let err = cron_job_from_row(row).unwrap_err();
-        assert!(matches!(err, CronError::Json(_)));
-    }
-
-    #[test]
-    fn nomi_agent_config_roundtrips_with_provider_id_and_model_only() {
-        let row = CronJobRow {
-            agent_type: "nomi".into(),
-            agent_config: Some(
-                serde_json::json!({
-                    "name": "Nomi",
-                    "provider_id": "0190f5fe-7c00-7a00-8000-000000000002",
-                    "model": "model-safe"
-                })
-                .to_string(),
-            ),
-            ..sample_row()
-        };
-
-        let job = cron_job_from_row(row).unwrap();
-        let config = job.agent_config.as_ref().unwrap();
-        assert_eq!(
-            config.provider_id.as_deref(),
-            Some("0190f5fe-7c00-7a00-8000-000000000002")
-        );
-        assert_eq!(config.model.as_deref(), Some("model-safe"));
-        assert!(config.backend.is_none());
-
-        let persisted = cron_job_to_row(&job).unwrap().agent_config.unwrap();
-        let persisted: serde_json::Value = serde_json::from_str(&persisted).unwrap();
-        assert_eq!(
-            persisted
-                .as_object()
-                .unwrap()
-                .keys()
-                .map(String::as_str)
-                .collect::<std::collections::BTreeSet<_>>(),
-            ["clear_context_each_run", "model", "name", "provider_id"]
-                .into_iter()
-                .collect()
-        );
-    }
-
-    #[test]
-    fn disabled_jobs_can_retain_an_empty_model_selection_after_catalog_deletion() {
-        let row = CronJobRow { enabled:false, agent_type:"nomi".into(),
-            agent_config:Some(serde_json::json!({"name":"Nomi","provider_id":null,"model":null}).to_string()),
-            ..sample_row() };
-        let job = cron_job_from_row(row).unwrap();
-        assert!(!job.enabled);
-        assert!(job.agent_config.as_ref().unwrap().provider_id.is_none());
-        let mut restored = cron_job_to_row(&job).unwrap();
-        restored.enabled = true;
-        assert!(cron_job_from_row(restored).is_err(),"reenabling still requires the user to choose a model");
-    }
-
-    #[test]
-    fn nomi_agent_config_rejects_backend_as_provider() {
-        let row = CronJobRow {
-            agent_type: "nomi".into(),
-            agent_config: Some(
-                serde_json::json!({
-                    "name": "Nomi",
-                    "backend": "openai",
-                    "model": "model-safe"
-                })
-                .to_string(),
-            ),
-            ..sample_row()
-        };
-
-        let error = cron_job_from_row(row).unwrap_err();
-        assert!(error.to_string().contains("use provider_id"), "{error}");
-    }
-
-    #[test]
-    fn row_to_domain_rejects_preset_lineage_without_agent_snapshot() {
-        for preset_id in [
-            "word-creator",
-            "7",
-            "preset_0190f5fe-7c00-7a00-8abc-012345678901",
-            "550e8400-e29b-41d4-a716-446655440000",
-            "0190F5FE-7C00-7A00-8ABC-012345678901",
-        ] {
-            let row = CronJobRow {
-                preset_id: Some(preset_id.into()),
-                ..sample_row()
-            };
-            let error = cron_job_from_row(row)
-                .expect_err("preset lineage without an Agent snapshot must fail closed");
-            assert!(
-                error
-                    .to_string()
-                    .contains("without a frozen Agent snapshot"),
-                "unexpected error for {preset_id:?}: {error}"
-            );
+            run_count: 0,
         }
     }
 
     #[test]
-    fn row_to_domain_rejects_mismatched_agent_snapshot_lineage() {
-        let snapshot = serde_json::json!({
-            "preset_id": "0190f5fe-7c00-7a00-8abc-012345678902",
-            "preset_revision": 2,
-            "preset_name": "Coding",
-            "resolved_agent_type": "nomi",
-            "resolved_model": {
-                "provider_id": PROVIDER_ID,
-                "model": "gpt-5"
-            },
-            "instructions": "",
-            "included_skills": [],
-            "excluded_auto_skills": [],
-            "enabled_capabilities": [],
-                        "knowledge_policy": {
-                "enabled": false,
-                "writeback": false,
-                "grounded": false
-            },
-            "warnings": []
-        });
-        let row = CronJobRow {
-            preset_id: Some("0190f5fe-7c00-7a00-8abc-012345678903".into()),
-            preset_revision: Some(2),
-            agent_snapshot: Some(snapshot.to_string()),
-            ..sample_row()
-        };
-        let error = cron_job_from_row(row).unwrap_err();
-        assert!(error.to_string().contains("inconsistent Agent snapshot lineage"));
-    }
-
-    #[test]
-    fn row_to_domain_materializes_agent_snapshot_and_lineage() {
-        let snapshot = serde_json::json!({
-            "preset_id": "0190f5fe-7c00-7a00-8abc-012345678902",
-            "preset_revision": 2,
-            "preset_name": "Coding",
-            "resolved_agent_type": "nomi",
-            "resolved_model": {
-                "provider_id": PROVIDER_ID,
-                "model": "gpt-5"
-            },
-            "instructions": "",
-            "included_skills": [],
-            "excluded_auto_skills": [],
-            "enabled_capabilities": [],
-                        "knowledge_policy": {
-                "enabled": false,
-                "writeback": false,
-                "grounded": false
-            },
-            "warnings": []
-        });
-        let row = CronJobRow {
-            preset_id: Some("0190f5fe-7c00-7a00-8abc-012345678902".into()),
-            preset_revision: Some(2),
-            agent_snapshot: Some(snapshot.to_string()),
-            agent_config: Some(
-                serde_json::json!({
-                    "name": "Coding",
-                    "model": "gpt-5",
-                    "provider_id": PROVIDER_ID
-                })
-                .to_string(),
-            ),
-            ..sample_row()
-        };
-        let job = cron_job_from_row(row).expect("valid frozen Agent snapshot");
-        let config = job.agent_config.expect("Agent config");
+    fn one_standard_binding_roundtrips_without_runtime_mirrors() {
+        let original = launch_job();
+        let row = cron_job_to_row(&original).unwrap();
         assert_eq!(
-            config.agent_snapshot.as_ref().map(|value| value.preset_revision),
-            Some(2)
+            serde_json::from_str::<AgentBindingValueDto>(row.agent_binding.as_ref().unwrap())
+                .unwrap(),
+            original.agent_binding.clone().unwrap()
         );
+        let restored = cron_job_from_row(row).unwrap();
+        assert_eq!(restored, original);
+        let response = cron_job_to_response(&restored);
+        assert_eq!(response.metadata.agent_binding, original.agent_binding);
+        assert_eq!(response.metadata.model, original.model);
+        assert_eq!(response.state.configuration_error, None);
+        let wire = serde_json::to_value(response).unwrap();
+        assert!(wire["metadata"].get("agent_config").is_none());
+        assert!(wire["metadata"].get("agent_type").is_none());
+        assert!(wire["state"].get("retry_count").is_none());
+    }
+
+    #[test]
+    fn continuing_session_presentation_never_becomes_stored_authority() {
+        let mut job = launch_job();
+        job.execution_mode = ExecutionMode::Existing;
+        job.conversation_id = Some("0190f5fe-7c00-7a00-8000-000000000091".into());
+        job.agent_label = Some("Live canonical Agent".into());
+        let row = cron_job_to_row(&job).unwrap();
+        assert!(row.agent_binding.is_none());
+        assert!(row.agent_selection.is_none());
+        assert!(row.model_selection.is_none());
         assert_eq!(
-            config.preset_id.as_deref(),
-            Some("0190f5fe-7c00-7a00-8abc-012345678902")
+            cron_job_to_response(&job).metadata.agent_label.as_deref(),
+            Some("Live canonical Agent")
         );
-        assert_eq!(config.preset_revision, Some(2));
-    }
-
-    // -- Domain ↔ DTO ---------------------------------------------------------
-
-    #[test]
-    fn domain_to_dto_every() {
-        let job = sample_job();
-        let resp = cron_job_to_response(&job);
-        assert_eq!(resp.cron_job_id, JOB_ID);
-        assert_eq!(resp.name, "Test Job");
-        assert!(resp.enabled);
-        assert!(matches!(
-            resp.schedule,
-            CronScheduleDto::Every {
-                every_ms: 60000,
-                ..
-            }
-        ));
-        assert_eq!(resp.message, "do something");
-        assert_eq!(resp.execution_mode, "existing");
-        assert_eq!(
-            resp.metadata.conversation_id.as_deref(),
-            Some("0190f5fe-7c00-7a00-8abc-012345678901")
-        );
-        assert_eq!(resp.metadata.agent_type, "nomi");
-        assert_eq!(resp.metadata.created_by, "user");
-        assert_eq!(resp.state.run_count, 5);
-        assert_eq!(resp.state.last_status.as_deref(), Some("ok"));
     }
 
     #[test]
-    fn domain_to_dto_at_type() {
-        let job = CronJob {
-            schedule: CronSchedule::At {
-                at_ms: 1700000000000,
-                description: Some("once".into()),
-            },
-            ..sample_job()
-        };
-        let resp = cron_job_to_response(&job);
-        assert!(matches!(
-            resp.schedule,
-            CronScheduleDto::At {
-                at_ms: 1700000000000,
-                ..
-            }
-        ));
+    fn malformed_typed_authoring_or_binding_json_fails_closed() {
+        for field in ["selection", "model", "binding"] {
+            let mut row = cron_job_to_row(&launch_job()).unwrap();
+            match field {
+                "selection" => row.agent_selection = Some("{".into()),
+                "model" => row.model_selection = Some("{".into()),
+                _ => row.agent_binding = Some("{".into()),
+            };
+            assert!(cron_job_from_row(row).is_err(), "{field}");
+        }
     }
 
     #[test]
-    fn domain_to_dto_cron_type() {
-        let job = CronJob {
-            schedule: CronSchedule::Cron {
-                expr: "0 0 9 * * *".into(),
-                tz: Some("UTC".into()),
-                description: Some("daily".into()),
-            },
-            ..sample_job()
-        };
-        let resp = cron_job_to_response(&job);
-        assert!(matches!(resp.schedule, CronScheduleDto::Cron { .. }));
+    fn invalid_id_and_enum_rows_are_rejected() {
+        for field in ["job", "owner", "session", "mode", "creator", "status"] {
+            let mut row = cron_job_to_row(&launch_job()).unwrap();
+            match field {
+                "job" => row.cron_job_id = "bad".into(),
+                "owner" => row.user_id = "bad".into(),
+                "session" => row.conversation_id = Some("bad".into()),
+                "mode" => row.execution_mode = "bad".into(),
+                "creator" => row.created_by = "bad".into(),
+                _ => row.last_status = Some("bad".into()),
+            };
+            assert!(cron_job_from_row(row).is_err(), "{field}");
+        }
     }
 
     #[test]
-    fn domain_to_dto_no_agent_config() {
-        let job = CronJob {
-            agent_config: None,
-            ..sample_job()
-        };
-        let resp = cron_job_to_response(&job);
-        assert!(resp.metadata.agent_config.is_none());
+    fn disabled_unproven_definition_retains_only_authoring_choice_and_diagnostic() {
+        let mut job = launch_job();
+        job.enabled = false;
+        job.agent_binding = None;
+        job.configuration_error = Some("CRON_CONFIGURATION_RESELECTION_REQUIRED".into());
+        let restored = cron_job_from_row(cron_job_to_row(&job).unwrap()).unwrap();
+        assert_eq!(restored, job);
+        assert!(restored.model.is_some());
     }
 
     #[test]
-    fn domain_to_dto_new_conversation_mode() {
-        let job = CronJob {
-            execution_mode: ExecutionMode::NewConversation,
-            ..sample_job()
-        };
-        let resp = cron_job_to_response(&job);
-        assert_eq!(resp.execution_mode, "new_conversation");
-    }
-
-    // -- DTO ↔ Domain schedule ------------------------------------------------
-
-    #[test]
-    fn schedule_from_dto_at() {
-        let dto = CronScheduleDto::At {
-            at_ms: 5000,
-            description: Some("once".into()),
-        };
-        let s = schedule_from_dto(&dto);
-        assert_eq!(
-            s,
+    fn all_schedule_forms_and_timezone_survive_row_domain_and_wire_conversion() {
+        for schedule in [
             CronSchedule::At {
-                at_ms: 5000,
+                at_ms: 123456,
                 description: Some("once".into()),
-            }
-        );
-    }
-
-    #[test]
-    fn schedule_from_dto_every() {
-        let dto = CronScheduleDto::Every {
-            every_ms: 30000,
-            description: None,
-        };
-        let s = schedule_from_dto(&dto);
-        assert_eq!(
-            s,
+            },
             CronSchedule::Every {
                 every_ms: 30000,
                 description: None,
-            }
-        );
-    }
-
-    #[test]
-    fn schedule_from_dto_cron() {
-        let dto = CronScheduleDto::Cron {
-            expr: "0 */5 * * * *".into(),
-            tz: Some("UTC".into()),
-            description: Some("every 5m".into()),
-        };
-        let s = schedule_from_dto(&dto);
-        assert_eq!(
-            s,
+            },
             CronSchedule::Cron {
-                expr: "0 */5 * * * *".into(),
-                tz: Some("UTC".into()),
-                description: Some("every 5m".into()),
-            }
-        );
+                expr: "0 0 9 * * *".into(),
+                tz: Some("Asia/Shanghai".into()),
+                description: Some("daily".into()),
+            },
+        ] {
+            let mut job = launch_job();
+            job.schedule = schedule.clone();
+            let restored = cron_job_from_row(cron_job_to_row(&job).unwrap()).unwrap();
+            assert_eq!(restored.schedule, schedule);
+            assert_eq!(
+                schedule_from_dto(&cron_job_to_response(&restored).schedule),
+                schedule
+            );
+        }
     }
-
     #[test]
-    fn agent_job_roundtrips_through_storage() {
-        let original = sample_job();
-        let row = cron_job_to_row(&sample_job()).unwrap();
-        let restored = cron_job_from_row(row).unwrap();
-        assert_eq!(restored, original);
+    fn exact_model_presentation_is_never_written_back_as_an_author_choice() {
+        let mut job = launch_job();
+        job.model = None;
+        job.effective_model = Some(AgentChatModelSelectionDto {
+            provider_id: PROVIDER_ID.into(),
+            model: "frozen-default".into(),
+        });
+        job.agent_label = Some("Original frozen Agent".into());
+        assert!(cron_job_to_row(&job).unwrap().model_selection.is_none());
+        assert_eq!(
+            cron_job_to_response(&job)
+                .metadata
+                .model
+                .as_ref()
+                .map(|model| model.model.as_str()),
+            Some("frozen-default")
+        );
+        assert_eq!(
+            cron_job_to_response(&job).metadata.agent_label.as_deref(),
+            Some("Original frozen Agent")
+        );
     }
 }

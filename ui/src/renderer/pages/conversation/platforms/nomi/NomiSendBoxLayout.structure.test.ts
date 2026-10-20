@@ -155,8 +155,8 @@ describe('Nomi sendbox control layout', () => {
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
     const agentSwitchSource = readSource(new URL('../../components/useConversationAgentSwitch.ts', import.meta.url));
 
-    expect(chatSource.includes('<GuidAgentSelector')).toBe(true);
-    expect(chatSource.includes('useAgentPresets()')).toBe(true);
+    expect(chatSource.includes('<AgentSelector')).toBe(true);
+    expect(chatSource.includes('useConversationAgentCatalog()')).toBe(true);
     expect(chatSource.includes('useConversationAgentSwitch({')).toBe(true);
     expect(chatSource.includes('AgentSwitchDialog')).toBe(false);
     expect(agentSwitchSource.includes('agentPlatform.sessions.previewAgentSwitch.invoke')).toBe(true);

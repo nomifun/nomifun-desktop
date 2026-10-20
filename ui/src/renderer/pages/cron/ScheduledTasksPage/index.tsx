@@ -15,10 +15,9 @@ import { type ICronJob } from '@/common/adapter/ipcBridge';
 import { HUB_PAGE_TITLE_CLASS } from '@/renderer/components/layout/HubPageShell';
 import type { ConversationId } from '@/common/types/ids';
 import { useKeepAwake } from '@renderer/hooks/ui/useKeepAwake';
-import { useConversationAgents } from '@renderer/pages/conversation/hooks/useConversationAgents';
 import CronStatusTag from './CronStatusTag';
 import CreateTaskDialog from './CreateTaskDialog';
-import { getJobAgentMeta } from './jobAgentMeta';
+import { scheduledAgentName, scheduledAgentLogo } from './scheduledAgentPresentation';
 import { shortSessionId } from '@renderer/utils/ui/shortId';
 import { filterCronJobsByQuery, filterCronJobsByStatus, type CronJobStatusFilter } from './cronJobSearch';
 import { parseScheduledConversationId } from './scheduledConversationId';
@@ -35,7 +34,6 @@ const ScheduledPlansPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { jobs, loading, pauseJob, resumeJob, deleteJob } = useAllCronJobs();
-  const { cliAgents } = useConversationAgents();
   const [createDialogVisible, setCreateDialogVisible] = useState(false);
   const [lockedCreateConversationId, setLockedCreateConversationId] = useState<ConversationId | undefined>(undefined);
   const [searchQuery, setSearchQuery] = useState('');
@@ -258,7 +256,7 @@ const ScheduledPlansPage: React.FC = () => {
             */}
             <div className='grid w-full grid-cols-1 items-start gap-8px md:block md:divide-y md:divide-x-0 md:divide-solid md:divide-[var(--color-border-2)]'>
               {pagedJobs.map((job) => {
-                const agentMeta = getJobAgentMeta(job, cliAgents);
+                const agentMeta = { name: scheduledAgentName(job, t), logo: scheduledAgentLogo };
                 const isManualOnly = job.schedule.kind === 'cron' && !job.schedule.expr;
                 const executionModeLabel =
                   job.execution_mode === 'new_conversation'

@@ -121,3 +121,17 @@ test.each(['en-US', 'zh-CN'])('native authentication and unknown results use can
     cleanup();
   }
 });
+
+test.each(['en-US', 'zh-CN'])('typed resource preparation failure identifies the local phase and shows missing grants in %s', async language => {
+  const locale = language === 'zh-CN' ? zhConversation : enConversation;
+  const { page } = await mount({ code: 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE', message: 'Local admission failed', retryable: false,
+    resourceBindingFailure: { missing_resource_kinds: ['workspace'], missing_resource_operations: { workspace: ['write'] } },
+    providerDiagnostic: { reason: 'auth_failed' },
+  }, language);
+  expect(page.getByRole('alert').textContent).toBe(locale.agentError.codes.NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE.title);
+  expect(page.getByText(locale.agentError.codes.NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE.body).closest('[hidden]')).toBeNull();
+  fireEvent.click(page.getByRole('button', { name: locale.agentError.expandDetails }));
+  expect(page.getByRole('region').textContent).toContain('workspace');
+  expect(page.getByRole('region').textContent).toContain('write');
+  expect(page.queryByText(locale.agentError.providerReasons.auth_failed.body)).toBeNull();
+});

@@ -35,12 +35,12 @@ impl Fixture {
             VALUES(?,?,'live','Original',0,0,'{}',1,1)")
             .bind(&session).bind(serde_json::json!({"principal_kind":"user","principal_id":owner}).to_string())
             .execute(db.pool()).await.unwrap();
-        sqlx::query("INSERT INTO cron_jobs(cron_job_id,user_id,name,schedule_kind,schedule_value,payload_message,conversation_id,agent_type,created_by,created_at,updated_at,next_run_at) \
-            VALUES(?,?,'Original schedule','every','60000','Original input',?,?,'user',1,1,60001)")
-            .bind(&job).bind(&owner).bind(&session).bind(AgentType::Nomi.serde_name()).execute(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO cron_jobs(cron_job_id,user_id,name,schedule_kind,schedule_value,payload_message,conversation_id,created_by,created_at,updated_at,next_run_at) \
+            VALUES(?,?,'Original schedule','every','60000','Original input',?,'user',1,1,60001)")
+            .bind(&job).bind(&owner).bind(&session).execute(db.pool()).await.unwrap();
         let repo=Arc::new(SqliteCronRepository::new(db.pool().clone()));
         repo.reserve_run(&owner,&ReserveCronRunParams {cron_job_run_id:run.clone(),cron_job_id:job.clone(),trigger_kind:"run_now".into(),
-            operation_key:format!("original:{run}"),request_fingerprint:"original".into(),schedule_revision:None,planned_at_ms:None,now:1}).await.unwrap();
+            operation_key:format!("original:{run}"),request_fingerprint:"original".into(),schedule_revision:None,planned_at_ms:None,next_run_at:None,disable:false,now:1}).await.unwrap();
         if attached {repo.attach_run_conversation(&owner,&run,&session,2).await.unwrap();}
         let initial=if attached {CronTurnReceiptState::Accepted {message_id:"0190f5fe-7c00-7a00-8000-000000000011".into()}}
             else {CronTurnReceiptState::Missing};
@@ -73,7 +73,7 @@ async fn exact_run_stop_preempts_job_fifo_and_a_dropped_waiter_retains_the_origi
     let sibling=CronJobRunId::new().into_string();
     fixture.repo.reserve_run(&fixture.owner,&ReserveCronRunParams {cron_job_run_id:sibling.clone(),cron_job_id:fixture.job.clone(),
         trigger_kind:"run_now".into(),operation_key:format!("sibling:{sibling}"),request_fingerprint:"sibling".into(),
-        schedule_revision:None,planned_at_ms:None,now:2}).await.unwrap();
+        schedule_revision:None,planned_at_ms:None,next_run_at:None,disable:false,now:2}).await.unwrap();
     let gate=fixture.service.job_gate(&fixture.job);
     let ordinary=gate.lock().await;
     let native=Arc::new(CancellationGate::default());
@@ -100,7 +100,7 @@ async fn exact_run_stop_preempts_job_fifo_and_a_dropped_waiter_retains_the_origi
         (future.enabled,future.schedule_revision,future.schedule_value,future.next_run_at));
     assert_eq!(saved.last_status.as_deref(),Some("cancelled"));
     assert_eq!(saved.run_count,1);
-    assert_eq!(saved.retry_count,0);
+
     assert_eq!(fixture.repo.get_run_reservation(&fixture.owner,&fixture.job,&sibling).await.unwrap().unwrap().status,"reserved");
     assert_eq!(fixture.repo.list_runs_by_job(&fixture.owner,&fixture.job,7).await.unwrap().len(),1);
 }
@@ -152,7 +152,7 @@ async fn cancelling_an_old_occurrence_cannot_advance_or_disable_a_new_schedule_r
     let run=CronJobRunId::new().into_string();
     fixture.repo.reserve_run(&fixture.owner,&ReserveCronRunParams {cron_job_run_id:run.clone(),cron_job_id:fixture.job.clone(),
         trigger_kind:"scheduled".into(),operation_key:format!("scheduled:{}:1:60001",fixture.job),request_fingerprint:"revision-one-input".into(),
-        schedule_revision:Some(1),planned_at_ms:Some(60001),now:2}).await.unwrap();
+        schedule_revision:Some(1),planned_at_ms:Some(60001),next_run_at:Some(120001),disable:false,now:2}).await.unwrap();
     // Isolated fixture represents a fully committed subsequent user edit.
     sqlx::query("UPDATE cron_jobs SET schedule_revision=2,schedule_value='120000',next_run_at=123456,updated_at=3 WHERE cron_job_id=?")
         .bind(&fixture.job).execute(fixture.db.pool()).await.unwrap();

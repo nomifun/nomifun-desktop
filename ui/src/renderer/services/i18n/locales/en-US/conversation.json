@@ -111,7 +111,7 @@
   "agentError": {
     "expandDetails": "Technical details",
     "collapseDetails": "Hide technical details",
-    "fallbackTitle": "The agent could not reply",
+    "fallbackTitle": "The request did not complete",
     "fallbackBody": "This request failed, and the specific cause is not yet known. Review the technical details; if the problem persists, send feedback with that information.",
     "details": {
       "rawDetail": "Original detail",
@@ -140,7 +140,9 @@
       "contentType": "Response content type",
       "providerParam": "Parameter or field",
       "providerId": "Provider ID",
-      "sessionModel": "Session-selected model"
+      "sessionModel": "Session-selected model",
+      "missingResourceKinds": "Missing resource kinds",
+      "missingResourceOperations": "Missing resource operations"
     },
     "incompleteReasons": {
       "blocked_work": {
@@ -582,6 +584,18 @@
       "EXECUTION_CLEANUP_UNPROVEN": {
         "title": "Task resource cleanup has not been confirmed",
         "body": "Resource cleanup has not been confirmed. Execution and new messages remain blocked. Wait for cleanup confirmation; if the blockage persists, check technical details and submit feedback."
+      },
+      "NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE": {
+        "title": "Local execution preparation failed",
+        "body": "The app did not completely prepare the Agent's execution environment. No model request was sent. Retrying cannot repair this configuration problem; check the technical details and send feedback."
+      },
+      "CRON_CONFIGURATION_RESELECTION_REQUIRED": {
+        "title": "Choose the task Agent again",
+        "body": "The task has no verifiable Agent execution configuration and has been paused. Edit it, choose a workbench Agent and an available model, then enable it again."
+      },
+      "CRON_MODEL_RESELECTION_REQUIRED": {
+        "title": "Choose the task model again",
+        "body": "The task's model configuration was removed. Edit the task and choose an available model before enabling it. For a bound conversation, change its model in that conversation first."
       },
       "CAPABILITY_ACTION_NOT_MATERIALIZED": {
         "title": "Start a new session",

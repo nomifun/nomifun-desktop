@@ -340,3 +340,13 @@ describe('compact message errors', () => {
     expect(secondToggle.getAttribute('aria-expanded')).toBe('false');
   });
 });
+
+test('local resource preparation failures never offer an ineffective turn retry, even without a retryable flag', () => {
+  const { page } = mount({ ...error, content: { ...error.content, error: {
+    code: 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE', message: 'Workspace write operation was not bound',
+    ownership: 'nomifun', resourceBindingFailure: { missing_resource_kinds: ['workspace'], missing_resource_operations: { workspace: ['write'] } },
+  } } });
+  expect(page.queryByTestId('message-error-retry')).toBeNull();
+  expect(page.getByRole('alert').textContent).toBe(conversation.agentError.codes.NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE.title);
+  expect(page.getByText(conversation.agentError.codes.NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE.body).closest('[hidden]')).toBeNull();
+});

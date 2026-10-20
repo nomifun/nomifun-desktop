@@ -163,9 +163,9 @@ v3 baseline 直接创建上述权限模型，不保留或规范化旧 schema gen
 
 ### 逻辑关联策略
 
-默认策略是逻辑关联：Agent Store Agent Store 例外之外的产品表
+默认策略是逻辑关联：Agent Store 例外之外的产品表
 都没有物理外键。稳定父实体关联（例如
-`messages.conversation_id`、`cron_job_runs.cron_job_id`）保存父实体的裸 UUIDv7
+`cron_run_reservations.conversation_id`、`cron_run_reservations.cron_job_id`）保存父实体的裸 UUIDv7
 业务 ID。Repository 层在事务
 中校验目标，并执行登记的 `RESTRICT`、应用层 `CASCADE`、`SET_NULL` 或
 `KEEP_HISTORY` 删除策略。应用层 `CASCADE` 是 Service/Repository 行为，不是

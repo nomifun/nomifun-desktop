@@ -111,7 +111,7 @@
   "agentError": {
     "expandDetails": "技术细节",
     "collapseDetails": "收起技术细节",
-    "fallbackTitle": "Agent 未能回复",
+    "fallbackTitle": "本次请求未完成",
     "fallbackBody": "本次请求失败，暂时无法确定具体原因。请查看技术细节；如果问题持续出现，请提交反馈并附上这些信息。",
     "details": {
       "rawDetail": "原始详情",
@@ -140,7 +140,9 @@
       "contentType": "响应内容类型",
       "providerParam": "相关参数或字段",
       "providerId": "服务商标识",
-      "sessionModel": "会话所选模型"
+      "sessionModel": "会话所选模型",
+      "missingResourceKinds": "缺少资源类型",
+      "missingResourceOperations": "缺少资源操作"
     },
     "incompleteReasons": {
       "blocked_work": {
@@ -582,6 +584,18 @@
       "EXECUTION_CLEANUP_UNPROVEN": {
         "title": "任务资源清理尚未确认",
         "body": "本回合的资源清理尚未确认，当前无法继续执行或发送新消息。请等待应用确认清理；如持续受阻，请查看技术细节并提交反馈。"
+      },
+      "NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE": {
+        "title": "本地执行准备失败",
+        "body": "应用没有完整准备 Agent 的执行环境，本次尚未调用模型。重复重试无法修复此配置问题，请查看技术详情并提交反馈。"
+      },
+      "CRON_CONFIGURATION_RESELECTION_REQUIRED": {
+        "title": "任务需要重新配置 Agent",
+        "body": "任务缺少可验证的 Agent 执行配置，已暂停执行。请编辑任务，选择工作台 Agent 和可用模型后重新启用。"
+      },
+      "CRON_MODEL_RESELECTION_REQUIRED": {
+        "title": "任务模型需要重新选择",
+        "body": "任务引用的模型配置已移除。请编辑任务选择可用模型后再启用；绑定会话的任务请先在该会话中更换模型。"
       },
       "CAPABILITY_ACTION_NOT_MATERIALIZED": {
         "title": "请新建会话",

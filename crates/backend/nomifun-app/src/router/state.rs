@@ -28,7 +28,7 @@ use nomifun_agent_kernel::{
 use nomifun_agent_control_plane::{
     KernelCatalogProvider,
 };
-use nomifun_api_types::{AgentResolvedSnapshot, TerminalExitEvent};
+use nomifun_api_types::TerminalExitEvent;
 use nomifun_auth::extract_token_from_ws_headers;
 use nomifun_channel::ChannelRouterState;
 use nomifun_common::{AppError, OnTerminalDelete};
@@ -228,11 +228,7 @@ pub(crate) async fn try_build_module_states(
     nomi_core_agent_api
         .install_cron_cleanup_owner(cron.cron_service.clone())
         .map_err(|error| anyhow::anyhow!("Nomi-core Cron cleanup owner installation failed: {error}"))?;
-    cron.cron_service.with_agent_preset_resolver(Arc::new(
-        NomiCoreCronAgentPresetResolver {
-            control_plane: nomi_core_agent_api.control_plane.clone(),
-        },
-    ));
+    cron.cron_service.with_agent_binding_resolver(nomi_core_agent_api.cron_agent_binding_resolver());
 
     // Generation-5 Store recovery is owned by NomiCoreSessionOwner. The
     // retired Conversation orphan sweep is intentionally not part of startup.
@@ -591,6 +587,7 @@ async fn build_nomi_core_agent_api_state(
             services.database.pool().clone(),
             Arc::clone(&services.official_runtime),
             resource_bindings.clone(),
+            &conversation_owner,
         ),
     );
     conversation_owner
@@ -962,45 +959,6 @@ mod catalog_publisher_tests {
     }
 }
 
-struct NomiCoreCronAgentPresetResolver {
-    control_plane: Arc<AgentControlPlane>,
-}
-
-#[async_trait::async_trait]
-impl nomifun_cron::CronAgentPresetResolver for NomiCoreCronAgentPresetResolver {
-    async fn resolve_snapshot(
-        &self,
-        owner_id: &str,
-        preset_id: &str,
-    ) -> Result<AgentResolvedSnapshot, AppError> {
-        let owner = nomifun_agent_contracts::UserId::from(owner_id.to_owned());
-        let editor = self
-            .control_plane
-            .editor(&owner, preset_id, None)
-            .await
-            .map_err(control_plane_error_to_app)?;
-        let binding = self
-            .control_plane
-            .resolve_agent_session_binding(&owner, preset_id)
-            .await
-            .map_err(control_plane_error_to_app)?;
-        let (binding, revision, snapshot) = self
-            .control_plane
-            .saved_binding_artifacts(&owner, &binding)
-            .await
-            .map_err(control_plane_error_to_app)?;
-        let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
-            .map_err(|error| AppError::Forbidden(format!("invalid Cron owner: {error}")))?;
-        super::agent_binding_projection::project_saved_artifacts(
-            &common_owner,
-            binding,
-            revision,
-            snapshot,
-            Some(&editor.preset.display_name),
-        )
-        .map(|resolved| resolved.projection.snapshot)
-    }
-}
 
 pub(super) fn control_plane_error_to_app(error: nomifun_agent_control_plane::ControlPlaneError) -> AppError {
     if error.code().as_ref() == nomifun_agent_contracts::SESSION_CONTRACT_EVOLUTION_REJECTED {

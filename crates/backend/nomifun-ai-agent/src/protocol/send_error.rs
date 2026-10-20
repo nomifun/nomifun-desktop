@@ -443,6 +443,22 @@ impl AgentSendError {
         match err {
             AppError::SystemExecution(failure) => Self::from_system_execution_failure(failure),
             AppError::SessionConfigurationChanged(_) => Self::session_configuration_changed(detail),
+            AppError::AgentResourceBindingIncomplete { missing_resource_kinds, missing_resource_operations, .. } => {
+                let mut error = Self::new(
+                    "The Agent's required resources were not prepared",
+                    AgentErrorCode::NomifunAgentResourceBindingIncomplete,
+                    AgentErrorOwnership::Nomifun,
+                    Some(detail),
+                    false,
+                    true,
+                    resolution(AgentErrorResolutionKind::SendFeedback, Some(AgentErrorResolutionTarget::Feedback)),
+                );
+                error.stream_error.resource_binding_failure = Some(nomifun_api_types::AgentResourceBindingFailure {
+                    missing_resource_kinds: missing_resource_kinds.clone(),
+                    missing_resource_operations: missing_resource_operations.clone(),
+                });
+                error
+            }
             AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(path) => Self {
                 stream_error: AgentStreamErrorData {
                     message: "This workspace path is no longer supported for execution".into(),
@@ -456,6 +472,7 @@ impl AgentSendError {
                     task_incomplete_reason: None,
                     provider_diagnostic: None,
                     system_execution_error: None,
+                    resource_binding_failure: None,
                     retryable: Some(false),
                     feedback_recommended: Some(false),
                     resolution: Some(AgentErrorResolution::new(
@@ -477,6 +494,7 @@ impl AgentSendError {
                     task_incomplete_reason: None,
                     provider_diagnostic: None,
                     system_execution_error: None,
+                    resource_binding_failure: None,
                     retryable: Some(false),
                     feedback_recommended: Some(false),
                     resolution: Some(AgentErrorResolution::new(
@@ -1317,6 +1335,27 @@ fn truncate_chars(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_host_resources_are_typed_local_and_non_retryable() {
+        let error = AgentSendError::from_app_error(AppError::AgentResourceBindingIncomplete {
+            message: "Host admission refused before provider dispatch".into(),
+            missing_resource_kinds: vec!["workspace".into(), "process_session".into()],
+            missing_resource_operations: std::collections::BTreeMap::from([
+                ("workspace".into(), std::collections::BTreeSet::from(["read".into(), "write".into()])),
+            ]),
+        });
+        let data = error.stream_error();
+        assert_eq!(data.code, Some(AgentErrorCode::NomifunAgentResourceBindingIncomplete));
+        assert_eq!(data.ownership, Some(AgentErrorOwnership::Nomifun));
+        assert_eq!(data.retryable, Some(false));
+        assert_eq!(data.resource_binding_failure.as_ref().unwrap().missing_resource_kinds,
+            ["workspace", "process_session"]);
+        let provider = AgentSendError::from_app_error(AppError::BadGateway(
+            "NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE: workspace grant".into()));
+        assert!(provider.stream_error().resource_binding_failure.is_none());
+        assert_ne!(provider.code(), data.code);
+    }
 
     #[test]
     fn native_authentication_codes_are_preserved_without_reclassifying_binding_acl_or_unknown() {

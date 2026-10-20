@@ -4,13 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
+import { useConversationAgentCatalog } from '@/renderer/components/agent/useConversationAgentCatalog';
 import type { AgentPresetSummary, OfficialPresetKey, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useGuidDraftState } from './useGuidDraftState';
 import {
   DEFAULT_GUID_AGENT_SELECTION,
-  isExecutableAgentPreset,
   normalizeGuidAgentSelection,
   readGuidDefaultAgentSelection,
 } from './agentSelectionUtils';
@@ -18,10 +17,6 @@ import type {
   ExecutableAgentPreset,
   GuidAgentSelection,
 } from '../types';
-import {
-  filterConversationAgentPresets,
-  isConversationAgentTemplate,
-} from '@/renderer/components/agent/conversationAgentCatalog';
 
 export type GuidAgentSelectionResult = {
   selection: GuidAgentSelection;
@@ -64,28 +59,19 @@ export const useGuidAgentSelection = ({
 
   const {
     library,
-    presets: savedPresets,
+    presets,
+    draftPresets,
+    officialTemplates: conversationTemplates,
     isLoading,
     error: loadError,
     refresh: refreshPresets,
-  } = useAgentPresets();
+  } = useConversationAgentCatalog();
   const isLoaded = library !== undefined;
-  const conversationPresets = useMemo(
-    () => filterConversationAgentPresets(savedPresets, library?.active_bindings ?? []),
-    [library?.active_bindings, savedPresets],
-  );
-  const presets = useMemo(
-    () => conversationPresets.filter(isExecutableAgentPreset),
-    [conversationPresets]
-  );
-  const draftPresets = useMemo(
-    () => conversationPresets.filter((preset) => !isExecutableAgentPreset(preset)),
-    [conversationPresets]
-  );
   const officialTemplates = useMemo(
-    () => (library?.official_templates ?? []).filter(template =>
-      template.template_key === fixedTemplateKey || isConversationAgentTemplate(template)),
-    [library?.official_templates, fixedTemplateKey],
+    () => fixedTemplateKey && !conversationTemplates.some(template => template.template_key === fixedTemplateKey)
+      ? [...conversationTemplates, ...(library?.official_templates ?? []).filter(template => template.template_key === fixedTemplateKey)]
+      : conversationTemplates,
+    [conversationTemplates, library?.official_templates, fixedTemplateKey],
   );
 
   const setSelection = useCallback((nextSelection: GuidAgentSelection) => {
