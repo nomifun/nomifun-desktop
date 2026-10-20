@@ -1,7 +1,12 @@
 import { expect, test } from 'bun:test';
 import { createHash, randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { canonicalInstallerCases, canonicalInstallerExecutionScript, canonicalUninstallerRawArguments, installerExecutionScript, installerInventoryScript, locateRenderedAcceptanceInstallerOutput, observeInstallerSignatures, parseRenderedAcceptanceInstaller, predictUnsignedNsisExecutable, validateCanonicalInstallerReceipt, validateInstallerAcceptanceConfig, validateInstallerFixtureClose } from './global-os-windows-installer.mjs';
-import { powershell, psLiteral, windowsObservation } from './global-os-windows-cases.mjs';
+import { powershell, psArguments, psLiteral, windowsObservation } from './global-os-windows-cases.mjs';
 import { validateWindowsExitResult, windowsCloseProcessIdentity } from './global-os-windows-process-exit-observer.mjs';
 
 const fixture = () => {
@@ -122,6 +127,35 @@ test('canonical uninstaller uses the exact unique root as the last unquoted NSIS
   expect(script).toContain('$p.WaitForExit()'); expect(script).toContain('[Console]::Out.Flush()');
   for(const forbidden of ['Stop-Process','Kill(', '-Verb RunAs','ExecutionPolicy','Remove-Item','ASFW_ANY']) expect(script).not.toContain(forbidden);
 });
+
+test.skipIf(process.platform !== 'win32')('actual Windows native binary guard loads Utility and rejects wrong file hashes before process construction', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'nomifun-installer-hash-prelude-'));
+  const path = join(root, 'owned-readonly-bytes.bin'), bytes = Buffer.from([0, 1, 2, 3, 127, 128, 254, 255]);
+  const expected = executableHash(bytes), marker = 'VERIFIED_NATIVE_BINARY_PRELUDE';
+  const execute = promisify(execFile);
+  const prelude = sha256 => {
+    const script = canonicalInstallerExecutionScript({ phase: 'install', path, sha256, rawArguments: '/S' });
+    const guard = script.indexOf("Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Utility\\");
+    const boundary = script.indexOf('$start=New-Object Diagnostics.ProcessStartInfo;');
+    expect(guard).toBeGreaterThanOrEqual(0); expect(boundary).toBeGreaterThan(guard);
+    const source = script.slice(guard, boundary);
+    expect(source).not.toContain('ProcessStartInfo'); expect(source).not.toContain('[Diagnostics.Process]::Start');
+    return `Import-Module ([IO.Path]::Combine($PSHOME,'Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1')) -ErrorAction Stop;Remove-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue;$PSModuleAutoLoadingPreference='None';if(Get-Command Get-FileHash -ErrorAction SilentlyContinue){throw 'Hash function was not isolated'};${source}[Console]::Write('${marker}')`;
+  };
+  try {
+    await writeFile(path, bytes, { flag: 'wx' });
+    const options = { encoding: 'utf8', windowsHide: true, timeout: 10000, maxBuffer: 64 * 1024 };
+    const valid = await execute(powershell, psArguments(prelude(expected)), options);
+    expect(valid.stdout).toBe(marker); expect(valid.stderr).toBe('');
+    let refused;
+    try { await execute(powershell, psArguments(prelude('0'.repeat(64))), options); } catch (error) { refused = error; }
+    expect(refused).toBeDefined(); expect(refused.code).toBe(1);
+    expect(refused.stdout).not.toContain(marker); expect(refused.stderr).toContain('Exact native binary SHA mismatch');
+    expect(Buffer.from(await readFile(path)).equals(bytes)).toBe(true);
+  } finally {
+    await unlink(path); await rmdir(root);
+  }
+}, 25000);
 
 test('canonical installer requires a complete native receipt and original supervisor reap, never unknown replay', () => {
   const expected={phase:'install',path:'C:\\private fixture\\setup.exe',sha256:'a'.repeat(64),rawArguments:'/S'};

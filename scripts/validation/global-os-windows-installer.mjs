@@ -263,7 +263,7 @@ export function canonicalUninstallerRawArguments(installRoot, config) {
 }
 const nativeBinaryGuard = (path, sha256) => {
   assert(win32.isAbsolute(path)); assert.match(sha256, /^[a-f0-9]{64}$/);
-  return `$binary=${psLiteral(path)};$item=Get-Item -Force -LiteralPath $binary;if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Expected exact regular binary'};$hash=(Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant();if($hash -cne ${psLiteral(sha256)}){throw 'Exact native binary SHA mismatch'};`;
+  return `Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop;$binary=${psLiteral(path)};$item=Get-Item -Force -LiteralPath $binary;if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Expected exact regular binary'};$hash=(Microsoft.PowerShell.Utility\\Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant();if($hash -cne ${psLiteral(sha256)}){throw 'Exact native binary SHA mismatch'};`;
 };
 export function canonicalInstallerExecutionScript({ phase, path, sha256, rawArguments }) {
   assert(['install', 'uninstall'].includes(phase)); assert.equal(typeof rawArguments, 'string');
