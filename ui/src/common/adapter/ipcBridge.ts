@@ -2660,6 +2660,7 @@ export const systemPermissions = {
 };
 
 export interface ComputerStatus {
+  phase: string;
   worker_version: string | null;
   platform: string;
   backend: string | null;

@@ -5873,6 +5873,7 @@ export type I18nKey =
   | 'settings.capabilityPermissions.computer.driver.title'
   | 'settings.capabilityPermissions.computer.driver.unavailable'
   | 'settings.capabilityPermissions.computer.driver.version'
+  | 'settings.capabilityPermissions.computer.driver.waitingForCurrentOperation'
   | 'settings.capabilityPermissions.computer.platformLimits'
   | 'settings.capabilityPermissions.computer.ready'
   | 'settings.capabilityPermissions.computer.summary'

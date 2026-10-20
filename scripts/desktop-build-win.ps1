@@ -103,7 +103,12 @@ if ($signed) {
     exit 1
   }
   if ($thumb -notmatch '^[0-9a-fA-F]{40}$') { throw 'WINDOWS_CERTIFICATE_THUMBPRINT must be a SHA-1 hexadecimal certificate thumbprint' }
-  $cfgJson = @{ bundle = @{ windows = @{ certificateThumbprint = $thumb } } } | ConvertTo-Json -Depth 5
+  $windowsSigning = @{ certificateThumbprint = $thumb }
+  if ($env:WINDOWS_TIMESTAMP_URL) {
+    $windowsSigning.timestampUrl = $env:WINDOWS_TIMESTAMP_URL
+    $windowsSigning.tsp = $true
+  }
+  $cfgJson = @{ bundle = @{ windows = $windowsSigning } } | ConvertTo-Json -Depth 5
   $signConfigFile = Join-Path ([System.IO.Path]::GetTempPath()) ('nomifun-sign-' + [Guid]::NewGuid().ToString('N') + '.json')
   [System.IO.File]::WriteAllText($signConfigFile, $cfgJson, (New-Object System.Text.UTF8Encoding($false)))
   $signConfig = @('--config', $signConfigFile)

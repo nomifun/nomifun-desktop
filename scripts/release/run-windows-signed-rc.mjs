@@ -16,10 +16,11 @@ import {
   lstatSync,
   mkdirSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
 } from 'node:fs';
-import { basename, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -108,6 +109,37 @@ export function signedRcPaths(sourceCommit, repoRoot = REPO_ROOT) {
   };
 }
 
+// The RC's fixed x64/release Host is restored by Tauri after NSIS packaging.
+// Sign that unmarked stage independently; it is not the package's marked PE.
+export function signedRcHostSigningCommands(host, environment = process.env) {
+  const thumbprint = environment.WINDOWS_CERTIFICATE_THUMBPRINT?.trim();
+  if (!thumbprint) {
+    failure('signed_rc_certificate_missing', 'WINDOWS_CERTIFICATE_THUMBPRINT is required');
+  }
+  const timestamp = environment.WINDOWS_TIMESTAMP_URL?.trim();
+  if (!timestamp) {
+    failure('signed_rc_timestamp_missing', 'WINDOWS_TIMESTAMP_URL is required for timestamped RC admission');
+  }
+  return [
+    ['sign', '/sha1', thumbprint, '/fd', 'SHA256', '/tr', timestamp, '/td', 'SHA256', host],
+    ['verify', '/pa', host],
+  ];
+}
+
+export function assertSignedRcTargetDirectory(result, repoRoot = REPO_ROOT) {
+  if (result.status !== 0 || result.error) {
+    failure('signed_rc_target_metadata_failed', 'Cargo could not confirm the RC target directory');
+  }
+  let metadata;
+  try { metadata = JSON.parse(String(result.stdout || '')); }
+  catch { failure('signed_rc_target_metadata_invalid', 'Cargo target-directory metadata is invalid'); }
+  const target = metadata?.target_directory;
+  if (typeof target !== 'string' || !isAbsolute(target) ||
+      resolve(target).toLowerCase() !== resolve(repoRoot, 'target').toLowerCase()) {
+    failure('signed_rc_output_override', 'Signed RC requires its fixed repository target directory');
+  }
+}
+
 function oneBuiltInstaller() {
   const directory = join(REPO_ROOT, 'dist', 'desktop');
   const matches = existsSync(directory)
@@ -132,29 +164,34 @@ function requireRegularFile(path, label) {
   return path;
 }
 
-function stageArtifacts(sourceCommit, hostInput, packageInput) {
-  const paths = signedRcPaths(sourceCommit);
-  if (!isPathWithin(join(REPO_ROOT, 'build.noindex'), paths.root)) {
+export function stageArtifacts(sourceCommit, hostInput, packageInput, repoRoot = REPO_ROOT) {
+  const paths = signedRcPaths(sourceCommit, repoRoot);
+  if (!isPathWithin(join(repoRoot, 'build.noindex'), paths.root)) {
     failure('signed_rc_output_boundary', 'Signed RC output escaped build.noindex');
   }
   if (existsSync(paths.root)) {
     failure('signed_rc_already_exists', 'Signed RC root already exists and will not be overwritten', {
-      root: relative(REPO_ROOT, paths.root).replaceAll('\\', '/'),
+      root: relative(repoRoot, paths.root).replaceAll('\\', '/'),
     });
   }
   mkdirSync(paths.parent, { recursive: true });
   const staging = join(paths.parent, `.${sourceCommit.slice(0, 9)}.staging-${randomUUID()}`);
+  // A collision must fail before cleanup can obtain authority over this path.
+  mkdirSync(staging, { recursive: false });
+  const ownedStaging = realpathSync(staging);
+  const ownedParent = realpathSync(paths.parent);
+  const ownedIdentity = lstatSync(staging);
   const artifactRoot = join(staging, 'artifacts');
-  mkdirSync(artifactRoot, { recursive: false });
   try {
+    mkdirSync(artifactRoot, { recursive: false });
     const host = join(artifactRoot, 'nomifun-desktop.exe');
     const packagePath = join(artifactRoot, basename(packageInput));
     const license = join(artifactRoot, 'LICENSE');
     const notice = join(artifactRoot, 'NOTICE');
     copyFileSync(hostInput, host);
     copyFileSync(packageInput, packagePath);
-    copyFileSync(join(REPO_ROOT, 'LICENSE'), license);
-    copyFileSync(join(REPO_ROOT, 'NOTICE'), notice);
+    copyFileSync(join(repoRoot, 'LICENSE'), license);
+    copyFileSync(join(repoRoot, 'NOTICE'), notice);
     const lock = createReleaseLock({
       root: staging,
       sourceCommit,
@@ -166,7 +203,15 @@ function stageArtifacts(sourceCommit, hostInput, packageInput) {
     writeReleaseLock(join(artifactRoot, 'NomiFun.release-lock.json'), lock);
     renameSync(staging, paths.root);
   } catch (error) {
-    rmSync(staging, { recursive: true, force: true });
+    const currentIdentity = lstatSync(staging);
+    const cleanupPath = realpathSync(staging);
+    if (currentIdentity.isSymbolicLink() || !currentIdentity.isDirectory() ||
+        cleanupPath !== ownedStaging || dirname(cleanupPath) !== ownedParent ||
+        basename(cleanupPath) !== basename(staging) ||
+        currentIdentity.dev !== ownedIdentity.dev || currentIdentity.ino !== ownedIdentity.ino) {
+      failure('signed_rc_staging_identity_changed', 'Refusing cleanup of a changed RC staging directory');
+    }
+    rmSync(cleanupPath, { recursive: true, force: true });
     throw error;
   }
   const verified = readAndVerifyReleaseLock(paths.lock, { root: paths.root });
@@ -180,9 +225,15 @@ function run() {
   if (process.platform !== 'win32' || process.arch !== 'x64') {
     failure('signed_rc_native_host_required', 'Windows signed RC build requires Windows x64');
   }
-  if (!process.env.WINDOWS_CERTIFICATE_THUMBPRINT?.trim()) {
-    failure('signed_rc_certificate_missing', 'WINDOWS_CERTIFICATE_THUMBPRINT is required');
-  }
+  const hostPath = join(REPO_ROOT, 'target', TARGET_TRIPLE, 'release', 'nomifun-desktop.exe');
+  const hostSigning = signedRcHostSigningCommands(hostPath);
+  assertSignedRcTargetDirectory(spawnSync('cargo', [
+    'metadata', '--no-deps', '--locked', '--offline', '--format-version', '1',
+    '--manifest-path', join(REPO_ROOT, 'apps', 'desktop', 'Cargo.toml'),
+  ], {
+    cwd: join(REPO_ROOT, 'apps', 'desktop'), encoding: 'utf8', shell: false,
+    windowsHide: true, stdio: 'pipe', timeout: 10_000, maxBuffer: 16 * 1024 * 1024,
+  }));
   const sourceCommit = currentCleanSource();
   const planned = signedRcPaths(sourceCommit);
   if (existsSync(planned.root)) {
@@ -191,10 +242,11 @@ function run() {
 
   runCommand('bun', ['run', 'build:win', 'x64', '--signed']);
   const hostInput = requireRegularFile(
-    join(REPO_ROOT, 'target', TARGET_TRIPLE, 'release', 'nomifun-desktop.exe'),
-    'signed Host',
+    hostPath,
+    'restored RC Host',
   );
   const packageInput = requireRegularFile(oneBuiltInstaller(), 'signed NSIS package');
+  for (const args of hostSigning) runCommand('signtool.exe', args);
   inspectAuthenticode(hostInput);
   inspectAuthenticode(packageInput);
   const paths = stageArtifacts(sourceCommit, hostInput, packageInput);

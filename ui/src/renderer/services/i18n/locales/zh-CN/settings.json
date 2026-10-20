@@ -391,6 +391,7 @@
         "process": "进程",
         "running": "运行中",
         "stopped": "未运行",
+        "waitingForCurrentOperation": "正在等待当前桌面操作结束",
         "version": "Worker 版本",
         "platform": "平台",
         "backend": "后端",

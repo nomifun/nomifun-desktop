@@ -391,6 +391,7 @@
         "process": "Process",
         "running": "Running",
         "stopped": "Not running",
+        "waitingForCurrentOperation": "Waiting for the current desktop operation to finish",
         "version": "Worker version",
         "platform": "Platform",
         "backend": "Backend",

@@ -10,7 +10,11 @@ const ComputerDriverStatus: React.FC = () => {
   const { t } = useTranslation();
   const { data, error, isLoading, mutate } = useSWR('computer.status', () => computer.status.invoke(), {
     revalidateOnFocus: true,
+    refreshInterval: snapshot => snapshot?.running ? 1000 : 0,
+    refreshWhenHidden: false,
+    dedupingInterval: 1000,
   });
+  const waiting = !error && data?.running && data.phase === 'waiting_for_current_operation';
   const unknown = t('settings.capabilityPermissions.states.unknown');
   const available = (value: boolean | null) => value === null ? unknown : t(value
     ? 'settings.capabilityPermissions.computer.driver.available'
@@ -18,11 +22,14 @@ const ComputerDriverStatus: React.FC = () => {
   return <VisualPanel title={t('settings.capabilityPermissions.computer.driver.title')}
     description={t('settings.capabilityPermissions.computer.driver.description')}>
     <VisualRow label={t('settings.capabilityPermissions.computer.driver.process')}>
-      <VisualStatus tone={data?.running ? 'success' : 'neutral'}>{!data ? unknown : t(data.running
-        ? 'settings.capabilityPermissions.computer.driver.running'
-        : 'settings.capabilityPermissions.computer.driver.stopped')}</VisualStatus>
+      <VisualStatus tone={!error && data?.running ? 'success' : 'neutral'}>
+        {!data || error ? unknown : t(data.running
+            ? 'settings.capabilityPermissions.computer.driver.running'
+            : 'settings.capabilityPermissions.computer.driver.stopped')}
+      </VisualStatus>
       <Button size='small' loading={isLoading} onClick={() => void mutate()}>{t('settings.capabilityPermissions.refresh')}</Button>
     </VisualRow>
+    {waiting && <Alert type='info' showIcon content={t('settings.capabilityPermissions.computer.driver.waitingForCurrentOperation')} />}
     {data && <>
       <VisualRow label={t('settings.capabilityPermissions.computer.driver.version')}>{data.worker_version ?? unknown}</VisualRow>
       <VisualRow label={t('settings.capabilityPermissions.computer.driver.platform')}>{data.platform}</VisualRow>
