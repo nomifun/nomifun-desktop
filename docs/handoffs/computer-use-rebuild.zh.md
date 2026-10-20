@@ -467,7 +467,8 @@ worker 环境变量白名单以私有运行时目录收敛写入：`CUA_DRIVER_R
 - **源码与构建身份**：本轮live源码SHA256 `f89558d09f3be7340b97aafae6c25c86fe5946cdc79b1d8642562938aced5967`，测试实物`8bf64e7a010659f2aca70e28935f5310fda18c771abb053d516bc641cb680abb`；同临时父目录`build-identity-inputconstraints.json`记录71份Rust/脚本/协议/UI改动源与实物，SHA256 `aaec7222cbdef52a02b002772bcd5cc5ba909c967ebc56463e2b3bb6283ec353`。UI dist合同44/build ID `4bac2c9d-6dae-46a5-8dd5-9f78af49220b`。worker仍为07d50d7a、fixture仍b978d766，上游SOURCE、补丁、冻结22动作和worker源码均未改变，不重复独立worker协议构建。
 - **暂存与行尾复验**：逐一核对上述71份改动源的构建身份后，仅暂存本专项代码、生成契约及架构文档。首次暂存发现新增013工作区为CRLF、Git规定LF，已规范为LF，原始Git blob与index完全相等，SHA256 `4c7f1423731d88ad21c3b8cc80863c05639175cfaf8726e00b70a28c22fbdd3d`；SQL语句不变，避免不同checkout得到不同迁移校验值。前述实模清单保留规范前的原字节身份；最终开发包使用规范后的源另列。LF源下DB定向 **2/2、2.53s**，现役`cargo test -p nomifun-shell --test stt_integration -- --test-threads=1` **8/8、4.93s**，验证非Chat语音配置与调用保持。
 - **最终开发包**：仍使用上述dev配置和`bun x tauri build --debug --bundles nsis ...`，完整 **exit0**，LF源重建Rust **41.72s**。桌面EXE **364,457,984B/SHA256 `5920a6e6fa81e50152ddb54b5d9f171d864a031cea49dc783b1c8f12c09216ed`**；`target/debug/bundle/nsis/NomiFun Dev_0.8.14_x64-setup.exe` **89,131,488B/SHA256 `e8ab3994f6b7675ed7a376001e247c27cccb3d2fbb0b203169fc1b6ba4e52ad4`**。最终71源/产物清单`build-identity-inputconstraints-package.json` SHA256 `a77618c1ef6dabbbd0c78a85daf318ad91d9491bdc45cc1bf2c66ec7aa3ffd8e`；与实模源只差上述013行尾。NSIS实际645行纳入同一07d50d7a worker，619–629行纳入许可资源；EXE、安装包和worker均NotSigned，未安装、未发布。
-- **下一动作**：本轮Windows实现、实模、测试与开发包已完成，检查主线并自洽提交同步；正式签名和其他平台原生项仍分别待验。
+- **主线源码提交**：`7374c011842947090fbb325bebb79070d1e7a8f9`（83文件）包含上述实现、生成契约、测试、UI/API44及架构。提交前再次fetch确认origin/main仍为457b970a2；83份暂存路径与71份最终源身份逐一相符，工作区与暂存diffcheck均0、文档检查0。原生/包/凭据和验收数据均在仓库外或忽略目录；保护同期主线，未stash/reset/覆盖用户改动。本条仅后续补记已验证源码身份。
+- **下一动作**：本轮Windows实现、实模、测试与开发包已完成；按发布范围补正式签名、安装与其他平台原生项，保留专项入口承接S4。
 
 ### 未执行项与下一动作
 
