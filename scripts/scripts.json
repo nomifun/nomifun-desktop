@@ -269,6 +269,18 @@
     "check:external-tools": {
       "group": "check",
       "desc": "校验受管组件来源、版本、制品和镜像摘要、许可证、旧预览链路退役及内置技能一致性"
+    },
+    "build:computer-worker": {
+      "group": "build",
+      "desc": "Build the independent Computer worker and stage the exact Tauri sidecar."
+    },
+    "gen:computer": {
+      "group": "gen",
+      "desc": "Derive Computer actions, schemas and tool presentation from the frozen worker inventory."
+    },
+    "check:computer-boundary": {
+      "group": "check",
+      "desc": "Verify vendored source, generated contracts, removed Computer paths and workspace isolation."
     }
   }
 }

@@ -242,8 +242,8 @@
         "body": "原生执行方报告了失败。请查看详情中的原始错误和执行状态。"
       },
       "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED": {
-        "title": "需要确认会话 Agent 配置",
-        "body": "升级涉及权限、工具来源或执行要求的变化，无法自动沿用当前会话的 Agent 配置。请通过会话的 Agent 选择器确认配置后继续；已有记录会保留。"
+        "title": "请新建会话",
+        "body": "此会话依赖已更新的能力，请新建会话继续；已有记录会保留"
       },
       "INTERRUPTED_BY_RESTART": {
         "title": "任务因应用退出而中断",
@@ -582,6 +582,10 @@
       "EXECUTION_CLEANUP_UNPROVEN": {
         "title": "任务资源清理尚未确认",
         "body": "本回合的资源清理尚未确认，当前无法继续执行或发送新消息。请等待应用确认清理；如持续受阻，请查看技术细节并提交反馈。"
+      },
+      "CAPABILITY_ACTION_NOT_MATERIALIZED": {
+        "title": "请新建会话",
+        "body": "此会话依赖已更新的能力，请新建会话继续；已有记录会保留"
       }
     },
     "adjustAndRetry": "调整后重试",

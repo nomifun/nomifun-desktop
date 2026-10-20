@@ -44,69 +44,17 @@ use windows_sys::Win32::{
             PIPE_UNLIMITED_INSTANCES,
         },
         RemoteDesktop::ProcessIdToSessionId,
-        StationsAndDesktops::{CloseDesktop, DESKTOP_READOBJECTS, GetThreadDesktop,
-            GetUserObjectInformationW, OpenInputDesktop, UOI_NAME},
         Threading::{
-            CreateEventW, GetCurrentProcess, GetCurrentThreadId, GetProcessId, GetProcessTimes, OpenProcess,
+            CreateEventW, GetCurrentProcess, GetProcessId, GetProcessTimes, OpenProcess,
             OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
             QueryFullProcessImageNameW, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
         },
     },
     UI::{
         Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW},
-        WindowsAndMessaging::{AllowSetForegroundWindow, GetForegroundWindow, GetWindowThreadProcessId, SW_HIDE},
+        WindowsAndMessaging::SW_HIDE,
     },
 };
-
-/// Host-owned native extensions retain their existing domain owner and typed
-/// request validation. The transport owns their admission and shutdown fence.
-pub trait WindowsExecutionExtension: Send + Sync {
-    fn call(&self, request: Value) -> Result<Value, SystemExecutionError>;
-    fn call_controlled(&self, request: Value, cancellation: WindowsCancellation) -> Result<Value, SystemExecutionError> {
-        if cancellation.is_cancelled() { return Err(cancelled_before_dispatch()); }
-        self.call(request)
-    }
-    fn shutdown(&self) -> Result<(), SystemExecutionError>;
-}
-#[path = "windows_cancellation.rs"]
-mod cancellation;
-pub use cancellation::WindowsCancellation;
-pub(super) use cancellation::{CancellationSource, cancelled_before_dispatch};
-
-pub(super) fn retain_control_delivery_error(result: Result<Value, SystemExecutionError>, delivery: Option<SystemExecutionError>) -> Result<Value, SystemExecutionError> {
-    let Some(delivery) = delivery else { return result; };
-    // A failed signal never settles, drops or reclassifies the original native
-    // operation. Return its actual result, retaining this distinct diagnostic.
-    match result {
-        Ok(mut value) => {
-            if let Some(object) = value.as_object_mut() { object.insert("control_delivery_error".into(), json!(delivery.to_string())); }
-            else { eprintln!("Native cancellation delivery failed; original non-object extension result retained: {delivery}"); }
-            Ok(value)
-        },
-        Err(mut original) => {
-            if let Some(object) = original.details.as_object_mut() {
-                object.insert("control_delivery_error".into(), json!(delivery.to_string()));
-            }
-            original.message.push_str(&format!("; cancellation signal delivery failed: {delivery}"));
-            Err(original)
-        }
-    }
-}
-type ExtensionFactory = fn() -> Arc<dyn WindowsExecutionExtension>;
-static EXTENSION: OnceLock<ExtensionFactory> = OnceLock::new();
-pub fn install_windows_extension_handler(
-    factory: ExtensionFactory,
-) -> Result<(), SystemExecutionError> {
-    EXTENSION.set(factory).map_err(|_| {
-        before(
-            "SYSTEM_EXECUTION_EXTENSION_ALREADY_INSTALLED",
-            "Native extension factory is already installed",
-        )
-    })
-}
-pub(super) fn new_extension() -> Option<Arc<dyn WindowsExecutionExtension>> {
-    EXTENSION.get().map(|factory| factory())
-}
 
 const BUILD: &str = env!("NOMIFUN_SYSTEM_EXECUTION_BUILD_ID");
 const MODE: &str = "--nomifun-system-runner";
@@ -125,13 +73,10 @@ static HOST_SUPPORTED: AtomicBool = AtomicBool::new(false);
 struct RpcDispatchSlots {
     active: Mutex<usize>,
     available: Condvar,
-    #[cfg(test)]
-    waiting: std::sync::atomic::AtomicUsize,
 }
 struct RpcDispatchPermit<'a>(&'a RpcDispatchSlots);
 impl RpcDispatchSlots {
-    fn new() -> Self { Self { active: Mutex::new(0), available: Condvar::new(),
-        #[cfg(test)] waiting: std::sync::atomic::AtomicUsize::new(0) } }
+    fn new() -> Self { Self { active: Mutex::new(0), available: Condvar::new() } }
 
     fn admit(&self, op: &str, interrupted: impl Fn() -> bool) -> io::Result<Option<RpcDispatchPermit<'_>>> {
         if matches!(op, "cancel" | "terminate" | "timeout" | "interrupt" | "quiesce" | "shutdown"
@@ -144,17 +89,12 @@ impl RpcDispatchSlots {
                 *active += 1;
                 return Ok(Some(RpcDispatchPermit(self)));
             }
-            #[cfg(test)] self.waiting.fetch_add(1, Ordering::AcqRel);
             active = self.available.wait_timeout(active, Duration::from_millis(25))
                 .unwrap_or_else(std::sync::PoisonError::into_inner).0;
-            #[cfg(test)] self.waiting.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
 
-#[cfg(test)]
-#[path = "windows_rpc_cancellation_tests.rs"]
-mod rpc_cancellation_tests;
 impl Drop for RpcDispatchPermit<'_> {
     fn drop(&mut self) {
         let mut active = self.0.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -341,7 +281,6 @@ struct Facility {
     pipe: String,
     process: Handle,
     stopped: AtomicBool,
-    foreground_admission: FacilityAdmission,
 }
 static FACILITY: OnceLock<Mutex<Option<Arc<Facility>>>> = OnceLock::new();
 impl Facility {
@@ -390,28 +329,16 @@ impl Facility {
             pipe,
             process,
             stopped: AtomicBool::new(false),
-            foreground_admission: FacilityAdmission::default(),
         }))
     }
     fn exchange(&self, client: Uuid, request: Value) -> Result<Value, SystemExecutionError> {
-        self.exchange_controlled(client, request, None)
-    }
-    fn exchange_controlled(&self, client: Uuid, request: Value, cancellation: Option<&CancellationSource>) -> Result<Value, SystemExecutionError> {
-        if cancellation.is_some_and(|source| source.connection != client) {
-            return Err(before("SYSTEM_EXECUTION_NOT_ADMITTED", "Cancellation belongs to a different original connection"));
-        }
-        let _foreground_fence = if request["op"] == "stop_facility" {
-            self.foreground_admission.closing.store(true, Ordering::Release);
-            Some(self.foreground_admission.gate.write().unwrap_or_else(|poison| poison.into_inner()))
-        } else { None };
         if self.stopped.load(Ordering::Acquire) || !self.process.running() {
             return Err(unknown(
                 "The original elevated runner has stopped; its operations cannot be replayed",
             ));
         }
-        let id = cancellation.map(|source| source.id).unwrap_or_else(Uuid::now_v7);
-        let mut envelope = json!({"build":BUILD,"connection":client.to_string(),"id":id.to_string(),"request":request});
-        if let Some(source) = cancellation { envelope["cancel_event"] = json!(source.name); }
+        let id = Uuid::now_v7();
+        let envelope = json!({"build":BUILD,"connection":client.to_string(),"id":id.to_string(),"request":request});
         let bytes = serde_json::to_vec(&envelope).expect("JSON");
         if bytes.len() > MAX_REQUEST {
             return Err(before(
@@ -486,16 +413,6 @@ pub(super) struct Client {
     id: Uuid,
 }
 impl Client {
-    pub(super) fn cancellation_source(&self) -> Result<CancellationSource, SystemExecutionError> {
-        CancellationSource::new(self.id)
-    }
-    pub(super) fn call_controlled(&self, request: Value, cancellation: &CancellationSource) -> Result<Value, SystemExecutionError> {
-        self.facility.exchange_controlled(self.id, request, Some(cancellation))
-    }
-    pub(super) fn allow_foreground_from_current_app(&self) -> bool {
-        self.facility.foreground_admission.delegate_if_open(&self.facility.stopped,
-            &mut NativeForegroundDelegation(&self.facility.process))
-    }
     pub(super) fn connect() -> Result<Self, SystemExecutionError> {
         let mut cached = FACILITY
             .get_or_init(|| Mutex::new(None))
@@ -541,56 +458,6 @@ impl Drop for Client {
             .spawn(move || {
                 let _ = facility.exchange(id, json!({"op":"release"}));
             });
-    }
-}
-
-trait ForegroundDelegationProbe {
-    fn default_input_desktop(&mut self) -> bool;
-    fn app_is_foreground(&mut self) -> bool;
-    fn runner_is_running(&mut self) -> bool;
-    fn retained_runner_pid(&mut self) -> u32;
-    fn allow_exact(&mut self, pid: u32) -> bool;
-}
-
-fn delegate_foreground(probe: &mut impl ForegroundDelegationProbe) -> bool {
-    if !probe.default_input_desktop() || !probe.app_is_foreground() || !probe.runner_is_running() {
-        return false;
-    }
-    let pid = probe.retained_runner_pid();
-    if pid == 0 || pid == u32::MAX { return false; }
-    probe.allow_exact(pid)
-}
-
-struct NativeForegroundDelegation<'a>(&'a Handle);
-fn default_desktop_name(desktop: HANDLE) -> bool {
-    let mut name = [0u16; 256];
-    let mut needed = 0;
-    if desktop.is_null() || unsafe {
-        GetUserObjectInformationW(desktop, UOI_NAME, name.as_mut_ptr().cast(),
-            std::mem::size_of_val(&name) as u32, &mut needed)
-    } == 0 { return false; }
-    name.iter().copied().take_while(|unit| *unit != 0).eq("Default".encode_utf16())
-}
-impl ForegroundDelegationProbe for NativeForegroundDelegation<'_> {
-    fn default_input_desktop(&mut self) -> bool {
-        let input = unsafe { OpenInputDesktop(0, 0, DESKTOP_READOBJECTS) };
-        if input.is_null() { return false; }
-        let default = default_desktop_name(input)
-            && default_desktop_name(unsafe { GetThreadDesktop(GetCurrentThreadId()) });
-        unsafe { CloseDesktop(input); }
-        default
-    }
-    fn app_is_foreground(&mut self) -> bool {
-        let mut pid = 0;
-        let thread = unsafe { GetWindowThreadProcessId(GetForegroundWindow(), &mut pid) };
-        thread != 0 && pid == std::process::id()
-    }
-    fn runner_is_running(&mut self) -> bool { self.0.running() }
-    fn retained_runner_pid(&mut self) -> u32 { unsafe { GetProcessId(self.0.0) } }
-    fn allow_exact(&mut self, pid: u32) -> bool {
-        // Only a currently eligible App may delegate; Windows can still
-        // refuse, and subsequent user input may revoke this permission.
-        unsafe { AllowSetForegroundWindow(pid) != 0 }
     }
 }
 
@@ -760,14 +627,6 @@ struct FacilityAdmission {
     closing: AtomicBool,
     gate: std::sync::RwLock<()>,
 }
-impl FacilityAdmission {
-    fn delegate_if_open(&self, stopped: &AtomicBool, probe: &mut impl ForegroundDelegationProbe) -> bool {
-        if self.closing.load(Ordering::Acquire) { return false; }
-        let Ok(_guard) = self.gate.try_read() else { return false; };
-        if self.closing.load(Ordering::Acquire) || stopped.load(Ordering::Acquire) { return false; }
-        delegate_foreground(probe)
-    }
-}
 struct RunnerCleanup {
     runners: Arc<Mutex<HashMap<Uuid, Arc<Runner>>>>,
     admission: Arc<FacilityAdmission>,
@@ -873,7 +732,7 @@ fn serve(key: Uuid, parent_pid: u32, stamp: u64) -> Result<(), String> {
             if unsafe{WaitForSingleObject(parent.0,u32::MAX)}!=WAIT_OBJECT_0 {return;}
             stopping.store(true,Ordering::Release);unsafe{SetEvent(stop.0);}
             if unsafe{WaitForSingleObject(cleaned.0,10_000)}!=WAIT_OBJECT_0 {
-                // A stuck native extension must not keep an elevated orphan or
+                // A stalled cleanup must not keep an elevated orphan or
                 // temporary Job alive after the original host died. Exiting
                 // this runner closes its non-inheritable kill-on-close Job
                 // handles. There is no receipt: original effects stay unknown.
@@ -960,31 +819,11 @@ fn handle_rpc(
         .map_err(io::Error::other)?;
     let request = &envelope["request"];
     let op = request["op"].as_str().unwrap_or("");
-    // The original Event is opened after authenticating the pipe, client and
-    // request identity, before any business-slot wait. An early Stop remains
-    // signalled even when no helper worker had registered this request yet.
-    let cancellation = match envelope.get("cancel_event") {
-        None => WindowsCancellation::default(),
-        Some(value) => {
-            let opened = value.as_str().filter(|_| op == "extension")
-                .ok_or_else(|| io::Error::other("Native cancellation is only valid for the original extension request"))
-                .and_then(|name| WindowsCancellation::open(name, client, id));
-            match opened {
-                Ok(cancellation) => cancellation,
-                Err(error) => return reply_rpc(pipe, parent, client, id,
-                    json!({"ok":false,"error":{"code":"SYSTEM_EXECUTION_NOT_ADMITTED","message":error.to_string(),
-                        "details":{"user_code_not_started":true,"cleanup_proven":true}}}), deadline),
-            }
-        }
-    };
-    let cancelled_reply = || { let error = cancellation.require_open().err().unwrap_or_else(cancelled_before_dispatch);
-        json!({"ok":false,"error":{"code":error.code,"message":error.message,"details":error.details}}) };
     // Admission owns the complete original request and lives through its
     // result/ACK. Waiting for an ordinary slot does not block the pipe listener
     // or drop an already-dispatched native future.
-    let _slot = match slots.admit(op, || cancellation.is_cancelled() || !parent.running() || stopping.load(Ordering::Acquire) || Instant::now() >= deadline) {
+    let _slot = match slots.admit(op, || !parent.running() || stopping.load(Ordering::Acquire) || Instant::now() >= deadline) {
         Ok(slot) => slot,
-        Err(_) if cancellation.is_cancelled() => return reply_rpc(pipe, parent, client, id, cancelled_reply(), deadline),
         // An authenticated request received after the original facility Stop
         // still owns a reply/ACK. Let the existing admission/Runner owner
         // return its known closing rejection or original terminal receipt;
@@ -992,9 +831,6 @@ fn handle_rpc(
         Err(_) if parent.running() && stopping.load(Ordering::Acquire) && Instant::now() < deadline => None,
         Err(error) => return Err(error),
     };
-    if cancellation.is_cancelled() {
-        return reply_rpc(pipe, parent, client, id, cancelled_reply(), deadline);
-    }
     let response = if op == "stop_facility" {
         admission.closing.store(true, Ordering::Release);
         let _fence = admission
@@ -1019,7 +855,7 @@ fn handle_rpc(
         }
         json!({"ok":true,"result":{"exact":exact}})
     } else {
-        let _admission = if matches!(op, "identity" | "start" | "acquire_read" | "extension") {
+        let _admission = if matches!(op, "identity" | "start" | "acquire_read") {
             Some(
                 admission
                     .gate
@@ -1054,7 +890,7 @@ fn handle_rpc(
                 }
                 response
             }
-            Some(runner) => runner.call_with_cancellation(&serde_json::to_vec(request).map_err(io::Error::other)?, cancellation),
+            Some(runner) => runner.call(&serde_json::to_vec(request).map_err(io::Error::other)?),
             None => {
                 json!({"ok":false,"error":{"code":"SYSTEM_EXECUTION_CONNECTION_CLOSED","message":"The exact native connection is absent or closed","details":{"user_code_not_started":true,"cleanup_proven":true}}})
             }
@@ -1270,7 +1106,7 @@ mod tests {
             drop(pipe);
         });
         let facility = Facility { pipe:name, process:process(std::process::id()).unwrap(),
-            stopped:AtomicBool::new(false), foreground_admission:FacilityAdmission::default() };
+            stopped:AtomicBool::new(false), };
         let connection = Uuid::now_v7();
         let failure = facility.exchange(connection, json!({"op":"acquire_read","request":{"kind":"fixture"}})).unwrap_err();
         let original = received.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -1336,7 +1172,7 @@ mod tests {
             assert_eq!(runners.lock().unwrap().len(), 1);
         });
         let facility = Facility { pipe: name, process: process(std::process::id()).unwrap(),
-            stopped: AtomicBool::new(false), foreground_admission: FacilityAdmission::default() };
+            stopped: AtomicBool::new(false), };
         let mut cancel = owner("cancel"); cancel["session_id"] = a["result"]["session_id"].clone();
         let stopped = facility.exchange(client, cancel).unwrap();
         assert_eq!(stopped["cleanup"]["reaped"], true, "{stopped}");
@@ -1365,78 +1201,12 @@ mod tests {
         received.recv_timeout(Duration::from_secs(2)).unwrap(); worker.join().unwrap();
     }
     #[test]
-    fn native_extension_quiesce_is_reusable_but_shutdown_closes_admission() {
-        struct Extension(std::sync::atomic::AtomicUsize);
-        impl WindowsExecutionExtension for Extension {
-            fn call(&self, _: Value) -> Result<Value, SystemExecutionError> {
-                Ok(json!({"calls":self.0.fetch_add(1,Ordering::SeqCst)+1}))
-            }
-            fn shutdown(&self) -> Result<(), SystemExecutionError> {
-                Ok(())
-            }
-        }
-        let extension = Arc::new(Extension(std::sync::atomic::AtomicUsize::new(0)));
-        let mut runner = Runner::new();
-        runner.extension = Some(extension.clone());
-        let request = br#"{"op":"extension","request":{}}"#;
-        assert_eq!(runner.call(request)["result"]["calls"], 1);
-        assert_eq!(runner.call(br#"{"op":"quiesce"}"#)["result"]["exact"], true);
-        assert_eq!(runner.call(request)["result"]["calls"], 2);
-        assert_eq!(
-            runner.call(br#"{"op":"shutdown"}"#)["result"]["exact"],
-            true
-        );
-        let refused = runner.call(request);
-        assert_eq!(
-            refused["error"]["code"],
-            "SYSTEM_EXECUTION_CONNECTION_CLOSED"
-        );
-        assert_eq!(refused["error"]["details"]["user_code_not_started"], true);
-        assert_eq!(extension.0.load(Ordering::SeqCst), 2);
-    }
-    #[test]
     fn unregistered_executable_cannot_trigger_uac_or_fallback() {
         assert!(!HOST_SUPPORTED.load(Ordering::Acquire));
         assert_eq!(
             Client::connect().unwrap_err().code,
             "SYSTEM_EXECUTION_NOT_AVAILABLE"
         );
-    }
-    #[test]
-    fn foreground_delegation_requires_current_app_desktop_and_exact_live_runner() {
-        struct Probe { desktop: bool, foreground: bool, running: bool, pid: u32,
-            accepted: bool, granted: Vec<u32> }
-        impl ForegroundDelegationProbe for Probe {
-            fn default_input_desktop(&mut self) -> bool { self.desktop }
-            fn app_is_foreground(&mut self) -> bool { self.foreground }
-            fn runner_is_running(&mut self) -> bool { self.running }
-            fn retained_runner_pid(&mut self) -> u32 { self.pid }
-            fn allow_exact(&mut self, pid:u32)->bool { self.granted.push(pid);self.accepted }
-        }
-        let probe = || Probe {desktop:true,foreground:true,running:true,pid:123,accepted:true,granted:vec![]};
-        for guard in 0..5 {
-            let mut value=probe();
-            match guard {0=>value.desktop=false,1=>value.foreground=false,2=>value.running=false,
-                3=>value.pid=0,_=>value.pid=u32::MAX}
-            assert!(!delegate_foreground(&mut value));
-            assert!(value.granted.is_empty());
-        }
-        for accepted in [false,true] {
-            let mut value=probe();value.accepted=accepted;
-            assert_eq!(delegate_foreground(&mut value),accepted);
-            assert_eq!(value.granted,[123],"one OS call with retained PID, no retry");
-        }
-        let admission=FacilityAdmission::default();let stopped=AtomicBool::new(false);
-        let mut value=probe();
-        {
-            let _fence=admission.gate.write().unwrap();
-            assert!(!admission.delegate_if_open(&stopped,&mut value));
-        }
-        stopped.store(true,Ordering::Release);
-        assert!(!admission.delegate_if_open(&stopped,&mut value));
-        stopped.store(false,Ordering::Release);admission.closing.store(true,Ordering::Release);
-        assert!(!admission.delegate_if_open(&stopped,&mut value));
-        assert!(value.granted.is_empty(),"closing/stopped facility never grants permission");
     }
     #[test]
     fn pending_native_pipe_read_deadline_cancels_and_joins_kernel_io() {
@@ -1502,7 +1272,6 @@ mod tests {
             pipe: name,
             process: process(std::process::id()).unwrap(),
             stopped: AtomicBool::new(false),
-            foreground_admission: FacilityAdmission::default(),
         };
         let a = Uuid::now_v7();
         let b = Uuid::now_v7();

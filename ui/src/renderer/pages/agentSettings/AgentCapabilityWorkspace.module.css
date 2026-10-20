@@ -328,3 +328,9 @@
   .statusFilters { align-self: flex-start; }
   .moduleMeta { padding-left: 12px; }
 }
+.actionGroup {
+  margin: 12px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-2);
+}

@@ -16,18 +16,11 @@ mod provider_deletion;
 mod robot_wiring;
 mod router;
 mod services;
-#[cfg(all(windows, feature = "computer-use"))]
-pub mod windows_computer;
 /// Enter native helper modes before a product host parses CLI arguments,
 /// initializes its runtime or opens the dataset. Feature selection belongs to
 /// this library, including when Cargo unifies desktop and WebUI dependencies.
 #[cfg(windows)]
 pub fn windows_system_execution_entry() -> Option<std::process::ExitCode> {
-    #[cfg(feature = "computer-use")]
-    if let Err(error) = windows_computer::install_execution_handler() {
-        eprintln!("Native Computer execution handler: {error}");
-        return Some(std::process::ExitCode::FAILURE);
-    }
     nomi_system_execution::helper_entry()
 }
 mod workshop_bridge;

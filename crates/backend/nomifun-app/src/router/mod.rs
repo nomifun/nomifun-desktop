@@ -1,6 +1,7 @@
 //! HTTP router assembly for the application.
 
-pub(crate) mod agent_role_host;
+#[cfg(feature = "computer-use")]
+pub(crate) mod computer_host;
 pub(crate) mod agent_wave1_host;
 pub(crate) mod agent_wave1_companion_host;
 pub(crate) mod agent_memory_authority;

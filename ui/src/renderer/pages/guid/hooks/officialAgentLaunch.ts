@@ -33,7 +33,7 @@ export function officialAgentLaunchError(error: unknown, t: TFunction): string {
   } else {
     reasons.push(getConversationCreateErrorMessage(error, t));
   }
-  const hint = codes.includes('AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED')
+  const hint = codes.some(code => code === 'AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED' || code === 'CAPABILITY_ACTION_NOT_MATERIALIZED')
     ? t('guid.agentEntries.contractChanged')
     : codes.some((code) => /MODEL_|CHAT_ROUTE|PROVIDER_/.test(code))
       ? t('guid.agentEntries.modelNeeded')

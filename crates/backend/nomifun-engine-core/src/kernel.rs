@@ -262,8 +262,6 @@ impl KernelEngineToolInvoker {
         let process_action_id = invocation.binding.action_id.clone();
         let is_file_write = invocation.binding.capability_id.as_ref() == "workspace.files"
             && matches!(invocation.binding.action_id.as_ref(), "workspace.files/write" | "workspace.files/patch");
-        let is_computer_launch = invocation.binding.capability_id.as_ref() == "computer"
-            && invocation.binding.action_id.as_ref() == "computer/launch";
         let request = CapabilityInvocationRequest {
             principal: invocation.principal,
             session_owner: self.session_owner.clone(),
@@ -290,7 +288,7 @@ impl KernelEngineToolInvoker {
             )
             .await
             .map_err(|error| {
-                kernel_error_for_action(error, is_process, is_file_write, is_computer_launch)
+                kernel_error_for_action(error, is_process, is_file_write)
             })?;
         Ok(EngineToolResult::text(
             invocation.call.call_id,
@@ -420,7 +418,6 @@ fn kernel_error_for_action(
     error: KernelError,
     is_process: bool,
     is_file_write: bool,
-    is_computer_launch: bool,
 ) -> EngineToolError {
     if let Some(failure) = error.capability_execution_failure()
         && let Some(message) = settlement_loss_feedback(&failure.message)
@@ -435,13 +432,6 @@ fn kernel_error_for_action(
         return EngineToolError::CapabilityKernel {
             code: error.canonical_code().0,
             message: workspace_write_feedback(&failure.message),
-            details: owner_failure_details(failure.details.as_ref()),
-        };
-    }
-    if is_computer_launch && let Some(failure) = error.capability_execution_failure() {
-        return EngineToolError::CapabilityKernel {
-            code: error.canonical_code().0,
-            message: format!("{}\n{}", owner_failure_detail(&failure.message, 2048), computer_launch_feedback(&failure.message)),
             details: owner_failure_details(failure.details.as_ref()),
         };
     }
@@ -504,14 +494,6 @@ fn owner_failure_details(details: Option<&serde_json::Value>) -> Option<serde_js
         projected["native_file_error"]["message"] = owner_failure_detail(message, 1024).into();
     }
     (serde_json::to_vec(&projected).ok()?.len() <= MAX_DETAILS_BYTES).then_some(projected)
-}
-
-fn computer_launch_feedback(detail: &str) -> &'static str {
-    if detail.contains("does not exist") {
-        "Computer launch target path does not exist. Use the exact installed application or an existing file/folder path. Do not guess an alternative or retry the same path. No successful launch was reported."
-    } else {
-        "The Computer launch owner rejected this target. Verify the exact installed application or existing file/folder path before a changed retry. Do not guess an alternative. No successful launch was reported."
-    }
 }
 
 fn settlement_loss_feedback(detail: &str) -> Option<&'static str> {

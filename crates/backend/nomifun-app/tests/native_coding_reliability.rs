@@ -17,6 +17,10 @@ const HTML: &str = "<!DOCTYPE html>\n<html lang=\"zh-CN\"><meta charset=\"utf-8\
 #[path="support/live_tool_reliability.rs"]
 mod live_tool_reliability;
 
+#[cfg(all(target_os="windows", feature="browser-use", feature="computer-use"))]
+#[path="support/native_computer_chain.rs"]
+mod native_computer_chain;
+
 #[cfg(feature="browser-use")]
 struct BindingOnlyBrowser(Arc<AtomicUsize>);
 

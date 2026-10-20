@@ -13,7 +13,7 @@ NomiFun 默认信任用户的本机任务，在操作系统允许授予的范围
 | --- | --- | --- |
 | 文件、卷、普通程序、Shell、用户安装 | 登录用户的 App/backend 与受管子进程 | 属主、ACL、文件系统和 TCC 仍有效；绝对路径和工作区外路径正常使用 |
 | 管理员文件、系统配置、安装器、服务 | 进程工具的原生系统执行路径；macOS 使用 ServiceManagement 注册的 XPC helper | 系统注册或认证成功后仍须核验实际结果；root 不代表 TCC、桌面或设备已就绪 |
-| Computer 截图、可访问性、聚焦、鼠标键盘 | 链接进桌面 App 的 `nomi-computer`、`nomi-a11y` | 许可属于实际 App 代码身份与登录桌面；后台系统服务不冒充交互桌面 |
+| Computer 截图、可访问性、聚焦、鼠标键盘 | App 直接启动的普通用户 `nomifun-computer-worker` 与 vendored Cua Driver | 许可属于实际 App 代码身份与登录桌面；后台系统服务不冒充交互桌面 |
 | macOS 内嵌网页与媒体 | 原桌面 App 内的 WKWebView 与系统 WebKit 内容进程 | 保持 macOS WKWebView、Windows WebView2 结构；网站决定与系统许可分别存在 |
 | 语音输入 | 桌面 renderer 的 `getUserMedia` | 宿主麦克风 TCC 状态由同一 App 内 AVFoundation 查询；真实采集仍可能因设备或环境失败 |
 | AppleScript / Apple Events | 普通进程工具启动的程序及其实际 responsible App | 正式 App 声明用途及 automation entitlement；授权按发送方、目标和操作发生 |
@@ -29,7 +29,7 @@ GUI 和 backend 不长期以 root 运行。明确要保留的服务、登录项�
 - `GET /api/system/permissions` 读取实时状态，不申请权限、不下载依赖。
 - `POST /api/system/permissions/request` 只申请明确的 microphone、camera、accessibility 或 screen_recording。
 - `POST /api/system/permissions/open-settings` 打开对应隐私面板，包含 Full Disk Access 与 Automation。
-- 读取要求安装 owner；会显示宿主 UI 的入口还要求本地桌面信任。旧 Computer 路径只保留兼容。
+- 读取要求安装 owner；会显示宿主 UI 的入口还要求本地桌面信任。Computer 只保留新的只读 `/api/computer/status`，旧权限路径已删除。
 
 状态同时返回实际探针进程的 `process_id` 与 `app_bundle_identifier`；裸 CLI 没有 bundle 时为 null，
 不把配置里的正式 identifier 冒充当前身份。验收仍须独立核对真实可执行文件、签名与 LaunchServices
@@ -61,42 +61,13 @@ GUI 和 backend 不长期以 root 运行。明确要保留的服务、登录项�
 
 ## 授权变化与任务继续
 
-界面通过现役 `useSystemPermissions` 在进入和窗口重新获得焦点时刷新；过期请求不能覆盖更新的
-状态。Computer host 在每次真实调用前重检该动作的精确许可，不在 Agent 配置里缓存 OS 就绪。
-仅截图需要 Screen Recording；可访问性观察和输入需要 Accessibility；启动程序不依赖两者。
+界面在进入和窗口重新获得焦点时刷新现役系统许可。Computer 的 `system_permissions` 来自同一冻结清单：无障碍要求、截图条件和截图默认值由元数据决定。宿主在派发前检查实际请求，不把 OS 就绪缓存进 Agent 配置。授权变化后重启需要刷新的驱动代际，再获取新观察，原输入和 unknown 不自动重放。
 
-macOS 跨进程窗口聚焦先读取实际前台 PID 与确切 AXFocusedWindow；目标已经拥有键盘焦点时返回已确认的
-`changed=false`，不再次投递 AXRaise。需要激活时先读取动作与属性可写性，使用公开的
-NSRunningApplication 激活，并仅对已证明支持的 AX 属性/动作发送请求；最后仍核对确切目标窗口、
-前台应用和 PID。系统接受激活请求不等于完成；已投递的原生变更报错仍保留 uncertain，不因后来
-源码修复或新的观察改写首次不确定事实。
+缺权沿原 `SYSTEM_PERMISSION_REQUIRED` 与 `system-permission-required.v1` 的 not_executed 载体返回，保留确切 Turn 和操作身份。打开设置或完成系统授权不等于动作已完成；它不建立新授权账本，也不增加 Agent 的动作集合。
 
-当前 App 自身窗口另走主线程 AppKit 路径：真实 CGWindowID 的 owner PID 必须等于当前进程，
-在现役主队列再次核对编号、owner、bounds 与标题，再以公开 NSApplication / NSWindow API 按需
-恢复并前置该确切窗口。所有 AppKit 访问和检查均在主队列；外部 worker 只传标量和元数据，以
-独立队列任务核验实际 frontmost PID、active 状态、精确 keyWindow、可见且未最小化，允许主事件
-循环处理异步激活。1.2 秒是验证阶段预算，已开始的队列任务仍继续 join，不把它当作总硬超时。
-本进程窗口不再向 AX actor 发送同步 AXRaise，也不把 self AX handle 搬到其他线程。首次原生变更前
-记录 submitted；已投递后无法确认或队列回复失败保留 uncertain，不能返回未执行或成功。
+macOS worker 由 App 直接启动，正式分发时与 App 同 Developer ID 签名并开启 Hardened Runtime；TCC 归属 NomiFun 的要求仍须在签名包验证，不能借 Terminal 或管理员 helper 的许可替代。Windows 不再提供提权桌面桥，普通完整性 worker 保留 UIPI/锁屏等结构化失败。Linux 的 portal、AT-SPI 和桌面 backend 按实际驱动结果表达，不用配置值伪造系统授权。
 
-macOS AX 观察保留具有真实非空 AXValue 的静态显示，即使其没有标题、描述或可执行动作。
-值仍由现役安全读取路径取得：密码角色或密码子角色不请求 AXValue，也不序列化其内容。
-显示节点和按钮使用相同的原生几何、遍历预算、快照代次和实时内容校验；可观察的数值不表示
-该节点支持点击。验收读取 Calculator 时先清除可能恢复的旧算式、观察实际 0，再取得新 ref 操作。
-
-macOS `key` 动作的 ASCII 字符在原输入主队列上只读查询当前 TIS 键盘布局，通过公开的
-UCKeyTranslate 取得真实无修饰键映射；主键区匹配优先于 SDK 定义的数字键盘重复键，只有没有
-主键匹配时才采用真实数字键盘映射。解析后的键码继续使用 Enigo 公开 Key::Other，原修饰键、
-反向释放和错误清理链保持一致。没有安全布局映射时明确返回未支持，不默认投递键码 0，不修改
-用户输入源或 IME。独立 `type` 文字动作保持布局无关的现役实现；它不能证明 `key` 组合键通过。
-
-确认缺权沿原工具结果返回 `SYSTEM_PERMISSION_REQUIRED` 与 `system-permission-required.v1` 的
-`not_executed`，保留确切 Turn 和操作身份。它不是新的授权账本，也不是已经完成的动作。
-授权变化后必须重新观察，再发起受阻步骤；旧物理输入与未知效果不能自动重放。
-需要重启时保留原 Session 和事实，按现役恢复合同继续，不把“打开设置”当成任务终态。
-
-原生管理员组件复用操作系统允许保留的注册/认证上下文。服务未注册、需要用户批准、连接失败、
-启动结果未知、取消及清理分别保留真实结果；不能把没有管理员设施改写成普通用户操作成功。
+原生管理员组件继续复用系统允许保留的注册和认证上下文。服务未注册、需要用户批准、连接失败、启动结果未知、取消及清理分别保存真实结果；管理员设施不代表桌面或设备已就绪。
 
 ## 三平台工程状态
 
@@ -106,7 +77,7 @@ UCKeyTranslate 取得真实无修饰键映射；主键区匹配优先于 SDK 定
 | --- | --- | --- | --- |
 | 文件与普通进程 | 共享 canonical 文件/进程与每次启动环境；原登录用户 | 共享合同适用；盘符、UNC、ACL、shim 须 Windows 编译和原生验证 | 共享合同适用；权限、卷、发行环境须 Linux 编译和原生验证 |
 | 管理员执行 | 原生 ServiceManagement + XPC + 同一 ProcessSupervisor；须正式签名 bundle 及系统批准 | 原生 UAC、可靠执行与进程树回执、安装/服务路径待平台交接 | 原生系统认证、可靠执行与服务路径待平台交接 |
-| Computer | 现役截图、AX、聚焦、输入；实时 TCC 与原登录桌面 | 现役 UIA/输入；高完整性窗口、UIPI 和登录会话桥接待实现/验证 | AT-SPI 已有库代码；完整产品入口仍有 UnsupportedPlatform，X11/Wayland/portal 待平台实现 |
+| Computer | App 直接启动同签名 Cua worker；TCC 和签名包待本次原生验收 | 普通完整性 Cua worker；提权窗口结构化拒绝 | X11/XWayland 与 AT-SPI；原生 Wayland capture 未启用，真实平台验收待补 |
 | Browser / 媒体 | 现役 WKWebView；宿主媒体状态、用途和 entitlements 接通；设备调用另验 | 保持 WebView2；OS/provider 媒体许可与设备调用待 Windows 原生验证 | 保持既有真实能力；不以删除 unsupported 标记冒充桌面实现 |
 | FDA / Automation / LAN | 全局不可可靠探测项保留 unknown，实际任务结果与对应设置入口 | 不套用 macOS TCC；系统完整性、账户和设备策略按实际操作报告 | 不套用 macOS TCC；显示会话、portal、SELinux 等按实际操作报告 |
 | 后台与持续产物 | 临时进程 owner 与原生 launchd 产物区分；服务完整生命周期另验 | SCM/Task Scheduler、用户桌面与服务 session 区分待平台交接 | systemd/发行打包、桌面会话与系统执行区分待平台交接 |
@@ -129,7 +100,7 @@ PID 69753 曾替换先前验收实例；完成后已协调退出，并通过签�
 会覆盖私人内容的截图不得提交。首次授权/撤回测试使用专用测试账户或 VM，不能为测试重置开发者
 全部隐私设置。只读库存或 Terminal 探针不能替代上述产品实测。
 
-现有原生入口包括 `nomi-computer/examples/macos_fixture_probe.rs`（仅隔离窗口聚焦）以及
+Browser 原生入口包括
 `apps/desktop/examples/macos_browser_compatibility_smoke.rs` 的
 `--media-permissions --media-user-ready`（可见网站媒体请求）。后者必须经过现役 native fixture
 打包/启动合同，不能把裸 executable 当成 App 许可验收。独立 fixture 通过只证明该 fixture 身份。
@@ -153,39 +124,8 @@ suspended=1、connected=1、inuse=0，IOPM 机盖闭合为 true；App camera 许
 麦克风许可由用户完成。首次合并采集的 `OverconstrainedError` 与当时摄像头 suspended、合盖
 诊断独立保留，不覆盖为后续麦克风成功，也不沿用历史零报告描述当前采集结果。
 
-`scripts/validation/global-os-native.mjs --scenario desktop --template assistant.general` 使用已正常
-启动的完整 App、隔离 owner 的正常登录 JWT 和现役默认 Agent，运行真实 Computer 截图、AX、
-聚焦、按钮点击、组合键与退出。仅在系统 Calculator 未运行时启动本次实例；计算清除按钮由实际
-AX 语义和新 ref 选取，严格读回 0 后再输入。现代 Calculator 的当前完整算式逐字核验为
-`12+`、`12+3`、`12+34`，最终必须出现独立数值 `46`，不能用算式子串、历史数字或按钮文字通过。
-脚本供应器在输入回执后有界等待异步 AX 通知，再执行新观察；过期代次仍返回真实失败。
-报告只保留截图 PNG 尺寸与字节数、所需代次/ref 和本次计算的核验值，不保留屏幕像素、原始 AX
-或其他窗口正文。最后经 Agent Cmd+Q 与宿主只读 PID 检查确认退出。该本机脚本供应器的产品路径
-证据不代表外网模型推理，也不覆盖许可首次授予、拒绝或撤回后的恢复。
+Computer 本次实现与实际平台证据见[专项进展](../handoffs/computer-use-rebuild.zh.md#12-单份执行进展)；已退役驱动的数字、ref/generation 和桥接验收不作为新实现的证明。
 
-同一入口的 test-only `--desktop-background-focus --native-data-root /PRIVATE/MARKED/native-data`
-只验后台激活。正常 owner JWT 读取当前 endpoint 的系统许可 caller PID，与 private dataset 公告
-及 bundle identifier 绑定；宿主仅只读 CGWindowList 和专用验收 App 的实际 bundle URL，确定它的
-唯一已有主窗口。默认 Agent 先真实激活该确切窗口，再以新 list 证明本次 Calculator 已在后台，
-随后真实激活 Calculator、核验新 AX 归属并退出。两个方向均拒绝将 already-focused 回执算作
-已激活；不再依赖 CUA 的 App 内事件来推断操作系统前台变化。历史 CUA setup 未达成和首次 self
-AXRaise 崩溃均独立保留。本轮 self-window 修复后的正式签名、公证 App 已独立通过两个方向的
-真实后台激活，回执均确认 actual activated；同一 App 的完整截图、AX、点击、原 `shift+=`、
-计算结果独立 `46` 和退出闭环也已通过，对应报告时间标识为 `1792174996658`、`1792175068351`。
-最终 e4 签名 App 在 PID 85132、UID 501 下又直接通过完整 Desktop 闭环，报告为
-`desktop-assistant.general-1792199279748-e3fa2d37-8dae-423a-860f-2acbe7744fff.json`；
-原先因锁屏未执行该最终版本回归的状态已成为历史。
-这些原生结果与下述源码、SDK 和单测证据分别记录，不结算旧数据中的未知或未完成 Effect。
-
-本轮 self-window 修复的定向 `nomi-computer` lib 为 127 passed / 8 ignored；`nomi-a11y` lib
-为 35 passed / 1 ignored。公开 AppKit 调用已用 arm64、x86_64 的 macOS 14 target 做 SDK ABI
-和 availability compile-only 检查；这些检查没有链接、执行或控制窗口，原生产品结果另记。
-
-定向验证使用 `cargo test -p nomi-computer -p nomi-a11y --lib`、
-`cargo test -p nomifun-app --lib --features computer-use computer_permissions::tests`、
-权限 model/hook/Settings 交互测试，以及 `bun run typecheck`、
-`bun run check:desktop-ui-boundary`。签名与打包另验 Info.plist、entitlements、helper、
-`codesign --verify --deep --strict`；公开分发还须公证和 Gatekeeper 检查。
 `bun scripts/validation/macos-host-signing-fixture.mjs --report /ABS/NEW/report.json` 提供无需账号、
 联网或管理员的真实 Mach-O 初签与增量重签回归，逐次校验 strict seal 和三项宿主 entitlement；
 成功后删除临时 App，失败保留 fixture。它不证明正式分发公证、helper 注册或任何 TCC 许可。

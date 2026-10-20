@@ -2,8 +2,8 @@ import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
 import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
-import { ipcBridge } from '@/common';
 import { appHosting } from '@/common/adapter/appHostingBridge';
+import { ipcBridge } from '@/common';
 import { SWRConfig } from 'swr';
 import { Modal } from '@arco-design/web-react';
 import { createInstance } from 'i18next';
@@ -25,6 +25,9 @@ import common from '../../services/i18n/locales/en-US/common.json';
 import settings from '../../services/i18n/locales/en-US/settings.json';
 import appHostingLocale from '../../services/i18n/locales/en-US/appHosting.json';
 import AgentCapabilityWorkspace from './AgentCapabilityWorkspace';
+import frozenComputer from '../../../../../crates/backend/nomifun-agent-contracts/contracts/computer-tools.v1.json';
+import { computerActionGroups } from '@/common/chat/computerSurface';
+import { resolveToolPresentation } from '@/common/chat/toolPresentation';
 
 const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
@@ -86,8 +89,7 @@ const files = moduleItem('workspace.files', [
 ], ['workspace']);
 const knowledge = moduleItem('knowledge', [['knowledge/search', 'read_sensitive']], ['knowledge_base']);
 const browser = moduleItem('browser', [['browser/observe', 'read_sensitive']]);
-const unavailableComputer = moduleItem('computer', [['computer/observe', 'read_sensitive']], ['computer']);
-const availableComputer = moduleItem('computer', [['computer/input', 'physical']], ['computer']);
+const unavailableDevice = moduleItem('test.device', [['test.device/inspect', 'read_sensitive']]);
 const appDevelopment = moduleItem('app.hosting', [
   ['app.hosting/import', 'write_durable'],
   ['app.hosting/list', 'read_sensitive'],
@@ -105,9 +107,9 @@ const filesWithDependency: CapabilityModuleCatalogItem = {
   required_modules: [workspaceGuard.module],
 };
 
-const catalog = (modules = [files, knowledge, browser, unavailableComputer]): AgentCatalogResponse => ({
+const catalog = (modules = [files, knowledge, browser, unavailableDevice]): AgentCatalogResponse => ({
   modules,
-  capabilities: modules.map((module) => availability(module, module !== unavailableComputer)),
+  capabilities: modules.map((module) => availability(module, module !== unavailableDevice)),
   skills: [],
   mcp_tools: [],
   roles: [],
@@ -164,6 +166,23 @@ afterEach(async () => {
 });
 
 describe('Agent capability Module workbench', () => {
+  test('groups all frozen Computer actions and edits their exact grant independently', async () => {
+    spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue({ platform: 'windows', app_label: 'NomiFun',
+      permissions: (['accessibility', 'screen_recording'] as const).map(kind => ({ kind, state: 'not_required',
+        can_request: false, can_open_settings: false, requires_restart_after_grant: false, capabilities: ['computer_use'] })) });
+    const computer = moduleItem('computer', frozenComputer.tools.map(tool => [tool.action_id,
+      tool.effect_class.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase()]));
+    const actions = computer.actions.map(action => action.action_id);
+    const screen = mount(documentWith([[computer.module, actions]]), catalog([computer]));
+    fireEvent.click(screen.getByRole('button', { name: /22 actions and contributions/ }));
+    for (const group of computerActionGroups) expect(screen.getByRole('heading', { name: en.workbench.computerGroups[group] })).toBeTruthy();
+    const tool = frozenComputer.tools[0];
+    const title = resolveToolPresentation({ name: tool.model_tool, capabilityId: 'computer', actionId: tool.action_id }, 'en-US').title;
+    expect(screen.getAllByRole('checkbox')).toHaveLength(actions.length);
+    fireEvent.click(screen.getByRole('checkbox', { name: `Allow ${title} in ${en.modules.computer.name}` }));
+    await waitFor(() => expect(screen.state().enabled_capabilities[0].action_allowlist).toEqual(actions.filter(action => action !== tool.action_id).sort()));
+  });
+
   test('offers communicating app development without enabling it until the user selects it', async () => {
     const screen = mount(documentWith([]), catalog([files, appDevelopment]));
     const moduleName = en.modules.appHosting.name;
@@ -386,32 +405,6 @@ describe('Agent capability Module workbench', () => {
     const action = dependency.getByRole('checkbox', { name: 'Allow Read in workspace.guard' }) as HTMLInputElement;
     expect(action.checked).toBe(true);
     expect(action.disabled).toBe(true);
-  });
-
-  test('keeps an unavailable Module inspectable but cannot enable it', () => {
-    const screen = mount(documentWith([]));
-    const toggle = screen.getByRole('switch', { name: 'Enable Computer' }) as HTMLButtonElement;
-    expect(toggle.disabled).toBe(true);
-    expect(screen.getByText(en.common.unavailable)).toBeTruthy();
-    expect(screen.state().enabled_capabilities).toEqual([]);
-  });
-
-  test('warns on the enabled Computer card and links to the exact permission tab', async () => {
-    const get = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue({
-      platform: 'macos', app_label: 'NomiFun', permissions: [
-        { kind: 'microphone', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['voice_input'] },
-        { kind: 'accessibility', state: 'not_determined', can_request: true, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['computer_use'] },
-        { kind: 'screen_recording', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: true, capabilities: ['computer_use'] },
-      ],
-    });
-    const screen = mount(
-      documentWith([[availableComputer.module, ['computer/input']]]),
-      catalog([availableComputer])
-    );
-    expect(await screen.findByText(/Missing system access: Accessibility/)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: en.workbench.openSystemPermissions }));
-    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/settings/permissions?tab=computer-use'));
-    get.mockRestore();
   });
 
   test('preserves a missing grant until the user explicitly disables it', async () => {

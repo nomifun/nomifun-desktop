@@ -124,31 +124,10 @@ pub(super) async fn compile(
                 action.action_id.as_ref(),
                 schema,
             );
-            if !concrete_object_schema(&schema.0, true) {
-                return Err(error(format!(
-                    "{} action {} has no strict canonical tool schema",
-                    selected.capability.id.as_ref(),
-                    action.action_id.as_ref(),
-                )));
-            }
-            exposures.push(AgentToolExposure {
-                definition: ChatToolDefinition {
-                    name: platform_tool_name(
-                        selected.capability.id.as_ref(),
-                        action.action_id.as_ref(),
-                    ),
-                    description: format!(
-                        "{}: {} Action: {}.",
-                        capability.manifest.display.name,
-                        capability.manifest.display.description,
-                        action.action_id.as_ref(),
-                    ),
-                    input_schema: schema,
-                    deferred: false,
-                },
-                capability_id: selected.capability.id.clone(),
-                action_id: action.action_id.clone(),
-            });
+            exposures.push(builtin_tool_exposure(
+                &selected.capability.id, &action.action_id, schema,
+                &capability.manifest.display.name, &capability.manifest.display.description,
+            )?);
         }
     }
     for selected in snapshot
@@ -262,6 +241,34 @@ fn resource_ready_exposures(
         }
     }
     Ok(resource_ready)
+}
+
+fn builtin_tool_exposure(
+    capability_id: &CapabilityId, action_id: &ActionId,
+    canonical: nomifun_agent_contracts::StrictJsonValue,
+    display_name: &str, display_description: &str,
+) -> Result<AgentToolExposure, AppError> {
+    let exposure = AgentToolExposure {
+        definition: ChatToolDefinition {
+            name: platform_tool_name(capability_id.as_ref(), action_id.as_ref()),
+            description: format!("{display_name}: {display_description} Action: {}.", action_id.as_ref()),
+            input_schema: canonical, deferred: false,
+        },
+        capability_id: capability_id.clone(), action_id: action_id.clone(),
+    };
+    // Computer's canonical authorization schema intentionally includes actual
+    // captured platform forms. The model receives the exact current platform
+    // definition through the same projection used when installing its plan.
+    // This does not replace the canonical resolver or Kernel validation.
+    #[cfg(feature = "computer-use")]
+    let exposure = if capability_id.as_ref() == nomifun_agent_domain_wave2::COMPUTER_MODULE_ID {
+        super::computer_host::project_exposure(exposure, nomifun_computer::surface::RouteTier::Full)
+            .ok_or_else(|| error(format!("Computer action {} has no frozen tool schema for this platform", action_id.as_ref())))?
+    } else { exposure };
+    if !concrete_object_schema(&exposure.definition.input_schema.0, true) {
+        return Err(error(format!("{} action {} has no strict canonical tool schema", capability_id.as_ref(), action_id.as_ref())));
+    }
+    Ok(exposure)
 }
 
 fn standard_tool_exposure(
@@ -386,20 +393,34 @@ mod tests {
             created_by: "creative-owner".into(), created_at_ms: 1, reason: None,
         };
         revision.reference.revision_digest = revision.revision_digest().unwrap();
+        let mut installation_role_bindings = BTreeMap::new();
+        if selected.iter().any(|(id, _)| *id == nomifun_agent_domain_wave2::COMPUTER_MODULE_ID) {
+            let role = nomifun_agent_domain_wave2::COMPUTER_EXECUTION_ROLE_ID;
+            let mount = nomifun_agent_domain_wave2::COMPUTER_MOUNT_ID;
+            let provider = materialized.role_provider(&role.into(), &mount.into()).unwrap();
+            installation_role_bindings.insert(role.into(), InstallationRoleBinding {
+                selection: RoleProviderSelection { role: provider.provider.role.clone(), provider_mount_id: mount.into() },
+                binding_version: 1, updated_at_ms: 0,
+            });
+        }
         let snapshot = AgentPresetCompiler::compile(&materialized, &CompilerEnvironment {
             resolver_version: "1.0.0".into(), required_runtime_protocol_version: "1.0.0".into(),
             required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
             runtime_feature_inventory_digest: "a".repeat(64).into(), available_runtime_features: BTreeSet::new(),
-            installation_role_bindings: BTreeMap::new(), canonical_schema_manifest_digest: "a".repeat(64).into(),
-            target_contribution_manifest_digest: materialized.registry_digest.clone(), host_target: "windows-desktop-x64".into(),
+            installation_role_bindings, canonical_schema_manifest_digest: "a".repeat(64).into(),
+            target_contribution_manifest_digest: materialized.registry_digest.clone(),
+            host_target: if selected.iter().any(|(id, _)| *id == nomifun_agent_domain_wave2::COMPUTER_MODULE_ID)
+                { "x86_64-pc-windows-msvc" } else { "windows-desktop-x64" }.into(),
             host_surface: "desktop".into(), availability_evidence_revision: "creative-resource-test".into(),
         }, CompileRequest { revision, principal: owner.clone(), scene: "creative".into(), surface: "desktop".into(),
             audience: "user".into(), created_at_ms: 1, resolver_run_id: "creative-resource-resolve".into(),
         }).unwrap().with_target_resource_bindings(&owner, resource_kinds.iter().map(|kind|TypedResourceBinding {
             binding_id:format!("fixture-{kind}-binding").into(),resource_kind:(*kind).into(),
             resource_id:if *kind=="asset_library" {nomifun_agent_domain_wave3::CREATIVE_ASSET_LIBRARY_RESOURCE_ID.into()}
+                else if *kind=="computer" {"local-desktop".into()}
                 else {format!("fixture-{kind}").into()},owner_id:owner.principal_id.clone(),
-            operations:BTreeSet::from(["read".into(),"write".into(),"execute".into()]),
+            operations:if *kind=="computer" {BTreeSet::from(["observe".into(),"input".into(),"launch".into()])}
+                else {BTreeSet::from(["read".into(),"write".into(),"execute".into()])},
             connection_config_ref:None,typed_parameters:BTreeMap::new(),
         }).collect()).unwrap();
         (snapshot, materialized, registry)
@@ -408,6 +429,112 @@ mod tests {
     fn creative_snapshot(selected: &[(&str, &[&str])]) -> (CompiledSnapshot, std::sync::Arc<MaterializedRegistry>) {
         let (snapshot,materialized,_)=platform_snapshot(nomifun_agent_domain_wave3::registrations().unwrap(),selected,&["asset_library"]);
         (snapshot,materialized)
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[tokio::test]
+    async fn computer_formal_surface_uses_exact_platform_tools_and_preserves_canonical_union() {
+        struct NoPluginSchemas;
+        #[async_trait::async_trait]
+        impl NomiPluginToolSchemaResolver for NoPluginSchemas {
+            async fn resolve(&self, _: &nomifun_agent_contracts::ResolvedCapability,
+                _: &nomifun_agent_contracts::CanonicalSchemaRef) -> Result<StrictJsonValue, String> {
+                Err("no Plugin selected".into())
+            }
+        }
+        struct FrozenSchemas;
+        #[async_trait::async_trait]
+        impl NomiPlatformBuiltinToolSchemaResolver for FrozenSchemas {
+            async fn resolve(&self, capability: &nomifun_agent_contracts::ResolvedCapability,
+                reference: &nomifun_agent_contracts::CanonicalSchemaRef) -> Result<StrictJsonValue, String> {
+                nomifun_agent_domain_wave2::resolve_action_schema(capability.capability.id.as_ref(), reference)
+            }
+        }
+        let (snapshot, registry, _) = platform_snapshot(
+            vec![nomifun_agent_domain_wave2::computer_registration().unwrap()],
+            &[("computer", nomifun_agent_domain_wave2::COMPUTER_ACTION_IDS)], &["computer"],
+        );
+        let active = nomifun_agent_kernel::SessionCapabilityState::new(&snapshot).snapshot().unwrap();
+        let canonical = registry.capability(&"computer".into()).unwrap().manifest.contributions.actions.iter()
+            .map(|action| (action.action_id.clone(), nomifun_agent_domain_wave2::resolve_action_schema("computer", &action.input_schema).unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        assert!(canonical.values().any(|schema| schema.0.get("anyOf").is_some()), "fixture exercises the cross-platform authorization union");
+        let expected = nomifun_computer::surface::tools_for_tier(nomifun_computer::surface::RouteTier::Full, "en-US");
+        let result = compile(&snapshot, &active, &registry, &NoPluginSchemas, &FrozenSchemas, &BTreeSet::new()).await;
+        if expected.is_empty() {
+            assert!(result.is_err(), "a platform without a frozen capture cannot borrow another platform's schema");
+            return;
+        }
+        let plan = result.unwrap();
+        assert_eq!(plan.len(), nomifun_agent_domain_wave2::COMPUTER_ACTION_IDS.len());
+        for tool in expected {
+            let binding = plan.binding(&tool.name).unwrap();
+            let definition = ChatToolDefinition { name: tool.name, description: tool.description,
+                input_schema: StrictJsonValue(tool.input_schema), deferred: tool.deferred };
+            assert_eq!(binding.definition, definition);
+            let exposure = super::super::computer_host::project_exposure(AgentToolExposure {
+                definition, capability_id: "computer".into(), action_id: tool.action_id.clone().into(),
+            }, nomifun_computer::surface::RouteTier::Full).unwrap();
+            assert_eq!(exposure.definition, binding.definition, "installation's canonical projection must be idempotent");
+            assert!(concrete_object_schema(&binding.definition.input_schema.0, true));
+        }
+        for action in &registry.capability(&"computer".into()).unwrap().manifest.contributions.actions {
+            assert_eq!(nomifun_agent_domain_wave2::resolve_action_schema("computer", &action.input_schema).unwrap(), canonical[&action.action_id]);
+        }
+        assert!(builtin_tool_exposure(&"other.domain".into(), &"other.domain/read".into(),
+            canonical.values().find(|schema| schema.0.get("anyOf").is_some()).unwrap().clone(), "Other", "Other").is_err(),
+            "Computer projection must not relax the generic strict-object boundary");
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[tokio::test]
+    async fn general_computer_catalog_deferral_survives_strict_canonical_recompile() {
+        struct NativeSchemas;
+        #[async_trait::async_trait]
+        impl NomiPluginToolSchemaResolver for NativeSchemas {
+            async fn resolve(&self, _: &nomifun_agent_contracts::ResolvedCapability,
+                _: &nomifun_agent_contracts::CanonicalSchemaRef) -> Result<StrictJsonValue, String> {
+                Err("this General slice has no Plugin tools".into())
+            }
+        }
+        #[async_trait::async_trait]
+        impl NomiPlatformBuiltinToolSchemaResolver for NativeSchemas {
+            async fn resolve(&self, capability: &nomifun_agent_contracts::ResolvedCapability,
+                reference: &nomifun_agent_contracts::CanonicalSchemaRef) -> Result<StrictJsonValue, String> {
+                nomifun_agent_domain_wave2::resolve_action_schema(capability.capability.id.as_ref(), reference)
+            }
+        }
+        // General's real Computer and file grants already cross the normal
+        // visibility budget; no synthetic schemas or relaxed limits are needed.
+        let seed = nomifun_agent_contracts::official_preset_seed_manifest_payload();
+        let general = &seed.templates[&nomifun_agent_contracts::OfficialPresetKey::AssistantGeneral];
+        let selections = general.enabled_capabilities.iter().filter(|selection|
+            matches!(selection.capability.id.as_ref(), "computer" | "workspace.files"))
+            .map(|selection| (selection.capability.id.as_ref(), selection.action_allowlist.iter()
+                .map(|action| action.as_ref()).collect::<Vec<&str>>())).collect::<Vec<_>>();
+        let selected = selections.iter().map(|(id, actions)| (*id, actions.as_slice())).collect::<Vec<_>>();
+        let (snapshot, registry, _) = platform_snapshot(vec![
+            nomifun_agent_domain_wave2::workspace_execution_registration().unwrap(),
+            nomifun_agent_domain_wave2::computer_registration().unwrap(),
+        ], &selected, &["workspace", "computer"]);
+        let active = nomifun_agent_kernel::SessionCapabilityState::new(&snapshot).snapshot().unwrap();
+        let initial = compile(&snapshot, &active, &registry, &NativeSchemas, &NativeSchemas, &BTreeSet::new()).await.unwrap();
+        let visible = initial.model_definitions().into_iter().filter(|definition| !definition.deferred).collect::<Vec<_>>();
+        assert!(serde_json::to_vec(&visible).unwrap().len() > nomifun_agent_runtime::VISIBLE_TOOL_DEFINITION_BYTE_BUDGET);
+        let presented = super::super::agent_tool_presentation::project(initial.clone(), true).unwrap();
+        assert!(initial.model_definitions().iter().any(|definition| {
+            let binding = initial.binding(&definition.name).unwrap();
+            binding.capability_id.as_ref() == "computer" && !definition.deferred
+                && presented.binding(&definition.name).unwrap().definition.deferred
+        }));
+        let exposures = presented.model_definitions().into_iter().map(|definition| {
+            let binding = presented.binding(&definition.name).unwrap();
+            super::super::computer_host::project_exposure(AgentToolExposure { definition,
+                capability_id: binding.capability_id.clone(), action_id: binding.action_id.clone() },
+                nomifun_computer::surface::RouteTier::Full).unwrap()
+        });
+        let canonical = nomifun_engine_core::compile_engine_tool_plan(&snapshot, &active, &registry, exposures).unwrap();
+        assert_eq!(presented, canonical, "installation still requires equality of every canonical binding field");
     }
 
     #[tokio::test]

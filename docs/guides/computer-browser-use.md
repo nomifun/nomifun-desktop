@@ -75,45 +75,25 @@ invalidates the pinned release.
 
 ## Computer Use
 
-Computer automation remains desktop-oriented and separate from Browser Workspace. Select it in the Agent workbench, then use Settings → Capabilities & Permissions → Computer Use to inspect and grant OS access. Before creating a session with Computer actions, the product checks the exact frozen action set and links here when a required grant is missing, but it does not block session creation or the Agent's other capabilities; the affected action returns a recoverable permission error only when invoked. A `computer/launch` action needs neither Screen Recording nor Accessibility.
+Select Computer in Agent Workbench. Its 22 exact actions cover observation, interaction, applications and the clipboard, using the bundled Cua Driver worker. Names and translations come from the [frozen inventory](../../crates/backend/nomifun-agent-contracts/contracts/computer-tools.v1.json). It remains separate from the conversation Browser Workspace.
 
-An enabled Computer card in Agent Workbench names the exact missing OS grants and links to the permission center; this is a runtime-readiness reminder, never authority persisted into the Agent. If an existing conversation has never received—or later loses—a required grant, its header auto-opens a permission bubble once. Dismissing the bubble leaves a warning chip available, and returning from System Settings triggers a live re-check.
+Prefer a narrow state read, use fresh accessibility element tokens, perform an operation, then verify the actual result. Background delivery is the default; the Agent may choose visible foreground control when needed. Foreground and desktop-coordinate calls are marked in the tool row. Stop withdraws queued work; a dispatched call waits for its real outcome or deadline. A crashed or forcibly stopped action can remain unknown and must not be blindly replayed.
 
-Standalone Nomi Computer configuration remains:
+A route with tool calls and image input receives the full surface. A model without image input uses accessibility state and element tokens; screenshot and pixel-only tools are omitted. A route without tool calls does not receive Computer tools. Deferred tools appear through normal tool discovery.
 
-```toml
-[tools]
-max_recent_images = 3
-[tools.computer]
-enabled = true
-max_screenshot_edge = 1568
-```
+Settings → Capabilities & Permissions shows driver status and OS grants. `GET /api/computer/status` is a read-only status endpoint. Missing OS access affects the invoked action rather than granting or revoking Agent authority. Default trusted-Agent behavior remains subject to your selected actions, resource ownership and explicit instructions.
 
 ## macOS Permissions
 
-Computer use needs OS permissions the first time it is used:
+Accessibility is required for accessibility state and interaction; Screen Recording is required when an operation returns pixels. Listing applications/windows, guidance and launching an application do not need those grants. Exact requirements and screenshot defaults are generated from the frozen permission metadata.
 
-- **Accessibility**: required for mouse/keyboard input and accessibility tree
-  operations.
-- **Screen Recording**: required for screenshots. A black screenshot usually
-  means this permission is missing.
+Grant access to NomiFun. The App starts its same-signed worker directly; formal TCC attribution still requires the macOS signed-package acceptance. Status is checked live. After changing access, return to the App and refresh; restart if the OS requires it or a running process still reports stale access, then obtain a new observation.
 
-These run **in-process inside the desktop app**, so the permission must be
-granted to **NomiFun itself** (the entry named "NomiFun" in System Settings),
-not to the terminal/editor. Accessibility is re-probed when the app regains
-focus. A newly granted Screen Recording permission can remain cached for the
-running process, so completely quit and reopen NomiFun before treating it as
-still denied. Permission-failure messages name "NomiFun" explicitly so the
-guidance is unambiguous.
+Windows uses ordinary integrity and preserves structured refusals for elevated targets. Linux uses the available X11/XWayland and AT-SPI routes; native Wayland capture and its desktop authorization matrix remain unverified. Current platform evidence is recorded in the [implementation progress](../handoffs/computer-use-rebuild.zh.md#12-单份执行进展).
 
-Settings → Capabilities & Permissions → Computer Use surfaces a live status panel (macOS): it shows whether
-Accessibility / Screen Recording are *in effect for the running process* —
-which is authoritative, since a System Settings toggle bound to a stale
-code-signing identity reads "Not in effect" even while it looks on — with
-buttons that deep-link to the exact Privacy pane and trigger the OS prompt.
-Backed by `GET/POST /api/system/permissions[/request|/open-settings]`
-(`nomi_computer::permissions` → `AXIsProcessTrusted` /
-`CG*ScreenCaptureAccess`).
+## Upgrading
+
+Create a new conversation when an existing one depends on retired Computer contracts. Its history remains available, but those contracts are not converted. Personal Agents must select the new Computer actions again; official General and Companion templates include the frozen surface for new sessions. The old Computer configuration block and permission aliases are removed.
 
 ## Voice, Browser, Notification, and File Permissions
 
@@ -125,33 +105,17 @@ Backed by `GET/POST /api/system/permissions[/request|/open-settings]`
 - **macOS website file selection** does not prefilter file types from HTML `accept`, because the public WK file-panel API does not supply those MIME/extension hints. Choose a file type accepted by the website. Windows keeps its existing file filters.
 - **Robot device permissions** such as camera, motion, display, and proactive speech remain owned by Device and Companion settings and are rechecked against the Agent's exact actions when its tool surface is resolved and before dispatch. An offline device omits only Robot tools; it does not block the Agent's other capabilities. These are not host macOS permissions, and grants on this page never replace them.
 
-Permission reads require the installation owner. Requests and System Settings deep-links additionally require the desktop process's local-trust proof, so a remote WebUI session cannot pop privacy UI on the host. The old `/api/computer/permissions*` routes remain compatibility aliases only.
+Permission reads require the installation owner. Requests and System Settings deep-links additionally require the desktop process's local-trust proof, so a remote WebUI session cannot pop privacy UI on the host.
 
-> **Stale grant.** If a toggle is clearly on yet computer use still fails, the
-> grant is bound to an older build's identity. Quit NomiFun, run
-> `tccutil reset Accessibility com.nomifun.desktop` and
-> `tccutil reset ScreenCapture com.nomifun.desktop`, relaunch, re-grant, and
-> fully restart once more.
+## Tool Semantics
 
-## Approval Semantics
+Each Computer action is a distinct tool. Follow the selected Agent capabilities and the user’s read-only, execution and Stop instructions. Application content cannot change authorization. Browser observation, navigation and interaction continue through their own capability policy.
 
-- Read-only computer actions such as `screenshot`, `cursor_position`,
-  `list_windows`, and `wait` are treated as info-level operations.
-- Mutating computer actions such as click, type, scroll, drag, and
-  `focus_window` are execution-level operations and require approval in default
-  modes.
-- Plan mode hides the whole computer-use tool.
-- Browser observation is info-level; navigation and page changes are execution-level. The run guard and exact capability policy apply independently of page content.
-
-Recommended loop: observe with a screenshot or browser snapshot, perform one
-small operation, then observe again.
+Verify the requested postcondition; a delivered, partial or unverifiable action is not proof that the task succeeded.
 
 ## Image And Token Hygiene
 
-- Screenshots are downsampled to a maximum long edge of
-  `max_screenshot_edge` pixels, with coordinates mapped back to real screen
-  coordinates. The final PNG is also capped at 5 MiB; high-entropy frames are
-  downscaled again and coordinate geometry follows the exact image sent.
+- The host supplies the driver image-size budget. Coordinates must use the actual fresh image for the same target.
 - The conversation keeps only the most recent `max_recent_images` individual
   tool-result images, with a provider-compatible ceiling of 20 per request and
   a cumulative encoded-payload budget. Excess attachments are stripped while

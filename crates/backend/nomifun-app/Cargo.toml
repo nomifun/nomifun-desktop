@@ -214,8 +214,7 @@ qqbot = ["nomifun-channel/qqbot"]
 # The canonical AgentPlatform Computer Role owns the native screen/input
 # implementation; web/headless builds omit the native stack entirely.
 computer-use = [
-    "dep:nomi-computer",
-    "dep:nomi-types",
+    "dep:nomifun-computer",
 ]
 # Browser-automation tools (desktop host enables this; web/server hosts do not).
 # Native Conversation Workspace plus the new isolated search/render engines.
@@ -320,13 +319,11 @@ if-addrs = "0.13"
 # Decode request paths before matching the immutable embedded WebUI asset map.
 percent-encoding = "2"
 
-# Computer Role implementation. Optional; only the `computer-use` feature pulls
-# the native screen/input/UI-Automation stack, so web/headless builds stay lean.
-nomi-computer = { workspace = true, optional = true }
+# Computer's private stdio host. The native driver is a separately built binary.
+nomifun-computer = { workspace = true, optional = true }
 # Browser v2 native contracts and isolated page execution, without the old facade.
 nomi-browser-engine = { workspace = true, optional = true }
 nomifun-browser-platform = { workspace = true, optional = true }
-nomi-types = { workspace = true, optional = true }
 
 # The in-process macOS desktop backend is the only authority that can report
 # whether the running NomiFun code identity may use the microphone.  Keep the

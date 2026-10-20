@@ -31,6 +31,8 @@ import {
 import React, { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
+import { computerTools } from '@/common/chat/computerSurface';
+import ComputerDriverStatus from './ComputerDriverStatus';
 
 const isCapabilityTab = (value: string | null): value is PermissionCapabilityTab =>
   value === 'overview' ||
@@ -104,7 +106,7 @@ const CapabilityPermissionsContent: React.FC = () => {
   const microphone = systemPermissionEntry(status, 'microphone');
   const accessibility = systemPermissionEntry(status, 'accessibility');
   const screenRecording = systemPermissionEntry(status, 'screen_recording');
-  const computerReady = computerPermissionsReady(status, []);
+  const computerReady = status?.platform !== 'macos' || computerPermissionsReady(status, computerTools.map(tool => tool.action_id));
   const voiceReady = permissionEntryIsReady(microphone);
 
   const setTab = useCallback((next: PermissionCapabilityTab) => {
@@ -222,7 +224,8 @@ const CapabilityPermissionsContent: React.FC = () => {
 
   const computer = (
     <div className='space-y-12px'>
-      <VisualPanel
+      <ComputerDriverStatus />
+      {status?.platform === 'macos' && <VisualPanel
         label={t('settings.capabilityPermissions.computer.title')}
       >
         <PermissionRow
@@ -245,11 +248,11 @@ const CapabilityPermissionsContent: React.FC = () => {
           onRequest={requestPermission}
           onOpenSettings={openSettings}
         />
-      </VisualPanel>
+      </VisualPanel>}
       <Alert
-        type={computerReady ? 'success' : 'warning'}
+        type={computerReady ? 'info' : 'warning'}
         showIcon
-        content={t(computerReady
+        content={t(status?.platform !== 'macos' ? 'settings.capabilityPermissions.computer.platformLimits' : computerReady
           ? 'settings.capabilityPermissions.computer.ready'
           : 'settings.capabilityPermissions.computer.blocked', { app: status?.app_label ?? 'NomiFun' })}
       />

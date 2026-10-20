@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapter::{ChatProtocolAdapter, ProviderWireStream};
 use crate::contracts::{
-    ChatContractError, ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatModelRequest, ChatProtocol,
+    ChatContractError, ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatModelFeature, ChatModelRequest, ChatProtocol,
     ChatRetryDirective, ChatToolCall, ResolvedChatRoute, ToolCallId,
 };
 use crate::ports::{
@@ -95,8 +95,79 @@ impl Stream for ChatModelStream {
     }
 }
 
+/// Process-local projection of a request for one actual provider attempt.
+/// Projection is pure; attempt-bound evidence belongs to `begin_attempt` and
+/// validated decoded events belong to `observe`, before their delivery.
+pub trait ChatAttemptProjection: Send + Sync {
+    fn project(
+        &self,
+        request: &ChatModelRequest,
+        route: &ResolvedChatRoute,
+        adapter_features: &BTreeSet<ChatModelFeature>,
+    ) -> Result<ChatModelRequest, ChatModelError>;
+
+    fn begin_attempt(
+        &self,
+        _request: &ChatModelRequest,
+        _route: &ResolvedChatRoute,
+        _adapter_features: &BTreeSet<ChatModelFeature>,
+    ) -> Result<(), ChatModelError> { Ok(()) }
+
+    fn observe(
+        &self,
+        _request: &ChatModelRequest,
+        _route: &ResolvedChatRoute,
+        _event: &ChatModelEvent,
+    ) -> Result<(), ChatModelError> { Ok(()) }
+}
+
+fn projection_error(mut error: ChatModelError, route: &ResolvedChatRoute) -> ChatModelError {
+    // A projection/evidence failure must never retry through another surface.
+    error.retry = ChatRetryDirective::Never;
+    error.with_route(route.model_route_id.clone())
+}
+
+fn project_attempt_request(
+    projection: Option<&dyn ChatAttemptProjection>,
+    request: &ChatModelRequest,
+    route: &ResolvedChatRoute,
+    adapter_features: &BTreeSet<ChatModelFeature>,
+) -> Result<ChatModelRequest, ChatModelError> {
+    let Some(projection) = projection else { return Ok(request.clone()); };
+    let projected = projection.project(request, route, adapter_features)
+        .map_err(|error| projection_error(error, route))?;
+    projected.validate().map_err(contract_error_to_model_error)
+        .map_err(|error| projection_error(error, route))?;
+    let original_names = request.input.tools.iter().map(|tool| tool.name.as_str()).collect::<BTreeSet<_>>();
+    let choice_narrowed = projected.input.tool_choice == request.input.tool_choice
+        || matches!(projected.input.tool_choice, crate::ChatToolChoice::None);
+    let mut fixed = projected.clone();
+    fixed.input.tools = request.input.tools.clone();
+    fixed.input.instructions = request.input.instructions.clone();
+    fixed.input.parallel_tool_calls = request.input.parallel_tool_calls;
+    fixed.input.tool_choice = request.input.tool_choice.clone();
+    if fixed != *request || !choice_narrowed
+        || projected.input.tools.iter().any(|tool| !original_names.contains(tool.name.as_str()))
+    {
+        return Err(projection_error(ChatModelError::invalid_request(
+            "attempt projection changed request identity, history, fixed input or added a tool",
+        ), route));
+    }
+    Ok(projected)
+}
+
 #[async_trait]
 pub trait ChatBrokerPort: Send + Sync {
+    fn with_attempt_projection(
+        &self,
+        _projection: Arc<dyn ChatAttemptProjection>,
+    ) -> Result<Arc<dyn ChatBrokerPort>, ChatModelError> {
+        Err(ChatModelError::new(
+            ChatModelErrorCode::AdapterUnavailable,
+            "chat broker does not support per-attempt request projection",
+            ChatRetryDirective::Never,
+        ))
+    }
     /// Optional ownership evidence. Default callers and older ports do not
     /// silently fall back to an unowned stream.
     async fn open_owned_chat_attempt(&self,_request:ChatModelRequest,_cancellation:CancellationToken)->Result<OwnedChatAttempt,ChatModelError>{
@@ -124,6 +195,7 @@ pub trait ChatBrokerPort: Send + Sync {
     }
 }
 
+#[derive(Clone)]
 pub struct ChatModelBroker {
     causality_gate: Arc<dyn ChatCausalityGate>,
     route_resolver: Arc<dyn ChatRouteResolver>,
@@ -131,6 +203,7 @@ pub struct ChatModelBroker {
     adapters: BTreeMap<ChatProtocol, Arc<dyn ChatProtocolAdapter>>,
     retry_policy: BrokerRetryPolicy,
     capability_observer: Arc<dyn ChatCapabilityObserver>,
+    attempt_projection: Option<Arc<dyn ChatAttemptProjection>>,
 }
 
 impl ChatModelBroker {
@@ -196,6 +269,7 @@ impl ChatModelBroker {
             adapters: by_protocol,
             retry_policy,
             capability_observer,
+            attempt_projection: None,
         })
     }
 
@@ -215,7 +289,6 @@ impl ChatModelBroker {
         routes
             .validate_for(&request.route)
             .map_err(contract_error_to_model_error)?;
-        let required = request.input.required_features();
         let mut candidates = Vec::new();
         for route in routes.candidates() {
             let mut signed_tools_match = true;
@@ -234,6 +307,10 @@ impl ChatModelBroker {
                 )
                 .with_route(route.model_route_id.clone()));
             };
+            let projected = project_attempt_request(
+                self.attempt_projection.as_deref(), request, route, &adapter.features(),
+            )?;
+            let required = projected.input.required_features();
             if !signed_tools_match
                 || !required.is_superset(&route.activation_features)
                 || !route.features.is_superset(&required)
@@ -287,6 +364,7 @@ impl ChatModelBroker {
         let route_resolver = Arc::clone(&self.route_resolver);
         let retry_policy = self.retry_policy;
         let capability_observer = Arc::clone(&self.capability_observer);
+        let attempt_projection = self.attempt_projection.clone();
         let (sender, receiver) = mpsc::channel(BROKER_STREAM_CAPACITY);
 
         let attempt_cancellation = cancellation.clone();
@@ -303,6 +381,7 @@ impl ChatModelBroker {
                     credential_store,
                     retry_policy,
                     capability_observer,
+                    attempt_projection,
                     sender.clone(),
                 ) => {},
             }
@@ -313,6 +392,14 @@ impl ChatModelBroker {
 
 #[async_trait]
 impl ChatBrokerPort for ChatModelBroker {
+    fn with_attempt_projection(
+        &self,
+        projection: Arc<dyn ChatAttemptProjection>,
+    ) -> Result<Arc<dyn ChatBrokerPort>, ChatModelError> {
+        let mut broker = self.clone();
+        broker.attempt_projection = Some(projection);
+        Ok(Arc::new(broker))
+    }
     async fn open_owned_chat_attempt(&self,request:ChatModelRequest,cancellation:CancellationToken)->Result<OwnedChatAttempt,ChatModelError>{
         ChatModelBroker::open_owned_chat_attempt(self,request,cancellation).await
     }
@@ -340,6 +427,7 @@ async fn run_broker(
     credential_store: Arc<dyn ProviderCredentialStore>,
     retry_policy: BrokerRetryPolicy,
     capability_observer: Arc<dyn ChatCapabilityObserver>,
+    attempt_projection: Option<Arc<dyn ChatAttemptProjection>>,
     sender: mpsc::Sender<Result<BrokerEventEnvelope, ChatModelError>>,
 ) {
     let mut route_index = 0_usize;
@@ -374,6 +462,7 @@ async fn run_broker(
                 .as_ref(),
             credential_store.as_ref(),
             route_resolver.as_ref(),
+            attempt_projection.as_deref(),
             route_attempt,
             total_attempt,
             &sender,
@@ -475,6 +564,7 @@ async fn run_attempt(
     adapter: &dyn ChatProtocolAdapter,
     credential_store: &dyn ProviderCredentialStore,
     route_resolver: &dyn ChatRouteResolver,
+    attempt_projection: Option<&dyn ChatAttemptProjection>,
     route_attempt: u8,
     total_attempt: u8,
     sender: &mpsc::Sender<Result<BrokerEventEnvelope, ChatModelError>>,
@@ -488,7 +578,23 @@ async fn run_attempt(
     }
     // Start from the canonical caller request each time. A primary model's
     // bound is not a caller preference and must not constrain a later model.
-    let mut attempted_request = request.clone();
+    let mut attempted_request = match project_attempt_request(
+        attempt_projection, request, route, &adapter.features(),
+    ) {
+        Ok(projected) => projected,
+        Err(error) => return AttemptOutcome::failed(error),
+    };
+    let required = attempted_request.input.required_features();
+    if !required.is_superset(&route.activation_features)
+        || !route.features.is_superset(&required)
+        || !adapter.features().is_superset(&required)
+    {
+        return AttemptOutcome::failed(ChatModelError::new(
+            ChatModelErrorCode::UnsupportedFeature,
+            "attempted route cannot express its projected request",
+            ChatRetryDirective::Never,
+        ).with_route(route.model_route_id.clone()));
+    }
     attempted_request.input.max_output_tokens = match (request.input.max_output_tokens, configured_output) {
         (Some(caller), Some(configured)) => Some(caller.min(configured)),
         (caller, None) => caller,
@@ -514,6 +620,11 @@ async fn run_attempt(
         }
     };
 
+    if let Some(projection) = attempt_projection
+        && let Err(error) = projection.begin_attempt(request, route, &adapter.features())
+    {
+        return AttemptOutcome::failed(projection_error(error, route));
+    }
     let wire_request = match adapter.encode_request(request, route, &credential) {
         Ok(request) => request,
         Err(error) => {
@@ -531,6 +642,7 @@ async fn run_attempt(
         route,
         adapter,
         request,
+        attempt_projection,
         wire_stream,
         route_attempt,
         total_attempt,
@@ -543,6 +655,7 @@ async fn consume_attempt_stream(
     route: &ResolvedChatRoute,
     adapter: &dyn ChatProtocolAdapter,
     request: &ChatModelRequest,
+    attempt_projection: Option<&dyn ChatAttemptProjection>,
     mut wire_stream: ProviderWireStream,
     route_attempt: u8,
     total_attempt: u8,
@@ -604,6 +717,14 @@ async fn consume_attempt_stream(
             if let Err(error) = sequence.observe(&event) {
                 return AttemptOutcome::Failed {
                     error: with_stream_diagnostic(error).with_route(route.model_route_id.clone()),
+                    semantic_output_committed,
+                };
+            }
+            if let Some(projection) = attempt_projection
+                && let Err(error) = projection.observe(request, route, &event)
+            {
+                return AttemptOutcome::Failed {
+                    error: projection_error(error, route),
                     semantic_output_committed,
                 };
             }

@@ -772,6 +772,8 @@ pub struct AppServices {
     /// must stop before the database is closed.
     pub(crate) background_shutdown: CancellationToken,
     pub(crate) background_tasks: Arc<BackgroundTaskRegistry>,
+    #[cfg(feature = "computer-use")]
+    pub(crate) computer: Arc<nomifun_computer::Computer>,
     /// Channel plugin manager registered during router assembly. It is
     /// stopped after ingress/queue tasks have quiesced and before SQLite
     /// closes.
@@ -1460,7 +1462,9 @@ impl AppServices {
     /// prevents that path from closing SQLite while host-owned background,
     /// terminal, channel, Agent Execution, Browser/Gateway, robot, or SSH
     /// resources are still active.
-    pub(crate) async fn shutdown_nomi_core_host(&self) -> anyhow::Result<()> {
+    /// Close the normal host owners before storage, including when an embedder
+    /// composes AppServices directly rather than using NomiCoreApplication.
+    pub async fn shutdown_nomi_core_host(&self) -> anyhow::Result<()> {
         self.quiesce_nomi_core_host().await?;
         let mut stage=self.host_shutdown_stage.lock().await;
         if stage.complete {return Ok(());}
@@ -1501,12 +1505,17 @@ impl AppServices {
         // Fence runtime admission immediately, before awaiting any producer or
         // resource owner. Its owned flight runs while these owners wind down.
         let engine_shutdown = self.agent_runtime_sessions.shutdown_and_wait();
+        let computer_shutdown = async {
+            #[cfg(feature = "computer-use")]
+            self.computer.shutdown().await.map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        };
         stage.start_mcp_auth_cleanup(self.mcp_auth.clone()).await;
         stage.start_terminal_cleanup(self.terminal_service.clone()).await;
         // Resource owners close admission while producers drain. A failed
         // producer may retain native infrastructure and storage, but must not
         // skip cancellation and exact view/connection cleanup in other domains.
-        let ((mut errors, runtimes_stopped, producers_stopped), browser_resources, (mut terminal_resources, mut mcp_auth_resources), ()) = tokio::join!(async {
+        let ((mut errors, runtimes_stopped, producers_stopped), browser_resources, (mut terminal_resources, mut mcp_auth_resources), (), computer_resources) = tokio::join!(async {
             let mut errors = Vec::new();
             if let Err(error) = self.app_hosting.shutdown().await {
                 errors.push(format!("Hosted application cleanup failed: {error}"));
@@ -1575,7 +1584,10 @@ impl AppServices {
             let terminal = stage.wait_terminal_cleanup().await;
             let mcp_auth = stage.wait_mcp_auth_cleanup().await;
             (terminal, mcp_auth)
-        }, self.companion_service.shutdown_matting_model());
+        }, self.companion_service.shutdown_matting_model(), computer_shutdown);
+        if let Err(error) = computer_resources {
+            errors.push(format!("Computer worker cleanup failed: {error}"));
+        }
         // The five-second observer may have finished before another domain.
         // Consume this exact worker's now-settled result before reporting an
         // old timeout or deciding whether native infrastructure can close.
@@ -1782,14 +1794,6 @@ impl AppServices {
     ) -> anyhow::Result<Self> {
         #[cfg(not(feature = "browser-use"))]
         let _ = host_services;
-        // Brand computer-use permission-error guidance with the host app's name so
-        // failures say "grant NomiFun … then quit and reopen NomiFun" instead of a
-        // generic "this app" — which a model otherwise misreads as the terminal /
-        // editor and sends the user to grant the wrong process. Set once, here, so
-        // every later `observe` / screenshot / input failure carries the right name.
-        #[cfg(feature = "computer-use")]
-        nomi_computer::set_host_app_label("NomiFun");
-
         let data_dir = config.data_dir.clone();
         let work_dir = config.work_dir.clone();
         let work_dir_is_cli_override = config.work_dir_is_cli_override;
@@ -2415,6 +2419,12 @@ impl AppServices {
             host_shutdown_stage: Default::default(),
             background_shutdown,
             background_tasks,
+            #[cfg(feature = "computer-use")]
+            computer: Arc::new(nomifun_computer::Computer::new(
+                nomifun_computer::WorkerConfig::new(
+                    crate::router::computer_host::worker_binary(), data_dir.clone(),
+                ),
+            )),
             channel_manager: Mutex::new(None),
             cron_service: Mutex::new(None),
             auto_work_runner: Mutex::new(None),

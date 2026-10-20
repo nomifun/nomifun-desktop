@@ -50,7 +50,8 @@ pub(crate) fn project_tool_event(calls:&mut BTreeMap<String,PendingToolProjectio
                         call.identity.action_id = Some(action_id.as_ref().to_owned());
                         call.description = nomifun_engine_core::tool_display_target(
                             Some(capability_id.as_ref()), Some(action_id.as_ref()), &call.name, &pending.arguments);
-                        call.identity.display.operation = nomifun_engine_core::tool_display_operation(Some(capability_id.as_ref()), &pending.arguments);
+                        call.identity.display.operation = nomifun_engine_core::tool_display_operation(Some(capability_id.as_ref()), Some(action_id.as_ref()));
+                        call.identity.display.foreground = nomifun_engine_core::tool_display_foreground(Some(capability_id.as_ref()), Some(action_id.as_ref()), &pending.arguments);
                         call.identity.display.file_summary = nomifun_engine_core::ToolFileProjection::from_call(
                             Some(capability_id.as_ref()), Some(action_id.as_ref()), &pending.arguments).map(|projection| projection.summary());
                         call.clone()
@@ -85,9 +86,11 @@ pub(crate) fn project_tool_event(calls:&mut BTreeMap<String,PendingToolProjectio
                 call.identity.error_code = call.identity.permission_required.as_ref()
                     .map(|_| nomifun_engine_core::SYSTEM_PERMISSION_REQUIRED.to_owned());
                 let operation = call.identity.display.operation.take();
+                let foreground = call.identity.display.foreground;
                 call.identity.display = nomifun_engine_core::tool_result_display(
                     call.identity.capability_id.as_deref(), call.identity.action_id.as_deref(), &result);
                 call.identity.display.operation = operation;
+                call.identity.display.foreground = foreground;
                 call.identity.display.file_summary = nomifun_engine_core::ToolFileProjection::from_call(
                     call.identity.capability_id.as_deref(), call.identity.action_id.as_deref(), &pending.arguments)
                     .map(|projection| projection.settled(&result, runtime_hold.is_some()));
@@ -130,6 +133,28 @@ mod tests {
     use super::*;
     use nomifun_agent_runtime::AgentToolResult;
     const ASSET:&str="0190f5fe-7c00-7a00-8000-000000000081";
+    #[test]
+    fn admitted_computer_foreground_survives_start_and_settlement_without_arguments() {
+        for (capability, mode, expected) in [("computer", "foreground", Some(true)),
+            ("computer", "background", Some(false)), ("third.party", "foreground", None)] {
+            let mut calls = BTreeMap::new();
+            project_tool_event(&mut calls, AgentEngineEvent::ToolCallCompleted { step: 1,
+                call: nomifun_chat_model_broker::ChatToolCall { call_id: "desktop".into(), name: "computer_click".into(),
+                    arguments: nomifun_agent_contracts::StrictJsonValue(serde_json::json!({"delivery_mode":mode,"text":"PRIVATE_ARGUMENT"})), provider_metadata: None } }, Some(1)).unwrap();
+            let start = project_tool_event(&mut calls, AgentEngineEvent::ToolStarted { step: 1, call_id: "desktop".into(),
+                capability_id: capability.into(), action_id: "computer/click".into() }, Some(2)).unwrap().unwrap();
+            assert_eq!(start.identity.display.foreground, expected);
+            assert_eq!(start.identity.display.operation.as_deref(), (capability == "computer").then_some("click"));
+            let settled = project_tool_event(&mut calls, AgentEngineEvent::ToolCompleted { step: 1, runtime_hold: None,
+                result: AgentToolResult::text("desktop".into(), "PRIVATE_RESULT", false) }, Some(3)).unwrap().unwrap();
+            assert_eq!(settled.identity.display.foreground, expected);
+            assert_eq!(settled.identity.display.operation, start.identity.display.operation);
+            let wire = serde_json::to_value(settled).unwrap();
+            assert_eq!(wire.get("foreground").and_then(serde_json::Value::as_bool), expected);
+            assert!(!wire.to_string().contains("PRIVATE_"));
+        }
+    }
+
     #[test]
     fn live_file_summary_uses_original_targets_and_only_successful_native_patch_counts() {
         let arguments=serde_json::json!({"files":[{"path":" src/one  two.rs ","hunks":[{"lines":[

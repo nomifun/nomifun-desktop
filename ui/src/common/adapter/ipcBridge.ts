@@ -2658,6 +2658,21 @@ export const systemPermissions = {
   ),
 };
 
+export interface ComputerStatus {
+  worker_version: string | null;
+  platform: string;
+  backend: string | null;
+  session_type: string | null;
+  wayland: boolean | null;
+  atspi: boolean | null;
+  last_error: string | null;
+  running: boolean;
+}
+
+export const computer = {
+  status: httpGet<ComputerStatus, void>('/api/computer/status'),
+};
+
 // ---------------------------------------------------------------------------
 // System events — global WS broadcasts owned by the backend
 // ---------------------------------------------------------------------------

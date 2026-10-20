@@ -10,17 +10,14 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const LINUX_SYSTEM_RUNNER = '/usr/libexec/nomifun-system-runner';
 export const LINUX_SYSTEM_POLICY = '/usr/share/polkit-1/actions/com.nomifun.system-execution.policy';
 const ASSET_NAMES = ['com.nomifun.system-execution.policy', 'install.sh', 'README.md'];
-// Wayland Computer consumes the desktop portal's PipeWire stream through
-// pipewiresrc -> videoconvert -> videoflip -> appsink. Plugins are runtime-loaded,
-// so ELF dependency scanning alone cannot discover their package dependencies.
+// The independent Computer worker's current ELF dependencies include X11/Xi
+// and xkbcommon. Browser/keyboard and native administrator dependencies remain.
 const DESKTOP_DEB_DEPENDENCIES = [
   'pkexec | policykit-1', 'polkitd | policykit-1', 'xdg-desktop-portal', 'util-linux', 'coreutils', 'libasound2t64 | libasound2', 'xwayland',
-  'libgstreamer1.0-0 (>= 1.14)', 'libgstreamer-plugins-base1.0-0 (>= 1.14)',
-  'gstreamer1.0-pipewire', 'gstreamer1.0-plugins-base', 'gstreamer1.0-plugins-good',
+  'libx11-6', 'libxi6', 'libxkbcommon0',
 ];
 const DESKTOP_RPM_DEPENDENCIES = [
-  'polkit', 'xdg-desktop-portal', 'util-linux', 'coreutils', 'alsa-lib', 'xorg-x11-server-Xwayland', 'gstreamer1', 'gstreamer1-plugins-base',
-  'gstreamer1-plugins-good', 'pipewire-gstreamer',
+  'polkit', 'xdg-desktop-portal', 'util-linux', 'coreutils', 'alsa-lib', 'xorg-x11-server-Xwayland', 'libX11', 'libXi', 'libxkbcommon',
 ];
 
 export function resolveLinuxSystemTarget(target, architecture = process.arch) {

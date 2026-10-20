@@ -1,5 +1,7 @@
 # Windows 全局操作系统能力原生接续记录
 
+本页保留原文件、进程、Browser、媒体和系统执行的历史证据；退役 Computer 的验收不再作为现役输入。新实现的范围和未验项见[Computer 架构](../architecture/computer-use.zh.md)，实际进展仅记专项第 12 节。
+
 记录始于 2026-10-17（Asia/Shanghai），两个发布阻塞的接续补验完成于2026-10-18。实际 checkout 为 `C:\Users\muli\workplace-c\nomifun-desktop`，最初在 `main`、HEAD `d1e968bfe262c39deeddcc460f3df27ab26ff0f7`，tracked/staged/untracked 均无改动。该提交已经包含完整共享全局能力及 Git 整合，不恢复旧 source-review patch、不 reset/clean。原始环境命令结果保存在仓库外 `windows-global-os-initial.txt`。
 
 本机为 Windows 10 Pro 22H2 x64、19045.6466；Rust 为 1.99.0，host/installed target 为 `x86_64-pc-windows-msvc`，Bun 1.4.2。真实登录身份为 `DESKTOP-NF7D5NP\muli`、Session 1、普通非 elevated token；USERPROFILE 为 `C:\Users\muli`。原始日志及报告位于本任务可视化目录的 `windows-native/`，JWT、私有数据集、截图、二进制和测试目录不提交。旧 macOS 的签名/原生报告仍属于[原三平台矩阵](global-os-2026-10-16.zh.md)，不计入本机结果。
@@ -170,11 +172,7 @@ validation 集中最终60通过/1个POSIX跳过/0失败、363断言，30.88秒�
 
 该 Task 后续同原 Session 的新 cleanup Turn PASS：`task-scoped-cleanup-93c93e9c-b2b9-4da5-a4c3-1a57d35fb10b.json` SHA-256 `347853ca764debb6a00e79a7c5593050b12cfb6bd828cf5a2247dfb7217ace5d`。确切定义、SID、InteractiveToken/RunLevel0、PT15M、action/workdir 和 marker 均先核对；Stop/DeleteTask 及 root delete 由正式工具执行，独立 Task/注册表 absent、PID29016 absent，answered/cleanup_proven、pending/unknown=0，原 failed 报告和全部前缀不变。此前 guard、原生账号规范化与新 Turn 的预接纳失败均保留；其中真实 `WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE` 来自 driver 提前删除空默认目录。仅对原 exact 私有夹具恢复空 workspace 后完成本次清理，此恢复不算产品门禁修复。正式 missing-default 修复和新 App 产品链另记，不能把 FileService 层的支持当作 Session 入口已通过。
 
-普通桌面候选完整 PASS：`desktop-assistant.general-1792215682122-fea04212-4b1c-4de3-be35-0a66712c8d9e.json` SHA-256 `81cbcfcef14f0915cd3d760c68e2cb2fe424026e976d0560ec146ad902aae681`，Session `01a14861-14ce-7bc2-b0fb-3bc5e509ac27`。新 Calculator21376/HWND2561130 的真实截图、fresh UIA/ref click、键盘12+34与独立结果46、fresh AltF4/确切 PID 消失全部成立，57项核对、answered/cleanup_proven、pending/unknown=0。原 Calculator15300 也已通过原 Session 新 Turn 的 fresh 调用清理，`desktop-scoped-cleanup-a764690e-1556-44bb-a020-9bed2b731350.json` SHA-256 `e5f2f05f4b5c5402ad443e044b48440f03db17536496518911200f9ecd2ade6d`；原80前缀、failed 报告与人类 reconciliation 不变，无旧调用重放或 host input/kill。
-
 候选管理员完整 PASS：`administrator-assistant.general-1792215849660-d3ffa373-c91f-49bb-bcf6-3154918162f2.json` SHA-256 `da3c938fd890876f8ae1b86b07c5a836b7c53d4bba81489aee5fb29c6e6edec4`。真实 BA/SY protected DACL、ordinary read/write 拒绝、正式 administrator read/marker、AGENTS 新规则延期与 fresh proposal 的完整538字节读取、high/elevated PID24736 的同 SID/Session1/USERPROFILE/cwd/显式 PATH、cancel/terminal reaped 与同 creation 身份实际退出均成立，answered/cleanup_proven、pending/unknown=0。本次两次只读 consent 进程库存未见窗口，不把 elevated 成功倒推为已观察本次 UAC 窗口；早先用户允许系统认证的证据仍按原 executable 分别保留。
-
-高完整性桌面候选完整 PASS：`desktop-high-assistant.general-1792216392475-74396a05-3b62-4f90-a3ad-081a38b5ec9e.json` SHA-256 `efc85ddc43f35f4d09b864b82201182aff97afa5db47a606020dbd9476681cac`。唯一 high WinForms12648/HWND10490402 经原 Computer owner 确认切换执行者为确定未执行，再 fresh bridge observe/focus/UIA/ref click/type/Apply，独立标签结果、PNG、原 supervisor cancel/reaped 与确切 PID 消失均通过，answered/cleanup_proven、pending/unknown=0。第一次实物链虽已验证并清理，但 completion 因原 `needs_replan` 门禁拒绝，整份 failed（SHA-256 `a3a092573aff37eeca5e4386b065301e97148edaba0cb2c1a71e7ebcaa657c65`）保留。修后 driver 先读取同 operation 的真实 PlanUpdated、单独 update_plan 并核对 ack revision 后再提交完成报告，未放宽门禁或结果计数。
 
 SCM 首次运行保留 FAILED：`service-chat.minimal-1792216495669-f7fed805-eb2f-4faf-be05-f75825c92f32.json` SHA-256 `97d5581cb5a07d1be32183cac8cc8a5235920424fd0259058644c55a8b1f96a9`。普通 source/compile 之后改变同一目录 DACL，before-model 对已跟踪 current_user 指令层 refresh 真实返回 EACCES；没有 SCM create 派发，未忽略错误或借管理员缓存。同原 Session 的新 cleanup 已 answered/cleanup_proven、pending/unknown=0，并删除准确 namespace，无服务遗留。fixture 正在将普通构建与从开始就受保护的系统安装目录分开；修后实际服务链另记。
 

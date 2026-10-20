@@ -156,7 +156,8 @@ impl Fixture {
         }).await.unwrap();
         Wave2TypedHostRequest {
             context: Wave2HostContext {
-                control: Default::default(),
+                authorized_actions: nomifun_agent_domain_wave2::action_ids(nomifun_agent_domain_wave2::BROWSER_MODULE_ID),
+            control: Default::default(),
                 principal: self.admission.principal.clone(), agent_session_id: self.admission.key.agent_session_id.clone().into(),
                 turn_id: self.admission.key.turn_id.clone().into(), operation_id: operation,
                 idempotency_key: IdempotencyKey::from(format!("browser-invoke-{key}")), correlation_id: CorrelationId::from(key),

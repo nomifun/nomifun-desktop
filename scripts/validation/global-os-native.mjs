@@ -84,20 +84,7 @@ export function nativeInstructionDeferral({raw,callId,callName,callArguments,eve
   assert(observations.every(event=>event.payload.value.event.observation.invocation_attempted===false),'An attempted invocation cannot be accepted as a pre-dispatch instruction hold');
   return{original_call_id:callId,proposal_seq:proposal.seq,instructions_updated_seq:updated.seq,hold_seq:held.seq,user_dispatch_count:0,arguments_rewritten:false};
 }
-export function nativeComputerNoEffectAdmission({raw,callId,callArguments,events,operationId,sessionId}){
-  assert(raw.startsWith('[tool error]'),'The route admission probe must retain its actual error result');
-  assert.equal(callArguments?.action,'focus_window');assert(Number.isSafeInteger(callArguments.window_id)&&callArguments.window_id>0);assert(Number.isSafeInteger(callArguments.expected_generation)&&callArguments.expected_generation>0);
-  assert(events.every(event=>event.agent_session_id===sessionId),'Admission evidence cannot come from another Session');
-  const records=events.filter(event=>event.correlation_id===operationId&&event.kind==='runtime/progress-recorded'&&event.payload?.storage==='inline_json');
-  const proposal=records.find(event=>event.payload.value.event?.event==='tool_call_completed'&&event.payload.value.event.step>0&&event.payload.value.event.call?.call_id===callId);
-  assert(proposal&&proposal.payload.value.event.call.name==='computer_input');canonicalSlot(proposal,'/event/call/arguments','tool_arguments',callArguments,sessionId);
-  const completed=records.find(event=>event.payload.value.event?.event==='tool_completed'&&event.payload.value.event.result?.call_id===callId);assert(completed?.payload.value.event.result.is_error===true);canonicalSlot(completed,'/event/result/output','tool_output',[{type:'text',text:raw.replace(/^\[tool error\]\r?\n/,'')}],sessionId);
-  const started=events.find(event=>event.kind==='effect/started'&&event.payload?.value?.operation_id===`${operationId}:tool:${callId}`&&event.payload.value.owner_domain==='computer'&&event.payload.value.action_id==='computer/input');assert(started,'The exact native owner admission needs its original Effect identity');
-  const effectId=started.payload.value.effect_id,terminal=events.filter(event=>event.payload?.value?.effect_id===effectId&&event.kind!=='effect/started');assert.equal(terminal.length,1,'An uncertain or separately reconciled Effect cannot be accepted as a no-effect route admission');
-  assert.match(started.payload.value.input_digest,/^[a-f0-9]{64}$/);for(const key of ['operation_id','owner_domain','action_id','input_digest','resource_key'])assert.equal(terminal[0].payload.value[key],started.payload.value[key],'The native no-effect terminal must match its original Effect input/resource');
-  assert.equal(terminal[0].kind,'effect/failed');assert.equal(terminal[0].payload.value.error?.code,'ROLE_HOST_STALE_OBSERVATION_GENERATION','Provider failures, input-not-applied outcomes and unknown results require their own review');assert(terminal[0].seq>started.seq&&completed.seq>terminal[0].seq);
-  return{call_id:callId,effect_id:effectId,started_seq:started.seq,failed_seq:terminal[0].seq,completed_seq:completed.seq,code:'ROLE_HOST_STALE_OBSERVATION_GENERATION',native_input_not_applied:true,next_input_requires_fresh_observation:true};
-}
+
 export function nativeControlTerminalFailureObservation({raw,callId,callArguments,events,operationId,sessionId}){
   assert(raw.startsWith('[tool error]'));assert(events.every(event=>event.agent_session_id===sessionId),'Control diagnostics require the exact Session facts');
   const records=events.filter(event=>event.correlation_id===operationId&&event.kind==='runtime/progress-recorded'&&event.payload?.storage==='inline_json');
@@ -198,12 +185,12 @@ const evidenceDigest = value => createHash('sha256').update(stableJson(value)).d
 const eventPayload = event => { assert.equal(event.payload?.storage, 'inline_json', 'Continuation requires readable canonical event payloads'); return event.payload.value; };
 
 export function nativeContinuationOptions({ administrator, scenario, template, continueSession, continuationSourceReport, continuationRetryReport, nativeDataRoot,
-  retainServiceForAppExit = false, desktopBackgroundFocus = false, protectedUserDirectory = false }) {
+  retainServiceForAppExit = false, protectedUserDirectory = false }) {
   if (continueSession === undefined && continuationSourceReport === undefined) {
     assert.equal(continuationRetryReport, undefined, 'Retry requires the complete original continuation tuple'); return false;
   }
   assert(administrator === true && scenario === 'files-process', 'Continuation is only available for the independent administrator scenario');
-  assert(!retainServiceForAppExit && !desktopBackgroundFocus && !protectedUserDirectory, 'Continuation cannot combine independent fixture scenarios');
+  assert(!retainServiceForAppExit && !protectedUserDirectory, 'Continuation cannot combine independent fixture scenarios');
   const pin = nativeAdministratorContinuationFixture;
   assert.equal(continueSession, pin.sessionId, 'Only the explicitly pinned failed administrator Session may continue');
   assert.equal(template, pin.template, 'Continuation must preserve the source template');
@@ -568,48 +555,44 @@ export function nativeInstallerPhases({steps,phases}) {
   const flattened=phases.flatMap(phase=>phase.steps);assert.deepEqual(flattened,steps,'Every installer step must belong to exactly its declared phase');
   const ids=flattened.map(step=>step.id);assert(ids.every(id=>typeof id==='string'&&id.length>0));assert.equal(new Set(ids).size,ids.length,'Installer business step identities cannot be repeated across Turns');return phases;
 }
-export function nativeSmbControlOptions({scenario,preservedUncReport,nativeDataRoot,platform,administrator=false,protectedUserDirectory=false,desktopBackgroundFocus=false,retainServiceForAppExit=false,continueSession,installerReport,missingDefault=false}){
+export function nativeSmbControlOptions({scenario,preservedUncReport,nativeDataRoot,platform,administrator=false,protectedUserDirectory=false,retainServiceForAppExit=false,continueSession,installerReport,missingDefault=false}){
   const enabled=scenario==='smb-disposition-control';assert(enabled?typeof preservedUncReport==='string'&&isAbsolute(preservedUncReport):preservedUncReport===undefined,'--preserved-unc-report is required only for the isolated SMB control scenario');if(!enabled)return;
-  assert.equal(platform,'win32');assert(typeof nativeDataRoot==='string'&&isAbsolute(nativeDataRoot),'SMB control requires the same marked private native data root');assert(!administrator&&!protectedUserDirectory&&!desktopBackgroundFocus&&!retainServiceForAppExit&&!continueSession&&installerReport===undefined&&!missingDefault,'SMB control cannot combine independent scenarios, administrator mode or source continuation');
+  assert.equal(platform,'win32');assert(typeof nativeDataRoot==='string'&&isAbsolute(nativeDataRoot),'SMB control requires the same marked private native data root');assert(!administrator&&!protectedUserDirectory&&!retainServiceForAppExit&&!continueSession&&installerReport===undefined&&!missingDefault,'SMB control cannot combine independent scenarios, administrator mode or source continuation');
 }
-export function nativeUncCwdControlOptions({scenario,nativeDataRoot,platform,administrator=false,protectedUserDirectory=false,desktopBackgroundFocus=false,retainServiceForAppExit=false,continueSession,installerReport,missingDefault=false}){
+export function nativeUncCwdControlOptions({scenario,nativeDataRoot,platform,administrator=false,protectedUserDirectory=false,retainServiceForAppExit=false,continueSession,installerReport,missingDefault=false}){
   if(scenario!=='unc-cwd-spelling-control')return;
   assert.equal(platform,'win32');assert(typeof nativeDataRoot==='string'&&isAbsolute(nativeDataRoot),'UNC cwd control requires the same marked private native data root');
-  assert(!administrator&&!protectedUserDirectory&&!desktopBackgroundFocus&&!retainServiceForAppExit&&!continueSession&&installerReport===undefined&&!missingDefault,'UNC cwd control cannot combine independent scenarios or source continuation');
+  assert(!administrator&&!protectedUserDirectory&&!retainServiceForAppExit&&!continueSession&&installerReport===undefined&&!missingDefault,'UNC cwd control cannot combine independent scenarios or source continuation');
 }
-export async function runNativeRegression({ baseUrl, token, tokenFile, reportDirectory, administrator = false, scenario = 'files-process', template = 'chat.minimal', administratorDirectory, retainServiceForAppExit = false, appPid, nativeDataRoot, signal, protectedUserDirectory = false, desktopBackgroundFocus = false, continueSession, continuationSourceReport, continuationRetryReport, installerReport, missingDefault = false,preservedUncReport, x11SessionRoot, administratorReadMatrix = false, administratorSystemService = false }) {
+export async function runNativeRegression({ baseUrl, token, tokenFile, reportDirectory, administrator = false, scenario = 'files-process', template = 'chat.minimal', administratorDirectory, retainServiceForAppExit = false, appPid, nativeDataRoot, signal, protectedUserDirectory = false, continueSession, continuationSourceReport, continuationRetryReport, installerReport, missingDefault = false,preservedUncReport, administratorReadMatrix = false, administratorSystemService = false }) {
   assert(['darwin', 'linux', 'win32'].includes(process.platform), 'This runner requires an actual supported native App host');
   const linux = process.platform === 'linux';
   if (linux) {
-    assert(!desktopBackgroundFocus && !protectedUserDirectory && !continueSession && !continuationSourceReport && !continuationRetryReport,
-      'Linux has its own native entries; macOS desktop and historical continuation fixtures are never reused');
+    assert(!protectedUserDirectory && !continueSession && !continuationSourceReport && !continuationRetryReport,
+      'Linux has its own native entries; macOS historical continuation fixtures are never reused');
     assert(typeof nativeDataRoot === 'string', 'Linux acceptance requires its private native App data root');
   }
-  assert(x11SessionRoot === undefined || (linux && scenario === 'desktop'), '--x11-session-root belongs only to the independent Linux desktop scenario');
-  nativeMissingDefaultOptions({enabled:missingDefault,platform:process.platform,scenario,administrator,protectedUserDirectory,retainServiceForAppExit,desktopBackgroundFocus,continueSession,installerReport,nativeDataRoot});
-  nativeSmbControlOptions({scenario,preservedUncReport,nativeDataRoot,platform:process.platform,administrator,protectedUserDirectory,desktopBackgroundFocus,retainServiceForAppExit,continueSession,installerReport,missingDefault});
-  nativeUncCwdControlOptions({scenario,nativeDataRoot,platform:process.platform,administrator,protectedUserDirectory,desktopBackgroundFocus,retainServiceForAppExit,continueSession,installerReport,missingDefault});
+  nativeMissingDefaultOptions({enabled:missingDefault,platform:process.platform,scenario,administrator,protectedUserDirectory,retainServiceForAppExit,continueSession,installerReport,nativeDataRoot});
+  nativeSmbControlOptions({scenario,preservedUncReport,nativeDataRoot,platform:process.platform,administrator,protectedUserDirectory,retainServiceForAppExit,continueSession,installerReport,missingDefault});
+  nativeUncCwdControlOptions({scenario,nativeDataRoot,platform:process.platform,administrator,protectedUserDirectory,retainServiceForAppExit,continueSession,installerReport,missingDefault});
   const isolatedNativeControl=scenario==='smb-disposition-control'||scenario==='unc-cwd-spelling-control';
   const windows = process.platform === 'win32';
   const windowsCases = windows ? await import('./global-os-windows-cases.mjs') : undefined;
   const loginIdentity = windows ? await windowsCases.windowsLoginIdentity() : undefined;
   if (!windows) assert.notEqual(process.getuid(), 0, 'Run the driver as the real ordinary login user');
-  assert(!windows || !desktopBackgroundFocus, 'Windows background-focus requires its own exact App-window proof; use the full desktop case');
   assert.equal(administratorDirectory, undefined, 'Arbitrary administrator directories are forbidden; use administrator=true / --administrator');
-  assert(['files-process', 'system', 'service', 'desktop', 'desktop-high', 'browser', 'unc','installer','smb-disposition-control','unc-cwd-spelling-control', ...(linux ? ['missing-default'] : [])].includes(scenario), 'Supported scenarios: files-process, system, desktop; Windows also supports service, desktop-high, browser, unc, installer, smb-disposition-control, unc-cwd-spelling-control; Linux also supports missing-default');
-  assert(windows || !['desktop-high', 'service', 'browser', 'unc','installer','smb-disposition-control','unc-cwd-spelling-control'].includes(scenario), 'This fixture is Windows-specific');
+  assert(['files-process', 'system', 'service', 'browser', 'unc','installer','smb-disposition-control','unc-cwd-spelling-control', ...(linux ? ['missing-default'] : [])].includes(scenario), 'Supported native scenarios exclude retired Computer acceptance');
+  assert(windows || !['service', 'browser', 'unc','installer','smb-disposition-control','unc-cwd-spelling-control'].includes(scenario), 'This fixture is Windows-specific');
   assert(scenario==='installer'?typeof installerReport==='string'&&installerReport.length>0:installerReport===undefined,'--installer-report is required only for the independent Windows installer scenario');
   assert(!administrator || scenario === 'files-process', 'Administrator verification is an independent scenario');
   assert(!administratorReadMatrix || (linux && administrator && template === 'assistant.general' && !retainServiceForAppExit), 'The administrator read matrix is an independent Linux default-General scenario');
   assert(!administratorSystemService || (linux && administrator && template === 'assistant.general' && !administratorReadMatrix && !retainServiceForAppExit), 'The administrator system service is an independent Linux default-General scenario');
   assert(!retainServiceForAppExit || (scenario === 'system' && !administrator), 'Retained service verification is a separate system scenario');
-  assert.equal(typeof desktopBackgroundFocus, 'boolean', '--desktop-background-focus is a boolean test option');
-  assert(!desktopBackgroundFocus || (scenario === 'desktop' && !administrator && !retainServiceForAppExit), '--desktop-background-focus requires the independent desktop scenario');
   assert.equal(typeof protectedUserDirectory, 'boolean', '--protected-user-directory is a boolean test option');
   assert(!protectedUserDirectory || (scenario === 'files-process' && !administrator && !retainServiceForAppExit), '--protected-user-directory applies only to ordinary files-process verification');
   assert(retainServiceForAppExit || appPid === undefined, '--app-pid applies only to retained-service verification');
-  const continuationRequested = nativeContinuationOptions({ administrator, scenario, template, continueSession, continuationSourceReport, continuationRetryReport, nativeDataRoot, retainServiceForAppExit, desktopBackgroundFocus, protectedUserDirectory });
-  assert(linux || retainServiceForAppExit || desktopBackgroundFocus || continuationRequested || scenario==='installer' || isolatedNativeControl || missingDefault || nativeDataRoot === undefined, '--native-data-root is required for Linux and otherwise applies only to retained-service, background-focus, canonical installer, isolated SMB controls, missing-default or pinned administrator continuation verification');
+  const continuationRequested = nativeContinuationOptions({ administrator, scenario, template, continueSession, continuationSourceReport, continuationRetryReport, nativeDataRoot, retainServiceForAppExit, protectedUserDirectory });
+  assert(linux || retainServiceForAppExit || continuationRequested || scenario==='installer' || isolatedNativeControl || missingDefault || nativeDataRoot === undefined, '--native-data-root applies only to scenarios that pin the private dataset');
   assert(['chat.minimal', 'assistant.general'].includes(template), 'Supported default templates: chat.minimal, assistant.general');
   const origin = new URL(baseUrl);
   assert(['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname), 'Only an explicitly supplied local native App is accepted');
@@ -633,7 +616,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     throw new Error('Canonical evidence exceeded bounded pagination');
   };
   let nativeDataset, initialAnnouncement, linuxNativeIdentity, desktopHostIdentity, authenticatedNativeCaller, continuation,preservedSmbEvidence;
-  if (linux || retainServiceForAppExit || desktopBackgroundFocus || continuationRequested || scenario==='installer' || isolatedNativeControl || missingDefault) {
+  if (linux || retainServiceForAppExit  || continuationRequested || scenario==='installer' || isolatedNativeControl || missingDefault) {
     assert(typeof nativeDataRoot === 'string', '--native-data-root is required for this native App identity check');
     nativeDataset = await validateNativeDataset(nativeDataRoot);
     initialAnnouncement = await readNativeAnnouncement(nativeDataset);
@@ -655,14 +638,14 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
       assert(ownerToken === token, 'A substituted login token is not permitted');
       assert(!origin.username && !origin.password, 'The native API URL must not contain credentials');
     }
-    if (desktopBackgroundFocus || continuationRequested || scenario==='installer' || isolatedNativeControl || missingDefault) {
+    if (continuationRequested || scenario==='installer' || isolatedNativeControl || missingDefault) {
       const response = await fetch(new URL('/api/system/permissions', origin), { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000) });
       assert(response.ok, `Authenticated native caller identity request failed (HTTP ${response.status})`);
       const envelope = await response.json(), caller = envelope.data === undefined ? envelope : envelope.data;
       assert.notEqual(envelope.success, false, 'The native App rejected the authenticated caller identity request');
       assert.equal(caller.platform, windows?'windows':'macos'); assert.equal(caller.process_id, initialAnnouncement.pid, 'The actual API caller PID differs from the marked data announcement');
-      if(desktopBackgroundFocus || continuationRequested){
-        assert.equal(caller.app_bundle_identifier, 'com.nomifun.desktop', 'Background focus requires the dedicated formally identified acceptance App');
+      if(continuationRequested){
+        assert.equal(caller.app_bundle_identifier, 'com.nomifun.desktop', 'Continuation requires the dedicated formally identified acceptance App');
         desktopHostIdentity = { pid: caller.process_id, bundle_identifier: caller.app_bundle_identifier, native_data_root: nativeDataset.root };
       }
       authenticatedNativeCaller = caller;
@@ -824,7 +807,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     assert(observed.exit_code === 1 && observed.stdout.trim() === '' && observed.stderr.trim() === '', 'The exact administrator process PID must be absent after proven helper cleanup');
     administratorExitVerified = true;
   };
-  let systemScenario, desktopScenario, windowsScenario;
+  let systemScenario, windowsScenario;
   if (scenario === 'system') {
     if (windows) systemScenario = await windowsCases.createWindowsSystemScenario({ fixture, workspace, loginIdentity, preserveServiceForHostExit: retainServiceForAppExit });
     else {
@@ -833,22 +816,8 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
       systemScenario = createScenario({ fixture, workspace, uid: process.getuid(), loopbackPort: await allocateLoopbackPort(), preserveServiceForHostExit: retainServiceForAppExit });
     }
   }
-  if (scenario === 'desktop') {
-    if (windows) {
-      const { createWindowsDesktopScenario } = await import('./global-os-windows-desktop-cases.mjs');
-      desktopScenario = await createWindowsDesktopScenario({ fixture, workspace });
-    } else if (linux) {
-      const { createLinuxDesktopScenario } = await import('./global-os-linux-desktop-cases.mjs');
-      desktopScenario = await createLinuxDesktopScenario({ fixture, workspace, uid: process.getuid(), nativeIdentity: linuxNativeIdentity, nativeDataRoot, x11SessionRoot });
-    } else {
-      const { createMacDesktopScenario } = await import('./global-os-desktop-cases.mjs');
-      desktopScenario = createMacDesktopScenario({ fixture, workspace, uid: process.getuid(), desktopBackgroundFocus, desktopHostIdentity });
-    }
-  }
-  if (scenario === 'desktop-high') {
-    const { createWindowsHighDesktopScenario } = await import('./global-os-windows-desktop-cases.mjs');
-    desktopScenario = await createWindowsHighDesktopScenario({ fixture, workspace, loginIdentity });
-  }
+
+
   if (scenario === 'service') {
     const { createWindowsServiceScenario } = await import('./global-os-windows-service-cases.mjs');
     windowsScenario = await createWindowsServiceScenario({ fixture, workspace, loginIdentity });
@@ -886,7 +855,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   const readScenario = administratorReadMatrix ? (await import('./global-os-linux-read-cases.mjs')).createLinuxAdministratorReadScenario({ fixture, workspace, uid: process.getuid() }) : undefined;
   const systemRootScenario = administratorSystemService ? (await import('./global-os-linux-system-root-cases.mjs')).createLinuxSystemRootScenario({ fixture, workspace, uid: process.getuid() }) : undefined;
   const missingDefaultScenario = scenario === 'missing-default' ? (await import('./global-os-linux-missing-default-cases.mjs')).createLinuxMissingDefaultScenario({ fixture, workspace, uid: process.getuid() }) : undefined;
-  const acceptanceScenario = systemScenario ?? desktopScenario ?? windowsScenario ?? readScenario ?? systemRootScenario ?? missingDefaultScenario;
+  const acceptanceScenario = systemScenario ?? windowsScenario ?? readScenario ?? systemRootScenario ?? missingDefaultScenario;
   const safeFailure = error => acceptanceScenario?.sanitizeFailure?.(error) ?? { name: error?.name ?? 'Error', message: error.message, stack: error.stack };
   const safeReport = value => acceptanceScenario?.sanitizeReport?.(value) ?? value;
   const steps = acceptanceScenario?.steps ?? (administrator ? [
@@ -980,7 +949,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     if (systemRootScenario) return systemRootScenario.completionSummary(activeTurnRole);
     if (missingDefaultScenario) return missingDefaultScenario.completionSummary(activeTurnRole);
     if (systemScenario?.completionSummary) return systemScenario.completionSummary(activeTurnRole);
-    if (linux && desktopScenario) return desktopScenario.completionSummary(activeTurnRole);
+
     const stepObservation = stepId => {
       const entry = [...observations].findLast(([callId]) => callSteps.get(callId)?.id === stepId);
       return entry && (callSteps.get(entry[0])?.processObservation?.() ?? entry[1]);
@@ -995,7 +964,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
       systemSummary = ({ 'system-install-config': preparation, 'system-service': service, 'system-network': network, 'system-finalize': finalization })[activeTurnRole]
         ?? `本次隔离系统操作的真实结果已记录。唯一服务为 ${target}；只有当前阶段实际核验的调用由本次完成回执支持。`;
     }
-    if (desktopScenario) return activeTurnRole === 'main' ? desktopScenario.completionSummary() : `原桌面验收失败仍保留。本次新 Turn 只通过现役 Computer 工具清理先前由本夹具新启动的 Calculator PID ${desktopScenario.resources.pid}；退出确认=${desktopScenario.resources.quit_confirmed}，不操作任何既有应用、用户文件或剪贴板。`;
+
     if (activeTurnRole === 'retained-cleanup') return `此前主阶段按要求保留了本次服务；宿主已独立确认原 App PID ${appPid} 退出、同一服务真实存续，再以原 owner 登录身份在同数据根的新 App 继续同一 Session。本轮原生停止唯一服务 ${systemScenario.resources.target}，确认已观察进程退出和服务不存在，并删除 ${systemScenario.resources.root}。具体退出和重启证据保留在验收记录中。`;
     if (activeTurnRole === 'cleanup') return `原验收失败保留。本次新 Turn 只清理本次唯一服务 ${systemScenario.resources.target}，确认原生状态不存在并删除 ${systemScenario.resources.root}；恢复清理不把首次失败改写为通过。`;
     if (systemScenario) return systemSummary;
@@ -1054,10 +1023,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
               checks.push({id,step:step.id,status:'deferred_for_fresh_instruction_context',...deferral});continue;
             }
           }
-          if(step.expectedComputerNoEffectAdmission===true){
-            const proof=nativeComputerNoEffectAdmission({raw,callId:id,callArguments:proposedArguments.get(id),events:await sessionEvents(),operationId:accepted.operation_id,sessionId});
-            await step.verifyNoEffect(proof);observations.set(id,{expected_no_effect_admission:proof});completedSteps.add(step.id);checks.push({id,step:step.id,status:'passed_expected_no_effect_admission',proof});continue;
-          }
+
           if(raw.startsWith('[tool error]')&&typeof step.observeTerminalFailure==='function'){
             assert.equal(scenario,'unc-cwd-spelling-control');assert.equal(step.id,'unc-cwd-two-spellings');
             await step.observeTerminalFailure(nativeControlTerminalFailureObservation({raw,callId:id,callArguments:proposedArguments.get(id),events:await sessionEvents(),operationId:accepted.operation_id,sessionId}));
@@ -1082,7 +1048,6 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
           if (complete !== false) completedSteps.add(step.id);
           checks.push({ id, step: step.id, status: complete === false ? 'waiting_for_remaining_output' : 'passed' });
           } catch (error) {
-            if (desktopScenario && error && typeof error === 'object' && /^desktop-[a-z0-9-]+$/.test(step.id)) error.safe_step = step.id;
             throw error;
           }
         } else if (discoveries.has(id)) {
@@ -1166,7 +1131,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const providerUrl = `http://127.0.0.1:${server.address().port}/v1`;
   const report = { schema: 'nomifun.global-os-native-regression.v2', platform: process.platform, login_identity: loginIdentity, native_case_evidence: windowsScenario?.nativeEvidence, windows_administrator_process: windowsScenario?.administratorEvidence, run_id: runId, session_id: continueSession, started_at: new Date().toISOString(), host: origin.origin, fixture, workspace, outside, template, scenario: administratorSystemService ? 'administrator-system-service' : administratorReadMatrix ? 'administrator-read-matrix' : administrator ? 'administrator' : scenario,
-    evidence_scope: scenario==='unc-cwd-spelling-control' ? 'Diagnostic same-App Windows ProcessStartInfo UNC cwd spelling control with two natural child WinPS exits. ProviderPath observations do not certify the full product UNC case or settle any preserved Effect.' : scenario==='smb-disposition-control' ? 'Public default Agent / same original private App and owner JWT / distinct UUID SMB native primitive control. Raw primitive outcomes are diagnostic observations, not product success or resolution of the preserved source Effect. No preserved source path is read or modified by the control probe.' : continuation ? 'Real native App / same originally selected Agent and Session / same private owner JWT / public model command and canonical contract transition / new isolated administrator fixture. No new Agent, grants or resources. Original failure remains failed. Local scripted provider is not live-model reasoning evidence.' : 'Real native App / unmodified default template / owner login JWT / local scripted provider / real native owners. App signing identity and GUI review require separate driver evidence. No live-model reasoning claim.', continuation: continuation?.report, administrator, administrator_fixture: administrator && !administratorReadMatrix && !administratorSystemService ? { path: administratorRoot, marker } : undefined, administrator_instructions: administrator && !administratorReadMatrix && !administratorSystemService ? administratorInstructionEvidence : undefined, administrator_process: administrator && !administratorReadMatrix && !administratorSystemService ? (windows ? windowsScenario.administratorEvidence : administratorProcessEvidence) : undefined, protected_user_directory: protectedParent ? { ...protectedParent, allocated_test_directory: outside } : undefined, checks, status: 'running', system_resources: systemScenario?.resources, native_case_resources: windowsScenario?.resources, desktop_resources: desktopScenario?.resources, desktop_mode: desktopScenario ? (desktopBackgroundFocus ? 'background_focus' : scenario === 'desktop-high' ? 'high_integrity' : 'full') : undefined, desktop_host_identity: desktopHostIdentity, pending_acceptance: acceptanceScenario?.pendingAcceptance, native_system_evidence: systemScenario?.nativeEvidence, native_read_evidence: readScenario?.nativeEvidence, read_resources: readScenario?.resources, native_system_root_evidence: systemRootScenario?.nativeEvidence, system_root_resources: systemRootScenario?.resources, native_missing_default_evidence: missingDefaultScenario?.nativeEvidence, missing_default_resources: missingDefaultScenario?.resources, retain_service_for_app_exit: retainServiceForAppExit, native_dataset: nativeDataset, initial_native_announcement: initialAnnouncement, linux_native_identity: linuxNativeIdentity, phase_checkpoints: [] };
+    evidence_scope: scenario==='unc-cwd-spelling-control' ? 'Diagnostic same-App Windows ProcessStartInfo UNC cwd spelling control with two natural child WinPS exits. ProviderPath observations do not certify the full product UNC case or settle any preserved Effect.' : scenario==='smb-disposition-control' ? 'Public default Agent / same original private App and owner JWT / distinct UUID SMB native primitive control. Raw primitive outcomes are diagnostic observations, not product success or resolution of the preserved source Effect. No preserved source path is read or modified by the control probe.' : continuation ? 'Real native App / same originally selected Agent and Session / same private owner JWT / public model command and canonical contract transition / new isolated administrator fixture. No new Agent, grants or resources. Original failure remains failed. Local scripted provider is not live-model reasoning evidence.' : 'Real native App / unmodified default template / owner login JWT / local scripted provider / real native owners. App signing identity and GUI review require separate driver evidence. No live-model reasoning claim.', continuation: continuation?.report, administrator, administrator_fixture: administrator && !administratorReadMatrix && !administratorSystemService ? { path: administratorRoot, marker } : undefined, administrator_instructions: administrator && !administratorReadMatrix && !administratorSystemService ? administratorInstructionEvidence : undefined, administrator_process: administrator && !administratorReadMatrix && !administratorSystemService ? (windows ? windowsScenario.administratorEvidence : administratorProcessEvidence) : undefined, protected_user_directory: protectedParent ? { ...protectedParent, allocated_test_directory: outside } : undefined, checks, status: 'running', system_resources: systemScenario?.resources, native_case_resources: windowsScenario?.resources, pending_acceptance: acceptanceScenario?.pendingAcceptance, native_system_evidence: systemScenario?.nativeEvidence, native_read_evidence: readScenario?.nativeEvidence, read_resources: readScenario?.resources, native_system_root_evidence: systemRootScenario?.nativeEvidence, system_root_resources: systemRootScenario?.resources, native_missing_default_evidence: missingDefaultScenario?.nativeEvidence, missing_default_resources: missingDefaultScenario?.resources, retain_service_for_app_exit: retainServiceForAppExit, native_dataset: nativeDataset, initial_native_announcement: initialAnnouncement, linux_native_identity: linuxNativeIdentity, phase_checkpoints: [] };
   const reportPath = join(reportDirectory, `${administratorSystemService ? 'administrator-system-service' : administratorReadMatrix ? 'administrator-read-matrix' : administrator ? 'administrator' : scenario}${continuation ? '-continuation' : ''}-${template}-${Date.now()}-${randomUUID()}.json`);
   if(missingDefault)report.missing_default={requested:true,status:'awaiting_frozen_session',workspace};
   const phaseCheckpoint = async (phase, extra = {}) => {
@@ -1502,13 +1467,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
         Object.assign(report, result);
       }
     } else if (systemScenario) await driveSystemPhases();
-    else if (linux && desktopScenario?.phases) {
-      report.desktop_phases = [];
-      for (const phase of desktopScenario.phases) {
-        const result = await driveTurn(phase.prompt, phase.steps, phase.role);
-        report.desktop_phases.push({ role: phase.role, step_ids: phase.steps.map(step => step.id), ...result });
-      }
-    } else Object.assign(report, await driveTurn(content, steps, 'main'));
+    else Object.assign(report, await driveTurn(content, steps, 'main'));
     assert.equal(await present(administrator ? administratorRoot : outside), false);
     if (retainServiceForAppExit) await continueAfterRootControlledAppRestart();
     if(missingDefaultFrozen)await verifyWindowsMissingDefaultCase({frozen:missingDefaultFrozen,session:await api('GET',`/api/agent-sessions/${sessionId}`),projection:await api('GET',`/api/agent-sessions/${sessionId}/projection`),events:await sessionEvents(),nativeDataset:await validateNativeDataset(nativeDataset.root),announcement:await readNativeAnnouncement(nativeDataset),evidence:report.missing_default});
@@ -1530,7 +1489,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
       try {
         // This is a new explicitly scoped recovery Turn. The first failure and
         // its exact cancellation/cleanup proof remain separate in the report.
-        const cleanupPrompt = acceptanceScenario.cleanupPrompt ?? (desktopScenario ? `原桌面验收失败，先前 Turn 已取消且临时资源与 pending/unknown 效果均已结算。只通过现役 Computer 工具取得新观察、聚焦并退出本次新启动的 Calculator PID ${desktopScenario.resources.pid}，确认该 PID 已退出。不重跑验收，不操作其他应用、用户文件或剪贴板。` : `原隔离验收失败，先前 Turn 已取消且临时进程清理、pending/unknown 效果均已结算。现在只清理本次随机偏好和唯一服务 ${systemScenario.resources.target}：通过系统原生状态确认，存在则 bootout；确认该服务及已观察 PID 退出后，再用文件工具删除 ${systemScenario.resources.root}。不重跑验收、不修改其他对象。`);
+        const cleanupPrompt = acceptanceScenario.cleanupPrompt ?? `原隔离验收失败，先前 Turn 已取消且临时进程清理、pending/unknown 效果均已结算。现在只清理本次随机偏好和唯一服务 ${systemScenario.resources.target}：通过系统原生状态确认，存在则 bootout；确认该服务及已观察 PID 退出后，再用文件工具删除 ${systemScenario.resources.root}。不重跑验收、不修改其他对象。`;
         report.recovery_cleanup = await driveTurn(acceptanceScenario.cleanupPrompt ?? cleanupPrompt, acceptanceScenario.cleanupSteps, 'cleanup');
       } catch (cleanupError) {
         report.recovery_cleanup_failure = { ...safeFailure(cleanupError), accepted };
@@ -1570,7 +1529,7 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
     }
     report.finished_at = new Date().toISOString(); report.observations = Object.fromEntries(observations); report.raw_tool_results = Object.fromEntries(rawResults); report.completion_receipts = Object.fromEntries(completions);
     if (acceptanceScenario) report.cleanup_intent = { ...acceptanceScenario.cleanupIntent, temporary_process: typeof acceptanceScenario.cleanupIntent?.temporary_process === 'function' ? acceptanceScenario.cleanupIntent.temporary_process() : acceptanceScenario.cleanupIntent?.temporary_process };
-    report.remaining_fixture = { missing_default_external_root: missingDefaultScenario ? await present(missingDefaultScenario.resources.root) : undefined, missing_default_directory: missingDefaultScenario ? await present(workspace) : undefined, administrator_service_root: systemRootScenario ? await present(systemRootScenario.resources.root) : undefined, read_root: readScenario ? await present(readScenario.resources.root) : undefined, outside: await present(outside).catch(error => ({ state: 'unknown', os_code: error.code, detail: safeFailure(error).message })), administrator_root: await present(administratorRoot), system_root: systemScenario ? await present(systemScenario.resources.root) : undefined, desktop_root: desktopScenario?.resources.root ? await present(desktopScenario.resources.root) : undefined };
+    report.remaining_fixture = { missing_default_external_root: missingDefaultScenario ? await present(missingDefaultScenario.resources.root) : undefined, missing_default_directory: missingDefaultScenario ? await present(workspace) : undefined, administrator_service_root: systemRootScenario ? await present(systemRootScenario.resources.root) : undefined, read_root: readScenario ? await present(readScenario.resources.root) : undefined, outside: await present(outside).catch(error => ({ state: 'unknown', os_code: error.code, detail: safeFailure(error).message })), administrator_root: await present(administratorRoot), system_root: systemScenario ? await present(systemScenario.resources.root) : undefined };
     // A failed run keeps its original default directory for a future scoped
     // canonical cleanup Turn, including after the original App has exited.
     // Successful runs remove only known empty fixture directories.
@@ -1587,30 +1546,29 @@ export async function runNativeRegression({ baseUrl, token, tokenFile, reportDir
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  if (process.argv.includes('--help')) console.log('node scripts/validation/global-os-native.mjs --base-url http://127.0.0.1:PORT --token-file /ABS/ISOLATED-OWNER-LOGIN-JWT --report-dir /ABS/EVIDENCE [--template chat.minimal|assistant.general] [--scenario files-process|system|service|desktop|desktop-high|browser|unc|installer|smb-disposition-control|unc-cwd-spelling-control] [--preserved-unc-report /ABS/PRESERVED_FAILED_UNC_REPORT] [--administrator [--continue-session PINNED_ID --continuation-source-report /ABS/PINNED_FAILED_REPORT [--continuation-retry-report /ABS/PINNED_ZERO_DISPATCH_FAILURE] --native-data-root /PRIVATE_MARKED_PARENT/native-data]] [--protected-user-directory] [--missing-default --native-data-root /PRIVATE_MARKED_PARENT/native-data] [--desktop-background-focus] [--retain-service-for-app-exit --app-pid ACTUAL_APP_PID --native-data-root /PRIVATE_MARKED_PARENT/native-data]. Run against an already running actual native App with its own isolated test dataset. Signing and notarization are separate acceptance evidence. Obtain the token by normal owner setup/login; the native browser trust secret is not an owner JWT. Run ordinary, system/network, SCM service, desktop, high-integrity desktop, Browser and administrator cases separately. SMB disposition control requires --preserved-unc-report and the marked original private --native-data-root; its distinct UUID namespace measures native primitive outcomes without replaying or settling the preserved source Effect. Windows service/desktop-high/browser are independent unique native fixtures; service uses SCM, while the system case uses Task Scheduler. The high-integrity fixture uses a real elevated WinForms window and existing Computer actions, preserving UAC and the Default desktop boundary. --protected-user-directory is a boolean ordinary files-process option: the actual existing homedir/Documents parent is resolved read-only, only an absent nomifun-global-os-product-UUID name is allocated there, and all creation/patch/search/cwd/process-cancel/deletion effects use the Agent; the workspace stays in the private /tmp fixture. Missing or denied Documents metadata is recorded, never prepared by the host. --missing-default is Windows ordinary files-process only: create and freeze the normal Session first, then rmdir only its known empty default directory before the first Turn; retain the same private data root, binding, resources and resolved snapshot throughout the external absolute-path cases. A busy directory is reported, never forced or recreated. --desktop-background-focus requires --scenario desktop and --native-data-root. The marked private data announcement and authenticated permission caller must identify the same live formal App; only that minimal identity is passed to the read-only window verifier. The Agent establishes background setup and performs all focus effects through Computer; no reviewer focus mutation is used. Desktop defaults to assistant.general with actual screenshot input capability on its local fixture model; all UI effects use the existing Agent Computer tools and reports omit private pixels/AX/global window text. Retained-service verification implies --scenario system: the driver emits an awaiting_app_exit checkpoint, waits at most ten minutes for the reviewer to quit and restart the App, independently observes service survival, authenticates the same owner JWT against the new private port announcement, then continues the same Session/provider with a new cleanup Turn. The driver never quits the App or kills a raw PID; SIGINT/SIGTERM cancel its wait and preserve any unproven service target. Administrator continuation is limited to the exact pinned private failed report, original Session, owner JWT and fourth dataset. It uses only the public model command to prepare current bundled contracts, preserves Agent intent/resources/workspace and original failure, allocates a fresh root fixture, and records source/event/schema digests. An optional retry accepts only the one pinned failed continuation whose canonical records prove no user effect dispatch, and requires that exact settled latest operation while retaining both old failures. It never creates a new Agent/Session or changes grants; prior-run receipts cannot satisfy new-run calls. Arbitrary administrator paths are forbidden. OS authentication stays in native UI. The local scripted provider is deterministic product-path evidence, not live-model or visual acceptance.');
+  if (process.argv.includes('--help')) console.log('node scripts/validation/global-os-native.mjs --base-url LOOPBACK --token-file PRIVATE_OWNER_JWT --report-dir EVIDENCE [--scenario files-process|system|service|browser|unc|installer|smb-disposition-control|unc-cwd-spelling-control] [--administrator] [--retain-service-for-app-exit --app-pid PID --native-data-root PRIVATE/native-data]. Uses an already running isolated native App and canonical Agent ingress. System authentication, signing, packaging and live-model acceptance are separate evidence.');
   else {
     assert.notEqual(process.platform, 'linux', 'Use scripts/validation/global-os-linux-native.mjs for the Linux CLI and its explicit native-data, read-matrix, system-service and X11 options');
     assert(!['--x11-session-root', '--administrator-read-matrix', '--administrator-system-service'].some(flag => process.argv.includes(flag)), 'Linux-specific options require scripts/validation/global-os-linux-native.mjs on the actual Linux host');
     assert(!process.argv.includes('--administrator-directory'), '--administrator-directory is forbidden; use --administrator with a host-allocated fixture');
     const retained = process.argv.includes('--retain-service-for-app-exit');
-    const background = process.argv.includes('--desktop-background-focus');
     const missingDefault = process.argv.includes('--missing-default');
     const continued = nativeContinuationCliArguments(process.argv);
     assert(retained || !process.argv.includes('--app-pid'), '--app-pid requires --retain-service-for-app-exit');
     const selectedScenario = option('--scenario') ?? (retained ? 'system' : 'files-process');
     const nativeControl=selectedScenario==='smb-disposition-control'||selectedScenario==='unc-cwd-spelling-control';
-    assert(retained || background || continued || selectedScenario==='installer' || nativeControl || missingDefault || !process.argv.includes('--native-data-root'), '--native-data-root requires retained-service, background-focus, canonical installer, isolated SMB controls, missing-default or pinned administrator continuation verification');
-    const selectedTemplate = option('--template') ?? (selectedScenario.startsWith('desktop') || selectedScenario === 'browser' ? 'assistant.general' : 'chat.minimal');
-    const nativeDataRoot = retained || background || continued || selectedScenario==='installer' || nativeControl || missingDefault ? required('--native-data-root') : undefined;
+    assert(retained || continued || selectedScenario==='installer' || nativeControl || missingDefault || !process.argv.includes('--native-data-root'), '--native-data-root requires a scenario that pins the isolated dataset');
+    const selectedTemplate = option('--template') ?? (selectedScenario === 'browser' ? 'assistant.general' : 'chat.minimal');
+    const nativeDataRoot = retained || continued || selectedScenario==='installer' || nativeControl || missingDefault ? required('--native-data-root') : undefined;
     const continueSession = option('--continue-session'), continuationSourceReport = option('--continuation-source-report'), continuationRetryReport = option('--continuation-retry-report');
     const administrator = process.argv.includes('--administrator');
     nativeContinuationOptions({ administrator, scenario: selectedScenario, template: selectedTemplate, continueSession, continuationSourceReport, continuationRetryReport, nativeDataRoot,
-      retainServiceForAppExit: retained, desktopBackgroundFocus: background, protectedUserDirectory: process.argv.includes('--protected-user-directory') });
+      retainServiceForAppExit: retained, protectedUserDirectory: process.argv.includes('--protected-user-directory') });
     const tokenFile = required('--token-file');
     if (continued) assert.equal(tokenFile, join(dirname(nativeAdministratorContinuationFixture.nativeDataRoot), 'owner-jwt'), 'Continuation requires its exact private owner JWT file');
     const token = (continued ? (await readNativeOwnedFixtureBytes(tokenFile, 4096)).toString('utf8') : await readFile(tokenFile, 'utf8')).trim();
     await runNativeRegression({ baseUrl: required('--base-url'), token, tokenFile, reportDirectory: required('--report-dir'), administrator, scenario: selectedScenario, template: selectedTemplate,
       retainServiceForAppExit: retained, appPid: retained ? Number(required('--app-pid')) : undefined, nativeDataRoot,
-      protectedUserDirectory: process.argv.includes('--protected-user-directory'), desktopBackgroundFocus: background, continueSession, continuationSourceReport, continuationRetryReport,installerReport:option('--installer-report'),missingDefault,preservedUncReport:option('--preserved-unc-report') });
+      protectedUserDirectory: process.argv.includes('--protected-user-directory'), continueSession, continuationSourceReport, continuationRetryReport,installerReport:option('--installer-report'),missingDefault,preservedUncReport:option('--preserved-unc-report') });
   }
 }

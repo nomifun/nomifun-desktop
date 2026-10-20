@@ -1,5 +1,7 @@
 # Linux 全局操作系统能力验证（2026-10-17）
 
+本页保留原文件、进程、Browser、媒体和系统执行的历史证据；退役 Computer 的验收不再作为现役输入。新实现的范围和未验项见[Computer 架构](../architecture/computer-use.zh.md)，实际进展仅记专项第 12 节。
+
 本页记录 Ubuntu 26.04 / WSL2 x86_64 的当前实现与本机证据。源码存在、单元测试、root 隔离夹具、portal 协议 fixture、独立 X11 虚拟桌面和默认 Agent 原生产品入口分别计证，不互相替代。真实 Wayland 系统许可、未提供硬件和其他发行版不能由本页推断通过。
 
 ## Git 与环境
@@ -31,7 +33,6 @@
 | Node/npm | 70 项 runtime unit 已通过；官方 Node 发行的独立 Linux npm offline lifecycle/literal argv、持久 CLI、损坏缓存恢复和重启回归实际 1 passed。首次隔离 fixture 缺 sh 的失败保留，补齐仅 shell 的隔离 PATH 后通过，未借系统 Node 冒充受管发行 |
 | 系统设施安装 | 同源 runner 与 policy 已通过显式安装入口安装；pkaction 校验固定 executable/argv1 与原生认证策略。最终 RT4iTT helper 与 cf41 build identity 的静态 UI Host 已配对安装/启动；真实管理员产品流程通过，GUI 全程 UID1000 |
 | 文件/挂载 | file 全套 543 passed / 3 ignored；foreign-owner root 隔离用例单独通过；ext4 五项 metadata/外部路径原生回归通过。v9fs 新文件 linkat 发布已证实；现有文件 replace 在保留 staging fd 时无法完成命名身份校验，返回真实 unknown。关闭句柄后的独立 probe 证实目标存在且新字节正确，不能当作未写入而重放；首次及后续报告保留 |
-| X11/Wayland | 详见[桌面验证](global-os-linux-desktop-2026-10-17.zh.md)；独立 Xvfb/Openbox 的真实 ComputerTool 路径和 private D-Bus fixture 分开记录；WSLg 缺 RemoteDesktop/ScreenCast backend，真实 Wayland grant/capture/input 未通过 |
 | 媒体 | 正式 Settings 入口的真实 GTK Cancel、同文档 NotAllowedError、reload 后 fresh Allow、1 audio track live→正式 stop→ended 均通过；未启 mock、录制或上传。补充 silent graph/Pulse AUTHORIZING 超时未计通过，实际声音链/物理来源未证明；无 `/dev/video*`。详见独立媒体报告 |
 | 默认 General/Minimal / system / desktop | General 与 Minimal 各自完成工作区外文件/进程闭环及 system 四阶段闭环；General 在私有原生 X11 完成后续 86 checks / 45 正式步骤（两正常 Turn，含 AX 与中文复制粘贴）。真实 polkit 管理员 7 步闭环已通过；新的 App-exit 持久服务全流程通过，旧失败报告保留 |
 | 完整原生包 | 已生成真实静态 UI Host 的本地 debug deb/rpm 并验证包内 UID/mode/字节，但其早期认证代码已被替代，旧目录明确标记 superseded。最终线程修复后的同源 debug deb 已冻结并通过 control/依赖/16项 payload/字节核对，本机安装、同版本替换、UID1000 私有数据启动、卸载与手动组件恢复均通过；不把结构 fixture 当产品包 |
@@ -57,12 +58,6 @@
 ## 默认 Agent 原生产品证据
 
 验收由本地 scripted provider 驱动正式默认 Agent、ToolPlan、canonical Session/Turn/Event/Effect 和实际宿主工具；不声称联网模型推理。主 App 使用普通用户 UID1000、真实 HOME、仓库外私有 XDG/dataset，凭据与 owner JWT 仅保存在 0600 仓库外文件。没有读取日常聊天或通过数据库补造事实。
-
-- Minimal 文件/进程报告 `files-process-chat.minimal-1792208636495-36507a95-947d-4207-b1e5-8929ee63eb04.json`（Session `01a147f5-8f25-7a92-a5ff-c1df7223f60c`）与 General 报告 `files-process-assistant.general-1792208710409-2df60f68-804a-4b48-8fe7-011ac049e819.json`（Session `01a147f6-b075-70a0-a883-39ef92a41f32`）通过：六项文件操作、绝对路径/合法 `..`/symlink、外部链接 cwd 中真实 running 进程、取消后 terminal/reaped/确切 PID 消失，以及本次 fixture 删除。外部产物使用 native path，没有伪造 workspace path。
-- Minimal system 报告 `system-chat.minimal-1792208212545-baaf6c39-1943-43f0-99e4-ebe223583871.json`（Session `01a147ef-16dd-71b2-b191-6547d5a8a5fc`）与 General 报告 `system-assistant.general-1792208311440-6d7b969b-a98f-4e1a-bee9-d9c69a74a5ff.json`（Session `01a147f0-99df-7bc3-b849-1694fbc929bb`）各完成 29 checks / 4 canonical Turns：隔离用户安装/卸载、literal argv、配置修改恢复、唯一 systemd user manager 配置键写读与清除、transient service 的真实 PID/cgroup/UID/cwd、loopback HTTP 和取消清理。首次 systemd fixture 对 shell `$$` 的错误由系统 `--expand-environment=no` 正确表达 literal argv 修复，失败报告未被覆盖。
-- General 桌面报告 `desktop-assistant.general-1792210386206-73bdc896-9ba7-4fd8-87bb-da467063b91e.json`（Session `01a14810-41d2-7712-8534-a413f5dfd825`）在独立真实 Xvfb/Openbox/Xauthority、私有 D-Bus/AT-SPI 环境完成 34 checks / 18 正式步骤，包括截图 vision attachment、窗口枚举、精确 focus、click/type/Enter/scroll、Ctrl+q 退出同一 GTK fixture PID、reaped/消失与 fixture 删除。它不代替 WSLg Wayland 系统许可或实体桌面验收。
-
-后续隔离 X11 补验 `desktop-assistant.general-1792212688669-49ca7f9a-01ba-474a-99f8-412ae66ef2b6.json`（Session `01a14833-6481-7710-bb91-22b515f23a07`）完成 86 checks / 45 实际步骤，分两个正常用户 Turn（23/22 步）并各自完成 GTK 生命周期，未调高默认预算。真实 AT-SPI tree 的 UUID accessible name、active XID 与受管 PID 精确绑定；正式 ref 动作执行 native EditableText whole-value setter 和 Action click，拒绝 pixel fallback。正式 Ctrl+C/V 将包含中文和 ✓ 的随机值从 source Entry 复制到 sink Entry，独立 GTK oracle 验证并恢复最初空的私有 clipboard。现役 Computer 没有独立 clipboard read/write operation，因此该项只证明 GUI keyboard copy/paste。两 GTK 均 Ctrl+q/exit0/reaped/PIDgone/delete；App196444 正常 exit0，11 个 owned PID 全部回收。来源报告与 cleanup 汇总见 `desktop-ax-final-evidence.json`。首个 header 假设错误和单 Turn 超出默认模型预算的失败分别保留，均在原 Session 新 cleanup Turn 删除确切残留目录；跨 Turn 旧 process ref 真实拒绝，没有放宽身份合同。
 
 新增 opt-in Node 生命周期组合的最终标准 Cargo 报告 `node-lifecycle-cargo-final.json`（SHA-256 `e01269a20d2a6d00a2a1314192d99a65f1eabc6ea28bf41a8304f408c02cfdbb`，1 passed / 13.32 s / exit0；较早直接组件重链报告保留独立身份）通过公开 runtime、McpOwner、canonical Store 与 Agent-only reset API，在真实 UID1000 / HOME `/home/muri`、私有 XDG 下验证离线官方 Node。真实 MCP tools/call、literal argv 与确切进程回收通过；Store 两个已接受/取消 Turn 的 1 Session / 2 Turns / 9 Events 经 reset 清零，用户与已安装 CLI 保留，同一 CLI dev/inode/SHA 在 reset、runtime cache replacement 与独立进程重启后仍可执行，再正式 npm 卸载并删除 fixture。原 Node 单独用例的 HOME 为 fixture；此组合用例另证真实 HOME。Store Turns 不作为直接 CLI/MCP 的 Agent Effect 归因，也不声称已覆盖真实 Desktop App clean cut、退役 schema 启动 clean cut或跨版本升级。详见[Node 验证](global-os-linux-node-2026-10-17.zh.md)。
 

@@ -12,6 +12,7 @@ import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import { formatToolPresentationLabel, resolveToolPresentation } from '@/common/chat/toolPresentation';
 import type { ToolPresentation } from '@/common/chat/toolPresentation';
 import type { ToolFileSummary } from '@/common/chat/fileSummary';
+import { computerActionGroup } from '@/common/chat/computerSurface';
 
 export type ToolReceiptAction =
   | 'read_files'
@@ -37,6 +38,7 @@ export interface ToolReceiptRow {
   commandExitCode?: number;
   commandNotStarted?: boolean;
   commandTimedOut?: boolean;
+  foreground?: boolean;
 }
 
 export const countBoundedSearchResults = (tools: NormalizedToolCall[]): number =>
@@ -110,6 +112,7 @@ export const buildToolReceiptRows = (tools: NormalizedToolCall[], language = 'en
       ...(tool.commandExitCode !== undefined ? { commandExitCode: tool.commandExitCode } : {}),
       ...(tool.commandNotStarted ? { commandNotStarted: true } : {}),
       ...(tool.commandTimedOut ? { commandTimedOut: true } : {}),
+      ...((tool.capabilityId === 'computer' || tool.actionId && computerActionGroup(tool.actionId)) && tool.foreground === true ? { foreground: true } : {}),
 
     };
   });

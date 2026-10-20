@@ -2,6 +2,7 @@
 //! carrier is part of the original tool result, never a second permission log.
 
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 pub const SYSTEM_PERMISSION_REQUIRED: &str = "SYSTEM_PERMISSION_REQUIRED";
 
@@ -25,19 +26,32 @@ pub struct SystemPermissionRequired {
 
 impl SystemPermissionRequired {
     fn valid(&self) -> bool {
-        let expected = match (self.action_id.as_str(), self.operation.as_str()) {
-            ("computer/observe", "screenshot") => Some(SystemPermissionKind::ScreenRecording),
-            ("computer/a11y.observe", "observe") => Some(SystemPermissionKind::Accessibility),
-            ("computer/input", "click_element" | "set_element_value" | "right_click_element"
-                | "double_click_element" | "left_click" | "right_click" | "middle_click"
-                | "double_click" | "triple_click" | "mouse_move" | "left_click_drag"
-                | "type" | "key" | "scroll" | "focus_window") => Some(SystemPermissionKind::Accessibility),
-            _ => None,
-        };
+        let Some(tool) = computer_tools().tools.iter().find(|tool|
+            tool.action_id == self.action_id && tool.driver_tool == self.operation) else { return false; };
         self.schema == "system-permission-required.v1" && self.capability == "computer"
             && self.execution == "not_executed"
-            && expected.is_some_and(|expected| self.permissions == [expected])
+            && !self.permissions.is_empty()
+            && self.permissions.iter().enumerate().all(|(index, permission)| {
+                !self.permissions[..index].contains(permission) && match permission {
+                    SystemPermissionKind::Accessibility => tool.system_permissions.accessibility,
+                    SystemPermissionKind::ScreenRecording => tool.system_permissions.screen_recording != "never",
+                }
+            })
     }
+}
+
+#[derive(Deserialize)]
+struct ComputerTools { tools: Vec<FrozenComputerAction> }
+#[derive(Deserialize)]
+struct FrozenComputerAction { action_id: String, driver_tool: String, system_permissions: ComputerPermissions }
+#[derive(Deserialize)]
+struct ComputerPermissions { accessibility: bool, screen_recording: String }
+
+fn computer_tools() -> &'static ComputerTools {
+    static TOOLS: OnceLock<ComputerTools> = OnceLock::new();
+    TOOLS.get_or_init(|| serde_json::from_str(include_str!(
+        "../../nomifun-agent-contracts/contracts/computer-tools.v1.json"
+    )).expect("the generated Computer permission surface must be valid"))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -76,27 +90,28 @@ pub fn project_system_permission_required(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
-    fn permission_projection_requires_the_explicit_failure_code_and_admitted_action() {
-        let message = json!({"schema":"system-permission-required.v1", "capability":"computer",
-            "action_id":"computer/observe", "operation":"screenshot", "permissions":["screen_recording"],
-            "execution":"not_executed"}).to_string();
+    fn frozen_operation_accepts_only_its_missing_permission_subset() {
+        let tool = computer_tools().tools.iter().find(|tool|
+            tool.system_permissions.accessibility && tool.system_permissions.screen_recording == "window_screenshot").unwrap();
+        let mut request = SystemPermissionRequired {
+            schema: "system-permission-required.v1".into(), capability: "computer".into(),
+            action_id: tool.action_id.clone(), operation: tool.driver_tool.clone(),
+            permissions: vec![SystemPermissionKind::ScreenRecording], execution: "not_executed".into(),
+        };
+        let message = serde_json::to_string(&request).unwrap();
         let carrier = system_permission_error_carrier(SYSTEM_PERMISSION_REQUIRED, &message).unwrap();
-        assert!(project_system_permission_required(Some("computer"), Some("computer/observe"), true, &carrier).is_some());
-        for (capability, action, is_error, body) in [
-            ("computer", "computer/observe", false, carrier.as_str()),
-            ("browser", "computer/observe", true, carrier.as_str()),
-            ("computer", "computer/input", true, carrier.as_str()),
-            ("computer", "computer/observe", true, message.as_str()),
-        ] { assert!(project_system_permission_required(Some(capability), Some(action), is_error, body).is_none()); }
-        assert!(system_permission_error_carrier("ROLE_HOST_PROVIDER_FAILURE", &message).is_none());
-        for (key, value) in [("execution",json!("unknown")), ("permissions",json!([])),
-            ("operation",json!("wait")), ("extra",json!(true))] {
-            let mut malformed: serde_json::Value = serde_json::from_str(&message).unwrap();
-            malformed[key] = value;
-            assert!(system_permission_error_carrier(SYSTEM_PERMISSION_REQUIRED, &malformed.to_string()).is_none());
-        }
+        assert!(project_system_permission_required(Some("computer"), Some(&tool.action_id), true, &carrier).is_some());
+        assert!(project_system_permission_required(Some("computer"), Some(&tool.action_id), false, &carrier).is_none());
+        assert!(project_system_permission_required(Some("computer"), Some("foreign/action"), true, &carrier).is_none());
+        assert!(system_permission_error_carrier("OTHER_ERROR", &message).is_none());
+        request.permissions.push(SystemPermissionKind::ScreenRecording);
+        assert!(!request.valid());
+        request.permissions.clear();
+        assert!(!request.valid());
+        request.permissions.push(SystemPermissionKind::Accessibility);
+        request.operation = "foreign_operation".into();
+        assert!(!request.valid());
     }
 }

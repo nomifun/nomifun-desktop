@@ -27,7 +27,7 @@ use crate::adapter::{
     VertexAdapter,
 };
 use crate::broker::{
-    BrokerRetryPolicy, ChatBrokerPort, ChatModelBroker, ChatModelStream,
+    BrokerRetryPolicy, ChatAttemptProjection, ChatBrokerPort, ChatModelBroker, ChatModelStream,
 };
 use crate::contracts::{
     ChatModelError, ChatModelErrorCode, ChatModelRequest, ChatProtocol, ChatRetryDirective,
@@ -771,6 +771,21 @@ impl ProductionChatModelBroker {
 
 #[async_trait]
 impl ChatBrokerPort for ProductionChatModelBroker {
+    fn with_attempt_projection(
+        &self,
+        projection: Arc<dyn ChatAttemptProjection>,
+    ) -> Result<Arc<dyn ChatBrokerPort>, ChatModelError> {
+        self.inner.with_attempt_projection(projection)
+    }
+
+    async fn open_owned_chat_attempt(
+        &self,
+        request: ChatModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<crate::OwnedChatAttempt, ChatModelError> {
+        self.inner.open_owned_chat_attempt(request, cancellation).await
+    }
+
     async fn open_chat_stream(
         &self,
         request: ChatModelRequest,

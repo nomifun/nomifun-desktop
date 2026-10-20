@@ -6016,19 +6016,6 @@
             "additionalProperties": false,
             "properties": {
               "availability": {
-                "const": "independent_partial_or_exact_unavailable",
-                "type": "string"
-              }
-            },
-            "required": [
-              "availability"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "availability": {
                 "const": "exact_unavailable",
                 "type": "string"
               },

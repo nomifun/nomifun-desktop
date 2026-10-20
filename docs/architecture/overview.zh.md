@@ -101,7 +101,7 @@ Cargo 工作区（根 [`Cargo.toml`](../../Cargo.toml)，`resolver = "3"`，`edi
 | `crates/backend/` | HTTP/WS 服务器、数据、认证、各项功能 | `nomifun-*` | 54 |
 | `crates/shared/` | 真正跨层共享工具 | mixed | 4 |
 
-agent 分组是**基本自包含的** —— `nomi-*` crate 不引用 `nomifun-*` crate、工作区根目录或 Tauri / sqlx / axum 等后端框架。反向依赖默认通过 `nomifun-ai-agent` 这条接缝汇集，它再导出 `nomi_config` 和 `nomi_types`。当前 `nomifun-app` 与 `nomifun-gateway` 为 browser/computer-use bridge 存在 feature-gated 直接依赖例外；新增例外必须有明确 feature gate 和文档说明。
+agent 分组是**基本自包含的** —— `nomi-*` crate 不引用 `nomifun-*` crate、工作区根目录或 Tauri / sqlx / axum 等后端框架。反向依赖默认通过 `nomifun-ai-agent` 这条接缝汇集，它再导出 `nomi_config` 和 `nomi_types`。当前 `nomifun-app` 与 `nomifun-gateway` 为 browser-use bridge 存在 feature-gated 直接依赖例外；新增例外必须有明确 feature gate 和文档说明。
 
 ## 各部分的位置
 
@@ -138,3 +138,8 @@ nomifun-desktop/
 | Tauri 命令 | 更新检查、WebUI 状态/启停、companion 同步、keep-awake、托盘标签等桌面能力 | 不适用 |
 
 桌面二进制的 `main.rs`（[`apps/desktop/src/main.rs`](../../apps/desktop/src/main.rs)）有意保持精简 —— 大部分逻辑都在 `nomifun_app::run_embedded_server` 中。Web 二进制（[`apps/web/src/main.rs`](../../apps/web/src/main.rs)）复用同样的引导辅助函数（`init_environment`、`init_data_layer`、`AppServices::from_config`、`create_router`），并补充了 SPA 回退以及首次运行管理员预置（`ensure_admin_credentials`）。
+
+
+## Computer Use 接缝
+
+Computer 的 `nomifun.computer` 模块由 `nomifun-app` 的 `computer_host` 持有，调用 `nomifun-computer` 五个单一职责模块和独立 Cua worker；Gateway 不注册桌面工具。UI 按冻结元数据展示观察/操作/应用/剪贴板分组、同源标题及前台标记，状态来自 `/api/computer/status`，系统许可使用现役 `/api/system/permissions`。UI/API 版本为 43，旧 Computer 会话提示新建，历史保留。架构与未完成平台验收见[Computer Use](computer-use.zh.md)。

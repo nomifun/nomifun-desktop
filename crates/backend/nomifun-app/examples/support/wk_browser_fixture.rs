@@ -1,6 +1,6 @@
 //! Deterministic protocol fixture for the actual Desktop App, never a native
 //! replacement window. Only the separately launched product owns the browser.
-use super::{Fixture, browser_tool, computer_result_text};
+use super::{Fixture, browser_tool, tool_result_text};
 use serde_json::{Value, json};
 use base64::Engine as _;
 
@@ -29,7 +29,7 @@ pub(super) fn step(body:&Value)->usize {
 }
 
 fn result(body: &Value, step: usize) -> anyhow::Result<Value> {
-    let text = computer_result_text(body, &call_id(body,step))?;
+    let text = tool_result_text(body, &call_id(body,step))?;
     let value: Value = serde_json::from_str(text)?;
     anyhow::ensure!(value.get("code").is_none(), "WK action returned an error at step {step}: {value}");
     Ok(value.get("result").cloned().unwrap_or(value))
@@ -75,7 +75,7 @@ fn screenshot_png(body: &Value, call_id: &str) -> anyhow::Result<Vec<u8>> {
         .ok_or_else(||anyhow::anyhow!("WK screenshot is not an inline PNG image for {call_id}"))?;
     let bytes=base64::engine::general_purpose::STANDARD.decode(encoded)?;
     anyhow::ensure!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"),"WK screenshot is not PNG");
-    let observed:Value=serde_json::from_str(computer_result_text(body,call_id)?)?;
+    let observed:Value=serde_json::from_str(tool_result_text(body,call_id)?)?;
     let observed=observed.get("result").unwrap_or(&observed);
     let screenshot=&observed["screenshot"];
     anyhow::ensure!(observed["target"].is_object() && screenshot["target"]==observed["target"]
@@ -98,7 +98,7 @@ pub(super) fn operation(fixture: &Fixture, body: &Value, step: usize) -> anyhow:
             ("browser/act",json!({"action":"drag","from":target,"to":target}))
         }
         3 => {
-            let error=computer_result_text(body,"gui-wk-2")?;
+            let error=tool_result_text(body,"gui-wk-2")?;
             anyhow::ensure!(error.contains("BROWSER_UNSUPPORTED_ACTION"),"WK drag did not return explicit unsupported");
             fixture.wk_evidence.lock().unwrap().insert("drag_explicitly_unsupported".into(),json!(true));
             ("browser/observe",json!({}))
@@ -111,7 +111,7 @@ pub(super) fn operation(fixture: &Fixture, body: &Value, step: usize) -> anyhow:
         }
         5 => { result(body,4)?; ("browser/act",json!({"action":"click","element":element(body,3,"提交验收")?})) }
         6 => {
-            let error=computer_result_text(body,"gui-wk-5")?;
+            let error=tool_result_text(body,"gui-wk-5")?;
             anyhow::ensure!(error.contains("BROWSER_STALE_TARGET") || error.contains("BROWSER_STALE_OBSERVATION"),"WK old document reference was not rejected");
             fixture.wk_evidence.lock().unwrap().insert("old_document_reference_rejected".into(),json!(true));
             ("browser/observe",json!({}))
@@ -157,7 +157,7 @@ pub(super) fn operation(fixture: &Fixture, body: &Value, step: usize) -> anyhow:
             }))));
         }
         18 => {
-            let completion=computer_result_text(body,"gui-wk-17")?;
+            let completion=tool_result_text(body,"gui-wk-17")?;
             anyhow::ensure!(completion.contains("Completion account recorded"),"WK completion report was not accepted");
             fixture.wk_evidence.lock().unwrap().insert("awaiting_terminal_release".into(),json!(true));
             return Ok(None);
@@ -213,7 +213,7 @@ mod screenshot_wire_tests {
     #[test]
     fn screenshot_uses_exact_call_media_after_the_whole_tool_batch() {
         let (body,png)=fixture();
-        assert!(!super::super::contains_inline_png(super::super::computer_tool_result(&body,"gui-wk-14").unwrap()));
+        assert!(!super::super::contains_inline_png(super::super::tool_result(&body,"gui-wk-14").unwrap()));
         assert_eq!(screenshot_png(&body,"gui-wk-14").unwrap(),png);
     }
 

@@ -1,0 +1,35 @@
+From: NomiFun contributors
+Subject: [D04] Disable optional core engines in platform dependencies
+
+The SDK disables these defaults already. Do the same for every platform so
+feature unification does not enable rego, yaml or the script engine again.
+
+diff --git a/crates/platform-linux/Cargo.toml b/crates/platform-linux/Cargo.toml
+--- a/crates/platform-linux/Cargo.toml
++++ b/crates/platform-linux/Cargo.toml
+@@ -14,6 +14,6 @@ tracing = { workspace = true }
+ async-trait = "0.1"
+ futures-util = "0.3"
+-cua-driver-core = { path = "../cua-driver-core" }
++cua-driver-core = { path = "../cua-driver-core", default-features = false }
+ cua-driver-contract = { path = "../cua-driver-contract" }
+ cursor-overlay = { path = "../cursor-overlay" }
+ pip-preview = { path = "../pip-preview" }
+diff --git a/crates/platform-macos/Cargo.toml b/crates/platform-macos/Cargo.toml
+--- a/crates/platform-macos/Cargo.toml
++++ b/crates/platform-macos/Cargo.toml
+@@ -22,4 +22,4 @@
+-cua-driver-core = { path = "../cua-driver-core" }
++cua-driver-core = { path = "../cua-driver-core", default-features = false }
+ cua-driver-contract = { path = "../cua-driver-contract" }
+ cursor-overlay = { path = "../cursor-overlay" }
+ pip-preview = { path = "../pip-preview" }
+diff --git a/crates/platform-windows/Cargo.toml b/crates/platform-windows/Cargo.toml
+--- a/crates/platform-windows/Cargo.toml
++++ b/crates/platform-windows/Cargo.toml
+@@ -15,4 +15,4 @@
+-cua-driver-core = { path = "../cua-driver-core" }
++cua-driver-core = { path = "../cua-driver-core", default-features = false }
+ cua-driver-contract = { path = "../cua-driver-contract" }
+ cursor-overlay = { path = "../cursor-overlay" }
+ pip-preview = { path = "../pip-preview" }

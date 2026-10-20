@@ -72,7 +72,7 @@
 | R05 | Waiting／Paused 会延长观察 deadline 并每 500ms 查询；Attempt 仍占现有并发和工作区预约。 | [attempt runner](../../crates/backend/nomifun-agent-execution/src/attempt_runner.rs) 317；[scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs) 2973、3016、3050。 |
 | R06 | Full／ReadShell 不是只读沙箱，任意命令与后台写者无法靠当前工具状态完整推断，因此共享工作区现有保守顺序有明确原因。 | [scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs) 3021；[全局 OS 能力](../architecture/global-os-capabilities.zh.md)。 |
 | R07 | Attached Chrome provider 的锁跨整次命令执行；disconnect、close、shutdown 也先取该锁。managed Browser 则已有按 Session 的隔离，不能混为全局锁。 | [attached provider](../../crates/backend/nomifun-app/src/browser_workspace_provider/attached_provider.rs) 261、359、436、690。 |
-| R08 | Wave2 Host Context 未携带 Kernel 的 control；Computer 等待物理锁及 native port 没有完整取消传递。普通 wait 有 5s 上限；永久 native hang 仅为结构风险。 | [Wave2 contract](../../crates/backend/nomifun-agent-domain-wave2/src/lib.rs) 358、1918；[role host](../../crates/backend/nomifun-app/src/router/agent_role_host.rs) 373、678；[Computer](../../crates/agent/nomi-computer/src/tool.rs) 24。 |
+| R08 | 旧 Computer 的控制缺口由新私有 Cua worker 接入承接；排队撤回、在途真实结果、超时 unknown 与退出退休沿原 InvocationControl，平台验收另计。 | [Wave2 contract](../../crates/backend/nomifun-agent-domain-wave2/src/lib.rs)、[Computer host](../../crates/backend/nomifun-app/src/router/computer_host.rs)、[worker owner](../../crates/backend/nomifun-computer/src/worker.rs)。 |
 | R09 | 固定最旧 100 项的 cleanup 查询会被持续失败项占住。此前原 SQL 内存复核连续三轮取不到第 101 项；执行阶段须固化为仓库回归测试。 | [scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs) 442、584；[repository](../../crates/backend/nomifun-db/src/repository/sqlite_agent_execution.rs) 4550、4573。 |
 | R10 | cleanup 的 cancel_for_execution 在无活动 Turn 时可直接返回成功；释放 Turn admission 不等于移除 Runtime。UserCancelled 又明确保留 Session 进程。 | [session owner](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) 4918、4942；[runtime registry](../../crates/backend/nomifun-ai-agent/src/runtime_sessions.rs) 1475；[runtime host](../../crates/backend/nomifun-app/src/router/unified_runtime_host.rs) 44、1667。 |
 | R11 | Session teardown 会 close 知识回写并 cancel_all；主 Turn 已终结不证明回写已结束。进程 owner 已可独立于 Runtime transport 存续。 | [kernel session](../../crates/backend/nomifun-app/src/router/engine_kernel_session.rs) 1487、1499；[writeback](../../crates/backend/nomifun-app/src/router/engine_knowledge_writeback.rs) 47；[Wave2 owner](../../crates/backend/nomifun-app/src/router/nomi_core_wave2.rs) 498。 |
@@ -268,7 +268,7 @@ P1 的后端与对应入口必须形成完整链路，不等 P2 的全部增强�
 | T14 | 通知在订阅边界丢失／UI 重连／owner 通知关闭 | cursor／receipt 补读能收敛；不永久等待，不以模型调用探测状态。 |
 | T15 | 不同 Agent 使用不同 Attached Chrome tab | 底层支持的独立操作可推进；同 target 保序，现有 claim／incarnation 不失效。 |
 | T16 | Chrome 调用准入与 disconnect 并发 | 关准入后无漏登记新调用；已登记者被准确取消与收束，不误杀用户浏览器。 |
-| T17 | Computer 在锁队列中取消；native 操作仍执行 | 队列可及时撤销，禁止新工作；原生未结束时如实呈现，不假释放。 |
+| T17 | 新 Computer worker 排队、执行与收尾时 Stop | 排队撤回零效果；在途保留实际结果，超时强杀 unknown 且不重放；真实平台回收独立验收。 |
 | T18 | 单个可独立终止 worker 被用户强制结束 | 不结束共享 host、用户 Chrome 或健康兄弟；已提交外部效果不冒称撤回。 |
 | T19 | Turn 成功且知识回写仍在进行 | 显示原成功，回写自然完成；自动退休不 cancel_all，不拖成新的主任务完成门槛。 |
 | T20 | Session 后台进程跨 Runtime soft recycle | 原 owner、原句柄与控制有效，无命令重启；上层无用引用可按真实责任退休。 |
@@ -353,7 +353,7 @@ Session／Execution、精确取消范围、DAG 归属、Stop 抢占、等待预�
 | PTY／标准输入 | ConPTY 没有通用 Unix stdin EOF 语义；中断、关闭输入、取消、强停和 HPCON close 分别验证。 | 验证 PTY 前台／后台 job、终端退出和 watchdog；逃离原登记组的进程不能假称已被完整回收。 | 分别验证 pipe／PTY、leader 先退出、watchdog 异常及实际 reaping；保留 PID／PGID 复用保护。 |
 | managed Browser | 当前 Desktop 的 WebView2；COM controller 关闭与 Tauri／Wry 注销分别确认，不能只隐藏窗口。 | 当前 Desktop 的 WKWebView；AppKit 主线程创建／操作／销毁，保留 WK 回调与实际收束证明，不能 kill 系统共享 WebContent。 | 当前 Desktop 组合没有注入此 provider；GTK／WebKit renderer 不等于 Agent managed Browser。本专项不补新后端。 |
 | Attached Chrome | 当前 Desktop 已注入，验收目标独立性、原子准入、断连与 incarnation 竞争。 | 当前 Desktop 已注入，同样验收；不能以 Chrome 通过替代 WK 验收。 | 当前 Desktop 组合未注入。保留现状 unavailable，不以“跨平台一致”为由新增支持或变成其他修复的门槛。 |
-| Computer | 普通／高完整性桥、物理目标锁、UAC／锁屏等待；取消一个 client 不关闭共享 runner。 | AppKit／AX 与主线程派发、TCC 拒绝／撤销；管理线程不能同步等待需要主线程回调的工作。 | X11 与 Wayland 两条现役实现分别检查；portal／PipeWire／native worker 的取消、按键释放及 join 不能用 drop Future 代替。 |
+| Computer | 普通完整性私有 worker；提权目标结构化拒绝，不再使用管理员桌面桥。 | App 直接启动同签名 worker，实际 TCC 与退出回收独立验收。 | X11/XWayland、AT-SPI 与原生资源清理；原生 Wayland capture 未启用，不以源码代替授权证明。 |
 | 管理员设施 | 原 UAC runner，按 logical client 保留独立 Supervisor 和 handle。 | 原 SMAppService daemon／XPC，按连接与原进程收束；设施批准不等于任务成功。 | 原 pkexec／系统设施路径；专用创建线程寿命覆盖 child，不能改为临时线程导致父线程死亡保护误杀合法 runner。 |
 | 桌面退出 | 关闭到托盘、明确退出、重启等分别走原 coordinator；事件线程在原生关闭确认前不能停。 | 加测 Cmd-Q、Dock／AppKit termination、重启与开发启动者退出；WK／Computer 收束期间主循环仍须服务。 | 加测正常退出、Unix signal 与重启；GTK 主循环和 native worker 停止不互相阻塞。 |
 
@@ -361,9 +361,9 @@ Session／Execution、精确取消范围、DAG 归属、Stop 抢占、等待预�
 
 - [Desktop provider 注入](../../apps/desktop/src/main.rs) 3407–3428、关闭到托盘 3793 附近；[browser surface 模块](../../apps/desktop/src/browser_surface/mod.rs)。
 - [Windows process](../../crates/shared/nomi-process-runtime/src/platform/windows.rs)、[ConPTY](../../crates/shared/nomi-process-runtime/src/platform/windows/conpty.rs)、[WebView2 native close](../../apps/desktop/src/browser_surface/windows.rs)。
-- [macOS session](../../crates/shared/nomi-process-runtime/src/platform/macos_session.rs)、[macOS watchdog](../../crates/shared/nomi-process-runtime/src/platform/macos_watchdog.rs)、[AppKit 生命周期](../../apps/desktop/src/macos_lifecycle.rs)、[WK 释放](../../apps/desktop/src/browser_surface/macos/lifecycle.rs)、[Computer 主线程派发](../../crates/agent/nomi-computer/src/macos_main.rs)。
-- [Linux watchdog](../../crates/shared/nomi-process-runtime/src/platform/linux_watchdog.rs)、[Linux recovery](../../crates/shared/nomi-process-runtime/src/platform/linux_recovery.rs)、[Linux native worker](../../crates/agent/nomi-computer/src/linux_native_worker.rs)、[X11](../../crates/agent/nomi-computer/src/linux_x11.rs)、[Wayland](../../crates/agent/nomi-computer/src/linux_wayland.rs)。
-- [三平台全局 OS 合同](../architecture/global-os-capabilities.zh.md)、[现有 Browser 验证](../validation/browser-platform.zh.md)、[现有 Linux 桌面验证](../validation/global-os-linux-desktop-2026-10-17.zh.md)。这些存量记录不代表本次改动已经验收，也不能把其中全部历史未验项无限绑定为本专项。
+- [macOS session](../../crates/shared/nomi-process-runtime/src/platform/macos_session.rs)、[macOS watchdog](../../crates/shared/nomi-process-runtime/src/platform/macos_watchdog.rs)、[AppKit 生命周期](../../apps/desktop/src/macos_lifecycle.rs)、[WK 释放](../../apps/desktop/src/browser_surface/macos/lifecycle.rs)、[Computer worker 生命周期](../../crates/backend/nomifun-computer/src/worker.rs)。
+- [Linux watchdog](../../crates/shared/nomi-process-runtime/src/platform/linux_watchdog.rs)、[Linux recovery](../../crates/shared/nomi-process-runtime/src/platform/linux_recovery.rs)、[Cua 私有 worker](../../apps/computer-worker/src/main.rs)、[原生补丁登记](../../vendor/CUA-DRIVER-PATCHES.md)。
+- [三平台全局 OS 合同](../architecture/global-os-capabilities.zh.md)、[现有 Browser 验证](../validation/browser-platform.zh.md)、[Computer worker 架构](../architecture/computer-use.zh.md)。退役 Computer 的源码与测试记录不作为新 worker 的验收；非 Computer 的存量记录与现役责任保持。
 
 不得为平台一致性把所有工具进程化、增加权限模式或禁用缺少“立即强停”的能力。统一底线是用户能发现、精确发出 Stop、禁止后续新动作、看到真实收束和未确认资源；系统原生限制如实呈现。
 
@@ -377,7 +377,7 @@ T01–T37 的共通逻辑回归在适用平台运行；下面 OS01–OS10 是原
 | OS02 | EOF、中断、取消、强停与终端关闭 | Windows 单独验证 ConPTY；macOS／Linux 验证 PTY job control。关闭输入不等于退出；进程、管道、PTY／HPCON 与原生关闭任务都可核对。 |
 | OS03 | managed Browser 在导航、modal、popup、下载或 chooser 中停止／退出 | Windows WebView2 与 macOS WK 分别真实验收；保留主事件循环至收束，旧 callback 不命中新对象；Linux 按现有 provider 不适用并注明源码依据，不要求新增后端。 |
 | OS04 | Attached Chrome 跨 target 并行与断连竞争 | Windows／macOS；关准入后无漏登记调用，释放 claims／override 有原回执，用户 Chrome 不被关闭；Linux 当前 Desktop 不适用。 |
-| OS05 | Computer 排队、权限等待与执行中停止 | Windows 普通／高完整性与锁屏／UAC；macOS AX／TCC／主队列；Linux X11 及真实 Wayland portal 分别验证。取消后无迟到输入、粘住按键／鼠标或丢失原 owner。 |
+| OS05 | 新 Computer 排队、权限等待与执行中停止 | 三端分别验证私有 worker 的精确 owner、用户 Stop、崩溃、应用退出与输入释放；Windows 普通完整性、macOS TCC、Linux 后端按本次实现及实际环境计证。 |
 | OS06 | 单任务 stop、单 client close、管理员设施 shutdown | 三平台分别验证三个作用范围；共享 runner／daemon 的其他 client 继续；认证等待可取消，设施重连不重放 unknown。 |
 | OS07 | 关闭窗口、明确退出、重启、crash／强杀、系统退出入口 | 托盘保持合法后台工作，已完成资源继续自动退休；真正退出覆盖所有旧／隐藏托管载体。macOS 补 AppKit／Cmd-Q，Unix 补 SIGINT／SIGTERM；强杀另验原生父死收敛，无关清理失败不跳过可安全释放资源。 |
 | OS08 | 系统睡眠／唤醒、锁屏／解锁及租约过期交错 | 核对该平台时钟与唤醒行为，覆盖 T11 四种组合；不新增静默／睡眠 TTL，不重置原预算，不因界面不可用自动从头开始。已有明确任务期限仍按原合同生效。 |
@@ -466,7 +466,7 @@ macOS 复用现有 darwin_registered／darwin_application 与 WK／AppKit fixtur
 | P4 Browser结算补齐 | 原repository单读快照及typed结束证明覆盖Completed automation根、Failed、canonical/scoped/aggregate取消与softdelete/fatal/source取消；无新ledger或普通API可见性变化。同Session活动任务、合法重试、用户页面与下载仍保护，跨Session委派不误当根Browser用途。当前dispatcher／BrowserService **28/28、27.57s**（14项新使命回归）；早期DB并发过载按测试并发2修正，未改产品并发／期限／断言 |
 | P4 使命闭合交接 | 旧Attempt／真实current分离、Step终结重唤醒原outbox、正式replan/supersede/skip/adopt证明及active后继deferred已落。当前DB执行 **53/53、48.18s**；原Execution **155/155**库源未变。target读取原正式System DecisionRequested／settlement的canonical引用，清queue仍同continuation，不回initial；App使命14例包含于当前Browser28和完整1223，保留Question Completed及原Attempt事实 |
 | P4 来源结束补齐 | Cron NewConversation创建路径捕获原tuple，正式结算封存live回执，跨合法job/run删除保原清理权限；当前Cron169/169含10项来源／删除竞争。私有互斥Cron／Remote typed来源写原accepted input，普通请求不能声明，旧重放不retrofit，不扩AgentInputSource。Remote取消沿原coordinator singleflight／shutdown，不占business64 semaphore，NeverInstalled不warmup或永久重试。Existing/InputRequired、Remote Ready保持续用途。当前source **3/3、3.26s**及完整App通过；无新ledger／TTL／重跑／声明门槛 |
-| P4 Computer | 原token贯穿readonly→focus/launch、spawn_blocking、mac主队列、三平台a11y actor及Wayland原worker。queued可撤、已dispatch保原future/按键释放/真实结果。Wayland局部取消保已发布共享grant。Windows每RPC独占Event绑定connection/request，在原64slot前后检查；Stop不排第二RPC，不kill共享runner；原worker保reply/ACK，信号失败保原结果 |
+| P4 Computer | 本专项旧 Computer 路径与其原生/桥接测试已经退役。由新的私有 Cua worker、宿主 InvocationControl、公平队列和 canonical Effect 承接；当前源码与分层证据只见[Computer 专项进展](computer-use-rebuild.zh.md#12-单份执行进展)，旧计数不作为新实现证明。 |
 | P4 Quit | Terminal、MCP auth原worker与Runtime／producer／Browser独立清理，挂起auth不挡Terminal实际delete hook或Browser close；仅观察超时不abort／重发原worker，drop外waiter后仍join。聚合前收原worker真实settled结果，native/storage仅在所有原owner已证明后关闭，域错误不跳过可独立释放资源。新增实际auth guard竞争与当前全量／三native通过 |
 | P5 | 只读Activity汇总原domain/runtime/resource owners，逐实例Stop及cleanup/unknown可见；AllStop是有限原源快照。Cron停原reservation，AutoWork停原claim、保配置。AutoWork仅原root用lead Session，child独立ChildAttempt，root/child/整组控制不混淆，Remote走原binding fence |
 | P6 | 现役架构及正式schema/event同步，替代路径/fixtures同批退役；强Workspace缓存按原Weak实例票据退休，Session/Companion/delete纯gate缓存不启动任务。资源稳态、原生退出、真实Edge控制、生成/边界检查见下 |
@@ -477,7 +477,7 @@ macOS 复用现有 darwin_registered／darwin_application 与 WK／AppKit fixtur
 | App 集成 | 合并图扩为四组，**48/48**：browser_workspace21/0.82s（b06e1fe3）、desktop_agent_shutdown2/33.40s（38a29bbd）、native_execution_recovery8/29.21s（b6aa6880）、mcp_e2e17/22.62s（21c6f199）。构建身份 lifecycle-merge-app-build.jsonl，独立 lifecycle-merge-{name}-tests.log。原writer锁unknown→显式retry及background Process同PID／owner／starts=1暂停继续通过，观察期未改 |
 | Canonical／DB／Execution | 当前Session331、DB执行53/reset2/ID6/OAuth迁移3/仓储9均通过，完整73；原remote6与Execution155对应库源未变。涵盖持久精确停止、原继续key、预约／四租约、公平清理、FIFO抢占、丢awaiter提交、专用取消证明、真实continuation及旧Attempt使命闭合。合并图以当前App完整和恢复8补整合链路；不把原库测试冒称新图重跑 |
 | 自动化／AI | 当前Cron **169/169、13.49s**；Requirement58/58、AI349/349为原实现且库源未改。真实App root/child原Session／claim／grant／physicalRoot隔离及source取消CAS包含于当前完整回归 |
-| Computer／System | a11y **35/35**，Computer **130通过/7原条件ignored**；System最终 **23/23**。包括真实Event只读权限/碰撞、提前/64满槽排队Stop、兄弟/后继、原pipe/ACK、drop waiter、SetEvent权限失败及任意JSON结果形状；原unknown不改写 |
+| Computer／System | 该行旧 Computer/a11y/桥接证据已退役；新实现见 Computer 专项。原 System 的 23/23 为当时来源的历史证据，不改写为本次源码重跑。 |
 | Process／SSH／Browser | process-runtime **156/156**；Windows parent-death/pipe/PTY及ConPTY/ACP opt-in native共 **27通过**。SSH后端 **47/47**、nomi-ssh **61/61**；Core **66通过/1条件ignored**，另真实Bun1/1。Browser Platform **116通过/2条件ignored**；Attached协议50、真实Chrome3及新增pending Promise跨target/disconnect1通过 |
 | 归档／原资源 | App Process资源 **5/5**、Journal **15/15**；Frozen V1黄金数据/raw cursor/decoder carry/EOF/ACP936通过。16MiB原Frozen字节用同agent_payloads分块，重复ACK重验损坏不伪修复，普通/伪装/孤立payload仍计预算；128 roots/1024 chunks查询计划无相关逐行子查询 |
 | MCP补验 | 合并图MCP **248单元＋19 auth integration＋11 connection integration全部通过**；App MCP e2e17、原outcome及strict诊断新回归包含于当前全量。仅原资源物理证明可用，业务Unknown／noReplay仍保留；foreign／损坏／active owner不借此放行。新661681a6三native各13原句柄通过。原request_lifecycle14与Windows literal argv1为之前证据，不冒称Unixstdio通过 |
@@ -516,7 +516,7 @@ macOS 复用现有 darwin_registered／darwin_application 与 WK／AppKit fixtur
 | T10、T29 | blocked_steer_preserves_fifo_while_siblings_settle_and_user_stop_preempts与App丢awaiter/重复ACK，Stop独立持久围栏/精确信号，原Steer仍join |
 | T11–T14 | 四租约、同Turn只读observer、持久取消恢复、原key/cursor/订阅补读、原running-successor隔离；新8轮warmup旧Stop同Arc/nonce/无新增退休强引用通过。实际OS睡眠/唤醒另待验 |
 | T15–T16 | Attached50+真实Chrome3+pending Promise跨target/disconnect1通过；另一target可读/释放，关准入并join原调用，原页/Chrome保留 |
-| T17–T18 | Computer130/a11y35/System23及App桥13：队列撤回与已dispatch结果分开、原exact owner/按键释放、共享host不kill；真实UAC/锁屏/物理输入未验 |
+| T17–T18 | Computer 部分改由本次私有 worker 接入与专项进展承接；旧 Computer/a11y/App 桥计数只属退役来源，不作为新实现验收。其他 System 责任与原事实保持。 |
 | T19 | App原知识回写自然join/失败保责任，主成功不改写；退休不cancel_all，不把回写变新主任务完成门槛 |
 | T20 | 真Bun跨原Runtime退休、原WeakHost释放、显式后继stdin/poll、同native handle/creator/retention/digest、starts=1与最后exact Stop通过；fixture非法stdin wait_ms已移除，arguments_rejected=0 |
 | T21–T23 | 第101项公平keyset清理、完成child原Runtime与资源分离、真正workspace缓存退休+factory失败、原native pause/checkpoint/budget/cursor/调用次数不变及Stop后carrier注销通过 |

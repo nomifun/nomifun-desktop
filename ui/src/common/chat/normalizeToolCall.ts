@@ -2,6 +2,7 @@ import type { IMessageToolCall, IMessageToolGroup } from './chatLib';
 import { toDisplayText } from './displayText';
 import { normalizeToolGroupStatus } from './toolGroupStatus';
 import type { ToolFileSummary } from './fileSummary';
+import { computerActionGroup } from './computerSurface';
 
 export type NormalizedToolStatus = 'pending' | 'running' | 'completed' | 'error' | 'canceled';
 export type NormalizedToolNotExecutedReason = 'invalid_arguments' | 'runtime_preflight' | 'process_reference';
@@ -12,6 +13,7 @@ export interface NormalizedToolCall {
   name: string;
   capabilityId?: string;
   actionId?: string;
+  foreground?: boolean;
   status: NormalizedToolStatus;
   /** Tool reported an error-like outcome, but it should not fail the turn-level process receipt. */
   nonFatalFailure?: boolean;
@@ -55,15 +57,18 @@ function toNormalizedToolGroupStatus(status: unknown): NormalizedToolStatus {
 
 export function normalizeToolGroup(message: IMessageToolGroup): NormalizedToolCall[] {
   if (!Array.isArray(message.content)) return [];
-  return message.content.map(({ name, call_id, description, status }) => {
+  return message.content.map(({ name, call_id, description, status, capability_id, action_id, foreground }) => {
     const displayStatus = normalizeToolGroupStatus(status);
     const desc = typeof description === 'string' ? description : '';
 
+    const capabilityId = capability_id ?? (action_id && computerActionGroup(action_id) ? 'computer' : undefined);
     return {
       key: toDisplayText(call_id),
       name: toDisplayText(name, 'Tool'),
       status: toNormalizedToolGroupStatus(displayStatus),
       description: desc,
+      ...(capabilityId && action_id ? { capabilityId, actionId: action_id } : {}),
+      ...(typeof foreground === 'boolean' ? { foreground } : {}),
     };
   });
 }
@@ -99,6 +104,7 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
       ? 'canceled' : normalizeToolCallStatus(status),
     ...(typeof capability_id === 'string' ? { capabilityId: capability_id } : {}),
     ...(typeof action_id === 'string' ? { actionId: action_id } : {}),
+    ...(typeof message.content.foreground === 'boolean' ? { foreground: message.content.foreground } : {}),
     ...(skipped ? { skipped: true } : {}),
     ...(invalidArgumentsNotExecuted ? { notExecutedReason: 'invalid_arguments' as const } : {}),
     ...(runtimePreflightNotExecuted ? { notExecutedReason: 'runtime_preflight' as const } : {}),

@@ -44,7 +44,6 @@ const moduleItem = (id: string, actions: Array<[string, string]>): CapabilityMod
   required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
 });
 const robot = moduleItem('robot', [['robot/vision', 'read_sensitive'], ['robot/motion', 'physical']]);
-const computer = moduleItem('computer', [['computer/launch', 'read_local'], ['computer/input', 'physical']]);
 const collaboration = moduleItem('agent.collaboration', [['agent/delegate', 'read_local'], ['agent/fork', 'read_local']]);
 const sessions = moduleItem('session.management', [
   ['session.management/list', 'read_local'], ['session.management/read', 'read_local'],
@@ -53,7 +52,7 @@ const sessions = moduleItem('session.management', [
 ]);
 const files = moduleItem('workspace.files', [['workspace.files/read', 'read_local']]);
 const browser = moduleItem('browser', [['browser/observe', 'read_sensitive']]);
-const modules = [robot, computer, collaboration, sessions, files, browser];
+const modules = [robot, collaboration, sessions, files, browser];
 const catalog: AgentCatalogResponse = {
   modules,
   capabilities: modules.map(module => ({
@@ -138,7 +137,7 @@ test('the official Companion can explicitly enable and customize Robot from the 
   expect(view.grant(robot)?.action_allowlist).toContain('robot/motion');
 });
 
-for (const source of ['official', 'user'] as const) test(`${source} Companion Agent can edit Computer, fork and full session actions with catalog-wide search and counts`, () => {
+for (const source of ['official', 'user'] as const) test(`${source} Companion Agent can edit fork and full session actions with catalog-wide search and counts`, () => {
   const view = mount(source, 'companion.default');
   expect(view.getByText(i18n.t('agentSettings.workbench.results', { count: modules.length })).textContent).toContain(String(modules.length));
   for (const module of modules) {
@@ -146,10 +145,6 @@ for (const source of ['official', 'user'] as const) test(`${source} Companion Ag
     expect(view.toggle(module, false).disabled).toBe(false);
   }
 
-  fireEvent.click(view.toggle(computer, false));
-  expect(view.grant(computer)?.action_allowlist).toContain('computer/launch');
-  view.expand(computer);
-  expect(view.action(computer, 'computer/input').disabled).toBe(false);
   for (const module of [collaboration, sessions]) {
     fireEvent.click(view.toggle(module, false));
     view.expand(module);

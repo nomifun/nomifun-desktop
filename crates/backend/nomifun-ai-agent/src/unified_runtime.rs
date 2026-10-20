@@ -1628,49 +1628,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_permission_live_projection_requires_a_failed_admitted_computer_call() {
-        use nomifun_agent_contracts::{ActionId, CapabilityId, StrictJsonValue};
-        use nomifun_chat_model_broker::{ChatToolCall, ToolCallId};
-        let host = Host::new();
-        let state = AgentRuntimeState::new(SESSION, "permission-projection", 32);
-        let turn = state.reset_for_new_turn(ConversationStatus::Running);
-        let projection = TurnProjection {
-            host: host.clone(), message: message(), output: EngineTurnOutput::new(state.clone(), turn),
-            calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
-            last_model_step: std::sync::atomic::AtomicU16::new(0),
-            pending_text: Mutex::new(VecDeque::new()), text_timeline: Mutex::new(None),
-        };
-        let body = serde_json::json!({"schema":"system-permission-required.v1","capability":"computer",
-            "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
-            "execution":"not_executed"}).to_string();
-        let carrier = nomifun_engine_core::system_permission_error_carrier("SYSTEM_PERMISSION_REQUIRED", &body).unwrap();
-        let mut events = state.subscribe();
-        for (index, (capability, is_error, output)) in [
-            ("computer", true, carrier.as_str()), ("computer", false, carrier.as_str()),
-            ("browser", true, carrier.as_str()), ("computer", true, body.as_str()),
-        ].into_iter().enumerate() {
-            let call_id = ToolCallId::from(format!("permission-{index}"));
-            projection.emit(AgentEngineEvent::ToolCallCompleted { step: 1, call: ChatToolCall {
-                call_id: call_id.clone(), name: "computer".into(), arguments: StrictJsonValue(serde_json::json!({"action":"screenshot"})),
-                provider_metadata: None,
-            }}).await.unwrap();
-            projection.emit(AgentEngineEvent::ToolStarted { step: 1, call_id: call_id.clone(),
-                capability_id: CapabilityId::from(capability), action_id: ActionId::from("computer/observe"),
-            }).await.unwrap();
-            let AgentStreamEvent::ToolCall(started) = events.recv().await.unwrap() else { panic!("start") };
-            assert!(started.identity.permission_required.is_none());
-            assert!(started.identity.result_seq.is_none());
-            projection.emit(AgentEngineEvent::ToolCompleted { runtime_hold: None, step: 1,
-                result: AgentToolResult::text(call_id, output, is_error),
-            }).await.unwrap();
-            let AgentStreamEvent::ToolCall(completed) = events.recv().await.unwrap() else { panic!("result") };
-            assert_eq!(completed.identity.result_seq, Some((index as u64 + 1) * 3));
-            assert_eq!(completed.identity.permission_required.is_some(), index == 0);
-            assert_eq!(completed.identity.error_code.as_deref(), (index == 0).then_some("SYSTEM_PERMISSION_REQUIRED"));
-        }
-    }
-
-    #[tokio::test]
     async fn text_turn_publishes_terminal_after_owner_cleanup_and_teardown_is_idempotent() {
         let host = Host::new();
         let runtime = runtime(host.clone(), model(false, false));

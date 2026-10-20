@@ -296,3 +296,34 @@ export async function createWindowsSystemScenario({ fixture, workspace, loginIde
 }
 
 export { allocateLoopbackPort };
+
+// TokenIntegrityLevel comes from the real process token, independently of the
+// executable name, launch intent or membership in the Administrators group.
+const integrityProbe=`Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class NomiFunAcceptanceIntegrity {
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr data, int size, out int needed);
+  [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+  [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
+  public static uint Read(int pid) {
+    IntPtr process=OpenProcess(0x1000, false, pid), token=IntPtr.Zero, data=IntPtr.Zero;
+    if(process==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+    try {
+      if(!OpenProcessToken(process, 8, out token)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      int needed; GetTokenInformation(token, 25, IntPtr.Zero, 0, out needed);
+      if(needed<=0) throw new Win32Exception(Marshal.GetLastWin32Error());
+      data=Marshal.AllocHGlobal(needed);
+      if(!GetTokenInformation(token, 25, data, needed, out needed)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      IntPtr sid=Marshal.ReadIntPtr(data); byte count=Marshal.ReadByte(GetSidSubAuthorityCount(sid));
+      if(count==0) throw new InvalidOperationException("Integrity SID has no authority");
+      return unchecked((uint)Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)count-1)));
+    } finally { if(data!=IntPtr.Zero) Marshal.FreeHGlobal(data); if(token!=IntPtr.Zero) CloseHandle(token); CloseHandle(process); }
+  }
+}
+'@`;
+export const windowsIntegrityObservationScript=pid=>`${integrityProbe}\n[NomiFunAcceptanceIntegrity]::Read(${pid})|ConvertTo-Json -Compress`;

@@ -50,24 +50,6 @@ afterEach(() => {
   restores.splice(0).forEach((restore) => restore());
 });
 
-test('Computer Use tab requests the exact grant and opens recovery settings while still blocked', async () => {
-  const screen = render(
-    <I18nextProvider i18n={i18n}>
-      <MemoryRouter initialEntries={['/settings/permissions?tab=computer-use']}>
-        <CapabilityPermissionsContent />
-      </MemoryRouter>
-    </I18nextProvider>
-  );
-
-  expect(await screen.findByText(settings.capabilityPermissions.permissions.accessibility)).toBeTruthy();
-  expect(screen.getByText(settings.capabilityPermissions.permissions.screenRecording)).toBeTruthy();
-  expect(screen.getAllByText(settings.capabilityPermissions.states.not_granted).length).toBe(2);
-
-  fireEvent.click(screen.getAllByRole('button', { name: settings.capabilityPermissions.requestAccess })[0]);
-  await waitFor(() => expect(ipcBridge.systemPermissions.request.invoke).toHaveBeenCalledWith({ kind: 'accessibility' }));
-  await waitFor(() => expect(ipcBridge.systemPermissions.openSettings.invoke).toHaveBeenCalledWith({ kind: 'accessibility' }));
-});
-
 test('host camera permission uses its native request while the website decision stays separate', async () => {
   const cameraStatus: SystemPermissionStatus = { ...blocked, permissions: [...blocked.permissions, {
     kind: 'camera', state: 'not_determined', can_request: true, can_open_settings: true,

@@ -2,7 +2,7 @@
 
 将本文件全文作为新会话的任务要求执行。先识别目标 Linux checkout、发行版、桌面和认证设施，核实源码后直接实施并完成原生产品验收；不要停在方案报告，也不要再次等待产品方案确认。本交接不是 Linux 已实现或已验证的证明。
 
-2026-10-17 已在 WSL Ubuntu 26.04 接续实现。当前源码、默认目录删除后同 Session 绝对文件/外部 cwd 闭环、原生管理员与 user/system 服务、AX/GUI clipboard、Node/MCP/reset、debug 及正式 release-profile deb、release-lock、安装替换卸载的证据见[Linux 总验证记录](../validation/global-os-linux-2026-10-17.zh.md)和[桌面验证记录](../validation/global-os-linux-desktop-2026-10-17.zh.md)。macOS 报告与 source-review 恢复步骤保留原始历史身份；接续使用当前 Git 源码，不重建已接通的 Linux adapter。系统认证、实际登录桌面与完整产品验收按当前记录的分层证据判断。
+2026-10-17 已在 WSL Ubuntu 26.04 接续实现。当前源码、默认目录删除后同 Session 绝对文件/外部 cwd 闭环、原生管理员与 user/system 服务、AX/GUI clipboard、Node/MCP/reset、debug 及正式 release-profile deb、release-lock、安装替换卸载的证据见[Linux 总验证记录](../validation/global-os-linux-2026-10-17.zh.md)和[Computer worker 架构](../architecture/computer-use.zh.md)。macOS 报告与 source-review 恢复步骤保留原始历史身份；接续使用当前 Git 源码，不重建已接通的 Linux adapter。系统认证、实际登录桌面与完整产品验收按当前记录的分层证据判断。
 
 本轮最后的 Node 补验已通过实际正式 release App 的 3 个真实 Turn 与正常重启：安装、后继 Turn、重启后同一 CLI 调用及卸载清理。自动准备与 cached-reuse 主体验证按不同原件计证，MCP/reset 仍保持组件层级；详见[Node 验证](../validation/global-os-linux-node-2026-10-17.zh.md)与[正式构建记录](../validation/global-os-linux-release-2026-10-17.zh.md)。源码审查包最终为 `source-review-linux-final-v3`；先前首版/v2 和正式源码快照保持原件。
 

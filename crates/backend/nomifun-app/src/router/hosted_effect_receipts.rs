@@ -77,9 +77,16 @@ fn failure() -> AppError {
     )
 }
 
+fn computer_effect(effect: &nomifun_agent_session::AgentEffectRecord) -> bool {
+    effect.owner_domain == "computer" && effect.capability_module.as_ref() == "computer"
+        && effect.resource_key.is_none()
+        && nomifun_agent_domain_wave2::COMPUTER_ACTION_IDS.contains(&effect.action_id.as_ref())
+}
+
 /// Canonical resource proof shared by Runtime and Browser retirement. This
-/// only separates an exact MCP owner's closed resources from Unknown business
-/// state; every other pending/unknown Effect remains a fence.
+/// separates an exact MCP owner's closed resources from Unknown business state.
+/// Computer's retained process owner proves its own shutdown independently;
+/// its business uncertainty cannot authorize replay or pin unrelated runtimes.
 pub(super) async fn ensure_original_effect_resource_cleanup(
     store: &AgentSessionStore, session: &AgentSessionId,
 ) -> Result<(), AppError> {
@@ -88,6 +95,7 @@ pub(super) async fn ensure_original_effect_resource_cleanup(
     }
     for effect in store.list_effects(session).await.map_err(|_| failure())? {
         if matches!(effect.state, nomifun_agent_session::AgentEffectState::Pending | nomifun_agent_session::AgentEffectState::Unknown)
+            && !computer_effect(&effect)
             && !super::mcp_effect_receipts::original_mcp_resources_closed(&effect)? {
             return Err(failure());
         }
@@ -1035,6 +1043,49 @@ mod tests {
         assert!(fixture.receipts.ensure_settled(&fixture.session.owner_ref.principal_id,
             fixture.session.agent_session_id.as_ref()).await.is_err());
         assert_eq!(fixture.store.list_effects(&fixture.session.agent_session_id).await.unwrap(), before);
+        fixture.database.close().await;
+    }
+
+    #[tokio::test]
+    async fn computer_unknown_keeps_canonical_admission_fenced_while_native_resources_retire() {
+        let fixture = fixture("app.hosting/start").await;
+        let session = &fixture.session.agent_session_id;
+        let operation = OperationId::from("computer-tool-operation");
+        let turn_started = fixture.store.read_events(session, None, 100).await.unwrap().events
+            .into_iter().find(|event| event.kind.0 == "turn/started").unwrap().event_id;
+        let tool = fixture.store.append_event(&event(session, "computer-tool", "tool/call-started",
+            operation.as_ref(), Some(turn_started), json!({
+                "operation_id": operation, "capability_id":"computer", "action_id":"computer/press_key",
+            }))).await.unwrap().ack.unwrap();
+        let mut request = EffectEventRequest {
+            agent_session_id: session.clone(), effect_id:"computer-effect".into(), turn_id:fixture.turn.clone(),
+            operation_id:operation, owner_domain:"computer".into(), capability_module:"computer".into(),
+            action_id:"computer/press_key".into(), resource_binding_id:None, resource_key:None,
+            input_digest:nomifun_agent_contracts::digest_payload(&json!({"key":"A"})).unwrap(), recorded_at:nomifun_common::now_ms(),
+            event_id:"computer-effect-started".into(), producer_id:"capability_host".into(),
+            idempotency_key:"computer-effect-lifecycle".into(), correlation_id:"computer-effect".into(),
+            strategy:EffectStrategy::ExternalUncertainEffect, causation_event_id:Some(tool.event_id),
+            payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+        };
+        fixture.store.record_effect_started(request.clone()).await.unwrap();
+        request.causation_event_id = Some(request.event_id.clone());
+        request.event_id = "computer-effect-uncertain".into();
+        request.producer_id = "owning_plugin".into();
+        request.payload = SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+            "outcome":"unknown", "error":{"code":"COMPUTER_RESULT_UNKNOWN","message":"worker transport ended"},
+        })));
+        fixture.store.record_effect_terminal(request, EffectTerminalState::Uncertain).await.unwrap();
+        let before = fixture.store.list_effects(session).await.unwrap();
+        assert_eq!(before[0].state, AgentEffectState::Unknown);
+        assert!(before[0].resource_key.is_none());
+        assert!(fixture.store.has_unsettled_effects(session).await.unwrap());
+        let user = fixture.session.owner_ref.principal_id.as_str();
+        assert!(fixture.receipts.ensure_settled(user, session.as_ref()).await.is_err());
+        // Native Computer retirement is proved by its separate retained owner.
+        // Releasing resources cannot settle the canonical business uncertainty.
+        fixture.receipts.ensure_shutdown_resources_closed(user, session.as_ref()).await.unwrap();
+        assert!(fixture.receipts.context(user, session.as_ref()).await.is_err());
+        assert_eq!(fixture.store.list_effects(session).await.unwrap(), before);
         fixture.database.close().await;
     }
 

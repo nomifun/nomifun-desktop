@@ -60,6 +60,7 @@ const packageJson = parseJson(packagePath);
 const lockText = readFileSync(lockPath, 'utf8');
 const config = parseJson(configPath);
 const nsis = config?.bundle?.windows?.nsis;
+check(config?.bundle?.externalBin?.includes('binaries/nomifun-computer-worker'), 'the packaged application must include its private Computer worker');
 
 check(
   packageJson?.devDependencies?.['@tauri-apps/cli'] === expectedCliVersion,
@@ -232,6 +233,7 @@ if (renderedArg) {
     checkIncludes(rendered, '!define PRODUCTNAME "NomiFun"', 'rendered installer product name is wrong');
     checkIncludes(rendered, '!define BUNDLEID "com.nomifun.desktop"', 'rendered installer bundle id is wrong');
     checkIncludes(rendered, 'RequestExecutionLevel user', 'rendered installer must remain currentUser');
+    checkIncludes(rendered, 'nomifun-computer-worker.exe', 'rendered installer lost the private Computer worker');
     checkIncludes(rendered, programsPath, 'rendered installer lost the Programs install path');
     checkIncludes(
       rendered,

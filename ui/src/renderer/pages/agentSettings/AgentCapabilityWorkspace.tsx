@@ -6,6 +6,8 @@ import type {
 } from '@/common/types/agentPlatform';
 import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { appHosting } from '@/common/adapter/appHostingBridge';
+import { computerActionGroup, computerActionGroups } from '@/common/chat/computerSurface';
+import { resolveToolPresentation } from '@/common/chat/toolPresentation';
 import { Button, Checkbox, Modal, Tag } from '@arco-design/web-react';
 import {
   Book,
@@ -309,7 +311,8 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
     String(referenceOf(entry).id) === 'computer' && computerPermissionIssue !== null;
   const needsAttention = (entry: ModuleEntry): boolean =>
     moduleNeedsAttention(entry) || permissionNeedsAttention(entry);
-  const localizedActionName = (actionId: string): string => t(
+  const localizedActionName = (actionId: string): string => actionId.startsWith('computer/')
+    ? resolveToolPresentation({ name: actionId, capabilityId: 'computer', actionId }, i18n.resolvedLanguage ?? i18n.language).title : t(
     `agentSettings.actionLabels.${actionI18nKey(actionId)}`,
     { defaultValue: actionFallbackName(actionId) }
   );
@@ -667,10 +670,16 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
                         <legend>{t(implicitDependency
                           ? 'agentSettings.workbench.dependencyActionPermissions'
                           : 'agentSettings.workbench.actionPermissions')}</legend>
-                        {knownActions.map((action) => {
+                        {(String(reference.id) === 'computer'
+                          ? computerActionGroups.flatMap(group => knownActions.filter(action => computerActionGroup(action.action_id) === group))
+                          : knownActions).map((action, index, actions) => {
                           const actionName = localizedActionName(action.action_id);
+                          const group = String(reference.id) === 'computer' ? computerActionGroup(action.action_id) : undefined;
                           return (
-                            <div key={action.action_id} className={styles.actionRow}>
+                            <React.Fragment key={action.action_id}>
+                            {group && (index === 0 || computerActionGroup(actions[index - 1].action_id) !== group) &&
+                              <h4 className={styles.actionGroup}>{t(`agentSettings.workbench.computerGroups.${group}`)}</h4>}
+                            <div className={styles.actionRow}>
                               <Checkbox
                                 checked={grantedActions.includes(action.action_id)}
                                 disabled={disabled || !selected}
@@ -684,6 +693,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
                                 </small>
                               </span>
                             </div>
+                            </React.Fragment>
                           );
                         })}
                         {missingActions.map((actionId) => (

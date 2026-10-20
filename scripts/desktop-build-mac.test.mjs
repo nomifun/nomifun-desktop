@@ -31,6 +31,7 @@ function releaseCompilerEnvironment(target, flags) {
       `} else if (args.includes('format')) console.log('ULMO');\n` +
       `else if (args.includes('build-settings')) console.log('false');\n` +
       `else if (args[0].endsWith('macos-onnx-runtime.mjs')) console.log('/owned/onnx/lib');\n` +
+      `else if (args[0].endsWith('computer/build-worker.mjs')) console.log('/owned/computer-worker');\n` +
       `else process.exit(74);\n`, { mode: 0o755 });
     writeFileSync(join(root, 'bin/rustup'), '#!/bin/sh\nprintf "aarch64-apple-darwin\\nx86_64-apple-darwin\\n"\n', { mode: 0o755 });
     const environment = { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, TEST_RECEIPT: receipt };

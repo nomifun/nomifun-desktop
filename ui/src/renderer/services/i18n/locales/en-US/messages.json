@@ -242,5 +242,6 @@
     "decodeErrors": "Contains {{count}} decoding errors.",
     "command": "Command",
     "directory": "Working directory: {{path}}"
-  }
+  },
+  "computerForeground": "Foreground"
 }

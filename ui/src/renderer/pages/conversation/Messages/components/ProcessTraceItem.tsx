@@ -139,6 +139,7 @@ const ToolTraceRow: React.FC<{ row: ToolObservationRow; workspaceRoots: string[]
           : row.action === 'run_commands' ? <Terminal theme='outline' size='13' /> : <Code theme='outline' size='13' />}
       </span>
       <span className='turn-process-trace__text'>{label}</span>
+      {row.foreground && <span className='text-11px text-t-secondary'>{t('messages.computerForeground')}</span>}
       {hasDetail && <Right theme='outline' size='12' className={classNames('turn-process-trace-tool__arrow', expanded && 'turn-process-trace-tool__arrow--open')} />}
     </Header>
     {expanded && parentVisible && hasDetail && <div id={detailId} className='turn-process-trace-detail'>

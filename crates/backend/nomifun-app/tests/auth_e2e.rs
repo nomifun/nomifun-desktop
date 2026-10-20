@@ -104,8 +104,6 @@ async fn remote_owner_cannot_prompt_host_system_permissions() {
     for uri in [
         "/api/system/permissions/request",
         "/api/system/permissions/open-settings",
-        "/api/computer/permissions/request",
-        "/api/computer/permissions/open-settings",
     ] {
         let response = app
             .clone()
@@ -421,7 +419,7 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
         "/api/agent-executions",
         "/api/agent-execution-templates",
         "/api/system/permissions",
-        "/api/computer/permissions",
+        "/api/computer/status",
     ] {
         let response = app
             .clone()

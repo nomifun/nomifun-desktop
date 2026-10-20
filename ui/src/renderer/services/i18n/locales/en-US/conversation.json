@@ -242,8 +242,8 @@
         "body": "The native owner reported a failure. Review its original error and execution state in the details."
       },
       "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED": {
-        "title": "Confirm this conversation’s Agent configuration",
-        "body": "The upgrade changes permissions, tool sources, or execution requirements, so this conversation’s Agent configuration cannot be updated automatically. Confirm its configuration through the conversation’s Agent selector to continue. Existing records are preserved."
+        "title": "Start a new session",
+        "body": "This session relies on capabilities that have changed. Start a new session to continue; your existing records will be kept."
       },
       "INTERRUPTED_BY_RESTART": {
         "title": "Task interrupted by app exit",
@@ -582,6 +582,10 @@
       "EXECUTION_CLEANUP_UNPROVEN": {
         "title": "Task resource cleanup has not been confirmed",
         "body": "Resource cleanup has not been confirmed. Execution and new messages remain blocked. Wait for cleanup confirmation; if the blockage persists, check technical details and submit feedback."
+      },
+      "CAPABILITY_ACTION_NOT_MATERIALIZED": {
+        "title": "Start a new session",
+        "body": "This session relies on capabilities that have changed. Start a new session to continue; your existing records will be kept."
       }
     },
     "adjustAndRetry": "Adjust and retry",

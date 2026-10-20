@@ -24,7 +24,6 @@ const REVIEWED_EXTERNAL_OWNERSHIP = new Map([
 const HAND_OFF_ALLOWLIST = new Set([
   'apps/desktop/src/browser_surface/macos/native/external_browser.rs',
   'crates/agent/nomi-browser-engine/src/backend/cdp.rs',
-  'crates/agent/nomi-computer/src/launch.rs',
   'crates/backend/nomifun-shell/src/opener.rs',
   'crates/shared/nomi-process-runtime/src/command_builder.rs',
 ]);
@@ -448,6 +447,9 @@ function scanEntries(entries) {
   };
 
   for (const { path, source } of normalizedEntries) {
+    // The independent stdio worker owns the pinned native driver. It is not
+    // linked into this workspace; check:computer-boundary verifies that cut.
+    if (path.startsWith('vendor/cua-driver/')) continue;
     if (!path.endsWith('.rs')) continue;
     if (path.split('/').includes('tests')) {
       continue;

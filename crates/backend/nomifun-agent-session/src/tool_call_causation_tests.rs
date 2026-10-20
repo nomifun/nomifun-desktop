@@ -1,11 +1,11 @@
 use super::*;
 use crate::{CommittedNativeToolCallCausation, NativeResumePreparation, NativeResumeRequest};
 
-fn computer_tool(f: &Fixture, key: &str, operation: &str) -> SessionEventAppend {
+fn workspace_tool(f: &Fixture, key: &str, operation: &str) -> SessionEventAppend {
     append(
         &f.session.agent_session_id, key, "runtime_supervisor", key,
         "tool/call-started", key, Some(f.started.clone()),
-        json!({"operation_id":operation,"call_id":key,"capability_id":"computer","action_id":"computer/observe"}),
+        json!({"operation_id":operation,"call_id":key,"capability_id":"workspace.files","action_id":"workspace.files/read"}),
     )
 }
 
@@ -14,7 +14,7 @@ async fn native_cause(
 ) -> Result<CommittedNativeToolCallCausation, SessionStoreError> {
     store.native_tool_call_causation(
         &owner(), &f.session.agent_session_id, &"lease-turn".into(),
-        &operation.into(), &"computer".into(), &"computer/observe".into(),
+        &operation.into(), &"workspace.files".into(), &"workspace.files/read".into(),
     ).await
 }
 
@@ -26,10 +26,10 @@ async fn committed_native_tool_causation_is_exact_per_call_and_keeps_first_zero_
     assert_eq!(lease.fence(), 0);
     assert!(lease.generation() > 0);
     let first = store.append_native_event(
-        &lease, &computer_tool(&f, "observe-first", "computer-call-first"), None,
+        &lease, &workspace_tool(&f, "observe-first", "workspace-call-first"), None,
     ).await.unwrap().ack.unwrap();
     let second = store.append_native_event(
-        &lease, &computer_tool(&f, "observe-second", "computer-call-second"), None,
+        &lease, &workspace_tool(&f, "observe-second", "workspace-call-second"), None,
     ).await.unwrap().ack.unwrap();
     store.append_native_observation(
         &lease, &progress(&f, "unrelated-progress", json!({"event":"host_cleanup_proven"})), None,
@@ -37,7 +37,7 @@ async fn committed_native_tool_causation_is_exact_per_call_and_keeps_first_zero_
     let before = store.current_cursor(&f.session.agent_session_id).await.unwrap();
     assert!(before.seq > second.seq && second.seq > first.seq);
 
-    for (operation, ack) in [("computer-call-first", &first), ("computer-call-second", &second)] {
+    for (operation, ack) in [("workspace-call-first", &first), ("workspace-call-second", &second)] {
         let cause = native_cause(&store, &f, operation).await.unwrap();
         assert_eq!(cause.tool_call.event_id, ack.event_id);
         assert_eq!(cause.tool_call.seq, ack.seq);
@@ -46,7 +46,7 @@ async fn committed_native_tool_causation_is_exact_per_call_and_keeps_first_zero_
         assert_eq!(cause.execution_scope.resolved_snapshot_ref(), &snapshot_ref());
         assert_eq!(store.effect_causation_event_id(
             &f.session.agent_session_id, &"lease-turn".into(), &operation.into(),
-            &"computer".into(), &"computer/observe".into(),
+            &"workspace.files".into(), &"workspace.files/read".into(),
         ).await.unwrap(), ack.event_id);
     }
     assert_eq!(store.current_cursor(&f.session.agent_session_id).await.unwrap(), before);
@@ -59,16 +59,16 @@ async fn committed_native_tool_causation_rejects_missing_wrong_identity_and_ambi
     let other = fixture(&store, "causation-other-session").await;
     let lease = store.claim_native_execution(claim(&f, "initial", 0, None)).await.unwrap();
     store.append_native_event(
-        &lease, &computer_tool(&f, "identity-call", "exact-call"), None,
+        &lease, &workspace_tool(&f, "identity-call", "exact-call"), None,
     ).await.unwrap();
     let before = store.current_cursor(&f.session.agent_session_id).await.unwrap();
     assert!(matches!(native_cause(&store, &f, "missing-call").await,
         Err(SessionStoreError::InvalidEvent(message)) if message.contains("exact committed")));
     for (session, turn, capability, action) in [
-        (&other.session.agent_session_id, "lease-turn", "computer", "computer/observe"),
-        (&f.session.agent_session_id, "different-turn", "computer", "computer/observe"),
-        (&f.session.agent_session_id, "lease-turn", "browser", "computer/observe"),
-        (&f.session.agent_session_id, "lease-turn", "computer", "computer/input"),
+        (&other.session.agent_session_id, "lease-turn", "workspace.files", "workspace.files/read"),
+        (&f.session.agent_session_id, "different-turn", "workspace.files", "workspace.files/read"),
+        (&f.session.agent_session_id, "lease-turn", "browser", "workspace.files/read"),
+        (&f.session.agent_session_id, "lease-turn", "workspace.files", "workspace.files/write"),
     ] {
         assert!(store.tool_call_causation(
             session, &turn.into(), &"exact-call".into(), &capability.into(), &action.into(),
@@ -80,21 +80,21 @@ async fn committed_native_tool_causation_rejects_missing_wrong_identity_and_ambi
     let foreign = PrincipalRef { principal_kind:"user".into(), principal_id:"foreign-owner".into() };
     assert!(matches!(store.native_tool_call_causation(
         &foreign, &f.session.agent_session_id, &"lease-turn".into(), &"exact-call".into(),
-        &"computer".into(), &"computer/observe".into(),
+        &"workspace.files".into(), &"workspace.files/read".into(),
     ).await, Err(SessionStoreError::ExecutionFenced)));
     assert_eq!(store.current_cursor(&f.session.agent_session_id).await.unwrap(), before);
 
     // The public canonical writer allows distinct events with the same exact
     // invocation identity. A query must reject this ambiguity, not choose one.
     store.append_native_event(
-        &lease, &computer_tool(&f, "identity-duplicate", "exact-call"), None,
+        &lease, &workspace_tool(&f, "identity-duplicate", "exact-call"), None,
     ).await.unwrap();
     let before = store.current_cursor(&f.session.agent_session_id).await.unwrap();
     assert!(matches!(native_cause(&store, &f, "exact-call").await,
         Err(SessionStoreError::InvalidEvent(message)) if message.contains("ambiguous")));
     assert!(matches!(store.effect_causation_event_id(
         &f.session.agent_session_id, &"lease-turn".into(), &"exact-call".into(),
-        &"computer".into(), &"computer/observe".into(),
+        &"workspace.files".into(), &"workspace.files/read".into(),
     ).await, Err(SessionStoreError::InvalidEvent(message)) if message.contains("ambiguous")));
     assert_eq!(store.current_cursor(&f.session.agent_session_id).await.unwrap(), before);
 }
@@ -103,16 +103,16 @@ async fn committed_native_tool_causation_rejects_missing_wrong_identity_and_ambi
 async fn committed_native_tool_causation_never_borrows_unclaimed_started_at() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     let f = fixture(&store, "unclaimed-native-causation").await;
-    let tool = store.append_event(&computer_tool(&f, "unclaimed-call", "unclaimed-operation"))
+    let tool = store.append_event(&workspace_tool(&f, "unclaimed-call", "unclaimed-operation"))
         .await.unwrap().ack.unwrap();
     // Non-native Effect identity remains usable; that is not a native lease.
     assert_eq!(store.tool_call_causation(
         &f.session.agent_session_id, &"lease-turn".into(), &"unclaimed-operation".into(),
-        &"computer".into(), &"computer/observe".into(),
+        &"workspace.files".into(), &"workspace.files/read".into(),
     ).await.unwrap().seq, tool.seq);
     assert_eq!(store.effect_causation_event_id(
         &f.session.agent_session_id, &"lease-turn".into(), &"unclaimed-operation".into(),
-        &"computer".into(), &"computer/observe".into(),
+        &"workspace.files".into(), &"workspace.files/read".into(),
     ).await.unwrap(), tool.event_id);
     let before = store.current_cursor(&f.session.agent_session_id).await.unwrap();
     assert!(matches!(native_cause(&store, &f, "unclaimed-operation").await,
@@ -126,10 +126,10 @@ async fn committed_native_tool_causation_rejects_completed_call_without_revoking
     let f = fixture(&store, "completed-native-causation").await;
     let lease = store.claim_native_execution(claim(&f, "initial", 0, None)).await.unwrap();
     let completed_tool = store.append_native_event(
-        &lease, &computer_tool(&f, "completed-call", "completed-operation"), None,
+        &lease, &workspace_tool(&f, "completed-call", "completed-operation"), None,
     ).await.unwrap().ack.unwrap();
     let active_tool = store.append_native_event(
-        &lease, &computer_tool(&f, "active-call", "active-operation"), None,
+        &lease, &workspace_tool(&f, "active-call", "active-operation"), None,
     ).await.unwrap().ack.unwrap();
     let result = append(
         &f.session.agent_session_id, "completed-result", "runtime_supervisor", "completed-result",
@@ -145,7 +145,7 @@ async fn committed_native_tool_causation_rejects_completed_call_without_revoking
     // tool result; this new guard is specifically native observation authority.
     assert_eq!(store.effect_causation_event_id(
         &f.session.agent_session_id, &"lease-turn".into(), &"completed-operation".into(),
-        &"computer".into(), &"computer/observe".into(),
+        &"workspace.files".into(), &"workspace.files/read".into(),
     ).await.unwrap(), completed_tool.event_id);
     assert_eq!(store.current_cursor(&f.session.agent_session_id).await.unwrap(), before);
 }
@@ -157,10 +157,10 @@ async fn committed_native_tool_causation_rejects_exact_settlement_before_result_
     let f = fixture(&store, "settled-native-causation").await;
     let lease = store.claim_native_execution(claim(&f, "initial", 0, None)).await.unwrap();
     store.append_native_event(
-        &lease, &computer_tool(&f, "settled-call", "settled-operation"), None,
+        &lease, &workspace_tool(&f, "settled-call", "settled-operation"), None,
     ).await.unwrap();
     let active = store.append_native_event(
-        &lease, &computer_tool(&f, "still-active-call", "still-active-operation"), None,
+        &lease, &workspace_tool(&f, "still-active-call", "still-active-operation"), None,
     ).await.unwrap().ack.unwrap();
     let mut settlement = progress(&f, "exact-host-settlement", json!({
         "event":"host_tool_settled","operation_id":"settled-operation","call_id":"settled-call",
@@ -204,7 +204,7 @@ async fn committed_native_tool_causation_requires_live_lease_and_exact_generatio
         let f = fixture(&store, fault).await;
         let lease = store.claim_native_execution(claim(&f, "initial", 0, None)).await.unwrap();
         store.append_native_event(
-            &lease, &computer_tool(&f, "current-call", "current-operation"), None,
+            &lease, &workspace_tool(&f, "current-call", "current-operation"), None,
         ).await.unwrap();
         native_cause(&store, &f, "current-operation").await.unwrap();
         // Deterministic corruption/expiry injection in this isolated database.
@@ -234,7 +234,7 @@ async fn committed_native_tool_causation_requires_typed_exact_claim_payload() {
         let f = fixture(&store, "typed-claim-causation").await;
         let lease = store.claim_native_execution(claim(&f, "initial", 0, None)).await.unwrap();
         store.append_native_event(
-            &lease, &computer_tool(&f, "typed-call", "typed-operation"), None,
+            &lease, &workspace_tool(&f, "typed-call", "typed-operation"), None,
         ).await.unwrap();
         native_cause(&store, &f, "typed-operation").await.unwrap();
         // Damage is injected only into this isolated canonical database. The
@@ -264,7 +264,7 @@ async fn committed_native_tool_causation_requires_native_tool_header_and_typed_i
         let store = AgentSessionStore::open_in_memory().await.unwrap();
         let f = fixture(&store, "typed-native-tool-causation").await;
         let lease = store.claim_native_execution(claim(&f, "initial", 0, None)).await.unwrap();
-        let mut tool = computer_tool(&f, "native-header-call", "native-header-operation");
+        let mut tool = workspace_tool(&f, "native-header-call", "native-header-operation");
         // Production uses a tool-message projection identity here. It must
         // not be incorrectly required to equal the canonical Turn operation.
         tool.semantic_event.correlation_id = uuid::Uuid::now_v7().to_string().into();
@@ -279,7 +279,7 @@ async fn committed_native_tool_causation_requires_native_tool_header_and_typed_i
         // and all typed tool-call identity fields.
         assert_eq!(store.effect_causation_event_id(
             &f.session.agent_session_id, &"lease-turn".into(), &"native-header-operation".into(),
-            &"computer".into(), &"computer/observe".into(),
+            &"workspace.files".into(), &"workspace.files/read".into(),
         ).await.unwrap(), ack.event_id);
         assert!(native_cause(&store, &f, "native-header-operation").await.is_err(),
             "native call identity must fail closed: {fault}");
@@ -296,7 +296,7 @@ async fn committed_native_tool_causation_survives_disk_reopen_without_reusing_ol
     let f = fixture(&original, "disk-causation").await;
     let old = original.claim_native_execution(claim(&f, "old", 0, None)).await.unwrap();
     let old_tool = original.append_native_event(
-        &old, &computer_tool(&f, "disk-old-call", "disk-old-operation"), None,
+        &old, &workspace_tool(&f, "disk-old-call", "disk-old-operation"), None,
     ).await.unwrap().ack.unwrap();
     let cp = checkpoint(&original, &f, &old).await;
     let old_cause = native_cause(&original, &f, "disk-old-operation").await.unwrap();
@@ -316,10 +316,10 @@ async fn committed_native_tool_causation_survives_disk_reopen_without_reusing_ol
     // causation contract; reopening does not author or reset its sequence.
     assert_eq!(reopened.tool_call_causation(
         &f.session.agent_session_id, &"lease-turn".into(), &"disk-old-operation".into(),
-        &"computer".into(), &"computer/observe".into(),
+        &"workspace.files".into(), &"workspace.files/read".into(),
     ).await.unwrap(), old_cause.tool_call);
     let fresh_tool = reopened.append_native_event(
-        &fresh, &computer_tool(&f, "disk-fresh-call", "disk-fresh-operation"), None,
+        &fresh, &workspace_tool(&f, "disk-fresh-call", "disk-fresh-operation"), None,
     ).await.unwrap().ack.unwrap();
     let cause = native_cause(&reopened, &f, "disk-fresh-operation").await.unwrap();
     assert_eq!(cause.tool_call.seq, fresh_tool.seq);
@@ -335,7 +335,7 @@ async fn committed_native_tool_causation_rejects_paused_and_pre_resume_calls() {
     let f = fixture(&store, "resume-causation").await;
     let old = store.claim_native_execution(claim(&f, "old", 0, None)).await.unwrap();
     store.append_native_event(
-        &old, &computer_tool(&f, "resume-old-call", "resume-old-operation"), None,
+        &old, &workspace_tool(&f, "resume-old-call", "resume-old-operation"), None,
     ).await.unwrap();
     let cp = checkpoint(&store, &f, &old).await;
     let pause = store.pause_native_execution(&old, "OWNER_REQUESTED", true).await.unwrap();
@@ -368,7 +368,7 @@ async fn committed_native_tool_causation_rejects_paused_and_pre_resume_calls() {
     assert!(matches!(native_cause(&store, &f, "resume-old-operation").await,
         Err(SessionStoreError::ExecutionFenced)));
     let tool = store.append_native_event(
-        &fresh, &computer_tool(&f, "resume-fresh-call", "resume-fresh-operation"), None,
+        &fresh, &workspace_tool(&f, "resume-fresh-call", "resume-fresh-operation"), None,
     ).await.unwrap().ack.unwrap();
     let cause = native_cause(&store, &f, "resume-fresh-operation").await.unwrap();
     assert_eq!(cause.tool_call.seq, tool.seq);
@@ -381,7 +381,7 @@ async fn committed_native_tool_causation_cannot_cross_into_successor_turn() {
     let f = fixture(&store, "successor-causation").await;
     let old = store.claim_native_execution(claim(&f, "old", 0, None)).await.unwrap();
     store.append_native_event(
-        &old, &computer_tool(&f, "successor-old-call", "shared-operation-name"), None,
+        &old, &workspace_tool(&f, "successor-old-call", "shared-operation-name"), None,
     ).await.unwrap();
     store.cancel_active_turn(&f.session.agent_session_id, "close-original".into(), "session_api".into())
         .await.unwrap();
@@ -398,19 +398,19 @@ async fn committed_native_tool_causation_cannot_cross_into_successor_turn() {
         Err(SessionStoreError::ExecutionFenced)));
     assert!(store.native_tool_call_causation(
         &owner(), &f.session.agent_session_id, &"successor-turn".into(), &"shared-operation-name".into(),
-        &"computer".into(), &"computer/observe".into(),
+        &"workspace.files".into(), &"workspace.files/read".into(),
     ).await.is_err());
     let new_tool = append(
         &f.session.agent_session_id, "successor-fresh-call", "runtime_supervisor",
         "successor-fresh-call", "tool/call-started", "successor-fresh-call",
         Some(turn.ack.unwrap().event_id),
         json!({"operation_id":"shared-operation-name","call_id":"successor-fresh-call",
-            "capability_id":"computer","action_id":"computer/observe"}),
+            "capability_id":"workspace.files","action_id":"workspace.files/read"}),
     );
     let tool = store.append_native_event(&fresh, &new_tool, None).await.unwrap().ack.unwrap();
     let cause = store.native_tool_call_causation(
         &owner(), &f.session.agent_session_id, &"successor-turn".into(), &"shared-operation-name".into(),
-        &"computer".into(), &"computer/observe".into(),
+        &"workspace.files".into(), &"workspace.files/read".into(),
     ).await.unwrap();
     assert_eq!(cause.tool_call.seq, tool.seq);
     assert_eq!(cause.execution_scope.generation(), fresh.generation());

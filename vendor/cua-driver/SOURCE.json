@@ -1,0 +1,2787 @@
+{
+  "format": 1,
+  "repository": "https://github.com/trycua/cua.git",
+  "tag": "cua-driver-rs-v0.37.0",
+  "commit": "4d959bbfa57f0c89f310330e849500b222084194",
+  "observed_tag_commit": "2d2f99228d4d2508dc6fcc84c176b296e146714a",
+  "upstream_root": "libs/cua-driver/rust",
+  "extraction": "D03: nine crates, no test fixtures; explicit Cargo target sources and embedded Skills/assets retained; workspace members projected only",
+  "patch_application": "git-apply-text-lf",
+  "patches": [
+    {
+      "path": "vendor/patches/cua-driver/0001-platform-core-without-default-features.patch",
+      "sha256": "349792cb91aa535cb4c7327290d520e03af195fb6fb9ed65215a649c4e206efb"
+    },
+    {
+      "path": "vendor/patches/cua-driver/0002-x11-owned-input-crash-cleanup.patch",
+      "sha256": "da2c04b7d7d128d225d0ed695601448a136106dd20e2a7fe05581d89f8740b25"
+    },
+    {
+      "path": "vendor/patches/cua-driver/0003-windows-user-app-lifetime.patch",
+      "sha256": "6700e4d1a822ca63b61eca5d716e3770470943398c5bd4c6b78656365b35e5fa"
+    }
+  ],
+  "files": [
+    {
+      "path": "Cargo.lock",
+      "upstream_path": "libs/cua-driver/rust/Cargo.lock",
+      "upstream_blob": "788077b61b7478b4be472452355d43560e843e31",
+      "sha256": "da5092b59b8f6c4f65aee941d6bfc8e1b01667942ffe31efbffbd39cfdddc047"
+    },
+    {
+      "path": "Cargo.toml",
+      "upstream_path": "libs/cua-driver/rust/Cargo.toml",
+      "upstream_blob": "7503a79935a67da491cba58a0727cca86ae68b14",
+      "transform": "workspace-members",
+      "sha256": "89206a989850273e8beef6c8283cd676ab7423299df1d1531f8539c757c523ab"
+    },
+    {
+      "path": "contract/manifest.json",
+      "upstream_path": "libs/cua-driver/contract/manifest.json",
+      "upstream_blob": "7fc22c7b291f9f50cba632274e410c614e373931",
+      "sha256": "6a174343bf2c8215c65f31e787d44881bb7a9e3aeb7061928b5014e119cf6b4c"
+    },
+    {
+      "path": "crates/cua-cursor-motion/Cargo.toml",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/Cargo.toml",
+      "upstream_blob": "2b43c7604f1dbe707738f71b3df99510564b0739",
+      "sha256": "6e72d6bfc8cd56a38b202c06d29191328e32203ade501f5a013c70f6f0b2afaa"
+    },
+    {
+      "path": "crates/cua-cursor-motion/examples/export_golden.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/examples/export_golden.rs",
+      "upstream_blob": "2d2610ace6b484a313e6794582d5566357e05394",
+      "sha256": "ab8d2c06805989858e28c29e6cfdeee50feb43ba0a09e91eadcd734631f5ff8e"
+    },
+    {
+      "path": "crates/cua-cursor-motion/LICENSE",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/LICENSE",
+      "upstream_blob": "b8b198ce3ebaa22c9f59588a80f9f1875d85b34a",
+      "sha256": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9"
+    },
+    {
+      "path": "crates/cua-cursor-motion/README.md",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/README.md",
+      "upstream_blob": "18b40d33ba3f7a1f9447628ba336afd8a4fee5e1",
+      "sha256": "9fcb56172e58e7775334a4b1e6c042749f27c2210956983a135dafcfac01377a"
+    },
+    {
+      "path": "crates/cua-cursor-motion/src/dubins.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/src/dubins.rs",
+      "upstream_blob": "bb1ec536d8482c6d833adc49afaf8999cff51503",
+      "sha256": "93f0380c2beafb441b6ac1c10e28aa15f0991ddf26fd871630df7d000ab72f94"
+    },
+    {
+      "path": "crates/cua-cursor-motion/src/ease.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/src/ease.rs",
+      "upstream_blob": "efca0b7a7b1aa318d8a43e2eaa9293a620c0c6d4",
+      "sha256": "b3e3a6550eb5cca2e83e78c1d937b403960af965a2864ebd3105ab533e501d24"
+    },
+    {
+      "path": "crates/cua-cursor-motion/src/effects.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/src/effects.rs",
+      "upstream_blob": "5ae01ed621926214f831c979b7a07e72e5d53689",
+      "sha256": "6c793703d0e0bebbe3800c1b17a5a0a5f15f51954ae2230f4de1cbf4174b23d3"
+    },
+    {
+      "path": "crates/cua-cursor-motion/src/geom.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/src/geom.rs",
+      "upstream_blob": "82a63645e09e107f4ff795c8873c5481d0e8e4f2",
+      "sha256": "1afdf65f07bf517ed3c9b4abdb2cbe06e26eafe29bcff526d3a2a0cc6b723472"
+    },
+    {
+      "path": "crates/cua-cursor-motion/src/lib.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/src/lib.rs",
+      "upstream_blob": "41b5f8f729a49c4a35c8595f9c8d3d036e7d61d1",
+      "sha256": "9d68d1e8c7da33b17e4fe52ad70d5656c3e07d39f5595c83b4268fa8d2bc90fd"
+    },
+    {
+      "path": "crates/cua-cursor-motion/src/params.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/src/params.rs",
+      "upstream_blob": "773ecb5b4b6004683d8e3d04ec6a8edde74426d4",
+      "sha256": "71d2e8d34578afec09f98915e120db3c9f291d5e5fd1bc05491ed0869dc0a10c"
+    },
+    {
+      "path": "crates/cua-cursor-motion/src/path.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/src/path.rs",
+      "upstream_blob": "903ca795f9e144d2bbfb5b1f4519ccc1da45ccf7",
+      "sha256": "69c93140fba4ebba4821ca3afd111b7592dc9cc849d607364930c5bdc0847d17"
+    },
+    {
+      "path": "crates/cua-cursor-motion/src/plan.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/src/plan.rs",
+      "upstream_blob": "0c99f44a9a7e21da54c61a8ce80fbef53edf3803",
+      "sha256": "f9abd21f62884b1dc8265db71ca358acad566ffca8f90dd49322403bccd46565"
+    },
+    {
+      "path": "crates/cua-cursor-motion/src/rng.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/src/rng.rs",
+      "upstream_blob": "9117e3a3781fe9dc43fd84aacadf84ed680d4f8a",
+      "sha256": "f128b80692ad1da1fe0922d493b00d3eccf03727744eda5999825d6fa24317f4"
+    },
+    {
+      "path": "crates/cua-cursor-motion/src/spec.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/src/spec.rs",
+      "upstream_blob": "c1fe3df9417bc618143d8995cf71220c216a2b4b",
+      "sha256": "54793c0352b5de0a872fed6e68167bb9e16f0aa771fae2c3c04912f4ebc31e81"
+    },
+    {
+      "path": "crates/cua-cursor-motion/src/style.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-cursor-motion/src/style.rs",
+      "upstream_blob": "0181ecae629f79ae98886470969f20b06eb0ee3f",
+      "sha256": "c22cd47dae47eb3728336d5c595916517010a6973a0086d09a76751cfe4de634"
+    },
+    {
+      "path": "crates/cua-driver-contract/Cargo.toml",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/Cargo.toml",
+      "upstream_blob": "a41ae2a7769314bd97548493ed9262dd7a43be89",
+      "sha256": "a0bfc462c279b13e3021325ffdfcb9240848f54273a5a4b8fc0d9a92a99528ac"
+    },
+    {
+      "path": "crates/cua-driver-contract/src/bin/cua-contract-gen.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/src/bin/cua-contract-gen.rs",
+      "upstream_blob": "43405026ff4d73484fb73a39f57f992373b22349",
+      "sha256": "09628932fdc64543be7720c95df6ecf9b4ed46c1593afbfde42cfda4508857c4"
+    },
+    {
+      "path": "crates/cua-driver-contract/src/compatibility.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/src/compatibility.rs",
+      "upstream_blob": "e1f536535da297f48eeb59534d76d61d9cae387b",
+      "sha256": "df60cf3567ce9bffa3f8ee93d038afc83c8eba5a43bda3321be96550f3889896"
+    },
+    {
+      "path": "crates/cua-driver-contract/src/cursor_tools.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/src/cursor_tools.rs",
+      "upstream_blob": "48d5ceb5ca2c75bbb214ed1f0c7531b80e907024",
+      "sha256": "06ef1d12c50b3702c9c6a5fb2da7bbc62e2523998e87c6b44c57a5c84f5221a3"
+    },
+    {
+      "path": "crates/cua-driver-contract/src/cursor.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/src/cursor.rs",
+      "upstream_blob": "461b63813bed5372426691e3c17886bcd1a75b0a",
+      "sha256": "b16c4b45431c75a62b6e3c28b93aaaaa90afba71010dcbdef395678893d83cfd"
+    },
+    {
+      "path": "crates/cua-driver-contract/src/desktop.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/src/desktop.rs",
+      "upstream_blob": "1f52857db761b1283e4390b703216844b0e2e00a",
+      "sha256": "61b3702c1fad4752b2bfcae5f34b553fc7f5eb23278dea82f43f693b68c54e28"
+    },
+    {
+      "path": "crates/cua-driver-contract/src/inputs.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/src/inputs.rs",
+      "upstream_blob": "5a0fca6b9ebe9b4714c6211287862e615814fbe1",
+      "sha256": "d9bb3f661d06a5783091d53f3c68cac02802bf744dbe24f1e5a61849f31b6aaa"
+    },
+    {
+      "path": "crates/cua-driver-contract/src/lib.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/src/lib.rs",
+      "upstream_blob": "d412e1a4caa870afff8fe98d490b613fafa69bd1",
+      "sha256": "05bc196b7eb7415e03bb2ef7340ba6964893841aa34a0afe114aa8994a96fa78"
+    },
+    {
+      "path": "crates/cua-driver-contract/src/outputs.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/src/outputs.rs",
+      "upstream_blob": "de182f9142b63d6dade1d34428373acf30b27e80",
+      "sha256": "f600d22ee62d05da27102d8a5941614034f99890c7be1ccfb3f510f7a82f156e"
+    },
+    {
+      "path": "crates/cua-driver-contract/src/session.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/src/session.rs",
+      "upstream_blob": "159ebc35a3e247c8b1ec04a92e152c684ab2890c",
+      "sha256": "977a95159947ad07b3dc9e19aeb6cf8db1f71494b286cc1182f300e50cfe957d"
+    },
+    {
+      "path": "crates/cua-driver-contract/src/verification.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/src/verification.rs",
+      "upstream_blob": "72ed6462e5e8a164634ec6fa3e53bf20317ca47e",
+      "sha256": "3345671784de3113dd281b3eab14f4efdb519e9f6d19d313222ae6ad21bf3aa5"
+    },
+    {
+      "path": "crates/cua-driver-contract/src/visual.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/src/visual.rs",
+      "upstream_blob": "0cc9c2c6d001b959e3a5cdbe6ef8ac7d8c9062cf",
+      "sha256": "54d4519110e14f84f2184982c29c994ae027e7989adc0d2353338768a2447686"
+    },
+    {
+      "path": "crates/cua-driver-contract/src/windows.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/src/windows.rs",
+      "upstream_blob": "25fb314eb59c3c8903812406939852d67f009985",
+      "sha256": "7d119f50cfbc83d0d02d8e278835195de97694c0593e7f1fcda4d85ab0281d68"
+    },
+    {
+      "path": "crates/cua-driver-contract/uniffi.toml",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-contract/uniffi.toml",
+      "upstream_blob": "d9791929f9295471e886cd9cafca40bfc65860f5",
+      "sha256": "3213462d1ca26b1aee8b0ddf63120e5dfdac4e1876217e95c0bb277830c72873"
+    },
+    {
+      "path": "crates/cua-driver-core/Cargo.toml",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/Cargo.toml",
+      "upstream_blob": "de9e618d6b514fa4508b8a247a3cd66213574b8a",
+      "sha256": "76a3632fb2ea88ac4b7649252111ee0ce75bb7bfb76538ccc8dde91d2c439433"
+    },
+    {
+      "path": "crates/cua-driver-core/src/action_record.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/action_record.rs",
+      "upstream_blob": "424a9061cd9fdad0f58a0de4afddee90393b4685",
+      "sha256": "6d049ed7e960df8a5f04854ae968a96e85cb881a6b3e61f0d8786ed1b2b0d826"
+    },
+    {
+      "path": "crates/cua-driver-core/src/action_target.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/action_target.rs",
+      "upstream_blob": "0c3a36596b0f694bd4c30eae20566b159b29062a",
+      "sha256": "bf4f928831474634551c630ffaa9aefb80c5e855afafe3cff93395f25be8a616"
+    },
+    {
+      "path": "crates/cua-driver-core/src/agent_cursor.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/agent_cursor.rs",
+      "upstream_blob": "b63ad91b517ec6c753d13c9b15bc81d60e8384bd",
+      "sha256": "41d47d47cc8ec85a70715f017f8c7a9383ab0b252d20855e22f025710dba93de"
+    },
+    {
+      "path": "crates/cua-driver-core/src/authorization.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs",
+      "upstream_blob": "8e4ed0d5578d44629c88f01240597c923493864a",
+      "sha256": "92e838a1153b5ba51aba6f2b8c357a4762618253b2d4a409621c69ecde185f35"
+    },
+    {
+      "path": "crates/cua-driver-core/src/background_input.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/background_input.rs",
+      "upstream_blob": "eae7b3b7ca09590dbdfcd162306ea7caa438e1d5",
+      "sha256": "1902d8de107baf7280dc748a51dfa34450406da6d726771bd6463faacf76c221"
+    },
+    {
+      "path": "crates/cua-driver-core/src/batch_nudge.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/batch_nudge.rs",
+      "upstream_blob": "d9d549a3d25d62571d3e3a6c3610c7570fd8f3a0",
+      "sha256": "42370f573c1ba919799cb4559c8210170bc8674f399b3c003ae94043e4abd342"
+    },
+    {
+      "path": "crates/cua-driver-core/src/batch_tools.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/batch_tools.rs",
+      "upstream_blob": "286d4291537b777dbd5961e1170d6a47be21910d",
+      "sha256": "02ee34f2fc3a330eb28d8ce3ca92915c8d20bb7b4193b9438e0a0c513bf918b9"
+    },
+    {
+      "path": "crates/cua-driver-core/src/batch_tools/flow_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/batch_tools/flow_tests.rs",
+      "upstream_blob": "48154f582d80be72dc9c389cbb6de8c975509225",
+      "sha256": "f643209866c364f850531b93b09bf8c73556aae30762b39774a5c504489fe6e3"
+    },
+    {
+      "path": "crates/cua-driver-core/src/batch_tools/locate.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/batch_tools/locate.rs",
+      "upstream_blob": "361cbf57223e6f7f8c7c151fd7a4daccdd76d72e",
+      "sha256": "5ada1ad04d21c57fbde9616b478fe7b2608ce461f4e70d456771d2a520ab8602"
+    },
+    {
+      "path": "crates/cua-driver-core/src/batch_tools/reliability_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/batch_tools/reliability_tests.rs",
+      "upstream_blob": "5e3c94e7556ac331f20ffc15af102ffe132c5f68",
+      "sha256": "47300f42a5b1cd9f5caccb1874d372e147d50044d3aa2113fd7cb242a276e4d4"
+    },
+    {
+      "path": "crates/cua-driver-core/src/batch_tools/tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/batch_tools/tests.rs",
+      "upstream_blob": "07a79e8c3be4e202b89792ff0455093d0d264204",
+      "sha256": "3ec1d072500cc414fc152fa27b54e7dde5bc8d3f4b6acf866c9907bb92d29b70"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/adapter_support.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/adapter_support.rs",
+      "upstream_blob": "8af59a15f6949acaa8b374a0025941cce5e51168",
+      "sha256": "e144026e18aaa2847827fec8c984fd1ffddf4c345bd119cce1b1db852d754a88"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/binding.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/binding.rs",
+      "upstream_blob": "3f797c5ada824691d9b2e1db7c0001e2ae25a09d",
+      "sha256": "edb81f39727b61b20abf9ba1c5e6bd19614afa518991284759731caeeeef2afc"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/cdp_ws.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/cdp_ws.rs",
+      "upstream_blob": "c401f20b43426e1a5fda2a27a40ba890d9fd129d",
+      "sha256": "b8e2933c8eb875865435fd321eaf3e3d67e6325a3da783d9d8e166c181a43306"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/download.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/download.rs",
+      "upstream_blob": "3a2a4677056a88ec3540dc1dac5579ea786a9876",
+      "sha256": "a8a54027ad28f217f50a94ccbd4e47b73a73ab8e458bf964a4c3a6b593638389"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/engine.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/engine.rs",
+      "upstream_blob": "1d0940c17b2cd195258c3dd6526efcd634f73e98",
+      "sha256": "0f0c8e74c07874f54348d4d3bee1248d75d7dd22aebf873d8facef6c8c883e0c"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/grant.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/grant.rs",
+      "upstream_blob": "7469b0e828ea4dc63a3540273010f66de042510f",
+      "sha256": "97a93df078b9ed7e2ff7d118d5618ae372993098d1beda5460a6747995b612af"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/keyed_gates.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/keyed_gates.rs",
+      "upstream_blob": "19ffdf3225646d60ca99dedb013fd08fc2848f57",
+      "sha256": "7156bd7b51c57410937ce9a20ff962a577ab500aabaa3ce1aa1020435e4d9dcf"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/mock_cdp.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/mock_cdp.rs",
+      "upstream_blob": "404ddd2a3078464b89740c6f4ef1cbfcfdf35e8f",
+      "sha256": "9db0d25022502653a2f28636fe07b4189290efbece9e6e1493c09e38d0c9ffd8"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/mod.rs",
+      "upstream_blob": "070d6c0734fa6ee1f410c254763149482d439944",
+      "sha256": "6fa6f1dfacc6029328ac40138d82bd2241af9bcf210d93cb6edbf0b7800481c5"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/mutation.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/mutation.rs",
+      "upstream_blob": "a901dd401612363f86434d0f3f788589fbb11085",
+      "sha256": "fdf9dbf57e2a1301ddaf060341ed1ede5364ad9dc756f0c033f8dba26532cee6"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/platform.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/platform.rs",
+      "upstream_blob": "98296acb6ab002941b08cc08df78d34017a70ce7",
+      "sha256": "668625ad3885944ca7eb7936ce21295e5a0e117fa21e5320331f27b8aeec893e"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/pointer.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/pointer.rs",
+      "upstream_blob": "bc741d9ba2499bc0a9f30c44a649d8eaa1443928",
+      "sha256": "307e25de9fc75433a7b94f826e9fbe903b84216c671120b56fd793db1297c3cb"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/prepare.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/prepare.rs",
+      "upstream_blob": "82f7dff412da11da83df25816e5d3e0c9b9a7b2c",
+      "sha256": "3c6ac920f3631fcc8c0847e087bd25d5b272271d8281757e03053a215db01965"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/reconnect.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/reconnect.rs",
+      "upstream_blob": "b6b14ad68f3da5840301caea86ab4637a30ce982",
+      "sha256": "480c0b7e9c0bb69f51f66170704362af64c87fe8dadd9dee1f233dd25b363f73"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/refusal.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/refusal.rs",
+      "upstream_blob": "d709315b4850c7837f8cb47e2af7dfad09be4740",
+      "sha256": "c3c295666085d25ffadf23757eee7b07ba5ae891b7f999182c0a341e5299d97a"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/semantic.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/semantic.rs",
+      "upstream_blob": "0005f29954f09eadeea49d33a0d7709aeb80b4a2",
+      "sha256": "ccd15f4c78695499189d661d1f4daeb5f44d752ef511a3da9f688bb800ef0a31"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/setup_descriptor.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/setup_descriptor.rs",
+      "upstream_blob": "dc4bd33bfb2ef98c50962277e5c7448d636626ff",
+      "sha256": "b6c188a2ef38b0d5192992f02e90fb5dc2329a4d58fa9838980373f3e1d15cca"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/store.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/store.rs",
+      "upstream_blob": "68f2099f61007c7b9023d7f2c14ef67631415262",
+      "sha256": "48364ebe08e2c0c472e644cbd8f5fec5f8380d60c3f4819a159836cf1080b99d"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/tools.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/tools.rs",
+      "upstream_blob": "7b31ed1a8e6e0140afc6713d1fe83f848cd7dfe5",
+      "sha256": "f8a07e62baba8a10ff0a7deff0b233ff7aaeced3b386dc25dfada14f9898b6ae"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/types.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/types.rs",
+      "upstream_blob": "51d22566643d51750d92a2a5e329f314b7f6b23b",
+      "sha256": "feaf155c9ea28cede5a589967e65460d09b011fcea5a79904b0daed38211aa34"
+    },
+    {
+      "path": "crates/cua-driver-core/src/browser/v2_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/browser/v2_tests.rs",
+      "upstream_blob": "14683b10f0efcd97cfe9ab80058535d6b06ade68",
+      "sha256": "5f3f09cddf525a315f1389645fd24a533edc31e5dad65efd5b4a4c8b885164c9"
+    },
+    {
+      "path": "crates/cua-driver-core/src/build_info.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/build_info.rs",
+      "upstream_blob": "46ec3685a07b611c885592bd7ea346b3a8bae893",
+      "sha256": "9efd9e35c518cca1eca406f4514b589a7aebd0000c44533f9414cc4906ad3806"
+    },
+    {
+      "path": "crates/cua-driver-core/src/capture_mode.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/capture_mode.rs",
+      "upstream_blob": "7f5c55b7e3051afc30cf3555d3f838b61b8f0f34",
+      "sha256": "5be32d743667e2f23d96fb499f4a873787aab4a3e206d2d02bfccb7d45480600"
+    },
+    {
+      "path": "crates/cua-driver-core/src/capture_registry.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/capture_registry.rs",
+      "upstream_blob": "f7e6be0d533edb2bbd1a30753e6e5cb2b91701a3",
+      "sha256": "4d7b2694ca19d338c28efe8143b4a3542eca9f7493ee13b84df1395fe6d4fe9e"
+    },
+    {
+      "path": "crates/cua-driver-core/src/capture_runtime.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/capture_runtime.rs",
+      "upstream_blob": "a661cc42786d1ef117a17c9490863ebc4c3a685b",
+      "sha256": "ef4ab0074ddff82c0200c085b1edcd92e949067cd271019e58c3a2c782532d2e"
+    },
+    {
+      "path": "crates/cua-driver-core/src/capture_scope.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/capture_scope.rs",
+      "upstream_blob": "bf86eea05bb50ef0770b23664a9562f3e593c293",
+      "sha256": "893ff1a4a37c500fdd06090ba358e305a2e7baa35428d33e7d40bdd3bee55e4f"
+    },
+    {
+      "path": "crates/cua-driver-core/src/cdp.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/cdp.rs",
+      "upstream_blob": "c7621a81a8fc2b26402fc35b86ea59641d692d13",
+      "sha256": "14c0a7475886a4385f442113e89b26e60e545a145524bbeebc803830e336e630"
+    },
+    {
+      "path": "crates/cua-driver-core/src/clipboard.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/clipboard.rs",
+      "upstream_blob": "613812b04dcd29c648d1ec06b5f0a3a2fbf7f884",
+      "sha256": "dbf8f93eee68a9a0bfc4af4e6a7687a06e9379871ba9222a05a79fe9bcb25d03"
+    },
+    {
+      "path": "crates/cua-driver-core/src/consent.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/consent.rs",
+      "upstream_blob": "397b15a307511b8402b4786edd8782ac9b8a8730",
+      "sha256": "fbaf3a714c97c670571270804c8519f3a5cbea7ab59260bd64489ac3e27f96f1"
+    },
+    {
+      "path": "crates/cua-driver-core/src/cursor_events.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/cursor_events.rs",
+      "upstream_blob": "23fe1cc4cc7c15d6fb08abbd3369bb65221a0fb9",
+      "sha256": "1c31403a1a3b7655f17b84fb3f6b612abfc841ac2f3969c1bbced2fdf715a5dd"
+    },
+    {
+      "path": "crates/cua-driver-core/src/cursor_hook.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/cursor_hook.rs",
+      "upstream_blob": "66a44b83dee4fe3f61465d4f5ccc74694d0335c2",
+      "sha256": "3a0b4d3b37d899361e33305f5570a384c26fd41c4de3e890d5e481c3957e2ba5"
+    },
+    {
+      "path": "crates/cua-driver-core/src/cursor_sampler.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/cursor_sampler.rs",
+      "upstream_blob": "4db005109ffc61d421252fb12a52e7a5c97d7604",
+      "sha256": "a4d96de7054d61fa44447acb56000f5cdad5767a2209db041c0a8c6be7c5bdda"
+    },
+    {
+      "path": "crates/cua-driver-core/src/cursor_shape.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/cursor_shape.rs",
+      "upstream_blob": "f79876eb9bb62e8febf6d9455900bbec2e6752f0",
+      "sha256": "799551a2696e683334d72679b5f290b5848968251bbe4d46326f777b17c18834"
+    },
+    {
+      "path": "crates/cua-driver-core/src/daemon.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/daemon.rs",
+      "upstream_blob": "aca2eb7f3310137e11c1ebb3edf126faef706ebd",
+      "sha256": "0c1305ac9b6352b617efbdd8c621a945268569fd6dbdd4e1d6957d2b65035a84"
+    },
+    {
+      "path": "crates/cua-driver-core/src/delivery.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/delivery.rs",
+      "upstream_blob": "a040bc3bb105cce9eb2ed8477b2c69fc94198f86",
+      "sha256": "bcd62b3d16a9d487253c0862e55b7940124f4b489425a77efeda67f71b66377d"
+    },
+    {
+      "path": "crates/cua-driver-core/src/desktop_capture_scale.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/desktop_capture_scale.rs",
+      "upstream_blob": "5c1dd9627e52b13802f45f2f4c8078853d8eda49",
+      "sha256": "2be72dfc4364e8cb2d7aed4e0d16b9810497d340115e746cf59abdd70dd5c7bf"
+    },
+    {
+      "path": "crates/cua-driver-core/src/element_frame.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/element_frame.rs",
+      "upstream_blob": "f046d16406ec373cb1873ba0c4c9801012c1b44f",
+      "sha256": "286aceae9d725d37d6ee43707050445061043b4af90b9c7071e5e6d687e1d0df"
+    },
+    {
+      "path": "crates/cua-driver-core/src/element_query.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/element_query.rs",
+      "upstream_blob": "4008ee6d64086320ad446e7f67bda5e5281b508a",
+      "sha256": "123ebde69bd76afbb237d84715cb96504d088feec8d54d9d17dd79b2e9b595cb"
+    },
+    {
+      "path": "crates/cua-driver-core/src/element_token.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/element_token.rs",
+      "upstream_blob": "14c630bd0dc283bf6dd417aba5f7379437df6381",
+      "sha256": "118874069d701cf6d710656b9d92bfe1ad225436bbbf2d957b412325507a0721"
+    },
+    {
+      "path": "crates/cua-driver-core/src/expectation.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/expectation.rs",
+      "upstream_blob": "54fcf78b70fedb6c494655617f9ce77162d76aaa",
+      "sha256": "1ce170608152331889c9b24d6c0d4fbfe60cdcc2f06d0c965a088e8377356800"
+    },
+    {
+      "path": "crates/cua-driver-core/src/ffmpeg_install.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/ffmpeg_install.rs",
+      "upstream_blob": "b1431fdb5c837944eee7bfed20dadd31f75b07f4",
+      "sha256": "5b0c3d5fc8cdb3c6e8bed78954f5ed8905bf5f682606402cf5f2e1d479c92eb7"
+    },
+    {
+      "path": "crates/cua-driver-core/src/guide.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/guide.rs",
+      "upstream_blob": "a960ca8aeb920845eca11ca8cd0144e30e744962",
+      "sha256": "4447d5fadce0d1ed3737ab6c4012aa706388ea673f5c74105b9dc27bd4c1cf91"
+    },
+    {
+      "path": "crates/cua-driver-core/src/health_report.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/health_report.rs",
+      "upstream_blob": "81f7d2738d74d3ecb902c7d2c86f25ae0962e2f3",
+      "sha256": "55ab2670a96ead19332329134eaf75096ef059711f49dac3306ad84b1aa10874"
+    },
+    {
+      "path": "crates/cua-driver-core/src/history.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/history.rs",
+      "upstream_blob": "188cec2f6c8984cc9c00b08009ff49f386530e7c",
+      "sha256": "b2fb453345b5e92e723df7fe8e06a45b26b03328089e536856ce75f78d06b921"
+    },
+    {
+      "path": "crates/cua-driver-core/src/image_utils.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/image_utils.rs",
+      "upstream_blob": "63061f4e3d20fe16c2d0a4d0ae68b9da1728415b",
+      "sha256": "8a034848008644ab1b02d13427a67f8df68a47efb31d8ae3b854d6bf8eb98fc8"
+    },
+    {
+      "path": "crates/cua-driver-core/src/interactive_input.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/interactive_input.rs",
+      "upstream_blob": "d0964a837cbfc95f5b33c32529a8616d56634230",
+      "sha256": "1d89bf4dcde7b0ecf7c5757880a5325441297e1eab1db944faa64f47b14cc9e3"
+    },
+    {
+      "path": "crates/cua-driver-core/src/interactive_input/gestures.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/interactive_input/gestures.rs",
+      "upstream_blob": "85cb4cae58b5cf2ee543c89482b507b837eec842",
+      "sha256": "8da88148f647d96ec9874265fb2755f808d2fa2d42e7d52481d654e9bdd119d7"
+    },
+    {
+      "path": "crates/cua-driver-core/src/key_pacing.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/key_pacing.rs",
+      "upstream_blob": "ed6a5cea99e4e25e4ce38750831f64b293e9e703",
+      "sha256": "9d84728a6d9b4ffd1b8dba8cb5fbb7622b0da981389e56513e6b0dc73fbc3357"
+    },
+    {
+      "path": "crates/cua-driver-core/src/launch_guard.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/launch_guard.rs",
+      "upstream_blob": "2ff1d39b9ddc46b479e65c31b995e8650c532c50",
+      "sha256": "d5fe3897fddb2f2fc903edfad13e19c06dba0586ab9f6f320ce9c9e4b7bab2eb"
+    },
+    {
+      "path": "crates/cua-driver-core/src/lib.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/lib.rs",
+      "upstream_blob": "f34132090ab155d925f21a0df512dde6e9fdee9e",
+      "sha256": "b59a649dd28cf40b1fb41f074832f0efba1398c62b3a9d984f570e8b86565e01"
+    },
+    {
+      "path": "crates/cua-driver-core/src/mcp_result.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/mcp_result.rs",
+      "upstream_blob": "aa0521bf01f96dbb3009197300c4777037a9f34f",
+      "sha256": "c54702c6a26eb5a7c8aeadd8a9d2f30d295b6f33034408f725b718761c657ee9"
+    },
+    {
+      "path": "crates/cua-driver-core/src/mcp_skills.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/mcp_skills.rs",
+      "upstream_blob": "02245026f889055dbfc70e0b2188472afb9a8f94",
+      "sha256": "7e8ce89e5096ae63e6a45345abfc6d378257a2d78e32c913329f3da2d879dc2a"
+    },
+    {
+      "path": "crates/cua-driver-core/src/mcp_wire.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/mcp_wire.rs",
+      "upstream_blob": "7b3d30db79cabf4281daa0014263c0056cea452c",
+      "sha256": "a9579e27b91048b7d650e2725ad53b8f029b0c4525895b0997d65e538c41650c"
+    },
+    {
+      "path": "crates/cua-driver-core/src/page.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/page.rs",
+      "upstream_blob": "dc0cb0a6f753ffa1fb0171ead429c6a7f2e193c8",
+      "sha256": "3b7df1a69f8fc670be3cc1696d7048ab4421394dcee5d2207bdfe1f64cfc1aa1"
+    },
+    {
+      "path": "crates/cua-driver-core/src/perception_client.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/perception_client.rs",
+      "upstream_blob": "b78bb6c8e6de677dc9acce88a88e048645c423f7",
+      "sha256": "3618a6fd472a9891baaf10e8e7ad0569cb78149e4132385e7c0b03671270e974"
+    },
+    {
+      "path": "crates/cua-driver-core/src/perception_client/containment.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/perception_client/containment.rs",
+      "upstream_blob": "6179d5eac250382b76ad951a9abfc1c950193be8",
+      "sha256": "60d99c96973a0d07c5e7f0003e782d8c8c2bdc6bf4f17a31d61ea4cadc375aff"
+    },
+    {
+      "path": "crates/cua-driver-core/src/perception_client/containment/linux.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/perception_client/containment/linux.rs",
+      "upstream_blob": "9c1e66bb95351fe87272b53168389b600430ae97",
+      "sha256": "3b03f634f85dfabe5684a0b30682b20b8577ed3451db704a1d941471d1611a8b"
+    },
+    {
+      "path": "crates/cua-driver-core/src/perception_client/containment/macos.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/perception_client/containment/macos.rs",
+      "upstream_blob": "28f9d8120057001db53dd40f80b591e290234469",
+      "sha256": "3586eee0cb5477fbbdd3848da110da8dc8f68704606c167d95fd8a3b7cd6d795"
+    },
+    {
+      "path": "crates/cua-driver-core/src/perception_client/containment/unix.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/perception_client/containment/unix.rs",
+      "upstream_blob": "fbabc6a76b02aae8b905fa08ec6a0f5308143495",
+      "sha256": "63ae9dcefc540efaed52e47c152d8a2684473254948173913d27cb6393d34801"
+    },
+    {
+      "path": "crates/cua-driver-core/src/perception_client/containment/unsupported.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/perception_client/containment/unsupported.rs",
+      "upstream_blob": "2324f685ebcbb2fb050e1fd99ce02e515013d329",
+      "sha256": "2897e4e606c9ab6cba0d431cef3a9c69fc2e5e6b44b41b64222b004a0b48d3f1"
+    },
+    {
+      "path": "crates/cua-driver-core/src/perception_client/containment/windows.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/perception_client/containment/windows.rs",
+      "upstream_blob": "ac9b94724a3a9b0e5f042145446ed021102a6986",
+      "sha256": "e23fdfc00033f4613b77f7348b63e61915b34f785e71802a467a50b90ddd2014"
+    },
+    {
+      "path": "crates/cua-driver-core/src/perception_tools.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/perception_tools.rs",
+      "upstream_blob": "d8e6b0bb14efc3e2e9a3250f983f8f15536dc109",
+      "sha256": "c3c016b5150179ff6f67217d559a772c458ceb5ff0da83589d4e08a5e8a5c76c"
+    },
+    {
+      "path": "crates/cua-driver-core/src/pip_hook.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/pip_hook.rs",
+      "upstream_blob": "d2c426169f13753ff68d48d996a710d51643b27e",
+      "sha256": "89c80a81a76465eb92fddf302a19560c07685be989eb93e5fa6112ad2b34e410"
+    },
+    {
+      "path": "crates/cua-driver-core/src/pointer_shape.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/pointer_shape.rs",
+      "upstream_blob": "6e9d1fa02adf68b57b2cb930ca876f1c96b685a0",
+      "sha256": "23c065684af68f3a5df48a186a1fed16ece8f7f0993511064abfb00932b2da7f"
+    },
+    {
+      "path": "crates/cua-driver-core/src/policy.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/policy.rs",
+      "upstream_blob": "20a3bce2d9160c9253d39d96c10870a0cdce1554",
+      "sha256": "01b166439382adf190f0425dfd380040840e12d3ac84c2f3fc814466ba8ac92b"
+    },
+    {
+      "path": "crates/cua-driver-core/src/protocol.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs",
+      "upstream_blob": "63733f8950eb317dc23891454273c021aa77e590",
+      "sha256": "0b3a4cc8c8ba8017504023f6a9a130eea89c809fa855c6c2193010b3767c4a89"
+    },
+    {
+      "path": "crates/cua-driver-core/src/recording_loader.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/recording_loader.rs",
+      "upstream_blob": "c0f45902be2ed1d5b4ddb376c54a83479e05c8e5",
+      "sha256": "166386e9b1e796c242f8cf0dc31e62356a49690dfd0b51a21f972ea335d8fa76"
+    },
+    {
+      "path": "crates/cua-driver-core/src/recording_render.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/recording_render.rs",
+      "upstream_blob": "733be1922ad6fbcf05b64dd53f8cfee2a72e6ad0",
+      "sha256": "6d6d8662ebc11415c79654d29a4d3a3d49996b9da36009bcbdd20f7c49474a31"
+    },
+    {
+      "path": "crates/cua-driver-core/src/recording_tools.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/recording_tools.rs",
+      "upstream_blob": "1c3d8a4a7bc0db05a52c8c7312d069f8a4140193",
+      "sha256": "89977862c2f521815d08b410896dd51a1464edba6d575b81008f899a51806537"
+    },
+    {
+      "path": "crates/cua-driver-core/src/recording_zoom.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/recording_zoom.rs",
+      "upstream_blob": "e2f289cd5d62593e812de176e236ffca03d463dd",
+      "sha256": "15f7d3eac89363c1e559d49c2174ff4c04fa7cd66d0748f29fc8a9422ba2d52c"
+    },
+    {
+      "path": "crates/cua-driver-core/src/recording.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/recording.rs",
+      "upstream_blob": "90e027aadcef75518e40ea00a8ca778101ed2608",
+      "sha256": "6e3c6c502f7241aebf020b035e2882981045a3e4627c72133675c0a6d16b0a9c"
+    },
+    {
+      "path": "crates/cua-driver-core/src/recovery_hint.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/recovery_hint.rs",
+      "upstream_blob": "9b7bc262f2de3b3649c05fdc531ae3c3ea0c16a9",
+      "sha256": "3b84e47d9d87170c374b1ca3847bfa8ad1630292663357a867df6d8982068248"
+    },
+    {
+      "path": "crates/cua-driver-core/src/recovery_hint/tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/recovery_hint/tests.rs",
+      "upstream_blob": "af032110de3224c8701afd57ff2b7069bebfdbe5",
+      "sha256": "0e672c1cbb9e72012b0b73027157a7d17b13522a6a11f5828cd0cbc69af26418"
+    },
+    {
+      "path": "crates/cua-driver-core/src/script_tool.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/script_tool.rs",
+      "upstream_blob": "fff364837d8fd68ca8a2f959024c2ed47c663ec3",
+      "sha256": "1a605bea0f06ce20942b883afa1bd15ce9219ccfc255a4aea649bbe7273baf23"
+    },
+    {
+      "path": "crates/cua-driver-core/src/script_tool/engine.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/script_tool/engine.rs",
+      "upstream_blob": "35fcd807f74db65e1bbc0c1d3b75d2fdb1c55ff3",
+      "sha256": "fa61393ba5b685df34858a81e8e32e8fbdab77e17f2e1094514b43510891242d"
+    },
+    {
+      "path": "crates/cua-driver-core/src/script_tool/prelude.js",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/script_tool/prelude.js",
+      "upstream_blob": "3a4426ab0352ddeea08159879ef9f0170bca89f9",
+      "sha256": "af23eaf9c7c198f7feb6ac38e26c94d5b4d76bc0b794c491b80adb9933ed2865"
+    },
+    {
+      "path": "crates/cua-driver-core/src/script_tool/tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/script_tool/tests.rs",
+      "upstream_blob": "47b0d49136d6226720badb1eaa5a3a034237f3b2",
+      "sha256": "5151299d6da710d18d7bfe49d80e9f43bfb4d364f6c172d5b21ae4374e14c6a8"
+    },
+    {
+      "path": "crates/cua-driver-core/src/server.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/server.rs",
+      "upstream_blob": "7c85f09756a8942cb255e826cbe880b67ef93376",
+      "sha256": "6c9e928cddd44b9ec38c39340fb8f3b47d7230af05f359dc164b25131740ed97"
+    },
+    {
+      "path": "crates/cua-driver-core/src/session_authorization.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/session_authorization.rs",
+      "upstream_blob": "febdade5df0318507d79b19651d5996dc26535ba",
+      "sha256": "7926bfe6f604ec35eb102dc20b38e25ba4d968fcce420a6f7a31d115d07292fc"
+    },
+    {
+      "path": "crates/cua-driver-core/src/session_manifest.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/session_manifest.rs",
+      "upstream_blob": "38546612bdaf0da76a6d40a1a93b16caffaa46f1",
+      "sha256": "6c7821cfb85bacf63b36bb837d3b57c025f1fad71afbe7d3ea8edb3eabf76447"
+    },
+    {
+      "path": "crates/cua-driver-core/src/session_tools.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/session_tools.rs",
+      "upstream_blob": "ef179296c85ddaf487066bea420d2830dcef0299",
+      "sha256": "6d11a07ccf080881cdf1e202ac08cf71735cc79afe5c0c3a9485cf2e723465c3"
+    },
+    {
+      "path": "crates/cua-driver-core/src/session.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/session.rs",
+      "upstream_blob": "7acb98101fba484b55e14bca95fba50015107762",
+      "sha256": "8d0c3cdbfb016dee29f7db5c158cd8e62720ad48bf8c908b81e28cb37a78bc0d"
+    },
+    {
+      "path": "crates/cua-driver-core/src/single_flight.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/single_flight.rs",
+      "upstream_blob": "9e7a6583e14f208926805791c8a05412236eae79",
+      "sha256": "618391ffe2263e526bb31790ebd82a0fd7139ed3ee525da7991cc0c74432d4e7"
+    },
+    {
+      "path": "crates/cua-driver-core/src/snapshot_store.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/snapshot_store.rs",
+      "upstream_blob": "944f54e8dcc21ece3cdd02afd35529376ab1d54a",
+      "sha256": "3e516a89e68fd7e9da6ef730bff94e8108b9bae0e62e5e77f5e9909f33e3edd1"
+    },
+    {
+      "path": "crates/cua-driver-core/src/snapshot_test_support.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/snapshot_test_support.rs",
+      "upstream_blob": "ed2235a29b4a3738f10e7dbe7734cebc2bbeb30a",
+      "sha256": "9a3306f46cf71c3668af8b8cfce2b88b98913fdb5bd164b5be8c3d9c4ee57b77"
+    },
+    {
+      "path": "crates/cua-driver-core/src/socket_io.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/socket_io.rs",
+      "upstream_blob": "01228978752b939baa29080b9769a8062c9b32ea",
+      "sha256": "a981bf695d495e13e490a03a0eb4627ef1dcabf908e98acc9c25c2166d688c51"
+    },
+    {
+      "path": "crates/cua-driver-core/src/step_pacing.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/step_pacing.rs",
+      "upstream_blob": "4ada4bdd2615cbd474ada4f52ca7822d4ab2ed82",
+      "sha256": "aa2f3982d1cad2a136f7d862385de28d1cbf9ed553e711ccd1e9b874f08edeb2"
+    },
+    {
+      "path": "crates/cua-driver-core/src/text_sanitize.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/text_sanitize.rs",
+      "upstream_blob": "29c985183cf594b38909b443bea8dc7c6a9f0d28",
+      "sha256": "5ff0a01d9b979157e7c284e9217b6c391c20b752754a85d3af487cfe25bc21de"
+    },
+    {
+      "path": "crates/cua-driver-core/src/timestamp.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/timestamp.rs",
+      "upstream_blob": "d8ea2b463bd54503e6b342b26c17979366c0f943",
+      "sha256": "d0345e148eaf26a2f8710a7c3b0fa0c7a51689dba637d518623b44fba1a595c7"
+    },
+    {
+      "path": "crates/cua-driver-core/src/tool_activity.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/tool_activity.rs",
+      "upstream_blob": "303820ca909c0ee2b174ba4544f190fb8df18854",
+      "sha256": "a5404544fd436b5ef716d3bb10cde73c3cfaa234a06883d4de359b3641429dbc"
+    },
+    {
+      "path": "crates/cua-driver-core/src/tool_args.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/tool_args.rs",
+      "upstream_blob": "126778ad1de5b76e22f90f20070dc17534087fc2",
+      "sha256": "aad4935ab17c72f718b1427b86db34821167d711d165ff246eb2f194d94bd110"
+    },
+    {
+      "path": "crates/cua-driver-core/src/tool_schema.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/tool_schema.rs",
+      "upstream_blob": "e60d3e26c78deea710f4ecbd86804cd3a784ed93",
+      "sha256": "b1d1c4a08cedc6c9622a9541591f840898e0078ab231c748f9dbae7f604e0997"
+    },
+    {
+      "path": "crates/cua-driver-core/src/tool.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs",
+      "upstream_blob": "5493c6c3866169494af2ee1284721734113f7a13",
+      "sha256": "b7b2ce4490c9efe6b399265f1f3da5f5f11b25030f5a6cef61ff753cb7d7e862"
+    },
+    {
+      "path": "crates/cua-driver-core/src/video_ffmpeg.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/video_ffmpeg.rs",
+      "upstream_blob": "36d108c8c0966dad0fa80826c4c3b30cab8a0ce9",
+      "sha256": "fc7b1fec2ba14f0a1136e1e3f9a740c6451f0d05554f1fc683af399631c9fed8"
+    },
+    {
+      "path": "crates/cua-driver-core/src/video.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/video.rs",
+      "upstream_blob": "f7eddc53d999059592be745bd66601709d6264b5",
+      "sha256": "84ab5377e52de87231ef6c3d36dd5473dfa1a0e0d9d28eb5084116559a089e22"
+    },
+    {
+      "path": "crates/cua-driver-core/src/walk_budget.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/walk_budget.rs",
+      "upstream_blob": "324832362f1e679b80f35b7f05fa13a9c47cf77d",
+      "sha256": "9a0ea50059adae1bb3bc96071aead65c66b663a0f07380705814847f6a92b1e4"
+    },
+    {
+      "path": "crates/cua-driver-core/src/window_inspection.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/window_inspection.rs",
+      "upstream_blob": "79d7234699ad60aa1ca7bee336abb8af123fde6a",
+      "sha256": "781126acd03bbe7a7857322f302452b377f1c5d64583c7df3c462e92fdee61db"
+    },
+    {
+      "path": "crates/cua-driver-core/src/window_observation.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/window_observation.rs",
+      "upstream_blob": "33f1e78932c20478ccbbb4a718c5350286bd3f67",
+      "sha256": "8546327e363a7af05a4acf61aab13a86b43bb4a8d718e7ae06a52daafa72dae2"
+    },
+    {
+      "path": "crates/cua-driver-core/src/window_state_view.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/window_state_view.rs",
+      "upstream_blob": "8505c3d1c9a04a8fad2b51620c9235624eca0bbd",
+      "sha256": "d626950796651cee184b3435f83c9a33f53027ba4b45fc5723014bf2659c79da"
+    },
+    {
+      "path": "crates/cua-driver-core/src/window_target.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-core/src/window_target.rs",
+      "upstream_blob": "3d2839c520da5beee396631973a2e3c48432a7db",
+      "sha256": "d1f76db25a4355f0155c0aab34cc234b2ff6a4c3b329169057225ffce52a2777"
+    },
+    {
+      "path": "crates/cua-driver-sdk/build.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/build.rs",
+      "upstream_blob": "9f62ee6662514a6855f7fe67ab5d4afb5033a10e",
+      "sha256": "a4b7a35fe80f3560eda62f9dec455bcab5d67082dd96de689fd2b98d04da7dd0"
+    },
+    {
+      "path": "crates/cua-driver-sdk/Cargo.toml",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/Cargo.toml",
+      "upstream_blob": "cdadd053eb4e28b80b47419854518b80129f92af",
+      "sha256": "f04ba5347c3ab010bb571cbb19c27150718f38156d4f2ab7131c8671f60b5ae0"
+    },
+    {
+      "path": "crates/cua-driver-sdk/cbindgen.toml",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/cbindgen.toml",
+      "upstream_blob": "8c32647a0f185d103ae2cfc1fe1da5c130502e3b",
+      "sha256": "c497e48e8736907ac3a58b7c7c1e5e0ffff1de018b9873de7fbacadeebab90f2"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/abi.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/abi.rs",
+      "upstream_blob": "d5a96b78edfed3e650d0af5de6c220b825af01a7",
+      "sha256": "9ef216a54f820d2daeb8f031fe32a26360cd99c3bc110b670c977674260c54fe"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/activity_observer.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/activity_observer.rs",
+      "upstream_blob": "cd49d1fafcc91a9dba86fe5dead3a09c799c5320",
+      "sha256": "057dcfa965780cb4ac0f9511a0ec5da9c76ffe2843bd9b8f857c2d1849c6153c"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/authorization_host.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/authorization_host.rs",
+      "upstream_blob": "bcb7c63c63b8c1dbe59fa1d4b5dc265b63fa2b72",
+      "sha256": "cf5a1263a9d8cadc38753cc965e21f58a481aa0cb21fc013b9446b95d8c63f1e"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/cursor_motion.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/cursor_motion.rs",
+      "upstream_blob": "d9429f7c9bf632aacb10c1d84d2792ab8b12cc6d",
+      "sha256": "3a465782f0bce65b275ce583f8277774a1adce3193416db89fcfb0382149707f"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/embedded.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/embedded.rs",
+      "upstream_blob": "99075b3b9b809104826531ff59fe11bc1937bf1c",
+      "sha256": "73422769879a0768d58b27284b50f77e2e84a990b409f108049f6342dfac267b"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/lib.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/lib.rs",
+      "upstream_blob": "776cd63ec9964818d7f99c0dc1222c6a5b1bfc6d",
+      "sha256": "cc3ed9b7ce2282274b4d4b109fd342de20e10790463e04aa53e20b82acb39ad0"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/remote_foreign.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/remote_foreign.rs",
+      "upstream_blob": "0e51349f7d9effee03223265aac0af94ac2f42a1",
+      "sha256": "daeab855f4a5b01b9ece5fc8547af04ee99b85534377a8b66ca0a7c4f59b81d3"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/remote_mcp.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/remote_mcp.rs",
+      "upstream_blob": "9edd2240e0852cf2507a712eb65dfc2173345973",
+      "sha256": "ff3afd92682a29607a5bf1496dd1b2d2e9a8f01da8e84ae7b068013f19acfdce"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/remote_mcp/tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/remote_mcp/tests.rs",
+      "upstream_blob": "bf08a7a6fabc76d1ea1701881d6d9f48071c7ce6",
+      "sha256": "49aa676a4b895a4d8b4a7c4b9879e53b34aec6fb7a5d5429130bba4e08366e79"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/remote_receiver.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/remote_receiver.rs",
+      "upstream_blob": "1446b990975a8833e3224abc54e2512045522304",
+      "sha256": "a24feedd0bba3a23e985d64116ef4561578d4e55e58c13b230e9f9020924be46"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/remote_receiver/tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/remote_receiver/tests.rs",
+      "upstream_blob": "8eeb387b784f90f49d91be329f8f81050bdb1359",
+      "sha256": "eabb7eac6b531098ad0bd70d5ae1bb7eddffc38bdb1baf6a58143faf54c25518"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/remote.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/remote.rs",
+      "upstream_blob": "5b1309c98e213296d36c63141df7821498663194",
+      "sha256": "e393fb81de44a1882f8c961a17e26b51d91ab99b02bd7e4c766a7086bed16e32"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/runtime.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs",
+      "upstream_blob": "044d66bc25b75479bc346fc263c4f346dc58f35f",
+      "sha256": "2e5c57191bf0515b5b37257556c6cd784e55e568cf3794b5d5c51a4e8ebf1623"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/service_session.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/service_session.rs",
+      "upstream_blob": "86c7c2a471c5f5b41cc437065845de5645155cce",
+      "sha256": "8dde52319bab95ec55e6783621a621600c8ecf5eef8a6a625d784c41fec1fb06"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/tests/native_windows.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/tests/native_windows.rs",
+      "upstream_blob": "7e2f7878ad477b25422224aa615d5e797373a7e8",
+      "sha256": "a51ac16a65bdf0cac4504a4e6ed9e826914743e3d161c3f486c480f083db5d3b"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/tests/snapshot_lifecycle.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/tests/snapshot_lifecycle.rs",
+      "upstream_blob": "6977b64d50d82315156275fbed7a79a5fcb9978d",
+      "sha256": "2cc1fc4895664babc985e67148f46f1da77e90e149fb3775923dbc65e8f7c267"
+    },
+    {
+      "path": "crates/cua-driver-sdk/src/worker.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/src/worker.rs",
+      "upstream_blob": "d454564a75889d3d2a848a876af2d9f87e3e57c4",
+      "sha256": "6863fed1b1a625a332ccff0255862bd76a79d13715f6099a5b67ebd804983174"
+    },
+    {
+      "path": "crates/cua-driver-sdk/uniffi.toml",
+      "upstream_path": "libs/cua-driver/rust/crates/cua-driver-sdk/uniffi.toml",
+      "upstream_blob": "ff12e5d66f91584ea6815529781b926dd338c9e9",
+      "sha256": "80aab2615fdae8564ee8ab25e173fac634f1fd826f4a80b027f3a6de2c53397b"
+    },
+    {
+      "path": "crates/cursor-overlay/assets/build_default_theme.py",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/assets/build_default_theme.py",
+      "upstream_blob": "681f5aac325b61cb3f7d6a5f489456293e4f4c3a",
+      "sha256": "df683f3bca9f0545c6564d7d2bd3310cd30169a03d16b9a20663dd82f91b7d53"
+    },
+    {
+      "path": "crates/cursor-overlay/assets/cua.default.cua-theme",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/assets/cua.default.cua-theme",
+      "upstream_blob": "0beb13487d3d84d424cec03dea9695a7d004978d",
+      "sha256": "ef23effd7eb9d3e64dd847d8560de4f91f291aa3a70be62a1d64bc21de3f63e5"
+    },
+    {
+      "path": "crates/cursor-overlay/assets/cua.default.lottie",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/assets/cua.default.lottie",
+      "upstream_blob": "7eb34db807ffdbf3c473fa62d9f9aeae3eab101b",
+      "sha256": "322e40a33475599b4403a6cb2ad3286d3312a6f9c71d94abfc92dbca8fa99de8"
+    },
+    {
+      "path": "crates/cursor-overlay/assets/Inter-OFL.txt",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/assets/Inter-OFL.txt",
+      "upstream_blob": "909a6bf9cfb4849d4468a723cc16ffb7a183bd09",
+      "sha256": "5dd548d31a85f756e01d63e00d7faf1e324103ed3e9102fcbbabf2cc2db6dd39"
+    },
+    {
+      "path": "crates/cursor-overlay/assets/Inter.ttf",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/assets/Inter.ttf",
+      "upstream_blob": "047c92f6e2212473dc436020afed689527076d44",
+      "sha256": "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031"
+    },
+    {
+      "path": "crates/cursor-overlay/assets/README.md",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/assets/README.md",
+      "upstream_blob": "f6fab52deed9eeac5b442d19b4775dc517133b96",
+      "sha256": "0168d225786c0f3a91e650f9c6d67001316171f2c1d9498296674b4df3a4c7a1"
+    },
+    {
+      "path": "crates/cursor-overlay/Cargo.toml",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/Cargo.toml",
+      "upstream_blob": "0b55e9e2b1b999ca4f9e450585611b0643c0a669",
+      "sha256": "de44389abe226ebe55a31578467a0732e90e82274e4c52a7f03502c3bb40237d"
+    },
+    {
+      "path": "crates/cursor-overlay/src/badge_glyphs.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/badge_glyphs.rs",
+      "upstream_blob": "0279863903e82dcba6dd46424cf30cb507a3b0cb",
+      "sha256": "d56e0e2d776df370c9f5b840116f7f718f6702be248609f9ef4ad94309dd24f6"
+    },
+    {
+      "path": "crates/cursor-overlay/src/badge_mode.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/badge_mode.rs",
+      "upstream_blob": "27c168b68ed058ddb70b1165bbb3055d1bb9770a",
+      "sha256": "3c45a1a540b8a8626aa1cf3b29e095593bed12b617b9ac7753fc30d10aa79c8c"
+    },
+    {
+      "path": "crates/cursor-overlay/src/bezier.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/bezier.rs",
+      "upstream_blob": "ef456c3284f02fec1d4c63ac8512cc3c06d7b0be",
+      "sha256": "52e22129c81fb281ce82ec56e86f42047cd49a63959b7d8600d1c90beb3a4e08"
+    },
+    {
+      "path": "crates/cursor-overlay/src/capture_exclusion.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/capture_exclusion.rs",
+      "upstream_blob": "66ed232b92255cad831f2f6c1044501019b53b9c",
+      "sha256": "1d8ae91554e3a10c97ed8f91da9e6ab33703235502d9bd234d04d12197354547"
+    },
+    {
+      "path": "crates/cursor-overlay/src/capture_utils.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/capture_utils.rs",
+      "upstream_blob": "931227bf3c7c52273b5c1cd652881f91ccc96980",
+      "sha256": "8546f14fc5448bd63f86738360991153a5f81952ad30396df1e3a516809308b7"
+    },
+    {
+      "path": "crates/cursor-overlay/src/lib.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/lib.rs",
+      "upstream_blob": "152c681a0c0a71d555e29bc1dcbd3b4fb3b7243a",
+      "sha256": "586242e979a62d64bbc0539518249603aac35f3f7081423b3dca1a063b31e1e3"
+    },
+    {
+      "path": "crates/cursor-overlay/src/motion_defaults.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/motion_defaults.rs",
+      "upstream_blob": "ebe2c15c1af186f66ccd9aa7371964f72ac9c925",
+      "sha256": "ec3b9ba5483d4b46c739773cf52cebf8eaefa3c1c468eb93179903c9cc83d185"
+    },
+    {
+      "path": "crates/cursor-overlay/src/motion.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/motion.rs",
+      "upstream_blob": "f0edd54da92582db6f357cf351654cb80d81650b",
+      "sha256": "d2cdfe4d5660b7a905d4e086ff1930820222c6834c6c5fa537cb359d242968e8"
+    },
+    {
+      "path": "crates/cursor-overlay/src/render_map.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/render_map.rs",
+      "upstream_blob": "6c4fc28095f2bbae59cb3c27ce744be807ac125f",
+      "sha256": "d130ae5aec2432c62edc0737326f27dacad1c49785585636c9ae63604d214e7d"
+    },
+    {
+      "path": "crates/cursor-overlay/src/render_state.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/render_state.rs",
+      "upstream_blob": "482d1867a06b3f3add3cadeb3844d1e3c449f23f",
+      "sha256": "86b5389ef75a2dc05c28a5648ca990bb557e5412528582c37745975d0c286ac3"
+    },
+    {
+      "path": "crates/cursor-overlay/src/session_badge.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/session_badge.rs",
+      "upstream_blob": "f66e866ad1c15195d85a77917d27755e3391ddf8",
+      "sha256": "3fe661a705ccb224ea3967769d3f70f37a22580f5a750686d33a1504ac5e0ee9"
+    },
+    {
+      "path": "crates/cursor-overlay/src/surface_fit.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/surface_fit.rs",
+      "upstream_blob": "04edfa1b0c0054f31a728c4137457ed16ebd9005",
+      "sha256": "7c9dad120ca17bc06705efad64ed915f154ebc8f014cc2863d07ba4e69c64caf"
+    },
+    {
+      "path": "crates/cursor-overlay/src/theme_artifact.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/theme_artifact.rs",
+      "upstream_blob": "473940efee1cfaa789db7fe024633b5320925a4c",
+      "sha256": "82823d546cfc3a7a3ee37e190b67fc7cc77835b2a3ef0ced00469976f780ace2"
+    },
+    {
+      "path": "crates/cursor-overlay/src/theme.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/theme.rs",
+      "upstream_blob": "624e2aec7b17f8ede92ec4adf3f89836926040f8",
+      "sha256": "976934baed9c1452f8bb03be766b44447e585bc5cdaf11be9ca3a64f9ddc1eb2"
+    },
+    {
+      "path": "crates/cursor-overlay/src/trajectory.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/trajectory.rs",
+      "upstream_blob": "fae297d2120ae1ceb024a10a0ed365ebfbd00424",
+      "sha256": "48e6390b496e60101f1a878909c488217092cab1bf87a2317daa48bd353b6ff5"
+    },
+    {
+      "path": "crates/cursor-overlay/src/z_order.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/cursor-overlay/src/z_order.rs",
+      "upstream_blob": "36c81c34147bd7a4221941960b25c2b7db06988b",
+      "sha256": "616aa67f83f45b43ecb4821f297b23f620a71f6a02a75636a23fc98ca0aefe5b"
+    },
+    {
+      "path": "crates/pip-preview/Cargo.toml",
+      "upstream_path": "libs/cua-driver/rust/crates/pip-preview/Cargo.toml",
+      "upstream_blob": "efa5f7b49d6e480a7fd703de9fa0a4f858a0d5b1",
+      "sha256": "7277a1ae52015d4e6352bb47e4f64f8bfdf4764928e85454c701eb8bf2c42c62"
+    },
+    {
+      "path": "crates/pip-preview/src/lib.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/pip-preview/src/lib.rs",
+      "upstream_blob": "8679316321edeb277a24547a8979006006506301",
+      "sha256": "252e4bd05903b2ede7aa7ecce445a2a3d3fc4d39da1c472655f1ca679723f382"
+    },
+    {
+      "path": "crates/platform-linux/Cargo.toml",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/Cargo.toml",
+      "upstream_blob": "dfb5ec0fdc3f971970dfd9e05a244ac8099fa87b",
+      "transform": "D04",
+      "sha256": "d091544945ef77ceb1afcce01bc36556afb7009eef7cfbeed01585517fc93894"
+    },
+    {
+      "path": "crates/platform-linux/examples/libei_input.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/examples/libei_input.rs",
+      "upstream_blob": "16ec7ef1f0960ca4b39f44b991be9ca0cc89ab53",
+      "sha256": "1a263b2a752196649aae37aa8cf65c8c7da898ca7e5954fac347c36c4e37e3c7"
+    },
+    {
+      "path": "crates/platform-linux/examples/libei_probe.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/examples/libei_probe.rs",
+      "upstream_blob": "c6fa344f5a46a3ad875919ca2c03d0eb3edfeb79",
+      "sha256": "092861dcc7c48aeaea974a00ac0609622b0df2aff61338d3258e280f8c9b37f9"
+    },
+    {
+      "path": "crates/platform-linux/examples/screenshot_cascade.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/examples/screenshot_cascade.rs",
+      "upstream_blob": "bf0de170e8c64eaa3785d69a98527f8cf0bc7214",
+      "sha256": "5a57ea1d40f6cce949d7907adbba03b28b75ff7226c976e7a2df57c8c7e82de1"
+    },
+    {
+      "path": "crates/platform-linux/protocol/virtual-keyboard-unstable-v1.xml",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/protocol/virtual-keyboard-unstable-v1.xml",
+      "upstream_blob": "6b0e1206cf41bda3dfcbdec875202d1cccb35a44",
+      "sha256": "a78529dcf5a9f0d6c8af00e4ea310d7ce98746f596a03d617188685118b05917"
+    },
+    {
+      "path": "crates/platform-linux/protocols/hyprland-toplevel-export-v1.xml",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/protocols/hyprland-toplevel-export-v1.xml",
+      "upstream_blob": "b1185aa54fd44616675a076f8581242724d1b165",
+      "sha256": "2b8e16da22df333494b616a2c83394dcc9aac04405da535126d68106786441ad"
+    },
+    {
+      "path": "crates/platform-linux/src/a11y.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/a11y.rs",
+      "upstream_blob": "fcdd28b57523f517a67ae8c064ee506b940b6b9e",
+      "sha256": "63ac5828f87dfb50e18b70ae1a460a0f36c74af1dc2be179f910c55ab6ced77b"
+    },
+    {
+      "path": "crates/platform-linux/src/at_point_policy.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/at_point_policy.rs",
+      "upstream_blob": "4c61fc5e60c223628230f79cf6cb784fead579fc",
+      "sha256": "5617b0c030d157642b648276e640a8f5ebc0f96b47eb7ecb3f2cd24a655943b0"
+    },
+    {
+      "path": "crates/platform-linux/src/atspi/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/mod.rs",
+      "upstream_blob": "77c5608cf2f5393920db0c99a9237bb706c19715",
+      "sha256": "8ba981b790d1912261ebff59bcc7232e6669e97ab45e81476de67608dee6bc91"
+    },
+    {
+      "path": "crates/platform-linux/src/atspi/native.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs",
+      "upstream_blob": "36451e533335892864981f6f36a69ad318309199",
+      "sha256": "59e3c53a54b4d51dd1259cdcdf347400dcf85dd8ffdae2d0a04462012e21042f"
+    },
+    {
+      "path": "crates/platform-linux/src/atspi/native/hit_test.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/native/hit_test.rs",
+      "upstream_blob": "95b97aa6f8f96b8e0f425978831f72e58dfe30b4",
+      "sha256": "6ea5b4eb0ef423628ce2c0c5159e278104887470f44057a7dbff739bcca99a9b"
+    },
+    {
+      "path": "crates/platform-linux/src/atspi/native/hit.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/native/hit.rs",
+      "upstream_blob": "8e7781c28749460cbe96b881a50ad32a38d4ffd1",
+      "sha256": "cc77dc7cb3179e205a053749bcc5e4cd28c8b38b62b72112c0d73048f98254f0"
+    },
+    {
+      "path": "crates/platform-linux/src/atspi/snapshot.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/snapshot.rs",
+      "upstream_blob": "c3f06cfb2b90c7595b83cce8fe977edf54c15eeb",
+      "sha256": "16fee7f6eac68eb2c7bc66bb8a2f6d983e48d6d8f22a9398cb6d8f133da24c21"
+    },
+    {
+      "path": "crates/platform-linux/src/browser_consent_ui.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/browser_consent_ui.rs",
+      "upstream_blob": "f77b78604841c9c68cb18602644d5c8996de4a25",
+      "sha256": "6f163fe167468a851e4676449d580a62772c64a9421169b6da2e9fc57420d5d3"
+    },
+    {
+      "path": "crates/platform-linux/src/browser_platform.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/browser_platform.rs",
+      "upstream_blob": "ddecce24e4008b0502b8fe25a35364d883600afa",
+      "sha256": "9e2f44bffd0b3d81108fd6d11c31587c6dcaba07ae856d9b51fdf8720ef988b7"
+    },
+    {
+      "path": "crates/platform-linux/src/browser_setup_ui.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/browser_setup_ui.rs",
+      "upstream_blob": "326da4d6a208a2b4290edf77ef10e8be30a65de4",
+      "sha256": "36c0a97c5121db669dc3f22b8d207ad7aa1539f8a9831bca2fd5ca5afd90dea1"
+    },
+    {
+      "path": "crates/platform-linux/src/capture_action_frame.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/capture_action_frame.rs",
+      "upstream_blob": "4ca394df824a85a023eb5e0f778c81d8b4a62de6",
+      "sha256": "4383a0ec23e0665f35c14b86548eca18af0c9a5007e9e04cf9a4234957424e9b"
+    },
+    {
+      "path": "crates/platform-linux/src/capture.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/capture.rs",
+      "upstream_blob": "b2c04867dcfa9eacec0b7f9e4087bd9a5ef36abe",
+      "sha256": "c1eaf2046fd49af871e77ad460d2e71e4a46d70fcbb68ad12c362700bbc74306"
+    },
+    {
+      "path": "crates/platform-linux/src/clipboard.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/clipboard.rs",
+      "upstream_blob": "792a79c0bb7b941205ab4bf7e89dc0be1ca75a43",
+      "sha256": "22812e17e460c37ad3ece7f9da272c03ba99f06cf93c920e94c09dd2cea11207"
+    },
+    {
+      "path": "crates/platform-linux/src/health_report.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/health_report.rs",
+      "upstream_blob": "fbdf341328c74ba23b489cfe3e1335fa272b91f8",
+      "sha256": "cc489df58510aa99751744429136b7ed1b0d8a656a079eb05b61b8ce67c94c6b"
+    },
+    {
+      "path": "crates/platform-linux/src/history.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/history.rs",
+      "upstream_blob": "5f3768b7da1713ee3a90e53f4a3642bb41ecf9b4",
+      "sha256": "bb057217058363368174d908ea5333425c5f66862bf77a18e8225adf6e2c059c"
+    },
+    {
+      "path": "crates/platform-linux/src/input/delivery.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/input/delivery.rs",
+      "upstream_blob": "d5270cd4711dfbc67f7486db8bbce6e489b4b873",
+      "sha256": "6d22bd85d88dede6a533c6fc85caa8a87b66afe2674b9bb71c07bd332a10bc4a"
+    },
+    {
+      "path": "crates/platform-linux/src/input/focus_guard.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/input/focus_guard.rs",
+      "upstream_blob": "4e0581d9e584a7380dc7da5e1cb2caa0bda331b4",
+      "sha256": "e2209b2719464f2210673aad3b4197bcbb63f999cd86ebbeba529d8204137e33"
+    },
+    {
+      "path": "crates/platform-linux/src/input/foreground.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/input/foreground.rs",
+      "upstream_blob": "2e45a4b7d4ea6b05a7a6746b46f5dd0c28e8f398",
+      "sha256": "ab66a0922e0f0389c774500c0be3377108627216916c9b3188720dc553a4567c"
+    },
+    {
+      "path": "crates/platform-linux/src/input/interactive.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/input/interactive.rs",
+      "upstream_blob": "5b551d5036913b7b08511ba7a6b92966be7b94ab",
+      "transform": "X11-cleanup",
+      "sha256": "9c5fafa0cf27a91204e4a6ffe0717a3984f6f255241dedb9c3aa8cf4dfc24558"
+    },
+    {
+      "path": "crates/platform-linux/src/input/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/input/mod.rs",
+      "upstream_blob": "729cacaedac7afa5dc427b8779291974a5597f33",
+      "transform": "X11-cleanup",
+      "sha256": "bef99af5b5247547c0d6b49bfd9384e07116bc8dfaef5e9fb04f7810d64d848f"
+    },
+    {
+      "path": "crates/platform-linux/src/input/mpx_keyboard.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/input/mpx_keyboard.rs",
+      "upstream_blob": "7adc8376d5eb65a04e3fa1626eefc4e5cb20a4b2",
+      "sha256": "432d02f5489fe315e7fb62835e7152fb5f0a9d8c1664aac2d0d87bddff4b69b4"
+    },
+    {
+      "path": "crates/platform-linux/src/input/mpx_owner.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/input/mpx_owner.rs",
+      "upstream_blob": "f6aca937ff6d38c3712b909ed401902c4efd7520",
+      "sha256": "ccc470282373900c1de95404f72561f02f5ad5276292b676da99c8cd985be1b8"
+    },
+    {
+      "path": "crates/platform-linux/src/input/owned_xtest.rs",
+      "upstream_path": null,
+      "upstream_blob": null,
+      "added_by_patch": "vendor/patches/cua-driver/0002-x11-owned-input-crash-cleanup.patch",
+      "transform": "X11-cleanup",
+      "sha256": "1e915494d350988dee25142b803e1640f96f103550385e84995907c621479b17"
+    },
+    {
+      "path": "crates/platform-linux/src/input/targeted.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/input/targeted.rs",
+      "upstream_blob": "ee6f41af2b0706ac8cef9cba9ca69a4f76395983",
+      "transform": "X11-cleanup",
+      "sha256": "16ead671b680ad2ec3de57fd6b482f3655efddc6871e122ac051aa00eb7a2efd"
+    },
+    {
+      "path": "crates/platform-linux/src/installed_apps.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/installed_apps.rs",
+      "upstream_blob": "ae3f68de61fc3b0e60212034739ceb406215458c",
+      "sha256": "ccc3fe81d3c3ec831de8dc39dacf30fc0fccdc883c1bcb5f21034091af1771a6"
+    },
+    {
+      "path": "crates/platform-linux/src/lib.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/lib.rs",
+      "upstream_blob": "fc866c39a61b6bc107c8fdd73dde5088bd0e4b8a",
+      "sha256": "50bccadbfc35bc643c48eead83222763645e0280fca3d8da47bb5841c1d98d20"
+    },
+    {
+      "path": "crates/platform-linux/src/overlay_capture.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/overlay_capture.rs",
+      "upstream_blob": "b01fa6cec31e93235ce3aecd05f8663101d78c5f",
+      "sha256": "a9ad753e39d0da8f7b1476164edb34e632bc32f044b6e7144a43c0789a98b907"
+    },
+    {
+      "path": "crates/platform-linux/src/overlay.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/overlay.rs",
+      "upstream_blob": "4e86686ab817d54e5be9b481eba1cb22e645ad8d",
+      "sha256": "8651dd06616c7b95c42daaa86f9b74a61f151d50606eb6d5b229e74829f03907"
+    },
+    {
+      "path": "crates/platform-linux/src/pip/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/pip/mod.rs",
+      "upstream_blob": "04960db4806dd0caea25807367ed2b015e1af81f",
+      "sha256": "d43c056f0dc1ac98b9ef4e7de17a016c67a1187ce022638cb77e3b4ee5ce7314"
+    },
+    {
+      "path": "crates/platform-linux/src/pointer_shape_map.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/pointer_shape_map.rs",
+      "upstream_blob": "2f4b620b67d7d0004269f951987bd23ccfb66312",
+      "sha256": "46cffd613547609762fd0511d93146fe37155ca91d494ac7a2edc833bef88245"
+    },
+    {
+      "path": "crates/platform-linux/src/pointer_shape.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/pointer_shape.rs",
+      "upstream_blob": "2e02bcb78b7a2e424de975310701fddfb6b1a2f3",
+      "sha256": "5f9edc3e0be80b71b2ad1b29c1939425dce3403a6708a4ff4e44153691a56135"
+    },
+    {
+      "path": "crates/platform-linux/src/proc_fs.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/proc_fs.rs",
+      "upstream_blob": "7cf1622cdfa3969d79a11e14b9776925c68bb4e4",
+      "sha256": "52ddcc74b7602a1a6983bf47846c50f00d2b24c8b37f5447ae8bb25095bf63ca"
+    },
+    {
+      "path": "crates/platform-linux/src/recording_hooks.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/recording_hooks.rs",
+      "upstream_blob": "a87cd8ee796ebece87e9810a4ff6b4c5ad3967fb",
+      "sha256": "9d8d176290f167745d44c51296d03a9d474a355eccbe84ebef643ee6c1ae6182"
+    },
+    {
+      "path": "crates/platform-linux/src/session_bus.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/session_bus.rs",
+      "upstream_blob": "bf901bcaa8f0600fbc100d522b08b8f6ee1fd0c8",
+      "sha256": "20072cb4d692de87e42c64c3ee799304b4ca317eca46e11da6df6703ac014051"
+    },
+    {
+      "path": "crates/platform-linux/src/snapshot_queries.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/snapshot_queries.rs",
+      "upstream_blob": "a0f84b1a9d16a81c3e19f7c6259fd596484af6b9",
+      "sha256": "fd1145381daea5b9bf52b6aa5d1435a0c49ca71ce89fecaccf585be09c81b411"
+    },
+    {
+      "path": "crates/platform-linux/src/terminal.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/terminal.rs",
+      "upstream_blob": "60d030f2a0f3c1cb1221dab9cd61c44b8dae990c",
+      "sha256": "31a537a0d58299a0a3b660b58b58a5aa045510bdb7e1b73d9fa4bf2493ae90e2"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_.rs",
+      "upstream_blob": "3be700798b9310b6cf931725f97ae7c02c619b5a",
+      "sha256": "1a22d33d7d13ec9fa05aa3dafd0b20bd5e6b0b30d386ac8cbd508c74dfa4cbc0"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/background_budget_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/background_budget_tests.rs",
+      "upstream_blob": "edcb78ed0697cd5c6db4156d72e6148865b60dbe",
+      "sha256": "04151da23c471736e286ec814e8618c60077cecabe3282f948ed77db074f04f6"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/background_keyboard_route_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/background_keyboard_route_tests.rs",
+      "upstream_blob": "3e11a11fc2c3d9ae59b2ea8cb8e3d3d66dca5151",
+      "sha256": "76a2bc17ef9be744deff5d2eadaabe23e1821aa2ef2c407448d1569accd15c9b"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/click_button_schema_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/click_button_schema_tests.rs",
+      "upstream_blob": "3d13735e856908d096fff9d56ca11f9c07e26569",
+      "sha256": "a0c56436d154b41c6bd571c31039c82d0350c59544247189be13ad39129d68c8"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/desktop_capture_frame_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/desktop_capture_frame_tests.rs",
+      "upstream_blob": "82baf3fc4d3375668de08629576a7ffa59ea3082",
+      "sha256": "2e1f1f5e3bab0e1e868cdfc92b779c44cf589ed144e3a371ebe381e6d8a6d481"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/display_only_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/display_only_tests.rs",
+      "upstream_blob": "4876c86c8af82d5ad00231df52aaa32696ef093f",
+      "sha256": "8bd8e2c8244655cbf6a51ea23d89d841dce20684db405d3266bb596cc269dfb9"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/get_window_state_actions_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/get_window_state_actions_tests.rs",
+      "upstream_blob": "fddb546a42a0f57de80de3cca21f92adb989223b",
+      "sha256": "41dedf85a51d2f2448f70a778bfeabadda6c01915a506bee7fe8344202116f93"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/launch_app_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/launch_app_tests.rs",
+      "upstream_blob": "9adec8731e9dfae8fd01e3a0c86194ebd387ea6e",
+      "sha256": "aa985e1fd5af4b3273ed185b383592793aed9785f9781dc6f7ca8ac957ae2f1e"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/launch_resolution_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/launch_resolution_tests.rs",
+      "upstream_blob": "614c4f102805e8f133e94df73ab0e0a811ea35b1",
+      "sha256": "bbe078fc9a2a9df0c50b33200cf5d9a2786316201c7bb625499325c809eb2b2c"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/list_windows_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/list_windows_tests.rs",
+      "upstream_blob": "d0f9b01cf195002a8d356fbff3ee8cb2c9f93922",
+      "sha256": "b633338a94c137f2246a0d0b7d45dc5693b05137761cafa82230ae34c9083b63"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/megapixel_cap_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/megapixel_cap_tests.rs",
+      "upstream_blob": "51fc69679ca50c88e07ba8e87725c1e9e433d520",
+      "sha256": "54d992b2b3fd71c52052acc79287bcd277a4ae8c772cb01b69ef5d5abc5d6fb1"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/pid_window_resolver_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/pid_window_resolver_tests.rs",
+      "upstream_blob": "687cb50eb5a3698fd0a2499881edec106e67f589",
+      "sha256": "4dd975346897f9244fd13c8300975f6cd6e28bae07a6691a859da897fbcdbd08"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/pid_window_target_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/pid_window_target_tests.rs",
+      "upstream_blob": "dcf3a31f27c85549958c8eb36e33c736c6b0562c",
+      "sha256": "d9c989e3ba088b98bde54ea7faa40c8b310a594b3808a4ca1df68f5134467116"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/pointer_argument_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/pointer_argument_tests.rs",
+      "upstream_blob": "e9d95c76a531230c6121ae8628b276f70fc0158a",
+      "sha256": "b58550af3b70076ce87a1aa5452ce9997c71b1c7edfcda696961d17f1d485aef"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/press_key_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/press_key_tests.rs",
+      "upstream_blob": "f4911628a7a8110bc171932d2dded8a1825e8c04",
+      "sha256": "f4c02f57aac200eada29ee220460c9f09384666fa85a921a39aa11abd357f620"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/session_cursor_target_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/session_cursor_target_tests.rs",
+      "upstream_blob": "d5ee4b44a9bae299e5faa51e118ac55d8c2d5036",
+      "sha256": "bc709d74f65ba96d01034948e0b8b0be395e4e1a2e02a33258ccb4f19219376a"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/set_value_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/set_value_tests.rs",
+      "upstream_blob": "c4a909c92e6e46b4515bcad40eee314425489f49",
+      "sha256": "74e3de34f95f653dee406c40d9e956ab9b9dd89b767c19101ffc8b8c0dad1e94"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/type_text_readback_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/type_text_readback_tests.rs",
+      "upstream_blob": "edff46a7aa2f07aa784d653413b8067f7c67e0f5",
+      "sha256": "2dab060ffe489e3fe4ea1f8e36ea5917c9dc01b920deab7a4b741672d54160d9"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/visibility_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/visibility_tests.rs",
+      "upstream_blob": "f961be5caf56e0e213ec0f117cacdf35c58fbfa6",
+      "sha256": "c181e6082fd91c55b4657c7d097dfb7486e393dd23eee406c8c9be39cd2dd29f"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/impl_/window_capture_dimension_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_/window_capture_dimension_tests.rs",
+      "upstream_blob": "f9ad1be0ca144bd3bee009a452222406fa74d53b",
+      "sha256": "f72b5d9c8434c709756604cb89ce347534e74b4a38d4821da51934361f2aa9ba"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/mod.rs",
+      "upstream_blob": "38b9c42d143b1626906b68725d72d2120bb52b86",
+      "sha256": "ab1f5e13dfd7b64f753bb67730972264ec8a7b6fde86f41d26ce49af07dc29bb"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/page.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/page.rs",
+      "upstream_blob": "21176f6e64272f341cbdf393ada27acf1f639772",
+      "sha256": "a4166f6b851e0be2cb49c90b24543a280aede59e2678176a0d7309eb0719cfa5"
+    },
+    {
+      "path": "crates/platform-linux/src/tools/stubs.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/stubs.rs",
+      "upstream_blob": "aed3bbc5e21a415da9c25ab8be9ad1eff725ad65",
+      "sha256": "c198645d5e53a9ce8dcaa37e94a0942a0cecd9a0f914f0c55bbe3acc298a973f"
+    },
+    {
+      "path": "crates/platform-linux/src/tty.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tty.rs",
+      "upstream_blob": "159a4c5eb8c745a520076e48da3e90a1d7f78ac5",
+      "sha256": "6c14cc65f807d064c608e7085bd41df1a2944f58a15a16833ca40829e60206cd"
+    },
+    {
+      "path": "crates/platform-linux/src/video_wayland.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/video_wayland.rs",
+      "upstream_blob": "0a525d88655da1bc7679584647f76751d12a8a15",
+      "sha256": "6019b397e2f95983013a4cd3c505682274e388c8167a16d1a1412beaa557ef09"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/ext_screencopy.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/ext_screencopy.rs",
+      "upstream_blob": "b103a2194804b96df1e6fdd9afb191a3a5743542",
+      "sha256": "92d98789860547f718484ef986de3abaadeace5e803d82c64ab6663efb531ca2"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/ext_toplevel.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/ext_toplevel.rs",
+      "upstream_blob": "e5e6071a255e62ddc0c998fd9e9dda8df968492d",
+      "sha256": "5872d07fc593c8757b8456b367e81ac61295c84c2c636390e0fd41bdcfcc77a9"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/hyprland_capture.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland_capture.rs",
+      "upstream_blob": "a1815d828b9f1d6274251a42e3bdcad4e21a906e",
+      "sha256": "596c513bdcffdbe859a2ee1a3064c26fe42252990c66ea249db0d90445c25c48"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/hyprland_compatibility.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland_compatibility.rs",
+      "upstream_blob": "5d14aeb27a8c459ae78075be3a2c58d46f119311",
+      "sha256": "975e9487f5f589daedb81adc790869b9e2a08d7cd418a01fa4d13763fab0f598"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/hyprland_input.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland_input.rs",
+      "upstream_blob": "5f6624f51e754caaae5b32b66716756c46faae52",
+      "sha256": "847d302a382f27030e6f39c86881b39afa02efbc90b395d5a80d499a15e4e986"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/hyprland.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs",
+      "upstream_blob": "9aaa2a05352f7ec5a88f8e84bdd5e7d47551fe21",
+      "sha256": "73d614b6ddef642fd8c682e89e91fe1876189f947253ef4c58d6eed83af6e420"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/kwin_helper.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/kwin_helper.rs",
+      "upstream_blob": "c6e607f183992e4d027d58fda67dc0a5c0177329",
+      "sha256": "14693dede3c33ec4675ce71f1de1b679107945c09ce99e6f70b62aa10f16f7db"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/libei.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/libei.rs",
+      "upstream_blob": "4ab3a74517f448edc8e622fdc147de756faa3cf0",
+      "sha256": "74de613e0ef108e64044e636ebcf55eccda0c2195ce3ff54147487fb0996f7f5"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/mod.rs",
+      "upstream_blob": "22d76aac461eabd386928d0741f09b2a2f44f9c7",
+      "sha256": "0a47748974c922f7d91eb1d270a6b76143a3bedd7ad1ee16231b2bdbda82a196"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/overlay.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/overlay.rs",
+      "upstream_blob": "1fe4cdf77bed7521f3e45ec910a845013e858929",
+      "sha256": "fc6646518ffc5c2a5b8587e71bc6eb641a562a27a932d249e299c0b91fc491db"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/persistent_vptr.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/persistent_vptr.rs",
+      "upstream_blob": "be594ba20f7488a671242e5fc3261df1d42c5657",
+      "sha256": "a80b424953d1e441d96f72c05263f02b8cc05b8653abfe3ed620d7b5aac7a68c"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/portal_screencast.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/portal_screencast.rs",
+      "upstream_blob": "14f1712dce205991c18e8658e0987a872ae830b9",
+      "sha256": "8dd44bd582cde3ce2720eda622527df35e7e3aff401d01a9e63ceb339ea49c15"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/portal_screenshot.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/portal_screenshot.rs",
+      "upstream_blob": "8c317fb0920ef2c5fc0e03e51452cb14d9228c3c",
+      "sha256": "a1fce9b2bf27ebda2bce842b7d78aa7060bd2663cb3ddda11f5adae096f7aab6"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/portal.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/portal.rs",
+      "upstream_blob": "166158bc5b45b9bd977a4a92b0bb62e1013f284e",
+      "sha256": "be18ddebfb6a2e8f2cb90469102a84f572d2f92e16c4acbc5c7df2225ac3de2e"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/primary_seat.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/primary_seat.rs",
+      "upstream_blob": "1bac1b4a32dca195bee3e188a0d996eefcffb0fe",
+      "sha256": "256105dc0213dea04f01c4e87b6e20b722b88b499a14c3ebf7d1b199b8983685"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/shell_helper.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/shell_helper.rs",
+      "upstream_blob": "c7a888a748ec31d723f26af8a75cc966cda34f3b",
+      "sha256": "54d183b4c019ab65a12b6fe405f3a18908abfc5d90638461fefb49b473cca17d"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/shell_helper/transport.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/shell_helper/transport.rs",
+      "upstream_blob": "e6e6590ef0f477c5b1b7d09319e9bb32bed6057a",
+      "sha256": "6c84bfa04b33124011ab09c57efb1bac1b87842174862d09c6b2ca9f9da20fb7"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/sway_ipc.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/sway_ipc.rs",
+      "upstream_blob": "5600334a448da9dccd9c03c8c1663b27e0027b34",
+      "sha256": "dfad7eaead9c0a6fca535840a437634d90f91957a4e465b4964d8095ee0de167"
+    },
+    {
+      "path": "crates/platform-linux/src/wayland/virtual_keyboard.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/virtual_keyboard.rs",
+      "upstream_blob": "9a1dabb52331a774200c72d8a1e2f2cc2d60c8d3",
+      "sha256": "00f26a3db6d08cb3c1351d0992c49ced8060a521d27ab1ed8a3b752571f8594a"
+    },
+    {
+      "path": "crates/platform-linux/src/x11_client_pid.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/x11_client_pid.rs",
+      "upstream_blob": "ee5d57e2bb0a87ae335c3026f370bf652f99bcbe",
+      "sha256": "9af4e64b32c04e65215d2ad1d08987a9ec2d93e89361adb8c8b7441546560ef4"
+    },
+    {
+      "path": "crates/platform-linux/src/x11/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/x11/mod.rs",
+      "upstream_blob": "a1bdf0b73e260eeedc2f483c2e75c0677ef17462",
+      "sha256": "ef07ea44230f6d6edcf1e19e02154853c6b48edb14520b9aee156aa9219379f9"
+    },
+    {
+      "path": "crates/platform-linux/src/xauth.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/xauth.rs",
+      "upstream_blob": "7e6f8460378cebe3cc08d8e33859286573b7ea19",
+      "sha256": "2cf83a13654b76e81f411b3a7cd264ea7855a3600624004fe63371fe1cdb0e11"
+    },
+    {
+      "path": "crates/platform-macos/build.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/build.rs",
+      "upstream_blob": "da59f3b2ee6f95fa75b5ed711c185ba1fadc6bcd",
+      "sha256": "ff011429ce783107aa7d24b83eb2a396925e865b73ea33efe308a6f6a8c75433"
+    },
+    {
+      "path": "crates/platform-macos/Cargo.toml",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/Cargo.toml",
+      "upstream_blob": "b457f1342ba5fa40ef92ec8b4fba0774fadfd4d1",
+      "transform": "D04",
+      "sha256": "2c1135978cc3a6fbd0ed597f09f79d2a1eb79bfc72c6aa7e62db506a4e5902d3"
+    },
+    {
+      "path": "crates/platform-macos/src/apple_events.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/apple_events.rs",
+      "upstream_blob": "b4ee2a43fb3424ca9909601aa7291a8d6af6379c",
+      "sha256": "4ad1b7fd84095d89ef4a4b493fce68d95bd159c132574be82764c6137eb87a4c"
+    },
+    {
+      "path": "crates/platform-macos/src/apps/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/apps/mod.rs",
+      "upstream_blob": "cc46479c20f0b35052354792a9585823c720508a",
+      "sha256": "ec46ce32427d9e150192e55260c45e00aec24c25df399c8d220a8504443f402b"
+    },
+    {
+      "path": "crates/platform-macos/src/apps/nsworkspace.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/apps/nsworkspace.rs",
+      "upstream_blob": "7893a013221140b5d751d9748e784b6f58a032ae",
+      "sha256": "d2be387361217c1793d52d8eba87a689413af084649f4d5258769366393ef4d8"
+    },
+    {
+      "path": "crates/platform-macos/src/ax/bindings.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs",
+      "upstream_blob": "91ba5def61218d59253e87c80c056acfcff7833b",
+      "sha256": "cb11ac124e6e0dafe7157f66839a83aef5a9c6fdea90056fec9a2efad74b6d5b"
+    },
+    {
+      "path": "crates/platform-macos/src/ax/enablement.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/ax/enablement.rs",
+      "upstream_blob": "cc46e07de9a90bd32cb56f96f91e5d9c00a44205",
+      "sha256": "0c254408f71684bf8687cda4754ab5f9d99d6d3076579b7b656b17b87ae10c90"
+    },
+    {
+      "path": "crates/platform-macos/src/ax/exact_target.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/ax/exact_target.rs",
+      "upstream_blob": "7ccdae7944dc0d8fda7d0f71b15185e33222aeb4",
+      "sha256": "a06cd9602add11130935a6d6777031b0aefccc2d50ffbe94f48ac4a171def3a7"
+    },
+    {
+      "path": "crates/platform-macos/src/ax/launch.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/ax/launch.rs",
+      "upstream_blob": "823ae86afa774fefe57635855fbbc32b7d0b4602",
+      "sha256": "ba552321658d77802ae9b8470d89c8f53e7c4117d8fd60b934d29f468ba368bc"
+    },
+    {
+      "path": "crates/platform-macos/src/ax/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/ax/mod.rs",
+      "upstream_blob": "6ad8c6e089bf2303578f5dcd85ded56bef158397",
+      "sha256": "b64fbac72081c4cf7ee8b7a22a108890a4d549b40bf8a48b1858d38d3efa6423"
+    },
+    {
+      "path": "crates/platform-macos/src/ax/reveal_scroll.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/ax/reveal_scroll.rs",
+      "upstream_blob": "39d99e2dd3117f184330fd94d9ff6cf88768a7be",
+      "sha256": "f500a055631b89dd79016f2fde7f215995fb214cce9b08bb292f73b051be19ed"
+    },
+    {
+      "path": "crates/platform-macos/src/ax/snapshot.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/ax/snapshot.rs",
+      "upstream_blob": "fc9145abae3166ffb492442c2c95a94e878f7160",
+      "sha256": "15b05543c02e41a7499574f508e5a80ced4585b69d37651030cd21ddbbdc6874"
+    },
+    {
+      "path": "crates/platform-macos/src/ax/tree.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/ax/tree.rs",
+      "upstream_blob": "681c636058fd94609b9e8285c4dd8fbd4fc9bf2d",
+      "sha256": "bdd1b29d6f3374bf9633c9669b9458e7d15690973f8070c932403461426980ab"
+    },
+    {
+      "path": "crates/platform-macos/src/ax/window_scope.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/ax/window_scope.rs",
+      "upstream_blob": "f23b53b530bac0ab3e8d4e39dc613c154ec03d06",
+      "sha256": "e01d85f0218cb8bc38004489bb444479dd4b10d29bd5068e1a94896ebe5f3f39"
+    },
+    {
+      "path": "crates/platform-macos/src/background_mutation.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/background_mutation.rs",
+      "upstream_blob": "4ca69d9ab5a5b86da869f991e19e7a9b275b61bd",
+      "sha256": "bf9a487f9b4e1352deac0b63010dd7d8f9aee1ee3ead7a85578a07e5c4435696"
+    },
+    {
+      "path": "crates/platform-macos/src/browser/ax_page_reader.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/browser/ax_page_reader.rs",
+      "upstream_blob": "bb017e04189ee4fe10fe8462952f309539b6ac93",
+      "sha256": "aa09bbfcb544a24940d10110600b2684521d1f3786814633f536039bb68c9504"
+    },
+    {
+      "path": "crates/platform-macos/src/browser/browser_js.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/browser/browser_js.rs",
+      "upstream_blob": "5d1e2c2adf625189a1b28d169532a9df49d65953",
+      "sha256": "232689fcf551077754edb3cbe1818e1ae0ae5c4c9baf751f20845f1bf78bfca3"
+    },
+    {
+      "path": "crates/platform-macos/src/browser/cdp_client.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/browser/cdp_client.rs",
+      "upstream_blob": "9bcde9898d3fdc28e4a9dc7d206f45062ca3a4b2",
+      "sha256": "257a9c6586f8aa6ee3d81cd989adf9de70f47cd1ca52054d1d494e1fcb64e2cb"
+    },
+    {
+      "path": "crates/platform-macos/src/browser/consent_ui.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/browser/consent_ui.rs",
+      "upstream_blob": "82dac6171b718d193283f7fe7090f905fa2897ae",
+      "sha256": "da83356dbd75717830e97f2314805722417558747321e47ba0ad69e82fa7af95"
+    },
+    {
+      "path": "crates/platform-macos/src/browser/electron_js.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/browser/electron_js.rs",
+      "upstream_blob": "c22f3e9989f2aea16592a8df7712829e0771cbc9",
+      "sha256": "4b30aa02796c84fbd3e798a895f5a640a1011bd06038ed90ce7821b2f2bf15ac"
+    },
+    {
+      "path": "crates/platform-macos/src/browser/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/browser/mod.rs",
+      "upstream_blob": "859243557ed79afa8ff8de02f0d99e39ffc47f92",
+      "sha256": "722cd19713e8f4119965caea0273f7884b480b5fb605c1b05d533ea6a20bbd5d"
+    },
+    {
+      "path": "crates/platform-macos/src/browser/platform.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/browser/platform.rs",
+      "upstream_blob": "219cd56abd743214245ed81bfae42e2e12bfd40c",
+      "sha256": "0e7f0e048526bdc0e6058868027f44c7480208dc2ea72feac3113895e7194890"
+    },
+    {
+      "path": "crates/platform-macos/src/browser/setup_ui.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/browser/setup_ui.rs",
+      "upstream_blob": "5c11742c6b66eabfbf195461db9af5096b3ac188",
+      "sha256": "9f8d988baa6df1308b6e8612245113c9d5e31ad7ca0ba08970de2cd3c225568d"
+    },
+    {
+      "path": "crates/platform-macos/src/browser/wk_web_view.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/browser/wk_web_view.rs",
+      "upstream_blob": "ceaba95460aec2975d5bc9598108de916b7923ac",
+      "sha256": "4f8c768ca9e290888516564496bce9834a33833f5cd8db492c9ee8e0d997a56b"
+    },
+    {
+      "path": "crates/platform-macos/src/capture_consent.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/capture_consent.rs",
+      "upstream_blob": "62752a2f054b62493923f4727016971b33a1c4f9",
+      "sha256": "484a5dfe8482c6899d1545626a1559dfedb41c1a790cbde4a265be5702688874"
+    },
+    {
+      "path": "crates/platform-macos/src/capture.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/capture.rs",
+      "upstream_blob": "dff4d82bd1fe9f0c1c31ae2d3aaa4612983bb742",
+      "sha256": "e94bc12acbaade034a6c7087f823f7982278bdc0374ff35f673f47ccbb942521"
+    },
+    {
+      "path": "crates/platform-macos/src/cursor/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/cursor/mod.rs",
+      "upstream_blob": "cb5012c56cb360f5300cadc94d1aa36b9143be64",
+      "sha256": "40b5c33c40ef5fe494c3f3b9d135278374d59da0b554b6f559c6a7b8984b8101"
+    },
+    {
+      "path": "crates/platform-macos/src/cursor/overlay.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/cursor/overlay.rs",
+      "upstream_blob": "b3fb832086ca972f833ff96bd0fb8406d33de5eb",
+      "sha256": "e4658bd3179191f0c566d36a7e8cd14ac0ec9f0f7023055bd8ce08c304e8deb9"
+    },
+    {
+      "path": "crates/platform-macos/src/cursor/shape.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/cursor/shape.rs",
+      "upstream_blob": "a858e39b486bfa16f80085d010c28886b75b3826",
+      "sha256": "58adab8d3e7db641c50b5231a2fddd4282d191a2a1434d98c9897c0fba95d64f"
+    },
+    {
+      "path": "crates/platform-macos/src/cursor/state.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/cursor/state.rs",
+      "upstream_blob": "5a7d655b96270a43fd6c4585ded7dbca523e88ab",
+      "sha256": "daef86279c2f06a4a94159b5c8a8cb530cea21aa119508e9ec8e880da427f55d"
+    },
+    {
+      "path": "crates/platform-macos/src/display_awake.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/display_awake.rs",
+      "upstream_blob": "9268bd094a4b256976e0f21f102c831a570cfbdd",
+      "sha256": "c63b8f8114edeb2f095627158b855b3951a20be22e8e527b0553021caa04f77f"
+    },
+    {
+      "path": "crates/platform-macos/src/document_edit.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/document_edit.rs",
+      "upstream_blob": "dd919c71c278d23550be46f613dfff639d917f98",
+      "sha256": "1b595172c8b791878e7fa6c8c5504db69c799cff3a80aad6cd2bc498563d194e"
+    },
+    {
+      "path": "crates/platform-macos/src/focus_guard.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/focus_guard.rs",
+      "upstream_blob": "7c859bc301455537b707ddd663e63560f624084b",
+      "sha256": "ccdf7d8db27d5c85152ddb7f088a63c63998f85dbd68fd3f37a1dbad5cc5476f"
+    },
+    {
+      "path": "crates/platform-macos/src/focus_steal.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/focus_steal.rs",
+      "upstream_blob": "682a6ff86d7736b897e89e77e98883f7973bc39c",
+      "sha256": "490dbd1e8d0faaae9c894307336fdf450e013ce2cd27ef0db34225a11fcd3e8d"
+    },
+    {
+      "path": "crates/platform-macos/src/history.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/history.rs",
+      "upstream_blob": "545904eb6f475cf9420f2663b641feac68411e58",
+      "sha256": "14d1716811c89eac24b0487d553c62e30c078808c01eea84a605c8f659abcaf5"
+    },
+    {
+      "path": "crates/platform-macos/src/input/ax_actions.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/input/ax_actions.rs",
+      "upstream_blob": "0adce0e332c8e4791d8aa50c4bdda475a97eed76",
+      "sha256": "664f6cf4eafbc601036cf801c3ddc6e57fd8479e0937e5212c97fb206d3914e3"
+    },
+    {
+      "path": "crates/platform-macos/src/input/electron_drag.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/input/electron_drag.rs",
+      "upstream_blob": "71120c7ea22fad3ed541958758f28f12773ec57e",
+      "sha256": "78e5e0df50373c33e628cab6a836d984f410e86ccfa2159d01a112b5d949d432"
+    },
+    {
+      "path": "crates/platform-macos/src/input/hover.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/input/hover.rs",
+      "upstream_blob": "bdec0bf0d3eeec271f6665e020c08a4c511811eb",
+      "sha256": "645870d13a9999bb3685c724425b06222308249af844234a58287c2d57ae290b"
+    },
+    {
+      "path": "crates/platform-macos/src/input/interactive.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/input/interactive.rs",
+      "upstream_blob": "e56e5174db581f6db3febb165afa6dc0cc3992e5",
+      "sha256": "8563f69a95c6d3b52bf29ac663d3fb1e754c828ec8a67b91a58fe74ef14580b0"
+    },
+    {
+      "path": "crates/platform-macos/src/input/keyboard.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/input/keyboard.rs",
+      "upstream_blob": "ad64bdfb83966c3da386193c903b48ab325e26fa",
+      "sha256": "5ed07b20a5f378c8429cd09b5a5cf608ddcd1a6a840888d23d37e30ca800514a"
+    },
+    {
+      "path": "crates/platform-macos/src/input/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/input/mod.rs",
+      "upstream_blob": "85fe32281bdbef827fc100332d343f19abcefee5",
+      "sha256": "8208429a5e71711b2ad6d2da076c8981175f8b4e05f65ca3953ff5ba264af286"
+    },
+    {
+      "path": "crates/platform-macos/src/input/mouse.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/input/mouse.rs",
+      "upstream_blob": "1b34151cb8ab27498bbd7bdc1bca8faf56ff1179",
+      "sha256": "66d728101546a4de74fe4bfab5c302922c1ec45d7f77ac9ba940f85a5a7a85d8"
+    },
+    {
+      "path": "crates/platform-macos/src/input/pointer_toolkit.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/input/pointer_toolkit.rs",
+      "upstream_blob": "49fefea4cb4cb81990486857f2708bc52e6843ae",
+      "sha256": "4808bf466c8dc1e2de1df6d2fe64023a6372f042b24e41784281e2e4008aeb18"
+    },
+    {
+      "path": "crates/platform-macos/src/input/skylight.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/input/skylight.rs",
+      "upstream_blob": "70e87b39bd5c13bd1d7f0bec46a571c0404dc260",
+      "sha256": "0b9d6d2471ca6793473c7be8693e7a671f172c91735417dab78dfc6aaf1c6404"
+    },
+    {
+      "path": "crates/platform-macos/src/key_focus_guard.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/key_focus_guard.rs",
+      "upstream_blob": "4d1fee14c7e2559bdc00b5f57b71aa0d0093c275",
+      "sha256": "36d04175897cb4c930e8231f1e42f6e7a83bf350da44222be58a4d39569678e3"
+    },
+    {
+      "path": "crates/platform-macos/src/lib.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/lib.rs",
+      "upstream_blob": "6b847b452cfe1e8fbe0785e1ceca8077d60a112f",
+      "sha256": "de9c0c3a7fad5c308526a4b2eebf27ae6201dbf57fa4c731c58720cc151b8fba"
+    },
+    {
+      "path": "crates/platform-macos/src/permission_observation.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/permission_observation.rs",
+      "upstream_blob": "eb2856c860af9595b5d77de36e93456027545982",
+      "sha256": "d6332a47b8d8cb399ba714cc74ff035d972948dfa93a4b89b452aeaf718160c5"
+    },
+    {
+      "path": "crates/platform-macos/src/permissions/gate.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/permissions/gate.rs",
+      "upstream_blob": "4768a1f71217d50ecaa85fa36836b55e226ab588",
+      "sha256": "49f3be33de354eca77c68f4f4ebf69df8a432e88957e4d5e10b11a0aa4c915b9"
+    },
+    {
+      "path": "crates/platform-macos/src/permissions/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/permissions/mod.rs",
+      "upstream_blob": "cb39371649187db73f00ae13c97a8ebe0cdabbff",
+      "sha256": "5873079890ca802a6a2360df4d61e64f975aba9bb79890962c8e5b584ca15fa8"
+    },
+    {
+      "path": "crates/platform-macos/src/permissions/panel.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/permissions/panel.rs",
+      "upstream_blob": "60556d5c9cebf6e79c76b53674e52031588f31a6",
+      "sha256": "bd7a733924fcc962e34d5456002ed63bcf140a60eb29e3226f760d5f5ae3a99a"
+    },
+    {
+      "path": "crates/platform-macos/src/permissions/status.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/permissions/status.rs",
+      "upstream_blob": "597577263f35ea8ab930139a7bdde073a4d2dfd2",
+      "sha256": "83aa2416d1fadc5ad37b68a6ce8b2a3c8049f40ddee99b650b99f2f02b413823"
+    },
+    {
+      "path": "crates/platform-macos/src/pip/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/pip/mod.rs",
+      "upstream_blob": "5ffe2afea35b736d44737ccb2f030e3e339d529a",
+      "sha256": "0751e1c66ccf5d9cf3d11ee90bce319256d380d8ee39180dcadb3bae67906dac"
+    },
+    {
+      "path": "crates/platform-macos/src/pointer_shape_map.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/pointer_shape_map.rs",
+      "upstream_blob": "6968cabd2ef55a1323574ff973cf00c8f2bc20f6",
+      "sha256": "bd6b75dbb7d076be1a03e43d39d04277f298051a2e47614b7b66e5e726e444fa"
+    },
+    {
+      "path": "crates/platform-macos/src/pointer_shape.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/pointer_shape.rs",
+      "upstream_blob": "039c3f63f18275457eb471e9a6f396858c2ff721",
+      "sha256": "ca7333ad89fc6c48d560d4023dbf2d314262f27288dccc9dec77744b2a9e5b70"
+    },
+    {
+      "path": "crates/platform-macos/src/recording_hooks.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/recording_hooks.rs",
+      "upstream_blob": "bb28e4b64f5adbd659752b40cd0c0ac2888c3f55",
+      "sha256": "f0e4067355cb701f0971619f6f790467f4688b387e6b965dcf1ca1d5549b10d8"
+    },
+    {
+      "path": "crates/platform-macos/src/session.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/session.rs",
+      "upstream_blob": "b03e7138f57831335cf8ab0a5c1e2bba7ce6c019",
+      "sha256": "c0babe5ee79b6849dc75a2710a0593277ebc8ea8e8f2b0b95bbdcb6aab98675e"
+    },
+    {
+      "path": "crates/platform-macos/src/step_latency_bench.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/step_latency_bench.rs",
+      "upstream_blob": "c009f830ea063dc79f515995a501f451f3634078",
+      "sha256": "bcd5490b17b482900ec243dc26eee57dd081eda53a71c7131155c1790bd0d2d6"
+    },
+    {
+      "path": "crates/platform-macos/src/terminal.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/terminal.rs",
+      "upstream_blob": "a14db618864ff5ae7c3dbe79126455244d81fb2a",
+      "sha256": "ac4dd63785940d441df7fca1fe23e6b948d475638b76943d0563b18b55d1a2b5"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/bring_to_front.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/bring_to_front.rs",
+      "upstream_blob": "222de0c88dcf159113c52275aef949066231a9fe",
+      "sha256": "a8ac342ac6a2b983f448d103343e787b851ef6e5245768fce6aa30cf4c81a224"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/capture_binding.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/capture_binding.rs",
+      "upstream_blob": "1c98f68c6db9814288fbb231e478e27aff0f6045",
+      "sha256": "e1f1ee46dcb06510ec1eaf2e0753421b14e282ff670ef0af4abd634568a4dd6a"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/check_permissions.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/check_permissions.rs",
+      "upstream_blob": "b7617427f1c885bec562ee164e15d02eb7f0c51c",
+      "sha256": "e9d262380ebcbba49f4b9c1b86b61321cfb84f14f4d9a8efd68c4439846f5352"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/click.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs",
+      "upstream_blob": "8503db326faa42687789ae42b39aa64a8e542d1b",
+      "sha256": "25e446df576d5470da3b67cdd912304a2368e65f512213316fd0fd2c10b8245a"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/clipboard.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/clipboard.rs",
+      "upstream_blob": "2f51a2ec8e088166f2092e9d26e3921ebfced013",
+      "sha256": "d1bea2623a167d604e7381c911b46ce932a92a0c2b13e3d7b7d1e249a1cdcbbc"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/cursor_tools.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/cursor_tools.rs",
+      "upstream_blob": "a811a53f476adb87edbc3d2127e0fb8dddae9642",
+      "sha256": "51805922396926bf179d788b27cf0a0d948c522bbbf2abef74ec18c877a5e3fd"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/desktop_pointer_guard.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/desktop_pointer_guard.rs",
+      "upstream_blob": "9d31492e1625c7058d0affd4e23c9a50cd7c09c6",
+      "sha256": "0ebbf6a7d6b8141b11cae7f8d0eaf8fade72cb30c86442a2746dee686c26137e"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/double_click.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/double_click.rs",
+      "upstream_blob": "0fafc8359d6cca03ad54c339acb96ebfecb5620f",
+      "sha256": "a422cc61a67d6116f662d15e5b05e08e03ccd133c0cb59692da5000c23142982"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/drag.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/drag.rs",
+      "upstream_blob": "8e8d8a2a7e88b1ab6f194e5322e44c4ce0b7f40a",
+      "sha256": "746e4a36d3f6b4e2c84703b96480e34a8346bbb65e6c3145cda8ce1ee6e26b0e"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/get_accessibility_tree.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/get_accessibility_tree.rs",
+      "upstream_blob": "c66c8d8cf124861696a44aad0fbef00b16d3b41a",
+      "sha256": "e4476270d9fb355b88073e1fe3b624980b8d8f831a2133c567183daa273f94e6"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/get_config.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/get_config.rs",
+      "upstream_blob": "ed98ea5e3cab8e30c248764bb261dfade09ca4fc",
+      "sha256": "3493301c7fe8ef95c9826625e38efa2ed6d65f36d5d750d903ecd9e87e04d394"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/get_cursor_position.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/get_cursor_position.rs",
+      "upstream_blob": "ae9ece755b54d34a6f4e5f109514ca13b5536324",
+      "sha256": "380b760fb43fe58db16270c41c2d4c1e5df8bb70e1bb51903f2b3799c74c7d88"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/get_desktop_state.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/get_desktop_state.rs",
+      "upstream_blob": "48d408a44a6edd8e8c7d49b1dfc86c163a084cc3",
+      "sha256": "f9c8f5dd4c106ad6a48ce0127a8586b6e41a7c3b9b08268ea673065495f11be7"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/get_screen_size.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/get_screen_size.rs",
+      "upstream_blob": "b18790a3095ddc63f4ccddc04053124f3aeb8380",
+      "sha256": "ee8dfbbe5d0ccd51d1eaf73d41f96d64999686ac4aa575abbae9f95ed78b7613"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/get_window_state.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs",
+      "upstream_blob": "29d9a97149e4774158c150555724d3391060c7a7",
+      "sha256": "9aaed99363b47fced492ec1e80094ad2886b452d9e6271e595da39b2daac68b8"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/health_report.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/health_report.rs",
+      "upstream_blob": "7ec69a56af74a05171d16b65d9421d8207132f5a",
+      "sha256": "1e43a8d9318a55a77fb3c7dcc8293f2bd5ba007a9663a0a084f9a0fae8c3a1fa"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/hotkey.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/hotkey.rs",
+      "upstream_blob": "fa30e286b7356821f8342971edf014e53f3cf73d",
+      "sha256": "3b448bb540bb3fd779536e2a37b357ff08660973b312518bbc58b81963a66b10"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/invoke_menu.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/invoke_menu.rs",
+      "upstream_blob": "841d8d000d6981145b4b95ce86929d660d8fef0a",
+      "sha256": "fc5f911c06e3ea215f4564001ee631e216b15752bd698fb2248a51ec4b644ee9"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/kill_app.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/kill_app.rs",
+      "upstream_blob": "c7c75e907293303686e5ff220ae83b68eeb08e26",
+      "sha256": "6863c4d92dd7d0c941af4895ccaaaaf5a1a824820a0eddb0eac52416446532ce"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/launch_app.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/launch_app.rs",
+      "upstream_blob": "dd879312fd97e330736650d7e570d2ac87d29a92",
+      "sha256": "366cf4a9c48639ac7e7dd24c111f01a46445bde453993e3a5cb39b36f7acaea4"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/list_apps.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/list_apps.rs",
+      "upstream_blob": "65cb5f6320e914a3e7acc491b0c6b701b4a6f0f0",
+      "sha256": "4abadcde3786bf6452b4d9d33340f3d25746887565d38ac51cee99142a14c274"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/list_windows.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/list_windows.rs",
+      "upstream_blob": "1c7449e4798fdc642e97ddcd3df3f9874cc444bd",
+      "sha256": "cce59ba62872c81566cfffdf0974d1e505ac26debbd52b7d47fae6dccc9f9d34"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/menu_equivalent.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/menu_equivalent.rs",
+      "upstream_blob": "638204710bbce0874c11b568e59e7b55bf97182a",
+      "sha256": "7b83a3f37b628063486a451649739841ce558d9e0a8aa0e51ed9da6d8b253f9d"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs",
+      "upstream_blob": "7b0efb0d9e7ad954244588aaa88491934274ae78",
+      "sha256": "5795f304e9d89dd817f57a7f16055bc813be8995736d814dcfd7da6e21cb55b4"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/move_cursor.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/move_cursor.rs",
+      "upstream_blob": "4e6831a69c4379f7fd58929237f1f70e993c81cc",
+      "sha256": "961fe111aec33795e5bee4e650c668a0179812d6b8791196661efd47416d3e26"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/page.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/page.rs",
+      "upstream_blob": "4fe58049342987d4820f65a6ab49a84e29310a08",
+      "sha256": "e09e328d7580caec2d1464d8dc2e83260c3dfa03ac9bef155da62a51c98fc714"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/pixel_route.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/pixel_route.rs",
+      "upstream_blob": "b7233f50ed1fbbaae377a6dea0ceed66dfcfced4",
+      "sha256": "4f779739cee4e619040d5882ed985056ebd8b670d952ea21fc006718156244cc"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/press_key.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/press_key.rs",
+      "upstream_blob": "e4d007f0bcd963cc82b12cfda6b09bf970948695",
+      "sha256": "1eb04e1e402ecd0241fabf1a9d98ee2aa3eaf0e948d0f0be12e74cc66b5a9d5b"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/px_frame.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/px_frame.rs",
+      "upstream_blob": "d24fee728ce2ef75dfa6bd5b61f5ccfdf3dd653f",
+      "sha256": "64afe76eabdb8f2b2b94b1de3f35af233c56d9a3775eed4b903ce49769c2ee79"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/right_click.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/right_click.rs",
+      "upstream_blob": "a16dc71830194928add2751e31fe566fb1668234",
+      "sha256": "519bc70d8d528c12578bf5e797d5fb6497afb8993861f7cba69ee096fb49ff39"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/scroll.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/scroll.rs",
+      "upstream_blob": "aa7a814deac5858541854241e5d888277d7b73c7",
+      "sha256": "646441e515d804149653d034a196a2f28253732a40ef1fe57351cf0099470739"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/set_config.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/set_config.rs",
+      "upstream_blob": "dd4c83e8ddac00519a54fe719543221fc404ceba",
+      "sha256": "436b6a09617750aac2aa009507e53a279f4e4da5cfc298536059b2f6a794443a"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/set_value.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/set_value.rs",
+      "upstream_blob": "3b786748c25caa599a890e77e1c07a95ffb070d6",
+      "sha256": "b0c33e9caa9f5d69dedce189df6526c056782476df13464478af4db6e91cc41c"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/set_window_frame.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/set_window_frame.rs",
+      "upstream_blob": "7cbdabcde7054b3e3401bbf236178bb541e8199a",
+      "sha256": "c102eda377668f5c8c77ffa8cb2a261a6ef77d40e056c3ed2d0d0a0b088a374e"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/type_text_chars.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/type_text_chars.rs",
+      "upstream_blob": "0a3bee810e4516cf945e11d322658074a9152542",
+      "sha256": "f4c9c96609b4af56ab4f78ecc54f4d214b542009c66b8a529af573e52faaa7ff"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/type_text.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/type_text.rs",
+      "upstream_blob": "ec454994a08aedf93d655d8de11cb9c8a08666b5",
+      "sha256": "312a20922c9a6a56c159fe9ca9f8dbfa0612b76ead1744ec84d97ec750aec6fe"
+    },
+    {
+      "path": "crates/platform-macos/src/tools/zoom.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/tools/zoom.rs",
+      "upstream_blob": "976ff7fc741983ce83d522feb4215b4d7e8c423d",
+      "sha256": "e2dadb5a707cc8fe80e81c9708581aa02cd96814a0745e8120a31036b697962b"
+    },
+    {
+      "path": "crates/platform-macos/src/video_sckit.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/video_sckit.rs",
+      "upstream_blob": "652e65eea10e1c1292262e8c7d22defd8dad5973",
+      "sha256": "b0b08352800dace884a72b2199a5bb7e9d216dadc7aaf300758c7c64e329d625"
+    },
+    {
+      "path": "crates/platform-macos/src/window_change_detector.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/window_change_detector.rs",
+      "upstream_blob": "0e5c693edd6313c85200dfc5d9e09cbce486f213",
+      "sha256": "74e67570f931d314327405a4ef00d58f4968c4f62b225d56706a5c9a97cc0614"
+    },
+    {
+      "path": "crates/platform-macos/src/windows.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/windows.rs",
+      "upstream_blob": "052e5f83f7affaec476e5402c0140f0d91629725",
+      "sha256": "60958be50493d4e3e52243dfdf6e39d765423f2059cb4cb7f8d3f2428948da87"
+    },
+    {
+      "path": "crates/platform-macos/tests/embedded_menu_restore.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-macos/tests/embedded_menu_restore.rs",
+      "upstream_blob": "cb4675b8e4bcc7f6021564c60ba5df6e9e648380",
+      "sha256": "2a5a54d0c19164abe058d2c5c5427989b2b5024fc1d89f915778a0973b767655"
+    },
+    {
+      "path": "crates/platform-windows/Cargo.toml",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/Cargo.toml",
+      "upstream_blob": "1d2a2ae148db9ffe7d9ee599babd4fd89ba416df",
+      "transform": "D04+Windows-user-app-owner",
+      "sha256": "642be3a0b8fad67a3e48d46569e12b4ddf9e9424d8e9d5aff4ac8568f7351e28"
+    },
+    {
+      "path": "crates/platform-windows/src/browser_consent_ui.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/browser_consent_ui.rs",
+      "upstream_blob": "38099eb9cc580de9d5c23ff2871ef3cd1f1d8f04",
+      "sha256": "84f5d26e3c0fe3ab0e69f45912d7eab0cbb53b7bf718693175aad0f1303add40"
+    },
+    {
+      "path": "crates/platform-windows/src/browser_installation_path.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/browser_installation_path.rs",
+      "upstream_blob": "23d1e189236690efd4bc8564817675162d03eacd",
+      "sha256": "907fcc168835788c6a673ddd715b10b2979fce0387ef68fc1cefa69e076b2244"
+    },
+    {
+      "path": "crates/platform-windows/src/browser_isolated_selection.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/browser_isolated_selection.rs",
+      "upstream_blob": "e0347490932be6d49cfecf168526234eb4e2e88c",
+      "sha256": "cc49a010e85c954b63c970f148cc167d9c8ccd6539d62653a4782bea972380e5"
+    },
+    {
+      "path": "crates/platform-windows/src/browser_launch_token.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/browser_launch_token.rs",
+      "upstream_blob": "b8d738b074945df611e7cfce441c97cd90f1db3b",
+      "sha256": "7ed2ca6000e05e52a7ee901eeb086e0b5c528afba7d1cdd7188f7bd845dc018d"
+    },
+    {
+      "path": "crates/platform-windows/src/browser_platform.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/browser_platform.rs",
+      "upstream_blob": "65db115912bfda098f3a52b7502ff4be80dbdf5e",
+      "sha256": "cf2d4bd97381fe99958748867fb2d9b846c957b8e1dac8302907d6e7eed741b4"
+    },
+    {
+      "path": "crates/platform-windows/src/browser_setup_ui.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/browser_setup_ui.rs",
+      "upstream_blob": "91bbe5cd9f191cf396648f00adaf0851a0a49cf2",
+      "sha256": "49c3ee40601bf6d62bc7db0f09c4e09d668240d30c544051f543c58b4cf7da99"
+    },
+    {
+      "path": "crates/platform-windows/src/browser_standard_user.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/browser_standard_user.rs",
+      "upstream_blob": "b27e574f1d3ff4dfac0b41e6e7a7a7063b3863c1",
+      "sha256": "d8e7df3715c79c7f150ece29f38e130f2a6f5837d338094e7addd113bf1e4684"
+    },
+    {
+      "path": "crates/platform-windows/src/capture_admission.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/capture_admission.rs",
+      "upstream_blob": "0c2c86564fb9129f68f52bce5d4144c72d372efb",
+      "sha256": "6c3f2da9ad90e130793d9b04cf83d4da27e405755f99324975589291862bd982"
+    },
+    {
+      "path": "crates/platform-windows/src/capture.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/capture.rs",
+      "upstream_blob": "453b0b715f06e00d81a360231902d436385caf9e",
+      "sha256": "480e7715c970df0d32459e3ac97fe13911f20f79d01d76f08f75c7fdc0fc8b98"
+    },
+    {
+      "path": "crates/platform-windows/src/clipboard.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/clipboard.rs",
+      "upstream_blob": "999e75fa1a7e1d95f49154deeefecec2f84518ea",
+      "sha256": "4fd7c03a5439767746b7121cf834586c333cf2c4663eb46c254a41a314f38ec3"
+    },
+    {
+      "path": "crates/platform-windows/src/diagnostics.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/diagnostics.rs",
+      "upstream_blob": "dd80c66ac8ec9d9824d388e2b70c0dcfc86c7c68",
+      "sha256": "32bdac31adc70f21f66b6f5d45954865a2c9ff3b6ff80d1057d7aa6891ef96b8"
+    },
+    {
+      "path": "crates/platform-windows/src/health_report.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/health_report.rs",
+      "upstream_blob": "43a5783c1d037908909e7209d13b3356c79b5e8d",
+      "sha256": "c1a81bab3285895fe6151efda1bdee4d9c62cecc94bd1037d52e9df63e7150ca"
+    },
+    {
+      "path": "crates/platform-windows/src/history.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/history.rs",
+      "upstream_blob": "3dee295fd06dd8d3f524c0ae20be9b976e551cf5",
+      "sha256": "5e931f9d03ec49aa8231dd329d6161f0128610eef36bc50252c2be07288d1998"
+    },
+    {
+      "path": "crates/platform-windows/src/input/delivery.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/input/delivery.rs",
+      "upstream_blob": "032cf9ee4607301f71fa08c1f58d9957cb42e615",
+      "sha256": "8989451d71b02dad4328b451f95d5c8f748f545d4de2ce64876339819abcf552"
+    },
+    {
+      "path": "crates/platform-windows/src/input/inject.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/input/inject.rs",
+      "upstream_blob": "6b75d8ac31ab24c2050214eb91d6d40e4e1db0c6",
+      "sha256": "c1e3c492fe7ad06923c9b08eb9ae1fa7a48e25c778bc697b6bad69668b9135ef"
+    },
+    {
+      "path": "crates/platform-windows/src/input/keyboard.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs",
+      "upstream_blob": "a0b1d9b8ae42729606ec6b71c9ee249fdf0aba88",
+      "sha256": "bc9aa34e811505fc75a34b1e36f6879e73a5e9dcfad4582253d2e7fe2996d5c8"
+    },
+    {
+      "path": "crates/platform-windows/src/input/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/input/mod.rs",
+      "upstream_blob": "4b3a2ebb6279444d0fa8c3c7acf028ebb6f4377b",
+      "sha256": "370eaa043b81ba57746e8688be86117734645a23a5e240765503fd2856ed3f53"
+    },
+    {
+      "path": "crates/platform-windows/src/input/mouse.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs",
+      "upstream_blob": "d6f4fbabcf8a73ba32a76411bda7ca6c54ae2f74",
+      "sha256": "f30555c8233b1c4d93a03983f63393e8a442c2cb9249f78870e0df784d29c791"
+    },
+    {
+      "path": "crates/platform-windows/src/keycodes.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/keycodes.rs",
+      "upstream_blob": "7b31acff9a73e8ee3543923f8cba8f163c8f9499",
+      "sha256": "24154fc85db2ec66efa5e079aac0d314aaf3e41195e44e1f07d008b4b003d964"
+    },
+    {
+      "path": "crates/platform-windows/src/launch_uwp.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/launch_uwp.rs",
+      "upstream_blob": "8af89b44c7fdb333084007bb00afe223f0a0b761",
+      "sha256": "0613ad4fba7d40741386e90e6b5acaefdd46077464bb834d62ab87f375de8e56"
+    },
+    {
+      "path": "crates/platform-windows/src/lib.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/lib.rs",
+      "upstream_blob": "b38d1633dfdf04caf94410368bef800c040aab43",
+      "transform": "Windows-user-app-owner",
+      "sha256": "de3114efcd092dda9c36381d06e1529b5b4d8df29639de0cfd7589d264cfc446"
+    },
+    {
+      "path": "crates/platform-windows/src/lparam.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/lparam.rs",
+      "upstream_blob": "1dcb54a2387a93d3b6e4d3a980c903a9fface717",
+      "sha256": "31d95bdbf8c53662fc2d3561ae2d0d49776230fa18101ceff0bb571d367c21d7"
+    },
+    {
+      "path": "crates/platform-windows/src/msaa.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/msaa.rs",
+      "upstream_blob": "36339073be1b71a16cf5eebbfd22acde8053a812",
+      "sha256": "750f6200466cfd19c2d3ef04317f77f37c7356b6c9462830752be8436ef9ca06"
+    },
+    {
+      "path": "crates/platform-windows/src/overlay.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/overlay.rs",
+      "upstream_blob": "7a2378e6a0aa3248c923594dbb751cc31504abd6",
+      "sha256": "6751f66f934248d3623e3b8a23afddeedccd7289c13616bc1c1a95351c7d437f"
+    },
+    {
+      "path": "crates/platform-windows/src/pip/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/pip/mod.rs",
+      "upstream_blob": "27ff16b232e76e80140f7e86a34f653d0defd9f7",
+      "sha256": "6f2d0b782070a1f98134da024c839dbd437df1d9c996b7552a94cf3593c70c65"
+    },
+    {
+      "path": "crates/platform-windows/src/pointer_shape_map.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/pointer_shape_map.rs",
+      "upstream_blob": "fb27357bbe9d738aa15883a722580ef286f151a1",
+      "sha256": "98f727072d239ee0ef9826bde9c75504303bca8924654f5cddf720749548365e"
+    },
+    {
+      "path": "crates/platform-windows/src/pointer_shape.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/pointer_shape.rs",
+      "upstream_blob": "9b6fd8721c71d0d257372910c97165c8f306e83a",
+      "sha256": "76964a7175181e9af9299e117a798aa2a299d182f59c4aecf50e8ba1a0917334"
+    },
+    {
+      "path": "crates/platform-windows/src/recording_hooks.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/recording_hooks.rs",
+      "upstream_blob": "450bcbe5319ab8ffc2ccda96063507bb3287789c",
+      "sha256": "8b2454bd1e159e621bd4ec5cfbd6929d88061beaafefddeefd452b7bf8000457"
+    },
+    {
+      "path": "crates/platform-windows/src/standard_user_launch.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/standard_user_launch.rs",
+      "upstream_blob": "e4989dea338b49d951501858f3d050f22e0a3e6f",
+      "sha256": "c7dc803eb084b4f32b54d0deaa4b3d76b66a47161dfaaa1de62c40d52f9a5f12"
+    },
+    {
+      "path": "crates/platform-windows/src/terminal.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/terminal.rs",
+      "upstream_blob": "d4e94ed15d86be7e5144ff5eb474e41e13ee0dfe",
+      "sha256": "ae25e2b9036cf4fb0a4312c581f2277bb064a134868521710bd5d154f88a777a"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs",
+      "upstream_blob": "94d1c68610ccb4db9fb55bbf39cbca8110df5bf2",
+      "transform": "Windows-user-app-owner",
+      "sha256": "1e87619ca60d12b8edbb6456acdf3532c6fcb8255d73306a4358a5d1a5ca35af"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/background_element_click_record_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/background_element_click_record_tests.rs",
+      "upstream_blob": "b0af8269afbc891217b4c11bd734f225f8260922",
+      "sha256": "c6a743bc4798572b0f47fe979c3e030c4fc3850170e2057596d2fae6a9527313"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/chromium_flag_injection_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/chromium_flag_injection_tests.rs",
+      "upstream_blob": "c7235df25d2259cc1054b81163aa90008a7cddd3",
+      "sha256": "c23cc962fe556844ae996ad724cf51a66a4c4a64b29d3e5abfa29b4773cbeaec"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/click_capture_id_schema_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/click_capture_id_schema_tests.rs",
+      "upstream_blob": "709bdce421dc8d1b15192dc40a6694f25aa8f914",
+      "sha256": "39b95dc095da72d4efcb76d7805ebfec290cc7487a789571abfc0c9436a1a9a2"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/cursor_key_resolution_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/cursor_key_resolution_tests.rs",
+      "upstream_blob": "c943b06a52dd82f231e975858cc42229ea5a974d",
+      "sha256": "839758b2e5a5da0ebb1f31ec57af7319ca4de46b9702ae299e7808fbf2487754"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/desktop_scope_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/desktop_scope_tests.rs",
+      "upstream_blob": "cc5541837205aaca17184add0b397abf37b2e46c",
+      "sha256": "295e8ccfce31c928a164e13b947c400760c269d94900429e2d571cff3bb68c69"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/display_only_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/display_only_tests.rs",
+      "upstream_blob": "e39fda62c1f5a589cbce105474ca5f06013045f3",
+      "sha256": "51b2f1fc8c4b1127d457c6897784d14548a38a6c285eec36f53f6933914c0e88"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/get_window_state_actions_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/get_window_state_actions_tests.rs",
+      "upstream_blob": "1690dc3e34a8b5361d645743afc1318c2bdf2cdb",
+      "sha256": "d3ab787390a62944481137bcf58cbd469ac1a23a4c756b2d821ea1544353aab9"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/launch_focus_restore_decision_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/launch_focus_restore_decision_tests.rs",
+      "upstream_blob": "8c3da651ce320b16c0ced582e9cdd3a2ee1dcc3c",
+      "sha256": "542c0115d34651ce9bf6e87ff0ab81339b63e12504d3978cb634b989e89a7eff"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/list_windows_z_index_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/list_windows_z_index_tests.rs",
+      "upstream_blob": "7c6737a7e9e50c0fff4d4e0f335efe1556f7776c",
+      "sha256": "c38723a93d0249aa53e2f4c902244111f1f9cb89fa82e690381b08432b5d73ac"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/pid_window_target_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/pid_window_target_tests.rs",
+      "upstream_blob": "f0631d067b019ca3b823dea809aa954b474df5df",
+      "sha256": "014217456d5b5ce48bb2f425455d6701e9dcefa39498edf40764a5e9800cee72"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/pixel_click_transport_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/pixel_click_transport_tests.rs",
+      "upstream_blob": "6c7922bb079e76912ba247609ae19e5702acce34",
+      "sha256": "b541e4a963d6950be1272eef2d25c6c2ad795942c4529fe5e9ef9c1cd3a354ec"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/post_message_readback_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/post_message_readback_tests.rs",
+      "upstream_blob": "b1a69139b9449697f8909517626a15dfffcf6673",
+      "sha256": "9e692777e3058a5ac954735079f6822e31bd4e936bac89c46cbe60582066b584"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/set_window_frame_geometry_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/set_window_frame_geometry_tests.rs",
+      "upstream_blob": "0f30e69c281cac241aa8a0030eead96d17464846",
+      "sha256": "9fe106d50e5772581696bad18fd6a8ec7922c2d404c7d7b6f5650d8679761299"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/snapshot_coordinate_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/snapshot_coordinate_tests.rs",
+      "upstream_blob": "e5b6cf4b81cfbc2b22f56394b1c0f36b6c476a43",
+      "sha256": "7bb8a59ac0e8f48d40b8084f468a2a89ad1517b1114af63aeb1ac58359010caf"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/impl_/value_write_readback_tests.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/value_write_readback_tests.rs",
+      "upstream_blob": "9b7c1867c12095d44f2d5f63ad35d66bba08ce1e",
+      "sha256": "34e70e17f57f4cf550f70796e50ebeff814156697f7218ec3408f5cb55fcb91c"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/mod.rs",
+      "upstream_blob": "b7c4793603a376b0204513b7dd991193fb7d498f",
+      "sha256": "7094e8f1641bc299bb3a14001b4f4c45c84cf6f41dc4f7162eb3630cebdfec5b"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/page_bookmark.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/page_bookmark.rs",
+      "upstream_blob": "2ab67a28428c013961a67f60987507b4b87fb153",
+      "sha256": "a1d10151c7b669b9c3139cce5fbbe0e1ba6e413d8515d3e9944c44c3d0011f2e"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/page_title_marker.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/page_title_marker.rs",
+      "upstream_blob": "415f84880f8dff87a25aa1f0d28c3fa386a12d41",
+      "sha256": "27273745dba10956a88e37c8e745fd108cee1e92fdd14c10c882f6cac36c7d60"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/page.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/page.rs",
+      "upstream_blob": "6d82874e374e4ca5ba3e6fc34d23b819080e1ae9",
+      "sha256": "87acdd9796230845a4007d0ca4a863aa833a59343c02377caa38b8469dea1f95"
+    },
+    {
+      "path": "crates/platform-windows/src/tools/stubs.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/tools/stubs.rs",
+      "upstream_blob": "6e1e6524d88938052583cb28fff879908c84e945",
+      "sha256": "52d4011ca4d4f0540f66aedbdfd51dfa9f491f887604a61201d909bd7f927c58"
+    },
+    {
+      "path": "crates/platform-windows/src/uia/fg_bypass.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/uia/fg_bypass.rs",
+      "upstream_blob": "34e83bd1f34dbb90a3722448cf66c960e33ce86d",
+      "sha256": "6ab7ea555059c8ac2f55fc4745fc35fe806dd14046a4c21043d300b28bda7500"
+    },
+    {
+      "path": "crates/platform-windows/src/uia/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs",
+      "upstream_blob": "7536aed7893863682508c463efb248b65dab5285",
+      "sha256": "d7d0d160c1009e20a636ee5694a60fcce257bc5e2e60b85c18ab39106a682dc3"
+    },
+    {
+      "path": "crates/platform-windows/src/uia/scroll.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/uia/scroll.rs",
+      "upstream_blob": "2e0cd6331eee46b20b4748adc7f0c6afbf963425",
+      "sha256": "e87bfcc2a9f6199e60b33f56a99d7ce945518950731f9dc50aa7c43ac98c9923"
+    },
+    {
+      "path": "crates/platform-windows/src/uia/snapshot_uaf_repro.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/uia/snapshot_uaf_repro.rs",
+      "upstream_blob": "276517bb690e848e82db756cdeb8a2d64a0fc4d1",
+      "sha256": "50f5b3935a0b212112e0c65c86ab562964e1e77f0d7d4d8a74bc8835584dabb0"
+    },
+    {
+      "path": "crates/platform-windows/src/uia/snapshot.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/uia/snapshot.rs",
+      "upstream_blob": "5f2e69a7ba7eaa30a92ddbd4bc0fe03fe9365eec",
+      "sha256": "66b7bfd9a4ce829932277a718c95d9c38423f79a29dec0869abae3bf94a9e7df"
+    },
+    {
+      "path": "crates/platform-windows/src/uia/windows_enum.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/uia/windows_enum.rs",
+      "upstream_blob": "32cc32897bf228f85c955d04d658d7aca691b8d8",
+      "sha256": "153fb2e0512bb4937ba074312dc1a2f012d1970b1931a3b588a1ed5439752e3e"
+    },
+    {
+      "path": "crates/platform-windows/src/user_app_launch.rs",
+      "upstream_path": null,
+      "upstream_blob": null,
+      "added_by_patch": "vendor/patches/cua-driver/0003-windows-user-app-lifetime.patch",
+      "transform": "Windows-user-app-owner",
+      "sha256": "ba9e88b9949ce7a339c3d9c91c907f0984955f331a52dd17da1cc66eb91e0a17"
+    },
+    {
+      "path": "crates/platform-windows/src/virtualdesk.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/virtualdesk.rs",
+      "upstream_blob": "ba3705d5af1a96820880e23a524408f9755f68c7",
+      "sha256": "23bc547dd7eb21cc4d6fa65a69205f7e81f08f259118d5ab42c4609c14292a55"
+    },
+    {
+      "path": "crates/platform-windows/src/wgc.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/wgc.rs",
+      "upstream_blob": "5533190ecb8b4812dedbc729505a91cf09e036e1",
+      "sha256": "a79667cc79e10a2046d356f937618ecf89e0309f350eafaff464e2d7f55d18a4"
+    },
+    {
+      "path": "crates/platform-windows/src/win32/apps.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/win32/apps.rs",
+      "upstream_blob": "3dc95dfc181797d7708d6518b2c706a5c5a14779",
+      "sha256": "d046236d921c748f191d77e6817843ada3d40c0ceeb6ed719177fdddf13ac7cf"
+    },
+    {
+      "path": "crates/platform-windows/src/win32/combo.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/win32/combo.rs",
+      "upstream_blob": "b5e9a744580a6023678d11fdc23735cd531941a3",
+      "sha256": "8481d387a3496013ff18800730f2458af92152dc69a4cc6512f25e7b3372f189"
+    },
+    {
+      "path": "crates/platform-windows/src/win32/installed_apps.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/win32/installed_apps.rs",
+      "upstream_blob": "825a943cfc3b5d6201e98d2525a0cbc838eb1e9c",
+      "sha256": "238e24134eb22a8b8cc9ad526153840e8611ca9fd21b5469a94438a50168ede7"
+    },
+    {
+      "path": "crates/platform-windows/src/win32/mod.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/win32/mod.rs",
+      "upstream_blob": "f35010825b13b746c27626d91e3ade90bcdace78",
+      "sha256": "7b73b1269b37f8c30b70cc42aaf3fa73b91e865d499d3b4effc08cf37d10db77"
+    },
+    {
+      "path": "crates/platform-windows/src/win32/windows.rs",
+      "upstream_path": "libs/cua-driver/rust/crates/platform-windows/src/win32/windows.rs",
+      "upstream_blob": "b13588d469c8b69ea8e03332495fe642faf4fe24",
+      "sha256": "0e4013949b10a5c991ae7245fe1250fb9249682ad23e894c2f62d2bd91e1e3b0"
+    },
+    {
+      "path": "LICENSE.md",
+      "upstream_path": "LICENSE.md",
+      "upstream_blob": "b8b198ce3ebaa22c9f59588a80f9f1875d85b34a",
+      "sha256": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9"
+    },
+    {
+      "path": "Skills/cua-driver/BROWSER.md",
+      "upstream_path": "libs/cua-driver/rust/Skills/cua-driver/BROWSER.md",
+      "upstream_blob": "85166d4d40e68d893dccc5bdad2f29ec591bacfe",
+      "sha256": "b008c6bfef08beaf030304adee72a297ddc0df436af32ee8fa643c0dff77efbf"
+    },
+    {
+      "path": "Skills/cua-driver/EMBEDDING.md",
+      "upstream_path": "libs/cua-driver/rust/Skills/cua-driver/EMBEDDING.md",
+      "upstream_blob": "8ab682382fa1089298cd301b247828ff7d8043af",
+      "sha256": "c015a13bfbd6a5102a4984091824215e5e84a868c6f99e504fee794d0a5a3a17"
+    },
+    {
+      "path": "Skills/cua-driver/LINUX.md",
+      "upstream_path": "libs/cua-driver/rust/Skills/cua-driver/LINUX.md",
+      "upstream_blob": "5364943c211c5dfd269594625bae56f32feda460",
+      "sha256": "286f3eae22b70c1dcba90ebb1d0c789546ab5f819baeb3f53c94b2b6588afa7b"
+    },
+    {
+      "path": "Skills/cua-driver/MACOS.md",
+      "upstream_path": "libs/cua-driver/rust/Skills/cua-driver/MACOS.md",
+      "upstream_blob": "b502b6f557d0cc36b2d21bd05b222e03cb4092ec",
+      "sha256": "a02c45ab38daeb72e39ba504db2a43f8243146bcde2b957e38139cb4a525d2d4"
+    },
+    {
+      "path": "Skills/cua-driver/README.md",
+      "upstream_path": "libs/cua-driver/rust/Skills/cua-driver/README.md",
+      "upstream_blob": "006ea54d79085ec2f31bc29d5da73218f40ef188",
+      "sha256": "7b561c189ec2f2c38eed3bc7981935ba45c0a3ae03db4788565e3528efc19e3b"
+    },
+    {
+      "path": "Skills/cua-driver/RECORDING.md",
+      "upstream_path": "libs/cua-driver/rust/Skills/cua-driver/RECORDING.md",
+      "upstream_blob": "1090ef5929585101526add0cf3697dcd00cd4002",
+      "sha256": "6d1d5f8ff192f37bd9c67efcda59154f3242b0fae72e86ba7e2ba5a4899fd248"
+    },
+    {
+      "path": "Skills/cua-driver/RUNTIME.md",
+      "upstream_path": "libs/cua-driver/rust/Skills/cua-driver/RUNTIME.md",
+      "upstream_blob": "d999b0ab794dd7d749fd1861908454ff0e2970c9",
+      "sha256": "b62dd42b3628792bc30e17b8052ece4b8442160d4e71893e927d0d3d996c6509"
+    },
+    {
+      "path": "Skills/cua-driver/SKILL.md",
+      "upstream_path": "libs/cua-driver/rust/Skills/cua-driver/SKILL.md",
+      "upstream_blob": "f93dc10bc4ef629a6ae7a50f38d6eaae96d35a02",
+      "sha256": "6a9aca777840bc7f7d514a9ecb3aed8ab299abe78fa1e001555b02f24f84b60b"
+    },
+    {
+      "path": "Skills/cua-driver/VISUAL.md",
+      "upstream_path": "libs/cua-driver/rust/Skills/cua-driver/VISUAL.md",
+      "upstream_blob": "e3d3a430e942137a66d60a4ba5def7e4318f0b83",
+      "sha256": "66aa0fadd643ee4cd0deda751af1f3ebc2cec0b77607eec61c9b2a4ee7d4a256"
+    },
+    {
+      "path": "Skills/cua-driver/WINDOWS.md",
+      "upstream_path": "libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md",
+      "upstream_blob": "3f1a1012ed92a74b5b89f0f9fb0a01f2e1f21b35",
+      "sha256": "21bf71d599c7481a10b3ecb9d02731c72b34b21367e769d554c9341071bf837d"
+    },
+    {
+      "path": "Skills/cua-driver/WORKFLOW.md",
+      "upstream_path": "libs/cua-driver/rust/Skills/cua-driver/WORKFLOW.md",
+      "upstream_blob": "41f39f8314ca2ad91d310db1de8ae20a82d47161",
+      "sha256": "1e3d2ed4751af6983ce0858d176db0acb977fe0cf02f3e38bcad5a3568b91be8"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "upstream_path": "libs/cua-driver/rust/THIRD_PARTY_NOTICES.md",
+      "upstream_blob": "8a111b26105f46a203da69d9fed0be54d91a44d8",
+      "sha256": "82470c85cb48dd084fccbf192d4a9f0b9d0afe614ab9b63e0fceac0eb315f412"
+    },
+    {
+      "path": "VERSION",
+      "upstream_path": "libs/cua-driver/rust/VERSION",
+      "upstream_blob": "0f1a7dfc7c405a8cf35cf670577340cba6b6c8c6",
+      "sha256": "f1a49cdeb0cce1d8c2d7cde8b8ae660a88ddd2fe44f9e8c2aac95b5d4dad6105"
+    }
+  ]
+}

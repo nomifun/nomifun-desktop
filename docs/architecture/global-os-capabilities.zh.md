@@ -72,17 +72,11 @@ helper 从连接的真实调用用户解析 HOME，保持用户环境；系统�
 
 Windows 的管理员路径在同一个已安装 executable 的早期子模式运行独立 UAC runner，使用 `ShellExecuteExW(runas)` 取得并保留真实进程句柄。GUI 维持登录用户身份，不安装后台系统服务、不保存认证信息；首次认证由 Windows 自己的界面完成。runner 在该 GUI 生命周期内复用，每个逻辑 client 保留独立的现役 ProcessSupervisor，不能因一个 Session teardown 而取消其他 client 的任务。
 
-Desktop、WebUI 与既有 CLI host 在解析命令、初始化 runtime 或打开数据集前，进入 App 库的同一个 Windows early entry；Computer extension 是否注册由库自身编译 feature 决定。WebUI 不因此强制开启 Computer 能力，Cargo 统一 feature 时也使用相同入口。
+Desktop、WebUI 与既有 CLI host 在解析命令、初始化 runtime 或打开数据集前，进入 App 库的同一个 Windows early entry。Computer 使用独立的普通用户 worker，不注册系统执行 extension。
 
-Windows 本地命名管道拒绝远程连接，每个 RPC 校验确切 parent/client 与 runner/server PID；parent 的创建时间、可执行文件、登录 Session 与 source-derived build identity 也必须匹配。请求和回复有体积及时间上限，OVERLAPPED I/O 通过原生事件等待；取消后等待内核完成才释放缓冲和 OVERLAPPED。回复绑定原 connection/request identity，完整接收后才确认管道回执。facility 关闭先封住 identity/start/acquire/desktop 准入，等待已准入调用再获取全部 supervisor 的关闭证明。派发失败或结果丢失保留 unknown，不换 runner 重发。普通/over-the-shoulder 管理员身份来自 UAC 的真实 token；命令显式环境保留原登录用户的 USERPROFILE/HOME 等值，环境名称按 Windows 原生大小写比较合并，显式 PATH 不能被 inherited Path 覆盖。管理员 token 的账号和 HKCU 仍是系统真实身份。
+Windows 本地命名管道拒绝远程连接，每个 RPC 校验确切 parent/client 与 runner/server PID；parent 的创建时间、可执行文件、登录 Session 与 source-derived build identity 也必须匹配。请求和回复有体积及时间上限，OVERLAPPED I/O 通过原生事件等待；取消后等待内核完成才释放缓冲和 OVERLAPPED。回复绑定原 connection/request identity，完整接收后才确认管道回执。facility 关闭先封住 identity/start/acquire 准入，等待已准入调用再获取全部 supervisor 的关闭证明。派发失败或结果丢失保留 unknown，不换 runner 重发。普通/over-the-shoulder 管理员身份来自 UAC 的真实 token；命令显式环境保留原登录用户的 USERPROFILE/HOME 等值，环境名称按 Windows 原生大小写比较合并，显式 PATH 不能被 inherited Path 覆盖。管理员 token 的账号和 HKCU 仍是系统真实身份。
 
 管理员 source/scope 获取通过同一 runner 的 `--readonly-acquire` 子进程，复用原进程监督、typed acquisition、Windows pinned native-file adapter 和原 FileService 投影；普通读不借用管理员缓存。runner 独立观察 parent 进程句柄，宿主退出先关闭准入再回收临时进程树。正常 App 关闭在数据库关闭前取得原监督器的 exact shutdown 并确认 runner 真正退出，供升级、卸载安全替换同一 executable。它没有持久的系统注册项；已正式注册的独立计划任务或服务按用户意图保留。
-
-Windows 高完整性桌面桥也使用该 runner 的同登录 Session，在现役 Computer owner 的 canonical 观察/效果/设备锁之内派发。每个 client 的原 ComputerTool/UIA cache 独立存在；切换执行者废弃旧观察并要求 fresh observe，不重放输入。每次真实设备调用核对 Default input desktop，锁屏与安全桌面交回系统界面，不切换或自动输入认证。具体编译、原生 UAC、桌面、签名与安装验收分开记录于 [Windows 验证](../validation/global-os-windows-2026-10-17.zh.md)，源码接入不等于这些项目已通过。
-
-Windows 聚焦使用一次原生 `SetForegroundWindow`。目标不存在或系统在任何变更前明确拒绝时，返回确定未执行并废弃旧观察；系统接受后，恢复最小化窗口及有界响应/前台核对失败仍是 uncertain。不会附加线程输入、注入按键或改前台锁策略来争抢焦点。既有 uncertain Effect 继续由同一物理桌面的持久未结算围栏保护；后续修复、换 Session 或升级 App 均不抹除它，只有现役 owner 对真实结果的核实对账能追加结算事实。
-
-高完整性桥的 remote focus 在派发前可传递 App 已具备的前台资格：仅当真实前台 PID 属于当前 App、线程和输入桌面均为 Default、原 facility 未关闭且 retained helper 进程句柄仍存活时，对该句柄取得的确切 PID 调用 [AllowSetForegroundWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-allowsetforegroundwindow)。不接受模型或 RPC 提供的 PID，不向所有进程开放，不主动激活 App；系统拒绝时不重复请求或注入输入。此资格可由后续用户输入撤销，成功委托也不能证明下一次聚焦成功，仍须保留真实 native 结果及原 Effect 结算。
 
 Linux 使用固定 `/usr/bin/pkexec --disable-internal-agent /usr/libexec/nomifun-system-runner --stdio`，由发行版 polkit 完成系统认证。普通 GUI 继续使用登录用户；runner 通过原监督器管理 Pipe/PTY 与 typed readonly worker。每连接使用有界帧和并发 RPC，握手核对真实 root、`PKEXEC_UID` 对应的调用用户及同源 build identity。调用用户的 HOME/USER/LOGNAME 从系统用户记录取得，不使用 root HOME；认证等待可取消，认证完成前不派发操作。丢失回执保持 unknown，断联和输出写失败进入原监督器清理，不能用新连接重放未知操作。
 
@@ -114,21 +108,15 @@ CLI 附带 Skill 必须进入现役技能库导入与发现路径，写到第三
 
 ## 桌面、媒体、网络与真实边界
 
-Computer 普通操作在登录桌面的 App 进程执行，每次操作按实际需要检测原生许可。Windows 高完整性目标使用同登录 Session、经现役 UAC runner 认证的独立 Computer adapter，保留同一物理目标 owner、generation 与 Effect；切换后先返回确定未执行，再要求新观察，旧 ref、截图或未知输入不重放。安全桌面和锁屏按真实系统限制拒绝，不切换或自动输入。Browser 保持 Windows WebView2、macOS WKWebView 的已定结构；网站媒体许可仍由实际宿主与 OS 隐私许可决定。
+Computer 通过 `nomifun-computer` 和直接启动的 `nomifun-computer-worker` 使用 vendored Cua Driver，宿主不链接原生桌面驱动。角色、资源和每步 Action 授权仍来自原 canonical Snapshot，动作结果沿同一 Effect 结算，Computer 不使用跨会话唯一 `resource_key`。详见[Computer 架构](computer-use.zh.md)。
 
-Kernel 原调用的 `InvocationControl` 经 Wave2 执行上下文传入 Computer 物理 owner；它不是冻结授权或观察身份的一部分。等待物理锁、Windows 路由锁和纯计时等待可以直接响应取消，设备尚未派发时以确切 typed 拒绝结算原 Effect。同一个 token 继续进入低层输入、无障碍 mutator 的原 actor command、macOS 主队列 slot 以及 Wayland 已有取消标志。只读窗口枚举或 Start Menu 解析结束后，新的 focus／launch 派发再次检查原 token；进入 native worker 的队列不表示已经执行 OS 输入。
+原 `InvocationControl` 控制公平排队与 Stop；排队请求撤回为零效果，在途请求保留实际结果。超过驱动预算才强杀并标为 unknown，下一代不会自动重放。worker 按需启动和闲置退休，退出协调在数据库关闭前等待它真实收束。
 
-原 actor command 的 queued slot 可撤回；开始 native 调用后仍保留原 receiver 和实际结果。macOS 主队列同样撤回尚未取出的闭包，已经取出并开始的调用继续 join。已经开始原生设备调用的操作继续由原 owner 等到真实结果及适用的输入释放，不丢弃 Future、不把请求取消说成无效果，也不自动重发或转用备用输入。取消后未派发的新调用及语义操作之后的像素 fallback 均不再准入。原生系统认证或设备 API 本身不能即时中断时，保留原 worker 与实际收束责任；不关闭其他 Session 共用的 runner 来制造局部停止。
+Windows worker 保持登录用户普通完整性，不复用系统执行 runner 操作提权窗口。macOS worker 由同签名 App 直接启动，TCC 归属另经正式平台验收。Linux 当前使用 X11/XWayland 与 AT-SPI，原生 Wayland capture 尚未启用；没有后台 backend 时保留驱动结构化拒绝，不借前台或管理员身份伪装成功。
 
-Windows 桥接 RPC 到达不等于 OS 输入已经执行。每次原调用持有绑定 connection 与 request nonce 的独占 manual-reset Event，创建碰撞拒绝；GUI 只向原持有的 set handle 发 Stop，helper 在认证后只取得 SYNCHRONIZE handle，先于原 64 个 business slots 的等待打开并检查，同一信号在取得 slot 后和原 Computer handler 内继续复核并转发到工具 token。取消先于 helper 登记也保持有效，不另存取消墓碑、不绕过并发槽或关闭共享 runner。排队取消通过原请求的完整回复和 ACK 确认；GUI waiter 离开仍由原 RPC blocking owner 保留 Event、client、准入与 ACK 责任。信号发送失败仍 join 原结果并保留独立投递诊断，不把实际结果或 unknown 改写成取消／释放成功；错误打开或读取 Event 不降级为无控制派发。
+Browser 保持 Windows WebView2、macOS WKWebView 的现役结构。网站媒体决定与宿主系统许可分别存在，Computer 授权不代替它们。许可库存包含实际 PID 和真实 App bundle 身份；AX/CG 的 false 只证明 not_granted，FDA、Automation 和局域网全局状态保持 unknown，实际目标操作再提供结果。Camera/Microphone 使用原生状态；用途说明和 Apple Events entitlement 随 App 打包。详见[系统许可](system-permissions.zh.md)。
 
-Wayland 取消只转发到本次 capture／input 原 worker，等待其真实结算。尚未发布的本次 portal 授权请求由原 creation owner 关闭并确认；已经建立的共享桌面 grant 不因一个 capture 取消而撤销。输入取消仍释放本次确切已提交的按键／按钮，真实释放确认后保留共享 grant；typed 排队拒绝证明 press 未派发时不制造 release。原生结果未知或释放失败仍沿原 Session 失效／Close 合同处理，不能用局部 Stop 隐藏未确认输入，也不能关闭共享 runner。
-
-权限库存包含实际 PID 和可解析的真实 App bundle 身份。AX/CG 返回 false 只证明 `not_granted`；FDA、Automation 和局域网没有适用于所有目标的全局可靠探针，保留 unknown，实际目标操作再给真实结果。Camera/Microphone 使用原生状态；使用说明与 Apple Events automation entitlement 随 App 打包。详见[系统许可](system-permissions.zh.md)。
-
-普通监听、本机/局域网访问、原生安装、服务与系统设置复用上述通用路径。SIP、UAC、安全桌面、TCC、ACL、网络设施和实际设备存在性仍按系统真实限制表达。Linux Computer 已接入正式模块与资源选择：完整 X11 后端核实真实服务器、窗口管理器及 EWMH 激活结果，不以点击窗口中心代替聚焦，也不把 XWayland 当作全局桌面。Wayland 使用系统 RemoteDesktop/ScreenCast portal、受控会话与 PipeWire/GStreamer 帧，通过同一 Computer 工具链观察和输入；缺 backend、尚未授权、session 关闭与失效必须如实返回，输入不能隐式重新弹出授权后继续旧动作。Wayland 没有通用的全局窗口枚举/聚焦和指针查询接口，这些操作保留明确限制，不用 XWayland 规避 compositor。
-
-独立 X11 虚拟桌面测试、portal 协议 fixture 与真实用户桌面授权分别计证，见 [Linux 桌面验证](../validation/global-os-linux-desktop-2026-10-17.zh.md)。Windows 普通和高完整性桌面的具体来源、真实结果与未覆盖项见 [Windows 验证](../validation/global-os-windows-2026-10-17.zh.md)，源码存在不替代原生验收。
+普通监听、本机/局域网访问、原生安装、服务与系统设置继续使用各自现役路径。SIP、UAC、安全桌面、TCC、ACL、网络设施及设备存在性按真实系统结果表达。新 Computer 的自动化、隔离原生和未执行项分别记录在[专项进展](../handoffs/computer-use-rebuild.zh.md#12-单份执行进展)，不复用退役实现的验收结论。
 
 ## 验证与平台接续
 

@@ -11,7 +11,7 @@ use nomifun_agent_contracts::{
     OperationId, ResolvedSnapshotId, ResolvedSnapshotRef, VersionString,
 };
 use nomifun_chat_model_broker::{
-    AnthropicAdapter, BedrockAdapter, BrokerRetryPolicy, ChatBrokerPort, ChatCausality,
+    AnthropicAdapter, BedrockAdapter, BrokerRetryPolicy, ChatAttemptProjection, ChatBrokerPort, ChatCausality,
     ChatCapabilityObserver, ChatCausalityGate, ChatContentPart, ChatFinishReason, ChatMessage, ChatModelBroker,
     ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatModelFeature, ChatModelInput, ChatModelRequest,
     ChatModality, ChatProtocol, ChatProtocolAdapter, ChatResponseFormat, ChatRetryDirective,
@@ -3247,4 +3247,181 @@ async fn bridge_keeps_argument_rejection_separate_from_provider_failure() {
     } if call_id.as_ref()=="bad" && name=="write_file" && diagnostic.category==nomifun_chat_model_broker::ToolArgumentDiagnosticCategory::RootType)));
     assert!(!events.iter().any(|event| matches!(event, ResponsesBridgeEvent::Failed { .. })));
     assert!(matches!(events.last(), Some(ResponsesBridgeEvent::Completed { finish_reason: ChatFinishReason::ToolCalls, .. })));
+}
+
+#[derive(Default)]
+struct RouteSurfaceProjection {
+    began: Mutex<Vec<(String, ChatModelRequest)>>,
+    observed: Mutex<Vec<(String, ChatModelEvent)>>,
+    reject_tool: bool,
+}
+
+impl ChatAttemptProjection for RouteSurfaceProjection {
+    fn project(&self, request: &ChatModelRequest, route: &ResolvedChatRoute,
+        adapter_features: &BTreeSet<ChatModelFeature>) -> Result<ChatModelRequest, ChatModelError> {
+        let mut projected = request.clone();
+        projected.input.instructions.push(format!("attempt-surface:{}", route.model_route_id.as_ref()));
+        if !route.features.contains(&ChatModelFeature::ToolCalls)
+            || !adapter_features.contains(&ChatModelFeature::ToolCalls) {
+            projected.input.tools.clear();
+            projected.input.tool_choice = ChatToolChoice::None;
+            projected.input.parallel_tool_calls = None;
+        } else {
+            projected.input.parallel_tool_calls = Some(false);
+            if !route.features.contains(&ChatModelFeature::ImageInput)
+                || !adapter_features.contains(&ChatModelFeature::ImageInput) {
+                projected.input.tools[0].input_schema.0["properties"]["include_screenshot"] =
+                    serde_json::json!({"const":false});
+            }
+        }
+        Ok(projected)
+    }
+
+    fn begin_attempt(&self, request: &ChatModelRequest, route: &ResolvedChatRoute,
+        _adapter_features: &BTreeSet<ChatModelFeature>) -> Result<(), ChatModelError> {
+        self.began.lock().unwrap().push((route.model_route_id.as_ref().to_owned(), request.clone()));
+        Ok(())
+    }
+
+    fn observe(&self, _request: &ChatModelRequest, route: &ResolvedChatRoute,
+        event: &ChatModelEvent) -> Result<(), ChatModelError> {
+        self.observed.lock().unwrap().push((route.model_route_id.as_ref().to_owned(), event.clone()));
+        if self.reject_tool && matches!(event, ChatModelEvent::ToolCallCompleted { .. }) {
+            return Err(ChatModelError::new(ChatModelErrorCode::InvalidRequest,
+                "fixture rejects attempt evidence", ChatRetryDirective::Failover));
+        }
+        Ok(())
+    }
+}
+
+struct ProjectionCaptureTransport {
+    requests: Arc<Mutex<Vec<ProviderWireRequest>>>,
+}
+
+#[async_trait]
+impl ProviderTransport for ProjectionCaptureTransport {
+    async fn open_stream(&self, request: ProviderWireRequest, _credential: CredentialLease)
+        -> Result<ProviderWireStream, ChatModelError> {
+        let mut requests = self.requests.lock().unwrap();
+        requests.push(request);
+        if requests.len() < 3 {
+            return Err(ChatModelError::new(ChatModelErrorCode::ProviderUnavailable,
+                "fixture advances route", ChatRetryDirective::Failover));
+        }
+        Ok(Box::pin(stream::iter(successful_frames("projection", "done"))))
+    }
+}
+
+fn projection_request(route: &ResolvedChatRoute) -> ChatModelRequest {
+    let mut request = basic_request(route);
+    request.input.tools = vec![nomifun_chat_model_broker::ChatToolDefinition {
+        name: "fixture_observe".into(), description: "Observe a fixture".into(), deferred: false,
+        input_schema: nomifun_agent_contracts::StrictJsonValue(serde_json::json!({
+            "type":"object","properties":{"include_screenshot":{"type":"boolean"}},
+            "additionalProperties":false,
+        })),
+    }];
+    request.input.tool_choice = ChatToolChoice::Auto;
+    request
+}
+
+#[tokio::test(start_paused = true)]
+async fn attempt_projection_rebuilds_each_failover_surface_for_ordinary_and_owned_streams() {
+    for owned in [false, true] {
+        let primary = route(ChatProtocol::OpenaiChat, "surface-full", 1);
+        let mut no_image = route(ChatProtocol::OpenaiChat, "surface-no-image", 1);
+        no_image.features.remove(&ChatModelFeature::ImageInput);
+        let mut no_tool = route(ChatProtocol::OpenaiChat, "surface-no-tool", 1);
+        no_tool.features.remove(&ChatModelFeature::ToolCalls);
+        let request = projection_request(&primary);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport: Arc<dyn ProviderTransport> = Arc::new(ProjectionCaptureTransport { requests: requests.clone() });
+        let transports = transport_map([(ChatProtocol::OpenaiChat, transport)]);
+        let broker = broker(StaticCausalityGate::allow(), ResolvedChatRouteSet {
+            primary, failovers: vec![no_image, no_tool],
+        }, Arc::new(StaticCredentialStore { mismatch: false }), &transports,
+            BrokerRetryPolicy { max_total_attempts: 3, max_attempts_per_route: 1 });
+        let projection = Arc::new(RouteSurfaceProjection::default());
+        let port = broker.with_attempt_projection(projection.clone()).unwrap();
+        let events = if owned {
+            let attempt = port.open_owned_chat_attempt(request.clone(), CancellationToken::new()).await.unwrap();
+            let events = attempt.stream.collect::<Vec<_>>().await;
+            attempt.shutdown.shutdown(tokio::time::Instant::now() + Duration::from_secs(1)).await.unwrap();
+            events
+        } else {
+            port.open_chat_stream(request.clone()).await.unwrap().collect::<Vec<_>>().await
+        };
+        assert!(events.iter().all(Result::is_ok));
+        assert!(matches!(&events.last().unwrap().as_ref().unwrap().event, ChatModelEvent::Completed { .. }));
+        let requests = requests.lock().unwrap();
+        let began = projection.began.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(began.len(), 3);
+        for (index, name) in ["surface-full", "surface-no-image", "surface-no-tool"].iter().enumerate() {
+            assert_eq!(requests[index].route_identity.route_id.as_ref(), *name);
+            assert_eq!(began[index].0, *name);
+            assert_eq!(began[index].1.causality, request.causality);
+            assert_eq!(began[index].1.route, request.route);
+            assert_eq!(began[index].1.input.messages, request.input.messages);
+            let wire = requests[index].body.to_string();
+            assert!(wire.contains(&format!("attempt-surface:{name}")));
+            assert_eq!(wire.matches("attempt-surface:").count(), 1);
+        }
+        assert_eq!(requests[0].body["tools"][0]["function"]["parameters"]["properties"]["include_screenshot"], serde_json::json!({"type":"boolean"}));
+        assert_eq!(requests[1].body["tools"][0]["function"]["parameters"]["properties"]["include_screenshot"], serde_json::json!({"const":false}));
+        assert!(requests[2].body.get("tools").is_none());
+        assert!(projection.observed.lock().unwrap().iter().all(|(id, _)| id == "surface-no-tool"));
+    }
+}
+
+#[tokio::test]
+async fn attempt_projection_rejects_history_changes_and_new_tool_names_before_admission() {
+    struct InvalidProjection(bool);
+    impl ChatAttemptProjection for InvalidProjection {
+        fn project(&self, request: &ChatModelRequest, _route: &ResolvedChatRoute,
+            _features: &BTreeSet<ChatModelFeature>) -> Result<ChatModelRequest, ChatModelError> {
+            let mut projected = request.clone();
+            if self.0 { projected.input.messages[0].content = vec![ChatContentPart::Text { text: "rewritten".into() }]; }
+            else { projected.input.tools[0].name = "invented_tool".into(); }
+            Ok(projected)
+        }
+    }
+    for rewrite_history in [false, true] {
+        let primary = route(ChatProtocol::OpenaiChat, "invalid-projection", 1);
+        let request = projection_request(&primary);
+        let gate = StaticCausalityGate::allow();
+        let transport = ScriptedTransport::new([]);
+        let transports = transport_map([(ChatProtocol::OpenaiChat, provider_transport(&transport))]);
+        let broker = broker(gate.clone(), ResolvedChatRouteSet { primary, failovers: Vec::new() },
+            Arc::new(StaticCredentialStore { mismatch: false }), &transports, BrokerRetryPolicy::default());
+        let port = broker.with_attempt_projection(Arc::new(InvalidProjection(rewrite_history))).unwrap();
+        let error = match port.open_chat_stream(request).await { Ok(_) => panic!("invalid projection admitted"), Err(error) => error };
+        assert_eq!(error.code, ChatModelErrorCode::InvalidRequest);
+        assert_eq!(error.retry, ChatRetryDirective::Never);
+        assert_eq!(gate.calls.load(Ordering::Acquire), 0);
+        assert_eq!(transport.calls(), 0);
+    }
+}
+
+#[tokio::test]
+async fn attempt_projection_observes_validated_tool_before_delivery_and_fails_without_fallback() {
+    let primary = route(ChatProtocol::OpenaiChat, "evidence-primary", 1);
+    let request = projection_request(&primary);
+    let backup = route(ChatProtocol::OpenaiChat, "evidence-backup", 1);
+    let transport = ScriptedTransport::new([TransportScript::Frames(vec![
+        frame("response.start", serde_json::json!({"id":"evidence"})),
+        frame("tool_call.completed", serde_json::json!({"call_id":"call-1","name":"fixture_observe","arguments":{"include_screenshot":true}})),
+        frame("done", serde_json::json!({"finish_reason":"tool_calls"})),
+    ])]);
+    let transports = transport_map([(ChatProtocol::OpenaiChat, provider_transport(&transport))]);
+    let broker = broker(StaticCausalityGate::allow(), ResolvedChatRouteSet { primary, failovers: vec![backup] },
+        Arc::new(StaticCredentialStore { mismatch: false }), &transports, BrokerRetryPolicy::default());
+    let projection = Arc::new(RouteSurfaceProjection { reject_tool: true, ..Default::default() });
+    let port = broker.with_attempt_projection(projection.clone()).unwrap();
+    let events = port.open_chat_stream(request).await.unwrap().collect::<Vec<_>>().await;
+    assert_eq!(transport.calls(), 1);
+    assert_eq!(projection.began.lock().unwrap().len(), 1);
+    assert!(projection.observed.lock().unwrap().iter().any(|(_, event)| matches!(event, ChatModelEvent::ToolCallCompleted { .. })));
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].as_ref().unwrap_err().retry, ChatRetryDirective::Never);
 }

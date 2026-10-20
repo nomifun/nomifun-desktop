@@ -217,7 +217,7 @@ async function run(options) {
   const load = name => import(pathToFileURL(join(repo, 'scripts', 'validation', name)).href);
   const common = await load('global-os-native.mjs');
   const windows = await load('global-os-windows-cases.mjs');
-  const { windowsIntegrityObservationScript } = await load('global-os-windows-desktop-cases.mjs');
+  const { windowsIntegrityObservationScript } = await load('global-os-windows-cases.mjs');
   const { beginWindowsProcessExitObservation } = await load('global-os-windows-process-exit-observer.mjs');
   const source = (await execute('git', ['rev-parse', 'HEAD'], { cwd: repo, windowsHide: true })).stdout.trim();
   assert.equal(source, options['--expected-source-head'], 'The checkout must match the explicitly selected merged source anchor');

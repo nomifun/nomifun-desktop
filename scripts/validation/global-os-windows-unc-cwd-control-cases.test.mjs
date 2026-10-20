@@ -20,7 +20,7 @@ test('UNC cwd diagnostic retains ProviderPath differences while requiring exact 
 test('UNC spelling control requires exact original private native App identity and independent scenario',()=>{
   const options={scenario:'unc-cwd-spelling-control',platform:'win32',nativeDataRoot:join(tmpdir(),'fixture','native-data')};
   expect(()=>nativeUncCwdControlOptions(options)).not.toThrow();
-  for(const change of [{platform:'darwin'},{nativeDataRoot:undefined},{administrator:true},{protectedUserDirectory:true},{desktopBackgroundFocus:true},{retainServiceForAppExit:true},{continueSession:'old'},{installerReport:'other'},{missingDefault:true}])expect(()=>nativeUncCwdControlOptions({...options,...change})).toThrow();
+  for(const change of [{platform:'darwin'},{nativeDataRoot:undefined},{administrator:true},{protectedUserDirectory:true},{retainServiceForAppExit:true},{continueSession:'old'},{installerReport:'other'},{missingDefault:true}])expect(()=>nativeUncCwdControlOptions({...options,...change})).toThrow();
 });
 test('failed child data can retain exact lifecycle proof without certifying protocol success or accepting missing exits',()=>{
   for(const failure of ['reported_error','nonzero','missing_json']){

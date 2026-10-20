@@ -602,8 +602,8 @@ pub(crate) fn factory(
             });
             #[cfg(test)]
             reliability_tests::capture_host(&host);
-            let model = host.session_host.compose_model_port_with_configuration(
-                host.clone(), Some(host.model_configuration.clone()),
+            let model = host.session_host.compose_model_port_with_projection(
+                host.clone(), Some(host.model_configuration.clone()), host.resources.model_attempt_projection(),
             )?;
             let runtime =
                 UnifiedAgentRuntime::new(&options, engine, engine_binding, model, tools, host)?;
@@ -854,7 +854,7 @@ impl ConversationRuntimeHost {
         );
         let epoch = i64::try_from(journal.generation()).map_err(error)?;
         let voice_control=if admitted.request_payload().pointer("/admission/voice_input_context/supersede_model_step").and_then(Value::as_bool)==Some(true) {
-            let model=self.session_host.compose_model_port_with_configuration(Arc::new(voice_correction::VoiceGate(self.self_reference.clone())),Some(self.model_configuration.clone()))?;
+            let model=self.session_host.compose_model_port_with_projection(Arc::new(voice_correction::VoiceGate(self.self_reference.clone())),Some(self.model_configuration.clone()),self.resources.model_attempt_projection())?;
             Some(Arc::new(voice_correction::VoiceCorrectionPort::new(self.self_reference.clone(),model)))
         }else{None};
         let mut active = self.active.lock().await;

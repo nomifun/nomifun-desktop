@@ -226,8 +226,6 @@ pub struct ToolsConfig {
     /// enforces the supported-provider ceiling of 20 images per request.
     #[serde(default = "default_max_recent_images")]
     pub max_recent_images: usize,
-    #[serde(default)]
-    pub computer: ComputerConfig,
     /// Opt-in (default empty = off): language servers for the experimental `Lsp`
     /// code-navigation tool. Each entry maps file extensions to a server
     /// command. The tool is registered only when this is non-empty.
@@ -268,32 +266,11 @@ impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             max_recent_images: default_max_recent_images(),
-            computer: ComputerConfig::default(),
             lsp_servers: Vec::new(),
             delegation_token_budget: None,
             builtin_allowlist: Vec::new(),
             enforce_builtin_allowlist: false,
             deferred_allowlist: Vec::new(),
-        }
-    }
-}
-
-/// Computer-use (screen/mouse/keyboard/window control) tool settings.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ComputerConfig {
-    /// Off by default: controlling the local desktop is opt-in.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Screenshots are downscaled so their longest edge fits this many pixels.
-    #[serde(default = "default_max_screenshot_edge")]
-    pub max_screenshot_edge: u32,
-}
-
-impl Default for ComputerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            max_screenshot_edge: default_max_screenshot_edge(),
         }
     }
 }
@@ -305,9 +282,6 @@ fn default_provider() -> String {
 }
 fn default_max_recent_images() -> usize {
     3
-}
-fn default_max_screenshot_edge() -> u32 {
-    1568
 }
 // --- Resolved runtime config ---
 
@@ -865,7 +839,7 @@ Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(toml::Table::new()),
 
 /// Merge explicit file fields before deserialization fills in defaults.
 /// Ordinary scalars/arrays override; the existing additive policies below are
-/// intentionally retained for tool selection and computer availability.
+/// intentionally retained for tool selection.
 fn merge_config_files(mut global: toml::Table, project: toml::Table) -> anyhow::Result<ConfigFile> {
     merge_config_tables(&mut global, project, &[]);
     global.try_into().context("failed to deserialize merged config")
@@ -888,8 +862,6 @@ fn merge_config_tables(global: &mut toml::Table, project: toml::Table, path: &[&
             }
             (["tools", "lsp_servers"],
                 Some(Value::Array(base)), Value::Array(overlay)) => base.extend(overlay),
-            (["tools", "computer", "enabled"],
-                Some(Value::Boolean(base)), Value::Boolean(overlay)) => *base |= overlay,
             (["tools", "builtin_allowlist"], Some(_), Value::Array(overlay)) if overlay.is_empty() => {}
             (_, Some(Value::Table(base)), Value::Table(overlay)) => {
                 merge_config_tables(base, overlay, &field);

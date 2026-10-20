@@ -21,6 +21,14 @@ const show = (item: Parameters<typeof ProcessTraceItem>[0]['item'], stateOverrid
 afterEach(cleanup);
 
 describe('public process trace', () => {
+  test('shows foreground only from the typed Computer disposition', () => {
+    const page = show(tool({ capability_id: 'computer', action_id: 'computer/click', foreground: true, description: '' }));
+    expect(page.getByText(messagesLocale.computerForeground)).toBeTruthy();
+    page.unmount();
+    const untyped = tool({ capability_id: 'computer', action_id: 'computer/click', foreground: false, description: '' });
+    Object.assign(untyped.content, { input: { foreground: true } });
+    expect(show(untyped).queryByText(messagesLocale.computerForeground)).toBeNull();
+  });
   test.each(['running', 'completed', 'error', 'canceled'] as const)(
     '%s file operations retain their path and icon without a body or empty disclosure', status => {
       const item = tool({ status });
