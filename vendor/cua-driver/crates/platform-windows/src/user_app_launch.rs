@@ -1,0 +1,513 @@
+//! One-shot user-application launch outside the driver's managed process tree.
+//!
+//! The exact interactive shell is the launch helper's native parent. Windows
+//! inherits its Job from that parent, leaving the driver's Job unchanged.
+//! The helper accepts one capability-bound file request and owns no long-lived
+//! endpoint. It watches the exact driver and exits within its launch budget.
+use crate::{browser_launch_token::windows_command_line, browser_standard_user::OwnedHandle};
+use serde::{Deserialize, Serialize};
+use std::{
+    ffi::OsStr,
+    fs::{self, OpenOptions},
+    io::{Read, Write},
+    os::windows::ffi::OsStrExt,
+    os::windows::io::AsRawHandle,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
+use windows::{
+    core::{PCWSTR, PWSTR},
+    Win32::{
+        Foundation::{
+            DuplicateHandle, DUPLICATE_SAME_ACCESS, FILETIME, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        },
+        Security::{
+            EqualSid, GetTokenInformation, TokenUser, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER,
+        },
+        Storage::FileSystem::{GetFileType, FILE_TYPE_PIPE},
+        System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED},
+        System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock},
+        System::RemoteDesktop::ProcessIdToSessionId,
+        System::Threading::{
+            CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetCurrentProcessId,
+            GetProcessTimes, InitializeProcThreadAttributeList, OpenProcess, OpenProcessToken,
+            TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW,
+            CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
+            PROCESS_CREATE_PROCESS, PROCESS_DUP_HANDLE, PROCESS_INFORMATION,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, STARTF_USESHOWWINDOW, STARTUPINFOEXW,
+            STARTUPINFOW,
+        },
+        UI::{
+            Shell::{
+                GetUserProfileDirectoryW, ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC,
+                SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+            },
+            WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId},
+        },
+    },
+};
+
+const FLAG: &str = "--nomifun-user-app-launch";
+const MAX_REQUEST: u64 = 128 * 1024;
+const HELPER_BUDGET: Duration = Duration::from_secs(13);
+static AVAILABLE: AtomicBool = AtomicBool::new(false);
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Request {
+    nonce: String,
+    owner_pid: u32,
+    owner_start: u64,
+    owner_lifetime_handle: u64,
+    file: String,
+    parameters: String,
+    show: i32,
+    direct: bool,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Response {
+    nonce: String,
+    pid: Option<u32>,
+    error: Option<String>,
+}
+fn wide(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().collect()
+}
+fn terminated(value: &OsStr) -> Vec<u16> {
+    wide(value).into_iter().chain([0]).collect()
+}
+fn creation(handle: HANDLE) -> Result<u64, String> {
+    let (mut start, mut exit, mut kernel, mut user) = (
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+    );
+    unsafe { GetProcessTimes(handle, &mut start, &mut exit, &mut kernel, &mut user) }
+        .map_err(|e| e.to_string())?;
+    Ok((u64::from(start.dwHighDateTime) << 32) | u64::from(start.dwLowDateTime))
+}
+fn session(pid: u32) -> Result<u32, String> {
+    let mut session = 0;
+    unsafe { ProcessIdToSessionId(pid, &mut session) }.map_err(|e| e.to_string())?;
+    Ok(session)
+}
+fn token_user(process: HANDLE) -> Result<(OwnedHandle, Vec<u64>), String> {
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, &mut token) }
+        .map_err(|e| e.to_string())?;
+    let token = OwnedHandle::new(token);
+    let mut size = 0;
+    let _ = unsafe { GetTokenInformation(token.raw(), TokenUser, None, 0, &mut size) };
+    if size == 0 {
+        return Err("no token user information".into());
+    }
+    let mut data = vec![0u64; (size as usize).div_ceil(8)];
+    unsafe {
+        GetTokenInformation(
+            token.raw(),
+            TokenUser,
+            Some(data.as_mut_ptr().cast()),
+            size,
+            &mut size,
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    Ok((token, data))
+}
+fn shell_parent() -> Result<OwnedHandle, String> {
+    let shell = unsafe { GetShellWindow() };
+    if shell.0.is_null() {
+        return Err("no interactive Windows shell; no app was launched".into());
+    }
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(shell, Some(&mut pid)) };
+    if pid == 0 || session(pid)? != session(unsafe { GetCurrentProcessId() })? {
+        return Err("interactive shell session mismatch; no app was launched".into());
+    }
+    let parent = OwnedHandle::new(
+        unsafe {
+            OpenProcess(
+                PROCESS_CREATE_PROCESS | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                pid,
+            )
+        }
+        .map_err(|e| format!("cannot retain interactive shell: {e}"))?,
+    );
+    // Retain an exact handle before checking its native window's PID again.
+    let mut current = 0;
+    unsafe { GetWindowThreadProcessId(shell, Some(&mut current)) };
+    if current != pid {
+        return Err("interactive shell changed; no app was launched".into());
+    }
+    let (_ours, ours) = token_user(unsafe { GetCurrentProcess() })?;
+    let (_theirs, theirs) = token_user(parent.raw())?;
+    let ours = unsafe { &*ours.as_ptr().cast::<TOKEN_USER>() };
+    let theirs = unsafe { &*theirs.as_ptr().cast::<TOKEN_USER>() };
+    unsafe { EqualSid(ours.User.Sid, theirs.User.Sid) }
+        .map_err(|_| "interactive shell user mismatch; no app was launched".to_owned())?;
+    Ok(parent)
+}
+struct IpcDirectory(PathBuf);
+struct UserEnvironment(*mut std::ffi::c_void);
+impl Drop for UserEnvironment {
+    fn drop(&mut self) {
+        let _ = unsafe { DestroyEnvironmentBlock(self.0) };
+    }
+}
+impl Drop for IpcDirectory {
+    fn drop(&mut self) {
+        for file in ["request.json", "claimed.json", "response.json"] {
+            let _ = fs::remove_file(self.0.join(file));
+        }
+        let _ = fs::remove_dir(&self.0);
+    }
+}
+fn read_limited<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(MAX_REQUEST + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_REQUEST {
+        return Err("private launch request too large".into());
+    }
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+}
+fn write_new(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(&bytes))
+        .map_err(|e| e.to_string())
+}
+
+/// Launch only one user-app target. There is deliberately no driver-tree fallback.
+pub(crate) fn launch(file: &str, parameters: &str, show: i32, direct: bool) -> Result<u32, String> {
+    if !AVAILABLE.load(Ordering::Acquire) {
+        return Err("this host has no private user-app launch entry; no app was launched".into());
+    }
+    let parent = shell_parent()?;
+    let (shell_token, _) = token_user(parent.raw())?;
+    let mut environment = std::ptr::null_mut();
+    // Rebuild from the same shell token without inheriting the driver's HOME,
+    // CUA, XDG, APPDATA or temporary-file overrides.
+    unsafe { CreateEnvironmentBlock(&mut environment, shell_token.raw(), false) }
+        .map_err(|e| e.to_string())?;
+    let environment = UserEnvironment(environment);
+    let mut profile_size = 0;
+    let _ =
+        unsafe { GetUserProfileDirectoryW(shell_token.raw(), PWSTR::null(), &mut profile_size) };
+    if profile_size == 0 {
+        return Err("cannot resolve shell user's profile; no app was launched".into());
+    }
+    let mut profile = vec![0u16; profile_size as usize];
+    unsafe {
+        GetUserProfileDirectoryW(
+            shell_token.raw(),
+            PWSTR(profile.as_mut_ptr()),
+            &mut profile_size,
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    let mut random = [0u8; 32];
+    getrandom::fill(&mut random).map_err(|e| e.to_string())?;
+    let nonce: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let directory = IpcDirectory(std::env::temp_dir().join(format!("nomifun-user-app-{nonce}")));
+    fs::create_dir(&directory.0).map_err(|e| e.to_string())?;
+    let request = Request {
+        nonce: nonce.clone(),
+        owner_pid: std::process::id(),
+        owner_start: creation(unsafe { GetCurrentProcess() })?,
+        owner_lifetime_handle: std::io::stderr().as_raw_handle() as usize as u64,
+        file: file.into(),
+        parameters: parameters.into(),
+        show,
+        direct,
+    };
+    validate(&request)?;
+    write_new(&directory.0.join("request.json"), &request)?;
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let application = terminated(executable.as_os_str());
+    let arguments = [
+        wide(OsStr::new(FLAG)),
+        wide(directory.0.as_os_str()),
+        wide(OsStr::new(&nonce)),
+    ];
+    let mut command = windows_command_line(&wide(executable.as_os_str()), &arguments)?;
+    command.push(0);
+    let mut size = 0;
+    let _ = unsafe {
+        InitializeProcThreadAttributeList(
+            LPPROC_THREAD_ATTRIBUTE_LIST(std::ptr::null_mut()),
+            1,
+            0,
+            &mut size,
+        )
+    };
+    if size == 0 {
+        return Err("cannot size private launcher parent attribute".into());
+    }
+    let mut storage = vec![0u64; size.div_ceil(8)];
+    let attributes = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast());
+    unsafe { InitializeProcThreadAttributeList(attributes, 1, 0, &mut size) }
+        .map_err(|e| e.to_string())?;
+    let parent_handle = parent.raw();
+    let updated = unsafe {
+        UpdateProcThreadAttribute(
+            attributes,
+            0,
+            PROC_THREAD_ATTRIBUTE_PARENT_PROCESS as usize,
+            Some((&parent_handle as *const HANDLE).cast()),
+            std::mem::size_of::<HANDLE>(),
+            None,
+            None,
+        )
+    };
+    let startup = STARTUPINFOEXW {
+        StartupInfo: STARTUPINFOW {
+            cb: std::mem::size_of::<STARTUPINFOEXW>() as u32,
+            ..Default::default()
+        },
+        lpAttributeList: attributes,
+    };
+    let mut process = PROCESS_INFORMATION::default();
+    // No driver stdio, Job handle or other handle crosses to the shell child.
+    let created = updated.and_then(|()| unsafe {
+        CreateProcessW(
+            PCWSTR(application.as_ptr()),
+            PWSTR(command.as_mut_ptr()),
+            None,
+            None,
+            false,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            Some(environment.0),
+            PCWSTR(profile.as_ptr()),
+            &startup.StartupInfo,
+            &mut process,
+        )
+    });
+    unsafe { DeleteProcThreadAttributeList(attributes) };
+    created
+        .map_err(|e| format!("cannot start private user-app launcher; no app was launched: {e}"))?;
+    let helper = OwnedHandle::new(process.hProcess);
+    drop(OwnedHandle::new(process.hThread));
+    let waited = unsafe { WaitForSingleObject(helper.raw(), 14_000) };
+    if waited != WAIT_OBJECT_0 {
+        // This exact short-lived helper is app-owned; the launched user app is
+        // never terminated here or added to the driver's Job.
+        let terminated = unsafe { TerminateProcess(helper.raw(), 125) };
+        if terminated.is_err()
+            || unsafe { WaitForSingleObject(helper.raw(), 1_000) } != WAIT_OBJECT_0
+        {
+            return Err("private launch helper did not retire; launch outcome unknown".into());
+        }
+        return Err(
+            "private launch helper exceeded its launch budget; launch outcome unknown".into(),
+        );
+    }
+    let response: Response = read_limited(&directory.0.join("response.json"))
+        .map_err(|e| format!("private launcher returned no result; launch outcome unknown: {e}"))?;
+    if response.nonce != nonce {
+        return Err("private launcher identity mismatch; launch outcome unknown".into());
+    }
+    match (response.pid, response.error) {
+        (Some(pid), None) => Ok(pid),
+        (None, Some(error)) => Err(error),
+        _ => Err("invalid private launch result; outcome unknown".into()),
+    }
+}
+fn validate(request: &Request) -> Result<(), String> {
+    if request.nonce.len() != 64
+        || !request.nonce.bytes().all(|v| v.is_ascii_hexdigit())
+        || request.owner_pid == 0
+        || request.file.is_empty()
+        || request.file.encode_utf16().count() > 32_000
+        || request.parameters.encode_utf16().count() > 32_000
+        || request.file.contains('\0')
+        || request.parameters.contains('\0')
+        || !matches!(request.show, 4 | 7)
+    {
+        return Err("invalid private app launch request; no app was launched".into());
+    }
+    Ok(())
+}
+fn execute(request: &Request) -> Result<u32, String> {
+    let file = terminated(OsStr::new(&request.file));
+    if request.direct {
+        let command = if request.parameters.is_empty() {
+            format!("\"{}\"", request.file)
+        } else {
+            format!("\"{}\" {}", request.file, request.parameters)
+        };
+        let mut command = terminated(OsStr::new(&command));
+        let startup = STARTUPINFOW {
+            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+            dwFlags: STARTF_USESHOWWINDOW,
+            wShowWindow: request.show as u16,
+            ..Default::default()
+        };
+        let mut process = PROCESS_INFORMATION::default();
+        unsafe {
+            CreateProcessW(
+                PCWSTR(file.as_ptr()),
+                PWSTR(command.as_mut_ptr()),
+                None,
+                None,
+                false,
+                Default::default(),
+                None,
+                PCWSTR::null(),
+                &startup,
+                &mut process,
+            )
+        }
+        .map_err(|e| e.to_string())?;
+        drop(OwnedHandle::new(process.hThread));
+        drop(OwnedHandle::new(process.hProcess));
+        Ok(process.dwProcessId)
+    } else {
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .ok()
+            .map_err(|e| e.to_string())?;
+        struct ComApartment;
+        impl Drop for ComApartment {
+            fn drop(&mut self) {
+                unsafe { CoUninitialize() };
+            }
+        }
+        let _apartment = ComApartment;
+        let operation = terminated(OsStr::new("open"));
+        let parameters = terminated(OsStr::new(&request.parameters));
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            // This short-lived STA has no message loop. Complete shell/DDE
+            // startup before it exits; never leave a pending activation behind.
+            fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+            lpVerb: PCWSTR(operation.as_ptr()),
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: PCWSTR(parameters.as_ptr()),
+            nShow: request.show,
+            ..Default::default()
+        };
+        unsafe { ShellExecuteExW(&mut info) }.map_err(|e| e.to_string())?;
+        if info.hProcess.is_invalid() {
+            Ok(0)
+        } else {
+            let process = OwnedHandle::new(info.hProcess);
+            Ok(unsafe { windows::Win32::System::Threading::GetProcessId(process.raw()) })
+        }
+    }
+}
+fn serve(directory: PathBuf, nonce: String) -> Result<(), String> {
+    if nonce.len() != 64
+        || !nonce.bytes().all(|v| v.is_ascii_hexdigit())
+        || directory.file_name() != Some(OsStr::new(&format!("nomifun-user-app-{nonce}")))
+    {
+        return Err("invalid private launch capability".into());
+    }
+    // The helper has the shell user's environment; its request lives at the
+    // explicit private driver path, never at a path inferred from user HOME.
+    use std::os::windows::fs::MetadataExt;
+    if fs::symlink_metadata(&directory)
+        .map_err(|e| e.to_string())?
+        .file_attributes()
+        & 0x400
+        != 0
+    {
+        return Err("private launch directory is a reparse point".into());
+    }
+    // A single successful rename consumes the capability before any launch.
+    fs::rename(
+        directory.join("request.json"),
+        directory.join("claimed.json"),
+    )
+    .map_err(|e| e.to_string())?;
+    let request: Request = read_limited(&directory.join("claimed.json"))?;
+    validate(&request)?;
+    if request.nonce != nonce {
+        return Err("private launch capability mismatch".into());
+    }
+    let owner = OwnedHandle::new(
+        unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_DUP_HANDLE,
+                false,
+                request.owner_pid,
+            )
+        }
+        .map_err(|e| e.to_string())?,
+    );
+    if creation(owner.raw())? != request.owner_start
+        || unsafe { WaitForSingleObject(owner.raw(), 0) } != WAIT_TIMEOUT
+    {
+        return Err("private launch owner has retired".into());
+    }
+    // Acquire the existing host stderr pipe before becoming launch-capable.
+    // Its EOF now proves that no launch-capable helper remains, even if the
+    // managed driver exits first. It is non-inheritable by the user's app.
+    let source = usize::try_from(request.owner_lifetime_handle)
+        .map_err(|_| "invalid private lifetime handle")?;
+    let mut lifetime = HANDLE::default();
+    unsafe {
+        DuplicateHandle(
+            owner.raw(),
+            HANDLE(source as *mut _),
+            GetCurrentProcess(),
+            &mut lifetime,
+            0,
+            false,
+            DUPLICATE_SAME_ACCESS,
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    let _lifetime = OwnedHandle::new(lifetime);
+    if unsafe { GetFileType(_lifetime.raw()) } != FILE_TYPE_PIPE
+        || unsafe { WaitForSingleObject(owner.raw(), 0) } != WAIT_TIMEOUT
+    {
+        return Err("private launch lifetime is unavailable".into());
+    }
+    // Only this helper is disposable. Its child is the user's application and
+    // remains alive when the driver, this helper or the host retires.
+    std::thread::spawn(move || {
+        // One native wait covers both exact owner death and the launch budget.
+        unsafe { WaitForSingleObject(owner.raw(), HELPER_BUDGET.as_millis() as u32) };
+        std::process::exit(125);
+    });
+    let result = execute(&request);
+    let (pid, error) = match result {
+        Ok(pid) => (Some(pid), None),
+        Err(error) => (None, Some(error)),
+    };
+    write_new(
+        &directory.join("response.json"),
+        &Response { nonce, pid, error },
+    )
+}
+/// Called before the worker parses its ordinary private protocol entry point.
+pub fn run_helper_if_requested() -> Option<i32> {
+    AVAILABLE.store(true, Ordering::Release);
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() != Some(OsStr::new(FLAG)) {
+        return None;
+    }
+    let rest: Vec<_> = args.collect();
+    Some(match rest.as_slice() {
+        [directory, nonce] => match nonce
+            .to_str()
+            .ok_or_else(|| "invalid private nonce".to_owned())
+            .and_then(|nonce| serve(directory.into(), nonce.into()))
+        {
+            Ok(()) => 0,
+            Err(_) => 126,
+        },
+        _ => 126,
+    })
+}

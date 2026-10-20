@@ -49,5 +49,22 @@ Adapted portions include the secret-redaction sanitizer
 defaults (crates/agent/nomi-config). Each adapted site carries a
 prominent upstream-source notice.
 
+Computer Use includes the vendored Cua Driver and a NomiFun private worker
+adapted from its private worker/startup implementation:
+
+  Cua Driver (trycua/cua)
+  https://github.com/trycua/cua
+  Version: 0.37.0
+  Source revision: 4d959bbfa57f0c89f310330e849500b222084194
+  Copyright (c) 2025 Cua AI, Inc.
+  Licensed under the MIT License.
+
+The original MIT text, upstream THIRD_PARTY_NOTICES (including the credited
+trope-cua, Interface-Agent, yabai and T3 Code portions), worker license, and
+locked worker dependency attribution are redistributed in component-notices/.
+The source tree keeps these files under
+crates/backend/nomifun-runtime/notices/. Registered local modifications are
+documented in vendor/CUA-DRIVER-PATCHES.md; upstream copyright is preserved.
+
 Our sincere thanks to the maintainers and communities of the open-source
 projects NomiFun uses.

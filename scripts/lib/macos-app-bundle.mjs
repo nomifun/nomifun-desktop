@@ -259,6 +259,13 @@ export async function signMacosAppBundle({ appPath, identity = '-', target = pro
   await requireFile(entitlementsPath, 'macOS application entitlements');
   const sign = (path, application = false) => run('codesign',
     macosCodeSigningArguments(path, identity, { application, entitlementsPath }));
+  const computerWorker = join(app, 'Contents/MacOS/nomifun-computer-worker');
+  if (await stat(computerWorker).catch(error => { if (error.code === 'ENOENT') return null; throw error; })) {
+    const workerArchitecture = await run('lipo', ['-archs', computerWorker], true);
+    if (workerArchitecture !== architecture) throw new Error(`expected ${architecture} Computer worker, received ${workerArchitecture}`);
+    await sign(computerWorker);
+    await run('codesign', ['--verify', '--strict', computerWorker]);
+  }
   const frameworks = join(app, 'Contents/Frameworks');
   if (await stat(frameworks).catch(error => { if (error.code === 'ENOENT') return null; throw error; })) await signMachO(frameworks, sign);
   const systemHelper = join(app, 'Contents/Library/HelperTools/nomifun-system-execution');

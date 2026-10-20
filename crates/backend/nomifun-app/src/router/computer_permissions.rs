@@ -13,6 +13,27 @@ use nomifun_api_types::ApiResponse;
 use nomifun_common::AppError;
 use serde::{Deserialize, Serialize};
 
+pub(super) fn computer_status_routes(services: &crate::services::AppServices) -> axum::Router {
+    #[cfg(feature = "computer-use")]
+    let handler = {
+        let computer = services.computer.clone();
+        axum::routing::get(move || {
+            let computer = computer.clone();
+            async move { Json(ApiResponse::ok(computer.status())) }
+        })
+    };
+    #[cfg(not(feature = "computer-use"))]
+    let handler = {
+        let _ = services;
+        axum::routing::get(|| async { Json(ApiResponse::ok(serde_json::json!({
+            "worker_version": null, "platform": PLATFORM, "backend": null,
+            "session_type": null, "wayland": null, "atspi": null,
+            "last_error": "Computer is unavailable in this build", "running": false,
+        }))) })
+    };
+    axum::Router::new().route("/api/computer/status", handler)
+}
+
 const PLATFORM: &str = if cfg!(target_os = "macos") {
     "macos"
 } else if cfg!(target_os = "windows") {
@@ -23,16 +44,7 @@ const PLATFORM: &str = if cfg!(target_os = "macos") {
     "other"
 };
 
-fn app_label() -> String {
-    #[cfg(feature = "computer-use")]
-    {
-        nomi_computer::host_app_label()
-    }
-    #[cfg(not(feature = "computer-use"))]
-    {
-        "NomiFun".to_owned()
-    }
-}
+fn app_label() -> String { "NomiFun".to_owned() }
 
 // ---------------------------------------------------------------------------
 // Canonical system-permission inventory
@@ -106,12 +118,12 @@ fn capture_state(_camera: bool) -> SystemPermissionState {
 fn computer_states() -> (SystemPermissionState, SystemPermissionState) {
     #[cfg(all(target_os = "macos", feature = "computer-use"))]
     {
-        let status = nomi_computer::permissions::permission_status();
+        let status = nomifun_computer::permissions::permission_status();
         let accessibility = binary_grant_state(status.accessibility);
         let screen_recording = binary_grant_state(status.screen_recording);
         (accessibility, screen_recording)
     }
-    #[cfg(all(target_os = "windows", feature = "computer-use"))]
+    #[cfg(all(any(target_os = "windows", target_os = "linux"), feature = "computer-use"))]
     {
         // There is no macOS-style up-front TCC switch on these hosts. Native
         // calls may still fail across secure desktop / integrity / display
@@ -120,10 +132,6 @@ fn computer_states() -> (SystemPermissionState, SystemPermissionState) {
             SystemPermissionState::NotRequired,
             SystemPermissionState::NotRequired,
         )
-    }
-    #[cfg(all(target_os = "linux", feature = "computer-use"))]
-    {
-        linux_computer_states(nomi_computer::linux_x11::desktop_state())
     }
     #[cfg(all(not(any(target_os = "macos", target_os = "windows", target_os = "linux")), feature = "computer-use"))]
     { (SystemPermissionState::Unknown, SystemPermissionState::Unknown) }
@@ -136,19 +144,6 @@ fn computer_states() -> (SystemPermissionState, SystemPermissionState) {
             SystemPermissionState::Unknown,
             SystemPermissionState::Unknown,
         )
-    }
-}
-
-#[cfg(all(target_os = "linux", feature = "computer-use"))]
-fn linux_computer_states(desktop_state: nomi_computer::linux_x11::DesktopState) -> (SystemPermissionState, SystemPermissionState) {
-    // A Wayland portal grant belongs to an actual session and is not a
-    // process-wide Boolean. A working X11 connection has no such prompt.
-    match desktop_state {
-        nomi_computer::linux_x11::DesktopState::X11 { .. } => (
-            SystemPermissionState::NotRequired,
-            SystemPermissionState::NotRequired,
-        ),
-        _ => (SystemPermissionState::Unknown, SystemPermissionState::Unknown),
     }
 }
 
@@ -303,10 +298,10 @@ async fn request_computer_kind(kind: &str) {
         // The CoreGraphics / Accessibility prompt calls are synchronous FFI.
         let _ = tokio::task::spawn_blocking(move || match kind.as_str() {
             "accessibility" => {
-                nomi_computer::permissions::request_accessibility();
+                nomifun_computer::permissions::request_accessibility();
             }
             "screen_recording" => {
-                nomi_computer::permissions::request_screen_recording();
+                nomifun_computer::permissions::request_screen_recording();
             }
             _ => {}
         })
@@ -418,51 +413,6 @@ fn macos_bundle_identifier() -> Option<String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Backward-compatible Computer Use API
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-pub(super) struct ComputerPermissionStatus {
-    accessibility: Option<bool>,
-    screen_recording: Option<bool>,
-    platform: &'static str,
-    app_label: String,
-}
-
-fn current_computer_status() -> ComputerPermissionStatus {
-    #[cfg(feature = "computer-use")]
-    {
-        let status = nomi_computer::permissions::permission_status();
-        ComputerPermissionStatus {
-            accessibility: status.accessibility,
-            screen_recording: status.screen_recording,
-            platform: PLATFORM,
-            app_label: app_label(),
-        }
-    }
-    #[cfg(not(feature = "computer-use"))]
-    {
-        ComputerPermissionStatus {
-            accessibility: None,
-            screen_recording: None,
-            platform: PLATFORM,
-            app_label: app_label(),
-        }
-    }
-}
-
-pub(super) async fn computer_permission_status() -> Json<ApiResponse<ComputerPermissionStatus>> {
-    Json(ApiResponse::ok(current_computer_status()))
-}
-
-pub(super) async fn request_computer_permission(
-    Json(body): Json<PermissionRequestBody>,
-) -> Json<ApiResponse<ComputerPermissionStatus>> {
-    request_computer_kind(&body.kind).await;
-    Json(ApiResponse::ok(current_computer_status()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,32 +462,6 @@ mod tests {
         assert_eq!(binary_grant_state(Some(true)), SystemPermissionState::Granted);
         assert_eq!(binary_grant_state(Some(false)), SystemPermissionState::NotGranted);
         assert_eq!(binary_grant_state(None), SystemPermissionState::Unknown);
-    }
-
-    #[cfg(all(target_os = "windows", feature = "computer-use"))]
-    #[test]
-    fn non_macos_computer_permissions_do_not_block_launch() {
-        let (accessibility, screen) = computer_states();
-        assert_eq!(accessibility, SystemPermissionState::NotRequired);
-        assert_eq!(screen, SystemPermissionState::NotRequired);
-    }
-
-    #[cfg(all(target_os = "linux", feature = "computer-use"))]
-    #[test]
-    fn linux_computer_permissions_follow_the_x11_desktop_state() {
-        let (accessibility, screen) = linux_computer_states(
-            nomi_computer::linux_x11::DesktopState::X11 { input: true, window_management: true },
-        );
-        assert_eq!(accessibility, SystemPermissionState::NotRequired);
-        assert_eq!(screen, SystemPermissionState::NotRequired);
-        for state in [
-            nomi_computer::linux_x11::DesktopState::Wayland,
-            nomi_computer::linux_x11::DesktopState::Unavailable("no display".to_owned()),
-        ] {
-            let (accessibility, screen) = linux_computer_states(state);
-            assert_eq!(accessibility, SystemPermissionState::Unknown);
-            assert_eq!(screen, SystemPermissionState::Unknown);
-        }
     }
 
     #[cfg(not(feature = "computer-use"))]

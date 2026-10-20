@@ -70,6 +70,28 @@
 - Do not force-push, rewrite shared history, or expose credentials without
   explicit authorization.
 
+## Active Computer Use rebuild
+
+- For Computer Use replacement work, read the sole
+  [active implementation plan](docs/handoffs/computer-use-rebuild.zh.md) and
+  [authorized start prompt](docs/handoffs/computer-use-rebuild.start-prompt.zh.md).
+  Continue from section 12 under the user's 2026-10-20 revision: complete
+  Windows S1/S2/S3 first; run other platform builds and native validation in
+  parallel. Missing machines, Wayland/DPI environments or model credentials
+  remain pending and do not block local integration. Release validation applies
+  to the platforms being released; never claim unverified support.
+- Use the vendored Cua Driver and NomiFun private worker, with only necessary
+  registered defect patches. Delete the replaced implementation as one complete
+  integration; do not migrate or read retired Computer contracts/data, add
+  compatibility paths, or alter canonical Agent Session storage. Preserve
+  unrelated concurrent main-branch work and the actual HEAD contract version.
+- Current-user desktop testing is authorized for dedicated test windows,
+  sessions and temporary data. Leave real files, credentials, production data
+  and signed-in browsers untouched. Prefer exact test-owned processes for fault
+  cases; isolated accounts, displays or VMs are optional tools, not prerequisites.
+  Keep automated, native and unexecuted evidence distinct, use targeted checks,
+  and retire this scoped entry at S5 after documenting stable contracts.
+
 ## Active Agent lifecycle reliability work
 
 - For this lifecycle/recovery/control/resource-retirement implementation,

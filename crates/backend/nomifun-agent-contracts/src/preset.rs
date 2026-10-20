@@ -2223,10 +2223,6 @@ mod tests {
                 "agent/delegate",
                 "agent/fork",
                 "agent/request_user_decision",
-                "computer/observe",
-                "computer/a11y.observe",
-                "computer/input",
-                "computer/launch",
                 "ssh/fs.read",
                 "ssh/fs.write",
                 "ssh/exec",
@@ -2250,6 +2246,22 @@ mod tests {
             "channel.messaging/send",
         ] {
             assert!(companion.contains(action), "Companion identity or follow-up lost {action}");
+        }
+    }
+
+    #[test]
+    fn official_desktop_agents_grant_the_exact_frozen_computer_surface() {
+        let inventory: serde_json::Value = serde_json::from_str(include_str!(
+            "../contracts/computer-tools.v1.json"
+        )).unwrap();
+        let expected: BTreeSet<_> = inventory["tools"].as_array().unwrap().iter()
+            .map(|tool| tool["action_id"].as_str().unwrap()).collect();
+        assert_eq!(expected.len(), 22);
+        let manifest = official_preset_seed_manifest_payload();
+        for key in [OfficialPresetKey::AssistantGeneral, OfficialPresetKey::CompanionDefault] {
+            let actual: BTreeSet<_> = official_actions(&manifest, key).into_iter()
+                .filter(|action| action.starts_with("computer/")).collect();
+            assert_eq!(actual, expected);
         }
     }
 

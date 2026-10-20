@@ -16,7 +16,7 @@ import { promisify } from 'node:util';
 import { nativeRunCallId, readNativeAnnouncement, validateNativeDataset } from './global-os-native.mjs';
 import { initializeWindowsPrivateEmptyFixture, powershell, psArguments, psLiteral, readWindowsOwnedFixtureBytes,
   windowsLoginIdentity, windowsObservation, windowsProcessObservation } from './global-os-windows-cases.mjs';
-import { windowsIntegrityObservationScript } from './global-os-windows-desktop-cases.mjs';
+import { windowsIntegrityObservationScript } from './global-os-windows-cases.mjs';
 
 const execute = promisify(execFile);
 const delay = ms => new Promise(done => setTimeout(done, ms));

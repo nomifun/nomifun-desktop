@@ -27,12 +27,10 @@ tempfile.workspace = true
 sha2.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-tokio-util.workspace = true
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization",
   "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO",
   "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_Shell",
   "Win32_System_Registry", "Win32_System_RemoteDesktop",
-  "Win32_System_StationsAndDesktops",
   "Win32_UI_WindowsAndMessaging",
 ] }

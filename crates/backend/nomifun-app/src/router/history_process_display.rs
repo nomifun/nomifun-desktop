@@ -28,9 +28,11 @@ pub(super) struct HistoricalToolObservation {
 
 fn record_result(observation: &mut HistoricalToolObservation, result: &AgentToolResult, event_seq: u64) {
     let operation = observation.display.operation.take().filter(|_| observation.capability_id.as_deref() == Some("computer"));
+    let foreground = observation.display.foreground.filter(|_| observation.capability_id.as_deref() == Some("computer"));
     observation.display = nomifun_engine_core::tool_result_display(
         observation.capability_id.as_deref(), observation.action_id.as_deref(), result);
     observation.display.operation = operation;
+    observation.display.foreground = foreground;
     observation.display.file_summary = observation.file_projection.as_ref()
         .map(|projection| projection.settled(result, observation.runtime_hold.is_some()));
     if let (Some(name), Some(target)) = (&observation.name, &observation.requested_stop_target) {
@@ -57,6 +59,8 @@ fn observe_tool_event(event: &Value, event_seq: u64, observations: &mut HashMap<
                 if observation.capability_id.as_deref() != Some(capability) || observation.action_id.as_deref() != Some(action) {
                     observation.file_projection = None;
                     observation.display.file_summary = None;
+                    observation.display.operation = None;
+                    observation.display.foreground = None;
                 }
                 observation.capability_id = Some(capability.to_owned());
                 observation.action_id = Some(action.to_owned());
@@ -81,7 +85,8 @@ fn observe_tool_event(event: &Value, event_seq: u64, observations: &mut HashMap<
             let observation = observations.entry(call.call_id.as_ref().to_owned()).or_default();
             observation.description = nomifun_engine_core::tool_display_target(
                 observation.capability_id.as_deref(), observation.action_id.as_deref(), &call.name, &call.arguments.0);
-            observation.display.operation = nomifun_engine_core::tool_display_operation(observation.capability_id.as_deref(), &call.arguments.0);
+            observation.display.operation = nomifun_engine_core::tool_display_operation(observation.capability_id.as_deref(), observation.action_id.as_deref());
+            observation.display.foreground = nomifun_engine_core::tool_display_foreground(observation.capability_id.as_deref(), observation.action_id.as_deref(), &call.arguments.0);
             observation.file_projection = nomifun_engine_core::ToolFileProjection::from_call(
                 observation.capability_id.as_deref(), observation.action_id.as_deref(), &call.arguments.0);
             observation.display.file_summary = observation.file_projection.as_ref().map(|projection| projection.summary());
@@ -94,6 +99,8 @@ fn observe_tool_event(event: &Value, event_seq: u64, observations: &mut HashMap<
             if observation.capability_id.as_deref() != Some(capability_id.as_ref()) || observation.action_id.as_deref() != Some(action_id.as_ref()) {
                 observation.file_projection = None;
                 observation.display.file_summary = None;
+                observation.display.operation = None;
+                observation.display.foreground = None;
             }
             observation.capability_id = Some(capability_id.as_ref().to_owned());
             observation.action_id = Some(action_id.as_ref().to_owned());
@@ -247,6 +254,29 @@ pub(super) async fn load_historical_tool_observations(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn computer_foreground_is_rederived_from_canonical_admission_and_survives_both_settlements() {
+        use serde_json::json;
+        for (capability, mode, expected) in [("computer", "foreground", Some(true)),
+            ("computer", "background", Some(false)), ("third.party", "foreground", None)] {
+            for settlement in ["tool_completed", "host_tool_settled"] {
+                let values = [
+                    json!({"event":"tool_call_completed","step":1,"call":{"call_id":"desktop","name":"computer_click",
+                        "arguments":{"delivery_mode":mode,"text":"PRIVATE_ARGUMENT"}}}),
+                    json!({"event":"tool_started","step":1,"call_id":"desktop","capability_id":capability,"action_id":"computer/click"}),
+                    json!({"event":settlement,"step":1,"call_id":"desktop","result":{"call_id":"desktop",
+                        "output":[{"type":"text","text":"PRIVATE_RESULT"}],"is_error":false}}),
+                ];
+                let events = values.iter().enumerate().map(|(index, value)| (index as u64 + 1, value)).collect::<Vec<_>>();
+                let observations = super::observe_tool_window(&events);
+                let display = &observations.get("desktop").unwrap().display;
+                assert_eq!(display.foreground, expected);
+                assert_eq!(display.operation.as_deref(), (capability == "computer").then_some("click"));
+                assert!(!format!("{display:?}").contains("PRIVATE_"));
+            }
+        }
+    }
+
     use super::*;
     use super::super::engine_journal::{EngineJournalWrite, test_fixture};
     use nomifun_agent_runtime::AgentToolResult;
@@ -438,65 +468,6 @@ mod tests {
         assert_eq!(tool.projection_id,again.iter().find(|item|item.projection["tool_summary"]["call_id"]=="rejected-report").unwrap().projection_id);
         assert_eq!(before_events,sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events").fetch_one(&pool).await.unwrap());
         assert_eq!(before_projections,sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_messages").fetch_one(&pool).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn system_permission_cold_history_uses_the_exact_committed_result_and_action() {
-        let (journal, pool) = test_fixture().await;
-        let session_id = AgentSessionId::from("0190f5fe-7c00-7a00-8000-000000000002");
-        let body = json!({"schema":"system-permission-required.v1","capability":"computer",
-            "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
-            "execution":"not_executed"}).to_string();
-        let carrier = nomifun_engine_core::system_permission_error_carrier("SYSTEM_PERMISSION_REQUIRED", &body).unwrap();
-        let mut exact_results = HashMap::new();
-        for (index, (capability, is_error, output)) in [
-            ("computer", true, carrier.as_str()), ("computer", false, carrier.as_str()),
-            ("browser", true, carrier.as_str()), ("computer", true, body.as_str()),
-        ].into_iter().enumerate() {
-            let call_id = format!("permission-{index}");
-            journal.append(json!({"event":"tool_call_completed","step":1,"call":{
-                "call_id":call_id,"name":"computer","arguments":{"action":"screenshot"}
-            }}).to_string(), None, EngineJournalWrite::Progress).await.unwrap();
-            journal.append(serde_json::to_string(&AgentEngineEvent::ToolStarted {
-                step: 1, call_id: call_id.clone().into(), capability_id: capability.into(),
-                action_id: "computer/observe".into(),
-            }).unwrap(), None, EngineJournalWrite::Progress).await.unwrap();
-            // The original owner call projection and native Runtime result
-            // share the same canonical chain; no second tool row is created.
-            journal.append(json!({"event":"host_tool_dispatch","dispatch":{
-                "operation_id":format!("operation-{index}"),"call_id":call_id,
-                "capability_id":capability,"action_id":"computer/observe","model_name":"computer"
-            }}).to_string(), None, EngineJournalWrite::Progress).await.unwrap();
-            journal.append(json!({"event":"host_tool_settled","operation_id":format!("operation-{index}"),
-                "call_id":call_id,"result":null,"error":"typed Kernel refusal"
-            }).to_string(), None, EngineJournalWrite::Settlement).await.unwrap();
-            let completed = AgentEngineEvent::ToolCompleted { runtime_hold: None, step: 1,
-                result: AgentToolResult::text(call_id.clone().into(), output, is_error),
-            };
-            let ack_seq = journal.append_with_receipt(serde_json::to_string(&completed).unwrap(),
-                None, EngineJournalWrite::Progress).await.unwrap().expect("canonical append ack");
-            let persisted: i64 = sqlx::query_scalar("SELECT seq FROM agent_events WHERE session_id = ? \
-                AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='tool_completed' \
-                AND json_extract(inline_json,'$.event.result.call_id')=?")
-                .bind(session_id.as_ref()).bind(&call_id).fetch_one(&pool).await.unwrap();
-            assert_eq!(ack_seq, persisted as u64);
-            exact_results.insert(call_id, ack_seq);
-        }
-        let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();
-        let (history, _, _) = store.message_history_before(&session_id, None, 50).await.unwrap();
-        let details = load_historical_tool_observations(&pool, &store, &session_id, &history).await.unwrap();
-        for index in 0..4 {
-            let call_id = format!("permission-{index}");
-            let tools = history.iter().filter(|item| item.projection["tool_summary"]["call_id"] == call_id)
-                .collect::<Vec<_>>();
-            assert_eq!(tools.len(), 1);
-            let detail = details.get(&tools[0].projection_id).unwrap();
-            assert_eq!(detail.result_seq, exact_results.get(&call_id).copied());
-            assert_eq!(detail.permission_required.is_some(), index == 0);
-            assert_eq!(detail.is_error, Some(index != 1));
-            assert!(detail.turn_id.is_some());
-            assert_eq!(detail.action_id.as_deref(), Some("computer/observe"));
-        }
     }
 
     #[tokio::test]

@@ -321,12 +321,12 @@
       },
       {
         "package": {
-          "id": "nomifun.computer-a11y",
+          "id": "nomifun.computer",
           "version": "1.0.0"
         },
         "source": {
           "source_kind": "bundled",
-          "source_identity": "nomifun.computer-a11y"
+          "source_identity": "nomifun.computer"
         },
         "capabilities": [
           {
@@ -349,7 +349,7 @@
                 "capability": {
                   "id": "computer"
                 },
-                "capability_manifest_digest": "69b67849aa7157cf82e370685f994dce9ebaf696e70a315b100f2fe69e76eb62",
+                "capability_manifest_digest": "e658dc8d383b571ef6f0849c121984242ab05534135a117de6bac0112fefe9d6",
                 "requirement": "required"
               }
             ],
@@ -363,7 +363,7 @@
                 "role_id": "system.computer_use",
                 "contract_version": "1.0.0"
               },
-              "contract_digest": "54e1c49ac6475498e538f7527fe20cc3e4f78bbc2e20bdad54a7840b50a4cf6b"
+              "contract_digest": "ac8d23b9329017d746d1d1961e5c4102bdc87af289c3988da15bdfe4a25088a0"
             },
             "display": {
               "name": "Computer Use",
@@ -634,5 +634,5 @@
       }
     ]
   },
-  "payload_digest": "362bfa16385d33220d72865c42975846a0a83c972ef27b386e80581413a918c4"
+  "payload_digest": "3821559376ca7af18d35a7b43e5e77cc5190027131224bd53f648775d17c9c43"
 }

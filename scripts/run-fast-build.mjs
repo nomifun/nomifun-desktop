@@ -13,6 +13,7 @@ import { prepareMacosBuildEnvironment, resolveMacosTarget } from './lib/macos-bu
 import { macosDevelopmentSigningIdentity, macosDevelopmentSigningNotice } from './lib/macos-dev-signing.mjs';
 import { installMacosSystemExecution } from './lib/macos-system-execution.mjs';
 import { prepareLinuxSystemExecution } from './lib/linux-system-execution.mjs';
+import { buildComputerWorker, rustHostTarget } from './computer/build-worker.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -129,17 +130,19 @@ export async function main(args = process.argv.slice(2)) {
     const compiler = process.platform === 'darwin'
       ? await prepareMacosBuildEnvironment({ target: invocation.target, environment })
       : { environment, bundleConfig: null };
-    const metadata = process.platform === 'darwin'
-      ? JSON.parse(await runCommand('cargo', ['metadata', '--format-version', '1', '--no-deps'], { capture: true, environment }))
-      : null;
+    const metadata = JSON.parse(await runCommand('cargo', ['metadata', '--format-version', '1', '--no-deps'], { capture: true, environment }));
     const requestedTarget = invocation.target ?? environment.CARGO_BUILD_TARGET;
     const outDir = metadata ? join(metadata.target_directory, ...(requestedTarget ? [requestedTarget] : []), 'debug') : null;
+    const worker = await buildComputerWorker({ root: ROOT, target: requestedTarget ?? rustHostTarget(compiler.environment), profile: 'debug', environment: compiler.environment });
     const buildArgs = [...invocation.args];
     if (compiler.bundleConfig) {
       const separator = buildArgs.indexOf('--');
       buildArgs.splice(separator < 0 ? buildArgs.length : separator, 0, '--config', compiler.bundleConfig);
     }
     await runCommand(tauri, buildArgs, { environment: compiler.environment });
+    if (process.platform !== 'darwin') {
+      await cp(worker.binary, join(outDir, `nomifun-computer-worker${process.platform === 'win32' ? '.exe' : ''}`));
+    }
     if (process.platform === 'linux') {
       const prepared = await prepareLinuxSystemExecution({ target: requestedTarget, profile: 'debug', environment });
       console.log(`[build:fast] system runner staged: ${prepared.directory}`);

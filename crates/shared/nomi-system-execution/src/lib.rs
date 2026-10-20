@@ -24,7 +24,7 @@ pub use readonly::{SystemReadReceipt, nomifun_system_readonly_worker};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{helper_entry, install_windows_extension_handler, WindowsExecutionExtension, WindowsCancellation};
+pub use windows::helper_entry;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
@@ -101,15 +101,6 @@ unsafe extern "C" {
 }
 
 impl SystemExecutionClient {
-    /// Transfer only this real foreground App's existing Windows permission
-    /// to its authenticated, retained runner. This never activates a window
-    /// and confers no guarantee that the subsequent native focus will succeed.
-    #[cfg(windows)]
-    pub async fn allow_windows_foreground_from_current_app(&self) -> bool {
-        let _admission = self.admission.read().await;
-        self.native.allow_foreground_from_current_app()
-    }
-
     pub fn connect() -> Result<Self, SystemExecutionError> {
         #[cfg(target_os = "macos")]
         {
@@ -237,7 +228,7 @@ impl SystemExecutionClient {
                 None,
             }
             let admission = match request["op"].as_str() {
-                Some("start" | "acquire_read" | "extension") => Admission::Start { _guard: self.admission.clone().read_owned().await },
+                Some("start" | "acquire_read") => Admission::Start { _guard: self.admission.clone().read_owned().await },
                 Some("quiesce" | "shutdown") => Admission::Fence { _guard: self.admission.clone().write_owned().await },
                 _ => Admission::None,
             };
@@ -257,45 +248,6 @@ impl SystemExecutionClient {
                 "Native administrator execution is not implemented on this platform",
             ))
         }
-    }
-
-    /// One original Windows Computer RPC carries its own native cancellation
-    /// Event through authenticated ingress and the original reply/ACK worker.
-    /// Stop never waits for a second RPC or closes another logical client.
-    #[cfg(windows)]
-    pub async fn call_windows_controlled(&self, request: Value,
-        cancellation: &tokio_util::sync::CancellationToken) -> Result<Value, SystemExecutionError> {
-        if request["op"] != "extension" {
-            return Err(SystemExecutionError { code: "invalid_system_request".into(),
-                message: "Controlled Windows calls require the original native extension request".into(),
-                details: json!({"user_code_not_started":true,"cleanup_proven":true}) });
-        }
-        let admission = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => return Err(windows::cancelled_before_dispatch()),
-            guard = self.admission.clone().read_owned() => guard,
-        };
-        let native = self.native.clone();
-        let source = Arc::new(native.cancellation_source()?);
-        struct SignalOnDrop(Arc<windows::CancellationSource>);
-        impl Drop for SignalOnDrop { fn drop(&mut self) { let _ = self.0.signal(); } }
-        let _signal = SignalOnDrop(source.clone());
-        let worker_source = source.clone();
-        let mut worker = tokio::task::spawn_blocking(move || {
-            let _admission = admission;
-            native.call_controlled(request, &worker_source)
-        });
-        let mut delivery_error = None;
-        let result = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => { delivery_error = source.signal().err(); worker.await }
-            result = &mut worker => result,
-        };
-        let result = match result {
-            Ok(result) => result,
-            Err(error) => Err(windows::unknown(format!("Native administrator RPC worker stopped: {error}"))),
-        };
-        windows::retain_control_delivery_error(result, delivery_error)
     }
 
     /// Called by the application's uninstall action, while its signed bundle
@@ -335,12 +287,6 @@ impl SystemExecutionClient {
 struct Runner {
     runtime: tokio::runtime::Runtime,
     supervisor: Arc<ProcessSupervisor>,
-    #[cfg(windows)]
-    extension: Option<Arc<dyn windows::WindowsExecutionExtension>>,
-    #[cfg(windows)]
-    extension_admission: Arc<tokio::sync::RwLock<()>>,
-    #[cfg(windows)]
-    extension_closed: std::sync::atomic::AtomicBool,
 }
 
 fn field<'a>(request: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -443,21 +389,9 @@ impl Runner {
                 .build()
                 .expect("system execution runtime"),
             supervisor: ProcessSupervisor::new(SupervisorConfig::default()),
-            #[cfg(windows)]
-            extension: windows::new_extension(),
-            #[cfg(windows)]
-            extension_admission: Arc::new(tokio::sync::RwLock::new(())),
-            #[cfg(windows)]
-            extension_closed: std::sync::atomic::AtomicBool::new(false),
         }
     }
-    #[cfg(not(windows))]
     async fn perform(&self, request: Value) -> Result<Value, (String, String, Value)> {
-        self.perform_with_cancellation(request, #[cfg(windows)] WindowsCancellation::default()).await
-    }
-
-    async fn perform_with_cancellation(&self, request: Value,
-        #[cfg(windows)] cancellation: WindowsCancellation) -> Result<Value, (String, String, Value)> {
         let invalid = |message: String| {
             (
                 "invalid_system_request".into(),
@@ -487,37 +421,7 @@ impl Runner {
             };
             (error.code().into(), error.to_string(), details)
         };
-        #[cfg(windows)]
-        if request["op"] == "shutdown" {
-            self.extension_closed.store(true, std::sync::atomic::Ordering::Release);
-        }
-        #[cfg(windows)]
-        let _extension_fence = if matches!(request["op"].as_str(),Some("quiesce" | "shutdown")) {
-            Some(self.extension_admission.clone().write_owned().await)
-        } else { None };
         match field(&request, "op").map_err(invalid)? {
-            #[cfg(windows)]
-            "extension" => {
-                let Some(extension) = self.extension.clone() else {
-                    return Err(("SYSTEM_EXECUTION_NOT_AVAILABLE".into(),"This native host has no extension handler".into(),json!({"user_code_not_started":true,"cleanup_proven":true})));
-                };
-                let admission = tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => {
-                        let error = windows::cancelled_before_dispatch();
-                        return Err((error.code, error.message, error.details));
-                    }
-                    guard = self.extension_admission.clone().read_owned() => guard,
-                };
-                if self.extension_closed.load(std::sync::atomic::Ordering::Acquire) {
-                    return Err(("SYSTEM_EXECUTION_CONNECTION_CLOSED".into(),"Native extension admission is closed".into(),json!({"user_code_not_started":true,"cleanup_proven":true})));
-                }
-                let request = request["request"].clone();
-                tokio::task::spawn_blocking(move || {
-                    let _admission = admission;
-                    extension.call_controlled(request, cancellation).map_err(|error|(error.code,error.message,error.details))
-                }).await.map_err(|error|("SYSTEM_EXECUTION_RESULT_UNKNOWN".into(),error.to_string(),json!({"cleanup_proven":false,"user_code_not_started":false})))?
-            }
             "acquire_read" => {
                 let request = serde_json::from_value(request["request"].clone()).map_err(|error|invalid(error.to_string()))?;
                 self.acquire_read(request).await
@@ -620,28 +524,16 @@ impl Runner {
             }
             "quiesce" => {
                 let report = self.supervisor.quiesce().await;
-                #[allow(unused_mut)]
-                let mut exact = report.is_exact();
-                #[allow(unused_mut)]
-                let mut errors = report.errors.clone();
-                #[cfg(windows)]
-                if let Some(extension) = &self.extension {
-                    if let Err(error) = extension.shutdown() { exact=false; errors.push(error.to_string()); }
-                }
+                let exact = report.is_exact();
+                let errors = report.errors.clone();
                 Ok(
                     json!({"exact":exact,"sessions":report.sessions.iter().map(|session|json!({"session_id":session.session_id.to_string(),"invocation_id":session.owner.invocation_id.to_string(),"call_id":session.owner.call_id.to_string(),"outcome":outcome(&session.outcome)})).collect::<Vec<_>>(),"startups":startup_reports(&report.startups),"startup_count":report.startups.len(),"errors":errors}),
                 )
             }
             "shutdown" => {
                 let report = self.supervisor.shutdown().await;
-                #[allow(unused_mut)]
-                let mut exact = report.is_exact();
-                #[allow(unused_mut)]
-                let mut errors: Vec<String> = Vec::new();
-                #[cfg(windows)]
-                if let Some(extension) = &self.extension {
-                    if let Err(error) = extension.shutdown() { exact=false; errors.push(error.to_string()); }
-                }
+                let exact = report.is_exact();
+                let errors: Vec<String> = Vec::new();
                 Ok(
                     json!({"exact":exact,"sessions":report.sessions.iter().map(|session|json!({"session_id":session.session_id.to_string(),"invocation_id":session.owner.invocation_id.to_string(),"call_id":session.owner.call_id.to_string(),"outcome":outcome(&session.outcome)})).collect::<Vec<_>>(),"startups":startup_reports(&report.startups),"startup_count":report.startups.len(),"errors":errors}),
                 )
@@ -783,17 +675,13 @@ impl Runner {
         }
     }
     fn call(&self, bytes: &[u8]) -> Value {
-        self.call_with_cancellation(bytes, #[cfg(windows)] WindowsCancellation::default())
-    }
-
-    fn call_with_cancellation(&self, bytes: &[u8], #[cfg(windows)] cancellation: WindowsCancellation) -> Value {
         let request: Value = match serde_json::from_slice(bytes) {
             Ok(value) => value,
             Err(error) => {
                 return json!({"ok":false,"error":{"code":"invalid_system_request","message":error.to_string(),"details":{"user_code_not_started":true,"cleanup_proven":true}}});
             }
         };
-        match self.runtime.block_on(self.perform_with_cancellation(request, #[cfg(windows)] cancellation)) {
+        match self.runtime.block_on(self.perform(request)) {
             Ok(result) => json!({"ok":true,"result":result}),
             Err((code, message, details)) => {
                 json!({"ok":false,"error":{"code":code,"message":message,"details":details}})

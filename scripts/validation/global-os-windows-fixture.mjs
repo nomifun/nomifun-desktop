@@ -12,15 +12,14 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { allocateLoopbackPort, assertWindowsPrivatePath, powershell, psArguments, psLiteral, readWindowsOwnedFixtureBytes, windowsLoginIdentity, windowsProcessGone, windowsProcessObservation,windowsObservation } from './global-os-windows-cases.mjs';
-import { windowsIntegrityObservationScript } from './global-os-windows-desktop-cases.mjs';
-import {freezeWindowsAdditionalSession,loadWindowsAdditionalSessionReport,verifyWindowsAdditionalSessionReport} from './global-os-windows-unsettled-preservation.mjs';
+import { windowsIntegrityObservationScript } from './global-os-windows-cases.mjs';
+import {freezeWindowsAdditionalSession} from './global-os-windows-unsettled-preservation.mjs';
 import {captureWindowsDailyUriSnapshot,windowsDailyUriLaunchObservation,windowsDailyUriCloseObservation} from './global-os-windows-uri-baseline.mjs';
 import {beginWindowsProcessExitObservation,windowsCloseProcessIdentity} from './global-os-windows-process-exit-observer.mjs';
 
 const delay=ms=>new Promise(done=>setTimeout(done,ms));
 const flag=name=>{const i=process.argv.indexOf(name);return i<0?undefined:process.argv[i+1];};
 async function executableDigest(path) {const hash=createHash('sha256');for await(const bytes of createReadStream(path))hash.update(bytes);return hash.digest('hex');}
-const canonicalDigest=value=>createHash('sha256').update(JSON.stringify(value,(_,entry)=>entry&&typeof entry==='object'&&!Array.isArray(entry)?Object.fromEntries(Object.keys(entry).sort().map(key=>[key,entry[key]])):entry)).digest('hex');
 async function actualAppIdentity(pid,login,exe){
   const integrity=await windowsObservation(windowsIntegrityObservationScript(pid));assert.equal(integrity,8192,'The GUI must retain ordinary Medium integrity');
   const observed=await windowsObservation(`$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}';if($null-eq$p){throw 'Exact App process is absent'};$o=Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid;[pscustomobject]@{pid=$p.ProcessId;session_id=$p.SessionId;sid=$o.Sid;owner_query=$o.ReturnValue}|ConvertTo-Json -Compress`);
@@ -122,50 +121,9 @@ export async function closeWindowsAcceptanceFixture({fixtureReport}) {
   catch{close.daily_uri_registration={status:'readonly_observation_unavailable',registry_restoration_performed:false,raw_values_recorded:false};}
   const path=join(report.report_root,`windows-fixture-close-${randomUUID()}.json`);await writeFile(path,`${JSON.stringify(close,null,2)}\n`,{flag:'wx'});console.log(JSON.stringify({status:close.status,report:path,app_pid:report.app_pid,exit_code:close.exit_code,process_exit_proven:close.process_exit_proven,overall_cleanup_proven:close.overall_cleanup_proven}));assert.equal(close.status,'exited','The coordinated request and exact retained App exit were not proven; retain the dataset and do not force terminate');return close;
 }
-export function assertWindowsUpgradePreservation({before,execution,events}) {
-  assert(['nomifun.windows-desktop-unknown-observation.v1','nomifun.windows-desktop-upgrade-preservation.v2'].includes(before.schema));
-  if(before.execution.unknown_effects===0){
-    assert.equal(before.schema,'nomifun.windows-desktop-upgrade-preservation.v2');const proof=before.owner_reconciliation;assert(proof,'A cleared unknown requires its original canonical human owner reconciliation');assert.equal(proof.outcome,'confirmed_failed');assert.match(proof.human_verification_sha256,/^[a-f0-9]{64}$/);
-    const attestation=proof.attestation_event,reconciled=proof.reconciled_event,value=attestation?.payload?.value;assert.equal(attestation?.kind,'runtime/effect-reconciliation-attested');assert.equal(value?.authority,'session_owner_verified');assert.equal(value?.outcome,'confirmed_failed');assert.equal(value?.effect_id,proof.effect_id);assert.equal(value?.input_digest,proof.input_digest);assert.equal(value?.evidence?.verified,true);assert.equal(value.evidence.evidence_digest,proof.human_verification_sha256);assert.equal(reconciled?.event_id,`${attestation.event_id}:effect`);assert.equal(reconciled?.kind,'effect/reconciled');assert.equal(reconciled?.payload?.value?.outcome,'confirmed_failed');assert.equal(reconciled.payload.value.effect_id,proof.effect_id);assert.equal(reconciled.payload.value.input_digest,proof.input_digest);
-    const uncertain=before.effect_events.find(event=>event.kind==='effect/uncertain'&&event.payload?.value?.effect_id===proof.effect_id&&event.payload.value.outcome==='unknown');assert(uncertain);assert.equal(uncertain.payload.value.input_digest,proof.input_digest);assert(uncertain.seq<attestation.seq&&attestation.seq<reconciled.seq);
-    assert.deepEqual(events.find(event=>event.event_id===attestation.event_id),attestation);assert.deepEqual(events.find(event=>event.event_id===reconciled.event_id),reconciled);
-  }else assert(before.execution.unknown_effects>0,'Upgrade preservation requires the actual original uncertain outcome');
-  assert.equal(execution.agent_session_id??before.session_id,before.session_id);
-  assert.equal(execution.unknown_effects,before.execution.unknown_effects,'An App upgrade cannot erase or settle the original unknown');
-  assert.equal(execution.pending_effects,before.execution.pending_effects);
-  assert.equal(execution.operation_id,before.execution.operation_id);
-  assert.equal(execution.state,before.execution.state);
-  assert(before.effect_events.some(event=>event.kind==='effect/uncertain'&&event.payload?.value?.outcome==='unknown'));
-  for(const original of before.effect_events){
-    const current=events.find(event=>event.event_id===original.event_id&&event.seq===original.seq);
-    assert(current,'An original canonical Effect event disappeared during upgrade');
-    assert.deepEqual(Object.fromEntries(Object.keys(original).map(key=>[key,current[key]])),original,'An original canonical Effect fact changed during upgrade');
-  }
-  if(before.canonical_prefix){const prefix=events.filter(event=>event.seq<=before.canonical_prefix.last_seq);assert.equal(prefix.length,before.canonical_prefix.event_count);assert.equal(canonicalDigest(prefix),before.canonical_prefix.sha256,'Original Session Event/Payload-reference facts changed during upgrade');}
-  if(before.original_unknown_prefix){const prefix=events.filter(event=>event.seq<=before.original_unknown_prefix.last_seq);assert.equal(prefix.length,before.original_unknown_prefix.event_count);assert.equal(canonicalDigest(prefix),before.original_unknown_prefix.sha256,'The original uncertain history must remain intact after owner reconciliation');}
-  return{session_id:before.session_id,operation_id:execution.operation_id,unknown_effects:execution.unknown_effects,pending_effects:execution.pending_effects,original_effect_event_ids:before.effect_events.map(event=>event.event_id),all_original_effect_events_unchanged:true,driver_original_calls_dispatched:0,driver_reconciliation_requests:0};
-}
-export function windowsPreservationValidationEvents(preserved){
-  const events=new Map(preserved.effect_events.map(event=>[event.event_id,event]));
-  for(const event of [preserved.owner_reconciliation?.attestation_event,preserved.owner_reconciliation?.reconciled_event]){
-    if(!event)continue;const compact=events.get(event.event_id);
-    if(compact)assert.deepEqual(Object.fromEntries(Object.keys(compact).map(key=>[key,event[key]])),compact,'Compact Effect facts must exactly match their complete canonical owner event');
-    events.set(event.event_id,event);
-  }
-  return[...events.values()];
-}
-export function assertWindowsDesktopPreservationSource({source,preserved,preservedBytes,preservedSessionReport}){
-  assert.equal(source.status,'ready');
-  const expected=assertWindowsUpgradePreservation({before:{...preserved,canonical_prefix:undefined,original_unknown_prefix:undefined},execution:preserved.execution,events:windowsPreservationValidationEvents(preserved)});
-  if(preserved.app_pid===source.app_pid)return{kind:'direct_original_app',app_pid:source.app_pid};
-  const prior=source.upgrade;assert(prior,'A different App PID requires the exact previous verified upgrade receipt');
-  assert.equal(source.owner_jwt_reused,true);assert.equal(prior.preserved_session_report,resolve(preservedSessionReport));
-  assert.equal(prior.preserved_session_report_sha256,createHash('sha256').update(preservedBytes).digest('hex'));
-  assert.equal(prior.native_data_root_unchanged,true);assert.equal(prior.owner_jwt_unchanged,true);assert.equal(prior.new_dataset_created,false);
-  assert.equal(source.exe_sha256,prior.new_exe_sha256);assert.equal(source.prior_app_pid,preserved.app_pid,'Every prior App hop must have a verified source receipt');
-  assert.deepEqual(prior.canonical_preservation,expected,'The previous upgrade must have verified this exact canonical Session preservation');
-  return{kind:'verified_prior_upgrade',app_pid:source.app_pid,original_guard_app_pid:preserved.app_pid,source_exe_sha256:source.exe_sha256};
-}
+
+
+
 export function assertWindowsPriorAppExited(source,observation) {
   assert.equal(observation.pid,source.app_pid);assert(['running','exited','absent'].includes(observation.state));
   if(observation.state!=='running')return observation;
@@ -177,32 +135,22 @@ export function assertWindowsPriorAppExited(source,observation) {
   // retained-HANDLE exit receipt remains the separate source of its exit code.
   return{...observation,pid_reused:true,expected_prior_creation_filetime:original.creation_filetime,prior_app_running:false};
 }
-export async function restartWindowsAcceptanceFixture({fixtureReport,upgradeExe,preservedSessionReport,additionalSessionReport,buildLabel}) {
+export async function restartWindowsAcceptanceFixture({fixtureReport,buildLabel}) {
   const source=JSON.parse(await readFile(fixtureReport,'utf8'));
   assert.equal(source.schema,'nomifun.windows-global-os-fixture.v1');assert.equal(source.status,'ready');const priorProcess=assertWindowsPriorAppExited(source,windowsProcessObservation(source.app_pid));
   assert.match(basename(source.parent),/^nomifun-global-os-owner-[0-9a-f-]{36}$/);assert.equal(source.native_data_root,join(source.parent,'native-data'));assert.equal(source.token_file,join(source.parent,'owner-jwt'));
   for(const path of [source.parent,source.native_data_root])await assertWindowsPrivatePath(path);
   assert.equal(await readFile(join(source.parent,'.nomifun-global-os-fixture'),'utf8'),'nomifun-global-os-native-acceptance-fixture.v1\n');
   assert.equal(await executableDigest(source.exe),source.exe_sha256,'Same-build persistence acceptance cannot silently replace the native executable');
-  let exe=source.exe,upgrade,preserved,additional;
-  if(upgradeExe){
-    assert(preservedSessionReport,'An explicit App upgrade requires its original unknown Session evidence');
-    exe=await realpath(resolve(upgradeExe));const item=await lstat(exe);assert(item.isFile()&&!item.isSymbolicLink());
-    const newDigest=await executableDigest(exe);assert.notEqual(newDigest,source.exe_sha256,'An explicit upgrade must identify a distinct immutable native binary');
-    const preservedBytes=await readFile(preservedSessionReport);preserved=JSON.parse(preservedBytes);
-    assert(['nomifun.windows-desktop-unknown-observation.v1','nomifun.windows-desktop-upgrade-preservation.v2'].includes(preserved.schema));assert(preserved.canonical_prefix,'Upgrade needs a frozen digest of the complete original canonical event prefix');
-    assert.match(preserved.canonical_prefix.sha256,/^[a-f0-9]{64}$/);assert(preserved.canonical_prefix.event_count>0&&preserved.canonical_prefix.last_seq>0);
-    const preservationSource=assertWindowsDesktopPreservationSource({source,preserved,preservedBytes,preservedSessionReport});
-    upgrade={old_exe:source.exe,old_exe_sha256:source.exe_sha256,new_exe:exe,new_exe_sha256:newDigest,preserved_session_report:resolve(preservedSessionReport),preserved_session_report_sha256:createHash('sha256').update(preservedBytes).digest('hex'),preserved_session_source:preservationSource,native_data_root_unchanged:true,owner_jwt_unchanged:true,new_dataset_created:false};
-    if(additionalSessionReport){additional=await loadWindowsAdditionalSessionReport(resolve(additionalSessionReport),source);Object.assign(upgrade,{additional_session_report:additional.path,additional_session_report_sha256:additional.sha256});}
-  }else {assert(!preservedSessionReport,'Session preservation is only an explicit upgrade argument');assert(!additionalSessionReport,'Additional Session preservation requires the existing explicit upgrade path');}
+  const exe=source.exe;
+
   const token=(await readWindowsOwnedFixtureBytes(source.token_file,4096)).toString('utf8').trim();assert.equal(token.split('.').length,3);
   const uriBefore=await captureWindowsDailyUriSnapshot({parent:source.parent,stage:'before'});
   const cdpPort=await allocateLoopbackPort(),suffix=randomUUID(),stdout=await open(join(source.parent,`app-restart-${suffix}.stdout.log`),'wx'),stderr=await open(join(source.parent,`app-restart-${suffix}.stderr.log`),'wx');
   const data=source.native_data_root,child=spawn(exe,[],{cwd:dirname(exe),windowsHide:true,detached:true,stdio:['ignore',stdout.fd,stderr.fd],env:{...process.env,NOMIFUN_DATA_DIR:data,NOMIFUN_WORK_DIR:join(data,'work'),NOMIFUN_CACHE_DIR:join(data,'cache'),NOMIFUN_LOG_DIR:join(data,'logs'),WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:`--remote-debugging-port=${cdpPort}`}});let spawnError;child.once('error',error=>{spawnError=error;});child.unref();await stdout.close();await stderr.close();
-  const report={...source,status:'restarting',exe,exe_sha256:upgrade?.new_exe_sha256??source.exe_sha256,build_label:buildLabel??source.build_label,upgrade,authenticated_native_caller:undefined,actual_app_identity:undefined,readonly_readiness_verification:undefined,ready_verified_at:undefined,app_pid:child.pid,cdp_port:cdpPort,restart_of:resolve(fixtureReport),prior_app_pid:source.app_pid,prior_process_observation:priorProcess,owner_jwt_reused:true,created_at:new Date().toISOString()};
-  report.daily_uri_registration=windowsDailyUriLaunchObservation({kind:upgrade?'upgrade':'restart',before:uriBefore,priorFixtureReport:fixtureReport});
-  const reportPath=join(source.report_root,`windows-fixture-${upgrade?'upgrade':'restart'}-${suffix}.json`);
+  const report={...source,status:'restarting',exe,exe_sha256:source.exe_sha256,build_label:buildLabel??source.build_label,authenticated_native_caller:undefined,actual_app_identity:undefined,readonly_readiness_verification:undefined,ready_verified_at:undefined,app_pid:child.pid,cdp_port:cdpPort,restart_of:resolve(fixtureReport),prior_app_pid:source.app_pid,prior_process_observation:priorProcess,owner_jwt_reused:true,created_at:new Date().toISOString()};
+  report.daily_uri_registration=windowsDailyUriLaunchObservation({kind:'restart',before:uriBefore,priorFixtureReport:fixtureReport});
+  const reportPath=join(source.report_root,`windows-fixture-restart-${suffix}.json`);
   try{
     const deadline=Date.now()+180000;let announcement;
     while(Date.now()<deadline){
@@ -215,41 +163,19 @@ export async function restartWindowsAcceptanceFixture({fixtureReport,upgradeExe,
     const get=async path=>{const response=await fetch(`${report.base_url}${path}`,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(15000)});assert(response.ok);const body=await response.json();assert.notEqual(body.success,false);return body.data??body;};
     const caller=await get('/api/system/permissions');assert.equal(caller.platform,'windows');assert.equal(caller.process_id,child.pid);
     report.authenticated_native_caller={platform:caller.platform,process_id:caller.process_id,process_identity_available:true};
-    if(preserved){
-      const events=[];let after=0;for(let page=0;page<20;page++){const value=await get(`/api/agent-sessions/${preserved.session_id}/events?after_seq=${after}&limit=500`);events.push(...value.events);if(!value.events.length||value.next_cursor.seq<=after)break;after=value.next_cursor.seq;assert(page<19,'Original Session preservation exceeds bounded pagination');}
-      report.upgrade.canonical_preservation=assertWindowsUpgradePreservation({before:preserved,execution:await get(`/api/agent-sessions/${preserved.session_id}/execution`),events});
-    }
-    if(additional)report.upgrade.additional_canonical_preservation=await verifyWindowsAdditionalSessionReport(additional,report);
-    report.daily_uri_registration=windowsDailyUriLaunchObservation({kind:upgrade?'upgrade':'restart',before:uriBefore,after:await captureWindowsDailyUriSnapshot({parent:source.parent,stage:'after-ready'}),priorFixtureReport:fixtureReport});
+
+
+    report.daily_uri_registration=windowsDailyUriLaunchObservation({kind:'restart',before:uriBefore,after:await captureWindowsDailyUriSnapshot({parent:source.parent,stage:'after-ready'}),priorFixtureReport:fixtureReport});
     report.ready_verified_at=new Date().toISOString();
     return {...report,report_path:reportPath};
   }catch(error){Object.assign(report,{status:'failed',failure:{name:error.name,message:error.message}});throw error;}
   finally{await writeFile(reportPath,`${JSON.stringify(report,null,2)}\n`,{flag:'wx'});console.log(JSON.stringify({status:report.status,report:reportPath,app_pid:child.pid,base_url:report.base_url,native_data_root:data}));}
 }
-export async function verifyExistingWindowsUpgrade({fixtureReport}){
-  const sourceBytes=await readFile(fixtureReport),source=JSON.parse(sourceBytes);assert.equal(source.schema,'nomifun.windows-global-os-fixture.v1');assert.equal(source.status,'failed');assert(source.upgrade&&source.restart_of);assert.equal(source.owner_jwt_reused,true);
-  const original=JSON.parse(await readFile(source.restart_of,'utf8'));assert.equal(original.status,'ready');assert.equal(original.app_pid,source.prior_app_pid);assert.equal(source.native_data_root,original.native_data_root);assert.equal(source.token_file,original.token_file);assert.equal(source.parent,original.parent);assertWindowsPriorAppExited(original,windowsProcessObservation(original.app_pid));assert.equal(await executableDigest(source.exe),source.exe_sha256);assert.equal(source.exe_sha256,source.upgrade.new_exe_sha256);
-  for(const path of [source.parent,source.native_data_root])await assertWindowsPrivatePath(path);assert.equal(await readFile(join(source.parent,'.nomifun-global-os-fixture'),'utf8'),'nomifun-global-os-native-acceptance-fixture.v1\n');
-  const token=(await readWindowsOwnedFixtureBytes(source.token_file,4096)).toString('utf8').trim(),preservedBytes=await readFile(source.upgrade.preserved_session_report);assert.equal(createHash('sha256').update(preservedBytes).digest('hex'),source.upgrade.preserved_session_report_sha256);const preserved=JSON.parse(preservedBytes);
-  const announcement=JSON.parse((await readWindowsOwnedFixtureBytes(join(source.native_data_root,'port.json'),4096)).toString('utf8'));assert.equal(announcement.pid,source.app_pid);assert.equal(announcement.port,Number(new URL(source.base_url).port));
-  const get=async path=>{const response=await fetch(`${source.base_url}${path}`,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(15000)});assert(response.ok);const value=await response.json();assert.notEqual(value.success,false);return value.data??value;};
-  const caller=await get('/api/system/permissions');assert.equal(caller.platform,'windows');assert.equal(caller.process_id,source.app_pid);const target=await waitForRendererTarget(source.cdp_port,Date.now()+60000),renderer=await rendererIdentity(target),identity=await actualAppIdentity(source.app_pid,source.login_identity,source.exe);
-  const events=[];let after=0;for(let page=0;page<20;page++){const value=await get(`/api/agent-sessions/${preserved.session_id}/events?after_seq=${after}&limit=500`);events.push(...value.events);if(!value.events.length||value.next_cursor.seq<=after)break;after=value.next_cursor.seq;assert(page<19);}
-  const preservation=assertWindowsUpgradePreservation({before:preserved,execution:await get(`/api/agent-sessions/${preserved.session_id}/execution`),events});assert.equal(await executableDigest(source.exe),source.exe_sha256);assert.equal(createHash('sha256').update(await readFile(fixtureReport)).digest('hex'),createHash('sha256').update(sourceBytes).digest('hex'));
-  let additionalPreservation;
-  if(source.upgrade.additional_session_report){const additional=await loadWindowsAdditionalSessionReport(source.upgrade.additional_session_report,original);assert.equal(additional.sha256,source.upgrade.additional_session_report_sha256);additionalPreservation=await verifyWindowsAdditionalSessionReport(additional,{...source,status:'ready'});}
-  const report={...source,status:'ready',failure:undefined,renderer,actual_app_identity:identity,authenticated_native_caller:{platform:caller.platform,process_id:caller.process_id,process_identity_available:true},upgrade:{...source.upgrade,canonical_preservation:preservation},readonly_readiness_verification:{original_failed_report:resolve(fixtureReport),original_failed_report_sha256:createHash('sha256').update(sourceBytes).digest('hex'),original_failed_report_unchanged:true,spawn_count:0,owner_setup_calls:0,owner_login_calls:0,agent_effect_calls:0,observed_at:new Date().toISOString()}};
-  if(additionalPreservation)report.upgrade.additional_canonical_preservation=additionalPreservation;
-  const path=join(source.report_root,`windows-fixture-upgrade-readback-${randomUUID()}.json`);await writeFile(path,JSON.stringify(report,null,2)+'\n',{flag:'wx'});console.log(JSON.stringify({status:'ready',report:path,app_pid:source.app_pid,base_url:source.base_url,original_canonical_prefix_event_count:preserved.canonical_prefix.event_count,original_canonical_prefix_unchanged:true,readonly_verification:true}));return{...report,report_path:path};
-}
+
 if(process.argv[1]===fileURLToPath(import.meta.url)){
-  if(flag('--preserve-additional-session-report'))assert(flag('--upgrade-existing-fixture')&&flag('--preserve-session-report'),'Additional preservation requires the original Desktop preservation and explicit same-dataset upgrade');
-  if(process.argv.includes('--help'))console.log('node scripts/validation/global-os-windows-fixture.mjs --exe C:\\ABS\\nomifun-desktop.exe --report-root C:\\ABS\\EVIDENCE [--build-label source-build]; --close-fixture-report C:\\ABS\\fixture.json requests existing coordinated product exit; --restart-fixture-report C:\\ABS\\ready-fixture.json restarts the same executable/dataset; --upgrade-existing-fixture C:\\ABS\\ready-fixture.json --exe C:\\ABS\\NEW.exe --preserve-session-report C:\\ABS\\unknown-observation.json explicitly upgrades after exact old PID exit. Both reuse original private owner JWT; upgrade verifies original unknown canonical Effect facts unchanged. Fresh launch alone performs normal owner setup/login. Never kills an App, changes an existing owner or deletes a dataset.');
+  if(process.argv.includes('--help'))console.log('node scripts/validation/global-os-windows-fixture.mjs --exe ABS_NATIVE_APP --report-root ABS_EVIDENCE [--build-label SOURCE]; --close-fixture-report ABS_FIXTURE requests coordinated product exit; --restart-fixture-report ABS_READY restarts the same executable/dataset after exact prior process exit. Fresh launch alone performs normal private owner setup/login.');
   else if(flag('--freeze-additional-session'))await freezeWindowsAdditionalSession({sessionId:flag('--freeze-additional-session'),fixtureReport:flag('--fixture-report'),sourceObservation:flag('--source-observation'),reportRoot:flag('--report-root')});
   else if(flag('--close-fixture-report'))await closeWindowsAcceptanceFixture({fixtureReport:flag('--close-fixture-report')});
   else if(flag('--restart-fixture-report'))await restartWindowsAcceptanceFixture({fixtureReport:flag('--restart-fixture-report')});
-  else if(flag('--verify-existing-upgrade-report'))await verifyExistingWindowsUpgrade({fixtureReport:flag('--verify-existing-upgrade-report')});
-  else if(flag('--upgrade-existing-fixture')){assert(flag('--exe')&&flag('--preserve-session-report'),'Upgrade requires --exe and --preserve-session-report');await restartWindowsAcceptanceFixture({fixtureReport:flag('--upgrade-existing-fixture'),upgradeExe:flag('--exe'),preservedSessionReport:flag('--preserve-session-report'),additionalSessionReport:flag('--preserve-additional-session-report'),buildLabel:flag('--build-label')});}
   else {assert(flag('--exe')&&flag('--report-root'),'--exe and --report-root are required');await launchWindowsAcceptanceFixture({exe:flag('--exe'),reportRoot:flag('--report-root'),buildLabel:flag('--build-label')});}
-  if(process.argv.includes('--help'))console.log('Read-only optional extra evidence: --freeze-additional-session 01a14893-93f7-7a90-b573-bc0b31116207 --fixture-report ABS_READY --source-observation ABS_ORIGINAL_UNC_JSON --report-root ABS_EVIDENCE. It does not close or restart an App. After review, append --preserve-additional-session-report ABS_SIDECAR to the existing upgrade command while retaining its mandatory Desktop --preserve-session-report. No reconciliation, replay, owner/dataset change or terminal settlement is performed.');
 }

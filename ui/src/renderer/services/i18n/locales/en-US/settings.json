@@ -380,10 +380,25 @@
     },
     "computer": {
       "title": "Computer Use",
-      "summary": "Observes and controls the whole desktop using Screen Recording and Accessibility.",
+      "summary": "Observe the desktop and interact with apps and the clipboard; system access is checked per action.",
       "description": "Grant access to the running NomiFun app, not a terminal or editor. Only an Agent that explicitly contains the Computer capability can invoke these actions.",
-      "ready": "The system permissions required for Computer Use on this platform are ready.",
-      "blocked": "Computer Use is not ready. Grant access to {{app}}. If the system toggle is already on, remove the stale entry and grant it again."
+      "ready": "macOS system access is ready; each action still checks its required permissions.",
+      "blocked": "Some actions need system access. Grant the corresponding permissions to {{app}}.",
+      "platformLimits": "Windows uses UIA. Linux capabilities depend on the current X11 / Wayland session and AT-SPI. Check driver status and action results for available backends and limits.",
+      "driver": {
+        "title": "Desktop driver",
+        "description": "Read-only status. Opening this page does not start the driver.",
+        "process": "Process",
+        "running": "Running",
+        "stopped": "Not running",
+        "version": "Worker version",
+        "platform": "Platform",
+        "backend": "Backend",
+        "sessionType": "Desktop session",
+        "available": "Available",
+        "unavailable": "Unavailable",
+        "loadFailed": "Could not read desktop driver status. Try again."
+      }
     },
     "browser": {
       "title": "Browser Use",

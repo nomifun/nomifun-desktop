@@ -5,6 +5,14 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- Rebuild Computer Use around a private Cua Driver worker, with generated
+  actions, accessibility tools for models without image input, driver status
+  and visible foreground-operation markers. Applications opened by Computer
+  Use remain open when the driver retires.
+- **Computer Use upgrade:** sessions bound to the retired Computer contract
+  require a new session; existing history is retained. Reselect Computer
+  actions in personal Agents. No previous Computer contract or data is migrated.
+
 ## v0.8.14 - 2026-10-18
 
 - Supersedes the retracted v0.8.13 with the same content plus consistent

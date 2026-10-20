@@ -68,7 +68,7 @@ mod tests {
                 }
                 | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Ssh { input }
                 | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Browser { input }
-                | nomifun_agent_domain_wave2::Wave2CapabilityOperation::ComputerA11y { input } => {
+                | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Computer { input } => {
                     input
                 }
             }
@@ -323,7 +323,7 @@ mod tests {
             "CAPABILITY_UNAVAILABLE",
             "process spawn failed: Permission denied (os error 13); executable=/tmp/native tool; cwd=/Volumes/Test; secret=NEVER_EMIT",
         );
-        let mapped = kernel_error_for_action(error, true, false, false).to_string();
+        let mapped = kernel_error_for_action(error, true, false).to_string();
         assert!(mapped.contains("Permission denied (os error 13)"));
         assert!(mapped.contains("executable=/tmp/native tool"));
         assert!(mapped.contains("cwd=/Volumes/Test"));
@@ -336,7 +336,6 @@ mod tests {
                 "CAPABILITY_UNAVAILABLE",
                 "process spawn failed: secret=NEVER_EMIT",
             ),
-            false,
             false,
             false,
         ).to_string();
@@ -367,16 +366,15 @@ mod tests {
         assert_eq!(code, "INVALID_PAYLOAD");
         assert_eq!(actual, Some(details.clone()));
 
-        for (is_process, is_file_write, is_computer_launch, message) in [
-            (false, false, false, "unrelated outer diagnostic"),
-            (true, false, false, "process owner failed"),
-            (false, true, false, "workspace.files failed: cannot resolve parent of a file"),
-            (false, false, true, "launch target path does not exist"),
-            (true, true, false, "owner reported success but the canonical terminal observation could not be committed"),
+        for (is_process, is_file_write, message) in [
+            (false, false, "unrelated outer diagnostic"),
+            (true, false, "process owner failed"),
+            (false, true, "workspace.files failed: cannot resolve parent of a file"),
+            (true, true, "owner reported success but the canonical terminal observation could not be committed"),
         ] {
             let mapped = kernel_error_for_action(
                 failure_with_details(message, details.clone()),
-                is_process, is_file_write, is_computer_launch,
+                is_process, is_file_write,
             );
             let EngineToolError::CapabilityKernel { code, details: actual, .. } = mapped else {
                 panic!("typed owner failure changed class")
@@ -478,7 +476,7 @@ mod tests {
             ("SYSTEM_EXECUTION_APPROVAL_REQUIRED", "The operating system requires native administrator approval"),
             (crate::SYSTEM_PERMISSION_REQUIRED, r#"{"kind":"system-permission-required.v1","permissions":["accessibility"],"status":"not_executed"}"#),
         ] {
-            let mapped = kernel_error_for_action(KernelError::capability_execution_failed(code, detail), true, false, false);
+            let mapped = kernel_error_for_action(KernelError::capability_execution_failed(code, detail), true, false);
             let EngineToolError::CapabilityKernel { code: actual, message, .. } = mapped else { panic!("changed typed failure") };
             assert_eq!(actual, code);
             assert_eq!(message, detail);
@@ -489,7 +487,7 @@ mod tests {
     fn file_failure_preserves_native_cause_and_gives_global_path_repair() {
         let detail = "workspace.files failed: cannot resolve parent of PRIVATE_PATH: secret=NEVER_EMIT";
         let mapped = kernel_error_for_action(
-            KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, true, false,
+            KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, true,
         ).to_string();
         assert!(mapped.contains("parent is unavailable"));
         assert!(mapped.contains("created automatically"));
@@ -497,29 +495,9 @@ mod tests {
         assert!(mapped.contains("native absolute or Session-default-directory relative"));
         assert!(!mapped.contains("NEVER_EMIT"));
         let unrelated = kernel_error_for_action(
-            KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, false, false,
+            KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, false,
         ).to_string();
         assert!(!unrelated.contains("created automatically"));
-    }
-
-    #[test]
-    fn computer_launch_missing_path_has_bounded_actionable_guidance() {
-        let detail = "role provider failed: launch target path \"PRIVATE_PATH\" does not exist; secret=NEVER_EMIT";
-        let mapped = kernel_error_for_action(
-            KernelError::capability_execution_failed("ROLE_HOST_PROVIDER_FAILURE", detail),
-            false,
-            false,
-            true,
-        );
-        let EngineToolError::CapabilityKernel { code, message, .. } = mapped else {
-            panic!("Computer launch failure changed error class")
-        };
-        assert_eq!(code, "ROLE_HOST_PROVIDER_FAILURE");
-        assert!(message.contains("target path does not exist"), "{message}");
-        assert!(message.contains("Do not guess"), "{message}");
-        assert!(message.contains("No successful launch"), "{message}");
-        assert!(message.contains("PRIVATE_PATH"));
-        assert!(!message.contains("NEVER_EMIT"));
     }
 
     #[test]
@@ -543,7 +521,6 @@ mod tests {
                 KernelError::capability_execution_failed("CAPABILITY_UNAVAILABLE",detail),
                 false,
                 true,
-                false,
             );
             let EngineToolError::CapabilityKernel { code,message, .. } = mapped else {
                 panic!("settlement loss changed error class")
@@ -581,7 +558,6 @@ mod tests {
             let mapped = kernel_error_for_action(
                 KernelError::capability_execution_failed("CAPABILITY_UNAVAILABLE",detail),
                 is_process,
-                false,
                 false,
             );
             let EngineToolError::CapabilityKernel { code,message, .. } = mapped else {
@@ -827,14 +803,4 @@ mod tests {
             [read_exposure(fixture.action_id)],
         ).is_err());
     }
-}
-#[test]
-fn system_permission_kernel_failure_preserves_the_typed_host_body() {
-    let body = serde_json::json!({"schema":"system-permission-required.v1","capability":"computer",
-        "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
-        "execution":"not_executed"}).to_string();
-    let mapped = super::kernel_error(nomifun_agent_kernel::KernelError::capability_execution_failed("SYSTEM_PERMISSION_REQUIRED", body.clone()));
-    let crate::EngineToolError::CapabilityKernel { code, message, .. } = mapped else { panic!("explicit Kernel failure was collapsed") };
-    assert_eq!(code, "SYSTEM_PERMISSION_REQUIRED");
-    assert_eq!(message, body);
 }

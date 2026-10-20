@@ -53,7 +53,7 @@
           "availability": "release_manifest_defined"
         },
         "computer": {
-          "availability": "independent_partial_or_exact_unavailable"
+          "availability": "release_manifest_defined"
         }
       }
     }

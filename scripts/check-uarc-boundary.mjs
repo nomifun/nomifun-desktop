@@ -520,10 +520,10 @@ export function assertSelfTest() {
   const literals = collectLiteralMatches(sample, ['alpha']);
   invariant(literals.length === 2 && literals[1].line === 2, 'literal scanner self-test failed');
   const identifiers = collectIdentifierMatches(
-    'fs.read ssh.fs.read workspace.files/read fs.read.detail computer/a11y.observe a11y.observe',
-    ['fs.read', 'a11y.observe'],
+    'fs.read ssh.fs.read workspace.files/read fs.read.detail scope/files.list files.list',
+    ['fs.read', 'files.list'],
   );
-  invariant(identifiers.length === 2 && identifiers.map((match) => match.term).join(',') === 'fs.read,a11y.observe',
+  invariant(identifiers.length === 2 && identifiers.map((match) => match.term).join(',') === 'fs.read,files.list',
     'identifier scanner self-test failed');
   const rustProduction = rustProductionText(
     '#[cfg(test)]\nmod tests { const SQL: &str = "FROM conversations"; }\nconst SQL: &str = "FROM agent_sessions";\n',

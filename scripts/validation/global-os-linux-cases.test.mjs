@@ -27,8 +27,6 @@ test('Linux CLI rejects historical continuation and incomplete lifecycle options
     [['--continue-session', 'historical-session'], /Unsupported Linux option --continue-session/],
     [['--app-pid', '12345'], /--app-pid requires the retained-service scenario/],
     [['--administrator', '--administrator'], /Duplicate option --administrator/],
-    [['--scenario', 'desktop'], /Desktop acceptance requires its private --x11-session-root/],
-    [['--x11-session-root', '/tmp/not-a-private-session'], /--x11-session-root requires --scenario desktop/],
   ]) await assert.rejects(execute(process.execPath, [script, ...args]), error => error.code === 1 && diagnostic.test(error.stderr) && !error.stderr.includes('ENOENT'));
 });
 

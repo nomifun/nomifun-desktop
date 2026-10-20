@@ -7224,40 +7224,6 @@ mod session_boundary_tests {
     }
 
     #[test]
-    fn system_permission_history_transport_uses_only_typed_canonical_observation() {
-        let session_id = AgentSessionId::from(SESSION_ID);
-        let message_id = "0190f5fe-7c00-7a00-8abc-012345678912";
-        let body = json!({"schema":"system-permission-required.v1","capability":"computer",
-            "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
-            "execution":"not_executed"}).to_string();
-        let carrier = nomifun_engine_core::system_permission_error_carrier("SYSTEM_PERMISSION_REQUIRED", &body).unwrap();
-        let permission = nomifun_engine_core::project_system_permission_required(
-            Some("computer"), Some("computer/observe"), true, &carrier).unwrap();
-        let projection = || MessageProjection {
-            session_id: session_id.clone(), projection_id: format!("tool:{message_id}"),
-            first_seq: 4, last_seq: 6, presentation_intent: "tool".into(), message_type: None, message_status: None,
-            projection: json!({"correlation_id":message_id,"state":"recorded","tool_summary":{
-                "call_id":"permission-call","name":"computer","error_code":"SYSTEM_PERMISSION_REQUIRED",
-                "permission_required":permission,"result_seq":999999
-            }}), semantic_digest: "digest".into(),
-        };
-        let unsupported = canonical_message_response_with_observation(&session_id, 1000, projection(), None).unwrap().unwrap();
-        assert!(unsupported.content.get("permission_required").is_none());
-        assert!(unsupported.content.get("error_code").is_none());
-        assert!(unsupported.content.get("result_seq").is_none());
-        let confirmed = canonical_message_response_with_observation(&session_id, 1000, projection(),
-            Some(&HistoricalToolObservation {
-                capability_id: Some("computer".into()), action_id: Some("computer/observe".into()),
-                is_error: Some(true), result_seq: Some(42),
-                permission_required: Some(permission), ..Default::default()
-            })).unwrap().unwrap();
-        assert_eq!(confirmed.content["status"], "error");
-        assert_eq!(confirmed.content["error_code"], "SYSTEM_PERMISSION_REQUIRED");
-        assert_eq!(confirmed.content["permission_required"]["permissions"], json!(["screen_recording"]));
-        assert_eq!(confirmed.content["result_seq"], 42);
-    }
-
-    #[test]
     fn history_projects_public_step_text_with_its_turn_identity() {
         let session_id = AgentSessionId::from(SESSION_ID);
         let root = "0190f5fe-7c00-7a00-8abc-012345678911";

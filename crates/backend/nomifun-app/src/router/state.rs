@@ -531,12 +531,6 @@ async fn build_nomi_core_agent_api_state(
         )?);
         bindings
     };
-    #[cfg(feature = "computer-use")]
-    let installation_role_bindings = {
-        let mut bindings = installation_role_bindings;
-        bindings.extend(super::agent_role_host::installation_binding(&materialized)?);
-        bindings
-    };
     let environment = CompilerEnvironment {
         resolver_version: VersionString::from(CONTRACT_VERSION),
         required_runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
@@ -604,6 +598,8 @@ async fn build_nomi_core_agent_api_state(
     let engine_sessions = Arc::new(super::engine_session_host::EngineSessionHost::new(
         &conversation_owner, Arc::clone(&control_plane), &services.official_runtime, services.database.pool().clone(), services.encryption_key,
         super::engine_kernel_session::EngineKernelAssembly {
+            #[cfg(feature = "computer-use")]
+            computer: services.computer.clone(),
             kernel: Arc::clone(&kernel), environment: environment.clone(), wave2: Arc::clone(&builtin_plan.wave2_owner),
             context_admission: Arc::clone(&platform_builtin_context_admission),
             knowledge: Arc::clone(&services.knowledge_service),

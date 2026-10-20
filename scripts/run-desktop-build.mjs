@@ -2,6 +2,7 @@
 // Product builds use the platform's complete application packaging pipeline.
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { buildComputerWorker, rustHostTarget } from './computer/build-worker.mjs';
 
 export function desktopBuildCommand(platform, args) {
   if (platform === 'darwin' || platform === 'linux') {
@@ -13,6 +14,12 @@ export function desktopBuildCommand(platform, args) {
 
 if (import.meta.main) {
   const forwarded = process.argv.slice(2).filter(argument => argument !== '--');
+  if (process.platform === 'win32') {
+    const targetIndex = forwarded.findIndex(argument => argument === '--target' || argument === '-t');
+    const target = forwarded.find(argument => argument.startsWith('--target='))?.slice('--target='.length)
+      ?? (targetIndex >= 0 ? forwarded[targetIndex + 1] : rustHostTarget());
+    await buildComputerWorker({ target, profile: forwarded.includes('--debug') || forwarded.includes('-d') ? 'debug' : 'release' });
+  }
   const invocation = desktopBuildCommand(process.platform, forwarded);
   const built = spawnSync(invocation.command, invocation.args, { stdio: 'inherit', env: { ...process.env, CI: 'true', NOMIFUN_EMBED_OFFICECLI: '1' } });
   if (built.error) throw built.error;

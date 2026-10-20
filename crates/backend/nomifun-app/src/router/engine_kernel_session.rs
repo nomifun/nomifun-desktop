@@ -105,6 +105,8 @@ impl nomifun_engine_core::EngineToolInvoker for ConstrainedTools {
 }
 
 pub(crate) struct EngineKernelAssembly {
+    #[cfg(feature = "computer-use")]
+    pub computer: Arc<nomifun_computer::Computer>,
     pub kernel: Arc<KernelRegistry>,
     pub environment: CompilerEnvironment,
     pub wave2: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
@@ -183,6 +185,10 @@ struct State {
 /// One production resource context per live registered Session runtime.
 /// Created only by EngineSessionHost from genuine owner-resolved facts.
 pub struct EngineKernelSession {
+    #[cfg(feature = "computer-use")]
+    computer: Arc<nomifun_computer::Computer>,
+    #[cfg(feature = "computer-use")]
+    computer_attempt: Arc<super::computer_host::ComputerAttemptSurface>,
     resource_tasks: nomifun_ai_agent::engine_sdk::EngineTaskGroup,
     knowledge_writebacks: knowledge_writeback::KnowledgeWritebacks,
     resource_settlement_failed: std::sync::atomic::AtomicBool,
@@ -367,7 +373,7 @@ impl EngineKernelSession {
             super::nomi_core_wave2::NomiWorkspaceWatchContext::start_if_present(&workspace)?
                 .map(|watch| watch as Arc<dyn ContextContributor>)
         } else { None };
-        let route_image_input = snapshot
+        let supports_route_feature = |feature| snapshot
             .content
             .chat_route_identity
             .as_ref()
@@ -382,9 +388,10 @@ impl EngineKernelSession {
                 std::iter::once(&record.primary)
                     .chain(record.failovers.iter())
                     .any(|candidate| candidate.features.contains(
-                        &nomifun_agent_contracts::ChatRouteFeature::ImageInput,
+                        &feature,
                     ))
             });
+        let route_image_input = supports_route_feature(nomifun_agent_contracts::ChatRouteFeature::ImageInput);
         if process_selected {
             let indices = binding
                 .typed_resource_bindings
@@ -417,6 +424,10 @@ impl EngineKernelSession {
         let registry = assembly.kernel.snapshot().map_err(failure)?;
         super::nomi_core_mcp_catalog::validate_resources(&compiled, &registry, principal)?;
         Ok(Self {
+            #[cfg(feature = "computer-use")]
+            computer: assembly.computer.clone(),
+            #[cfg(feature = "computer-use")]
+            computer_attempt: Arc::new(super::computer_host::ComputerAttemptSurface::new(session_id.clone(), compiled.snapshot_ref().clone())),
             resource_tasks: nomifun_ai_agent::engine_sdk::EngineTaskGroup::new(32)?,
             knowledge_writebacks: knowledge_writeback::KnowledgeWritebacks::new(session.agent_binding().binding_version)?,
             resource_settlement_failed: false.into(),
@@ -495,6 +506,13 @@ impl EngineKernelSession {
     /// they never hard-code Knowledge, Companion, or Plugin context sources.
     pub async fn initial_capability_context(&self) -> Result<Option<String>, AppError> {
         Ok(self.capability_context().await?.initial.clone())
+    }
+
+    pub(super) fn model_attempt_projection(&self) -> Option<Arc<dyn nomifun_chat_model_broker::ChatAttemptProjection>> {
+        #[cfg(feature = "computer-use")]
+        { self.computer_attempt.has_tools().then(|| self.computer_attempt.clone() as Arc<dyn nomifun_chat_model_broker::ChatAttemptProjection>) }
+        #[cfg(not(feature = "computer-use"))]
+        { None }
     }
 
     async fn capability_context(&self) -> Result<&CapabilityContext, AppError> {
@@ -992,7 +1010,14 @@ impl EngineKernelSession {
     ) -> Result<EngineToolPlan, AppError> {
         let preview = self.active.snapshot().map_err(failure)?;
         let registry = self.registry_snapshot()?;
-        let exposures = exposures.into_iter().take(257).collect::<Vec<_>>();
+        let exposures = exposures.into_iter().take(257);
+        #[cfg(feature = "computer-use")]
+        let exposures = exposures.filter_map(|exposure| super::computer_host::project_exposure(
+            exposure, nomifun_computer::surface::RouteTier::Full,
+        ));
+        #[cfg(not(feature = "computer-use"))]
+        let exposures = exposures.filter(|exposure| exposure.capability_id.as_ref() != "computer");
+        let exposures = exposures.collect::<Vec<_>>();
         if exposures.len() > 256 {
             return Err(failure("tool surface exceeds the platform bound"));
         }
@@ -1054,6 +1079,8 @@ impl EngineKernelSession {
                 "tool plan differs from the canonical Session mapping",
             ));
         }
+        #[cfg(feature = "computer-use")]
+        self.computer_attempt.bind_plan(&plan).map_err(failure)?;
         for definition in plan.model_definitions() {
             let binding = plan
                 .binding(&definition.name)
@@ -1094,7 +1121,12 @@ impl EngineKernelSession {
             route_image_input: self.route_image_input,
         };
         let invoker: Arc<dyn nomifun_engine_core::EngineToolInvoker> = Arc::new(invoker);
-        let invoker = super::engine_computer_media::ComputerMediaTools {
+        #[cfg(feature = "computer-use")]
+        let invoker: Arc<dyn nomifun_engine_core::EngineToolInvoker> = Arc::new(super::computer_host::ComputerModelTools {
+            inner: invoker, snapshot: self.compiled.clone(), active: self.active.clone(),
+            attempt: self.computer_attempt.clone(),
+        });
+        let invoker = super::engine_computer_media::BrowserMediaTools {
             inner: invoker,
             snapshot: self.compiled.clone(),
             active: self.active.clone(),
@@ -1326,6 +1358,8 @@ impl EngineKernelSession {
         })
         .await;
         let tasks = guard_effect_settlement(|| tools.join()).await;
+        #[cfg(feature = "computer-use")]
+        if tasks.is_ok() { self.computer_attempt.clear(); }
         let retained_processes = guard_effect_settlement(|| async {
             if release_session { Ok(()) } else {
                 self.wave2.ensure_runtime_processes_retained(&self.principal.principal_id, self.session_id.as_ref()).await
@@ -1535,6 +1569,8 @@ impl EngineKernelSession {
             // fresh Runtime with no ToolHost but retained Session processes.
             self.wave2.cleanup_runtime_session(&self.principal.principal_id,self.session_id.as_ref()).await?;
         }
+        #[cfg(feature = "computer-use")]
+        self.computer.close_session(self.session_id.as_ref()).await.map_err(failure)?;
         *self
             .creation_turn_root
             .lock()

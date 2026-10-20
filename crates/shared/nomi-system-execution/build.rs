@@ -71,15 +71,9 @@ fn main() {
         for relative in [
             "apps/desktop/src/main.rs", "apps/web/src/main.rs",
             "crates/backend/nomifun-app/src/main.rs", "crates/backend/nomifun-app/src/lib.rs",
-            "crates/backend/nomifun-app/src/windows_computer.rs",
-            "crates/backend/nomifun-app/src/router/agent_role_host.rs",
             "crates/backend/nomifun-app/Cargo.toml",
-            "crates/agent/nomi-computer/Cargo.toml", "crates/agent/nomi-a11y/Cargo.toml",
         ] {
             hash_file(&root, &root.join(relative), &mut identity);
-        }
-        for relative in ["crates/agent/nomi-computer/src", "crates/agent/nomi-a11y/src"] {
-            hash_sources(&root, &root.join(relative), &mut identity);
         }
     }
     identity.update(env::var("TARGET").expect("build target"));

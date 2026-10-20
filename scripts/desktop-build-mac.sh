@@ -303,6 +303,7 @@ BASE_CARGO_ENCODED_RUSTFLAGS_SET="${CARGO_ENCODED_RUSTFLAGS+x}"
 for t in "${TRIPLES[@]}"; do
   echo ""
   echo "▶▶▶ 构建 $t ..."
+  computer_worker="$(bun "$ROOT/scripts/computer/build-worker.mjs" --target "$t" --profile release)"
   # Tauri's updater archive precedes final signing. Disable it here and generate
   # both distribution formats only after the final App is signed.
   updater="$(bun "$APP_BUNDLE_TOOL" build-settings --root "$ROOT" -- ${PASSTHRU[@]+"${PASSTHRU[@]}"})"
@@ -342,6 +343,10 @@ for t in "${TRIPLES[@]}"; do
   # this exact Cargo output before final nested signing changes its seal.
   cmp -s "$ROOT/target/$t/release/nomifun-desktop" "$app/Contents/MacOS/nomifun-desktop" || {
     echo "❌ Tauri App does not contain this exact desktop build; refusing stale or mismatched output。" >&2
+    exit 1
+  }
+  cmp -s "$computer_worker" "$app/Contents/MacOS/nomifun-computer-worker" || {
+    echo "❌ Tauri App does not contain this exact Computer worker。" >&2
     exit 1
   }
   bun "$ROOT/scripts/lib/macos-system-execution.mjs" --root "$ROOT" --target "$t" --profile release --app "$app"

@@ -17,7 +17,7 @@ mod tool_file_display;
 pub use tool_file_display::ToolFileProjection;
 mod tool_schema;
 pub use tool_schema::model_tool_schema;
-pub use tool_display::{ToolDisplayFacts, ToolBoundedResult, WrittenKnowledgeFile, tool_display_target, tool_result_target, tool_result_display, tool_display_operation, tool_denied_stop_target};
+pub use tool_display::{ToolDisplayFacts, ToolBoundedResult, WrittenKnowledgeFile, tool_display_target, tool_result_target, tool_result_display, tool_display_operation, tool_display_foreground, tool_denied_stop_target};
 
 pub use error::{EngineProcessError, EngineToolError};
 pub use system_permission::{SystemPermissionKind, SystemPermissionRequired, SYSTEM_PERMISSION_REQUIRED,

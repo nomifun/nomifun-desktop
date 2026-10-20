@@ -106,7 +106,6 @@ pub enum CapabilityContractSubject {
 pub enum CapabilityAvailability {
     RequiredExactSet,
     ReleaseManifestDefined,
-    IndependentPartialOrExactUnavailable,
     ExactUnavailable { error_code: CanonicalErrorCode },
 }
 
@@ -534,7 +533,7 @@ fn validate_target_cell(
             HostSurface::Desktop,
             "appimage-deb-rpm",
             CapabilityAvailability::ReleaseManifestDefined,
-            CapabilityAvailability::IndependentPartialOrExactUnavailable,
+            CapabilityAvailability::ReleaseManifestDefined,
         ),
     };
 

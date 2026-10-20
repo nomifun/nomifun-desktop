@@ -244,8 +244,8 @@
         "body": "The native owner reported a failure. Review its original error and execution state in the details."
       },
       "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED": {
-        "title": "Confirm this conversation’s Agent configuration",
-        "body": "The upgrade changes permissions, tool sources, or execution requirements, so this conversation’s Agent configuration cannot be updated automatically. Confirm its configuration through the conversation’s Agent selector to continue. Existing records are preserved."
+        "title": "Start a new session",
+        "body": "This session relies on capabilities that have changed. Start a new session to continue; your existing records will be kept."
       },
       "INTERRUPTED_BY_RESTART": {
         "title": "Task interrupted by app exit",
@@ -596,6 +596,10 @@
       "CRON_MODEL_RESELECTION_REQUIRED": {
         "title": "Choose the task model again",
         "body": "The task's model configuration was removed. Edit the task and choose an available model before enabling it. For a bound conversation, change its model in that conversation first."
+      },
+      "CAPABILITY_ACTION_NOT_MATERIALIZED": {
+        "title": "Start a new session",
+        "body": "This session relies on capabilities that have changed. Start a new session to continue; your existing records will be kept."
       }
     },
     "adjustAndRetry": "Adjust and retry",

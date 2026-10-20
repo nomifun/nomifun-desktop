@@ -65,7 +65,7 @@ async fn storage_maintenance_admission(
 }
 
 use super::computer_permissions::{
-    computer_permission_status, open_permission_settings, request_computer_permission,
+    computer_status_routes, open_permission_settings,
     request_system_permission, system_permission_status,
 };
 use super::health::{
@@ -1021,13 +1021,11 @@ fn create_nomi_core_router_with_all_state(
     );
 
     // Host OS permission inventory + prompt (macOS TCC). The canonical system
-    // surface includes microphone, Accessibility and Screen Recording. Keep
-    // the old Computer-only paths as API-compatible aliases while product UI
-    // converges on /api/system/permissions.
+    // surface includes microphone, Accessibility and Screen Recording.
     let system_permissions_read_authenticated = protect_instance_owner(
         Router::new()
             .route("/api/system/permissions", get(system_permission_status))
-            .route("/api/computer/permissions", get(computer_permission_status)),
+            .merge(computer_status_routes(services)),
         &auth_mw_state,
         &instance_owner_state,
     );
@@ -1042,14 +1040,6 @@ fn create_nomi_core_router_with_all_state(
             )
             .route(
                 "/api/system/permissions/open-settings",
-                post(open_permission_settings),
-            )
-            .route(
-                "/api/computer/permissions/request",
-                post(request_computer_permission),
-            )
-            .route(
-                "/api/computer/permissions/open-settings",
                 post(open_permission_settings),
             )
             .route_layer(middleware::from_fn(require_local_trust_middleware)),

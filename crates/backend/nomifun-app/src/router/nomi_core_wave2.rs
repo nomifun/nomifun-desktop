@@ -89,8 +89,8 @@ pub(crate) fn declared_role_bindings(
             nomifun_agent_domain_wave2::BROWSER_MOUNT_ID,
             nomifun_agent_domain_wave2::BROWSER_PACKAGE_ID),
         (nomifun_agent_domain_wave2::COMPUTER_EXECUTION_ROLE_ID,
-            nomifun_agent_domain_wave2::COMPUTER_A11Y_MOUNT_ID,
-            nomifun_agent_domain_wave2::COMPUTER_A11Y_PACKAGE_ID),
+            nomifun_agent_domain_wave2::COMPUTER_MOUNT_ID,
+            nomifun_agent_domain_wave2::COMPUTER_PACKAGE_ID),
     ] {
         let role_id = nomifun_agent_contracts::ExecutionRoleId::from(role);
         let mount_id = nomifun_agent_contracts::AgentModuleId::from(mount);

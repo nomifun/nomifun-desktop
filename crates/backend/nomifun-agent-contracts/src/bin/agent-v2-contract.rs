@@ -8,7 +8,8 @@ use nomifun_agent_contracts::{
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     AgentStoreSchemaManifestPayload,
     IdmmDecisionExplanation, IdmmDecisionNotice, ContextClearedPayloadV1, AgentTurnOutcome,
-    MessageTimeline, MessageTimelineUpdate, RuntimeToolHoldReason, SystemExecutionFailure, ToolDetailPage,
+    MessageTimeline, MessageTimelineSegment, MessageTimelineUpdate, TimelineSegmentKind, TimelineSegmentState,
+    RuntimeToolHoldReason, SystemExecutionFailure, ToolDetailPage,
     ToolDetailSection, ToolDetailAvailability, ToolDetailFormat, ToolDetailRetention,
     ToolFileSummary, ToolFileEntry, ToolFileOperation, ToolFileSummaryKind,
     TurnWorkspaceFilesObservedV1, KnowledgeWritebackStartedV1, KnowledgeWritebackSettledV1,
@@ -305,7 +306,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let system_error_binding = SystemExecutionFailure::export_to_string(&ts_rs::Config::default())?
         .replace("\r\n", "\n").replace('\r', "\n");
     let system_error_binding = format!("{}\n", system_error_binding.lines().map(str::trim_end).collect::<Vec<_>>().join("\n"));
-    let tool_detail_bindings = [
+    let presentation_bindings = [
         ("ToolDetailPage", ToolDetailPage::export_to_string(&ts_rs::Config::default())?),
         ("ToolDetailSection", ToolDetailSection::export_to_string(&ts_rs::Config::default())?),
         ("ToolDetailAvailability", ToolDetailAvailability::export_to_string(&ts_rs::Config::default())?),
@@ -315,6 +316,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         ("ToolFileEntry", ToolFileEntry::export_to_string(&ts_rs::Config::default())?),
         ("ToolFileOperation", ToolFileOperation::export_to_string(&ts_rs::Config::default())?),
         ("ToolFileSummaryKind", ToolFileSummaryKind::export_to_string(&ts_rs::Config::default())?),
+        ("MessageTimeline", MessageTimeline::export_to_string(&ts_rs::Config::default())?),
+        ("MessageTimelineSegment", MessageTimelineSegment::export_to_string(&ts_rs::Config::default())?),
+        ("MessageTimelineUpdate", MessageTimelineUpdate::export_to_string(&ts_rs::Config::default())?),
+        ("TimelineSegmentKind", TimelineSegmentKind::export_to_string(&ts_rs::Config::default())?),
+        ("TimelineSegmentState", TimelineSegmentState::export_to_string(&ts_rs::Config::default())?),
     ].map(|(name, binding)| {
         let binding = binding.replace("\r\n", "\n").replace('\r', "\n");
         (root.join(format!("../../../ui/src/common/protocolBindings/{name}.ts")),
@@ -329,7 +335,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         fs::write(&outcome_binding_path, &outcome_binding)?;
         fs::write(&system_error_binding_path, &system_error_binding)?;
-        for (path, binding) in &tool_detail_bindings { fs::write(path, binding)?; }
+        for (path, binding) in &presentation_bindings { fs::write(path, binding)?; }
     } else {
         check_json(&seed_path, &seed)?;
         check_json(&platform_path, &platform)?;
@@ -353,7 +359,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             return Err(format!("generated artifact drift: {}; run agent-v2-contract write",
                 system_error_binding_path.display()).into());
         }
-        for (path, binding) in &tool_detail_bindings {
+        for (path, binding) in &presentation_bindings {
             if fs::read_to_string(path)?.replace("\r\n", "\n") != *binding {
                 return Err(format!("generated artifact drift: {}; run agent-v2-contract write", path.display()).into());
             }

@@ -1,12 +1,12 @@
 import { expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { nativeAdministratorInstructionContext, nativeAdministratorInstructionProof, nativeCompletionArguments, nativeCompletionContract, nativeCanonicalPathReconsideration,nativeInstructionDeferral,nativeComputerNoEffectAdmission,nativeRetainedSessionPreservation,nativeInstallerPhases,nativeStableAnnouncementSnapshot,nativeCompletionPlanControl,nativeSmbControlOptions } from './global-os-native.mjs';
+import { nativeAdministratorInstructionContext, nativeAdministratorInstructionProof, nativeCompletionArguments, nativeCompletionContract, nativeCanonicalPathReconsideration,nativeInstructionDeferral,nativeRetainedSessionPreservation,nativeInstallerPhases,nativeStableAnnouncementSnapshot,nativeCompletionPlanControl,nativeSmbControlOptions } from './global-os-native.mjs';
 import {resolve} from 'node:path';
 
 test('SMB primitive control has explicit original evidence and same private App identity without borrowing source continuation',()=>{
   const options={scenario:'smb-disposition-control',platform:'win32',preservedUncReport:resolve('own-failed-unc.json'),nativeDataRoot:resolve('private/native-data')};
   expect(()=>nativeSmbControlOptions(options)).not.toThrow();
-  for(const change of [{preservedUncReport:undefined},{preservedUncReport:'relative'},{nativeDataRoot:undefined},{nativeDataRoot:'relative'},{platform:'darwin'},{administrator:true},{continueSession:'source'},{missingDefault:true},{protectedUserDirectory:true},{retainServiceForAppExit:true},{desktopBackgroundFocus:true},{installerReport:'artifact'}])expect(()=>nativeSmbControlOptions({...options,...change})).toThrow();
+  for(const change of [{preservedUncReport:undefined},{preservedUncReport:'relative'},{nativeDataRoot:undefined},{nativeDataRoot:'relative'},{platform:'darwin'},{administrator:true},{continueSession:'source'},{missingDefault:true},{protectedUserDirectory:true},{retainServiceForAppExit:true},{installerReport:'artifact'}])expect(()=>nativeSmbControlOptions({...options,...change})).toThrow();
   expect(()=>nativeSmbControlOptions({...options,scenario:'unc'})).toThrow();
   expect(()=>nativeSmbControlOptions({scenario:'files-process',platform:'win32'})).not.toThrow();
 });
@@ -37,14 +37,6 @@ test('retained-task restart preserves exact original canonical prefix, owner and
   for(const change of [value=>{value.after.session.agent_session_id='replacement';},value=>{value.after.session.owner_ref.principal_id='different-owner';},value=>{value.after.session.agent_binding.typed_resource_bindings.push({resource_kind:'computer',resource_id:'manually-added'});},value=>{value.eventsAfter[1].payload.payload_id='replacement-payload';},value=>{value.eventsAfter[0].agent_session_id='foreign';},value=>{value.eventsBefore.pop();}]){const invalid=structuredClone(input);change(invalid);expect(()=>nativeRetainedSessionPreservation(invalid)).toThrow();}
 });
 
-test('high-integrity route admission requires exact canonical typed no-effect failure and never consumes unknown/provider failure',()=>{
-  const sessionId='session',operationId='turn',callId='route-probe',callArguments={action:'focus_window',window_id:123,expected_generation:10},raw='[tool error]\nComputer observation is stale';
-  const event=(seq,kind,value,correlation_id=operationId)=>({agent_session_id:sessionId,seq,kind,correlation_id,payload:{storage:'inline_json',value}});
-  const effect={effect_id:'effect',operation_id:`${operationId}:tool:${callId}`,owner_domain:'computer',action_id:'computer/input',input_digest:'a'.repeat(64),resource_key:'computer:original'};
-  const events=[event(1,'runtime/progress-recorded',{event:{event:'tool_call_completed',step:1,call:{call_id:callId,name:'computer_input',arguments:callArguments}}}),event(2,'effect/started',effect,'effect'),event(3,'effect/failed',{...effect,error:{code:'ROLE_HOST_STALE_OBSERVATION_GENERATION'}},'effect'),event(4,'runtime/progress-recorded',{event:{event:'tool_completed',step:1,result:{call_id:callId,is_error:true,output:[{type:'text',text:'Computer observation is stale'}]}}})];
-  const input={raw,callId,callArguments,events,operationId,sessionId};expect(nativeComputerNoEffectAdmission(input).native_input_not_applied).toBe(true);
-  for(const change of [value=>{value.events[2].kind='effect/uncertain';},value=>{value.events[2].payload.value.error.code='ROLE_HOST_PROVIDER_FAILURE';},value=>{value.events[2].payload.value.input_digest='b'.repeat(64);},value=>{value.events[0].agent_session_id='other-session';},value=>{value.events.push({...value.events[2],seq:5,kind:'effect/reconciled'});},value=>{value.callArguments={...value.callArguments,expected_generation:11};}]){const invalid=structuredClone(input);change(invalid);expect(()=>nativeComputerNoEffectAdmission(invalid)).toThrow();}
-});
 
 function fixture() {
   const operationId = 'turn:test', root = '/private/tmp/fixture/admin-root', path = `${root}/AGENTS.md`, marker = 'NOMIFUN_ADMIN_INSTRUCTION_fixture';
@@ -227,7 +219,7 @@ test('continuation options admit only the one complete pinned administrator tupl
   for (const changed of [{ administrator: false }, { scenario: 'system' }, { scenario: 'desktop' }, { template: 'chat.minimal' },
     { continueSession: 'different' }, { continuationSourceReport: undefined }, { continueSession: undefined },
     { continuationSourceReport: pin.sourceReport + '.awaiting_app_exit.json' }, { nativeDataRoot: undefined },
-    { nativeDataRoot: '/private/tmp/other/native-data' }, { protectedUserDirectory: true }, { retainServiceForAppExit: true }, { desktopBackgroundFocus: true }]) {
+    { nativeDataRoot: '/private/tmp/other/native-data' }, { protectedUserDirectory: true }, { retainServiceForAppExit: true }]) {
     expect(() => nativeContinuationOptions({ ...options, ...changed })).toThrow();
   }
 });

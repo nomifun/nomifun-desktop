@@ -215,7 +215,7 @@
     },
     "computer": {
       "name": "Computer",
-      "description": "High-privilege extension. Missing OS grants disable only Computer actions, not the Agent's other capabilities."
+      "description": "Observe the desktop and interact with apps and the clipboard. Some actions use the foreground desktop; system permissions are checked when actions run."
     },
     "creationMedia": {
       "name": "Media creation",
@@ -365,7 +365,6 @@
     "fs_write": "Write remote files",
     "sudo": "Run privileged commands",
     "claim": "Claim work",
-    "a11y_observe": "Inspect accessibility tree",
     "vision": "Use robot vision",
     "display": "Use robot display",
     "motion": "Control motion",
@@ -661,7 +660,13 @@
     "hideList": "Hide Agent list",
     "saveAsMine": "Save as my Agent",
     "readyToSave": "Ready for server validation",
-    "resetTemplate": "Restore preset capabilities"
+    "resetTemplate": "Restore preset capabilities",
+    "computerGroups": {
+      "observation": "Observation",
+      "interaction": "Interaction",
+      "application": "Apps",
+      "clipboard": "Clipboard"
+    }
   },
   "runtimePolicy": {
     "title": "Runtime & supervision",

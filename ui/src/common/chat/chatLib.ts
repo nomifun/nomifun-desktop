@@ -28,7 +28,7 @@ import { normalizeModelFailureDiagnostic, sanitizeDiagnosticDetail, type ModelFa
 import { normalizeSystemExecutionFailure, type SystemExecutionFailure } from './systemExecutionError';
 import { normalizeKnowledgeWritebackDiagnostic, type KnowledgeWritebackDiagnostic } from './knowledgeWritebackDiagnostic';
 import { isAbsoluteLocalPath, isFileUri } from '../utils/localPath';
-import { computerPermissionKindsForOperation } from './computerPermissionContract';
+import { computerPermissionKindsForOperation } from './computerSurface';
 import type { AgentUserInputRequest } from '../protocolBindings/AgentUserInputRequest';
 import type { AgentTurnOutcome } from '../protocolBindings/AgentTurnOutcome';
 import { normalizeAgentTurnOutcome, mergeAgentTurnOutcome } from './turnOutcome';
@@ -272,6 +272,8 @@ export type IMessageToolCall = IMessage<
     /** Canonical identity projected by the host, separate from the model alias. */
     capability_id?: string;
     action_id?: string;
+    /** Typed Computer input disposition supplied by the canonical host. */
+    foreground?: boolean;
     error?: string;
     error_code?: string;
     permission_required?: SystemPermissionRequired;
@@ -357,6 +359,8 @@ export type IMessageToolGroup = IMessage<
     status: 'Executing' | 'Success' | 'Error' | 'Canceled' | 'Pending';
     operation?: string;
     action_id?: string;
+    foreground?: boolean;
+    capability_id?: string;
     error_code?: string;
     permission_required?: SystemPermissionRequired;
     result_seq?: number;
@@ -801,8 +805,8 @@ export const normalizeSystemPermissionRequired = (value: unknown, actionId: unkn
     value.permissions.some(kind => kind !== 'screen_recording' && kind !== 'accessibility')) return undefined;
   const required = computerPermissionKindsForOperation(value.action_id, value.operation);
   const permissions = value.permissions;
-  if (actionId !== value.action_id || required.length === 0 || permissions.length !== required.length ||
-    !required.every(kind => permissions.includes(kind))) return undefined;
+  if (actionId !== value.action_id || required.length === 0 || new Set(permissions).size !== permissions.length ||
+    !permissions.every(kind => required.includes(kind))) return undefined;
   return { schema: value.schema, capability: value.capability, action_id: value.action_id,
     operation: value.operation, permissions: [...new Set(value.permissions)].sort(), execution: value.execution };
 };
@@ -822,6 +826,8 @@ export const normalizeToolGroupContent = (value: unknown): IMessageToolGroup['co
         name: toDisplayText(item.name, 'Tool'),
         status,
         ...(typeof item.action_id === 'string' ? { action_id: item.action_id } : {}),
+        ...(typeof item.capability_id === 'string' ? { capability_id: item.capability_id } : {}),
+        ...(typeof item.foreground === 'boolean' ? { foreground: item.foreground } : {}),
         ...(typeof item.operation === 'string' ? { operation: item.operation } : {}),
         ...(typeof item.result_seq === 'number' && Number.isSafeInteger(item.result_seq) && item.result_seq >= 0 ? { result_seq: item.result_seq } : {}),
         ...(typeof item.error_code === 'string' ? { error_code: item.error_code } : {}),
@@ -932,6 +938,7 @@ export const normalizeToolCallContent = (
     ...(isObject(data.managed_file_paths) ? { managed_file_paths: data.managed_file_paths as Record<string, string> } : {}),
     ...(typeof data.capability_id === 'string' ? { capability_id: data.capability_id } : {}),
     ...(typeof data.action_id === 'string' ? { action_id: data.action_id } : {}),
+    ...(typeof data.foreground === 'boolean' ? { foreground: data.foreground } : {}),
     ...(typeof data.description === 'string' ? { description: data.description } : {}),
     file_summary: normalizeToolFileSummary(data.file_summary, data.capability_id, data.action_id,
       status === 'completed' && Number.isSafeInteger(data.result_seq) && Number(data.result_seq) > 0 && !data.runtime_hold && !data.error),

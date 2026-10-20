@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/agent/*", "crates/backend/*", "crates/shared/*", "apps/web", "apps/desktop"]
-exclude = ["vendor/wry", "vendor/tauri", "vendor/tauri-runtime-wry"]
+exclude = ["vendor/wry", "vendor/tauri", "vendor/tauri-runtime-wry", "vendor/cua-driver", "apps/computer-worker"]
 
 [patch.crates-io]
 # Child-WebView shutdown belongs to the native browser owner, not a JS callback.
@@ -83,8 +83,7 @@ nomi-types = { path = "crates/agent/nomi-types" }
 nomi-compact = { path = "crates/agent/nomi-compact" }
 nomi-config = { path = "crates/agent/nomi-config" }
 nomi-providers = { path = "crates/agent/nomi-providers" }
-nomi-computer = { path = "crates/agent/nomi-computer" }
-nomi-a11y = { path = "crates/agent/nomi-a11y" }
+nomifun-computer = { path = "crates/backend/nomifun-computer" }
 nomi-browser-engine = { path = "crates/agent/nomi-browser-engine" }
 
 # --- Core framework ---
@@ -243,8 +242,6 @@ unicase = "2.9"
 
 # --- Computer / browser use ---
 image = { version = "0.25", default-features = false, features = ["png"] }
-xcap = "0.9"
-enigo = "0.6"
 # In-process self-hosted CDP browser engine (nomi-browser-engine). 0.9.1 has NO
 # `tokio-runtime` feature — its transport rides `async-tungstenite` and is
 # runtime-agnostic, so the core CDP engine needs NO extra features here.

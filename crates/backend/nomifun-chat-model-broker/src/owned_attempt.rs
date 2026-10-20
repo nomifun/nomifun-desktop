@@ -85,10 +85,10 @@ impl ChatModelBroker{
         let routes=tokio::select!{biased;_=cancellation.cancelled()=>return Err(cleanup_error("owned model opening cancelled")),result=self.prepare(&request)=>result?};
         let operation_id=request.causality.operation_id.clone();
         let adapters=self.adapters.clone();let credential_store=self.credential_store.clone();let route_resolver=self.route_resolver.clone();
-        let retry_policy=self.retry_policy;let capability_observer=self.capability_observer.clone();
+        let retry_policy=self.retry_policy;let capability_observer=self.capability_observer.clone();let attempt_projection=self.attempt_projection.clone();
         let(sender,receiver)=mpsc::channel(BROKER_STREAM_CAPACITY);let producer_cancel=cancellation.clone();
         let worker=tokio::spawn(async move{tokio::select!{biased;_=producer_cancel.cancelled()=>{},_=sender.closed()=>{},
-            _=run_broker(request,routes,adapters,route_resolver,credential_store,retry_policy,capability_observer,sender.clone())=>{}}});
+            _=run_broker(request,routes,adapters,route_resolver,credential_store,retry_policy,capability_observer,attempt_projection,sender.clone())=>{}}});
         let owner=OwnedProducer{operation_id,task_id:worker.id().to_string(),cancellation:cancellation.clone(),state:Mutex::new(ProducerState{worker:Some(worker),receipt:None})};
         // No await occurs between producing the worker and returning its owner.
         Ok(OwnedChatAttempt{stream:ChatModelStream{receiver,cancellation},shutdown:Arc::new(owner)})

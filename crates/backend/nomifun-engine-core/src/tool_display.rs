@@ -24,6 +24,8 @@ pub struct ToolDisplayFacts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_summary: Option<nomifun_agent_contracts::ToolFileSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub written_knowledge_file: Option<WrittenKnowledgeFile>,
@@ -43,13 +45,14 @@ pub enum ToolBoundedResult { SearchContextWithheld }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WrittenKnowledgeFile { pub kb_id: String, pub rel_path: String }
 
-pub fn tool_display_operation(capability: Option<&str>, arguments: &Value) -> Option<String> {
+pub fn tool_display_operation(capability: Option<&str>, action: Option<&str>) -> Option<String> {
     if capability != Some("computer") { return None; }
-    let operation = arguments.get("action")?.as_str()?;
-    matches!(operation, "screenshot" | "observe" | "click_element" | "set_element_value" | "right_click_element"
-        | "double_click_element" | "left_click" | "right_click" | "middle_click" | "double_click" | "triple_click"
-        | "mouse_move" | "left_click_drag" | "type" | "key" | "scroll" | "focus_window")
-        .then(|| operation.to_owned())
+    nomifun_agent_contracts::computer_driver_tool(action?).map(str::to_owned)
+}
+
+pub fn tool_display_foreground(capability: Option<&str>, action: Option<&str>, arguments: &Value) -> Option<bool> {
+    tool_display_operation(capability, action)?;
+    Some(nomifun_agent_contracts::computer_action_uses_foreground(action?, arguments))
 }
 
 /// The compatibility Gateway returns an explicit structured denial. English
@@ -347,8 +350,6 @@ mod tests {
         let result = EngineToolResult::text("write".into(), json!({"resource_id":kb,"relative_path":"notes/fact.md","created":true,"content":"PRIVATE"}).to_string(), false);
         let facts = tool_result_display(Some("knowledge"), Some("knowledge/write"), &result);
         assert_eq!(facts.written_knowledge_file, Some(WrittenKnowledgeFile { kb_id:kb.into(),rel_path:"notes/fact.md".into() }));
-        assert_eq!(tool_display_operation(Some("computer"), &json!({"action":"screenshot","text":"PRIVATE"})).as_deref(), Some("screenshot"));
-        assert!(tool_display_operation(Some("mcp.fake"), &json!({"action":"screenshot"})).is_none());
         assert_eq!(tool_display_target(Some("web.research"), Some("web.research/fetch"), "web_fetch", &json!({"url":"https://pvp.qq.com/path?q=x"})).as_deref(), Some("pvp.qq.com"));
         let denial = json!({"error":"session_capability_denied","tool":"nomi_stop_conversation"});
         let result = EngineToolResult::text("stop".into(), json!({"content":[{"type":"text","text":denial.to_string()}]}).to_string(), false);

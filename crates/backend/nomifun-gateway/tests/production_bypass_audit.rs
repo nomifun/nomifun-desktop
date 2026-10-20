@@ -1,9 +1,7 @@
-//! Static guard for the SL-S3-06 Browser/Computer bypass migration.
+//! Keep concrete Browser/Computer execution out of the Gateway.
 //!
-//! This test is the production bypass gate for SL-S3-06. Browser/Computer
-//! capability modules and the standalone computer stdio bridge are deleted;
-//! the scan remains to prevent concrete implementation dependencies from
-//! returning to the Gateway.
+//! Capability dispatch belongs to the Kernel's admitted hosts. The Gateway
+//! must not create a private Computer worker or a native Browser owner.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,16 +14,8 @@ struct Marker {
 
 const DIRECT_BYPASS_MARKERS: &[Marker] = &[
     Marker {
-        name: "direct ComputerTool construction",
-        needle: "ComputerTool::new(",
-    },
-    Marker {
-        name: "direct ComputerTool execution",
-        needle: ".tool.execute(",
-    },
-    Marker {
-        name: "direct ComputerRegistry execution",
-        needle: "reg.execute(input).await",
+        name: "direct Computer host construction",
+        needle: "nomifun_computer::",
     },
     Marker {
         name: "direct ManagedBrowserFacade construction",
@@ -41,7 +31,7 @@ const DIRECT_BYPASS_MARKERS: &[Marker] = &[
     },
     Marker {
         name: "concrete computer dependency declaration",
-        needle: "nomi-computer",
+        needle: "nomifun-computer",
     },
     Marker {
         name: "concrete browser dependency declaration",

@@ -924,9 +924,11 @@ pub(crate) async fn run_turn(
         // Discovery cannot share an execution batch. Ask supporting providers
         // for one call while both kinds are visible; keep the complete-batch
         // guard below even if a provider ignores this delivery preference.
-        model_request.input.parallel_tool_calls = if model_request.input.tools.len() > 1
+        let computer_active = model_request.input.tools.iter().any(|tool|
+            request.tool_plan.binding(&tool.name).is_some_and(|binding| binding.capability_id.as_ref() == "computer"));
+        model_request.input.parallel_tool_calls = if computer_active || (model_request.input.tools.len() > 1
             && model_request.input.tools.iter().any(|tool| tool.name == crate::tool_discovery::TOOL_NAME)
-            && !model_request.input.tools.iter().any(|tool| tool.name == crate::silent_completion::TOOL_NAME)
+            && !model_request.input.tools.iter().any(|tool| tool.name == crate::silent_completion::TOOL_NAME))
         { Some(false) } else { requested_parallel_tool_calls };
         context_lifecycle.prepare(&mut model_request, &retained_inputs, &binding, model.clone(), event_sink.as_ref(), cancellation.clone()).await?;
         let context_bytes = serde_json::to_vec(&model_request.input)
@@ -3456,6 +3458,8 @@ async fn invoke_tool_calls(
     }
     let mut calls = Vec::with_capacity(step.call_order.len());
     let mut can_parallelize = silent_finish.is_none() && !has_exact_call && !step.call_order.is_empty();
+    can_parallelize &= !model_request.input.tools.iter().any(|tool|
+        plan.binding(&tool.name).is_some_and(|binding| binding.capability_id.as_ref() == "computer"));
     for call_id in &step.call_order {
         if cancellation.is_cancelled() {
             return Err(AgentEngineError::Cancelled);
@@ -4325,36 +4329,6 @@ mod tests {
             assert!(result.is_error);
             assert_eq!(result.call_id.as_ref(),format!("settlement-{}",cases[index].0));
         }
-    }
-
-    #[tokio::test]
-    async fn system_permission_kernel_error_is_recorded_in_the_original_tool_result() {
-        #[derive(Default)]
-        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
-        #[async_trait]
-        impl AgentEventSink for Sink {
-            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
-                self.0.lock().unwrap().push(event); Ok(())
-            }
-        }
-        let sink = Sink::default();
-        let body = json!({"schema":"system-permission-required.v1","capability":"computer",
-            "action_id":"computer/observe","operation":"screenshot","permissions":["screen_recording"],
-            "execution":"not_executed"}).to_string();
-        let (_, result) = record_tool_result("permission-call".into(), Err(AgentEngineError::CapabilityKernel {
-            code: "SYSTEM_PERMISSION_REQUIRED".into(), message: body.clone(), details:None,
-        }), &sink, 1).await.unwrap();
-        assert!(result.is_error);
-        assert!(nomifun_engine_core::project_system_permission_required(Some("computer"), Some("computer/observe"),
-            result.is_error, &result.output_text()).is_some());
-        let recorded = sink.0.lock().unwrap()[0].clone();
-        let AgentEngineEvent::ToolCompleted { result: persisted, .. } = recorded
-            else { panic!("denial must use the ordinary canonical tool result") };
-        assert_eq!(persisted.output_text(), result.output_text());
-        let (_, unrelated) = record_tool_result("unrelated-call".into(), Err(AgentEngineError::ToolInvocation(body)),
-            &sink, 2).await.unwrap();
-        assert!(nomifun_engine_core::project_system_permission_required(Some("computer"), Some("computer/observe"),
-            unrelated.is_error, &unrelated.output_text()).is_none());
     }
 
     #[tokio::test]
@@ -8740,6 +8714,105 @@ mod tests {
             .any(|part| matches!(part,
                 ChatContentPart::ToolResult { call_id: id, is_error: false, .. }
                     if id == &call_id)));
+    }
+
+    mod computer_surface_dispatch {
+        use super::*;
+
+        #[derive(Default)]
+        struct Events(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Events {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+
+        struct ComputerOwner { activity: ConcurrencyTool, failure: Option<&'static str> }
+        #[async_trait]
+        impl AgentToolInvoker for ComputerOwner {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                assert_eq!(invocation.binding.capability_id.as_ref(), "computer");
+                let active = self.activity.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.activity.max_active.fetch_max(active, Ordering::SeqCst);
+                let first = invocation.call.call_id.as_ref() == "call-1";
+                tokio::time::sleep(if first { self.activity.delay * 2 } else { self.activity.delay }).await;
+                self.activity.order.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                self.activity.active.fetch_sub(1, Ordering::SeqCst);
+                match self.failure {
+                    Some("unknown") => Err(AgentEngineError::ToolInvocation("COMPUTER_RESULT_UNKNOWN: original observation unavailable".into())),
+                    Some(_) => Ok(AgentToolResult::text(invocation.call.call_id, "{\"status\":\"refused\"}", true)),
+                    None => Ok(AgentToolResult::text(invocation.call.call_id, "{\"apps\":[]}", false)),
+                }
+            }
+        }
+
+        fn frozen_reads() -> (AgentToolPlan, Vec<Result<ChatModelEvent, ChatModelError>>) {
+            let frozen: serde_json::Value = serde_json::from_str(include_str!(
+                "../../nomifun-agent-contracts/contracts/computer-tools.v1.json")).unwrap();
+            let selected = frozen["tools"].as_array().unwrap().iter().filter(|tool| tool["group"] == "observation"
+                && tool["platforms"]["windows"]["input_schema"].get("required")
+                    .and_then(serde_json::Value::as_array).is_none_or(Vec::is_empty)).take(2).collect::<Vec<_>>();
+            assert_eq!(selected.len(), 2);
+            let mut calls = Vec::new();
+            let bindings = selected.iter().enumerate().map(|(index, tool)| {
+                let name = tool["model_tool"].as_str().unwrap();
+                let mut binding = tool_binding(name, "computer", tool["action_id"].as_str().unwrap(), AgentEffectClass::ReadOnly, true);
+                binding.definition.description = tool["descriptions"]["en-US"].as_str().unwrap().to_owned();
+                binding.definition.input_schema = nomifun_agent_contracts::StrictJsonValue(tool["platforms"]["windows"]["input_schema"].clone());
+                binding.schema_digest = crate::tool::input_schema_digest(&binding.definition.input_schema).unwrap();
+                let mut call = control_step(&format!("call-{}", index + 1), name, json!({}));
+                call.pop();
+                calls.extend(call);
+                binding
+            }).collect::<Vec<_>>();
+            calls.push(Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }));
+            (AgentToolPlan::new(bindings).unwrap(), calls)
+        }
+
+        async fn dispatch(failure: Option<&'static str>) -> (Arc<ObservingModel>, Arc<ComputerOwner>, Arc<Events>) {
+            let (plan, calls) = frozen_reads();
+            let model = Arc::new(ObservingModel { steps: std::sync::Mutex::new(vec![calls]), requests: Default::default() });
+            let owner = Arc::new(ComputerOwner { activity: ConcurrencyTool { active: AtomicUsize::new(0),
+                max_active: AtomicUsize::new(0), order: Default::default(), delay: Duration::from_millis(10) }, failure });
+            let events = Arc::new(Events::default());
+            let mut input = request();
+            input.input.parallel_tool_calls = Some(true);
+            let _ = run_turn(binding(), model.clone(), owner.clone(), events.clone(),
+                AgentTurnRequest::new(input, plan, principal(), 0).with_max_model_steps(1),
+                AgentContextBudget::default(), CancellationToken::new()).await;
+            assert!(model.steps.lock().unwrap().is_empty());
+            assert_eq!(model.requests.lock().unwrap()[0].input.parallel_tool_calls, Some(false));
+            (model, owner, events)
+        }
+
+        #[tokio::test]
+        async fn provider_ignoring_single_call_preference_still_runs_frozen_computer_reads_in_order() {
+            let (_, owner, events) = dispatch(None).await;
+            assert_eq!(owner.activity.max_active.load(Ordering::SeqCst), 1);
+            assert_eq!(*owner.activity.order.lock().unwrap(), ["call-1", "call-2"]);
+            assert_eq!(events.0.lock().unwrap().iter().filter(|event| matches!(event,
+                AgentEngineEvent::ToolCompleted { result, runtime_hold: None, .. } if !result.is_error)).count(), 2);
+        }
+
+        #[tokio::test]
+        async fn failed_or_unknown_first_computer_call_holds_remaining_calls_without_dispatch() {
+            for failure in ["refused", "unknown"] {
+                let (_, owner, events) = dispatch(Some(failure)).await;
+                assert_eq!(owner.activity.max_active.load(Ordering::SeqCst), 1);
+                assert_eq!(*owner.activity.order.lock().unwrap(), ["call-1"]);
+                let events = events.0.lock().unwrap();
+                assert!(events.iter().any(|event| matches!(event,
+                    AgentEngineEvent::ToolCompleted { result, runtime_hold: None, .. }
+                        if result.call_id.as_ref() == "call-1" && result.is_error)));
+                assert!(events.iter().any(|event| matches!(event,
+                    AgentEngineEvent::ToolCompleted { result, runtime_hold: Some(crate::RuntimeToolHoldReason::PriorCallFailed), .. }
+                        if result.call_id.as_ref() == "call-2" && result.is_error)));
+                assert!(!events.iter().any(|event| matches!(event,
+                    AgentEngineEvent::ToolStarted { call_id, .. } if call_id.as_ref() == "call-2")));
+            }
+        }
     }
 
     #[tokio::test]

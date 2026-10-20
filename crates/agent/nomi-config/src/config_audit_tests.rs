@@ -73,12 +73,11 @@ pub(super) fn merge_sources(global: &str, project: &str) -> ConfigFile {
 #[test]
 fn explicit_default_values_override_global_scalars() {
     let merged = merge_sources(
-        "[default]\nprovider = \"openai\"\n[tools]\nmax_recent_images = 8\n[tools.computer]\nmax_screenshot_edge = 2048",
-        "[default]\nprovider = \"anthropic\"\n[tools]\nmax_recent_images = 3\n[tools.computer]\nmax_screenshot_edge = 1568",
+        "[default]\nprovider = \"openai\"\n[tools]\nmax_recent_images = 8",
+        "[default]\nprovider = \"anthropic\"\n[tools]\nmax_recent_images = 3",
     );
     assert_eq!(merged.default.provider, "anthropic");
     assert_eq!(merged.tools.max_recent_images, 3);
-    assert_eq!(merged.tools.computer.max_screenshot_edge, 1568);
 }
 
 #[test]
@@ -124,10 +123,9 @@ fn explicit_true_can_restore_default_feature_settings() {
 #[test]
 fn merge_retains_additive_tool_selection() {
     let merged = merge_sources(
-        "[tools]\nbuiltin_allowlist = [\"Read\"]\n[tools.computer]\nenabled = true",
-        "[tools]\nbuiltin_allowlist = []\n[tools.computer]\nenabled = false",
+        "[tools]\nbuiltin_allowlist = [\"Read\"]",
+        "[tools]\nbuiltin_allowlist = []",
     );
-    assert!(merged.tools.computer.enabled);
     assert_eq!(merged.tools.builtin_allowlist, ["Read"]);
 }
 

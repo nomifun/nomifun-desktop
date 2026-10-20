@@ -17,6 +17,7 @@
   },
   "bundle": {
     "active": true,
+    "externalBin": ["binaries/nomifun-computer-worker"],
     "targets": [
       "nsis",
       "app",

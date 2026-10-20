@@ -72,10 +72,10 @@ describe('Linux system execution packaging', () => {
       }
       expect(config.deb.depends).toContain('pkexec | policykit-1');
       expect(config.rpm.depends).toContain('polkit');
-      for (const dependency of ['gstreamer1.0-pipewire', 'gstreamer1.0-plugins-base', 'gstreamer1.0-plugins-good', 'xdg-desktop-portal', 'libasound2t64 | libasound2', 'xwayland']) {
+      for (const dependency of ['xdg-desktop-portal', 'libasound2t64 | libasound2', 'xwayland']) {
         expect(config.deb.depends).toContain(dependency);
       }
-      for (const dependency of ['pipewire-gstreamer', 'gstreamer1-plugins-base', 'gstreamer1-plugins-good', 'xdg-desktop-portal', 'alsa-lib', 'xorg-x11-server-Xwayland']) {
+      for (const dependency of ['xdg-desktop-portal', 'alsa-lib', 'xorg-x11-server-Xwayland']) {
         expect(config.rpm.depends).toContain(dependency);
       }
     } finally { await rm(item.root, { recursive: true, force: true }); }

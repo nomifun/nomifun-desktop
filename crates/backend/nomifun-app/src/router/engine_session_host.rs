@@ -654,10 +654,11 @@ impl EngineSessionHost {
             })
     }
 
-    pub(super) fn compose_model_port_with_configuration(
+    pub(super) fn compose_model_port_with_projection(
         &self,
         gate: Arc<dyn nomifun_chat_model_broker::ChatCausalityGate>,
         configuration: Option<super::chat_broker_host::TurnModelConfiguration>,
+        projection: Option<Arc<dyn nomifun_chat_model_broker::ChatAttemptProjection>>,
     ) -> Result<Arc<dyn nomifun_chat_model_broker::EngineModelPort>, AppError> {
         let composition = configuration.map(|view| self.broker.for_turn_configuration(view))
             .unwrap_or_else(|| self.broker.clone());
@@ -669,6 +670,10 @@ impl EngineSessionHost {
                 nomifun_chat_model_broker::BrokerRetryPolicy::default(),
             )
             .map_err(|error| AppError::Conflict(format!("Engine Broker assembly: {error}")))?;
+        let broker = if let Some(projection) = projection {
+            broker.with_attempt_projection(projection)
+                .map_err(|error| AppError::Conflict(format!("Engine request presentation: {}", error.message)))?
+        } else { broker };
         Ok(Arc::new(
             nomifun_chat_model_broker::BrokerEngineModelPort::new(broker),
         ))

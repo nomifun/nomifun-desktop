@@ -18,6 +18,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createMacosDevSupervisor } from './lib/macos-dev-supervisor.mjs';
 import { macosDevelopmentSigningNotice } from './lib/macos-dev-signing.mjs';
+import { buildComputerWorker, rustHostTarget } from './computer/build-worker.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CANONICAL_DATABASE_BASELINE = join(
@@ -542,6 +543,8 @@ async function main() {
   try {
     tauriArguments = developmentTauriArguments(process.argv.slice(2));
     environment = developmentEnvironment(loadWindowsToolchainEnvironment(process.env));
+    const worker = await buildComputerWorker({ target: rustHostTarget(environment), profile: 'debug', environment });
+    environment.NOMIFUN_COMPUTER_WORKER = worker.binary;
     if (process.platform === 'darwin') signingNotice = macosDevelopmentSigningNotice(environment);
     generatedDataDirectory = ensureGeneratedDevelopmentDataDirectory(environment, process.env);
   } catch (error) {

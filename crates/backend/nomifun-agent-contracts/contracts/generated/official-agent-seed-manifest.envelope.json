@@ -2,7 +2,7 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "manifest_version": "1.0.0",
-    "target_first_party_contribution_digest": "362bfa16385d33220d72865c42975846a0a83c972ef27b386e80581413a918c4",
+    "target_first_party_contribution_digest": "3821559376ca7af18d35a7b43e5e77cc5190027131224bd53f648775d17c9c43",
     "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
     "templates": {
       "chat.minimal": {
@@ -112,10 +112,28 @@
               "id": "computer"
             },
             "action_allowlist": [
-              "computer/a11y.observe",
-              "computer/input",
-              "computer/launch",
-              "computer/observe"
+              "computer/bring_to_front",
+              "computer/click",
+              "computer/clipboard_read",
+              "computer/clipboard_write",
+              "computer/drag",
+              "computer/get_desktop_state",
+              "computer/get_guide",
+              "computer/get_window_state",
+              "computer/hotkey",
+              "computer/invoke_menu",
+              "computer/launch_app",
+              "computer/list_apps",
+              "computer/list_windows",
+              "computer/move_cursor",
+              "computer/press_key",
+              "computer/run_steps",
+              "computer/scroll",
+              "computer/set_value",
+              "computer/set_window_frame",
+              "computer/type_text",
+              "computer/verify_state",
+              "computer/zoom"
             ]
           },
           {
@@ -756,10 +774,28 @@
               "id": "computer"
             },
             "action_allowlist": [
-              "computer/a11y.observe",
-              "computer/input",
-              "computer/launch",
-              "computer/observe"
+              "computer/bring_to_front",
+              "computer/click",
+              "computer/clipboard_read",
+              "computer/clipboard_write",
+              "computer/drag",
+              "computer/get_desktop_state",
+              "computer/get_guide",
+              "computer/get_window_state",
+              "computer/hotkey",
+              "computer/invoke_menu",
+              "computer/launch_app",
+              "computer/list_apps",
+              "computer/list_windows",
+              "computer/move_cursor",
+              "computer/press_key",
+              "computer/run_steps",
+              "computer/scroll",
+              "computer/set_value",
+              "computer/set_window_frame",
+              "computer/type_text",
+              "computer/verify_state",
+              "computer/zoom"
             ]
           },
           {
@@ -1476,5 +1512,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "ad03e9f5df2e206effe3214d029721468d6a33e9a85b5f87b9a555b14bb9db5d"
+  "payload_digest": "96075d7ba1e03f9102a70843096281e079b82a4083e72d90f979d1cd1e744df3"
 }

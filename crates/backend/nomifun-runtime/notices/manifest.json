@@ -43,6 +43,58 @@
           "sha256": "3a4715b268e148a8e9566f5e835f766f5c95c3da4d6e5ddd908806a258a2f07b"
         }
       ]
+    },
+    {
+      "id": "cua-driver",
+      "version": "0.37.0",
+      "worker_lock_sha256": "cf23a506c957d94c11a43c6fe1ac8619fdf761206045beba76278ed7a6602c30",
+      "files": [
+        {
+          "filename": "cua-driver-0.37.0-LICENSE.md",
+          "source": "https://raw.githubusercontent.com/trycua/cua/4d959bbfa57f0c89f310330e849500b222084194/LICENSE.md",
+          "sha256": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9"
+        },
+        {
+          "filename": "cua-driver-0.37.0-THIRD_PARTY_NOTICES.md",
+          "source": "https://raw.githubusercontent.com/trycua/cua/4d959bbfa57f0c89f310330e849500b222084194/libs/cua-driver/rust/THIRD_PARTY_NOTICES.md",
+          "sha256": "82470c85cb48dd084fccbf192d4a9f0b9d0afe614ab9b63e0fceac0eb315f412"
+        },
+        {
+          "filename": "nomifun-computer-worker-0.1.0-LICENSE.txt",
+          "source": "https://raw.githubusercontent.com/trycua/cua/4d959bbfa57f0c89f310330e849500b222084194/LICENSE.md",
+          "sha256": "d0a32419a44fa38d5023d1431dfcbedd1457eb5e7b2e6c7c87ca064facb41b41"
+        },
+        {
+          "filename": "nomifun-computer-worker-windows-dependencies.json",
+          "source": "https://github.com/nomifun/nomifun-desktop/tree/main/apps/computer-worker",
+          "sha256": "62d573f53f2ce3cc3dd887dfe209167e7d188ea1adc835e32eba0d5b682aa543"
+        },
+        {
+          "filename": "nomifun-computer-worker-windows-THIRD_PARTY_NOTICES.txt",
+          "source": "https://github.com/nomifun/nomifun-desktop/tree/main/apps/computer-worker",
+          "sha256": "37feba89b9c46ceb0f7ac25beb08c19ffe96e9bb0fe02713dbb1a96463426d36"
+        },
+        {
+          "filename": "nomifun-computer-worker-linux-dependencies.json",
+          "source": "https://github.com/nomifun/nomifun-desktop/tree/main/apps/computer-worker",
+          "sha256": "24362abc5b71e61d5dbc32bc02b8c08db5d522052f6537ae6f52b15f6656d6df"
+        },
+        {
+          "filename": "nomifun-computer-worker-linux-THIRD_PARTY_NOTICES.txt",
+          "source": "https://github.com/nomifun/nomifun-desktop/tree/main/apps/computer-worker",
+          "sha256": "4e46ef4610d6fea6a83e259e921749254391211804254033da0881bb18191d47"
+        },
+        {
+          "filename": "nomifun-computer-worker-macos-dependencies.json",
+          "source": "https://github.com/nomifun/nomifun-desktop/tree/main/apps/computer-worker",
+          "sha256": "d8954a8b91e59ac699ea810e0c2eec1170e6441ba83316e510c8f45c4e2a88b1"
+        },
+        {
+          "filename": "nomifun-computer-worker-macos-THIRD_PARTY_NOTICES.txt",
+          "source": "https://github.com/nomifun/nomifun-desktop/tree/main/apps/computer-worker",
+          "sha256": "79f75a90a763eb53c53bc66c7ec8506f58aa29d857fe52379cfa9e91b43edb79"
+        }
+      ]
     }
   ]
 }

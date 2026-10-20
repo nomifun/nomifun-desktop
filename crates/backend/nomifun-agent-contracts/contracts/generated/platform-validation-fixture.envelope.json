@@ -3,10 +3,10 @@
   "payload": {
     "manifest_version": "1.0.0",
     "confirmed_decision_contract_digest": "92b3de5b8e46bb769e1af7143555dd3cf65be323ab2a6335e48b0fa01854a6c4",
-    "canonical_schema_manifest_digest": "5f9f16ab8044fd9285b83e21a1ccbd2fc9272a36f1fac56cf2d9be3c2cf99ffa",
-    "cargo_lock_digest": "9f418d589e7a24cb91df9e185742c8779a77c6d5637f655cc0d3fcec9a9b7170",
-    "official_preset_seed_manifest_digest": "ad03e9f5df2e206effe3214d029721468d6a33e9a85b5f87b9a555b14bb9db5d",
-    "capability_availability_manifest_digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c",
+    "canonical_schema_manifest_digest": "1c2ea7a7b8ac78f26f80584e405730522cd8041731e833be63bc8be46e26e34c",
+    "cargo_lock_digest": "79f27cfb0cf554100b92bd1276264b3fe9706c83f75460dd52f1659c1e2af69b",
+    "official_preset_seed_manifest_digest": "96075d7ba1e03f9102a70843096281e079b82a4083e72d90f979d1cd1e744df3",
+    "capability_availability_manifest_digest": "25abe47d3023bd835382282a692cd6d08832658af87119c7a89bbe05aea70e39",
     "coding_codex_native_contract_digest": "853344a5149eef78e0fc08ff2fac380489775703fd340172f9d49990c5e51d8c",
     "platform_matrix": {
       "target_cells": {
@@ -63,7 +63,7 @@
               "availability": "release_manifest_defined"
             },
             "computer": {
-              "availability": "independent_partial_or_exact_unavailable"
+              "availability": "release_manifest_defined"
             }
           }
         }
@@ -124,7 +124,7 @@
         "verification_point_id": "linux_desktop_gnu_host_musl_runtime",
         "owning_module": "runtime-supervisor/linux",
         "target_cell": "linux_desktop_x64",
-        "behavior_to_observe": "GNU desktop Host launches the musl x64 runtime and fails closed for unavailable Computer capability",
+        "behavior_to_observe": "GNU desktop Host launches the musl x64 runtime and exposes Computer through the packaged Cua Driver worker",
         "exact_check_id": "c8_ld_full_gate"
       }
     ],
@@ -147,9 +147,9 @@
       "d028_platform_matrix": {
         "artifact_id": "d028_platform_matrix",
         "normalized_relative_path": "contracts/validation/d028-platform-matrix.json",
-        "digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c"
+        "digest": "25abe47d3023bd835382282a692cd6d08832658af87119c7a89bbe05aea70e39"
       }
     }
   },
-  "payload_digest": "8956817234839905db0fa7d096136f3191191c02e4e8d64633ec5379c6652a8a"
+  "payload_digest": "880dfcbfd8731c2223ba59ae983a056e318a7d47f0f26238b511f59945cb6891"
 }

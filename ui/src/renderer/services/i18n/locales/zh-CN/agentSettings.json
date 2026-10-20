@@ -215,7 +215,7 @@
     },
     "computer": {
       "name": "电脑控制",
-      "description": "高权限扩展；缺少系统授权时仅电脑操作暂不可用，不影响 Agent 的其他能力。"
+      "description": "观察桌面、操作应用及剪贴板。部分操作会使用前台桌面，系统权限在执行时检查。"
     },
     "creationMedia": {
       "name": "媒体创作",
@@ -365,7 +365,6 @@
     "fs_write": "写入远程文件",
     "sudo": "执行特权命令",
     "claim": "认领工作",
-    "a11y_observe": "检查无障碍树",
     "vision": "使用机器人视觉",
     "display": "使用机器人显示",
     "motion": "控制运动",
@@ -661,7 +660,13 @@
     "hideList": "收起 Agent 列表",
     "saveAsMine": "保存为我的 Agent",
     "readyToSave": "等待服务端校验",
-    "resetTemplate": "恢复预设能力"
+    "resetTemplate": "恢复预设能力",
+    "computerGroups": {
+      "observation": "观察",
+      "interaction": "操作",
+      "application": "应用",
+      "clipboard": "剪贴板"
+    }
   },
   "runtimePolicy": {
     "title": "运行与值守",

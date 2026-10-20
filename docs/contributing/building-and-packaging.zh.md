@@ -27,19 +27,15 @@ deb/rpm 将 runner 和 polkit action 安装到固定系统路径；AppImage 携�
 开发启动不修改系统文件。安装、升级/卸载、原生认证要求和检查见
 [Linux 系统执行组件说明](../../apps/desktop/linux-system-execution/README.md)。
 
-Linux Computer 还链接系统 GStreamer core/app/video（至少 1.14），构建预检检查这三个
-pkg-config 模块。Debian/Ubuntu 构建依赖为 `libgstreamer1.0-dev` 和
-`libgstreamer-plugins-base1.0-dev`；运行时需要 `gstreamer1.0-pipewire`、
-`gstreamer1.0-plugins-base`、`gstreamer1.0-plugins-good`。RPM 依赖名采用 Fedora 的
-`pipewire-gstreamer`、`gstreamer1-plugins-base`、`gstreamer1-plugins-good`。
-原生包明确声明这些动态加载插件及 `xdg-desktop-portal`；仅扫描 ELF 链接库无法发现
-必需的 `pipewiresrc`、`videoconvert`、`videoflip`、`appsink` factories。
-Wayland 还需要登录桌面的实际 PipeWire 服务，以及实现所请求 ScreenCast/RemoteDesktop
-接口的 portal backend 和原生用户同意。
+## Computer worker
 
-AppImage 同样需要这些匹配的宿主服务和 GStreamer 插件。成品的动态库及插件搜索路径须
-结合目标桌面实查；`bundleMediaFramework` 开关本身不证明包含 `pipewiresrc` 或宿主 portal
-backend。只有实际运行对应 AppImage 后才能记录其 Wayland 验收通过。
+平台构建先运行 `scripts/computer/build-worker.mjs`，在独立工作区构建并从 Cargo compiler-artifact 取得真实 executable，复制为 `apps/desktop/binaries/nomifun-computer-worker-<target>[.exe]`。Tauri externalBin 将其打入应用；开发入口设置 `NOMIFUN_COMPUTER_WORKER`，macOS 开发 bundle 使用其已签名副本。
+
+macOS 先签 worker 再封 App；Windows --signed 先用相同证书签并验证 worker，再交 Tauri。实际证书、公证、安装与 self-check 是单独的发布验收，不由构建脚本的存在证明。
+
+Linux worker 的当前构建依赖为 X11、Xi、xkbcommon（Debian/Ubuntu：libx11-dev、libxi-dev、libxkbcommon-dev）；运行依赖为 libx11-6、libxi6、libxkbcommon0，RPM 使用 libX11、libXi、libxkbcommon。旧 Computer 的 GStreamer 预检和专用插件依赖已删除；Browser、音频、portal 与系统执行的既有依赖保留。AppImage 含 worker，但仍须在目标桌面验证动态库和实际 backend；原生 Wayland capture 未启用。
+
+`bun run check:computer-boundary` 核对 vendor/补丁、冻结派生、旧引用零残留与主 workspace 不链接驱动。许可原文和 worker 依赖署名随现有 component-notices 资源一起打包。
 
 ## Web 部署产物
 

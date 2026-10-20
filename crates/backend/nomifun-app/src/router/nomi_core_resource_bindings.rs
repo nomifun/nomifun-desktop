@@ -2441,25 +2441,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn computer_actions_can_wait_for_a_selected_environment() {
-        let capability = nomifun_agent_domain_wave2::COMPUTER_MODULE_ID.to_owned();
-        let bindings = registry("computer", &["observe"])
-            .resolve_selected(
-                "owner-1",
-                &[],
-                &BTreeSet::from([capability.clone()]),
-                &BTreeMap::from([(
-                    capability,
-                    BTreeSet::from([ActionId::from("computer/observe")]),
-                )]),
-                &[],
-            )
-            .await
-            .unwrap();
-        assert!(bindings.is_empty());
-    }
-
-    #[tokio::test]
     async fn authority_cannot_grant_less_than_the_server_derived_requirement() {
         let error = registry("customer", &["read"])
             .resolve_selected(
@@ -2723,7 +2704,7 @@ mod tests {
             ),
             (
                 nomifun_agent_domain_wave2::COMPUTER_MODULE_ID.into(),
-                BTreeSet::from([ActionId::from("computer/observe")]),
+                BTreeSet::from([ActionId::from("computer/get_window_state")]),
             ),
             (
                 nomifun_agent_domain_wave5::AUTOMATION_SCHEDULE_MODULE_ID.into(),

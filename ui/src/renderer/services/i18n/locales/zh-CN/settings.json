@@ -380,10 +380,25 @@
     },
     "computer": {
       "title": "Computer Use",
-      "summary": "观察并操作整个桌面，需要屏幕录制与辅助功能权限。",
+      "summary": "观察桌面、操作应用与剪贴板；系统访问按动作检查。",
       "description": "权限必须授予正在运行的 NomiFun，而不是终端或编辑器。只有显式包含 Computer 能力的 Agent 才能调用这些动作。",
-      "ready": "当前平台所需的 Computer Use 系统权限已经就绪。",
-      "blocked": "Computer Use 尚未就绪。请授权给 {{app}}；若系统开关已开启但仍未生效，请移除旧条目后重新授权。"
+      "ready": "macOS 系统访问已就绪；每次操作仍会检查所需权限。",
+      "blocked": "部分操作需要系统访问，请为 {{app}} 开启对应权限。",
+      "platformLimits": "Windows 使用 UIA；Linux 能力取决于当前 X11 / Wayland 会话与 AT-SPI。可用后端和操作限制以当前驱动状态及实际执行结果为准。",
+      "driver": {
+        "title": "桌面驱动",
+        "description": "只读状态；打开此页不会启动驱动。",
+        "process": "进程",
+        "running": "运行中",
+        "stopped": "未运行",
+        "version": "Worker 版本",
+        "platform": "平台",
+        "backend": "后端",
+        "sessionType": "桌面会话",
+        "available": "可用",
+        "unavailable": "不可用",
+        "loadFailed": "无法读取桌面驱动状态，请重试。"
+      }
     },
     "browser": {
       "title": "Browser Use",

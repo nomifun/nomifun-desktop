@@ -91,7 +91,7 @@ describe('Agent resource picker', () => {
     const changes: AgentResourceSelectionValue[] = [];
     const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
       requiredKinds={['computer', 'browser']} capabilityIds={['computer', 'browser']}
-      actionIds={['computer/observe', 'browser/navigate']} value={{}} onChange={(value) => changes.push(value)}
+      actionIds={['browser/navigate']} value={{}} onChange={(value) => changes.push(value)}
       onAdmissionReadinessChange={(ready) => states.push(ready)} hideAutomaticBrowser
     /></MemoryRouter></I18nextProvider>);
     await waitFor(() => expect(states.at(-1)).toBe(true));
@@ -240,39 +240,7 @@ describe('Agent resource picker', () => {
     expect(screen.getByText(en.resources.ready)).toBeTruthy();
   });
 
-  test.each([
-    { actionIds: ['computer/observe'] },
-    { actionIds: ['computer/input'] },
-    { actionIds: ['computer/launch'] },
-    { actionIds: ['computer/observe', 'computer/a11y.observe'] },
-  ])('leaves Computer authorization to actual tool use for %j', async ({ actionIds }) => {
-    const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke');
-    restores.push(() => permissions.mockRestore());
-    const states: boolean[] = [];
-    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
-      requiredKinds={['computer']} capabilityIds={['computer']} actionIds={actionIds}
-      value={{}} onChange={() => undefined} onAdmissionReadinessChange={(ready) => states.push(ready)}
-    /></MemoryRouter></I18nextProvider>);
-    await waitFor(() => expect(states.at(-1)).toBe(true));
-    expect(permissions).not.toHaveBeenCalled();
-    expect(screen.container.querySelector('section')).toBeNull();
-  });
 
-  test('keeps concrete resource choices available without probing Computer grants or showing a permission summary', async () => {
-    const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke');
-    restores.push(() => permissions.mockRestore());
-    const states: boolean[] = [];
-    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
-      requiredKinds={['computer', 'companion']} capabilityIds={['computer']} actionIds={['computer/input']}
-      value={{ companion: 'companion-1' }} onChange={() => undefined}
-      loadInventory={async () => inventory} onAdmissionReadinessChange={(ready) => states.push(ready)}
-    /></MemoryRouter></I18nextProvider>);
-    await waitFor(() => expect(states.at(-1)).toBe(true));
-    expect(permissions).not.toHaveBeenCalled();
-    expect(screen.getByRole('combobox', { name: 'Select Companion' }).textContent).toContain('Mochi');
-    expect(screen.queryByText(en.resources.kinds.computer)).toBeNull();
-    expect(screen.queryByText(en.resources.configure)).toBeNull();
-  });
 
   test('filters dependent resources by the selected product owner', () => {
     expect(optionsForAgentResourceField('channel', inventory, { companion: 'companion-1' }, new Set(['companion', 'channel'])).map((option) => option.value)).toEqual(['channel-1']);

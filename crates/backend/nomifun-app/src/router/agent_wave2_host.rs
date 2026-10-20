@@ -553,7 +553,7 @@ fn effect_record_matches(
         && record.capability_module == context.capability_id
         && record.action_id == context.action_id
         && record.resource_binding_id.as_ref() == Some(&binding.binding_id)
-        && record.resource_key.as_deref() == Some(resource_key)
+        && record.resource_key.as_deref() == if owner_domain == "computer" { None } else { Some(resource_key) }
         && record.input_digest == *input_digest
         && record.strategy == strategy
 }
@@ -622,7 +622,11 @@ fn observe_wave2_effect(
         }
         nomifun_agent_session::AgentEffectState::Unknown => {
             Err(Wave2HostPortError::unavailable(
-                "Wave 2 effect has a durable unknown outcome; explicit reconciliation is required before another physical effect",
+                if owner_domain == "computer" {
+                    "Computer outcome is unknown; this call cannot be replayed. Observe the application before deciding on a new call"
+                } else {
+                    "Wave 2 effect has a durable unknown outcome; explicit reconciliation is required before another physical effect"
+                },
             ))
         }
         nomifun_agent_session::AgentEffectState::Cancelled => {
@@ -652,7 +656,7 @@ fn new_wave2_effect_request(
         capability_module: context.capability_id.clone(),
         action_id: context.action_id.clone(),
         resource_binding_id: Some(binding.binding_id.clone()),
-        resource_key: Some(resource_key),
+        resource_key: (owner_domain != "computer").then_some(resource_key),
         input_digest,
         recorded_at: nomifun_common::now_ms(),
         event_id: nomifun_agent_contracts::EventId::from(format!(
@@ -1008,7 +1012,7 @@ impl Wave2HostPort for Wave2ApplicationHost {
                 }
                 Wave2CapabilityOperation::Ssh { .. }
                 | Wave2CapabilityOperation::Browser { .. }
-                | Wave2CapabilityOperation::ComputerA11y { .. } => {
+                | Wave2CapabilityOperation::Computer { .. } => {
                     Err(unavailable(&capability_id))
                 }
             }
@@ -3330,6 +3334,7 @@ pub(super) mod tests {
     fn context(root: &std::path::Path) -> Wave2HostContext {
         let agent_session_id = AgentSessionId::from(nomifun_common::generate_id());
         Wave2HostContext {
+            authorized_actions: nomifun_agent_domain_wave2::action_ids(nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID),
             control: Default::default(),
             principal: PrincipalRef {
                 principal_kind: "user".to_owned(),
@@ -3575,6 +3580,45 @@ pub(super) mod tests {
             },
         })
         .await
+    }
+
+    #[tokio::test]
+    async fn computer_uncertainty_blocks_replay_without_fencing_a_new_canonical_call() {
+        let root = tempfile::tempdir().unwrap();
+        let store = test_effect_store().await;
+        let mut first = context(root.path());
+        first.capability_id = CapabilityId::from("computer");
+        first.action_id = ActionId::from("computer/press_key");
+        first.authorized_actions = nomifun_agent_domain_wave2::action_ids("computer");
+        let binding = &mut first.resource_bindings[0];
+        binding.resource_kind = ResourceKind::from("computer");
+        binding.resource_id = ResourceId::from("local-desktop");
+        binding.operations = BTreeSet::from(["input".to_owned()]);
+        binding.typed_parameters.clear();
+        ensure_test_effect_context(&store, &first).await;
+        let input = StrictJsonValue(json!({"key":"A"}));
+        let strategy = nomifun_agent_session::EffectStrategy::ExternalUncertainEffect;
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_exclusive_effect(
+            &store, &first, &first.resource_bindings[0], &input, strategy,
+        ).await.unwrap() else { panic!("new Computer call must reserve its own Effect") };
+        finish_wave2_uncertain_effect(&reservation, first.action_id.as_ref(),
+            &Wave2HostPortError::new("COMPUTER_RESULT_UNKNOWN", "worker transport ended")).await.unwrap();
+        let before = store.list_effects(&first.agent_session_id).await.unwrap();
+        assert_eq!(before[0].state, nomifun_agent_session::AgentEffectState::Unknown);
+        assert!(before[0].resource_key.is_none());
+        let replay = begin_wave2_exclusive_effect(
+            &store, &first, &first.resource_bindings[0], &input, strategy,
+        ).await.unwrap_err();
+        assert!(replay.message.contains("cannot be replayed"));
+        let mut second = first.clone();
+        second.agent_session_id = AgentSessionId::from(nomifun_common::generate_id());
+        ensure_test_effect_context(&store, &second).await;
+        let Wave2EffectAdmission::Reserved(next) = begin_wave2_exclusive_effect(
+            &store, &second, &second.resource_bindings[0], &input, strategy,
+        ).await.unwrap() else { panic!("a new Computer call must not share a desktop Effect fence") };
+        finish_wave2_succeeded_effect(&next, second.action_id.as_ref(),
+            &StrictJsonValue(json!({"effect":"confirmed"}))).await.unwrap();
+        assert_eq!(store.list_effects(&first.agent_session_id).await.unwrap(), before);
     }
 
     #[test]

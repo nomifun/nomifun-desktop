@@ -152,7 +152,7 @@ mod tests {
                 }
                 | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Ssh { input }
                 | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Browser { input }
-                | nomifun_agent_domain_wave2::Wave2CapabilityOperation::ComputerA11y { input } => {
+                | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Computer { input } => {
                     input
                 }
             }

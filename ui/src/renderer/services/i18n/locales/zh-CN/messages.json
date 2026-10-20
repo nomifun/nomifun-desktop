@@ -235,5 +235,6 @@
     "decodeErrors": "包含 {{count}} 个解码错误。",
     "command": "命令",
     "directory": "工作目录：{{path}}"
-  }
+  },
+  "computerForeground": "前台"
 }

@@ -27,17 +27,17 @@ pub fn reasoning_display_event(kind: &str) -> ReasoningDisplayEvent {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
-#[ts(export, export_to = "../../../../ui/src/common/protocolBindings/")]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(rename_all = "snake_case")]
 pub enum TimelineSegmentKind { Reasoning, Narration, Tool }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
-#[ts(export, export_to = "../../../../ui/src/common/protocolBindings/")]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(rename_all = "snake_case")]
 pub enum TimelineSegmentState { Running, Completed, Failed, Cancelled, Interrupted }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
-#[ts(export, export_to = "../../../../ui/src/common/protocolBindings/")]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(deny_unknown_fields)]
 pub struct MessageTimelineSegment {
     /// The first canonical event in this uninterrupted source segment.
@@ -65,7 +65,7 @@ pub struct MessageTimelineSegment {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
-#[ts(export, export_to = "../../../../ui/src/common/protocolBindings/")]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(deny_unknown_fields)]
 pub struct MessageTimeline {
     /// Exact committed Session cursor of the read snapshot used by this view.
@@ -75,7 +75,7 @@ pub struct MessageTimeline {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, ts_rs::TS)]
-#[ts(export, export_to = "../../../../ui/src/common/protocolBindings/")]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(deny_unknown_fields)]
 pub struct MessageTimelineUpdate {
     /// Correlation identity of the canonical owning message projection.

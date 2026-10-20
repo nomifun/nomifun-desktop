@@ -7,10 +7,10 @@ import {dirname,join} from 'node:path';
 import {assertWindowsFixture,windowsObservation,psLiteral} from './global-os-windows-cases.mjs';
 const stable=value=>JSON.stringify(value,(_,entry)=>entry&&typeof entry==='object'&&!Array.isArray(entry)?Object.fromEntries(Object.keys(entry).sort().map(key=>[key,entry[key]])):entry);
 const digest=value=>createHash('sha256').update(stable(value)).digest('hex');
-export function nativeMissingDefaultOptions({enabled=false,platform,scenario,administrator=false,protectedUserDirectory=false,retainServiceForAppExit=false,desktopBackgroundFocus=false,continueSession,installerReport,nativeDataRoot}){
+export function nativeMissingDefaultOptions({enabled=false,platform,scenario,administrator=false,protectedUserDirectory=false,retainServiceForAppExit=false,continueSession,installerReport,nativeDataRoot}){
   assert.equal(typeof enabled,'boolean','--missing-default is a boolean fixture option');if(!enabled)return;
   assert.equal(platform,'win32','--missing-default requires a native Windows App');assert.equal(scenario,'files-process','--missing-default only applies to ordinary files-process');
-  assert(!administrator&&!protectedUserDirectory&&!retainServiceForAppExit&&!desktopBackgroundFocus&&!continueSession&&installerReport===undefined,'The missing-default fixture cannot combine independent scenarios or continuation');
+  assert(!administrator&&!protectedUserDirectory&&!retainServiceForAppExit&&!continueSession&&installerReport===undefined,'The missing-default fixture cannot combine independent scenarios or continuation');
   assert(typeof nativeDataRoot==='string'&&nativeDataRoot.length>0,'--missing-default requires the same private --native-data-root');
 }
 export function missingDefaultFrozenIdentity({session,projection,events,workspace,nativeDataset,announcement,caller}){

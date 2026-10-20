@@ -34,8 +34,6 @@ use uuid::Uuid;
 
 const LOCAL_TRUST_SECRET: &str = "official-preset-catalog-integrity";
 
-#[path = "support/previous_full_general_release.rs"]
-mod previous_full_general_release;
 
 struct CatalogGateBrowserFactory;
 
@@ -122,7 +120,7 @@ fn official_preset_action_safety_matrix_is_exact() {
     const KNOWLEDGE: &[&str] = &["knowledge/autogen", "knowledge/read", "knowledge/search", "knowledge/write"];
     const SCHEDULE: &[&str] = &["automation.schedule/create", "automation.schedule/delete", "automation.schedule/list", "automation.schedule/update"];
     const BROWSER: &[&str] = &["browser/act", "browser/download", "browser/evaluate", "browser/navigate", "browser/observe", "browser/render_content", "browser/upload"];
-    const COMPUTER: &[&str] = &["computer/a11y.observe", "computer/input", "computer/launch", "computer/observe"];
+    const COMPUTER: &[&str] = nomifun_agent_domain_wave2::COMPUTER_ACTION_IDS;
     const COLLABORATION: &[&str] = &["agent/delegate", "agent/fork", "agent/request_user_decision"];
     const MEDIA: &[&str] = &["creation.media/audio", "creation.media/image", "creation.media/image_edit", "creation.media/music", "creation.media/text", "creation.media/video"];
     const OFFICE: &[&str] = &["office/document.edit", "office/preview", "office/sheet.edit", "office/slides.edit"];

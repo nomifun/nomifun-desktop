@@ -188,7 +188,8 @@ impl Mission {
         let tool = OperationId::from("browser-mission-tool");
         self.owner.effect_store.append_event(&self.append("tool/call-started", self.operation.as_ref(),
             json!({"operation_id":tool,"capability_id":"browser","action_id":"browser/navigate"}))).await.unwrap();
-        self.owner.invoke_typed(Wave2TypedHostRequest { context: Wave2HostContext { control: Default::default(),
+        self.owner.invoke_typed(Wave2TypedHostRequest { context: Wave2HostContext { authorized_actions: nomifun_agent_domain_wave2::action_ids(nomifun_agent_domain_wave2::BROWSER_MODULE_ID),
+            control: Default::default(),
             principal: self.principal.clone(), agent_session_id: self.session.clone(), turn_id: self.operation.as_ref().into(),
             operation_id: tool, idempotency_key: IdempotencyKey::from("browser-mission-dispatch"), correlation_id: CorrelationId::from("browser-mission"),
             resolved_snapshot_ref: self.admission.snapshot.clone(), registry_generation: self.admission.registry_generation,
@@ -259,7 +260,8 @@ impl Mission {
                 kind: SessionEventKind("tool/call-started".into()), kind_version: 1, correlation_id: turn.operation_id.as_ref().into(), causation_event_id: Some(started),
                 payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"operation_id":call,"capability_id":"browser","action_id":"browser/navigate"}))) },
         }).await.unwrap();
-        self.owner.invoke_typed(Wave2TypedHostRequest { context: Wave2HostContext { control: Default::default(), principal: self.principal.clone(),
+        self.owner.invoke_typed(Wave2TypedHostRequest { context: Wave2HostContext { authorized_actions: nomifun_agent_domain_wave2::action_ids(nomifun_agent_domain_wave2::BROWSER_MODULE_ID),
+            control: Default::default(), principal: self.principal.clone(),
             agent_session_id: child.clone(), turn_id: turn.operation_id.as_ref().into(), operation_id: call, idempotency_key: "child-browser-dispatch".into(),
             correlation_id: "child-browser".into(), resolved_snapshot_ref: admission.snapshot.clone(), registry_generation: admission.registry_generation,
             capability_id: BROWSER_MODULE_ID.into(), action_id: "browser/navigate".into(), role_provider: Some(admission.provider.clone()),

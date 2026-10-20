@@ -30,3 +30,10 @@
 *.p12 binary
 *.p8 binary
 *.key binary
+
+# Unified-diff context markers and verbatim upstream license bytes are data.
+# Keep readable diffs and byte-level SOURCE/notice hash checks for these files.
+vendor/patches/cua-driver/*.patch -whitespace
+apps/computer-worker/LICENSE -text -whitespace
+apps/computer-worker/nomifun-computer-worker.manifest -text -whitespace
+crates/backend/nomifun-runtime/notices/nomifun-computer-worker-*.txt -text -whitespace

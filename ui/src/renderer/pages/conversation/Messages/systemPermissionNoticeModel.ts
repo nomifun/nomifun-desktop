@@ -25,7 +25,7 @@ export const collectSystemPermissionNotices = (messages: TMessage[], currentTurn
     return calls.flatMap(call => {
       if ((call.status !== 'completed' && call.status !== 'Success') || !call.action_id ||
         !Number.isSafeInteger(call.result_seq) || call.result_seq! < 0) return [];
-      const permissions = computerPermissionKindsForOperation(call.action_id, call.operation);
+      const permissions = computerPermissionKindsForOperation(call.action_id, call.operation, true);
       return permissions.length ? [{ permissions, result_seq: call.result_seq! }] : [];
     });
   });

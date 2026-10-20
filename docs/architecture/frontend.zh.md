@@ -151,3 +151,8 @@ i18next 使用 `zh-CN`/`en-US` 静态语言 bundle，共享 [common/config/i18n.
 ## 一点平台特定的 UX
 
 桌面外壳在 Windows / Linux 上是**无边框**的（[`ui/src/renderer/components/layout/Titlebar/`](../../ui/src/renderer/components/layout/Titlebar/) 中的 React 标题栏通过 `@tauri-apps/api/window` 绘制最小化 / 最大化 / 关闭按钮）；macOS 通过 `TitleBarStyle::Overlay` 保留原生交通灯按钮。同一份 SPA 在浏览器中会隐藏标题栏，让浏览器外框处理它。区别在运行时通过 `isTauri()`（定义于 `tauriShell.ts`）来检测。
+
+
+## Computer Use 接缝
+
+Computer 的 `nomifun.computer` 模块由 `nomifun-app` 的 `computer_host` 持有，调用 `nomifun-computer` 五个单一职责模块和独立 Cua worker；Gateway 不注册桌面工具。UI 按冻结元数据展示观察/操作/应用/剪贴板分组、同源标题及前台标记，状态来自 `/api/computer/status`，系统许可使用现役 `/api/system/permissions`。UI/API 版本为 43，旧 Computer 会话提示新建，历史保留。架构与未完成平台验收见[Computer Use](computer-use.zh.md)。

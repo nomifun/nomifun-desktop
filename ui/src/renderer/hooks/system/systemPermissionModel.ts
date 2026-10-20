@@ -4,7 +4,8 @@ import type {
   SystemPermissionState,
   SystemPermissionStatus,
 } from '@/common/adapter/ipcBridge';
-export { computerPermissionKindsForOperation } from '@/common/chat/computerPermissionContract';
+import { computerPermissionKindsForActions } from '@/common/chat/computerSurface';
+export { computerPermissionKindsForOperation, computerPermissionKindsForActions } from '@/common/chat/computerSurface';
 
 export type PermissionCapabilityTab =
   | 'overview'
@@ -39,8 +40,8 @@ export const SYSTEM_PERMISSION_AUDIT: Readonly<Record<PermissionCapabilityId, {
     optionalRecovery: [],
   },
   computer_use: {
-    requiredBeforeUse: ['accessibility', 'screen_recording'],
-    requestedOnDemand: [],
+    requiredBeforeUse: [],
+    requestedOnDemand: ['accessibility', 'screen_recording'],
     optionalRecovery: [],
   },
   browser_use: {
@@ -81,23 +82,6 @@ const permissionStateIsReady = (state: SystemPermissionState | undefined): boole
 
 export const permissionEntryIsReady = (entry: SystemPermissionEntry | undefined): boolean =>
   permissionStateIsReady(entry?.state);
-
-/** Exact action-time Computer prerequisites; `computer/launch` needs neither. */
-export const computerPermissionKindsForActions = (
-  actionIds: Iterable<string>
-): Array<'accessibility' | 'screen_recording'> => {
-  const actions = new Set([...actionIds].filter((actionId) => actionId.startsWith('computer/')));
-  const required: Array<'accessibility' | 'screen_recording'> = [];
-  if (actions.size === 0 || actions.has('computer/observe')) required.push('screen_recording');
-  if (
-    actions.size === 0 ||
-    actions.has('computer/a11y.observe') ||
-    actions.has('computer/input')
-  ) {
-    required.push('accessibility');
-  }
-  return required;
-};
 
 export const computerPermissionsReady = (
   status: SystemPermissionStatus | null,

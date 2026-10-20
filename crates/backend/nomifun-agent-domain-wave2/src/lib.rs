@@ -2,7 +2,7 @@
 //!
 //! The package inventory in this crate is deliberately limited to the
 //! extension surface around Coding: workspace/filesystem/process/terminal/VCS,
-//! SSH, Browser, and Computer/A11y. Dynamic MCP tools are published by their
+//! SSH, Browser, and Computer. Dynamic MCP tools are published by their
 //! owning extension package and are intentionally absent here. The exact native Coding
 //! surface is owned by the Runtime contract and is not re-declared here.
 
@@ -53,12 +53,10 @@ pub const PACKAGE_VERSION: &str = CONTRACT_VERSION;
 pub const WORKSPACE_EXECUTION_PACKAGE_ID: &str = "nomifun.workspace-execution";
 pub const SSH_PACKAGE_ID: &str = "nomifun.ssh";
 pub const BROWSER_PACKAGE_ID: &str = "nomifun.browser";
-pub const COMPUTER_A11Y_PACKAGE_ID: &str = "nomifun.computer-a11y";
 
 pub const WORKSPACE_EXECUTION_MOUNT_ID: &str = "domain-workspace-execution";
 pub const SSH_MOUNT_ID: &str = "domain-ssh";
 pub const BROWSER_MOUNT_ID: &str = "domain-browser";
-pub const COMPUTER_A11Y_MOUNT_ID: &str = "domain-computer-a11y";
 pub const BROWSER_EXECUTION_ROLE_ID: &str = "system.browser_use";
 pub const COMPUTER_EXECUTION_ROLE_ID: &str = "system.computer_use";
 
@@ -66,7 +64,7 @@ pub const PACKAGE_IDS: [&str; 4] = [
     WORKSPACE_EXECUTION_PACKAGE_ID,
     SSH_PACKAGE_ID,
     BROWSER_PACKAGE_ID,
-    COMPUTER_A11Y_PACKAGE_ID,
+    COMPUTER_PACKAGE_ID,
 ];
 pub const TARGET_PACKAGE_IDS: [&str; 4] = PACKAGE_IDS;
 
@@ -211,13 +209,7 @@ pub const BROWSER_ACTION_IDS: &[&str] = &[
 ];
 pub const BROWSER_CAPABILITY_IDS: &[&str] = &[BROWSER_MODULE_ID];
 
-pub const COMPUTER_ACTION_IDS: &[&str] = &[
-    "computer/observe",
-    "computer/a11y.observe",
-    "computer/input",
-    "computer/launch",
-];
-pub const COMPUTER_A11Y_CAPABILITY_IDS: &[&str] = &[COMPUTER_MODULE_ID];
+include!("generated/computer.rs");
 
 pub const ALL_CAPABILITY_IDS: [&str; 7] = [
     WORKSPACE_FILES_MODULE_ID,
@@ -374,6 +366,8 @@ pub struct Wave2HostContext {
     pub registry_generation: u64,
     pub capability_id: CapabilityId,
     pub action_id: ActionId,
+    /// Exact process-local authorization from this invocation's frozen plan.
+    pub authorized_actions: BTreeSet<ActionId>,
     pub role_provider: Option<ExactRoleProviderRef>,
     /// The frozen, authorization-bearing host bindings selected for this
     /// invocation. The application resolves these bindings; the adapter
@@ -395,7 +389,7 @@ pub enum Wave2CapabilityOperation {
     WorkspaceExecution { input: StrictJsonValue },
     Ssh { input: StrictJsonValue },
     Browser { input: StrictJsonValue },
-    ComputerA11y { input: StrictJsonValue },
+    Computer { input: StrictJsonValue },
 }
 
 /// Exact capability-to-operation mapping exposed to composable host
@@ -438,10 +432,30 @@ pub enum Wave2TypedCapabilityOperation {
     BrowserDownload { input: StrictJsonValue },
     BrowserUpload { input: StrictJsonValue },
     BrowserEvaluate { input: StrictJsonValue },
-    ComputerObserve { input: StrictJsonValue },
-    ComputerA11yObserve { input: StrictJsonValue },
-    ComputerInput { input: StrictJsonValue },
-    ComputerLaunch { input: StrictJsonValue },
+    // BEGIN GENERATED COMPUTER VARIANTS
+    ComputerListApps { input: StrictJsonValue },
+    ComputerListWindows { input: StrictJsonValue },
+    ComputerGetWindowState { input: StrictJsonValue },
+    ComputerGetDesktopState { input: StrictJsonValue },
+    ComputerZoom { input: StrictJsonValue },
+    ComputerVerifyState { input: StrictJsonValue },
+    ComputerGetGuide { input: StrictJsonValue },
+    ComputerClick { input: StrictJsonValue },
+    ComputerTypeText { input: StrictJsonValue },
+    ComputerPressKey { input: StrictJsonValue },
+    ComputerHotkey { input: StrictJsonValue },
+    ComputerScroll { input: StrictJsonValue },
+    ComputerDrag { input: StrictJsonValue },
+    ComputerMoveCursor { input: StrictJsonValue },
+    ComputerSetValue { input: StrictJsonValue },
+    ComputerInvokeMenu { input: StrictJsonValue },
+    ComputerRunSteps { input: StrictJsonValue },
+    ComputerBringToFront { input: StrictJsonValue },
+    ComputerSetWindowFrame { input: StrictJsonValue },
+    ComputerLaunchApp { input: StrictJsonValue },
+    ComputerClipboardRead { input: StrictJsonValue },
+    ComputerClipboardWrite { input: StrictJsonValue },
+    // END GENERATED COMPUTER VARIANTS
 }
 
 impl Wave2TypedCapabilityOperation {
@@ -477,10 +491,30 @@ impl Wave2TypedCapabilityOperation {
             | Self::BrowserDownload { .. }
             | Self::BrowserUpload { .. }
             | Self::BrowserEvaluate { .. } => BROWSER_MODULE_ID,
-            Self::ComputerObserve { .. }
-            | Self::ComputerA11yObserve { .. }
-            | Self::ComputerInput { .. }
-            | Self::ComputerLaunch { .. } => COMPUTER_MODULE_ID,
+            // BEGIN GENERATED COMPUTER CAPABILITY
+            Self::ComputerListApps { .. }
+            | Self::ComputerListWindows { .. }
+            | Self::ComputerGetWindowState { .. }
+            | Self::ComputerGetDesktopState { .. }
+            | Self::ComputerZoom { .. }
+            | Self::ComputerVerifyState { .. }
+            | Self::ComputerGetGuide { .. }
+            | Self::ComputerClick { .. }
+            | Self::ComputerTypeText { .. }
+            | Self::ComputerPressKey { .. }
+            | Self::ComputerHotkey { .. }
+            | Self::ComputerScroll { .. }
+            | Self::ComputerDrag { .. }
+            | Self::ComputerMoveCursor { .. }
+            | Self::ComputerSetValue { .. }
+            | Self::ComputerInvokeMenu { .. }
+            | Self::ComputerRunSteps { .. }
+            | Self::ComputerBringToFront { .. }
+            | Self::ComputerSetWindowFrame { .. }
+            | Self::ComputerLaunchApp { .. }
+            | Self::ComputerClipboardRead { .. }
+            | Self::ComputerClipboardWrite { .. } => COMPUTER_MODULE_ID,
+            // END GENERATED COMPUTER CAPABILITY
         }
     }
 
@@ -516,10 +550,30 @@ impl Wave2TypedCapabilityOperation {
             Self::BrowserDownload { .. } => "browser/download",
             Self::BrowserUpload { .. } => "browser/upload",
             Self::BrowserEvaluate { .. } => "browser/evaluate",
-            Self::ComputerObserve { .. } => "computer/observe",
-            Self::ComputerA11yObserve { .. } => "computer/a11y.observe",
-            Self::ComputerInput { .. } => "computer/input",
-            Self::ComputerLaunch { .. } => "computer/launch",
+            // BEGIN GENERATED COMPUTER ACTIONS
+            Self::ComputerListApps { .. } => "computer/list_apps",
+            Self::ComputerListWindows { .. } => "computer/list_windows",
+            Self::ComputerGetWindowState { .. } => "computer/get_window_state",
+            Self::ComputerGetDesktopState { .. } => "computer/get_desktop_state",
+            Self::ComputerZoom { .. } => "computer/zoom",
+            Self::ComputerVerifyState { .. } => "computer/verify_state",
+            Self::ComputerGetGuide { .. } => "computer/get_guide",
+            Self::ComputerClick { .. } => "computer/click",
+            Self::ComputerTypeText { .. } => "computer/type_text",
+            Self::ComputerPressKey { .. } => "computer/press_key",
+            Self::ComputerHotkey { .. } => "computer/hotkey",
+            Self::ComputerScroll { .. } => "computer/scroll",
+            Self::ComputerDrag { .. } => "computer/drag",
+            Self::ComputerMoveCursor { .. } => "computer/move_cursor",
+            Self::ComputerSetValue { .. } => "computer/set_value",
+            Self::ComputerInvokeMenu { .. } => "computer/invoke_menu",
+            Self::ComputerRunSteps { .. } => "computer/run_steps",
+            Self::ComputerBringToFront { .. } => "computer/bring_to_front",
+            Self::ComputerSetWindowFrame { .. } => "computer/set_window_frame",
+            Self::ComputerLaunchApp { .. } => "computer/launch_app",
+            Self::ComputerClipboardRead { .. } => "computer/clipboard_read",
+            Self::ComputerClipboardWrite { .. } => "computer/clipboard_write",
+            // END GENERATED COMPUTER ACTIONS
         }
     }
 
@@ -559,12 +613,32 @@ impl Wave2TypedCapabilityOperation {
             | Self::BrowserEvaluate { input } => {
                 Wave2CapabilityOperation::Browser { input: input.clone() }
             }
-            Self::ComputerObserve { input }
-            | Self::ComputerA11yObserve { input }
-            | Self::ComputerInput { input }
-            | Self::ComputerLaunch { input } => {
-                Wave2CapabilityOperation::ComputerA11y { input: input.clone() }
+            // BEGIN GENERATED COMPUTER FAMILY
+            Self::ComputerListApps { input }
+            | Self::ComputerListWindows { input }
+            | Self::ComputerGetWindowState { input }
+            | Self::ComputerGetDesktopState { input }
+            | Self::ComputerZoom { input }
+            | Self::ComputerVerifyState { input }
+            | Self::ComputerGetGuide { input }
+            | Self::ComputerClick { input }
+            | Self::ComputerTypeText { input }
+            | Self::ComputerPressKey { input }
+            | Self::ComputerHotkey { input }
+            | Self::ComputerScroll { input }
+            | Self::ComputerDrag { input }
+            | Self::ComputerMoveCursor { input }
+            | Self::ComputerSetValue { input }
+            | Self::ComputerInvokeMenu { input }
+            | Self::ComputerRunSteps { input }
+            | Self::ComputerBringToFront { input }
+            | Self::ComputerSetWindowFrame { input }
+            | Self::ComputerLaunchApp { input }
+            | Self::ComputerClipboardRead { input }
+            | Self::ComputerClipboardWrite { input } => {
+                Wave2CapabilityOperation::Computer { input: input.clone() }
             }
+            // END GENERATED COMPUTER FAMILY
         }
     }
 }
@@ -599,7 +673,7 @@ impl Wave2HostRequest {
             Wave2CapabilityOperation::WorkspaceExecution { input }
             | Wave2CapabilityOperation::Ssh { input }
             | Wave2CapabilityOperation::Browser { input }
-            | Wave2CapabilityOperation::ComputerA11y { input } => input.clone(),
+            | Wave2CapabilityOperation::Computer { input } => input.clone(),
         };
         let typed = typed_operation_for(
             &self.context.capability_id,
@@ -840,7 +914,7 @@ impl Wave2RoleHostPorts {
     fn action_port(&self, package_id: &str) -> Arc<dyn Wave2HostPort> {
         match package_id {
             BROWSER_PACKAGE_ID => Arc::clone(&self.browser_actions),
-            COMPUTER_A11Y_PACKAGE_ID => Arc::clone(&self.computer_actions),
+            COMPUTER_PACKAGE_ID => Arc::clone(&self.computer_actions),
             _ => Arc::clone(&self.actions),
         }
     }
@@ -1012,14 +1086,7 @@ const BROWSER_CAPABILITIES: &[CapabilityDefinition] = &[CapabilityDefinition::mo
     PlatformScope::BrowserDesktop,
 )];
 
-const COMPUTER_ACTIONS: &[ActionDefinition] = &[
-    ActionDefinition::function("computer/observe", EffectClass::ReadSensitive),
-    ActionDefinition::function("computer/a11y.observe", EffectClass::ReadSensitive),
-    ActionDefinition::function("computer/input", EffectClass::Physical),
-    ActionDefinition::function("computer/launch", EffectClass::ExecuteLocal),
-];
-
-const COMPUTER_A11Y_CAPABILITIES: &[CapabilityDefinition] =
+const COMPUTER_CAPABILITIES: &[CapabilityDefinition] =
     &[CapabilityDefinition::module_on(
         COMPUTER_MODULE_ID,
         COMPUTER_ACTIONS,
@@ -1051,11 +1118,11 @@ const PACKAGE_DEFINITIONS: &[PackageDefinition] = &[
         capabilities: BROWSER_CAPABILITIES,
     },
     PackageDefinition {
-        id: COMPUTER_A11Y_PACKAGE_ID,
-        display_name: "Computer & Accessibility",
-        description: "Desktop Computer and accessibility observation capabilities.",
-        mount_id: COMPUTER_A11Y_MOUNT_ID,
-        capabilities: COMPUTER_A11Y_CAPABILITIES,
+        id: COMPUTER_PACKAGE_ID,
+        display_name: "Computer Use",
+        description: "Desktop observation, interaction, applications and clipboard through Cua Driver.",
+        mount_id: COMPUTER_MOUNT_ID,
+        capabilities: COMPUTER_CAPABILITIES,
     },
 ];
 
@@ -1670,49 +1737,6 @@ fn browser_act_input_schema() -> StrictJsonValue {
     StrictJsonValue(action_schema)
 }
 
-fn computer_action_input_schema(action_id: &str) -> Option<StrictJsonValue> {
-    let schema = match action_id {
-        "computer/observe" => strict_object_schema(
-            serde_json::json!({
-                "action":{"type":"string","enum":["screenshot","cursor_position","list_windows","wait"]},
-                "display":{"type":"integer","minimum":0},
-                "seconds":{"type":"number","minimum":0,"maximum":5}
-            }),
-            &["action"],
-        ),
-        "computer/a11y.observe" => strict_object_schema(
-            serde_json::json!({"action":{"const":"observe"}}),
-            &["action"],
-        ),
-        "computer/input" => strict_object_schema(
-            serde_json::json!({
-                "action":{"type":"string","enum":["click_element","set_element_value","right_click_element","double_click_element","left_click","right_click","middle_click","double_click","triple_click","mouse_move","left_click_drag","type","key","scroll","focus_window"]},
-                "ref":{"type":"integer","minimum":0},
-                "x":{"type":"integer"},"y":{"type":"integer"},
-                "start_x":{"type":"integer"},"start_y":{"type":"integer"},
-                "end_x":{"type":"integer"},"end_y":{"type":"integer"},
-                "text":{"type":"string","maxLength":65536},
-                "key":{"type":"string","minLength":1,"maxLength":256},
-                "direction":{"type":"string","enum":["up","down","left","right"]},
-                "amount":{"type":"integer","minimum":1,"maximum":100},
-                "window_id":{"type":"integer","minimum":0},
-                "expected_generation":{"type":"integer","minimum":1}
-            }),
-            &["action","expected_generation"],
-        ),
-        "computer/launch" => strict_object_schema(
-            serde_json::json!({
-                "action":{"const":"launch"},
-                "target":{"type":"string","minLength":1,"maxLength":4096},
-                "app":{"type":"string","minLength":1,"maxLength":1024}
-            }),
-            &["action","target"],
-        ),
-        _ => return None,
-    };
-    Some(schema)
-}
-
 fn canonical_schema(schema_owner: &str, role: &str) -> StrictJsonValue {
     if schema_owner == "browser/render_content" && role == "output" {
         return strict_object_schema(serde_json::json!({
@@ -1931,6 +1955,7 @@ impl CapabilityHandler for Wave2CapabilityHandler {
                         resolved_snapshot_ref: context.resolved_snapshot_ref,
                         registry_generation: context.registry_generation,
                         capability_id: self.capability_id.clone(),
+                        authorized_actions: context.resolved_capability.action_allowlist.clone(),
                         action_id: context.action_id,
                         role_provider: context
                             .role_provider
@@ -2054,17 +2079,10 @@ pub fn typed_operation_for(
         (BROWSER_MODULE_ID, "browser/download") => Wave2TypedCapabilityOperation::BrowserDownload { input },
         (BROWSER_MODULE_ID, "browser/upload") => Wave2TypedCapabilityOperation::BrowserUpload { input },
         (BROWSER_MODULE_ID, "browser/evaluate") => Wave2TypedCapabilityOperation::BrowserEvaluate { input },
-        (COMPUTER_MODULE_ID, "computer/observe") => {
-            Wave2TypedCapabilityOperation::ComputerObserve { input }
-        }
-        (COMPUTER_MODULE_ID, "computer/a11y.observe") => {
-            Wave2TypedCapabilityOperation::ComputerA11yObserve { input }
-        }
-        (COMPUTER_MODULE_ID, "computer/input") => {
-            Wave2TypedCapabilityOperation::ComputerInput { input }
-        }
-        (COMPUTER_MODULE_ID, "computer/launch") => {
-            Wave2TypedCapabilityOperation::ComputerLaunch { input }
+        (COMPUTER_MODULE_ID, action_id) => {
+            return computer_typed_operation(action_id, input).ok_or_else(|| KernelError::CapabilityExecution {
+                reason: format!("Computer does not expose action {action_id}"),
+            });
         }
         _ => {
             return Err(KernelError::CapabilityExecution {
@@ -2141,9 +2159,7 @@ pub fn required_action_resource_operation(
         (BROWSER_MODULE_ID, "browser/download") => Some("download"),
         (BROWSER_MODULE_ID, "browser/upload") => Some("upload"),
         (BROWSER_MODULE_ID, "browser/evaluate") => Some("evaluate"),
-        (COMPUTER_MODULE_ID, "computer/observe" | "computer/a11y.observe") => Some("observe"),
-        (COMPUTER_MODULE_ID, "computer/input") => Some("input"),
-        (COMPUTER_MODULE_ID, "computer/launch") => Some("launch"),
+        (COMPUTER_MODULE_ID, action_id) => computer_resource_operation(action_id),
         _ => None,
     }
 }
@@ -2364,8 +2380,8 @@ pub fn browser_registration() -> Result<PluginRegistration, String> {
     )
 }
 
-/// Build the bundled Computer/A11y registration.
-pub fn computer_a11y_registration() -> Result<PluginRegistration, String> {
+/// Build the bundled Computer registration.
+pub fn computer_registration() -> Result<PluginRegistration, String> {
     build_registration(
         &PACKAGE_DEFINITIONS[3],
         Wave2RoleHostPorts::with_actions(unconfigured_host_port()),
@@ -2388,7 +2404,7 @@ fn role_contracts_for_package(
 ) -> Result<Vec<RoleContractManifest>, String> {
     let role_id = match package.id {
         BROWSER_PACKAGE_ID => BROWSER_EXECUTION_ROLE_ID,
-        COMPUTER_A11Y_PACKAGE_ID => COMPUTER_EXECUTION_ROLE_ID,
+        COMPUTER_PACKAGE_ID => COMPUTER_EXECUTION_ROLE_ID,
         _ => return Ok(Vec::new()),
     };
     let member_ids = match role_id {
@@ -3571,7 +3587,7 @@ mod tests {
         let mut bindings = BTreeMap::new();
         for (module, kind, role, mount) in [
             (BROWSER_MODULE_ID, "browser", BROWSER_EXECUTION_ROLE_ID, BROWSER_MOUNT_ID),
-            (COMPUTER_MODULE_ID, "computer", COMPUTER_EXECUTION_ROLE_ID, COMPUTER_A11Y_MOUNT_ID),
+            (COMPUTER_MODULE_ID, "computer", COMPUTER_EXECUTION_ROLE_ID, COMPUTER_MOUNT_ID),
         ] {
             let provider = registry.role_provider(&role.into(), &mount.into()).unwrap();
             policy.optional_resources.insert(module.into(), OptionalResourceCeiling {
@@ -3938,6 +3954,7 @@ mod tests {
             registry_generation: 7,
             capability_id: CapabilityId::from(WORKSPACE_FILES_MODULE_ID),
             action_id: ActionId::from("workspace.files/read"),
+            authorized_actions: action_ids(WORKSPACE_FILES_MODULE_ID),
             role_provider: None,
             state: test_state_handle(),
             resource_bindings: vec![binding.clone()],
@@ -4111,6 +4128,7 @@ mod tests {
                 registry_generation: 11,
                 capability_id: CapabilityId::from(WORKSPACE_FILES_MODULE_ID),
                 action_id: ActionId::from("workspace.files/read"),
+                authorized_actions: action_ids(WORKSPACE_FILES_MODULE_ID),
                 role_provider: None,
                 state: test_state_handle(),
                 resource_bindings: vec![nomifun_agent_contracts::TypedResourceBinding {
@@ -4171,6 +4189,7 @@ mod tests {
                     registry_generation: 1,
                     capability_id: CapabilityId::from(WORKSPACE_FILES_MODULE_ID),
                     action_id: ActionId::from("workspace.files/read"),
+                    authorized_actions: action_ids(WORKSPACE_FILES_MODULE_ID),
                     role_provider: None,
                     state: test_state_handle(),
                     resource_bindings: Vec::new(),
@@ -4260,10 +4279,10 @@ mod tests {
             assert_eq!(error.canonical_code(), unavailable_on_platform_code());
         }
 
-        for capability_id in COMPUTER_A11Y_CAPABILITY_IDS {
+        for capability_id in COMPUTER_CAPABILITY_IDS {
             let capability = materialized
                 .capability(&CapabilityId::from(*capability_id))
-                .expect("Computer/A11y capability");
+                .expect("Computer capability");
             assert_eq!(
                 capability.manifest.supported_platforms,
                 vec![PlatformConstraint::Any]
@@ -4315,7 +4334,7 @@ mod tests {
                     &AgentModuleId::from(if role_id == BROWSER_EXECUTION_ROLE_ID {
                         BROWSER_MOUNT_ID
                     } else {
-                        COMPUTER_A11Y_MOUNT_ID
+                        COMPUTER_MOUNT_ID
                     }),
                 )
                 .expect("first-party role provider");

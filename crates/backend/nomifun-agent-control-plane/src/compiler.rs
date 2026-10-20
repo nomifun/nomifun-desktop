@@ -174,7 +174,21 @@ impl PresetRevisionCompiler {
         let (revision, snapshot) = self.compile_session_configuration(
             owner, preset_id, payload, source_snapshot, catalog,
             "Session bundled contract evolution",
-        )?;
+        ).map_err(|error| {
+            // A frozen Session whose Actions or Provider no longer materialize
+            // cannot enter the evolution proof. Use the same existing contract
+            // rejection as a failed proof, before persisting any candidate.
+            if matches!(error.code().as_ref(),
+                "CAPABILITY_NOT_MATERIALIZED" | "CAPABILITY_ACTION_NOT_MATERIALIZED")
+            {
+                ControlPlaneError::with_details(
+                    nomifun_agent_contracts::SESSION_CONTRACT_EVOLUTION_REJECTED,
+                    axum::http::StatusCode::CONFLICT,
+                    error.to_string(),
+                    serde_json::json!({"cause_code":error.code(), "cause_details":error.details()}),
+                )
+            } else { error }
+        })?;
         if add_default_local_os {
             nomifun_agent_contracts::validate_default_local_os_evolution(
                 source_revision, source_snapshot, &revision, &snapshot,

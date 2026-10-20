@@ -1,4 +1,4 @@
-//! Project canonical Computer and Browser screenshots into typed model image parts.
+//! Project canonical Browser screenshots into typed model image parts.
 //!
 //! The native role owner returns a bounded JSON envelope because the Kernel
 //! capability port is JSON-only. This exact adapter removes pixel bodies from
@@ -18,11 +18,11 @@ use nomifun_engine_core::{
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-const MAX_COMPUTER_IMAGE_ENCODED_BYTES: usize = 2 * 1024 * 1024;
-const MAX_COMPUTER_IMAGE_DECODED_BYTES: usize = 3 * 1024 * 1024 / 2;
+const MAX_BROWSER_IMAGE_ENCODED_BYTES: usize = 2 * 1024 * 1024;
+const MAX_BROWSER_IMAGE_DECODED_BYTES: usize = 3 * 1024 * 1024 / 2;
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
-pub(super) struct ComputerMediaTools {
+pub(super) struct BrowserMediaTools {
     pub inner: Arc<dyn EngineToolInvoker>,
     pub snapshot: Arc<CompiledSnapshot>,
     pub active: Arc<SessionCapabilityState>,
@@ -31,12 +31,6 @@ pub(super) struct ComputerMediaTools {
 
 fn error(message: &str) -> EngineToolError {
     EngineToolError::ToolInvocation(message.into())
-}
-
-fn is_computer_screenshot(capability_id: &str, action_id: &str, native_action: Option<&str>) -> bool {
-    capability_id == nomifun_agent_domain_wave2::COMPUTER_MODULE_ID
-        && action_id == "computer/observe"
-        && native_action == Some("screenshot")
 }
 
 fn is_browser_screenshot(capability_id: &str, action_id: &str, arguments: &Value) -> bool {
@@ -70,11 +64,11 @@ fn project_browser_screenshot(result: EngineToolResult) -> Result<EngineToolResu
         return Err(error("Canonical Browser screenshot target or dimensions are invalid"));
     }
     let data_base64 = screenshot.remove("png_base64").and_then(|body| body.as_str().map(str::to_owned))
-        .filter(|body| !body.is_empty() && body.len() <= MAX_COMPUTER_IMAGE_ENCODED_BYTES)
+        .filter(|body| !body.is_empty() && body.len() <= MAX_BROWSER_IMAGE_ENCODED_BYTES)
         .ok_or_else(|| error("Canonical Browser screenshot encoded body is invalid"))?;
     let decoded = STANDARD.decode(data_base64.as_bytes())
         .map_err(|_| error("Canonical Browser screenshot is not valid base64"))?;
-    if decoded.len() > MAX_COMPUTER_IMAGE_DECODED_BYTES || !decoded.starts_with(PNG_SIGNATURE) {
+    if decoded.len() > MAX_BROWSER_IMAGE_DECODED_BYTES || !decoded.starts_with(PNG_SIGNATURE) {
         return Err(error("Canonical Browser screenshot body is not bounded PNG"));
     }
     screenshot.insert("media_type".into(), json!("image/png"));
@@ -88,12 +82,12 @@ fn project_browser_screenshot(result: EngineToolResult) -> Result<EngineToolResu
     Ok(projected)
 }
 
-impl ComputerMediaTools {
+impl BrowserMediaTools {
     fn admit_image(&self, generation: u64) -> Result<(), EngineToolError> {
         let active = self
             .active
             .snapshot()
-            .map_err(|_| error("Computer image capability state is unavailable"))?;
+            .map_err(|_| error("Browser image capability state is unavailable"))?;
         if !self.route_image_input
             || active.generation != generation
             || active.resolved_snapshot_ref != *self.snapshot.snapshot_ref()
@@ -106,110 +100,17 @@ impl ComputerMediaTools {
     }
 }
 
-fn project_computer_screenshot(result: EngineToolResult) -> Result<EngineToolResult, EngineToolError> {
-    if result.is_error {
-        return Ok(result);
-    }
-    let [ChatToolResultPart::Text { text }] = result.output.as_slice() else {
-        return Err(error("Canonical Computer screenshot result has an invalid shape"));
-    };
-    let mut envelope: Value = serde_json::from_str(text)
-        .map_err(|_| error("Canonical Computer screenshot result could not be decoded"))?;
-    let generation = envelope
-        .get("generation")
-        .and_then(Value::as_u64)
-        .filter(|generation| *generation > 0)
-        .ok_or_else(|| error("Canonical Computer screenshot generation is missing"))?;
-    let result_object = envelope
-        .get_mut("result")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| error("Canonical Computer screenshot payload is missing"))?;
-    let text = result_object
-        .get("text")
-        .and_then(Value::as_str)
-        .filter(|text| !text.trim().is_empty())
-        .ok_or_else(|| error("Canonical Computer screenshot text is missing"))?
-        .to_owned();
-    let images = result_object
-        .remove("images")
-        .and_then(|images| images.as_array().cloned())
-        .filter(|images| images.len() == 1)
-        .ok_or_else(|| error("Canonical Computer screenshot requires exactly one image"))?;
-
-    let mut output = Vec::with_capacity(2);
-    let mut encoded_bytes = 0usize;
-    for image in images {
-        let media_type = image
-            .get("media_type")
-            .and_then(Value::as_str)
-            .filter(|media_type| *media_type == "image/png")
-            .ok_or_else(|| error("Canonical Computer screenshot media type is invalid"))?
-            .to_owned();
-        let data_base64 = image
-            .get("data")
-            .and_then(Value::as_str)
-            .filter(|data| !data.is_empty() && data.len() <= MAX_COMPUTER_IMAGE_ENCODED_BYTES)
-            .ok_or_else(|| error("Canonical Computer screenshot encoded body is invalid"))?
-            .to_owned();
-        let decoded = STANDARD
-            .decode(data_base64.as_bytes())
-            .map_err(|_| error("Canonical Computer screenshot is not valid base64"))?;
-        if decoded.len() > MAX_COMPUTER_IMAGE_DECODED_BYTES {
-            return Err(error("Canonical Computer screenshot decoded body exceeds its limit"));
-        }
-        if !decoded.starts_with(PNG_SIGNATURE) {
-            return Err(error("Canonical Computer screenshot body is not PNG"));
-        }
-        encoded_bytes = encoded_bytes.saturating_add(data_base64.len());
-        output.push(ChatToolResultPart::Image {
-            media_type,
-            data_base64,
-        });
-    }
-    output.insert(
-        0,
-        ChatToolResultPart::Text {
-            text: json!({
-                "kind":"computer_screenshot",
-                "generation":generation,
-                "text":text,
-                "image_count":1,
-                "encoded_bytes":encoded_bytes,
-                "notice":"Pixels came from the exact authorized local Computer owner. History or compaction may omit them; re-observe before any later pixel action."
-            })
-            .to_string(),
-        },
-    );
-    let projected = EngineToolResult {
-        call_id: result.call_id,
-        output,
-        is_error: false,
-    };
-    projected.validate_for(&projected.call_id)?;
-    Ok(projected)
-}
-
 #[async_trait]
-impl EngineToolInvoker for ComputerMediaTools {
+impl EngineToolInvoker for BrowserMediaTools {
     async fn invoke(
         &self,
         invocation: EngineToolInvocation,
         cancellation: CancellationToken,
     ) -> Result<EngineToolResult, EngineToolError> {
-        let screenshot = is_computer_screenshot(
-            invocation.binding.capability_id.as_ref(),
-            invocation.binding.action_id.as_ref(),
-            invocation
-                .call
-                .arguments
-                .0
-                .get("action")
-                .and_then(Value::as_str),
-        );
         let browser_screenshot = is_browser_screenshot(
             invocation.binding.capability_id.as_ref(), invocation.binding.action_id.as_ref(), &invocation.call.arguments.0,
         );
-        if !screenshot && !browser_screenshot {
+        if !browser_screenshot {
             return self.inner.invoke(invocation, cancellation).await;
         }
         if cancellation.is_cancelled() {
@@ -225,20 +126,21 @@ impl EngineToolInvoker for ComputerMediaTools {
             item.contribution_lock.source_kind == ContributionSourceKind::PlatformBuiltin
         }) {
             return Err(error(
-                "Native media projection requires the canonical platform Computer or Browser observation contribution",
+                "Native media projection requires the canonical platform Browser observation contribution",
             ));
         }
         let generation = invocation.active_set_generation;
         self.admit_image(generation)?;
         let result = self.inner.invoke(invocation, cancellation).await?;
         self.admit_image(generation)?;
-        if browser_screenshot { project_browser_screenshot(result) } else { project_computer_screenshot(result) }
+        project_browser_screenshot(result)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "browser-use")]
     use nomifun_chat_model_broker::ToolCallId;
     #[cfg(feature = "browser-use")]
     use nomifun_browser_platform::runtime::{BrowserDialog, BrowserDialogKind, BrowserInteractionCapabilities, BrowserObservation, BrowserScreenshot, BrowserTabTarget};
@@ -348,71 +250,4 @@ mod tests {
         assert!(!projected.output_text().contains(BROWSER_PNG));
     }
 
-    #[test]
-    fn projection_is_exact_to_the_canonical_screenshot_action() {
-        assert!(is_computer_screenshot(
-            "computer",
-            "computer/observe",
-            Some("screenshot")
-        ));
-        assert!(!is_computer_screenshot(
-            "computer",
-            "computer/a11y.observe",
-            Some("observe")
-        ));
-        assert!(!is_computer_screenshot(
-            "foreign.computer",
-            "computer/observe",
-            Some("screenshot")
-        ));
-    }
-
-    #[test]
-    fn projection_removes_base64_from_text_and_returns_one_typed_image() {
-        let encoded = STANDARD.encode([PNG_SIGNATURE.as_slice(), b"bounded fixture"].concat());
-        let result = EngineToolResult::text(
-            ToolCallId::from("screen"),
-            json!({
-                "generation": 3,
-                "result": {
-                    "text":"Screenshot captured: 10x10.",
-                    "images":[{"media_type":"image/png","data":encoded}]
-                }
-            })
-            .to_string(),
-            false,
-        );
-        let projected = project_computer_screenshot(result).unwrap();
-        assert_eq!(projected.output.len(), 2);
-        let ChatToolResultPart::Text { text } = &projected.output[0] else {
-            panic!("first part must be text")
-        };
-        assert!(!text.contains(&encoded));
-        assert!(text.contains("computer_screenshot"));
-        assert!(matches!(
-            &projected.output[1],
-            ChatToolResultPart::Image { media_type, data_base64 }
-                if media_type == "image/png" && data_base64 == &encoded
-        ));
-    }
-
-    #[test]
-    fn projection_rejects_a_non_png_body() {
-        let result = EngineToolResult::text(
-            ToolCallId::from("screen"),
-            json!({
-                "generation": 3,
-                "result": {
-                    "text":"Screenshot captured: 10x10.",
-                    "images":[{"media_type":"image/png","data":STANDARD.encode(b"not png")}]
-                }
-            })
-            .to_string(),
-            false,
-        );
-        assert!(project_computer_screenshot(result)
-            .unwrap_err()
-            .to_string()
-            .contains("not PNG"));
-    }
 }

@@ -115,7 +115,7 @@ The agent group is **self-contained** — no `nomi-*` crate references any
 The reverse direction normally goes through `nomifun-ai-agent`, which re-exports
 `nomi_config` and `nomi_types` for backend consumers.
 `nomifun-app` and `nomifun-gateway` have feature-gated direct dependencies for
-browser/computer bridge surfaces; those are documented exceptions, not the
+browser bridge surfaces; those are documented exceptions, not the
 default pattern.
 
 ## What lives where
@@ -169,3 +169,8 @@ The canonical Nomi router exposes installation-token authenticated canonical Rem
 operations at `/mcp` and `/api/remote/*`. They are mounted by
 [`bootstrap/nomi_core.rs`](../../crates/backend/nomifun-app/src/bootstrap/nomi_core.rs)
 and use explicit AgentSession IDs rather than the legacy Gateway registry.
+
+
+## Computer Use interface
+
+The `nomifun.computer` module is owned by `nomifun-app`’s `computer_host`, using the five host modules in `nomifun-computer` and an independent Cua worker. Gateway does not register desktop tools. The UI derives observation/interaction/application/clipboard groups, titles and foreground marks from frozen metadata. Status is `/api/computer/status`; OS access uses `/api/system/permissions`. UI/API version is 43. Retired Computer sessions ask for a new conversation while keeping history. See [Computer Use](computer-use.md) for architecture and outstanding platform acceptance.

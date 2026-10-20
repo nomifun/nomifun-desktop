@@ -37,6 +37,8 @@ pub mod model_route;
 pub mod model_middleware;
 pub mod tool_middleware;
 pub mod tool_presentation;
+pub mod computer_display;
+pub use computer_display::{computer_driver_tool, computer_action_uses_foreground, computer_arguments_use_foreground};
 pub mod tool_detail;
 pub use tool_detail::*;
 pub mod tool_file_summary;

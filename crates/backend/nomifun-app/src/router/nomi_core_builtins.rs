@@ -103,13 +103,12 @@ pub(crate) async fn build(
     #[cfg(feature = "computer-use")]
     let wave2_ports = {
         let mut wave2_ports = wave2_ports;
-        let computer = Arc::new(super::agent_role_host::ComputerRoleInvoker::new(
-            Arc::new(nomi_computer::tool::ComputerTool::new(&Default::default())),
+        let computer = Arc::new(super::computer_host::ComputerRoleInvoker::new(
+            services.computer.clone(),
             effect_store.clone(),
+            services.database.pool().clone(),
         ));
-        wave2_ports.computer_actions = Arc::new(
-            super::agent_role_host::RoleHostPortAdapter::new(computer),
-        );
+        wave2_ports.computer_actions = Arc::new(super::computer_host::RoleHostPortAdapter(computer));
         wave2_ports
     };
     let wave2 = nomifun_agent_domain_wave2::registrations_with_role_host_ports(wave2_ports)

@@ -48,10 +48,6 @@ function Preview() {
             actionIds={['companion/evolve', 'companion/learn', 'companion.memory/recall', 'companion.memory/write', 'channel.messaging/reply', 'robot/vision']}
             value={value} onChange={setValue} loadInventory={loadInventory} />
           <pre aria-label="当前选择">{JSON.stringify(value)}</pre>
-          <h2>Windows 电脑权限状态</h2>
-          <AgentResourcePicker requiredKinds={['computer']} capabilityIds={['computer']}
-            actionIds={['computer/observe', 'computer/a11y.observe']} value={{}}
-            onChange={() => undefined} />
         </div>
       </main>
     </div>

@@ -26,8 +26,7 @@
 #   并通过 --config 注入 tauri 的 bundle.windows.certificateThumbprint。
 #   也可改用 tauri.conf.json 里的 signCommand 走自定义签名(如 azuresigntool)。
 #   未设置该环境变量时,--signed 直接报错提示。
-#   ⚠ 注:--signed 仍走内联 JSON 注入指纹,在 PowerShell 5.1 下会被剥引号而失败,
-#      需在 pwsh 7+ 下运行(或改 signCommand)。本轮未启用 Authenticode,留待有证书时处理。
+#   worker 先签名再交给 Tauri 打包；真实证书和安装包验收单独执行。
 #
 # 注:macOS 包用 build:mac,Linux 包用 build:linux,且都需在对应系统上构建。
 # ============================================================================
@@ -103,8 +102,11 @@ if ($signed) {
 "@
     exit 1
   }
-  $cfgJson = '{"bundle":{"windows":{"certificateThumbprint":"' + $thumb + '"}}}'
-  $signConfig = @('--config', $cfgJson)
+  if ($thumb -notmatch '^[0-9a-fA-F]{40}$') { throw 'WINDOWS_CERTIFICATE_THUMBPRINT must be a SHA-1 hexadecimal certificate thumbprint' }
+  $cfgJson = @{ bundle = @{ windows = @{ certificateThumbprint = $thumb } } } | ConvertTo-Json -Depth 5
+  $signConfigFile = Join-Path ([System.IO.Path]::GetTempPath()) ('nomifun-sign-' + [Guid]::NewGuid().ToString('N') + '.json')
+  [System.IO.File]::WriteAllText($signConfigFile, $cfgJson, (New-Object System.Text.UTF8Encoding($false)))
+  $signConfig = @('--config', $signConfigFile)
   Write-Host "▶ 签名: 已启用 (指纹 $($thumb.Substring(0,[Math]::Min(8,$thumb.Length)))...)"
 }
 
@@ -134,6 +136,18 @@ foreach ($t in $triples) {
   Write-Host "▶▶▶ 构建 $t ..."
   $env:CI = 'true'
   $env:NOMIFUN_EMBED_OFFICECLI = '1'
+  $workerPath = (& bun "$Root/scripts/computer/build-worker.mjs" --target $t --profile release | Select-Object -Last 1)
+  if ($LASTEXITCODE -ne 0) { throw "Computer worker build failed for $t" }
+  if ($signed) {
+    $signTool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+    if (-not $signTool) { throw 'signtool.exe is required to sign the Computer worker before packaging' }
+    $workerSignArgs = @('sign', '/sha1', $thumb, '/fd', 'SHA256')
+    if ($env:WINDOWS_TIMESTAMP_URL) { $workerSignArgs += @('/tr', $env:WINDOWS_TIMESTAMP_URL, '/td', 'SHA256') }
+    & $signTool @workerSignArgs $workerPath
+    if ($LASTEXITCODE -ne 0) { throw 'Computer worker Authenticode signing failed' }
+    & $signTool verify /pa $workerPath
+    if ($LASTEXITCODE -ne 0) { throw 'Computer worker Authenticode verification failed' }
+  }
   # 第二个 --config 把 bundle.targets 锁成单一 NSIS(tauri.conf.json 里是全平台全列表)。
   # 用配置文件而非内联 JSON:PowerShell 5.1 会剥掉传给原生程序的双引号,内联 JSON 必坏。
   & bun x tauri build --config $Conf --config $WinConf --target $t @signConfig @passthru

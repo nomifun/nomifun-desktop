@@ -31,23 +31,15 @@ runner and prints its manual installation command. Development startup does not
 change system files. Installation, upgrade/removal, authentication requirements
 and checks are in the [Linux system execution guide](../../apps/desktop/linux-system-execution/README.md).
 
-Linux Computer also links GStreamer core/app/video (system version 1.14 or newer).
-The build preflight checks all three pkg-config modules. Debian/Ubuntu build
-packages are `libgstreamer1.0-dev` and `libgstreamer-plugins-base1.0-dev`; runtime
-packages are `gstreamer1.0-pipewire`, `gstreamer1.0-plugins-base` and
-`gstreamer1.0-plugins-good`. The RPM dependency names follow Fedora's
-`pipewire-gstreamer`, `gstreamer1-plugins-base` and `gstreamer1-plugins-good`.
-The native packages declare these runtime-loaded plugins and `xdg-desktop-portal`;
-ELF library scanning cannot discover the required `pipewiresrc`, `videoconvert`,
-`videoflip` and `appsink` factories by itself. Wayland additionally needs the
-logged-in desktop's working PipeWire service and a portal backend implementing
-the requested ScreenCast/RemoteDesktop interfaces and native consent.
+## Computer worker
 
-AppImage still requires those matching host services and GStreamer plugins.
-Its actual linked libraries/plugin search path must be inspected in the finished
-image with the target desktop; the bundler's `bundleMediaFramework` option alone
-does not prove that `pipewiresrc` or a host portal backend is present. AppImage
-Wayland operation remains unverified until that packaged runtime is exercised.
+Platform builds first run `scripts/computer/build-worker.mjs` in the independent workspace. Cargo compiler-artifact reports the actual executable, staged as `apps/desktop/binaries/nomifun-computer-worker-<target>[.exe]` for Tauri externalBin. Development sets `NOMIFUN_COMPUTER_WORKER`; the macOS development bundle uses its signed in-bundle copy.
+
+macOS signs the worker before the enclosing App. Windows --signed signs and verifies the worker with the same certificate before Tauri packaging. Real certificates, notarization, installation and package self-check remain separate release acceptance.
+
+Current Linux worker build dependencies are X11, Xi and xkbcommon (Debian/Ubuntu: libx11-dev, libxi-dev, libxkbcommon-dev); runtime packages are libx11-6, libxi6 and libxkbcommon0, or libX11, libXi and libxkbcommon on RPM systems. Old Computer GStreamer preflights and dedicated plugins are removed. Existing Browser, audio, portal and system-execution dependencies remain. AppImage includes the worker but its libraries and backend still need target-desktop verification. Native Wayland capture remains disabled.
+
+`bun run check:computer-boundary` checks vendor/patch identity, frozen generation, retired references and workspace isolation. License texts and worker dependency attribution ship through the existing component-notices resource.
 
 ## Web deployment artifacts
 

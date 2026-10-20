@@ -38,7 +38,7 @@
     "demo:idmm": "bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --idmm-smoke --report .tmp-idmm-demo-report.json",
     "test:agent-reliability-report": "node --test scripts/validation/agent-reliability-report.test.mjs",
     "check:agent-reliability": "node scripts/validation/agent-reliability-report.mjs",
-    "check": "bun run check:docs && bun run typecheck && bun run check:desktop-ui-boundary && bun run check:i18n && bun run check:theme && bun run check:icons && bun run check:dead-css && bun run check:windows-installer && bun run check:creative-studio-retirement && bun run check:external-tools && bun run check:process-runtime-boundary && bun run check:browser-platform-boundary && bun run check:uarc-boundary && bun run check:agent-session-boundary && bun run check:app-hosting-boundary && bun run check:agent-vocabulary && bun run help --check",
+    "check": "bun run check:docs && bun run typecheck && bun run check:desktop-ui-boundary && bun run check:i18n && bun run check:theme && bun run check:icons && bun run check:dead-css && bun run check:windows-installer && bun run check:creative-studio-retirement && bun run check:external-tools && bun run check:computer-boundary && bun run check:process-runtime-boundary && bun run check:browser-platform-boundary && bun run check:uarc-boundary && bun run check:agent-session-boundary && bun run check:app-hosting-boundary && bun run check:agent-vocabulary && bun run help --check",
     "typecheck": "bun run --filter=./ui typecheck",
     "check:docs": "bun scripts/check-docs.mjs",
     "check:desktop-ui-boundary": "bun scripts/check-desktop-ui-boundary.mjs",
@@ -66,7 +66,10 @@
     "test:voice-smoke-runner": "node --test ./scripts/validation/run-agent-voice-smoke.test.mjs",
     "test:mobile-voice-live": "bun scripts/validation/run-agent-voice-smoke.mjs",
     "check:app-hosting-boundary": "bun scripts/check-app-hosting-boundary.mjs",
-    "check:external-tools": "bun scripts/check-external-tools.mjs"
+    "check:external-tools": "bun scripts/check-external-tools.mjs",
+    "build:computer-worker": "bun scripts/computer/build-worker.mjs",
+    "gen:computer": "bun scripts/computer/generate-contracts.mjs",
+    "check:computer-boundary": "bun scripts/check-computer-boundary.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.2",
