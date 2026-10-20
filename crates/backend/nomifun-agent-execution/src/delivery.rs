@@ -6,15 +6,32 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Host-authored provenance for background or parallel work from any Agent
-/// entry. These reference the original canonical facts, never another ledger.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentExecutionSource {
-    pub agent_session_id: String,
-    pub turn_operation_id: String,
-    pub tool_operation_id: String,
-    pub effect_id: String,
+pub use nomifun_common::AgentExecutionSource;
+
+/// Missing receipt evidence stays absent. Explicit JSON null is an invalid
+/// original invocation reference to the existing cleanup reader.
+pub(crate) fn with_terminal_reference(mut payload: serde_json::Value,
+    terminal: Option<(String,String)>) -> serde_json::Value {
+    if let Some((operation,event))=terminal {
+        payload["canonical_operation_id"]=operation.into();
+        payload["terminal_event_id"]=event.into();
+    }
+    payload
+}
+
+#[cfg(test)]
+mod terminal_reference_tests {
+    use super::with_terminal_reference;
+    #[test]
+    fn optional_terminal_reference_preserves_the_original_cleanup_contract() {
+        let payload=serde_json::json!({"turn_operation_key":"original-initial","step_status":"failed"});
+        let absent=with_terminal_reference(payload.clone(),None);
+        assert_eq!(absent,payload);
+        assert!(absent.get("canonical_operation_id").is_none()&&absent.get("terminal_event_id").is_none());
+        let exact=with_terminal_reference(payload,Some(("original-operation".into(),"original-terminal".into())));
+        assert_eq!(exact["canonical_operation_id"],"original-operation");assert_eq!(exact["terminal_event_id"],"original-terminal");
+        assert_eq!(exact["turn_operation_key"],"original-initial");
+    }
 }
 
 /// Host-verified canonical human control input. The original typed event owns

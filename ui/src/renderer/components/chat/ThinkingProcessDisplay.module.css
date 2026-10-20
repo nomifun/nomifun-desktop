@@ -22,8 +22,8 @@
   color: var(--color-text-3, #86909c);
   cursor: pointer;
   font: inherit;
-  font-size: 13px;
-  line-height: 20px;
+  font-size: var(--conversation-message-font-size, 14px);
+  line-height: var(--conversation-message-line-height, 22px);
   user-select: none;
   text-align: left;
 }
@@ -40,9 +40,7 @@
 .headerProcess {
   box-sizing: border-box;
   align-self: flex-start;
-  min-height: var(--conversation-process-row-height, 18px);
-  font-size: var(--conversation-process-font-size, 12px);
-  line-height: var(--conversation-process-line-height, 16px);
+  min-height: var(--conversation-process-row-height, 24px);
   padding: 1px 0;
 }
 
@@ -108,8 +106,6 @@
   max-height: 280px;
   overflow-y: auto;
   color: var(--color-text-3, #86909c);
-  font-size: var(--conversation-process-font-size, 12px);
-  line-height: var(--conversation-process-line-height, 16px);
 }
 
 .bodyRich {

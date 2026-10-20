@@ -9,6 +9,7 @@ import type { MessageTimeline } from '@/common/protocolBindings/MessageTimeline'
 import type { MessageTimelineSegment } from '@/common/protocolBindings/MessageTimelineSegment';
 import { parseConversationId, parseMessageId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
+import { database } from '@/common/adapter/ipcBridge';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import { PreviewProvider } from '../../Preview';
 import MessageList from '../MessageList';
@@ -62,6 +63,11 @@ beforeEach(() => {
   frames = new Map();
   ingressTimers = new Map();
   restore = [];
+  const records = spyOn(database.getDelegationRecords, 'invoke').mockResolvedValue({ records: [], through_session_seq: 0 });
+  const details = spyOn(database.getToolDetails, 'invoke').mockImplementation(async request => ({ turn_id: request.turn_id,
+    call_id: request.call_id, call_event_id: 'canonical-call', through_seq: request.through_seq ?? 0, result_seq: request.expected_result_seq,
+    section: request.section, availability: 'available', content: '', format: 'text', offset: 0, total_bytes: 0, eof: true, non_text_parts: 0 }));
+  restore.push(() => { records.mockRestore(); details.mockRestore(); });
   const time = spyOn(performance, 'now').mockImplementation(() => now);
   restore.push(() => time.mockRestore());
   globalThis.requestAnimationFrame = callback => { frames.set(++nextFrame, callback); return nextFrame; };
@@ -226,11 +232,11 @@ test('collapsed live prose drains hidden appends and completed process history r
   expect(prose(page.getByTestId('process-narration')).length).toBeLessThan(first.length);
   const disclosure = () => page.container.querySelector('.turn-process-disclosure__toggle')!;
   fireEvent.click(disclosure());
-  expect(page.queryByTestId('process-narration')).toBeNull();
+  expect(page.container.querySelector('.turn-process-disclosure__body')?.hasAttribute('hidden')).toBe(true);
   act(() => send(textMessage(suffix)));
   drainIngress();
   frame(600);
-  expect(page.queryByTestId('process-narration')).toBeNull();
+  expect(page.container.querySelector('.turn-process-disclosure__body')?.hasAttribute('hidden')).toBe(true);
   expect(canonicalText()).toBe(first + suffix);
   act(() => {
     send({ ...textMessage('任务已完成。'), id: 'final-answer', message_id: finalId, msg_id: finalId });
@@ -487,16 +493,16 @@ test.each(['真实思考。', '', '[Private reasoning omitted from replay]'])(
     const group = page.container.querySelector('[data-process-group-id="process:continuous-narration"]')!;
     expect(liveNodes[0].compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(group.compareDocumentPosition(liveNodes[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    fireEvent.click(group.querySelector('button')!);
+    expect(page.container.querySelector('.turn-process-group')).toBeNull();
     expect(page.container.querySelector('[data-tool-call-id="installation"]')).not.toBeNull();
-    const assertReasoning = (node: Element) => {
-      const toggle = node.querySelector('[data-thinking-process-header]');
+    const assertReasoning = (node: Element | null) => {
+      const toggle = node?.querySelector('[data-thinking-process-header]') ?? null;
       if (!nextReasoning) { expect(toggle).toBeNull(); return; }
       expect(toggle).not.toBeNull();
-      fireEvent.click(toggle!);
-      expect(node.querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain(reasoning + nextReasoning);
+      if (toggle!.getAttribute('aria-expanded') !== 'true') fireEvent.click(toggle!);
+      expect(node!.querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain(reasoning + nextReasoning);
     };
-    assertReasoning(group);
+    assertReasoning(page.container.querySelector('[data-process-segment-id="thinking-between-words"]'));
     act(() => {
       send({ ...textMessage('安装完成。'), id: 'final-answer', message_id: finalId, msg_id: finalId, created_at: 13 });
       const terminal = summary();
@@ -516,9 +522,8 @@ test.each(['真实思考。', '', '[Private reasoning omitted from replay]'])(
     const reopenedGroup = page.container.querySelector('[data-process-group-id="process:continuous-narration"]')!;
     expect(reopenedNodes[0].compareDocumentPosition(reopenedGroup) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(reopenedGroup.compareDocumentPosition(reopenedNodes[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    fireEvent.click(reopenedGroup.querySelector('button')!);
     expect(page.container.querySelector('[data-tool-call-id="installation"]')).not.toBeNull();
-    assertReasoning(reopenedGroup);
+    assertReasoning(page.container.querySelector('[data-process-segment-id="thinking-between-words"]'));
     expect(page.container.querySelector('[data-testid="message-text-left"]')?.closest('.turn-process-disclosure')).toBeNull();
     await act(async () => {});
   }

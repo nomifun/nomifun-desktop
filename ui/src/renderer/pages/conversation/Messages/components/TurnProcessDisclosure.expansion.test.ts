@@ -21,6 +21,13 @@ describe('TurnProcessDisclosure expansion state', () => {
     ).toBe(false);
   });
 
+  test('a terminal default cannot override the user choice for the same identity', () => {
+    expect(shouldResetTurnProcessDisclosureExpansion(
+      { itemId: 'turn', hasProcessItems: true, defaultCollapsed: false },
+      { itemId: 'turn', hasProcessItems: true, defaultCollapsed: true }, true
+    )).toBe(false);
+  });
+
   test('resets when a new turn disclosure replaces the current one', () => {
     expect(
       shouldResetTurnProcessDisclosureExpansion(

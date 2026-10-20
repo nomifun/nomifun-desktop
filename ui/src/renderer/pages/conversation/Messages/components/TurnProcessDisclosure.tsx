@@ -7,7 +7,8 @@
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import { Right } from '@icon-park/react';
 import classNames from 'classnames';
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { ProcessDetailsVisibilityContext } from '../processDetailsVisibility';
 import { useTranslation } from 'react-i18next';
 
 export interface TurnProcessDisclosureView<T> {
@@ -28,11 +29,8 @@ interface TurnProcessDisclosureCommonProps<T> {
   getProcessItemState: (item: T) => TurnDisclosureProcessState;
   getProcessItemLayoutKind?: (item: T) => string;
   getProcessGroupId?: (item: T) => string | undefined;
-  getProcessGroupLabel?: (items: T[]) => string;
   isProcessItemHighlighted?: (item: T) => boolean;
   getProcessItemSourceId?: (item: T) => string | undefined;
-  processFooter?: React.ReactNode;
-  activityLabel?: string;
 }
 
 type TurnProcessDisclosureProps<T> = TurnProcessDisclosureCommonProps<T> & (
@@ -54,9 +52,11 @@ const getDefaultExpanded = (hasProcessItems: boolean, defaultCollapsed: boolean)
 
 export function shouldResetTurnProcessDisclosureExpansion(
   previous: TurnProcessDisclosureExpansionSnapshot,
-  next: TurnProcessDisclosureExpansionSnapshot
+  next: TurnProcessDisclosureExpansionSnapshot,
+  manuallyChanged = false
 ): boolean {
   if (previous.itemId !== next.itemId) return true;
+  if (manuallyChanged) return false;
   if (previous.hasProcessItems !== next.hasProcessItems) return true;
   if (previous.defaultCollapsed !== next.defaultCollapsed) return true;
   return false;
@@ -117,36 +117,6 @@ const TurnWorkDuration: React.FC<{
   return <span className='turn-process-disclosure__label' role={preparationLabel ? 'status' : undefined}>{preparationLabel ?? label}</span>;
 };
 
-type ProcessEntry<T> = { kind: 'item'; item: T } | { kind: 'group'; id: string; items: T[] };
-
-/** A group is a read-only canonical boundary and starts collapsed. Manual
- * choices are scoped to its immutable identity and survive incoming text,
- * tools, and history refreshes. */
-function ProcessGroup<T>({ id, items, label, active, running, highlighted, children }: {
-  id: string; items: T[]; label: string; active: boolean; running: boolean; highlighted: boolean; children: React.ReactNode;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const followRef = useRef(true);
-  useLayoutEffect(() => {
-    if (active && expanded && followRef.current && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
-  }, [active, expanded, items]);
-  const bodyId = `process-group-${sanitizeDomId(id)}`;
-  useEffect(() => { if (highlighted) setExpanded(true); }, [highlighted]);
-  return <div className={classNames('turn-process-group', running && 'turn-process-group--running')} data-process-group-id={id}>
-    <button type='button' className='turn-process-group__toggle' aria-expanded={expanded} aria-controls={bodyId}
-      onClick={() => setExpanded(!expanded)}>
-      <Right theme='outline' size='12' className={classNames('turn-process-disclosure__arrow', expanded && 'turn-process-disclosure__arrow--open')} />
-      <span className='turn-process-group__label'>{label}</span>
-    </button>
-    {expanded && <div ref={bodyRef} id={bodyId} className='turn-process-group__body' data-process-group-items={items.length}
-      onWheel={event => { if (event.deltaY < 0) followRef.current = false; }}
-      onScroll={event => { const body = event.currentTarget; followRef.current = body.scrollHeight - body.scrollTop - body.clientHeight < 16; }}>
-      {children}
-    </div>}
-  </div>;
-}
-
 function TurnProcessDisclosure<T>({
   item,
   preparationLabel,
@@ -156,19 +126,18 @@ function TurnProcessDisclosure<T>({
   getProcessItemState,
   getProcessItemLayoutKind,
   getProcessGroupId,
-  getProcessGroupLabel,
   isProcessItemHighlighted,
   getProcessItemSourceId,
-  processFooter,
-  activityLabel,
 }: TurnProcessDisclosureProps<T>) {
   const { t } = useTranslation();
-  const hasProcessItems = Boolean(item && (item.processItems.length > 0 || processFooter != null));
+  const hasProcessItems = Boolean(item && item.processItems.length > 0);
   const itemId = item?.id ?? '';
   const defaultCollapsed = item?.defaultCollapsed ?? true;
   const running = item?.running === true;
   const beganPreparing = useRef(!item);
   const [expanded, setExpanded] = useState(() => getDefaultExpanded(hasProcessItems, defaultCollapsed));
+  const manuallyChanged = useRef(false);
+  const [bodyMounted, setBodyMounted] = useState(() => getDefaultExpanded(hasProcessItems, defaultCollapsed));
   const expansionSnapshotRef = useRef<TurnProcessDisclosureExpansionSnapshot>({
     itemId,
     hasProcessItems,
@@ -181,7 +150,8 @@ function TurnProcessDisclosure<T>({
       hasProcessItems,
       defaultCollapsed,
     };
-    const shouldReset = shouldResetTurnProcessDisclosureExpansion(expansionSnapshotRef.current, nextSnapshot);
+    if (expansionSnapshotRef.current.itemId !== itemId) { manuallyChanged.current = false; setBodyMounted(false); }
+    const shouldReset = shouldResetTurnProcessDisclosureExpansion(expansionSnapshotRef.current, nextSnapshot, manuallyChanged.current);
     expansionSnapshotRef.current = nextSnapshot;
     if (shouldReset) setExpanded(getDefaultExpanded(hasProcessItems, defaultCollapsed));
   }, [hasProcessItems, defaultCollapsed, itemId]);
@@ -190,45 +160,24 @@ function TurnProcessDisclosure<T>({
     if (highlighted && hasProcessItems) setExpanded(true);
   }, [hasProcessItems, highlighted]);
 
-  const entries = useMemo(() => {
-    const output: ProcessEntry<T>[] = [];
-    const groups = new Map<string, Extract<ProcessEntry<T>, { kind: 'group' }>>();
-    for (const processItem of item?.processItems ?? []) {
-      const groupId = getProcessGroupId?.(processItem);
-      if (!groupId) { output.push({ kind: 'item', item: processItem }); continue; }
-      let group = groups.get(groupId);
-      if (!group) { group = { kind: 'group', id: groupId, items: [] }; groups.set(groupId, group); output.push(group); }
-      group.items.push(processItem);
-    }
-    return output;
-  }, [getProcessGroupId, item?.processItems]);
-  const currentGroup = item?.running ? entries.findLast(entry => entry.kind === 'group' &&
-    entry.items.some(processItem => getProcessItemState(processItem) === 'running')) : undefined;
-  const currentGroupId = currentGroup?.kind === 'group' ? currentGroup.id : undefined;
-  // A trailing process phase also includes the model/argument wait between its
-  // tool calls. Narration closes that continuation; lifecycle status rows do
-  // not. This affects the title only, never a tool outcome or expansion choice.
-  const continuingPhase = running ? entries.findLast(entry => entry.kind === 'group'
-    || getProcessItemLayoutKind?.(entry.item) === 'text') : undefined;
-  const continuingGroupId = continuingPhase?.kind === 'group' ? continuingPhase.id : undefined;
   const renderEntryItem = (processItem: T) => {
     const itemKey = getProcessItemKey(processItem);
     const state = getProcessItemState(processItem);
     const layoutKind = getProcessItemLayoutKind?.(processItem) ?? 'other';
-    return <div key={`item:${itemKey}`} data-process-segment-id={itemKey} data-process-source-message-id={getProcessItemSourceId?.(processItem)}
+    return <div key={`item:${itemKey}`} data-process-segment-id={itemKey} data-process-source-message-id={getProcessItemSourceId?.(processItem)} data-process-group-id={getProcessGroupId?.(processItem)}
       className={classNames('turn-process-disclosure__item', `turn-process-disclosure__item--${layoutKind}`,
-        `turn-process-disclosure__item--${state}`)}>
+        `turn-process-disclosure__item--${state}`, isProcessItemHighlighted?.(processItem) && 'turn-process-disclosure__item--highlighted')}>
       {renderProcessItem(processItem)}
     </div>;
   };
 
   const bodyId = `turn-process-disclosure-body-${sanitizeDomId(itemId)}`;
-  const disclosureExpanded = hasProcessItems && (beganPreparing.current && expansionSnapshotRef.current.itemId === ''
-    ? getDefaultExpanded(hasProcessItems, defaultCollapsed) : expanded);
+  const sameIdentity = expansionSnapshotRef.current.itemId === itemId;
+  const disclosureExpanded = hasProcessItems && (sameIdentity ? expanded : getDefaultExpanded(hasProcessItems, defaultCollapsed));
+  useEffect(() => { if (disclosureExpanded) setBodyMounted(true); }, [disclosureExpanded]);
   const headerContent = (
     <>
       <TurnWorkDuration startAt={item?.startAt} endAt={item?.endAt} running={running} state={item?.state ?? 'completed'} preparationLabel={!item ? preparationLabel : undefined} />
-      {activityLabel && <span className='turn-process-disclosure__activity' role='status'>{activityLabel}</span>}
       {hasProcessItems && (
         <Right
           theme='outline'
@@ -257,7 +206,7 @@ function TurnProcessDisclosure<T>({
             type='button'
             className={classNames('turn-process-disclosure__toggle', !hasProcessItems && 'turn-process-disclosure__toggle--static')}
             disabled={!hasProcessItems}
-            onClick={() => setExpanded((value) => !value)}
+            onClick={() => { manuallyChanged.current = true; setExpanded((value) => !value); }}
             aria-label={hasProcessItems ? t(
               disclosureExpanded ? 'messages.turnProcess.collapse' : 'messages.turnProcess.expand',
               { defaultValue: disclosureExpanded ? 'Collapse thinking process' : 'Expand thinking process' }
@@ -280,17 +229,11 @@ function TurnProcessDisclosure<T>({
           })}
         </div>
       )}
-      {disclosureExpanded && item && (
-        <div id={bodyId} className='turn-process-disclosure__body'>
-          {entries.map(entry => entry.kind === 'item' ? renderEntryItem(entry.item) :
-            <ProcessGroup key={`group:${entry.id}`} id={entry.id} items={entry.items}
-              label={getProcessGroupLabel?.(entry.items) ?? t('conversation.thinking.complete')}
-              running={running && (entry.id === continuingGroupId
-                || entry.items.some(processItem => getProcessItemState(processItem) === 'running'))}
-              active={entry.id === currentGroupId} highlighted={entry.items.some(processItem => isProcessItemHighlighted?.(processItem))}>
-              {entry.items.map(renderEntryItem)}
-            </ProcessGroup>)}
-          {processFooter}
+      {(disclosureExpanded || (sameIdentity && bodyMounted)) && item && (
+        <div id={bodyId} className='turn-process-disclosure__body' hidden={!disclosureExpanded}>
+          <ProcessDetailsVisibilityContext.Provider value={disclosureExpanded}>
+            {item.processItems.map(renderEntryItem)}
+          </ProcessDetailsVisibilityContext.Provider>
         </div>
       )}
     </div>

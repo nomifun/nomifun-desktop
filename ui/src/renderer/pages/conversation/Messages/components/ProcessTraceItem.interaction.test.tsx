@@ -35,20 +35,20 @@ describe('public process trace', () => {
     }
   );
 
-  test.each(['read_file', 'search_files', 'write_file', 'apply_patch', 'write_process_stdin', 'exec_command'])(
+  test.each(['read_file', 'search_files', 'write_file', 'apply_patch', 'write_process_stdin', 'start_process'])(
     '%s never renders a raw input or output supplied outside the public contract', name => {
-      const item = tool({ name, description: name === 'exec_command' ? 'sed -n 1,300p guide.html' : 'src/app.ts' });
+      const item = tool({ name, description: name === 'start_process' ? 'sed -n 1,300p guide.html' : 'src/app.ts' });
       Object.assign(item.content, { args: { path: 'src/app.ts', content: 'PRIVATE WRITE BODY' },
         input: { patch: 'PRIVATE PATCH BODY' }, output: 'PRIVATE FILE CONTENT' });
       const { container, queryByRole } = show(item);
       expect(container.textContent).not.toContain('PRIVATE');
       expect(container.querySelector('pre')).toBeNull();
       expect(queryByRole('button')).toBeNull();
-      if (name === 'exec_command') expect(container.textContent).toContain('sed -n 1,300p guide.html');
+      if (name === 'start_process') expect(container.textContent).toContain('sed -n 1,300p guide.html');
     }
   );
 
-  test('canonical web actions retain their existing localized target and only a public error expands', async () => {
+  test('canonical web targets stay localized and an unbound row exposes only its public diagnostic', async () => {
     const locale = createInstance();
     await locale.use(initReactI18next).init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: { messages: chineseMessages } } } });
     const name = 'platform__web_research_web_research_fetch__30fb0227939eb7c80164';
@@ -70,7 +70,7 @@ describe('public process trace', () => {
     [{ command_not_started: true }, 'did not start; command was not run'],
     [{ command_exit_code: 1, non_fatal_failure: true }, 'ended with exit code 1'],
   ])('typed process outcome preserves the existing command row', (metadata, expected) => {
-    const item = tool({ name: 'exec_command', status: 'error', description: 'bun test', ...metadata });
+    const item = tool({ name: 'start_process', status: 'error', description: 'bun test', ...metadata });
     const { container, queryByRole } = show(item);
     expect(container.textContent).toContain('bun test');
     expect(container.textContent).toContain(expected);

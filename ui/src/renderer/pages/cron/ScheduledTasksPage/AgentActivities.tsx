@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { agentActivities } from '@/common/adapter/ipcBridge';
 import type { AgentActivity, AgentActivityTarget, StopAgentActivityRequest } from '@/common/types/agentExecution/agentActivity';
 import { uuidv7 } from '@/common/utils/uuidv7';
+import { ActivityCleanupProgress } from '@/renderer/pages/conversation/execution/TaskActivityDetails';
 
 /** Polling reads existing owner facts only. Commands retain the exact target
  * captured at the click, including on a retry after a lost HTTP response. */
@@ -123,13 +124,7 @@ const AgentActivities: React.FC = () => {
         </div>
         {item.continuation !== 'none' && <p className='mb-0 text-13px text-t-secondary'>{t(item.continuation === 'answer_queued' ? 'cron.activity.answerQueued' : 'cron.activity.resumeQueued')}</p>}
         {item.waiting_reason && <p className='mb-0 text-13px text-t-secondary'>{item.waiting_reason}</p>}
-        <div className='mt-12px grid grid-cols-2 gap-x-24px gap-y-8px text-12px text-t-secondary'>
-          {item.resources.map((resource) => <div key={JSON.stringify(resource.target ?? resource.kind)} className='flex min-w-0 items-start justify-between gap-8px'>
-            <span className='min-w-0 flex-1 break-words'>{resource.display_name ?? t(`cron.activity.resources.${resource.kind}`)} · {t(`cron.activity.resourceStates.${resource.state}`)}</span>
-            {resource.target && resource.state !== 'released' && <Button size='mini' type='text' className='shrink-0' onClick={() => { void stop(resource.target!); }}>{t('cron.activity.closeResource')}</Button>}
-          </div>)}
-        </div>
-        {wasAccepted && item.resources.some((resource) => resource.state === 'unconfirmed') && <p className='mb-0 text-12px text-t-tertiary'>{t('cron.activity.releaseUnknown')}</p>}
+        <ActivityCleanupProgress item={item} accepted={wasAccepted} showStatus={false} onCloseResource={target => { void stop(target); }} />
       </article>;
     })}
     {cursor && <Button onClick={() => { pages.current += 1; void refresh(); }}>{t('cron.activity.more')}</Button>}

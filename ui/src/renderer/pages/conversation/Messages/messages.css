@@ -8,12 +8,10 @@
 .message-item {
   --conversation-message-font-size: 14px;
   --conversation-message-line-height: 22px;
-  --conversation-process-font-size: 12px;
-  --conversation-process-line-height: 16px;
   --conversation-process-gap: 6px;
   --conversation-process-row-gap: 0px;
   --conversation-process-detail-gap: 4px;
-  --conversation-process-row-height: 18px;
+  --conversation-process-row-height: 24px;
 }
 
 .message-text-body {
@@ -383,106 +381,6 @@
   white-space: nowrap;
 }
 
-.turn-process-disclosure__activity {
-  margin-left: 6px;
-  color: var(--color-text-2, #4e5969);
-}
-
-.turn-process-disclosure--live .turn-process-disclosure__activity {
-  color: var(--primary);
-}
-
-.conversation-delegation {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-  color: var(--color-text-2, #4e5969);
-}
-
-.conversation-delegation__heading,
-.conversation-delegation__empty,
-.conversation-delegation__row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.conversation-delegation__heading {
-  min-height: 28px;
-  font-size: 14px;
-  flex-wrap: wrap;
-}
-
-.conversation-delegation__count {
-  margin-left: auto;
-  color: var(--color-text-3, #86909c);
-  font-size: 12px;
-}
-
-.conversation-delegation__empty {
-  flex-wrap: wrap;
-  margin-left: 24px;
-  font-size: 13px;
-  line-height: 22px;
-}
-
-.conversation-delegation__goal {
-  overflow-wrap: anywhere;
-}
-
-.conversation-delegation__row {
-  width: 100%;
-  min-height: 32px;
-  padding: 3px 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 14px;
-  line-height: 22px;
-  text-align: left;
-}
-
-button.conversation-delegation__row { cursor: pointer; }
-button.conversation-delegation__row:hover { color: var(--color-text-1, #1d2129); }
-button.conversation-delegation__row:focus-visible {
-  outline: 2px solid var(--color-primary-light-3, #bedaff);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-
-.conversation-delegation__icon {
-  flex: none;
-  width: 16px;
-  color: var(--color-text-3, #86909c);
-}
-
-.conversation-delegation__content {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.conversation-delegation__name,
-.conversation-delegation__participant { display: block; overflow-wrap: anywhere; }
-.conversation-delegation__participant { color: var(--color-text-3, #86909c); font-size: 12px; }
-.conversation-delegation__status { flex: none; font-size: 12px; color: var(--color-text-3, #86909c); }
-.conversation-delegation__task--running .conversation-delegation__status { color: var(--primary); }
-.conversation-delegation__task--completed .conversation-delegation__status { color: var(--success); }
-.conversation-delegation__task--failed .conversation-delegation__status { color: var(--danger); }
-.conversation-delegation__task--waiting_input .conversation-delegation__status { color: var(--warning); }
-.conversation-delegation__note {
-  margin: 4px 0 0 24px;
-  font-size: 13px;
-  line-height: 20px;
-  overflow-wrap: anywhere;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-}
-
 .turn-process-disclosure__arrow {
   flex: none;
   opacity: 0.75;
@@ -517,20 +415,6 @@ button.conversation-delegation__row:focus-visible {
   margin-bottom: 0;
 }
 
-.turn-process-group--running > .turn-process-group__toggle .turn-process-group__label {
-  animation: turn-process-group-pulse 2.8s ease-in-out infinite;
-}
-
-@keyframes turn-process-group-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.55;
-  }
-}
-
 .turn-process-receipt {
   width: 100%;
   color: var(--color-text-3, #86909c);
@@ -557,9 +441,9 @@ button.conversation-delegation__row:focus-visible {
   color: inherit;
   cursor: pointer;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--conversation-message-font-size, 14px);
   font-weight: 400;
-  line-height: 20px;
+  line-height: var(--conversation-message-line-height, 22px);
   padding: 0 2px;
   text-align: left;
   user-select: none;
@@ -646,7 +530,7 @@ button.conversation-delegation__row:focus-visible {
   box-sizing: border-box;
   display: flex;
   width: 100%;
-  min-height: var(--conversation-process-row-height, 18px);
+  min-height: var(--conversation-process-row-height, 24px);
   min-width: 0;
   align-items: flex-start;
   gap: 6px;
@@ -654,9 +538,9 @@ button.conversation-delegation__row:focus-visible {
   background: transparent;
   color: var(--color-text-3, #86909c);
   font: inherit;
-  font-size: var(--conversation-process-font-size, 12px);
+  font-size: var(--conversation-message-font-size, 14px);
   font-weight: 400;
-  line-height: var(--conversation-process-line-height, 16px);
+  line-height: var(--conversation-message-line-height, 22px);
   padding: 1px 0;
   text-align: left;
 }
@@ -687,7 +571,7 @@ button.turn-process-trace__row:focus-visible {
 .turn-process-trace__row-icon {
   display: inline-flex;
   width: 14px;
-  height: var(--conversation-process-line-height, 16px);
+  height: var(--conversation-message-line-height, 22px);
   flex: none;
   align-items: center;
   justify-content: center;
@@ -715,7 +599,7 @@ button.turn-process-trace__row:focus-visible {
 .turn-process-trace-tool__arrow {
   display: inline-flex;
   flex: none;
-  height: var(--conversation-process-line-height, 16px);
+  height: var(--conversation-message-line-height, 22px);
   align-items: center;
   justify-content: center;
   line-height: 0;
@@ -928,56 +812,7 @@ button.turn-process-trace__row:focus-visible {
     transition: none;
   }
 
-  .turn-process-group--running > .turn-process-group__toggle .turn-process-group__label {
-    animation: none;
-  }
 
-}
-
-/* Canonical process stages use the conversation text axis. Only opened details
-   have a surface; titles and stage disclosures stay transparent. */
-.turn-process-group {
-  min-width: 0;
-}
-
-.turn-process-group__toggle {
-  display: flex;
-  width: 100%;
-  min-height: 28px;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 0;
-  border: 0;
-  background: transparent;
-  color: var(--color-text-3);
-  font: inherit;
-  font-size: var(--conversation-message-font-size, 14px);
-  line-height: var(--conversation-message-line-height, 22px);
-  text-align: left;
-  cursor: pointer;
-}
-
-.turn-process-group__label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.turn-process-group__body {
-  --conversation-process-text-color: var(--color-text-3);
-  display: flex;
-  max-height: 320px;
-  flex-direction: column;
-  gap: var(--conversation-process-row-gap, 0px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 2px 0 4px;
-}
-
-.turn-process-group__toggle:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
 }
 
 .turn-process-trace-tool__toggle {
@@ -986,33 +821,164 @@ button.turn-process-trace__row:focus-visible {
 }
 
 /* Keep nested process scroll areas quiet without changing other app panels. */
-:is(.turn-process-group__body, .turn-process-trace-detail, .turn-process-disclosure [data-thinking-process-body]) {
+:is(.turn-process-trace-detail, .turn-process-disclosure [data-thinking-process-body]) {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--color-text-3) 45%, transparent) transparent;
 }
 
 /* Chromium's standard thin width takes precedence over WebKit pixel widths. */
 @supports selector(::-webkit-scrollbar) {
-  :is(.turn-process-group__body, .turn-process-trace-detail, .turn-process-disclosure [data-thinking-process-body]) {
+  :is(.turn-process-trace-detail, .turn-process-disclosure [data-thinking-process-body]) {
     scrollbar-width: auto;
     scrollbar-color: auto;
   }
 }
 
-:is(.turn-process-group__body, .turn-process-trace-detail, .turn-process-disclosure [data-thinking-process-body])::-webkit-scrollbar {
+:is(.turn-process-trace-detail, .turn-process-disclosure [data-thinking-process-body])::-webkit-scrollbar {
   width: 4px;
   height: 4px;
 }
 
-:is(.turn-process-group__body, .turn-process-trace-detail, .turn-process-disclosure [data-thinking-process-body])::-webkit-scrollbar-track {
+:is(.turn-process-trace-detail, .turn-process-disclosure [data-thinking-process-body])::-webkit-scrollbar-track {
   background: transparent;
 }
 
-:is(.turn-process-group__body, .turn-process-trace-detail, .turn-process-disclosure [data-thinking-process-body])::-webkit-scrollbar-thumb {
+:is(.turn-process-trace-detail, .turn-process-disclosure [data-thinking-process-body])::-webkit-scrollbar-thumb {
   border-radius: 999px;
   background: color-mix(in srgb, var(--color-text-3) 45%, transparent);
 }
 
-:is(.turn-process-group__body, .turn-process-trace-detail, .turn-process-disclosure [data-thinking-process-body])::-webkit-scrollbar-thumb:hover {
+:is(.turn-process-trace-detail, .turn-process-disclosure [data-thinking-process-body])::-webkit-scrollbar-thumb:hover {
   background: color-mix(in srgb, var(--color-text-3) 70%, transparent);
 }
+
+/* Rows share one text axis. Only explicitly opened payloads get a surface. */
+.turn-process-disclosure__body[hidden] { display: none; }
+.turn-process-disclosure__item--highlighted { outline: 1px solid var(--color-primary-light-3); border-radius: 4px; }
+.turn-tool-details { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.turn-process-trace-detail__notice { margin: 2px 0; color: var(--color-text-3); font-size: 12px; line-height: 18px; }
+.turn-process-trace-detail__more, .turn-process-records-more { border: 0; background: transparent; color: var(--primary); font: inherit; font-size: 12px; padding: 2px 0; cursor: pointer; text-align: left; }
+.turn-process-trace-delegation {
+  min-width: 0;
+  color: var(--color-text-3, #86909c);
+  font-size: var(--conversation-message-font-size, 14px);
+  line-height: 24px;
+}
+
+.turn-process-trace-delegation__row,
+.turn-process-trace-delegation__task {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.turn-process-trace-delegation__row {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  vertical-align: top;
+}
+
+.turn-process-trace-delegation__row:hover,
+.turn-process-trace-delegation__task:hover {
+  color: var(--color-text-2, #4e5969);
+}
+
+.turn-process-trace-delegation__row:focus-visible,
+.turn-process-trace-delegation__task:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--color-primary-light-3, #bedaff);
+  outline-offset: 2px;
+}
+
+.turn-process-trace-delegation__row:disabled,
+.turn-process-trace-delegation__task:disabled {
+  cursor: default;
+}
+
+.turn-process-trace-delegation__leading {
+  position: relative;
+  display: inline-flex;
+  width: 14px;
+  height: 24px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  margin-right: 6px;
+}
+
+.turn-process-trace-delegation__leading > span {
+  display: inline-flex;
+  line-height: 0;
+}
+
+.turn-process-trace-delegation__disclosure {
+  position: absolute;
+  opacity: 0;
+}
+
+.turn-process-trace-delegation__row:is(:hover, :focus-visible, [aria-expanded='true']):not(:disabled) .turn-process-trace-delegation__symbol {
+  opacity: 0;
+}
+
+.turn-process-trace-delegation__row:is(:hover, :focus-visible, [aria-expanded='true']):not(:disabled) .turn-process-trace-delegation__disclosure {
+  opacity: 1;
+}
+
+.turn-process-trace-delegation__row[aria-expanded='true'] .turn-process-trace-delegation__disclosure {
+  transform: rotate(90deg);
+}
+
+.turn-process-trace-delegation__action {
+  flex: none;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.turn-process-trace-delegation__separator {
+  width: 2px;
+  height: 2px;
+  flex: none;
+  margin: 0 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.turn-process-trace-delegation__summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-process-trace-delegation[data-delegation-record-kind='failed'] .turn-process-trace-delegation__summary {
+  color: var(--color-danger-6);
+}
+
+.turn-process-trace-delegation__records {
+  margin: 4px 0;
+}
+
+.turn-process-trace-delegation__task {
+  display: block;
+  overflow: hidden;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-process-trace-delegation__task:not(:disabled):is(:hover, :focus-visible) {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.turn-process-trace-tool__toggle:disabled { cursor: default; opacity: 1; }
+
+.turn-process-trace-detail__notice p { margin: 2px 0; }

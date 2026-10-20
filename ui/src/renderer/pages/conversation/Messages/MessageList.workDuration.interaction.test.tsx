@@ -11,6 +11,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { ipcBridge } from '@/common';
+import { database } from '@/common/adapter/ipcBridge';
 import { createStoredMessageMapper } from '@/common/adapter/storedMessageMapper';
 import { transformUserCreatedEvent, type TMessage } from '@/common/chat/chatLib';
 import { parseConversationId, parseMessageId } from '@/common/types/ids';
@@ -37,6 +38,7 @@ const root = messageId(WALL, 1);
 const olderRoot = messageId(CURSOR, 2);
 
 beforeEach(() => {
+  spyOn(database.getDelegationRecords, 'invoke').mockResolvedValue({ records: [], through_session_seq: 0 });
   spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.conversation.turnCompleted, 'on').mockReturnValue(() => {});
   spyOn(ipcBridge.conversation.reconnected, 'on').mockReturnValue(() => {});

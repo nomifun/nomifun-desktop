@@ -63,7 +63,8 @@ export function orderProcessSegments<T extends ProcessSegmentIdentity>(items: T[
 /** Missing result evidence ends the display observation, without asserting a
  * tool outcome or authorizing another invocation. */
 export function isToolObservationUnconfirmed(message: TMessage, callId: string): boolean {
-  return message.type === 'tool_call' && message.content.call_id === callId &&
+  return message.type === 'tool_call' && message.content.call_id === callId
+    && message.content.result_seq === undefined &&
     message.content.timeline?.segments.some(segment => segment.kind === 'tool' &&
       segment.call_id === callId && segment.state === 'interrupted') === true;
 }

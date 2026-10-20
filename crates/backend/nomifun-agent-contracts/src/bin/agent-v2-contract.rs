@@ -8,7 +8,8 @@ use nomifun_agent_contracts::{
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     AgentStoreSchemaManifestPayload,
     IdmmDecisionExplanation, IdmmDecisionNotice, ContextClearedPayloadV1, AgentTurnOutcome,
-    MessageTimeline, MessageTimelineUpdate, RuntimeToolHoldReason, SystemExecutionFailure,
+    MessageTimeline, MessageTimelineUpdate, RuntimeToolHoldReason, SystemExecutionFailure, ToolDetailPage,
+    ToolDetailSection, ToolDetailAvailability, ToolDetailFormat, ToolDetailRetention,
     TurnWorkspaceFilesObservedV1, KnowledgeWritebackStartedV1, KnowledgeWritebackSettledV1,
     CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload, CanonicalHttpMethod,
     CanonicalErrorRegistryPayload,
@@ -303,6 +304,17 @@ fn run() -> Result<(), Box<dyn Error>> {
     let system_error_binding = SystemExecutionFailure::export_to_string(&ts_rs::Config::default())?
         .replace("\r\n", "\n").replace('\r', "\n");
     let system_error_binding = format!("{}\n", system_error_binding.lines().map(str::trim_end).collect::<Vec<_>>().join("\n"));
+    let tool_detail_bindings = [
+        ("ToolDetailPage", ToolDetailPage::export_to_string(&ts_rs::Config::default())?),
+        ("ToolDetailSection", ToolDetailSection::export_to_string(&ts_rs::Config::default())?),
+        ("ToolDetailAvailability", ToolDetailAvailability::export_to_string(&ts_rs::Config::default())?),
+        ("ToolDetailFormat", ToolDetailFormat::export_to_string(&ts_rs::Config::default())?),
+        ("ToolDetailRetention", ToolDetailRetention::export_to_string(&ts_rs::Config::default())?),
+    ].map(|(name, binding)| {
+        let binding = binding.replace("\r\n", "\n").replace('\r', "\n");
+        (root.join(format!("../../../ui/src/common/protocolBindings/{name}.ts")),
+            format!("{}\n", binding.lines().map(str::trim_end).collect::<Vec<_>>().join("\n")))
+    });
     if mode == "write" {
         fs::create_dir_all(&generated)?;
         write_json(&seed_path, &seed)?;
@@ -312,6 +324,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         fs::write(&outcome_binding_path, &outcome_binding)?;
         fs::write(&system_error_binding_path, &system_error_binding)?;
+        for (path, binding) in &tool_detail_bindings { fs::write(path, binding)?; }
     } else {
         check_json(&seed_path, &seed)?;
         check_json(&platform_path, &platform)?;
@@ -334,6 +347,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         if fs::read_to_string(&system_error_binding_path)?.replace("\r\n", "\n") != system_error_binding {
             return Err(format!("generated artifact drift: {}; run agent-v2-contract write",
                 system_error_binding_path.display()).into());
+        }
+        for (path, binding) in &tool_detail_bindings {
+            if fs::read_to_string(path)?.replace("\r\n", "\n") != *binding {
+                return Err(format!("generated artifact drift: {}; run agent-v2-contract write", path.display()).into());
+            }
         }
     }
 
@@ -634,6 +652,7 @@ fn generated_display_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>
     add_schema::<MessageTimelineUpdate>(&mut schemas, "message_timeline_update")?;
     add_schema::<RuntimeToolHoldReason>(&mut schemas, "runtime_tool_hold_reason")?;
     add_schema::<SystemExecutionFailure>(&mut schemas, "system_execution_failure")?;
+    add_schema::<ToolDetailPage>(&mut schemas, "tool_detail_page")?;
     Ok(schemas)
 }
 
@@ -780,7 +799,7 @@ mod display_schema_tests {
     fn display_views_do_not_change_the_persisted_schema_contract() {
         let storage = generated_schemas().unwrap();
         let display = generated_display_schemas().unwrap();
-        assert_eq!(display.len(), 4);
+        assert_eq!(display.len(), 5);
         assert!(display.keys().all(|key| !storage.contains_key(key)));
         let published: Value = serde_json::from_str(include_str!(
             "../../contracts/generated/canonical-agent-store-schema-manifest.envelope.json")).unwrap();

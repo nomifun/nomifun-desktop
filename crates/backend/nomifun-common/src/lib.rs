@@ -2,6 +2,8 @@
 pub mod ansi;
 pub mod constants;
 pub mod agent_execution;
+mod delegation_record;
+pub use delegation_record::*;
 
 mod atomic_file;
 mod case_convert;

@@ -1,10 +1,13 @@
 //! All HTTP request/response DTOs shared across the API surface.
+pub use nomifun_agent_contracts::{ToolDetailAvailability, ToolDetailFormat, ToolDetailPage, ToolDetailQuery, ToolDetailRetention, ToolDetailSection};
 mod agent_build_extra;
 mod agent_discovery;
 mod agent_error;
 mod agent_execution;
 mod agent_activity;
 pub use agent_activity::*;
+mod delegation_record;
+pub use delegation_record::*;
 mod execution_constraints;
 pub use execution_constraints::*;
 mod agent_execution_template;

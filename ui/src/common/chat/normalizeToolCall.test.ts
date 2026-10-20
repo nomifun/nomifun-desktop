@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import type { IMessageToolCall } from './chatLib';
 import { normalizeToolCallContent } from './chatLib';
-import { formatToolDisplayName, normalizeToolCall, normalizeToolGroup } from './normalizeToolCall';
+import { normalizeToolCall, normalizeToolGroup } from './normalizeToolCall';
 
 const normalize = (content: Record<string, unknown>) => normalizeToolCall({
-  type: 'tool_call', content: normalizeToolCallContent({ call_id: 'call', name: 'exec_command', ...content }),
+  type: 'tool_call', content: normalizeToolCallContent({ call_id: 'call', name: 'start_process', ...content }),
 } as IMessageToolCall);
 
 describe('public tool outcomes', () => {
@@ -47,7 +47,7 @@ describe('public tool outcomes', () => {
     const raw = { status: 'error', args: { path: 'app.ts', content: 'PRIVATE FILE BODY' },
       input: { patch: 'PRIVATE PATCH' }, output: 'Exit code: 1\nPRIVATE STDOUT',
       command_exit_code: -1, command_not_started: 'true', non_fatal_failure: 'true', bounded_result: 'unknown' };
-    const content = normalizeToolCallContent({ call_id: 'call', name: 'Bash', ...raw });
+    const content = normalizeToolCallContent({ call_id: 'call', name: 'start_process', ...raw });
     expect(content).not.toHaveProperty('args');
     expect(content).not.toHaveProperty('input');
     expect(content).not.toHaveProperty('output');
@@ -79,13 +79,6 @@ describe('public tool outcomes', () => {
     expect(result?.status).toBe('error');
     expect(result?.notExecutedReason).toBeUndefined();
     expect(result?.error).toContain('remote service error');
-  });
-
-  it('formats canonical names while preserving exact routing identity', () => {
-    expect(formatToolDisplayName('mcp__nomifun-desktop__nomi_delegate__anxmvqfkcuzfi4mq')).toBe('nomifun-desktop/nomi_delegate');
-    expect(formatToolDisplayName('mcp__server__read_file')).toBe('server/read_file');
-    expect(formatToolDisplayName('platform__app_hosting_app_hosting_list__0d897918b652be9c2802')).toBe('platform/app_hosting_app_hosting_list');
-    expect(normalize({ name: 'mcp__server__read_file' })?.name).toBe('mcp__server__read_file');
   });
 
   it('retains group labels and statuses without adding a second input carrier', () => {

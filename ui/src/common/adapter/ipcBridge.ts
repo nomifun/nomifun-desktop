@@ -13,6 +13,8 @@
  */
 
 import { bridge } from '@/platform';
+import type { ToolDetailPage, ToolDetailRequest } from '../chat/toolDetails';
+import type { DelegationRecordsPage } from '../chat/delegationRecords';
 import type { AgentActivitiesResponse, AgentActivityCommandReceipt, AgentActivityStopSnapshot, StopAgentActivityRequest } from '../types/agentExecution/agentActivity';
 import type { DiscoverModelProtocolsRequest } from '@/common/protocolBindings/DiscoverModelProtocolsRequest';
 import type { DiscoverModelProtocolsAnonymousRequest } from '@/common/protocolBindings/DiscoverModelProtocolsAnonymousRequest';
@@ -2401,6 +2403,23 @@ export type PaginatedResult<T> = {
 };
 
 export const database = {
+  getDelegationRecords: httpGet<DelegationRecordsPage, { conversation_id: ConversationId; source_message_ids?: string; after_session_seq?: number; through_session_seq?: number; cursor?: string; limit?: number }>((p) => {
+    const query = new URLSearchParams();
+    if (p.source_message_ids) query.set('source_message_ids', p.source_message_ids);
+    if (p.after_session_seq !== undefined) query.set('after_session_seq', String(p.after_session_seq));
+    if (p.through_session_seq !== undefined) query.set('through_session_seq', String(p.through_session_seq));
+    if (p.cursor) query.set('cursor', p.cursor);
+    if (p.limit !== undefined) query.set('limit', String(p.limit));
+    return `/api/conversations/${p.conversation_id}/delegation-records?${query}`;
+  }),
+  getToolDetails: httpGet<ToolDetailPage, ToolDetailRequest>((p) => {
+    const query = new URLSearchParams({ turn_id: p.turn_id, call_id: p.call_id, section: p.section });
+    if (p.through_seq !== undefined) query.set('through_seq', String(p.through_seq));
+    if (p.expected_result_seq !== undefined) query.set('expected_result_seq', String(p.expected_result_seq));
+    if (p.cursor) query.set('cursor', p.cursor);
+    if (p.limit !== undefined) query.set('limit', String(p.limit));
+    return `/api/agent-sessions/${p.conversation_id}/tool-details?${query}`;
+  }),
   getConversationMessages: withResponseMap(
     httpGet<
       PaginatedResult<StoredMessageResponse>,
@@ -4282,10 +4301,15 @@ const fromApiExecutionTemplateDetail = (raw: unknown): TAgentExecutionTemplateDe
 
 export const agentActivities = {
   stopTargets: httpGet<AgentActivityStopSnapshot, void>('/api/agent-activities/stop-targets'),
-  list: httpGet<AgentActivitiesResponse, { after_cursor?: string; limit?: number }>((params) => {
+  list: httpGet<AgentActivitiesResponse, { after_cursor?: string; limit?: number; execution_id?: ExecutionId; step_id?: ExecutionStepId; attempt_id?: ExecutionAttemptId }>((params) => {
     const query = new URLSearchParams();
     if (params.after_cursor) query.set('after_cursor', params.after_cursor);
     if (params.limit != null) query.set('limit', String(params.limit));
+    if (params.execution_id && params.step_id && params.attempt_id) {
+      query.set('execution_id', params.execution_id);
+      query.set('step_id', params.step_id);
+      query.set('attempt_id', params.attempt_id);
+    }
     return `/api/agent-activities?${query}`;
   }),
   stop: httpPost<AgentActivityCommandReceipt, StopAgentActivityRequest>('/api/agent-activities/stop'),

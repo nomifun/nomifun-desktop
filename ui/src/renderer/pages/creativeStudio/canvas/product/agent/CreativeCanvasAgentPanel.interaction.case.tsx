@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import './standardsDocument.testSetup';
 import assert from 'node:assert/strict';
 import { spyOn } from 'bun:test';
 import i18next from 'i18next';
@@ -24,7 +25,7 @@ import {
   parseProviderId,
 } from '@/common/types/ids';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
-import { agentPlatform, conversation, fs as skillFs } from '@/common/adapter/ipcBridge';
+import { agentExecution, agentPlatform, conversation, database, fs as skillFs } from '@/common/adapter/ipcBridge';
 import type { TChatConversation } from '@/common/config/storage';
 import { serializeCreativeStudioAgentHistory } from '../../../agent/adapters';
 import type {
@@ -732,11 +733,16 @@ const run = async (): Promise<void> => {
   const bindingOptions = spyOn(agentPlatform.productBindingOptions, 'invoke')
     .mockRejectedValue(new Error('Agent options are unavailable in this transcript fixture'));
   const skillCatalog = spyOn(skillFs.listAvailableSkills, 'invoke').mockResolvedValue([]);
+  // This case tests the exclusive Canvas history proof and controller. The
+  // separate canonical-process interaction test exercises populated activity.
+  const processHistory = spyOn(database.getConversationMessages, 'invoke').mockResolvedValue({ items: [], total: 0, has_more: false });
   const commandActivity = spyOn(conversation.get, 'invoke').mockImplementation(async ({ conversation_id }) => ({
     id: conversation_id, name: 'Canvas planning', type: 'nomi', status: 'finished',
   } as TChatConversation));
-  const commandEvents = [conversation.listChanged, conversation.turnStarted, conversation.turnCompleted,
-    conversation.turnPaused, conversation.reconnected].map(event => spyOn(event, 'on').mockImplementation(() => () => {}));
+  const commandEvents = [conversation.listChanged, conversation.responseStream, conversation.turnStarted, conversation.turnCompleted,
+    conversation.turnPaused, conversation.reconnected, conversation.userCreated, conversation.messageAnnotated,
+    agentPlatform.sessions.onAgentChanged, agentExecution.events.changed, agentExecution.events.leadThinking]
+    .map(event => spyOn(event, 'on').mockImplementation(() => () => {}));
   const originalConsoleError = console.error;
   console.error = (...args: unknown[]) => {
     if (
@@ -763,6 +769,7 @@ const run = async (): Promise<void> => {
   } finally {
     bindingOptions.mockRestore();
     skillCatalog.mockRestore();
+    processHistory.mockRestore();
     commandActivity.mockRestore();
     commandEvents.forEach(event => event.mockRestore());
     console.error = originalConsoleError;

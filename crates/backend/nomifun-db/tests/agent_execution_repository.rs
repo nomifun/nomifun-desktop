@@ -1447,3 +1447,6 @@ mod task_retirement;
 
 #[path = "agent_execution_repository/stopped_backoff_cleanup.rs"]
 mod stopped_backoff_cleanup;
+
+#[path = "agent_execution_repository/delegation_records.rs"]
+mod delegation_records;

@@ -44,11 +44,16 @@ import MessageListSkeleton from './components/MessageListSkeleton';
 import TurnProcessDisclosure from './components/TurnProcessDisclosure';
 import TurnProcessReceipt, { type TurnProcessReceiptIcon } from './components/TurnProcessReceipt';
 import {
-  buildToolReceiptSummaryParts,
+  buildToolReceiptRows,
   countBoundedSearchResults,
-  getToolReceiptIconFromSummaryParts,
-} from './components/toolGroupSummaryModel';
+  getToolReceiptIcon,
+} from './components/toolReceiptModel';
 import ProcessTraceItem from './components/ProcessTraceItem';
+import { ToolDetailsProvider } from './components/ToolDetails';
+import DelegationRecordRow from './components/DelegationRecordRow';
+import { useDelegationRecords } from './useDelegationRecords';
+import { isTerminalExecutionStatus } from '../execution/executionStatusMeta';
+import { insertDelegationRecords, withoutRecordedDelegationCalls, type DelegationProcessItem } from './delegationProcessModel';
 import { isContextCompressionTip } from './processTipModel';
 import {
   selectJournalProcessItems,
@@ -83,7 +88,6 @@ import type { ConversationId, MessageId } from '@/common/types/ids';
 import { creationTaskPlacementAfterIndices } from './creationTaskPlacement';
 import { useExecutionSafe } from '../execution/ExecutionContext';
 import { delegatedTurnPresentation, resolveConversationDelegation } from './conversationDelegationModel';
-import DelegationProgress from './components/DelegationProgress';
 import { conversationPauseErrorMessage } from '../utils/conversationPauseError';
 import { collectSystemPermissionNotices, shouldCompactPermissionBlockedSummary, type SystemPermissionNotice as PermissionNotice } from './systemPermissionNoticeModel';
 import SystemPermissionNotice from './components/SystemPermissionNotice';
@@ -342,27 +346,6 @@ const compactReceiptText = (value: unknown, fallback: string): string => {
   return compacted || fallback;
 };
 
-const getToolReceiptIcon = (
-  messages: Array<IMessageToolGroup | IMessageToolCall>
-): TurnProcessReceiptIcon => {
-  const latestMessage = messages.findLast(Boolean);
-  if (!latestMessage) return 'tool';
-
-  if (latestMessage.type === 'tool_group') {
-    if (!Array.isArray(latestMessage.content)) return 'tool';
-    const latestTool = latestMessage.content.findLast(Boolean);
-    const latestToolName = `${latestTool?.name ?? ''} ${latestTool?.description ?? ''}`.toLowerCase();
-    if (/\b(write|edit|patch|update|modify)\b/.test(latestToolName)) return 'edit';
-    if (/\b(read|list|ls|glob|search|grep|find)\b/.test(latestToolName)) return 'file';
-    return 'tool';
-  }
-
-  const toolName = `${latestMessage.content.name ?? ''} ${latestMessage.content.description ?? ''}`.toLowerCase();
-  if (/\b(write|edit|patch|update|modify)\b/.test(toolName)) return 'edit';
-  if (/\b(read|list|ls|glob|search|grep|find)\b/.test(toolName)) return 'file';
-  return 'tool';
-};
-
 type ProcessReceiptSummary = {
   label: string;
   icon: TurnProcessReceiptIcon;
@@ -380,14 +363,14 @@ const buildProcessReceiptSummary = (
 ): ProcessReceiptSummary => {
   if ('type' in item && item.type === 'tool_summary') {
     const tools = normalizeToolMessages(item.messages);
-    const receiptParts = buildToolReceiptSummaryParts(tools, state, options.language);
+    const receiptRows = buildToolReceiptRows(tools, options.language);
     const summarySeparator = t('messages.processReceipt.summarySeparator', { defaultValue: ', ' });
     const boundedSearchCount = countBoundedSearchResults(tools);
     const label = boundedSearchCount > 0
         ? t('messages.processReceipt.searchResultsLimited', {
             defaultValue: 'Search results limited; full reconciliation required',
           })
-      : receiptParts.length
+      : receiptRows.length
         ? tools.map(tool => formatToolPresentationLabel(resolveToolPresentation(tool, options.language))).join(summarySeparator)
         : t('messages.processReceipt.tools', {
             count: item.messages.length,
@@ -395,7 +378,7 @@ const buildProcessReceiptSummary = (
           });
     return {
       label,
-      icon: getToolReceiptIconFromSummaryParts(receiptParts) ?? getToolReceiptIcon(item.messages),
+      icon: getToolReceiptIcon(receiptRows) ?? 'tool',
       defaultExpanded: false,
       hasDetail: true,
       ...(boundedSearchCount > 0 ? { attention: true } : {}),
@@ -652,18 +635,23 @@ const MessageList: React.FC<{
     return result;
   }, [list, thinkingDisplay.visible, conversationContext?.isProcessing]);
 
+  const delegationRoots = useMemo(() => [...list.flatMap(message => message.type === 'text' && message.position === 'right' && message.msg_id ? [message.msg_id] : []),
+    ...(conversationContext?.activeRequestMessageId ? [conversationContext.activeRequestMessageId] : [])], [list, conversationContext?.activeRequestMessageId]);
+  const delegationRecords = useDelegationRecords(conversationContext?.conversation_id, delegationRoots,
+    conversationContext?.isProcessing === true || Boolean(execution?.executionId && !isTerminalExecutionStatus(execution.detail?.execution.status)), execution?.executionId);
+
+
+  const delegationOwners = useMemo(() => assignTurnIdsFromUserRequests(list.map(message => {
+    const role = getProcessedItemRole(message);
+    return { id: message.id, turnId: role === 'user' ? message.msg_id : message.turn_id, role,
+      createdAt: message.created_at ?? 0, displayAt: message.type === 'text' ? message.content.display_at_ms : undefined,
+      sourceMessageIds: getProcessedItemSourceMessageIds(message), turnStartedAt: getProcessedItemTurnStartedAt(message) };
+  }), { activeTurnId: conversationContext?.activeTurnId, activeRequestMessageId: conversationContext?.activeRequestMessageId }),
+  [list, conversationContext?.activeTurnId, conversationContext?.activeRequestMessageId]);
   const delegation = useMemo(() => resolveConversationDelegation(conversationContext?.conversation_id, execution,
-    assignTurnIdsFromUserRequests(list.map(message => {
-      const role = getProcessedItemRole(message);
-      return { id: message.id, turnId: role === 'user' ? message.msg_id : message.turn_id, role,
-        createdAt: message.created_at ?? 0,
-        displayAt: message.type === 'text' ? message.content.display_at_ms : undefined,
-        sourceMessageIds: getProcessedItemSourceMessageIds(message),
-        turnStartedAt: getProcessedItemTurnStartedAt(message) };
-    }), {
-      activeTurnId: conversationContext?.activeTurnId,
-      activeRequestMessageId: conversationContext?.activeRequestMessageId,
-    })), [conversationContext?.conversation_id, conversationContext?.activeTurnId, conversationContext?.activeRequestMessageId, execution, list]);
+    delegationOwners, delegationRecords.records, { turnId: conversationContext?.activeTurnId, requestMessageId: conversationContext?.activeRequestMessageId }),
+    [conversationContext?.conversation_id, conversationContext?.activeTurnId, conversationContext?.activeRequestMessageId, execution, delegationOwners, delegationRecords.records]);
+
 
   const pausedFileTurnId = useMemo(() => {
     const pausedTurnId = conversationContext?.executionPause?.turnId;
@@ -723,6 +711,9 @@ const MessageList: React.FC<{
     }
 
     const disclosureItems = buildTurnDisclosureItems(modelInput, {
+      processRecordTurnIds: new Set(modelInput.flatMap(owner => owner.role === 'user' && owner.turnId
+        && delegationRecords.records.some(record => owner.sourceMessageIds?.includes(record.source.source_message_id)
+          || owner.turnId === record.source.source_message_id) ? [owner.turnId] : [])),
       // Initial false is not idle authority while the runtime query is pending.
       tailClosed: conversationContext?.isTurnStateHydrated === false
         ? undefined
@@ -821,6 +812,7 @@ const MessageList: React.FC<{
     conversationContext?.isProcessing,
     conversationContext?.stopNotice,
     creationTaskOwnerMessageIds,
+    delegationRecords.records,
     processedList,
     pausedFileTurnId,
     t,
@@ -1207,16 +1199,26 @@ const MessageList: React.FC<{
     />;
     const linkedDelegation = delegation?.turnId === item.msg_id ? delegation : undefined;
     const presentation = delegatedTurnPresentation(item, linkedDelegation);
-    const getDisclosureProcessItemState = (processItem: IRenderableItem): TurnDisclosureProcessState =>
-      processItem.processSegmentState ?? item.processItemStates[getProcessedItemAnchorId(processItem)] ?? getProcessItemState(processItem);
-    const visibleProcessItems = orderProcessSegments(selectJournalProcessItems(item.processItems, {
+    type DisplayProcessItem = IRenderableItem | DelegationProcessItem;
+    const getDisclosureProcessItemState = (processItem: DisplayProcessItem): TurnDisclosureProcessState =>
+      processItem.type === 'delegation_record' ? processItem.records[0].kind === 'failed' ? 'failed' : 'completed' : processItem.processSegmentState ?? item.processItemStates[getProcessedItemAnchorId(processItem)] ?? getProcessItemState(processItem);
+    const canonicalProcessItems = orderProcessSegments(selectJournalProcessItems(item.processItems, {
       running: item.running,
       isPrivateActivity: isPrivateJournalActivity,
       isRunning: (processItem) => getDisclosureProcessItemState(processItem) === 'running',
       textOf: (processItem) => processItem.type === 'text' ? toDisplayText(processItem.content.content) : undefined,
       finalText: item.finalAnswer,
     }));
-    const renderJournalProcessItem = (processItem: IRenderableItem) => {
+    const turnRecords = delegationRecords.records.filter(record => (record.source.source_message_id === conversationContext?.activeRequestMessageId && item.msg_id === conversationContext?.activeTurnId)
+      || delegationOwners.some(owner => owner.role === 'user' && owner.turnId === item.msg_id
+        && (owner.sourceMessageIds?.includes(record.source.source_message_id) || owner.turnId === record.source.source_message_id)));
+    const visibleProcessItems = insertDelegationRecords(canonicalProcessItems.flatMap((processItem): IRenderableItem[] => {
+      if (processItem.type !== 'tool_summary') return [processItem];
+      const messages = withoutRecordedDelegationCalls(processItem.messages, turnRecords);
+      return messages.length ? [{ ...processItem, messages }] : [];
+    }), turnRecords);
+    const renderJournalProcessItem = (processItem: DisplayProcessItem) => {
+      if (processItem.type === 'delegation_record') return <DelegationRecordRow records={processItem.records} />;
       const processState = getDisclosureProcessItemState(processItem);
       const layoutKind = getProcessItemLayoutKind(processItem);
 
@@ -1263,24 +1265,15 @@ const MessageList: React.FC<{
     return (
       <TurnProcessDisclosure
         item={{ ...presentation, processItems: visibleProcessItems }}
-        activityLabel={linkedDelegation ? linkedDelegation.detail
-          ? t('messages.delegation.activity', { status: t(`agentExecution.status.execution.${linkedDelegation.detail.execution.status}`) })
-          : t('messages.delegation.syncing') : undefined}
-        processFooter={linkedDelegation && execution ? <DelegationProgress delegation={linkedDelegation}
-          projectStep={execution.projectStep} refetch={execution.refetch} /> : undefined}
         highlighted={highlighted}
         renderProcessItem={renderJournalProcessItem}
-        getProcessItemKey={getProcessedItemAnchorId}
+        getProcessItemKey={(entry) => entry.type === 'delegation_record' ? entry.id : getProcessedItemAnchorId(entry)}
         getProcessItemState={getDisclosureProcessItemState}
-        getProcessItemLayoutKind={getProcessItemLayoutKind}
+        getProcessItemLayoutKind={(entry) => entry.type === 'delegation_record' ? 'delegation' : getProcessItemLayoutKind(entry)}
         getProcessGroupId={(processItem) => processItem.processGroupId}
-        getProcessItemSourceId={(processItem) => getProcessedItemSourceMessageIds(processItem)[0]}
-        isProcessItemHighlighted={(processItem) => Boolean(highlightedMessageId && getProcessedItemSourceMessageIds(processItem).includes(highlightedMessageId))}
-        getProcessGroupLabel={(items) => {
-          const labels = items.flatMap(processItem => processItem.type === 'tool_summary'
-            ? normalizeToolMessages(processItem.messages).map(tool => resolveToolPresentation(tool, toolLanguage).title) : []);
-          return [...new Set(labels)].slice(0, 3).join(t('messages.processReceipt.summarySeparator')) || t(items.some(processItem => getDisclosureProcessItemState(processItem) === 'running') ? 'conversation.thinking.label' : 'conversation.thinking.complete');
-        }}
+        getProcessItemSourceId={(processItem) => processItem.type === 'delegation_record' ? processItem.records[0].source.source_message_id : getProcessedItemSourceMessageIds(processItem)[0]}
+        isProcessItemHighlighted={(processItem) => Boolean(highlightedMessageId && (processItem.type === 'delegation_record' ? processItem.records[0].source.source_message_id === highlightedMessageId : getProcessedItemSourceMessageIds(processItem).includes(highlightedMessageId)))}
+
       />
     );
   };
@@ -1455,6 +1448,7 @@ const MessageList: React.FC<{
   }
 
   return (
+    <ToolDetailsProvider scope={conversationContext?.conversation_id}>
     <ConversationProseContext.Provider value={prosePresentation}>
     <div className='relative flex-1 h-full'>
       <ConversationQuestionLocator conversation_id={conversationContext?.conversation_id} />
@@ -1478,6 +1472,8 @@ const MessageList: React.FC<{
             <div ref={handleColumnRef} className={contentStyles.column} data-testid='message-list-content' style={{ overflowAnchor: 'none' }}>
               <div className='h-10px' />
               {renderedRows}
+              {delegationRecords.hasMore && <button type='button' className='turn-process-records-more' disabled={delegationRecords.loading} onClick={delegationRecords.loadMore}>{t('messages.delegation.more')}</button>}
+              {delegationRecords.failed && <p role='alert' className='turn-process-trace-detail__notice'>{t('messages.delegation.loadFailed')} <button type='button' onClick={delegationRecords.retry}>{t('messages.delegation.retry')}</button></p>}
               {pauseError && <div className='mt-6px' data-testid='conversation-pause-error'><MessageTips message={pauseError} /></div>}
               {conversationContext?.executionWait && <div role='note' data-testid='conversation-waiting-notice'
                 className='mt-6px bg-message-tips rd-8px px-12px py-10px text-t-secondary text-13px'>
@@ -1512,6 +1508,7 @@ const MessageList: React.FC<{
       <SelectionReplyButton messages={list} />
     </div>
     </ConversationProseContext.Provider>
+    </ToolDetailsProvider>
   );
 };
 

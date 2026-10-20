@@ -1058,6 +1058,12 @@ async function main() {
     } catch { /* The exit failure remains authoritative if report writing fails. */ }
   }
   if (!typed) {
+    // Never forward arbitrary child diagnostics: they may contain provider
+    // content. Exit/signal and a fixed classification identify harness faults.
+    const signal = typeof test.signal === 'string' && /^SIG[A-Z0-9]{1,16}$/.test(test.signal) ? test.signal : 'none';
+    const exit = Number.isInteger(test.status) && test.status >= 0 && test.status <= 255 ? test.status : 'none';
+    const stackOverflow = /stack overflow|overflowed its stack/i.test(`${test.stdout}\n${test.stderr}`);
+    console.error(`live_smoke_harness exit=${exit} signal=${signal} stack_overflow=${stackOverflow}`);
     const panicLine = `${test.stdout}\n${test.stderr}`.split(/\r?\n/)
       .find(line => line.includes('panicked at '));
     if (panicLine) {

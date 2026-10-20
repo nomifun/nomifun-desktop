@@ -82,6 +82,29 @@ export function inspectRendererSource(file, source, minimumWidth = 880) {
       value: match[0],
     });
   }
+  if (/\.tsx?$/.test(file)) {
+    const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
+      file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    const visit = node => {
+      if (ts.isCallExpression(node) && (
+        (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'matchMedia') ||
+        (ts.isIdentifier(node.expression) && node.expression.text === 'matchMedia')
+      )) {
+        const query = node.arguments[0];
+        if (query && (ts.isStringLiteral(query) || ts.isNoSubstitutionTemplateLiteral(query))) {
+          for (const match of query.text.matchAll(/\(\s*(?:max|min)-width\s*:\s*(\d+(?:\.\d+)?)px\s*\)/g)) {
+            if (Number(match[1]) < minimumWidth) failures.push({
+              offset: query.getStart(parsed),
+              reason: `viewport breakpoint ${match[1]}px is below the supported ${minimumWidth}px minimum`,
+              value: query.text,
+            });
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(parsed);
+  }
   return failures.map(({ offset, reason, value }) => ({
     line: source.slice(0, offset).split('\n').length, reason, value,
   }));

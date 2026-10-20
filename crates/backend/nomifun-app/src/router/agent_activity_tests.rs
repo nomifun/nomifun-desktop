@@ -6,6 +6,8 @@ mod autowork_scope_tests;
 
 #[path = "source_browser_retirement_tests.rs"]
 mod source_browser_retirement_tests;
+#[path = "agent_activity_task_details_tests.rs"]
+mod task_details_tests;
 
 const TRUST: &str = "activity-lifecycle-regression";
 

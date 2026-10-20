@@ -91,6 +91,8 @@ pub use session_input::{PendingSessionInput,SessionInputClaim,SessionInputBlocke
 mod history_standalone_projection;
 #[path = "message_timeline.rs"]
 mod message_timeline;
+#[path = "tool_detail.rs"]
+mod tool_detail;
 
 #[path = "knowledge_writeback.rs"]
 mod knowledge_writeback;

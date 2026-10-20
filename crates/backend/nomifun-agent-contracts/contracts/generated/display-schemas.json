@@ -295,5 +295,166 @@
     ],
     "title": "SystemExecutionFailure",
     "type": "object"
+  },
+  "tool_detail_page": {
+    "$defs": {
+      "ToolDetailAvailability": {
+        "enum": [
+          "available",
+          "pending",
+          "unconfirmed"
+        ],
+        "type": "string"
+      },
+      "ToolDetailFormat": {
+        "enum": [
+          "json",
+          "text"
+        ],
+        "type": "string"
+      },
+      "ToolDetailRetention": {
+        "additionalProperties": false,
+        "properties": {
+          "decode_errors": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "dropped_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "next_cursor": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "retained_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source_encoding": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "next_cursor",
+          "retained_bytes",
+          "dropped_bytes",
+          "source_encoding",
+          "decode_errors"
+        ],
+        "type": "object"
+      },
+      "ToolDetailSection": {
+        "enum": [
+          "arguments",
+          "output"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "availability": {
+        "$ref": "#/$defs/ToolDetailAvailability",
+        "description": "Output absence is independent of the tool's execution status. Available\nwith zero bytes means a committed empty output, not a missing result."
+      },
+      "call_event_id": {
+        "type": "string"
+      },
+      "call_id": {
+        "type": "string"
+      },
+      "content": {
+        "type": "string"
+      },
+      "eof": {
+        "type": "boolean"
+      },
+      "format": {
+        "$ref": "#/$defs/ToolDetailFormat"
+      },
+      "next_cursor": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "non_text_parts": {
+        "description": "Media stays in the existing verified artifact paths, never inline base64.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "offset": {
+        "description": "UTF-8 byte offsets in this immutable presentation section.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "result_seq": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "retention": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ToolDetailRetention"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Original native observation bounds, not a claim of complete process\nhistory. Present only for an exact admitted native process Action."
+      },
+      "section": {
+        "$ref": "#/$defs/ToolDetailSection"
+      },
+      "through_seq": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "total_bytes": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "turn_id": {
+        "type": "string"
+      },
+      "working_directory": {
+        "description": "Original explicitly supplied cwd, never the current workspace or disk.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "turn_id",
+      "call_id",
+      "call_event_id",
+      "through_seq",
+      "section",
+      "availability",
+      "content",
+      "format",
+      "offset",
+      "total_bytes",
+      "eof",
+      "non_text_parts"
+    ],
+    "title": "ToolDetailPage",
+    "type": "object"
   }
 }

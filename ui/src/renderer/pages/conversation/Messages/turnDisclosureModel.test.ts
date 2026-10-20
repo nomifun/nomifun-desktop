@@ -1170,3 +1170,16 @@ test('a late paused status in a different row cannot replace the public terminal
   expect([...selectTurnPublicResultIds([question, paused])]).toEqual(['question']);
   expect([...selectTurnPublicResultIds([paused, question])]).toEqual(['question']);
 });
+
+test('source-bound process records can open a paged-out tool Turn without inventing an end time', () => {
+  const turnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000008881');
+  const items: TurnDisclosureInputItem[] = [{ id: 'request-only', role: 'user', turnId, createdAt: 10, displayAt: 1_000 }];
+  const output = buildTurnDisclosureItems(items, { tailClosed: true, processRecordTurnIds: new Set([turnId]) });
+  const process = output.find(entry => entry.type === 'turn_disclosure');
+  expect(process?.type).toBe('turn_disclosure');
+  if (process?.type !== 'turn_disclosure') throw new Error('Expected exact source process');
+  expect(process.processItemIds).toEqual([]);
+  expect(process.startAt).toBe(1_000);
+  expect(Number.isNaN(process.endAt)).toBe(true);
+  expect(buildTurnDisclosureItems(items, { tailClosed: true }).some(entry => entry.type === 'turn_disclosure')).toBe(false);
+});

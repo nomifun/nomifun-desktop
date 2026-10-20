@@ -27,6 +27,8 @@ import { useExecutionLive } from './useExecutionLive';
 import ExecutionStopControl from './ExecutionStopControl';
 import ExecutionStepStopControl from './ExecutionStepStopControl';
 import { attemptRecoveryReview } from './attemptRecoveryReview';
+import { selectProjectedAttempt } from './projectedAttemptSelection';
+import TaskActivityDetails from './TaskActivityDetails';
 
 type ProjectedAttemptViewProps = { payload: OpenStepPayload };
 type StepConfigDraft = Pick<TConfigureExecutionStep, 'model' | 'preset_prompt'>;
@@ -68,15 +70,17 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
     [detail?.steps, payload.step],
   );
   const attempts = detail?.attempts ?? (payload.attempt ? [payload.attempt] : []);
-  const attempt = latestAttemptForStep(attempts, step.step_id) ?? payload.attempt;
+  const historical = payload.attemptId !== undefined;
+  const attempt = selectProjectedAttempt(attempts, step.step_id, payload.attemptId);
   const recoveryReview = attemptRecoveryReview(attempt?.runtime_state);
   const conversationId = detail ? attempt?.conversation_id : undefined;
   const participants = detail?.participants ?? payload.participants;
   const assignableParticipants = participants.filter(
     (participant) => participant.retired_in_revision == null && participantSupportsProfile(participant, step.profile),
   );
-  const currentParticipant = step.assigned_participant_id
-    ? participants.find((participant) => participant.participant_id === step.assigned_participant_id)
+  const participantId = historical ? attempt?.participant_id : step.assigned_participant_id;
+  const currentParticipant = participantId
+    ? participants.find((participant) => participant.participant_id === participantId)
     : payload.participant;
 
   useEffect(() => {
@@ -84,15 +88,15 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
     setSteerText('');
   }, [attempt?.attempt_id]);
   const automationControl = detail?.automation_control;
-  const canConfigure = detail !== null && !automationControl && step.kind === 'agent' && step.status === 'pending';
+  const canConfigure = !historical && detail !== null && !automationControl && step.kind === 'agent' && step.status === 'pending';
   const attemptActive = attempt ? ['queued', 'running', 'waiting_input'].includes(attempt.status) : false;
-  const canSteer = detail !== null && canSteerExecutionAttempt(attempt?.status, detail.execution.status);
+  const canSteer = !historical && detail !== null && canSteerExecutionAttempt(attempt?.status, detail.execution.status);
   const executionCancelled = detail?.execution.status === 'cancelled';
   const canRetry =
-    detail !== null && !automationControl && !executionCancelled &&
+    !historical && detail !== null && !automationControl && !executionCancelled &&
     (['completed', 'failed', 'skipped'].includes(step.status) || (step.status === 'pending' && step.dispatch_after != null));
   const canAdopt =
-    conversationId != null && Boolean(detail?.execution) && !automationControl && !executionCancelled && step.status !== 'cancelled' && !attemptActive;
+    !historical && conversationId != null && Boolean(detail?.execution) && !automationControl && !executionCancelled && step.status !== 'cancelled' && !attemptActive;
 
   const projectReplacementStep = useCallback(
     (replacement: TExecutionStep) => {
@@ -379,18 +383,23 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
             <Comment theme='outline' size='13' />
           </span>
           <span className={styles.bannerEyebrow}>
-            {t('agentExecution.projection.viewing', {
+            {t(historical ? 'agentExecution.projection.history' : 'agentExecution.projection.viewing', {
               defaultValue: '当前任务',
             })}
           </span>
           <span className={styles.bannerTitle}>{step.title}</span>
         </div>
         <div className={styles.bannerActions}>
-          {detail && <ExecutionStepStopControl key={step.step_id} executionId={payload.executionId}
+          {historical && detail && <button type='button' className={styles.action}
+            onClick={() => projectStep({ ...payload, attemptId: undefined, projectionKey: step.step_id,
+              attempt: latestAttemptForStep(attempts, step.step_id), refetch })}>
+            {t('agentExecution.projection.current')}
+          </button>}
+          {!historical && detail && <ExecutionStepStopControl key={step.step_id} executionId={payload.executionId}
             executionVersion={detail.execution.version} executionStatus={detail.execution.status}
             stepId={step.step_id} stepVersion={step.version} stepStatus={step.status}
             delegatedOnly={automationControl?.root_step_id === step.step_id} refetch={refetch} />}
-          {detail && <ExecutionStopControl key={payload.executionId} executionId={payload.executionId}
+          {!historical && detail && <ExecutionStopControl key={payload.executionId} executionId={payload.executionId}
             executionVersion={detail.execution.version} status={detail.execution.status} refetch={refetch}
             automationControl={automationControl} />}
           {canConfigure && assignableParticipants.length > 1 && (
@@ -475,7 +484,7 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
         </div>
       )}
 
-      {recoveryReview && (
+      {!historical && recoveryReview && (
         <div className={styles.questionBanner} role='status'>
           <span className={styles.questionIcon}><Help theme='filled' size='15' /></span>
           <div className={styles.questionBody}>
@@ -491,7 +500,7 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
         </div>
       )}
 
-      {!recoveryReview && step.status === 'waiting_input' && attempt?.question?.trim() && (
+      {!historical && !recoveryReview && step.status === 'waiting_input' && attempt?.question?.trim() && (
         <div className={styles.questionBanner} role='status'>
           <span className={styles.questionIcon}>
             <Help theme='filled' size='15' />
@@ -533,6 +542,8 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
         </div>
       )}
 
+      {attempt && <TaskActivityDetails key={`${payload.executionId}:${step.step_id}:${attempt.attempt_id}`}
+        executionId={payload.executionId} stepId={step.step_id} attemptId={attempt.attempt_id} />}
       <div className={styles.body}>
         <RouteErrorBoundary>
           {!detail ? (
@@ -548,7 +559,7 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
             <div className={styles.center}>
               <Comment theme='outline' size='26' />
               <div className={styles.emptyTitle}>
-                {t('agentExecution.transcript.notStarted', {
+                {t(historical ? 'agentExecution.projection.unavailable' : 'agentExecution.transcript.notStarted', {
                   defaultValue: '协作者尚未开始',
                 })}
               </div>

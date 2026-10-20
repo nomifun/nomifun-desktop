@@ -1,17 +1,20 @@
 import type { IMessageToolCall, IMessageToolGroup, TMessage } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
 import { normalizeToolMessages } from '@/common/chat/normalizeToolCall';
+import type { ToolDetailIdentity } from '@/common/chat/toolDetails';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { hasSkillSuggest, stripSkillSuggest } from '@renderer/utils/chat/skillSuggestParser';
 import { hasThinkTags, stripThinkTags } from '@renderer/utils/chat/thinkTagFilter';
-import { Attention, Code, Right } from '@icon-park/react';
+import { Attention, Code, Edit, FolderOpen, Right, Terminal } from '@icon-park/react';
 import classNames from 'classnames';
 import { Spin } from '@arco-design/web-react';
-import React, { useId, useMemo, useState } from 'react';
+import React, { useContext, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { isContextCompressionTip } from '../processTipModel';
 import { formatWorkspaceFileTarget } from '../processFileTargetLabel';
-import { hasVisibleProcessReasoning, projectAssistantText, stripInternalToolCallPayload, shouldShowToolRowDetail } from '../processTraceDisplayModel';
+import { hasVisibleProcessReasoning, projectAssistantText, stripInternalToolCallPayload } from '../processTraceDisplayModel';
+import { ProcessDetailsVisibilityContext } from '../processDetailsVisibility';
+import ToolDetails from './ToolDetails';
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import type { MessageId } from '@/common/types/ids';
 import { getProcessItemState } from '../turnProcessState';
@@ -20,7 +23,7 @@ import AssistantProtocolNotice from './AssistantProtocolNotice';
 import MessageThinking from './MessageThinking';
 import ConversationProse from './ConversationProse';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
-import { buildToolReceiptDetailRows, type ToolReceiptDetailRow } from './toolGroupSummaryModel';
+import { buildToolReceiptRows, type ToolReceiptRow } from './toolReceiptModel';
 
 type ToolProcessMessage = IMessageToolGroup | IMessageToolCall;
 export type ProcessTraceRenderableItem = TMessage | {
@@ -28,19 +31,6 @@ export type ProcessTraceRenderableItem = TMessage | {
   sourceMessageIds: string[]; created_at: number;
 };
 type TranslationFn = ReturnType<typeof useTranslation>['t'];
-const defaultToolSummaryByState: Record<TurnDisclosureProcessState, string> = {
-  completed: 'Ran {{target}}',
-  running: 'Running {{target}}',
-  failed: 'Failed {{target}}',
-  canceled: 'Canceled {{target}}',
-};
-
-const compactReceiptText = (value: unknown, fallback: string): string => {
-  if (typeof value !== 'string') return fallback;
-  const compacted = value.replace(/\s+/g, ' ').trim();
-  return compacted || fallback;
-};
-
 const getPublicProcessNarration = (value: unknown): string => {
   let content = toDisplayText(value).trim();
   if (hasThinkTags(content)) content = stripThinkTags(content);
@@ -48,16 +38,14 @@ const getPublicProcessNarration = (value: unknown): string => {
   return stripInternalToolCallPayload(content);
 };
 
-const joinCompactText = (parts: Array<string | undefined>): string => parts.filter(Boolean).join(' ');
-
-const getToolReceiptDetailDisplayTarget = (row: ToolReceiptDetailRow, workspaceRoots: string[]): string | undefined => {
+const getToolReceiptDetailDisplayTarget = (row: ToolReceiptRow, workspaceRoots: string[]): string | undefined => {
   if (!row.target) return undefined;
   if (row.action !== 'read_files' && row.action !== 'edit_files') return row.target;
   return formatWorkspaceFileTarget(row.target, { workspaceRoots }).label;
 };
 
 const formatToolReceiptDetailLabel = (
-  row: ToolReceiptDetailRow,
+  row: ToolReceiptRow,
   t: TranslationFn,
   workspaceRoots: string[]
 ): string => {
@@ -105,19 +93,6 @@ const formatToolReceiptDetailLabel = (
     });
   }
 
-  // Generic titles describe the action; errors keep a diagnostic preview.
-  // Preserve the explicit preflight and process outcomes handled above.
-  if (row.commandExitCode === undefined && (row.action === 'generic' || row.showActionTitle)) {
-    return row.action === 'generic' ? row.target ?? row.title
-      : [row.title, displayTarget && displayTarget !== row.title ? displayTarget : undefined].filter(Boolean).join(' · ');
-  }
-
-  if ((row.state === 'failed' || row.state === 'canceled') && displayTarget) {
-    return t(`messages.toolSummary.${row.state}`, {
-      target: displayTarget,
-      defaultValue: defaultToolSummaryByState[row.state],
-    });
-  }
   if (row.commandExitCode !== undefined) {
     return t('messages.toolSummary.commandExited', {
       target: displayTarget ?? row.title, code: row.commandExitCode,
@@ -125,57 +100,8 @@ const formatToolReceiptDetailLabel = (
     });
   }
 
-  if (row.action === 'run_commands' && row.target) {
-    return t(`messages.toolSummary.${row.state}`, {
-      target: row.target,
-      defaultValue: defaultToolSummaryByState[row.state],
-    });
-  }
-
-  if (row.action === 'search_code') {
-    return row.target
-      ? t('messages.processReceipt.searchedTarget', {
-          target: row.target,
-          defaultValue: 'Searched {{target}}',
-        })
-      : t('messages.processReceipt.searchedCode', { defaultValue: 'Searched code' });
-  }
-
-  if (row.action === 'list_files') {
-    return row.target
-      ? t('messages.processReceipt.listedTarget', {
-          target: row.target,
-          defaultValue: 'Listed {{target}}',
-        })
-      : t('messages.processReceipt.listedFiles', { defaultValue: 'Listed files' });
-  }
-
-  if (row.action === 'discover_tools') return row.target ?? row.title;
-
-  if (row.action === 'read_files' && displayTarget) {
-    return compactReceiptText(
-      t('messages.processReceipt.fileRead', {
-        target: displayTarget,
-        defaultValue: 'Read {{target}}',
-      }),
-      displayTarget
-    );
-  }
-
-  if (row.action === 'edit_files' && displayTarget) {
-    return compactReceiptText(
-      t('messages.processReceipt.fileChanged', {
-        target: displayTarget,
-        stats: '',
-        defaultValue: 'Edited {{target}}',
-      }),
-      displayTarget
-    );
-  }
-
-  return displayTarget && (displayTarget === row.title || displayTarget.startsWith(`${row.title} `))
-    ? displayTarget
-    : joinCompactText([row.title, displayTarget]);
+  return row.action === 'generic' ? row.target ?? row.title
+    : [row.title, displayTarget && displayTarget !== row.title ? displayTarget : undefined].filter(Boolean).join(' · ');
 };
 
 
@@ -185,13 +111,14 @@ const DetailSection: React.FC<{ label: string; value?: string }> = ({ label, val
     <pre className='turn-process-trace-detail__content'>{value}</pre>
   </div> : null;
 
-type ToolObservationRow = ToolReceiptDetailRow & { observationUnconfirmed?: boolean };
+type ToolObservationRow = ToolReceiptRow & { observationUnconfirmed?: boolean; detailSource?: ToolDetailIdentity };
 
 const ToolTraceRow: React.FC<{ row: ToolObservationRow; workspaceRoots: string[] }> = ({ row, workspaceRoots }) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
+  const parentVisible = useContext(ProcessDetailsVisibilityContext);
   const detailId = useId();
-  const hasDetail = shouldShowToolRowDetail(row);
+  const hasDetail = Boolean(row.detailSource || row.error);
   const label = row.observationUnconfirmed
     ? `${row.target ?? row.title} · ${t('messages.toolResultUnconfirmed')}`
     : formatToolReceiptDetailLabel(row, t, workspaceRoots);
@@ -204,14 +131,17 @@ const ToolTraceRow: React.FC<{ row: ToolObservationRow; workspaceRoots: string[]
       aria-expanded={hasDetail ? expanded : undefined} aria-controls={hasDetail ? detailId : undefined}>
       <span className='turn-process-trace__row-icon' role={row.state === 'failed' || row.state === 'canceled' ? 'img' : undefined}
         aria-label={row.state === 'failed' || row.state === 'canceled' ? t(`messages.toolSummary.${row.state}`, { target: label }) : undefined}>
-        {row.state === 'running' ? <Spin size={12} /> : row.state === 'failed' || row.state === 'canceled' ? <Attention theme='outline' size='13' /> : <Code theme='outline' size='13' />}
+        {row.state === 'running' ? <Spin size={12} /> : row.state === 'failed' || row.state === 'canceled' ? <Attention theme='outline' size='13' />
+          : row.action === 'edit_files' ? <Edit theme='outline' size='13' /> : row.action === 'read_files' || row.action === 'search_code' ? <FolderOpen theme='outline' size='13' />
+          : row.action === 'run_commands' ? <Terminal theme='outline' size='13' /> : <Code theme='outline' size='13' />}
       </span>
       <span className='turn-process-trace__text'>{label}</span>
       {hasDetail && <Right theme='outline' size='12' className={classNames('turn-process-trace-tool__arrow', expanded && 'turn-process-trace-tool__arrow--open')} />}
     </Header>
-    {expanded && hasDetail && <div id={detailId} className='turn-process-trace-detail'>
+    {expanded && parentVisible && hasDetail && <div id={detailId} className='turn-process-trace-detail'>
       {row.observationUnconfirmed && <div className='turn-process-trace-detail__label'>{t('messages.toolResultUnconfirmed')}</div>}
       <DetailSection label={t('messages.toolDetailError')} value={row.error} />
+      {row.detailSource && <ToolDetails source={row.detailSource} />}
     </div>}
   </div>;
 };
@@ -219,10 +149,18 @@ const ToolTraceRow: React.FC<{ row: ToolObservationRow; workspaceRoots: string[]
 const ToolProcessTraceRows: React.FC<{ messages: ToolProcessMessage[]; workspaceRoots: string[]; stateOverride?: TurnDisclosureProcessState }> = ({ messages, workspaceRoots, stateOverride }) => {
   const { i18n } = useTranslation();
   const language = i18n.resolvedLanguage ?? i18n.language;
-  const rows = useMemo(() => buildToolReceiptDetailRows(normalizeToolMessages(messages), language).map((row): ToolObservationRow => {
+  const rows = useMemo(() => buildToolReceiptRows(normalizeToolMessages(messages), language).map((row): ToolObservationRow => {
     const observationUnconfirmed = messages.some(message => isToolObservationUnconfirmed(message, row.key));
-    return observationUnconfirmed ? { ...row, state: 'completed', observationUnconfirmed: true }
-      : stateOverride && row.state === 'running' ? { ...row, state: stateOverride } : row;
+    const source = messages.find(message => message.type === 'tool_call' ? message.content.call_id === row.key
+      : message.content.some(tool => tool.call_id === row.key));
+    const detailSource: ToolDetailIdentity | undefined = source?.turn_id ? {
+      conversation_id: source.conversation_id, turn_id: source.turn_id, call_id: row.key,
+      ...(source.type === 'tool_call' && source.content.timeline ? { through_seq: Math.max(source.content.timeline.through_seq, source.content.result_seq ?? 0) } : {}),
+      ...(source.type === 'tool_call' && source.content.result_seq !== undefined ? { expected_result_seq: source.content.result_seq } : {}),
+    } : undefined;
+    const view = { ...row, detailSource };
+    return observationUnconfirmed ? { ...view, state: 'completed', observationUnconfirmed: true }
+      : stateOverride && row.state === 'running' ? { ...view, state: stateOverride } : view;
   }), [language, messages, stateOverride]);
   return <div className='turn-process-trace'>{rows.map(row => <ToolTraceRow key={row.key} row={row} workspaceRoots={workspaceRoots} />)}</div>;
 };

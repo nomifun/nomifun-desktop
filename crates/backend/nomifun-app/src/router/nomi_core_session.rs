@@ -65,6 +65,10 @@ mod companion_decision_delivery;
 
 #[path = "turn_files_api.rs"]
 mod turn_files_api;
+#[path = "tool_details_api.rs"]
+mod tool_details_api;
+#[path = "delegation_records_api.rs"]
+mod delegation_records_api;
 
 #[cfg(test)]
 #[path = "idmm_message_tests.rs"]
@@ -9316,6 +9320,8 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             "/api/agent-sessions/{agent_session_id}/turn-files",
             get(turn_files_api::get),
         )
+        .route("/api/agent-sessions/{agent_session_id}/tool-details", get(tool_details_api::get))
+        .route("/api/conversations/{agent_session_id}/delegation-records", get(delegation_records_api::get))
         .route(
             "/api/agent-sessions/{agent_session_id}/delete-override",
             post(override_nomi_core_agent_session_delete),

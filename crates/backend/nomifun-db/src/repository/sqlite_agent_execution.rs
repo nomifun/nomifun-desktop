@@ -890,6 +890,7 @@ async fn append_event_tx(
     .bind(execution_id)
     .fetch_one(&mut **tx)
     .await?;
+    let presentation_payload = crate::execution_presentation::annotate_event_tx(tx, execution_id, event, &on_behalf_of_user_id).await?;
     sqlx::query(
         "INSERT INTO agent_execution_events (\
             execution_id, sequence, event_type, step_id, attempt_id, \
@@ -907,7 +908,7 @@ async fn append_event_tx(
     .bind(&actor_conversation_id)
     .bind(&actor_attempt_id)
     .bind(&on_behalf_of_user_id)
-    .bind(&event.payload)
+    .bind(&presentation_payload)
     .bind(now)
     .execute(&mut **tx)
     .await?;
@@ -922,7 +923,7 @@ async fn append_event_tx(
         actor_conversation_id,
         actor_attempt_id,
         on_behalf_of_user_id,
-        payload: event.payload.clone(),
+        payload: presentation_payload,
         created_at: now,
         published_at: None,
     })
@@ -4375,6 +4376,14 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             return Err(conflict("Agent Execution recovery"));
         }
         let mut event = scoped_event(event, step_id, Some(attempt_id));
+        if let Some(output) = recovered_output {
+            let mut payload: serde_json::Value = serde_json::from_str(&event.payload)
+                .map_err(|_| conflict("recovered Attempt event payload"))?;
+            let object = payload.as_object_mut().ok_or_else(|| conflict("recovered Attempt event payload"))?;
+            object.insert("canonical_operation_id".into(), output.canonical_operation_id.clone().into());
+            object.insert("terminal_event_id".into(), output.terminal_event_id.clone().into());
+            event.payload = payload.to_string();
+        }
         if disposition == AgentExecutionAttemptRecoveryDisposition::UserInputRequested {
             let output = recovered_output.ok_or_else(|| conflict("recovered user input source"))?;
             let request = output.user_input_request.as_ref().ok_or_else(|| conflict("recovered user input request"))?;

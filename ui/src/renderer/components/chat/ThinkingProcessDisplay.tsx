@@ -74,7 +74,11 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
   const isProcessVariant = variant === 'process';
   const defaultExpanded = expanded ?? !isDone;
   const [internalExpanded, setInternalExpanded] = useState(() => defaultExpanded);
-  const resolvedExpanded = expanded ?? internalExpanded;
+  const manuallyChanged = useRef(false);
+  const expansionIdentity = useRef(identityKey);
+  const resolvedExpanded = expanded ?? (expansionIdentity.current === identityKey ? internalExpanded : defaultExpanded);
+  const [openedBody, setOpenedBody] = useState({ identity: identityKey, opened: defaultExpanded });
+  const mountBody = resolvedExpanded || (openedBody.identity === identityKey && openedBody.opened);
   const [elapsedTime, setElapsedTime] = useState(() => {
     const initialStartedAt = startedAt ?? Date.now();
     return isDone || !showElapsedTime ? 0 : Math.max(0, Math.floor((Date.now() - initialStartedAt) / 1000));
@@ -84,12 +88,20 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
   const bodyId = useId();
   const Header = disclosure ? 'button' : 'div';
 
-  // A phase transition owns the automatic disclosure default. Repeated body
-  // updates within that phase keep the user's manual choice.
+  // Defaults follow lifecycle only until the user chooses. A stable canonical
+  // identity keeps that choice through streamed updates and completion.
   useLayoutEffect(() => {
     if (expanded !== undefined) return;
-    setInternalExpanded(defaultExpanded);
+    if (expansionIdentity.current !== identityKey) {
+      expansionIdentity.current = identityKey;
+      manuallyChanged.current = false;
+    }
+    if (!manuallyChanged.current) setInternalExpanded(defaultExpanded);
   }, [defaultExpanded, expanded, identityKey]);
+
+  useEffect(() => {
+    if (resolvedExpanded) setOpenedBody({ identity: identityKey, opened: true });
+  }, [identityKey, resolvedExpanded]);
 
   useEffect(() => {
     if (isDone || !showElapsedTime) return;
@@ -113,6 +125,7 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
     if (!disclosure) return;
     const nextExpanded = !resolvedExpanded;
     if (expanded === undefined) {
+      manuallyChanged.current = true;
       setInternalExpanded(nextExpanded);
     }
     onExpandedChange?.(nextExpanded);
@@ -177,7 +190,7 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
           )}
           data-thinking-process-body
         >
-          {children ?? content}
+          {mountBody ? children ?? content : null}
         </div>
       ) : null}
     </div>

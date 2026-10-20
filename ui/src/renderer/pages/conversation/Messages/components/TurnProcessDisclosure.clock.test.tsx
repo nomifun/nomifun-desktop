@@ -40,7 +40,7 @@ test('the work clock advances without messages while collapsed and stops at the 
     expect(label()).toBe('Took 11s');
     expect(journalRenders).toBe(rendersBeforeTick);
     fireEvent.click(page.getByRole('button', { name: 'Collapse thinking process' }));
-    expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
+    expect(page.container.querySelector('.turn-process-disclosure__body')?.hasAttribute('hidden')).toBe(true);
     now += 1000;
     act(() => tick!());
     expect(label()).toBe('Took 12s');

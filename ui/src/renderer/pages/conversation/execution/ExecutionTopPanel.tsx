@@ -24,7 +24,7 @@ const DEFAULT_WIDTH = 480;
 const MIN_CHAT_WIDTH = 360;
 
 function availableMaxWidth(containerWidth?: number): number {
-  if (typeof window === 'undefined' || window.matchMedia('(max-width: 768px)').matches) return MAX_WIDTH;
+  if (typeof window === 'undefined') return MAX_WIDTH;
   const layoutWidth = containerWidth && containerWidth > 0 ? containerWidth : window.innerWidth;
   return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, layoutWidth - MIN_CHAT_WIDTH));
 }
@@ -68,7 +68,6 @@ const ExecutionTopPanel: React.FC = () => {
     projectedStepId,
     returnToMain,
     canvasOpen,
-    setCanvasOpen,
   } = execution;
 
   useEffect(() => {
@@ -202,9 +201,8 @@ const ExecutionTopPanel: React.FC = () => {
   const openStep = useCallback(
     (payload: OpenStepPayload) => {
       projectStep(payload);
-      if (window.matchMedia('(max-width: 768px)').matches) setCanvasOpen(false);
     },
-    [projectStep, setCanvasOpen],
+    [projectStep],
   );
 
   if (!executionId || !canvasOpen) return null;

@@ -20,6 +20,7 @@ import type {
   CreativeStudioAgentProposal,
 } from './types';
 import styles from './CreativeStudioAgentPanel.module.css';
+import { CreativeStudioProcessContent, useCreativeStudioCanonicalProcess } from './CreativeStudioCanonicalProcess';
 
 interface CreativeStudioAgentMessagesProps {
   conversationId?: string;
@@ -39,12 +40,16 @@ const CreativeStudioAgentMessages: React.FC<CreativeStudioAgentMessagesProps> = 
   onApplyProposal,
 }) => {
   const { t } = useTranslation();
+  const process = useCreativeStudioCanonicalProcess();
+  const processOwners = React.useMemo(() => process?.owners(messages), [process, messages]);
 
   return (
-    <div className={styles.messageList} aria-live='polite'>
+    <CreativeStudioProcessContent><div className={styles.messageList} aria-live='polite'>
+      {process?.older}
       {messages.map((message) => {
         const isAssistant = message.role === 'assistant';
         const proposal = proposals.find((candidate) => candidate.messageId === message.id);
+        const processContent = isAssistant && processOwners?.has(message.id) ? process?.render(message) : null;
         return (
           <article
             key={message.id}
@@ -52,6 +57,7 @@ const CreativeStudioAgentMessages: React.FC<CreativeStudioAgentMessagesProps> = 
             data-agent-message-role={message.role}
             data-agent-message-status={message.status}
           >
+            {processContent}
             {message.text ? (
               <div className={styles.messageBubble}>
                 {isAssistant && (
@@ -70,7 +76,7 @@ const CreativeStudioAgentMessages: React.FC<CreativeStudioAgentMessagesProps> = 
               </div>
             ) : null}
 
-            {message.status === 'running' && (
+            {message.status === 'running' && !processContent && (
               <ThinkingProcessDisplay
                 className={styles.thinkingStatus}
                 state='running'
@@ -180,7 +186,7 @@ const CreativeStudioAgentMessages: React.FC<CreativeStudioAgentMessagesProps> = 
           </article>
         );
       })}
-    </div>
+    </div></CreativeStudioProcessContent>
   );
 };
 

@@ -4,11 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ToolReceiptDetailRow } from './components/toolGroupSummaryModel';
-
-export const shouldShowToolRowDetail = (row: ToolReceiptDetailRow): boolean =>
-  Boolean(row.error);
-
 /** Reasoning without a public body cannot create an empty process group. */
 export const hasVisibleProcessReasoning = (content: string): boolean => {
   const text = content.trim();

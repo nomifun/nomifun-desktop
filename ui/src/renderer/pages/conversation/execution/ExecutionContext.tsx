@@ -1,7 +1,7 @@
 import type { ConversationId, ExecutionId, ExecutionStepId } from '@/common/types/ids';
 import type { TChatConversation } from '@/common/config/storage';
 import type { TAgentExecutionDetail } from '@/common/types/agentExecution/agentExecutionTypes';
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { OpenStepPayload } from './DagCanvas';
 import type { LeadThinkingState } from './useLeadThinking';
 import { useConversationExecution } from './useConversationExecution';
@@ -16,6 +16,7 @@ export interface ExecutionContextValue {
   projectedStepId: ExecutionStepId | null;
   projectedPayload: OpenStepPayload | null;
   projectStep: (payload: OpenStepPayload) => void;
+  projectStepAsync: (load: () => Promise<OpenStepPayload | null>) => Promise<void>;
   returnToMain: () => void;
   canvasOpen: boolean;
   setCanvasOpen: (open: boolean) => void;
@@ -31,13 +32,40 @@ export const ExecutionProvider: React.FC<{
   const { executionId, detail, refetch, leadThinking, loading } = useConversationExecution(conversation);
   const [projectedPayload, setProjectedPayload] = useState<OpenStepPayload | null>(null);
   const [canvasOpen, setCanvasOpen] = useState(false);
+  const projectionIntent = useRef(0);
+  const mounted = useRef(false);
+  const session = useRef(conversation.id);
 
-  const projectStep = useCallback((payload: OpenStepPayload) => setProjectedPayload(payload), []);
-  const returnToMain = useCallback(() => setProjectedPayload(null), []);
+  const projectStep = useCallback((payload: OpenStepPayload) => {
+    if (!mounted.current || session.current !== conversation.id) return;
+    projectionIntent.current += 1;
+    setProjectedPayload(payload);
+  }, [conversation.id]);
+  const projectStepAsync = useCallback(async (load: () => Promise<OpenStepPayload | null>) => {
+    if (!mounted.current || session.current !== conversation.id) return;
+    const intent = ++projectionIntent.current;
+    const current = () => mounted.current && session.current === conversation.id && intent === projectionIntent.current;
+    try {
+      const payload = await load();
+      if (payload && current()) setProjectedPayload(payload);
+    } catch (error) {
+      if (current()) throw error;
+    }
+  }, [conversation.id]);
+  const returnToMain = useCallback(() => {
+    if (!mounted.current || session.current !== conversation.id) return;
+    projectionIntent.current += 1;
+    setProjectedPayload(null);
+  }, [conversation.id]);
   const toggleCanvas = useCallback(() => setCanvasOpen((open) => !open), []);
 
-  useEffect(() => {
+  // Only committed UI navigation owns this fence. It is not an execution ledger.
+  useLayoutEffect(() => {
+    mounted.current = true;
+    session.current = conversation.id;
+    projectionIntent.current += 1;
     setProjectedPayload(null);
+    return () => { mounted.current = false; projectionIntent.current += 1; };
   }, [conversation.id]);
 
   // A task opened from older history owns its exact execution identity. A new
@@ -57,6 +85,7 @@ export const ExecutionProvider: React.FC<{
       projectedStepId: projectedPayload?.step.step_id ?? null,
       projectedPayload,
       projectStep,
+      projectStepAsync,
       returnToMain,
       canvasOpen,
       setCanvasOpen,
@@ -70,6 +99,7 @@ export const ExecutionProvider: React.FC<{
       leadThinking,
       loading,
       projectStep,
+      projectStepAsync,
       projectedPayload,
       refetch,
       returnToMain,

@@ -30,6 +30,8 @@ mod robot_authored_execution_tests;
 
 #[path = "unified_session_input_tests.rs"]
 mod unified_session_input_tests;
+#[path = "tool_details_http_tests.rs"]
+mod tool_details_http_tests;
 
 type InputClaimBarrier=(Arc<tokio::sync::Notify>,Arc<tokio::sync::Notify>);
 static INPUT_CLAIM_BARRIERS:OnceLock<Mutex<BTreeMap<String,InputClaimBarrier>>>=OnceLock::new();

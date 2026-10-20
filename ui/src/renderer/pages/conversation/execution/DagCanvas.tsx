@@ -21,7 +21,7 @@ import type {
   TExecutionStep,
 } from '@/common/types/agentExecution/agentExecutionTypes';
 import { latestAttemptForStep } from '@/common/types/agentExecution/agentExecutionTypes';
-import type { ExecutionId, ExecutionStepId } from '@/common/types/ids';
+import type { ExecutionAttemptId, ExecutionId, ExecutionStepId } from '@/common/types/ids';
 import {
   resolveExecutionCanvasFocusStepId,
   resolveExecutionCanvasRelationState,
@@ -119,6 +119,8 @@ const MINI_MAP_COLORS: Record<'light' | 'dark', Record<string, string>> = {
 export interface OpenStepPayload {
   /** Stable UI identity across immutable replacements of the same selected step. */
   projectionKey?: string;
+  /** An event opens this exact historical attempt; omission follows the current step. */
+  attemptId?: ExecutionAttemptId;
   step: TExecutionStep;
   participant?: TExecutionParticipant;
   participants: TExecutionParticipant[];

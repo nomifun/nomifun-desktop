@@ -1,5 +1,5 @@
-//! Product-only views of tool facts. Raw arguments and observations remain in
-//! canonical history; neither may become expandable conversation log content.
+//! Bounded product summaries of tool facts. Complete invocation content remains
+//! canonical and is read separately, only when a user opens its detail.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -83,96 +83,31 @@ fn compact(value: &str) -> Option<String> {
     Some(text)
 }
 
-/// A conservative shell word reader for display only. Expansion, operators,
-/// redirection, escapes and multiline source are not ordinary argument syntax.
-fn plain_shell_words(source: &str) -> Option<Vec<String>> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut quote = None;
-    for character in source.chars() {
-        if character.is_control() { return None; }
-        if let Some(delimiter) = quote {
-            if character == delimiter { quote = None; }
-            else if delimiter == '"' && matches!(character, '$' | '`') { return None; }
-            else { word.push(character); }
-        } else {
-            match character {
-                '\'' | '"' => quote = Some(character),
-                ' ' => { if !word.is_empty() { words.push(std::mem::take(&mut word)); } },
-                '$' | '`' | '\\' | ';' | '|' | '&' | '<' | '>' | '(' | ')' | '{' | '}' | '#' | '*' | '?' | '[' | ']' | '~' | '!' => return None,
-                character => word.push(character),
-            }
-        }
-    }
-    if quote.is_some() { return None; }
-    if !word.is_empty() { words.push(word); }
-    (!words.is_empty()).then_some(words)
-}
-
-fn safe_executable(source: &str) -> Option<String> {
-    let mut quote = None;
-    let mut program = String::new();
-    for character in source.trim_start().chars() {
-        if let Some(delimiter) = quote {
-            if character == delimiter { quote = None; } else { program.push(character); }
-        } else if matches!(character, '\'' | '"') { quote = Some(character); }
-        else if character.is_whitespace() { break; }
-        else { program.push(character); }
-    }
-    if quote.is_some() || program.is_empty() || program.len() > 4096
-        || !program.chars().all(|character| character.is_alphanumeric() || matches!(character, '/' | '\\' | ':' | '.' | '_' | '-' | ' ')) { return None; }
-    Some(program)
-}
-
-fn numeric_argument(value: &str) -> bool {
-    let value = value.strip_prefix('+').or_else(|| value.strip_prefix('-')).unwrap_or(value);
-    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-/// Shell source stays private by default. These bounded, literal CLI forms
-/// preserve existing reading-command labels without claiming any file effect.
+/// Display the bounded first source line without interpreting shell effects.
+/// Complete scripts and literal argv remain available through canonical detail.
 fn shell_display_target(source: &str) -> Option<String> {
-    let executable = safe_executable(source)?;
-    let Some(words) = plain_shell_words(source) else { return Some(executable); };
-    let program = words[0].rsplit(['/', '\\']).next()?;
-    let flags = match program {
-        "head" | "tail" => "qvz",
-        "cat" => "AbEnstTuv",
-        "wc" => "clLmPw",
-        "ls" => "aACdFhlnpRrSst1",
-        "pwd" => "LP",
-        _ => return Some(executable),
-    };
-    let mut position = 1;
-    let mut paths = false;
-    while position < words.len() {
-        let word = &words[position];
-        if !paths && word == "--" { paths = true; position += 1; continue; }
-        if !paths && matches!(program, "head" | "tail") {
-            if matches!(word.as_str(), "-n" | "-c" | "--lines" | "--bytes") {
-                position += 1;
-                if words.get(position).is_none_or(|value| !numeric_argument(value)) { return Some(executable); }
-                position += 1; continue;
-            }
-            if ["-n", "-c", "--lines=", "--bytes="].iter()
-                .any(|prefix| word.strip_prefix(*prefix).is_some_and(numeric_argument)) {
-                position += 1; continue;
-            }
-        }
-        if !paths && word.starts_with('-') && word != "-" {
-            if !word.starts_with("--") && word[1..].chars().all(|character| flags.contains(character)) {
-                position += 1; continue;
-            }
-            return Some(executable);
-        }
-        if program == "pwd" || display_path(word).is_none() { return Some(executable); }
-        position += 1;
-    }
-    compact(source).or(Some(executable))
+    let mut lines = source.lines().filter(|line| !line.trim().is_empty());
+    let mut label = compact(lines.next()?)?;
+    if lines.next().is_some() && !label.ends_with('…') { label.push('…'); }
+    Some(label)
 }
 
-/// Keep the existing short target label, without serializing its source object.
-/// Multiline/evaluated process scripts are source content, not safe labels.
+fn process_display_target(arguments: &Value, field: &str, value: &str) -> Option<String> {
+    if field == "cmd" { return shell_display_target(value); }
+    let mut label = display_path(value)?;
+    if let Some(args) = arguments.get("args").and_then(Value::as_array) {
+        for argument in args.iter().filter_map(Value::as_str) {
+            label.push(' ');
+            if argument.chars().any(char::is_whitespace) || argument.contains(['\'', '"']) {
+                label.push_str(&serde_json::to_string(argument).ok()?);
+            } else { label.push_str(argument); }
+            if label.chars().count() > 120 { break; }
+        }
+    }
+    compact(&label)
+}
+
+/// Summaries never copy complete source objects or determine execution effects.
 pub fn tool_display_target(capability: Option<&str>, action: Option<&str>, name: &str, arguments: &Value) -> Option<String> {
     let catalogue = nomifun_agent_contracts::tool_presentation::tool_presentations();
     let entry = match (capability, action) {
@@ -190,8 +125,8 @@ pub fn tool_display_target(capability: Option<&str>, action: Option<&str>, name:
         if value.trim().is_empty() { continue; }
         if entry.capability_id.as_deref() == Some("workspace.process")
             || (entry.capability_id.as_deref() == Some("ssh") && field == "command") {
-            return if entry.capability_id.as_deref() == Some("workspace.process") && field == "command" {
-                display_path(value)
+            return if entry.capability_id.as_deref() == Some("workspace.process") {
+                process_display_target(arguments, field, value)
             } else { shell_display_target(value) };
         }
         if matches!(entry.capability_id.as_deref(), Some("workspace.files" | "knowledge" | "ssh"))
@@ -352,7 +287,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn targets_keep_paths_and_never_copy_file_or_shell_bodies() {
+    fn targets_keep_file_paths_and_bounded_command_summaries() {
         let args = json!({"path":"src/app.rs", "content":"PRIVATE_FILE_BODY"});
         assert_eq!(tool_display_target(Some("workspace.files"), Some("workspace.files/write"), "write_file", &args).as_deref(), Some("src/app.rs"));
         assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process", &json!({"cmd":"head -n 5 file.txt"})).as_deref(), Some("head -n 5 file.txt"));
@@ -362,21 +297,22 @@ mod tests {
         assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process", &json!({"cmd":windows})).as_deref(), Some(windows));
         let path = format!("docs/{}  multiple spaces/文档.md", "long".repeat(50));
         assert_eq!(tool_display_target(Some("workspace.files"), Some("workspace.files/read"), "read_file", &json!({"path":path})), Some(path));
-        for command in ["cat <<EOF\nPRIVATE_FILE_BODY\nEOF", "python -c 'PRIVATE_FILE_BODY'", "echo \"PRIVATE_FILE_BODY\" > file.txt"] {
-            assert!(!tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process", &json!({"cmd":command})).unwrap_or_default().contains("PRIVATE_FILE_BODY"));
-        }
-        for (command, expected) in [("sed -i 's/old/PRIVATE_FILE_BODY/' app.ts", "sed"),
-            ("/usr/bin/printf 'PRIVATE_FILE_BODY' > app.ts", "/usr/bin/printf"),
-            ("python3.12 -c 'PRIVATE_FILE_BODY'", "python3.12")] {
-            assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process", &json!({"cmd":command})).as_deref(), Some(expected));
-        }
+        assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process",
+            &json!({"cmd":"git status --short && rg -n 'requestAnimationFrame' src/game.ts"})).as_deref(),
+            Some("git status --short && rg -n 'requestAnimationFrame' src/game.ts"));
+        assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process",
+            &json!({"cmd":"cat <<EOF\nPRIVATE_FILE_BODY\nEOF"})).as_deref(),Some("cat <<EOF…"));
+        let long = format!("python3 -c '{}'", "source".repeat(100));
+        let label = tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process", &json!({"cmd":long})).unwrap();
+        assert!(label.starts_with("python3 -c "));assert!(label.ends_with('…'));assert_eq!(label.chars().count(),121);
+        assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process",
+            &json!({"command":"git","args":["status","--short"]})).as_deref(),Some("git status --short"));
+        assert_eq!(tool_display_target(Some("workspace.process"), Some("workspace.process/start"), "start_process",
+            &json!({"component":"bun","args":["run","check"]})).as_deref(),Some("bun run check"));
         for action in ["ssh/exec", "ssh/sudo"] {
             assert_eq!(tool_display_target(Some("ssh"), Some(action), "ssh_exec", &json!({"command":quoted})).as_deref(), Some(quoted));
-            for (command, expected) in [("sed -i 's/old/PRIVATE_FILE_BODY/' app.ts", "sed"),
-                ("/usr/bin/printf 'PRIVATE_FILE_BODY' > app.ts", "/usr/bin/printf"),
-                ("python3.12 -c 'PRIVATE_FILE_BODY'", "python3.12")] {
-                assert_eq!(tool_display_target(Some("ssh"), Some(action), "ssh_exec", &json!({"command":command})).as_deref(), Some(expected));
-            }
+            assert_eq!(tool_display_target(Some("ssh"), Some(action), "ssh_exec",
+                &json!({"command":"git diff --stat"})).as_deref(),Some("git diff --stat"));
         }
         assert!(tool_display_target(Some("mcp.fake"), Some("workspace.files/write"), "write_file", &args).is_none());
     }

@@ -54,6 +54,8 @@ export type TurnDisclosureOutputItem =
     };
 
 export interface BuildTurnDisclosureOptions {
+  /** Exact source-bound read projections may outlive a paged-out tool message. */
+  processRecordTurnIds?: ReadonlySet<MessageId>;
   tailClosed?: boolean;
   activeTurnId?: MessageId;
   /** Canonical runtime start when the current history window omits the Turn summary. */
@@ -313,7 +315,8 @@ function buildSegmentOutput(
   resultAnchor?: TurnDisclosureInputItem,
   turnStartedAt?: number,
   turnEndedAt?: number,
-  publicResultIds: ReadonlySet<string> = new Set()
+  publicResultIds: ReadonlySet<string> = new Set(),
+  hasProcessRecords = false
 ): TurnDisclosureOutputItem[] {
   const turnId = segment[0]?.turnId;
   if (!turnId) return segment.map((entry) => ({ type: 'item', id: entry.id }));
@@ -351,6 +354,8 @@ function buildSegmentOutput(
         turnEndedAt ?? fallbackEnd
       );
     }
+    if (hasProcessRecords) return buildEmptyClosedSegmentOutput(turnId, segment, resultAnchor,
+      turnStartedAt ?? Number.NaN, turnEndedAt ?? Number.NaN);
     return visibleEntries.map((entry) => ({ type: 'item', id: entry.id }));
   }
 
@@ -610,7 +615,8 @@ export function buildTurnDisclosureItems(
         segmentTurnId ? resultAnchorByTurn.get(segmentTurnId) : undefined,
         segmentTurnId ? turnStartedAtByTurn.get(segmentTurnId) : undefined,
         segmentTurnId ? turnEndedAtByTurn.get(segmentTurnId) : undefined,
-        publicResultIds
+        publicResultIds,
+        segmentTurnId !== undefined && options.processRecordTurnIds?.has(segmentTurnId)
       )
     );
     segment = [];

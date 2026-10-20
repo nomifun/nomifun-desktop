@@ -5,6 +5,7 @@
  */
 
 import { uuidv7 } from '@/common/utils/uuidv7';
+import { CreativeStudioCanonicalProcessProvider } from '../../../agent/CreativeStudioCanonicalProcess';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import React, {
   useCallback,
@@ -900,6 +901,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
   const model = lockedModel ?? selectedModel;
 
   return (
+    <CreativeStudioCanonicalProcessProvider conversationId={activeConversationId ?? undefined}>
     <CreativeStudioAgentPanel
       view={view}
       loadState={loadState}
@@ -967,6 +969,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       onRetryMessage={activeSession?.pendingTurn && !isRunning ? handleRetryMessage : undefined}
       onOpenModelSettings={props.onOpenModelSettings}
     />
+    </CreativeStudioCanonicalProcessProvider>
   );
 });
 

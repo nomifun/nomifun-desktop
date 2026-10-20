@@ -4,6 +4,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { ipcBridge } from '@/common';
+import { database } from '@/common/adapter/ipcBridge';
 import { configService } from '@/common/config/configService';
 import { createStoredMessageMapper } from '@/common/adapter/storedMessageMapper';
 import type { IResponseMessage, IConversationTurnCompletedEvent } from '@/common/adapter/ipcBridge';
@@ -31,6 +32,7 @@ const scenarios = [
 ];
 
 beforeEach(() => {
+  spyOn(database.getDelegationRecords, 'invoke').mockResolvedValue({ records: [], through_session_seq: 0 });
   spyOn(configService, 'get').mockImplementation(() => undefined);
   spyOn(configService, 'subscribe').mockImplementation(() => () => {});
   spyOn(ipcBridge.agentPlatform.sessions.onAgentChanged, 'on').mockReturnValue(() => {});

@@ -41,3 +41,11 @@ export const leadConversation: TChatConversation = {
   model: { id: parseProviderId('00000000-03e8-7000-8000-000000000005'), platform: 'openai',
     name: 'Test provider', base_url: 'https://example.test/v1', auth_scheme: 'bearer', has_credentials: false, use_model: 'test-model' },
 };
+
+export const makeDelegationRecord = (overrides: Partial<import('@/common/chat/delegationRecords').DelegationRecord> = {}): import('@/common/chat/delegationRecords').DelegationRecord => ({
+  id: 'delegated-record', kind: 'delegated', execution_id: executionId, execution_event_sequence: 1,
+  step_id: makeStep(0).step_id, attempt_id: null, title: 'Inspect workspace', source_scoped_order: false,
+  source: { agent_session_id: leadConversationId, source_message_id: requestId, turn_operation_id: 'canonical-turn',
+    tool_operation_id: 'canonical-tool', tool_call_id: 'delegate-call', effect_id: 'effect', tool_event_id: 'tool-event', tool_event_seq: 10 },
+  anchor: { agent_session_id: leadConversationId, event_id: 'source-event', seq: 10 }, ...overrides,
+});

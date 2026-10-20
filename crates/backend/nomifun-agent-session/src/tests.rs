@@ -71,6 +71,8 @@ mod committed_tool_causation_tests;
 mod context_clear_tests;
 #[path = "shared_content_tests.rs"]
 mod shared_content_tests;
+#[path = "tool_detail_tests.rs"]
+mod tool_detail_tests;
 #[path = "terminal_content_tests.rs"]
 mod terminal_content_tests;
 #[path = "robot_question_transaction_tests.rs"]

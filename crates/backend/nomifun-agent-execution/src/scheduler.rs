@@ -2336,6 +2336,7 @@ impl ExecutionScheduler {
                 return Ok(());
         }
 
+        let canonical_terminal = outcome.as_ref().ok().and_then(|outcome|outcome.canonical_terminal.clone());
         let (attempt_status, step_status, error, output, output_files, tokens, retry_after) = match outcome {
             Ok(outcome) if agent_outcome_can_complete(&outcome) => (
                 ExecutionAttemptStatus::Completed,
@@ -2462,8 +2463,8 @@ impl ExecutionScheduler {
                     AgentExecutionEventKind::AttemptChanged,
                     Some(step_id),
                     Some(attempt_id),
-                    json!({"attempt_status":attempt_status,"step_status":step_status,
-                        "turn_operation_key":settled_turn_key}),
+                    crate::delivery::with_terminal_reference(json!({"attempt_status":attempt_status,"step_status":step_status,
+                        "turn_operation_key":settled_turn_key}),canonical_terminal),
                 ),
             )
             .await;

@@ -18,6 +18,9 @@ use nomifun_api_types::{
 pub(super) struct ActivityQuery {
     after_cursor: Option<String>,
     limit: Option<usize>,
+    execution_id: Option<String>,
+    step_id: Option<String>,
+    attempt_id: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -44,6 +47,7 @@ struct AttemptCandidate {
     runtime_state: Option<String>,
     conversation_id: Option<String>,
     cleanup_pending: bool,
+    task_stop_current: bool,
     updated_at: i64,
     initial_plan_input: String,
 }
@@ -531,11 +535,233 @@ async fn owned_resource_snapshot(
     .await
 }
 
+const ATTEMPT_CANDIDATE_SQL: &str = "SELECT execution.execution_id,step.step_id,attempt.attempt_id,step.title,attempt.status AS attempt_status,execution.status AS execution_status, \
+         execution.version AS execution_version,step.version AS step_version,attempt.runtime_state,link.conversation_id,attempt.updated_at,execution.initial_plan_input, \
+         NOT EXISTS(SELECT 1 FROM agent_execution_attempts newer WHERE newer.execution_id=attempt.execution_id \
+            AND newer.step_id=attempt.step_id AND newer.attempt_no>attempt.attempt_no) AS task_stop_current, \
+         EXISTS(SELECT 1 FROM conversation_execution_links cleanup WHERE cleanup.execution_id=attempt.execution_id AND cleanup.attempt_id=attempt.attempt_id \
+            AND cleanup.relation IN ('attempt','automation') AND cleanup.active=0 AND cleanup.cleanup_completed_at IS NULL \
+            AND NOT EXISTS(SELECT 1 FROM conversation_execution_links active_link WHERE active_link.conversation_id=cleanup.conversation_id \
+                AND active_link.execution_id=cleanup.execution_id AND active_link.step_id=cleanup.step_id AND active_link.attempt_id=cleanup.attempt_id \
+                AND active_link.relation IN ('attempt','automation') AND active_link.active=1)) AS cleanup_pending \
+         FROM agent_execution_attempts attempt JOIN agent_executions execution ON execution.execution_id=attempt.execution_id \
+         JOIN agent_execution_steps step ON step.execution_id=attempt.execution_id AND step.step_id=attempt.step_id \
+         LEFT JOIN conversation_execution_links link ON link.id=(SELECT MAX(candidate.id) FROM conversation_execution_links candidate \
+            WHERE candidate.execution_id=attempt.execution_id AND candidate.step_id=attempt.step_id AND candidate.attempt_id=attempt.attempt_id AND candidate.relation IN ('attempt','automation')) \
+         WHERE execution.user_id=? AND step.kind='agent'";
+
+async fn attempt_observation_operation(state:&NomiCoreAgentApiState,owner:&str,session:&str,
+    candidate:&AttemptCandidate,effects:Option<&nomifun_db::AttemptConversationEffects>)
+    ->Result<Option<OperationId>,NomiCoreApiError> {
+    if matches!(candidate.attempt_status.as_str(),"completed"|"failed"|"cancelled")
+        && effects.is_none_or(|effects|effects.pending_conversation_effects.is_empty()) {
+        use nomifun_db::IAgentExecutionRepository;
+        // Settlement retires the live queue. The original cleanup owner keeps
+        // the exact final continuation in its committed source facts; reuse its
+        // reader rather than reverting a finished task to its initial Turn.
+        let repository=nomifun_db::SqliteAgentExecutionRepository::new(state.session_owner.pool.clone());
+        let facts=repository.read_task_retirement_facts(owner,session,&candidate.execution_id,
+            &candidate.step_id,&candidate.attempt_id).await.map_err(|error|AppError::Internal(error.to_string()))?;
+        return Ok(facts.and_then(|facts|match facts.target {
+                nomifun_db::ConversationCleanupTurnTarget::Exact {operation_id}=>Some(operation_id.into()),
+                nomifun_db::ConversationCleanupTurnTarget::Unconfirmed {..}=>None,
+        }));
+    }
+    let key=effects.cloned().unwrap_or_default().current_turn_operation_key(&candidate.attempt_id)?;
+    Ok(Some(NomiCoreSessionOwner::turn_operation_id(owner,session,&key)))
+}
+
+// The global activity index and an exact task inspector consume this same
+// owner projection. Reading it neither creates nor resumes a runtime.
+async fn project_attempt_activity(
+    state: &NomiCoreAgentApiState, owner: &AuthenticatedOwner, principal: &PrincipalRef,
+    candidate: AttemptCandidate, automation_controls: &mut HashMap<String, nomifun_api_types::AutomationExecutionControl>,
+    exact_task: bool,
+) -> Result<AgentActivity, NomiCoreApiError> {
+        let effects = candidate
+            .runtime_state
+            .clone()
+            .map(|raw| nomifun_db::AttemptConversationEffects::decode(Some(&raw)))
+            .transpose()?;
+        let mut continuation = if effects.as_ref().is_some_and(|effects| {
+            effects.pending_conversation_effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    nomifun_db::PendingConversationEffect::DecisionInput { .. }
+                )
+            })
+        }) {
+            Continuation::AnswerQueued
+        } else {
+            Continuation::None
+        };
+        let mut row_state = activity_state(&candidate.attempt_status);
+        let mut resources = unknown_resources();
+        let mut execution_stopped = false;
+        if let Some(session) = candidate.conversation_id.as_ref() {
+            let session_id = AgentSessionId::from(session.clone());
+            let owned = match state
+                .session_owner
+                .canonical
+                .store()
+                .get_live_session(&session_id)
+                .await
+            {
+                Ok(session) => Some(session),
+                Err(
+                    nomifun_agent_session::SessionStoreError::NotFound(_)
+                    | nomifun_agent_session::SessionStoreError::Deleted(_),
+                ) => None,
+                Err(error) => return Err(agent_session_store_error(error).into()),
+            };
+            if let Some(owned) = owned {
+                if owned.owner_ref != *principal {
+                    return Err(AppError::Forbidden(
+                        "activity Attempt Session belongs to another owner".into(),
+                    )
+                    .into());
+                }
+                let head = state
+                    .session_owner
+                    .canonical
+                    .store()
+                    .head(&session_id)
+                    .await
+                    .map_err(agent_session_store_error)?;
+                if let Some(operation)=attempt_observation_operation(state,owner.as_ref(),session,&candidate,effects.as_ref()).await? {
+                let progress = state
+                    .session_owner
+                    .canonical
+                    .store()
+                    .read_turn_progress(&session_id, &operation)
+                    .await
+                    .map_err(agent_session_store_error)?;
+                resources = observe_resources(
+                    &state,
+                    owner.as_ref(),
+                    &session_id,
+                    head.last_seq,
+                    Some(&operation),
+                    true,
+                )
+                .await?;
+                let carrier = state
+                    .session_owner
+                    .runtime_sessions
+                    .observe_runtime_carrier(session);
+                execution_stopped = terminal_turn(progress.status)
+                    && carrier.supported
+                    && !carrier.registered
+                    && carrier.active_generation.is_none()
+                    && carrier.constructing_generation.is_none()
+                    && !carrier.uncertain_acquisition
+                    && !carrier.teardown_pending;
+                if !terminal_turn(progress.status) && progress.suspended {
+                    row_state = if head.status == "paused" {
+                        ActivityState::Paused
+                    } else {
+                        ActivityState::Waiting
+                    };
+                }
+                if head.status == "paused" {
+                    if let Some(inspection) = state
+                        .session_owner
+                        .canonical
+                        .store()
+                        .inspect_latest_native_execution(&principal, &session_id)
+                        .await
+                        .map_err(agent_session_store_error)?
+                    {
+                        if inspection.operation_id == operation && inspection.resume_requested {
+                            continuation = Continuation::ResumeQueued;
+                        }
+                    }
+                }
+                }
+            }
+        }
+        let control=if exact_task {None} else {automation_activity_control(state,owner.as_ref(),&candidate.execution_id,&candidate.initial_plan_input,automation_controls).await?};
+        let mut stop_accepted = candidate.attempt_status == "cancelled";
+        let task_target=Target::ExecutionTask {execution_id:candidate.execution_id.clone(),step_id:candidate.step_id.clone(),
+            attempt_id:candidate.attempt_id.clone(),expected_execution_version:candidate.execution_version,expected_step_version:candidate.step_version};
+        let root=control.as_ref().filter(|control|control.root_step_id.as_deref()==Some(candidate.step_id.as_str()));
+        let mut root_run_active=false;
+        let (kind, target,delegation_target) = if let Some(root)=root {
+            let source_status:Option<String>=sqlx::query_scalar("SELECT status FROM requirements WHERE requirement_id=? AND claim_generation=? AND owner_conversation_id=?")
+                .bind(&root.requirement_id).bind(root.claim_generation).bind(&root.lead_conversation_id).fetch_optional(&state.session_owner.pool).await.map_err(|error|AppError::Internal(error.to_string()))?;
+            let cancelled=source_status.as_deref()==Some("cancelled");
+            root_run_active=source_status.as_deref()==Some("in_progress");
+            if root_run_active && matches!(candidate.attempt_status.as_str(),"completed"|"failed"|"cancelled") {
+                row_state=activity_state(&candidate.execution_status);
+            }
+            if cancelled {
+                stop_accepted = true;
+                if !execution_stopped {
+                    row_state = ActivityState::Stopping;
+                }
+            }
+            (
+                Kind::AutoWorkRun,
+                Target::AutoWorkRun {
+                    target_kind: nomifun_api_types::AutoWorkTargetKind::Conversation,
+                    target_id:root.lead_conversation_id.clone(),
+                    requirement_id: root.requirement_id.clone(),
+                    claim_generation: root.claim_generation,
+                },
+                (!matches!(candidate.execution_status.as_str(),"completed"|"completed_with_failures"|"failed"|"cancelled")).then_some(task_target),
+            )
+        } else {
+            (
+                Kind::DelegatedTask,
+                task_target,None,
+            )
+        };
+        let terminal = matches!(
+            candidate.attempt_status.as_str(),
+            "completed" | "failed" | "cancelled"
+        );
+        Ok(AgentActivity {
+            delegation_target,
+            key: format!("execution:{}", candidate.attempt_id),
+            title: candidate.title,
+            kind,
+            state: row_state,
+            agent_session_id: candidate.conversation_id,
+            target,
+            continuation,
+            waiting_reason: None,
+            stop_accepted,
+            execution_stopped,
+            resources,
+            // A newer Attempt only fences a business Stop; it never replaces
+            // the exact historical object being observed or its cleanup target.
+            can_stop: if root.is_some() {root_run_active} else {!terminal && candidate.task_stop_current},
+            can_retry_cleanup: candidate.cleanup_pending,
+            updated_at_ms: Some(candidate.updated_at),
+        })
+}
+
 pub(super) async fn list(
     State(state): State<NomiCoreAgentApiState>,
     Extension(owner): Extension<AuthenticatedOwner>,
     Query(query): Query<ActivityQuery>,
 ) -> Result<Json<ApiResponse<AgentActivitiesResponse>>, NomiCoreApiError> {
+    if query.execution_id.is_some() || query.step_id.is_some() || query.attempt_id.is_some() {
+        let (Some(execution), Some(step), Some(attempt)) = (&query.execution_id, &query.step_id, &query.attempt_id) else {
+            return Err(AppError::BadRequest("exact activity inspection requires execution_id, step_id and attempt_id".into()).into());
+        };
+        if query.after_cursor.is_some() { return Err(AppError::BadRequest("an exact activity has no global page cursor".into()).into()); }
+        for id in [execution, step, attempt] {
+            nomifun_common::validate_uuidv7(id).map_err(|error| AppError::BadRequest(error.to_string()))?;
+        }
+        let candidate = sqlx::query_as::<_, AttemptCandidate>(&format!(
+            "{ATTEMPT_CANDIDATE_SQL} AND execution.execution_id=? AND step.step_id=? AND attempt.attempt_id=? LIMIT 1"))
+            .bind(owner.as_ref()).bind(execution).bind(step).bind(attempt)
+            .fetch_optional(&state.session_owner.pool).await.map_err(|error| AppError::Internal(error.to_string()))?
+            .ok_or_else(|| AppError::NotFound("original task activity is unavailable".into()))?;
+        let item = project_attempt_activity(&state, &owner, &authenticated_principal(&owner), candidate, &mut HashMap::new(), true).await?;
+        return Ok(Json(ApiResponse::ok(AgentActivitiesResponse { items: vec![item], next_cursor: None })));
+    }
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
     let after = query.after_cursor.as_deref().unwrap_or("");
     if after.len() > 4096 || after.chars().any(char::is_control) {
@@ -624,19 +850,8 @@ pub(super) async fn list(
          ORDER BY session.agent_session_id LIMIT ?",
     ).bind(owner.as_ref()).bind(after).bind(&inventory_json).bind((limit+1) as i64)
         .fetch_all(&state.session_owner.pool).await.map_err(|error|AppError::Internal(error.to_string()))?;
-    let attempts: Vec<AttemptCandidate> = sqlx::query_as(
-        "SELECT execution.execution_id,step.step_id,attempt.attempt_id,step.title,attempt.status AS attempt_status,execution.status AS execution_status, \
-         execution.version AS execution_version,step.version AS step_version,attempt.runtime_state,link.conversation_id,attempt.updated_at,execution.initial_plan_input, \
-         EXISTS(SELECT 1 FROM conversation_execution_links cleanup WHERE cleanup.execution_id=attempt.execution_id AND cleanup.attempt_id=attempt.attempt_id \
-            AND cleanup.relation IN ('attempt','automation') AND cleanup.active=0 AND cleanup.cleanup_completed_at IS NULL \
-            AND NOT EXISTS(SELECT 1 FROM conversation_execution_links active_link WHERE active_link.conversation_id=cleanup.conversation_id \
-                AND active_link.execution_id=cleanup.execution_id AND active_link.step_id=cleanup.step_id AND active_link.attempt_id=cleanup.attempt_id \
-                AND active_link.relation IN ('attempt','automation') AND active_link.active=1)) AS cleanup_pending \
-         FROM agent_execution_attempts attempt JOIN agent_executions execution ON execution.execution_id=attempt.execution_id \
-         JOIN agent_execution_steps step ON step.execution_id=attempt.execution_id AND step.step_id=attempt.step_id \
-         LEFT JOIN conversation_execution_links link ON link.id=(SELECT MAX(candidate.id) FROM conversation_execution_links candidate \
-            WHERE candidate.execution_id=attempt.execution_id AND candidate.attempt_id=attempt.attempt_id AND candidate.relation IN ('attempt','automation')) \
-         WHERE execution.user_id=? AND step.kind='agent' AND 'execution:'||attempt.attempt_id>? \
+    let attempts: Vec<AttemptCandidate> = sqlx::query_as(&format!(
+        "{ATTEMPT_CANDIDATE_SQL} AND 'execution:'||attempt.attempt_id>? \
            AND (attempt.status IN ('queued','running','waiting_input','interrupted') OR \
              EXISTS(SELECT 1 FROM conversation_execution_links cleanup WHERE cleanup.execution_id=attempt.execution_id AND cleanup.attempt_id=attempt.attempt_id \
                 AND cleanup.relation IN ('attempt','automation') AND cleanup.active=0 AND cleanup.cleanup_completed_at IS NULL \
@@ -649,7 +864,7 @@ pub(super) async fn list(
                AND EXISTS(SELECT 1 FROM requirements requirement WHERE requirement.requirement_id=json_extract(execution.initial_plan_input,'$.source.requirement_id') \
                  AND requirement.claim_generation=json_extract(execution.initial_plan_input,'$.source.claim_generation') AND requirement.status='in_progress'))) \
          ORDER BY attempt.attempt_id LIMIT ?",
-    ).bind(owner.as_ref()).bind(after).bind(&inventory_json).bind((limit+1) as i64)
+    )).bind(owner.as_ref()).bind(after).bind(&inventory_json).bind((limit+1) as i64)
         .fetch_all(&state.session_owner.pool).await.map_err(|error|AppError::Internal(error.to_string()))?;
     let scan_more = if sessions.len() == limit + 1 {
         sessions
@@ -1204,170 +1419,7 @@ pub(super) async fn list(
         });
     }
     for candidate in attempts {
-        let effects = candidate
-            .runtime_state
-            .clone()
-            .map(|raw| nomifun_db::AttemptConversationEffects::decode(Some(&raw)))
-            .transpose()?;
-        let mut continuation = if effects.as_ref().is_some_and(|effects| {
-            effects.pending_conversation_effects.iter().any(|effect| {
-                matches!(
-                    effect,
-                    nomifun_db::PendingConversationEffect::DecisionInput { .. }
-                )
-            })
-        }) {
-            Continuation::AnswerQueued
-        } else {
-            Continuation::None
-        };
-        let mut row_state = activity_state(&candidate.attempt_status);
-        let mut resources = unknown_resources();
-        let mut execution_stopped = false;
-        if let Some(session) = candidate.conversation_id.as_ref() {
-            let session_id = AgentSessionId::from(session.clone());
-            let owned = match state
-                .session_owner
-                .canonical
-                .store()
-                .get_live_session(&session_id)
-                .await
-            {
-                Ok(session) => Some(session),
-                Err(
-                    nomifun_agent_session::SessionStoreError::NotFound(_)
-                    | nomifun_agent_session::SessionStoreError::Deleted(_),
-                ) => None,
-                Err(error) => return Err(agent_session_store_error(error).into()),
-            };
-            if let Some(owned) = owned {
-                if owned.owner_ref != principal {
-                    return Err(AppError::Forbidden(
-                        "activity Attempt Session belongs to another owner".into(),
-                    )
-                    .into());
-                }
-                let head = state
-                    .session_owner
-                    .canonical
-                    .store()
-                    .head(&session_id)
-                    .await
-                    .map_err(agent_session_store_error)?;
-                let key = effects
-                    .clone()
-                    .unwrap_or_default()
-                    .current_turn_operation_key(&candidate.attempt_id)?;
-                let operation =
-                    NomiCoreSessionOwner::turn_operation_id(owner.as_ref(), session, &key);
-                let progress = state
-                    .session_owner
-                    .canonical
-                    .store()
-                    .read_turn_progress(&session_id, &operation)
-                    .await
-                    .map_err(agent_session_store_error)?;
-                resources = observe_resources(
-                    &state,
-                    owner.as_ref(),
-                    &session_id,
-                    head.last_seq,
-                    Some(&operation),
-                    true,
-                )
-                .await?;
-                let carrier = state
-                    .session_owner
-                    .runtime_sessions
-                    .observe_runtime_carrier(session);
-                execution_stopped = terminal_turn(progress.status)
-                    && carrier.supported
-                    && !carrier.registered
-                    && carrier.active_generation.is_none()
-                    && carrier.constructing_generation.is_none()
-                    && !carrier.uncertain_acquisition
-                    && !carrier.teardown_pending;
-                if !terminal_turn(progress.status) && progress.suspended {
-                    row_state = if head.status == "paused" {
-                        ActivityState::Paused
-                    } else {
-                        ActivityState::Waiting
-                    };
-                }
-                if head.status == "paused" {
-                    if let Some(inspection) = state
-                        .session_owner
-                        .canonical
-                        .store()
-                        .inspect_latest_native_execution(&principal, &session_id)
-                        .await
-                        .map_err(agent_session_store_error)?
-                    {
-                        if inspection.resume_requested {
-                            continuation = Continuation::ResumeQueued;
-                        }
-                    }
-                }
-            }
-        }
-        let control=automation_activity_control(&state,owner.as_ref(),&candidate.execution_id,&candidate.initial_plan_input,&mut automation_controls).await?;
-        let mut stop_accepted = candidate.attempt_status == "cancelled";
-        let task_target=Target::ExecutionTask {execution_id:candidate.execution_id.clone(),step_id:candidate.step_id.clone(),
-            attempt_id:candidate.attempt_id.clone(),expected_execution_version:candidate.execution_version,expected_step_version:candidate.step_version};
-        let root=control.as_ref().filter(|control|control.root_step_id.as_deref()==Some(candidate.step_id.as_str()));
-        let mut root_run_active=false;
-        let (kind, target,delegation_target) = if let Some(root)=root {
-            let source_status:Option<String>=sqlx::query_scalar("SELECT status FROM requirements WHERE requirement_id=? AND claim_generation=? AND owner_conversation_id=?")
-                .bind(&root.requirement_id).bind(root.claim_generation).bind(&root.lead_conversation_id).fetch_optional(&state.session_owner.pool).await.map_err(|error|AppError::Internal(error.to_string()))?;
-            let cancelled=source_status.as_deref()==Some("cancelled");
-            root_run_active=source_status.as_deref()==Some("in_progress");
-            if root_run_active && matches!(candidate.attempt_status.as_str(),"completed"|"failed"|"cancelled") {
-                row_state=activity_state(&candidate.execution_status);
-            }
-            if cancelled {
-                stop_accepted = true;
-                if !execution_stopped {
-                    row_state = ActivityState::Stopping;
-                }
-            }
-            (
-                Kind::AutoWorkRun,
-                Target::AutoWorkRun {
-                    target_kind: nomifun_api_types::AutoWorkTargetKind::Conversation,
-                    target_id:root.lead_conversation_id.clone(),
-                    requirement_id: root.requirement_id.clone(),
-                    claim_generation: root.claim_generation,
-                },
-                (!matches!(candidate.execution_status.as_str(),"completed"|"completed_with_failures"|"failed"|"cancelled")).then_some(task_target),
-            )
-        } else {
-            (
-                Kind::DelegatedTask,
-                task_target,None,
-            )
-        };
-        let terminal = matches!(
-            candidate.attempt_status.as_str(),
-            "completed" | "failed" | "cancelled"
-        );
-        items.push(AgentActivity {
-            delegation_target,
-            key: format!("execution:{}", candidate.attempt_id),
-            title: candidate.title,
-            kind,
-            state: row_state,
-            agent_session_id: candidate.conversation_id,
-            target,
-            continuation,
-            waiting_reason: None,
-            stop_accepted,
-            execution_stopped,
-            resources,
-            can_stop: if root.is_some() {root_run_active} else {!terminal},
-            can_retry_cleanup: candidate.cleanup_pending,
-            updated_at_ms: Some(candidate.updated_at),
-        });
-        let _ = candidate.execution_status;
+        items.push(project_attempt_activity(&state, &owner, &principal, candidate, &mut automation_controls, false).await?);
     }
     items.retain(|item| item.key.as_str() > after);
     items.sort_by(|left, right| left.key.cmp(&right.key));

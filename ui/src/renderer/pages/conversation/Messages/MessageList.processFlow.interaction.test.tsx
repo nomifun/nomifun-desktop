@@ -6,7 +6,7 @@ import { MemoryRouter } from 'react-router-dom';
 import type { IMessageToolCall, TMessage } from '@/common/chat/chatLib';
 import type { MessageTimeline } from '@/common/protocolBindings/MessageTimeline';
 import type { MessageTimelineSegment } from '@/common/protocolBindings/MessageTimelineSegment';
-import { parseConversationId, parseKnowledgeBaseId, parseMessageId, parsePersistedArtifactId } from '@/common/types/ids';
+import { parseConversationId, parseExecutionAttemptId, parseKnowledgeBaseId, parseMessageId, parsePersistedArtifactId } from '@/common/types/ids';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import { PreviewProvider } from '../Preview';
 import MessageList from './MessageList';
@@ -14,6 +14,7 @@ import { MessageListProvider, MessageListLoadingProvider, useMessageLstCache, us
 import { configService } from '@/common/config/configService';
 import messagesLocale from '@/renderer/services/i18n/locales/en-US/messages.json';
 import { ipcBridge } from '@/common';
+import { database } from '@/common/adapter/ipcBridge';
 import agentExecutionLocale from '@/renderer/services/i18n/locales/en-US/agentExecution.json';
 import conversationLocale from '@/renderer/services/i18n/locales/en-US/conversation.json';
 import { ThemeProvider } from '@/renderer/hooks/context/ThemeContext';
@@ -23,7 +24,7 @@ import { dispatchChatMessageJump } from '@/renderer/utils/chat/chatMinimapEvents
 import { emitter } from '@/renderer/utils/emitter';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { ExecutionProvider, useExecutionSafe } from '../execution/ExecutionContext';
-import { executionId, leadConversation, leadConversationId, makeAttempt, makeDetail, makeStep, requestId } from '../../../../../test/fixtures/conversationDelegation';
+import { executionId, leadConversation, leadConversationId, makeAttempt, makeDetail, makeStep, makeDelegationRecord, requestId } from '../../../../../test/fixtures/conversationDelegation';
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { messages: messagesLocale, conversation: conversationLocale, agentExecution: agentExecutionLocale, idmm: idmmLocale } } } });
@@ -33,6 +34,13 @@ const messageId = (index: number) => parseMessageId(`0190f5fe-7c00-7a00-8000-${S
 
 let restoreListeners = () => {};
 beforeEach(() => {
+  const delegationRecords = spyOn(database.getDelegationRecords, 'invoke').mockResolvedValue({ records: [], through_session_seq: 0 });
+  const details = spyOn(database.getToolDetails, 'invoke').mockImplementation(async request => ({ turn_id: request.turn_id,
+    call_id: request.call_id, call_event_id: 'canonical-call', through_seq: request.through_seq ?? 0,
+    result_seq: request.expected_result_seq, section: request.section, availability: 'available', content: '', format: 'text',
+    offset: 0, total_bytes: 0, eof: true, non_text_parts: 0 }));
+  const executionChanged = spyOn(ipcBridge.agentExecution.events.changed, 'on').mockReturnValue(() => {});
+  const sourceResponse = spyOn(ipcBridge.conversation.responseStream, 'on').mockReturnValue(() => {});
   const agentChanged = spyOn(ipcBridge.agentPlatform.sessions.onAgentChanged, 'on').mockReturnValue(() => {});
   const turnFiles = spyOn(ipcBridge.conversation.turnFiles, 'invoke').mockResolvedValue([]);
   const completed = spyOn(ipcBridge.conversation.turnCompleted, 'on').mockReturnValue(() => {});
@@ -50,6 +58,7 @@ beforeEach(() => {
   const watchFiles = spyOn(ipcBridge.workspaceOfficeWatch.fileAdded, 'on').mockImplementation(() => () => {});
   const files = spyOn(ipcBridge.fs.listWorkspaceFiles, 'invoke').mockResolvedValue([]);
   restoreListeners = () => {
+    delegationRecords.mockRestore(); details.mockRestore(); executionChanged.mockRestore(); sourceResponse.mockRestore();
     agentChanged.mockRestore(); turnFiles.mockRestore(); completed.mockRestore(); paused.mockRestore(); reconnected.mockRestore();
     content.mockRestore(); tree.mockRestore(); entry.mockRestore(); metadata.mockRestore(); image.mockRestore();
     watchStart.mockRestore(); watchStop.mockRestore(); watchFiles.mockRestore(); files.mockRestore();
@@ -400,7 +409,7 @@ test('a live journal tracks thinking lifecycle and preserves completed thought d
   const secondHeader = thoughts[1].querySelector<HTMLButtonElement>('[data-thinking-process-header]')!;
   expect(firstHeader.textContent).toContain('Thought complete');
   expect(secondHeader.textContent).toContain('Thinking...');
-  expect(thoughts[0].querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('First reasoning is complete.');
+  expect(thoughts[0].querySelector('.markdown-shadow')).toBeNull();
   expect(firstHeader.getAttribute('aria-expanded')).toBe('false');
   fireEvent.click(firstHeader);
   expect(firstHeader.getAttribute('aria-expanded')).toBe('true');
@@ -427,7 +436,7 @@ test('a live journal tracks thinking lifecycle and preserves completed thought d
   expect(messages[4].type === 'thinking' && messages[4].content.status).toBe('thinking');
 
   fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.collapse }));
-  expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
+  expect(page.container.querySelector('.turn-process-disclosure__body')?.hasAttribute('hidden')).toBe(true);
   expect(page.queryByTestId('conversation-current-activity')).toBeNull();
   page.rerender(view(false));
   expect(page.queryByTestId('conversation-current-activity')).toBeNull();
@@ -512,6 +521,8 @@ test('canonical terminal metadata closes stale thinking while the session still 
   expect(thought?.getAttribute('data-thinking-process-state')).toBe('completed');
   expect(thought?.querySelector('.arco-spin')).toBeNull();
   expect(thought?.querySelector('[data-thinking-process-header]')?.textContent).toContain('Thought complete');
+  expect(thought?.querySelector('.markdown-shadow')).toBeNull();
+  fireEvent.click(thought!.querySelector('[data-thinking-process-header]')!);
   expect(thought?.querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('The source inspection reasoning.');
   expect(messages[1].type === 'thinking' && messages[1].content.status).toBe('thinking');
 });
@@ -547,7 +558,7 @@ test('waiting for the first response and running a tool call do not add a duplic
   expect(page.container.querySelector('[data-tool-call-id="read-active"] .turn-process-trace__row--running')).not.toBeNull();
   expect(page.queryByTestId('conversation-current-activity')).toBeNull();
   fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.collapse }));
-  expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
+  expect(page.container.querySelector('.turn-process-disclosure__body')?.hasAttribute('hidden')).toBe(true);
   expect(page.queryByTestId('conversation-current-activity')).toBeNull();
 });
 
@@ -583,20 +594,23 @@ test('a completed journal defaults closed and expands its full reasoning and cal
   expect(thoughtHeaders).toHaveLength(2);
   thoughtHeaders.forEach((header) => expect(header.getAttribute('aria-expanded')).toBe('false'));
   page.rerender(view(false));
-  expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
+  expect(page.container.querySelector('.turn-process-disclosure__body')?.hasAttribute('hidden')).toBe(true);
   expect(Array.from(page.container.querySelectorAll('.markdown-shadow'), (node) => node.shadowRoot?.textContent ?? '')
     .filter((text) => text.includes('The inspection is complete.'))).toHaveLength(1);
   fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.expand }));
   const steps = Array.from(page.container.querySelectorAll('.turn-process-disclosure__item'));
   expect(steps.map((step) => step.className.match(/turn-process-disclosure__item--(thinking|tool|text)/)?.[1]))
     .toEqual(['thinking', 'tool', 'text', 'thinking', 'tool']);
+  expect(steps[0].querySelector('.markdown-shadow')).toBeNull();
+  fireEvent.click(steps[0].querySelector('[data-thinking-process-header]')!);
+  fireEvent.click(steps[3].querySelector('[data-thinking-process-header]')!);
   expect(steps[0].querySelector('.markdown-shadow')?.shadowRoot?.querySelector('strong')?.textContent).toBe('First reasoning');
   expect(steps[3].querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('Second reasoning');
   expect(page.container.querySelectorAll('.turn-process-receipt')).toHaveLength(0);
   const calls = page.container.querySelectorAll('[data-tool-call-id]');
   expect(Array.from(calls, (call) => call.getAttribute('data-tool-call-id'))).toEqual(['read-1', 'read-2']);
   fireEvent.click(calls[0].querySelector('button')!);
-  expect(calls[1].querySelector('button')).toBeNull();
+  expect(calls[1].querySelector('button')?.getAttribute('aria-expanded')).toBe('false');
   expect(calls[0].textContent).toContain('First attempt failed');
   expect(calls[1].textContent).toContain('first.ts');
   expect(calls[1].textContent).not.toContain('Second attempt result');
@@ -606,13 +620,15 @@ test('a completed journal defaults closed and expands its full reasoning and cal
   expect(messages[1].type).toBe('thinking');
 });
 
-test('finished root reply keeps the collaboration clock live, opens tasks, and collapses only after all work finishes', async () => {
+test('source-anchored delegation records keep the aggregate clock and open precise task details', async () => {
   const step = makeStep(1, { title: 'Build flight game' });
   const waiting = makeStep(2, { title: 'Verify gameplay', status: 'pending' });
   const attempt = makeAttempt(step);
   const start = Date.now() - 3000;
   const detail = makeDetail({ steps: [step, waiting], attempts: [attempt] });
   Object.assign(detail.execution, { created_at: start + 1000, updated_at: start + 2000 });
+  const startRecord = makeDelegationRecord({ step_id: step.step_id, title: step.title });
+  const readRecords = spyOn(database.getDelegationRecords, 'invoke').mockResolvedValue({ records: [startRecord], through_session_seq: 100 });
   const get = spyOn(ipcBridge.agentExecution.get, 'invoke').mockResolvedValue(detail);
   const changed = spyOn(ipcBridge.agentExecution.events.changed, 'on').mockImplementation(() => () => {});
   const thinking = spyOn(ipcBridge.agentExecution.events.leadThinking, 'on').mockImplementation(() => () => {});
@@ -639,30 +655,103 @@ test('finished root reply keeps the collaboration clock live, opens tasks, and c
         </ExecutionProvider>
       </PreviewProvider>
     </I18nextProvider></MemoryRouter>);
-    await waitFor(() => expect(page.getByTestId('conversation-delegation').textContent).toContain('Build flight game'));
+    await waitFor(() => expect(page.container.querySelector('[data-delegation-record-id]')?.textContent).toContain('Build flight game'));
+    expect(page.container.querySelector('.conversation-delegation')).toBeNull();
     expect(page.container.querySelector('.turn-process-disclosure--live')).not.toBeNull();
     expect(page.getByTestId('root-processing').textContent).toBe('false');
     expect(page.container.querySelectorAll('[data-thinking-process-header]')).toHaveLength(1);
     expect(page.container.querySelector('[data-thinking-process-header]')?.textContent).not.toMatch(/\d+s/);
     expect(page.container.querySelector('.turn-process-disclosure__label')?.textContent).toContain('3s');
     await waitFor(() => expect(page.container.querySelector('.turn-process-disclosure__label')?.textContent).toContain('4s'), { timeout: 1600 });
-    fireEvent.click(page.getByRole('button', { name: 'View subtask: Build flight game' }));
-    expect(page.getByTestId('projected-step').textContent).toBe(step.step_id);
+    fireEvent.click(page.getByRole('button', { name: i18n.t('messages.delegation.openRecord', { title: step.title }) }));
+    await waitFor(() => expect(page.getByTestId('projected-step').textContent).toBe(step.step_id));
     expect(page.getByTestId('root-processing').textContent).toBe('false');
     expect(Array.from(page.container.querySelectorAll('.markdown-shadow'), node => node.shadowRoot?.textContent ?? '')
       .some(text => text.includes('The subagent tasks have started.'))).toBe(true);
 
+    readRecords.mockResolvedValue({ records: [startRecord, makeDelegationRecord({ id: 'done', kind: 'completed', step_id: step.step_id, title: step.title, attempt_id: attempt.attempt_id, execution_event_sequence: 2 })], through_session_seq: 100 });
     get.mockResolvedValue(makeDetail({ execution: { ...detail.execution, status: 'completed', updated_at: start + 4000, event_sequence: 2 },
       steps: detail.steps.map(value => ({ ...value, status: 'completed' })), attempts: [{ ...attempt, status: 'completed', finished_at: start + 4000 }] }));
     act(() => changed.mock.calls.forEach(([listener]) => listener({ execution_id: executionId, sequence: 2, change_kind: 'status_changed' })));
     await waitFor(() => expect(Boolean(page.container.querySelector('.turn-process-disclosure--live'))).toBe(false));
-    await waitFor(() => expect(Boolean(page.container.querySelector('.turn-process-disclosure__body'))).toBe(false));
+    await waitFor(() => expect(page.container.querySelector('.turn-process-disclosure__body')?.hasAttribute('hidden')).toBe(true));
     expect(page.container.querySelector('.turn-process-disclosure__label')?.textContent).toContain('4s');
-    expect(page.container.querySelector('.turn-process-disclosure__activity')?.textContent).toContain('Completed');
+    expect(page.container.querySelector('.turn-process-disclosure__activity')).toBeNull();
     fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.expand }));
-    expect(page.getByTestId('conversation-delegation').textContent).toContain(i18n.t('agentExecution.progress.summary', { done: 2, total: 2 }));
+    expect(page.container.querySelector('[data-delegation-record-kind="completed"]')?.textContent).toContain('Build flight game');
     expect(page.getByTestId('root-processing').textContent).toBe('false');
-  } finally { cleanup(); get.mockRestore(); changed.mockRestore(); thinking.mockRestore(); reconnect.mockRestore(); }
+  } finally { cleanup(); get.mockRestore(); readRecords.mockRestore(); changed.mockRestore(); thinking.mockRestore(); reconnect.mockRestore(); }
+});
+
+test('adjacent delegation facts compact in the shared timeline and each expanded member keeps its exact navigation mode', async () => {
+  const steps = Array.from({ length: 5 }, (_, index) => makeStep(index, { title: 'Inspect ' + index, status: index === 1 ? 'completed' : 'running' }));
+  const attempts = steps.map((step, index) => makeAttempt(step, {
+    attempt_id: parseExecutionAttemptId('00000000-09c4-7000-8000-' + String(30 + index).padStart(12, '0')),
+    conversation_id: parseConversationId('00000000-09c4-7000-8000-' + String(40 + index).padStart(12, '0')),
+    status: index < 2 ? 'completed' : 'running',
+  }));
+  const retry = makeAttempt(steps[0], { attempt_id: parseExecutionAttemptId('00000000-09c4-7000-8000-000000000039'),
+    conversation_id: parseConversationId('00000000-09c4-7000-8000-000000000049'), attempt_no: 2, status: 'running' });
+  const detail = makeDetail({ steps, attempts: [attempts[0], retry, ...attempts.slice(1)] });
+  detail.execution.event_sequence = 20;
+  const starts = steps.map((step, index) => makeDelegationRecord({ id: 'start-' + index, step_id: step.step_id,
+    title: step.title, execution_event_sequence: index + 1 }));
+  const completions = starts.slice(0, 2).map((record, index) => ({ ...record, id: 'done-' + index, kind: 'completed' as const,
+    attempt_id: attempts[index].attempt_id, anchor: { ...record.anchor, seq: 30 }, execution_event_sequence: index + 10 }));
+  const readRecords = spyOn(database.getDelegationRecords, 'invoke').mockResolvedValue({ records: [...starts, ...completions], through_session_seq: 50 });
+  const get = spyOn(ipcBridge.agentExecution.get, 'invoke').mockResolvedValue(detail);
+  const thinking = spyOn(ipcBridge.agentExecution.events.leadThinking, 'on').mockReturnValue(() => {});
+  const final = messageId(810);
+  const narration = 'The implementation is ready to validate.';
+  const initial: TMessage[] = [
+    { id: 'batch-user', type: 'text', position: 'right', conversation_id: leadConversationId, message_id: requestId, msg_id: requestId,
+      created_at: 1000, content: { content: 'Inspect using subagents.' } },
+    { id: 'batch-progress', type: 'text', position: 'left', conversation_id: leadConversationId, turn_id: requestId,
+      msg_id: messageId(811), created_at: 1200, content: { content: narration, timeline: { through_seq: 50, segments: [{
+        segment_id: 'batch-narration', group_id: 'narration', first_seq: 15, last_seq: 15, kind: 'narration', state: 'completed', start_utf16: 0, end_utf16: narration.length }] } } },
+    { id: 'batch-command', type: 'tool_call', position: 'left', conversation_id: leadConversationId, turn_id: requestId,
+      msg_id: messageId(812), created_at: 1300, content: { call_id: 'validation', name: 'start_process', status: 'completed', description: 'Validate workspace',
+        result_seq: 25, timeline: { through_seq: 50, segments: [{ segment_id: 'batch-tool', group_id: 'validation', first_seq: 20, last_seq: 25,
+          kind: 'tool', call_id: 'validation', state: 'completed' }] } } },
+    { id: 'batch-final', type: 'text', position: 'left', conversation_id: leadConversationId, turn_id: requestId, msg_id: final,
+      created_at: 2000, content: { content: 'Inspection finished.' } },
+    { id: 'batch-summary', type: 'agent_status', conversation_id: leadConversationId, turn_id: requestId, msg_id: messageId(813), created_at: 2100,
+      content: { backend: 'nomi', status: 'prepared', turn_summary: true, turn_state: 'completed', started_at_ms: 1000, finished_at_ms: 2000,
+        turn_outcome: { kind: 'answered', message_ids: [final] } } },
+  ];
+  const Probe = () => {
+    const selected = useExecutionSafe()?.projectedPayload;
+    return <><output data-testid='batch-selected-step'>{selected?.step.step_id}</output>
+      <output data-testid='batch-exact-attempt'>{selected?.attemptId}</output>
+      <output data-testid='batch-current-attempt'>{selected?.attempt?.attempt_id}</output></>;
+  };
+  try {
+    const page = render(<MemoryRouter><I18nextProvider i18n={i18n}><PreviewProvider persistNamespace='compact-delegation-batches' subscribeGlobalOpen={false}>
+      <ExecutionProvider conversation={leadConversation}><ConversationProvider value={{ conversation_id: leadConversationId, type: 'nomi', readOnly: true, isProcessing: false }}>
+        <MessageListProvider initialValue={initial}><MessageList /><Probe /></MessageListProvider>
+      </ConversationProvider></ExecutionProvider>
+    </PreviewProvider></I18nextProvider></MemoryRouter>);
+    await waitFor(() => expect(page.container.querySelectorAll('[data-delegation-record-count]')).toHaveLength(2));
+    expect([...page.container.querySelectorAll('[data-delegation-record-count]')].map(node => node.getAttribute('data-delegation-record-count'))).toEqual(['5', '2']);
+    expect([...page.container.querySelectorAll('.turn-process-disclosure__item')].map(node => node.getAttribute('data-process-segment-id')))
+      .toEqual(['delegation:start-0', 'batch-narration', 'batch-tool', 'delegation:done-0']);
+    expect(page.container.querySelector('[data-tool-call-id="validation"]')).not.toBeNull();
+    expect(page.container.querySelector('[data-testid="process-narration"]')).not.toBeNull();
+    expect(page.container.querySelectorAll('[data-delegation-record-id]')).toHaveLength(0);
+    fireEvent.click(page.getByRole('button', { name: i18n.t('messages.delegation.toggleRecords', {
+      action: i18n.t('messages.delegation.action.delegated'), count: 5 }) }));
+    expect(page.container.querySelectorAll('[data-delegation-record-id]')).toHaveLength(5);
+    fireEvent.click(page.getByRole('button', { name: i18n.t('messages.delegation.openRecord', { title: steps[0].title }) }));
+    await waitFor(() => expect(page.getByTestId('batch-selected-step').textContent).toBe(steps[0].step_id));
+    expect(page.getByTestId('batch-exact-attempt').textContent).toBe('');
+    expect(page.getByTestId('batch-current-attempt').textContent).toBe(retry.attempt_id);
+    fireEvent.click(page.getByRole('button', { name: i18n.t('messages.delegation.toggleRecords', {
+      action: i18n.t('messages.delegation.action.completed'), count: 2 }) }));
+    const historical = page.container.querySelector<HTMLButtonElement>('[data-delegation-record-id="done-0"]')!;
+    fireEvent.click(historical);
+    await waitFor(() => expect(page.getByTestId('batch-exact-attempt').textContent).toBe(attempts[0].attempt_id));
+    expect(page.getByTestId('batch-current-attempt').textContent).toBe(attempts[0].attempt_id);
+  } finally { cleanup(); readRecords.mockRestore(); get.mockRestore(); thinking.mockRestore(); }
 });
 
 test.each(['completed', 'failed', 'canceled'] as const)('canonical file list survives %s outcome and partial message history without changing its placement', async (outcome) => {
@@ -800,7 +889,7 @@ test('paused and resumed Turns hide file headings and image gallery until canoni
   expect(query).toHaveBeenCalledWith({ conversation_id: conversationId, turn_ids: [turnId] });
 });
 
-test('canonical group headings span model waits without changing tool outcomes or crossing narration and terminal boundaries', () => {
+test('flat canonical rows retain identity through model waits, narration and terminal boundaries', () => {
   const groupId = 'canonical-model-wait';
   const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
   const tool: IMessageToolCall = { ...base, id: 'wait-completed-tool', msg_id: messageId(811), type: 'tool_call', created_at: 10,
@@ -839,39 +928,26 @@ test('canonical group headings span model waits without changing tool outcomes o
       </ConversationProvider>
     </PreviewProvider>
   </I18nextProvider></MemoryRouter>);
-  const group = page.container.querySelector(`[data-process-group-id="${groupId}"]`)!;
-  const toggle = group.querySelector('button')!;
-  expect(group.classList.contains('turn-process-group--running')).toBe(true);
+  const row = page.container.querySelector(`[data-process-group-id="${groupId}"]`)!;
+  const toggle = row.querySelector('button')!;
   expect(toggle.getAttribute('aria-expanded')).toBe('false');
-  fireEvent.click(toggle);
-  expect(group.querySelector('[data-tool-call-id="wait-read"] .turn-process-trace__row--completed')).not.toBeNull();
-  expect(group.querySelector('.turn-process-trace__row--running')).toBeNull();
-  fireEvent.click(toggle);
+  expect(row.querySelector('[data-tool-call-id="wait-read"] .turn-process-trace__row--completed')).not.toBeNull();
   fireEvent.click(page.getByRole('button', { name: 'Refresh completed tool' }));
-  expect(page.container.querySelector(`[data-process-group-id="${groupId}"]`)).toBe(group);
+  expect(page.container.querySelector(`[data-process-group-id="${groupId}"]`)).toBe(row);
   expect(toggle.getAttribute('aria-expanded')).toBe('false');
-  expect(group.classList.contains('turn-process-group--running')).toBe(true);
-  fireEvent.click(toggle);
-  expect(group.querySelector('[data-tool-call-id="wait-read"] .turn-process-trace__row--completed')).not.toBeNull();
-  expect(group.querySelector('.turn-process-trace__row--running')).toBeNull();
   fireEvent.click(page.getByRole('button', { name: 'Deliver phase narration' }));
-  expect(group.classList.contains('turn-process-group--running')).toBe(false);
-  expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  expect(page.container.querySelector('.turn-process-group')).toBeNull();
   expect(page.container.querySelector('.turn-process-disclosure--live')).not.toBeNull();
-  expect(page.container.querySelector('[data-process-segment-id="wait-public-boundary"]')?.closest('.turn-process-group')).toBeNull();
-  const nextGroup = page.container.querySelector('[data-process-group-id="canonical-stale-tail"]')!;
-  expect(nextGroup.querySelector('button')?.getAttribute('aria-expanded')).toBe('false');
-  expect(nextGroup.querySelector('.turn-process-group__body')).toBeNull();
-  expect(nextGroup.classList.contains('turn-process-group--running')).toBe(true);
+  expect(page.container.querySelector('[data-process-segment-id="wait-public-boundary"]')).not.toBeNull();
+  expect(page.container.querySelector('[data-process-group-id="canonical-stale-tail"]')).not.toBeNull();
   fireEvent.click(page.getByRole('button', { name: 'Commit terminal receipt' }));
   expect(page.container.querySelector('.turn-process-disclosure--live')).toBeNull();
   fireEvent.click(page.getByRole('button', { name: messagesLocale.turnProcess.expand }));
   expect(page.container.querySelector('[data-process-group-id="canonical-stale-tail"]')).not.toBeNull();
-  expect(page.container.querySelector('.turn-process-group--running')).toBeNull();
   expect(staleTool.content.status).toBe('running');
 });
 
-test('canonical segment references keep active groups collapsed and preserve manual choices around narration', () => {
+test('canonical ranges stay flat and preserve row-level reasoning choices around narration', () => {
   const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
   const timeline = (segments: MessageTimelineSegment[]): MessageTimeline => ({ through_seq: 30, segments });
   const ref = (id: string, group: string, seq: number, kind: MessageTimelineSegment['kind'], start = 0, end = 1,
@@ -910,33 +986,22 @@ test('canonical segment references keep active groups collapsed and preserve man
   const page = render(view(true));
   const first = page.container.querySelector('[data-process-group-id="canonical-first"]')!;
   const second = page.container.querySelector('[data-process-group-id="canonical-second"]')!;
-  const firstToggle = first.querySelector('button')!;
-  const secondToggle = second.querySelector('button')!;
+  const firstToggle = first.querySelector('[data-thinking-process-header]')!;
+  const secondToggle = second.querySelector('[data-thinking-process-header]')!;
   expect(firstToggle.getAttribute('aria-expanded')).toBe('false');
-  expect(secondToggle.getAttribute('aria-expanded')).toBe('false');
-  expect(first.querySelector('.turn-process-group__body')).toBeNull();
-  expect(second.querySelector('.turn-process-group__body')).toBeNull();
-  expect(second.classList.contains('turn-process-group--running')).toBe(true);
   const narration = page.container.querySelector('[data-process-segment-id="public-between"] [data-testid="process-narration"]')!;
   expect(narration).not.toBeNull();
-  expect(narration.closest('.turn-process-group')).toBeNull();
   expect(first.compareDocumentPosition(narration) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(narration.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   fireEvent.click(firstToggle);
   fireEvent.click(page.getByRole('button', { name: 'Update current reasoning' }));
   expect(firstToggle.getAttribute('aria-expanded')).toBe('true');
-  expect(secondToggle.getAttribute('aria-expanded')).toBe('false');
-  expect(second.querySelector('[data-process-segment-id="reasoning-second"]')).toBeNull();
-  fireEvent.click(secondToggle);
-  expect(second.querySelector('[data-process-segment-id="reasoning-second"]')).not.toBeNull();
-  expect(second.querySelector('.markdown-shadow')?.shadowRoot?.textContent).toContain('Second. Streamed.');
   page.rerender(view(false));
-  expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
   const answer = page.container.querySelector('#message-segment-final')!;
   expect(answer).not.toBeNull();
   expect(answer.closest('.turn-process-disclosure')).toBeNull();
   act(() => dispatchChatMessageJump({ conversation_id: conversationId, messageId: messageId(802) }));
-  expect(page.container.querySelector('[data-process-group-id="canonical-first"] > button')?.getAttribute('aria-expanded')).toBe('true');
-  expect(page.container.querySelector('[data-process-group-id="canonical-second"] > button')?.getAttribute('aria-expanded')).toBe('false');
   expect(page.container.querySelector('[data-tool-call-id="segment-read"]')).not.toBeNull();
+  expect(secondToggle).not.toBeNull();
+  expect(page.container.querySelector('.turn-process-group')).toBeNull();
 });

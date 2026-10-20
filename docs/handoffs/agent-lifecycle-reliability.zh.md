@@ -615,3 +615,17 @@ macOS 复用现有 darwin_registered／darwin_application 与 WK／AppKit fixtur
 | 已修存量 | `bundled_role_inventory_matches_native_action_resource_contracts`：冻结清单早于浏览器描述/上传 schema 变化及 Computer 桌面目标中的 Linux，已用 `target_inventory` 与 `agent-v2-contract write` 再生成；`non_macos_computer_permissions_do_not_block_launch`：Linux 映射提为纯函数并以构造桌面状态测试；`default_platform_shutdown_waits_for_gateway_only`：改为探测无监听而非重绑端口 |
 | 暂缓与观察 | 按用户要求不在 WSL 强行操作：真实 Wayland portal 授权／拒绝／撤销；OS06 管理员；OS07 托盘／GUI Quit／重启／系统退出；OS08；OS10 WebUI 浏览器。共享侧车改动后的 Windows/macOS 流程未在本机重跑。观察：`9e7ecc3c6` 新增的 `--keyboard-service` 为分离的独立服务，App 退出后存活属设计；驱动只记录后按 pidfd 关闭本次运行自己产生的实例 |
 | 证据保留 | E 下保留 final7／final8 原生报告、t28-final7 与回归日志；只保留被最终证据引用的夹具根（无 JWT/凭据），其余带标记的一次性夹具根已删除 |
+
+### 10.7 过程展示与只读详情接续（2026-10-20）
+
+本次用户已授权按确认稿实施：命令／工具可展开、文件默认摘要、子智能体只留委派与终结记录、全部平铺，无单次耗时，顶部总工作时间保留。起点为 `c3e750542` 干净工作区；不提交、推送、安装或发布，不使用真实用户数据作故障实验。
+
+| 项目 | 当前证据与边界 |
+| --- | --- |
+| 事实与读取 | 原 Event／Payload 按需只读工具详情；委派记录从原 Execution 事件与源 Session 因果读取，不新增表、正文镜像或生命周期账本。原调度、控制范围、并发和资源退休合同保留 |
+| 入口与清理 | 普通／伙伴／只读任务及创作过程使用共享展示核心；退役旧 footer、双轨摘要、未使用字段和不可能状态分支。历史完成记录固定原 Attempt，当前操作须显式进入当前任务 |
+| UI 与静态验证 | UI 范围 92 个文件／787 项通过，后续快照修正定向 13 项通过；最终 `bun run check` 与 `bun run build:ui` 通过。真实共享组件完成 880×600 与 1280×800 桌面浏览器验收，验证展开、文件摘要、平铺、历史入口和手动开合保持 |
+| 子智能体视觉复核 | 对照本地 DeepSeek 的操作／摘要行，退役逐任务全宽状态导航；共享投影仅收拢同源、同阶段相邻记录，默认摘要、名单平铺、原 Attempt 分别导航，按记录数计数。共享查看意图使过时读取不能覆盖后续选择、返回或 Session 切换。本轮 6 个文件／67 项定向回归通过，最终类型、桌面边界、国际化、文档及生产 UI 构建通过；880×600 与 1280×800 验证同源 5 条委派及 2 条完成默认呈现为两个摘要，保留完整展开和历史入口。后端事实、存储与调度未改动 |
+| 后端验证 | Session 328 项、Execution 161 项、Execution repository 59 项、Activity 相关 18 项、工具详情 HTTP 1 项和展示／持久 schema 隔离 1 项通过；Activity 原有手工原生浏览器用例 1 项未运行。生成器 check、边界规则 6 项及精确 Attempt／伙伴投影相关回归通过，不以此宣称全部产品／原生生命周期场景完成 |
+| 实模与测试驱动 | `step-5-preview` coding 烟测最终通过：真实写入 1 次、读取 1 次，无工具错误，并通过新只读 API 核验原调用参数和结果。曾暴露测试驱动栈溢出；场景 Future 分配及 HTTP 请求分派现有明确边界，不增线程栈、不改生产 Runtime；16 项无凭据证据测试通过，包含请求超时后实际析构证明 |
+| 凭据与数据 | 用户提供的 StepFun 凭据仅允许临时测试输入，不写入源码、命令日志或产物；现役隔离测试 runner 保留 Cargo／工具子进程环境清除与 stdin 交接边界 |

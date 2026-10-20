@@ -70,13 +70,11 @@ describe('turn process continuous work journal layout', () => {
     expect(paragraphRule.includes('white-space: pre-wrap')).toBe(false);
   });
 
-  test('scopes the process pulse to outer group titles and respects reduced motion', () => {
-    expect(cssSource.includes('.turn-process-disclosure--live .turn-process-disclosure__label')).toBe(false);
-    expect(cssSource.includes('@keyframes turn-process-group-pulse')).toBe(true);
-    expect(cssRuleFor('.turn-process-group--running > .turn-process-group__toggle .turn-process-group__label')
-      .includes('animation:')).toBe(true);
+  test('keeps one flat text axis and suspends previously opened hidden bodies', () => {
+    expect(cssSource.includes('.conversation-delegation')).toBe(false);
+    expect(cssSource.includes('.turn-process-group')).toBe(false);
+    expect(cssRuleFor('.turn-process-disclosure__body[hidden]').includes('display: none')).toBe(true);
     expect(cssRuleFor('\n.turn-process-trace__text {').includes('animation:')).toBe(false);
-    expect(cssSource.includes('prefers-reduced-motion: reduce')).toBe(true);
   });
 
   test('keeps the shared conversation typography contract', () => {

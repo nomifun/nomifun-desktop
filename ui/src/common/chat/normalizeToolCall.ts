@@ -1,5 +1,4 @@
 import type { IMessageToolCall, IMessageToolGroup } from './chatLib';
-import type { ConversationId, MessageId } from '../types/ids';
 import { toDisplayText } from './displayText';
 import { normalizeToolGroupStatus } from './toolGroupStatus';
 
@@ -30,35 +29,9 @@ export interface NormalizedToolCall {
   description?: string;
   /** Bounded public diagnostic supplied by the canonical host. */
   error?: string;
-  messageId?: MessageId;
-  conversationId?: ConversationId;
 }
 
 const formatValue = (value: unknown): string => toDisplayText(value);
-
-const canonicalMcpOriginHash = /^(?:[a-z2-7]{16}|[a-f0-9]{20})$/;
-
-/**
- * Turn provider-facing MCP routing aliases back into a stable receipt label.
- * The original name remains the exact routing identity; its origin hash must
- * not become the user-facing tool title.
- */
-export const formatToolDisplayName = (value: unknown): string => {
-  const fullName = toDisplayText(value).trim();
-  const platformAlias = fullName.match(/^platform__([a-z0-9_]+)__[a-f0-9]{20}$/);
-  if (platformAlias) return `platform/${platformAlias[1]}`;
-  if (!fullName.startsWith('mcp__')) return fullName;
-
-  const segments = fullName.split('__');
-  if (segments.length < 3) return fullName;
-  if (segments.length >= 4 && canonicalMcpOriginHash.test(segments.at(-1) ?? '')) {
-    segments.pop();
-  }
-
-  const serverName = segments[1]?.trim();
-  const toolName = segments.slice(2).join('__').trim();
-  return serverName && toolName ? `${serverName}/${toolName}` : fullName;
-};
 
 // ===== tool_group → NormalizedToolCall[] =====
 
@@ -82,7 +55,7 @@ export function normalizeToolGroup(message: IMessageToolGroup): NormalizedToolCa
   if (!Array.isArray(message.content)) return [];
   return message.content.map(({ name, call_id, description, status }) => {
     const displayStatus = normalizeToolGroupStatus(status);
-    const desc = typeof description === 'string' ? description.slice(0, 100) : '';
+    const desc = typeof description === 'string' ? description : '';
 
     return {
       key: toDisplayText(call_id),

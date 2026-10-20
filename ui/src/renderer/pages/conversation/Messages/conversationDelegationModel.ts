@@ -5,6 +5,7 @@
  */
 
 import type { ConversationId, ExecutionId, MessageId } from '@/common/types/ids';
+import type { DelegationRecord } from '@/common/chat/delegationRecords';
 import type { TAgentExecutionDetail } from '@/common/types/agentExecution/agentExecutionTypes';
 import type { TurnDisclosureInputItem, TurnDisclosureProcessState } from './turnDisclosureModel';
 import { isTerminalExecutionStatus } from '../execution/executionStatusMeta';
@@ -16,32 +17,25 @@ export interface ConversationDelegation {
   unfinished: boolean;
 }
 
-/** UUIDv7 carries message wall time when createdAt is only a history cursor. */
-const identityTime = (id: string | undefined): number | undefined => {
-  if (!id || !/^[\da-f]{8}-[\da-f]{4}-7[\da-f]{3}-[\da-f]{4}-[\da-f]{12}$/i.test(id)) return undefined;
-  return Number.parseInt(id.replaceAll('-', '').slice(0, 12), 16);
-};
-
 /** Bind collaboration to its initiating request, never to the newest unrelated turn. */
 export function resolveConversationDelegation(
   conversationId: ConversationId | undefined,
   execution: { conversationId: ConversationId; executionId: ExecutionId | null; detail: TAgentExecutionDetail | null } | null,
   items: TurnDisclosureInputItem[],
+  records: DelegationRecord[],
+  activeSource?: { turnId?: MessageId; requestMessageId?: MessageId },
 ): ConversationDelegation | undefined {
   if (!conversationId || !execution?.executionId || execution.conversationId !== conversationId) return undefined;
   const detail = execution.detail?.execution.execution_id === execution.executionId ? execution.detail : null;
   if (detail?.execution.lead_conversation_id && detail.execution.lead_conversation_id !== conversationId) return undefined;
-  const createdAt = detail?.execution.created_at ?? identityTime(execution.executionId);
-  if (createdAt === undefined) return undefined;
-  const starts = new Map(items.flatMap(item => item.turnId && item.turnStartedAt !== undefined
-    ? [[item.turnId, item.turnStartedAt] as const] : []));
-  let turnId: MessageId | undefined;
-  let latestStart = -Infinity;
-  for (const item of items) {
-    if (item.role !== 'user' || !item.turnId) continue;
-    const start = item.displayAt ?? starts.get(item.turnId) ?? identityTime(item.sourceMessageIds?.[0]) ?? item.createdAt;
-    if (start <= createdAt && start >= latestStart) { turnId = item.turnId; latestStart = start; }
-  }
+  const sources = new Set(records.filter(record => record.execution_id === execution.executionId
+    && record.source.agent_session_id === conversationId).map(record => record.source.source_message_id));
+  // An incomplete/unloaded source cannot authorize attaching current work to a different request.
+  if (sources.size !== 1) return undefined;
+  const source = [...sources][0];
+  const owner = items.find(item => item.role === 'user' && item.turnId
+    && (item.sourceMessageIds?.includes(source) || item.turnId === source));
+  const turnId = owner?.turnId ?? (activeSource?.requestMessageId === source ? activeSource.turnId : undefined);
   if (!turnId) return undefined;
   return { executionId: execution.executionId, turnId, detail,
     unfinished: !detail || !isTerminalExecutionStatus(detail.execution.status) };
@@ -58,5 +52,7 @@ export function delegatedTurnPresentation<T extends {
     : status === 'cancelled' ? 'canceled'
     : status === 'failed' || status === 'completed_with_failures' ? 'failed' : turn.state;
   return { ...turn, running, state, defaultCollapsed: !running,
-    endAt: running ? turn.endAt : Math.max(turn.endAt, delegation.detail?.execution.updated_at ?? turn.endAt) };
+    endAt: running ? turn.endAt : Number.isFinite(turn.endAt)
+      ? Math.max(turn.endAt, delegation.detail?.execution.updated_at ?? turn.endAt)
+      : delegation.detail?.execution.updated_at ?? turn.endAt };
 }

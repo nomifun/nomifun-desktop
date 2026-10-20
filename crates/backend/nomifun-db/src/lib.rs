@@ -16,6 +16,8 @@ pub use repository::agent_execution_admission::{AgentExecutionReservation, execu
 mod provider_cleanup;
 pub use provider_cleanup::insert_agent_preset_revision_tx;
 mod session_projection;
+mod execution_presentation;
+pub use execution_presentation::read_delegation_records;
 mod installation_role_bindings;
 pub use installation_role_bindings::{load_installation_role_bindings, put_installation_role_binding};
 

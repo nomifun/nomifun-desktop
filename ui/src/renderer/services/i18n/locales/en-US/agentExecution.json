@@ -157,6 +157,9 @@
   },
   "projection": {
     "viewing": "Current task",
+    "history": "Historical execution",
+    "current": "View current task",
+    "unavailable": "This execution record is unavailable",
     "return": "Back to main conversation"
   },
   "question": {
@@ -183,6 +186,13 @@
   },
   "transcript": {
     "notStarted": "The task has not started yet"
+  },
+  "activity": {
+    "title": "Execution and cleanup",
+    "loading": "Reading the original task's execution and resources…",
+    "readFailed": "This task's activity could not be refreshed. The last observation does not confirm its current state.",
+    "stopPending": "Execution stop is not yet confirmed",
+    "cleanupFailed": "Cleanup was not confirmed. Retry targets the same original task."
   },
   "profile": {
     "title": "Save as preset",

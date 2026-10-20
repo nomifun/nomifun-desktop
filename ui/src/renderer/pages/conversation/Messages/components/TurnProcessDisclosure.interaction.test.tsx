@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
+import { useEffect, useState } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { parseMessageId } from '@/common/types/ids';
 import { buildTurnDisclosureItems } from '../turnDisclosureModel';
@@ -100,10 +101,10 @@ test('completed history starts collapsed and preserves manual expansion on refre
   expect(toggle.getAttribute('aria-expanded')).toBe('true');
   fireEvent.click(toggle);
   expect(toggle.getAttribute('aria-expanded')).toBe('false');
-  expect(page.queryByText('thinking')).toBeNull();
+  expect(page.container.querySelector('.turn-process-disclosure__body')?.hasAttribute('hidden')).toBe(true);
 });
 
-test('stream updates preserve manual collapse and a resumed task opens by default', () => {
+test('stream updates and resume preserve a manual collapse for the same identity', () => {
   const page = render(view(true));
   const toggle = page.getByRole('button', { name: 'Collapse thinking process' });
   expect(toggle.getAttribute('aria-expanded')).toBe('true');
@@ -112,13 +113,12 @@ test('stream updates preserve manual collapse and a resumed task opens by defaul
   const updatedSteps: Step[] = [...steps, { id: 'next-tool', kind: 'tool', state: 'running' }];
   page.rerender(view(true, updatedSteps));
   expect(toggle.getAttribute('aria-expanded')).toBe('false');
-  expect(page.queryByText('next-tool')).toBeNull();
+  expect(page.container.querySelector('.turn-process-disclosure__body')?.hasAttribute('hidden')).toBe(true);
 
   page.rerender(view(false, updatedSteps));
   expect(toggle.getAttribute('aria-expanded')).toBe('false');
   page.rerender(view(true, updatedSteps));
-  expect(toggle.getAttribute('aria-expanded')).toBe('true');
-  expect(page.getByText('next-tool')).toBeDefined();
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
 });
 
 test('opens when the first live process items arrive', () => {
@@ -130,120 +130,38 @@ test('opens when the first live process items arrive', () => {
   expect(page.getByText('thinking')).toBeDefined();
 });
 
-test('canonical groups start collapsed, keep narration outside, and preserve manual choices across increments', () => {
-  type Entry = { id: string; group?: string; kind: 'thinking' | 'tool' | 'text'; state: 'running' | 'completed' };
-  const items: Entry[] = [
-    { id: 'past-thinking', group: 'canonical-first', kind: 'thinking', state: 'completed' },
-    { id: 'past-tool', group: 'canonical-first', kind: 'tool', state: 'completed' },
-    { id: 'public-narration', kind: 'text', state: 'completed' },
-    { id: 'current-tool', group: 'canonical-second', kind: 'tool', state: 'running' },
-  ];
-  const stageView = (running: boolean, entries = items) => <I18nextProvider i18n={i18n}>
-    <TurnProcessDisclosure item={{ id: 'turn', processItems: entries, startAt: 1, endAt: 10,
-      state: running ? 'running' : 'completed', running, defaultCollapsed: !running }}
-      renderProcessItem={entry => <span>{entry.id}</span>} getProcessItemKey={entry => entry.id}
-      getProcessItemState={entry => entry.state} getProcessItemLayoutKind={entry => entry.kind}
-      getProcessGroupId={entry => entry.group} getProcessGroupLabel={entries => entries[0].group!} />
-  </I18nextProvider>;
-  const page = render(stageView(true));
-  const first = () => page.container.querySelector('[data-process-group-id="canonical-first"] > button')!;
-  const second = () => page.container.querySelector('[data-process-group-id="canonical-second"] > button')!;
-  expect(first().getAttribute('aria-expanded')).toBe('false');
-  expect(second().getAttribute('aria-expanded')).toBe('false');
-  expect(page.queryByText('past-tool')).toBeNull();
-  expect(page.queryByText('current-tool')).toBeNull();
-  expect(first().parentElement?.classList.contains('turn-process-group--running')).toBe(false);
-  expect(second().parentElement?.classList.contains('turn-process-group--running')).toBe(true);
-  expect(page.getByText('public-narration').closest('.turn-process-group')).toBeNull();
-  page.rerender(stageView(true, [...items]));
-  expect(second().getAttribute('aria-expanded')).toBe('false');
-  fireEvent.click(first());
-  fireEvent.click(second());
-  expect(page.getByText('past-tool')).toBeDefined();
-  expect(page.getByText('current-tool')).toBeDefined();
-  page.rerender(stageView(true, [...items, { id: 'later-output', group: 'canonical-second', kind: 'tool', state: 'running' }]));
-  expect(first().getAttribute('aria-expanded')).toBe('true');
-  expect(second().getAttribute('aria-expanded')).toBe('true');
-  expect(page.getByText('later-output')).toBeDefined();
-  fireEvent.click(second());
-  page.rerender(stageView(true, [...items]));
-  expect(second().getAttribute('aria-expanded')).toBe('false');
-  expect(page.queryByText('current-tool')).toBeNull();
-  expect(second().parentElement?.classList.contains('turn-process-group--running')).toBe(true);
-  page.rerender(stageView(false));
-  expect(page.container.querySelector('.turn-process-disclosure__body')).toBeNull();
-  fireEvent.click(page.container.querySelector('.turn-process-disclosure__toggle')!);
-  expect(page.container.querySelector('.turn-process-group--running')).toBeNull();
-  expect(first().getAttribute('aria-expanded')).toBe('false');
-  expect(second().getAttribute('aria-expanded')).toBe('false');
-});
-
-type PhaseEntry = {
-  id: string;
-  group?: string;
-  kind: 'thinking' | 'tool' | 'text' | 'status';
-  state: 'running' | 'completed';
-};
-const phaseView = (
-  entries: PhaseEntry[],
-  state: 'running' | 'completed' | 'failed' | 'canceled' = 'running'
-) => <I18nextProvider i18n={i18n}>
-  <TurnProcessDisclosure item={{ id: 'phase-turn', processItems: entries, startAt: 1, endAt: 10,
-    state, running: state === 'running', defaultCollapsed: false }}
+test('process rows stay flat and retain their exact canonical group references', () => {
+  const entries = [{ id: 'a', kind: 'tool' as const, state: 'completed' as const, group: 'canonical-one' },
+    { id: 'narration', kind: 'tool' as const, state: 'completed' as const, group: undefined },
+    { id: 'b', kind: 'tool' as const, state: 'running' as const, group: 'canonical-two' }];
+  const page = render(<I18nextProvider i18n={i18n}><TurnProcessDisclosure
+    item={{ id: 'turn', processItems: entries, startAt: 1, endAt: 10, state: 'running', running: true, defaultCollapsed: false }}
     renderProcessItem={entry => <span>{entry.id}</span>} getProcessItemKey={entry => entry.id}
-    getProcessItemState={entry => entry.state} getProcessItemLayoutKind={entry => entry.kind}
-    getProcessGroupId={entry => entry.group} getProcessGroupLabel={entries => entries[0].group!} />
-</I18nextProvider>;
-const pulsingGroups = (container: HTMLElement) => Array.from(container.querySelectorAll('.turn-process-group--running'))
-  .map(group => group.getAttribute('data-process-group-id'));
-
-test('a process title stays active between calls without reopening a manually closed group', () => {
-  const tool: PhaseEntry = { id: 'tool', group: 'phase', kind: 'tool', state: 'running' };
-  const page = render(phaseView([tool]));
-  const toggle = page.getByRole('button', { name: 'phase' });
-  expect(toggle.getAttribute('aria-expanded')).toBe('false');
-  fireEvent.click(toggle);
-  expect(toggle.getAttribute('aria-expanded')).toBe('true');
-  fireEvent.click(toggle);
-  const settled: PhaseEntry = { ...tool, state: 'completed' };
-  const preparing: PhaseEntry = { id: 'model-preparing', kind: 'status', state: 'running' };
-  page.rerender(phaseView([settled, preparing]));
-  expect(pulsingGroups(page.container)).toEqual(['phase']);
-  expect(toggle.getAttribute('aria-expanded')).toBe('false');
-  expect(page.getByRole('button', { name: 'phase' })).toBe(toggle);
-  fireEvent.click(toggle);
-  expect(toggle.getAttribute('aria-expanded')).toBe('true');
-  expect(pulsingGroups(page.container)).toEqual(['phase']);
-  expect(page.container.querySelector('.turn-process-disclosure__item--completed')?.textContent).toBe('tool');
-  expect(settled.state).toBe('completed');
-  page.rerender(phaseView([settled, { id: 'narration', kind: 'text', state: 'completed' }, preparing]));
-  expect(pulsingGroups(page.container)).toEqual([]);
+    getProcessItemState={entry => entry.state} getProcessItemLayoutKind={entry => entry.kind} getProcessGroupId={entry => entry.group} />
+  </I18nextProvider>);
+  expect(page.container.querySelector('.turn-process-group')).toBeNull();
+  expect([...page.container.querySelectorAll('[data-process-segment-id]')].map(row => row.getAttribute('data-process-segment-id'))).toEqual(['a', 'narration', 'b']);
+  expect(page.container.querySelector('[data-process-segment-id="a"]')?.getAttribute('data-process-group-id')).toBe('canonical-one');
 });
 
-test('phase continuation follows narration boundaries while parallel work keeps its own title active', () => {
-  const first: PhaseEntry = { id: 'first-tool', group: 'first', kind: 'tool', state: 'running' };
-  const narration: PhaseEntry = { id: 'narration', kind: 'text', state: 'completed' };
-  const second: PhaseEntry = { id: 'second-tool', group: 'second', kind: 'tool', state: 'completed' };
-  const entries = [first, narration, second];
-  const page = render(phaseView(entries));
-  expect(pulsingGroups(page.container)).toEqual(['first', 'second']);
-  page.rerender(phaseView([{ ...first, state: 'completed' }, narration, second]));
-  expect(pulsingGroups(page.container)).toEqual(['second']);
-  page.rerender(phaseView([{ ...first, state: 'completed' }, narration, second,
-    { id: 'second-narration', kind: 'text', state: 'completed' }]));
-  expect(pulsingGroups(page.container)).toEqual([]);
-});
-
-test.each(['completed', 'failed', 'canceled'] as const)('a %s Turn immediately stops every title, including stale running children', state => {
-  const entries: PhaseEntry[] = [
-    { id: 'parallel', group: 'earlier', kind: 'tool', state: 'running' },
-    { id: 'narration', kind: 'text', state: 'completed' },
-    { id: 'settled', group: 'trailing', kind: 'tool', state: 'completed' },
-  ];
-  const page = render(phaseView(entries));
-  expect(pulsingGroups(page.container)).toEqual(['earlier', 'trailing']);
-  page.rerender(phaseView(entries, state));
-  expect(page.container.querySelector('.turn-process-disclosure__body')).not.toBeNull();
-  expect(pulsingGroups(page.container)).toEqual([]);
-  expect(entries[0].state).toBe('running');
+test('manual opening survives terminal transition and outer collapse preserves row-local state', () => {
+  let mounts = 0;
+  const Row = () => { const [open, setOpen] = useState(false); useEffect(() => { mounts += 1; }, []);
+    return <button type='button' onClick={() => setOpen(!open)}>{open ? 'row open' : 'row closed'}</button>; };
+  const content = (running: boolean) => <I18nextProvider i18n={i18n}><TurnProcessDisclosure
+    item={{ id: 'stable-turn', processItems: [{ id: 'row' }], startAt: 1, endAt: 10,
+      state: running ? 'running' : 'completed', running, defaultCollapsed: !running }}
+    renderProcessItem={() => <Row />} getProcessItemKey={entry => entry.id} getProcessItemState={() => 'completed'} />
+  </I18nextProvider>;
+  const page = render(content(true));
+  fireEvent.click(page.getByRole('button', { name: 'Collapse thinking process' }));
+  fireEvent.click(page.getByRole('button', { name: 'Expand thinking process' }));
+  fireEvent.click(page.getByRole('button', { name: 'row closed' }));
+  page.rerender(content(false));
+  expect(page.getByRole('button', { name: 'Collapse thinking process' }).getAttribute('aria-expanded')).toBe('true');
+  fireEvent.click(page.getByRole('button', { name: 'Collapse thinking process' }));
+  expect(page.container.querySelector('.turn-process-disclosure__body')?.hasAttribute('hidden')).toBe(true);
+  fireEvent.click(page.getByRole('button', { name: 'Expand thinking process' }));
+  expect(page.getByRole('button', { name: 'row open' })).toBeDefined();
+  expect(mounts).toBe(1);
 });

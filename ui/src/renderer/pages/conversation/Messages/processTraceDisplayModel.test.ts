@@ -5,35 +5,13 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import type { ToolReceiptDetailRow } from './components/toolGroupSummaryModel';
 import {
   isProcessTextEchoOfFinal,
   selectJournalProcessItems,
-  shouldShowToolRowDetail,
   stripInternalToolCallPayload,
 } from './processTraceDisplayModel';
 
-const row = (item: Partial<ToolReceiptDetailRow> & Pick<ToolReceiptDetailRow, 'action'>): ToolReceiptDetailRow => ({
-  key: item.key ?? 'tool-1',
-  state: item.state ?? 'completed',
-  title: item.title ?? 'Write',
-  ...item,
-});
-
 describe('process trace display model', () => {
-  test('file paths, command labels and call identity do not create empty disclosures', () => {
-    for (const item of [
-      row({ action: 'edit_files', target: 'snake.html' }),
-      row({ action: 'read_files', target: 'MessageList.tsx' }),
-      row({ action: 'run_commands', target: 'bun run check' }),
-    ]) expect(shouldShowToolRowDetail(item)).toBe(false);
-  });
-
-  test('only a public error keeps an existing row expandable', () => {
-    expect(shouldShowToolRowDetail(row({ action: 'edit_files', state: 'failed',
-      target: 'snake.html', error: 'Permission denied' }))).toBe(true);
-  });
-
   test('hides completed private activity without losing public progress or tool order', () => {
     const items = [
       { kind: 'private', running: false, text: 'thought 1' },

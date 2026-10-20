@@ -347,7 +347,16 @@ async fn dispatch_json_with_headers(
                 StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
             )
         })?;
-        let response = router.clone().oneshot(request).await.map_err(|_| {
+        // Match an HTTP server's request task boundary instead of polling the
+        // entire route under the scenario driver's nested test stack. A timed
+        // out or dropped observation still aborts this exact request task.
+        let service = router.clone();
+        let dispatch = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            service.oneshot(request).await
+        }));
+        let response = dispatch.await.map_err(|_| SmokeFailure::new(
+            phase, "ROUTER_REQUEST_TASK_FAILED", StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+        ))?.map_err(|_| {
             SmokeFailure::new(
                 phase,
                 "ROUTER_DISPATCH_FAILED",
@@ -2425,9 +2434,9 @@ async fn run_live_workspace_file_chain(
     official_coding: bool,
     snake_game: bool,
 ) -> Result<(), SmokeFailure> {
-    run_live_workspace_file_chain_observed(
+    Box::pin(run_live_workspace_file_chain_observed(
         router, api_key, model, work_dir, official_coding, snake_game, None, true,
-    ).await
+    )).await
 }
 
 async fn run_live_workspace_file_chain_observed(
@@ -2572,6 +2581,7 @@ async fn run_live_workspace_file_chain_observed(
                     && message.pointer("/projection/state").and_then(Value::as_str) == Some("recorded")) {
                 return Err(SmokeFailure::new("file.messages", "WORKSPACE_READBACK_RECEIPT_MISSING", 422));
             }
+            verify_live_tool_detail(router, &session_id).await?;
             // Tool-using models may add a short explanation around the final
             // answer. The selected-model smoke checks exact text separately;
             // here we require a real terminal reply and verified file effect.
@@ -2588,6 +2598,42 @@ async fn run_live_workspace_file_chain_observed(
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// Inspect the exact real-provider write receipt through the product read API.
+/// Only fixed failure codes leave this fixture; arguments and output are never logged.
+async fn verify_live_tool_detail(router: &Router, session_id: &str) -> Result<(), SmokeFailure> {
+    let history = successful_json(router, "file.tool_detail_history", Method::GET,
+        format!("/api/agent-sessions/{session_id}/message-history?cursor=&page_size=100"),
+        None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let history = envelope_data("file.tool_detail_history", history)?;
+    let tool = history.get("items").and_then(Value::as_array).and_then(|items| items.iter().find(|message|
+        message.get("type").and_then(Value::as_str) == Some("tool_call")
+        && message.pointer("/content/name").and_then(Value::as_str) == Some("write_file")))
+        .ok_or_else(|| SmokeFailure::new("file.tool_detail_history", "TOOL_DETAIL_WRITE_MISSING", 422))?;
+    let turn = tool.pointer("/content/turn_id").and_then(Value::as_str)
+        .ok_or_else(|| SmokeFailure::new("file.tool_detail_history", "TOOL_DETAIL_TURN_MISSING", 422))?;
+    let call = tool.pointer("/content/call_id").and_then(Value::as_str)
+        .ok_or_else(|| SmokeFailure::new("file.tool_detail_history", "TOOL_DETAIL_CALL_MISSING", 422))?;
+    for section in ["arguments", "output"] {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("turn_id", turn).append_pair("call_id", call).append_pair("section", section).finish();
+        let page = successful_json(router, "file.tool_detail", Method::GET,
+            format!("/api/agent-sessions/{session_id}/tool-details?{query}"),
+            None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+        let page = envelope_data("file.tool_detail", page)?;
+        if page.get("turn_id").and_then(Value::as_str) != Some(turn)
+            || page.get("call_id").and_then(Value::as_str) != Some(call)
+            || page.get("section").and_then(Value::as_str) != Some(section)
+            || page.get("availability").and_then(Value::as_str) != Some("available")
+            || page.get("result_seq").and_then(Value::as_u64).is_none()
+            || page.get("call_event_id").and_then(Value::as_str).is_none()
+            || (section == "arguments" && page.get("content").and_then(Value::as_str).is_none_or(str::is_empty)) {
+            return Err(SmokeFailure::new("file.tool_detail", "TOOL_DETAIL_SOURCE_MISMATCH", 422));
+        }
+    }
+    eprintln!("NOMIFUN_LIVE_SMOKE_STAGE phase=file.tool_details status=pass");
+    Ok(())
 }
 
 /// Independent parsing, not model self-assessment or execution of generated
@@ -3146,6 +3192,33 @@ fn assert_ui_fixture_shutdown_files(snapshot: UiFixtureShutdownFiles) -> Result<
     Ok(())
 }
 
+/// Each scenario owns its future on the heap. Keeping all scenario chains in
+/// one async match inflates the driver frame and can overflow the test stack
+/// before its first request; larger worker stacks would hide that coupling.
+fn live_case_future<'a>(case: LiveCase, router: &'a Router, api_key: &'a str,
+    model: &'a str, root: &'a Path, work_dir: &'a Path,
+    application: &'a NomiCoreApplication, local_proof: Option<&'a str>,
+) -> futures_util::future::LocalBoxFuture<'a, Result<(), SmokeFailure>> {
+    match case {
+        LiveCase::WorkspaceFile | LiveCase::CodingPreset | LiveCase::SnakeGame => run_live_workspace_file_chain(
+            router, api_key, model, work_dir,
+            matches!(case, LiveCase::CodingPreset | LiveCase::SnakeGame), matches!(case, LiveCase::SnakeGame),
+        ).boxed_local(),
+        LiveCase::LongCoding => run_live_long_coding_chain(router, api_key, model, work_dir).boxed_local(),
+        LiveCase::SelectedModel => run_selected_model_chain(router, api_key, model).boxed_local(),
+        LiveCase::ManagedComponent => run_live_managed_component_chain(router, api_key, model).boxed_local(),
+        LiveCase::UserInputHandoff => live_user_input::run(router, api_key, model, root).boxed_local(),
+        LiveCase::ResourceWait => live_resource_wait::run(router, api_key, model, root).boxed_local(),
+        LiveCase::ReasoningLifecycle => live_reasoning_lifecycle::run(router, api_key, model, work_dir).boxed_local(),
+        LiveCase::Companion => run_live_companion_chain(router, api_key, model).boxed_local(),
+        LiveCase::CreativeStudio => run_live_creative_studio_chain(router, api_key, model).boxed_local(),
+        LiveCase::Idmm => live_idmm_demo::run(router, api_key, model).boxed_local(),
+        LiveCase::AppHosting => live_app_hosting::run(router, application, api_key,
+            local_proof.expect("application smoke has its isolated boot proof"), model).boxed_local(),
+        LiveCase::AppWorkspaceUiFixture => live_app_hosting::run_ui_fixture(router, application, api_key, model).boxed_local(),
+    }
+}
+
 async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
     let model = live_model()?;
     let api_key = required_secret_from_stdin()?;
@@ -3171,34 +3244,12 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
             }
         }))
     } else { fixture.application.router() };
+    let work_dir = root.path().join("work");
     let result = AssertUnwindSafe(async {
         official_runtime_build(&router).await?;
-        match case {
-        LiveCase::WorkspaceFile | LiveCase::CodingPreset | LiveCase::SnakeGame => run_live_workspace_file_chain(
-            &router,
-            api_key.as_str(),
-            &model,
-            &root.path().join("work"),
-            matches!(case, LiveCase::CodingPreset | LiveCase::SnakeGame),
-            matches!(case, LiveCase::SnakeGame),
-        ).await,
-        LiveCase::LongCoding => run_live_long_coding_chain(
-            &router, api_key.as_str(), &model, &root.path().join("work")).await,
-        LiveCase::SelectedModel => run_selected_model_chain(&router, api_key.as_str(), &model).await,
-        LiveCase::ManagedComponent => run_live_managed_component_chain(&router, api_key.as_str(), &model).await,
-        LiveCase::UserInputHandoff => live_user_input::run(&router, api_key.as_str(), &model, root.path()).await,
-        LiveCase::ResourceWait => live_resource_wait::run(&router, api_key.as_str(), &model, root.path()).await,
-        LiveCase::ReasoningLifecycle => live_reasoning_lifecycle::run(
-            &router, api_key.as_str(), &model, &root.path().join("work")).await,
-        LiveCase::Companion => run_live_companion_chain(&router, api_key.as_str(), &model).await,
-        LiveCase::CreativeStudio => run_live_creative_studio_chain(&router, api_key.as_str(), &model).await,
-        LiveCase::Idmm => live_idmm_demo::run(&router, api_key.as_str(), &model).await,
-        LiveCase::AppHosting => live_app_hosting::run(
-            &router, &fixture.application, api_key.as_str(), local_proof.as_deref().expect("application smoke has its isolated boot proof"),
-            &model).await,
-        LiveCase::AppWorkspaceUiFixture => live_app_hosting::run_ui_fixture(
-            &router, &fixture.application, api_key.as_str(), &model).await,
-    }}).catch_unwind().await.unwrap_or_else(|_| Err(SmokeFailure::new(
+        live_case_future(case, &router, api_key.as_str(), &model, root.path(), &work_dir,
+            &fixture.application, local_proof.as_deref()).await
+    }).catch_unwind().await.unwrap_or_else(|_| Err(SmokeFailure::new(
         "live.case", "LIVE_CASE_PANICKED", 500)));
     let shutdown_files = if matches!(case, LiveCase::AppWorkspaceUiFixture) {
         Some(snapshot_ui_fixture_shutdown_files(&router, root.path()).await)
@@ -3386,6 +3437,40 @@ async fn nomi_core_general_desktop_reaches_live_stepfun() {
 #[cfg(test)]
 mod evidence_tests {
     use super::*;
+
+    #[test]
+    fn live_driver_future_frames_are_bounded_without_larger_thread_stacks() {
+        let driver = run_live_provider_smoke(LiveCase::CodingPreset);
+        let router = Router::new();
+        let file_chain = run_live_workspace_file_chain(&router, "", "step-5-preview", Path::new("."), true, false);
+        assert!(std::mem::size_of_val(&driver) < 128 * 1024, "scenario driver frame must stay below 128 KiB");
+        assert!(std::mem::size_of_val(&file_chain) < 64 * 1024, "file scenario wrapper must stay below 64 KiB");
+    }
+
+    #[tokio::test]
+    async fn file_scenario_polls_local_http_without_a_credential_or_provider_request() {
+        let router = Router::new().fallback(|| async {
+            (StatusCode::BAD_REQUEST, axum::Json(json!({"code":"FIXTURE_HTTP_REJECTED"})))
+        });
+        let failure = run_live_workspace_file_chain(&router, "LOCAL_FIXTURE_ONLY", "step-5-preview", Path::new("."), true, false).await.unwrap_err();
+        assert_eq!(failure.phase, "provider.create");
+        assert_eq!(failure.code, "FIXTURE_HTTP_REJECTED");
+    }
+
+    #[tokio::test]
+    async fn timed_out_http_observation_aborts_its_exact_request_task() {
+        struct NotifyOnDrop(std::sync::Arc<tokio::sync::Notify>);
+        impl Drop for NotifyOnDrop { fn drop(&mut self) { self.0.notify_one(); } }
+        let dropped = std::sync::Arc::new(tokio::sync::Notify::new());
+        let signal = dropped.clone();
+        let router = Router::new().fallback(move || {
+            let guard = NotifyOnDrop(signal.clone());
+            async move { let _guard = guard; std::future::pending::<StatusCode>().await }
+        });
+        let failure = dispatch_json(&router, "fixture.deadline", Method::GET, "/".into(), None, Duration::from_millis(25)).await.unwrap_err();
+        assert_eq!(failure.code, "HTTP_DEADLINE_EXCEEDED");
+        tokio::time::timeout(Duration::from_secs(1), dropped.notified()).await.expect("timed out request must not become an orphaned handler");
+    }
 
     #[test]
     fn provider_http_diagnostics_require_typed_public_metadata() {

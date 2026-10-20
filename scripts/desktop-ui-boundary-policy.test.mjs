@@ -31,3 +31,21 @@ test('other renderer surfaces retain the existing mobile terminology boundary', 
   assert.ok(inspectRendererSource('ui/src/renderer/pages/connections/index.css', '.mobile { display: block; }').length > 0);
   assert.deepEqual(inspectRendererSource(connectionPage, "const style = '@media(max-width: 880px) { .panel {display:block} }';"), []);
 });
+
+test('JavaScript viewport media queries obey the same desktop minimum', () => {
+  const file = 'ui/src/renderer/pages/conversation/execution/ExecutionTopPanel.tsx';
+  for (const query of ['(max-width: 768px)', '(min-width: 600px)', '(max-width: 879.5px)']) {
+    const failures = inspectRendererSource(file, `window.matchMedia(${JSON.stringify(query)}).matches`);
+    assert.equal(failures.length, 1, query);
+    assert.match(failures[0].reason, /below the supported 880px minimum/);
+  }
+  assert.deepEqual(inspectRendererSource(file, "matchMedia('(min-width: 880px)').matches"), []);
+  assert.deepEqual(inspectRendererSource(file, "window.matchMedia('(prefers-reduced-motion: reduce)').matches"), []);
+});
+
+test('container queries, comments and quoted examples do not become viewport decisions', () => {
+  const file = 'ui/src/renderer/pages/conversation/execution/example.tsx';
+  assert.deepEqual(inspectRendererSource(file, "const css = '@container (max-width: 600px) { .pane {} }';"), []);
+  assert.deepEqual(inspectRendererSource(file, '// window.matchMedia("(max-width: 768px)").matches'), []);
+  assert.deepEqual(inspectRendererSource(file, 'const example = `window.matchMedia("(max-width: 768px)")`;'), []);
+});

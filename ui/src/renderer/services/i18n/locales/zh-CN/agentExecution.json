@@ -157,6 +157,9 @@
   },
   "projection": {
     "viewing": "当前任务",
+    "history": "历史执行记录",
+    "current": "查看当前任务",
+    "unavailable": "该次执行记录不可用",
     "return": "返回主对话"
   },
   "question": {
@@ -183,6 +186,13 @@
   },
   "transcript": {
     "notStarted": "任务尚未开始"
+  },
+  "activity": {
+    "title": "执行与资源清理",
+    "loading": "正在读取原任务的执行与资源状态…",
+    "readFailed": "未能刷新此任务的活动状态，最近一次观察不能证明当前状态。",
+    "stopPending": "尚未确认执行已停止",
+    "cleanupFailed": "清理结果未确认，重试仍只作用于原任务。"
   },
   "profile": {
     "title": "沉淀为设定",

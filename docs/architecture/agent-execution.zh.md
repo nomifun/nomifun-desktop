@@ -140,6 +140,16 @@ Step spec 是任务输入；完成要求交给唯一 Runtime 的 typed requireme
 
 结果通过稳定 operation 幂等投影到 lead Session，不发送隐藏用户消息触发第二次模型总结。模型入口复用 `nomi_delegate`、`nomi_execution_get` 和 `nomi_execution_update`；HTTP 位于 `/api/agent-executions`，模板位于 `/api/agent-execution-templates`。前端通过 Link 读取关系，按 `agentExecution.changed` sequence 去重和补拉，不保存第二份执行状态。
 
+聊天过程只显示已接受委派与真实任务终结记录，不再附加当前任务列表、运行／等待行、动态进度或常驻控制。开始记录来自原 PlanChanged 提交的任务；它只表示已委派，不把 write-ahead ToolStarted 或 Attempt running 当作真实启动。完成来自 Step 的业务结算，单次 Attempt 结束、循环继续、重试或父 Turn 结束均不能替代。正常结算、恢复收养及采用结果在原领域事件写事务保留必要的 typed 变更引用和父 Session 游标锚点，不新增生命周期表或展示日志。停止接受和清理观察留在原控制详情，不伪装为成功完成。
+
+展示以“操作名称 · 摘要”的紧凑行承载委派。同一 Execution、原请求及工具调用／Effect 下，相邻同类记录可收拢为一行；正文、思考、工具、不同来源和不同终态均打断合并，可信锚点与仅来源顺序也不能混用。收拢仅发生在共享前端投影，保留每条原记录及其 Attempt 身份，不写回消息或领域状态。数量表示组内已提交记录数，不表示实时完成进度或不同任务数。批量默认显示数量，展开后平铺任务名并可分别打开原详情；单条直接打开，常态不附远端箭头、模型副行或状态尾标。异步详情只应用于当前会话的最后一次查看选择；返回主对话或切换会话后，旧响应不能重新打开或替换详情。
+
+`GET /api/conversations/{session}/delegation-records` 按 owner 和已加载 accepted input 窗口读取原 Execution 事件，包括不再由最新 linked execution 指向的历史协作。Session 与 Execution 序号各自排序，不能相互比较；原 source 决定 Turn 归属，父流锚点只决定可证位置。正文分段是原子阅读单元，落在段内的异步锚点排在该段之后，不按文字内容或时间戳伪造文本切口。后继 Turn 期间才完成的任务仍归原请求。分页固定各 Execution 原事件上界，异步完成不依赖父 Session 新增消息；重连按稳定记录身份补读。缺少历史父流锚点时仅保持可信来源分组，不按时间戳重建伪造顺序。
+
+开始记录可打开当前 Step 的原宿主控制；完成记录锁定确切 Attempt 和该次子任务的 Session，不随最新重试替换。历史查看与当前任务操作分开，切到当前任务须显式选择。单任务、委派范围、整个 Execution 的停止仍由现役控制组件和领域 owner 处理；停止请求、执行停止和资源释放分别读取真实证明。详情通过原 Activity 投影按 Execution／Step／Attempt 三个身份精确观察，不扫描全局活动列表寻找目标，不把原 AutoWork Attempt 的清理扩大为停止整次自动运行。展开记录不启动或恢复 Agent，也不改变并发、调度、重试或 Runtime 退休。
+
+终态详情复用原 retirement facts 解析最终继续执行记录。实时队列退休后，不退回初始 Turn，也不猜测最新 Turn；缺少或损坏的原引用保持未确认。结算事件仅在有 canonical terminal 证明时附带原操作与终态事件引用，无证明时字段缺省，不写显式 null。它们仍属于原领域结算事件，不产生第二份清理账本。
+
 ## IDMM：Session 领域监督
 
 [IDMM](../../crates/backend/nomifun-idmm/src/lib.rs) 通过 `IdmmSessionPort` 读取有界、已验证的 Session 观察，规则先行，仅在显式配置时调用旁路模型。它不拥有 Runtime、Session、工具权限或全局备用模型，也不注册 Agent Capability。工具阶段静默只触发安全停止记录，不自动取消正在执行的工具。

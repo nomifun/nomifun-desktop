@@ -1,9 +1,10 @@
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
-import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ipcBridge } from '@/common';
+import { database } from '@/common/adapter/ipcBridge';
 import { createStoredMessageMapper } from '@/common/adapter/storedMessageMapper';
 import { configService } from '@/common/config/configService';
 import type { TChatConversation } from '@/common/config/storage';
@@ -26,6 +27,7 @@ const selection: NomiModelSelection = {
   providers: [], pickerDisabled: true, getAvailableModels: () => [],
   handleSelectModel: async () => {}, getDisplayModelName: name => name ?? '',
 };
+beforeEach(() => { spyOn(database.getDelegationRecords, 'invoke').mockResolvedValue({ records: [], through_session_seq: 0 }); });
 afterEach(() => { cleanup(); mock.restore(); });
 
 test('real route remount restores compact active thinking before runtime hydration and keeps phase disclosures current', async () => {

@@ -5,7 +5,7 @@
  */
 
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
-import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { Message } from '@arco-design/web-react';
 import { createInstance } from 'i18next';
 import { readFileSync } from 'node:fs';
@@ -14,12 +14,13 @@ import { useEffect, useState } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
+import type { DelegationRecord } from '@/common/chat/delegationRecords';
 import {
   parseAgentId, parseCompanionId, parseConversationId, parseExecutionAttemptId,
   parseExecutionId, parseExecutionParticipantId,
 } from '@/common/types/ids';
 import type { TAgentExecutionDetail, TExecutionParticipant } from '@/common/types/agentExecution/agentExecutionTypes';
-import DelegationProgress from '@/renderer/pages/conversation/Messages/components/DelegationProgress';
+import DelegationRecordRow from '@/renderer/pages/conversation/Messages/components/DelegationRecordRow';
 import { ExecutionProvider, useExecution } from '@/renderer/pages/conversation/execution/ExecutionContext';
 import ExecutionContentSwitcher from '@/renderer/pages/conversation/execution/ExecutionContentSwitcher';
 import * as executionState from '@/renderer/pages/conversation/execution/useConversationExecution';
@@ -27,7 +28,7 @@ import * as readonlyTranscript from '@/renderer/pages/conversation/execution/Rea
 import messages from '@/renderer/services/i18n/locales/en-US/messages.json';
 import agentExecution from '@/renderer/services/i18n/locales/en-US/agentExecution.json';
 import {
-  childConversationId, executionId, leadConversation, makeAttempt, makeDetail, makeStep, requestId,
+  childConversationId, executionId, leadConversation, makeAttempt, makeDelegationRecord, makeDetail, makeStep,
 } from '../../../../../test/fixtures/conversationDelegation';
 
 const i18n = createInstance();
@@ -35,6 +36,20 @@ await i18n.use(initReactI18next).init({
   lng: 'en-US', resources: { 'en-US': { translation: { messages, agentExecution } } },
 });
 const restores: Array<() => void> = [];
+beforeEach(() => {
+  const activity = spyOn(ipcBridge.agentActivities.list, 'invoke').mockImplementation(async query => {
+    if (!query.execution_id || !query.step_id || !query.attempt_id) throw new Error('Expected an exact task activity read');
+    return { items: [{ key: `execution:${query.attempt_id}`, title: 'Selected task', kind: 'delegated_task', state: 'completed',
+      agent_session_id: childConversationId, target: { kind: 'execution_task', execution_id: query.execution_id,
+        step_id: query.step_id, attempt_id: query.attempt_id, expected_execution_version: 1, expected_step_version: 1 },
+      continuation: 'none', waiting_reason: null, stop_accepted: false, execution_stopped: true,
+      resources: [{ kind: 'runtime', state: 'released', detail: null }], can_stop: false, can_retry_cleanup: false, updated_at_ms: null,
+    }], next_cursor: null };
+  });
+  const changed = spyOn(ipcBridge.agentExecution.events.changed, 'on').mockReturnValue(() => {});
+  const reconnect = spyOn(ipcBridge.conversation.reconnected, 'on').mockReturnValue(() => {});
+  for (const spy of [activity, changed, reconnect]) restores.push(() => spy.mockRestore());
+});
 afterEach(() => {
   cleanup();
   restores.splice(0).reverse().forEach(restore => restore());
@@ -43,7 +58,7 @@ afterEach(() => {
 type MountCounter = { mounted: number; unmounted: number };
 
 /** Keep the actual delegation button/context chain and a stateful lead composer. */
-function CompanionMainConversation({ lifecycle, cardDetail }: { lifecycle: MountCounter; cardDetail?: TAgentExecutionDetail }) {
+function CompanionMainConversation({ lifecycle, cardDetail, completed = false, batchRecords }: { lifecycle: MountCounter; cardDetail?: TAgentExecutionDetail; completed?: boolean; batchRecords?: DelegationRecord[] }) {
   const [draft, setDraft] = useState('');
   const execution = useExecution();
   const detail = cardDetail ?? execution.detail;
@@ -53,13 +68,145 @@ function CompanionMainConversation({ lifecycle, cardDetail }: { lifecycle: Mount
   }, [lifecycle]);
   return <section aria-label='Companion main conversation' data-testid='companion-main-conversation'>
     <textarea aria-label='Companion message draft' value={draft} onChange={event => setDraft(event.target.value)} />
-    <DelegationProgress
-      delegation={{ executionId: detail?.execution.execution_id ?? executionId, turnId: requestId, detail, unfinished: false }}
-      projectStep={execution.projectStep}
-      refetch={execution.refetch}
-    />
+    {batchRecords ? <DelegationRecordRow records={batchRecords} /> : detail?.steps.map(step => <DelegationRecordRow key={step.step_id} records={[makeDelegationRecord({
+      id: `event:${step.step_id}`, execution_id: detail.execution.execution_id, step_id: step.step_id,
+      title: step.title, kind: completed ? 'completed' : 'delegated',
+      attempt_id: completed ? detail.attempts.find(attempt => attempt.step_id === step.step_id)?.attempt_id ?? null : null,
+    })]} />)}
   </section>;
 }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((accept, decline) => { resolve = accept; reject = decline; });
+  return { promise, resolve, reject };
+}
+
+/** Different rows own independent GETs while their shared main conversation remains mounted. */
+function projectionRaceScene() {
+  const slowStep = makeStep(20, { title: 'Slow A', status: 'completed' });
+  const slowAttempt = makeAttempt(slowStep, { status: 'completed' });
+  const slowDetail = makeDetail({ execution: { ...makeDetail().execution, status: 'completed' }, steps: [slowStep], attempts: [slowAttempt] });
+  const fastId = parseExecutionId('00000000-07d0-7000-8000-000000000901');
+  const fastChild = parseConversationId('00000000-09c4-7000-8000-000000000902');
+  const fastStep = makeStep(21, { execution_id: fastId, title: 'Fast B', status: 'completed' });
+  const fastAttempt = makeAttempt(fastStep, { execution_id: fastId, status: 'completed',
+    attempt_id: parseExecutionAttemptId('00000000-09c4-7000-8000-000000000903'), conversation_id: fastChild });
+  const fastDetail = makeDetail({ execution: { ...makeDetail().execution, execution_id: fastId, status: 'completed' }, steps: [fastStep], attempts: [fastAttempt] });
+  const latestId = parseExecutionId('00000000-07d0-7000-8000-000000000904');
+  const latest = makeDetail({ execution: { ...makeDetail().execution, execution_id: latestId, status: 'completed' } });
+  const slow = deferred<TAgentExecutionDetail>();
+  const refetch = mock(async () => {});
+  const state = spyOn(executionState, 'useConversationExecution').mockReturnValue({
+    executionId: latestId, detail: latest, refetch, loading: false,
+    leadThinking: { phase: null, reasoning: '', active: false, textHeartbeat: false },
+  });
+  const getExecution = spyOn(ipcBridge.agentExecution.get, 'invoke').mockImplementation(({ execution_id }) => {
+    if (execution_id === executionId) return slow.promise;
+    if (execution_id === fastId) return Promise.resolve(fastDetail);
+    throw new Error('Unexpected execution in race');
+  });
+  const getChild = spyOn(ipcBridge.conversation.get, 'invoke').mockImplementation(async ({ conversation_id }) => {
+    const selected = conversation_id === childConversationId ? { step: slowStep, attempt: slowAttempt }
+      : conversation_id === fastChild ? { step: fastStep, attempt: fastAttempt } : null;
+    if (!selected) throw new Error('Unexpected child in race');
+    return { ...leadConversation, id: conversation_id, name: selected.step.title, linked_execution_id: undefined,
+      execution_step_id: selected.step.step_id, execution_attempt_id: selected.attempt.attempt_id };
+  });
+  const transcript = spyOn(readonlyTranscript, 'default').mockImplementation(({ conversation }) =>
+    <section aria-label='Raced task transcript' data-session-id={conversation.id}>{conversation.name}</section>);
+  for (const spy of [state, getExecution, getChild, transcript]) restores.push(() => spy.mockRestore());
+  const records = [
+    makeDelegationRecord({ id: 'race-a', title: slowStep.title, step_id: slowStep.step_id, kind: 'completed', attempt_id: slowAttempt.attempt_id }),
+    makeDelegationRecord({ id: 'race-b', title: fastStep.title, execution_id: fastId, step_id: fastStep.step_id, kind: 'completed', attempt_id: fastAttempt.attempt_id }),
+  ];
+  let navigation!: ReturnType<typeof useExecution>;
+  function Controls() {
+    navigation = useExecution();
+    return <aside>
+      <button onClick={navigation.returnToMain}>Cancel task navigation</button>
+      <button onClick={() => navigation.projectStep({ executionId: fastId, step: fastStep, attempt: fastAttempt,
+        attemptId: fastAttempt.attempt_id, participants: [], refetch })}>Choose B synchronously</button>
+    </aside>;
+  }
+  function Main() {
+    const [draft, setDraft] = useState('');
+    return <section data-testid='raced-main'>
+      <textarea aria-label='Raced companion draft' value={draft} onChange={event => setDraft(event.target.value)} />
+      {records.map(record => <DelegationRecordRow key={record.id} records={[record]} />)}
+    </section>;
+  }
+  const scene = (id = leadConversation.id) => <MemoryRouter><I18nextProvider i18n={i18n}>
+    <ExecutionProvider conversation={{ ...leadConversation, id, linked_execution_id: latestId }}>
+      <Controls /><ExecutionContentSwitcher><Main /></ExecutionContentSwitcher>
+    </ExecutionProvider>
+  </I18nextProvider></MemoryRouter>;
+  const view = render(scene());
+  const chooseSlow = () => fireEvent.click(view.getByRole('button', { name: i18n.t('messages.delegation.openRecord', { title: slowStep.title }) }));
+  const chooseFast = () => fireEvent.click(view.getByRole('button', { name: i18n.t('messages.delegation.openRecord', { title: fastStep.title }) }));
+  return { view, scene, slow, slowDetail, fastChild, getChild, getExecution, chooseSlow, chooseFast, navigation: () => navigation };
+}
+
+test.each(['resolve', 'reject'] as const)('a stale slow row cannot replace a later fast exact projection or surface its late %s', async outcome => {
+  const race = projectionRaceScene();
+  const input = race.view.getByRole('textbox', { name: 'Raced companion draft' }) as HTMLTextAreaElement;
+  fireEvent.change(input, { target: { value: 'Keep this draft' } });
+  race.chooseSlow(); race.chooseFast();
+  const selected = await race.view.findByRole('region', { name: 'Raced task transcript' });
+  expect(selected.getAttribute('data-session-id')).toBe(race.fastChild);
+  expect(race.view.getByTestId('raced-main').parentElement?.style.display).toBe('none');
+  await act(async () => { if (outcome === 'resolve') race.slow.resolve(race.slowDetail); else race.slow.reject(new Error('Late obsolete read')); });
+  expect(race.view.getByRole('region', { name: 'Raced task transcript' }).getAttribute('data-session-id')).toBe(race.fastChild);
+  expect(race.getChild.mock.calls.map(([request]) => request.conversation_id)).toEqual([race.fastChild]);
+  expect(race.view.container.textContent).not.toContain(messages.delegation.openFailed);
+  fireEvent.click(race.view.getByRole('button', { name: 'Back to main conversation' }));
+  expect(race.view.getByRole('textbox', { name: 'Raced companion draft' }) === input).toBe(true);
+  expect(input.value).toBe('Keep this draft');
+});
+
+test('returning to main invalidates the latest unresolved row even before a projection opens', async () => {
+  const race = projectionRaceScene();
+  race.chooseSlow();
+  fireEvent.click(race.view.getByRole('button', { name: 'Cancel task navigation' }));
+  await act(async () => race.slow.resolve(race.slowDetail));
+  expect(race.view.queryByRole('region', { name: 'Raced task transcript' })).toBeNull();
+  expect(race.view.getByRole('textbox', { name: 'Raced companion draft' })).toBeTruthy();
+  expect(race.getChild).not.toHaveBeenCalled();
+});
+
+test('a synchronous task selection also preempts an older async row lookup', async () => {
+  const race = projectionRaceScene();
+  race.chooseSlow();
+  fireEvent.click(race.view.getByRole('button', { name: 'Choose B synchronously' }));
+  await race.view.findByRole('region', { name: 'Raced task transcript' });
+  await act(async () => race.slow.resolve(race.slowDetail));
+  expect(race.view.getByRole('region', { name: 'Raced task transcript' }).getAttribute('data-session-id')).toBe(race.fastChild);
+  expect(race.getChild.mock.calls.map(([request]) => request.conversation_id)).toEqual([race.fastChild]);
+});
+
+test('a Session switch invalidates an outstanding selection while its old source row stays mounted', async () => {
+  const race = projectionRaceScene();
+  race.chooseSlow();
+  const nextSession = parseConversationId('00000000-09c4-7000-8000-000000000905');
+  race.view.rerender(race.scene(nextSession));
+  expect(race.navigation().conversationId).toBe(nextSession);
+  await act(async () => race.slow.resolve(race.slowDetail));
+  expect(race.navigation().projectedPayload).toBeNull();
+  expect(race.getChild).not.toHaveBeenCalled();
+});
+
+test('unmount swallows a stale async rejection but an active row failure remains actionable', async () => {
+  const race = projectionRaceScene();
+  const stale = race.navigation().projectStepAsync(() => race.slow.promise.then(() => null));
+  race.view.unmount();
+  await act(async () => { race.slow.reject(new Error('Read after unmount')); await stale; });
+  const active = projectionRaceScene();
+  active.chooseSlow();
+  await act(async () => active.slow.reject(new Error('Current lookup failed')));
+  await waitFor(() => expect(active.view.container.textContent).toContain(messages.delegation.openFailed));
+  expect(active.getChild).not.toHaveBeenCalled();
+});
 
 test('the companion surface mounts the shared content switcher around its conversation and resets projection by Session', async () => {
   const source = readFileSync(new URL('./CompanionCohabitView.tsx', import.meta.url), 'utf8');
@@ -71,10 +218,22 @@ test('the companion surface mounts the shared content switcher around its conver
   );
 });
 
-test('opening a companion delegation displays the exact read-only attempt and returning preserves the mounted chat draft', async () => {
+test.each([false, true])('opening a companion delegation batch %j displays the exact read-only attempt and preserves the mounted draft', async batch => {
   const step = makeStep(1, { title: 'Prepare a file on the local computer', status: 'completed' });
   const attempt = makeAttempt(step, { status: 'completed', finished_at: 3100 });
-  const detail = makeDetail({ steps: [step], attempts: [attempt] });
+  const retryAttempt = makeAttempt(step, {
+    attempt_id: parseExecutionAttemptId('00000000-09c4-7000-8000-000000000031'), attempt_no: 2,
+    conversation_id: parseConversationId('00000000-09c4-7000-8000-000000000032'),
+  });
+  const otherStep = makeStep(2, { title: step.title, status: 'completed' });
+  const otherAttempt = makeAttempt(otherStep, { attempt_id: parseExecutionAttemptId('00000000-09c4-7000-8000-000000000033'),
+    conversation_id: parseConversationId('00000000-09c4-7000-8000-000000000034'), status: 'completed' });
+  const detail = makeDetail({ steps: batch ? [{ ...step, status: 'running' }, otherStep] : [{ ...step, status: 'running' }],
+    attempts: batch ? [attempt, retryAttempt, otherAttempt] : [attempt, retryAttempt] });
+  const batchRecords = batch ? [
+    makeDelegationRecord({ id: 'other-result', step_id: otherStep.step_id, title: otherStep.title, kind: 'completed', attempt_id: otherAttempt.attempt_id }),
+    makeDelegationRecord({ id: 'old-result', step_id: step.step_id, title: step.title, kind: 'completed', attempt_id: attempt.attempt_id }),
+  ] : undefined;
   const conversation: TChatConversation = {
     ...leadConversation,
     extra: {
@@ -112,20 +271,29 @@ test('opening a companion delegation displays the exact read-only attempt and re
   const lifecycle: MountCounter = { mounted: 0, unmounted: 0 };
   const view = render(<MemoryRouter><I18nextProvider i18n={i18n}>
     <ExecutionProvider key={conversation.id} conversation={conversation}>
-      <ExecutionContentSwitcher><CompanionMainConversation lifecycle={lifecycle} /></ExecutionContentSwitcher>
+      <ExecutionContentSwitcher><CompanionMainConversation lifecycle={lifecycle} completed batchRecords={batchRecords} /></ExecutionContentSwitcher>
     </ExecutionProvider>
   </I18nextProvider></MemoryRouter>);
   const input = view.getByRole('textbox', { name: 'Companion message draft' }) as HTMLTextAreaElement;
   fireEvent.change(input, { target: { value: 'A message drafted before opening the computer task' } });
   expect(lifecycle).toEqual({ mounted: 1, unmounted: 0 });
 
-  fireEvent.click(view.getByRole('button', { name: `View subtask: ${step.title}` }));
+  if (batch) {
+    expect(view.queryByRole('button', { name: i18n.t('messages.delegation.openRecord', { title: step.title }) })).toBeNull();
+    fireEvent.click(view.getByRole('button', { name: i18n.t('messages.delegation.toggleRecords', {
+      action: i18n.t('messages.delegation.action.completed'), count: 2 }) }));
+    expect(get).not.toHaveBeenCalled();
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>('[data-delegation-record-id="old-result"]')!);
+  } else fireEvent.click(view.getByRole('button', { name: i18n.t('messages.delegation.openRecord', { title: step.title }) }));
   const projected = await view.findByRole('region', { name: 'Read-only task transcript' });
   expect(projected.getAttribute('data-session-id')).toBe(childConversationId);
   expect(projected.textContent).toContain('The local file was prepared.');
   expect(get).toHaveBeenCalledTimes(1);
   expect(get.mock.calls[0][0]).toEqual({ conversation_id: childConversationId });
   expect(transcript.mock.calls.at(-1)?.[0]).toMatchObject({ conversation: child, agent_name: step.title });
+  expect(view.getByText(agentExecution.projection.history)).toBeTruthy();
+  expect(view.queryByRole('button', { name: 'Stop task' })).toBeNull();
+  expect(view.getByRole('button', { name: agentExecution.projection.current })).toBeTruthy();
   expect(view.queryByRole('textbox', { name: 'Companion message draft' })).toBeNull();
   const main = view.getByTestId('companion-main-conversation');
   expect(main.parentElement?.style.display).toBe('none');
@@ -243,7 +411,7 @@ test('an older message projects and retries its own execution while the provider
   </I18nextProvider></MemoryRouter>);
   const input = view.getByRole('textbox', { name: 'Companion message draft' }) as HTMLTextAreaElement;
   fireEvent.change(input, { target: { value: 'Keep this draft while inspecting the earlier task' } });
-  fireEvent.click(view.getByRole('button', { name: `View subtask: ${cardStep.title}` }));
+  fireEvent.click(view.getByRole('button', { name: i18n.t('messages.delegation.openRecord', { title: cardStep.title }) }));
   await waitFor(() => expect(getExecution).toHaveBeenCalledTimes(1));
   expect(getExecution.mock.calls[0][0]).toEqual({ execution_id: executionId });
   expect(getChild).not.toHaveBeenCalled();
@@ -275,19 +443,19 @@ test('an older message projects and retries its own execution while the provider
   </I18nextProvider></MemoryRouter>);
   expect(view.getByRole('region', { name: 'Read-only task transcript' }).getAttribute('data-session-id')).toBe(latestOldChildId);
   expect(view.queryByRole('textbox', { name: 'Companion message draft' })).toBeNull();
-  expect(getExecution).toHaveBeenCalledTimes(1);
+  expect(getExecution).toHaveBeenCalledTimes(2);
   expect(getChild).toHaveBeenCalledTimes(1);
   expect(lifecycle).toEqual({ mounted: 1, unmounted: 0 });
 
   fireEvent.click(view.getByRole('button', { name: 'Retry' }));
-  await waitFor(() => expect(getExecution).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(getExecution).toHaveBeenCalledTimes(3));
   expect(retry).toHaveBeenCalledTimes(1);
   expect(retry.mock.calls[0][0]).toEqual({
     execution_id: executionId,
     step_id: authoritativeStep.step_id,
     updates: { expected_execution_version: authoritative.execution.version, expected_step_version: authoritativeStep.version },
   });
-  expect(getExecution.mock.calls.map(call => call[0])).toEqual([{ execution_id: executionId }, { execution_id: executionId }]);
+  expect(getExecution.mock.calls.map(call => call[0])).toEqual([{ execution_id: executionId }, { execution_id: executionId }, { execution_id: executionId }]);
   expect(refreshCurrent).not.toHaveBeenCalled();
   await waitFor(() => expect(success).toHaveBeenCalledTimes(1));
   expect(error).not.toHaveBeenCalled();
@@ -297,8 +465,8 @@ test('an older message projects and retries its own execution while the provider
   expect(input.value).toBe('Keep this draft while inspecting the earlier task');
   expect(lifecycle).toEqual({ mounted: 1, unmounted: 0 });
   expect(view.queryByRole('region', { name: 'Read-only task transcript' })).toBeNull();
-  expect(unsubscribeChanged).toHaveBeenCalledTimes(1);
-  expect(unsubscribeReconnect).toHaveBeenCalledTimes(1);
+  expect(unsubscribeChanged).toHaveBeenCalledTimes(2);
+  expect(unsubscribeReconnect).toHaveBeenCalledTimes(2);
 });
 
 test('an interrupted older task can be stopped from its projection without answering or cancelling the newer task', async () => {
@@ -345,19 +513,18 @@ test('an interrupted older task can be stopped from its projection without answe
   </I18nextProvider></MemoryRouter>);
   const input = view.getByRole('textbox', { name: 'Companion message draft' }) as HTMLTextAreaElement;
   fireEvent.change(input, { target: { value: 'Preserve my next request' } });
-  // The main companion progress card exposes the same stop command.
-  expect(view.getByRole('button', { name: 'Stop collaboration' })).toBeTruthy();
-  expect(view.getByText(agentExecution.recovery.title)).toBeTruthy();
-  fireEvent.click(view.getByRole('button', { name: `View subtask: ${step.title}` }));
+  // The record stays compact; its exact inspector retains recovery and Stop.
+  expect(view.queryByRole('button', { name: 'Stop collaboration' })).toBeNull();
+  fireEvent.click(view.getByRole('button', { name: i18n.t('messages.delegation.openRecord', { title: step.title }) }));
   await view.findByRole('region', { name: 'Task record' });
-  expect(view.getByRole('status').textContent).toContain(agentExecution.recovery.title);
+  expect(view.getAllByRole('status').some(element => element.textContent?.includes(agentExecution.recovery.title))).toBe(true);
   expect(view.queryByRole('button', { name: 'Submit decision' })).toBeNull();
   expect(view.queryByRole('textbox')).toBeNull();
   expect(view.getByText('The exact prior operation result is unknown.')).toBeTruthy();
   fireEvent.click(view.getByRole('button', { name: 'Stop collaboration' }));
   await waitFor(() => expect(view.queryByRole('button', { name: 'Stop collaboration' })).toBeNull());
   expect(cancel.mock.calls[0][0]).toEqual({ execution_id: executionId, updates: { expected_version: 23 } });
-  expect(getExecution.mock.calls.map(call => call[0])).toEqual([{ execution_id: executionId }, { execution_id: executionId }]);
+  expect(getExecution.mock.calls.map(call => call[0])).toEqual([{ execution_id: executionId }, { execution_id: executionId }, { execution_id: executionId }]);
   expect(refreshNewer).not.toHaveBeenCalled();
   expect(decision).not.toHaveBeenCalled();
   expect(error).not.toHaveBeenCalled();
@@ -408,8 +575,8 @@ for (const selection of ['root', 'completed_root', 'child'] as const) test(`an o
     </ExecutionProvider>
   </I18nextProvider></MemoryRouter>);
   expect(view.queryByRole('button', { name: 'Stop collaboration' })).toBeNull();
-  expect(view.getByRole('button', { name: 'Stop current automatic run' })).toBeTruthy();
-  fireEvent.click(view.getByRole('button', { name: `View subtask: ${selected.title}` }));
+  expect(view.queryByRole('button', { name: 'Stop current automatic run' })).toBeNull();
+  fireEvent.click(view.getByRole('button', { name: i18n.t('messages.delegation.openRecord', { title: selected.title }) }));
   await view.findByRole('region', { name: 'Original task record' });
   expect(view.queryByRole('button', { name: 'Retry' })).toBeNull();
   expect(view.queryByRole('button', { name: 'Adopt current result' })).toBeNull();

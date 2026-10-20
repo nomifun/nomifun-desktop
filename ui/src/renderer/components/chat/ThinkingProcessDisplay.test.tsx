@@ -50,7 +50,7 @@ describe('ThinkingProcessDisplay', () => {
     expect(html.includes('data-thinking-process-disclosure="true"')).toBe(true);
     expect(html.includes('思考完成')).toBe(true);
     expect(html.includes('data-thinking-process-body')).toBe(true);
-    expect(html.includes('已检查上下文')).toBe(true);
+    expect(html.includes('已检查上下文')).toBe(false);
   });
 
   test('a phase with no elapsed time keeps its status and body without starting a clock', () => {
@@ -83,10 +83,10 @@ describe('ThinkingProcessDisplay', () => {
 
     expect(html.includes('data-thinking-body-length="compact"')).toBe(true);
     expect(html.includes('思考完成 · 检查了关键路径')).toBe(true);
-    expect(html.includes('完整思考内容')).toBe(true);
+    expect(html.includes('完整思考内容')).toBe(false);
   });
 
-  test('automatically opens live phases and collapses completion while preserving manual completed expansion', () => {
+  test('defaults follow lifecycle while manual choices survive completion and resume of the same phase', () => {
     const view = (state: 'running' | 'completed', identityKey = 'step-1', content = 'Full reasoning') =>
       <ThinkingProcessDisplay state={state} identityKey={identityKey} variant='process' content={content} bodyLength='compact' />;
     const page = render(view('running'));
@@ -110,7 +110,7 @@ describe('ThinkingProcessDisplay', () => {
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     page.rerender(view('completed', 'step-2'));
     page.rerender(view('running', 'step-2'));
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
   });
 
   test('cold and remounted completed phases are collapsed while active phases start expanded', () => {

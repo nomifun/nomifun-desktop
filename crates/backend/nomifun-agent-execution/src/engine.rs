@@ -1051,6 +1051,16 @@ impl AgentExecutionEngine {
         requested_model_pool: Option<ExecutionModelPool>,
         explicit_steps: Option<Vec<nomifun_api_types::PlannedExecutionStep>>,
     ) -> Result<(AgentExecutionDetail, Vec<String>), AppError> {
+        self.delegate_from_attempt_with_source(owner_id, actor, conversation_id, goal, model_pool,
+            requested_model_pool, explicit_steps, None).await
+    }
+
+    async fn delegate_from_attempt_with_source(
+        &self, owner_id: &str, actor: &AgentExecutionActor, conversation_id: &str,
+        goal: String, model_pool: ExecutionModelPool, requested_model_pool: Option<ExecutionModelPool>,
+        explicit_steps: Option<Vec<nomifun_api_types::PlannedExecutionStep>>,
+        source: Option<AgentExecutionSource>,
+    ) -> Result<(AgentExecutionDetail, Vec<String>), AppError> {
         canonical_id::<ConversationId>("conversation_id", conversation_id)?;
         let goal = non_empty("goal", goal)?;
         if explicit_steps.as_ref().is_some_and(Vec::is_empty) {
@@ -1216,6 +1226,7 @@ impl AgentExecutionEngine {
                     Some(&caller_attempt_id),
                     json!({
                         "change":"delegated_steps_appended",
+                        "delegation_source":source,
                     }),
                 ),
             )
@@ -2488,6 +2499,7 @@ impl AgentExecutionEngine {
             .await?
             .filter(agent_outcome_can_complete)
             .ok_or_else(|| AppError::BadRequest("Agent conversation has no successful canonical public delivery to adopt".to_owned()))?;
+        let canonical_terminal = outcome.canonical_terminal.clone();
         let output = outcome.text.filter(|text| !text.trim().is_empty()).unwrap_or_else(|| {
             format!("Verified output files:\n{}", outcome.output_files.join("\n"))
         });
@@ -2512,7 +2524,7 @@ impl AgentExecutionEngine {
                     AgentExecutionEventKind::AttemptChanged,
                     Some(step_id),
                     None,
-                    json!({"change":"output_adopted"}),
+                    crate::delivery::with_terminal_reference(json!({"change":"output_adopted"}),canonical_terminal),
                 ),
             )
             .await?;
@@ -3417,7 +3429,7 @@ impl AgentExecutionEngine {
             })?;
             let actor = AgentExecutionActor::agent(agent_session_id, Some(attempt_id));
             return self
-                .delegate_from_attempt(
+                .delegate_from_attempt_with_source(
                     owner_id,
                     &actor,
                     agent_session_id,
@@ -3425,6 +3437,7 @@ impl AgentExecutionEngine {
                     ExecutionModelPool::Automatic,
                     None,
                     steps,
+                    Some(source.clone()),
                 )
                 .await
                 .map(|(detail, _)| detail.execution);
