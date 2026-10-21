@@ -1,0 +1,4 @@
+# Staged sidecars are build outputs. Tauri's recursive dev watcher does not
+# apply binaries/.gitignore to file events; watching them restarts the runner
+# while it is preparing the native app. Worker sources are built by run-dev.
+/binaries/

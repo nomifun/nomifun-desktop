@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Build the independent worker workspace and stage Tauri's exact sidecar name.
 import { spawn, spawnSync } from 'node:child_process';
-import { chmod, copyFile, mkdir } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { chmod, copyFile, mkdir, stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -31,7 +33,22 @@ export function cargoWorkerArtifact(line) {
     && value.target.kind?.includes('bin') && typeof value.executable === 'string' ? value.executable : null;
 }
 
-export async function buildComputerWorker({ root = ROOT, target, profile = 'release', environment = process.env } = {}, { spawnCargo = spawn, stage = copyFile, createDirectory = mkdir, executableMode = chmod } = {}) {
+async function inspectStagedWorker(artifact, destination) {
+  let staged;
+  try { staged = await stat(destination); }
+  catch (error) { if (error.code === 'ENOENT') return { matches: false }; throw error; }
+  const source = await stat(artifact);
+  if (!staged.isFile() || staged.size !== source.size) return { matches: false };
+  const digest = async file => {
+    const hash = createHash('sha256');
+    for await (const bytes of createReadStream(file)) hash.update(bytes);
+    return hash.digest('hex');
+  };
+  const [sourceDigest, stagedDigest] = await Promise.all([digest(artifact), digest(destination)]);
+  return { matches: sourceDigest === stagedDigest, mode: staged.mode };
+}
+
+export async function buildComputerWorker({ root = ROOT, target, profile = 'release', environment = process.env } = {}, { spawnCargo = spawn, stage = copyFile, createDirectory = mkdir, executableMode = chmod, inspectStaged = inspectStagedWorker } = {}) {
   const plan = workerBuildPlan({ root, target, profile, environment });
   const child = spawnCargo('cargo', plan.args, { cwd: root, env: plan.environment, stdio: ['inherit', 'pipe', 'inherit'], windowsHide: true });
   const finished = new Promise((accept, reject) => {
@@ -50,9 +67,16 @@ export async function buildComputerWorker({ root = ROOT, target, profile = 'rele
   }
   await finished;
   if (!artifact) throw new Error('Cargo did not report the actual Computer worker executable');
-  await createDirectory(dirname(plan.destination), { recursive: true });
-  await stage(artifact, plan.destination);
-  if (!target.includes('-windows-')) await executableMode(plan.destination, 0o755);
+  const staged = await inspectStaged(artifact, plan.destination);
+  if (!staged.matches) {
+    await createDirectory(dirname(plan.destination), { recursive: true });
+    await stage(artifact, plan.destination);
+  }
+  // Tauri watches this sidecar and Cargo tracks its mtime as a build input.
+  // Preserve both content and metadata when a cached worker is already staged.
+  if (!target.includes('-windows-') && (!staged.matches || (staged.mode & 0o111) !== 0o111)) {
+    await executableMode(plan.destination, 0o755);
+  }
   return { binary: plan.destination, artifact, target, profile };
 }
 
