@@ -8,9 +8,10 @@ import { configService } from '@/common/config/configService';
 import type { GuidAgentSelectionPreference } from '@/common/config/configKeys';
 import type { AgentPresetLibraryResponse } from '@/common/types/agentPlatform';
 import {
-  filterConversationAgentPresets,
+  conversationAgentPresets,
   isConversationAgentTemplate,
 } from '@/renderer/components/agent/conversationAgentCatalog';
+import { agentPresetDisplayName } from '@/renderer/components/agent/agentPresetPresentation';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { SettingTwo } from '@icon-park/react';
 import { useId, useMemo, useState } from 'react';
@@ -64,10 +65,7 @@ export default function GuidDefaultAgentSetting({ library }: Props) {
       }), [library.official_templates, t]);
 
   const presetOptions = useMemo<DefaultAgentOption[]>(() =>
-    filterConversationAgentPresets(
-      library.user_presets,
-      library.active_bindings
-    )
+    conversationAgentPresets(library)
       .filter((preset) => Boolean(preset.current_stable_revision))
       .map((preset) => {
         const selection: GuidAgentSelection = {
@@ -77,9 +75,9 @@ export default function GuidDefaultAgentSetting({ library }: Props) {
         return {
           selection,
           value: selectionValue(selection),
-          label: preset.display_name,
+          label: agentPresetDisplayName(preset, t),
         };
-      }), [library.active_bindings, library.user_presets]);
+      }), [library, t]);
 
   const options = useMemo(
     () => [...templateOptions, ...presetOptions],

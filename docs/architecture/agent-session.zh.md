@@ -605,7 +605,7 @@ Computer 调用经 Kernel、Wave2 和 `nomifun-computer` 进入私有 worker。�
 
 App 共用的 Computer owner 公平串行调度各 Session。worker 协议代际由宿主为新进程产生，原生 session、snapshot 和 `element_token` 由私有 worker 与 Cua Driver 管理，不来自 canonical Observe 事件序号。宿主不保存 ref/截图消费缓存或观察授权，Store 不发布观察凭据。每次实际模型尝试的表面回执仅核对该次 schema 投影，不能代替 Kernel 权限，也不是观察或恢复账本。未知效果不自动重放。生命周期、模型分档与平台边界见[Computer Use](computer-use.zh.md)。
 
-已保存官方预设不会因发布 seed 被覆盖。owner-scoped `GET /api/agent-presets/{preset_id}/recommended-capabilities` 只返回缺失能力、Action 和 Package Skill 的合并草稿与差异；它保留人格、指令、模型、Runtime 配置、已有扩展及 Skill 固定版本，不写入新 Revision。界面先展示新增项，再通过现有 SaveRevision 的 `expected_current_revision` CAS 保存；未保存编辑不能被补齐覆盖。保存不改变现有 Session；伙伴显式“应用最新设定”经空闲、已结算边界复用 canonical Agent switch，在同一 Session 操作围栏与 binding version 校验内准备并提交当前 owner 已保存的配置。直接 Session preview/apply 还须验证此前预览的精确目标 Snapshot。两者均保留 Session 与旧历史，不增加配置升级或绑定账本。
+已保存官方预设不会因发布 seed 被覆盖。owner-scoped `GET /api/agent-presets/{preset_id}/recommended-capabilities` 只返回缺失能力、Action 和 Package Skill 的合并草稿与差异；它保留人格、指令、模型、Runtime 配置、已有扩展及 Skill 固定版本，不写入新 Revision。界面先展示新增项，再通过现有 SaveRevision 的 `expected_current_revision` CAS 保存；未保存编辑不能被补齐覆盖。保存不改变现有 Session；伙伴显式“应用最新设定”经空闲、已结算边界复用 canonical Agent switch，在同一 Session 操作围栏与 binding version 校验内，按明确选择的 Template 准备当前发布定义，或按 Preset 准备其保存配置。直接 Session preview/apply 还须验证此前预览的精确目标 Snapshot。两者均保留 Session 与旧历史，不增加配置升级或绑定账本。
 
 `knowledge.management` 使用现有知识领域服务提供列表、详情、托管建库、元数据与 URL 来源更新、删除。建库后来源或文档失败返回已创建的真实 ID 与各项状态，重试针对该库处理；新库必须在空闲边界通过现有知识选择器挂载，不能修改当前 Turn 的冻结绑定。`session.management` 提供 canonical 会话查询和创建、向其他空闲普通本地会话发送输入、取消精确 Turn，以及真实 PTY 和关联 AgentExecution 的管理。输入沿用原 canonical 幂等与 binding/context 围栏；终端写入、重启和停止核验 owner、行版本与 PTY epoch；协作修改继续要求当前 lead/attempt 关系及精确版本。查询结果和终端输出是数据，不授予目标会话权限，不重放未知效果，也不新增效果账本。
 
@@ -830,9 +830,15 @@ SSH 会话的主机身份直接来自当前 `agent_snapshot.canonical_binding.ty
 `extra.ssh_host_id` 回填或镜像资源身份；资源切换后的展示和链路状态必须匹配当前 binding。
 远程命令的目录和环境属于真实长驻 shell，由 SSH owner 管理，不是另一份 Session 内容或环境台账。
 
-官方 Agent 为每个 owner 保留稳定可编辑的 Preset 身份，保存通过同一不可变 Revision 链；发布 seed 只初始化尚未保存的配置，不覆盖用户修改。官方产品入口准备会话时读取该 owner 已保存的配置，模型或扩展变体仍由现有 Revision/Snapshot 路径冻结。官方身份由 host 验证的 owner、来源与稳定模板 key 确认，不以当前 seed 或最新可变配置的 payload 相等性判断历史身份。
+新建入口明确区分官方模板与已保存 Agent。`kind:template` 始终从当前发布 seed 和现役能力目录准备定义，不读取 owner 已保存的官方 Revision，也不从隐藏配置继承权限、指令或模型默认值；准入校验、资源预检和实际编译使用同一来源。模型取本次明确选择或现役安装默认，能力随当前发布定义更新。
 
-Agent 工作台的默认模型是可空的预设配置。选择器读取已启用的 Chat 模型目录，以供应商与模型身份向 Host 请求确切路由；解析候选不保存 Revision，也不改变 Session。选择或清空默认值通过原有 SaveRevision 与 CAS 保存，不把安装默认模型自动写入明确提交的空配置。新建会话页从所选 Agent 的同一已保存文档读取默认模型，先通过现役预设文档边界还原接口省略的合法空字段，不把空模型误判为能力读取失败；仅用于当前选择，不写入安装默认值，用户随后明确选择的模型优先。真正的读取失败提供显式只读重试，等待期间继续阻止发送，不借模板或缓存补造已保存权限。创建会话时，界面中选定的模型由既有 Session 模型派生路径冻结；执行模型要求不因作者配置可空而放宽，已有 Revision、Snapshot 与会话历史不改写。
+每个 owner 原有稳定可编辑的官方 Preset、个人 Preset 及不可变 Revision 仍保留。`kind:preset` 使用该明确身份的保存配置；工作台“开始对话”传递 Preset 身份，选择器将官方来源的保存定制与当前模板分别展示。没有 Revision 的官方编辑项首次明确使用时可准备当前发布基线，不增加先保存的前置步骤。保存不覆盖发布 seed，不改变已有 Session；失效的明确保存配置仍须由用户在工作台检查，不能靠模板替代其权限。
+
+隐藏的 `session_only` 配置只缓存宿主派生的编译结果，公开 authoring 保存接口不得编辑。复用须证明请求 payload 与当前完整执行合同等值；失效候选不演进、不改历史，直接从当前权威定义新编译。存储 I/O 与当前定义错误继续返回失败，缓存不能兜底。内部模板准备固定返回的精确 Revision/Snapshot，不通过可变 latest 指针再次选择权限。现有会话仍消费原冻结 binding；官方谱系只用于可信呈现，不证明它选择的是当前模板，界面也不能仅凭 `official_template_key` 跳过显式 Agent 切换。UI/API 契约版本为45。
+
+已保存 SSH 主机的启动入口由 Host 从当前 `chat.minimal` 与确切 `ssh/exec` 定义准备独立隐藏配置，经真实主机归属、资源和 canonical 新建围栏创建会话。客户端只提交主机身份与模型，不编辑模板缓存，不创建可见个人 Agent，也不使普通资源选择自动增加 SSH 权限。
+
+Agent 工作台的默认模型是可空的预设配置。选择器读取已启用的 Chat 模型目录，以供应商与模型身份向 Host 请求确切路由；解析候选不保存 Revision，也不改变 Session。选择或清空默认值通过原有 SaveRevision 与 CAS 保存，不把安装默认模型自动写入明确提交的空配置。新建会话明确选择 Preset 时，从该保存文档读取默认模型与资源需求，合法空字段不会被误判为读取失败；选择官方 Template 时只读发布 seed 的能力，使用本次模型或安装默认，不读取同名保存定制。默认值仅作用于当前选择，用户随后明确选择的模型优先。真正的保存配置读取失败提供显式只读重试，等待期间继续阻止该选择发送，不借模板或缓存补造其权限。创建时仍由原 Session 模型派生路径冻结选定模型，已有 Revision、Snapshot 与会话历史不改写。
 
 内置 Agent 的会话名称来自 host 验证的 `official_template_key` 与统一翻译；创作入口统一显示“创作”。隐藏配置保留 host 写入的稳定模板 key，个人副本保持独立身份。浏览器创作草稿只保存媒体输入，不镜像 Agent 身份或名称；名称修正不改写不可变 Revision、Snapshot、Session binding 或事件历史。
 

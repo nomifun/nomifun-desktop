@@ -15,7 +15,7 @@ import { ipcBridge } from '@/common';
 import type { ICronJob, ICronSchedule } from '@/common/adapter/ipcBridge';
 import { parseCronJobId } from '@/common/types/ids';
 import * as agents from '@/renderer/components/agent/useConversationAgentCatalog';
-import * as capabilities from '@/renderer/components/agent/useAgentPresetCapabilities';
+import * as capabilities from '@/renderer/components/agent/useAgentLaunchCapabilities';
 import * as providers from '@/renderer/hooks/agent/useModelProviderList';
 import { configService } from '@/common/config/configService';
 import { MemoryRouter } from 'react-router-dom';
@@ -77,10 +77,10 @@ function fixture() {
     library: { official_templates: templates, official_presets: {}, user_presets: [], active_bindings: [], fresh_start: { data_generation: 6, legacy_data_imported: false, official_template_count: 2, user_preset_count: 0 } },
     presets: [], draftPresets: [], officialTemplates: templates, isLoading: false, error: undefined, refresh: async () => {},
   });
-  const capabilityState = spyOn(capabilities, 'useAgentPresetCapabilities').mockReturnValue({
+  const capabilityState = spyOn(capabilities, 'useAgentLaunchCapabilities').mockReturnValue({
     capabilityIds: new Set(), actionIds: new Set(), requiredResourceKinds: new Set(),
     defaultModel: null, isLoading: false, error: undefined, refresh: () => {},
-    idmm: {} as ReturnType<typeof capabilities.useAgentPresetCapabilities>['idmm'],
+    idmm: {} as ReturnType<typeof capabilities.useAgentLaunchCapabilities>['idmm'],
   });
   const defaults = spyOn(configService, 'get').mockImplementation(((key: Parameters<typeof configService.get>[0]) => key === 'nomi.defaultModel' ? { provider_id: providerId, model: 'configured-model' } : undefined) as typeof configService.get);
   const providerList = spyOn(providers, 'useProvidersQuery').mockReturnValue({ data: [provider], isLoading: false, error: undefined, mutate: async () => [provider] } as ReturnType<typeof providers.useProvidersQuery>);
@@ -272,7 +272,7 @@ describe('workbench Agent task creation', () => {
     await act(async () => { f.requests[0]!.resolve(job); });
   });
 
-  test('explicitly reselecting the current Agent requests its current saved revision', async () => {
+  test('explicitly reselecting the current Template requests its current published definition', async () => {
     const f = fixture(); const job = cronJob(dailySchedule); const v = await f.mount(job);
     await act(async () => { fireEvent.click(v.getByTestId('agent-selector')); });
     const menu = within(document.body).getByRole('dialog', { name: guid.agentEntries.choose });

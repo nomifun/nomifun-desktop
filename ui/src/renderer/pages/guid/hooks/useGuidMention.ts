@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
+import { agentPresetDisplayName } from '@/renderer/components/agent/agentPresetPresentation';
 
 export type GuidMentionResult = {
   mentionQuery: string | null;
@@ -79,7 +80,7 @@ export const useGuidMention = ({
         };
       }),
       ...presets.map((preset) => {
-        const label = preset.display_name;
+        const label = agentPresetDisplayName(preset, t);
         const normalizedLabel = label.toLowerCase();
         const presetSelection: GuidAgentSelection = {
           kind: 'preset',
@@ -137,7 +138,7 @@ export const useGuidMention = ({
 
   const selectedAgentLabel = selection.kind === 'template'
     ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`)
-    : selectedPreset?.display_name ?? t('guid.agentEntries.choose');
+    : selectedPreset ? agentPresetDisplayName(selectedPreset, t) : t('guid.agentEntries.choose');
   const selectedKey = selectionKey(selection);
   const mentionMenuActiveOption =
     filteredMentionOptions[mentionActiveIndex] || filteredMentionOptions[0];

@@ -63,7 +63,7 @@ import { useGuidInput } from './hooks/useGuidInput';
 import { GuidDraftScopeContext } from './hooks/useGuidDraftState';
 import { useGuidMention } from './hooks/useGuidMention';
 import { useGuidModelSelection } from './hooks/useGuidModelSelection';
-import { useAgentPresetCapabilities } from '@/renderer/components/agent/useAgentPresetCapabilities';
+import { useAgentLaunchCapabilities } from '@/renderer/components/agent/useAgentLaunchCapabilities';
 import { useGuidSend, type GuidSendDeps } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
 import type { GuidAgentSelection } from './types';
@@ -72,7 +72,6 @@ import CreationControls, { CreationModelSelector } from '@/renderer/creation/Cre
 import { CreationComposerContext } from '@/renderer/creation/CreationComposerContext';
 import { useGuidCreation } from '@/renderer/creation/useGuidCreation';
 import type { OfficialPresetKey } from '@/common/types/agentPlatform';
-import { createDefaultIdmmConfig } from '@/common/types/idmm';
 import type { ModelTechnicalCapability } from '@/common/config/storage';
 import {
   capabilityOf,
@@ -157,21 +156,12 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
     guidInput.setFiles([]);
     guidInput.setDir('');
   }, [guidInput.setInput, guidInput.setFiles, guidInput.setDir]);
-  const selectedCapabilityPreset = agentSelection.selectedOfficialPreset ?? agentSelection.selectedPreset;
+  const selectedCapabilityPreset = agentSelection.selectedPreset;
   const selectedCapabilityRevisionDigest = selectedCapabilityPreset?.current_stable_revision?.revision_digest;
-  const presetCapabilities = useAgentPresetCapabilities(
-    selectedCapabilityPreset?.preset_id,
-    selectedCapabilityRevisionDigest,
-  );
-  // A missing owner configuration can occur before official initialization.
-  // Once it exists, its saved document is the sole source for launch preflight.
-  const officialSeedFallback = agentSelection.selectedTemplate && !agentSelection.selectedOfficialPreset
-    ? agentSelection.selectedTemplate.seed
-    : undefined;
+  const presetCapabilities = useAgentLaunchCapabilities(selectedCapabilityPreset, agentSelection.selectedTemplate);
 
   const presetResourceResolutionReady = agentSelection.selection.kind === 'template'
     ? Boolean(agentSelection.selectedTemplate)
-      && (Boolean(officialSeedFallback) || (!presetCapabilities.isLoading && !presetCapabilities.error))
     : !presetCapabilities.isLoading && !presetCapabilities.error;
   const selectedAgentModelKey = selectedCapabilityPreset
     ? `${selectedCapabilityPreset.preset_id}:${selectedCapabilityRevisionDigest ?? 'draft'}`
@@ -184,19 +174,9 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
     defaultModel: presetCapabilities.defaultModel,
   });
   const collaboration = useCollaborationDraft(modelSelection.current_model);
-  const presetResourceKinds = officialSeedFallback
-    ? new Set(officialSeedFallback.required_resource_kinds)
-    : presetCapabilities.requiredResourceKinds;
-  const presetCapabilityIds = officialSeedFallback
-      ? new Set(officialSeedFallback.enabled_capabilities.map((selection) => selection.capability.id))
-    : presetCapabilities.capabilityIds;
-  const presetActionIds = officialSeedFallback
-    ? new Set(
-        officialSeedFallback.enabled_capabilities.flatMap(
-          (selection) => selection.action_allowlist ?? []
-        )
-      )
-    : presetCapabilities.actionIds;
+  const presetResourceKinds = presetCapabilities.requiredResourceKinds;
+  const presetCapabilityIds = presetCapabilities.capabilityIds;
+  const presetActionIds = presetCapabilities.actionIds;
   const creation = useGuidCreation(agentSelection, guidInput.input, guidInput.files, guidInput.dir, clearSentInput, {
     config: collaboration.config, model: modelSelection.current_model, ready: collaboration.ready,
   }, { requiredResourceKinds: presetResourceKinds, actionIds: presetActionIds, ready: presetResourceResolutionReady }, !productEntry);
@@ -336,13 +316,12 @@ const GuidPage: React.FC<{ productEntry?: GuidProductEntry }> = ({ productEntry 
     const sourceKey = `${location.key}:${selectedAgentResourceKey}:${selectedCapabilityRevisionDigest ?? 'draft'}`;
     if (appliedIdmmDefaultRef.current === sourceKey) return;
     advancedConfig.setIdmmDefault(
-      officialSeedFallback ? createDefaultIdmmConfig() : presetCapabilities.idmm
+      presetCapabilities.idmm
     );
     appliedIdmmDefaultRef.current = sourceKey;
   }, [
     productEntry,
     advancedConfig.setIdmmDefault,
-    officialSeedFallback,
     location.key,
     presetCapabilities.idmm,
     presetResourceResolutionReady,

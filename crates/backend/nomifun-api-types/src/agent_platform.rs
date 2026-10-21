@@ -489,9 +489,10 @@ pub struct CreateAgentPresetRequest {
 pub struct CreateAgentPresetFromTemplateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<AgentChatModelSelectionDto>,
-    /// Prepare/reuse the owner's editable official Agent for direct launch.
-    /// Model selections derive hidden immutable variants. False creates a
-    /// personal Agent from the bundled baseline in the library.
+    /// Prepare/reuse the current released template for direct launch, without
+    /// reading or changing the owner's saved official configuration. Model
+    /// selections belong to hidden immutable execution configurations. False
+    /// creates a personal Agent from the released baseline in the library.
     /// This field is deliberately required: silently defaulting a missing field
     /// to false turns an ordinary launch into a persistent personal Agent.
     pub reuse_existing: bool,
@@ -940,6 +941,16 @@ pub struct CreateAgentSessionRequestDto {
     pub workspace: Option<String>,
 }
 
+/// Explicit saved-host launch. The Host prepares its current minimal SSH
+/// configuration and validates the selected resource; callers supply no grants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSshAgentSessionRequestDto {
+    pub ssh_host_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<AgentChatModelSelectionDto>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionCapabilitySelectionDto {
@@ -1001,10 +1012,14 @@ pub struct AgentChatModelSelectionDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentSwitchSelectionDto {
+    /// The owner's explicitly saved configuration, including saved official
+    /// customizations. A released template never replaces this authority.
     Preset {
         #[serde(deserialize_with = "crate::serde_util::deserialize_preset_id")]
         preset_id: String,
     },
+    /// The current released definition. Saved personal defaults and internal
+    /// execution caches are not sources of template authority.
     Template {
         template_key: String,
     },

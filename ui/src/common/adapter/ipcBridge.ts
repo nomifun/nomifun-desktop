@@ -182,6 +182,7 @@ import type {
   CreateAgentPresetFromTemplateRequest,
   CreateAgentPresetRequest,
   CreateAgentSessionRequest,
+  CreateSshAgentSessionRequest,
   CreateAgentSessionResponse,
   CreateAgentSessionTurnRequest,
   CreateAgentSessionTurnResponse,
@@ -750,6 +751,9 @@ export const agentPlatform = {
   sessions: {
     create: httpPost<CreateAgentSessionResponse, CreateAgentSessionRequest>(
       '/api/agent-sessions'
+    ),
+    createSsh: httpPost<CreateAgentSessionResponse, CreateSshAgentSessionRequest>(
+      '/api/agent-sessions/ssh'
     ),
     getCapabilitySelection: httpGet<AgentSessionCapabilitySelectionState, { agent_session_id: string }>(
       (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/capability-selection`

@@ -55,6 +55,21 @@ const renderSelector = (props: Partial<AgentSelectorProps> = {}) => {
 afterEach(cleanup);
 
 describe('Guid Agent selector', () => {
+  test('published Template and its saved customization remain separate choices', async () => {
+    const customization = { ...saved, source: 'official' as const, display_name: 'assistant.general' };
+    const savedName = guid.agentEntries.savedCustomization.replace('{{name}}', agentSettings.template.assistant.general.name);
+    const { page, open, selections } = renderSelector({ presets: [customization], draftPresets: [],
+      selection: { kind: 'template', templateKey: 'assistant.general' } });
+    await open();
+    fireEvent.click(page.getByRole('button', { name: savedName }));
+    expect(selections).toEqual([{ kind: 'preset', presetId: customization.preset_id }]);
+    expect(page.getByTestId('agent-selector').textContent).toBe(savedName);
+    await open();
+    const published = within(page.getByRole('group', { name: guid.agentEntries.fromTemplate }))
+      .getByRole('button', { name: agentSettings.template.assistant.general.name });
+    fireEvent.click(published);
+    expect(selections[1]).toEqual({ kind: 'template', templateKey: 'assistant.general' });
+  });
   test('keeps Agent switching feedback inside the selector', () => {
     const { page } = renderSelector({
       switching: true,

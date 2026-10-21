@@ -1,0 +1,74 @@
+.page {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  overflow-y: auto;
+  padding: 24px 32px;
+}
+
+.content {
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.totalCount {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.search {
+  width: 208px;
+  border-radius: 6px;
+}
+
+.createButton:global(.arco-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  gap: 6px;
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+.actionIcon {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
+.settingsButton:global(.arco-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  min-width: 30px;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--color-text-1);
+}
+
+.settingsMenuItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 264px);
+  align-items: start;
+  gap: 10px;
+}
+
+.filterEmpty {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--color-text-3);
+  font-size: 13px;
+}

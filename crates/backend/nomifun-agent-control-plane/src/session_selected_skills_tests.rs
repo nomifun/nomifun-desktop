@@ -325,12 +325,11 @@ async fn companion_materialization_keeps_saved_explicit_skill_before_global_defa
     assert!(source_snapshot.content.skill_locks.iter().any(|lock|
         matches!(lock, ResolvedSkillLock::Library { skill, selected: true, .. } if skill.name == "desktop-code-guide")));
 
+    let prepared = control.prepare_preset_base_binding(
+        &owner(), &authored.preset_revision_ref.preset_id, None,
+    ).await.unwrap();
     let robot = control
-        .resolve_companion_session_binding_with_model(
-            &owner(),
-            &authored.preset_revision_ref.preset_id,
-            None,
-        )
+        .resolve_companion_session_capabilities_binding(&owner(), &prepared)
         .await
         .unwrap();
     let (_, _, snapshot) = control
@@ -386,4 +385,36 @@ async fn companion_materialization_keeps_saved_explicit_skill_before_global_defa
             .unwrap(),
         source_snapshot
     );
+}
+
+#[tokio::test]
+async fn prepared_product_bases_do_not_promote_global_default_skills_into_companion_authority() {
+    let store = Arc::new(InMemoryControlPlaneStore::new());
+    let control = template_control_plane(store, OfficialPresetKey::CompanionDefault, false)
+        .with_session_capabilities_resolver(Arc::new(FullLibrary));
+    let personal = control.create_from_template(
+        &owner(), "companion.default", official_launch_request(false),
+    ).await.unwrap();
+    let untouched = control.library(&owner()).await.unwrap().official_presets
+        [&nomifun_api_types::OfficialPresetKeyDto::CompanionDefault].preset_id.clone();
+    let bases = [
+        control.prepare_template_base_binding(&owner(), "companion.default", None).await.unwrap(),
+        control.prepare_preset_base_binding(&owner(), &untouched, None).await.unwrap(),
+        control.prepare_preset_base_binding(&owner(), &personal.preset.preset_id, None).await.unwrap(),
+    ];
+    for base in bases {
+        let restricted = control.resolve_companion_session_capabilities_binding(&owner(), &base).await.unwrap();
+        let (_, _, snapshot) = control.saved_binding_artifacts(&owner(), &restricted).await.unwrap();
+        assert!(snapshot.content.skill_locks.is_empty(),
+            "a nonempty installation default does not become the product author's selected data");
+        assert!(!serde_json::to_string(&snapshot.content).unwrap().contains(ROBOT_GUIDE));
+        assert!(!serde_json::to_string(&snapshot.content).unwrap().contains(DESKTOP_SECRET));
+    }
+    let ordinary = control.prepare_preset_session_binding(&owner(), &personal.preset.preset_id, None).await.unwrap();
+    let (_, _, snapshot) = control.saved_binding_artifacts(&owner(), &ordinary).await.unwrap();
+    assert_eq!(snapshot.content.skill_locks.len(), 3,
+        "the same nonempty global directory remains available to ordinary Sessions");
+    assert!(snapshot.content.skill_locks.iter().any(|lock|
+        matches!(lock, ResolvedSkillLock::Library { skill, selected: true, .. } if skill.name == ROBOT_GUIDE)));
+    assert!(skill_bytes(&snapshot) > 100 * 1024);
 }

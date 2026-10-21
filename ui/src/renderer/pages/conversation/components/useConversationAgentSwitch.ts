@@ -39,14 +39,12 @@ const services: AgentSwitchServices = {
 
 export const useConversationAgentSwitch = ({
   sessionId,
-  currentSelection,
   processing,
   switchingRef,
   configurationChangingRef,
   reasoningUpdatingRef,
 }: {
   sessionId: ConversationId;
-  currentSelection: GuidAgentSelection;
   processing: boolean;
   switchingRef: MutableRefObject<boolean>;
   configurationChangingRef: MutableRefObject<boolean>;
@@ -85,11 +83,6 @@ export const useConversationAgentSwitch = ({
     }
     if (configurationChangingRef.current || reasoningUpdatingRef.current
       || (switchingRef.current && requestRef.current?.sessionId === sessionId)) return;
-    if ((selection.kind === 'preset' && currentSelection.kind === 'preset'
-      && selection.presetId === currentSelection.presetId)
-      || (selection.kind === 'template' && currentSelection.kind === 'template'
-      && selection.templateKey === currentSelection.templateKey)) return;
-
     const request = { sessionId, idempotencyKey: uuidv7(), generation: generationRef.current };
     requestRef.current = request;
     switchingRef.current = true;
@@ -141,7 +134,7 @@ export const useConversationAgentSwitch = ({
         setPendingSessionId(null);
       }
     }
-  }, [configurationChangingRef, currentSelection, operations, processing, reasoningUpdatingRef, sessionId, switchingRef, t]);
+  }, [configurationChangingRef, operations, processing, reasoningUpdatingRef, sessionId, switchingRef, t]);
 
   return { switching: pendingSessionId === sessionId && requestRef.current?.generation === generationRef.current, switchAgent };
 };

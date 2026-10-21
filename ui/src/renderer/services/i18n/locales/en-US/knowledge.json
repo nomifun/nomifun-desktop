@@ -31,6 +31,9 @@
   "backToList": "Back to knowledge bases",
   "opening": "Opening knowledge base…",
   "openingNamed": "Opening “{{name}}”…",
+  "listDescription": "Manage documents and web sources for your Agent sessions.",
+  "listCount": "{{count}} knowledge bases",
+  "filteredListCount": "{{visible}} / {{total}} knowledge bases",
   "card": {
     "actionEdit": "Edit",
     "actionMore": "More",

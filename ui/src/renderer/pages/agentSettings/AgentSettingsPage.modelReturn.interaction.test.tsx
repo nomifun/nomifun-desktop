@@ -172,11 +172,11 @@ async function mount(error?: unknown, initialEditor?: AgentPresetEditorResponse,
   return { ...view, create, save, turn, states, library, getEditor, officialEditors, officialId };
 }
 
-test('starting a conversation from an official Agent preserves its template selection key', async () => {
+test('starting a conversation from a saved official customization preserves its exact preset', async () => {
   const v = await mount(undefined, undefined, { entry: '/agent?template=coding.codex' });
   fireEvent.click(v.getByRole('button', { name: en.actions.startConversation }));
   await v.findByRole('heading', { name: 'New conversation' });
-  expect(v.states.at(-1)).toEqual({ selectedAgentTemplateKey: 'coding.codex' });
+  expect(v.states.at(-1)).toEqual({ selectedAgentPresetId: v.officialId('coding.codex') });
   expect(v.create).not.toHaveBeenCalled();
   expect(v.turn).not.toHaveBeenCalled();
 });

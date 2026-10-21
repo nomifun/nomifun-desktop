@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import { isBackendHttpError, redactSensitiveText, type BackendHttpError } from '@/common/adapter/httpBridge';
 import { parseError } from '@/common/utils';
 import type { TFunction } from 'i18next';
 import { conversationConfigurationErrorCode } from './conversationConfigurationError';
@@ -104,6 +104,24 @@ const getConversationConfigurationErrorKey = (payload: EmbeddedBackendErrorPaylo
   return code ? `conversation.agentError.codes.${code}.body` : undefined;
 };
 
+/** Only the bridge's redacted message and bounded typed diagnostics enter launch errors. */
+export const getAgentPreparationDiagnostics = (error: BackendHttpError): { codes: string[]; reasons: string[] } => {
+  const codes = error.code ? [error.code] : [];
+  const reasons = [[error.code ? `[${error.code}]` : '', error.backendMessage].filter(Boolean).join(' ')];
+  const diagnostics = (error.details as { diagnostics?: unknown[] } | undefined)?.diagnostics;
+  if (Array.isArray(diagnostics)) {
+    for (const entry of diagnostics.slice(0, 5)) {
+      if (!entry || typeof entry !== 'object') continue;
+      const diagnostic = entry as { code?: unknown; subject?: unknown; message?: unknown };
+      if (typeof diagnostic.code === 'string') codes.push(diagnostic.code);
+      reasons.push([diagnostic.code, diagnostic.subject, diagnostic.message]
+        .filter((value): value is string => typeof value === 'string' && Boolean(value.trim()))
+        .join(': '));
+    }
+  }
+  return { codes, reasons };
+};
+
 const getWorkspacePathFromErrorDetails = (error: unknown): string | undefined => {
   const payload = getWorkspacePathErrorPayload(error);
   return getWorkspacePathFromDetails(payload?.details);
@@ -141,22 +159,23 @@ const normalizeConversationRuntimeWorkspaceErrorCode = (
 export const getConversationCreateErrorMessage = (error: unknown, t: TFunction): string => {
   const normalizedCode = normalizeConversationCreateErrorCode(error);
   const payload = getWorkspacePathErrorPayload(error);
-  if (payload?.code === 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE') return t('conversation.agentError.codes.NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE.body');
-  const configurationKey = getConversationConfigurationErrorKey(payload);
-  if (configurationKey) {
-    return t(configurationKey);
-  }
+  const configurationCode = conversationConfigurationErrorCode(payload);
   const workspacePath = getWorkspacePathFromErrorDetails(error);
   const rawMessage = payload?.error || parseError(error) || t('conversation.createFailed');
-
-  if (normalizedCode && workspacePath) {
-    return t(`conversation.createError.pathVariants.${normalizedCode}`, {
-      workspacePath,
-      defaultValue: rawMessage,
-    });
-  }
-
-  return rawMessage;
+  // Preparation has no Session to replace. The hint describes configuration,
+  // while the original safe code and diagnostic remain available to investigate.
+  const hint = configurationCode ? t('guid.agentEntries.contractChanged')
+    : payload?.code === 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE'
+      ? t('conversation.agentError.codes.NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE.body')
+      : normalizedCode && workspacePath ? t(`conversation.createError.pathVariants.${normalizedCode}`, {
+        workspacePath, defaultValue: rawMessage,
+      }) : undefined;
+  const reasons = isBackendHttpError(error) ? getAgentPreparationDiagnostics(error).reasons : [
+    configurationCode
+      ? redactSensitiveText([payload?.code ? `[${payload.code}]` : '', rawMessage].filter(Boolean).join(' '))
+      : rawMessage,
+  ];
+  return [...new Set([hint, ...reasons].filter(Boolean))].join('\n');
 };
 
 export const getConversationRuntimeWorkspaceErrorMessage = (error: unknown, t: TFunction): string => {

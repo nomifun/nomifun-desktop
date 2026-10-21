@@ -8,7 +8,7 @@ import { useRef, type ReactNode } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import type { ApplyAgentSessionSwitchResponse, OfficialPresetTemplate, PreviewAgentSessionSwitchResponse } from '@/common/types/agentPlatform';
-import { parseConversationId } from '@/common/types/ids';
+import { parseAgentPresetId, parseConversationId } from '@/common/types/ids';
 import conversation from '@/renderer/services/i18n/locales/en-US/conversation.json';
 import agentSettings from '@/renderer/services/i18n/locales/en-US/agentSettings.json';
 import guid from '@/renderer/services/i18n/locales/en-US/guid.json';
@@ -48,16 +48,29 @@ const operations = (overrides: Partial<Operations> = {}) => ({
   refresh: mock(async () => {}),
   ...overrides,
 });
-const mount = (ports: Operations, processing = false) => renderHook(({ sessionId, selection }) => {
+const mount = (ports: Operations, processing = false) => renderHook(({ sessionId }) => {
   const switchingRef = useRef(false);
   const configurationChangingRef = useRef(false);
   const reasoningUpdatingRef = useRef(false);
-  return useConversationAgentSwitch({ sessionId, currentSelection: selection, processing, switchingRef, configurationChangingRef, reasoningUpdatingRef }, ports);
+  return useConversationAgentSwitch({ sessionId, processing, switchingRef, configurationChangingRef, reasoningUpdatingRef }, ports);
 }, { initialProps: { sessionId: firstSession, selection: minimal }, wrapper });
 
 afterEach(() => { cleanup(); mock.restore(); });
 
 describe('current conversation Agent switching', () => {
+  test('an explicit reselection is resolved by the Host even when the authoring identity is unchanged', async () => {
+    const ports = operations();
+    spyOn(Message, 'success').mockImplementation(() => () => {});
+    const hook = mount(ports);
+    await act(async () => { await hook.result.current.switchAgent(minimal); });
+    const customization: GuidAgentSelection = { kind: 'preset', presetId: parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000104') };
+    await act(async () => { await hook.result.current.switchAgent(customization); });
+    await act(async () => { await hook.result.current.switchAgent(customization); });
+    expect(ports.preview).toHaveBeenCalledTimes(3);
+    expect(ports.apply).toHaveBeenCalledTimes(3);
+    expect(ports.preview).toHaveBeenLastCalledWith(firstSession, { kind: 'preset', preset_id: customization.presetId });
+  });
+
   test('selecting an Agent starts the switch immediately and keeps the input draft mounted', async () => {
     const pending = deferred<PreviewAgentSessionSwitchResponse>();
     const ports = operations({ preview: mock(() => pending.promise) });
@@ -68,7 +81,7 @@ describe('current conversation Agent switching', () => {
       const configurationChangingRef = useRef(false);
       const reasoningUpdatingRef = useRef(false);
       const switcher = useConversationAgentSwitch({
-        sessionId: firstSession, currentSelection: minimal, processing: false,
+        sessionId: firstSession, processing: false,
         switchingRef, configurationChangingRef, reasoningUpdatingRef,
       }, ports);
       return <>
@@ -218,7 +231,7 @@ describe('current conversation Agent switching', () => {
     expect(ports.apply).toHaveBeenCalledTimes(0);
   });
 
-  test('waits for model and reasoning changes and skips the already selected Agent', async () => {
+  test('waits for model and reasoning changes before resolving an explicit Agent choice', async () => {
     const ports = operations();
     spyOn(Message, 'success').mockImplementation(() => () => {});
     const hook = renderHook(() => {
@@ -226,7 +239,7 @@ describe('current conversation Agent switching', () => {
       const configurationChangingRef = useRef(true);
       const reasoningUpdatingRef = useRef(false);
       const switcher = useConversationAgentSwitch({
-        sessionId: firstSession, currentSelection: minimal, processing: false,
+        sessionId: firstSession, processing: false,
         switchingRef, configurationChangingRef, reasoningUpdatingRef,
       }, ports);
       return { ...switcher, configurationChangingRef, reasoningUpdatingRef };
@@ -239,8 +252,8 @@ describe('current conversation Agent switching', () => {
     expect(ports.preview).toHaveBeenCalledTimes(0);
     hook.result.current.reasoningUpdatingRef.current = false;
     await act(async () => { await hook.result.current.switchAgent(minimal); });
-    expect(ports.preview).toHaveBeenCalledTimes(0);
+    expect(ports.preview).toHaveBeenCalledTimes(1);
     await act(async () => { await hook.result.current.switchAgent(general); });
-    expect(ports.apply).toHaveBeenCalledTimes(1);
+    expect(ports.apply).toHaveBeenCalledTimes(2);
   });
 });

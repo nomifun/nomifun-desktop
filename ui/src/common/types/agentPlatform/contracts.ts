@@ -583,6 +583,12 @@ export interface CreateAgentSessionRequest {
   workspace?: string;
 }
 
+/** Host-owned saved SSH host launch; no client-authored Agent grants. */
+export interface CreateSshAgentSessionRequest {
+  ssh_host_id: string;
+  model?: { provider_id: string; model: string };
+}
+
 export interface UpdateAgentSessionReasoningResponse {
   reasoning_effort?: import('../reasoningEffort').SessionReasoningEffort;
 }

@@ -4,6 +4,7 @@
     "choose": "选择 Agent",
     "search": "搜索 Agent",
     "fromTemplate": "官方 Agent",
+    "savedCustomization": "{{name}}（已保存定制）",
     "showMorePersonal": "显示更多（{{count}}）",
     "showFewerPersonal": "收起自定义 Agent",
     "manage": "管理 Agent",
@@ -25,7 +26,7 @@
       "targetNotFound": "没有找到要配置的模型，已为你打开供应商与模型列表。"
     },
     "capabilitiesNeeded": "这个官方 Agent 所需的部分能力尚未接入当前版本。当前输入和选择已保留，你可以选择其他 Agent，或在管理中调整能力。",
-    "contractChanged": "此会话依赖已更新的能力，请新建会话继续；已有记录会保留",
+    "contractChanged": "所选 Agent 配置引用的能力已更新，暂时无法创建会话。请在 Agent 工作台检查并保存配置后重试，或选择其他 Agent；当前输入和选择已保留。",
     "launchFailed": "暂时无法启动这个官方 Agent，请检查服务状态后重试。当前输入和选择已保留。"
   },
   "noAgentAvailable": "没有可用的 Main Agent。请登录 Google 或安装 Claude/Codex CLI。是否前往设置？",

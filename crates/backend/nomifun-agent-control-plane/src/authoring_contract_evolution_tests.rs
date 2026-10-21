@@ -117,12 +117,10 @@ async fn authoring_contract_evolution_keeps_unproven_publishers_effects_and_reso
             provider_id: media_chat_route("model-b").primary.provider_id,
             model: "model-b".into(),
         };
-        for (template, preset) in [(Some("chat.minimal"), None), (None, Some(preset_id))] {
-            for model in [None, Some(&selected_model)] {
-                let error = control.validate_product_selection(&owner, template, preset, model)
-                    .await.unwrap_err();
-                assert_eq!(error.code().as_ref(), "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED", "{drift}");
-            }
+        for model in [None, Some(&selected_model)] {
+            let error = control.validate_product_selection(&owner, None, Some(preset_id), model)
+                .await.unwrap_err();
+            assert_eq!(error.code().as_ref(), "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED", "{drift}");
         }
         assert_eq!(authoring_store_presets(&store, &owner).await, before, "{drift}");
         assert_eq!(store.get_revision(&revision.reference).await.unwrap().unwrap(), revision);
@@ -169,17 +167,15 @@ async fn authoring_contract_evolution_does_not_drop_an_unknown_saved_action() {
         provider_id: media_chat_route("model-b").primary.provider_id,
         model: "model-b".into(),
     };
-    for (template, preset) in [(Some("chat.minimal"), None), (None, Some(preset_id))] {
-        for model in [None, Some(&selected_model)] {
-            let error = control.validate_product_selection(&owner, template, preset, model)
-                .await.unwrap_err();
-            assert_eq!(error.code().as_ref(), "CAPABILITY_NOT_MATERIALIZED");
-            let details = error.details().expect("unavailable actions include actionable diagnostics");
-            let diagnostics = details["diagnostics"].as_array().unwrap();
-            assert_eq!(diagnostics.len(), 1);
-            assert_eq!(diagnostics[0]["code"], "CAPABILITY_ACTION_NOT_MATERIALIZED");
-            assert_eq!(diagnostics[0]["subject"], unknown);
-        }
+    for model in [None, Some(&selected_model)] {
+        let error = control.validate_product_selection(&owner, None, Some(preset_id), model)
+            .await.unwrap_err();
+        assert_eq!(error.code().as_ref(), "CAPABILITY_NOT_MATERIALIZED");
+        let details = error.details().expect("unavailable actions include actionable diagnostics");
+        let diagnostics = details["diagnostics"].as_array().unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0]["code"], "CAPABILITY_ACTION_NOT_MATERIALIZED");
+        assert_eq!(diagnostics[0]["subject"], unknown);
     }
     let mut draft = editor.draft;
     let actions = &mut draft.document.enabled_capabilities.iter_mut()

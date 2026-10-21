@@ -4928,9 +4928,13 @@ async fn started_companion_fixture() -> StartedCompanion {
         json!({ "model": { "provider_id": provider_id, "model": "step-3.7-flash" } })).await;
     assert_eq!(status, StatusCode::OK, "{patched}");
     save_companion_core_agent_for_fixture(router.clone()).await;
+    let (status, authored_library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{authored_library}");
+    let authored_id = authored_library["data"]["official_presets"]["companion.default"]["preset_id"].as_str().unwrap();
+    let authored_selection = json!({ "kind":"preset", "preset_id":authored_id });
     let (status, selected_default) = call(router.clone(), "PUT",
         &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({
-            "selection": { "kind": "template", "template_key": "companion.default" },
+            "selection": authored_selection,
             "model": { "provider_id": provider_id, "model": "step-3.7-flash" },
             "resource_selections": [
                 { "resource_kind": "companion", "resource_id": companion_id },
@@ -5103,8 +5107,8 @@ async fn started_companion_fixture() -> StartedCompanion {
     let (status, options) = call(router.clone(), "GET",
         &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{options}");
-    assert_eq!(options["data"]["selection"], json!({ "kind": "template", "template_key": "companion.default" }),
-        "the implicit official choice must remain a template selection rather than a personal Agent");
+    assert_eq!(options["data"]["selection"], authored_selection,
+        "the explicitly saved official configuration remains a Preset selection");
     let minimal_option = options["data"]["options"].as_array().unwrap().iter()
         .find(|option| option["selection"]["template_key"] == "chat.minimal").unwrap();
     assert_eq!(minimal_option["available"], false);
@@ -5209,7 +5213,7 @@ async fn one_companion_agent_serves_independent_desktop_and_device_sessions() {
         "expected_current_revision":editor["data"]["revision"]["reference"], "draft":shared_draft,
     })).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let selection = json!({"kind":"template", "template_key":"companion.default"});
+    let selection = json!({"kind":"preset", "preset_id":shared_preset});
     let (status, applied) = call(router.clone(), "PUT", &agent_path, json!({
         "selection":selection,"model":model,"conversation_id":desktop_id,"update_default":true,
     })).await;
@@ -5320,7 +5324,7 @@ async fn one_companion_agent_serves_independent_desktop_and_device_sessions() {
         "desktop hardware access still requires the selected real owned device");
     let (status, defaults) = call(router.clone(), "GET", &agent_path, json!({})).await;
     assert_eq!(status, StatusCode::OK, "{defaults}");
-    assert_eq!(defaults["data"]["selection"], json!({"kind":"template", "template_key":"companion.default"}),
+    assert_eq!(defaults["data"]["selection"], selection,
         "explicit Session resource changes preserve the one shared Agent default");
     assert_eq!(fixture.upstream.received_requests().await.unwrap().len(), 2, "authorizing capabilities performs no model call");
     let thread_path = format!("/api/companion/companions/{companion_id}/companion/threads");
@@ -5695,7 +5699,9 @@ async fn companion_official_agent_edits_require_an_exact_preview_and_preserve_hi
     let enabled = fixture.snapshot["enabled_capabilities"].as_array().unwrap().iter()
         .map(|capability| capability.as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
     let path = format!("/api/companion/companions/{companion_id}/companion/threads");
-    let history_items = fixture.history["data"]["items"].as_array().unwrap();
+    let original_through: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=?")
+        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+    let original_facts = original_history_fact_fingerprints(&services, conversation_id, original_through).await;
     let unchanged = fixture.unchanged;
 
     // The library's owner-scoped official ID is directly editable. Saving a
@@ -5738,7 +5744,7 @@ async fn companion_official_agent_edits_require_an_exact_preview_and_preserve_hi
     let (status, frozen) = call(router.clone(), "GET", &session_path, json!({})).await;
     assert_eq!(status, StatusCode::OK, "{frozen}");
     assert_eq!(frozen["data"]["session"]["agent_binding"], old_binding);
-    let selection = json!({ "kind": "template", "template_key": "companion.default" });
+    let selection = json!({ "kind": "preset", "preset_id": official_id });
     let preview_path = format!("{session_path}/agent-switch/preview");
     let (status, preview) = call(router.clone(), "POST", &preview_path,
         json!({"selection": selection})).await;
@@ -5819,11 +5825,9 @@ async fn companion_official_agent_edits_require_an_exact_preview_and_preserve_hi
     let (status, preserved_history) = call(router.clone(), "GET",
         &format!("{session_path}/message-history?page_size=50"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{preserved_history}");
-    for message in history_items {
-        assert_eq!(preserved_history["data"]["items"].as_array().unwrap().iter()
-            .find(|retained| retained["message_id"] == message["message_id"]), Some(message),
-            "applying the new official revision must retain existing history");
-    }
+    assert_history_identity_and_content_preserved(&fixture.history, &preserved_history);
+    assert_eq!(original_history_fact_fingerprints(&services, conversation_id, original_through).await,
+        original_facts, "explicitly applying the saved configuration cannot rewrite any original Event or Payload byte");
 
     let (status, next_turn) = call(router.clone(), "POST", &format!("{session_path}/turns"), json!({
         "idempotency_key": uuid::Uuid::now_v7().to_string(),

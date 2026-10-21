@@ -18,6 +18,7 @@ import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import { resolveAgentResourceSelections } from '@/renderer/hooks/agent/agentResourceSelection';
 import { useGuidAgentSelection } from './useGuidAgentSelection';
 import { useAgentPresetCapabilities } from '@/renderer/components/agent/useAgentPresetCapabilities';
+import { useAgentLaunchCapabilities } from '@/renderer/components/agent/useAgentLaunchCapabilities';
 
 const officialId = parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000108');
 const personalId = parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000109');
@@ -79,35 +80,36 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); mock.restore(); sessionStorage.clear(); configService.reset(); });
 
-function mount(preset: AgentPresetSummary) {
+function mount(preset: AgentPresetSummary, source: 'template' | 'preset' = 'preset') {
   const cache = new Map();
   const wrapper = ({ children }: PropsWithChildren) => <SWRConfig value={{
     provider: () => cache, fallback: { 'agent-presets.library': library(preset) },
     revalidateOnMount: false, shouldRetryOnError: false,
   }}>{children}</SWRConfig>;
   return renderHook(() => {
-    const selection = useGuidAgentSelection({ selectedAgentTemplateKey: 'assistant.general' });
-    const configured = selection.selectedOfficialPreset ?? selection.selectedPreset;
-    const capabilities = useAgentPresetCapabilities(configured?.preset_id, configured?.current_stable_revision?.revision_digest);
+    const selection = useGuidAgentSelection(source === 'template'
+      ? { selectedAgentTemplateKey: 'assistant.general' }
+      : { selectedAgentPresetId: preset.preset_id });
+    const capabilities = useAgentLaunchCapabilities(selection.selectedPreset, selection.selectedTemplate);
     return { selection, capabilities };
   }, { wrapper });
 }
 
-test('official selection reads its baseline draft without preparing or saving a Revision', async () => {
-  const preset = summary();
-  const getEditor = spyOn(agentPlatform.getEditor, 'invoke').mockResolvedValue(editor(preset, extendedDocument()));
+test('a published Template ignores saved customization grants and model defaults without reading its editor', async () => {
+  const preset = summary(1);
+  const getEditor = spyOn(agentPlatform.getEditor, 'invoke').mockResolvedValue(editor(preset, setDefaultModel(extendedDocument(), 'custom-model')));
   const prepare = spyOn(agentPlatform.createFromTemplate, 'invoke');
   const save = spyOn(agentPlatform.saveRevision, 'invoke');
-  const hook = mount(preset);
-  expect(hook.result.current.capabilities.isLoading).toBe(true);
+  const hook = mount(preset, 'template');
   await waitFor(() => expect(hook.result.current.capabilities.isLoading).toBe(false));
   expect(hook.result.current.selection.selection).toEqual({ kind: 'template', templateKey: 'assistant.general' });
-  expect(hook.result.current.selection.selectedOfficialPreset?.preset_id).toBe(officialId);
-  expect([...hook.result.current.capabilities.actionIds]).toEqual(['platform.remote-review/read']);
-  expect([...hook.result.current.capabilities.requiredResourceKinds]).toEqual(['customer']);
-  expect(hook.result.current.capabilities.idmm.mode).toBe('rule_only');
+  expect(hook.result.current.selection.selectedPreset).toBeUndefined();
+  expect([...hook.result.current.capabilities.actionIds]).toEqual([]);
+  expect([...hook.result.current.capabilities.requiredResourceKinds]).toEqual([]);
+  expect(hook.result.current.capabilities.idmm).toEqual(createDefaultIdmmConfig());
   expect(hook.result.current.capabilities.defaultModel).toBeNull();
-  expect(getEditor).toHaveBeenCalledWith({ preset_id: officialId });
+  expect(getEditor).not.toHaveBeenCalled();
+  expect(hook.result.current.selection.presets.map(preset => preset.preset_id)).toContain(officialId);
   expect(prepare).not.toHaveBeenCalled();
   expect(save).not.toHaveBeenCalled();
 });
@@ -149,7 +151,7 @@ test('saving extended official capabilities at the same ID refreshes resource an
   let resolveEditor!: (value: AgentPresetEditorResponse) => void;
   getEditor.mockImplementation(() => new Promise(resolve => { resolveEditor = resolve; }));
   await act(async () => { await hook.result.current.selection.refreshPresets(); });
-  expect(hook.result.current.selection.selectedOfficialPreset?.preset_id).toBe(officialId);
+  expect(hook.result.current.selection.selectedPreset?.preset_id).toBe(officialId);
   expect(hook.result.current.capabilities.isLoading).toBe(true);
   expect(hook.result.current.capabilities.actionIds.size).toBe(0);
   await act(async () => { resolveEditor(editor(saved, extendedDocument())); });
@@ -165,7 +167,7 @@ test('saving extended official capabilities at the same ID refreshes resource an
   expect(resolveAgentResourceSelections(resolved.requiredResourceKinds, { customer: 'chosen-customer' }).missingKinds).toEqual([]);
   expect(resolved.idmm.mode).toBe('rule_only');
   expect(getEditor).toHaveBeenCalledTimes(2);
-  expect(hook.result.current.selection.selection).toEqual({ kind: 'template', templateKey: 'assistant.general' });
+  expect(hook.result.current.selection.selection).toEqual({ kind: 'preset', presetId: officialId });
 });
 
 test('a saved personal Agent uses the host current contract while retaining its immutable Revision', async () => {
@@ -224,13 +226,13 @@ test('late model defaults from another Agent or Revision cannot replace the curr
   expect(hook.result.current.isLoading).toBe(true);
 });
 
-test('an official editor read failure exposes an error and cannot use its immutable template as launch authority', async () => {
+test('an explicit saved customization read failure cannot fall back to Template authority', async () => {
   const failure = new Error('Official configuration unavailable');
   spyOn(agentPlatform.getEditor, 'invoke').mockRejectedValue(failure);
   spyOn(console, 'error').mockImplementation(() => {});
   const hook = mount(summary(1));
   await waitFor(() => expect(hook.result.current.capabilities.error).toBe(failure));
-  expect(hook.result.current.selection.selectedOfficialPreset).toBeDefined();
+  expect(hook.result.current.selection.selectedPreset).toBeDefined();
   expect(hook.result.current.capabilities.actionIds.size).toBe(0);
   expect(hook.result.current.capabilities.requiredResourceKinds.size).toBe(0);
 });
@@ -247,7 +249,7 @@ test.each([false, true])('compact editor wire defaults preserve capabilities wit
   const prepare = spyOn(agentPlatform.createFromTemplate, 'invoke');
   const save = spyOn(agentPlatform.saveRevision, 'invoke');
   spyOn(console, 'error').mockImplementation(() => {});
-  const hook = mount(preset);
+  const hook = renderHook(() => ({ capabilities: useAgentPresetCapabilities(preset.preset_id, preset.current_stable_revision?.revision_digest) }));
   await waitFor(() => expect(hook.result.current.capabilities.isLoading).toBe(false));
   expect(hook.result.current.capabilities.error).toBeUndefined();
   expect(hook.result.current.capabilities.defaultModel).toBeNull();

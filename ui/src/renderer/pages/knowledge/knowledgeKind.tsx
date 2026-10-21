@@ -9,9 +9,8 @@
  * (local / web / blank) plus the rounded-square kind icon. Used by both
  * `KnowledgeCard` (grid item) and `KnowledgeDetailPage` (header).
  *
- * The two surfaces intentionally differ in badge text color: the card uses
- * per-kind accent colors while the detail header stays neutral — pick via
- * `textVariant`.
+ * The catalog uses neutral inline labels; the detail header also reuses the
+ * kind-specific badge and rounded-square icon presentation.
  */
 import type { TFunction } from 'i18next';
 import { Earth, EditTwo, FolderOpen } from '@icon-park/react';
@@ -79,7 +78,7 @@ export function getKindConfig(
   }
 }
 
-/** Kind icon in a rounded square container (card: 20/42px, detail header: 22/52px). */
+/** Kind icon in a rounded square container for knowledge detail headers. */
 export function KindIcon({
   kind,
   config,

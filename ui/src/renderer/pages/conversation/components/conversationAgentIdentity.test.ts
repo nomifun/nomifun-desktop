@@ -5,7 +5,8 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { officialAgentTemplateKey, officialConversationTemplateKey } from './conversationAgentIdentity';
+import { frozenConversationAgentSelection, officialAgentTemplateKey, officialConversationTemplateKey } from './conversationAgentIdentity';
+import { parseAgentPresetId } from '@/common/types/ids';
 
 describe('officialConversationTemplateKey', () => {
   test('uses only verified host projection, not a matching display name', () => {
@@ -25,4 +26,12 @@ test('presentation recognizes product Agents without exposing them in ordinary c
   for (const extra of [null, [], 'companion.default', { official_template_key: 'unknown.template' }]) {
     expect(officialAgentTemplateKey(extra)).toBeNull();
   }
+});
+
+test('localized template presentation cannot replace the exact frozen execution identity', () => {
+  const presetId = parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000104');
+  const projection = { preset_id: presetId, extra: { official_template_key: 'assistant.general' } };
+  expect(frozenConversationAgentSelection(projection)).toEqual({ kind: 'preset', presetId });
+  expect(officialConversationTemplateKey(projection.extra)).toBe('assistant.general');
+  expect(frozenConversationAgentSelection({})).toBeUndefined();
 });

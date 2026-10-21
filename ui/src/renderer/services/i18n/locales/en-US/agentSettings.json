@@ -61,7 +61,7 @@
     "title": "Recommended additions",
     "current": "Recommended capabilities are already complete",
     "reviewHint": "Review these missing modules, actions and Skills. Completing the list re-enables recommended capabilities you previously turned off; your other settings are kept.",
-    "sessionHint": "Saved capabilities apply to new conversations. Apply the saved update separately in an existing Companion conversation.",
+    "sessionHint": "Select this saved Agent to use its configuration in a new conversation. Existing Companion conversations apply saved updates separately.",
     "saveFirst": "Save or discard your changes before reviewing recommended additions.",
     "apply": "Complete and save",
     "skill": "Skill · v{{version}}"
@@ -108,7 +108,7 @@
     "officialTag": "Official",
     "customTag": "Custom",
     "applyLatest": "Apply latest setup",
-    "applyLatestHint": "After editing and saving the current Agent, apply its latest setup to this companion's existing conversation.",
+    "applyLatestHint": "Apply the selected official template's current release, or the selected saved Agent's latest setup, to this companion's existing conversation.",
     "editAgent": "Edit Agent"
   },
   "library": {
@@ -570,7 +570,7 @@
     "mine": "My Agents",
     "official": "Official presets",
     "noAgents": "No matching Agents",
-    "officialHint": "Edit official Agents directly and save for their product entry points",
+    "officialHint": "Save your customization here and select it as a saved Agent. Official templates in new conversations always use the current release.",
     "myHint": "Prepare the right Agent for your work",
     "capabilityTab": "Modules & actions",
     "settingsTab": "Profile & behavior",
@@ -598,8 +598,8 @@
     "disabledSave": "Resolve unavailable modules or actions before saving",
     "presetBadge": "Customizable preset",
     "personalBadge": "Personal Agent",
-    "officialBadge": "Official Agent · Personal configuration",
-    "officialSaveHint": "Saved changes apply to new sessions. Apply updates to an existing companion in its settings.",
+    "officialBadge": "Personal configuration · Official template",
+    "officialSaveHint": "Select this saved Agent to use these changes. Official templates keep the current release defaults; existing companions must select this saved configuration and apply it in their settings.",
     "createCopy": "Create a copy",
     "openCompanions": "Open Companions",
     "openCustomerService": "Open Customer Service",

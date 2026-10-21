@@ -17,11 +17,14 @@ async fn explicit_application_workflow_refresh_preserves_legacy_blank_revision_a
     let model = seed_model(&services).await;
     let editor = data(&router, "POST", "/api/agent-presets/from-template/app.developer", json!({
         "model":model,"reuse_existing":true,"display_name":"app.developer"})).await;
-    let preset = editor["preset"]["preset_id"].as_str().unwrap();
-    let mut draft = editor["draft"].clone();
+    let library = data(&router, "GET", "/api/agent-preset-templates", Value::Null).await;
+    let preset = library["official_presets"]["app.developer"]["preset_id"].as_str().unwrap();
+    let author = data(&router, "GET", &format!("/api/agent-presets/{preset}/editor"), Value::Null).await;
+    let mut draft = author["draft"].clone();
+    draft["document"] = editor["draft"]["document"].clone();
     draft["document"]["instructions"] = json!("");
     let saved = data(&router, "POST", &format!("/api/agent-presets/{preset}/revisions"), json!({
-        "expected_current_revision":editor["revision"]["reference"],"draft":draft,
+        "expected_current_revision":draft["current_revision"],"draft":draft,
         "reason":"Current-generation blank application role regression fixture"})).await;
     let revision = saved["revision"]["reference"]["revision"].as_u64().unwrap();
     let old_revision = data(&router, "GET", &format!("/api/agent-presets/{preset}/revisions/{revision}"), Value::Null).await;

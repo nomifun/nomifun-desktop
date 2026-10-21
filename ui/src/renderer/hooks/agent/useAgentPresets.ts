@@ -10,6 +10,7 @@ import type {
   AgentPresetSummary,
 } from '@/common/types/agentPlatform';
 import useSWR from 'swr';
+import { savedAgentPresets } from '@/renderer/components/agent/conversationAgentCatalog';
 
 /** One shared cache for every product surface that selects an AgentPreset. */
 export const AGENT_PRESET_LIBRARY_SWR_KEY = 'agent-presets.library';
@@ -20,8 +21,8 @@ export const fetchAgentPresetLibrary = async (): Promise<AgentPresetLibraryRespo
 /**
  * The only renderer-side AgentPreset catalog hook.
  *
- * Official entries have owner-scoped editable configurations. Product template
- * selections resolve those saved configurations; personal selectors use user presets.
+ * Templates are current published definitions. Saved owner configurations are
+ * explicit Preset choices; their immutable revisions remain independently selectable.
  */
 export const useAgentPresets = (): {
   library: AgentPresetLibraryResponse | undefined;
@@ -40,7 +41,7 @@ export const useAgentPresets = (): {
 
   return {
     library: data,
-    presets: data?.user_presets ?? [],
+    presets: data ? savedAgentPresets(data) : [],
     isLoading,
     error,
     refresh: async () => {

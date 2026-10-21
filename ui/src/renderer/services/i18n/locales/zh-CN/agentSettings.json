@@ -61,7 +61,7 @@
     "title": "推荐新增能力",
     "current": "推荐能力已完整",
     "reviewHint": "核对缺少的模块、操作和 Skill。补齐会重新启用你此前关闭的推荐能力，其他设置保持。",
-    "sessionHint": "保存后用于新会话。已有伙伴会话可单独应用已保存的更新。",
+    "sessionHint": "新会话选择此已保存 Agent 后使用该配置。已有伙伴会话可单独应用已保存的更新。",
     "saveFirst": "请先保存或放弃当前修改，再查看推荐新增能力。",
     "apply": "补齐并保存",
     "skill": "Skill · v{{version}}"
@@ -108,7 +108,7 @@
     "officialTag": "官方",
     "customTag": "自定义",
     "applyLatest": "应用最新设定",
-    "applyLatestHint": "编辑并保存当前 Agent 后，将最新设定应用到这位伙伴的现有会话。",
+    "applyLatestHint": "将所选官方模板的当前发布版本，或所选已保存 Agent 的最新设定，应用到这位伙伴的现有会话。",
     "editAgent": "编辑 Agent"
   },
   "library": {
@@ -570,7 +570,7 @@
     "mine": "我的 Agent",
     "official": "官方预设",
     "noAgents": "暂无匹配的 Agent",
-    "officialHint": "直接编辑官方 Agent，保存后用于对应产品入口",
+    "officialHint": "在此保存定制，并以已保存 Agent 选用。新会话中的官方模板始终使用当前发布版本。",
     "myHint": "为你的工作准备好合适的 Agent",
     "capabilityTab": "模块与操作",
     "settingsTab": "名称与行为",
@@ -598,8 +598,8 @@
     "disabledSave": "请先处理不可用模块或操作",
     "presetBadge": "可自定义预设",
     "personalBadge": "个人 Agent",
-    "officialBadge": "官方 Agent · 个人配置",
-    "officialSaveHint": "保存后用于新会话；已有伙伴会话可在伙伴设置中应用更新。",
+    "officialBadge": "个人配置 · 基于官方模板",
+    "officialSaveHint": "选择此已保存 Agent 后使用这些修改。官方模板保持当前发布默认；已有伙伴请在伙伴设置中选择此保存配置并应用更新。",
     "createCopy": "创建副本",
     "openCompanions": "打开伙伴",
     "openCustomerService": "打开客服",

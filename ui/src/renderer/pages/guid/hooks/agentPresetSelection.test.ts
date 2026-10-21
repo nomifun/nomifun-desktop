@@ -63,13 +63,12 @@ describe('Guid Agent selection contract', () => {
     ).toEqual(DEFAULT_GUID_AGENT_SELECTION);
   });
 
-  test('loads saved user presets and filters draft-only rows', () => {
+  test('keeps saved Preset choices separate from published Templates and filters draft-only rows', () => {
     const library = readSource(
       new URL('../../../hooks/agent/useAgentPresets.ts', import.meta.url)
     );
     const selection = readSource(new URL('./useGuidAgentSelection.ts', import.meta.url));
 
-    expect(library.includes('presets: data?.user_presets ?? []')).toBe(true);
     expect(library.includes('presets: data?.official_templates')).toBe(false);
     expect(selection.includes('useConversationAgentCatalog()')).toBe(true);
     const catalog = readSource(new URL('../../../components/agent/useConversationAgentCatalog.ts', import.meta.url));
@@ -95,7 +94,6 @@ describe('Guid Agent selection contract', () => {
         'const { data, error, isLoading, mutate } = useSWR<'
       )
     ).toBe(true);
-    expect(library.includes('presets: data?.user_presets ?? [],')).toBe(true);
     expect(library.includes('error,')).toBe(true);
 
     expect(selection.includes('loadError: Error | undefined;')).toBe(true);

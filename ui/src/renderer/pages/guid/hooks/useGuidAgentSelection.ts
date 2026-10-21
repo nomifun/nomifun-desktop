@@ -22,7 +22,6 @@ export type GuidAgentSelectionResult = {
   selection: GuidAgentSelection;
   selectedPreset: ExecutableAgentPreset | undefined;
   selectedTemplate: OfficialPresetTemplate | undefined;
-  selectedOfficialPreset?: AgentPresetSummary;
   presets: ExecutableAgentPreset[];
   draftPresets: AgentPresetSummary[];
   officialTemplates: OfficialPresetTemplate[];
@@ -90,7 +89,7 @@ export const useGuidAgentSelection = ({
   }, [officialTemplates, presets, setSelectionState]);
 
   const selectedPresetId =
-    selection.kind === 'preset' ? selection.presetId : undefined;
+    !fixedTemplateKey && selection.kind === 'preset' ? selection.presetId : undefined;
   const selectedPreset = useMemo(
     () =>
       selectedPresetId
@@ -107,9 +106,6 @@ export const useGuidAgentSelection = ({
     ? officialTemplates.find(
         (template) => template.template_key === effectiveSelection.templateKey
       )
-    : undefined;
-  const selectedOfficialPreset = effectiveSelection.kind === 'template'
-    ? library?.official_presets?.[effectiveSelection.templateKey]
     : undefined;
 
   const navigationRequestHandledRef = useRef(false);
@@ -208,7 +204,6 @@ export const useGuidAgentSelection = ({
     selection: effectiveSelection,
     selectedPreset,
     selectedTemplate,
-    selectedOfficialPreset,
     presets,
     draftPresets,
     officialTemplates,
