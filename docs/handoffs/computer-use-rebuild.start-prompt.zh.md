@@ -17,7 +17,7 @@
 
 从方案第 12 节接续：
 - S1：确认 AGENTS.md 现役入口；固定上游 commit 4d959bbfa57f0c89f310330e849500b222084194（版本标签 cua-driver-rs-v0.37.0，标签解析差异按 SOURCE.json 记录），用 --filter=blob:none --sparse 按 D03 导入 vendor/cua-driver。只读参考可用 C:/Users/rika0/code/nomifun/main/resources/cua。保留 D04 去默认 features 补丁及已授权的必要最小缺陷补丁，全部登记并经 sync 应用；不再限定只能一个。完成独立 apps/computer-worker、MIT 署名、DPI manifest、self-check、真实 worker 协议测试、冻结清单和精简覆盖。Windows 构建/self-check/协议与一致性检查通过后进入 S2，其他平台和额外原生 POC 并行补验。
-- S2：一次完整替换落地：删除第 7 节旧实现/旧测试/夹具/配置/引用；由冻结清单生成 22 Action 和契约；实现 nomifun-computer 五模块、computer_host、效果/Stop/分档/生命周期；UI 旧动作/路由/许可接新契约；接入 worker 构建、externalBin 与各平台适用签名脚本；上线 check:computer-boundary。资源种类为 computer，ResourceId 为 local-desktop。实际 main 的 UI/API 版本已是 42，本专项升 43，保留他人的 42 改动，实施时再复核是否已有并发递增。本机正式产品链路先用专用计算器/文本编辑窗口和临时数据跑通，有受控模型凭据即补真实模型；缺凭据不阻塞代码接入。
+- S2：一次完整替换落地：删除第 7 节旧实现/旧测试/夹具/配置/引用；由冻结清单生成 22 Action 和契约；实现 nomifun-computer 五模块、computer_host、效果/Stop/分档/生命周期；UI 旧动作/路由/许可接新契约；接入 worker 构建、externalBin 与各平台适用签名脚本；上线 check:computer-boundary。资源种类为 computer，ResourceId 为 local-desktop。当前交付的 UI/API 版本为 44；接续时以实际 HEAD 为准，保留并发递增，不重复执行历史的 42→43，也不回退版本。本机正式产品链路先用专用计算器/文本编辑窗口和临时数据跑通，有受控模型凭据即补真实模型；缺凭据不阻塞代码接入。
 - S3：补齐驱动状态卡、GET /api/computer/status、能力工作台分组、“前台”标记、中英文文案与文档。核实旧会话实际拒绝错误码命中新建会话文案，不为旧会话/升级路径写测试。可与本机 S2 收尾并行。
 - S4：按拟发布平台/架构补齐适用签名、公证、安装包、依赖、原生和真实模型验收；不把固定厂商数量或全平台排列组合变成日常开发门槛，未验平台只记待验，不冒充已支持。
 - S5：发布说明（含升级影响）、CHANGELOG、版本与架构定稿，按既有发布授权交付并退役本专项入口。
@@ -39,19 +39,31 @@
 ## macOS 并行补验 prompt
 
 ```text
-请在 macOS main checkout 并行补齐 Computer Use 重构的 macOS 构建、产品接入和发布验收。先核对 git status、HEAD、main 并 git pull --ff-only，保护无关改动，不 stash/reset/覆盖。阅读 AGENTS.md、唯一实施方案与本 prompt，从方案第 12 节接续，消费最新完整替换，不重做 Windows 已交付内容，不改 canonical 存储或引入旧 Computer 兼容。
+请从包含本文件的最新 main 接续 Computer Use 的 macOS 剩余实现与 S4。先查 git status、HEAD、分支并 git pull --ff-only；每阶段同步，保护并发工作，不 stash/reset/覆盖/清理。当前 UI/API44，以实际 HEAD 为准，不回退版本；Linux 已验源码基线 9b8706f71 只作证据身份，不要求 checkout 回旧提交。
 
-按可用环境构建 arm64（可得时 x86_64）worker并通过 self-check/协议；检查完整开发签名 App 直接 spawn worker 的 TCC 继承、主线程光标覆盖层、写入位置和输入清理。发布 macOS 前补齐适用 Developer ID/Hardened Runtime/公证、codesign --verify --deep --strict、安装包 worker，自有测试窗口中的计算器/TextEdit 保存、多窗口、Stop、崩溃恢复与 Cmd-Q 收束；真实模型凭据可得时执行，缺失只记待验。
+阅读 AGENTS.md、唯一方案 docs/handoffs/computer-use-rebuild.zh.md（尤其§8/9/12）、docs/architecture/computer-use.zh.md 及其会话/许可架构引用、docs/handoffs/agent-lifecycle-reliability.zh.md（U01–U13）。从最新§12接续已定 C01–C08/D01–D14，不恢复旧 Computer 或旧数据兼容、不改 canonical 存储。vendor 仅通过登记补丁修改，动作/schema/标题仍由冻结输入生成。
 
-当前用户桌面可用于专用测试窗口和临时数据，不改真实文件、既有会话、凭据或登录浏览器内容；故障只作用于精确自有测试进程。隔离账户/虚拟机按需要选择，不是前置条件。不擅自安装、提权或重置系统隐私设置；已有许可先复用，权限操作依会话授权。只更新第 12 节平台证据与下一动作，区分编译、脚本、原生与未执行项；未验不宣称 macOS 支持，不要求 Windows 主实现等待。
+Windows S1–S3及 Full/显式 NoImage 共享模型链路已有证据；Linux x64 release 三包、40项 Rust 测试、离线资源/ELF核验和3份 release lock 已完成。复用对应源码的有效证据，不机械重跑无关矩阵；这些不证明 macOS 原生、安装或正式身份通过。
+
+复用现役 build:mac、worker 和原生验收脚本，先完成 arm64，Intel按可得环境补齐。实际构建 worker，运行 self-check、真实协议和冻结采集；检查 App 直接启动 worker、主线程光标覆盖层、私有写入位置及输入清理。正式发布范围须补 Developer ID/Hardened Runtime、嵌套 worker 签名、公证和包内实物校验；开发签名不冒充正式签名。验证 TCC 责任归属、只向 NomiFun.app 授权、缺权零执行和许可变化后的新代际。
+
+当前用户桌面可用于专用测试窗口、新 Session 和临时文件，VM/测试账户均非前置。按方案验证 Calculator、TextEdit 保存、多窗口、实际设置功能、Stop、适用故障恢复及 Cmd-Q 回收；观察设置不算功能通过。保留精确目标/worker代际和真实清理证据，不重放未知输入；故障只触及精确自有实例，被拒动作不换路重试。可复用既有进程，仅操作能精确确认的本次测试窗口/标签，不以新PID为前置；不读取或改动其他用户内容、生产数据、凭据或已登录浏览器，不提交隐私截图，不擅自安装系统组件、提权或重置隐私许可；权限交互沿已有授权。
+
+真实模型只用获授权的受控配置，记录实际模型、成功率、步数和耗时；脚本 provider 不算实模，共享模型证据不冒充 Mac 原生任务。缺机器、配置或凭据只记待验，继续其余工作。按改动范围运行最小验证，正式交付按拟发布范围补门槛，不自行发布。只在方案§12记录源码/产物/签名身份、命令、非零测试数、原生证据及未执行原因；自动化、实模、原生分别记证，不把缺失项写成通过，S5按实际完成状态处理。
 ```
 
 ## Linux 并行补验 prompt
 
 ```text
-请在 Linux main checkout 并行补齐 Computer Use 重构的 Linux 构建、产品接入和发布验收。先核对 git status、HEAD、main 并 git pull --ff-only，保护无关改动，不 stash/reset/覆盖。阅读 AGENTS.md、唯一实施方案与本 prompt，从第 12 节接续，消费最新完整替换，不写旧数据兼容或修改 canonical 存储。
+请从包含本文件的最新 main 接续 Computer Use 的 Linux 原生产品与 S4。先查 git status、HEAD、分支并 git pull --ff-only；每阶段同步，保护并发工作，不 stash/reset/覆盖/清理。当前 UI/API44，以实际 HEAD 为准，不回退到历史源码或版本。
 
-记录发行版/内核、桌面、合成器、AT-SPI 和 portal 后端。构建 x86_64 worker（portal-input；portal-capture按真实环境结论），跑 self-check/协议与受影响检查，以 readelf/ldd核对依赖。用专用窗口验证 X11/XWayland、AT-SPI 和原生清理；有真实 GNOME Wayland 时验证 portal 授权/拒绝、后台动作/前台输入及 Shell helper边界，得出固定启用规则。Xvfb/WSLg/XWayland证据不冒充原生Wayland；缺少环境只记待验并继续其他实现，不阻塞Windows。
+阅读 AGENTS.md、唯一方案 docs/handoffs/computer-use-rebuild.zh.md（尤其§8/9/12）、docs/architecture/computer-use.zh.md 及其会话/许可架构引用、docs/handoffs/agent-lifecycle-reliability.zh.md（U01–U13）。遵循已定 C01–C08/D01–D14，不恢复旧 Computer/数据兼容、不改 canonical；vendor 只用登记补丁，动作/schema/标题由冻结输入派生。
 
-发布Linux前补齐适用 deb/rpm/AppImage 的worker、依赖与对应原生/真实模型任务；删除旧GStreamer依赖。保留精确native清理owner，worker退出不冒充清理成功，不重放输入。当前桌面可用专用测试窗口/临时数据，故障只作用于精确自有测试实例；不动真实文件、既有会话、凭据或登录浏览器。不擅自安装系统组件、提权或改系统权限；隔离显示服务/账户/虚拟机按方便选用，不是前置。只在第12节记录实际命令、非零测试数、源码/构建身份、原生证据和未验原因，不宣称未验支持。
+§12已闭合源码 9b8706f71 的 Linux x64 release worker、协议12/12和宿主28/28共40项 Rust 测试、deb/rpm/AppImage 构建、真实离线提取、依赖/资源/ELF核验及3/3 release lock。优先取得实物并核对既有SHA后复用；无输入变化不重编三包或重跑40项。AppImage有已验证的ELF改写，按各包自身身份验收，不要求三包 Host/worker 原始SHA相等。离线包与锁不证明安装、分发签名或真实桌面通过。
+
+记录实际发行版、内核、架构、登录桌面、合成器、AT-SPI 和 portal 后端。当前 CUA_DRIVER_RS_ENABLE_WAYLAND=0，portal-capture未启用；按D12在真实环境验证后确定固定启用规则，不新增开关，不因显示环境变量存在便宣称可用。用专用窗口、新 Session、临时文件验证真实X11/AT-SPI计算器、文本编辑保存、后台动作、适用前台输入、Stop及退出回收；有真实GNOME Wayland再补portal授予/拒绝和helper边界。Xvfb/WSLg/XWayland不冒充原生Wayland，观察设置不算设置功能验收。
+
+当前用户桌面已允许专用测试，VM/测试账户/私有显示服务只是可选工具。可复用既有进程，仅操作能精确确认的本次测试窗口/标签，不以新PID为前置；不读取或改动其他用户内容、生产数据、凭据或已登录浏览器，不提交隐私截图；安装与权限操作沿已有授权，不擅自安装系统组件、提权或改系统许可。保留精确原生owner、worker代际和正常关闭证据，worker退出不等于全部清理完成，不重放未知输入。故障仅作用于精确自有实例，被拒动作不换路重试。
+
+Windows Full/显式NoImage共享链路已有实模证据，可复用但不冒充Linux原生任务；脚本provider不算实模。平台实模仅用获授权配置，记录实际模型/成功率/步数/耗时，缺配置不阻塞其余工作。只为真实架构、源码或平台缺陷补构建和最小验证，不另造重复框架；安装包、原生、正式身份按拟发布范围分别验收，不自行发布。只在方案§12记录源码/产物身份、实际命令、非零测试数、原生证据及待验原因，自动化/实模/原生分开，不宣称未验支持，S5按实际完成状态处理。
 ```
