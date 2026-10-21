@@ -7,6 +7,7 @@ import type { IMessageToolCall } from '@/common/chat/chatLib';
 import type { ToolDetailPage, ToolDetailRequest } from '@/common/chat/toolDetails';
 import type { ToolFileSummary } from '@/common/chat/fileSummary';
 import { parseConversationId, parseMessageId } from '@/common/types/ids';
+import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import messages from '@/renderer/services/i18n/locales/en-US/messages.json';
 import ProcessTraceItem from './ProcessTraceItem';
 import { ToolDetailsProvider } from './ToolDetails';
@@ -38,6 +39,10 @@ let restore = () => {};
 let reconnected: () => void;
 let restoreReconnect = () => {};
 beforeEach(() => {
+  // Deletion is a renderer-wide notification. When the full conversation UI
+  // is loaded, its draft cleanup listener requires the same dataset bootstrap
+  // that production performs before any Session deletion can be observed.
+  setBrowserStorageGeneration('0190f5fe-7c00-7a00-8000-000000000020');
   const observer = spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(listener => {
     reconnected = () => listener(); return () => {};
   });

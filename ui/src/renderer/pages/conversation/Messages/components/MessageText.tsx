@@ -104,9 +104,6 @@ const MessageText: React.FC<{
   const [showCopyAlert, setShowCopyAlert] = useState(false);
   const isUserMessage = message.position === 'right';
   const inputDelivery = isUserMessage ? message.content.input_delivery : undefined;
-  const deliveryReason = inputDelivery?.state === 'blocked' ? ({
-    ATTACHMENT_PREPARATION_FAILED: 'attachment', SKILL_UNAVAILABLE: 'skill', INPUT_BUDGET_EXCEEDED: 'budget',
-  } as const)[inputDelivery.reason as 'ATTACHMENT_PREPARATION_FAILED' | 'SKILL_UNAVAILABLE' | 'INPUT_BUDGET_EXCEEDED'] : undefined;
   const hasMultipleNarrationRanges = !isUserMessage
     && (message.content.timeline?.segments.filter(segment => segment.kind === 'narration').length ?? 0) > 1;
   const decision = isUserMessage ? message.content.idmm_decision : undefined;
@@ -315,14 +312,6 @@ const MessageText: React.FC<{
           </div>
         )}
         {presentation.hasToolPayload && <AssistantProtocolNotice />}
-        {(inputDelivery?.state === 'pending' || inputDelivery?.state === 'blocked' || inputDelivery?.state === 'discarded' || inputDelivery?.state === 'cancelled') && <div
-          role='status' data-testid='message-input-delivery' className='mt-4px text-12px text-t-secondary'>
-          {inputDelivery.state === 'pending'
-            ? t('conversation.inputDelivery.pending')
-            : inputDelivery.state === 'cancelled' ? t('conversation.inputDelivery.cancelled')
-            : inputDelivery.state === 'discarded' ? t('conversation.inputDelivery.discarded')
-            : <>{t('conversation.inputDelivery.blocked')}{deliveryReason ? ` ${t(`conversation.inputDelivery.${deliveryReason}`)}` : ''}</>}
-        </div>}
         {message.content.observations?.map((observation) => (
           <div key={observation.image.id} className='mt-8px flex max-w-full flex-col gap-6px rd-8px border border-solid border-arco-2 p-10px'>
             <span className='text-12px text-t-secondary'>{t('nomi.robot.visualObservation')}</span>

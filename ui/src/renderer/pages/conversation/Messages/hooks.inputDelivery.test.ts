@@ -11,6 +11,39 @@ const later: IMessageText = { ...base, id: 'later-assistant', msg_id: parseMessa
   message_id: undefined, position: 'left', content: { content: 'Working' } };
 
 for (const [name, merge] of [['indexed Messages hook', composeMessageForTest], ['shared composer', composeMessage]] as const) {
+  test(`${name} keeps the chosen exact Turn and steering position across stale ACK, notification and history`, () => {
+    const target = parseMessageId('0190f5fe-7c00-7a00-8000-000000000061');
+    const staleTarget = parseMessageId('0190f5fe-7c00-7a00-8000-000000000062');
+    const delivered: IMessageText = { ...base, turn_id: target, content: { ...base.content,
+      input_delivery: { state: 'claimed', kind: 'steering', placement: 'transcript', turn_id: target, order_seq: 30, event_seq: 40 } } };
+    const stale: IMessageText = { ...base, turn_id: staleTarget, content: { ...base.content,
+      input_delivery: { state: 'pending', kind: 'steering', placement: 'steering', turn_id: staleTarget, order_seq: 20, event_seq: 20 } } };
+    let rows = merge(delivered, [base, later]);
+    rows = merge(stale, rows);
+    rows = merge({ ...base, content: { ...base.content, input_delivery: { state: 'pending' } } }, rows);
+    rows = mergeFetchedMessagesForConversation(rows, [normalizeDbMessage(stale)], conversation);
+    const original = rows.find(row => row.msg_id === message);
+    expect(original?.type).toBe('text');
+    if (original?.type !== 'text') throw new Error('original input was lost');
+    expect(original.content.input_delivery).toEqual(delivered.content.input_delivery);
+    expect(original.turn_id).toBe(target);
+    expect(rows.filter(row => row.msg_id === message)).toHaveLength(1);
+  });
+}
+
+for (const [name, merge] of [['indexed Messages hook', composeMessageForTest], ['shared composer', composeMessage]] as const) {
+  test(`${name} clears a prior steering owner when the unclaimed input becomes an independent root`, () => {
+    const originalTurn = parseMessageId('0190f5fe-7c00-7a00-8000-000000000059');
+    const steering: IMessageText = { ...base, turn_id: originalTurn, content: { ...base.content,
+      input_delivery: { state: 'pending', kind: 'steering', placement: 'steering', turn_id: originalTurn, event_seq: 20, order_seq: 20 } } };
+    const resumed: IMessageText = { ...base, content: { ...base.content,
+      input_delivery: { state: 'pending', kind: 'root', placement: 'transcript', event_seq: 30, order_seq: 10 } } };
+    const rows = merge(resumed, [steering]) as IMessageText[];
+    expect(rows[0].turn_id).toBeUndefined();
+    const staleHistory = mergeFetchedMessagesForConversation(rows, [normalizeDbMessage(steering)], conversation);
+    expect(staleHistory[0].turn_id).toBeUndefined();
+    expect(staleHistory[0].type === 'text' && staleHistory[0].content.input_delivery?.kind).toBe('root');
+  });
   test(`${name} applies repeated userCreated delivery facts without duplicating or concatenating the body`, () => {
     let rows = [base, later];
     for (const input_delivery of [

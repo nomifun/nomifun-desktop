@@ -287,6 +287,12 @@ existing fail-closed behavior.
 
 Ordinary messages use one `/messages` intake. The Host commits `message/user-accepted` once
 and returns its stable message ID, cursor and accepted receipt, independently of execution.
+Ordinary delivery always defaults to `queue`: an idle Session prepares and starts an independent
+Turn immediately, while a busy Session retains separate FIFO roots. Explicit `prefer_current`
+targets the exact observed Turn source and is claimed at a safe boundary without forcibly
+interrupting an in-flight model or tool. There is no send-mode setting; `chat.sendKey` only
+selects the send/newline gesture. Unclaimed expired targets may become later independent roots;
+claimed or delivery-unknown inputs retain their original proof and are never replayed elsewhere.
 A single Session scheduler derives pending inputs from the same canonical chain, claims them at
 an active safe boundary or starts a later Turn. Consumption references the original input without
 copying its body or introducing a queue/recovery ledger. The Store also records new native input
@@ -304,6 +310,35 @@ acknowledges that original input; an explicit redo is a new input. Its `cancelle
 `CANCELLED_BY_OWNER` projection has no edit or retry action and is separate from repairable preparation blocks.
 Unknown Effects and technical pauses still fence execution; accepting
 text never grants budget increases, cleanup attestations or native resume authority.
+
+Acceptance receipts, input notifications, queue reads and history use one derived `SessionInputView`.
+Its placement is `queued`, `steering` or `transcript`; kind, exact Turn source and `order_seq`
+express root/steering ownership and the execution boundary. `event_seq` fences late acknowledgements,
+notifications and history. The view grants no execution authority and is never written into input payloads.
+UI/API contract 46 covers input acceptance, replacement and preparation-stop responses without
+changing the Agent data generation, native checkpoints or physical database schema.
+Only queued inputs render in the compact composer dock; an idle first input appears directly in the
+transcript, and pending steering renders once at its tail before the native receipt places that same
+identity between the preceding and following process segments. User message bubbles do not show input-delivery
+or execution-state captions; typed metadata still serves exact delivery, queue controls and edit eligibility. Empty docks disappear, one row is
+compact, multiple rows initially collapse, and queue-wide operations have a separate scope.
+
+Queue controls use stable keys and versions derived from relevant input/control and Turn-boundary
+facts, never token updates. Clear and explicit pause affect queued inputs; they leave starting and
+pending-steering transcript inputs alone. Stop retains its accepted-batch cutoff. Editing is local
+until save: one writer cancels the old input, accepts the replacement and records references only,
+preserving attachments, Skills, effective intent, cross-source order and hold. A claim that wins
+the race prevents editing. Canceling the editor leaves the input untouched; an unavailable editing
+target keeps its local text visible. Replacement text is stored only in its new accepted payload.
+Routing folds and model-boundary reads do not hydrate unrelated queued bodies. After commit,
+the existing Host owner takes the wake before observer reads or client notifications. Replaying
+consumed or canceled inputs only confirms their exact original receipt.
+
+Process groups follow canonical timeline and steering boundaries. Late fragments merge only
+within their own segment, preserving process-before → human steering → process-after order,
+public results, questions, approvals and errors. Pagination retains reading anchors and Session-scoped
+display expansion choices without holding Runtime objects. Existing `created_at` keyset semantics
+remain intact; timeline sequences and input `order_seq` supply explicit execution order.
 
 The renderer keeps unsent drafts and stable payload/idempotency retry identity, without a second
 business queue or new-turn/steer/resume routing. Ordinary human handoff shows the question and
@@ -591,7 +626,7 @@ A native `report_completion` is hidden as bookkeeping only when completed with a
 
 `GET /api/agent-sessions/{session}/tool-details` reads one exact accepted Turn and invocation. One Store transaction verifies owner, causation and shared Payload integrity. A byte-page cursor pins the content digest, result and committed upper bound; later results cannot enter an older page. Committed empty output, output not yet submitted, unconfirmed terminal observations and corrupt storage are distinct. Late original host settlement after cancellation remains readable, without borrowing a later Turn or replaying a process archive. Native output retention, loss and decoding metadata remain visible; `eof` refers only to that committed section. Inspection acquires no Runtime or execution authority and never runs, resumes or retries a tool.
 
-Detail DTOs and bounded request caches are separate from TMessage. A confirmed call/result identity is separate from its read snapshot: an opened inspector pins its first upper bound, preserving loaded pages and reading position as unrelated Session events arrive. Result changes and reconnect invalidation select a new snapshot. Ordinary, companion, read-only task and creative process views share their inspection semantics; companion bubbles remain summaries. Opening detail neither changes exports nor causes exports to fetch raw content. UI/API contract version 42 includes the read-only display endpoints and file activity summaries; display schemas are separate from persisted execution schemas and do not trigger an Agent dataset rebuild.
+Detail DTOs and bounded request caches are separate from TMessage. A confirmed call/result identity is separate from its read snapshot: an opened inspector pins its first upper bound, preserving loaded pages and reading position as unrelated Session events arrive. Result changes and reconnect invalidation select a new snapshot. Ordinary, companion, read-only task and creative process views share their inspection semantics; companion bubbles remain summaries. Opening detail neither changes exports nor causes exports to fetch raw content. The UI/API display contract includes the read-only display endpoints and file activity summaries; display schemas are separate from persisted execution schemas and do not trigger an Agent dataset rebuild.
 
 `ToolCompleted.runtime_hold` records only a bounded Runtime reason why one proposal did not reach its owner port. `ToolStarted` remains write-ahead admission intent. Discovery, held proposals, owner failures, cancellation and unknown Effects keep distinct semantics. Missing historical reasons remain unclassified rather than guessed from English output. Host settlement remains readable when cancellation prevents a Runtime completion. Display metadata never changes authority, work accounting, delivery review or replay decisions. New reports use the v5 public format without automatically appended aggregate failure counts. Work accounting and delivery gates retain their original values; saved current-generation older deliveries keep exact text validation without rewriting history.
 

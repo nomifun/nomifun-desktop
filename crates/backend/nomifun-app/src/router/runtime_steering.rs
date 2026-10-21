@@ -125,18 +125,15 @@ impl ConversationRuntimeHost {
         if owner.require_ordinary_owner_input(&self.principal,&session).await.is_err() {return Ok(());}
         let store=self.session_host.canonical_store()?;
         if store.has_unsettled_effects(&session).await.map_err(error)? {return Ok(());}
-        let(_,root)=store.turn_accepted_input(&session,&turn.operation.clone().into()).await.map_err(error)?;
-        let receiver=nomifun_agent_contracts::ChannelInputSource::from_input(&root.0).map_err(error)?;
-        let mut inputs=store.pending_session_inputs(&session,None).await.map_err(error)?;
+        let operation=turn.operation.clone().into();
+        let mut inputs=store.pending_session_inputs_for_steering(&session,&operation,None).await.map_err(error)?;
         for id in std::mem::take(&mut turn.steering.retry_inputs) {
-            inputs.extend(store.pending_session_inputs(&session,Some(&id.into())).await.map_err(error)?);
+            inputs.extend(store.pending_session_inputs_for_steering(&session,&operation,Some(&id.into())).await.map_err(error)?);
         }
         inputs.sort_by_key(|input|input.event.seq);let mut seen=BTreeSet::new();
         for original in inputs {
-            if !seen.insert(original.event.event_id.clone()) || original.input.0.get("reply_to").is_some()
+            if !seen.insert(original.event.event_id.clone())
                 || turn.steering.deferred_inputs.contains(original.event.event_id.as_ref()) {continue;}
-            let incoming=nomifun_agent_contracts::ChannelInputSource::from_input(&original.input.0).map_err(error)?;
-            if !nomifun_agent_contracts::ChannelInputSource::same_destination(receiver.as_ref(),incoming.as_ref()) {continue;}
             let text=original.input.0.get("content").and_then(serde_json::Value::as_str).ok_or_else(||error("accepted input lost its original text"))?.to_owned();
             let files=super::super::runtime_attachments::references(&original.input.0)?;
             let skills=super::super::runtime_attachments::selected_skills(&original.input.0)?;
@@ -154,7 +151,12 @@ impl ConversationRuntimeHost {
                 },
             };
             turn.journal.verify_execution_lease().await.map_err(error)?;
-            let claim=store.claim_session_input_as_steering(&self.principal,&session,&original.event.event_id,&turn.operation.clone().into()).await.map_err(error)?;
+            #[cfg(test)]
+            super::reliability_tests::session_input_preclaim_cutpoint(&self.options.conversation_id).await;
+            // A queue control may win while attachment preparation awaits.
+            // The original writer reports that ordinary race without turning
+            // a user's pause/remove into a failure of the running model Turn.
+            let Some(claim)=store.try_claim_session_input_as_steering(&self.principal,&session,&original.event.event_id,&operation).await.map_err(error)? else {continue;};
             let ack=claim.ack.ok_or_else(||error("input claim has no original acknowledgement"))?;
             // The Store has just checked the exact original input and target
             // under its transaction; the active mutex still owns this scope.
@@ -640,15 +642,15 @@ impl AgentInputPort for HostPort {
         let session=host.options.conversation_id.clone().into();let store=host.session_host.canonical_store().map_err(engine_error)?;
         if store.has_unsettled_effects(&session).await.map_err(engine_error)? {return Ok(false);}
         if host.session_host.session_owner().map_err(engine_error)?.require_ordinary_owner_input(&host.principal,&session).await.is_err() {return Ok(false);}
-        let inputs=store.pending_session_inputs(&session,None).await.map_err(engine_error)?;
-        let(_,root)=store.turn_accepted_input(&session,&turn.operation.clone().into()).await.map_err(engine_error)?;
-        let receiver=nomifun_agent_contracts::ChannelInputSource::from_input(&root.0).map_err(engine_error)?;
-        for input in inputs {
-            let incoming=nomifun_agent_contracts::ChannelInputSource::from_input(&input.input.0).map_err(engine_error)?;
-            if input.input.0.get("reply_to").is_none() && !turn.steering.deferred_inputs.contains(input.event.event_id.as_ref())
-                && nomifun_agent_contracts::ChannelInputSource::same_destination(receiver.as_ref(),incoming.as_ref()) {return Ok(true);}
+        let operation=turn.operation.clone().into();
+        let mut inputs=store.pending_session_inputs_for_steering(&session,&operation,None).await.map_err(engine_error)?;
+        for id in &turn.steering.retry_inputs {
+            inputs.extend(store.pending_session_inputs_for_steering(&session,&operation,Some(&id.clone().into())).await.map_err(engine_error)?);
         }
-        Ok(!turn.steering.retry_inputs.is_empty())
+        for input in inputs {
+            if !turn.steering.deferred_inputs.contains(input.event.event_id.as_ref()) {return Ok(true);}
+        }
+        Ok(false)
     }
 }
 

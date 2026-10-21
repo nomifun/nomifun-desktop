@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const source = read('./nomi/NomiSendBox.tsx');
-const queue = read('./useConversationCommandQueue.ts');
 
 describe('ordinary input delivery ownership', () => {
   test('uses one intake without client execution or recovery routing', () => {
@@ -20,8 +19,6 @@ describe('ordinary input delivery ownership', () => {
     expect(source.includes("error.code === 'INPUT_NOT_ACCEPTED'")).toBe(true);
   });
   test('preserves explicit queued and initial identities until canonical acceptance', () => {
-    expect(queue.includes('id: uuidv7(),')).toBe(true);
-    expect(queue.includes('items: restoreQueuedCommand(state.items, nextCommand)')).toBe(true);
     expect(source.includes('{ id: idempotency_key, input, files, initialOnly: true }')).toBe(true);
     expect(source.includes('completeInitialMessageDelivery(sessionStorage, storageKey, idempotency_key)')).toBe(true);
   });

@@ -15,6 +15,10 @@ export interface TurnDisclosureInputItem {
   id: string;
   turnId?: MessageId;
   role: TurnDisclosureRole;
+  /** Canonical input membership; steering never opens another Turn. */
+  inputKind?: 'root' | 'steering';
+  /** Canonical display boundary, independent of the wall clock. */
+  sequence?: number;
   createdAt: number;
   /** Wall-clock content time; createdAt may instead be a stable history cursor. */
   displayAt?: number;
@@ -51,6 +55,7 @@ export type TurnDisclosureOutputItem =
       processItemStates: Record<string, TurnDisclosureProcessState>;
       running: boolean;
       defaultCollapsed: boolean;
+      earlierSegment?: boolean;
     };
 
 export interface BuildTurnDisclosureOptions {
@@ -144,6 +149,10 @@ export function assignTurnIdsFromUserRequests(
 
   for (const entry of items) {
     if (entry.role === 'user') {
+      if (entry.inputKind === 'steering') {
+        output.push(entry);
+        continue;
+      }
       if (requestBoundaryTurnId) retiredTurnIds.add(requestBoundaryTurnId);
       if (currentTurnId) retiredTurnIds.add(currentTurnId);
       if (authoritativeTurnId) retiredTurnIds.add(authoritativeTurnId);
@@ -159,7 +168,7 @@ export function assignTurnIdsFromUserRequests(
       // In particular, an unseen delayed event from an older turn must not
       // claim the new request merely because it is the first explicit id.
       currentTurnId = activeRootTurnId ?? entry.turnId;
-      authoritativeTurnId = activeRootTurnId;
+      authoritativeTurnId = entry.inputKind === 'root' ? currentTurnId : activeRootTurnId;
       currentRequestFallbackIndices = [output.length];
       output.push({ ...entry, turnId: currentTurnId });
       continue;
@@ -226,7 +235,8 @@ const getProcessEndAt = (entry: TurnDisclosureInputItem): number => entry.proces
 const buildEmptyRunningDisclosure = (
   turnId: MessageId,
   segment: TurnDisclosureInputItem[],
-  turnStartedAt?: number
+  turnStartedAt?: number,
+  disclosureId = `turn-disclosure-${turnId}`
 ): TurnDisclosureOutputItem => {
   const startEntry = segment.findLast((entry) => entry.role === 'user') ?? segment[0];
   const startAt = turnStartedAt ?? (startEntry ? getProcessStartAt(startEntry) : 0);
@@ -234,7 +244,7 @@ const buildEmptyRunningDisclosure = (
 
   return {
     type: 'turn_disclosure',
-    id: `turn-disclosure-${turnId}`,
+    id: disclosureId,
     turnId,
     processItemIds: [],
     sourceMessageIds: [],
@@ -275,7 +285,8 @@ const buildEmptyClosedSegmentOutput = (
   segment: TurnDisclosureInputItem[],
   resultAnchor: TurnDisclosureInputItem | undefined,
   turnStartedAt: number,
-  turnEndedAt: number
+  turnEndedAt: number,
+  disclosureId = `turn-disclosure-${turnId}`
 ): TurnDisclosureOutputItem[] => {
   const state = resultAnchor?.processState === 'failed'
     ? 'failed'
@@ -284,7 +295,7 @@ const buildEmptyClosedSegmentOutput = (
       : 'completed';
   const disclosure: TurnDisclosureOutputItem = {
     type: 'turn_disclosure',
-    id: `turn-disclosure-${turnId}`,
+    id: disclosureId,
     turnId,
     processItemIds: [],
     sourceMessageIds: [],
@@ -316,7 +327,8 @@ function buildSegmentOutput(
   turnStartedAt?: number,
   turnEndedAt?: number,
   publicResultIds: ReadonlySet<string> = new Set(),
-  hasProcessRecords = false
+  hasProcessRecords = false,
+  disclosureId = `turn-disclosure-${segment[0]?.turnId}`
 ): TurnDisclosureOutputItem[] {
   const turnId = segment[0]?.turnId;
   if (!turnId) return segment.map((entry) => ({ type: 'item', id: entry.id }));
@@ -334,7 +346,7 @@ function buildSegmentOutput(
 
   if (!processItems.length) {
     if (!isClosed) {
-      return buildEmptyRunningSegmentOutput(segment, buildEmptyRunningDisclosure(turnId, segment, turnStartedAt));
+      return buildEmptyRunningSegmentOutput(segment, buildEmptyRunningDisclosure(turnId, segment, turnStartedAt, disclosureId));
     }
     const visibleEntries = segment.filter((entry) => entry.role !== 'metadata');
     const fallbackStart = visibleEntries.length
@@ -351,11 +363,12 @@ function buildSegmentOutput(
         segment,
         resultAnchor,
         turnStartedAt ?? fallbackStart,
-        turnEndedAt ?? fallbackEnd
+        turnEndedAt ?? fallbackEnd,
+        disclosureId
       );
     }
     if (hasProcessRecords) return buildEmptyClosedSegmentOutput(turnId, segment, resultAnchor,
-      turnStartedAt ?? Number.NaN, turnEndedAt ?? Number.NaN);
+      turnStartedAt ?? Number.NaN, turnEndedAt ?? Number.NaN, disclosureId);
     return visibleEntries.map((entry) => ({ type: 'item', id: entry.id }));
   }
 
@@ -373,7 +386,7 @@ function buildSegmentOutput(
 
   const disclosure: TurnDisclosureOutputItem = {
     type: 'turn_disclosure',
-    id: `turn-disclosure-${turnId}`,
+    id: disclosureId,
     turnId,
     processItemIds: processItems.map((entry) => entry.id),
     sourceMessageIds: unique(processItems.flatMap((entry) => entry.sourceMessageIds ?? [])),
@@ -429,12 +442,12 @@ const getDisclosureStateObservedAt = (
   return observedTimes.length ? Math.max(...observedTimes) : disclosure.endAt;
 };
 
-const coalesceTurnDisclosures = (
+const coalesceProcessBoundaries = (
   items: TurnDisclosureOutputItem[],
   processObservedAtByItemId: ReadonlyMap<string, number>
 ): TurnDisclosureOutputItem[] => {
   const output: TurnDisclosureOutputItem[] = [];
-  const disclosureIndexByTurn = new Map<MessageId, number>();
+  const disclosureIndexById = new Map<string, number>();
 
   for (const item of items) {
     if (item.type !== 'turn_disclosure') {
@@ -442,9 +455,9 @@ const coalesceTurnDisclosures = (
       continue;
     }
 
-    const existingIndex = disclosureIndexByTurn.get(item.turnId);
+    const existingIndex = disclosureIndexById.get(item.id);
     if (existingIndex === undefined) {
-      disclosureIndexByTurn.set(item.turnId, output.length);
+      disclosureIndexById.set(item.id, output.length);
       output.push(item);
       continue;
     }
@@ -474,45 +487,45 @@ const coalesceTurnDisclosures = (
   return output;
 };
 
-const placeTurnDisclosuresAtTurnBoundary = (
+const placeProcessBoundaries = (
   items: TurnDisclosureOutputItem[],
-  requestByTurn: ReadonlyMap<MessageId, TurnDisclosureInputItem>,
-  resultAnchorByTurn: ReadonlyMap<MessageId, TurnDisclosureInputItem>
+  requestByBoundary: ReadonlyMap<string, TurnDisclosureInputItem>,
+  resultAnchorByBoundary: ReadonlyMap<string, TurnDisclosureInputItem>
 ): TurnDisclosureOutputItem[] => {
-  const disclosureByTurn = new Map<MessageId, Extract<TurnDisclosureOutputItem, { type: 'turn_disclosure' }>>();
+  const disclosureByBoundary = new Map<string, Extract<TurnDisclosureOutputItem, { type: 'turn_disclosure' }>>();
   for (const item of items) {
-    if (item.type === 'turn_disclosure') disclosureByTurn.set(item.turnId, item);
+    if (item.type === 'turn_disclosure') disclosureByBoundary.set(item.id, item);
   }
 
   const visibleItemIds = new Set(items.flatMap((item) => (item.type === 'item' ? [item.id] : [])));
-  const requestTurnByItemId = new Map<string, MessageId>();
-  for (const [turnId, request] of requestByTurn) {
-    if (visibleItemIds.has(request.id)) requestTurnByItemId.set(request.id, turnId);
+  const requestBoundaryByItemId = new Map<string, string>();
+  for (const [boundary, request] of requestByBoundary) {
+    if (visibleItemIds.has(request.id)) requestBoundaryByItemId.set(request.id, boundary);
   }
-  const requestAnchoredTurns = new Set(requestTurnByItemId.values());
+  const requestAnchoredBoundaries = new Set(requestBoundaryByItemId.values());
 
-  const resultTurnByItemId = new Map<string, MessageId>();
-  for (const [turnId, resultAnchor] of resultAnchorByTurn) {
-    if (!requestAnchoredTurns.has(turnId) && visibleItemIds.has(resultAnchor.id)) {
-      resultTurnByItemId.set(resultAnchor.id, turnId);
+  const resultBoundaryByItemId = new Map<string, string>();
+  for (const [boundary, resultAnchor] of resultAnchorByBoundary) {
+    if (!requestAnchoredBoundaries.has(boundary) && visibleItemIds.has(resultAnchor.id)) {
+      resultBoundaryByItemId.set(resultAnchor.id, boundary);
     }
   }
-  const anchoredTurns = new Set([...requestAnchoredTurns, ...resultTurnByItemId.values()]);
+  const anchoredBoundaries = new Set([...requestAnchoredBoundaries, ...resultBoundaryByItemId.values()]);
 
   const output: TurnDisclosureOutputItem[] = [];
   for (const item of items) {
-    if (item.type === 'turn_disclosure' && anchoredTurns.has(item.turnId)) {
+    if (item.type === 'turn_disclosure' && anchoredBoundaries.has(item.id)) {
       continue;
     }
     if (item.type === 'item') {
-      const turnId = resultTurnByItemId.get(item.id);
-      const disclosure = turnId ? disclosureByTurn.get(turnId) : undefined;
+      const boundary = resultBoundaryByItemId.get(item.id);
+      const disclosure = boundary ? disclosureByBoundary.get(boundary) : undefined;
       if (disclosure) output.push(disclosure);
     }
     output.push(item);
     if (item.type === 'item') {
-      const turnId = requestTurnByItemId.get(item.id);
-      const disclosure = turnId ? disclosureByTurn.get(turnId) : undefined;
+      const boundary = requestBoundaryByItemId.get(item.id);
+      const disclosure = boundary ? disclosureByBoundary.get(boundary) : undefined;
       if (disclosure) output.push(disclosure);
     }
   }
@@ -552,13 +565,40 @@ export function buildTurnDisclosureItems(
   const output: TurnDisclosureOutputItem[] = [];
   let segment: TurnDisclosureInputItem[] = [];
   const activeTurnId = options.tailClosed === true ? undefined : options.activeTurnId;
-  const requestByTurn = new Map<MessageId, TurnDisclosureInputItem>();
-  const resultAnchorByTurn = new Map<MessageId, TurnDisclosureInputItem>();
+  const requestByBoundary = new Map<string, TurnDisclosureInputItem>();
+  const resultAnchorByBoundary = new Map<string, TurnDisclosureInputItem>();
   const turnStartedAtByTurn = new Map<MessageId, number>();
   const turnEndedAtByTurn = new Map<MessageId, number>();
   const terminalStateByTurn = new Map<MessageId, TurnDisclosureProcessState>();
   const authoritativeStartedTurns = new Set<MessageId>();
   const processObservedAtByItemId = new Map<string, number>();
+  const indexByItem = new Map(items.map((item, index) => [item, index]));
+  const comparePosition = (left: TurnDisclosureInputItem, right: TurnDisclosureInputItem) =>
+    left.sequence !== undefined && right.sequence !== undefined ? left.sequence - right.sequence
+      : left.sequence === undefined && right.sequence === undefined ? left.createdAt - right.createdAt
+        : indexByItem.get(left)! - indexByItem.get(right)!;
+  const firstProcessByTurn = new Map<MessageId, TurnDisclosureInputItem>();
+  for (const item of items) {
+    if (!item.turnId || item.role === 'user' || item.role === 'metadata' || item.role === 'other') continue;
+    const previous = firstProcessByTurn.get(item.turnId);
+    if (!previous || comparePosition(item, previous) < 0) firstProcessByTurn.set(item.turnId, item);
+  }
+  const steeringByTurn = new Map<MessageId, TurnDisclosureInputItem[]>();
+  for (const item of items) {
+    if (!item.turnId || item.inputKind !== 'steering') continue;
+    // Opening inputs share the initial process. An actual intervention after
+    // process evidence creates a durable reading boundary within the same Turn.
+    const firstProcess = firstProcessByTurn.get(item.turnId);
+    if (!firstProcess || comparePosition(firstProcess, item) >= 0) continue;
+    const boundaries = steeringByTurn.get(item.turnId) ?? [];
+    boundaries.push(item);
+    steeringByTurn.set(item.turnId, boundaries);
+  }
+  for (const boundaries of steeringByTurn.values()) boundaries.sort(comparePosition);
+  const boundaryOf = (item: TurnDisclosureInputItem): string => {
+    const intervention = item.turnId && steeringByTurn.get(item.turnId)?.findLast(candidate => comparePosition(candidate, item) <= 0);
+    return `turn-disclosure-${item.turnId}${intervention ? `:${intervention.id}` : ''}`;
+  };
 
   if (activeTurnId && isTurnTimestamp(options.activeTurnStartedAt)) {
     turnStartedAtByTurn.set(activeTurnId, options.activeTurnStartedAt);
@@ -577,7 +617,8 @@ export function buildTurnDisclosureItems(
       }
     }
     if (item.turnId && item.role === 'user') {
-      if (!requestByTurn.has(item.turnId)) requestByTurn.set(item.turnId, item);
+      const boundary = boundaryOf(item);
+      if (!requestByBoundary.has(boundary) || item.inputKind === 'steering') requestByBoundary.set(boundary, item);
       const currentStart = turnStartedAtByTurn.get(item.turnId);
       const requestStartedAt = getProcessStartAt(item);
       if (
@@ -599,25 +640,31 @@ export function buildTurnDisclosureItems(
   // public: every public member is already selected by the exact receipt.
   for (const item of items) {
     if (item.turnId && publicResultIds.has(item.id)) {
-      const current = resultAnchorByTurn.get(item.turnId);
-      if (!current?.terminal || item.terminal) resultAnchorByTurn.set(item.turnId, item);
+      const boundary = boundaryOf(item);
+      const current = resultAnchorByBoundary.get(boundary);
+      if (!current?.terminal || item.terminal) resultAnchorByBoundary.set(boundary, item);
     }
   }
   const flush = (fallbackClosed: boolean) => {
     if (!segment.length) return;
     const segmentTurnId = segment[0]?.turnId;
+    const boundary = boundaryOf(segment[0]);
+    const boundaries = segmentTurnId ? steeringByTurn.get(segmentTurnId) : undefined;
+    const lastBoundary = boundaries?.at(-1);
+    const isEarlierBoundary = Boolean(lastBoundary && boundary !== boundaryOf(lastBoundary));
     const isClosed = (segmentTurnId !== undefined && turnEndedAtByTurn.has(segmentTurnId))
-      || options.tailClosed === true || (activeTurnId ? segmentTurnId !== activeTurnId : fallbackClosed);
+      || isEarlierBoundary || options.tailClosed === true || (activeTurnId ? segmentTurnId !== activeTurnId : fallbackClosed);
     output.push(
       ...buildSegmentOutput(
         segment,
         isClosed,
-        segmentTurnId ? resultAnchorByTurn.get(segmentTurnId) : undefined,
+        resultAnchorByBoundary.get(boundary),
         segmentTurnId ? turnStartedAtByTurn.get(segmentTurnId) : undefined,
-        segmentTurnId ? turnEndedAtByTurn.get(segmentTurnId) : undefined,
+        !isEarlierBoundary && segmentTurnId ? turnEndedAtByTurn.get(segmentTurnId) : undefined,
         publicResultIds,
-        segmentTurnId !== undefined && options.processRecordTurnIds?.has(segmentTurnId)
-      )
+        segmentTurnId !== undefined && options.processRecordTurnIds?.has(segmentTurnId),
+        boundary
+      ).map(entry => entry.type === 'turn_disclosure' && isEarlierBoundary ? { ...entry, earlierSegment: true } : entry)
     );
     segment = [];
   };
@@ -632,7 +679,7 @@ export function buildTurnDisclosureItems(
     }
 
     const currentTurnId = segment[0]?.turnId;
-    if (currentTurnId && currentTurnId !== item.turnId) {
+    if (currentTurnId && (currentTurnId !== item.turnId || boundaryOf(segment[0]) !== boundaryOf(item))) {
       flush(true);
     }
 
@@ -640,19 +687,16 @@ export function buildTurnDisclosureItems(
   }
 
   flush(options.tailClosed === true);
-  // Delayed events can make one logical turn appear in multiple non-contiguous
-  // segments. Keep ordinary transcript items in arrival order, fold their
-  // synthetic process metadata into one disclosure, then place that disclosure
-  // after the visible request (or before the final answer for a background
-  // turn). Persisted process rows may arrive after several later messages;
-  // leaving the synthetic header there stacks old "processed" rows below the
-  // newest text.
-  const coalesced = coalesceTurnDisclosures(output, processObservedAtByItemId);
-  const placed = placeTurnDisclosuresAtTurnBoundary(coalesced, requestByTurn, resultAnchorByTurn);
+  // Delayed rows join their original process boundary. An intervention keeps
+  // separate disclosures before and after it, even though both own one Turn.
+  const coalesced = coalesceProcessBoundaries(output, processObservedAtByItemId);
+  const placed = placeProcessBoundaries(coalesced, requestByBoundary, resultAnchorByBoundary);
   // Durable terminal metadata wins over partial text and stale live tool rows,
   // including after reload when the in-memory stop notice no longer exists.
   const authoritative = placed.map((item): TurnDisclosureOutputItem => {
     if (item.type !== 'turn_disclosure') return item;
+    const lastIntervention = steeringByTurn.get(item.turnId)?.at(-1);
+    if (lastIntervention && item.id !== boundaryOf(lastIntervention)) return item;
     const state = terminalStateByTurn.get(item.turnId);
     return state ? { ...item, state, running: false, defaultCollapsed: true } : item;
   });

@@ -309,6 +309,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         .replace("\r\n", "\n").replace('\r', "\n");
     let system_error_binding = format!("{}\n", system_error_binding.lines().map(str::trim_end).collect::<Vec<_>>().join("\n"));
     let presentation_bindings = [
+        ("SessionInputDeliveryIntent", nomifun_agent_contracts::SessionInputDeliveryIntent::export_to_string(&ts_rs::Config::default())?),
+        ("SessionInputQueueAction", nomifun_agent_contracts::SessionInputQueueAction::export_to_string(&ts_rs::Config::default())?),
+        ("SessionInputQueueCommand", nomifun_agent_contracts::SessionInputQueueCommand::export_to_string(&ts_rs::Config::default())?),
+        ("SessionInputView", nomifun_agent_contracts::SessionInputView::export_to_string(&ts_rs::Config::default())?),
+        ("SessionInputPlacement", nomifun_agent_contracts::SessionInputPlacement::export_to_string(&ts_rs::Config::default())?),
+        ("SessionInputKind", nomifun_agent_contracts::SessionInputKind::export_to_string(&ts_rs::Config::default())?),
+        ("SessionInputState", nomifun_agent_contracts::SessionInputState::export_to_string(&ts_rs::Config::default())?),
         ("ToolDetailPage", ToolDetailPage::export_to_string(&ts_rs::Config::default())?),
         ("ToolDetailSection", ToolDetailSection::export_to_string(&ts_rs::Config::default())?),
         ("ToolDetailAvailability", ToolDetailAvailability::export_to_string(&ts_rs::Config::default())?),
@@ -640,6 +647,11 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<AgentTurnOutcome>(&mut schemas, "agent_turn_outcome")?;
     add_schema::<AgentStoreSchemaManifestPayload>(&mut schemas, "agent_store_schema_manifest")?;
     add_schema::<SessionEventRegistryPayload>(&mut schemas, "session_event_registry")?;
+    add_schema::<nomifun_agent_contracts::SessionInputDeliveryIntent>(&mut schemas, "session_input_delivery_intent")?;
+    add_schema::<nomifun_agent_contracts::SessionInputQueueAction>(&mut schemas, "session_input_queue_action")?;
+    add_schema::<nomifun_agent_contracts::SessionInputQueueCommand>(&mut schemas, "session_input_queue_command")?;
+    add_schema::<nomifun_agent_contracts::SessionInputView>(&mut schemas, "session_input_view")?;
+    add_schema::<nomifun_agent_contracts::SessionInputQueueChangedV1>(&mut schemas, "session_input_queue_changed")?;
     add_schema::<TurnWorkspaceFilesObservedV1>(&mut schemas, "turn_workspace_files_observed")?;
     add_schema::<nomifun_agent_contracts::ChannelInputQuestionDeliveredV1>(&mut schemas, "channel_input_question_delivered")?;
     add_schema::<nomifun_agent_contracts::ChannelInputDeliveryStateV1>(&mut schemas, "channel_input_delivery_state")?;

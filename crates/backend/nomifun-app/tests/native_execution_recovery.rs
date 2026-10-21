@@ -293,18 +293,13 @@ async fn owner_pause_resume(with_input: bool) {
     assert!(status.is_client_error());
     let source:String=sqlx::query_scalar("SELECT source_message_id FROM agent_turns WHERE session_id=? AND operation_id=?")
         .bind(id).bind(paused["operation_id"].as_str().unwrap()).fetch_one(app.database.pool()).await.unwrap();
-    let plain_steer_path=format!("/api/agent-sessions/{id}/turns/steer");
-    assert!(response(&router,"POST",&plain_steer_path,json!({"idempotency_key":"cannot-steer-paused","expected_turn_id":source,
-        "input":{"content":"This cannot bypass native resume"}})).await.0.is_client_error());
-    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/steer-accepted'")
-        .bind(id).fetch_one(app.database.pool()).await.unwrap(),0,"rejected paused steer must not save undeliverable input");
     let resume = json!({"operation_id":paused["operation_id"],"idempotency_key":"resume-once",
         "expected_pause_revision":paused["pause"]["revision"],"expected_checkpoint_revision":paused["checkpoint_revision"],
         "expected_checkpoint_digest":paused["checkpoint_digest"],"budget":{}});
     let mut stale = resume.clone(); stale["expected_checkpoint_digest"] = json!("f".repeat(64));
     assert!(response(&router,"POST",&format!("{execution}/resume"),stale).await.0.is_client_error());
     if with_input {
-        let input=json!({"idempotency_key":"ordinary-pause-input","input":{"content":"CONTINUE_ORIGINAL_TASK: continue the original task without changing any requirements."}});
+        let input=json!({"idempotency_key":"ordinary-pause-input","delivery":{"kind":"prefer_current","turn_id":source},"input":{"content":"CONTINUE_ORIGINAL_TASK: continue the original task without changing any requirements."}});
         let path=format!("/api/agent-sessions/{id}/messages");
         let accepted=call(&router,"POST",&path,input.clone()).await;
         let duplicate=call(&router,"POST",&path,input).await;
@@ -357,12 +352,6 @@ async fn owner_pause_resume(with_input: bool) {
         .bind(id).fetch_one(app.database.pool()).await.unwrap(),event_count,
         "terminal resume attempts cannot append canonical events");
     assert_eq!(call(&router,"GET",&execution,Value::Null).await["state"],"completed");
-    let (late_status,late)=response(&router,"POST",&plain_steer_path,json!({"idempotency_key":"late-first-input","expected_turn_id":source,
-        "input":{"content":"A late message must retain its draft"}})).await;
-    assert_eq!(late_status,StatusCode::CONFLICT);
-    assert_eq!(late["code"],"INPUT_NOT_ACCEPTED");
-    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events WHERE session_id=?")
-        .bind(id).fetch_one(app.database.pool()).await.unwrap(),event_count,"a closed target must not falsely acknowledge an unaccepted input");
     drop(router);
     app.shutdown_browser_platform().await.unwrap(); app.database.close().await;
     server.abort(); let _ = server.await;

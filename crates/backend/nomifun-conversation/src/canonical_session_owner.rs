@@ -498,6 +498,22 @@ impl CanonicalAgentSessionOwner {
         Ok(AgentMutationReceipt { target_operation_id, event_id, cursor: result.cursor, duplicate: result.duplicate })
     }
 
+    /// Ordinary composer Stop retains its exact pending input batch. Domain
+    /// cancellation continues through the separate existing methods above.
+    pub async fn cancel_composer_turn(&self,owner:&PrincipalRef,session:&AgentSessionId,key:&str,target:Option<&OperationId>)
+        ->Result<AgentMutationReceipt,AppError> {
+        self.require_owner(owner,session).await?;
+        let key=IdempotencyKey::from(format!("{}:cancel",scoped_key(owner,key,session.as_ref())?));
+        let producer=EventProducerId::from("session_api");
+        let (target_operation_id,result)=match target {
+            Some(target)=>self.store.cancel_exact_turn_with_input_hold(session,target,key,producer).await,
+            None=>self.store.cancel_active_turn_with_input_hold(session,key,producer).await,
+        }.map_err(store_error)?;
+        let event_id=result.record.as_ref().map(|record|record.event_id.clone())
+            .ok_or_else(||AppError::Conflict("canonical cancellation has no durable Turn receipt".into()))?;
+        Ok(AgentMutationReceipt {target_operation_id,event_id,cursor:result.cursor,duplicate:result.duplicate})
+    }
+
     /// Opt-in native proof over the same exact Turn cancellation writer.
     pub async fn cancel_exact_native_turn(&self,owner:&PrincipalRef,session_id:&AgentSessionId,key:&str,target:&OperationId,
         fence:&nomifun_agent_session::NativeTurnMutationFence)->Result<AgentMutationReceipt,AppError> {

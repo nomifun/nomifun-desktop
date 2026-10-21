@@ -95,6 +95,7 @@ import SystemPermissionNotice from './components/SystemPermissionNotice';
 import { ConversationProseContext } from './components/ConversationProse';
 import { proseSourceIdentity } from './proseSource';
 import { useStreamingProseIngress } from './streamingProse';
+import { ProcessExpansionContext } from './processExpansion';
 
 type SourceMessageId = MessageId;
 
@@ -128,6 +129,7 @@ type ITurnProcessDisclosureVO = {
   state: TurnDisclosureProcessState;
   running: boolean;
   defaultCollapsed: boolean;
+  earlierSegment?: boolean;
 };
 type IProcessReceiptVO = {
   type: 'process_receipt';
@@ -311,6 +313,12 @@ const getProcessedItemMsgId = (item: IRenderableItem): MessageId | undefined => 
 };
 
 const getProcessedItemTurnId = (item: IRenderableItem): MessageId | undefined => {
+  if (item.type === 'text' && item.position === 'right') {
+    const input = item.content.input_delivery;
+    if (input?.placement === 'steering') return undefined;
+    if (input?.kind === 'root') return input.turn_id ?? item.msg_id;
+    return input?.turn_id ?? item.turn_id ?? item.msg_id;
+  }
   return item.turn_id;
 };
 
@@ -320,6 +328,7 @@ const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['r
   }
   switch (item.type) {
     case 'text':
+      if (item.position === 'right' && item.content.input_delivery?.placement === 'steering') return 'other';
       if (item.position === 'left' && (item.content.agentMessage || item.content.standalone_projection)) return 'other';
       return item.position === 'right' ? 'user' : 'assistant';
     case 'tips':
@@ -577,6 +586,10 @@ const MessageList: React.FC<{
   const proseIngress = useStreamingProseIngress();
   const isMessageListLoading = useMessageListLoading();
   const conversationContext = useConversationContextSafe();
+  const processExpansionMemory = useRef({ conversationId: conversationContext?.conversation_id, values: new Map<string, boolean>() });
+  if (processExpansionMemory.current.conversationId !== conversationContext?.conversation_id) {
+    processExpansionMemory.current = { conversationId: conversationContext?.conversation_id, values: new Map() };
+  }
   const pauseError = useMemo(() => {
     const pause = conversationContext?.executionPause;
     if (!pause || !conversationContext?.conversation_id) return null;
@@ -606,10 +619,15 @@ const MessageList: React.FC<{
   const [loadingQuestionPage, setLoadingQuestionPage] = useState(false);
 
   // Pre-process message list to group tool outputs into summary cards
-  const processedList = useMemo(() => {
+  const processedList = useMemo<IMessageVO[]>(() => {
+    const transcript = list.filter(message => !(message.type === 'text' && message.position === 'right'
+      && message.content.input_delivery?.placement === 'queued'));
+    const pendingSteering = transcript.filter(message => message.type === 'text' && message.position === 'right'
+      && message.content.input_delivery?.placement === 'steering');
+    const pendingIds = new Set(pendingSteering.map(message => message.id));
     // Canonical content references own reading boundaries. Routine model
     // lifecycle activity does not introduce another content boundary.
-    const journalSources = selectJournalProcessItems(list, {
+    const journalSources = selectJournalProcessItems(transcript.filter(message => !pendingIds.has(message.id)), {
       running: conversationContext?.isProcessing === true,
       isPrivateActivity: isPrivateJournalActivity,
       isRunning: (message) => getProcessItemState(message) === 'running',
@@ -622,7 +640,7 @@ const MessageList: React.FC<{
       if (outcome && message.turn_id) outcomes.set(message.turn_id, mergeAgentTurnOutcome(outcomes.get(message.turn_id), outcome)!);
     }
     for (const outcome of outcomes.values()) if ('message_ids' in outcome) for (const id of outcome.message_ids) publicSources.add(id);
-    for (const message of projectProcessSegments(journalSources, publicSources)) {
+    for (const message of orderProcessSegments(projectProcessSegments(journalSources, publicSources))) {
       if (message.hidden || isInternalInstructionToolCall(message) || isTaskControlReceipt(message)) continue;
       if (message.type === 'agent_status' && ['connecting', 'connected', 'authenticated', 'session_active'].includes(message.content.status)) continue;
       if (message.type === 'thinking' && !thinkingDisplay.visible) continue;
@@ -633,18 +651,21 @@ const MessageList: React.FC<{
           processGroupId: message.processGroupId, processSequence: message.processSequence, processSegmentState: message.processSegmentState });
       } else result.push(message);
     }
-    return result;
+    return [...result, ...pendingSteering];
   }, [list, thinkingDisplay.visible, conversationContext?.isProcessing]);
 
-  const delegationRoots = useMemo(() => [...list.flatMap(message => message.type === 'text' && message.position === 'right' && message.msg_id ? [message.msg_id] : []),
+  const delegationRoots = useMemo(() => [...list.flatMap(message => message.type === 'text' && message.position === 'right' && message.msg_id
+    && message.content.input_delivery?.placement !== 'queued' && message.content.input_delivery?.kind !== 'steering' ? [message.msg_id] : []),
     ...(conversationContext?.activeRequestMessageId ? [conversationContext.activeRequestMessageId] : [])], [list, conversationContext?.activeRequestMessageId]);
   const delegationRecords = useDelegationRecords(conversationContext?.conversation_id, delegationRoots,
     conversationContext?.isProcessing === true || Boolean(execution?.executionId && !isTerminalExecutionStatus(execution.detail?.execution.status)), execution?.executionId);
 
 
-  const delegationOwners = useMemo(() => assignTurnIdsFromUserRequests(list.map(message => {
+  const delegationOwners = useMemo(() => assignTurnIdsFromUserRequests(list.filter(message => !(message.type === 'text'
+    && message.position === 'right' && message.content.input_delivery?.placement === 'queued')).map(message => {
     const role = getProcessedItemRole(message);
-    return { id: message.id, turnId: role === 'user' ? message.msg_id : message.turn_id, role,
+    return { id: message.id, turnId: getProcessedItemTurnId(message), role,
+      inputKind: message.type === 'text' ? message.content.input_delivery?.kind : undefined,
       createdAt: message.created_at ?? 0, displayAt: message.type === 'text' ? message.content.display_at_ms : undefined,
       sourceMessageIds: getProcessedItemSourceMessageIds(message), turnStartedAt: getProcessedItemTurnStartedAt(message) };
   }), { activeTurnId: conversationContext?.activeTurnId, activeRequestMessageId: conversationContext?.activeRequestMessageId }),
@@ -672,7 +693,9 @@ const MessageList: React.FC<{
       itemById.set(id, item);
       return {
         id,
-        turnId: role === 'user' ? getProcessedItemMsgId(item) : getProcessedItemTurnId(item),
+        turnId: getProcessedItemTurnId(item),
+        inputKind: item.type === 'text' ? item.content.input_delivery?.kind : undefined,
+        sequence: item.processSequence,
         role,
         createdAt: getProcessedItemCreatedAt(item),
         displayAt: item.type === 'text' ? item.content.display_at_ms : undefined,
@@ -775,6 +798,7 @@ const MessageList: React.FC<{
           state: entry.state,
           running: entry.running,
           defaultCollapsed: entry.defaultCollapsed,
+          earlierSegment: entry.earlierSegment,
         };
       })
       .filter((item): item is IProcessedItem => Boolean(item));
@@ -1448,6 +1472,7 @@ const MessageList: React.FC<{
   }
 
   return (
+    <ProcessExpansionContext.Provider value={processExpansionMemory.current.values}>
     <ToolDetailsProvider scope={conversationContext?.conversation_id}>
     <ConversationProseContext.Provider value={prosePresentation}>
     <div className='relative flex-1 h-full'>
@@ -1509,6 +1534,7 @@ const MessageList: React.FC<{
     </div>
     </ConversationProseContext.Provider>
     </ToolDetailsProvider>
+    </ProcessExpansionContext.Provider>
   );
 };
 

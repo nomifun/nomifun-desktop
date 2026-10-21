@@ -20,7 +20,6 @@ import * as themeContext from '@/renderer/hooks/context/ThemeContext';
 import { MessageListProvider } from '../../Messages/hooks';
 import { PreviewProvider } from '../../Preview';
 import { persistInitialMessageDelivery } from '../initialMessageDelivery';
-import { createQueuedCommandItem } from '../useConversationCommandQueue';
 import type { NomiMessageRuntime } from './useNomiMessage';
 import type { NomiModelSelection } from './useNomiModelSelection';
 import NomiSendBox from './NomiSendBox';
@@ -38,17 +37,21 @@ const activity = { running: false, hasHydratedRunningState: true, pauseNotice: n
 } as unknown as NomiMessageRuntime;
 
 beforeEach(() => {
+  spyOn(ipcBridge.conversation.inputQueue, 'invoke').mockResolvedValue({ version: 0, items: [] });
   configService.reset(); setBrowserStorageGeneration(uuidv7()); sessionStorage.clear();
   spyOn(themeContext, 'useThemeContext').mockReturnValue({ theme: 'light', colorScheme: 'default', fontScale: 1,
     setTheme: async () => {}, setColorScheme: async () => {}, setFontScale: async () => {} });
   for (const event of [ipcBridge.mode.onProvidersChanged, ipcBridge.conversation.reconnected, ipcBridge.conversation.turnStarted,
     ipcBridge.conversation.turnCompleted, ipcBridge.agentPlatform.sessions.onAgentChanged, ipcBridge.agentPlatform.sessions.onCapabilitiesChanged,
-    ipcBridge.conversation.responseStream, ipcBridge.knowledge.onTreeChanged, ipcBridge.knowledge.onEntryContentUpdated,
+    ipcBridge.conversation.responseStream, ipcBridge.conversation.userCreated, ipcBridge.knowledge.onTreeChanged, ipcBridge.knowledge.onEntryContentUpdated,
     ipcBridge.fileStream.contentUpdate]) spyOn(event, 'on').mockImplementation(() => () => {});
   spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.mode.listProviders, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.fs.listWorkspaceFiles, 'invoke').mockResolvedValue([]);
+  spyOn(ipcBridge.fs.getFileMetadata, 'invoke').mockResolvedValue({ name: 'reference.txt', path: 'C:/reference.txt', size: 0,
+    type: 'text/plain', lastModified: 1, isDirectory: false });
+  spyOn(ipcBridge.fs.getImageBase64, 'invoke').mockResolvedValue(null);
   spyOn(ipcBridge.mcpService.listServers, 'invoke').mockResolvedValue([]);
   spyOn(appHosting.mcpSources, 'invoke').mockResolvedValue([]);
   spyOn(ipcBridge.agentPlatform.sessions.getCapabilitySelection, 'invoke').mockResolvedValue({
@@ -62,7 +65,7 @@ function mountPausedComposer(conversation: TChatConversation, initialPaused = fa
   spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(conversation);
   spyOn(ipcBridge.conversation.taskPlan, 'invoke').mockResolvedValue({ conversation_id: conversation.id, sequence: 0, turn_id: null, turn_status: null, plan: null });
   const send = spyOn(ipcBridge.conversation.sendMessage, 'invoke').mockResolvedValue({
-    msg_id: parseMessageId(uuidv7()), replayed: false,
+    msg_id: parseMessageId(uuidv7()), replayed: false, input_delivery: { state: 'pending', placement: 'transcript', kind: 'root', event_seq: 1, order_seq: 1 },
   });
   function Composer() {
     const [paused, setPaused] = useState(initialPaused); pause = setPaused;
@@ -144,6 +147,7 @@ test.each([false, true])('manual file work cancels an old authority read and res
   expect(transcript).toHaveBeenCalledTimes(2);
   expect(composer.send.mock.calls[0][0]).toMatchObject({ conversation_id: conversation.id, idempotency_key: original.idempotency_key,
     files: original.files, initial_only: true });
+  expect(composer.send.mock.calls[0][0].delivery).toBeUndefined();
   expect(sessionStorage.getItem(key)).toBeNull();
 });
 
@@ -203,39 +207,86 @@ test('a rejected product preparation preserves the unsent prompt and does not re
   expect(composer.send).not.toHaveBeenCalled();
 });
 
-test.each(['initial', 'queued'] as const)('restored %s delivery preserves its authority without product preparation', async kind => {
+test('restored initial delivery preserves its authority without product preparation', async () => {
   const conversation = freshConversation();
-  if (kind === 'initial') {
-    const key = sessionStorageKey('initial-message-nomi', conversationTarget(conversation.id));
-    persistInitialMessageDelivery(sessionStorage, key, conversation.id, 'The admitted application request', []);
-  } else {
-    const key = sessionStorageKey('command-queue', conversationTarget(conversation.id));
-    sessionStorage.setItem(key, JSON.stringify({ items: [createQueuedCommandItem({ input: 'A queued application change', files: [] })], isPaused: false }));
-  }
+  const key = sessionStorageKey('initial-message-nomi', conversationTarget(conversation.id));
+  persistInitialMessageDelivery(sessionStorage, key, conversation.id, 'The admitted application request', []);
   spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockResolvedValue({ items: [], total: 0, has_more: false });
   const prepare = mock(async () => {});
-  const composer = mountPausedComposer(conversation, kind === 'queued', prepare);
-  if (kind === 'queued') {
-    await composer.view.findAllByText('A queued application change');
-    composer.pause(false);
-  }
+  const composer = mountPausedComposer(conversation, false, prepare);
   await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
   expect(prepare).not.toHaveBeenCalled();
 });
 
-test('manual file work pauses the existing command queue until ordinary runtime reconciliation releases it', async () => {
+test('manual file work and remount only observe the Host queue without sending its pending input', async () => {
   const conversation = freshConversation();
-  const queued = createQueuedCommandItem({ input: 'Keep this queued app change', files: [] });
-  const key = sessionStorageKey('command-queue', conversationTarget(conversation.id));
-  sessionStorage.setItem(key, JSON.stringify({ items: [queued], isPaused: false }));
+  const pending = { message_id: parseMessageId(uuidv7()), input: { content: 'Keep this pending app change', files: [] },
+    delivery: { kind: 'queue' as const }, input_delivery: { state: 'pending' as const, placement: 'queued' as const }, held: false };
+  spyOn(ipcBridge.conversation.inputQueue, 'invoke').mockResolvedValue({ version: 1, items: [pending] });
   spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockResolvedValue({ items: [], total: 0, has_more: false });
   const composer = mountPausedComposer(conversation, true);
-  await composer.view.findAllByText(queued.input);
+  await composer.view.findByText(pending.input.content);
   expect(composer.send).not.toHaveBeenCalled();
-  expect(JSON.parse(sessionStorage.getItem(key)!)).toMatchObject({ items: [queued] });
   composer.pause(false);
-  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
-  expect(composer.send.mock.calls[0][0]).toMatchObject({ conversation_id: conversation.id, idempotency_key: queued.id, initial_only: false });
+  await act(async () => {});
+  expect(composer.send).not.toHaveBeenCalled();
+});
+
+test('queue editing keeps the original input and replaces it only when saved without taking over the composer', async () => {
+  const conversation = freshConversation();
+  const pending = { message_id: parseMessageId(uuidv7()), input: { content: 'Edit this canonical pending input', files: ['C:/reference.txt'], inject_skills: ['review'] },
+    delivery: { kind: 'queue' as const }, input_delivery: { state: 'pending' as const, placement: 'queued' as const }, held: true };
+  spyOn(ipcBridge.conversation.inputQueue, 'invoke').mockResolvedValue({ version: 8, items: [pending] });
+  spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockResolvedValue({ items: [], total: 0, has_more: false });
+  let acknowledge!: (value: { version: number; items: [] }) => void;
+  const update = spyOn(ipcBridge.conversation.updateInputQueue, 'invoke').mockImplementation(() => new Promise(resolve => { acknowledge = resolve; }));
+  const composer = mountPausedComposer(conversation);
+  await composer.view.findByText(pending.input.content);
+  fireEvent.click(composer.view.getByRole('button', { name: 'conversation.inputQueue.more' }));
+  fireEvent.click(await composer.view.findByRole('menuitem', { name: 'common.edit' }));
+  const input = composer.view.getByTestId('sendbox-input') as HTMLTextAreaElement;
+  const editor = composer.view.getByRole('textbox', { name: 'conversation.inputQueue.edit' }) as HTMLTextAreaElement;
+  expect(input.value).toBe('');
+  expect(input.disabled).toBe(false);
+  expect(editor.value).toBe(pending.input.content);
+  expect(update).not.toHaveBeenCalled();
+  fireEvent.change(editor, { target: { value: 'Revised queued task' } });
+  fireEvent.click(composer.view.getByRole('button', { name: 'common.save' }));
+  await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+  expect(update.mock.calls[0][0]).toMatchObject({ expected_version: 8, action: { kind: 'replace', message_id: pending.message_id, content: 'Revised queued task' } });
+  await act(async () => acknowledge({ version: 9, items: [] }));
+  await waitFor(() => expect(composer.view.queryByRole('textbox', { name: 'conversation.inputQueue.edit' })).toBeNull());
+  expect(input.value).toBe('');
+  expect(pending.input.files).toEqual(['C:/reference.txt']);
+  expect(pending.input.inject_skills).toEqual(['review']);
+  expect(composer.send).not.toHaveBeenCalled();
+});
+
+test('a separate draft survives queue editing and a raced claim never stops or sends a Turn', async () => {
+  const conversation = freshConversation();
+  const pending = { message_id: parseMessageId(uuidv7()), input: { content: 'Original pending task', files: [] },
+    delivery: { kind: 'queue' as const }, input_delivery: { state: 'pending' as const, placement: 'queued' as const }, held: false };
+  spyOn(ipcBridge.conversation.inputQueue, 'invoke').mockResolvedValue({ version: 8, items: [pending] });
+  spyOn(ipcBridge.database.getConversationMessages, 'invoke').mockResolvedValue({ items: [], total: 0, has_more: false });
+  const update = spyOn(ipcBridge.conversation.updateInputQueue, 'invoke').mockRejectedValue(new Error('already claimed'));
+  const stop = spyOn(ipcBridge.conversation.stop, 'invoke').mockResolvedValue();
+  const composer = mountPausedComposer(conversation);
+  await composer.view.findByText(pending.input.content);
+  const input = composer.view.getByTestId('sendbox-input') as HTMLTextAreaElement;
+  fireEvent.change(input, { target: { value: 'Keep this separate draft' } });
+  fireEvent.click(composer.view.getByRole('button', { name: 'conversation.inputQueue.more' }));
+  fireEvent.click(await composer.view.findByRole('menuitem', { name: 'common.edit' }));
+  expect(update).not.toHaveBeenCalled();
+  const editor = composer.view.getByRole('textbox', { name: 'conversation.inputQueue.edit' }) as HTMLTextAreaElement;
+  fireEvent.change(editor, { target: { value: 'Preserve my revised queued task' } });
+  fireEvent.click(composer.view.getByRole('button', { name: 'common.save' }));
+  await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+  await composer.view.findByText('conversation.inputQueue.changeFailed');
+  expect(input.disabled).toBe(false);
+  expect(input.value).toBe('Keep this separate draft');
+  expect(editor.value).toBe('Preserve my revised queued task');
+  expect(stop).not.toHaveBeenCalled();
+  expect(composer.send).not.toHaveBeenCalled();
 });
 
 test('a pause after the POST begins preserves unknown-outcome handoff without automatically dispatching again', async () => {

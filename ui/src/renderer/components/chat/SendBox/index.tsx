@@ -146,6 +146,8 @@ const SendBox: React.FC<{
   value?: string;
   onChange?: (value: string) => void;
   onSend: (message: string) => Promise<void>;
+  onGuide?: (message: string) => Promise<void>;
+  guideAvailable?: boolean;
   onStop?: () => Promise<void>;
   /** Recall a sent prompt for revision. Submission creates a new canonical Turn;
    *  the original message and its history remain immutable. */
@@ -177,6 +179,7 @@ const SendBox: React.FC<{
   commandPanel?: ComposerCommandPanel;
   commandTargetKey?: string;
   allowSendWhileLoading?: boolean;
+  retryingInput?: boolean;
   compactStacked?: boolean;
   selectedWorkspaceItems?: FileSelectionItem[];
   onSelectedWorkspaceItemsChange?: (items: FileSelectionItem[]) => void;
@@ -185,6 +188,8 @@ const SendBox: React.FC<{
   taskPlan?: TaskPlanSnapshot | null;
 }> = ({
   onSend,
+  onGuide,
+  guideAvailable = false,
   onStop,
   onEditResubmit,
   prefix,
@@ -213,6 +218,7 @@ const SendBox: React.FC<{
   commandPanel,
   commandTargetKey,
   allowSendWhileLoading = false,
+  retryingInput = false,
   compactStacked = false,
   selectedWorkspaceItems,
   onSelectedWorkspaceItemsChange,
@@ -224,11 +230,18 @@ const SendBox: React.FC<{
   const [isLoading, setIsLoading] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const isStoppingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const submissionTarget = commandTargetKey ?? String(conversationContext?.conversation_id ?? 'composer');
+  const submissionTargetRef = useLatestRef(submissionTarget);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const [isSingleLine, setIsSingleLine] = useState(!defaultMultiLine);
   const [isInputFocused, setIsInputFocused] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const commandController = useComposerCommands({
-    targetKey: commandTargetKey ?? String(conversationContext?.conversation_id ?? 'composer'),
+    targetKey: submissionTarget,
     input, setInput, commands, panel: commandPanel, anchorRef: containerRef,
   });
   const singleLineWidthRef = useRef<number>(0);
@@ -919,8 +932,7 @@ const SendBox: React.FC<{
   );
 
   // Builds the final message from the current draft and CLEARS the input.
-  // Returns null when there's nothing to send. Mirrors the compose half of
-  // sendMessageHandler so steer can reuse it.
+  // Returns null when there is nothing to send.
   const composeAndClear = (clear = true): string | null => {
     if (!input.trim() && domSnippets.length === 0) return null;
 
@@ -965,7 +977,11 @@ const SendBox: React.FC<{
     setInput(prev);
   };
 
-  const sendMessageHandler = () => {
+  const sendMessageHandler = (guide = false) => {
+    const submit = guide ? onGuide : onSend;
+    if (!submit || guide && (!guideAvailable || retryingInput || editingMsgId)) return;
+    const target = submissionTarget;
+    const stillOwnsDraft = () => mountedRef.current && submissionTargetRef.current === target;
     if (commandController.dispatchInput()) return;
     if (disabled || submitDisabled) return;
     if (isUploading || isStopping) return;
@@ -979,13 +995,14 @@ const SendBox: React.FC<{
       setIsLoading(true);
       onEditResubmit(targetId, targetCreatedAt, finalMessage)
         .then(() => {
+          if (!stillOwnsDraft()) return;
           setEditingMsgId(null);
           editPrevDraftRef.current = null;
           if (latestInputRef.current === finalMessage) setInputRef.current('');
         })
         .catch(() => {})
         .finally(() => {
-          setIsLoading(false);
+          if (stillOwnsDraft()) setIsLoading(false);
         });
       return;
     }
@@ -1027,8 +1044,9 @@ const SendBox: React.FC<{
     const finalMessage = composeAndClear(!preserveDraftUntilAccepted);
     if (finalMessage == null) return;
 
-    onSend(finalMessage)
+    submit(finalMessage)
       .then(() => {
+        if (!stillOwnsDraft()) return;
         if (preserveDraftUntilAccepted && latestInputRef.current === submittedDraft) {
           setInputRef.current('');
           clearDomSnippets();
@@ -1037,7 +1055,7 @@ const SendBox: React.FC<{
       })
       .catch(() => {})
       .finally(() => {
-        setIsLoading(false);
+        if (stillOwnsDraft()) setIsLoading(false);
       });
   };
 
@@ -1071,8 +1089,12 @@ const SendBox: React.FC<{
     : disabled || submitDisabled || isUploading || isStopping || (!input.trim() && domSnippets.length === 0);
 
   // Reusable send button component
-  const sendButton = <ComposerSendButton disabled={isButtonDisabled} onClick={sendMessageHandler} />;
-
+  const sendButton = <ComposerSendButton disabled={isButtonDisabled} onClick={() => sendMessageHandler()}
+    title={retryingInput ? t('conversation.sendbox.retrySend') : undefined} />;
+  const guideButton = onGuide && guideAvailable && hasDraftToSend && !retryingInput && !editingMsgId
+    ? <Button size='small' type='primary' disabled={isButtonDisabled} onClick={() => sendMessageHandler(true)}
+        title={t('conversation.sendbox.guideHint')} aria-label={t('conversation.sendbox.guide')}
+        data-testid='sendbox-guide-btn'>{t('conversation.sendbox.guide')}</Button> : null;
   const stopButton = (
     <Button
       shape='circle'
@@ -1112,6 +1134,7 @@ const SendBox: React.FC<{
       return (
         <div className='flex items-center gap-2' data-testid='sendbox-busy-actions'>
           {stopButton}
+          {guideButton}
           {sendButton}
         </div>
       );
@@ -1121,7 +1144,7 @@ const SendBox: React.FC<{
       return stopButton;
     }
 
-    return sendButton;
+    return <>{guideButton}{sendButton}</>;
   };
 
   const shouldUseHighlightOverlay = !isComposingState && allAtFileQueries.length > 0;
@@ -1328,7 +1351,7 @@ const SendBox: React.FC<{
           onScroll: event => syncHighlightScroll(event.currentTarget),
           ...compositionHandlers,
           onKeyDown: createKeyDownHandler(
-                  sendMessageHandler,
+                  () => sendMessageHandler(),
                   (event) => {
                     if (handleAtFileMenuKeyDown(event) || commandController.onKeyDown(event) || handleHistoryKeyDown(event)) {
                       return true;

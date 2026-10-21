@@ -7,6 +7,16 @@ const source = (type: 'thinking' | 'text', content: string, segments: unknown[])
 const segment = (id: string, seq: number, kind: 'reasoning' | 'narration', start: number, end: number, group = 'first') => ({
   segment_id: id, group_id: group, first_seq: seq, last_seq: seq, kind, state: 'completed', start_utf16: start, end_utf16: end,
 });
+
+test('one reasoning source splits around the exact steering boundary rather than its earlier acceptance time', () => {
+  const thought = source('thinking', 'Before.After.', [segment('before', 20, 'reasoning', 0, 7),
+    segment('after', 50, 'reasoning', 7, 13, 'steered')]);
+  const guide = { id: 'guide', type: 'text', position: 'right', created_at: 1,
+    content: { content: 'Change direction', input_delivery: { state: 'claimed', kind: 'steering', placement: 'transcript', order_seq: 40 } } } as unknown as TMessage;
+  const rows = orderProcessSegments(projectProcessSegments([thought, guide], new Set()));
+  expect(rows.map(row => row.id)).toEqual(['before', 'guide', 'after']);
+  expect(rows.map(textOf)).toEqual(['Before.', 'Change direction', 'After.']);
+});
 test('canonical reasoning and narration each retain their complete source body through interleaving', () => {
   const thought = source('thinking', '甲😀乙', [{ ...segment('r1', 4, 'reasoning', 0, 4), last_seq: 6 }]);
   const text = '我将安装 **CLI**。';

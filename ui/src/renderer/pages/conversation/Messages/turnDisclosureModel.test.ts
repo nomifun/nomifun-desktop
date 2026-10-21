@@ -1183,3 +1183,75 @@ test('source-bound process records can open a paged-out tool Turn without invent
   expect(Number.isNaN(process.endAt)).toBe(true);
   expect(buildTurnDisclosureItems(items, { tailClosed: true }).some(entry => entry.type === 'turn_disclosure')).toBe(false);
 });
+
+test('an exact steering input remains in its original Turn without changing the root for transient tail rows', () => {
+  const assigned = assignTurnIdsFromUserRequests([
+    item('root', 'user', { inputKind: 'root', turnId: TURN_1 }),
+    item('before', 'process', { turnId: TURN_1 }),
+    item('guide', 'user', { inputKind: 'steering', turnId: TURN_1 }),
+    item('late-other-turn', 'process', { turnId: TURN_2 }),
+    item('after', 'process', { turnId: undefined }),
+  ]);
+  expect(assigned.map(entry => entry.turnId)).toEqual([TURN_1, TURN_1, TURN_1, TURN_2, TURN_1]);
+});
+
+test('steering keeps earlier and later process on opposite sides and delayed facts join only their own boundary', () => {
+  const guide = item('guide', 'user', { inputKind: 'steering', sequence: 40 });
+  const entries = [
+    item('root', 'user', { inputKind: 'root', sequence: 10 }),
+    item('before', 'process', { sequence: 20 }),
+    guide,
+    item('after', 'process', { sequence: 50 }),
+    item('answer', 'assistant', { sequence: 60 }),
+    item('late-before', 'process', { sequence: 30 }),
+    item('late-after', 'process', { sequence: 55 }),
+  ];
+  const output = buildTurnDisclosureItems(entries, { tailClosed: true });
+  expect(output.map(entry => entry.id)).toEqual(['root', DISCLOSURE_1, 'guide', `${DISCLOSURE_1}:guide`, 'answer']);
+  const disclosures = output.filter(entry => entry.type === 'turn_disclosure');
+  expect(disclosures.map(entry => entry.turnId)).toEqual([TURN_1, TURN_1]);
+  expect(disclosures.map(entry => entry.processItemIds)).toEqual([['before', 'late-before'], ['after', 'late-after']]);
+  expect(new Set(output.map(entry => entry.id)).size).toBe(output.length);
+});
+
+test('a current intervention closes only its preceding process while the same Turn continues', () => {
+  const output = buildTurnDisclosureItems([
+    item('root', 'user', { inputKind: 'root', sequence: 10 }),
+    item('before', 'process_content', { sequence: 20, processState: 'running' }),
+    item('guide', 'user', { inputKind: 'steering', sequence: 30 }),
+    item('after', 'process_content', { sequence: 40, processState: 'running' }),
+  ], { activeTurnId: TURN_1, tailClosed: false });
+  expect(output.map(entry => entry.id)).toEqual(['root', DISCLOSURE_1, 'guide', `${DISCLOSURE_1}:guide`]);
+  const disclosures = output.filter(entry => entry.type === 'turn_disclosure');
+  expect(disclosures.map(entry => entry.running)).toEqual([false, true]);
+  expect(disclosures.map(entry => entry.earlierSegment === true)).toEqual([true, false]);
+  expect(disclosures[0].processItemStates.before).toBe('completed');
+  expect(disclosures[1].processItemStates.after).toBe('running');
+});
+
+test('opening steering without prior process shares one initial process instead of introducing an empty segment', () => {
+  const output = buildTurnDisclosureItems([
+    item('root', 'user', { inputKind: 'root', sequence: 10 }),
+    item('opening-guide', 'user', { inputKind: 'steering', sequence: 20 }),
+    item('after', 'process', { sequence: 30, processState: 'running' }),
+  ], { activeTurnId: TURN_1 });
+  expect(output.filter(entry => entry.type === 'turn_disclosure')).toHaveLength(1);
+  expect(output.map(entry => entry.id)).toEqual(['root', 'opening-guide', DISCLOSURE_1]);
+});
+
+test('multiple interventions retain distinct reading boundaries and a later cancellation settles only the active segment', () => {
+  const output = buildTurnDisclosureItems([
+    item('root', 'user', { inputKind: 'root', sequence: 10 }),
+    item('first', 'process', { sequence: 20, processState: 'completed' }),
+    item('guide-one', 'user', { inputKind: 'steering', sequence: 30 }),
+    item('middle', 'process', { sequence: 40, processState: 'completed' }),
+    item('guide-two', 'user', { inputKind: 'steering', sequence: 50 }),
+    item('last', 'process', { sequence: 60, processState: 'running' }),
+    item('terminal', 'metadata', { sequence: 70, turnStartedAt: 1000, turnEndedAt: 7000, processState: 'canceled' }),
+  ], { tailClosed: true });
+  expect(output.map(entry => entry.id)).toEqual(['root', DISCLOSURE_1, 'guide-one', `${DISCLOSURE_1}:guide-one`,
+    'guide-two', `${DISCLOSURE_1}:guide-two`]);
+  const disclosures = output.filter(entry => entry.type === 'turn_disclosure');
+  expect(disclosures.map(entry => entry.state)).toEqual(['completed', 'completed', 'canceled']);
+  expect(disclosures.map(entry => entry.processItemIds)).toEqual([['first'], ['middle'], ['last']]);
+});

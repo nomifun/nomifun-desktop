@@ -37,10 +37,22 @@ async fn forward_006_retires_only_unused_upload_configuration_on_upgrade_and_res
         .fetch_all(&old).await.unwrap();
     let metadata: (i64, i64, String) = sqlx::query_as("SELECT data_generation,migration_head,canonical_schema_manifest_digest FROM schema_metadata")
         .fetch_one(&old).await.unwrap();
-    let settings: (i64, String, String, bool, bool, bool, i64) = sqlx::query_as("SELECT id,singleton_key,language,notification_enabled,cron_notification_enabled,command_queue_enabled,updated_at FROM system_settings")
+    let settings: (i64, String, String, bool, bool, i64) = sqlx::query_as("SELECT id,singleton_key,language,notification_enabled,cron_notification_enabled,updated_at FROM system_settings")
         .fetch_one(&old).await.unwrap();
     let receipts: Vec<(i64, Vec<u8>)> = sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
         .fetch_all(&old).await.unwrap();
+    // Prove this migration's schema scope at its own boundary. Later canonical
+    // and product migrations legitimately change other tables and are covered
+    // by their own upgrade tests.
+    let through_retirement = Migrator {
+        migrations: Cow::Owned(MIGRATOR.iter().take_while(|migration| migration.version <= 6).cloned().collect()),
+        ..Migrator::DEFAULT
+    };
+    through_retirement.run(&old).await.unwrap();
+    assert_eq!(sqlx::query_as::<_, (String, String)>("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name<>'system_settings' ORDER BY name")
+        .fetch_all(&old).await.unwrap(), schema);
+    assert_eq!(sqlx::query_as::<_, (i64, i64, String)>("SELECT data_generation,migration_head,canonical_schema_manifest_digest FROM schema_metadata")
+        .fetch_one(&old).await.unwrap(), metadata);
     old.close().await;
 
     for _ in 0..2 {
@@ -49,7 +61,7 @@ async fn forward_006_retires_only_unused_upload_configuration_on_upgrade_and_res
         let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('system_settings')")
             .fetch_all(current.pool()).await.unwrap();
         assert!(!columns.iter().any(|column| column == "save_upload_to_workspace"));
-        assert_eq!(sqlx::query_as::<_, (i64, String, String, bool, bool, bool, i64)>("SELECT id,singleton_key,language,notification_enabled,cron_notification_enabled,command_queue_enabled,updated_at FROM system_settings")
+        assert_eq!(sqlx::query_as::<_, (i64, String, String, bool, bool, i64)>("SELECT id,singleton_key,language,notification_enabled,cron_notification_enabled,updated_at FROM system_settings")
             .fetch_one(current.pool()).await.unwrap(), settings);
         let preferences: Vec<(String, String, i64)> = sqlx::query_as("SELECT key,value,updated_at FROM client_preferences ORDER BY key")
             .fetch_all(current.pool()).await.unwrap();
@@ -57,8 +69,6 @@ async fn forward_006_retires_only_unused_upload_configuration_on_upgrade_and_res
             ("system.autoPreviewOfficeFiles".into(), "false".into(), 3),
             ("theme".into(), "\"dark\"".into(), 4),
         ]);
-        assert_eq!(sqlx::query_as::<_, (String, String)>("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name<>'system_settings' ORDER BY name")
-            .fetch_all(current.pool()).await.unwrap(), schema);
         assert_eq!(sqlx::query_as::<_, (i64, i64, String)>("SELECT data_generation,migration_head,canonical_schema_manifest_digest FROM schema_metadata")
             .fetch_one(current.pool()).await.unwrap(), metadata);
         let current_receipts: Vec<(i64, Vec<u8>)> = sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")

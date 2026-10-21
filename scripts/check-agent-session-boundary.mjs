@@ -89,11 +89,18 @@ const mcpOAuthForwardMigration = 'crates/backend/nomifun-db/migrations/010_mcp_o
 const cronCancellationForwardMigration = 'crates/backend/nomifun-db/migrations/011_cron_run_cancellation.sql';
 const cronWorkbenchForwardMigration = 'crates/backend/nomifun-db/migrations/012_unify_cron_agent_binding.sql';
 const modelInputConstraintsForwardMigration = 'crates/backend/nomifun-db/migrations/013_model_input_constraints.sql';
-if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration, mcpOAuthForwardMigration, cronCancellationForwardMigration, cronWorkbenchForwardMigration, modelInputConstraintsForwardMigration].includes(path))) {
+const queueSettingForwardMigration = 'crates/backend/nomifun-db/migrations/014_retire_command_queue_setting.sql';
+if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration, mcpOAuthForwardMigration, cronCancellationForwardMigration, cronWorkbenchForwardMigration, modelInputConstraintsForwardMigration, queueSettingForwardMigration].includes(path))) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward migrations');
 }
 const migrationStatements = (path) => readFileSync(resolve(ROOT, path), 'utf8')
   .replace(/--[^\r\n]*/g, '').split(';').map((statement) => statement.replace(/\s+/g, ' ').trim()).filter(Boolean);
+if (migrations.includes(queueSettingForwardMigration)
+  && JSON.stringify(migrationStatements(queueSettingForwardMigration)) !== JSON.stringify([
+    'ALTER TABLE system_settings DROP COLUMN command_queue_enabled',
+  ])) {
+  failures.push('Queue setting retirement may only drop its unused system setting column; other configuration, canonical Agent facts and lineage receipts stay unchanged');
+}
 if (migrations.includes(modelInputConstraintsForwardMigration)
   && JSON.stringify(migrationStatements(modelInputConstraintsForwardMigration)) !== JSON.stringify([
     'ALTER TABLE provider_model_capabilities ADD COLUMN input_constraints TEXT',

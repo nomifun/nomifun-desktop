@@ -1,8 +1,9 @@
-import { useId, useState } from 'react';
+import { useId } from 'react';
 import { Copy, Right } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import type { ToolFileSummary } from '@/common/chat/fileSummary';
 import { projectFileActivity } from '../fileActivityModel';
+import { useProcessExpansion } from '../processExpansion';
 
 export type FileActivityInput = { key: string; summary: ToolFileSummary };
 
@@ -32,9 +33,12 @@ export function FileActivityList({ items, workspaceRoots, confirmed }: {
   </div>;
 }
 
-export default function FileActivitySummary({ items, workspaceRoots }: { items: readonly FileActivityInput[]; workspaceRoots: readonly string[] }) {
+export default function FileActivitySummary({ identity, items, workspaceRoots }: {
+  identity: string; items: readonly FileActivityInput[]; workspaceRoots: readonly string[];
+}) {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
+  const [savedExpanded, setExpanded] = useProcessExpansion(`files:${identity}`);
+  const expanded = savedExpanded ?? false;
   const id = useId();
   const view = projectFileActivity([...items]);
   const summary = (['read', 'edit', 'delete', 'rename', 'instructions'] as const)
@@ -44,7 +48,7 @@ export default function FileActivitySummary({ items, workspaceRoots }: { items: 
   if (!view.entries.length) return null;
   return <div className='turn-file-activity'>
     <button type='button' className='turn-process-trace__row turn-file-activity__toggle' aria-expanded={expanded}
-      aria-controls={id} onClick={() => setExpanded(value => !value)}>
+      aria-controls={id} onClick={() => setExpanded(!expanded)}>
       <span className='turn-process-trace__row-icon'><Copy theme='outline' size='14' /></span>
       <span className='turn-process-trace__text'>{summary}</span>
       <Right theme='outline' size='12' className={`turn-process-trace-tool__arrow${expanded ? ' turn-process-trace-tool__arrow--open' : ''}`} />

@@ -915,25 +915,6 @@
       "tokensTooltip": "本轮 token 用量（输入 + 输出）"
     }
   },
-  "commandQueue": {
-    "title": "排队指令",
-    "clear": "清空队列",
-    "edit": "编辑",
-    "editing": "编辑中",
-    "editPlaceholder": "可以在执行前先修改这条排队指令。",
-    "cancelEdit": "取消",
-    "saveEdit": "保存",
-    "moreActions": "更多操作",
-    "reorder": "拖动以调整排队指令顺序",
-    "remove": "移除",
-    "files": "{{count}} 个文件",
-    "pausedAfterFailure": "下一条排队指令启动失败。请编辑、调整顺序或移除后再继续。",
-    "emptyInput": "排队指令不能为空。",
-    "queueFull": "队列已满，请先移除部分指令再继续添加。",
-    "inputTooLong": "排队指令内容过长，请缩短后再发送。",
-    "tooManyFiles": "这条排队指令附加的文件过多。",
-    "queueTooLarge": "队列数据过大，无法安全缓存，请先移除部分排队指令。"
-  },
   "contextUsage": {
     "contextUsed": "上下文已使用",
     "title": "背景信息窗口",
@@ -1000,7 +981,10 @@
   "sendbox": {
     "hint": "输入 / 唤起命令，@ 引用文件",
     "dropToAttach": "释放文件以添加附件",
-    "dropNoFiles": "未检测到可添加的文件，请拖入文件而非文件夹。"
+    "dropNoFiles": "未检测到可添加的文件，请拖入文件而非文件夹。",
+    "retrySend": "重试原消息（保留原投递意图）",
+    "guide": "引导",
+    "guideHint": "在安全边界补充到当前任务"
   },
   "hoverCard": {
     "id": "会话 ID",
@@ -1019,15 +1003,12 @@
     }
   },
   "notFound": "会话不存在或已被删除",
-  "steer": {
-    "fallbackQueued": "追加输入的交付尚未确认。文字和附件已保留待确认，队列不会自动执行。请先核对会话，再编辑重发或移除此草稿。",
-    "reviewDelivery": "待确认交付"
-  },
   "stop": {
     "button": "停止 Agent",
     "stopping": "正在停止 Agent…",
     "failed": "停止当前任务失败，请重试。",
-    "endPausedTurn": "结束本回合"
+    "endPausedTurn": "结束本回合",
+    "awaitingTarget": "正在确认当前回合，请稍后重试停止。"
   },
   "editMessage": {
     "action": "编辑",
@@ -1045,12 +1026,30 @@
     "addInput": "补充信息"
   },
   "inputDelivery": {
-    "pending": "已保存，等待处理",
-    "blocked": "此输入已保存但未处理，检查问题后重新发送。",
-    "attachment": "请检查附件是否可用。",
-    "skill": "请检查所选技能是否可用。",
-    "budget": "请缩短内容或减少附件。",
-    "discarded": "已随上下文清空取消处理",
-    "cancelled": "这条消息已在处理前取消。若要重新执行，请发送一条新消息。"
+    "deferred": "当前任务已结束，将随后处理"
+  },
+  "inputQueue": {
+    "title": "{{count}} 条排队消息",
+    "pause": "暂停队列",
+    "resume": "继续队列",
+    "clear": "清空队列",
+    "loadFailed": "无法读取待处理消息。",
+    "changeFailed": "队列操作未确认，请刷新后重试。",
+    "moveUp": "上移",
+    "moveDown": "下移",
+    "remove": "移除",
+    "held": "已暂停",
+    "blocked": "等待处理问题",
+    "files": "{{count}} 个附件",
+    "showFull": "查看全文",
+    "guide": "引导",
+    "more": "此消息的更多操作",
+    "skills": "技能",
+    "skillCount": "{{count}} 项技能",
+    "emptyInput": "待处理输入",
+    "queueActions": "整个队列的操作",
+    "edit": "编辑排队消息",
+    "editPreservesAttachments": "保留原附件与技能",
+    "editUnavailable": "原消息已开始处理或已变更。编辑内容已保留，可复制后另行发送。"
   }
 }

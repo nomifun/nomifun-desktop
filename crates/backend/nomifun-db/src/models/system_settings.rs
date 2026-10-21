@@ -12,6 +12,5 @@ pub struct SystemSettings {
     pub language: String,
     pub notification_enabled: bool,
     pub cron_notification_enabled: bool,
-    pub command_queue_enabled: bool,
     pub updated_at: TimestampMs,
 }

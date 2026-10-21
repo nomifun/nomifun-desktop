@@ -82,3 +82,81 @@ test('a full chat remount recovers the same canonical start without resetting it
   expect(returned.result.current.activeTurnId).toBe(turnId);
   expect(returned.result.current.activeTurnStartedAt).toBe(1000);
 });
+
+test('preparation after a missed terminal clears the old Turn identity while keeping Stop-visible work busy', async () => {
+  let reconnect: Parameters<typeof ipcBridge.conversation.reconnected.on>[0] | undefined;
+  let started: Parameters<typeof ipcBridge.conversation.turnStarted.on>[0] | undefined;
+  spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(listener => { reconnect = listener; return () => {}; });
+  spyOn(ipcBridge.conversation.turnStarted, 'on').mockImplementation(listener => { started = listener; return () => {}; });
+  for (const name of ['responseStream', 'turnCompleted', 'turnPaused', 'userCreated', 'messageAnnotated'] as const) {
+    spyOn(ipcBridge.conversation[name], 'on').mockImplementation(() => () => {});
+  }
+  const active = { state: 'running' as const, is_processing: true, can_send_message: false, active_turn_id: turnId, processing_started_at: 1000 };
+  const get = spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ id: conversationId, type: 'nomi', status: 'running', runtime: active } as TChatConversation);
+  const hook = renderHook(() => useNomiMessage(conversationId), { wrapper });
+  await waitFor(() => expect(hook.result.current.activeTurnId).toBe(turnId));
+  act(() => hook.result.current.setActiveMsgId(requestId));
+  // The earlier Turn ended without its terminal notification. The next input
+  // now has a real preparation owner, but no canonical Turn has been claimed.
+  get.mockResolvedValue({ id: conversationId, type: 'nomi', status: 'finished', runtime: {
+    state: 'starting', is_processing: true, can_send_message: false, active_turn_id: null,
+  } } as unknown as TChatConversation);
+  act(() => reconnect!());
+  await waitFor(() => expect(hook.result.current.activeTurnId).toBeUndefined());
+  expect(hook.result.current.running).toBe(true);
+  expect(hook.result.current.hasHydratedRunningState).toBe(true);
+  expect(hook.result.current.activeTurnStartedAt).toBeUndefined();
+  expect(hook.result.current.activeRequestMessageId).toBeUndefined();
+  await act(async () => {
+    started!({ conversation_id: conversationId, turn_id: turnId, status: 'running', state: 'ai_generating',
+      detail: '', can_send_message: false, runtime: active });
+    await Promise.resolve();
+  });
+  expect(hook.result.current.activeTurnId).toBeUndefined();
+  expect(hook.result.current.running).toBe(true);
+});
+
+test('a preparation-only first hydration establishes activity without a fabricated Turn', async () => {
+  for (const name of ['responseStream', 'turnStarted', 'turnCompleted', 'turnPaused', 'userCreated', 'messageAnnotated', 'reconnected'] as const) {
+    spyOn(ipcBridge.conversation[name], 'on').mockImplementation(() => () => {});
+  }
+  spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ id: conversationId, type: 'nomi', status: 'finished', runtime: {
+    state: 'starting', is_processing: true, can_send_message: false, active_turn_id: null,
+  } } as unknown as TChatConversation);
+  const hook = renderHook(() => useNomiMessage(conversationId), { wrapper });
+  await waitFor(() => expect(hook.result.current.hasHydratedRunningState).toBe(true));
+  expect(hook.result.current.running).toBe(true);
+  expect(hook.result.current.activeTurnId).toBeUndefined();
+  expect(hook.result.current.activeRequestMessageId).toBeUndefined();
+});
+
+test('a late starting snapshot cannot clear a newer verified Turn', async () => {
+  let reconnect: Parameters<typeof ipcBridge.conversation.reconnected.on>[0] | undefined;
+  let started: Parameters<typeof ipcBridge.conversation.turnStarted.on>[0] | undefined;
+  spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(listener => { reconnect = listener; return () => {}; });
+  spyOn(ipcBridge.conversation.turnStarted, 'on').mockImplementation(listener => { started = listener; return () => {}; });
+  for (const name of ['responseStream', 'turnCompleted', 'turnPaused', 'userCreated', 'messageAnnotated'] as const) {
+    spyOn(ipcBridge.conversation[name], 'on').mockImplementation(() => () => {});
+  }
+  const active = { state: 'running' as const, is_processing: true, can_send_message: false, active_turn_id: turnId };
+  const get = spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ id: conversationId, type: 'nomi', status: 'running', runtime: active } as TChatConversation);
+  const hook = renderHook(() => useNomiMessage(conversationId), { wrapper });
+  await waitFor(() => expect(hook.result.current.activeTurnId).toBe(turnId));
+  let resolveStarting!: (value: TChatConversation) => void;
+  get.mockImplementationOnce(() => new Promise(resolve => { resolveStarting = resolve; }));
+  act(() => reconnect!());
+  await waitFor(() => expect(typeof resolveStarting).toBe('function'));
+  const next = { ...active, active_turn_id: nextTurnId, processing_started_at: 2000 };
+  get.mockResolvedValue({ id: conversationId, type: 'nomi', status: 'running', runtime: next } as TChatConversation);
+  act(() => {
+    hook.result.current.setWaitingResponse(true);
+    started!({ conversation_id: conversationId, turn_id: nextTurnId, status: 'running', state: 'ai_generating',
+      detail: '', can_send_message: false, runtime: next });
+  });
+  await waitFor(() => expect(hook.result.current.activeTurnId).toBe(nextTurnId));
+  await act(async () => resolveStarting({ id: conversationId, type: 'nomi', status: 'finished', runtime: {
+    state: 'starting', is_processing: true, can_send_message: false, active_turn_id: null,
+  } } as unknown as TChatConversation));
+  expect(hook.result.current.activeTurnId).toBe(nextTurnId);
+  expect(hook.result.current.activeTurnStartedAt).toBe(2000);
+});

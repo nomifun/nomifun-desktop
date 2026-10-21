@@ -96,7 +96,8 @@ async fn an_undelivered_claim_remains_visible_without_new_turn_replay_authority(
     assert_eq!(store.session_input_delivery(sid,&second.event_id).await.unwrap()["state"],json!("pending"));
     let terminal=append(sid,"failed-owner-terminal","runtime_supervisor","failed-owner-terminal","turn/failed","failed-owner",Some(started),json!({"error":"delivery unavailable"}));
     let seq=store.append_turn_terminal(&terminal,&"failed-owner".into()).await.unwrap().cursor.seq;
-    let expected=json!({"state":"blocked","reason":"TURN_ENDED_BEFORE_INPUT_DELIVERY","event_seq":seq});
+    let expected=json!({"state":"blocked","reason":"TURN_ENDED_BEFORE_INPUT_DELIVERY","event_seq":seq,
+        "placement":"transcript","kind":"steering","turn_id":first.event_id,"order_seq":before});
     assert_eq!(store.session_input_delivery(sid,&second.event_id).await.unwrap(),expected);
     let page=store.messages_with_turns_after(sid,before).await.unwrap();
     let message=page.iter().find(|message|message.projection_id==format!("message:{}",second.event_id.as_ref())).unwrap();
@@ -119,7 +120,8 @@ async fn input_preparation_block_is_visible_idempotent_and_does_not_block_later_
     assert_eq!(store.current_cursor(sid).await.unwrap(),blocked_cursor);
     let page=store.messages_with_turns_after(sid,before).await.unwrap();
     let message=page.iter().find(|row|row.projection_id==format!("message:{}",input.event_id.as_ref())).unwrap();
-    assert_eq!(message.projection["input_delivery"],json!({"state":"blocked","reason":"SKILL_UNAVAILABLE","event_seq":blocked_cursor.seq}));
+    assert_eq!(message.projection["input_delivery"],json!({"state":"blocked","reason":"SKILL_UNAVAILABLE","event_seq":blocked_cursor.seq,
+        "placement":"transcript","kind":"root","order_seq":input.seq}));
     assert_eq!(message.last_seq,blocked_cursor.seq);
     assert!(store.pending_session_inputs(sid,None).await.unwrap().is_empty());
     assert_eq!(store.pending_session_inputs(sid,Some(&input.event_id)).await.unwrap().len(),1,"only explicit original-input retry includes the blocked item");
@@ -137,7 +139,8 @@ async fn cancelled_unclaimed_input_is_terminal_and_cannot_retry_or_steer_a_succe
     let input=accept(&store,sid,"cancelled","Do not execute this old instruction").await;
     store.mark_session_input_blocked(sid,&input.event_id,SessionInputBlockedReason::CancelledByOwner).await.unwrap();
     let cancelled_cursor=store.current_cursor(sid).await.unwrap();
-    let expected=json!({"state":"cancelled","reason":"CANCELLED_BY_OWNER","event_seq":cancelled_cursor.seq});
+    let expected=json!({"state":"cancelled","reason":"CANCELLED_BY_OWNER","event_seq":cancelled_cursor.seq,
+        "placement":"transcript","kind":"root","order_seq":input.seq});
     assert_eq!(store.session_input_delivery(sid,&input.event_id).await.unwrap(),expected);
     assert!(store.pending_session_inputs(sid,None).await.unwrap().is_empty());
     assert!(store.pending_session_inputs(sid,Some(&input.event_id)).await.unwrap().is_empty(),

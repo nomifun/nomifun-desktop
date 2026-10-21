@@ -38,7 +38,7 @@ impl Fixture {
         std::fs::create_dir_all(work.join("conversations")).unwrap();
         let db = init_database(&data.join("nomifun-backend.db")).await.unwrap();
         let settings = SqliteSettingsRepository::new(db.pool().clone());
-        settings.upsert_settings(Some("zh-CN"), Some(false), None, None).await.unwrap();
+        settings.upsert_settings(Some("zh-CN"), Some(false), None).await.unwrap();
         std::fs::write(data.join("storage-generation"), GENERATION).unwrap();
         std::fs::write(work.join("conversations/history-attachment.txt"), b"existing attachment").unwrap();
         factory_reset::write_v3_dataset_receipt_for_work_dir(&data, &work, GENERATION).unwrap();

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -1028,4 +1028,103 @@ test('canonical ranges stay flat and preserve row-level reasoning choices around
   expect(page.container.querySelector('[data-tool-call-id="segment-read"]')).not.toBeNull();
   expect(secondToggle).not.toBeNull();
   expect(page.container.querySelector('.turn-process-group')).toBeNull();
+});
+
+test('queued input stays out of history and the same steering identity moves from the tail into its exact process boundary', async () => {
+  const guideId = messageId(9602);
+  const base = { conversation_id: conversationId, turn_id: turnId, position: 'left' as const };
+  const reasoning = (delivered: boolean): TMessage => ({ ...base, id: 'guided-process', type: 'thinking',
+    msg_id: messageId(9603), created_at: 200,
+    content: { content: delivered ? 'Before.After.' : 'Before.', status: 'thinking', timeline: { through_seq: delivered ? 60 : 20,
+      segments: [{ segment_id: 'guide-before', group_id: 'initial-process', first_seq: 20, last_seq: 30,
+        kind: 'reasoning', state: 'completed', start_utf16: 0, end_utf16: 7 },
+      ...(delivered ? [{ segment_id: 'guide-after', group_id: 'guided-process', first_seq: 50, last_seq: 60,
+        kind: 'reasoning' as const, state: 'running' as const, start_utf16: 7, end_utf16: 13 }] : [])] } } });
+  const guide = (placement: 'queued' | 'steering' | 'transcript'): TMessage => ({ ...base,
+    id: 'guide-original-input', msg_id: guideId, message_id: guideId, type: 'text', position: 'right', created_at: 150,
+    content: { content: 'Prioritize the visual design.', input_delivery: {
+      state: placement === 'transcript' ? 'claimed' : 'pending', placement,
+      kind: placement === 'queued' ? 'root' : 'steering', turn_id: turnId,
+      event_seq: placement === 'transcript' ? 60 : placement === 'steering' ? 35 : 15,
+      order_seq: placement === 'transcript' ? 40 : 15,
+    } } });
+  const initial: TMessage[] = [{ ...base, id: 'guide-root', msg_id: turnId, type: 'text', position: 'right', created_at: 100,
+    content: { content: 'Build the game.', input_delivery: { state: 'claimed', placement: 'transcript', kind: 'root',
+      turn_id: turnId, order_seq: 10, event_seq: 10 } } }, reasoning(false), guide('queued')];
+  const Controls = () => {
+    const update = useUpdateMessageList();
+    return <>
+      <button onClick={() => update(current => current.map(row => row.id === 'guide-original-input' ? guide('steering') : row))}>Guide queued input</button>
+      <button onClick={() => update(current => current.map(row => row.id === 'guide-original-input' ? guide('transcript')
+        : row.id === 'guided-process' ? reasoning(true) : row))}>Receive guide at the boundary</button>
+    </>;
+  };
+  const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+    <PreviewProvider persistNamespace='guided-input-timeline' subscribeGlobalOpen={false}>
+      <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', readOnly: true, isProcessing: true,
+        isTurnStateHydrated: true, activeTurnId: turnId, activeRequestMessageId: turnId }}>
+        <MessageListProvider initialValue={initial}><MessageList /><Controls /></MessageListProvider>
+      </ConversationProvider>
+    </PreviewProvider>
+  </I18nextProvider></MemoryRouter>);
+  const history = within(page.getByTestId('message-list-scroller'));
+  expect(history.queryByText('Prioritize the visual design.')).toBeNull();
+  fireEvent.click(page.getByRole('button', { name: 'Guide queued input' }));
+  const pending = await history.findByText('Prioritize the visual design.');
+  expect(history.getAllByText('Prioritize the visual design.')).toHaveLength(1);
+  expect(page.queryByTestId('message-input-delivery')).toBeNull();
+  expect(page.container.querySelector('[data-process-segment-id="guide-before"]')!.compareDocumentPosition(pending)
+    & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.click(page.getByRole('button', { name: 'Receive guide at the boundary' }));
+  await waitFor(() => expect(page.container.querySelector('[data-process-segment-id="guide-after"]')).not.toBeNull());
+  expect(page.queryByTestId('message-input-delivery')).toBeNull();
+  expect(history.getAllByText('Prioritize the visual design.')).toHaveLength(1);
+  expect(history.getByText('Prioritize the visual design.') === pending).toBe(true);
+  const before = page.container.querySelector('[data-process-segment-id="guide-before"]')!;
+  const after = page.container.querySelector('[data-process-segment-id="guide-after"]')!;
+  // The completed first segment remains inspectable; receiving the guide does
+  // not merge the new process above its user bubble or make a second Turn.
+  expect(after).not.toBeNull();
+  expect(pending.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(before).not.toBeNull();
+  expect(page.container.querySelectorAll('.turn-process-disclosure--live')).toHaveLength(1);
+  expect(history.getByText(messagesLocale.turnProcess.previous)).toBeTruthy();
+  expect(page.container.querySelector('.turn-process-disclosure:not(.turn-process-disclosure--live)')?.textContent).not.toContain('--');
+});
+
+test('loading a missing intervention preserves reasoning choices when its canonical rows move into separate process sections', async () => {
+  const guideId = messageId(9702);
+  const source: TMessage = { id: 'paged-process', type: 'thinking', conversation_id: conversationId, turn_id: turnId,
+    msg_id: messageId(9703), created_at: 200, content: { content: 'Before.After.', status: 'thinking', timeline: { through_seq: 60,
+      segments: [{ segment_id: 'paged-before', group_id: 'initial-process', first_seq: 20, last_seq: 30,
+        kind: 'reasoning', state: 'completed', start_utf16: 0, end_utf16: 7 },
+      { segment_id: 'paged-after', group_id: 'guided-process', first_seq: 50, last_seq: 60,
+        kind: 'reasoning', state: 'running', start_utf16: 7, end_utf16: 13 }] } } };
+  const initial: TMessage[] = [{ id: 'paged-root', type: 'text', position: 'right', conversation_id: conversationId,
+    msg_id: turnId, created_at: 100, content: { content: 'Build the game.', input_delivery: { state: 'claimed',
+      placement: 'transcript', kind: 'root', turn_id: turnId, order_seq: 10, event_seq: 10 } } }, source];
+  const EarlierPage = () => {
+    const update = useUpdateMessageList();
+    return <button onClick={() => update(current => [...current, { id: 'paged-guide', msg_id: guideId, message_id: guideId,
+      type: 'text', position: 'right', conversation_id: conversationId, turn_id: turnId, created_at: 150,
+      content: { content: 'Design first.', input_delivery: { state: 'claimed', placement: 'transcript', kind: 'steering',
+        turn_id: turnId, order_seq: 40, event_seq: 45 } } }])}>Load earlier intervention</button>;
+  };
+  const page = render(<MemoryRouter><I18nextProvider i18n={i18n}>
+    <PreviewProvider persistNamespace='paged-guide-reading-choice' subscribeGlobalOpen={false}>
+      <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', readOnly: true, isProcessing: true,
+        isTurnStateHydrated: true, activeTurnId: turnId, activeRequestMessageId: turnId }}>
+        <MessageListProvider initialValue={initial}><MessageList /><EarlierPage /></MessageListProvider>
+      </ConversationProvider>
+    </PreviewProvider>
+  </I18nextProvider></MemoryRouter>);
+  const secondHeader = () => page.container.querySelector('[data-process-segment-id="paged-after"] [data-thinking-process-header]')!;
+  expect(secondHeader().getAttribute('aria-expanded')).toBe('true');
+  fireEvent.click(secondHeader());
+  expect(secondHeader().getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(page.getByRole('button', { name: 'Load earlier intervention' }));
+  await waitFor(() => expect(page.container.querySelectorAll('.turn-process-disclosure')).toHaveLength(2));
+  expect(secondHeader().getAttribute('aria-expanded')).toBe('false');
+  const guide = within(page.getByTestId('message-list-scroller')).getByText('Design first.');
+  expect(guide.compareDocumentPosition(secondHeader()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });

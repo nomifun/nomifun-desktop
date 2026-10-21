@@ -17,10 +17,14 @@ export function projectProcessSegments(messages: TMessage[], publicSources: Read
     const content = message.content as unknown;
     const timeline = content && !Array.isArray(content) && typeof content === 'object'
       ? (content as { timeline?: MessageTimeline }).timeline : undefined;
-    if (message.type === 'text' && message.position === 'right') return [message];
+    if (message.type === 'text' && message.position === 'right') {
+      return [{ ...message, processSequence: message.content.input_delivery?.order_seq }];
+    }
     if (timeline?.segments.length === 0) return [];
     if (message.type === 'thinking' && !hasVisibleProcessReasoning(message.content.content)) return [];
-    if (message.type === 'text' && publicSources.has(message.message_id ?? message.msg_id ?? '')) return [message];
+    if (message.type === 'text' && publicSources.has(message.message_id ?? message.msg_id ?? '')) {
+      return [{ ...message, processSequence: timeline?.segments[0]?.first_seq }];
+    }
     if (!timeline) return [message];
     return timeline.segments.flatMap((segment, index): ProcessSegmentMessage[] => {
       if (!segment.segment_id || !segment.group_id || !Number.isSafeInteger(segment.first_seq)) return [];

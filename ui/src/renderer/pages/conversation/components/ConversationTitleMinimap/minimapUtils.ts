@@ -164,6 +164,7 @@ export const buildTurnPreview = (messages: TMessage[]): TurnPreviewItem[] => {
 
   for (const message of messages) {
     if (!isTextMessage(message)) continue;
+    if (message.position === 'right' && message.content.input_delivery?.placement === 'queued') continue;
 
     const text = normalizeText(message.content.content || '');
     if (!text) continue;

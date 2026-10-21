@@ -354,6 +354,26 @@
         "replay_rule": "rebuild_projection"
       },
       {
+        "kind": "message/input-queue-changed",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/message-input-queue-changed/v1",
+        "producer": {
+          "allowed": [
+            "session_api"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_committed"
+        },
+        "correlation": "session",
+        "idempotency": "producer_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "rebuild_projection"
+      },
+      {
         "kind": "message/input-blocked",
         "version": 1,
         "persistence": "persistent",
@@ -1457,5 +1477,5 @@
       }
     ]
   },
-  "payload_digest": "506aa56b2c5e0d14d0f356158326c22e4cd97d08ebaf1fbbcaa5e3336ab42e59"
+  "payload_digest": "4668dd186f751abd0ee8f2215629a02fcf4a063ba72cbfbc331a1d21fd5de269"
 }

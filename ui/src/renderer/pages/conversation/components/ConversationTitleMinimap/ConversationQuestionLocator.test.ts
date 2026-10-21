@@ -6,6 +6,27 @@
 
 import { describe, expect, test } from 'bun:test';
 import { getDotDistanceLevel, pickActiveQuestionIndex } from './ConversationQuestionLocator';
+import { buildTurnPreview } from './minimapUtils';
+import type { IMessageText } from '@/common/chat/chatLib';
+import { parseConversationId, parseMessageId } from '@/common/types/ids';
+
+test('question navigation skips queued inputs and retains a current-task steering question', () => {
+  const conversation = parseConversationId('0190f5fe-7c00-7a00-8000-000000000981');
+  const message = (suffix: string, content: string, position: 'left' | 'right', placement?: 'queued' | 'steering'): IMessageText => ({
+    id: suffix, msg_id: parseMessageId(`0190f5fe-7c00-7a00-8000-${suffix.padStart(12, '0')}`), conversation_id: conversation,
+    type: 'text', position, content: { content, ...(placement ? { input_delivery: { state: 'pending', placement } } : {}) },
+  });
+  const preview = buildTurnPreview([
+    message('1', 'Original question', 'right'),
+    message('2', 'Later queued question', 'right', 'queued'),
+    message('3', 'Original answer', 'left'),
+    message('4', 'Correct this task', 'right', 'steering'),
+    message('5', 'Corrected answer', 'left'),
+  ]);
+  expect(preview.map(turn => turn.question)).toEqual(['Original question', 'Correct this task']);
+  expect(preview.map(turn => turn.index)).toEqual([1, 2]);
+  expect(preview[0].answer).toBe('Original answer');
+});
 
 describe('pickActiveQuestionIndex', () => {
   test('chooses the latest question above the viewport anchor', () => {

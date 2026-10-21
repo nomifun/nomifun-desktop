@@ -915,25 +915,6 @@
       "tokensTooltip": "Tokens used this turn (input + output)"
     }
   },
-  "commandQueue": {
-    "title": "Queued Commands",
-    "clear": "Clear Queue",
-    "edit": "Edit",
-    "editing": "Editing",
-    "editPlaceholder": "Update the queued command before it runs.",
-    "cancelEdit": "Cancel",
-    "saveEdit": "Save",
-    "moreActions": "More actions",
-    "reorder": "Drag to reorder queued command",
-    "remove": "Remove",
-    "files": "{{count}} files",
-    "pausedAfterFailure": "The next queued command could not start. Edit, reorder, or remove it to continue.",
-    "emptyInput": "Queued commands cannot be empty.",
-    "queueFull": "Queue is full. Remove a command before adding more.",
-    "inputTooLong": "This queued command is too long. Shorten it before sending.",
-    "tooManyFiles": "Too many files are attached to this queued command.",
-    "queueTooLarge": "Queue data is too large to persist safely. Remove some queued commands first."
-  },
   "contextUsage": {
     "contextUsed": "context used",
     "title": "Context window",
@@ -1002,7 +983,10 @@
   "sendbox": {
     "hint": "Type / for commands, @ to reference files",
     "dropToAttach": "Drop files to add attachments",
-    "dropNoFiles": "No files could be added. Please drop files rather than folders."
+    "dropNoFiles": "No files could be added. Please drop files rather than folders.",
+    "retrySend": "Retry the original message (preserving its delivery intent)",
+    "guide": "Guide",
+    "guideHint": "Add to the current task at its next safe boundary"
   },
   "hoverCard": {
     "id": "Session ID",
@@ -1021,15 +1005,12 @@
     }
   },
   "notFound": "Conversation not found or has been deleted",
-  "steer": {
-    "fallbackQueued": "Steering delivery was not confirmed. Text and attachments are saved for review; the queue will not run automatically. Check the conversation before editing to resend or removing this draft.",
-    "reviewDelivery": "Review delivery"
-  },
   "stop": {
     "button": "Stop Agent",
     "stopping": "Stopping Agent…",
     "failed": "Failed to stop the current task. Please try again.",
-    "endPausedTurn": "End this turn"
+    "endPausedTurn": "End this turn",
+    "awaitingTarget": "Confirming the current turn. Please retry Stop shortly."
   },
   "editMessage": {
     "action": "Edit",
@@ -1047,12 +1028,30 @@
     "addInput": "Add information"
   },
   "inputDelivery": {
-    "pending": "Saved, waiting to be processed",
-    "blocked": "This input was saved but not processed. Check the issue before sending it again.",
-    "attachment": "Check that the attachments are available.",
-    "skill": "Check that the selected skills are available.",
-    "budget": "Shorten the message or reduce the attachments.",
-    "discarded": "No longer pending after the context was cleared",
-    "cancelled": "This message was cancelled before processing. Send a new message to start again."
+    "deferred": "The current task ended; this message will run next"
+  },
+  "inputQueue": {
+    "title": "Queued messages ({{count}})",
+    "pause": "Pause queue",
+    "resume": "Resume queue",
+    "clear": "Clear queue",
+    "loadFailed": "Could not load pending messages.",
+    "changeFailed": "Queue change is not confirmed. Refresh and retry.",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "remove": "Remove",
+    "held": "Paused",
+    "blocked": "Needs attention",
+    "files": "Attachments: {{count}}",
+    "showFull": "Full text",
+    "guide": "Guide",
+    "more": "More actions for this message",
+    "skills": "Skills",
+    "skillCount": "{{count}} skills",
+    "emptyInput": "Pending input",
+    "queueActions": "Actions for the entire queue",
+    "edit": "Edit queued message",
+    "editPreservesAttachments": "Attachments and skills are preserved",
+    "editUnavailable": "The original message started or changed. Your edit is preserved; copy it to send separately."
   }
 }

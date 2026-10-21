@@ -30,6 +30,8 @@ use crate::projector::reduce_agent_messages;
 
 #[path = "native_checkpoint_tests.rs"]
 mod native_checkpoint_tests;
+#[path = "session_input_stop_tests.rs"]
+mod session_input_stop_tests;
 #[path = "native_execution_tests.rs"]
 mod native_execution_tests;
 #[path = "runtime_state_tests.rs"]
@@ -4477,3 +4479,5 @@ async fn turn_output_facts_resolve_payloads_only_inside_the_exact_terminal_bound
 
 #[path = "session_input_tests.rs"]
 mod session_input_tests;
+#[path = "session_input_queue_tests.rs"]
+mod session_input_queue_tests;

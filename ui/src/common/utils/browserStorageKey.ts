@@ -24,7 +24,6 @@ export type BrowserStorageFeature =
   | 'draft'
   | 'initial-message-nomi'
   | 'initial-message-processed'
-  | 'command-queue'
   | 'cron-unread'
   | (string & {});
 

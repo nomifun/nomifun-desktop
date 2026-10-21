@@ -49,7 +49,7 @@ describe('browser storage keys', () => {
     const terminal = terminalTarget('0190f5fe-7c00-7a00-8000-000000000001');
     const agentKeys = [
       sessionStorageKey('draft', conversation),
-      sessionStorageKey('command-queue', conversation),
+      sessionStorageKey('nomi-input-delivery', conversation),
       sessionStorageKey('workspace-preview', conversation),
       agentBrowserStorageGenerationKey('guid-draft:input'),
       agentBrowserStorageGenerationKey('conversation-creation-draft:guid'),
@@ -67,7 +67,7 @@ describe('browser storage keys', () => {
     initializeAgentBrowserStorageGeneration(7);
     const currentKeys = [
       sessionStorageKey('draft', conversation),
-      sessionStorageKey('command-queue', conversation),
+      sessionStorageKey('nomi-input-delivery', conversation),
       sessionStorageKey('workspace-preview', conversation),
       agentBrowserStorageGenerationKey('guid-draft:input'),
       agentBrowserStorageGenerationKey('conversation-creation-draft:guid'),

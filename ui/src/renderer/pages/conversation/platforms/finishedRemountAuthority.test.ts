@@ -10,12 +10,6 @@ import {
   getNomiHydrationLifecycleFence,
   shouldApplyNomiStreamEventToTurn,
 } from './nomi/nomiLifecycleFence';
-import {
-  IDLE_EXECUTION_GATE,
-  reduceCommandQueueExecutionGate,
-  shouldDispatchConversationCommandQueue,
-} from './commandQueueExecutionGate';
-
 const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000071');
 const completedTurnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000072');
 
@@ -32,8 +26,6 @@ const finishedSnapshot = {
 describe('Finished conversation remount authority', () => {
   test('late old started/stream/completed plus remount stays idle and sends no POST', async () => {
     let warmupPostCount = 0;
-    let sendPostCount = 0;
-    let busy = false;
 
     // Passive mount first performs an authoritative GET. Finished is a
     // terminal snapshot and cannot trigger runtime preparation.
@@ -77,44 +69,6 @@ describe('Finished conversation remount authority', () => {
       })
     ).toBe('ignore');
 
-    // The queue also refuses to correlate a raw old start/completion pair.
-    // With no persisted user command, no execution callback is reachable.
-    const gated = reduceCommandQueueExecutionGate(IDLE_EXECUTION_GATE, {
-      type: 'turnStarted',
-      turnId: completedTurnId,
-    });
-    expect(
-      reduceCommandQueueExecutionGate(gated, {
-        type: 'turnCompleted',
-        turnId: completedTurnId,
-        runtimeIsProcessing: false,
-      })
-    ).toBe(gated);
-    expect(
-      reduceCommandQueueExecutionGate(gated, {
-        type: 'runtimeReconciled',
-        purpose: 'completion',
-        runtimeIsProcessing: false,
-      })
-    ).toBe(IDLE_EXECUTION_GATE);
-
-    // The production queue dispatcher has no persisted user intent and remains
-    // unreachable after the stale-event reconciliation.
-    const shouldDispatch = shouldDispatchConversationCommandQueue({
-      enabled: true,
-      isHydrated: true,
-      isPaused: false,
-      isBusy: busy,
-      gate: IDLE_EXECUTION_GATE,
-      isInteractionLocked: false,
-      itemCount: 0,
-    });
-    if (shouldDispatch) {
-      sendPostCount += 1;
-      busy = true;
-    }
-    expect(busy).toBe(false);
     expect(warmupPostCount).toBe(0);
-    expect(sendPostCount).toBe(0);
   });
 });

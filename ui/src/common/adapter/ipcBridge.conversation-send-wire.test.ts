@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseConversationId } from '@/common/types/ids';
+import { parseConversationId, parseMessageId } from '@/common/types/ids';
 import { conversation } from './ipcBridge';
 
 const source = readFileSync(new URL('./ipcBridge.ts', import.meta.url), 'utf8');
 const realFetch = globalThis.fetch;
 const session = parseConversationId('0190f5fe-7c00-7a00-8000-000000000211');
 const message = '0190f5fe-7c00-7a00-8000-000000000219';
+const input_delivery = { state: 'pending' as const, placement: 'transcript' as const,
+  kind: 'root' as const, event_seq: 99, order_seq: 99 };
 afterEach(() => { globalThis.fetch = realFetch; });
 
 describe('ordinary message intake wire contract', () => {
@@ -17,7 +19,7 @@ describe('ordinary message intake wire contract', () => {
       const body = JSON.parse(String(init?.body));
       expect(body).toEqual({ idempotency_key: 'initial-key', input: { content: 'Initial request' } });
       return new Response(JSON.stringify({ success: true, data: {
-        agent_session_id: session, message_id: message, status: 'accepted', replayed: false,
+        agent_session_id: session, message_id: message, status: 'accepted', replayed: false, input_delivery,
       } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }) as typeof fetch;
     await conversation.sendMessage.invoke({ conversation_id: session, input: 'Initial request',
@@ -30,17 +32,45 @@ describe('ordinary message intake wire contract', () => {
       expect(String(url)).toContain(`/api/agent-sessions/${session}/messages`);
       requests.push(JSON.parse(String(init?.body)));
       return new Response(JSON.stringify({ success: true, data: {
-        agent_session_id: session, message_id: message, cursor: { seq: 99 }, status: 'accepted', replayed: true,
+        agent_session_id: session, message_id: message, cursor: { seq: 99 }, status: 'accepted', replayed: true, input_delivery,
       } }), { status: 202, headers: { 'Content-Type': 'application/json' } });
     }) as typeof fetch;
     const receipt = await conversation.sendMessage.invoke({ conversation_id: session,
       input: 'The dependency is ready', files: ['/work/brief.txt'], inject_skills: ['office'], idempotency_key: 'same-input-key' });
-    expect(receipt).toEqual({ msg_id: message, replayed: true });
+    expect(receipt).toEqual({ msg_id: message, replayed: true, input_delivery });
     expect(requests[0]).toEqual({ idempotency_key: 'same-input-key', input: {
       content: 'The dependency is ready', files: ['/work/brief.txt'], inject_skills: ['office'],
     } });
     expect(source.includes('resumeInput:')).toBe(false);
     expect(source.includes('normalizeConversationInputAction')).toBe(false);
+  });
+
+  test.each([
+    { kind: 'queue' as const },
+    { kind: 'prefer_current' as const, turn_id: parseMessageId(message) },
+  ])('carries one frozen delivery intent through the ordinary intake', async delivery => {
+    globalThis.fetch = (async (url, init) => {
+      expect(String(url)).toContain(`/api/agent-sessions/${session}/messages`);
+      expect(JSON.parse(String(init?.body))).toEqual({ idempotency_key: 'frozen-intent', delivery,
+        input: { content: 'One user intention', files: ['reference.png'] } });
+      return new Response(JSON.stringify({ success: true, data: {
+        agent_session_id: session, message_id: message, status: 'accepted', replayed: false, input_delivery,
+      } }), { headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    await conversation.sendMessage.invoke({ conversation_id: session, input: 'One user intention', files: ['reference.png'],
+      idempotency_key: 'frozen-intent', delivery });
+  });
+
+  test('queue mutation addresses the original input and its queue version without resending content', async () => {
+    globalThis.fetch = (async (url, init) => {
+      expect(String(url)).toContain(`/api/agent-sessions/${session}/input-queue`);
+      expect(JSON.parse(String(init?.body))).toEqual({ idempotency_key: 'queue-command', expected_version: 12,
+        action: { kind: 'promote', message_id: message, turn_id: message } });
+      return new Response(JSON.stringify({ success: true, data: { version: 13, items: [] } }),
+        { headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    await expect(conversation.updateInputQueue.invoke({ conversation_id: session, idempotency_key: 'queue-command', expected_version: 12,
+      action: { kind: 'promote', message_id: parseMessageId(message), turn_id: parseMessageId(message) } })).resolves.toEqual({ version: 13, items: [] });
   });
 
   test.each([
@@ -60,6 +90,14 @@ describe('ordinary message intake wire contract', () => {
     globalThis.fetch = (async () => { requests++; throw new Error('must not request'); }) as typeof fetch;
     await expect(conversation.sendMessage.invoke({ conversation_id: session, input: 'Hello', idempotency_key: '' })).rejects.toThrow();
     expect(requests).toBe(0);
+  });
+
+  test('does not fabricate placement when the host acceptance omits its input view', async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({ success: true, data: {
+      agent_session_id: session, message_id: message, status: 'accepted', replayed: false,
+    } }), { headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    await expect(conversation.sendMessage.invoke({ conversation_id: session, input: 'Hello', idempotency_key: 'missing-view' }))
+      .rejects.toThrow('canonical input placement');
   });
 
   test('keeps explicit domain Turn delivery separate from ordinary input acceptance', async () => {

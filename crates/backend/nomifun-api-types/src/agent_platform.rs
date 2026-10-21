@@ -1163,6 +1163,17 @@ pub struct CreateAgentSessionTurnRequestDto {
 pub struct AcceptAgentSessionMessageRequestDto {
     pub input: Value,
     pub idempotency_key: String,
+    /// A user-authored delivery preference, never execution or resume authority.
+    #[serde(default)]
+    pub delivery: Option<nomifun_agent_contracts::SessionInputDeliveryIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAgentSessionInputQueueRequestDto {
+    pub idempotency_key: String,
+    pub expected_version: u64,
+    pub action: nomifun_agent_contracts::SessionInputQueueCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1173,6 +1184,7 @@ pub struct AcceptAgentSessionMessageResponseDto {
     pub cursor: SessionCursorDto,
     pub status: String,
     pub replayed: bool,
+    pub input_delivery: nomifun_agent_contracts::SessionInputView,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1197,15 +1209,6 @@ pub struct CreateAgentSessionTurnResponseDto {
     pub result_error_retryable: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
-#[serde(deny_unknown_fields)]
-pub struct AgentWaitReplyTargetDto {
-    pub turn_id: String,
-    /// Cursor of the exact canonical waiting event, including requestless waits.
-    #[ts(type = "number")]
-    pub wait_seq: u64,
-}
-
 /// The original committed question being referenced by an ordinary input.
 /// This association never grants execution or native recovery authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -1214,17 +1217,6 @@ pub struct AgentQuestionReplyTargetDto {
     pub turn_id: String,
     #[ts(type = "number")]
     pub question_seq: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SteerAgentSessionTurnRequestDto {
-    pub input: Value,
-    pub idempotency_key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_turn_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_wait: Option<AgentWaitReplyTargetDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1238,12 +1230,32 @@ pub struct AgentSessionTurnMutationResponseDto {
     pub duplicate: bool,
 }
 
+/// A preparation has an accepted input and a real cancellation event, but no
+/// Turn operation. Do not manufacture a Turn mutation receipt for that case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionInputCancellationResponseDto {
+    pub agent_session_id: String,
+    pub input_message_id: String,
+    pub message_id: String,
+    pub cursor: SessionCursorDto,
+    pub status: String,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CancelAgentSessionTurnResponseDto {
+    Turn(AgentSessionTurnMutationResponseDto),
+    Input(AgentSessionInputCancellationResponseDto),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CancelAgentSessionTurnRequestDto {
     pub idempotency_key: String,
-    /// Optional accepted input UUIDv7 from `turn.started`. When present,
-    /// cancellation stays attached to that Turn even after it has closed.
+    /// Exact observed accepted input UUIDv7. Before initial claim this stops
+    /// its preparation; after claim it stays attached to the original Turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_turn_id: Option<String>,
 }
@@ -1730,29 +1742,6 @@ mod snapshot_tests {
 
     #[test]
     fn canonical_turn_mutations_require_explicit_idempotency() {
-        assert!(serde_json::from_value::<SteerAgentSessionTurnRequestDto>(json!({
-            "input": {"content": "continue"},
-            "idempotency_key": "steer-1"
-        })).is_ok());
-        assert!(serde_json::from_value::<SteerAgentSessionTurnRequestDto>(json!({
-            "input": "continue"
-        })).is_err());
-        for wait_seq in [41, 52] {
-            let reply: SteerAgentSessionTurnRequestDto = serde_json::from_value(json!({
-                "input":{"content":"done"},"idempotency_key":"reply",
-                "expected_wait":{"turn_id":"0190f5fe-7c00-7a00-8abc-012345678901","wait_seq":wait_seq}
-            })).unwrap();
-            let target = reply.expected_wait.unwrap();
-            assert_eq!(target.turn_id, "0190f5fe-7c00-7a00-8abc-012345678901");
-            assert_eq!(target.wait_seq, wait_seq);
-        }
-        assert!(serde_json::from_value::<SteerAgentSessionTurnRequestDto>(json!({
-            "input":{"content":"done"},"idempotency_key":"reply","expected_wait":{"wait_seq":41}
-        })).is_err());
-        assert!(serde_json::from_value::<SteerAgentSessionTurnRequestDto>(json!({
-            "input":{"content":"done"},"idempotency_key":"reply",
-            "expected_wait":{"turn_id":"0190f5fe-7c00-7a00-8abc-012345678901","request_id":null}
-        })).is_err());
         assert!(serde_json::from_value::<CancelAgentSessionTurnRequestDto>(json!({
             "idempotency_key": "cancel-1",
             "conversation_id": "legacy"
@@ -1766,5 +1755,19 @@ mod snapshot_tests {
             "expected_turn_id": "0190f5fe-7c00-7a00-8abc-012345678901"
         })).unwrap();
         assert_eq!(exact.expected_turn_id.as_deref(), Some("0190f5fe-7c00-7a00-8abc-012345678901"));
+    }
+
+    #[test]
+    fn ordinary_delivery_is_a_closed_intent_and_queue_controls_require_the_observed_version() {
+        let default:AcceptAgentSessionMessageRequestDto=serde_json::from_value(json!({"idempotency_key":"one-input","input":{"content":"A queued request"}})).unwrap();
+        assert!(default.delivery.is_none(),"Host defaults only a new acceptance, preserving original receipt retries");
+        let explicit:AcceptAgentSessionMessageRequestDto=serde_json::from_value(json!({"idempotency_key":"one-input","input":{"content":"A queued request"},"delivery":{"kind":"queue"}})).unwrap();
+        assert!(matches!(explicit.delivery,Some(nomifun_agent_contracts::SessionInputDeliveryIntent::Queue {..})));
+        for delivery in [json!({"kind":"automatic"}),json!({"kind":"prefer_current"}),json!({"kind":"queue","turn_id":"invented"})] {
+            assert!(serde_json::from_value::<AcceptAgentSessionMessageRequestDto>(json!({"idempotency_key":"one-input","input":{"content":"A request"},"delivery":delivery})).is_err());
+        }
+        assert!(serde_json::from_value::<UpdateAgentSessionInputQueueRequestDto>(json!({"idempotency_key":"clear-queue","action":{"kind":"clear"}})).is_err());
+        let clear:UpdateAgentSessionInputQueueRequestDto=serde_json::from_value(json!({"idempotency_key":"clear-queue","expected_version":0,"action":{"kind":"clear"}})).unwrap();
+        assert_eq!(clear.expected_version,0);
     }
 }

@@ -1,8 +1,9 @@
+import { normalizeDeliveryIntent, QUEUED_INPUT, type SessionInputDeliveryIntent } from '@/common/chat/inputSubmission';
 import { conversationTarget, type ConversationId } from '@/common/types/ids';
 import { uuidv7 } from '@/common/utils';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 
-type Attempt = { fingerprint: string; key: string; content: string; files: string[]; injectSkills: string[] };
+type Attempt = { fingerprint: string; key: string; content: string; files: string[]; injectSkills: string[]; delivery?: SessionInputDeliveryIntent };
 const attempts = new Map<string, Attempt[]>();
 const storageKey = (conversationId: ConversationId) => sessionStorageKey('nomi-input-delivery', conversationTarget(conversationId));
 
@@ -13,8 +14,9 @@ function read(key: string): Attempt[] {
     if (Array.isArray(stored)) return stored.flatMap(value => {
       return typeof value?.fingerprint === 'string' && typeof value?.key === 'string'
         && typeof value?.content === 'string' && Array.isArray(value?.files) && value.files.every((file: unknown) => typeof file === 'string')
+        && (value?.delivery === undefined || normalizeDeliveryIntent(value.delivery) !== undefined)
         && Array.isArray(value?.injectSkills) && value.injectSkills.every((skill: unknown) => typeof skill === 'string')
-        ? [{ fingerprint: value.fingerprint, key: value.key, content: value.content, files: value.files, injectSkills: value.injectSkills }] : [];
+        ? [{ fingerprint: value.fingerprint, key: value.key, content: value.content, files: value.files, injectSkills: value.injectSkills, ...(value.delivery === undefined ? {} : { delivery: normalizeDeliveryIntent(value.delivery)! }) }] : [];
     });
   } catch { /* A blocked browser store still retains the mounted attempt. */ }
   return [];
@@ -28,7 +30,7 @@ export function pendingInputDelivery(conversationId: ConversationId, input: stri
 
 /** A retry resubmits the original payload and key. Only the canonical intake
  * owns its execution claim; the composer never chooses a Turn or checkpoint. */
-export function inputDeliveryAttempt(conversationId: ConversationId, input: string, files: string[], injectSkills: string[] = [], content = input): Attempt {
+export function inputDeliveryAttempt(conversationId: ConversationId, input: string, files: string[], injectSkills: string[] = [], content = input, delivery: SessionInputDeliveryIntent = QUEUED_INPUT): Attempt {
   const key = storageKey(conversationId);
   const previous = read(key);
   const existing = previous.find(attempt => attempt.fingerprint === fingerprint(input, files));
@@ -36,7 +38,7 @@ export function inputDeliveryAttempt(conversationId: ConversationId, input: stri
   if (previous.length >= 16) {
     throw new Error('Too many messages have unconfirmed delivery. Retry an earlier message before sending another.');
   }
-  const attempt = { fingerprint: fingerprint(input, files), key: uuidv7(), content, files: [...files], injectSkills: [...injectSkills] };
+  const attempt = { fingerprint: fingerprint(input, files), key: uuidv7(), content, files: [...files], injectSkills: [...injectSkills], delivery: Object.freeze({ ...delivery }) };
   const next = [...previous, attempt];
   attempts.set(key, next);
   try { sessionStorage.setItem(key, JSON.stringify(next)); } catch { /* Memory fallback. */ }

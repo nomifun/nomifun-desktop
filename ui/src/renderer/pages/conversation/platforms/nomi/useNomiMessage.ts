@@ -260,6 +260,24 @@ export const useNomiMessage = (
 
   const adoptAuthoritativeProcessing = useCallback((conversation: TChatConversation) => {
     const activeTurnId = conversation.runtime?.active_turn_id;
+    if (!activeTurnId && conversation.runtime?.state === 'starting' && conversation.runtime.is_processing === true) {
+      // Preparation/cleanup owns work without a Turn. A verified snapshot can
+      // retire a missing prior terminal's identity, but must not invent a new
+      // Turn or clear an in-flight user Stop fence. Subsequent starts still
+      // require the existing exact runtime verification.
+      setRootTurnId(null);
+      setActiveMsgId(null);
+      awaitingBackendTurnRef.current = false;
+      turnClosedRef.current = true;
+      verifyUnannouncedStartRuntimeRef.current = true;
+      turnSettledRef.current = false;
+      setPauseNotice(null);
+      setWaitingNotice(null);
+      setThought({ subject: '', description: '' });
+      dispatchTurn({ type: 'hydrate', isRunning: true });
+      setHasHydratedRunningState(true);
+      return;
+    }
     if (
       !activeTurnId ||
       rejectUnannouncedStartRef.current ||

@@ -39,6 +39,9 @@ mod live_user_input;
 #[path = "support/live_resource_wait.rs"]
 mod live_resource_wait;
 
+#[path = "support/live_input_queue.rs"]
+mod live_input_queue;
+
 #[path = "support/live_scheduled_tasks.rs"]
 mod live_scheduled_tasks;
 
@@ -780,12 +783,24 @@ fn verify_resource_selections(binding: &Value, selections: &Value) -> Result<(),
 }
 
 fn verify_resource_selections_in_workspace(binding: &Value, selections: &Value, workspace: Option<&Path>) -> Result<(), SmokeFailure> {
-    let selections = selections.as_array().ok_or_else(|| {
+    let mut selections = selections.as_array().ok_or_else(|| {
         SmokeFailure::new("session.resources", "FIXTURE_RESOURCE_SELECTION_INVALID", 500)
-    })?;
+    })?.clone();
     let resources = binding.get("typed_resource_bindings").and_then(Value::as_array).ok_or_else(|| {
         SmokeFailure::new("session.resources", "SESSION_RESOURCE_BINDINGS_MISSING", 502)
     })?;
+    if workspace.is_some() && !selections.iter().any(|selection| selection["resource_kind"] == "workspace") {
+        // An explicit cwd adds one location identity when the Agent has no file
+        // Actions. It must not acquire file authority through this extra binding.
+        let mut locations = resources.iter().filter(|resource| resource["resource_kind"] == "workspace");
+        if !locations.next().is_some_and(|resource|
+            resource["operations"].as_array().is_some_and(Vec::is_empty))
+            || locations.next().is_some()
+        {
+            return Err(SmokeFailure::new("session.resources", "SESSION_WORKSPACE_LOCATION_AUTHORITY_INVALID", 409));
+        }
+        selections.push(json!({"resource_kind":"workspace","resource_id":"default-workspace"}));
+    }
     if resources.len() != selections.len() {
         return Err(SmokeFailure::new("session.resources", format!("SESSION_RESOURCE_COUNT_MISMATCH_{}_{}", resources.len(), selections.len()), 409));
     }
@@ -3443,6 +3458,15 @@ async fn nomi_core_resource_wait_reaches_live_stepfun() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --input-queue-smoke"]
+async fn nomi_core_input_queue_reaches_live_stepfun() {
+    if let Err(failure) = live_input_queue::run().boxed_local().await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a live credential on stdin; use the runner --file-smoke"]
 async fn nomi_core_workspace_file_reaches_live_stepfun() {
     if let Err(failure) = run_live_provider_smoke(LiveCase::WorkspaceFile).await {
@@ -3700,6 +3724,48 @@ mod evidence_tests {
         binding["typed_resource_bindings"][0]["binding_id"] = canonical_id;
         binding["typed_resource_bindings"][1]["typed_parameters"]["workspace_root"] = json!("missing-root");
         assert!(verify_resource_selections_in_workspace(&binding, &selections, Some(root.path())).is_err());
+    }
+
+    #[test]
+    fn selected_process_workspace_adds_only_zero_operation_location_identity() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let id = format!("selected-workspace-{:x}", Sha256::digest(path.as_bytes()));
+        let mut binding = json!({"typed_resource_bindings":[
+            {"binding_id":"pending","resource_kind":"workspace","resource_id":id,"owner_id":"live-smoke-owner","operations":[],"typed_parameters":{"workspace_root":path}},
+            {"binding_id":"pending","resource_kind":"process_session","resource_id":"managed-process-session","owner_id":"live-smoke-owner","operations":["execute"],"typed_parameters":{"workspace_root":path}}
+        ]});
+        let freeze = |resource: &mut Value| {
+            let definition = serde_json::from_value::<nomifun_agent_contracts::TypedResourceBinding>(resource.clone()).unwrap();
+            resource["binding_id"] = json!(nomifun_agent_contracts::resource_definition_id(&definition).unwrap());
+        };
+        for resource in binding["typed_resource_bindings"].as_array_mut().unwrap() { freeze(resource); }
+        let selections = json!([{"resource_kind":"process_session","resource_id":"managed-process-session"}]);
+        assert!(verify_resource_selections_in_workspace(&binding, &selections, Some(root.path())).is_ok());
+        assert!(verify_resource_selections(&binding, &selections).is_err());
+        let valid = binding.clone();
+        binding["typed_resource_bindings"][0]["operations"] = json!(["read"]);
+        freeze(&mut binding["typed_resource_bindings"][0]);
+        assert!(verify_resource_selections_in_workspace(&binding, &selections, Some(root.path())).is_err(), "an automatic location must grant no file authority");
+        binding = valid.clone();
+        binding["typed_resource_bindings"][0]["typed_parameters"]["workspace_root"] = json!(other.path());
+        freeze(&mut binding["typed_resource_bindings"][0]);
+        assert!(verify_resource_selections_in_workspace(&binding, &selections, Some(root.path())).is_err());
+        binding = valid.clone();
+        binding["typed_resource_bindings"][0]["binding_id"] = json!("invalid-digest");
+        assert!(verify_resource_selections_in_workspace(&binding, &selections, Some(root.path())).is_err());
+        binding = valid.clone();
+        binding["typed_resource_bindings"][0]["resource_id"] = json!("selected-workspace-wrong-id");
+        freeze(&mut binding["typed_resource_bindings"][0]);
+        assert!(verify_resource_selections_in_workspace(&binding, &selections, Some(root.path())).is_err());
+        binding = valid.clone();
+        binding["typed_resource_bindings"].as_array_mut().unwrap().push(valid["typed_resource_bindings"][0].clone());
+        assert!(verify_resource_selections_in_workspace(&binding, &selections, Some(root.path())).is_err(), "exactly one location identity is allowed");
+        binding = valid;
+        binding["typed_resource_bindings"].as_array_mut().unwrap().push(json!({"resource_kind":"browser","resource_id":"unrequested-browser"}));
+        assert!(verify_resource_selections_in_workspace(&binding, &selections, Some(root.path())).is_err(), "unselected resources remain forbidden");
     }
 
     #[test]

@@ -13,6 +13,7 @@ import { useThinkingDisplayPreferences } from '@renderer/hooks/config/useThinkin
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
+import { useProcessExpansion } from '../processExpansion';
 
 interface MessageThinkingProps {
   message: IMessageThinking;
@@ -31,6 +32,7 @@ const MessageThinking: React.FC<MessageThinkingProps> = ({
 }) => {
   const { t } = useTranslation();
   const thinkingDisplay = useThinkingDisplayPreferences();
+  const [savedExpanded, saveExpanded] = useProcessExpansion(`thinking:${message.id}`);
 
   const { status, subject } = message.content;
   const text = toDisplayText(message.content.content);
@@ -49,8 +51,8 @@ const MessageThinking: React.FC<MessageThinkingProps> = ({
       startedAt={message.created_at}
       identityKey={message.msg_id ?? message.id}
       variant={variant}
-      expanded={expanded}
-      onExpandedChange={onExpandedChange}
+      expanded={expanded ?? savedExpanded}
+      onExpandedChange={next => { saveExpanded(next); onExpandedChange?.(next); }}
       runningFallbackLabel={t('conversation.thinking.label', {
         defaultValue: 'Thinking...',
       })}

@@ -129,7 +129,7 @@ use nomifun_api_types::{
     ConversationRuntimeStateKind, ConversationRuntimeSummary, CreateAgentSessionRequestDto, CreateConversationRequest,
     CreateAgentSessionResponseDto, CreateAgentSessionTurnRequestDto,
     CreateAgentSessionTurnResponseDto, AgentSessionTurnMutationResponseDto,
-    CancelAgentSessionTurnRequestDto, SteerAgentSessionTurnRequestDto,
+    CancelAgentSessionTurnRequestDto,CancelAgentSessionTurnResponseDto,
     ErrorResponse, ForkAgentSessionRequestDto,
     ForkAgentSessionResponseDto, ListMessagesQuery, MessageListResponse, MessageResponse,
     MessageSearchItem, MessageSearchResponse, SearchMessagesQuery,
@@ -237,7 +237,6 @@ struct AdmittedSteering {
 
 #[derive(Clone)]
 enum SteeringAuthority {
-    Ordinary,
     Domain,
     Native {fence:nomifun_agent_session::NativeTurnMutationFence,immediate:bool},
 }
@@ -2967,8 +2966,17 @@ impl NomiCoreSessionOwner {
                     "read canonical AgentExecution Conversation link: {error}"
                 ))
             })?;
-        let response = canonical_conversation_response(observed,projected,workspace,created_at,
+        let mut response = canonical_conversation_response(observed,projected,workspace,created_at,
             execution_link,companion_origin,companion_associated_task)?;
+        if !self.input_preparation_observations(session_id)?.is_empty()
+            && let Some(runtime)=response.runtime.as_mut()
+            && runtime.state==ConversationRuntimeStateKind::Idle {
+            // Preparing/cleaning an accepted input owns live work before a
+            // canonical Turn exists. GET must not report Stop released merely
+            // because the head is ready; no fictitious Turn identity is added.
+            runtime.state=ConversationRuntimeStateKind::Starting;
+            runtime.is_processing=true;
+        }
         Ok(Some(response))
     }
 
@@ -3293,6 +3301,12 @@ impl NomiCoreSessionOwner {
         target_operation_id: &OperationId,
         reason: nomifun_common::AgentKillReason,
     ) -> Result<AgentMutationReceipt, AppError> {
+        self.cancel_owned_turn(owner_id,session_id,idempotency_key,Some(target_operation_id),reason,false).await
+    }
+
+    async fn cancel_owned_turn(&self,owner_id:&str,session_id:&AgentSessionId,idempotency_key:&str,
+        target_operation_id:Option<&OperationId>,reason:nomifun_common::AgentKillReason,hold_input_queue:bool)
+        ->Result<AgentMutationReceipt,AppError> {
         let canonical = self.canonical.clone();
         let runtimes = self.runtime_sessions.clone();
         let original_runtime = runtimes.get_runtime(session_id.as_ref());
@@ -3300,7 +3314,7 @@ impl NomiCoreSessionOwner {
         let input_owner = engines.as_ref().and_then(|host| host.session_owner().ok());
         let input_owner_id = owner_id.to_owned();
         let principal = PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() };
-        let session = session_id.clone(); let target = target_operation_id.clone(); let key = idempotency_key.to_owned();
+        let session = session_id.clone(); let target = target_operation_id.cloned(); let key = idempotency_key.to_owned();
         #[cfg(test)]
         let barrier = {
             let mut installed = self.cancellation_signal_barrier.lock().unwrap();
@@ -3314,7 +3328,12 @@ impl NomiCoreSessionOwner {
         // a cancelled canonical Turn running without its cancellation owner.
         if !self.background_tasks.spawn(Box::pin(async move {
             let result = async {
-                let receipt = canonical.cancel_exact_turn(&principal, &session, &key, &target).await?;
+                let receipt = if hold_input_queue {
+                    canonical.cancel_composer_turn(&principal,&session,&key,target.as_ref()).await?
+                } else {
+                    canonical.cancel_exact_turn(&principal,&session,&key,target.as_ref()
+                        .ok_or_else(||AppError::BadRequest("domain cancellation requires its exact Turn".into()))?).await?
+                };
                 #[cfg(test)]
                 if let Some(barrier) = barrier { barrier.entered.notify_one(); barrier.release.notified().await; }
                 let signalled = Self::signal_receipted_runtime_turn(canonical.store(), runtimes.as_ref(), engines,
@@ -3338,7 +3357,7 @@ impl NomiCoreSessionOwner {
                     // observation failed after the cancellation committed.
                     if let Some(runtime) = original_runtime.filter(|_| !receipt.duplicate) {
                         owner.schedule_completed_runtime_retirement(input_owner_id,
-                            session.clone(), target.clone(), runtime);
+                            session.clone(), receipt.target_operation_id.clone(), runtime);
                     }
                 }
                 signalled?;
@@ -3372,6 +3391,7 @@ impl NomiCoreSessionOwner {
             nomifun_common::AgentKillReason::UserCancelled).await
     }
 
+    /// Read the exact root used by channel delivery and other existing consumers.
     async fn operation_for_accepted_input(&self, owner_id:&str,session_id:&AgentSessionId,
         source_message_id:&str) -> Result<OperationId,AppError> {
         let source = Uuid::parse_str(source_message_id)
@@ -3381,9 +3401,6 @@ impl NomiCoreSessionOwner {
             &PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() },
             session_id,
         ).await?;
-        // Source-to-operation identity is immutable. The existing exact Turn
-        // mutation rechecks active/closed state atomically, so a successor
-        // started between this lookup and cancellation cannot become a target.
         let operations: Vec<String> = sqlx::query_scalar(
             "SELECT turn.operation_id FROM agent_turns turn \
              JOIN agent_events started ON started.event_id=turn.started_event_id \
@@ -3401,13 +3418,6 @@ impl NomiCoreSessionOwner {
         }
     }
 
-    async fn cancel_accepted_input_turn(&self,owner_id:&str,session_id:&AgentSessionId,
-        idempotency_key:&str,source_message_id:&str) -> Result<AgentMutationReceipt,AppError> {
-        let operation=self.operation_for_accepted_input(owner_id,session_id,source_message_id).await?;
-        self.cancel_exact_turn(owner_id,session_id,idempotency_key,&operation,
-            nomifun_common::AgentKillReason::UserCancelled).await
-    }
-
     /// Voice opt-in adds proof, then delegates runtime cleanup to the existing owner.
     pub(crate) async fn voice_cancel_exact_native_turn(&self,owner:&str,session:&AgentSessionId,key:&str,target:&OperationId,
         fence:&nomifun_agent_session::NativeTurnMutationFence)->Result<AgentMutationReceipt,AppError> {
@@ -3422,7 +3432,7 @@ impl NomiCoreSessionOwner {
         if let Some(receipt)=self.canonical.read_native_steer_receipt(&principal,session,key,target,&canonical_turn_input(&input),fence,supersede).await? {
             self.queue_receipted_steering(session,&receipt).await?;return Ok(receipt);
         }
-        let admitted=self.admit_live_steering(&principal,session,key,target,input,None,SteeringAuthority::Native {fence:fence.clone(),immediate:supersede}).await?;
+        let admitted=self.admit_live_steering(&principal,session,key,target,input,SteeringAuthority::Native {fence:fence.clone(),immediate:supersede}).await?;
         admitted.delivery?;Ok(admitted.receipt)
     }
 
@@ -3462,7 +3472,7 @@ impl NomiCoreSessionOwner {
     }
 
     async fn admit_live_steering(&self,owner:&PrincipalRef,session:&AgentSessionId,key:&str,target:&OperationId,
-        request:SendMessageRequest,expected_wait:Option<nomifun_api_types::AgentWaitReplyTargetDto>,authority:SteeringAuthority)
+        request:SendMessageRequest,authority:SteeringAuthority)
         ->Result<AdmittedSteering,AppError> {
         let turn=self.canonical.turn_receipt(owner,session,target).await
             .map_err(|_|AppError::Internal("the original steering Turn could not be verified; retry the original key".into()))?;
@@ -3474,23 +3484,21 @@ impl NomiCoreSessionOwner {
         let runtime=self.runtime_sessions.get_runtime(session.as_ref()).ok_or_else(||AppError::Conflict("steering target has no live Runtime".into()))?;
         let input_owner=self.native_engines.get().and_then(std::sync::Weak::upgrade)
             .ok_or_else(||AppError::Conflict("steering input owner is not installed".into()))?.session_owner()?;
-        let retry_request=request.clone();let retry_wait=expected_wait.clone();let retry_authority=authority.clone();
+        let retry_request=request.clone();let retry_authority=authority.clone();
         let canonical=self.canonical.clone();let principal=owner.clone();let id=session.clone();let operation=target.clone();let commit_key=key.to_owned();
         let wire=root.clone();
         let commit=Box::pin(async move {
             let input=canonical_turn_input(&request);
             // Recheck after obtaining the same inbox mutex as take(true): a
             // concurrent identical caller may have committed while we waited.
-            let receipt=if let Some(receipt)=input_owner.steering_receipt(&principal,&id,&commit_key,&operation,&request,expected_wait.as_ref(),&authority).await
+            let receipt=if let Some(receipt)=input_owner.steering_receipt(&principal,&id,&commit_key,&operation,&request,&authority).await
                 .map_err(|_|AppError::Internal("the original steering receipt could not be verified; retry the original key".into()))? {
                 receipt
             } else {
-                if matches!(authority,SteeringAuthority::Ordinary) {Self::validate_ordinary_message_origin(&request)?;input_owner.require_ordinary_owner_input(&principal,&id).await?;}
                 match authority {
                     SteeringAuthority::Native {fence,immediate:true}=>canonical.steer_exact_native_immediate_turn(&principal,&id,&commit_key,&operation,input,&fence).await?,
                     SteeringAuthority::Native {fence,immediate:false}=>canonical.steer_exact_native_turn(&principal,&id,&commit_key,&operation,input,&fence).await?,
-                    _=>canonical.admit_exact_steer(&principal,&id,&commit_key,&operation,input,
-                        expected_wait.as_ref().map(|wait|(wait.turn_id.as_str(),wait.wait_seq))).await?,
+                    SteeringAuthority::Domain=>canonical.admit_exact_steer(&principal,&id,&commit_key,&operation,input,None).await?,
                 }
             };
             Ok(nomifun_ai_agent::RuntimeSteerCommitted {
@@ -3506,7 +3514,7 @@ impl NomiCoreSessionOwner {
                 // In particular, a close or domain transition may follow a
                 // concurrent identical admission. Never call that old input
                 // unaccepted merely because this caller lost the race.
-                if let Some(receipt)=self.steering_receipt(owner,session,key,target,&retry_request,retry_wait.as_ref(),&retry_authority).await
+                if let Some(receipt)=self.steering_receipt(owner,session,key,target,&retry_request,&retry_authority).await
                     .map_err(|_|AppError::Internal("steering admission could not reconfirm its original receipt; retry the original key".into()))? {
                     let delivery=self.queue_receipted_steering(session,&receipt).await;
                     return Ok(AdmittedSteering {receipt,delivery});
@@ -3520,11 +3528,11 @@ impl NomiCoreSessionOwner {
     }
 
     async fn steering_receipt(&self,owner:&PrincipalRef,session:&AgentSessionId,key:&str,target:&OperationId,input:&SendMessageRequest,
-        expected_wait:Option<&nomifun_api_types::AgentWaitReplyTargetDto>,authority:&SteeringAuthority)->Result<Option<AgentMutationReceipt>,AppError> {
+        authority:&SteeringAuthority)->Result<Option<AgentMutationReceipt>,AppError> {
         let input=canonical_turn_input(input);
         match authority {
             SteeringAuthority::Native {fence,immediate}=>self.canonical.read_native_steer_receipt(owner,session,key,target,&input,fence,*immediate).await,
-            _=>self.canonical.read_steer_receipt(owner,session,key,Some(target),&input,expected_wait.map(|wait|(wait.turn_id.as_str(),wait.wait_seq))).await,
+            SteeringAuthority::Domain=>self.canonical.read_steer_receipt(owner,session,key,Some(target),&input,None).await,
         }
     }
 
@@ -5299,7 +5307,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         self.canonical.get(&principal,&session_id).await?;
         let target=self.canonical.store().head(&session_id).await.map_err(agent_session_store_error)?.active_turn_id
             .ok_or_else(||AppError::Conflict("steering has no original active Turn".into()))?;
-        let admitted=self.admit_live_steering(&principal,&session_id,operation_id,&target.into(),request,None,SteeringAuthority::Domain).await?;
+        let admitted=self.admit_live_steering(&principal,&session_id,operation_id,&target.into(),request,SteeringAuthority::Domain).await?;
         admitted.delivery?;
         Ok(admitted.receipt.event_id.as_ref().to_owned())
     }
@@ -5321,7 +5329,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         }
         let original=self.canonical.turn_receipt(&principal,&session_id,&target).await?;
         if let Some(terminal)=original.terminal_event {return Ok(terminal.event_id.as_ref().to_owned());}
-        let admitted=self.admit_live_steering(&principal,&session_id,operation_id,&target,request,None,SteeringAuthority::Domain).await?;
+        let admitted=self.admit_live_steering(&principal,&session_id,operation_id,&target,request,SteeringAuthority::Domain).await?;
         admitted.delivery?;
         Ok(admitted.receipt.event_id.as_ref().to_owned())
     }
@@ -7583,7 +7591,6 @@ mod session_boundary_tests {
         for route in [
             "/api/agent-sessions",
             "/api/agent-sessions/{agent_session_id}/turns",
-            "/api/agent-sessions/{agent_session_id}/turns/steer",
             "/api/agent-sessions/{agent_session_id}/turns/cancel",
             "/api/agent-sessions/{agent_session_id}/events",
             "/api/agent-sessions/{agent_session_id}/messages",
@@ -7638,7 +7645,6 @@ mod session_boundary_tests {
         for handler in [
             "create_nomi_core_agent_session",
             "start_nomi_core_agent_session_turn",
-            "steer_nomi_core_agent_session_turn",
             "cancel_nomi_core_agent_session_turn",
             "fork_nomi_core_agent_session",
             "delete_nomi_core_agent_session",
@@ -9326,10 +9332,6 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             post(start_nomi_core_agent_session_turn),
         )
         .route(
-            "/api/agent-sessions/{agent_session_id}/turns/steer",
-            post(steer_nomi_core_agent_session_turn),
-        )
-        .route(
             "/api/agent-sessions/{agent_session_id}/turns/cancel",
             post(cancel_nomi_core_agent_session_turn),
         )
@@ -9340,6 +9342,10 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
         .route(
             "/api/agent-sessions/{agent_session_id}/messages",
             get(get_nomi_core_agent_session_messages).post(session_input_intake::accept_message),
+        )
+        .route(
+            "/api/agent-sessions/{agent_session_id}/input-queue",
+            get(session_input_intake::get_input_queue).post(session_input_intake::update_input_queue),
         )
         .route(
             "/api/agent-sessions/{agent_session_id}/forks",
@@ -16696,87 +16702,31 @@ fn initial_delivery_requested(headers: &HeaderMap) -> Result<bool, NomiCoreApiEr
     Ok(true)
 }
 
-/// Only use before an input receipt has been committed. Transport/commit
-/// failures and post-admission delivery failures must retain the original key.
-fn input_admission_error(error:AppError) -> NomiCoreApiError {
-    if error.status_code().is_client_error() {
-        NomiCoreApiError::with_details(error.status_code(),"INPUT_NOT_ACCEPTED",error.to_string(),
-            json!({"accepted":false,"reason":error.error_code()}))
-    } else { error.into() }
-}
-
-async fn steer_nomi_core_agent_session_turn(
-    State(state): State<NomiCoreAgentApiState>,
-    Extension(owner): Extension<AuthenticatedOwner>,
-    Path(agent_session_id): Path<String>,
-    Json(request): Json<SteerAgentSessionTurnRequestDto>,
-) -> Result<Json<ApiResponse<AgentSessionTurnMutationResponseDto>>, NomiCoreApiError> {
-    let session_id = parse_agent_session_id(&agent_session_id)?;
-    let key = canonical_nonempty(&request.idempotency_key, "idempotency_key")?;
-    let turn = bounded_turn_input(request.input)?;
-    let input = canonical_turn_input(&turn);
-    let principal = authenticated_principal(&owner);
-    let expected_wait=request.expected_wait;
-    if expected_wait.as_ref().is_some_and(|wait|request.expected_turn_id.as_ref().is_some_and(|source|source!=&wait.turn_id)) {
-        return Err(AppError::Conflict("steering target differs from the waiting Turn".into()).into());
-    }
-    let source=expected_wait.as_ref().map(|wait|wait.turn_id.clone()).or(request.expected_turn_id)
-        .ok_or_else(||AppError::BadRequest("steering requires its exact observed Turn".into()))?;
-    let operation=state.session_owner.operation_for_accepted_input(&principal.principal_id,&session_id,&source).await?;
-    // A lost ACK is a query of the original input, even if this Session has
-    // since acquired a domain owner. It cannot select today's active Turn.
-    let receipt=if let Some(receipt)=state.session_owner.canonical().read_steer_receipt(&principal,&session_id,&key,
-        Some(&operation),&input,expected_wait.as_ref().map(|wait|(wait.turn_id.as_str(),wait.wait_seq))).await? {
-        state.session_owner.queue_receipted_steering(&session_id,&receipt).await?;
-        receipt
-    } else {
-        let admitted=state.session_owner.admit_live_steering(&principal,&session_id,&key,&operation,turn,expected_wait,SteeringAuthority::Ordinary)
-            .await.map_err(input_admission_error)?;
-        // Everything after the canonical ACK is delivery-unknown on failure.
-        // Never tell the client to replace the committed idempotency key.
-        admitted.delivery?;
-        admitted.receipt
-    };
-    Ok(Json(ApiResponse::ok(AgentSessionTurnMutationResponseDto {
-        agent_session_id: session_id.as_ref().to_owned(),
-        target_operation_id: receipt.target_operation_id.as_ref().to_owned(),
-        message_id: receipt.event_id.as_ref().to_owned(),
-        cursor: session_cursor(&session_id, receipt.cursor.seq),
-        status: "running".to_owned(),
-        duplicate: receipt.duplicate,
-    })))
-}
-
 async fn cancel_nomi_core_agent_session_turn(
     State(state): State<NomiCoreAgentApiState>,
     Extension(owner): Extension<AuthenticatedOwner>,
     Path(agent_session_id): Path<String>,
     Json(request): Json<CancelAgentSessionTurnRequestDto>,
-) -> Result<Json<ApiResponse<AgentSessionTurnMutationResponseDto>>, NomiCoreApiError> {
+) -> Result<Json<ApiResponse<CancelAgentSessionTurnResponseDto>>, NomiCoreApiError> {
     let session_id = parse_agent_session_id(&agent_session_id)?;
     let key = canonical_nonempty(&request.idempotency_key, "idempotency_key")?;
     let principal = authenticated_principal(&owner);
-    let receipt = if let Some(expected_turn_id) = request.expected_turn_id.as_deref() {
-        state.session_owner.cancel_accepted_input_turn(
-            &principal.principal_id, &session_id, &key, expected_turn_id,
-        ).await?
-    } else {
-        state.session_owner.cancel_turn(
-            &principal.principal_id,
-            &session_id,
-            &key,
-            nomifun_common::AgentKillReason::UserCancelled,
-        )
-        .await?
-    };
-    Ok(Json(ApiResponse::ok(AgentSessionTurnMutationResponseDto {
+    if let Some(source)=request.expected_turn_id {
+        let input=Uuid::parse_str(&source).ok().filter(|id|id.get_version_num()==7)
+            .ok_or_else(||AppError::BadRequest("expected_turn_id must be a canonical UUIDv7".into()))?;
+        let response=state.session_owner.stop_composer_source(principal.principal_id,session_id,nomifun_agent_contracts::EventId::from(input.to_string()),key).await?;
+        return Ok(Json(ApiResponse::ok(response)));
+    }
+    let receipt=state.session_owner.cancel_owned_turn(&principal.principal_id,&session_id,&key,None,
+        nomifun_common::AgentKillReason::UserCancelled,true).await?;
+    Ok(Json(ApiResponse::ok(CancelAgentSessionTurnResponseDto::Turn(AgentSessionTurnMutationResponseDto {
         agent_session_id: session_id.as_ref().to_owned(),
         target_operation_id: receipt.target_operation_id.as_ref().to_owned(),
         message_id: receipt.event_id.as_ref().to_owned(),
         cursor: session_cursor(&session_id, receipt.cursor.seq),
         status: "cancelled".to_owned(),
         duplicate: receipt.duplicate,
-    })))
+    }))))
 }
 
 /// Both the built-in page and a scoped plugin UI use the same admission path.
@@ -18610,7 +18560,7 @@ pub(super) fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, Nom
             "turn input must be a string or an object containing content",
         )
     })?;
-    if ["idmm_decision", "idmm_notice", "input_source", "channel_source", "reply_to", "cron_runtime_overlay", "remote_runtime_source"].iter().any(|key| object.contains_key(*key))
+    if ["idmm_decision", "idmm_notice", "input_source", "channel_source", "reply_to", "delivery_intent", "cron_runtime_overlay", "remote_runtime_source"].iter().any(|key| object.contains_key(*key))
         || matches!(object.get("origin").and_then(Value::as_str), Some("idmm" | "robot" | "directed_delegation_result" | "channel_guest")) {
         return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST,
             "NOMI_CORE_INVALID_REQUEST", "Input source metadata is reserved for its authenticated host"));
