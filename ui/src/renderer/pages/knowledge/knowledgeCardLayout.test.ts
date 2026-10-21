@@ -1,52 +1,28 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
-const cardSource = readFileSync(new URL('./KnowledgeCard.tsx', import.meta.url), 'utf8');
-const listPageSource = readFileSync(new URL('./KnowledgeListPage/index.tsx', import.meta.url), 'utf8');
+const cardStyles = readFileSync(new URL('./KnowledgeCard.module.css', import.meta.url), 'utf8');
+const pageStyles = readFileSync(new URL('./KnowledgeListPage/index.module.css', import.meta.url), 'utf8');
 
-describe('Knowledge list grid layout', () => {
-  test('keeps cards compact enough for up to three responsive columns', () => {
-    expect(listPageSource.includes("minmax(min(290px, 100%), 1fr)")).toBe(true);
-    expect(listPageSource.includes('max-w-1180px')).toBe(true);
-    expect(listPageSource.includes('minmax(min(520px, 100%), 1fr)')).toBe(false);
-    expect(listPageSource.includes('minmax(330px, 1fr)')).toBe(false);
-  });
-});
+function rule(styles: string, selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const content = styles.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))?.[1];
+  expect(content).toBeDefined();
+  return content!;
+}
 
-describe('KnowledgeCard footer layout', () => {
-  test('uses a lightweight footer instead of a full-width recessed meta strip', () => {
-    expect(cardSource.includes('knowledge-card-footer')).toBe(true);
-    expect(cardSource.includes('knowledge-card-meta')).toBe(true);
-    expect(cardSource.includes('border-t border-solid border-[var(--color-border-2)]')).toBe(false);
+describe('Knowledge catalog card geometry', () => {
+  test('keeps the approved card width instead of stretching cards into empty grid space', () => {
+    expect(rule(pageStyles, '.grid')).toMatch(/grid-template-columns:\s*repeat\(auto-fill,\s*264px\)/);
+    expect(rule(cardStyles, '.card')).toMatch(/width:\s*264px/);
   });
 
-  test('keeps hover actions in footer flow instead of overlaying metadata', () => {
-    expect(cardSource.includes('knowledge-card-actions')).toBe(true);
-    expect(cardSource.includes('absolute bottom-16px right-16px')).toBe(false);
-    expect(cardSource.includes('group-hover:pointer-events-auto')).toBe(true);
-  });
-
-  test('surfaces missing local folders directly on the card', () => {
-    expect(cardSource.includes('knowledge-card-root-missing')).toBe(true);
-    expect(cardSource.includes('!base.root_exists')).toBe(true);
-    expect(cardSource.includes("t('knowledge.card.rootMissing'")).toBe(true);
-  });
-
-  test('uses a delete icon for the destructive card action', () => {
-    expect(cardSource.includes('MoreOne')).toBe(false);
-    expect(cardSource.includes("title={t('knowledge.actions.delete'")).toBe(true);
-    expect(cardSource.includes("<Delete theme='outline' size={13} strokeWidth={3} />")).toBe(true);
-  });
-
-  test('caps visible tags and exposes the complete tag list in a tooltip', () => {
-    expect(cardSource.includes('const MAX_VISIBLE_TAGS = 5')).toBe(true);
-    expect(cardSource.includes('resolved.slice(0, MAX_VISIBLE_TAGS)')).toBe(true);
-    expect(cardSource.includes('+{overflowCount}')).toBe(true);
-    expect(cardSource.includes('<Tooltip content={tooltipContent}')).toBe(true);
-  });
-
-  test('strictly clips descriptions to two lines inside compact cards', () => {
-    expect(cardSource.includes('max-h-40px min-h-0 flex-1 overflow-hidden')).toBe(true);
-    expect(cardSource.includes('WebkitLineClamp: 2')).toBe(true);
+  test('keeps the same outer height and description space for populated, empty and tagged cards', () => {
+    expect(rule(cardStyles, '.card')).toMatch(/height:\s*107px/);
+    expect(rule(cardStyles, '.card')).toMatch(/box-sizing:\s*border-box/);
+    expect(rule(cardStyles, '.body')).toMatch(/height:\s*36px/);
+    expect(rule(cardStyles, '.body')).toMatch(/overflow:\s*hidden/);
+    expect(rule(cardStyles, '.description')).toMatch(/-webkit-line-clamp:\s*2/);
+    expect(rule(cardStyles, '.singleLine')).toMatch(/-webkit-line-clamp:\s*1/);
   });
 });

@@ -5,29 +5,27 @@
  */
 
 /**
- * KnowledgeListPage — Card grid with two-dimension filters (kind + tag).
- *
- * Consumes KnowledgeCard (B2), KnowledgeTagFilterBar (B3), useKnowledgeBases,
- * useKnowledgeTags (B1). Uses CreateStudio (Phase C) for the create flow.
- * The old Form-based create Modal has been removed; only the edit path (openEdit)
- * retains a simple modal.
+ * KnowledgeListPage — Compact knowledge cards with kind, tag and search filters.
+ * Creation uses CreateStudio; editing and deletion retain their existing dialogs.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
+  Button,
   Checkbox,
+  Dropdown,
   Form,
   Input,
+  Menu,
   Message,
   Modal,
   Tooltip,
-  Typography,
 } from '@arco-design/web-react';
-import { AddOne, Brain, Search, SettingTwo } from '@icon-park/react';
+import { Brain, Plus, Search, SettingTwo } from '@icon-park/react';
 import { isDesktopShell } from '@renderer/utils/platform';
 import { ipcBridge } from '@/common';
-import { HUB_PAGE_TITLE_CLASS } from '@/renderer/components/layout/HubPageShell';
+import PageHeader from '@/renderer/components/layout/PageHeader';
 import { preloadKnowledgeDetailRoute } from '@/renderer/components/layout/routePreload';
 import type { KnowledgeKindShortcut } from '../KnowledgeEmptyState';
 import type { IKnowledgeBase, IKnowledgeTag } from '@/common/adapter/ipcBridge';
@@ -44,18 +42,12 @@ import KnowledgeTagFilterBar, {
   type KnowledgeSort,
   type KnowledgeSortDirection,
 } from '../KnowledgeTagFilterBar';
-import toolbarStyles from '../KnowledgeTagFilterBar.module.css';
+import styles from './index.module.css';
 import { sortKnowledgeBases } from '../knowledgeSort';
 import KnowledgeTagManagementModal from '../KnowledgeTagManagementModal';
 import KnowledgeRetrievalSettingsModal from '../KnowledgeRetrievalSettingsModal';
 import CreateStudio from '../CreateStudio';
 import type { StudioInitialKind } from '../CreateStudio/sourceTypes';
-
-// Keep the catalog compact and responsive: the existing 1180px page shell
-// caps the grid at three 290px+ cards, while auto-fill steps down to two and
-// one column only as the actual content area narrows. `min(..., 100%)` keeps
-// the single-column layout overflow-safe on small screens.
-const KNOWLEDGE_CARD_GRID_COLUMNS = 'repeat(auto-fill, minmax(min(290px, 100%), 1fr))';
 
 // ─── Filter pure function ────────────────────────────────────────────────────
 
@@ -108,6 +100,7 @@ const KnowledgeListPage: React.FC = () => {
   const { tags, error: tagsError, refresh: refreshTags, createTag, updateTag, deleteTag } = useKnowledgeTags();
   const [tagModalVisible, setTagModalVisible] = useState(false);
   const [retrievalModalVisible, setRetrievalModalVisible] = useState(false);
+  const [settingsMenuVisible, setSettingsMenuVisible] = useState(false);
   const openingBaseIdRef = useRef<string | null>(null);
   const [openingBaseId, setOpeningBaseId] = useState<string | null>(null);
 
@@ -315,24 +308,74 @@ const KnowledgeListPage: React.FC = () => {
   const newBaseLabel = t('knowledge.newBase', { defaultValue: '新建知识库' });
 
   return (
-    <div
-      className={[
-        'size-full box-border overflow-y-auto',
-        'px-12px py-24px md:px-40px md:py-32px',
-      ].join(' ')}
-    >
-      <div className='mx-auto flex w-full max-w-1180px box-border flex-col gap-12px'>
-        {/* Header */}
-        <div className='w-full'>
-          <h1 className={HUB_PAGE_TITLE_CLASS}>
-            {t('knowledge.title', { defaultValue: '知识库' })}
-          </h1>
-          <Typography.Paragraph className='!m-0 !mt-6px max-w-1000px text-13px leading-20px text-[var(--color-text-3)]'>
-            {t('knowledge.subtitle', { defaultValue: '集中管理你的专属领域知识。任意会话、终端、数字伙伴都能挂载它作为模型的扩展知识来源。' })}
-          </Typography.Paragraph>
-        </div>
+    <div className={styles.page}>
+      <div className={styles.content}>
+        <PageHeader
+          title={t('knowledge.title', { defaultValue: '知识库' })}
+          description={t('knowledge.listDescription', { defaultValue: '管理文档与网页资料，在 Agent 会话中按需引用。' })}
+          badge={<span className={styles.totalCount}>{bases.length}</span>}
+          actions={(
+            <>
+              <Input
+                className={styles.search}
+                prefix={<Search theme='outline' size={14} strokeWidth={3} fill='currentColor' className={styles.actionIcon} />}
+                aria-label={searchLabel}
+                placeholder={searchLabel}
+                value={searchQuery}
+                onChange={setSearchQuery}
+                allowClear
+              />
+              <Button
+                type='primary'
+                className={styles.createButton}
+                icon={<Plus theme='outline' size={15} strokeWidth={3} fill='currentColor' className={styles.actionIcon} />}
+                onClick={() => openStudio()}
+              >
+                {newBaseLabel}
+              </Button>
+              <Dropdown
+                trigger='click'
+                position='br'
+                popupVisible={settingsMenuVisible}
+                onVisibleChange={setSettingsMenuVisible}
+                droplist={(
+                  <Menu
+                    onClickMenuItem={(key) => {
+                      setSettingsMenuVisible(false);
+                      if (key === 'retrieval') setRetrievalModalVisible(true);
+                      else if (key === 'tags') handleManageTags();
+                    }}
+                  >
+                    <Menu.Item key='retrieval'>
+                      <span className={styles.settingsMenuItem}>
+                        <Brain theme='outline' size={14} strokeWidth={3} fill='currentColor' className={styles.actionIcon} />
+                        {retrievalSettingsLabel}
+                      </span>
+                    </Menu.Item>
+                    <Menu.Item key='tags'>
+                      <span className={styles.settingsMenuItem}>
+                        <SettingTwo theme='outline' size={14} strokeWidth={3} fill='currentColor' className={styles.actionIcon} />
+                        {manageTagsLabel}
+                      </span>
+                    </Menu.Item>
+                  </Menu>
+                )}
+              >
+                <Tooltip content={t('common.settings')} position='top' mini>
+                  <Button
+                    type='text'
+                    className={styles.settingsButton}
+                    icon={<SettingTwo theme='outline' size={16} strokeWidth={3} fill='currentColor' className={styles.actionIcon} />}
+                    aria-label={t('common.settings')}
+                    aria-haspopup='menu'
+                    aria-expanded={settingsMenuVisible}
+                  />
+                </Tooltip>
+              </Dropdown>
+            </>
+          )}
+        />
 
-        {/* Compact filter and action toolbar */}
         <KnowledgeTagFilterBar
           kindFilter={kindFilter}
           tagFilter={tagFilter}
@@ -345,143 +388,13 @@ const KnowledgeListPage: React.FC = () => {
           onSortChange={setSort}
           sortDirection={sortDirection}
           onSortDirectionChange={setSortDirection}
-          actions={(
-            <div
-              className={[
-                'flex min-w-0 items-center gap-6px',
-                'flex-1 justify-end',
-                toolbarStyles.desktopActions,
-              ].join(' ')}
-            >
-              {/* Search */}
-              <Tooltip content={searchLabel} position='top' mini>
-                <div
-                  className={[
-                    'flex h-34px box-border min-w-0 items-center gap-7px rounded-full px-11px',
-                    'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
-                    'focus-within:border-primary-6 transition-colors',
-                    'w-220px',
-                    toolbarStyles.desktopSearch,
-                  ].join(' ')}
-                >
-                  <span
-                    className={[
-                      'inline-flex h-18px w-18px flex-none items-center justify-center',
-                      toolbarStyles.actionIcon,
-                      toolbarStyles.desktopSearchIcon,
-                    ].join(' ')}
-                  >
-                    <Search theme='outline' size={14} className='block text-[var(--color-text-3)]' />
-                  </span>
-                  <input
-                    aria-label={searchLabel}
-                    className={[
-                      'w-full border-none bg-transparent text-13px leading-18px text-[var(--color-text-1)] outline-none font-[inherit] placeholder:text-[var(--color-text-3)]',
-                      toolbarStyles.desktopSearchInput,
-                    ].join(' ')}
-                    placeholder={searchLabel}
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                  />
-                </div>
-              </Tooltip>
-
-              {/* Install-wide, task-exact knowledge retrieval models */}
-              <Tooltip content={retrievalSettingsLabel} position='top' mini>
-                <div
-                  role='button'
-                  tabIndex={0}
-                  aria-label={retrievalSettingsLabel}
-                  onClick={() => setRetrievalModalVisible(true)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      setRetrievalModalVisible(true);
-                    }
-                  }}
-                  className={[
-                    'inline-flex h-34px box-border flex-none items-center gap-6px rounded-full px-12px leading-none',
-                    'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
-                    'text-13px font-medium text-[var(--color-text-1)] cursor-pointer select-none',
-                    'hover:border-[var(--color-border-4)] hover:bg-[var(--color-fill-2)]',
-                    'focus-visible:outline-none focus-visible:border-primary-6 transition-colors',
-                    toolbarStyles.desktopIconAction,
-                  ].join(' ')}
-                >
-                  <span className={`${toolbarStyles.actionIcon} inline-flex h-18px w-18px flex-none items-center justify-center`}>
-                    <Brain theme='outline' size={14} strokeWidth={3} className='block' />
-                  </span>
-                  <span className={`${toolbarStyles.desktopActionLabel} inline-flex h-18px items-center leading-18px`}>
-                    {retrievalSettingsLabel}
-                  </span>
-                </div>
-              </Tooltip>
-
-              {/* Tag management */}
-              <Tooltip content={manageTagsLabel} position='top' mini>
-                <div
-                  role='button'
-                  tabIndex={0}
-                  aria-label={manageTagsLabel}
-                  onClick={handleManageTags}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      handleManageTags();
-                    }
-                  }}
-                  className={[
-                    'inline-flex h-34px box-border flex-none items-center gap-6px rounded-full px-12px leading-none',
-                    'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
-                    'text-13px font-medium text-[var(--color-text-1)] cursor-pointer select-none',
-                    'hover:border-[var(--color-border-4)] hover:bg-[var(--color-fill-2)]',
-                    'focus-visible:outline-none focus-visible:border-primary-6 transition-colors',
-                    toolbarStyles.desktopIconAction,
-                  ].join(' ')}
-                >
-                  <span className={`${toolbarStyles.actionIcon} inline-flex h-18px w-18px flex-none items-center justify-center`}>
-                    <SettingTwo theme='outline' size={14} strokeWidth={3} className='block' />
-                  </span>
-                  <span className={`${toolbarStyles.desktopActionLabel} inline-flex h-18px items-center leading-18px`}>
-                    {manageTagsLabel}
-                  </span>
-                </div>
-              </Tooltip>
-
-              {/* Create button */}
-              <Tooltip content={newBaseLabel} position='top' mini>
-                <div
-                  role='button'
-                  tabIndex={0}
-                  aria-label={newBaseLabel}
-                  onClick={() => openStudio()}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      openStudio();
-                    }
-                  }}
-                  className={[
-                    'inline-flex h-34px box-border flex-none items-center gap-6px cursor-pointer select-none leading-none',
-                    'rounded-full px-14px text-13px font-700',
-                    'border border-solid border-transparent',
-                    'bg-[rgba(var(--primary-6),0.12)] text-[var(--color-text-1)]',
-                    'hover:bg-[rgba(var(--primary-6),0.18)]',
-                    'focus-visible:border-primary-6 focus-visible:outline-none',
-                    'transition-colors',
-                    toolbarStyles.desktopIconAction,
-                  ].join(' ')}
-                >
-                  <span className={`${toolbarStyles.actionIcon} inline-flex h-18px w-18px flex-none items-center justify-center`}>
-                    <AddOne theme='outline' size={15} strokeWidth={4} className='block text-primary-6' />
-                  </span>
-                  <span className={`${toolbarStyles.desktopActionLabel} inline-flex h-18px items-center leading-18px`}>
-                    {newBaseLabel}
-                  </span>
-                </div>
-              </Tooltip>
-            </div>
-          )}
+          resultCount={displayBases.length === bases.length
+            ? t('knowledge.listCount', { count: bases.length, defaultValue: '{{count}} 个知识库' })
+            : t('knowledge.filteredListCount', {
+              visible: displayBases.length,
+              total: bases.length,
+              defaultValue: '{{visible}} / {{total}} 个知识库',
+            })}
         />
 
         {/* Error state */}
@@ -491,7 +404,7 @@ const KnowledgeListPage: React.FC = () => {
         ) : bases.length > 0 || !error ? (
           <>
             {/* Card grid */}
-            <div className='grid gap-16px' style={{ gridTemplateColumns: KNOWLEDGE_CARD_GRID_COLUMNS }}>
+            <div className={styles.grid}>
               {displayBases.map((base) => (
                 <KnowledgeCard
                   key={base.knowledge_base_id}
@@ -504,42 +417,11 @@ const KnowledgeListPage: React.FC = () => {
                   onDelete={handleCardDelete}
                 />
               ))}
-
-              {/* Add-new dashed card (always last) */}
-              <div
-                role='button'
-                tabIndex={0}
-                onClick={() => openStudio()}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    openStudio();
-                  }
-                }}
-                className={[
-                  'flex flex-col items-center justify-center gap-8px cursor-pointer select-none',
-                  'min-h-172px box-border rounded-16px',
-                  'border border-dashed border-[var(--color-border-3)] bg-transparent',
-                  'text-[var(--color-text-3)]',
-                  'hover:border-[var(--color-primary-light-3)] hover:text-primary-6 hover:bg-[var(--color-primary-light-1)]',
-                  // This card is in the tab order (focusable div), and nothing
-                  // styles a bare focusable div, so without these the keyboard
-                  // focus was invisible. Mirrors the hover treatment;
-                  // border-dashed is untouched because only the colour changes.
-                  'focus-visible:border-primary-6 focus-visible:text-primary-6 focus-visible:outline-none',
-                  'transition-all duration-150',
-                ].join(' ')}
-              >
-                <div className='w-38px h-38px rounded-full border border-solid border-current grid place-items-center text-20px leading-none'>
-                  ＋
-                </div>
-                <span className='text-13px'>{t('knowledge.newBase', { defaultValue: '新建知识库' })}</span>
-              </div>
             </div>
 
             {/* Empty filter result */}
             {displayBases.length === 0 && bases.length > 0 && (
-              <div className='flex flex-col items-center gap-8px py-40px text-[var(--color-text-3)] text-13px'>
+              <div className={styles.filterEmpty} role='status'>
                 {t('knowledge.filterEmpty', { defaultValue: '没有匹配的知识库' })}
               </div>
             )}

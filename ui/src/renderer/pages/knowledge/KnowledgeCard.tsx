@@ -4,28 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * KnowledgeCard — A grid item for the knowledge base list.
- * Mirrors PresetCard visual language (rounded-16px bordered surface, soft hover)
- * with knowledge-specific additions: kind icon + badge, status tags, user tag chips,
- * meta row, and hover-revealed actions.
- *
- * Theme variables only; `<div onClick>` for clickables (no <button>).
- */
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { Spin, Tooltip } from '@arco-design/web-react';
-import { Delete, EditTwo, LinkOne } from '@icon-park/react';
+import { Button, Dropdown, Menu, Spin, Tooltip } from '@arco-design/web-react';
+import { Delete, Earth, EditTwo, FolderOpen, MoreOne } from '@icon-park/react';
 import type { IKnowledgeBase, IKnowledgeTag } from '@/common/adapter/ipcBridge';
 import { formatSize } from './useKnowledge';
-import { getKindConfig, KindIcon } from './knowledgeKind';
-
-// ─── Props ────────────────────────────────────────────────────────────────────
+import { getKindConfig } from './knowledgeKind';
+import styles from './KnowledgeCard.module.css';
 
 export interface KnowledgeCardProps {
   base: IKnowledgeBase;
-  /** Map of tag key → IKnowledgeTag, for resolving base.tags to label + color. */
   tagMap?: Record<string, IKnowledgeTag>;
   onOpen?: (base: IKnowledgeBase) => void;
   onPrefetch?: (base: IKnowledgeBase) => void;
@@ -34,112 +24,28 @@ export interface KnowledgeCardProps {
   onDelete?: (base: IKnowledgeBase, e: React.MouseEvent) => void;
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+const MAX_VISIBLE_TAGS = 2;
 
-/** Source-mode status badges (live/snapshot). */
-function StatusBadges({
-  base,
-  t,
-}: {
-  base: IKnowledgeBase;
-  t: TFunction;
-}) {
-  const badges: React.ReactNode[] = [];
-
-  if (!base.root_exists) {
-    badges.push(
-      <span
-        key='root-missing'
-        className='knowledge-card-root-missing inline-flex items-center rounded-6px px-8px py-2px text-10px font-600 border border-solid border-[rgba(var(--danger-6),0.35)] text-danger-6 bg-[rgba(var(--danger-6),0.08)]'
-      >
-        {t('knowledge.card.rootMissing', { defaultValue: '目录不可用' })}
-      </span>
-    );
-  }
-
-  if (base.source) {
-    if (base.source.mode === 'live') {
-      badges.push(
-        <span
-          key='live'
-          className='inline-flex items-center rounded-6px px-8px py-2px text-10px font-600 border border-solid border-[rgba(var(--success-6),0.4)] text-success-5 bg-transparent'
-        >
-          {t('knowledge.card.modeLive', { defaultValue: '实时' })}
-        </span>
-      );
-    } else if (base.source.mode === 'snapshot') {
-      badges.push(
-        <span
-          key='snapshot'
-          className='inline-flex items-center rounded-6px px-8px py-2px text-10px font-600 border border-solid border-[var(--color-border-2)] text-[var(--color-text-2)] bg-fill-2'
-        >
-          {t('knowledge.card.modeSnapshot', { defaultValue: '快照' })}
-        </span>
-      );
-    }
-  }
-
-  return badges.length > 0 ? <>{badges}</> : null;
-}
-
-const MAX_VISIBLE_TAGS = 5;
-
-/** User tag chips row with colored dots. */
-function TagChips({
-  tags,
-  tagMap,
-}: {
-  tags: string[];
-  tagMap?: Record<string, IKnowledgeTag>;
-}) {
-  if (!tags.length || !tagMap) return null;
-
-  const resolved = tags
-    .map((key) => tagMap[key])
-    .filter((t): t is IKnowledgeTag => Boolean(t));
-
-  if (!resolved.length) return null;
-
-  const visibleTags = resolved.slice(0, MAX_VISIBLE_TAGS);
-  const overflowCount = resolved.length - visibleTags.length;
-  const tooltipContent = (
-    <div className='max-w-280px whitespace-normal break-words text-12px leading-18px'>
-      {resolved.map((tag) => tag.label).join(' · ')}
-    </div>
-  );
+function TagChips({ tags }: { tags: IKnowledgeTag[] }) {
+  if (!tags.length) return null;
+  const visibleTags = tags.slice(0, MAX_VISIBLE_TAGS);
+  const overflowCount = tags.length - visibleTags.length;
 
   return (
-    <Tooltip content={tooltipContent} position='top'>
-      <div className='knowledge-card-tags flex flex-wrap items-center gap-5px'>
-        {visibleTags.map((tag) => (
-          <div
-            key={tag.key}
-            className='inline-flex items-center gap-5px rounded-6px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-2)] px-7px py-1px text-11px leading-16px text-[var(--color-text-2)]'
-          >
-            {tag.color && (
-              <i
-                className='h-6px w-6px flex-none rounded-full'
-                style={{ background: tag.color }}
-              />
-            )}
-            {tag.label}
-          </div>
-        ))}
-        {overflowCount > 0 && (
-          <div className='inline-flex items-center rounded-6px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-2)] px-7px py-1px text-11px font-600 leading-16px text-[var(--color-text-2)]'>
-            +{overflowCount}
-          </div>
-        )}
-      </div>
-    </Tooltip>
+    <span className={`knowledge-card-tags ${styles.tags}`}>
+      {visibleTags.map((tag) => (
+        <span key={tag.key} className={styles.tag}>
+          {tag.color && <i className={styles.tagDot} style={{ background: tag.color }} aria-hidden='true' />}
+          <span className={styles.tagLabel}>{tag.label}</span>
+        </span>
+      ))}
+      {overflowCount > 0 && <span className={styles.tagOverflow}>+{overflowCount}</span>}
+    </span>
   );
 }
 
-/** Relative time format (simple). */
 function formatRelativeTime(epochMs: number, t: TFunction): string {
-  const now = Date.now();
-  const diff = now - epochMs;
-  const seconds = Math.floor(diff / 1000);
+  const seconds = Math.floor((Date.now() - epochMs) / 1000);
   const minutes = Math.floor(seconds / 60);
   const hours = Math.floor(minutes / 60);
   const days = Math.floor(hours / 24);
@@ -152,8 +58,7 @@ function formatRelativeTime(epochMs: number, t: TFunction): string {
   return t('knowledge.card.timeWeeksAgo', { defaultValue: '上周' });
 }
 
-// ─── Main Component ───────────────────────────────────────────────────────────
-
+/** Fixed-height catalog card; opening and menu controls are separate buttons. */
 export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
   base,
   tagMap,
@@ -165,6 +70,7 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
 }) => {
   const { t } = useTranslation();
   const prefetchTimerRef = React.useRef<number | null>(null);
+  const [menuVisible, setMenuVisible] = React.useState(false);
   const cancelPrefetch = () => {
     if (prefetchTimerRef.current === null) return;
     window.clearTimeout(prefetchTimerRef.current);
@@ -172,164 +78,148 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
   };
   const prefetchNow = () => {
     cancelPrefetch();
-    onPrefetch?.(base);
+    if (!opening) onPrefetch?.(base);
   };
   const schedulePrefetch = () => {
-    if (!onPrefetch || prefetchTimerRef.current !== null) return;
+    if (opening || !onPrefetch || prefetchTimerRef.current !== null) return;
     prefetchTimerRef.current = window.setTimeout(() => {
       prefetchTimerRef.current = null;
       onPrefetch(base);
     }, 120);
   };
   React.useEffect(() => cancelPrefetch, []);
-  const kindConfig = getKindConfig(base.kind, t);
+
+  const kindConfig = getKindConfig(base.kind, t, 'neutral');
+  const sourceLabel = [
+    kindConfig.label,
+    base.source?.mode === 'live'
+      ? t('knowledge.card.modeLive', { defaultValue: '实时' })
+      : base.source?.mode === 'snapshot'
+        ? t('knowledge.card.modeSnapshot', { defaultValue: '快照' })
+        : null,
+  ].filter(Boolean).join(' · ');
+  const resolvedTags = base.tags
+    .map((key) => tagMap?.[key])
+    .filter((tag): tag is IKnowledgeTag => Boolean(tag));
   const metaItems = [
-    base.file_count > 0 ? t('knowledge.card.fileCount', { count: base.file_count, defaultValue: '{{count}} 篇' }) : null,
-    base.total_size > 0 ? formatSize(base.total_size) : null,
+    t('knowledge.card.fileCount', { count: base.file_count, defaultValue: '{{count}} 篇' }),
+    formatSize(base.total_size),
     formatRelativeTime(base.updated_at, t),
-  ].filter((item): item is string => Boolean(item));
+  ];
+  const rootMissingLabel = t('knowledge.card.rootMissing', { defaultValue: '目录不可用' });
+  const tooltipContent = (
+    <div className={styles.tooltip}>
+      <strong>{base.name}</strong>
+      <div>{sourceLabel}</div>
+      {!base.root_exists && <div>{rootMissingLabel}</div>}
+      {base.description && <div>{base.description}</div>}
+      {resolvedTags.length > 0 && <div>{resolvedTags.map((tag) => tag.label).join(' · ')}</div>}
+    </div>
+  );
+  const iconProps = { theme: 'outline' as const, size: 15, strokeWidth: 3, fill: 'currentColor' };
 
   return (
-    <div
-      className={[
-        'group relative flex flex-col gap-6px rounded-16px border border-solid',
-        'border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-14px pt-14px pb-6px box-border cursor-pointer',
-        'min-h-172px',
-        'transition-all duration-160',
-        'hover:border-[var(--color-border-3)] hover:shadow-[0_14px_38px_rgba(0,0,0,0.15)] hover:-translate-y-2px',
-      ].join(' ')}
-      role='button'
-      tabIndex={opening ? -1 : 0}
+    <article
+      className={styles.card}
       aria-busy={opening}
-      aria-label={`${t('knowledge.card.actionOpen', { defaultValue: '打开' })}: ${base.name}`}
       data-knowledge-base-id={base.knowledge_base_id}
       data-knowledge-opening={opening ? 'true' : 'false'}
-      onMouseEnter={schedulePrefetch}
-      onMouseLeave={cancelPrefetch}
-      onFocus={prefetchNow}
-      onPointerDown={prefetchNow}
-      onClick={() => {
-        if (!opening) onOpen?.(base);
-      }}
-      onKeyDown={(event) => {
-        if (!opening && (event.key === 'Enter' || event.key === ' ')) {
-          event.preventDefault();
-          onOpen?.(base);
-        }
-      }}
     >
-      {/* Header: icon + name + badges */}
-      <div className='flex items-center gap-10px'>
-        <KindIcon kind={base.kind} config={kindConfig} />
-        <div className='min-w-0 flex-1'>
-          <div className='text-15px font-700 leading-[1.3] text-[var(--color-text-1)] truncate'>
-            {base.name}
-          </div>
-          <div className='mt-3px flex flex-wrap gap-5px'>
-            {/* Kind badge */}
-            <span
-              className={[
-                'inline-flex items-center rounded-6px px-8px py-2px text-10px font-600 border border-solid',
-                kindConfig.bgClass,
-                kindConfig.textClass,
-                kindConfig.borderClass,
-              ].join(' ')}
-            >
-              {kindConfig.label}
-            </span>
-            {/* Status badges */}
-            <StatusBadges base={base} t={t} />
-          </div>
-        </div>
-      </div>
-
-      {/* Description (2-line clamp) */}
-      <div
-        className='max-h-40px min-h-0 flex-1 overflow-hidden break-words text-13px leading-20px text-[var(--color-text-2)]'
-        style={{
-          display: '-webkit-box',
-          WebkitLineClamp: 2,
-          WebkitBoxOrient: 'vertical',
-          overflow: 'hidden',
-        }}
+      <Tooltip
+        content={tooltipContent}
+        position='top'
+        trigger={['hover', 'focus']}
+        disabled={opening || menuVisible}
+        triggerProps={{ mouseEnterDelay: 400 }}
       >
-        {base.description || t('knowledge.card.noDescription', { defaultValue: '暂无描述' })}
-      </div>
-
-      {/* User tags row */}
-      <TagChips tags={base.tags} tagMap={tagMap} />
-
-      <div className='knowledge-card-footer mt-auto flex min-h-24px items-center gap-8px'>
-        <div className='knowledge-card-meta flex min-w-0 flex-wrap items-center gap-6px text-12px leading-16px text-[var(--color-text-3)]'>
-          {metaItems.map((item, index) => (
-            <React.Fragment key={`${item}-${index}`}>
-              {index > 0 && <i className='h-3px w-3px rounded-full bg-[var(--color-fill-4)]' aria-hidden='true' />}
-              <span className='whitespace-nowrap'>{item}</span>
-            </React.Fragment>
-          ))}
-        </div>
-
-        <div
-          className='knowledge-card-actions pointer-events-none ml-auto flex shrink-0 gap-6px opacity-0 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100'
-          onClick={(e) => e.stopPropagation()}
+        <button
+          type='button'
+          className={styles.openButton}
+          disabled={opening}
+          aria-label={`${t('knowledge.card.actionOpen', { defaultValue: '打开' })}: ${base.name}`}
+          onMouseEnter={schedulePrefetch}
+          onMouseLeave={cancelPrefetch}
+          onFocus={prefetchNow}
+          onPointerDown={prefetchNow}
+          onClick={() => {
+            if (!opening) onOpen?.(base);
+          }}
+          onKeyDown={(event) => {
+            if (!opening && (event.key === 'Enter' || event.key === ' ')) {
+              event.preventDefault();
+              onOpen?.(base);
+            }
+          }}
         >
-          <div
-            onClick={() => onOpen?.(base)}
-            className={[
-              'grid h-26px w-26px place-items-center rounded-7px',
-              'border border-solid border-transparent',
-              'bg-transparent text-[var(--color-text-3)] cursor-pointer',
-              'hover:border-[var(--color-border-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
-              'transition-colors',
-            ].join(' ')}
-            title={t('knowledge.card.actionOpen', { defaultValue: '打开' })}
-          >
-            <LinkOne theme='outline' size={13} strokeWidth={3} />
-          </div>
-          <div
-            onClick={() => onEdit?.(base)}
-            className={[
-              'grid h-26px w-26px place-items-center rounded-7px',
-              'border border-solid border-transparent',
-              'bg-transparent text-[var(--color-text-3)] cursor-pointer',
-              'hover:border-[var(--color-border-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
-              'transition-colors',
-            ].join(' ')}
-            title={t('knowledge.card.actionEdit', { defaultValue: '编辑' })}
-          >
-            <EditTwo theme='outline' size={13} strokeWidth={3} />
-          </div>
-          <div
-            onClick={(e) => onDelete?.(base, e)}
-            className={[
-              'grid h-26px w-26px place-items-center rounded-7px',
-              'border border-solid border-transparent',
-              'bg-transparent text-[var(--color-text-3)] cursor-pointer',
-              'hover:border-[rgba(var(--danger-6),0.28)] hover:bg-[rgba(var(--danger-6),0.08)] hover:text-danger-6',
-              'transition-colors',
-            ].join(' ')}
-            title={t('knowledge.actions.delete', { defaultValue: '删除' })}
-          >
-            <Delete theme='outline' size={13} strokeWidth={3} />
-          </div>
-        </div>
-      </div>
-      {opening ? (
-        <div
-          className='absolute inset-0 z-10 flex cursor-progress flex-col items-center justify-center gap-10px rounded-16px bg-[color-mix(in_srgb,var(--color-bg-2)_88%,transparent)] text-13px font-600 text-[var(--color-text-1)] backdrop-blur-5px'
-          role='status'
-          aria-live='polite'
-        >
-          <Spin dot size={18} />
-          <span>
-            {t('knowledge.openingNamed', {
-              name: base.name,
-              defaultValue: '正在打开“{{name}}”…',
-            })}
+          <span className={styles.heading}>
+            <span className={styles.kindIcon} aria-hidden='true'>
+              {base.kind === 'local' ? <FolderOpen {...iconProps} /> : base.kind === 'web' ? <Earth {...iconProps} /> : <EditTwo {...iconProps} />}
+            </span>
+            <span className={styles.name}>{base.name}</span>
+            <span className={styles.source}>{sourceLabel}</span>
           </span>
+          <span className={styles.body}>
+            <span className={`${styles.description} ${resolvedTags.length > 0 ? styles.singleLine : ''}`}>
+              {!base.root_exists && <span className={`knowledge-card-root-missing ${styles.rootMissing}`}>{rootMissingLabel}</span>}
+              {base.description}
+            </span>
+            <TagChips tags={resolvedTags} />
+          </span>
+          <span className={`knowledge-card-footer knowledge-card-meta ${styles.meta}`}>
+            {metaItems.map((item, index) => <span key={index}>{item}</span>)}
+          </span>
+        </button>
+      </Tooltip>
+      {(onEdit || onDelete) && (
+        <Dropdown
+          trigger='click'
+          position='br'
+          disabled={opening}
+          popupVisible={!opening && menuVisible}
+          onVisibleChange={setMenuVisible}
+          droplist={
+            <Menu selectable={false}>
+              {onEdit && (
+                <Menu.Item key='edit' disabled={opening} onClick={() => {
+                  if (opening) return;
+                  setMenuVisible(false);
+                  onEdit(base);
+                }}>
+                  <span className={styles.menuItem}><EditTwo {...iconProps} />{t('knowledge.card.actionEdit', { defaultValue: '编辑' })}</span>
+                </Menu.Item>
+              )}
+              {onDelete && (
+                <Menu.Item key='delete' disabled={opening} onClick={(event) => {
+                  event.stopPropagation();
+                  if (opening) return;
+                  setMenuVisible(false);
+                  onDelete(base, event);
+                }}>
+                  <span className={`${styles.menuItem} ${styles.deleteItem}`}><Delete {...iconProps} />{t('knowledge.actions.delete', { defaultValue: '删除' })}</span>
+                </Menu.Item>
+              )}
+            </Menu>
+          }
+        >
+          <Button
+            type='text'
+            size='mini'
+            className={styles.moreButton}
+            disabled={opening}
+            aria-label={`${base.name}: ${t('knowledge.card.actionMore', { defaultValue: '更多' })}`}
+            aria-haspopup='menu'
+            aria-expanded={!opening && menuVisible}
+            icon={<MoreOne {...iconProps} />}
+          />
+        </Dropdown>
+      )}
+      {opening && (
+        <div className={styles.opening} role='status' aria-live='polite'>
+          <Spin size={16} />
+          <span>{t('knowledge.openingNamed', { name: base.name, defaultValue: '正在打开“{{name}}”…' })}</span>
         </div>
-      ) : null}
-    </div>
+      )}
+    </article>
   );
 };
 

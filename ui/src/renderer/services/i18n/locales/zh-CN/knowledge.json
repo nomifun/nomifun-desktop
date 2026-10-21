@@ -31,6 +31,9 @@
   "backToList": "返回知识库列表",
   "opening": "正在打开知识库…",
   "openingNamed": "正在打开“{{name}}”…",
+  "listDescription": "管理文档与网页资料，在 Agent 会话中按需引用。",
+  "listCount": "{{count}} 个知识库",
+  "filteredListCount": "{{visible}} / {{total}} 个知识库",
   "card": {
     "actionEdit": "编辑",
     "actionMore": "更多",
