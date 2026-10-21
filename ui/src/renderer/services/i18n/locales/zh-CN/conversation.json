@@ -1051,7 +1051,10 @@
     "files": "{{count}} 个附件",
     "finishDraftFirst": "请先处理当前草稿，再编辑排队消息。",
     "showFull": "查看全文",
-    "hideFull": "收起",
-    "guide": "引导"
+    "guide": "引导",
+    "more": "更多队列操作",
+    "skills": "技能",
+    "skillCount": "{{count}} 项技能",
+    "emptyInput": "待处理输入"
   }
 }

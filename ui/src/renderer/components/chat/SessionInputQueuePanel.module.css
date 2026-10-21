@@ -1,67 +1,127 @@
 .panel {
   flex-shrink: 0;
   min-width: 0;
-}
-
-.itemContent {
-  flex: 1 1 220px;
-  min-width: 0;
-}
-
-.actions {
-  max-width: 100%;
+  margin: 0 8px -8px;
+  padding: 2px 8px 8px;
+  border: 1px solid var(--color-border-2);
+  border-bottom: 0;
+  border-radius: 12px 12px 0 0;
+  background: var(--color-fill-1);
 }
 
 .list {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-block-size: min(240px, 30vh);
+  max-block-size: 102px;
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-3) transparent;
 }
 
-.inputText {
-  min-width: 0;
-  font-size: 13px;
-  line-height: 18px;
+.list::-webkit-scrollbar-thumb {
+  background: var(--color-border-3);
 }
 
-.summary {
+.list:hover {
+  scrollbar-color: var(--color-text-3) transparent;
+}
+
+.list:hover::-webkit-scrollbar-thumb,
+.list::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-3);
+}
+
+.row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
-  list-style: none;
-  cursor: pointer;
+  height: 34px;
+  min-width: 0;
 }
 
-.summary::-webkit-details-marker {
-  display: none;
+.queueIcon {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--color-text-3);
 }
 
 .preview {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
   flex: 1;
   min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-2);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
-.expandLabel {
+.state {
   flex-shrink: 0;
-  color: var(--color-text-3);
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--color-fill-2);
+  color: var(--color-text-2);
   font-size: 11px;
+  line-height: 18px;
+}
+
+.actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+}
+
+.panel .actions .guide:not(:disabled),
+.panel .actions .iconAction:not(:disabled) {
+  color: var(--color-text-3);
+}
+
+.panel .actions .guide:disabled,
+.panel .actions .iconAction:disabled {
+  color: var(--color-text-4);
+}
+
+.panel .actions .guide:not(:disabled):hover,
+.panel .actions .iconAction:not(:disabled):hover,
+.preview:hover {
+  color: var(--color-text-1);
+}
+
+.menu:global(.arco-dropdown-menu) :global(.arco-dropdown-menu-item) {
+  height: 28px;
+  margin: 0;
+  line-height: 28px;
 }
 
 .fullText {
-  margin: 6px 0;
-  max-block-size: 160px;
-  overflow: auto;
+  margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.inspection {
+  max-block-size: calc(100vh - 180px);
+  overflow: auto;
+}
+
+.metadata,
+.error {
+  margin: 6px 0;
+  color: var(--color-text-2);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }

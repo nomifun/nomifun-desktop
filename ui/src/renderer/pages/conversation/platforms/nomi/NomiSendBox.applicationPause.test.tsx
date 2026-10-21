@@ -242,7 +242,8 @@ test('editing a Host queue item awaits exact removal and restores all attachment
   const update = spyOn(ipcBridge.conversation.updateInputQueue, 'invoke').mockImplementation(() => new Promise(resolve => { acknowledge = resolve; }));
   const composer = mountPausedComposer(conversation);
   await composer.view.findByText(pending.input.content);
-  fireEvent.click(composer.view.getByRole('button', { name: 'common.edit' }));
+  fireEvent.click(composer.view.getByRole('button', { name: 'conversation.inputQueue.more' }));
+  fireEvent.click(await composer.view.findByRole('menuitem', { name: 'common.edit' }));
   await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
   const input = composer.view.getByTestId('sendbox-input') as HTMLTextAreaElement;
   expect(input.value).toBe('');
@@ -267,12 +268,14 @@ test('editing cannot overwrite the current draft and a raced claim cannot stop a
   await composer.view.findByText(pending.input.content);
   const input = composer.view.getByTestId('sendbox-input') as HTMLTextAreaElement;
   fireEvent.change(input, { target: { value: 'Keep this separate draft' } });
-  const edit = composer.view.getByRole('button', { name: 'common.edit' }) as HTMLButtonElement;
-  expect(edit.disabled).toBe(true);
+  fireEvent.click(composer.view.getByRole('button', { name: 'conversation.inputQueue.more' }));
+  const edit = await composer.view.findByRole('menuitem', { name: 'common.edit' });
+  expect(edit.getAttribute('aria-disabled')).toBe('true');
   fireEvent.click(edit);
   expect(update).not.toHaveBeenCalled();
   fireEvent.change(input, { target: { value: '' } });
-  fireEvent.click(edit);
+  await waitFor(() => expect(composer.view.getByRole('menuitem', { name: 'common.edit' }).getAttribute('aria-disabled')).not.toBe('true'));
+  fireEvent.click(composer.view.getByRole('menuitem', { name: 'common.edit' }));
   await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(input.disabled).toBe(false));
   expect(input.value).toBe('');

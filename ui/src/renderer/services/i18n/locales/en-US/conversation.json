@@ -1053,7 +1053,10 @@
     "files": "{{count}} attachments",
     "finishDraftFirst": "Finish the current draft before editing a queued message.",
     "showFull": "Full text",
-    "hideFull": "Collapse",
-    "guide": "Guide"
+    "guide": "Guide",
+    "more": "More queue actions",
+    "skills": "Skills",
+    "skillCount": "{{count}} skills",
+    "emptyInput": "Pending input"
   }
 }
