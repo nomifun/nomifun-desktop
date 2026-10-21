@@ -373,3 +373,27 @@ async fn expired_driver_binding_is_replaced_without_replaying_an_action() {
     assert!(calls(root.path()).is_empty());
     bounded(actor.retire()).await.unwrap();
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn user_launch_context_preserves_only_original_user_paths() {
+    use std::os::unix::ffi::OsStringExt;
+    let home = OsString::from_vec(b"/tmp/user-\xff".to_vec());
+    let cwd = PathBuf::from(OsString::from_vec(b"/tmp/work-\xfe".to_vec()));
+    let context: Value = serde_json::from_str(&linux_user_launch_context(
+        [
+            (OsString::from("HOME"), home),
+            (OsString::from("XDG_DATA_DIRS"), OsString::from("/opt/apps:/usr/share")),
+            (OsString::from("PROVIDER_API_KEY"), OsString::from("not-forwarded")),
+            (OsString::from("CUA_DRIVER_RS_HOME"), OsString::from("/private-driver")),
+        ],
+        cwd,
+    )).unwrap();
+    assert_eq!(context["cwd"], serde_json::json!(b"/tmp/work-\xfe".to_vec()));
+    assert_eq!(context["environment"]["HOME"], serde_json::json!(b"/tmp/user-\xff".to_vec()));
+    assert_eq!(context["environment"]["XDG_DATA_DIRS"], serde_json::json!(b"/opt/apps:/usr/share".to_vec()));
+    assert!(context["environment"]["TMPDIR"].is_null());
+    assert_eq!(context["environment"].as_object().unwrap().len(), 12);
+    assert!(context["environment"].get("PROVIDER_API_KEY").is_none());
+    assert!(context["environment"].get("CUA_DRIVER_RS_HOME").is_none());
+}

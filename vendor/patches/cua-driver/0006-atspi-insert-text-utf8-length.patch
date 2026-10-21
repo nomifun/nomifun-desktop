@@ -1,0 +1,31 @@
+Subject: [atspi-insert-text-utf8-length] Pass UTF-8 bytes to AT-SPI EditableText.InsertText
+
+The ATK/AT-SPI bridge forwards the length unchanged to the native toolkit.
+Character counts can truncate inside UTF-8 and cause an acknowledged no-op.
+Use checked byte lengths in typing and set-value insertion, retaining caret units.
+Reference: https://docs.gtk.org/atk/method.EditableText.insert_text.html
+
+diff --git a/crates/platform-linux/src/atspi/native.rs b/crates/platform-linux/src/atspi/native.rs
+--- a/crates/platform-linux/src/atspi/native.rs
++++ b/crates/platform-linux/src/atspi/native.rs
+@@ -2806,7 +2806,9 @@
+         Ok(tp) => tp.caret_offset().await.unwrap_or(0),
+         Err(_) => 0,
+     };
+-    let len = text.chars().count() as i32;
++    // ATK InsertText length is UTF-8 bytes; the caret offset stays characters.
++    let len = i32::try_from(text.len())
++        .map_err(|_| anyhow!("AT-SPI InsertText exceeds the signed 32-bit byte length"))?;
+ 
+     if et.insert_text(off, text, len).await.unwrap_or(false) {
+         return Ok(true);
+@@ -5262,7 +5264,8 @@
+             Ok(tp) => tp.caret_offset().await.unwrap_or(0),
+             Err(_) => 0,
+         };
+-        let len = value.chars().count() as i32;
++        let len = i32::try_from(value.len())
++            .map_err(|_| anyhow!("AT-SPI InsertText exceeds the signed 32-bit byte length"))?;
+         if et.insert_text(off, value, len).await.unwrap_or(false) {
+             commit_editable_write(&proxies).await;
+             return Ok(());

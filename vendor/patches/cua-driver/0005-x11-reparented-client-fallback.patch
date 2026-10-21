@@ -1,0 +1,157 @@
+Subject: [x11-reparented-client-fallback] Find ICCCM clients below frames when EWMH lists are absent
+
+ICCCM 4.1.3.1 requires recursive WM_STATE search for reparented top-level
+clients. Retain present-empty EWMH authority and existing mapped-root fallback.
+Reference: https://xorg.freedesktop.org/archive/current/doc/xorg-docs/icccm/icccm.html
+
+diff --git a/crates/platform-linux/src/x11/mod.rs b/crates/platform-linux/src/x11/mod.rs
+--- a/crates/platform-linux/src/x11/mod.rs
++++ b/crates/platform-linux/src/x11/mod.rs
+@@ -107,7 +107,9 @@
+         }
+ 
+         let title = get_window_title(&conn, xid).unwrap_or_default();
+-        if !window_is_listable(source, &title) {
++        let wm_managed = source == WindowSource::RootChildren
++            && get_atom(&conn, "WM_STATE").is_ok_and(|atom| has_managed_wm_state(&conn, xid, atom));
++        if !window_is_listable(source, &title, wm_managed) {
+             continue;
+         }
+         let app_name = get_window_class(&conn, xid)
+@@ -161,8 +163,8 @@
+ /// is often the modal window holding the focus. Without a window manager the
+ /// title is the only hint that a mapped root child is an application window
+ /// rather than a popup or tooltip.
+-fn window_is_listable(source: WindowSource, title: &str) -> bool {
+-    source == WindowSource::ClientList || !title.trim().is_empty()
++fn window_is_listable(source: WindowSource, title: &str, wm_managed: bool) -> bool {
++    source == WindowSource::ClientList || wm_managed || !title.trim().is_empty()
+ }
+ 
+ pub(crate) fn get_window_list(
+@@ -187,22 +189,72 @@
+         }
+     }
+ 
+-    // No EWMH client-list property means there may be no window manager. In
+-    // that case only expose mapped root children; unmapped Electron children
+-    // can otherwise be reported before a late-starting WM reparents them.
++    // ICCCM 4.1.3.1 requires recursively locating WM_STATE under WM frames.
++    // WSLg reparents clients without publishing either EWMH client list.
++    // Only if a root branch has no managed client retain its mapped-root
++    // fallback. A present empty EWMH property returned above remains final.
+     let tree = conn.query_tree(root)?.reply()?;
+-    let windows = tree
+-        .children
+-        .into_iter()
+-        .filter(|window| {
+-            conn.get_window_attributes(*window)
+-                .ok()
+-                .and_then(|cookie| cookie.reply().ok())
+-                .map(|attributes| fallback_window_is_listable(attributes.map_state))
+-                .unwrap_or(false)
++    let wm_state = get_atom(conn, "WM_STATE")?;
++    let windows = fallback_window_list(tree.children, |window| {
++        let attributes = conn.get_window_attributes(window).ok()?.reply().ok()?;
++        let wm_managed = !attributes.override_redirect
++            && has_managed_wm_state(conn, window, wm_state);
++        let children = if wm_managed || !fallback_window_is_listable(attributes.map_state) {
++            Vec::new()
++        } else {
++            conn.query_tree(window).ok()?.reply().ok()?.children
++        };
++        Some(FallbackWindow {
++            viewable: fallback_window_is_listable(attributes.map_state),
++            wm_managed,
++            children,
+         })
+-        .collect();
++    });
+     Ok((windows, WindowSource::RootChildren))
++}
++
++struct FallbackWindow {
++    viewable: bool,
++    wm_managed: bool,
++    children: Vec<Window>,
++}
++
++fn fallback_window_list(
++    root_children: Vec<Window>,
++    mut inspect: impl FnMut(Window) -> Option<FallbackWindow>,
++) -> Vec<Window> {
++    let mut windows = Vec::new();
++    for root_child in root_children {
++        let before = windows.len();
++        let mut root_viewable = false;
++        let mut pending = vec![root_child];
++        let mut visited = std::collections::HashSet::new();
++        while let Some(window) = pending.pop() {
++            if !visited.insert(window) { continue; }
++            let Some(node) = inspect(window) else { continue };
++            if window == root_child { root_viewable = node.viewable; }
++            if !node.viewable { continue; }
++            if node.wm_managed {
++                windows.push(window);
++            } else {
++                // QueryTree order is bottom-to-top. Reverse only the DFS stack
++                // so the resulting client order retains that stacking order.
++                pending.extend(node.children.into_iter().rev());
++            }
++        }
++        if windows.len() == before && root_viewable {
++            windows.push(root_child);
++        }
++    }
++    windows
++}
++
++fn has_managed_wm_state(conn: &RustConnection, window: Window, atom: Atom) -> bool {
++    let Some(reply) = conn.get_property(false, window, atom, atom, 0, 2)
++        .ok().and_then(|cookie| cookie.reply().ok()) else { return false };
++    let values: Vec<u32> = reply.value32().map(|values| values.collect()).unwrap_or_default();
++    reply.type_ == atom && reply.format == 32 && reply.bytes_after == 0
++        && values.len() == 2 && matches!(values[0], 1 | 3)
+ }
+ 
+ fn client_list_property(property_type: Atom, windows: &[Window]) -> Option<&[Window]> {
+@@ -764,13 +816,35 @@
+ 
+     #[test]
+     fn untitled_windows_are_listed_only_when_the_window_manager_manages_them() {
+-        assert!(window_is_listable(WindowSource::ClientList, ""));
+-        assert!(window_is_listable(WindowSource::ClientList, "Save Changes"));
++        assert!(window_is_listable(WindowSource::ClientList, "", false));
++        assert!(window_is_listable(WindowSource::ClientList, "Save Changes", false));
+         assert!(window_is_listable(
+             WindowSource::RootChildren,
+-            "Save Changes"
++            "Save Changes",
++            false
+         ));
+-        assert!(!window_is_listable(WindowSource::RootChildren, " "));
++        assert!(!window_is_listable(WindowSource::RootChildren, " ", false));
++    }
++
++    #[test]
++    fn reparented_fallback_lists_managed_clients_in_order_not_frames_or_widgets() {
++        let windows = fallback_window_list(vec![10, 20, 30, 40], |window| {
++            let (viewable, wm_managed, children) = match window {
++                10 => (true, false, vec![11]), // WSLg root frame
++                11 => (true, false, vec![12, 13]), // nested decoration
++                12 => (true, true, vec![99]), // first real client
++                13 => (true, true, vec![]), // second real client, stacked above
++                20 => (true, false, vec![21]), // no managed client: root fallback
++                21 => (true, false, vec![]),
++                30 => (false, false, vec![31]), // unmapped branch is omitted
++                40 => return None, // stale/destroyed branch
++                _ => panic!("must not inspect widget or invisible descendant {window}"),
++            };
++            Some(FallbackWindow { viewable, wm_managed, children })
++        });
++        assert_eq!(windows, vec![12, 13, 20]);
++        assert!(window_is_listable(WindowSource::RootChildren, "", true));
++        assert!(!window_is_listable(WindowSource::RootChildren, "", false));
+     }
+ 
+     #[test]

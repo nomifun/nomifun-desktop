@@ -19,6 +19,18 @@
     {
       "path": "vendor/patches/cua-driver/0003-windows-user-app-lifetime.patch",
       "sha256": "6700e4d1a822ca63b61eca5d716e3770470943398c5bd4c6b78656365b35e5fa"
+    },
+    {
+      "path": "vendor/patches/cua-driver/0004-linux-user-app-lifetime.patch",
+      "sha256": "a55c501c3ceb7c47b80c2325caea9a1e608b4df82bba40574cb6c95e035ca14c"
+    },
+    {
+      "path": "vendor/patches/cua-driver/0005-x11-reparented-client-fallback.patch",
+      "sha256": "3bd825b1cc997fd718189cdc25eda344f0595c8b9218ae0bcdf0966e4178ea5c"
+    },
+    {
+      "path": "vendor/patches/cua-driver/0006-atspi-insert-text-utf8-length.patch",
+      "sha256": "6712e93ec207e4e0deab4d45a6230e92979e12d2cf8d4de588b69c69ec038936"
     }
   ],
   "files": [
@@ -1222,7 +1234,8 @@
       "path": "crates/platform-linux/src/atspi/native.rs",
       "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs",
       "upstream_blob": "36451e533335892864981f6f36a69ad318309199",
-      "sha256": "59e3c53a54b4d51dd1259cdcdf347400dcf85dd8ffdae2d0a04462012e21042f"
+      "transform": "atspi-insert-text-utf8-length",
+      "sha256": "d2efc4571fc60c9636e834226aff2c960d3f88f5e65e2e7b53574caa9818871c"
     },
     {
       "path": "crates/platform-linux/src/atspi/native/hit_test.rs",
@@ -1353,13 +1366,15 @@
       "path": "crates/platform-linux/src/installed_apps.rs",
       "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/installed_apps.rs",
       "upstream_blob": "ae3f68de61fc3b0e60212034739ceb406215458c",
-      "sha256": "ccc3fe81d3c3ec831de8dc39dacf30fc0fccdc883c1bcb5f21034091af1771a6"
+      "transform": "linux-user-app-lifetime",
+      "sha256": "3cce3e9546befd012a95a82d61730b2a7f4e192e9dd86eb020f9e6488edc5df7"
     },
     {
       "path": "crates/platform-linux/src/lib.rs",
       "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/lib.rs",
       "upstream_blob": "fc866c39a61b6bc107c8fdd73dde5088bd0e4b8a",
-      "sha256": "50bccadbfc35bc643c48eead83222763645e0280fca3d8da47bb5841c1d98d20"
+      "transform": "linux-user-app-lifetime",
+      "sha256": "1560e7324ff87a15a3aee7064eb8250af5f223085348b5161ec5fe1214d3b7c9"
     },
     {
       "path": "crates/platform-linux/src/overlay_capture.rs",
@@ -1425,7 +1440,8 @@
       "path": "crates/platform-linux/src/tools/impl_.rs",
       "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_.rs",
       "upstream_blob": "3be700798b9310b6cf931725f97ae7c02c619b5a",
-      "sha256": "1a22d33d7d13ec9fa05aa3dafd0b20bd5e6b0b30d386ac8cbd508c74dfa4cbc0"
+      "transform": "linux-user-app-lifetime",
+      "sha256": "1a16a73b1ddae3abe525b09d02e9e969095c091f97608fda08de80f059c80d22"
     },
     {
       "path": "crates/platform-linux/src/tools/impl_/background_budget_tests.rs",
@@ -1566,6 +1582,14 @@
       "sha256": "6c14cc65f807d064c608e7085bd41df1a2944f58a15a16833ca40829e60206cd"
     },
     {
+      "path": "crates/platform-linux/src/user_app_launch.rs",
+      "upstream_path": null,
+      "upstream_blob": null,
+      "added_by_patch": "vendor/patches/cua-driver/0004-linux-user-app-lifetime.patch",
+      "transform": "linux-user-app-lifetime",
+      "sha256": "862729ae6708d96f48a8620937d585d735c39e7bae0c87cfd19afb50ca60c28d"
+    },
+    {
       "path": "crates/platform-linux/src/video_wayland.rs",
       "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/video_wayland.rs",
       "upstream_blob": "0a525d88655da1bc7679584647f76751d12a8a15",
@@ -1695,7 +1719,8 @@
       "path": "crates/platform-linux/src/x11/mod.rs",
       "upstream_path": "libs/cua-driver/rust/crates/platform-linux/src/x11/mod.rs",
       "upstream_blob": "a1bdf0b73e260eeedc2f483c2e75c0677ef17462",
-      "sha256": "ef07ea44230f6d6edcf1e19e02154853c6b48edb14520b9aee156aa9219379f9"
+      "transform": "x11-reparented-client-fallback",
+      "sha256": "d31996715d11f7e57e63ab5c7fc463235ad67c776b6c53dd383169dcd4147179"
     },
     {
       "path": "crates/platform-linux/src/xauth.rs",

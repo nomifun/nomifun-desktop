@@ -2806,7 +2806,9 @@ async fn write_through_editable_proxies(
         Ok(tp) => tp.caret_offset().await.unwrap_or(0),
         Err(_) => 0,
     };
-    let len = text.chars().count() as i32;
+    // ATK InsertText length is UTF-8 bytes; the caret offset stays characters.
+    let len = i32::try_from(text.len())
+        .map_err(|_| anyhow!("AT-SPI InsertText exceeds the signed 32-bit byte length"))?;
 
     if et.insert_text(off, text, len).await.unwrap_or(false) {
         return Ok(true);
@@ -5262,7 +5264,8 @@ async fn set_value_on(
             Ok(tp) => tp.caret_offset().await.unwrap_or(0),
             Err(_) => 0,
         };
-        let len = value.chars().count() as i32;
+        let len = i32::try_from(value.len())
+            .map_err(|_| anyhow!("AT-SPI InsertText exceeds the signed 32-bit byte length"))?;
         if et.insert_text(off, value, len).await.unwrap_or(false) {
             commit_editable_write(&proxies).await;
             return Ok(());

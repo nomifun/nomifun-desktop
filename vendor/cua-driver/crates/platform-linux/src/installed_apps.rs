@@ -96,21 +96,27 @@ pub fn list_installed_apps() -> Vec<InstalledApp> {
 /// Build the search-path list per the XDG Base Directory Specification.
 fn xdg_application_dirs() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let home = std::env::var("HOME").unwrap_or_default();
-    let xdg_data_home = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
-        if home.is_empty() {
-            String::new()
-        } else {
-            format!("{home}/.local/share")
-        }
+    // Read the host's original search roots without changing the private
+    // worker environment or permitting applications to write in its HOME.
+    let context = match crate::user_app_launch::UserLaunchContext::read() {
+        Ok(context) => context,
+        Err(_) => return out,
+    };
+    let value = |key| match &context {
+        Some(context) => context.value(key),
+        None => std::env::var_os(key),
+    };
+    let data_home = value("XDG_DATA_HOME").map(PathBuf::from).or_else(|| {
+        value("HOME")
+            .filter(|home| !home.is_empty())
+            .map(|home| PathBuf::from(home).join(".local/share"))
     });
-    if !xdg_data_home.is_empty() {
-        out.push(PathBuf::from(format!("{xdg_data_home}/applications")));
+    if let Some(data_home) = data_home.filter(|path| !path.as_os_str().is_empty()) {
+        out.push(data_home.join("applications"));
     }
-    let xdg_data_dirs =
-        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_owned());
-    for d in xdg_data_dirs.split(':').filter(|s| !s.is_empty()) {
-        out.push(PathBuf::from(format!("{d}/applications")));
+    let data_dirs = value("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    for dir in std::env::split_paths(&data_dirs).filter(|path| !path.as_os_str().is_empty()) {
+        out.push(dir.join("applications"));
     }
     out
 }

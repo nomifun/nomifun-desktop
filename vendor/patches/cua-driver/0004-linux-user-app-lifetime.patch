@@ -1,0 +1,224 @@
+Subject: [linux-user-app-lifetime] Keep user launch paths and lifetime outside the private worker
+
+The host supplies only original user directory values and cwd through inherited
+environment context. All launch paths share null stdio, a separate process group,
+and removal of private Cua variables. Desktop discovery reads the same user roots.
+
+diff --git a/crates/platform-linux/src/lib.rs b/crates/platform-linux/src/lib.rs
+--- a/crates/platform-linux/src/lib.rs
++++ b/crates/platform-linux/src/lib.rs
+@@ -55,6 +55,9 @@
+ 
+ #[cfg(target_os = "linux")]
+ pub mod installed_apps;
++
++#[cfg(target_os = "linux")]
++mod user_app_launch;
+ 
+ #[cfg(target_os = "linux")]
+ pub mod capture;
+diff --git a/crates/platform-linux/src/tools/impl_.rs b/crates/platform-linux/src/tools/impl_.rs
+--- a/crates/platform-linux/src/tools/impl_.rs
++++ b/crates/platform-linux/src/tools/impl_.rs
+@@ -1893,21 +1893,8 @@
+     let prog = parts.next().unwrap_or(cmd);
+     let mut rest: Vec<String> = parts.map(str::to_owned).collect();
+     rest.extend(additional_arguments.iter().cloned());
+-    let mut launch = std::process::Command::new(prog);
+-    launch
+-        .args(&rest)
+-        // The child must not inherit the driver's stdio: in private-worker mode
+-        // stdout is the JSON-RPC stream to the SDK, and a chatty app (Chromium's
+-        // zygote logs, GTK warnings) writing there corrupts a response and shuts
+-        // the worker down.
+-        .stdin(std::process::Stdio::null())
+-        .stdout(std::process::Stdio::null())
+-        .stderr(std::process::Stdio::null())
+-        // Enable accessibility for this child without toggling GNOME's global
+-        // ScreenReaderEnabled setting (which can launch Orca). Native
+-        // toolkits ignore these when they do not need them.
+-        .env("ACCESSIBILITY_ENABLED", "1")
+-        .env("NO_AT_BRIDGE", "0");
++    let mut launch = crate::user_app_launch::command(prog)?;
++    launch.args(&rest);
+     if chromium_family_program(prog)
+         && !rest
+             .iter()
+@@ -2074,7 +2061,7 @@
+                     for url in &urls {
+                         children.push((
+                             url.clone(),
+-                            std::process::Command::new("xdg-open").arg(url).spawn()?,
++                            crate::user_app_launch::command("xdg-open")?.arg(url).spawn()?,
+                         ));
+                     }
+                     for (url, child) in children {
+@@ -2139,7 +2126,7 @@
+                                      round-trip its launch_path."
+                                 );
+                             }
+-                            let child = std::process::Command::new("xdg-open").arg(cmd).spawn()?;
++                            let child = crate::user_app_launch::command("xdg-open")?.arg(cmd).spawn()?;
+                             if let Some(reason) = xdg_open_failure(child) {
+                                 anyhow::bail!("could not open '{cmd}': {reason}");
+                             }
+diff --git a/crates/platform-linux/src/installed_apps.rs b/crates/platform-linux/src/installed_apps.rs
+--- a/crates/platform-linux/src/installed_apps.rs
++++ b/crates/platform-linux/src/installed_apps.rs
+@@ -96,21 +96,27 @@
+ /// Build the search-path list per the XDG Base Directory Specification.
+ fn xdg_application_dirs() -> Vec<PathBuf> {
+     let mut out = Vec::new();
+-    let home = std::env::var("HOME").unwrap_or_default();
+-    let xdg_data_home = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
+-        if home.is_empty() {
+-            String::new()
+-        } else {
+-            format!("{home}/.local/share")
+-        }
++    // Read the host's original search roots without changing the private
++    // worker environment or permitting applications to write in its HOME.
++    let context = match crate::user_app_launch::UserLaunchContext::read() {
++        Ok(context) => context,
++        Err(_) => return out,
++    };
++    let value = |key| match &context {
++        Some(context) => context.value(key),
++        None => std::env::var_os(key),
++    };
++    let data_home = value("XDG_DATA_HOME").map(PathBuf::from).or_else(|| {
++        value("HOME")
++            .filter(|home| !home.is_empty())
++            .map(|home| PathBuf::from(home).join(".local/share"))
+     });
+-    if !xdg_data_home.is_empty() {
+-        out.push(PathBuf::from(format!("{xdg_data_home}/applications")));
+-    }
+-    let xdg_data_dirs =
+-        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_owned());
+-    for d in xdg_data_dirs.split(':').filter(|s| !s.is_empty()) {
+-        out.push(PathBuf::from(format!("{d}/applications")));
++    if let Some(data_home) = data_home.filter(|path| !path.as_os_str().is_empty()) {
++        out.push(data_home.join("applications"));
++    }
++    let data_dirs = value("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
++    for dir in std::env::split_paths(&data_dirs).filter(|path| !path.as_os_str().is_empty()) {
++        out.push(dir.join("applications"));
+     }
+     out
+ }
+diff --git a/crates/platform-linux/src/user_app_launch.rs b/crates/platform-linux/src/user_app_launch.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/platform-linux/src/user_app_launch.rs
+@@ -0,0 +1,110 @@
++// NomiFun extension under the vendored MIT license; see ../../../LICENSE.md.
++// Upstream Cua attribution is retained in the existing source and license.
++// NomiFun's private worker must not own the applications it opens for the user.
++use serde::Deserialize;
++use std::{
++    collections::BTreeMap,
++    ffi::{OsStr, OsString},
++    io,
++    os::unix::{
++        ffi::{OsStrExt, OsStringExt},
++        process::CommandExt,
++    },
++    path::PathBuf,
++    process::{Command, Stdio},
++};
++
++const CONTEXT_ENV: &str = "CUA_DRIVER_RS_USER_LAUNCH_CONTEXT";
++const USER_ENV: &[&str] = &[
++    "HOME",
++    "USERPROFILE",
++    "APPDATA",
++    "LOCALAPPDATA",
++    "XDG_CONFIG_HOME",
++    "XDG_STATE_HOME",
++    "XDG_DATA_HOME",
++    "XDG_CACHE_HOME",
++    "TMPDIR",
++    "TMP",
++    "TEMP",
++    "XDG_DATA_DIRS",
++];
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++pub(crate) struct UserLaunchContext {
++    cwd: Vec<u8>,
++    environment: BTreeMap<String, Option<Vec<u8>>>,
++}
++
++impl UserLaunchContext {
++    pub(crate) fn read() -> io::Result<Option<Self>> {
++        let Some(encoded) = std::env::var_os(CONTEXT_ENV) else {
++            return Ok(None);
++        };
++        let context: Self = serde_json::from_slice(encoded.as_bytes()).map_err(|error| {
++            io::Error::new(
++                io::ErrorKind::InvalidData,
++                format!("invalid user launch context: {error}"),
++            )
++        })?;
++        if context.cwd.contains(&0)
++            || !PathBuf::from(OsString::from_vec(context.cwd.clone())).is_absolute()
++            || context.environment.iter().any(|(key, value)| {
++                !USER_ENV.contains(&key.as_str())
++                    || value.as_ref().is_some_and(|bytes| bytes.contains(&0))
++            })
++        {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                "invalid user launch paths",
++            ));
++        }
++        Ok(Some(context))
++    }
++
++    pub(crate) fn value(&self, key: &str) -> Option<OsString> {
++        self.environment
++            .get(key)
++            .and_then(|value| value.as_ref())
++            .map(|bytes| OsString::from_vec(bytes.clone()))
++    }
++}
++
++/// One launch boundary for direct executables and xdg-open. The worker remains
++/// supervised; the user application gets its own process group and no protocol
++/// handles or private driver directory overrides.
++pub(crate) fn command(program: impl AsRef<OsStr>) -> io::Result<Command> {
++    let context = UserLaunchContext::read()?;
++    let mut command = Command::new(program);
++    command
++        .process_group(0)
++        .stdin(Stdio::null())
++        .stdout(Stdio::null())
++        .stderr(Stdio::null())
++        .env("ACCESSIBILITY_ENABLED", "1")
++        .env("NO_AT_BRIDGE", "0");
++    if let Some(context) = context {
++        command.current_dir(OsString::from_vec(context.cwd));
++        for key in USER_ENV {
++            match context
++                .environment
++                .get(*key)
++                .and_then(|value| value.as_ref())
++            {
++                Some(value) => {
++                    command.env(key, OsString::from_vec(value.clone()));
++                }
++                None => {
++                    command.env_remove(key);
++                }
++            }
++        }
++    }
++    for (key, _) in std::env::vars_os() {
++        if key.as_bytes().starts_with(b"CUA_") {
++            command.env_remove(key);
++        }
++    }
++    Ok(command)
++}
