@@ -140,6 +140,18 @@ pub(super) async fn prepare_images(
 mod tests {
     use super::*;
 
+    #[test]
+    fn composer_delivery_intent_never_shadows_the_accepted_content_envelope() {
+        for intent in [serde_json::json!({"kind":"queue"}),serde_json::json!({"kind":"prefer_current","turn_id":"0190f5fe-7c00-7a00-8abc-012345678901"})] {
+            let input=serde_json::json!({"content":"Preserve the selected material","files":["C:/owned-fixture/reference.txt"],
+                "inject_skills":["original-selected-skill"],"delivery_intent":intent});
+            for receipt in [input.clone(),serde_json::json!({"delivery":input})] {
+                assert_eq!(references(&receipt).unwrap(),vec!["C:/owned-fixture/reference.txt"]);
+                assert_eq!(selected_skills(&receipt).unwrap(),vec!["original-selected-skill"]);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn skill_only_input_projects_exact_selected_references_without_a_synthetic_task() {
         let mut message=SendMessageData {content:String::new(),msg_id:"skill-only".into(),source_message_id:None,

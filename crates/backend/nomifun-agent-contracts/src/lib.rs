@@ -15,6 +15,8 @@ pub mod digest;
 pub mod event;
 pub mod user_input;
 pub use user_input::*;
+pub mod session_input;
+pub use session_input::*;
 pub mod channel_input_delivery;
 pub use channel_input_delivery::*;
 pub mod session_process_owner;

@@ -1,0 +1,67 @@
+.panel {
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.itemContent {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.actions {
+  max-width: 100%;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-block-size: min(240px, 30vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.inputText {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.summary::-webkit-details-marker {
+  display: none;
+}
+
+.preview {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.expandLabel {
+  flex-shrink: 0;
+  color: var(--color-text-3);
+  font-size: 11px;
+}
+
+.fullText {
+  margin: 6px 0;
+  max-block-size: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}

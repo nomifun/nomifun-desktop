@@ -58,6 +58,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  spyOn(ipcBridge.conversation.inputQueue, 'invoke').mockResolvedValue({ version: 0, items: [] });
   setBrowserStorageGeneration('0190f5fe-7c00-7a00-8000-000000001400');
   sessionStorage.clear();
   spyOn(configService, 'get').mockReturnValue(undefined);
@@ -260,7 +261,6 @@ test('slow preparation and acceptance keep the real transcript mounted without a
 });
 
 test('a Pending initial delivery prepares once through its owner and focus cannot compete with the accepted send', async () => {
-  jest.useFakeTimers();
   spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ ...conversation, status: 'pending',
     runtime: { state: 'idle', is_processing: false, can_send_message: true },
   });
@@ -277,7 +277,11 @@ test('a Pending initial delivery prepares once through its owner and focus canno
   expect(send).toHaveBeenCalledTimes(1);
   expect(send.mock.calls[0][0]).toMatchObject({ conversation_id: conversationId, initial_only: true,
     idempotency_key: page.delivery.idempotency_key });
-  await act(async () => { jest.advanceTimersByTime(300); });
+  // This full Host-facing component also owns SWR reads and background
+  // reconciliation. Keep its clock real; the focused SendBox tests below
+  // isolate the debounce with fake time. Verify the same actual 300ms window.
+  fireEvent.focus(page.getByTestId('sendbox-input'));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
   expect(warmup).toHaveBeenCalledTimes(1);
   expect(send).toHaveBeenCalledTimes(1);
   await act(async () => { accepted.resolve({ msg_id: messageId, replayed: false }); });

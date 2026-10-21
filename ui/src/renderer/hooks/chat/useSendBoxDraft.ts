@@ -1,6 +1,6 @@
 import type { TChatConversation } from '@/common/config/storage';
-import { useCallback } from 'react';
-import useSWR from 'swr';
+import { useCallback, useMemo } from 'react';
+import useSWR, { useSWRConfig } from 'swr';
 import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
 import type { ConversationId } from '@/common/types/ids';
 export type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
@@ -20,13 +20,18 @@ export const getSendBoxDraftHook = (
   initialValue: Draft
 ) => {
   function useDraft(conversation_id: ConversationId) {
-    const { data, mutate } = useSWR(
-      [`/send-box/${type}/draft/${conversation_id}`, conversation_id],
+    const key = useMemo(() => [`/send-box/${type}/draft/${conversation_id}`, conversation_id] as const, [conversation_id]);
+    const { data } = useSWR(
+      key,
       ([_, id]) => store.get(id)
     );
+    const { mutate } = useSWRConfig();
     const mutateDraft = useCallback(
       (update: (previous: Draft) => Draft | undefined): void => {
-        void mutate(
+        // Bind the cache address to the original draft. SWR's bound mutate
+        // follows the hook's latest key and is unsafe in a late old callback.
+        void mutate<Draft | undefined>(
+          key,
           (previous) => {
             const next = update(previous ?? initialValue);
             if (next) store.set(conversation_id, next);
@@ -38,7 +43,7 @@ export const getSendBoxDraftHook = (
           console.error('Failed to mutate draft:', error);
         });
       },
-      [conversation_id, mutate]
+      [conversation_id, key, mutate]
     );
     return { data, mutate: mutateDraft };
   }

@@ -61,7 +61,6 @@ fn export_binding_if_changed<T: TS + 'static>(file_name: &str) {
 #[test]
 fn export_turn_disposition_bindings() {
     export_binding_if_changed::<nomifun_api_types::AgentQuestionReplyTargetDto>("AgentQuestionReplyTargetDto.ts");
-    export_binding_if_changed::<nomifun_api_types::AgentWaitReplyTargetDto>("AgentWaitReplyTargetDto.ts");
     export_binding_if_changed::<nomifun_agent_contracts::AgentWaitReason>("AgentWaitReason.ts");
     export_binding_if_changed::<nomifun_agent_contracts::AgentTurnOutcome>("AgentTurnOutcome.ts");
     export_binding_if_changed::<nomifun_api_types::TaskPlanSnapshot>("TaskPlanSnapshot.ts");

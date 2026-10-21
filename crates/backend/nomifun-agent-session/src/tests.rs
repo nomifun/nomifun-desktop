@@ -4477,3 +4477,5 @@ async fn turn_output_facts_resolve_payloads_only_inside_the_exact_terminal_bound
 
 #[path = "session_input_tests.rs"]
 mod session_input_tests;
+#[path = "session_input_queue_tests.rs"]
+mod session_input_queue_tests;

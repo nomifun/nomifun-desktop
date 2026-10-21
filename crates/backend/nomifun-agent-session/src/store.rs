@@ -87,6 +87,9 @@ mod turn_progress;
 #[path = "session_input.rs"]
 mod session_input;
 pub use session_input::{PendingSessionInput,SessionInputClaim,SessionInputBlockedReason,canonical_steering_input,is_session_input_event,session_input_namespace};
+#[path = "session_input_queue.rs"]
+mod session_input_queue;
+pub use session_input_queue::{SessionInputQueueItem, SessionInputQueueSnapshot};
 #[path = "history_standalone_projection.rs"]
 mod history_standalone_projection;
 #[path = "message_timeline.rs"]
@@ -982,7 +985,7 @@ impl AgentSessionStore {
         idempotency_key: IdempotencyKey,
         producer_id: EventProducerId,
     ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
-        self.cancel_selected_turn(session_id, None, idempotency_key, producer_id, None).await
+        self.cancel_selected_turn(session_id, None, idempotency_key, producer_id, None, false).await
     }
 
     /// Cancel only the specified canonical Turn. A delayed command for a
@@ -998,7 +1001,22 @@ impl AgentSessionStore {
         if target_operation_id.as_ref().trim().is_empty() {
             return Err(SessionStoreError::InvalidEvent("exact cancellation requires a target Turn".into()));
         }
-        self.cancel_selected_turn(session_id, Some(target_operation_id), idempotency_key, producer_id, None).await
+        self.cancel_selected_turn(session_id, Some(target_operation_id), idempotency_key, producer_id, None, false).await
+    }
+
+    /// Composer Stop keeps the existing ordinary-input batch durably held.
+    /// Domain cancellation retains its narrower original contract.
+    pub async fn cancel_active_turn_with_input_hold(&self,session_id:&AgentSessionId,
+        idempotency_key:IdempotencyKey,producer_id:EventProducerId)
+        ->Result<(OperationId,SessionEventAppendResult),SessionStoreError> {
+        self.cancel_selected_turn(session_id,None,idempotency_key,producer_id,None,true).await
+    }
+
+    pub async fn cancel_exact_turn_with_input_hold(&self,session_id:&AgentSessionId,target_operation_id:&OperationId,
+        idempotency_key:IdempotencyKey,producer_id:EventProducerId)
+        ->Result<(OperationId,SessionEventAppendResult),SessionStoreError> {
+        if target_operation_id.as_ref().trim().is_empty() {return Err(SessionStoreError::InvalidEvent("exact cancellation requires a target Turn".into()));}
+        self.cancel_selected_turn(session_id,Some(target_operation_id),idempotency_key,producer_id,None,true).await
     }
 
     /// Additional proof for an opt-in consumer, using the original mutation writer.
@@ -1006,7 +1024,7 @@ impl AgentSessionStore {
         idempotency_key:IdempotencyKey,producer_id:EventProducerId,fence:&NativeTurnMutationFence)
         ->Result<(OperationId,SessionEventAppendResult),SessionStoreError> {
         if target_operation_id.as_ref().trim().is_empty(){return Err(SessionStoreError::InvalidEvent("exact cancellation requires a target Turn".into()));}
-        self.cancel_selected_turn(session_id,Some(target_operation_id),idempotency_key,producer_id,Some(fence)).await
+        self.cancel_selected_turn(session_id,Some(target_operation_id),idempotency_key,producer_id,Some(fence),false).await
     }
 
     async fn cancel_selected_turn(
@@ -1016,6 +1034,7 @@ impl AgentSessionStore {
         idempotency_key: IdempotencyKey,
         producer_id: EventProducerId,
         expected_native:Option<&NativeTurnMutationFence>,
+        hold_input_queue:bool,
     ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
         let mut tx = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
@@ -1099,6 +1118,9 @@ impl AgentSessionStore {
             )
         })?;
         let turn_event = event_from_row(turn_event)?;
+        if hold_input_queue {
+            self.hold_session_input_queue_for_stop_tx(&mut tx,session_id,&target_operation_id,&idempotency_key).await?;
+        }
         let mut mutation_payload=json!({"target_operation_id":target_operation_id,"finished_at_ms":wall_clock_now_ms()});
         if let Some(fence)=expected_native {mutation_payload["native_target_fence"]=serde_json::to_value(fence)?;}
         let append = SessionEventAppend {
@@ -6281,6 +6303,8 @@ async fn validate_semantic_event_tx(
     event: &SessionEventRecord,
     payload: &Value,
 ) -> Result<(), SessionStoreError> {
+    session_input_queue::validate_event(event, payload)?;
+    session_input_queue::validate_references_tx(tx,event,payload).await?;
     knowledge_writeback::validate_event_tx(tx, event, payload).await?;
     session_ssh_link::validate_event_tx(tx,event,payload).await?;
     if event.kind.0=="runtime/progress-recorded" && payload.pointer("/event/event").and_then(Value::as_str)==Some("host_cleanup_proven")

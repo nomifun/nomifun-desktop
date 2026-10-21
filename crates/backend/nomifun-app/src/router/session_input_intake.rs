@@ -1,6 +1,11 @@
 //! Ordinary input is durable before execution is selected. The existing
 //! Session gate schedules work; Runtime safe boundaries claim supplements.
 use super::*;
+
+enum SessionInputIntakePolicy {
+    Domain,
+    Composer(Option<nomifun_agent_contracts::SessionInputDeliveryIntent>),
+}
 use nomifun_agent_contracts::EventId;
 
 /// Cancellation transport for the original input-drain owner. Durable input
@@ -92,6 +97,7 @@ pub(super) fn runtime_message_request(input:&nomifun_agent_contracts::StrictJson
     if let Some(object)=content.as_object_mut() {
         object.remove("reply_to");
         object.remove("channel_source");
+        object.remove("delivery_intent");
         if let Some(source)=object.remove("input_source").filter(|source|!source.is_null()) {
             serde_json::from_value::<nomifun_agent_contracts::AgentInputSource>(source)
                 .map_err(|error|AppError::Internal(format!("invalid accepted input provenance: {error}")))?;
@@ -197,19 +203,20 @@ impl NomiCoreSessionOwner {
     pub(super) async fn accept_ordinary_session_input(&self,owner_id:&str,session:&AgentSessionId,key:&str,
         request:SendMessageRequest,reply_to:Option<nomifun_api_types::AgentQuestionReplyTargetDto>)
         ->Result<IdempotentMessageDelivery,AppError> {
-        self.accept_session_input_with_source(owner_id,session,key,request,reply_to,None,false).await
+        self.accept_session_input_with_source(owner_id,session,key,request,reply_to,None,false,SessionInputIntakePolicy::Domain).await
     }
 
     pub(super) async fn accept_channel_session_input(&self,owner_id:&str,session:&AgentSessionId,key:&str,
         request:SendMessageRequest,source:nomifun_agent_contracts::ChannelInputSource,
         reply_to:Option<nomifun_api_types::AgentQuestionReplyTargetDto>)->Result<IdempotentMessageDelivery,AppError> {
         source.validate().map_err(AppError::BadRequest)?;
-        self.accept_session_input_with_source(owner_id,session,key,request,reply_to,Some(source),false).await
+        self.accept_session_input_with_source(owner_id,session,key,request,reply_to,Some(source),false,SessionInputIntakePolicy::Domain).await
     }
 
     async fn accept_session_input_with_source(&self,owner_id:&str,session:&AgentSessionId,key:&str,
         request:SendMessageRequest,reply_to:Option<nomifun_api_types::AgentQuestionReplyTargetDto>,
-        source:Option<nomifun_agent_contracts::ChannelInputSource>,initial_only:bool)->Result<IdempotentMessageDelivery,AppError> {
+        source:Option<nomifun_agent_contracts::ChannelInputSource>,initial_only:bool,
+        policy:SessionInputIntakePolicy)->Result<IdempotentMessageDelivery,AppError> {
         Self::validate_ordinary_message_origin(&request)?;
         let mut input=canonical_turn_input(&request);
         // These are permanent envelope checks, not a current Turn's budget or
@@ -221,6 +228,10 @@ impl NomiCoreSessionOwner {
         super::super::runtime_attachments::selected_skills(&input)?;
         if let Some(target)=reply_to {input["reply_to"]=serde_json::to_value(target).map_err(|error|AppError::Internal(error.to_string()))?;}
         if let Some(source)=source {input["channel_source"]=serde_json::to_value(source).map_err(|error|AppError::Internal(error.to_string()))?;}
+        let composer_default=matches!(&policy,SessionInputIntakePolicy::Composer(None));
+        if let SessionInputIntakePolicy::Composer(Some(delivery))=policy {
+            input["delivery_intent"]=serde_json::to_value(delivery).map_err(|error|AppError::Internal(error.to_string()))?;
+        }
         let host=self.native_engines.get().and_then(std::sync::Weak::upgrade)
             .ok_or_else(||AppError::Internal("Session input owner is not installed".into()))?.session_owner()?;
         let principal=PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.into()};
@@ -233,9 +244,16 @@ impl NomiCoreSessionOwner {
             let outcome=async {
                 let _gate=host.session_operation_lock(session.as_ref()).read_owned().await;
                 if let Some(original)=host.canonical.session_input_by_key(&principal,&session,&key).await? {
+                    // Current-generation uncertain submissions retain their
+                    // exact original envelope. Only a new omitted preference
+                    // defaults to Queue; a replay never rewrites old intent.
+                    if composer_default && original.input.0.get("delivery_intent").is_some() {
+                        input["delivery_intent"]=json!({"kind":"queue"});
+                    }
                     if original.input.0!=input {return Err(AppError::Conflict("Session input key was reused with different content".into()));}
                     return Ok((original.event.event_id,true));
                 }
+                if composer_default {input["delivery_intent"]=json!({"kind":"queue"});}
                 host.require_ordinary_owner_input(&principal,&session).await?;
                 let saved=if initial_only {host.canonical.accept_initial_session_input(&principal,&session,&key,input).await?}
                     else {host.canonical.accept_session_input(&principal,&session,&key,input).await?};
@@ -311,6 +329,9 @@ impl NomiCoreSessionOwner {
             let admitted=match preparation {
                 Ok(admitted)=>admitted,
                 Err(_)=>{
+                    // A precise queue control can withdraw preparation without
+                    // declaring the retained input broken or dropping its owner.
+                    if preparing.cancel.is_cancelled() {return Ok(());}
                     self.canonical.store().mark_session_input_blocked(session,&original.event.event_id,
                         nomifun_agent_session::SessionInputBlockedReason::ContextPreparationFailed).await.map_err(agent_session_store_error)?;
                     let _=self.publish_session_input_delivery(owner_id,session,&original.event.event_id).await;
@@ -318,8 +339,12 @@ impl NomiCoreSessionOwner {
                 },
             };
             let admission=admitted.get("admission").cloned().ok_or_else(||AppError::Internal("new Turn lost its exact execution admission".into()))?;
-            let claimed=self.canonical.store().claim_session_input_as_turn(&principal,session,&original.event.event_id,&operation,StrictJsonValue(admission))
-                .await.map_err(agent_session_store_error)?;
+            let Some(claimed)=self.canonical.store().try_claim_session_input_as_turn(&principal,session,&original.event.event_id,&operation,StrictJsonValue(admission))
+                .await.map_err(agent_session_store_error)? else {
+                // A newer input/queue control owns its own wake. Release this
+                // stale preparation instead of dispatching the old order.
+                return Ok(());
+            };
             match self.deliver_claimed_turn(owner_id,session,request,nomifun_conversation::AgentTurnReceipt {
                 operation_id:operation.clone(),cursor:claimed.cursor,duplicate:false}).await {
                 Ok(_)=>break,
@@ -338,17 +363,91 @@ impl NomiCoreSessionOwner {
     }
 }
 
+async fn confirmed_input_error(host:&NomiCoreSessionOwner,owner:&AuthenticatedOwner,session:&AgentSessionId,key:&str,
+    error:NomiCoreApiError)->NomiCoreApiError {
+    if !error.status.is_client_error() {return error;}
+    match host.canonical.session_input_by_key(&authenticated_principal(owner),session,key).await {
+        Ok(None)=>NomiCoreApiError::with_details(error.status,"INPUT_NOT_ACCEPTED",error.message,
+            json!({"accepted":false,"reason":error.code})),
+        Ok(Some(_))=>error,
+        Err(failure)=>failure.into(),
+    }
+}
+
 pub(super) async fn accept_message(State(state):State<NomiCoreAgentApiState>,Extension(owner):Extension<AuthenticatedOwner>,
     Path(id):Path<String>,headers:HeaderMap,Json(request):Json<nomifun_api_types::AcceptAgentSessionMessageRequestDto>)
     ->Result<Json<ApiResponse<nomifun_api_types::AcceptAgentSessionMessageResponseDto>>,NomiCoreApiError> {
     let initial_only=initial_delivery_requested(&headers)?;
     let session=parse_agent_session_id(&id)?;let key=canonical_nonempty(&request.idempotency_key,"idempotency_key")?;
-    let input=bounded_turn_input(request.input)?;
-    let delivery=state.session_owner.accept_session_input_with_source(owner.as_ref(),&session,&key,input,None,None,initial_only).await?;
+    let input=match bounded_turn_input(request.input) {
+        Ok(input)=>input,
+        Err(error)=>return Err(confirmed_input_error(&state.session_owner,&owner,&session,&key,error).await),
+    };
+    let delivery=match state.session_owner.accept_session_input_with_source(owner.as_ref(),&session,&key,input,None,None,initial_only,SessionInputIntakePolicy::Composer(request.delivery)).await {
+        Ok(delivery)=>delivery,
+        Err(error)=>{
+            // Only the completed acceptance owner plus an authoritative absent
+            // receipt can prove non-admission. Existing-key conflicts remain
+            // delivery-unknown and retain the original client identity.
+            return Err(confirmed_input_error(&state.session_owner,&owner,&session,&key,error.into()).await);
+        },
+    };
     let original=state.session_owner.canonical.session_input_by_key(&authenticated_principal(&owner),&session,&key).await?
         .ok_or_else(||AppError::Internal("accepted input acknowledgement could not be re-read".into()))?;
     Ok(Json(ApiResponse::ok(nomifun_api_types::AcceptAgentSessionMessageResponseDto {agent_session_id:id,
         message_id:delivery.message_id,cursor:session_cursor(&session,original.event.seq),replayed:delivery.replayed,status:"accepted".into()})))
+}
+
+/// Reading a queue never acquires a Runtime or schedules execution.
+pub(super) async fn get_input_queue(State(state):State<NomiCoreAgentApiState>,Extension(owner):Extension<AuthenticatedOwner>,
+    Path(id):Path<String>)->Result<Json<ApiResponse<Value>>,NomiCoreApiError> {
+    let session=parse_agent_session_id(&id)?;let principal=authenticated_principal(&owner);
+    let snapshot=state.session_owner.canonical.store().session_input_queue(&principal,&session).await.map_err(agent_session_store_error)?;
+    Ok(Json(ApiResponse::ok(serde_json::to_value(snapshot).map_err(|error|AppError::Internal(error.to_string()))?)))
+}
+
+/// The existing tracked task owner retains a queue mutation after its observer
+/// disappears. The Store serializes it with initial/steering claim and Stop.
+pub(super) async fn update_input_queue(State(state):State<NomiCoreAgentApiState>,Extension(owner):Extension<AuthenticatedOwner>,
+    Path(id):Path<String>,Json(request):Json<nomifun_api_types::UpdateAgentSessionInputQueueRequestDto>)
+    ->Result<Json<ApiResponse<Value>>,NomiCoreApiError> {
+    let session=parse_agent_session_id(&id)?;let principal=authenticated_principal(&owner);
+    let key=canonical_nonempty(&request.idempotency_key,"idempotency_key")?;
+    let host=state.session_owner.clone();let (sender,receiver)=tokio::sync::oneshot::channel();
+    if !state.session_owner.background_tasks.spawn(Box::pin(async move {
+        let outcome=async {
+            let before=host.canonical.store().session_input_queue(&principal,&session).await.map_err(agent_session_store_error)?;
+            let command_key=key.into();
+            let snapshot=match host.canonical.store().read_session_input_queue_receipt(&principal,&session,&command_key,&request.action,Some(request.expected_version))
+                .await.map_err(agent_session_store_error)? {
+                Some(snapshot)=>snapshot,
+                None=>{
+                    host.require_ordinary_owner_input(&principal,&session).await?;
+                    host.canonical.store().update_session_input_queue(&principal,&session,&command_key,&request.action,Some(request.expected_version))
+                        .await.map_err(agent_session_store_error)?
+                },
+            };
+            for (input,_) in host.input_preparation_observations(&session)? {
+                let delivery=host.canonical.store().session_input_delivery(&session,&input).await.map_err(agent_session_store_error)?;
+                // Terminal input cancellation cannot acquire a later owner for
+                // this identity. Pause/reorder instead use the claim writer's
+                // eligibility fence: signalling by message ID after a quick
+                // resume could otherwise cancel its legitimate new preparation.
+                if matches!(delivery["state"].as_str(),Some("cancelled"|"discarded")) {
+                    host.cancel_input_preparation(&session,&input)?;
+                }
+            }
+            // Publish original input identities so all connected clients reread
+            // the same projection, including items just removed by this command.
+            let ids=before.items.iter().chain(snapshot.items.iter()).map(|item|item.message_id.clone()).collect::<BTreeSet<_>>();
+            for input in ids {let _=host.publish_session_input_delivery(owner.as_ref(),&session,&input).await;}
+            host.schedule_session_input_drain(owner.as_ref().to_owned(),session,None);
+            serde_json::to_value(snapshot).map_err(|error|AppError::Internal(error.to_string()))
+        }.await;
+        let _=sender.send(outcome);
+    })) {return Err(AppError::Conflict("Session queue control owner is shutting down".into()).into());}
+    let snapshot=receiver.await.map_err(|_|AppError::Internal("Queue acknowledgement is unknown; retry its original key".into()))??;
+    Ok(Json(ApiResponse::ok(snapshot)))
 }
 
 #[cfg(test)]

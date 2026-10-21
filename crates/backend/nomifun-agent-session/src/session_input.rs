@@ -88,12 +88,13 @@ pub(super) async fn accepted_input_tx(tx:&mut Transaction<'_,Sqlite>,session:&Ag
         return Err(SessionStoreError::InvalidEvent("Session input identity differs from its accepted fact".into()));
     }
     let input=StrictJsonValue(payload_value_for_event_tx(tx,&event).await?);
+    session_input_queue::validate_delivery_envelope_tx(tx,session,&input.0).await?;
     Ok(PendingSessionInput {event,input})
 }
 
 /// Cancellation terminates this accepted input, unlike a repairable preparation
 /// failure. Read its exact original fact; a later retry cannot revive it.
-async fn cancelled_input_tx(tx:&mut Transaction<'_,Sqlite>,accepted:&SessionEventRecord)
+pub(super) async fn cancelled_input_tx(tx:&mut Transaction<'_,Sqlite>,accepted:&SessionEventRecord)
     ->Result<Option<SessionEventRecord>,SessionStoreError> {
     let identity=format!("session-input-blocked:{}:cancelled_by_owner",accepted.event_id.as_ref());
     let Some(row)=event_by_event_id_tx(tx,&identity).await? else {return Ok(None);};
@@ -273,6 +274,33 @@ pub(super) async fn attach_updates_after(tx:&mut Transaction<'_,Sqlite>,session:
     Ok(())
 }
 
+pub(super) const PENDING_INPUT_PREDICATE: &str = " WHERE input.session_id=? AND input.kind='message/user-accepted' \
+            AND input.producer_id='session_api' AND input.kind_version=1 AND substr(input.idempotency_key,1,length(?))=? \
+            AND input.seq>COALESCE((SELECT MAX(clear.seq) FROM agent_events clear WHERE clear.session_id=input.session_id AND clear.kind='context/cleared'),0) \
+            AND NOT EXISTS(SELECT 1 FROM agent_turns turn JOIN agent_events started ON started.event_id=turn.started_event_id AND started.session_id=turn.session_id AND started.kind='turn/started' AND started.correlation_id=turn.operation_id WHERE turn.session_id=input.session_id AND (turn.source_message_id=input.event_id OR started.causation_event_id=input.event_id)) \
+            AND NOT EXISTS(SELECT 1 FROM agent_events claim LEFT JOIN agent_payloads cp ON cp.payload_id=claim.payload_id AND cp.session_id=claim.session_id WHERE claim.session_id=input.session_id AND claim.kind='turn/steer-accepted' AND claim.kind_version=2 \
+                AND COALESCE(json_extract(claim.inline_json,'$.input_event_id'),json_extract(CAST(cp.body AS TEXT),'$.value.input_event_id'))=input.event_id) \
+            AND (? OR input.event_id=? OR NOT EXISTS(SELECT 1 FROM agent_events blocked LEFT JOIN agent_payloads bp ON bp.payload_id=blocked.payload_id AND bp.session_id=blocked.session_id WHERE blocked.session_id=input.session_id AND blocked.kind='message/input-blocked' \
+                AND COALESCE(json_extract(blocked.inline_json,'$.input_event_id'),json_extract(CAST(bp.body AS TEXT),'$.value.input_event_id'))=input.event_id))";
+
+pub(super) async fn pending_inputs_tx(tx:&mut Transaction<'_,Sqlite>,session:&AgentSessionId,include_blocked:Option<&EventId>,all_blocked:bool)
+        ->Result<Vec<PendingSessionInput>,SessionStoreError> {
+        let live=require_live_session_tx(tx,session.as_ref()).await?;
+        let prefix=session_input_namespace(&live.owner_ref,session);
+        let query=format!("SELECT input.session_id,input.seq,input.event_id,input.producer_id,input.idempotency_key,input.kind,input.kind_version,input.correlation_id,input.causation_event_id,input.inline_json,input.payload_id FROM agent_events input{} ORDER BY input.seq",PENDING_INPUT_PREDICATE);
+        let rows=sqlx::query_as::<_,StoredEventRow>(&query)
+            .bind(session.as_ref()).bind(&prefix).bind(&prefix).bind(all_blocked).bind(include_blocked.map(|id|id.as_ref())).fetch_all(&mut **tx).await?;
+        let mut inputs=Vec::new();for row in rows {
+            let event=event_from_row(row)?;
+            if !is_session_input_event(&event,&live.owner_ref) {return Err(SessionStoreError::InvalidEvent("pending input lost its original Session provenance".into()));}
+            if (all_blocked || include_blocked==Some(&event.event_id)) && cancelled_input_tx(tx,&event).await?.is_some() {continue;}
+            let input=StrictJsonValue(payload_value_for_event_tx(tx,&event).await?);
+            session_input_queue::validate_delivery_envelope_tx(tx,session,&input.0).await?;
+            inputs.push(PendingSessionInput {event,input});
+        }
+        Ok(inputs)
+    }
+
 impl AgentSessionStore {
     pub async fn session_input(&self,session:&AgentSessionId,input:&EventId)->Result<PendingSessionInput,SessionStoreError> {
         let mut tx=self.pool.begin().await?;require_live_session_tx(&mut tx,session.as_ref()).await?;
@@ -390,6 +418,7 @@ impl AgentSessionStore {
             let ack=event_ack(&record);tx.commit().await?;
             return Ok(SessionEventAppendResult {record:Some(record),ack:Some(ack.clone()),cursor:ack.cursor,persisted:true,duplicate:true});
         }
+        session_input_queue::validate_delivery_envelope_tx(&mut tx,session,&input.0).await?;
         if initial_only {
             let occupied:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_turns WHERE session_id=?) OR EXISTS(SELECT 1 FROM agent_events WHERE session_id=? AND kind LIKE 'message/%')")
                 .bind(session.as_ref()).bind(session.as_ref()).fetch_one(&mut *tx).await?;
@@ -410,67 +439,87 @@ impl AgentSessionStore {
         let result=self.append_event_tx(&mut tx,&event,None).await?;tx.commit().await?;Ok(result)
     }
 
+    /// Filter persistent delivery eligibility before bounding a dispatch batch.
     pub async fn pending_session_inputs(&self,session:&AgentSessionId,include_blocked:Option<&EventId>)
         ->Result<Vec<PendingSessionInput>,SessionStoreError> {
-        let mut tx=self.pool.begin().await?;let live=require_live_session_tx(&mut tx,session.as_ref()).await?;
-        let prefix=session_input_namespace(&live.owner_ref,session);
-        let ids:Vec<String>=sqlx::query_scalar("SELECT input.event_id FROM agent_events input WHERE input.session_id=? AND input.kind='message/user-accepted' \
-            AND input.producer_id='session_api' AND input.kind_version=1 AND substr(input.idempotency_key,1,length(?))=? \
-            AND input.seq>COALESCE((SELECT MAX(clear.seq) FROM agent_events clear WHERE clear.session_id=input.session_id AND clear.kind='context/cleared'),0) \
-            AND NOT EXISTS(SELECT 1 FROM agent_turns turn JOIN agent_events started ON started.event_id=turn.started_event_id AND started.session_id=turn.session_id AND started.kind='turn/started' AND started.correlation_id=turn.operation_id WHERE turn.session_id=input.session_id AND (turn.source_message_id=input.event_id OR started.causation_event_id=input.event_id)) \
-            AND NOT EXISTS(SELECT 1 FROM agent_events claim LEFT JOIN agent_payloads cp ON cp.payload_id=claim.payload_id AND cp.session_id=claim.session_id WHERE claim.session_id=input.session_id AND claim.kind='turn/steer-accepted' AND claim.kind_version=2 \
-                AND COALESCE(json_extract(claim.inline_json,'$.input_event_id'),json_extract(CAST(cp.body AS TEXT),'$.value.input_event_id'))=input.event_id) \
-            AND (input.event_id=? OR NOT EXISTS(SELECT 1 FROM agent_events blocked LEFT JOIN agent_payloads bp ON bp.payload_id=blocked.payload_id AND bp.session_id=blocked.session_id WHERE blocked.session_id=input.session_id AND blocked.kind='message/input-blocked' \
-                AND COALESCE(json_extract(blocked.inline_json,'$.input_event_id'),json_extract(CAST(bp.body AS TEXT),'$.value.input_event_id'))=input.event_id)) ORDER BY input.seq LIMIT 64")
-            .bind(session.as_ref()).bind(&prefix).bind(&prefix).bind(include_blocked.map(|id|id.as_ref())).fetch_all(&mut *tx).await?;
-        let mut inputs=Vec::new();for id in ids {
-            let accepted=accepted_input_tx(&mut tx,session,&id.into()).await?;
-            if cancelled_input_tx(&mut tx,&accepted.event).await?.is_none() {inputs.push(accepted);}
-        }
+        let mut tx=self.pool.begin().await?;
+        let candidates=pending_inputs_tx(&mut tx,session,include_blocked,false).await?;
+        let state=session_input_queue::queue_state_tx(&mut tx,session).await?;
+        let mut inputs=Vec::new();
+        for input in candidates {if !state.held(&input)? {inputs.push(input);}}
+        state.sort(&mut inputs)?;inputs.truncate(64);
+        tx.commit().await?;Ok(inputs)
+    }
+
+    /// has_pending and take use this same exact-target candidate selection.
+    pub async fn pending_session_inputs_for_steering(&self,session:&AgentSessionId,target:&OperationId,include_blocked:Option<&EventId>)
+        ->Result<Vec<PendingSessionInput>,SessionStoreError> {
+        let mut tx=self.pool.begin().await?;
+        let state=session_input_queue::queue_state_tx(&mut tx,session).await?;
+        let inputs=session_input_queue::pending_steering_inputs_tx(&mut tx,session,target,include_blocked,&state).await?;
         tx.commit().await?;Ok(inputs)
     }
 
     pub async fn claim_session_input_as_turn(&self,owner:&PrincipalRef,session:&AgentSessionId,input:&EventId,operation:&OperationId,
         admission:StrictJsonValue)->Result<SessionEventAppendResult,SessionStoreError> {
+        self.try_claim_session_input_as_turn(owner,session,input,operation,admission).await?
+            .ok_or(SessionStoreError::ExecutionFenced)
+    }
+
+    pub async fn try_claim_session_input_as_turn(&self,owner:&PrincipalRef,session:&AgentSessionId,input:&EventId,operation:&OperationId,
+        admission:StrictJsonValue)->Result<Option<SessionEventAppendResult>,SessionStoreError> {
         let mut tx=self.begin_write_transaction().await?;
         if live_session_by_id_tx(&mut tx,session.as_ref()).await?.owner_ref!=*owner {return Err(SessionStoreError::ExecutionFenced);}
         let accepted=accepted_input_tx(&mut tx,session,input).await?;
-        if cancelled_input_tx(&mut tx,&accepted.event).await?.is_some() {return Err(SessionStoreError::ExecutionFenced);}
+        if cancelled_input_tx(&mut tx,&accepted.event).await?.is_some() {tx.commit().await?;return Ok(None);}
+        let queue=session_input_queue::queue_state_tx(&mut tx,session).await?;
+        if queue.held(&accepted)? {tx.commit().await?;return Ok(None);}
         let floor:i64=sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=? AND kind='context/cleared'")
             .bind(session.as_ref()).fetch_one(&mut *tx).await?;
-        if accepted.event.seq<=as_u64(floor,"input context floor")? {return Err(SessionStoreError::ExecutionFenced);}
-        if input_claimed_tx(&mut tx,session,input).await? {return Err(SessionStoreError::Conflict("Session input already has its original claim".into()));}
+        if accepted.event.seq<=as_u64(floor,"input context floor")? {tx.commit().await?;return Ok(None);}
+        if input_claimed_tx(&mut tx,session,input).await? {tx.commit().await?;return Ok(None);}
         let head=head_by_id_tx(&mut tx,session.as_ref()).await?;
-        if head.status!="ready" || head.active_turn_id.is_some() {return Err(SessionStoreError::Conflict("execution remains owned by the original Turn".into()));}
+        if head.status!="ready" || head.active_turn_id.is_some() {tx.commit().await?;return Ok(None);}
         let unsettled:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_effects WHERE session_id=? AND state IN ('pending','unknown'))")
             .bind(session.as_ref()).fetch_one(&mut *tx).await?;
         if unsettled {return Err(SessionStoreError::RecoveryRequiresReconciliation);}
+        if session_input_queue::desktop_delivery_intent(&accepted.input.0)?.is_some() {
+            let mut eligible=Vec::new();
+            for candidate in pending_inputs_tx(&mut tx,session,Some(input),false).await? {
+                if !queue.held(&candidate)? {eligible.push(candidate);}
+            }
+            queue.sort(&mut eligible)?;
+            if eligible.first().is_none_or(|candidate|candidate.event.event_id!=*input) {tx.commit().await?;return Ok(None);}
+        }
         let mut payload=json!({"operation_id":operation,"source_message_id":input,"admission":admission});
         for field in ["route_identity","resolved_snapshot_ref"] {if let Some(value)=admission.0.get(field) {payload[field]=value.clone();}}
         let event=SessionEventAppend {agent_session_id:session.clone(),event_id:new_event_id(),producer_id:"session_api".into(),
             idempotency_key:format!("session-input-claim:{}",input.as_ref()).into(),semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {
                 kind:SessionEventKind("turn/started".into()),kind_version:1,correlation_id:CorrelationId::from(operation.as_ref()),
                 causation_event_id:Some(accepted.event.event_id),payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(payload))}};
-        let result=self.append_event_tx(&mut tx,&event,None).await?;tx.commit().await?;Ok(result)
+        let result=self.append_event_tx(&mut tx,&event,None).await?;tx.commit().await?;Ok(Some(result))
     }
 
     pub async fn claim_session_input_as_steering(&self,owner:&PrincipalRef,session:&AgentSessionId,input:&EventId,target:&OperationId)
         ->Result<SessionEventAppendResult,SessionStoreError> {
+        self.try_claim_session_input_as_steering(owner,session,input,target).await?
+            .ok_or(SessionStoreError::ExecutionFenced)
+    }
+
+    pub async fn try_claim_session_input_as_steering(&self,owner:&PrincipalRef,session:&AgentSessionId,input:&EventId,target:&OperationId)
+        ->Result<Option<SessionEventAppendResult>,SessionStoreError> {
         let mut tx=self.begin_write_transaction().await?;
         if live_session_by_id_tx(&mut tx,session.as_ref()).await?.owner_ref!=*owner {return Err(SessionStoreError::ExecutionFenced);}
         let accepted=accepted_input_tx(&mut tx,session,input).await?;
-        if cancelled_input_tx(&mut tx,&accepted.event).await?.is_some() {return Err(SessionStoreError::ExecutionFenced);}
-        if accepted.input.0.get("reply_to").is_some() {return Err(SessionStoreError::ExecutionFenced);}
+        if cancelled_input_tx(&mut tx,&accepted.event).await?.is_some() {tx.commit().await?;return Ok(None);}
+        let head=head_by_id_tx(&mut tx,session.as_ref()).await?;
+        if head.status!="running" || head.active_turn_id.as_deref()!=Some(target.as_ref()) {tx.commit().await?;return Ok(None);}
+        let queue=session_input_queue::queue_state_tx(&mut tx,session).await?;
+        if !session_input_queue::steering_eligible_tx(&mut tx,session,&accepted,target,&queue).await? {tx.commit().await?;return Ok(None);}
         let floor:i64=sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=? AND kind='context/cleared'")
             .bind(session.as_ref()).fetch_one(&mut *tx).await?;
-        if accepted.event.seq<=as_u64(floor,"input context floor")? {return Err(SessionStoreError::ExecutionFenced);}
-        if input_claimed_tx(&mut tx,session,input).await? {return Err(SessionStoreError::Conflict("Session input already has its original claim".into()));}
-        let head=head_by_id_tx(&mut tx,session.as_ref()).await?;
-        if head.status!="running" || head.active_turn_id.as_deref()!=Some(target.as_ref()) {return Err(SessionStoreError::ExecutionFenced);}
-        let(_,root)=Self::turn_accepted_input_tx(&mut tx,session,target).await?;
-        let receiver=nomifun_agent_contracts::ChannelInputSource::from_input(&root.0).map_err(SessionStoreError::InvalidPayload)?;
-        let incoming=nomifun_agent_contracts::ChannelInputSource::from_input(&accepted.input.0).map_err(SessionStoreError::InvalidPayload)?;
-        if !nomifun_agent_contracts::ChannelInputSource::same_destination(receiver.as_ref(),incoming.as_ref()) {return Err(SessionStoreError::ExecutionFenced);}
+        if accepted.event.seq<=as_u64(floor,"input context floor")? {tx.commit().await?;return Ok(None);}
+        if input_claimed_tx(&mut tx,session,input).await? {tx.commit().await?;return Ok(None);}
         let unknown:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_effects WHERE session_id=? AND state='unknown')")
             .bind(session.as_ref()).fetch_one(&mut *tx).await?;
         if unknown {return Err(SessionStoreError::RecoveryRequiresReconciliation);}
@@ -478,7 +527,7 @@ impl AgentSessionStore {
             idempotency_key:format!("session-input-claim:{}",input.as_ref()).into(),semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {
                 kind:SessionEventKind("turn/steer-accepted".into()),kind_version:2,correlation_id:CorrelationId::from(target.as_ref()),
                 causation_event_id:Some(input.clone()),payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"input_event_id":input,"target_operation_id":target})))}};
-        let result=self.append_event_tx(&mut tx,&event,None).await?;tx.commit().await?;Ok(result)
+        let result=self.append_event_tx(&mut tx,&event,None).await?;tx.commit().await?;Ok(Some(result))
     }
 
     pub async fn mark_session_input_blocked(&self,session:&AgentSessionId,input:&EventId,reason:SessionInputBlockedReason)

@@ -8049,6 +8049,280 @@
     "title": "SessionEventRegistryPayload",
     "type": "object"
   },
+  "session_input_delivery_intent": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "queue",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "prefer_current",
+            "type": "string"
+          },
+          "turn_id": {
+            "description": "The source message of the canonical Turn observed at submission.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "turn_id"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "SessionInputDeliveryIntent"
+  },
+  "session_input_queue_action": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "pause",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "resume",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "remove",
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "message_id"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "clear",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "reorder",
+            "type": "string"
+          },
+          "message_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "message_ids"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "promote",
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "turn_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "message_id",
+          "turn_id"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "SessionInputQueueAction"
+  },
+  "session_input_queue_changed": {
+    "$defs": {
+      "SessionInputQueueAction": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "pause",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "resume",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "remove",
+                "type": "string"
+              },
+              "message_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "reorder",
+                "type": "string"
+              },
+              "message_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "message_ids"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "promote",
+                "type": "string"
+              },
+              "message_id": {
+                "type": "string"
+              },
+              "turn_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message_id",
+              "turn_id"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Reference-only changes to the ordinary composer inbox. Message bodies stay\nin their original accepted input, while all readers fold these same facts.",
+    "properties": {
+      "action": {
+        "$ref": "#/$defs/SessionInputQueueAction"
+      },
+      "expected_version": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "through_seq": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "action"
+    ],
+    "title": "SessionInputQueueChangedV1",
+    "type": "object"
+  },
   "session_process_owner_released": {
     "$defs": {
       "NativeRetainedProcess": {

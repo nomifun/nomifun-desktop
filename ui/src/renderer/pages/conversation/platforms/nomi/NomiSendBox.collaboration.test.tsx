@@ -48,6 +48,7 @@ let warning: ReturnType<typeof spyOn<typeof Message, 'warning'>>;
 
 beforeEach(() => {
   configService.reset(); setBrowserStorageGeneration(uuidv7()); sessionStorage.clear();
+  spyOn(ipcBridge.conversation.inputQueue, 'invoke').mockResolvedValue({ version: 0, items: [] });
   warning = spyOn(Message, 'warning').mockImplementation(() => undefined as never);
   draft = { mainModel: main, activeCollaborators: [helper], setCollaborators: noop,
     policy: { delegationPolicy: 'prefer_parallel', decisionPolicy: 'ask_user' }, setPolicy: noop, selectedTemplate: null,
@@ -63,12 +64,11 @@ beforeEach(() => {
   spyOn(modelCatalog, 'useExecutionModelPool').mockReturnValue({ providers: [], getAvailableModels: () => [], formatModelLabel: (_provider, name) => name ?? '',
     isLoading: false, configuredPairs: [main, helper], allPairs: [main, helper], hasModels: true, buildModelPool: () => null });
   spyOn(executionContext, 'useExecutionSafe').mockReturnValue(null);
-  spyOn(ipcBridge.conversation.steer, 'invoke').mockRejectedValue(new Error('ordinary input must not choose a Turn'));
   spyOn(themeContext, 'useThemeContext').mockReturnValue({ theme: 'light', colorScheme: 'default', fontScale: 1,
     setTheme: async () => {}, setColorScheme: async () => {}, setFontScale: async () => {} });
   for (const event of [ipcBridge.mode.onProvidersChanged, ipcBridge.conversation.reconnected, ipcBridge.conversation.turnStarted,
     ipcBridge.conversation.turnCompleted, ipcBridge.agentPlatform.sessions.onAgentChanged, ipcBridge.agentPlatform.sessions.onCapabilitiesChanged,
-    ipcBridge.conversation.responseStream, ipcBridge.knowledge.onTreeChanged, ipcBridge.knowledge.onEntryContentUpdated, ipcBridge.fileStream.contentUpdate]) {
+    ipcBridge.conversation.responseStream, ipcBridge.conversation.userCreated, ipcBridge.knowledge.onTreeChanged, ipcBridge.knowledge.onEntryContentUpdated, ipcBridge.fileStream.contentUpdate]) {
     spyOn(event, 'on').mockImplementation(() => () => {});
   }
   spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([]);
@@ -87,12 +87,12 @@ beforeEach(() => {
 afterEach(() => { cleanup(); mock.restore(); configService.reset(); sessionStorage.clear(); });
 
 function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolean; paused?: boolean; waiting?: boolean;
-  pauseReason?: string } = {}) {
+  pauseReason?: string; knownTarget?: boolean } = {}) {
   const pausedTurnId = parseMessageId(uuidv7());
   const conversation = { id: parseConversationId(uuidv7()), name: 'General', type: 'nomi', session_purpose: 'conversation', status: 'finished',
     created_at: 1, modified_at: 1, model, extra: { workspace: '/project' } } as TChatConversation;
-  spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(conversation);
-  spyOn(ipcBridge.conversation.taskPlan, 'invoke').mockResolvedValue({ conversation_id: conversation.id, sequence: 0, turn_id: null, turn_status: null, plan: null });
+  spyOn(ipcBridge.conversation.get, 'invoke').mockImplementation(async request => ({ ...conversation, id: request.conversation_id }));
+  spyOn(ipcBridge.conversation.taskPlan, 'invoke').mockImplementation(async request => ({ conversation_id: request.conversation_id, sequence: 0, turn_id: null, turn_status: null, plan: null }));
   const send = spyOn(ipcBridge.conversation.sendMessage, 'invoke').mockResolvedValue({ msg_id: parseMessageId(uuidv7()), replayed: false });
   const create = spyOn(ipcBridge.agentExecution.create, 'invoke').mockResolvedValue({ execution_id: parseExecutionId(uuidv7()) } as never);
   const fromTemplate = spyOn(ipcBridge.agentExecutionTemplate.createExecution, 'invoke').mockResolvedValue({ execution_id: parseExecutionId(uuidv7()) } as never);
@@ -101,10 +101,10 @@ function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolea
     spyOn(executionContext, 'useExecutionSafe').mockReturnValue({ conversationId: conversation.id, executionId,
       detail: { execution: { execution_id: executionId, status: 'running' } } } as never);
   }
-  const renderComposer = (busy = options.busy ?? options.waiting ?? false) => <MemoryRouter><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, shouldRetryOnError: false }}>
-    <PreviewProvider persistNamespace={browserStorageKey('collaboration-test', 'conversation', conversation.id)} subscribeGlobalOpen={false}>
-      <MessageListProvider><NomiSendBox conversation_id={conversation.id} modelSelection={modelSelection}
-        turnActivity={{ ...activity, running: busy, executing: busy && !options.waiting, waitingNotice: options.waiting ? {
+  const renderComposer = (busy = options.busy ?? options.waiting ?? false, id = conversation.id) => <MemoryRouter><I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, shouldRetryOnError: false }}>
+    <PreviewProvider persistNamespace={browserStorageKey('collaboration-test', 'conversation', id)} subscribeGlobalOpen={false}>
+      <MessageListProvider><NomiSendBox conversation_id={id} modelSelection={modelSelection}
+        turnActivity={{ ...activity, running: busy, activeTurnId: busy && options.knownTarget !== false ? pausedTurnId : undefined, executing: busy && !options.waiting, waitingNotice: options.waiting ? {
           turnId: pausedTurnId, outcome: { kind: 'waiting', wait_seq: 41, request_id: 'authorize', reason: 'user_input' },
         } : null, pauseNotice: options.paused
           ? { turnId: pausedTurnId, reason: options.pauseReason ?? 'EXECUTION_TOTAL_MODEL_BUDGET', cleanupProven: true, pausedAt: 123 } : null }}
@@ -119,7 +119,7 @@ function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolea
     await waitFor(() => expect(input.value).toBe(text));
     await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); });
   };
-  return { view, input, submit, setBusy, conversation, send, create, fromTemplate, pausedTurnId };
+  return { view, input, submit, setBusy, navigate: (id: typeof conversation.id) => view.rerender(renderComposer(false, id)), conversation, send, create, fromTemplate, pausedTurnId };
 }
 
 test('an existing conversation keeps the shared icon and submits its chosen pool and policies through the original Execution API', async () => {
@@ -205,7 +205,6 @@ test.each([false, true])('repeated submit and steer shortcuts cannot resend or q
   const composer = mount();
   let accept!: (value: Awaited<ReturnType<typeof ipcBridge.conversation.sendMessage.invoke>>) => void;
   composer.send.mockImplementation(() => new Promise(resolve => { accept = resolve; }));
-  const steer = spyOn(ipcBridge.conversation.steer, 'invoke').mockResolvedValue(undefined as never);
 
   await composer.submit('Send this once');
   await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
@@ -216,9 +215,8 @@ test.each([false, true])('repeated submit and steer shortcuts cannot resend or q
     fireEvent.keyDown(composer.input, { key: 'Enter', ctrlKey: true });
   });
   expect(composer.send).toHaveBeenCalledTimes(1);
-  expect(steer).not.toHaveBeenCalled();
   expect(composer.input.value).toBe('Send this once');
-  expect(composer.view.container.querySelector('[data-command-queue-list]') === null).toBe(true);
+  expect(composer.view.queryByTestId('session-input-queue')).toBeNull();
 
   await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false }));
 });
@@ -255,10 +253,118 @@ test('an active Turn accepts ordinary input into its existing owner instead of a
   expect((radio as HTMLButtonElement).disabled).toBe(true);
   await composer.submit();
   await waitFor(() => expect(composer.input.value).toBe(''));
-  expect(ipcBridge.conversation.steer.invoke).not.toHaveBeenCalled();
   expect(composer.create).not.toHaveBeenCalled();
   expect(composer.send).toHaveBeenCalledTimes(1);
-  expect(composer.view.queryByTestId('command-queue-panel')).toBeNull();
+  expect(composer.send.mock.calls[0][0].delivery).toEqual({ kind: 'queue' });
+  expect(composer.view.queryByTestId('session-input-queue')).toBeNull();
+});
+
+test.each(['enter', 'mod-enter'] as const)('ordinary busy sends always queue with the existing %s shortcut', async sendKey => {
+  configService.setLocal('chat.sendKey', sendKey);
+  const composer = mount({ busy: true });
+  fireEvent.change(composer.input, { target: { value: 'An independent queued instruction' } });
+  expect(composer.view.getByTestId('sendbox-stop-btn')).toBeTruthy();
+  fireEvent.keyDown(composer.input, { key: 'Enter', ctrlKey: sendKey === 'mod-enter' });
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
+  expect(composer.send.mock.calls[0][0].delivery).toEqual({ kind: 'queue' });
+});
+
+test('guiding is an explicit draft action beside Stop and ordinary Send', async () => {
+  const composer = mount({ busy: true });
+  expect(composer.view.queryByTestId('sendbox-guide-btn')).toBeNull();
+  fireEvent.change(composer.input, { target: { value: 'A correction for the observed Turn' } });
+  const guide = composer.view.getByTestId('sendbox-guide-btn');
+  expect(guide.getAttribute('title')).toBe('conversation.sendbox.guideHint');
+  expect(composer.view.getByTestId('sendbox-stop-btn')).toBeTruthy();
+  expect(composer.view.getByTestId('sendbox-send-btn')).toBeTruthy();
+  fireEvent.click(guide);
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
+  expect(composer.send.mock.calls[0][0].delivery).toEqual({ kind: 'prefer_current', turn_id: composer.pausedTurnId });
+});
+
+test('guiding is unavailable without a known active Turn and Ctrl+Enter remains an ordinary send', async () => {
+  const composer = mount();
+  draft.config = { execution_model_pool: { mode: 'single', model: main }, execution_template_id: null, delegation_policy: 'automatic', decision_policy: 'automatic' };
+  fireEvent.change(composer.input, { target: { value: 'A normal independent request' } });
+  expect(composer.view.queryByTestId('sendbox-guide-btn')).toBeNull();
+  fireEvent.keyDown(composer.input, { key: 'Enter', ctrlKey: true });
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
+  expect(composer.send.mock.calls[0][0].delivery).toEqual({ kind: 'queue' });
+});
+
+test.each([false, true])('Stop names observed T even if successor A has already taken ownership (%s)', async successorStarted => {
+  const composer = mount({ busy: true });
+  const successor = parseMessageId(uuidv7());
+  let serverActive: typeof successor | undefined = successorStarted ? successor : composer.pausedTurnId;
+  const cancelled: Array<typeof successor> = [];
+  // Model the exact-target server boundary: omission would select its newer
+  // active Turn, so this checks the actual UI request rather than UI labels.
+  const stop = spyOn(ipcBridge.conversation.stop, 'invoke').mockImplementation(async request => {
+    const target = request.expected_turn_id ?? serverActive;
+    if (target && target === serverActive) { cancelled.push(target); serverActive = undefined; }
+  });
+  fireEvent.click(composer.view.getByTestId('sendbox-stop-btn'));
+  await waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
+  expect(stop.mock.calls[0][0]).toEqual({ conversation_id: composer.conversation.id, expected_turn_id: composer.pausedTurnId });
+  expect(cancelled).toEqual(successorStarted ? [] : [composer.pausedTurnId]);
+  expect(serverActive).toBe(successorStarted ? successor : undefined);
+});
+
+test('Stop without a known target reconciles authority without selecting the latest Turn', async () => {
+  const reconcile = spyOn(activity, 'reconcileAfterStreamTerminal').mockImplementation(noop);
+  const composer = mount({ busy: true, knownTarget: false });
+  const stop = spyOn(ipcBridge.conversation.stop, 'invoke').mockResolvedValue();
+  fireEvent.change(composer.input, { target: { value: 'Keep this independent draft' } });
+  expect(composer.view.queryByTestId('sendbox-guide-btn')).toBeNull();
+  fireEvent.click(composer.view.getByTestId('sendbox-stop-btn'));
+  await waitFor(() => expect(reconcile).toHaveBeenCalled());
+  expect(stop).not.toHaveBeenCalled();
+  expect(warning).toHaveBeenCalledWith('conversation.stop.awaitingTarget');
+  expect(composer.input.value).toBe('Keep this independent draft');
+});
+
+test('IME composition never submits either send behavior', async () => {
+  const composer = mount({ busy: true });
+  fireEvent.change(composer.input, { target: { value: '输入中的消息' } });
+  fireEvent.compositionStart(composer.input);
+  fireEvent.keyDown(composer.input, { key: 'Enter' });
+  fireEvent.keyDown(composer.input, { key: 'Enter', ctrlKey: true });
+  await act(async () => {});
+  expect(composer.send).not.toHaveBeenCalled();
+  expect(composer.input.value).toBe('输入中的消息');
+});
+
+test('a lost Guide acknowledgement retries its original target through ordinary Send', async () => {
+  const composer = mount({ busy: true });
+  composer.send.mockRejectedValueOnce(new Error('accepted response lost'));
+  fireEvent.change(composer.input, { target: { value: 'This precise supplement' } });
+  fireEvent.click(composer.view.getByTestId('sendbox-guide-btn'));
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
+  const original = composer.send.mock.calls[0][0];
+  expect(original.delivery).toEqual({ kind: 'prefer_current', turn_id: composer.pausedTurnId });
+  act(() => composer.setBusy(false));
+  await composer.submit('This precise supplement');
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(2));
+  expect(composer.send.mock.calls[1][0]).toEqual(original);
+});
+
+test('a late accepted response cannot clear another Session draft or its attachments', async () => {
+  const composer = mount({ busy: true });
+  let accept!: (value: Awaited<ReturnType<typeof ipcBridge.conversation.sendMessage.invoke>>) => void;
+  composer.send.mockImplementationOnce(() => new Promise(resolve => { accept = resolve; }));
+  act(() => emitter.emit('nomi.selected.file', ['/project/brief.txt']));
+  await composer.view.findByText('brief.txt');
+  await composer.submit('Original Session request');
+  await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
+  act(() => composer.navigate(parseConversationId(uuidv7())));
+  const nextInput = composer.view.getByTestId('sendbox-input') as HTMLTextAreaElement;
+  fireEvent.change(nextInput, { target: { value: 'Keep the new Session draft' } });
+  act(() => emitter.emit('nomi.selected.file', ['/project/brief.txt']));
+  await composer.view.findByText('brief.txt');
+  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false }));
+  expect(nextInput.value).toBe('Keep the new Session draft');
+  expect(composer.view.getByText('brief.txt')).toBeTruthy();
+  expect(composer.send).toHaveBeenCalledTimes(1);
 });
 
 test('a technical pause accepts information through the same intake and retries a lost acknowledgement with its original payload and key', async () => {
@@ -273,7 +379,6 @@ test('a technical pause accepts information through the same intake and retries 
   expect(composer.send.mock.calls[1][0]).toEqual(composer.send.mock.calls[0][0]);
   expect(composer.send.mock.calls[0][0]).not.toHaveProperty('target');
   expect(composer.send.mock.calls[0][0]).not.toHaveProperty('expected_wait');
-  expect(ipcBridge.conversation.steer.invoke).not.toHaveBeenCalled();
   expect(composer.create).not.toHaveBeenCalled();
   await waitFor(() => expect(composer.input.value).toBe(''));
 });
@@ -288,7 +393,6 @@ test.each(['idle', 'running', 'paused'] as const)('a local image capability refu
   await act(async () => {});
   expect(composer.input.value).toBe('Preserve this unsent explanation');
   expect(composer.view.getByText('photo.png')).toBeTruthy();
-  expect(ipcBridge.conversation.steer.invoke).not.toHaveBeenCalled();
   expect(composer.send).not.toHaveBeenCalled();
   expect(composer.create).not.toHaveBeenCalled();
 });
@@ -319,7 +423,6 @@ test('an explicit non-admission receipt releases only that attempt and keeps the
   await composer.submit('Keep this exact draft');
   await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(2));
   expect(composer.send.mock.calls[1][0].idempotency_key).not.toBe(composer.send.mock.calls[0][0].idempotency_key);
-  expect(ipcBridge.conversation.steer.invoke).not.toHaveBeenCalled();
   await waitFor(() => expect(composer.input.value).toBe(''));
 });
 
@@ -383,7 +486,6 @@ test('a normal input handoff has no End Turn button and sends nonempty input thr
   await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
   expect(composer.send.mock.calls[0][0].conversation_id).toBe(composer.conversation.id);
   expect(composer.send.mock.calls[0][0]).not.toHaveProperty('expected_wait');
-  expect(ipcBridge.conversation.steer.invoke).not.toHaveBeenCalled();
   expect(composer.create).not.toHaveBeenCalled();
   expect(composer.fromTemplate).not.toHaveBeenCalled();
   await waitFor(() => expect(composer.input.value).toBe(''));

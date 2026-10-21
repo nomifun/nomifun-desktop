@@ -1,3 +1,6 @@
+import { type SessionInputDeliveryIntent } from '@/common/chat/inputSubmission';
+import type { InputDelivery } from '@/common/chat/inputDelivery';
+import type { SessionInputQueueAction } from '@/common/protocolBindings/SessionInputQueueAction';
 /**
  * @license
  * Copyright 2025-2026 NomiFun (nomifun.com)
@@ -1122,6 +1125,7 @@ export const conversation = {
       const result = await httpRequest<{ agent_session_id: string; message_id: string; status: string; replayed: boolean }>(
         'POST', `/api/agent-sessions/${p.conversation_id}/messages`, {
           idempotency_key: idempotencyKey,
+          ...(p.delivery ? { delivery: p.delivery } : {}),
           input: { content: p.input, files: p.files, inject_skills: p.inject_skills },
         }, { idempotencyKey, initialOnly: p.initial_only === true }
       );
@@ -1161,40 +1165,14 @@ export const conversation = {
       });
     },
   },
-  steer: {
-    provider: () => {},
-    invoke: async (p: ISendMessageParams & { expected_turn_id: MessageId }): Promise<ISendMessageResult> => {
-      const idempotencyKey = requireConversationIdempotencyKey(p.idempotency_key);
-      const result = await httpRequest<{
-        message_id: string;
-        duplicate: boolean;
-      }>(
-        'POST',
-        `/api/agent-sessions/${p.conversation_id}/turns/steer`,
-        {
-          idempotency_key: idempotencyKey,
-          expected_turn_id: parseMessageId(p.expected_turn_id),
-          ...(p.expected_wait ? { expected_wait: p.expected_wait } : {}),
-          input: {
-            content: p.input,
-            files: p.files,
-            inject_skills: p.inject_skills,
-          },
-        },
-        { idempotencyKey }
-      );
-      return fromApiSendMessageResult({
-        msg_id: parseMessageId(result.message_id),
-        replayed: result.duplicate,
-        completed: false,
-        result_ok: null,
-        result_text: null,
-        result_error: null,
-        result_error_code: null,
-        result_error_retryable: null,
-      });
-    },
-  },
+  inputQueue: httpGet<SessionInputQueueSnapshot, { conversation_id: ConversationId }>(
+    p => `/api/agent-sessions/${p.conversation_id}/input-queue`
+  ),
+  updateInputQueue: httpPost<SessionInputQueueSnapshot, {
+    conversation_id: ConversationId; idempotency_key: string; expected_version: number; action: SessionInputQueueAction;
+  }>(p => `/api/agent-sessions/${p.conversation_id}/input-queue`, p => ({
+    idempotency_key: requireConversationIdempotencyKey(p.idempotency_key), expected_version: p.expected_version, action: p.action,
+  })),
   responseStream: wsMappedEmitter<IResponseMessage>('message.stream', (raw) =>
     fromApiResponseMessage(raw as IResponseMessage)
   ),
@@ -3243,6 +3221,16 @@ export const terminal = {
 // Shared types (re-exported for consumers)
 // ---------------------------------------------------------------------------
 
+export type SessionInputQueueItem = {
+  message_id: MessageId;
+  input: { content: string; files?: string[]; inject_skills?: string[] };
+  delivery: SessionInputDeliveryIntent;
+  input_delivery: InputDelivery;
+  held: boolean;
+};
+export type SessionInputQueueSnapshot = { version: number; items: SessionInputQueueItem[] };
+export type { SessionInputQueueAction } from '@/common/protocolBindings/SessionInputQueueAction';
+
 interface ISendMessageParams {
   /** Deliverable obligation only; it never grants Plugin tools. */
   input: string;
@@ -3252,8 +3240,7 @@ interface ISendMessageParams {
   /** Automatic Guid/QuickStart handoff; never set for explicit user sends. */
   initial_only?: boolean;
   inject_skills?: string[];
-  /** A reply may only wake the exact canonical waiting event the user saw. */
-  expected_wait?: { turn_id: MessageId; wait_seq: number };
+  delivery?: SessionInputDeliveryIntent;
 }
 
 // Server-assigned identifier for the newly created user message. Clients must

@@ -14,7 +14,6 @@ import { prepareOfficialAgent } from '@/renderer/pages/guid/hooks/officialAgentL
 import { emptyCreationDraft, useCreationDraft } from './useCreationDraft';
 import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } from './submission';
 import { validateCreationTasks } from './client';
-import { createQueuedCommandItem, normalizeQueueState } from '@/renderer/pages/conversation/platforms/useConversationCommandQueue';
 import { creationParameterPolicy, creationVideoInputRoles } from './parameterPolicy';
 import { initialGenerationModel } from './useGenerationModel';
 import { recallCreationTask } from './recallTask';
@@ -323,16 +322,6 @@ describe('conversation creation admission and draft behavior', () => {
     const task = { creation_task_id: 'task', owner: { kind: 'conversation_turn', conversation_id: conversationId, message_id: messageId }, status: 'succeeded', result_asset_ids: [] };
     expect(() => validateCreationTasks([task], conversationId)).toThrow('no media');
     expect(() => validateCreationTasks([{ ...task, owner: { ...task.owner, conversation_id: 'foreign' } }], conversationId)).toThrow('does not belong');
-  });
-
-  test('queued ordinary messages cannot carry a per-turn Agent override', () => {
-    const item = createQueuedCommandItem({ input: 'Continue', files: [] });
-    const restored = normalizeQueueState({
-      items: [{ ...item, preset_id: presetId }],
-      isPaused: false,
-    }).items[0] as unknown as Record<string, unknown>;
-    expect(restored.input).toBe('Continue');
-    expect(restored).not.toHaveProperty('preset_id');
   });
 
   test('protocol policies do not submit OpenAI video duration or quality values to incompatible models', () => {

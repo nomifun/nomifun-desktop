@@ -72,7 +72,7 @@ async fn get_settings_default_values() {
     assert_eq!(json["data"]["language"], "en-US");
     assert_eq!(json["data"]["notification_enabled"], true);
     assert_eq!(json["data"]["cron_notification_enabled"], false);
-    assert_eq!(json["data"]["command_queue_enabled"], false);
+    assert!(json["data"].get("command_queue_enabled").is_none());
     assert!(json["data"].get("save_upload_to_workspace").is_none());
 }
 
@@ -99,7 +99,7 @@ async fn patch_settings_multiple_fields() {
         "/api/settings",
         serde_json::json!({
             "notification_enabled": false,
-            "command_queue_enabled": true
+            "cron_notification_enabled": true
         }),
     );
     let resp = app.oneshot(req).await.unwrap();
@@ -107,7 +107,7 @@ async fn patch_settings_multiple_fields() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["data"]["notification_enabled"], false);
-    assert_eq!(json["data"]["command_queue_enabled"], true);
+    assert_eq!(json["data"]["cron_notification_enabled"], true);
     assert_eq!(json["data"]["language"], "en-US");
 }
 
@@ -169,6 +169,17 @@ async fn patch_settings_retired_upload_preference_rejected() {
 }
 
 #[tokio::test]
+async fn patch_settings_retired_queue_setting_rejected_without_partial_write() {
+    let (app, db) = setup().await;
+    let request = json_request("PATCH", "/api/settings", serde_json::json!({
+        "language": "zh-CN", "command_queue_enabled": true
+    }));
+    assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    let response = system_routes(build_state(&db)).oneshot(get_request("/api/settings")).await.unwrap();
+    assert_eq!(body_json(response).await["data"]["language"], "en-US");
+}
+
+#[tokio::test]
 async fn patch_then_get_reflects_changes() {
     let (app, db) = setup().await;
 
@@ -176,7 +187,7 @@ async fn patch_then_get_reflects_changes() {
     let req = json_request(
         "PATCH",
         "/api/settings",
-        serde_json::json!({"language": "zh-CN", "command_queue_enabled": true}),
+        serde_json::json!({"language": "zh-CN", "cron_notification_enabled": true}),
     );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -187,7 +198,7 @@ async fn patch_then_get_reflects_changes() {
     let resp = app2.oneshot(get_request("/api/settings")).await.unwrap();
     let json = body_json(resp).await;
     assert_eq!(json["data"]["language"], "zh-CN");
-    assert_eq!(json["data"]["command_queue_enabled"], true);
+    assert_eq!(json["data"]["cron_notification_enabled"], true);
 }
 
 // ===========================================================================

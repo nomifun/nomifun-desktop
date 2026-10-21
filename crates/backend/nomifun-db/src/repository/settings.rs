@@ -17,6 +17,5 @@ pub trait ISettingsRepository: Send + Sync {
         language: Option<&str>,
         notification_enabled: Option<bool>,
         cron_notification_enabled: Option<bool>,
-        command_queue_enabled: Option<bool>,
     ) -> Result<SystemSettings, DbError>;
 }

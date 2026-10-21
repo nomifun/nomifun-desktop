@@ -24,7 +24,7 @@ pub use context_snapshot::{CanonicalContextMessage, CanonicalContextRole, ForkCo
 pub use error::SessionStoreError;
 pub use store::{
     ChannelInputDeliveryDisposition,RecoverableChannelInput,
-    AgentSessionStore, PendingSessionInput, SessionInputClaim, SessionInputBlockedReason, canonical_steering_input, is_session_input_event, session_input_namespace, MAX_EVENT_PAGE_SIZE, MAX_INLINE_JSON_BYTES, MAX_SESSION_PAYLOAD_BYTES,
+    AgentSessionStore, PendingSessionInput, SessionInputClaim, SessionInputBlockedReason, SessionInputQueueItem, SessionInputQueueSnapshot, canonical_steering_input, is_session_input_event, session_input_namespace, MAX_EVENT_PAGE_SIZE, MAX_INLINE_JSON_BYTES, MAX_SESSION_PAYLOAD_BYTES,
     MAX_SINGLE_PAYLOAD_BYTES,
     NativeCheckpoint, NativeCheckpointWrite, MAX_NATIVE_CHECKPOINT_BYTES,
     RuntimeStateObservation,

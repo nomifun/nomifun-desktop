@@ -31,7 +31,6 @@ impl SettingsService {
                 language: s.language,
                 notification_enabled: s.notification_enabled,
                 cron_notification_enabled: s.cron_notification_enabled,
-                command_queue_enabled: s.command_queue_enabled,
             }),
         )
     }
@@ -48,7 +47,6 @@ impl SettingsService {
                 req.language.as_deref(),
                 req.notification_enabled,
                 req.cron_notification_enabled,
-                req.command_queue_enabled,
             )
             .await
             .map_err(|e| AppError::Internal(format!("Failed to update settings: {e}")))?;
@@ -57,7 +55,6 @@ impl SettingsService {
             language: row.language,
             notification_enabled: row.notification_enabled,
             cron_notification_enabled: row.cron_notification_enabled,
-            command_queue_enabled: row.command_queue_enabled,
         })
     }
 }
@@ -137,12 +134,12 @@ mod tests {
         let svc = setup().await;
         let req = UpdateSettingsRequest {
             notification_enabled: Some(false),
-            command_queue_enabled: Some(true),
+            cron_notification_enabled: Some(true),
             ..Default::default()
         };
         let result = svc.update_settings(req).await.unwrap();
         assert!(!result.notification_enabled);
-        assert!(result.command_queue_enabled);
+        assert!(result.cron_notification_enabled);
         assert_eq!(result.language, "en-US");
     }
 
@@ -169,7 +166,7 @@ mod tests {
         let svc = setup().await;
         svc.update_settings(UpdateSettingsRequest {
             language: Some("zh-CN".into()),
-            command_queue_enabled: Some(true),
+            cron_notification_enabled: Some(true),
             ..Default::default()
         })
         .await
@@ -177,6 +174,6 @@ mod tests {
 
         let settings = svc.get_settings().await.unwrap();
         assert_eq!(settings.language, "zh-CN");
-        assert!(settings.command_queue_enabled);
+        assert!(settings.cron_notification_enabled);
     }
 }

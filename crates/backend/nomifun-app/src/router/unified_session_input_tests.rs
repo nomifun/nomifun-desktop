@@ -55,7 +55,7 @@ async fn ordinary_message_acceptance_and_original_key_replay_do_not_depend_on_th
     let (request,runtime)=prepare_live_steering(&fixture).await;
     let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
     let path=format!("/api/agent-sessions/{}/messages",session.as_ref());
-    let body=json!({"idempotency_key":"one-original-intent","input":{"content":"A safe-step decision"}});
+    let body=json!({"idempotency_key":"one-original-intent","delivery":{"kind":"prefer_current","turn_id":fixture.message.source_message_id},"input":{"content":"A safe-step decision"}});
     let (first,retry)=tokio::join!(api(&fixture._router,&path,body.clone()),api(&fixture._router,&path,body));
     assert_eq!(first["status"],"accepted");assert_eq!(first["message_id"],retry["message_id"]);
     assert!(first.get("operation_id").is_none());
@@ -109,8 +109,12 @@ async fn unavailable_selected_skill_is_saved_and_publicly_blocked_without_failin
     let (request,runtime)=prepare_live_steering(&fixture).await;
     let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
     let saved=api(&fixture._router,&format!("/api/agent-sessions/{}/messages",session.as_ref()),
-        json!({"idempotency_key":"unavailable-input-skill","input":{"content":"Use the selected reference", "inject_skills":["not-selected-in-this-snapshot"]}})).await;
+        json!({"idempotency_key":"unavailable-input-skill","delivery":{"kind":"prefer_current","turn_id":fixture.message.source_message_id},"input":{"content":"Use the selected reference", "inject_skills":["not-selected-in-this-snapshot"]}})).await;
     let id=nomifun_agent_contracts::EventId::from(saved["message_id"].as_str().unwrap());
+    let original=fixture.owner.canonical().store().session_input(&session,&id).await.unwrap();
+    assert_eq!(original.input.0["delivery_intent"]["kind"],"prefer_current");
+    assert!(original.input.0.get("delivery").is_none(),"intent must not shadow the current-generation content delivery envelope");
+    assert_eq!(original.input.0["inject_skills"],json!(["not-selected-in-this-snapshot"]));
     let cursor=fixture.owner.canonical().store().current_cursor(&session).await.unwrap().seq;
     let port=request.input_port.unwrap();assert!(port.take(&request.model_request.causality,false).await.unwrap().is_empty());
     let state=fixture.owner.canonical().store().session_input_delivery(&session,&id).await.unwrap();

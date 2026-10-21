@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseConversationId } from '@/common/types/ids';
+import { parseConversationId, parseMessageId } from '@/common/types/ids';
 import { conversation } from './ipcBridge';
 
 const source = readFileSync(new URL('./ipcBridge.ts', import.meta.url), 'utf8');
@@ -41,6 +41,34 @@ describe('ordinary message intake wire contract', () => {
     } });
     expect(source.includes('resumeInput:')).toBe(false);
     expect(source.includes('normalizeConversationInputAction')).toBe(false);
+  });
+
+  test.each([
+    { kind: 'queue' as const },
+    { kind: 'prefer_current' as const, turn_id: parseMessageId(message) },
+  ])('carries one frozen delivery intent through the ordinary intake', async delivery => {
+    globalThis.fetch = (async (url, init) => {
+      expect(String(url)).toContain(`/api/agent-sessions/${session}/messages`);
+      expect(JSON.parse(String(init?.body))).toEqual({ idempotency_key: 'frozen-intent', delivery,
+        input: { content: 'One user intention', files: ['reference.png'] } });
+      return new Response(JSON.stringify({ success: true, data: {
+        agent_session_id: session, message_id: message, status: 'accepted', replayed: false,
+      } }), { headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    await conversation.sendMessage.invoke({ conversation_id: session, input: 'One user intention', files: ['reference.png'],
+      idempotency_key: 'frozen-intent', delivery });
+  });
+
+  test('queue mutation addresses the original input and its queue version without resending content', async () => {
+    globalThis.fetch = (async (url, init) => {
+      expect(String(url)).toContain(`/api/agent-sessions/${session}/input-queue`);
+      expect(JSON.parse(String(init?.body))).toEqual({ idempotency_key: 'queue-command', expected_version: 12,
+        action: { kind: 'promote', message_id: message, turn_id: message } });
+      return new Response(JSON.stringify({ success: true, data: { version: 13, items: [] } }),
+        { headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    await expect(conversation.updateInputQueue.invoke({ conversation_id: session, idempotency_key: 'queue-command', expected_version: 12,
+      action: { kind: 'promote', message_id: parseMessageId(message), turn_id: parseMessageId(message) } })).resolves.toEqual({ version: 13, items: [] });
   });
 
   test.each([

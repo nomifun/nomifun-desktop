@@ -40,9 +40,6 @@ struct UpdateSettingsParams {
     /// System language code. Allowed: "en-US" or "zh-CN".
     #[serde(default)]
     language: Option<String>,
-    /// Enable/disable the command queue (batch-queued execution of LLM requests).
-    #[serde(default)]
-    command_queue_enabled: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -244,7 +241,6 @@ async fn update_settings(deps: Arc<SystemCapabilityDeps>, p: UpdateSettingsParam
         // Agent grant. Its existing settings UI remains the owner.
         notification_enabled: None,
         cron_notification_enabled: None,
-        command_queue_enabled: p.command_queue_enabled,
     };
     if req.is_empty() {
         return json!({ "error": "nothing to update: provide at least one field" });
@@ -407,7 +403,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_system_update_settings",
             "system",
-            "Partially update Agent-safe system settings (language and command queue). Notification delivery remains platform-owned.",
+            "Update the system language. Notification delivery remains platform-owned.",
             EffectClass::Write,
         ),
         adapt(update_settings),
@@ -580,5 +576,15 @@ mod tests {
         assert!(serde_json::from_value::<UpdateSettingsParams>(json!({
             "save_upload_to_workspace": true
         })).is_err());
+    }
+
+    #[test]
+    fn retired_queue_setting_has_no_agent_settings_grant_or_schema() {
+        assert!(serde_json::from_value::<UpdateSettingsParams>(json!({
+            "command_queue_enabled": true
+        })).is_err());
+        let schema = serde_json::to_value(schemars::schema_for!(UpdateSettingsParams)).unwrap();
+        assert!(schema["properties"].get("command_queue_enabled").is_none());
+        assert!(schema["properties"].get("language").is_some());
     }
 }

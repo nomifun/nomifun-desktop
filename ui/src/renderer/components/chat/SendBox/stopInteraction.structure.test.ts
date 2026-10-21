@@ -45,48 +45,20 @@ describe('SendBox stop interaction', () => {
         stopResultIndex
       );
       const confirmIndex = platform.source.indexOf('confirmStopped();', statusIndex);
-      const queueResetIndex = platform.source.indexOf("resetActiveExecution('external-reset');", statusIndex);
 
       expect(stopResultIndex >= 0).toBe(true);
       expect(statusIndex > stopResultIndex).toBe(true);
       expect(confirmIndex > statusIndex).toBe(true);
-      expect(queueResetIndex > statusIndex).toBe(true);
       expect(platform.source.includes('getTurnCompletionGeneration')).toBe(true);
       expect(platform.source.includes('shouldReleaseStopInteraction(stopAttemptStatus)')).toBe(true);
     }
   });
 
-  test('manual stop pauses the remaining queue before releasing the active execution gate', () => {
+  test('Stop delegates durable queue ownership to the Host', () => {
     for (const platform of platformSendBoxes) {
-      const stop = platform.source.indexOf('const stopAttempt = beginStopAttempt();');
-      const pause = platform.source.indexOf('pause();', stop);
-      const reset = platform.source.indexOf("resetActiveExecution('stop');", stop);
-
-      expect(stop >= 0).toBe(true);
-      expect(pause > stop).toBe(true);
-      expect(reset > pause).toBe(true);
-    }
-  });
-
-  test('queue execution guards platform-local resolve and reject side effects', () => {
-    for (const platform of platformSendBoxes) {
-      const execute = platform.source.indexOf('const executeCommand = useCallback');
-      const invoke = platform.source.indexOf('.sendMessage.invoke({', execute);
-      const resolveFence = platform.source.indexOf(
-        'if (execution && !execution.isCurrent()) return;',
-        invoke
-      );
-      const reject = platform.source.indexOf('catch (error', resolveFence);
-      const rejectFence = platform.source.indexOf(
-        'if (execution && !execution.isCurrent()) return;',
-        reject
-      );
-
-      expect(execute >= 0).toBe(true);
-      expect(invoke > execute).toBe(true);
-      expect(resolveFence > invoke).toBe(true);
-      expect(reject > resolveFence).toBe(true);
-      expect(rejectFence > reject).toBe(true);
+      expect(platform.source.includes('resetActiveExecution')).toBe(false);
+      expect(platform.source.includes('useConversationCommandQueue')).toBe(false);
+      expect(platform.source.includes('stopConversationAndConfirmRelease(conversation_id')).toBe(true);
     }
   });
 });

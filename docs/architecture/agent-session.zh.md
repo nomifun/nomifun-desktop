@@ -480,8 +480,17 @@ checkpoint，只有收到提交回执才续段。空轮询、轮询参数变化�
 
 普通消息统一通过 `/messages` 受理。Host 在原 Session 操作边界提交一次 `message/user-accepted`，
 返回稳定 message ID、cursor 与 accepted 回执；保存输入不等于获准执行。前端只保留未发送草稿和
-原 payload/幂等键的重投身份，不持有业务派发队列，不选择 steer/new-turn/resume 或携带 checkpoint。
-Host 从同一 canonical 事件链派生未消费输入；活动 Turn 在安全边界 claim，空闲时建立后继 Turn。
+原 payload/幂等键的重投身份，不持有业务派发队列，也不选择执行／恢复或携带 checkpoint。
+普通人工输入 API 的 `delivery` 是 typed 用户意图，在 canonical accepted payload 唯一保存为 `delivery_intent`，
+与现役自动任务／continuation 的 `delivery` 内容封套区分。缺省 `queue`，只允许成为独立后继 Turn 的根输入；
+`prefer_current` 携带发送时观察到的确切 Turn source-message UUID，仅该 Turn 可在安全边界领取。
+目标必须是同一 Session 的真实 canonical Turn；合法过期目标的未领取输入按队列顺序作为后继根输入，
+不改投其他活动 Turn。已经 claim 或 native 交付未知的输入保留原证明，不能回退为新回合重放。
+普通发送和发送键固定排队；会话中的显式“引导”操作提交 `prefer_current`，模型请求和在途工具不会因此被强行打断。
+不提供发送方式偏好或模式设置。提交时固定正文、附件、技能、意图、目标和幂等身份；后续导航不改变重投。
+`chat.sendKey` 仅控制发送键和换行，保留原有用户选择。
+Host 从同一 canonical 事件链派生未消费输入；资格先于分页限制，由 Store 的同一规则约束查询和最终 claim，
+`has_pending`／take／wait 不把排队输入当作当前回合可消费输入。领域、渠道及 native exact controls 不读 UI 偏好。
 消费事实只引用原输入，不重复存正文，不新增队列表、消息恢复台账或第二份上下文。
 新输入的 native delivery 同样由 Store 保存原 claim/accepted 引用，并在读取时验证 Session、Turn、
 因果与字段后还原 Runtime typed 内容；缺失原事实拒绝读取，不以旧 Runtime 正文回退。
@@ -493,6 +502,17 @@ Host 从同一 canonical 事件链派生未消费输入；活动 Turn 在安全�
 展示为 `cancelled` / `CANCELLED_BY_OWNER`，与可修复的附件或 Skill 准备阻塞分开，不提供重试原输入按钮。
 当前素材准备受阻以原输入关联的 typed 状态说明原因，不伪造成失败 Turn，不阻塞无关的有效新消息。
 未知 Effect、技术暂停及领域许可继续限制执行，普通消息不会增加预算、承认清理或隐式恢复 native 执行。
+
+`/input-queue` 只读投影原 accepted 输入及引用它们的 `message/input-queue-changed`，不建立队列表、正文镜像或
+第二执行账本。控制命令有独立稳定幂等键及仅由队列相关事实派生的版本；remove／clear 只取消未 claim 输入，
+不能因领取竞争升级为停止实际 Turn。编辑取消原待处理输入并回草稿，重新发送使用新身份；排序只记录输入引用。
+排队项的“引导”在同一 writer 追加原消息的确切目标意图，不以取消后复制正文重发实现。重复命令不复活已取消输入。
+普通 composer Stop 在原取消 writer 同事务持久 hold 已接受的普通输入截止点，然后向确切 native owner 发信号；
+不经过业务控制 FIFO，不取消队列内容，也不扩大到领域、渠道或后台资源。显式 resume 才解除原 hold；新输入
+不释放已暂停批次。正常关闭和重启保留 pending／hold，后台恢复沿原 Host 准入，GET、投影和缓存不派发任务。
+renderer 不读取、导入或执行已退役的本地 `command-queue`。当前代交付未知的原 payload／key 则仍只用于确认
+原受理回执，不回填其历史意图。孤儿 `command_queue_enabled` 及普通 `/turns/steer` 新写入口已退役；现役领域／
+native exact steering 和必要同代历史解释保留。
 
 前向 `/messages` 和 renderer history 复用同一 canonical Turn 结果派生；问题从原提交事件即
 可读取，不依赖另一份正文写入。增量游标取真实事件序号，分页保留边界同序号的完整消息组。

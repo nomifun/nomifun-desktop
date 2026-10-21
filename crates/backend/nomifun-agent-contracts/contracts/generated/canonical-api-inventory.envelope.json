@@ -415,6 +415,36 @@
         ]
       },
       {
+        "operation_id": "agent_sessions.messages.accept",
+        "method": "POST",
+        "path": "/api/agent-sessions/{agent_session_id}/messages",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.input_queue.get",
+        "method": "GET",
+        "path": "/api/agent-sessions/{agent_session_id}/input-queue",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.input_queue.update",
+        "method": "POST",
+        "path": "/api/agent-sessions/{agent_session_id}/input-queue",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
         "operation_id": "agent_sessions.turn_files",
         "method": "GET",
         "path": "/api/agent-sessions/{agent_session_id}/turn-files?turn_ids={turn_ids}",
@@ -648,5 +678,5 @@
       "/v1/tools?profile"
     ]
   },
-  "payload_digest": "6addf6ddc6847571816ad3cd67db7d807002d4b843d4de7febcb01eeda7d12d6"
+  "payload_digest": "a431a9aa7a5c28fde9803c79b00ac4a84f4a1cfdc6c2fee2e674eb624371b386"
 }
