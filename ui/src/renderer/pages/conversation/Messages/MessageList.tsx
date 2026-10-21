@@ -1136,7 +1136,6 @@ const MessageList: React.FC<{
         return;
       }
       setPendingQuestionJump(null);
-      setHighlightedMessageId(detail.messageId ?? detail.msgId);
 
       hideScrollButton();
       requestAnimationFrame(() => requestAnimationFrame(() => {
