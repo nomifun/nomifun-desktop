@@ -49,6 +49,30 @@ enum ScreenCaptureProbeStatus { Ready, Unavailable, TimedOut, ProbeFailed }
 #[serde(deny_unknown_fields)]
 struct ScreenCaptureProbeResponse { status: ScreenCaptureProbeStatus }
 
+// Only these user path values cross the private worker boundary for app launch.
+// Unix byte arrays preserve non-UTF-8 paths without forwarding arbitrary host
+// environment variables (which can contain provider credentials).
+#[cfg(target_os = "linux")]
+fn linux_user_launch_context(
+    environment: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    cwd: std::path::PathBuf,
+) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    const KEYS: &[&str] = &[
+        "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME",
+        "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMPDIR", "TMP", "TEMP",
+        "XDG_DATA_DIRS",
+    ];
+    let mut values: std::collections::BTreeMap<&str, Option<Vec<u8>>> =
+        KEYS.iter().map(|key| (*key, None)).collect();
+    for (key, value) in environment {
+        if let Some(entry) = key.to_str().and_then(|key| values.get_mut(key)) {
+            *entry = Some(value.as_bytes().to_vec());
+        }
+    }
+    serde_json::json!({"cwd": cwd.as_os_str().as_bytes(), "environment": values}).to_string()
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
     pub executable: PathBuf,
@@ -736,6 +760,16 @@ impl Actor {
                 builder.env(key, value);
             }
         }
+        // This trusted launch context is consumed only by the Linux app
+        // launcher. The worker itself keeps its private HOME/XDG/TMP and cwd.
+        #[cfg(target_os = "linux")]
+        builder.env(
+            "CUA_DRIVER_RS_USER_LAUNCH_CONTEXT",
+            linux_user_launch_context(
+                std::env::vars_os(),
+                std::env::current_dir().map_err(|error| CallError::unavailable(error.to_string()))?,
+            ),
+        );
         // Resolve the inherited login user's authority before HOME is isolated.
         #[cfg(target_os = "linux")]
         if std::env::var_os("XAUTHORITY").is_none() {

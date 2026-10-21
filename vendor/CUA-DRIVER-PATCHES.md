@@ -25,7 +25,10 @@ fixture is imported.
 | [0001-platform-core-without-default-features.patch](patches/cua-driver/0001-platform-core-without-default-features.patch) | D04: prevent platform dependency feature unification from re-enabling `rego`, `yaml` and `script`; remove the Windows Spectre-library build dependency. | The `cua-driver-core` dependency in `platform-linux`, `platform-macos` and `platform-windows` Cargo manifests only. |
 | [0002-x11-owned-input-crash-cleanup.patch](patches/cua-driver/0002-x11-owned-input-crash-cleanup.patch) | User-authorized exception on 2026-10-20 for the reproduced X11 input cleanup defect: give foreground XTEST an exact owned device pair and pre-runtime cleanup guardian, and conditionally restore only native-owner-authored temporary keymap rows. Preserve upstream background delivery and keyboard-layout planning. | `platform-linux/src/input/{interactive.rs,mod.rs,targeted.rs}` and the new `owned_xtest.rs` source module. |
 | [0003-windows-user-app-lifetime.patch](patches/cua-driver/0003-windows-user-app-lifetime.patch) | User-authorized exception on 2026-10-20 for the reproduced Windows launch lifetime defect: user applications must survive normal worker retirement. Launch through a capability-bound one-shot helper whose exact native parent is the existing same-user interactive shell. Preserve the driver's Job and precise launch PID; never fall back to launching inside that Job. | `platform-windows/Cargo.toml` (`Win32_System_Environment` API feature) and `src/{lib.rs,user_app_launch.rs,tools/impl_.rs}`. |
-| [0004-macos-direct-capture-consent-home.patch](patches/cua-driver/0004-macos-direct-capture-consent-home.patch) | User-authorized exception on 2026-10-21 for the reproduced macOS consent lookup defect: private worker `HOME` is writable driver state, not the native account home that owns replayd metadata. Resolve the read-only approval path through `getpwuid_r`, while keeping private write roots and the existing Missing/Unknown policy. Direct embedded-host consent guidance to the host's explicit Screen Recording / Verify capture setup. | `platform-macos/src/capture_consent.rs` only. |
+| [0004-linux-user-app-lifetime.patch](patches/cua-driver/0004-linux-user-app-lifetime.patch) | Restore the existing user-application lifetime and launch environment contract after a native normal-shutdown reproduction: separate launched applications from the worker process group, restore only original user directory/cwd values and use the same boundary for direct and xdg-open launches. Read user desktop-entry search roots from the same trusted context. | `platform-linux/src/{lib.rs,user_app_launch.rs,installed_apps.rs,tools/impl_.rs}`. |
+| [0005-x11-reparented-client-fallback.patch](patches/cua-driver/0005-x11-reparented-client-fallback.patch) | Restore window discovery on the reproduced WSLg reparenting case: when both EWMH client lists are absent, recursively locate ICCCM `WM_STATE` clients below WM frames. Preserve present-empty EWMH authority, visible root fallback and stacking order. | `platform-linux/src/x11/mod.rs` and focused pure traversal coverage in that source. |
+| [0006-atspi-insert-text-utf8-length.patch](patches/cua-driver/0006-atspi-insert-text-utf8-length.patch) | Repair the reproduced GTK TextView Unicode no-op: pass checked UTF-8 byte lengths to AT-SPI `EditableText.InsertText` in typing and set-value fallback. Preserve character-based caret offsets. | The two insert-length calculations in `platform-linux/src/atspi/native.rs` only. |
+| [0007-macos-direct-capture-consent-home.patch](patches/cua-driver/0007-macos-direct-capture-consent-home.patch) | User-authorized exception on 2026-10-21 for the reproduced macOS consent lookup defect: private worker `HOME` is writable driver state, not the native account home that owns replayd metadata. Resolve the read-only approval path through `getpwuid_r`, while keeping private write roots and the existing Missing/Unknown policy. Direct embedded-host consent guidance to the host's explicit Screen Recording / Verify capture setup. | `platform-macos/src/capture_consent.rs` only. |
 
 The X11 cleanup patch also drains the original core pointer's hover client and
 keyboard-focus client when a device pair was created but input binding had not
@@ -46,11 +49,11 @@ Creation and retirement recover an existing pair through its retained exact
 native name before draining it. An empty cached pair does not prove that no pair
 exists; partial discovery or inspection errors retain the same owner for cleanup.
 
-There are exactly four registered patches. The latter three are the narrowly
-authorized input-cleanup, user-app lifetime and macOS consent-lookup exceptions recorded in the sole implementation plan's
-[execution progress](../docs/handoffs/computer-use-rebuild.zh.md#12-单份执行进展);
-They do not authorize any other driver behavior changes. The Windows helper has
-no persistent endpoint, accepts one nonce-bound typed file request, and inherits no
+There are seven registered patches. The latter six repair reproduced input-cleanup,
+user-app launch/lifetime, window-discovery, UTF-8 input and macOS consent-lookup defects within the authorized D04 scope, recorded in
+the sole implementation plan's [execution progress](../docs/handoffs/computer-use-rebuild.zh.md#12-单份执行进展).
+Further behavior changes must be necessary registered defect fixes under that same scope.
+The Windows helper has no persistent endpoint, accepts one nonce-bound typed file request, and inherits no
 worker handles at creation. Before any user-app launch it duplicates only the
 existing host stderr pipe as a non-inheritable native lifetime handle. Host EOF
 therefore continues to cover a launch-capable helper after its worker exits;
@@ -61,6 +64,12 @@ shell token, and its working directory is that token's user profile. Private
 driver HOME, XDG, CUA and temporary-directory overrides never reach the user app.
 It changes neither process-runtime Job limits nor system permissions. Both direct
 Win32 and ShellExecute paths, including secondary URLs, use the same launch boundary.
+The Linux launcher keeps the worker's supervised process group intact and places
+only opened user applications in separate process groups. The host's byte-preserving
+launch context contains only original HOME/XDG/TMP paths and cwd, never arbitrary
+provider environment values. The context and all CUA variables are removed from
+launched applications; desktop-entry discovery reads the original user search roots
+without changing the worker's private write locations.
 Do not edit imported
 sources. Change the registered patch and resync if an approved source change is
 needed. Sync verifies the existing owned files against their recorded hashes
@@ -75,6 +84,7 @@ The existing capture guard and `CUA_DRIVER_ALLOW_CAPTURE_CONSENT_ALERT` branch
 are unchanged; the embedding-host hint does not suggest that bypass. A matching
 OS record is not proof that a real capture succeeded. The host's explicit
 permission flow remains responsible for any native prompt and live verification.
+
 
 `cua-driver/SOURCE.json` records every upstream path/blob, final SHA-256, the
 workspace extraction and registered patch hashes. Run:
