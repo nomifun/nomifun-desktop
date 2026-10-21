@@ -32,7 +32,10 @@ async fn call(
         .call(
             session,
             session,
-            "computer/click",
+            // These are transport/owner tests with a fake worker, not native
+            // input tests. The real guide traverses the same dispatch queue
+            // without requiring the test runner's macOS Accessibility grant.
+            "computer/get_guide",
             args,
             &all(),
             true,
@@ -372,4 +375,175 @@ async fn expired_driver_binding_is_replaced_without_replaying_an_action() {
     assert_ne!(first, second);
     assert!(calls(root.path()).is_empty());
     bounded(actor.retire()).await.unwrap();
+}
+
+fn screen_capture_requests(root: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(root.join("computer-driver/screen-capture.jsonl"))
+        .unwrap_or_default().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+fn enqueue_screen_capture(computer: &Computer) -> oneshot::Receiver<Result<(), CallError>> {
+    let (reply, receiver) = oneshot::channel();
+    computer.sender.send(Command::RequestScreenCapture(reply)).unwrap();
+    receiver
+}
+
+fn change_screen_capture_fixture(root: &std::path::Path, config: &mut WorkerConfig, response: &str) {
+    let source = include_str!("../tests/fake-worker.mjs");
+    let changed = source.replace("respond(request,{status:'ready'});continue;", response);
+    assert_ne!(changed, source);
+    let script = root.join("screen-capture-worker.mjs");
+    std::fs::write(&script, changed).unwrap();
+    config.prefix_args = vec![script.into_os_string()];
+}
+
+#[tokio::test]
+async fn screen_capture_denied_does_not_start_worker() {
+    let (root, mut config) = fixture();
+    config.screen_capture_granted = Some(false);
+    let computer = Computer::new(config);
+    let error = bounded(enqueue_screen_capture(&computer)).await.unwrap().unwrap_err();
+    assert_eq!(error.code, "SYSTEM_PERMISSION_REQUIRED");
+    assert_eq!(error.kind, CallErrorKind::BeforeDispatch);
+    assert!(!root.path().join("computer-driver").exists());
+    assert!(!computer.status().running);
+    bounded(computer.shutdown()).await.unwrap();
+}
+
+#[tokio::test]
+async fn closed_queued_screen_capture_observer_never_dispatches() {
+    let (root, mut config) = fixture();
+    config.screen_capture_granted = Some(true);
+    let computer = Arc::new(Computer::new(config));
+    let gate = root.path().join("release");
+    let active = tokio::spawn(call(computer.clone(), "a", json!({"wait_for_file":gate}), InvocationControl::default()));
+    until(|| calls(root.path()).len() == 1).await;
+    drop(enqueue_screen_capture(&computer));
+    std::fs::write(gate, []).unwrap();
+    let before = active.await.unwrap().unwrap();
+    let after = call(computer.clone(), "a", json!({}), InvocationControl::default()).await.unwrap();
+    assert_eq!(before.generation, after.generation);
+    assert!(screen_capture_requests(root.path()).is_empty());
+    bounded(computer.shutdown()).await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_screen_capture_retires_generation_and_old_session_binding() {
+    let (root, mut config) = fixture();
+    config.screen_capture_granted = Some(true);
+    let computer = Arc::new(Computer::new(config));
+    let before = call(computer.clone(), "a", json!({}), InvocationControl::default()).await.unwrap();
+    bounded(enqueue_screen_capture(&computer)).await.unwrap().unwrap();
+    assert!(!computer.status().running);
+    let probes = screen_capture_requests(root.path());
+    assert_eq!(probes.len(), 1);
+    assert_eq!(probes[0]["generation"], before.generation);
+    assert!(probes[0]["session"].is_null());
+    let after = call(computer.clone(), "a", json!({}), InvocationControl::default()).await.unwrap();
+    assert_ne!(before.generation, after.generation);
+    assert_eq!(calls(root.path()).len(), 2);
+    bounded(computer.shutdown()).await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_or_malformed_screen_capture_is_an_error_and_retires_exact_owner() {
+    for response in [
+        "respond(request,{status:'unavailable'});continue;",
+        "respond(request,{status:'ready',unexpected:'not status metadata'});continue;",
+        "respond(request,true);continue;",
+    ] {
+        let (root, mut config) = fixture();
+        config.screen_capture_granted = Some(true);
+        change_screen_capture_fixture(root.path(), &mut config, response);
+        let computer = Computer::new(config);
+        let error = bounded(enqueue_screen_capture(&computer)).await.unwrap().unwrap_err();
+        assert_eq!(error.code, "COMPUTER_SCREEN_CAPTURE_REQUEST_FAILED");
+        assert_eq!(screen_capture_requests(root.path()).len(), 1);
+        assert!(!computer.status().running);
+        bounded(computer.shutdown()).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn dropped_inflight_screen_capture_observer_keeps_owner_until_result_and_retirement() {
+    let (root, mut config) = fixture();
+    config.screen_capture_granted = Some(true);
+    let gate = root.path().join("release");
+    change_screen_capture_fixture(root.path(), &mut config, &format!(
+        "while(!existsSync({}))await sleep(5);respond(request,{{status:'ready'}});continue;", serde_json::to_string(&gate).unwrap()));
+    let computer = Arc::new(Computer::new(config));
+    let receiver = enqueue_screen_capture(&computer);
+    until(|| screen_capture_requests(root.path()).len() == 1).await;
+    let generation = screen_capture_requests(root.path())[0]["generation"].as_str().unwrap().to_owned();
+    drop(receiver);
+    assert!(computer.status().running);
+    let next = tokio::spawn(call(computer.clone(), "a", json!({}), InvocationControl::default()));
+    std::fs::write(gate, []).unwrap();
+    assert_ne!(bounded(next).await.unwrap().unwrap().generation, generation);
+    assert_eq!(screen_capture_requests(root.path()).len(), 1);
+    bounded(computer.shutdown()).await.unwrap();
+}
+
+#[tokio::test]
+async fn screen_capture_native_deadline_retires_without_retry() {
+    let (root, mut config) = fixture();
+    config.screen_capture_granted = Some(true);
+    config.screen_capture_timeout = Some(Duration::from_millis(40));
+    change_screen_capture_fixture(root.path(), &mut config, "await new Promise(()=>setInterval(()=>{},1000));");
+    let computer = Computer::new(config);
+    let error = bounded(enqueue_screen_capture(&computer)).await.unwrap().unwrap_err();
+    assert!(error.message.contains("native probe deadline"));
+    assert_eq!(screen_capture_requests(root.path()).len(), 1);
+    assert!(!computer.status().running);
+    bounded(computer.shutdown()).await.unwrap();
+}
+
+#[tokio::test]
+async fn app_shutdown_preempts_screen_capture_native_deadline() {
+    let (root, mut config) = fixture();
+    config.screen_capture_granted = Some(true);
+    change_screen_capture_fixture(root.path(), &mut config, "await new Promise(()=>setInterval(()=>{},1000));");
+    let computer = Computer::new(config);
+    let receiver = enqueue_screen_capture(&computer);
+    until(|| screen_capture_requests(root.path()).len() == 1).await;
+    tokio::time::timeout(Duration::from_secs(2), computer.shutdown()).await.unwrap().unwrap();
+    assert!(receiver.await.unwrap().is_err());
+    assert_eq!(screen_capture_requests(root.path()).len(), 1);
+    assert!(!computer.status().running);
+}
+
+#[tokio::test]
+async fn worker_timed_out_metadata_reaps_the_still_blocked_native_owner() {
+    let (root, mut config) = fixture();
+    config.screen_capture_granted = Some(true);
+    change_screen_capture_fixture(root.path(), &mut config,
+        "respond(request,{status:'timed_out'});await new Promise(()=>setInterval(()=>{},1000));");
+    let computer = Computer::new(config);
+    let error = tokio::time::timeout(Duration::from_secs(2), enqueue_screen_capture(&computer)).await.unwrap().unwrap().unwrap_err();
+    assert!(error.message.contains("timed out"));
+    assert_eq!(screen_capture_requests(root.path()).len(), 1);
+    assert!(!computer.status().running);
+    bounded(computer.shutdown()).await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_during_probe_never_reports_a_late_ready_as_success() {
+    let (root, mut config) = fixture();
+    config.screen_capture_granted = Some(true);
+    let gate = root.path().join("release");
+    change_screen_capture_fixture(root.path(), &mut config, &format!(
+        "while(!existsSync({}))await sleep(5);respond(request,{{status:'ready'}});continue;", serde_json::to_string(&gate).unwrap()));
+    let computer = Arc::new(Computer::new(config));
+    let receiver = enqueue_screen_capture(&computer);
+    until(|| screen_capture_requests(root.path()).len() == 1).await;
+    let quitting = computer.clone();
+    let shutdown = tokio::spawn(async move { quitting.shutdown().await });
+    until(|| computer.shutdown_requested.is_cancelled()).await;
+    std::fs::write(gate, []).unwrap();
+    let error = bounded(receiver).await.unwrap().unwrap_err();
+    assert_eq!(error.code, "COMPUTER_SCREEN_CAPTURE_REQUEST_CANCELLED");
+    assert_eq!(error.kind, CallErrorKind::Cancelled);
+    bounded(shutdown).await.unwrap().unwrap();
+    assert!(!computer.status().running);
+    assert_eq!(screen_capture_requests(root.path()).len(), 1);
 }

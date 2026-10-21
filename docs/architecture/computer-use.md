@@ -10,7 +10,7 @@ The package is `nomifun.computer`, mount `domain-computer`, capability `computer
 
 The [frozen inventory](../../crates/backend/nomifun-agent-contracts/contracts/computer-tools.v1.json) comes from actual platform worker lists. The [compact overrides](../../crates/backend/nomifun-agent-contracts/contracts/computer-tools.overrides.v1.json) own localized presentation, loading groups, permission metadata and parameter removal. `scripts/computer/generate-contracts.mjs` derives all 22 exact Actions, typed Wave2 operations, presentation records and both official template grants. Hosts, UI and documentation must not maintain another action catalogue.
 
-Canonical authorization accepts the captured native schema forms. Model tools use the exact frozen schema for the actual host platform. Windows and Linux captures exist; macOS capture remains a platform task. Missing capture evidence must not be reported as native acceptance.
+Canonical authorization accepts the captured native schema forms. Model tools use the exact frozen schema for the actual host platform. Windows, Linux and macOS captures exist. Inventory capture verifies tool definitions; native actions and permission behavior require separate platform acceptance.
 
 ## Invocation and process ownership
 
@@ -39,6 +39,8 @@ The Broker projects tools and instructions again for each actual route and adapt
 Frozen `system_permissions` metadata determines live per-call checks. Missing access uses the existing `SYSTEM_PERMISSION_REQUIRED` carrier and does not report execution. Driver status is `GET /api/computer/status`. System access remains under `/api/system/permissions` and its request/open-settings endpoints; old Computer permission aliases are removed.
 
 Status reads the current generation's cache without starting a worker or retrying a probe. `backend` identifies the initialized native dispatch family, not permission, UIA, capture or universal action readiness. Linux `atspi` comes from that worker's read-only accessibility-bus probe at initialization. Missing or failed diagnostics stay unknown and retire with the generation; each action still relies on its current checks and native result.
+
+On macOS, the registered consent patch reads the OS approval metadata from the native account home while driver writes remain in its private HOME/XDG directories. A CG Screen Recording grant alone does not prove capture readiness. The existing permission request endpoint exposes an explicit **Verify capture** action after that grant. The same worker owner serializes a host-only private-protocol request that takes the upstream 16×16 verification frame; it returns status metadata and retains no pixels. This is not a model tool or Agent Session. Failure returns an HTTP error with the unchanged CG inventory. The owner retires the exact generation after the probe, including its consent cache and bindings; timeout and application shutdown retain cleanup responsibility until the process is reaped. Status reads never trigger this request or a system prompt.
 
 macOS targets 14+ with direct App-to-worker spawning and the same distribution signing identity. Actual TCC attribution and installed behavior still require platform verification. Windows uses the current login session at ordinary integrity; elevated targets retain structured driver refusal rather than an administrator desktop bridge. Linux currently uses X11/XWayland and AT-SPI. Native Wayland capture remains disabled; portal support, desktop backends and the GNOME helper require their own evidence.
 

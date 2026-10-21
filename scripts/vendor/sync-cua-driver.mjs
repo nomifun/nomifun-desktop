@@ -19,6 +19,7 @@ const patchPaths = [
   'vendor/patches/cua-driver/0001-platform-core-without-default-features.patch',
   'vendor/patches/cua-driver/0002-x11-owned-input-crash-cleanup.patch',
   'vendor/patches/cua-driver/0003-windows-user-app-lifetime.patch',
+  'vendor/patches/cua-driver/0004-macos-direct-capture-consent-home.patch',
 ];
 const metadataName = 'SOURCE.json';
 const patchApplication = 'git-apply-text-lf';

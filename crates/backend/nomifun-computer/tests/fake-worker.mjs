@@ -12,6 +12,10 @@ for await(const line of createInterface({input:process.stdin})){
  if(request.operation==='bind_session'){respond(request,{session_handle:`binding-${++binding}`});continue;}
  if(request.operation==='close_session'){respond(request,{closed:true});continue;}
  if(request.operation==='shutdown'){respond(request,{shutdown:true});break;}
+ if(request.operation==='request_screen_capture'){
+  appendFileSync(join(process.env.CUA_DRIVER_RS_HOME,'screen-capture.jsonl'),JSON.stringify({generation,session:request.session_handle??null})+'\n');
+  respond(request,{status:'ready'});continue;
+ }
  if(request.operation==='call'){
   const args=request.arguments??{};
   appendFileSync(join(process.env.CUA_DRIVER_RS_HOME,'calls.jsonl'),JSON.stringify({label:args.label,generation,session:request.session_handle})+'\n');

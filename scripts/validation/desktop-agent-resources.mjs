@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { sourceIdentity } from '../lib/source-identity.mjs';
+import { computerGuideForLifecycle } from './desktop-computer-resource-proof.mjs';
 
 const option = (key) => { const index = process.argv.indexOf(key); return index < 0 ? undefined : process.argv[index + 1]; };
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -44,17 +45,9 @@ await mkdir(artifacts, { recursive: false });
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 let computerGuide, computerDefinition;
 if (withComputer) {
-  assert(windows && ready.mode === 'quit', 'Computer resource observation is only enabled for normal Windows Quit');
   const path = join(repository, 'crates/backend/nomifun-agent-contracts/contracts/computer-tools.v1.json');
   const bytes = await readFile(path);
-  const tools = JSON.parse(bytes).tools.filter((tool) => tool.driver_tool === 'get_guide');
-  assert.equal(tools.length, 1, 'The guide must have one frozen definition');
-  computerGuide = tools[0];
-  const schema = computerGuide.platforms.windows.input_schema;
-  assert.equal(schema.type, 'object'); assert.equal((schema.required ?? []).length, 0, 'The guide must accept an empty object');
-  assert.equal(computerGuide.effect_class, 'Pure');
-  assert.equal(computerGuide.system_permissions.accessibility, false);
-  assert.equal(computerGuide.system_permissions.screen_recording, 'never');
+  computerGuide = computerGuideForLifecycle(JSON.parse(bytes), process.platform, ready.mode);
   computerDefinition = { path, sha256: createHash('sha256').update(bytes).digest('hex'),
     action_id: computerGuide.action_id, model_tool: computerGuide.model_tool, arguments: {} };
 }

@@ -241,6 +241,25 @@ fn malformed_request_is_rejected_and_channel_can_shutdown() {
 }
 
 #[test]
+fn host_screen_capture_request_rejects_tool_arguments_or_session_before_capture() {
+    let mut worker = initialized();
+    // Never send the valid capture request here: protocol CI has no authority
+    // to prompt TCC or capture the user's desktop.
+    for (arguments, name, session) in [
+        (Some(json!({})), None, None),
+        (None, Some("get_window_state"), None),
+        (None, None, Some("unbound")),
+    ] {
+        let request = worker.request("request_screen_capture", arguments, name, session);
+        let response = worker.exchange(&request).unwrap();
+        assert!(!response.ok);
+        assert_eq!(response.error_code.as_deref(), Some("invalid_request"));
+        assert_eq!(response.completion, ActionCompletion::NotStarted);
+    }
+    shutdown(worker);
+}
+
+#[test]
 fn initialization_identity_must_match_before_runtime_creation() {
     for variant in ["generation", "protocol", "request_id", "operation"] {
         let mut worker = spawn();

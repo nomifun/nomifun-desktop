@@ -19,6 +19,10 @@
     {
       "path": "vendor/patches/cua-driver/0003-windows-user-app-lifetime.patch",
       "sha256": "6700e4d1a822ca63b61eca5d716e3770470943398c5bd4c6b78656365b35e5fa"
+    },
+    {
+      "path": "vendor/patches/cua-driver/0004-macos-direct-capture-consent-home.patch",
+      "sha256": "d34c106dc51a30a600b206efba29f86d6c6f1d42d30720b955c53ca7cfdf7ff1"
     }
   ],
   "files": [
@@ -1852,7 +1856,8 @@
       "path": "crates/platform-macos/src/capture_consent.rs",
       "upstream_path": "libs/cua-driver/rust/crates/platform-macos/src/capture_consent.rs",
       "upstream_blob": "62752a2f054b62493923f4727016971b33a1c4f9",
-      "sha256": "484a5dfe8482c6899d1545626a1559dfedb41c1a790cbde4a265be5702688874"
+      "transform": "macOS-native-consent-home",
+      "sha256": "590af1289dfd3bba590d64e09d748bf7d216510288da26e0d5a91655409796d2"
     },
     {
       "path": "crates/platform-macos/src/capture.rs",

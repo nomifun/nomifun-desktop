@@ -1036,7 +1036,7 @@ fn create_nomi_core_router_with_all_state(
         Router::new()
             .route(
                 "/api/system/permissions/request",
-                post(request_system_permission),
+                request_system_permission(services),
             )
             .route(
                 "/api/system/permissions/open-settings",

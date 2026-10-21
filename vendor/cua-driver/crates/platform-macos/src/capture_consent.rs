@@ -63,18 +63,18 @@ pub fn capture_blocked_reason() -> Option<String> {
         RECORDED.store(true, Ordering::Relaxed);
         return None;
     }
+    let bundle_id = crate::tools::main_bundle_identifier();
+    let host_permission_flow = cua_driver_core::embedded_mode()
+        || !matches!(bundle_id.as_deref(), Some("com.trycua.driver" | "com.trycua.driver.local"));
     if let Ok(last) = LAST_MISS.lock() {
         if last.is_some_and(|at| at.elapsed() < NEGATIVE_RECHECK) {
-            return Some(blocked_message(&bundle));
+            return Some(blocked_message(&bundle, host_permission_flow));
         }
     }
-    let home = std::env::var_os("HOME")?;
-    let bundle_id = crate::tools::main_bundle_identifier();
-    match consent_state(
-        &Path::new(&home).join(APPROVALS_RELATIVE_PATH),
-        &bundle,
-        bundle_id.as_deref(),
-    ) {
+    // HOME may intentionally name an embedding host's private writable state.
+    // replayd owns this read-only OS record in the native user's account home.
+    let home = native_user_home()?;
+    match consent_state_in_home(&home, &bundle, bundle_id.as_deref()) {
         ConsentState::Recorded | ConsentState::Unknown => {
             RECORDED.store(true, Ordering::Relaxed);
             None
@@ -83,12 +83,22 @@ pub fn capture_blocked_reason() -> Option<String> {
             if let Ok(mut last) = LAST_MISS.lock() {
                 *last = Some(Instant::now());
             }
-            Some(blocked_message(&bundle))
+            Some(blocked_message(&bundle, host_permission_flow))
         }
     }
 }
 
-fn blocked_message(bundle: &Path) -> String {
+fn blocked_message(bundle: &Path, host_permission_flow: bool) -> String {
+    if host_permission_flow {
+        return format!(
+            "{CONSENT_REQUIRED_CODE}: screen capture skipped. macOS has not yet asked whether {} \
+             may capture the screen directly, and the first capture would show that system alert \
+             over the user's window and take their keyboard focus. Open the host application's \
+             Screen Recording permissions and explicitly choose Verify capture so any system \
+             confirmation appears during that user-requested setup. The accessibility tree is unaffected.",
+            bundle.file_name().and_then(|name| name.to_str()).unwrap_or("the host app")
+        );
+    }
     format!(
         "{CONSENT_REQUIRED_CODE}: screen capture skipped. macOS has not yet asked whether {} \
          may capture the screen directly, and the first capture would show that system alert \
@@ -101,6 +111,63 @@ fn blocked_message(bundle: &Path) -> String {
             .and_then(|name| name.to_str())
             .unwrap_or("Cua Driver")
     )
+}
+
+// Account lookup is independent of HOME/XDG/CUA writable-root overrides.
+// Failure stays unknown: it must never fall back to a caller-selected HOME.
+fn native_user_home() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::mem::MaybeUninit;
+
+    const MAX_ACCOUNT_BUFFER: usize = 1024 * 1024;
+    // SAFETY: sysconf/getuid only read process/account metadata.
+    let recommended = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    let mut size = usize::try_from(recommended)
+        .ok()
+        .filter(|size| *size > 0)
+        .unwrap_or(16 * 1024)
+        .min(MAX_ACCOUNT_BUFFER);
+    let uid = unsafe { libc::getuid() };
+    loop {
+        let mut account = MaybeUninit::<libc::passwd>::zeroed();
+        let mut result = std::ptr::null_mut();
+        let mut buffer = vec![0u8; size];
+        // SAFETY: account/result and the scratch buffer remain valid through
+        // the call and until pw_dir has been copied into an owned PathBuf.
+        let status = unsafe {
+            libc::getpwuid_r(
+                uid,
+                account.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE {
+            size = size.checked_mul(2).filter(|next| *next <= MAX_ACCOUNT_BUFFER)?;
+            continue;
+        }
+        if status != 0 || result.is_null() {
+            return None;
+        }
+        // SAFETY: successful getpwuid_r initialized the account record.
+        let account = unsafe { account.assume_init() };
+        if account.pw_dir.is_null() {
+            return None;
+        }
+        let directory = unsafe { CStr::from_ptr(account.pw_dir) };
+        return native_home_from_bytes(directory.to_bytes());
+    }
+}
+
+fn native_home_from_bytes(directory: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let home = PathBuf::from(std::ffi::OsStr::from_bytes(directory));
+    home.is_absolute().then_some(home)
+}
+
+fn consent_state_in_home(home: &Path, bundle: &Path, bundle_id: Option<&str>) -> ConsentState {
+    consent_state(&home.join(APPROVALS_RELATIVE_PATH), bundle, bundle_id)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,5 +373,49 @@ mod tests {
         std::fs::write(&file, b"not a plist").unwrap();
         assert_eq!(consent_state(&file, bundle, id), ConsentState::Unknown);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_account_home_requires_an_absolute_path() {
+        assert_eq!(native_home_from_bytes(b"/native/account"), Some(PathBuf::from("/native/account")));
+        assert_eq!(native_home_from_bytes(b""), None);
+        assert_eq!(native_home_from_bytes(b"private/driver"), None);
+    }
+
+    #[test]
+    fn os_approval_lookup_is_separate_from_the_private_writable_home() {
+        let root = tempfile::tempdir().unwrap();
+        let native_home = root.path().join("native-account");
+        let private_home = root.path().join("private-driver-state");
+        let native_approvals = native_home.join(APPROVALS_RELATIVE_PATH);
+        let private_approvals = private_home.join(APPROVALS_RELATIVE_PATH);
+        std::fs::create_dir_all(native_approvals.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(private_approvals.parent().unwrap()).unwrap();
+        let bundle = Path::new("/Applications/EmbeddingHost.app");
+        let bundle_id = Some("com.example.embedding-host");
+
+        write_plist(&native_approvals, &["com.example.embedding-host"]);
+        assert_eq!(consent_state_in_home(&native_home, bundle, bundle_id), ConsentState::Recorded);
+        assert_eq!(consent_state_in_home(&private_home, bundle, bundle_id), ConsentState::Missing);
+
+        // Private state cannot stand in for an OS-authored account record.
+        write_plist(&private_approvals, &["com.example.embedding-host"]);
+        std::fs::remove_file(&native_approvals).unwrap();
+        assert_eq!(consent_state_in_home(&native_home, bundle, bundle_id), ConsentState::Missing);
+        std::fs::write(&native_approvals, b"unreadable plist format").unwrap();
+        assert_eq!(consent_state_in_home(&native_home, bundle, bundle_id), ConsentState::Unknown);
+    }
+
+    #[test]
+    fn embedded_capture_hint_uses_host_setup_without_cli_or_environment_bypass() {
+        let bundle = Path::new("/Applications/EmbeddingHost.app");
+        let host = blocked_message(bundle, true);
+        assert!(host.contains("Screen Recording"));
+        assert!(host.contains("Verify capture"));
+        assert!(!host.contains("cua-driver permissions grant"));
+        assert!(!host.contains(ALLOW_ALERT_ENV));
+        let standalone = blocked_message(Path::new("/Applications/CuaDriver.app"), false);
+        assert!(standalone.contains("cua-driver permissions grant"));
+        assert!(standalone.contains(ALLOW_ALERT_ENV));
     }
 }

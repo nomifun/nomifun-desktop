@@ -34,6 +34,20 @@ const QUEUED: u8 = 0;
 const DISPATCHED: u8 = 1;
 const CANCELLED: u8 = 2;
 const FINISHED: u8 = 3;
+#[cfg(any(target_os = "macos", test))]
+// The native worker uses the upstream 10-second direct-capture budget; leave
+// one second for its private-channel response, then reap the exact owner.
+const SCREEN_CAPTURE_REQUEST_TIMEOUT: Duration = Duration::from_secs(11);
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ScreenCaptureProbeStatus { Ready, Unavailable, TimedOut, ProbeFailed }
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScreenCaptureProbeResponse { status: ScreenCaptureProbeStatus }
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
@@ -48,6 +62,10 @@ pub struct WorkerConfig {
     prefix_args: Vec<OsString>,
     #[cfg(test)]
     call_timeout: Option<Duration>,
+    #[cfg(test)]
+    screen_capture_granted: Option<bool>,
+    #[cfg(test)]
+    screen_capture_timeout: Option<Duration>,
 }
 
 #[cfg(test)]
@@ -66,6 +84,10 @@ impl WorkerConfig {
             prefix_args: Vec::new(),
             #[cfg(test)]
             call_timeout: None,
+            #[cfg(test)]
+            screen_capture_granted: None,
+            #[cfg(test)]
+            screen_capture_timeout: None,
         }
     }
 }
@@ -177,6 +199,8 @@ struct QueuedCall {
 }
 enum Command {
     Call(QueuedCall),
+    #[cfg(any(target_os = "macos", test))]
+    RequestScreenCapture(oneshot::Sender<Result<(), CallError>>),
     Close(String, oneshot::Sender<Result<(), CallError>>),
     Shutdown(oneshot::Sender<Result<(), CallError>>),
 }
@@ -261,6 +285,25 @@ impl Computer {
         receiver
             .await
             .map_err(|_| CallError::unavailable("Session cleanup owner stopped"))?
+    }
+    /// Only an explicit host permission request may call this. Status, caches,
+    /// model tools and Session reconstruction never start this native probe.
+    pub async fn request_screen_capture(&self) -> Result<(), CallError> {
+        #[cfg(target_os = "macos")]
+        {
+            if !self.accepting.load(Ordering::Acquire) {
+                return Err(CallError::unavailable("Computer owner is shutting down"));
+            }
+            let (reply, receiver) = oneshot::channel();
+            self.sender.send(Command::RequestScreenCapture(reply))
+                .map_err(|_| CallError::unavailable("Computer owner has stopped"))?;
+            receiver.await.map_err(|_| CallError::unavailable("Screen capture request owner stopped"))?
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(CallError::new(CallErrorKind::BeforeDispatch, "COMPUTER_PLATFORM_UNSUPPORTED",
+                "Explicit screen capture consent is only supported on macOS"))
+        }
     }
     pub async fn shutdown(&self) -> Result<(), CallError> {
         self.accepting.store(false, Ordering::Release);
@@ -510,6 +553,19 @@ impl Actor {
                 }
                 queue.push_back(request);
             }
+            #[cfg(any(target_os = "macos", test))]
+            Command::RequestScreenCapture(reply) => {
+                // A dropped HTTP observer has no authority to start a later
+                // prompt. An already dispatched probe remains with this owner.
+                if !reply.is_closed() {
+                    let result = self.request_screen_capture(&reply).await;
+                    self.last_activity = Instant::now();
+                    self.publish(if self.cleanup_pending { "cleanup_pending" }
+                        else if self.live.is_some() { "ready" } else { "stopped" },
+                        result.as_ref().err().map(ToString::to_string));
+                    let _ = reply.send(result);
+                }
+            }
             Command::Close(session, reply) => {
                 if let Some(queue) = self.queues.remove(&session) {
                     for request in queue {
@@ -567,6 +623,77 @@ impl Actor {
             }
         }
         false
+    }
+    #[cfg(any(target_os = "macos", test))]
+    async fn request_screen_capture(&mut self, reply: &oneshot::Sender<Result<(), CallError>>) -> Result<(), CallError> {
+        if self.shutdown_requested.is_cancelled() || reply.is_closed() {
+            return Err(CallError::cancelled());
+        }
+        #[cfg(test)]
+        let granted = self.config.screen_capture_granted.or_else(permissions::screen_recording_granted);
+        #[cfg(not(test))]
+        let granted = permissions::screen_recording_granted();
+        if granted != Some(true) {
+            return Err(CallError::new(CallErrorKind::BeforeDispatch, "SYSTEM_PERMISSION_REQUIRED",
+                "Screen Recording is not granted; no verification capture was dispatched"));
+        }
+        let already_running = self.live.is_some();
+        self.start().await?;
+        if self.shutdown_requested.is_cancelled() || reply.is_closed() {
+            if !already_running { self.retire().await?; }
+            return Err(CallError::cancelled());
+        }
+        self.publish("busy", None);
+        let budget = SCREEN_CAPTURE_REQUEST_TIMEOUT;
+        #[cfg(test)]
+        let budget = self.config.screen_capture_timeout.unwrap_or(budget);
+        let result = {
+            let response = self.live.as_mut().unwrap().exchange("request_screen_capture", None, None, None);
+            tokio::pin!(response);
+            tokio::select! {
+                result = tokio::time::timeout(budget, &mut response) => result,
+                _ = self.shutdown_requested.cancelled() => tokio::time::timeout(self.config.shutdown_timeout, &mut response).await,
+            }
+        };
+        let response = match result {
+            Ok(Ok(response)) => response,
+            other => {
+                let message = match other {
+                    Ok(Err(error)) => error.to_string(),
+                    Err(_) => "Explicit screen capture verification exceeded its native probe deadline".into(),
+                    _ => unreachable!(),
+                };
+                self.live.as_mut().unwrap().input.take();
+                self.retire().await?;
+                return Err(CallError::unavailable(message));
+            }
+        };
+        let probe = response.result.clone().and_then(|value| serde_json::from_value::<ScreenCaptureProbeResponse>(value).ok());
+        if probe.as_ref().is_some_and(|probe| probe.status == ScreenCaptureProbeStatus::TimedOut) {
+            // Dropping a spawn_blocking future does not end the native call.
+            // Skip graceful IPC and reap this exact worker before replying.
+            self.live.as_mut().unwrap().input.take();
+        }
+        // Explicit consent can change while AX/CG Boolean grants stay true.
+        // Retire this exact generation even then; no old snapshot or negative
+        // consent cache may survive into a subsequent Agent operation.
+        self.retire().await?;
+        if self.shutdown_requested.is_cancelled() {
+            return Err(CallError::new(CallErrorKind::Cancelled, "COMPUTER_SCREEN_CAPTURE_REQUEST_CANCELLED",
+                "Application shutdown retired the screen capture verification worker"));
+        }
+        if !response.ok || response.completion != ActionCompletion::Completed
+            || !probe.as_ref().is_some_and(|probe| probe.status == ScreenCaptureProbeStatus::Ready) {
+            let diagnostic = match probe.map(|probe| probe.status) {
+                Some(ScreenCaptureProbeStatus::TimedOut) => "The native verification capture timed out; its worker was retired",
+                Some(ScreenCaptureProbeStatus::ProbeFailed) => "The native verification capture could not complete",
+                Some(ScreenCaptureProbeStatus::Unavailable) => "The driver could not capture a verification frame; the native permission state remains unchanged",
+                _ => "The worker returned an invalid screen capture verification response",
+            };
+            return Err(CallError::new(CallErrorKind::Unavailable, "COMPUTER_SCREEN_CAPTURE_REQUEST_FAILED",
+                response.error.unwrap_or_else(|| diagnostic.into())));
+        }
+        Ok(())
     }
     async fn start(&mut self) -> Result<(), CallError> {
         if self.cleanup_pending {

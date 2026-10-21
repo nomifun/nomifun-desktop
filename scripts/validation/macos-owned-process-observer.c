@@ -69,7 +69,7 @@ int main(int argc, char **argv) {
     process->parent_pid = verify_program(process->pid, argv[index * 2 + 2]);
     struct kevent request, receipt;
     EV_SET(&request, process->pid, EVFILT_PROC, EV_ADD | EV_ENABLE | EV_ONESHOT | EV_RECEIPT,
-      NOTE_EXIT, 0, (void *)(intptr_t)index);
+      NOTE_EXIT | NOTE_EXITSTATUS, 0, (void *)(intptr_t)index);
     struct timespec immediate = {0, 0};
     if (kevent(queue, &request, 1, &receipt, 1, &immediate) != 1 || receipt.ident != (uintptr_t)process->pid
         || receipt.filter != EVFILT_PROC || !(receipt.flags & EV_ERROR) || receipt.data != 0)
@@ -96,8 +96,8 @@ int main(int argc, char **argv) {
           || !(events[event].fflags & NOTE_EXIT) || events[event].ident != (uintptr_t)processes[index].pid
           || processes[index].exited) fail("unexpected_native_exit_event");
       processes[index].exited = 1; exited++;
-      printf("{\"event\":\"exit\",\"index\":%d,\"pid\":%d,\"note_exit\":true,\"native_status\":%ld}\n",
-        index, processes[index].pid, (long)events[event].data);
+      printf("{\"event\":\"exit\",\"index\":%d,\"pid\":%d,\"note_exit\":true,\"note_exit_status\":%s,\"native_status\":%ld}\n",
+        index, processes[index].pid, events[event].fflags & NOTE_EXITSTATUS ? "true" : "false", (long)events[event].data);
     }
     if (exited == count) break;
     ssize_t length = read(STDIN_FILENO, input + used, sizeof(input) - used - 1);

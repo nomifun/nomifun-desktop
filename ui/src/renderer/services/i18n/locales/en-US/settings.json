@@ -346,6 +346,9 @@
     "loadFailed": "The latest system permission state could not be read. Return to the desktop app and try again.",
     "restartAfterGrant": "Re-check after granting. If macOS requests a restart or access remains unavailable, completely quit and reopen NomiFun, then resume the task.",
     "requestAccess": "Request access",
+    "verifyCapture": "Verify capture",
+    "verifyCaptureDescription": "macOS may ask you to confirm the first direct screen capture. Respond to the system prompt.",
+    "verifyCaptureFailed": "Could not verify capture. Check any macOS confirmation and try again.",
     "openSystemSettings": "Open System Settings",
     "tabs": {
       "overview": "Overview",

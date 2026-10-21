@@ -75,9 +75,13 @@ const PermissionRow: React.FC<PermissionRowProps> = ({
 }) => {
   const { t } = useTranslation();
   const state = entry?.state ?? 'unknown';
+  const verifyCapture = kind === 'screen_recording' && state === 'granted';
   return <VisualRow
     label={<><span>{title}</span><VisualStatus tone={statusTone(state)}>{t(`settings.capabilityPermissions.states.${state}`)}</VisualStatus></>}
     description={<>{description}
+      {verifyCapture && <span className='cv-row__note'>
+        {t('settings.capabilityPermissions.verifyCaptureDescription')}
+      </span>}
       {entry?.requires_restart_after_grant && !readyState(state) && <span className='cv-row__note'>
         {t('settings.capabilityPermissions.restartAfterGrant')}
       </span>}
@@ -85,7 +89,9 @@ const PermissionRow: React.FC<PermissionRowProps> = ({
   >
     {extraAction}
     {actionsEnabled && entry?.can_request && state !== 'denied' && state !== 'restricted' && (
-      <Button size='small' type='primary' loading={busy} onClick={() => onRequest?.(kind)}>{t('settings.capabilityPermissions.requestAccess')}</Button>
+      <Button size='small' type='primary' loading={busy} onClick={() => onRequest?.(kind)}>{t(verifyCapture
+        ? 'settings.capabilityPermissions.verifyCapture'
+        : 'settings.capabilityPermissions.requestAccess')}</Button>
     )}
     {actionsEnabled && entry?.can_open_settings && !readyState(state) && (
       <Button size='small' onClick={() => onOpenSettings?.(kind)}>{t('settings.capabilityPermissions.openSystemSettings')}</Button>
@@ -119,7 +125,10 @@ const CapabilityPermissionsContent: React.FC = () => {
   }, [setSearchParams]);
 
   const requestPermission = useCallback(async (kind: SystemPermissionKind) => {
-    const next = await request(kind);
+    const verifyCapture = kind === 'screen_recording' && screenRecording?.state === 'granted';
+    const next = await request(kind, verifyCapture
+      ? () => Message.error(t('settings.capabilityPermissions.verifyCaptureFailed'))
+      : undefined);
     const entry = systemPermissionEntry(next, kind);
     if (
       (kind === 'accessibility' || kind === 'screen_recording') &&
@@ -128,7 +137,7 @@ const CapabilityPermissionsContent: React.FC = () => {
     ) {
       await openSettings(kind);
     }
-  }, [openSettings, request]);
+  }, [openSettings, request, screenRecording?.state, t]);
 
   const testMicrophone = useCallback(async () => {
     setMicrophoneBusy(true);

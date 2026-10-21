@@ -25,6 +25,7 @@ fixture is imported.
 | [0001-platform-core-without-default-features.patch](patches/cua-driver/0001-platform-core-without-default-features.patch) | D04: prevent platform dependency feature unification from re-enabling `rego`, `yaml` and `script`; remove the Windows Spectre-library build dependency. | The `cua-driver-core` dependency in `platform-linux`, `platform-macos` and `platform-windows` Cargo manifests only. |
 | [0002-x11-owned-input-crash-cleanup.patch](patches/cua-driver/0002-x11-owned-input-crash-cleanup.patch) | User-authorized exception on 2026-10-20 for the reproduced X11 input cleanup defect: give foreground XTEST an exact owned device pair and pre-runtime cleanup guardian, and conditionally restore only native-owner-authored temporary keymap rows. Preserve upstream background delivery and keyboard-layout planning. | `platform-linux/src/input/{interactive.rs,mod.rs,targeted.rs}` and the new `owned_xtest.rs` source module. |
 | [0003-windows-user-app-lifetime.patch](patches/cua-driver/0003-windows-user-app-lifetime.patch) | User-authorized exception on 2026-10-20 for the reproduced Windows launch lifetime defect: user applications must survive normal worker retirement. Launch through a capability-bound one-shot helper whose exact native parent is the existing same-user interactive shell. Preserve the driver's Job and precise launch PID; never fall back to launching inside that Job. | `platform-windows/Cargo.toml` (`Win32_System_Environment` API feature) and `src/{lib.rs,user_app_launch.rs,tools/impl_.rs}`. |
+| [0004-macos-direct-capture-consent-home.patch](patches/cua-driver/0004-macos-direct-capture-consent-home.patch) | User-authorized exception on 2026-10-21 for the reproduced macOS consent lookup defect: private worker `HOME` is writable driver state, not the native account home that owns replayd metadata. Resolve the read-only approval path through `getpwuid_r`, while keeping private write roots and the existing Missing/Unknown policy. Direct embedded-host consent guidance to the host's explicit Screen Recording / Verify capture setup. | `platform-macos/src/capture_consent.rs` only. |
 
 The X11 cleanup patch also drains the original core pointer's hover client and
 keyboard-focus client when a device pair was created but input binding had not
@@ -45,8 +46,8 @@ Creation and retirement recover an existing pair through its retained exact
 native name before draining it. An empty cached pair does not prove that no pair
 exists; partial discovery or inspection errors retain the same owner for cleanup.
 
-There are exactly three registered behavior patches. The latter two are the narrowly
-authorized input-cleanup and user-app lifetime exceptions recorded in the sole implementation plan's
+There are exactly four registered patches. The latter three are the narrowly
+authorized input-cleanup, user-app lifetime and macOS consent-lookup exceptions recorded in the sole implementation plan's
 [execution progress](../docs/handoffs/computer-use-rebuild.zh.md#12-单份执行进展);
 They do not authorize any other driver behavior changes. The Windows helper has
 no persistent endpoint, accepts one nonce-bound typed file request, and inherits no
@@ -66,6 +67,14 @@ needed. Sync verifies the existing owned files against their recorded hashes
 before replacing the snapshot; local vendor edits are never overwritten.
 Runtime write locations are controlled by the private worker's environment,
 not by a vendor patch.
+
+The macOS consent patch reads only the native account's existing replayd record;
+it never writes or fabricates approvals and never falls back to an overridden
+`HOME`. Missing and unreadable/unknown records keep their upstream meanings.
+The existing capture guard and `CUA_DRIVER_ALLOW_CAPTURE_CONSENT_ALERT` branch
+are unchanged; the embedding-host hint does not suggest that bypass. A matching
+OS record is not proof that a real capture succeeded. The host's explicit
+permission flow remains responsible for any native prompt and live verification.
 
 `cua-driver/SOURCE.json` records every upstream path/blob, final SHA-256, the
 workspace extraction and registered patch hashes. Run:

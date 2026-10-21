@@ -12,11 +12,13 @@ import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { launchMacosApplication } from '../lib/macos-application-launch.mjs';
+import { macosComputerProcessProof } from './desktop-computer-resource-proof.mjs';
+import { verifyGuardedMacosBuild } from './macos-guarded-build-proof.mjs';
 
 const options = process.argv.slice(2);
 const option = (name) => { const index = options.indexOf(name); return index < 0 ? undefined : options[index + 1]; };
 if (options.includes('--help')) {
-  console.log('Use --app /ABS/NomiFun\ Dev.app --controller /ABS/macos_application_controller --fixture /ABS/browser_gui_fixture --observer /ABS/macos-owned-process-observer --appkit-probe /ABS/macos_appkit_termination_probe --bun /ABS/bun --mode appkit|sigint|sigterm|parent-death|cmd-q [--stop-first] [--retirement-observe-ms 70000] [--wk-inflight] [--matting-request]. Every run creates a private direct temporary root and retains failures. retirement-observe-ms requires stop-first and adds a 70000–180000 ms read-only fixture window after original native retirement proof; it is not a product TTL. matting-request verifies normal host cancellation of an original pending authenticated model-supply HTTP request; it is not available for parent-death. cmd-q writes gui-quit-ready.json and gives the authorized GUI operator 300 seconds from that readiness, then requires gui-quit-evidence.json with host_pid, app_path, shortcut="Cmd+Q", observed_at and nonempty absolute evidence_paths. It never generates keyboard evidence itself. Compile the observer with clang -Wall -Wextra -Werror scripts/validation/macos-owned-process-observer.c -o /ABS/observer.');
+  console.log('Use --app /ABS/NomiFun\ Dev.app --guarded-build-proof /ABS/EXTERNAL/build-proof.json --controller /ABS/macos_application_controller --fixture /ABS/browser_gui_fixture --observer /ABS/macos-owned-process-observer --appkit-probe /ABS/macos_appkit_termination_probe --bun /ABS/bun --mode appkit|sigint|sigterm|parent-death|cmd-q [--with-computer] [--stop-first] [--retirement-observe-ms 70000] [--wk-inflight] [--matting-request]. Before any preparer or App starts, the external proof must bind this exact signed debug Host to the reviewed guard/main source and existing build records; strict signature and compiled guard presence are checked. The matching runtime nonce receipt remains mandatory. Every run creates a private direct temporary root and retains failures. with-computer only accepts appkit/cmd-q and adds one permission-free canonical guide call plus the real bundled worker native lifetime/normal exit proof; it does not send desktop input or capture images. retirement-observe-ms requires stop-first and adds a 70000–180000 ms read-only fixture window after original native retirement proof; it is not a product TTL. matting-request verifies normal host cancellation of an original pending authenticated model-supply HTTP request; it is not available for parent-death. cmd-q writes gui-quit-ready.json and gives the authorized GUI operator 300 seconds from that readiness, then requires gui-quit-evidence.json with host_pid, app_path, shortcut="Cmd+Q", observed_at and nonempty absolute evidence_paths. It never generates keyboard evidence itself. Compile the observer with clang -Wall -Wextra -Werror scripts/validation/macos-owned-process-observer.c -o /ABS/observer.');
   process.exit(0);
 }
 assert.equal(process.platform, 'darwin', 'Actual macOS required');
@@ -24,6 +26,9 @@ const { DatabaseSync } = await import('node:sqlite');
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const mode = option('--mode') ?? 'appkit';
 assert(['appkit', 'sigint', 'sigterm', 'parent-death', 'cmd-q'].includes(mode));
+const withComputer = options.includes('--with-computer');
+assert(!withComputer || ['appkit', 'cmd-q'].includes(mode), 'Computer native cleanup observation requires normal AppKit/Cmd-Q');
+assert(!withComputer || !options.includes('--stop-first'), 'Computer Quit evidence requires its original worker live before Quit; use the separate Stop fixture without --with-computer');
 const retirementObserveMs = Number(option('--retirement-observe-ms') ?? 0);
 assert(Number.isSafeInteger(retirementObserveMs) && (retirementObserveMs === 0
   || (options.includes('--stop-first') && retirementObserveMs >= 70_000 && retirementObserveMs <= 180_000)),
@@ -35,6 +40,10 @@ for (const name of ['app', 'controller', 'fixture', 'observer', 'appkit-probe', 
   paths[name] = await realpath(option(`--${name}`));
 }
 const program = await realpath(join(paths.app, 'Contents/MacOS/nomifun-desktop'));
+const computerWorker = withComputer ? await realpath(join(paths.app, 'Contents/MacOS/nomifun-computer-worker')) : undefined;
+// Refuse stale descriptor-compatible Dev Apps before they can enter Keyboard
+// startup. A post-launch missing nonce receipt alone is too late for this case.
+const guardedBuild = await verifyGuardedMacosBuild({ proofPath: option('--guarded-build-proof'), appPath: paths.app, repoRoot: repository });
 // No daily development supervisor, provider credential or app-specific data
 // environment crosses into this isolated launch. Normal native path/locale
 // discovery stays available; tool programs are frozen explicitly below.
@@ -52,6 +61,8 @@ await writeFile(join(root, 'fixture-sentinel'), token, { flag: 'wx', mode: 0o600
 const report = { schema: 'nomifun.macos-desktop-agent-resources.v1', root, mode, token, passed: false,
   source_head: '', started_at: new Date().toISOString(), paths, model: 'scripted-loopback-only',
   data_isolation: 'fresh-private-direct-temporary-root', retirement_observe_ms: retirementObserveMs, native_events: [] };
+report.computer = { enabled: withComputer, input_calls: 0, screenshot_calls: 0, model: 'local scripted provider', ordinary_quit_only: withComputer };
+report.guarded_build_admission = guardedBuild;
 const sleep = ms => new Promise(done => setTimeout(done, ms));
 const journal = async () => {
   await writeFile(join(root, 'result.json.tmp'), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
@@ -97,7 +108,10 @@ try {
   let head = ''; git.stdout.on('data', bytes => { head += bytes; }); const gitResult = await completion(git); assert.equal(gitResult.code, 0); report.source_head = head.trim();
   report.build_identity = {};
   for (const [name, path] of Object.entries({ host: program, ...paths, driver: fileURLToPath(import.meta.url),
-    sidecar: join(repository, 'scripts/validation/desktop-agent-resources.mjs') })) {
+    sidecar: join(repository, 'scripts/validation/desktop-agent-resources.mjs'),
+    computer_proof: join(repository, 'scripts/validation/desktop-computer-resource-proof.mjs'),
+    guarded_build_verifier: join(repository, 'scripts/validation/macos-guarded-build-proof.mjs'),
+    ...(withComputer ? { computer_worker: computerWorker } : {}) })) {
     if (name !== 'app') report.build_identity[name] = { path, sha256: await sha256(path) };
   }
   preparer = await logged(paths.fixture, [data, '--wk-actions'], 'preparer', { ...isolatedEnvironment, NOMIFUN_WORK_DIR: work });
@@ -125,7 +139,8 @@ try {
   report.outside_tree_sentinel = { pid: sentinel.pid, parent: process.pid, preservation_verified: false };
   application = await launchMacosApplication({ program, controllerProgram: paths.controller, cwd: repository,
     args: ['-ApplePersistenceIgnoreState', 'YES'], applicationScope: 'desktop_development',
-    environment: { ...isolatedEnvironment, NOMIFUN_DATA_DIR: data, NOMIFUN_WORK_DIR: work, NOMIFUN_BUN_PATH: paths.bun } });
+    environment: { ...isolatedEnvironment, NOMIFUN_DATA_DIR: data, NOMIFUN_WORK_DIR: work, NOMIFUN_BUN_PATH: paths.bun,
+      NOMIFUN_LIFECYCLE_FIXTURE_DIR: root, NOMIFUN_LIFECYCLE_FIXTURE_TOKEN: token, NOMIFUN_LIFECYCLE_FIXTURE_MODE: mode } });
   report.application_evidence = application.evidenceDirectory;
   await journal();
   // A crash must be recorded as abnormal by the existing controller. The
@@ -137,7 +152,15 @@ try {
     if (applicationResult) throw Error('Actual App exited before backend readiness');
   }, 'the actual Desktop backend port', 120_000);
   report.host_pid = bound.pid; report.backend_port = bound.port;
+  // Retain the exact ordinary teardown capability even if a supplied App
+  // lacks the required fixture guard receipt and resource setup is refused.
   await run(paths['appkit-probe'], ['--prepare', String(bound.pid), paths.app, join(root, 'owned-appkit-request.json')], 'appkit-prepare');
+  const isolation = await json(join(root, 'macos-lifecycle-fixture.json'));
+  assert(isolation, 'The actual App must confirm the strict debug fixture guard before resource setup');
+  for (const [key, expected] of Object.entries({ host_pid: bound.pid, token, data, work, shared_keyboard_started: false })) {
+    assert.equal(isolation[key], expected, `The exact App fixture isolation receipt must confirm ${key}`);
+  }
+  report.fixture_isolation = isolation;
   const base = `http://127.0.0.1:${bound.port}`;
   const request = async (path, method = 'GET', body) => {
     const response = await fetch(`${base}${path}`, { method,
@@ -157,6 +180,7 @@ try {
   await writeFile(join(root, 'ready.json'), JSON.stringify({ token, host_pid: bound.pid, backend_port: bound.port,
     host_program: program, data_root: data, agent_resources: true, mode }), { flag: 'wx', mode: 0o600 });
   sidecar = await logged(process.execPath, [join(repository, 'scripts/validation/desktop-agent-resources.mjs'), '--root', root, '--bun-exe', paths.bun,
+    ...(withComputer ? ['--with-computer'] : []),
     ...(retirementObserveMs ? ['--retirement-observe-ms', String(retirementObserveMs)] : [])], 'sidecar', isolatedEnvironment);
   const resources = await until(async () => {
     const progress = await json(join(root, 'agent-resources-progress.json'));
@@ -165,7 +189,21 @@ try {
     return await json(join(root, 'agent-resources-ready.json'));
   }, 'the original Bun pipe, PTY and inflight stdio MCP', 120_000);
   report.resources = resources.processes; report.session_id = resources.session_id; report.operation_id = resources.operation_id;
-  const pairs = [{ pid: bound.pid, expected_image: program }, ...resources.processes];
+  const pairs = [{ pid: bound.pid, kind: 'host', expected_image: program }, ...resources.processes];
+  if (withComputer) {
+    const computer = resources.computer, status = computer?.status;
+    assert.equal(computer?.enabled, true);
+    assert.equal(computer.canonical_call?.is_error, false); assert.equal(computer.canonical_call.image_parts, 0);
+    assert(computer.canonical_call.topic_count > 0);
+    assert.equal(status?.running, true); assert.equal(status.phase, 'ready'); assert.equal(status.bound_sessions, 1);
+    assert(Number.isSafeInteger(status.process_id) && status.process_id > 1);
+    assert.match(status.generation, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert(!pairs.some(value => value.pid === status.process_id), 'The internal Computer worker must have a distinct native owner');
+    Object.assign(report.computer, { internal_desktop_worker: { pid: status.process_id, generation: status.generation,
+      image: report.build_identity.computer_worker, status_at_readiness: status,
+      canonical_call: computer.canonical_call, frozen_definition: computer.definition } });
+    pairs.push({ pid: status.process_id, kind: 'computer', expected_image: computerWorker });
+  }
   observerLog = await open(join(root, 'native-observer.jsonl'), 'wx', 0o600);
   observer = spawn(paths.observer, pairs.flatMap(value => [String(value.pid), value.expected_image]), { stdio: ['pipe', 'pipe', 'inherit'] });
   observerDone = completion(observer); let buffer = '';
@@ -190,6 +228,7 @@ try {
   assert.equal(payloadIdentity.parent_unique_id, launcherIdentity.unique_id, 'The original PTY payload must name this exact launcher kernel generation');
   assert.equal(payloadIdentity.original_parent_pid_version, launcherIdentity.pid_version);
   report.pty_kernel_parent_proof = { launcher: launcherIdentity, payload: payloadIdentity };
+  if (withComputer) report.computer.kernel_parent_proof = macosComputerProcessProof(report.native_events, bound.pid, resources.computer.status.process_id);
   if (options.includes('--wk-inflight')) {
     const accepted = await request(`/api/agent-sessions/${fixture.session_id}/turns`, 'POST', {
       idempotency_key: `desktop-lifecycle-wk-${token}`, input: { content: fixture.prompt } });
@@ -213,7 +252,7 @@ try {
       assert.equal(report.stop.retirement_observation?.passed, true);
       assert(report.stop.retirement_observation.elapsed_ms >= retirementObserveMs);
     }
-    const retained = pairs.flatMap((value, index) => index > 0 && resources.processes[index - 1].kind !== 'mcp' ? [{ index, pid: value.pid }] : []);
+    const retained = pairs.flatMap((value, index) => index > 0 && !['mcp', 'computer'].includes(value.kind) ? [{ index, pid: value.pid }] : []);
     for (const process of retained) assert(!report.native_events.some(event => event.event === 'exit' && event.index === process.index), 'Original pipe/PTY must still be alive after this Turn Stop');
     report.stop_native = { exact_original_pipe_and_pty_retained: retained, observed_at: new Date().toISOString() };
   }
@@ -240,7 +279,17 @@ try {
     await request('/api/auth/status');
     report.matting_request.pending_before_exit_action = report.matting_request.headers_received_at === undefined;
   }
-  const expectedLive = resources.processes.filter(resource => !options.includes('--stop-first') || resource.kind !== 'mcp');
+  if (withComputer) {
+    const confirmed = await request('/api/computer/status');
+    const original = resources.computer.status;
+    for (const [key, expected] of Object.entries({ running: true, phase: 'ready', process_id: original.process_id,
+      generation: original.generation, bound_sessions: options.includes('--stop-first') ? 0 : 1, last_error: null })) {
+      assert.equal(confirmed[key], expected, `The original Computer generation must remain ${key} before Quit`);
+    }
+    report.computer.internal_desktop_worker.status_before_quit = confirmed;
+    report.computer.kernel_parent_proof = macosComputerProcessProof(report.native_events, bound.pid, original.process_id);
+  }
+  const expectedLive = pairs.slice(1).filter(resource => !options.includes('--stop-first') || resource.kind !== 'mcp');
   for (const resource of expectedLive) assert(!report.native_events.some(event => event.event === 'exit' && event.pid === resource.pid),
     'An already exited original resource cannot substitute for a live resource at the quit action');
   report.original_resources_live_before_exit_action = expectedLive.map(resource => ({ pid: resource.pid, kind: resource.kind }));
@@ -261,6 +310,12 @@ try {
   }
   await until(() => { if (observerFailure) throw observerFailure; if (!running(observer) && !observerComplete) throw Error('Native observer exited before all original processes'); return observerComplete; }, 'all original native process NOTE_EXIT proofs', mode === 'cmd-q' ? Math.max(0, guiQuitDeadline - Date.now()) : 60_000);
   const observed = await observerDone; await observerLog.close(); observerLog = undefined; assert.equal(observed.code, 0); exitReached = true;
+  if (withComputer) {
+    const proof = macosComputerProcessProof(report.native_events, bound.pid, resources.computer.status.process_id, { exited: true });
+    report.computer.native_exit_proof = proof;
+    report.computer.worker_exit_code = proof.worker_exit_code;
+    report.computer.exact_native_generation_exited = true;
+  }
   if (['sigint', 'sigterm', 'parent-death'].includes(mode)) {
     const expectedSignal = mode === 'sigint' ? 2 : mode === 'sigterm' ? 15 : 9;
     const signals = report.native_events.filter(event => event.event === 'signal');

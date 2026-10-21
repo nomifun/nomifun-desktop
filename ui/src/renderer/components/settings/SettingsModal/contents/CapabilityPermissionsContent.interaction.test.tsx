@@ -2,7 +2,8 @@ import '../../../../../../test/setup-dom.ts';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { ipcBridge } from '@/common';
-import type { SystemPermissionStatus } from '@/common/adapter/ipcBridge';
+import { computer, type SystemPermissionStatus } from '@/common/adapter/ipcBridge';
+import { Message } from '@arco-design/web-react';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -42,7 +43,9 @@ beforeEach(() => {
   const request = spyOn(ipcBridge.systemPermissions.request, 'invoke').mockResolvedValue(blocked);
   const open = spyOn(ipcBridge.systemPermissions.openSettings, 'invoke').mockResolvedValue(undefined);
   const notification = spyOn(ipcBridge.notification.permissionState, 'invoke').mockResolvedValue('denied');
-  restores.push(() => get.mockRestore(), () => request.mockRestore(), () => open.mockRestore(), () => notification.mockRestore());
+  const driver = spyOn(computer.status, 'invoke').mockResolvedValue({ phase: 'stopped', worker_version: null,
+    platform: 'macos', backend: null, session_type: null, wayland: null, atspi: null, last_error: null, running: false });
+  restores.push(() => get.mockRestore(), () => request.mockRestore(), () => open.mockRestore(), () => notification.mockRestore(), () => driver.mockRestore());
 });
 afterEach(() => {
   cleanup();
@@ -115,6 +118,43 @@ test('the granted microphone retains its existing settings action behavior', asy
   );
   expect(await screen.findByText(settings.capabilityPermissions.states.granted)).toBeTruthy();
   expect(screen.queryByRole('button', { name: settings.capabilityPermissions.openSystemSettings })).toBeNull();
+});
+
+test('a granted screen permission verifies capture only after an explicit click', async () => {
+  const granted: SystemPermissionStatus = { ...blocked, permissions: blocked.permissions.map(entry =>
+    entry.kind === 'screen_recording' ? { ...entry, state: 'granted' } : entry) };
+  const get = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue(granted);
+  const request = spyOn(ipcBridge.systemPermissions.request, 'invoke').mockResolvedValue(granted);
+  restores.push(() => get.mockRestore(), () => request.mockRestore());
+  const screen = render(<I18nextProvider i18n={i18n}>
+    <MemoryRouter initialEntries={['/settings/permissions?tab=computer-use']}><CapabilityPermissionsContent /></MemoryRouter>
+  </I18nextProvider>);
+  const button = await screen.findByRole('button', { name: settings.capabilityPermissions.verifyCapture });
+  expect(screen.getByText(settings.capabilityPermissions.verifyCaptureDescription)).toBeTruthy();
+  expect(request).not.toHaveBeenCalled();
+  fireEvent.click(button);
+  await waitFor(() => expect(request).toHaveBeenCalledWith({ kind: 'screen_recording' }));
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(ipcBridge.systemPermissions.openSettings.invoke).not.toHaveBeenCalled();
+});
+
+test('a capture verification error shows a failure toast without reporting success', async () => {
+  const granted: SystemPermissionStatus = { ...blocked, permissions: blocked.permissions.map(entry =>
+    entry.kind === 'screen_recording' ? { ...entry, state: 'granted' } : entry) };
+  const get = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue(granted);
+  const request = spyOn(ipcBridge.systemPermissions.request, 'invoke').mockRejectedValue(new Error('Native capture probe failed'));
+  const error = spyOn(Message, 'error').mockReturnValue(() => {});
+  const success = spyOn(Message, 'success').mockReturnValue(() => {});
+  restores.push(() => get.mockRestore(), () => request.mockRestore(), () => error.mockRestore(), () => success.mockRestore());
+  const screen = render(<I18nextProvider i18n={i18n}>
+    <MemoryRouter initialEntries={['/settings/permissions?tab=computer-use']}><CapabilityPermissionsContent /></MemoryRouter>
+  </I18nextProvider>);
+  fireEvent.click(await screen.findByRole('button', { name: settings.capabilityPermissions.verifyCapture }));
+  await waitFor(() => expect(error).toHaveBeenCalledWith(settings.capabilityPermissions.verifyCaptureFailed));
+  expect(error).toHaveBeenCalledTimes(1);
+  expect(success).not.toHaveBeenCalled();
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(ipcBridge.systemPermissions.openSettings.invoke).not.toHaveBeenCalled();
 });
 
 function LocationProbe() {

@@ -346,6 +346,9 @@
     "loadFailed": "无法读取最新系统权限，请回到桌面客户端后重试。",
     "restartAfterGrant": "授权后请重新检测；若系统要求重启或访问仍未生效，彻底退出并重新打开 NomiFun 后继续任务。",
     "requestAccess": "请求授权",
+    "verifyCapture": "验证截图",
+    "verifyCaptureDescription": "首次直接捕获屏幕时，macOS 可能显示系统确认，请由你处理。",
+    "verifyCaptureFailed": "截图验证失败，请检查 macOS 系统确认后重试。",
     "openSystemSettings": "打开系统设置",
     "tabs": {
       "overview": "总览",

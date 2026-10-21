@@ -8,8 +8,8 @@
 //! process-wide Boolean here: their inventory remains unknown and the actual
 //! operation supplies the result. Notification state stays with Tauri's plugin.
 
-use axum::Json;
-use nomifun_api_types::ApiResponse;
+use axum::{Json, http::StatusCode, response::{IntoResponse, Response}};
+use nomifun_api_types::{ApiResponse, ErrorResponse};
 use nomifun_common::AppError;
 use serde::{Deserialize, Serialize};
 
@@ -202,9 +202,9 @@ fn current_system_status() -> SystemPermissionStatus {
             SystemPermissionEntry {
                 kind: "screen_recording",
                 state: screen_recording,
-                can_request: macos
-                    && computer_use_available
-                    && screen_recording != SystemPermissionState::Granted,
+                // An existing CG grant still needs the user's explicit tiny
+                // capture to verify the driver's separate capture consent.
+                can_request: macos && computer_use_available,
                 can_open_settings: macos && computer_use_available,
                 requires_restart_after_grant: macos && computer_use_available,
                 capabilities: &["computer_use"],
@@ -295,13 +295,10 @@ async fn request_computer_kind(kind: &str) {
     #[cfg(feature = "computer-use")]
     {
         let kind = kind.to_owned();
-        // The CoreGraphics / Accessibility prompt calls are synchronous FFI.
+        // The Accessibility prompt is synchronous FFI.
         let _ = tokio::task::spawn_blocking(move || match kind.as_str() {
             "accessibility" => {
                 nomifun_computer::permissions::request_accessibility();
-            }
-            "screen_recording" => {
-                nomifun_computer::permissions::request_screen_recording();
             }
             _ => {}
         })
@@ -316,16 +313,60 @@ async fn request_computer_kind(kind: &str) {
 /// POST /api/system/permissions/request — request only the named up-front
 /// permission for this host. Browser website grants are separate from these
 /// native camera/microphone grants and remain owned by the visible page.
-pub(super) async fn request_system_permission(
-    Json(body): Json<PermissionRequestBody>,
-) -> Json<ApiResponse<SystemPermissionStatus>> {
+pub(super) fn request_system_permission(services: &crate::services::AppServices) -> axum::routing::MethodRouter {
+    #[cfg(feature = "computer-use")]
+    let computer = services.computer.clone();
+    #[cfg(not(feature = "computer-use"))]
+    let _ = services;
+    axum::routing::post(move |Json(body): Json<PermissionRequestBody>| {
+        #[cfg(feature = "computer-use")]
+        let computer = computer.clone();
+        async move {
+            request_system_permission_inner(body, #[cfg(feature = "computer-use")] computer).await
+        }
+    })
+}
+
+async fn request_system_permission_inner(
+    body: PermissionRequestBody,
+    #[cfg(feature = "computer-use")] computer: std::sync::Arc<nomifun_computer::Computer>,
+) -> Response {
     match body.kind.as_str() {
         "microphone" => request_capture_permission(false).await,
         "camera" => request_capture_permission(true).await,
-        "accessibility" | "screen_recording" => request_computer_kind(&body.kind).await,
+        "accessibility" => request_computer_kind(&body.kind).await,
+        "screen_recording" => {
+            #[cfg(all(target_os = "macos", feature = "computer-use"))]
+            {
+                // This endpoint is local-owner protected. No GET inventory,
+                // cached status or model action may request this capture.
+                let granted = tokio::task::spawn_blocking(nomifun_computer::permissions::request_screen_recording).await;
+                match granted {
+                    Ok(true) => {}
+                    Ok(false) => return permission_request_failure(StatusCode::CONFLICT,
+                        "SYSTEM_PERMISSION_REQUIRED", "Screen Recording is not granted; verification capture was not dispatched", current_system_status()),
+                    Err(error) => return permission_request_failure(StatusCode::BAD_GATEWAY,
+                        "SYSTEM_PERMISSION_REQUEST_FAILED", error.to_string(), current_system_status()),
+                }
+                if let Err(error) = computer.request_screen_capture().await {
+                    return permission_request_failure(StatusCode::BAD_GATEWAY, error.code,
+                        error.message, current_system_status());
+                }
+            }
+            #[cfg(not(all(target_os = "macos", feature = "computer-use")))]
+            return permission_request_failure(StatusCode::NOT_IMPLEMENTED,
+                "COMPUTER_PLATFORM_UNSUPPORTED", "Explicit screen capture consent is only available in a macOS Computer build", current_system_status());
+        }
         _ => {}
     }
-    Json(ApiResponse::ok(current_system_status()))
+    #[cfg(all(feature = "computer-use", not(target_os = "macos")))]
+    let _ = computer;
+    Json(ApiResponse::ok(current_system_status())).into_response()
+}
+
+fn permission_request_failure(status: StatusCode, code: impl Into<String>, message: impl Into<String>, inventory: SystemPermissionStatus) -> Response {
+    (status, Json(ErrorResponse::new_with_details(message, code,
+        serde_json::json!({"system_permissions": inventory})))).into_response()
 }
 
 /// POST /api/system/permissions/open-settings — deep-link to an exact macOS
@@ -462,6 +503,30 @@ mod tests {
         assert_eq!(binary_grant_state(Some(true)), SystemPermissionState::Granted);
         assert_eq!(binary_grant_state(Some(false)), SystemPermissionState::NotGranted);
         assert_eq!(binary_grant_state(None), SystemPermissionState::Unknown);
+    }
+
+    #[tokio::test]
+    async fn failed_capture_verification_keeps_granted_inventory_and_returns_http_error() {
+        // Supply an inventory fixture: this test must never request native TCC
+        // or capture any image, and a capture failure cannot revoke a CG fact.
+        let inventory = SystemPermissionStatus {
+            platform: "macos", app_label: "NomiFun".into(), process_id: 7,
+            app_bundle_identifier: Some("com.nomifun.desktop.dev".into()),
+            permissions: vec![SystemPermissionEntry {
+                kind: "screen_recording", state: SystemPermissionState::Granted,
+                can_request: true, can_open_settings: true,
+                requires_restart_after_grant: true, capabilities: &["computer_use"],
+            }],
+        };
+        let response = permission_request_failure(StatusCode::BAD_GATEWAY,
+            "COMPUTER_SCREEN_CAPTURE_REQUEST_FAILED", "No verification frame", inventory);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["success"], false);
+        assert_eq!(body["code"], "COMPUTER_SCREEN_CAPTURE_REQUEST_FAILED");
+        assert_eq!(body["details"]["system_permissions"]["permissions"][0]["state"], "granted");
+        assert_eq!(body["details"]["system_permissions"]["permissions"][0]["can_request"], true);
     }
 
     #[cfg(not(feature = "computer-use"))]

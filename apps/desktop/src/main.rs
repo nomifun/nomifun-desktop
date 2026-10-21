@@ -56,11 +56,15 @@ mod relay_pairing;
 mod updater_install_context;
 #[cfg(all(windows,debug_assertions))]
 mod lifecycle_quit_fixture;
+#[cfg(all(target_os = "macos", debug_assertions))]
+mod macos_lifecycle_fixture;
 
 fn lifecycle_quit_fixture_active()->bool {
     #[cfg(all(windows,debug_assertions))]
     { return lifecycle_quit_fixture::active(); }
-    #[cfg(not(all(windows,debug_assertions)))]
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    { return macos_lifecycle_fixture::active(); }
+    #[cfg(not(all(any(windows, target_os = "macos"), debug_assertions)))]
     { false }
 }
 
@@ -3317,6 +3321,32 @@ fn reconcile_companion_windows(
 }
 
 fn main() -> std::process::ExitCode {
+    // Validate the inherited LaunchServices descriptor before admitting a
+    // disposable fixture or entering Keyboard, storage, or runtime startup.
+    // Ordinary production startup never accepts a private launch descriptor.
+    #[cfg(target_os = "macos")]
+    let development_launch = if macos_development_launch::development_application_is_eligible() {
+        match macos_development_launch::prepare_application(
+            macos_development_launch::ApplicationScope::DesktopDevelopment,
+        ) {
+            Ok(launch) => launch,
+            Err(_) => {
+                eprintln!("macOS development application admission failed");
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    } else {
+        if std::env::args_os().any(|argument| argument == macos_development_launch::DESCRIPTOR_ARGUMENT) {
+            eprintln!("development launch descriptors are unsupported by the production application");
+            return std::process::ExitCode::FAILURE;
+        }
+        None
+    };
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if let Err(error) = macos_lifecycle_fixture::prepare_launch() {
+        eprintln!("MACOS_LIFECYCLE_FIXTURE_REFUSED: {error}");
+        return std::process::ExitCode::FAILURE;
+    }
     #[cfg(all(windows,debug_assertions))]
     if let Err(error)=lifecycle_quit_fixture::prepare_launch() {
         eprintln!("LIFECYCLE_FIXTURE_REFUSED: {error}");
@@ -3355,27 +3385,6 @@ fn main() -> std::process::ExitCode {
     #[cfg(target_os = "linux")]
     unsafe { keyboard::configure_gui_backend(); }
 
-    // LaunchServices development admission finishes before PATH discovery,
-    // storage or worker creation. Ordinary production startup never accepts
-    // the private development descriptor as an injection interface.
-    #[cfg(target_os = "macos")]
-    let development_launch = if macos_development_launch::development_application_is_eligible() {
-        match macos_development_launch::prepare_application(
-            macos_development_launch::ApplicationScope::DesktopDevelopment,
-        ) {
-            Ok(launch) => launch,
-            Err(_) => {
-                eprintln!("macOS development application admission failed");
-                return std::process::ExitCode::FAILURE;
-            }
-        }
-    } else {
-        if std::env::args_os().any(|argument| argument == macos_development_launch::DESCRIPTOR_ARGUMENT) {
-            eprintln!("development launch descriptors are unsupported by the production application");
-            return std::process::ExitCode::FAILURE;
-        }
-        None
-    };
     #[cfg(target_os = "macos")]
     let development_exit_reporter = macos_development_launch::ApplicationExitReporter::new(development_launch);
 

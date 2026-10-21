@@ -62,7 +62,7 @@ export const useSystemPermissions = (enabled = true, scope = '') => {
     };
   }, [enabled, refresh]);
 
-  const request = useCallback(async (kind: SystemPermissionKind) => {
+  const request = useCallback(async (kind: SystemPermissionKind, onError?: () => void) => {
     if (!enabled || !mounted.current || !current.current.enabled || current.current.scope !== scope) return null;
     const requestGeneration = begin();
     try {
@@ -71,8 +71,11 @@ export const useSystemPermissions = (enabled = true, scope = '') => {
       setSnapshot({ scope, status: next, error: null, loading: false });
       return next;
     } catch (caught) {
-      if (isCurrent(requestGeneration)) setSnapshot(previous => ({ ...previous, loading: false,
-        error: caught instanceof Error ? caught.message : String(caught) }));
+      if (isCurrent(requestGeneration)) {
+        setSnapshot(previous => ({ ...previous, loading: false,
+          error: caught instanceof Error ? caught.message : String(caught) }));
+        onError?.();
+      }
       return null;
     }
   }, [begin, enabled, isCurrent, scope]);

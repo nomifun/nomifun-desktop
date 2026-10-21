@@ -19,6 +19,36 @@ use std::sync::Arc;
 
 struct InitializationSignal(Option<std::sync::mpsc::SyncSender<bool>>);
 
+#[cfg(target_os = "macos")]
+const DIRECT_CAPTURE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+enum DirectCaptureProbeResult { Ready, Unavailable, TimedOut, Failed }
+
+#[cfg(target_os = "macos")]
+impl DirectCaptureProbeResult {
+    fn metadata(&self) -> Value {
+        serde_json::json!({"status": match self {
+            Self::Ready => "ready", Self::Unavailable => "unavailable",
+            Self::TimedOut => "timed_out", Self::Failed => "probe_failed",
+        }})
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn bounded_capture_probe(
+    timeout: std::time::Duration,
+    probe: impl std::future::Future<Output = Result<bool, tokio::task::JoinError>>,
+) -> DirectCaptureProbeResult {
+    match tokio::time::timeout(timeout, probe).await {
+        Ok(Ok(true)) => DirectCaptureProbeResult::Ready,
+        Ok(Ok(false)) => DirectCaptureProbeResult::Unavailable,
+        Ok(Err(_)) => DirectCaptureProbeResult::Failed,
+        Err(_) => DirectCaptureProbeResult::TimedOut,
+    }
+}
+
 impl InitializationSignal {
     fn ready(&mut self) {
         if let Some(sender) = self.0.take() {
@@ -209,6 +239,25 @@ async fn handle_request(
     request: ChannelRequest,
 ) -> ChannelResponse {
     let request_id = request.request_id;
+    if request.operation == "request_screen_capture" {
+        // This is a host-only explicit permission flow, never an SDK/model
+        // tool or a Session call. No caller-controlled capture arguments exist.
+        if request.name.is_some() || request.arguments.is_some() || request.session_handle.is_some() {
+            return ChannelResponse::error(request_id, generation, "invalid_request",
+                "request_screen_capture accepts no tool, arguments or session", ActionCompletion::NotStarted);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let result = bounded_capture_probe(DIRECT_CAPTURE_PROBE_TIMEOUT,
+                tokio::task::spawn_blocking(platform_macos::capture::capture_probe_frame)).await;
+            // A timed-out blocking native call stays in this worker's exact
+            // process owner. The host immediately retires/reaps that owner.
+            return ChannelResponse::ok(request_id, generation, result.metadata());
+        }
+        #[cfg(not(target_os = "macos"))]
+        return ChannelResponse::error(request_id, generation, "platform_unsupported",
+            "Explicit screen capture consent is only supported on macOS", ActionCompletion::NotStarted);
+    }
     let result: Result<Value, String> = match request.operation.as_str() {
         "metadata" => driver
             .metadata()
@@ -376,4 +425,18 @@ fn write_response(writer: &mut impl Write, response: &ChannelResponse) -> anyhow
     writer.write_all(b"\n")?;
     writer.flush()?;
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn direct_capture_statuses_are_bounded_without_any_native_capture() {
+        let budget = std::time::Duration::from_millis(20);
+        assert_eq!(bounded_capture_probe(budget, async { Ok(true) }).await.metadata(), serde_json::json!({"status":"ready"}));
+        assert_eq!(bounded_capture_probe(budget, async { Ok(false) }).await.metadata(), serde_json::json!({"status":"unavailable"}));
+        assert_eq!(bounded_capture_probe(budget, tokio::spawn(async { panic!("fixture probe failure"); #[allow(unreachable_code)] false })).await.metadata(), serde_json::json!({"status":"probe_failed"}));
+        assert_eq!(bounded_capture_probe(budget, std::future::pending()).await.metadata(), serde_json::json!({"status":"timed_out"}));
+    }
 }

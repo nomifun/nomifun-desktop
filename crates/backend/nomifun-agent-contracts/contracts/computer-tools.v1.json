@@ -13,6 +13,19 @@
         "tools_list_schema_version": "1"
       }
     },
+    "macos": {
+      "capability_version": "1",
+      "list_schema_version": "1",
+      "list_sha256": "4922d65254250c7a99765baef6836851e57a6b6dc5718fcd337a6a8af6f363fd",
+      "listed_tools": 59,
+      "metadata": {
+        "capability_version": "1",
+        "contract_version": "0.8.0",
+        "driver_version": "0.37.0",
+        "mcp_protocol_version": "2025-06-18",
+        "tools_list_schema_version": "1"
+      }
+    },
     "windows": {
       "capability_version": "1",
       "list_schema_version": "1",
@@ -104,6 +117,23 @@
           },
           "source_definition_sha256": "b5d14874d340729d4d44b6392816511c0db48650c0477124754f0f9dcdd51e8b"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "capabilities": [
+            "app.list"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+          },
+          "source_definition_sha256": "8c68ac0b004ffceb1f71407a6b4ea5b8392240874293643d86553b8e86db7d0e"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": false,
@@ -175,6 +205,36 @@
             "type": "object"
           },
           "source_definition_sha256": "df74975b4c47111e6568c67598f403af5105485f79c3b976218f1a345f105b46"
+        },
+        "macos": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "capabilities": [
+            "window.list"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "app": {
+                "description": "Only windows of apps whose name contains this text (case-insensitive), or whose bundle id equals it. Prefer this or `pid` over an unfiltered call, which returns every window on the host.",
+                "type": "string"
+              },
+              "on_screen_only": {
+                "description": "Drop windows not on the current Space.",
+                "type": "boolean"
+              },
+              "pid": {
+                "description": "Only this pid's windows, on every layer.",
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "source_definition_sha256": "0be63dbd6c7ff11008a20f7744afad8687bf84eab04977b72657811ece10f317"
         },
         "windows": {
           "annotations": {
@@ -320,6 +380,96 @@
           },
           "source_definition_sha256": "4ae6f99c0aa4f2f36849c05a6bac5cf5b28e3667c9a52a819af6f28a39896f51"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "capabilities": [
+            "accessibility.window_state",
+            "accessibility.tree",
+            "accessibility.tree.structured",
+            "accessibility.tree.bounded",
+            "accessibility.element_tokens",
+            "screen.capture",
+            "screen.capture.window"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "display_only": {
+                "description": "Default false. With include_accessibility_tree:false, returns pixels for display without registering an action capture or replacing the agent snapshot. The image cannot ground input actions.",
+                "type": "boolean"
+              },
+              "full_output": {
+                "description": "Default false. Set true to restore the previous full response: both `elements` and `tree_markdown`, all metadata, and the platform's own walk limits unless max_elements / max_depth are passed. Does not combine with `since`.",
+                "type": "boolean"
+              },
+              "include_accessibility_tree": {
+                "description": "Return the accessibility tree; false requests a visual read without replacing element tokens.",
+                "type": "boolean"
+              },
+              "include_screenshot": {
+                "description": "Include a screenshot when the model supports images. Keep false for a model without image input.",
+                "type": "boolean"
+              },
+              "max_depth": {
+                "description": "Maximum accessibility-tree depth.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "max_elements": {
+                "description": "Maximum returned accessibility elements.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "pid": {
+                "description": "Target process ID.",
+                "type": "integer"
+              },
+              "query": {
+                "description": "Filter the accessibility tree by relevant text or control name.",
+                "type": "string"
+              },
+              "since": {
+                "description": "Use 'latest' for changes since the previous matching read; omit for a full read.",
+                "type": "string"
+              },
+              "timeout_ms": {
+                "default": 1000,
+                "description": "Time budget in milliseconds; a bounded observation may return a partial tree. Use the advertised bounds.",
+                "maximum": 120000,
+                "minimum": 100,
+                "type": "integer"
+              },
+              "tree_format": {
+                "description": "Which tree representation to return. Default \"markdown\": the compact `tree_markdown` only, where a row `[N]` is addressed with element_token `<snapshot_id>:N`. \"elements\": the structured `elements` array only (per-element element_token, frame, parent_index, value). \"both\": the two together, as before; roughly doubles the size.",
+                "enum": [
+                  "markdown",
+                  "elements",
+                  "both"
+                ],
+                "type": "string"
+              },
+              "verbose": {
+                "description": "Default false. Set true to include the `_note` string and the full `background_input` capability report (macOS), which are omitted by default to save context.",
+                "type": "boolean"
+              },
+              "window_id": {
+                "description": "Target window ID from computer_list_windows.",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "pid",
+              "window_id"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "8d6ec65cab38427355f58f3426e21180125744da925d14ceb773271177c7f439"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": false,
@@ -453,6 +603,24 @@
           },
           "source_definition_sha256": "9475fee6753925a6d37f49cbf7a9ed516b8f329960aeba3f74f0a84cedff6410"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "capabilities": [
+            "screen.capture",
+            "screen.dimensions"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+          },
+          "source_definition_sha256": "75f68a261ff646315262a0d8e716211510347b49fffafdaeaad75485fbd3dfea"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": false,
@@ -547,6 +715,57 @@
           },
           "source_definition_sha256": "8e20b047921170e156612c46d7c9dc4cc0eb7173c05d50501512616512d071dc"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "capabilities": [
+            "screen.capture",
+            "screen.capture.window",
+            "screen.capture.region"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "pid": {
+                "description": "Optional target pid. When omitted, the driver resolves the unique current snapshot for this session and window.",
+                "type": "integer"
+              },
+              "window_id": {
+                "description": "CGWindowID from computer_list_windows.",
+                "type": "integer"
+              },
+              "x1": {
+                "description": "Left edge of region in screenshot pixels.",
+                "type": "number"
+              },
+              "x2": {
+                "description": "Right edge of region in screenshot pixels.",
+                "type": "number"
+              },
+              "y1": {
+                "description": "Top edge of region in screenshot pixels.",
+                "type": "number"
+              },
+              "y2": {
+                "description": "Bottom edge of region in screenshot pixels.",
+                "type": "number"
+              }
+            },
+            "required": [
+              "window_id",
+              "x1",
+              "y1",
+              "x2",
+              "y2"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "7142b5206a97ecba7c2805f37dba5f639f4dcf02300b2f5560ae09bd4e734b9b"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": false,
@@ -624,6 +843,148 @@
       "no_image": "window_without_image",
       "platforms": {
         "linux": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "capabilities": [
+            "state.verify",
+            "state.verify.window",
+            "state.verify.element",
+            "state.observe.visual_evidence"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "expect": {
+                "description": "Postcondition checks after the action, using the advertised predicate schema.",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "element": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "exists": {
+                          "description": "Assert that at least one trusted element matches the selector.\n\nElement walks are not yet exhaustive on every platform, so absence\ncannot be proven. `false` is rejected instead of returning an\nindefinitely-unknown predicate.",
+                          "type": "boolean"
+                        },
+                        "selected": {
+                          "type": "boolean"
+                        },
+                        "selector": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "label_contains": {
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "role": {
+                              "minLength": 1,
+                              "type": "string"
+                            }
+                          },
+                          "required": [],
+                          "type": "object"
+                        },
+                        "value_equals": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "selector"
+                      ],
+                      "type": "object"
+                    },
+                    "window": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "bounds": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "height": {
+                              "type": "number"
+                            },
+                            "tolerance_px": {
+                              "maximum": 100,
+                              "minimum": 0,
+                              "type": "number"
+                            },
+                            "width": {
+                              "type": "number"
+                            },
+                            "x": {
+                              "type": "number"
+                            },
+                            "y": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "x",
+                            "y",
+                            "width",
+                            "height"
+                          ],
+                          "type": "object"
+                        },
+                        "exists": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [],
+                      "type": "object"
+                    }
+                  },
+                  "required": [],
+                  "type": "object"
+                },
+                "maxItems": 8,
+                "minItems": 1,
+                "type": "array"
+              },
+              "include_screenshot": {
+                "description": "Include a screenshot when the model supports images. Keep false for a model without image input.",
+                "type": "boolean"
+              },
+              "pid": {
+                "description": "Exact process whose window may be observed.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "stable_samples": {
+                "default": 2,
+                "description": "Consecutive satisfied samples required before returning success.",
+                "maximum": 5,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "timeout_ms": {
+                "default": 5000,
+                "description": "Time budget in milliseconds; a bounded observation may return a partial tree. Use the advertised bounds.",
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window_id": {
+                "description": "Exact native window identifier.",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "pid",
+              "window_id",
+              "expect"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "210a6596888701a439b7f99acf94b374ae05c4f6b26ebe378ab4d951ac737623"
+        },
+        "macos": {
           "annotations": {
             "destructiveHint": false,
             "idempotentHint": false,
@@ -954,6 +1315,28 @@
           },
           "source_definition_sha256": "31fbe0b5d353b3228e8e0e9353abac0dc31f8a89e9fca7c466c2618bd3dd2dc7"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "capabilities": [
+            "driver.guide"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "topic": {
+                "description": "One of: overview, computer_drag, browser, permissions, batching, menus. Omit to list the topics.",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "source_definition_sha256": "31fbe0b5d353b3228e8e0e9353abac0dc31f8a89e9fca7c466c2618bd3dd2dc7"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": false,
@@ -1117,6 +1500,117 @@
             "type": "object"
           },
           "source_definition_sha256": "18d71da13b568bc3e4f73a54f61543d2aa3625166c0690d5f820529f78425346"
+        },
+        "macos": {
+          "annotations": {
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "input.pointer.click",
+            "input.pointer.click.left",
+            "accessibility.element_tokens",
+            "input.delivery_mode"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "description": "AX action: press (default), show_menu, pick, confirm, cancel, open, show_alternate_ui, show_default_ui. show_alternate_ui reveals hover-only controls on an element that lists it, without the pointer.",
+                "type": "string"
+              },
+              "button": {
+                "description": "Mouse button. Default left.",
+                "enum": [
+                  "left",
+                  "right",
+                  "middle"
+                ],
+                "type": "string"
+              },
+              "capture_id": {
+                "description": "Capture identity returned with the screenshot used for these coordinates.",
+                "type": "string"
+              },
+              "count": {
+                "description": "Click count (pixel path only). Default 1.",
+                "type": "integer"
+              },
+              "debug_image_out": {
+                "description": "Write a screenshot with a crosshair at (x, y) to this path. Needs window_id; not with from_zoom.",
+                "type": "string"
+              },
+              "delivery_mode": {
+                "description": "background by default; foreground visibly activates the target when background delivery is insufficient.",
+                "enum": [
+                  "background",
+                  "foreground"
+                ],
+                "type": "string"
+              },
+              "element_token": {
+                "description": "Fresh snapshot-bound element handle from computer_get_window_state, e.g. s0000002a:11. Refresh after a stale-token refusal.",
+                "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+                "type": "string"
+              },
+              "from_zoom": {
+                "description": "Coordinates come from the most recent computer_zoom result for this target.",
+                "type": "boolean"
+              },
+              "modifier": {
+                "description": "Modifier keys: cmd, shift, option/alt, ctrl.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "target": {
+                "additionalProperties": true,
+                "description": "Exact window: {kind:'window',pid,window_id}; desktop: {kind:'desktop',display_id:'primary'}. Omit when element_token identifies the target.",
+                "properties": {
+                  "display_id": {
+                    "description": "Display id. Required when kind is desktop; use \"primary\".",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "description": "window requires pid and window_id; desktop requires display_id.",
+                    "enum": [
+                      "window",
+                      "desktop"
+                    ],
+                    "type": "string"
+                  },
+                  "pid": {
+                    "description": "Process id. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "window_id": {
+                    "description": "Window id from computer_list_windows. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "x": {
+                "description": "X in screenshot pixels (computer_get_window_state PNG, or computer_get_desktop_state PNG for a desktop target).",
+                "type": "number"
+              },
+              "y": {
+                "description": "Y in screenshot pixels from the image selected by target.",
+                "type": "number"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "source_definition_sha256": "bac2292f3dd3579e16a20a2d64162deed85aeea378eba8acd1c9f9f8d65500d2"
         },
         "windows": {
           "annotations": {
@@ -1342,6 +1836,93 @@
           },
           "source_definition_sha256": "f15bac5dc7c0d738f28108c75c43bb69b040836541230638017cea8d8272b31f"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "input.keyboard.type",
+            "input.keyboard.type.terminal_safe",
+            "accessibility.element_tokens",
+            "input.delivery_mode"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "delay_ms": {
+                "description": "Ms between characters in the CGEvent fallback. Default 30.",
+                "maximum": 200,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "delivery_mode": {
+                "description": "background by default; foreground visibly activates the target when background delivery is insufficient.",
+                "enum": [
+                  "background",
+                  "foreground"
+                ],
+                "type": "string"
+              },
+              "element_token": {
+                "description": "Fresh snapshot-bound element handle from computer_get_window_state, e.g. s0000002a:11. Refresh after a stale-token refusal.",
+                "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+                "type": "string"
+              },
+              "target": {
+                "additionalProperties": true,
+                "description": "Exact window: {kind:'window',pid,window_id}; desktop: {kind:'desktop',display_id:'primary'}. Omit when element_token identifies the target.",
+                "properties": {
+                  "display_id": {
+                    "description": "Display id. Required when kind is desktop; use \"primary\".",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "description": "window requires pid and window_id; desktop requires display_id.",
+                    "enum": [
+                      "window",
+                      "desktop"
+                    ],
+                    "type": "string"
+                  },
+                  "pid": {
+                    "description": "Process id. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "window_id": {
+                    "description": "Window id from computer_list_windows. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "text": {
+                "description": "Text to insert.",
+                "type": "string"
+              },
+              "x": {
+                "description": "Screenshot-pixel X of the field (computer_get_window_state PNG, as in computer_click). With y and no element_token, pixel-clicks to focus, then types.",
+                "type": "number"
+              },
+              "y": {
+                "description": "Screenshot-pixel Y (see x).",
+                "type": "number"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "2b6bcfa9b2d6adb21d4a48f539fdd2dad18ec66a50001ae507e616aca7ff6b2d"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": true,
@@ -1550,6 +2131,93 @@
           },
           "source_definition_sha256": "196e0695a92a1250b8aabb7e46562ba4d89c46aea446600039afadeecffe6e47"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "input.keyboard.press",
+            "accessibility.element_tokens",
+            "input.delivery_mode"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "delivery_mode": {
+                "description": "background by default; foreground visibly activates the target when background delivery is insufficient.",
+                "enum": [
+                  "background",
+                  "foreground"
+                ],
+                "type": "string"
+              },
+              "element_token": {
+                "description": "Fresh snapshot-bound element handle from computer_get_window_state, e.g. s0000002a:11. Refresh after a stale-token refusal.",
+                "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+                "type": "string"
+              },
+              "key": {
+                "description": "Key name.",
+                "type": "string"
+              },
+              "modifiers": {
+                "description": "cmd, shift, option/alt, ctrl, fn.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "target": {
+                "additionalProperties": true,
+                "description": "Exact window: {kind:'window',pid,window_id}; desktop: {kind:'desktop',display_id:'primary'}. Omit when element_token identifies the target.",
+                "properties": {
+                  "display_id": {
+                    "description": "Display id. Required when kind is desktop; use \"primary\".",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "description": "window requires pid and window_id; desktop requires display_id.",
+                    "enum": [
+                      "window",
+                      "desktop"
+                    ],
+                    "type": "string"
+                  },
+                  "pid": {
+                    "description": "Process id. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "window_id": {
+                    "description": "Window id from computer_list_windows. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "x": {
+                "description": "Screenshot-pixel X: pixel-computer_click to focus, then send the key. With y, no element_token.",
+                "type": "number"
+              },
+              "y": {
+                "description": "Screenshot-pixel Y (see x).",
+                "type": "number"
+              }
+            },
+            "required": [
+              "key"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "f47933d324aa8b43cbf74a753ddf0debbcff84bb6b2b505e53a3e11836362d30"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": true,
@@ -1745,6 +2413,89 @@
             "type": "object"
           },
           "source_definition_sha256": "3a31112bde72359865dfa85046d3062416af7d1340bb35803ec4c3336bd78198"
+        },
+        "macos": {
+          "annotations": {
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "input.keyboard.hotkey",
+            "input.delivery_mode"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "delivery_mode": {
+                "description": "background by default; foreground visibly activates the target when background delivery is insufficient.",
+                "enum": [
+                  "background",
+                  "foreground"
+                ],
+                "type": "string"
+              },
+              "element_token": {
+                "description": "Fresh snapshot-bound element handle from computer_get_window_state, e.g. s0000002a:11. Refresh after a stale-token refusal.",
+                "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+                "type": "string"
+              },
+              "keys": {
+                "description": "Modifier(s) and one non-modifier key, e.g. [\"cmd\", \"c\"].",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 2,
+                "type": "array"
+              },
+              "target": {
+                "additionalProperties": true,
+                "description": "Exact window: {kind:'window',pid,window_id}; desktop: {kind:'desktop',display_id:'primary'}. Omit when element_token identifies the target.",
+                "properties": {
+                  "display_id": {
+                    "description": "Display id. Required when kind is desktop; use \"primary\".",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "description": "window requires pid and window_id; desktop requires display_id.",
+                    "enum": [
+                      "window",
+                      "desktop"
+                    ],
+                    "type": "string"
+                  },
+                  "pid": {
+                    "description": "Process id. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "window_id": {
+                    "description": "Window id from computer_list_windows. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "x": {
+                "description": "Screenshot-pixel X — the element px action form: pixel-computer_click there to focus, then send the combo (so e.g. Cmd+V pastes into that field). Pass with y. Use for Chromium/Electron surfaces the background combo can't reach.",
+                "type": "number"
+              },
+              "y": {
+                "description": "Screenshot-pixel Y (see x).",
+                "type": "number"
+              }
+            },
+            "required": [
+              "keys"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "43f03de2c9828014273cc27ec32b63c90d5322f880bed2b672a86c4aee52fcae"
         },
         "windows": {
           "annotations": {
@@ -1967,6 +2718,107 @@
             "type": "object"
           },
           "source_definition_sha256": "a439380624b11a474b3b872567eb0a53be6ee135544482847380e28bce6568ab"
+        },
+        "macos": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "input.pointer.scroll",
+            "accessibility.element_tokens",
+            "input.delivery_mode",
+            "input.scroll.coordinates"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "amount": {
+                "description": "Wheel notches or key repetitions, clamped to the maximum. Default 3.",
+                "maximum": 50,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "by": {
+                "description": "Scroll granularity. Default: line.",
+                "enum": [
+                  "line",
+                  "page"
+                ],
+                "type": "string"
+              },
+              "delivery_mode": {
+                "description": "background by default; foreground visibly activates the target when background delivery is insufficient.",
+                "enum": [
+                  "background",
+                  "foreground"
+                ],
+                "type": "string"
+              },
+              "direction": {
+                "description": "Scroll direction.",
+                "enum": [
+                  "up",
+                  "down",
+                  "left",
+                  "right"
+                ],
+                "type": "string"
+              },
+              "element_token": {
+                "description": "Fresh snapshot-bound element handle from computer_get_window_state, e.g. s0000002a:11. Refresh after a stale-token refusal.",
+                "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+                "type": "string"
+              },
+              "target": {
+                "additionalProperties": true,
+                "description": "Exact window: {kind:'window',pid,window_id}; desktop: {kind:'desktop',display_id:'primary'}. Omit when element_token identifies the target.",
+                "properties": {
+                  "display_id": {
+                    "description": "Display id. Required when kind is desktop; use \"primary\".",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "description": "window requires pid and window_id; desktop requires display_id.",
+                    "enum": [
+                      "window",
+                      "desktop"
+                    ],
+                    "type": "string"
+                  },
+                  "pid": {
+                    "description": "Process id. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "window_id": {
+                    "description": "Window id from computer_list_windows. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "x": {
+                "description": "Window-local screenshot X (computer_get_window_state PNG). With y, wheel-scrolls at that point; needs window_id.",
+                "type": "number"
+              },
+              "y": {
+                "description": "Window-local screenshot Y.",
+                "type": "number"
+              }
+            },
+            "required": [
+              "direction"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "6fa4755db07631cb6a0d8ca5bd44a028500d02646824125b9344d56e126a25c4"
         },
         "windows": {
           "annotations": {
@@ -2220,6 +3072,119 @@
           },
           "source_definition_sha256": "77fb17d41e809dab0a882acefa68bb7957e314ad12643bede9dfc71eb0894b89"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "input.pointer.drag",
+            "input.delivery_mode"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "button": {
+                "description": "Mouse button used for the computer_drag. Default: left.",
+                "enum": [
+                  "left",
+                  "right",
+                  "middle"
+                ],
+                "type": "string"
+              },
+              "delivery_mode": {
+                "description": "background by default; foreground visibly activates the target when background delivery is insufficient.",
+                "enum": [
+                  "background",
+                  "foreground"
+                ],
+                "type": "string"
+              },
+              "duration_ms": {
+                "description": "Wall-clock duration of the computer_drag path between mouseDown and mouseUp. Default: 500.",
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "from_x": {
+                "description": "Drag-start X in window-local screenshot pixels. Top-left origin.",
+                "type": "number"
+              },
+              "from_y": {
+                "description": "Drag-start Y in window-local screenshot pixels. Top-left origin.",
+                "type": "number"
+              },
+              "from_zoom": {
+                "description": "Coordinates come from the most recent computer_zoom result for this target.",
+                "type": "boolean"
+              },
+              "modifier": {
+                "description": "Modifier keys held across the entire gesture: cmd/shift/option/ctrl.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "steps": {
+                "description": "Number of intermediate mouseDragged events linearly interpolated along the path. Default: 20.",
+                "maximum": 200,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "target": {
+                "additionalProperties": true,
+                "description": "Exact window: {kind:'window',pid,window_id}; desktop: {kind:'desktop',display_id:'primary'}. Omit when element_token identifies the target.",
+                "properties": {
+                  "display_id": {
+                    "description": "Display id. Required when kind is desktop; use \"primary\".",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "description": "window requires pid and window_id; desktop requires display_id.",
+                    "enum": [
+                      "window",
+                      "desktop"
+                    ],
+                    "type": "string"
+                  },
+                  "pid": {
+                    "description": "Process id. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "window_id": {
+                    "description": "Window id from computer_list_windows. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "to_x": {
+                "description": "Drag-end X in window-local screenshot pixels.",
+                "type": "number"
+              },
+              "to_y": {
+                "description": "Drag-end Y in window-local screenshot pixels.",
+                "type": "number"
+              }
+            },
+            "required": [
+              "from_x",
+              "from_y",
+              "to_x",
+              "to_y"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "f81bc7fa7826e2e72c4991c10480b1e1cf81b695967c857c44448f64729ceba8"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": true,
@@ -2425,6 +3390,82 @@
           },
           "source_definition_sha256": "6d92785b785cc18af07a5f61ed073d0e7a2e9b1892e6cbad195aa0f352d84dc9"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "agent_cursor.move",
+            "input.pointer.move",
+            "input.delivery_mode"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "cursor_id": {
+                "description": "Cursor instance to move. Default: 'default'.",
+                "type": "string"
+              },
+              "delivery_mode": {
+                "description": "background by default; foreground visibly activates the target when background delivery is insufficient.",
+                "enum": [
+                  "background",
+                  "foreground"
+                ],
+                "type": "string"
+              },
+              "target": {
+                "additionalProperties": true,
+                "description": "Exact window: {kind:'window',pid,window_id}; desktop: {kind:'desktop',display_id:'primary'}. Omit when element_token identifies the target.",
+                "properties": {
+                  "display_id": {
+                    "description": "Display id. Required when kind is desktop; use \"primary\".",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "description": "window requires pid and window_id; desktop requires display_id.",
+                    "enum": [
+                      "window",
+                      "desktop"
+                    ],
+                    "type": "string"
+                  },
+                  "pid": {
+                    "description": "Process id. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "window_id": {
+                    "description": "Window id from computer_list_windows. Required when kind is window.",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "x": {
+                "description": "Destination X. Window target: window screenshot pixels. No target: screen points for the agent cursor overlay. Desktop scope: native computer_get_desktop_state screenshot pixels.",
+                "type": "number"
+              },
+              "y": {
+                "description": "Destination Y, in the same space as x.",
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "a0c6de3a7f8a3570681ad0032bea3565071e230f466c4e19b4c686cc843af5b5"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": false,
@@ -2566,6 +3607,45 @@
           },
           "source_definition_sha256": "5cafbd127c4fdf4f59ccc759b913d318b23717f17afd22b80aa2eb357f286ae9"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "input.keyboard.type",
+            "accessibility.element_tokens"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "element_token": {
+                "description": "Fresh snapshot-bound element handle from computer_get_window_state, e.g. s0000002a:11. Refresh after a stale-token refusal.",
+                "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+                "type": "string"
+              },
+              "pid": {
+                "description": "Target process ID. Optional with element_token (the token carries the pid).",
+                "type": "integer"
+              },
+              "value": {
+                "description": "New value, coerced to the element's type.",
+                "type": "string"
+              },
+              "window_id": {
+                "description": "Window ID. Omit with element_token.",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "7f3315e9d837e43d41e326e6fd99ff5ed4870179311b388194a15453890a0c1e"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": true,
@@ -2685,6 +3765,52 @@
           },
           "source_definition_sha256": "777130b270cc9dc44e3bdbc98da9606cf2481db1da4c0ddc054e768c7ea586f9"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "menu.path.invoke",
+            "accessibility.menu.native"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "description": "Exact, immediate-child application menu path to resolve and invoke through\nthe operating system's accessibility API. Path labels are matched after\ntrimming surrounding whitespace and otherwise remain case-sensitive. On\nmacOS, three periods in a label also match the ellipsis character that\nnative menu titles use (`Save As...` finds `Save As…`).",
+            "properties": {
+              "path": {
+                "description": "Menu labels from the top-level menu to the item, e.g. `[\"File\", \"Save As...\"]`\n(1 to 16 labels).",
+                "items": {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "minItems": 1,
+                "type": "array"
+              },
+              "pid": {
+                "description": "Process ID of the application that owns the menu.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "window_id": {
+                "description": "Window ID from computer_list_windows whose menu is invoked.",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "pid",
+              "window_id",
+              "path"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "777130b270cc9dc44e3bdbc98da9606cf2481db1da4c0ddc054e768c7ea586f9"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": true,
@@ -2757,6 +3883,114 @@
       "no_image": "steps",
       "platforms": {
         "linux": {
+          "annotations": {
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "input.batch",
+            "input.delivery_mode"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "app": {
+                "description": "Default app (name or bundle id) for steps that name no window.",
+                "type": "string"
+              },
+              "delay_ms": {
+                "description": "Pause between steps in milliseconds (not after the last). Default 0.",
+                "maximum": 2000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "delivery_mode": {
+                "description": "background by default; foreground visibly activates the target when background delivery is insufficient.",
+                "enum": [
+                  "background",
+                  "foreground"
+                ],
+                "type": "string"
+              },
+              "foreground_fallback": {
+                "description": "Retry a background refusal once in the foreground; visibly activates the window. Default false.",
+                "type": "boolean"
+              },
+              "observe": {
+                "description": "Arguments for one final computer_get_window_state read. {} uses the last step's window and since:'latest'.",
+                "type": "object"
+              },
+              "pid": {
+                "description": "Default pid for steps that name no window (a step's own pid/window_id/app/window wins).",
+                "type": "integer"
+              },
+              "steps": {
+                "description": "Ordered {tool,args} steps, with optional wait_for/expect checks. Use advertised computer_* tool names. Stop at the first failure.",
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "args": {
+                      "description": "The selected tool's arguments; named targets may use role/name/nth/app/window.",
+                      "type": "object"
+                    },
+                    "expect": {
+                      "description": "Postcondition checks after the action, using the advertised predicate schema.",
+                      "items": {
+                        "type": "object"
+                      },
+                      "maxItems": 4,
+                      "type": "array"
+                    },
+                    "timeout_ms": {
+                      "description": "Time budget in milliseconds; a bounded observation may return a partial tree. Use the advertised bounds.",
+                      "maximum": 10000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "tool": {
+                      "description": "Action tool to run.",
+                      "enum": [
+                        "computer_click",
+                        "computer_set_value",
+                        "computer_type_text",
+                        "computer_press_key",
+                        "computer_hotkey",
+                        "computer_scroll",
+                        "computer_drag",
+                        "computer_move_cursor"
+                      ],
+                      "type": "string"
+                    },
+                    "wait_for": {
+                      "description": "Precondition checked before this step's action.",
+                      "type": "object"
+                    }
+                  },
+                  "type": "object"
+                },
+                "maxItems": 64,
+                "minItems": 1,
+                "type": "array"
+              },
+              "window": {
+                "description": "Default window title substring for steps that name no window.",
+                "type": "string"
+              },
+              "window_id": {
+                "description": "Default window_id for steps that name no window, with `pid`.",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "steps"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "1791fb1df20fc8742278f483b8545fc5ac2427e5f7f32bc25e5a7bcd710ca643"
+        },
+        "macos": {
           "annotations": {
             "destructiveHint": true,
             "idempotentHint": false,
@@ -3026,6 +4260,35 @@
           },
           "source_definition_sha256": "7e6fc2e58801888e63f61b17fc83912112a0c8afdfe2b0731138248123805e15"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "window.activate"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "pid": {
+                "description": "Process ID of the app to activate.",
+                "type": "integer"
+              },
+              "window_id": {
+                "description": "CGWindowID to verify as the focused, frontmost window. Omit to activate the app only.",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "pid"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "5a08bfece158011111101b7d1bd851ceb696c18380e8101a0eb7d61e70e8762c"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": false,
@@ -3081,6 +4344,60 @@
       "no_image": "all",
       "platforms": {
         "linux": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "window.frame.set"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "height": {
+                "description": "New height, in the same units as computer_list_windows bounds.",
+                "minimum": 1,
+                "type": "number"
+              },
+              "pid": {
+                "description": "Process ID that owns the window.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "width": {
+                "description": "New width, in the same units as computer_list_windows bounds.",
+                "minimum": 1,
+                "type": "number"
+              },
+              "window_id": {
+                "description": "Window ID from computer_list_windows.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "x": {
+                "description": "New left edge in the desktop coordinate space reported by computer_list_windows.",
+                "type": "number"
+              },
+              "y": {
+                "description": "New top edge in the desktop coordinate space reported by computer_list_windows.",
+                "type": "number"
+              }
+            },
+            "required": [
+              "pid",
+              "window_id",
+              "x",
+              "y",
+              "width",
+              "height"
+            ],
+            "type": "object"
+          },
+          "source_definition_sha256": "57a14084649526932076886c3d1e077ea08fc8275c0f3028fcf7cb6ec179a15a"
+        },
+        "macos": {
           "annotations": {
             "destructiveHint": false,
             "idempotentHint": true,
@@ -3257,6 +4574,54 @@
           },
           "source_definition_sha256": "4a24879e136de91f1afbd81791fb42b06ab48afb963fa75d81bedc02fbd5cddb"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "app.launch"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "additional_arguments": {
+                "description": "Extra arguments appended after --args when launching.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "bundle_id": {
+                "description": "App bundle identifier, e.g. com.apple.calculator. Preferred over name.",
+                "type": "string"
+              },
+              "creates_new_application_instance": {
+                "description": "When true, force a new app instance even if already running (open -n). Use for concurrent multi-agent/multi-session work so each session gets an isolated instance + window instead of sharing one — on single-instance apps (e.g. Calculator) every caller otherwise gets the same window and the sessions clobber each other.",
+                "type": "boolean"
+              },
+              "name": {
+                "description": "App display name. Used only when bundle_id is absent.",
+                "type": "string"
+              },
+              "urls": {
+                "description": "Optional file paths or URLs to open with the app (e.g. a folder path for Finder).",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "webkit_inspector_port": {
+                "description": "Open a WebKit inspector server on this port (sets WEBKIT_INSPECTOR_SERVER env var).",
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "source_definition_sha256": "ce20507a2066f5052dd193dc5241cf09706df7947ba3a2d21145ac042e1cfea3"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": false,
@@ -3371,6 +4736,31 @@
           },
           "source_definition_sha256": "f2cd59dbef51bc71d29c28dc9f0a7f7fc8e78863f6e0651b4d2081deb86779be"
         },
+        "macos": {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false,
+            "readOnlyHint": true
+          },
+          "capabilities": [
+            "clipboard.read",
+            "clipboard.types"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "include_text": {
+                "default": false,
+                "description": "Return plain-text clipboard content in addition to the available types.\nClipboard content is privacy-sensitive and is never retained in telemetry.",
+                "type": "boolean"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "source_definition_sha256": "f2cd59dbef51bc71d29c28dc9f0a7f7fc8e78863f6e0651b4d2081deb86779be"
+        },
         "windows": {
           "annotations": {
             "destructiveHint": false,
@@ -3422,6 +4812,41 @@
       "no_image": "all",
       "platforms": {
         "linux": {
+          "annotations": {
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": false,
+            "readOnlyHint": false
+          },
+          "capabilities": [
+            "clipboard.write",
+            "clipboard.write.text",
+            "clipboard.write.image",
+            "clipboard.write.file_url",
+            "clipboard.types"
+          ],
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "file_path": {
+                "description": "Absolute path to a local file to place on the clipboard as a file URL.",
+                "type": "string"
+              },
+              "image_path": {
+                "description": "Absolute path to a local image to place on the clipboard.",
+                "type": "string"
+              },
+              "text": {
+                "description": "Plain text to place on the clipboard.",
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "source_definition_sha256": "def3d6b9094feca8bae4ab43a2f6bb130277d2973df72ac458ddbdf180da6f04"
+        },
+        "macos": {
           "annotations": {
             "destructiveHint": true,
             "idempotentHint": true,

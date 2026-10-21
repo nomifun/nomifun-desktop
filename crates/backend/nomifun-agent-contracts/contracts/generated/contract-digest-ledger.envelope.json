@@ -6,7 +6,7 @@
       "canonical_api_inventory": "6addf6ddc6847571816ad3cd67db7d807002d4b843d4de7febcb01eeda7d12d6",
       "canonical_schema_manifest": "b0009f3fb63a57f87c24bf2deb0a42e480caac9a33c9d96da11a81be37201685",
       "capability_catalog_entry": "32b70c1749ef9dcbc73bcc6200b46cd28d90e37e64ae736010c63b6480ce2168",
-      "cargo_lock": "79f27cfb0cf554100b92bd1276264b3fe9706c83f75460dd52f1659c1e2af69b",
+      "cargo_lock": "979872a2a57d10cbbf7256303af6af99a4e7842d9290ac0b263f8b1adbf708f9",
       "coding_codex_native_contract": "853344a5149eef78e0fc08ff2fac380489775703fd340172f9d49990c5e51d8c",
       "confirmed_decision_contract": "92b3de5b8e46bb769e1af7143555dd3cf65be323ab2a6335e48b0fa01854a6c4",
       "database_schema": "855244c46e97838c4deaee55f3fd5640875c2b87e43ccba2ef6773f23258b4d8",
@@ -14,7 +14,7 @@
       "official_preset_seed_manifest": "96075d7ba1e03f9102a70843096281e079b82a4083e72d90f979d1cd1e744df3",
       "package_schema": "78633c6aada5d08339172daa0ef7eb11610c48f471dd9ba36f3da0fafc32905a",
       "platform_validation_contract": "5aef0a4ec9b86a353eb2a621f824d31df067bbf7eaa844393bebcd9ab78459c1",
-      "platform_validation_fixture": "99bc5af3de822f4f4d0efecf8a5ac9dab79979fe9bbfa782c86b481030244582",
+      "platform_validation_fixture": "6a9fc0c6bc3589ce915250f72bff1c3d3e1fc99aa57d7281489344bb7de3bbc8",
       "runtime_feature_inventory": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
       "runtime_protocol": "5c7792fb52932933b387984887475a525bedde5c03cd6b5b3fa81e7df614382f",
       "rust_contract_schema": "320e9527c23931e75d2cc683de567ea0b694c5ace334cb49ed26556168d3c1d7",
@@ -22,5 +22,5 @@
       "target_first_party_inventory": "3821559376ca7af18d35a7b43e5e77cc5190027131224bd53f648775d17c9c43"
     }
   },
-  "payload_digest": "dd8f44e847c9428519c9284d17d283d2094cd24114ad2d340fe3006243c169ce"
+  "payload_digest": "945a5f8d2133d075e4e317cd68bcdf853afa473fa02a846e19c0c1db45c16152"
 }

@@ -10,7 +10,7 @@ Computer Use 由 NomiFun 私有 worker 和 vendored Cua Driver 提供。宿主�
 
 [冻结清单](../../crates/backend/nomifun-agent-contracts/contracts/computer-tools.v1.json)保存真实 worker 的平台 `list` 结果；[精简覆盖](../../crates/backend/nomifun-agent-contracts/contracts/computer-tools.overrides.v1.json)提供标题、描述、加载分组、许可元数据与参数裁剪。`scripts/computer/generate-contracts.mjs` 从这两个输入生成 22 个精确 Action、Wave2 typed operation、工具展示与两个官方模板的授权集合。不要在宿主、UI 或文档复制另一份动作表。
 
-canonical 授权 schema 接受已采集平台的定义；模型工具使用当前宿主平台的精确冻结 schema。当前清单含 Windows、Linux 实采定义，macOS 采集仍待对应平台执行。清单缺失某平台不构成该平台原生验证。
+canonical 授权 schema 接受已采集平台的定义；模型工具使用当前宿主平台的精确冻结 schema。当前清单含 Windows、Linux、macOS 实采定义。清单采集只验证工具定义，不构成该平台原生动作或许可验收。
 
 ## 调用与进程
 
@@ -39,6 +39,8 @@ Broker 按每次实际尝试的路由与适配器能力重新投影工具和提�
 许可由冻结的 `system_permissions` 元数据派生，在实际调用时检查。缺权沿现有 `SYSTEM_PERMISSION_REQUIRED` 载体返回，未执行不是动作成功。状态入口为 `GET /api/computer/status`；系统许可继续使用 `/api/system/permissions` 及其 request/open-settings 入口，没有旧 Computer 权限别名。
 
 状态读取只返回当前代际的缓存，不启动 worker 或重试探针。`backend` 标识已经初始化的原生分派家族，不证明权限、UIA、抓图或所有动作均可用；Linux `atspi` 来自该 worker 初始化时对真实 accessibility bus 的只读探测。缺失或失败的诊断保持未知，代际退休后清除；具体动作仍依据本次实际检查与原生结果。
+
+macOS 的登记同意补丁从原生账户 home 只读查询系统审批元数据，驱动写入仍使用私有 HOME/XDG。CG 屏幕录制授权本身不证明截图已可用；现役许可 request 入口在该授权后提供显式“验证截图”。同一 worker owner 串行处理仅供宿主调用的私有协议请求，复用上游16×16验证帧，仅返回状态元数据、不保留像素；它不是模型工具或 Agent Session。失败返回 HTTP 错误并保留真实 CG 库存。探测结束后退休该精确代际及其同意缓存、binding；超时和应用退出继续保留清理责任，直至实际进程 reaped。状态查询不会触发该请求或系统提示。
 
 macOS 目标为 14+，worker 由 App 直接启动并与 App 使用相同正式签名身份；TCC 归属和安装包行为需要在该平台实际验证。Windows 使用当前登录会话和普通完整性，提权窗口保留驱动的结构化拒绝，不借管理员执行设施绕过 UIPI。Linux 当前路径为 X11/XWayland 与 AT-SPI；原生 Wayland capture 尚未启用，portal、桌面 backend 与 GNOME helper 不能仅靠源码或 Xvfb 证明可用。
 
