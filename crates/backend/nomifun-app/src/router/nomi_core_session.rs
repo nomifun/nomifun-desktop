@@ -129,7 +129,7 @@ use nomifun_api_types::{
     ConversationRuntimeStateKind, ConversationRuntimeSummary, CreateAgentSessionRequestDto, CreateConversationRequest,
     CreateAgentSessionResponseDto, CreateAgentSessionTurnRequestDto,
     CreateAgentSessionTurnResponseDto, AgentSessionTurnMutationResponseDto,
-    CancelAgentSessionTurnRequestDto,
+    CancelAgentSessionTurnRequestDto,CancelAgentSessionTurnResponseDto,
     ErrorResponse, ForkAgentSessionRequestDto,
     ForkAgentSessionResponseDto, ListMessagesQuery, MessageListResponse, MessageResponse,
     MessageSearchItem, MessageSearchResponse, SearchMessagesQuery,
@@ -2966,8 +2966,17 @@ impl NomiCoreSessionOwner {
                     "read canonical AgentExecution Conversation link: {error}"
                 ))
             })?;
-        let response = canonical_conversation_response(observed,projected,workspace,created_at,
+        let mut response = canonical_conversation_response(observed,projected,workspace,created_at,
             execution_link,companion_origin,companion_associated_task)?;
+        if !self.input_preparation_observations(session_id)?.is_empty()
+            && let Some(runtime)=response.runtime.as_mut()
+            && runtime.state==ConversationRuntimeStateKind::Idle {
+            // Preparing/cleaning an accepted input owns live work before a
+            // canonical Turn exists. GET must not report Stop released merely
+            // because the head is ready; no fictitious Turn identity is added.
+            runtime.state=ConversationRuntimeStateKind::Starting;
+            runtime.is_processing=true;
+        }
         Ok(Some(response))
     }
 
@@ -3382,6 +3391,7 @@ impl NomiCoreSessionOwner {
             nomifun_common::AgentKillReason::UserCancelled).await
     }
 
+    /// Read the exact root used by channel delivery and other existing consumers.
     async fn operation_for_accepted_input(&self, owner_id:&str,session_id:&AgentSessionId,
         source_message_id:&str) -> Result<OperationId,AppError> {
         let source = Uuid::parse_str(source_message_id)
@@ -3391,9 +3401,6 @@ impl NomiCoreSessionOwner {
             &PrincipalRef { principal_kind: "user".into(), principal_id: owner_id.into() },
             session_id,
         ).await?;
-        // Source-to-operation identity is immutable. The existing exact Turn
-        // mutation rechecks active/closed state atomically, so a successor
-        // started between this lookup and cancellation cannot become a target.
         let operations: Vec<String> = sqlx::query_scalar(
             "SELECT turn.operation_id FROM agent_turns turn \
              JOIN agent_events started ON started.event_id=turn.started_event_id \
@@ -16700,24 +16707,26 @@ async fn cancel_nomi_core_agent_session_turn(
     Extension(owner): Extension<AuthenticatedOwner>,
     Path(agent_session_id): Path<String>,
     Json(request): Json<CancelAgentSessionTurnRequestDto>,
-) -> Result<Json<ApiResponse<AgentSessionTurnMutationResponseDto>>, NomiCoreApiError> {
+) -> Result<Json<ApiResponse<CancelAgentSessionTurnResponseDto>>, NomiCoreApiError> {
     let session_id = parse_agent_session_id(&agent_session_id)?;
     let key = canonical_nonempty(&request.idempotency_key, "idempotency_key")?;
     let principal = authenticated_principal(&owner);
-    let target=match request.expected_turn_id.as_deref() {
-        Some(source)=>Some(state.session_owner.operation_for_accepted_input(&principal.principal_id,&session_id,source).await?),
-        None=>None,
-    };
-    let receipt=state.session_owner.cancel_owned_turn(&principal.principal_id,&session_id,&key,target.as_ref(),
+    if let Some(source)=request.expected_turn_id {
+        let input=Uuid::parse_str(&source).ok().filter(|id|id.get_version_num()==7)
+            .ok_or_else(||AppError::BadRequest("expected_turn_id must be a canonical UUIDv7".into()))?;
+        let response=state.session_owner.stop_composer_source(principal.principal_id,session_id,nomifun_agent_contracts::EventId::from(input.to_string()),key).await?;
+        return Ok(Json(ApiResponse::ok(response)));
+    }
+    let receipt=state.session_owner.cancel_owned_turn(&principal.principal_id,&session_id,&key,None,
         nomifun_common::AgentKillReason::UserCancelled,true).await?;
-    Ok(Json(ApiResponse::ok(AgentSessionTurnMutationResponseDto {
+    Ok(Json(ApiResponse::ok(CancelAgentSessionTurnResponseDto::Turn(AgentSessionTurnMutationResponseDto {
         agent_session_id: session_id.as_ref().to_owned(),
         target_operation_id: receipt.target_operation_id.as_ref().to_owned(),
         message_id: receipt.event_id.as_ref().to_owned(),
         cursor: session_cursor(&session_id, receipt.cursor.seq),
         status: "cancelled".to_owned(),
         duplicate: receipt.duplicate,
-    })))
+    }))))
 }
 
 /// Both the built-in page and a scoped plugin UI use the same admission path.

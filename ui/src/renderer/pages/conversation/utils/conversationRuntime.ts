@@ -12,8 +12,11 @@ export type ConversationActivity = 'idle' | 'running' | 'waiting' | 'paused';
  * lifecycle. Undefined means the snapshot has not established activity. */
 export const getConversationActivity = (conversation?: ActivitySnapshot | null): ConversationActivity | undefined => {
   if (!conversation) return undefined;
-  if (conversation.status === 'finished') return 'idle';
   const runtime = conversation.runtime;
+  // A retained, exact input-preparation owner can outlive the preceding Turn's
+  // finished status. Its read projection blocks idle actions until cleanup.
+  if (runtime?.state === 'starting' && runtime.is_processing === true) return 'running';
+  if (conversation.status === 'finished') return 'idle';
   if (runtime?.state === 'waiting') return runtime.active_turn_id && runtime.is_processing === false
     && runtime.can_send_message === false && runtime.turn_outcome?.kind === 'waiting' ? 'waiting' : undefined;
   if (runtime?.state === 'paused' || runtime?.state === 'reconciliation') return runtime.active_turn_id && runtime.is_processing === false

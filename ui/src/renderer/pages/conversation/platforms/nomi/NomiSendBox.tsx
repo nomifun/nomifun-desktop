@@ -11,7 +11,7 @@ import { uuid } from '@/common/utils';
 import SessionInputQueuePanel from '@/renderer/components/chat/SessionInputQueuePanel';
 import { useSessionInputQueue } from '../useSessionInputQueue';
 import { guidedInput, QUEUED_INPUT, type SessionInputDeliveryIntent } from '@/common/chat/inputSubmission';
-import type { SessionInputQueueItem } from '@/common/adapter/ipcBridge';
+import type { InputDelivery } from '@/common/chat/inputDelivery';
 import contentStyles from '../../components/ConversationContentColumn.module.css';
 import SendBox from '@/renderer/components/chat/SendBox';
 import { useSessionComposerCommands } from '@/renderer/components/chat/commands/useSessionComposerCommands';
@@ -249,6 +249,20 @@ const NomiSendBox: React.FC<{
   } = turnActivity;
   const { pending: initialMessage, end: endInitialMessage } = useInitialMessage();
   const messageList = useMessageList();
+  const inputQueue = useSessionInputQueue(conversation_id);
+  const isStartingInput = (delivery: InputDelivery | undefined) => delivery?.state === 'pending'
+    && delivery.kind === 'root' && delivery.placement === 'transcript';
+  const startingSources = new Set(inputQueue.snapshot.items.filter(item => isStartingInput(item.input_delivery)).map(item => item.message_id));
+  // An accepted-message ACK can precede the queue observation. Only its exact
+  // canonical identity and a newer fact cursor may temporarily fill that gap.
+  // A later queue snapshot without that source retires the stale ACK candidate.
+  for (const message of messageList) {
+    if (message.conversation_id !== conversation_id || message.type !== 'text' || message.position !== 'right') continue;
+    const delivery = message.content.input_delivery;
+    const source = message.msg_id ?? message.message_id;
+    if (source && isStartingInput(delivery) && delivery?.event_seq && delivery.event_seq > inputQueue.snapshot.version) startingSources.add(source);
+  }
+  const startingInputId = startingSources.size === 1 ? startingSources.values().next().value : undefined;
   const initialMessageRef = useLatestRef(initialMessage);
   // The presentation may outlive admission while execution state arrives.
   // Release composer interaction at the same accepted-user boundary as before.
@@ -350,7 +364,7 @@ const NomiSendBox: React.FC<{
   const messageListRef = useLatestRef(messageList);
   const { setSendBoxHandler } = usePreviewContext();
   const [isStopping, setIsStopping] = useState(false);
-  const isBusy = running || isStopping;
+  const isBusy = running || isStopping || Boolean(startingInputId);
   const capabilitiesWereBlocked = useRef(Boolean(isBusy || pauseNotice));
   useEffect(() => {
     const blocked = Boolean(isBusy || pauseNotice);
@@ -437,7 +451,7 @@ const NomiSendBox: React.FC<{
         if (attempt) settleInputDelivery(conversation_id, attempt.key);
         if (!mountedRef.current || requestConversationIdRef.current !== conversation_id) return;
         addOrUpdateMessage({ id: uuid(), msg_id: res.msg_id, type: 'text', position: 'right',
-          conversation_id, content: { content: attempt?.content ?? displayMessage, input_delivery: { state: 'pending' } }, created_at: Date.now() });
+          conversation_id, content: { content: attempt?.content ?? displayMessage, input_delivery: res.input_delivery }, created_at: Date.now() });
         // Saving input is not proof of a new or resumed Turn. Lifecycle comes
         // from canonical runtime snapshots and stream events only.
         reconcileAfterStreamTerminal();
@@ -462,11 +476,7 @@ const NomiSendBox: React.FC<{
       submissionDisabledRef, requestConversationIdRef, prepareIdleSubmission]
   );
 
-  const inputQueue = useSessionInputQueue(conversation_id);
   const hasPendingCommands = inputQueue.snapshot.items.length > 0;
-  const [queueEditing, setQueueEditing] = useState(false);
-  const queueEditOwner = useRef<string | null>(null);
-  useEffect(() => { queueEditOwner.current = null; setQueueEditing(false); }, [conversation_id]);
 
   // Handle the Guid handoff only after passive warmup has settled.
   // This sequences the UI requests; runtime admission remains backend-owned.
@@ -651,21 +661,6 @@ const NomiSendBox: React.FC<{
     await onSendHandler(message);
   };
 
-  const handleEditQueuedInput = async (item: SessionInputQueueItem) => {
-    if (contentRef.current.trim() || collectSelectedFiles(uploadFile, atPathRef.current).length) return;
-    const owner = uuid(); queueEditOwner.current = owner; setQueueEditing(true);
-    try {
-      await inputQueue.change({ kind: 'remove', message_id: item.message_id });
-      if (requestConversationIdRef.current !== conversation_id || queueEditOwner.current !== owner) return;
-      setContent(item.input.content);
-      setUploadFile(Array.from(new Set(item.input.files ?? [])));
-      setAtPath([]);
-      emitter.emit('nomi.selected.file.clear');
-    } finally {
-      if (queueEditOwner.current === owner) { queueEditOwner.current = null; setQueueEditing(false); }
-    }
-  };
-
   const appendSelectedFiles = useCallback(
     (files: string[]) => {
       setUploadFile((prev) => [...prev, ...files]);
@@ -688,7 +683,7 @@ const NomiSendBox: React.FC<{
   // Stop conversation handler
   const handleStop = async (): Promise<void> => {
     if (isStopping) return;
-    const observedTurnId = pauseNotice?.turnId ?? waitingNotice?.turnId ?? turnActivity.activeTurnId;
+    const observedTurnId = pauseNotice?.turnId ?? waitingNotice?.turnId ?? turnActivity.activeTurnId ?? startingInputId;
     if (!observedTurnId) {
       reconcileAfterStreamTerminal();
       inputQueue.refresh();
@@ -710,6 +705,7 @@ const NomiSendBox: React.FC<{
     }
     if (result.status === 'released' || result.status === 'deleted') {
       confirmStopped();
+      inputQueue.refresh();
       setIsStopping(false);
       if (result.status === 'released') emitter.emit('chat.history.refresh');
       return;
@@ -734,6 +730,7 @@ const NomiSendBox: React.FC<{
     }
     if (settled === 'released' || settled === 'deleted') {
       confirmStopped();
+      inputQueue.refresh();
       setIsStopping(false);
       if (settled === 'released') emitter.emit('chat.history.refresh');
       return;
@@ -767,10 +764,10 @@ const NomiSendBox: React.FC<{
         recoveryAction={<button type='button' className='message-error-note__retry' onClick={sessionCapabilities.retry}>{t('common.retry')}</button>}
       />}
       <SessionInputQueuePanel
+        key={`input-queue:${conversation_id}`}
         snapshot={inputQueue.snapshot} changing={inputQueue.changing} error={inputQueue.error}
         activeTurn={turnActivity.activeTurnId} onChange={inputQueue.change}
-        editDisabled={Boolean(content.trim() || collectSelectedFiles(uploadFile, atPath).length)}
-        onEdit={handleEditQueuedInput} onRefresh={inputQueue.refresh}
+        onRefresh={inputQueue.refresh}
       />
       <SendBox
         key={conversation_id}
@@ -811,9 +808,9 @@ const NomiSendBox: React.FC<{
           emitter.emit('nomi.selected.file', items);
           setAtPath(items);
         }}
-        loading={isCreating ? creationSubmitting : executing || isStopping}
+        loading={isCreating ? creationSubmitting : executing || isStopping || Boolean(startingInputId)}
         paused={Boolean(pauseNotice)}
-        disabled={submissionDisabled || preparingSubmission || collaborationSubmitting || initialSubmissionPending || queueEditing}
+        disabled={submissionDisabled || preparingSubmission || collaborationSubmitting || initialSubmissionPending}
         submitDisabled={isCreating && !isBusy && !pauseNotice
           ? !generation.ready || creation?.preparing
           : false}

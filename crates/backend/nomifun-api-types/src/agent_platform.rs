@@ -1173,7 +1173,7 @@ pub struct AcceptAgentSessionMessageRequestDto {
 pub struct UpdateAgentSessionInputQueueRequestDto {
     pub idempotency_key: String,
     pub expected_version: u64,
-    pub action: nomifun_agent_contracts::SessionInputQueueAction,
+    pub action: nomifun_agent_contracts::SessionInputQueueCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1184,6 +1184,7 @@ pub struct AcceptAgentSessionMessageResponseDto {
     pub cursor: SessionCursorDto,
     pub status: String,
     pub replayed: bool,
+    pub input_delivery: nomifun_agent_contracts::SessionInputView,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1229,12 +1230,32 @@ pub struct AgentSessionTurnMutationResponseDto {
     pub duplicate: bool,
 }
 
+/// A preparation has an accepted input and a real cancellation event, but no
+/// Turn operation. Do not manufacture a Turn mutation receipt for that case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionInputCancellationResponseDto {
+    pub agent_session_id: String,
+    pub input_message_id: String,
+    pub message_id: String,
+    pub cursor: SessionCursorDto,
+    pub status: String,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CancelAgentSessionTurnResponseDto {
+    Turn(AgentSessionTurnMutationResponseDto),
+    Input(AgentSessionInputCancellationResponseDto),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CancelAgentSessionTurnRequestDto {
     pub idempotency_key: String,
-    /// Optional accepted input UUIDv7 from `turn.started`. When present,
-    /// cancellation stays attached to that Turn even after it has closed.
+    /// Exact observed accepted input UUIDv7. Before initial claim this stops
+    /// its preparation; after claim it stays attached to the original Turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_turn_id: Option<String>,
 }

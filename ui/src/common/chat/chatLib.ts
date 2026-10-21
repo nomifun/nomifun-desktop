@@ -1214,6 +1214,7 @@ export const transformUserCreatedEvent = (
     id: uuid(),
     type: 'text',
     msg_id: event.msg_id,
+    ...(inputDelivery?.turn_id ? { turn_id: inputDelivery.turn_id } : {}),
     position: 'right',
     status: normalizeMessageStatus(event.status),
     conversation_id: event.conversation_id,
@@ -1230,21 +1231,26 @@ export const transformUserCreatedEvent = (
 };
 
 /** Accepted user bodies are complete; later canonical facts update metadata. */
-export const mergeUserTextMessage = (existing: IMessageText, incoming: IMessageText): IMessageText => ({
+export const mergeUserTextMessage = (existing: IMessageText, incoming: IMessageText): IMessageText => {
+  const inputDelivery = preferInputDelivery(incoming.content.input_delivery, existing.content.input_delivery);
+  return {
   ...existing,
   ...incoming,
   id: existing.id,
   message_id: existing.message_id ?? incoming.message_id,
-  turn_id: incoming.turn_id ?? existing.turn_id,
+  turn_id: inputDelivery?.kind
+    ? inputDelivery.turn_id
+    : incoming.turn_id ?? existing.turn_id,
   created_at: existing.created_at ?? incoming.created_at,
   content: {
     ...existing.content,
     ...incoming.content,
     content: existing.content.content,
-    input_delivery: preferInputDelivery(incoming.content.input_delivery, existing.content.input_delivery),
+    input_delivery: inputDelivery,
     idmm_decision: incoming.content.idmm_decision ?? existing.content.idmm_decision,
   },
-});
+  };
+};
 
 /**
  * @description 将消息合并到消息列表中

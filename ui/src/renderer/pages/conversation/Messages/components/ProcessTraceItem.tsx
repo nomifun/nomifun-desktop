@@ -8,7 +8,7 @@ import { hasThinkTags, stripThinkTags } from '@renderer/utils/chat/thinkTagFilte
 import { Attention, Code, Edit, FolderOpen, Right, Terminal } from '@icon-park/react';
 import classNames from 'classnames';
 import { Spin } from '@arco-design/web-react';
-import React, { useContext, useId, useMemo, useState } from 'react';
+import React, { useContext, useId, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { isContextCompressionTip } from '../processTipModel';
 import { formatWorkspaceFileTarget } from '../processFileTargetLabel';
@@ -25,6 +25,7 @@ import ConversationProse from './ConversationProse';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
 import { buildToolReceiptRows, type ToolReceiptRow } from './toolReceiptModel';
 import FileActivitySummary, { FileActivityList } from './FileActivitySummary';
+import { useProcessExpansion } from '../processExpansion';
 import { isConfirmedFileActivity } from '../fileActivityModel';
 
 type ToolProcessMessage = IMessageToolGroup | IMessageToolCall;
@@ -117,7 +118,8 @@ type ToolObservationRow = ToolReceiptRow & { observationUnconfirmed?: boolean; d
 
 const ToolTraceRow: React.FC<{ row: ToolObservationRow; workspaceRoots: string[] }> = ({ row, workspaceRoots }) => {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
+  const [savedExpanded, setExpanded] = useProcessExpansion(`tool:${row.detailSource?.turn_id ?? ''}:${row.key}`);
+  const expanded = savedExpanded ?? false;
   const parentVisible = useContext(ProcessDetailsVisibilityContext);
   const detailId = useId();
   const hasPayload = row.detailPolicy === 'payload' && Boolean(row.detailSource);
@@ -130,7 +132,7 @@ const ToolTraceRow: React.FC<{ row: ToolObservationRow; workspaceRoots: string[]
   return <div className='turn-process-trace-tool' data-tool-call-id={row.key} data-tool-observation={row.observationUnconfirmed ? 'unconfirmed' : undefined}>
     <Header type={hasDetail ? 'button' : undefined}
       className={classNames('turn-process-trace__row turn-process-trace-tool__toggle', `turn-process-trace__row--${visualState}`)}
-      onClick={hasDetail ? () => setExpanded(value => !value) : undefined}
+      onClick={hasDetail ? () => setExpanded(!expanded) : undefined}
       aria-expanded={hasDetail ? expanded : undefined} aria-controls={hasDetail ? detailId : undefined}>
       <span className='turn-process-trace__row-icon' role={row.state === 'failed' || row.state === 'canceled' ? 'img' : undefined}
         aria-label={row.state === 'failed' || row.state === 'canceled' ? t(`messages.toolSummary.${row.state}`, { target: label }) : undefined}>
@@ -179,7 +181,8 @@ const ToolProcessTraceRows: React.FC<{ messages: ToolProcessMessage[]; workspace
     } else entries.push(row);
   }
   return <div className='turn-process-trace'>{entries.map(entry => 'files' in entry
-    ? <FileActivitySummary key={entry.key} items={entry.files.flatMap(row => row.fileSummary ? [{ key: row.key, summary: row.fileSummary }] : [])} workspaceRoots={workspaceRoots} />
+    ? <FileActivitySummary key={entry.key} identity={`${entry.files[0].detailSource?.turn_id ?? ''}:${entry.files[0].fileGroupId ?? entry.key}`}
+      items={entry.files.flatMap(row => row.fileSummary ? [{ key: row.key, summary: row.fileSummary }] : [])} workspaceRoots={workspaceRoots} />
     : <ToolTraceRow key={entry.key} row={entry} workspaceRoots={workspaceRoots} />)}</div>;
 };
 

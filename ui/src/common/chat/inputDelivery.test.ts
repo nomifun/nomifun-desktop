@@ -32,3 +32,14 @@ test('delivery ordering follows canonical sequence through blocked, pending, cla
   expect(preferInputDelivery(discarded, retry)).toEqual(discarded);
   expect(preferInputDelivery({ state: 'pending' }, claimed)).toEqual(claimed);
 });
+
+test('host input placement preserves the exact owner and boundary through late acknowledgements', () => {
+  const turn_id = '0190f5fe-7c00-7a00-8000-000000000012';
+  const steering = normalizeInputDelivery({ state: 'pending', placement: 'steering', kind: 'steering', turn_id, order_seq: 20, event_seq: 21 })!;
+  expect(steering).toEqual({ state: 'pending', placement: 'steering', kind: 'steering', turn_id, order_seq: 20, event_seq: 21 });
+  const received = normalizeInputDelivery({ ...steering, state: 'claimed', placement: 'transcript', event_seq: 25 })!;
+  expect(preferInputDelivery(steering, received)).toEqual(received);
+  for (const invalid of [{ placement: 'auto' }, { kind: 'task' }, { turn_id: 'latest' }, { order_seq: -1 }]) {
+    expect(normalizeInputDelivery({ ...steering, ...invalid })).toBeUndefined();
+  }
+});

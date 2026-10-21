@@ -93,7 +93,7 @@ function mount(options: { compact?: boolean; busy?: boolean; linkedBusy?: boolea
     created_at: 1, modified_at: 1, model, extra: { workspace: '/project' } } as TChatConversation;
   spyOn(ipcBridge.conversation.get, 'invoke').mockImplementation(async request => ({ ...conversation, id: request.conversation_id }));
   spyOn(ipcBridge.conversation.taskPlan, 'invoke').mockImplementation(async request => ({ conversation_id: request.conversation_id, sequence: 0, turn_id: null, turn_status: null, plan: null }));
-  const send = spyOn(ipcBridge.conversation.sendMessage, 'invoke').mockResolvedValue({ msg_id: parseMessageId(uuidv7()), replayed: false });
+  const send = spyOn(ipcBridge.conversation.sendMessage, 'invoke').mockResolvedValue({ msg_id: parseMessageId(uuidv7()), replayed: false, input_delivery: { state: 'pending', placement: 'transcript', kind: 'root', event_seq: 1, order_seq: 1 } });
   const create = spyOn(ipcBridge.agentExecution.create, 'invoke').mockResolvedValue({ execution_id: parseExecutionId(uuidv7()) } as never);
   const fromTemplate = spyOn(ipcBridge.agentExecutionTemplate.createExecution, 'invoke').mockResolvedValue({ execution_id: parseExecutionId(uuidv7()) } as never);
   if (options.linkedBusy) {
@@ -160,21 +160,21 @@ test('a pending chat submission only shows stop until admission, then allows act
   await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
   expect(composer.input.value).toBe('Hello');
   expect(composer.view.getByTestId('sendbox-stop-btn')).toBeTruthy();
-  expect(composer.view.queryByTestId('sendbox-steer-btn') === null).toBe(true);
+  expect(composer.view.queryByTestId('sendbox-guide-btn') === null).toBe(true);
   expect(composer.view.queryByTestId('sendbox-send-btn') === null).toBe(true);
 
   act(() => composer.setBusy(true));
-  expect(composer.view.queryByTestId('sendbox-steer-btn') === null).toBe(true);
+  expect(composer.view.queryByTestId('sendbox-guide-btn') === null).toBe(true);
   expect(composer.view.queryByTestId('sendbox-send-btn') === null).toBe(true);
-  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false }));
+  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false, input_delivery: { state: 'pending', placement: 'transcript', kind: 'root', event_seq: 1, order_seq: 1 } }));
   await waitFor(() => expect(composer.input.value).toBe(''));
   expect(composer.view.getByTestId('sendbox-stop-btn')).toBeTruthy();
-  expect(composer.view.queryByTestId('sendbox-steer-btn') === null).toBe(true);
+  expect(composer.view.queryByTestId('sendbox-guide-btn') === null).toBe(true);
   expect(composer.view.queryByTestId('sendbox-send-btn') === null).toBe(true);
 
   fireEvent.change(composer.input, { target: { value: 'A follow-up while the turn runs' } });
   await waitFor(() => expect(composer.view.getByTestId('sendbox-send-btn')).toBeTruthy());
-  expect(composer.view.queryByTestId('sendbox-steer-btn')).toBeNull();
+  expect(composer.view.getByTestId('sendbox-guide-btn')).toBeTruthy();
   expect(composer.view.getByTestId('sendbox-stop-btn')).toBeTruthy();
   expect(composer.view.getByTestId('sendbox-send-btn')).toBeTruthy();
   expect(composer.send).toHaveBeenCalledTimes(1);
@@ -189,14 +189,14 @@ test('a rejected chat submission restores send without exposing steer for its pr
   await composer.submit('Keep this draft');
   await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
   expect(composer.view.getByTestId('sendbox-stop-btn')).toBeTruthy();
-  expect(composer.view.queryByTestId('sendbox-steer-btn') === null).toBe(true);
+  expect(composer.view.queryByTestId('sendbox-guide-btn') === null).toBe(true);
   expect(composer.view.queryByTestId('sendbox-send-btn') === null).toBe(true);
 
   await act(async () => reject(new Error('Chat admission rejected')));
   await waitFor(() => expect(composer.view.getByTestId('sendbox-send-btn')).toBeTruthy());
   expect(composer.input.value).toBe('Keep this draft');
   expect(composer.view.queryByTestId('sendbox-stop-btn') === null).toBe(true);
-  expect(composer.view.queryByTestId('sendbox-steer-btn') === null).toBe(true);
+  expect(composer.view.queryByTestId('sendbox-guide-btn') === null).toBe(true);
   expect(composer.send).toHaveBeenCalledTimes(1);
 });
 
@@ -218,7 +218,7 @@ test.each([false, true])('repeated submit and steer shortcuts cannot resend or q
   expect(composer.input.value).toBe('Send this once');
   expect(composer.view.queryByTestId('session-input-queue')).toBeNull();
 
-  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false }));
+  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false, input_delivery: { state: 'pending', placement: 'transcript', kind: 'root', event_seq: 1, order_seq: 1 } }));
 });
 
 test('the selected plan uses the same template creation route as the welcome composer', async () => {
@@ -292,6 +292,20 @@ test('guiding is unavailable without a known active Turn and Ctrl+Enter remains 
   expect(composer.send.mock.calls[0][0].delivery).toEqual({ kind: 'queue' });
 });
 
+test('an idle input being prepared has an exact host Stop without a queue row or active Turn', async () => {
+  const source = parseMessageId(uuidv7());
+  spyOn(ipcBridge.conversation.inputQueue, 'invoke').mockResolvedValue({ version: 7, items: [{ message_id: source,
+    input: { content: 'Preparing this exact input' }, delivery: { kind: 'queue' }, held: false,
+    input_delivery: { state: 'pending', kind: 'root', placement: 'transcript', event_seq: 7, order_seq: 7 } }] });
+  const stop = spyOn(ipcBridge.conversation.stop, 'invoke').mockResolvedValue();
+  const composer = mount();
+  const button = await composer.view.findByTestId('sendbox-stop-btn');
+  expect(composer.view.queryByTestId('session-input-queue')).toBeNull();
+  fireEvent.click(button);
+  await waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
+  expect(stop.mock.calls[0][0]).toMatchObject({ conversation_id: composer.conversation.id, expected_turn_id: source });
+});
+
 test.each([false, true])('Stop names observed T even if successor A has already taken ownership (%s)', async successorStarted => {
   const composer = mount({ busy: true });
   const successor = parseMessageId(uuidv7());
@@ -361,7 +375,7 @@ test('a late accepted response cannot clear another Session draft or its attachm
   fireEvent.change(nextInput, { target: { value: 'Keep the new Session draft' } });
   act(() => emitter.emit('nomi.selected.file', ['/project/brief.txt']));
   await composer.view.findByText('brief.txt');
-  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false }));
+  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false, input_delivery: { state: 'pending', placement: 'transcript', kind: 'root', event_seq: 1, order_seq: 1 } }));
   expect(nextInput.value).toBe('Keep the new Session draft');
   expect(composer.view.getByText('brief.txt')).toBeTruthy();
   expect(composer.send).toHaveBeenCalledTimes(1);
@@ -369,7 +383,7 @@ test('a late accepted response cannot clear another Session draft or its attachm
 
 test('a technical pause accepts information through the same intake and retries a lost acknowledgement with its original payload and key', async () => {
   const composer = mount({ paused: true, pauseReason: 'EXECUTION_DEPENDENCY_BLOCKED' });
-  composer.send.mockRejectedValueOnce(new Error('response lost')).mockResolvedValue({ msg_id: parseMessageId(uuidv7()), replayed: true });
+  composer.send.mockRejectedValueOnce(new Error('response lost')).mockResolvedValue({ msg_id: parseMessageId(uuidv7()), replayed: true, input_delivery: { state: 'pending', placement: 'transcript', kind: 'root', event_seq: 1, order_seq: 1 } });
   await composer.submit('The required application is now configured');
   await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
   expect(composer.input.value).toBe('The required application is now configured');
@@ -511,7 +525,7 @@ test('an edited input acknowledgement preserves a newer draft typed while the or
   await composer.submit('Save this revision');
   await waitFor(() => expect(composer.send).toHaveBeenCalledTimes(1));
   fireEvent.change(composer.input, { target: { value: 'Keep this newer draft' } });
-  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false }));
+  await act(async () => accept({ msg_id: parseMessageId(uuidv7()), replayed: false, input_delivery: { state: 'pending', placement: 'transcript', kind: 'root', event_seq: 1, order_seq: 1 } }));
   await waitFor(() => expect(composer.input.value).toBe('Keep this newer draft'));
   expect(composer.send.mock.calls[0][0].input).toBe('Save this revision');
   expect(composer.send).toHaveBeenCalledTimes(1);

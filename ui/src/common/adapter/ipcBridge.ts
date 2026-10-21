@@ -1,6 +1,7 @@
 import { type SessionInputDeliveryIntent } from '@/common/chat/inputSubmission';
 import type { InputDelivery } from '@/common/chat/inputDelivery';
-import type { SessionInputQueueAction } from '@/common/protocolBindings/SessionInputQueueAction';
+import type { SessionInputQueueCommand as SessionInputQueueAction } from '@/common/protocolBindings/SessionInputQueueCommand';
+import { normalizeInputDelivery } from '@/common/chat/inputDelivery';
 /**
  * @license
  * Copyright 2025-2026 NomiFun (nomifun.com)
@@ -1122,7 +1123,7 @@ export const conversation = {
     provider: () => {},
     invoke: async (p: ISendMessageParams): Promise<IAcceptMessageResult> => {
       const idempotencyKey = requireConversationIdempotencyKey(p.idempotency_key);
-      const result = await httpRequest<{ agent_session_id: string; message_id: string; status: string; replayed: boolean }>(
+      const result = await httpRequest<{ agent_session_id: string; message_id: string; status: string; replayed: boolean; input_delivery: unknown }>(
         'POST', `/api/agent-sessions/${p.conversation_id}/messages`, {
           idempotency_key: idempotencyKey,
           ...(p.delivery ? { delivery: p.delivery } : {}),
@@ -1132,7 +1133,11 @@ export const conversation = {
       if (result.status !== 'accepted' || result.agent_session_id !== p.conversation_id || typeof result.replayed !== 'boolean') {
         throw new TypeError('The Session did not return a canonical accepted-message receipt');
       }
-      return { msg_id: parseMessageId(result.message_id), replayed: result.replayed };
+      const inputDelivery = normalizeInputDelivery(result.input_delivery);
+      if (!inputDelivery?.placement || !inputDelivery.kind || !inputDelivery.event_seq || !inputDelivery.order_seq) {
+        throw new TypeError('The Session did not return its canonical input placement');
+      }
+      return { msg_id: parseMessageId(result.message_id), replayed: result.replayed, input_delivery: inputDelivery };
     },
   },
   /** Explicit domain Turn admission. Ordinary user input uses sendMessage. */
@@ -3229,7 +3234,7 @@ export type SessionInputQueueItem = {
   held: boolean;
 };
 export type SessionInputQueueSnapshot = { version: number; items: SessionInputQueueItem[] };
-export type { SessionInputQueueAction } from '@/common/protocolBindings/SessionInputQueueAction';
+export type { SessionInputQueueCommand as SessionInputQueueAction } from '@/common/protocolBindings/SessionInputQueueCommand';
 
 interface ISendMessageParams {
   /** Deliverable obligation only; it never grants Plugin tools. */
@@ -3263,6 +3268,7 @@ export interface ISendMessageResult {
 export interface IAcceptMessageResult {
   msg_id: MessageId;
   replayed: boolean;
+  input_delivery: InputDelivery;
 }
 
 export interface ICreateConversationParams {

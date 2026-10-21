@@ -26,12 +26,20 @@ const mount = (message: IMessageText) => {
     </ConversationProvider>
   </I18nextProvider></MemoryRouter>);
 };
-test('a saved pending input is visible beside its original user bubble without declaring execution', () => {
+test('an opening input shows preparation beside its original bubble without declaring execution', () => {
   const page = mount({ ...base, content: { ...base.content, input_delivery: { state: 'pending' } } });
-  expect(page.getByTestId('message-input-delivery').textContent).toBe('Saved, waiting to be processed');
+  expect(page.getByTestId('message-input-delivery').textContent).toBe(en.inputDelivery.starting);
   expect(page.getByTestId('message-text-content').textContent).toBe(base.content.content);
   expect(page.queryByRole('alert')).toBeNull();
   expect(page.queryByTestId('message-edit-action')).not.toBeNull();
+});
+test.each([
+  ['WAITING_FOR_EFFECT_SETTLEMENT', 'waiting'], ['TARGET_TURN_ENDED', 'deferred'],
+] as const)('an unclaimed input explains %s without claiming to be executing', (reason, label) => {
+  const page = mount({ ...base, content: { ...base.content, input_delivery: {
+    state: 'pending', placement: 'transcript', kind: 'root', reason,
+  } } });
+  expect(page.getByTestId('message-input-delivery').textContent).toBe(en.inputDelivery[label]);
 });
 test('blocked input keeps its saved body and offers a concrete corrective step', () => {
   const page = mount({ ...base, content: { ...base.content, input_delivery: { state: 'blocked', reason: 'ATTACHMENT_PREPARATION_FAILED' } } });
@@ -46,6 +54,16 @@ test('claimed history clears the pending label even when a longer live body wins
   expect(merged.content.input_delivery).toEqual({ state: 'claimed' });
   const page = mount(merged);
   expect(page.queryByTestId('message-input-delivery')).toBeNull();
+});
+
+test.each([
+  [{ state: 'pending', placement: 'transcript', kind: 'root' }, 'starting'],
+  [{ state: 'pending', placement: 'steering', kind: 'steering' }, 'steering'],
+  [{ state: 'claimed', placement: 'transcript', kind: 'steering' }, 'received'],
+] as const)('an input shows its actual delivery stage %j without a generic saved/queued label', (input_delivery, label) => {
+  const page = mount({ ...base, content: { ...base.content, input_delivery } });
+  expect(page.getByTestId('message-input-delivery').textContent).toBe(en.inputDelivery[label]);
+  expect(page.queryByText('Saved, waiting to be processed')).toBeNull();
 });
 test('context-cleared input has a neutral discarded state without a pending or execution failure label', () => {
   const page = mount({ ...base, content: { ...base.content, input_delivery: { state: 'discarded', reason: 'CONTEXT_CLEARED' } } });

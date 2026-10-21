@@ -8291,6 +8291,34 @@
             "type": "object"
           }
         ]
+      },
+      "SessionInputQueueChange": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "replace",
+                "type": "string"
+              },
+              "message_id": {
+                "type": "string"
+              },
+              "replacement_message_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message_id",
+              "replacement_message_id"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/SessionInputQueueAction"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -8298,7 +8326,14 @@
     "description": "Reference-only changes to the ordinary composer inbox. Message bodies stay\nin their original accepted input, while all readers fold these same facts.",
     "properties": {
       "action": {
-        "$ref": "#/$defs/SessionInputQueueAction"
+        "$ref": "#/$defs/SessionInputQueueChange"
+      },
+      "except_message_ids": {
+        "description": "Explicit queue pause leaves visible starting/steering inputs alone.\nUser Stop supplies no exemptions and fences its entire accepted batch.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
       },
       "expected_version": {
         "format": "uint64",
@@ -8321,6 +8356,214 @@
       "action"
     ],
     "title": "SessionInputQueueChangedV1",
+    "type": "object"
+  },
+  "session_input_queue_command": {
+    "$defs": {
+      "SessionInputQueueAction": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "pause",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "resume",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "remove",
+                "type": "string"
+              },
+              "message_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "reorder",
+                "type": "string"
+              },
+              "message_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "message_ids"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "promote",
+                "type": "string"
+              },
+              "message_id": {
+                "type": "string"
+              },
+              "turn_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message_id",
+              "turn_id"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "replace",
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "message_id",
+          "content"
+        ],
+        "type": "object"
+      },
+      {
+        "$ref": "#/$defs/SessionInputQueueAction"
+      }
+    ],
+    "description": "Authoring commands carry replacement text only until the writer stores it\nas a new accepted input. Queue facts themselves retain references only.",
+    "title": "SessionInputQueueCommand"
+  },
+  "session_input_view": {
+    "$defs": {
+      "SessionInputKind": {
+        "enum": [
+          "root",
+          "steering"
+        ],
+        "type": "string"
+      },
+      "SessionInputPlacement": {
+        "enum": [
+          "queued",
+          "steering",
+          "transcript"
+        ],
+        "type": "string"
+      },
+      "SessionInputState": {
+        "enum": [
+          "pending",
+          "blocked",
+          "claimed",
+          "discarded",
+          "cancelled"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "A read projection of accepted input, claim and native delivery facts. This\nis never written into an accepted payload or used as execution authority.",
+    "properties": {
+      "event_seq": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "kind": {
+        "$ref": "#/$defs/SessionInputKind"
+      },
+      "order_seq": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "placement": {
+        "$ref": "#/$defs/SessionInputPlacement"
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "state": {
+        "$ref": "#/$defs/SessionInputState"
+      },
+      "turn_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "state",
+      "event_seq",
+      "placement",
+      "kind",
+      "order_seq"
+    ],
+    "title": "SessionInputView",
     "type": "object"
   },
   "session_process_owner_released": {

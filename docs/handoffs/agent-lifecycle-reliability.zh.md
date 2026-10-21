@@ -658,20 +658,25 @@ macOS 复用现有 darwin_registered／darwin_application 与 WK／AppKit fixtur
 
 合并验证：Contracts **122/122＋bin 5/5**、正式生成器 check、受影响 UI **230/230**、最终完整 `bun run check` 通过。开启 `computer-use` 的鉴权 **18/18**；修正后的 Cron HTTP **36/36**、工具表模块 **19/19** 通过，包含 General 普通工具、原生文件末尾 LF、严格重编译、未知动作拒绝与 typed 本地错误归属。原“所有 canonical 输入必须是单个 object”的测试已按现行 Computer 跨平台授权集合逐项校验各平台严格输入，不放宽生产模型 schema 规则。文档检查与工作区/index 空白检查通过；原实模证据归属于上表的合并前构建，本次平台隔离复测使用受控模型，没有追加真实模型或原生 Computer 支持声明。
 
-### 10.9 普通输入排队与引导（2026-10-21）
+### 10.9 普通输入投递、引导与时间线（2026-10-21，已实施并验证）
 
-用户已明确授权实施并最终简化为普通发送固定排队、会话内显式“引导”，不保留发送方式设置；完整清理旧派发机制，并验证排队、插话、停止、重启及幂等。
-当前合同已集成至 `agent-session.zh.md`：统一 `/messages` 受理明确 typed delivery，原 canonical Event/Payload
-保存一次输入；队列控制与 hold 同属原事实链，不增加表或正文镜像。当前段落记录工作区交付，不代表提交、发布或平台打包。
+本轮按用户确认的全局方案接续：空闲立即发送、工作中默认排队、显式引导进入原任务，重整正文与队列的唯一展示位置；不增加配置、不扩大到独立调度器或第二账本。当前合同集成至 `agent-session.zh.md`／`agent-session.md`，本节只记录当前实施和验证，替换先前已被本轮设计取代的交接说明。
 
-- 普通 composer 默认 `queue`；`prefer_current` 固定提交时观察到的同 Session Turn source，安全边界领取，未领取的过期意图才可成为独立后继根输入。已领取／交付未知不换轮重放。
-- Store 查询／最终 claim 共用资格；先按 routing metadata 分页筛选，合格后读取正文。正常领取竞争返回 typed None，不把队列暂停／移除变成当前模型失败。普通 Stop 在原 writer 同事务 hold 原输入截止点并持久取消原 Turn，然后直接通知确切 owner；领域／native 控制保持独立。
-- 队列 GET 只读，控制要求观察版本与稳定幂等键；原控制回执先于当前领域准入。移除／清空只取消未领取输入并精确信号其准备 owner；暂停／排序靠 writer 围栏，不按迟到消息 ID 取消后来恢复的准备。阻塞输入禁止直接晋升，仍可编辑和移除。
-- 旧前端 queue hook、execution gate、Panel、local 派发和普通 `/turns/steer` 新写入口退役；孤儿 `command_queue_enabled` 从 DB／System／DTO／Gateway 整链移除，014 前向迁移不改 baseline 或其它配置。现役领域、native exact steering 和必要同代历史解释保留。
-- 用户后续明确简化为普通发送固定排队、会话显式“引导”插话，不保留新增模式设置或偏好。Stop 始终可见；未知交付和 initial handoff 保留原 payload/key。队列按 Host 投影显示，长列表及全文限高滚动。实测修复迟到 ACK 跨 Session 清稿，草稿写者固定原缓存 key。
+- 原 `/messages` 受理和现有 Host owner 保留输入、wake 与精确执行责任；提交后先交接 wake，再做观察读取／通知。重投已消费或取消输入只确认原事实，不推进无关后继。
+- typed `SessionInputView` 贯通 ACK、通知、队列与历史，明确 placement、原 Turn、root／steering 与排序锚点；消息正文仍仅存原 accepted payload。读取、缓存和展示不获得执行权限。
+- 普通排队项只在 composer 队列出现；空闲首项显示准备，显式引导在正文等待原生接收，随后以同一身份进入原回合的实际边界。过程按引导分段，分页／迟到事实不再跨边界整轮合并；纯 UI 展开记忆不保留 Runtime。
+- 队列编辑改为内联、保存时原子替换；正文不写进控制事实，附件／技能／有效意图／跨来源位置／hold 保留。显式 clear／pause 只作用于队列项，原 Stop 仍 hold 其受理截止批次；准备阶段 Stop 通过原 source 精确取消，等待原准备 owner 收束，不伪造 Turn。
+- UI/API 合同从实际 HEAD 的 45 递增至 46，保留同期 Computer 合同；不修改物理表、历史迁移、Agent 数据代际或 checkpoint。旧 pending 通用提示、回草稿前先删除输入的编辑路径、跨引导整轮聚合及旧按钮断言随替换退役。
 
-最终验证：冻结 UI 图的 38 文件 **273/273** 通过，随后恢复原有草稿隔离／重挂载／清空附件覆盖，最小补验 **2/2**（去重共 274 项）；完整 Session **361/361**（含 16 项新队列用例）、最终 Host 定向 **29/29**、API 快照 **17/17**、严格 wire **2/2**、迁移／设置相关 **48/48** 通过。正式契约生成／check、完整 `bun run check`、UI 生产构建和 diff 检查通过。原生恢复集成最终 **8/8**；测试需要创建隔离 Session 的 AppData 锁，且仅在该测试进程 PATH 优先使用真实 `bun.exe`，避免 npm 启动脚本的父子 PID 差异；永久 PATH、生产进程实现和断言均未改。原沙箱前置失败与 npm shim 环境的 7/8 单独保留，不覆盖为成功。
+| 范围 | 本轮最终证据 |
+| --- | --- |
+| Canonical 输入 | 最终输入／队列／准备停止定向 **35/35**，含跨来源替换位置、hold、领取竞争、重复键与重启。Session 整包首轮 **370/371**；唯一失败为旧用例在终态后继续使用旧队列版本，修正观察版本后纳入上述 35 项通过，不把首轮整包改记为全过 |
+| Host 贯通 | 最终 **11/11**，17.14s；生产 HTTP 及受控本地模型验证空闲立即到达、忙碌 FIFO、终态后新发送、并发空闲唯一领取、引导精确进入原 Turn。准备停止验证持久围栏、原 owner 收束与跨分支幂等键；显式暂停只 hold 真正排队项，不撤回正在准备的引导 |
+| 正式契约与存储保护 | Contracts 整包 **126/126**、API agent_platform **17/17**、数据库 Agent reset **3/3**，正式生成器 write／check 通过；不新增物理表、迁移或数据代际 |
+| Renderer | Messages 完整同进程 **629/629**（55 文件、3371 断言）；composer／队列相关 **91/91**，另有消息合并、wire、runtime／identity 定向回归通过。各集合有重叠，不累加为总数。629 项保留工具结果摘要回执，未冒称保留完整 stdout |
+| 静态与构建 | 完整 `bun run check`、UI 生产构建、最终 TypeScript 检查和差异空白检查通过；最终文档和 Session／桌面 UI 边界另执行。保留现有构建 chunk-size／deprecated 警告，不扩大修复范围 |
+| 视觉与边界 | 使用生产组件的隔离浏览器在 **880×600、1280×800** 验证：空闲正文准备且无队列条、紧凑队列、引导前／后过程顺序、内联编辑和可见 Stop，均无横向溢出。临时 fixture、浏览器页和测试 Vite 已清理；不作为物理 Tauri 窗口或真实外部模型验收 |
 
-真实 Step Plan `step-5-preview` 最终通过，运行时 build digest 为 `0d2ac580d93ece7783ad3f8f10182ecb5e7232275d5466d07a7e2720dd876279`：原 T 只接收确切 C 引导，A／B 为独立 FIFO 后继回合；Stop 同事务 hold，完整关闭／重建 Host 后仍 hold，显式 resume 才执行原待处理输入；重复原 key 不新增回合，已移除输入重投不复活。四阶段证据与关闭、凭据明文落盘审计均通过；安全报告位于临时证据目录 `nomifun-input-queue-validation-20261021-6b01cf01dd994cb6a6a3335a8f3353a8/live-input-queue-final.json`。首轮冷编译期限退出未调用模型；随后夹具在零模型步骤时发现漏算显式 cwd 的零操作 workspace 身份，已按现役合同修正纯测试校验并以 **2/2** 验证权限／root／digest／资源集合拒绝，未改变生产资源规则或放宽期限。最终报告与上述首失败分开保留。
+本轮证据目录为 `C:/Users/muli/.codex/visualizations/2026/10/21/01a15e6a-3be5-7b81-b6e5-d249464be2e5/`，含截图、视觉回执及 `input-queue-validation/` 日志。首轮 Windows ONNX 链接因继承的离线变量失败，随后只清除测试进程变量，使用已有分发缓存正常重编；沙箱首次运行在测试临时 workspace 的共享 authority 文件初始化失败，最终同一测试程序经所需权限运行。旧 Pause 用例按本轮确认合同补齐 queued-held／原 Turn steering 断言后，最终 11 项全部通过；失败记录保留，不改生产锁路径、依赖或权限规则。
 
-改动范围复核保留用户原有 `Cargo.toml`／`bun.lock`，没有改动 001–013 历史迁移、Agent 数据代际或 checkpoint 合同；任务生成的 13,536 个未跟踪临时构建文件已在留存验证回执后精确清理，不进入产品差异。当前证据覆盖自动化组件、Windows 原生进程／宿主和真实模型路径；未执行 Tauri 窗口视觉验收、跨平台构建或发布。
+保留用户原有 `Cargo.toml`／`bun.lock` 改动，不纳入本轮提交。用户在验证完成后明确授权本轮 commit＋push，交付身份以 Git 记录为准；未打包安装或发布。未执行物理 Tauri 窗口、其他平台构建或真实外部模型验收，此前专项的实模报告不作为本轮最终图证明。

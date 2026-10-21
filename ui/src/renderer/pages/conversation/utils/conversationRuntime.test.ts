@@ -12,6 +12,14 @@ import {
 const activeTurnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000081');
 
 describe('conversation runtime authority', () => {
+  test('a retained preparation owner remains processing without inventing a Turn', () => {
+    const preparing = { status: 'finished', runtime: { state: 'starting', is_processing: true,
+      active_turn_id: null, can_send_message: true } } as unknown as TChatConversation;
+    expect(getConversationActivity(preparing)).toBe('running');
+    expect(getConversationRuntimeAuthority(preparing)).toBe('processing');
+    expect(isConversationBindingBlocked(preparing)).toBe(true);
+    expect(preparing.runtime?.active_turn_id).toBeNull();
+  });
   test('three presentation states retain ownership and unknown hydration blocks binding changes', () => {
     expect(getConversationActivity()).toBeUndefined();
     expect(isConversationBindingBlocked()).toBe(true);

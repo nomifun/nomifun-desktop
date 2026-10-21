@@ -30,6 +30,8 @@ use crate::projector::reduce_agent_messages;
 
 #[path = "native_checkpoint_tests.rs"]
 mod native_checkpoint_tests;
+#[path = "session_input_stop_tests.rs"]
+mod session_input_stop_tests;
 #[path = "native_execution_tests.rs"]
 mod native_execution_tests;
 #[path = "runtime_state_tests.rs"]

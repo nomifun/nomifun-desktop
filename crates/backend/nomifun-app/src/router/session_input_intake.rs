@@ -15,8 +15,8 @@ use nomifun_agent_contracts::EventId;
 pub(super) struct InputPreparationControls {
     slots:std::sync::Mutex<std::collections::HashMap<String,InputPreparation>>,
 }
-struct InputPreparation {nonce:Uuid,input:EventId,cancel:tokio_util::sync::CancellationToken}
-struct InputPreparationGuard<'a> {owner:&'a InputPreparationControls,session:String,nonce:Uuid,cancel:tokio_util::sync::CancellationToken}
+struct InputPreparation {nonce:Uuid,input:EventId,cancel:tokio_util::sync::CancellationToken,finished:tokio_util::sync::CancellationToken}
+struct InputPreparationGuard<'a> {owner:&'a InputPreparationControls,session:String,nonce:Uuid,cancel:tokio_util::sync::CancellationToken,finished:tokio_util::sync::CancellationToken}
 impl InputPreparationControls {
     fn observations(&self,session:&AgentSessionId)->Result<Vec<(EventId,bool)>,AppError> {
         let slots=self.slots.lock().map_err(|_|AppError::Conflict("input preparation ownership is unconfirmed".into()))?;
@@ -29,13 +29,17 @@ impl InputPreparationControls {
         let mut slots=self.slots.lock().map_err(|_|AppError::Conflict("input preparation ownership is unconfirmed".into()))?;
         if slots.contains_key(session.as_ref()) {return Err(AppError::Conflict("original input preparation still owns this Session".into()));}
         let nonce=Uuid::now_v7();let cancel=tokio_util::sync::CancellationToken::new();
-        slots.insert(session.as_ref().into(),InputPreparation {nonce,input:input.clone(),cancel:cancel.clone()});
-        Ok(InputPreparationGuard {owner:self,session:session.as_ref().into(),nonce,cancel})
+        let finished=tokio_util::sync::CancellationToken::new();
+        slots.insert(session.as_ref().into(),InputPreparation {nonce,input:input.clone(),cancel:cancel.clone(),finished:finished.clone()});
+        Ok(InputPreparationGuard {owner:self,session:session.as_ref().into(),nonce,cancel,finished})
     }
     fn cancel(&self,session:&AgentSessionId,input:&EventId)->Result<bool,AppError> {
-        let token=self.slots.lock().map_err(|_|AppError::Conflict("input preparation ownership is unconfirmed".into()))?
-            .get(session.as_ref()).filter(|slot|slot.input==*input).map(|slot|slot.cancel.clone());
-        if let Some(token)=token {token.cancel();Ok(true)} else {Ok(false)}
+        Ok(self.cancel_and_observe(session,input)?.is_some())
+    }
+    fn cancel_and_observe(&self,session:&AgentSessionId,input:&EventId)->Result<Option<tokio_util::sync::CancellationToken>,AppError> {
+        let control=self.slots.lock().map_err(|_|AppError::Conflict("input preparation ownership is unconfirmed".into()))?
+            .get(session.as_ref()).filter(|slot|slot.input==*input).map(|slot|(slot.cancel.clone(),slot.finished.clone()));
+        Ok(control.map(|(cancel,finished)|{cancel.cancel();finished}))
     }
 }
 impl Drop for InputPreparationGuard<'_> {
@@ -43,6 +47,7 @@ impl Drop for InputPreparationGuard<'_> {
         if let Ok(mut slots)=self.owner.slots.lock() {
             if slots.get(&self.session).is_some_and(|slot|slot.nonce==self.nonce) {slots.remove(&self.session);}
         }
+        self.finished.cancel();
     }
 }
 
@@ -128,6 +133,43 @@ fn original_pending_question(events:&[(u64,AgentEngineEvent)],source:&EventId)
 }
 
 impl NomiCoreSessionOwner {
+    pub(super) async fn stop_composer_source(self:&std::sync::Arc<Self>,owner_id:String,session:AgentSessionId,input:EventId,key:String)
+        ->Result<nomifun_api_types::CancelAgentSessionTurnResponseDto,AppError> {
+        let owner=self.clone();let (sender,receiver)=tokio::sync::oneshot::channel();
+        // The original task owner retains the durable fence, cancellation
+        // signal and preparation join even when the HTTP observer disappears.
+        if !self.background_tasks.spawn(Box::pin(async move {
+            let outcome=async {
+                let principal=PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.clone()};
+                match owner.canonical.store().stop_session_input(&principal,&session,&input,&key).await.map_err(agent_session_store_error)? {
+                    nomifun_agent_session::SessionInputStop::Turn {operation_id}=>{
+                        let receipt=owner.cancel_owned_turn(&owner_id,&session,&key,Some(&operation_id),
+                            nomifun_common::AgentKillReason::UserCancelled,true).await?;
+                        // Initial claim can win while its preparation owner
+                        // still holds the handoff. Confirm that exact owner as
+                        // well as the native Turn cancellation before replying.
+                        if let Some(finished)=owner.input_preparations.cancel_and_observe(&session,&input)? {finished.cancelled().await;}
+                        Ok(nomifun_api_types::CancelAgentSessionTurnResponseDto::Turn(nomifun_api_types::AgentSessionTurnMutationResponseDto {
+                            agent_session_id:session.as_ref().into(),target_operation_id:receipt.target_operation_id.as_ref().into(),
+                            message_id:receipt.event_id.as_ref().into(),cursor:session_cursor(&session,receipt.cursor.seq),status:"cancelled".into(),duplicate:receipt.duplicate,
+                        }))
+                    },
+                    nomifun_agent_session::SessionInputStop::Input {event,through_seq,duplicate}=>{
+                        let finished=owner.input_preparations.cancel_and_observe(&session,&input)?;
+                        let _=owner.publish_session_input_delivery(&owner_id,&session,&input).await;
+                        if let Some(finished)=finished {finished.cancelled().await;}
+                        Ok(nomifun_api_types::CancelAgentSessionTurnResponseDto::Input(nomifun_api_types::AgentSessionInputCancellationResponseDto {
+                            agent_session_id:session.as_ref().into(),input_message_id:input.as_ref().into(),message_id:event.event_id.as_ref().into(),
+                            cursor:session_cursor(&session,through_seq),status:"cancelled".into(),duplicate,
+                        }))
+                    },
+                }
+            }.await;
+            let _=sender.send(outcome);
+        })) {return Err(AppError::Conflict("Session input Stop owner is shutting down".into()));}
+        receiver.await.map_err(|_|AppError::Internal("Input Stop acknowledgement is unknown; retry its original key".into()))?
+    }
+
     pub(crate) fn cancel_input_preparation(&self,session:&AgentSessionId,input:&EventId)->Result<bool,AppError> {
         self.input_preparations.cancel(session,input)
     }
@@ -136,6 +178,11 @@ impl NomiCoreSessionOwner {
     }
     pub(crate) fn registered_input_preparation_sessions(&self)->Result<Vec<String>,AppError> {
         self.input_preparations.sessions()
+    }
+    #[cfg(test)]
+    pub(in crate::router) async fn hold_input_preparation_gate_for_test(&self,session:&AgentSessionId)
+        ->tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.session_operation_lock(session.as_ref()).write_owned().await
     }
     #[cfg(test)]
     pub(in crate::router) fn hold_input_preparation_for_test(&self,session:&AgentSessionId,input:&EventId)
@@ -262,14 +309,14 @@ impl NomiCoreSessionOwner {
             }.await;
             match outcome {
                 Ok((input,replayed))=>{
+                    // Commit transfers the wake to the existing Host task
+                    // owner before any read-only publication or HTTP observer.
+                    // A failed/slow claim observation must not strand a newly
+                    // accepted idle input. Replays are checked under the drain
+                    // gate against this exact source before selecting work.
+                    host.schedule_session_input_drain(owner.clone(),session.clone(),replayed.then_some(input.clone()));
                     if !replayed {let _=host.publish_session_input_delivery(&owner,&session,&input).await;}
                     let _=send.send(Ok(accepted_delivery(input.as_ref().to_owned(),replayed)));
-                    // Replaying an already consumed input only confirms its
-                    // original receipt; it cannot select a successor Turn.
-                    match host.canonical.store().session_input_claim(&session,&input).await {
-                        Ok(None)=>host.schedule_session_input_drain(owner,session,replayed.then_some(input)),
-                        Ok(Some(_))=>{},Err(error)=>tracing::warn!(%error,"accepted input claim observation unavailable"),
-                    }
                 },
                 Err(error)=>{let _=send.send(Err(error));},
             }
@@ -290,6 +337,16 @@ impl NomiCoreSessionOwner {
     async fn drain_session_inputs(&self,owner_id:&str,session:&AgentSessionId,retry_input:Option<EventId>)->Result<(),AppError> {
         let _gate=self.session_operation_lock(session.as_ref()).write_owned().await;
         let principal=PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.into()};
+        if let Some(input)=&retry_input {
+            // An original-key retry only confirms or prepares its unclaimed
+            // source. In particular a late replay cannot wake another queued
+            // task after the source has already joined a Turn.
+            if self.canonical.store().session_input_claim(session,input).await.map_err(agent_session_store_error)?.is_some() {
+                return Ok(());
+            }
+            let delivery=self.canonical.store().session_input_delivery(session,input).await.map_err(agent_session_store_error)?;
+            if matches!(delivery["state"].as_str(),Some("cancelled"|"discarded")) {return Ok(());}
+        }
         if self.require_ordinary_owner_input(&principal,session).await.is_err() {return Ok(());}
         let head=self.canonical.store().head(session).await.map_err(agent_session_store_error)?;
         if head.status=="running" {
@@ -313,6 +370,11 @@ impl NomiCoreSessionOwner {
             if matches!(delivery.get("state").and_then(Value::as_str),Some("cancelled"|"discarded"|"claimed")) {
                 preparing.cancel.cancel();continue;
             }
+            // Re-read the selected original through the canonical reference
+            // validator before preparing files or Skills. A pending batch is
+            // only a candidate list, never authority to skip replacement
+            // ancestry validation or fall back to its previously loaded body.
+            let original=self.canonical.store().session_input(session,&original.event.event_id).await.map_err(agent_session_store_error)?;
             let request=runtime_message_request(&original.input)?;
             let operation=OperationId::from(format!("turn:session-input:{}",original.event.event_id.as_ref()));
             let preparation=async {
@@ -394,8 +456,10 @@ pub(super) async fn accept_message(State(state):State<NomiCoreAgentApiState>,Ext
     };
     let original=state.session_owner.canonical.session_input_by_key(&authenticated_principal(&owner),&session,&key).await?
         .ok_or_else(||AppError::Internal("accepted input acknowledgement could not be re-read".into()))?;
+    let input_delivery=serde_json::from_value(state.session_owner.canonical.store().session_input_delivery(&session,&original.event.event_id)
+        .await.map_err(agent_session_store_error)?).map_err(|error|AppError::Internal(format!("invalid accepted input view: {error}")))?;
     Ok(Json(ApiResponse::ok(nomifun_api_types::AcceptAgentSessionMessageResponseDto {agent_session_id:id,
-        message_id:delivery.message_id,cursor:session_cursor(&session,original.event.seq),replayed:delivery.replayed,status:"accepted".into()})))
+        message_id:delivery.message_id,cursor:session_cursor(&session,original.event.seq),replayed:delivery.replayed,status:"accepted".into(),input_delivery})))
 }
 
 /// Reading a queue never acquires a Runtime or schedules execution.
@@ -418,15 +482,18 @@ pub(super) async fn update_input_queue(State(state):State<NomiCoreAgentApiState>
         let outcome=async {
             let before=host.canonical.store().session_input_queue(&principal,&session).await.map_err(agent_session_store_error)?;
             let command_key=key.into();
-            let snapshot=match host.canonical.store().read_session_input_queue_receipt(&principal,&session,&command_key,&request.action,Some(request.expected_version))
+            let (snapshot,replayed)=match host.canonical.store().read_session_input_queue_command_receipt(&principal,&session,&command_key,&request.action,Some(request.expected_version))
                 .await.map_err(agent_session_store_error)? {
-                Some(snapshot)=>snapshot,
+                Some(snapshot)=>(snapshot,true),
                 None=>{
                     host.require_ordinary_owner_input(&principal,&session).await?;
-                    host.canonical.store().update_session_input_queue(&principal,&session,&command_key,&request.action,Some(request.expected_version))
-                        .await.map_err(agent_session_store_error)?
+                    (host.canonical.store().update_session_input_queue_command(&principal,&session,&command_key,&request.action,Some(request.expected_version))
+                        .await.map_err(agent_session_store_error)?,false)
                 },
             };
+            // Commit transfers scheduling to the retained Session owner before
+            // any fallible observer read or client notification can interrupt it.
+            if !replayed {host.schedule_session_input_drain(owner.as_ref().to_owned(),session.clone(),None);}
             for (input,_) in host.input_preparation_observations(&session)? {
                 let delivery=host.canonical.store().session_input_delivery(&session,&input).await.map_err(agent_session_store_error)?;
                 // Terminal input cancellation cannot acquire a later owner for
@@ -441,7 +508,6 @@ pub(super) async fn update_input_queue(State(state):State<NomiCoreAgentApiState>
             // the same projection, including items just removed by this command.
             let ids=before.items.iter().chain(snapshot.items.iter()).map(|item|item.message_id.clone()).collect::<BTreeSet<_>>();
             for input in ids {let _=host.publish_session_input_delivery(owner.as_ref(),&session,&input).await;}
-            host.schedule_session_input_drain(owner.as_ref().to_owned(),session,None);
             serde_json::to_value(snapshot).map_err(|error|AppError::Internal(error.to_string()))
         }.await;
         let _=sender.send(outcome);

@@ -986,7 +986,7 @@
     "dropNoFiles": "No files could be added. Please drop files rather than folders.",
     "retrySend": "Retry the original message (preserving its delivery intent)",
     "guide": "Guide",
-    "guideHint": "Submit without interrupting the model"
+    "guideHint": "Add to the current task at its next safe boundary"
   },
   "hoverCard": {
     "id": "Session ID",
@@ -1028,16 +1028,20 @@
     "addInput": "Add information"
   },
   "inputDelivery": {
-    "pending": "Saved, waiting to be processed",
     "blocked": "This input was saved but not processed. Check the issue before sending it again.",
     "attachment": "Check that the attachments are available.",
     "skill": "Check that the selected skills are available.",
     "budget": "Shorten the message or reduce the attachments.",
     "discarded": "No longer pending after the context was cleared",
-    "cancelled": "This message was cancelled before processing. Send a new message to start again."
+    "cancelled": "This message was cancelled before processing. Send a new message to start again.",
+    "starting": "Starting…",
+    "steering": "Waiting for the current task to receive",
+    "received": "Received by the current task",
+    "deferred": "The current task ended; this message will run next",
+    "waiting": "Waiting for task cleanup"
   },
   "inputQueue": {
-    "title": "Pending messages ({{count}})",
+    "title": "Queued messages ({{count}})",
     "pause": "Pause queue",
     "resume": "Resume queue",
     "clear": "Clear queue",
@@ -1048,15 +1052,16 @@
     "remove": "Remove",
     "held": "Paused",
     "blocked": "Needs attention",
-    "steering": "Waiting for the current turn",
-    "queued": "Queued for a separate turn",
-    "files": "{{count}} attachments",
-    "finishDraftFirst": "Finish the current draft before editing a queued message.",
+    "files": "Attachments: {{count}}",
     "showFull": "Full text",
     "guide": "Guide",
-    "more": "More queue actions",
+    "more": "More actions for this message",
     "skills": "Skills",
     "skillCount": "{{count}} skills",
-    "emptyInput": "Pending input"
+    "emptyInput": "Pending input",
+    "queueActions": "Actions for the entire queue",
+    "edit": "Edit queued message",
+    "editPreservesAttachments": "Attachments and skills are preserved",
+    "editUnavailable": "The original message started or changed. Your edit is preserved; copy it to send separately."
   }
 }

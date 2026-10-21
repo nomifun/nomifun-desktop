@@ -83,7 +83,8 @@
   "turnProcess": {
     "expand": "展开执行进度",
     "collapse": "收起执行进度",
-    "interruptedReply": "下方是停止前尚未完成的回复。"
+    "interruptedReply": "下方是停止前尚未完成的回复。",
+    "previous": "此前执行过程"
   },
   "knowledgeWriteback": {
     "saved": "已回写知识库 · {{count}} 篇",

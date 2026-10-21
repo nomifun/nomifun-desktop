@@ -1,11 +1,10 @@
 .panel {
   flex-shrink: 0;
   min-width: 0;
-  margin: 0 8px -8px;
-  padding: 2px 8px 8px;
+  margin: 0 0 8px;
+  padding: 2px 8px;
   border: 1px solid var(--color-border-2);
-  border-bottom: 0;
-  border-radius: 12px 12px 0 0;
+  border-radius: 12px;
   background: var(--color-fill-1);
 }
 
@@ -13,7 +12,7 @@
   list-style: none;
   margin: 0;
   padding: 0;
-  max-block-size: 102px;
+  max-block-size: 204px;
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -42,10 +41,75 @@
   min-width: 0;
 }
 
-.queueIcon {
+.header {
   display: flex;
-  flex-shrink: 0;
-  color: var(--color-text-3);
+  align-items: center;
+  min-height: 34px;
+  gap: 8px;
+}
+
+.toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-2);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.toggle:focus-visible,
+.preview:focus-visible {
+  outline: 2px solid var(--primary-6);
+  outline-offset: 2px;
+}
+
+.toggle:disabled {
+  cursor: default;
+}
+
+.editing {
+  height: auto;
+  padding: 6px 0;
+}
+
+.editor {
+  flex: 1;
+  min-width: 0;
+}
+
+.editInput {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-height: 66px;
+  max-height: 132px;
+  resize: vertical;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 6px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.editorFooter {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.editorFooter .metadata {
+  flex: 1;
 }
 
 .preview {
@@ -67,12 +131,16 @@
 
 .state {
   flex-shrink: 0;
+  max-width: 35%;
+  overflow: hidden;
   padding: 0 4px;
   border-radius: 4px;
   background: var(--color-fill-2);
   color: var(--color-text-2);
   font-size: 11px;
   line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .actions {
@@ -82,18 +150,18 @@
   gap: 2px;
 }
 
-.panel .actions .guide:not(:disabled),
-.panel .actions .iconAction:not(:disabled) {
+.panel .guide:not(:disabled),
+.panel .iconAction:not(:disabled) {
   color: var(--color-text-3);
 }
 
-.panel .actions .guide:disabled,
-.panel .actions .iconAction:disabled {
+.panel .guide:disabled,
+.panel .iconAction:disabled {
   color: var(--color-text-4);
 }
 
-.panel .actions .guide:not(:disabled):hover,
-.panel .actions .iconAction:not(:disabled):hover,
+.panel .guide:not(:disabled):hover,
+.panel .iconAction:not(:disabled):hover,
 .preview:hover {
   color: var(--color-text-1);
 }

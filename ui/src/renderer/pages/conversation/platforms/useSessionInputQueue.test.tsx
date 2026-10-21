@@ -12,7 +12,7 @@ const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000981
 const messageId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000982');
 const snapshot: SessionInputQueueSnapshot = { version: 7, items: [{ message_id: messageId,
   input: { content: 'Canonical pending input', files: ['/work/reference.png'] }, delivery: { kind: 'queue' },
-  input_delivery: { state: 'pending', event_seq: 7 }, held: true }] };
+  input_delivery: { state: 'pending', placement: 'queued', event_seq: 7 }, held: true }] };
 
 beforeEach(() => {
   for (const event of [ipcBridge.conversation.userCreated, ipcBridge.conversation.turnStarted,

@@ -90,7 +90,8 @@
   "turnProcess": {
     "expand": "Expand execution progress",
     "collapse": "Collapse execution progress",
-    "interruptedReply": "The reply below was written before stopping and is incomplete."
+    "interruptedReply": "The reply below was written before stopping and is incomplete.",
+    "previous": "Earlier work"
   },
   "knowledgeWriteback": {
     "saved": "Knowledge saved · {{count}}",

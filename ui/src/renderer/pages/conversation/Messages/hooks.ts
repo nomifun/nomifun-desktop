@@ -854,7 +854,9 @@ const withFetchedCanonicalIdentity = <T extends TMessage>(dbMessage: T, preferre
     msg_id: dbMessage.msg_id ?? preferred.msg_id,
     conversation_id: dbMessage.conversation_id,
     created_at: dbMessage.created_at ?? preferred.created_at,
-    turn_id: dbMessage.turn_id ?? preferred.turn_id,
+    turn_id: preferred.type === 'text' && preferred.position === 'right'
+      ? preferred.content.input_delivery?.kind ? preferred.content.input_delivery.turn_id : dbMessage.turn_id ?? preferred.turn_id
+      : dbMessage.turn_id ?? preferred.turn_id,
     status: dbMessage.status ?? preferred.status,
   }) as T;
 

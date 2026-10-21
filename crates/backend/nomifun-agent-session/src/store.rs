@@ -90,6 +90,9 @@ pub use session_input::{PendingSessionInput,SessionInputClaim,SessionInputBlocke
 #[path = "session_input_queue.rs"]
 mod session_input_queue;
 pub use session_input_queue::{SessionInputQueueItem, SessionInputQueueSnapshot};
+#[path = "session_input_stop.rs"]
+mod session_input_stop;
+pub use session_input_stop::SessionInputStop;
 #[path = "history_standalone_projection.rs"]
 mod history_standalone_projection;
 #[path = "message_timeline.rs"]

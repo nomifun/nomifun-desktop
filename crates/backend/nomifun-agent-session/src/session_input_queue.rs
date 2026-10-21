@@ -1,7 +1,8 @@
 //! Queue control is a projection of accepted input and reference-only changes.
 //! It never owns another message body, task ledger, or runtime.
 use super::*;
-use nomifun_agent_contracts::{SessionInputDeliveryIntent, SessionInputQueueAction, SessionInputQueueChangedV1 as QueueChange};
+use nomifun_agent_contracts::{SessionInputDeliveryIntent, SessionInputQueueAction, SessionInputQueueChangedV1 as QueueChange,
+    SessionInputQueueChange as Change, SessionInputQueueCommand as Command};
 use serde::{Deserialize, Serialize};
 
 const QUEUE_CHANGED: &str = "message/input-queue-changed";
@@ -28,6 +29,9 @@ pub(super) struct QueueState {
     released: BTreeSet<EventId>,
     order: Vec<EventId>,
     delivery_overrides: BTreeMap<EventId, SessionInputDeliveryIntent>,
+    intent_sequences: BTreeMap<EventId,u64>,
+    replacement_holds:BTreeSet<EventId>,
+    replacement_order:BTreeMap<EventId,u64>,
 }
 
 pub(super) fn desktop_delivery_intent(input: &Value) -> Result<Option<SessionInputDeliveryIntent>, SessionStoreError> {
@@ -56,7 +60,110 @@ pub(super) async fn validate_delivery_envelope_tx(tx:&mut Transaction<'_,Sqlite>
     Ok(())
 }
 
+struct AcceptedRouting {
+    seq:u64,
+    intent:SessionInputDeliveryIntent,
+}
+impl AcceptedRouting {
+    fn value(&self)->Value {json!({"delivery_intent":self.intent})}
+}
+
+/// Read only the provenance and routing fields of an unselected input. A
+/// queue control is not authority to hydrate its text, files or Skill bodies.
+async fn accepted_routing_tx(tx:&mut Transaction<'_,Sqlite>,session:&AgentSessionId,input:&EventId,owner:&PrincipalRef)
+    ->Result<AcceptedRouting,SessionStoreError> {
+    type Routing=(i64,String,i64,String,String,String,Option<String>,bool,bool);
+    let row=sqlx::query_as::<_,Routing>("SELECT e.seq,e.kind,e.kind_version,e.producer_id,e.idempotency_key,e.correlation_id, \
+        COALESCE(json_extract(e.inline_json,'$.delivery_intent'),json_extract(CAST(p.body AS TEXT),'$.value.delivery_intent')), \
+        COALESCE(json_type(e.inline_json,'$.channel_source'),json_type(CAST(p.body AS TEXT),'$.value.channel_source')) IS NOT NULL, \
+        COALESCE(json_type(e.inline_json,'$.input_source'),json_type(CAST(p.body AS TEXT),'$.value.input_source')) IS NOT NULL \
+        FROM agent_events e LEFT JOIN agent_payloads p ON p.payload_id=e.payload_id AND p.session_id=e.session_id \
+        WHERE e.session_id=? AND e.event_id=?")
+        .bind(session.as_ref()).bind(input.as_ref()).fetch_optional(&mut **tx).await?
+        .ok_or_else(||SessionStoreError::InvalidEvent("queue routing source is missing".into()))?;
+    let(seq,kind,version,producer,key,correlation,intent,has_channel,has_source)=row;
+    let prefix=session_input::session_input_namespace(owner,session);
+    let valid_key=key.strip_prefix(&prefix).is_some_and(|digest|digest.len()==64
+        && digest.bytes().all(|byte|byte.is_ascii_digit()||(b'a'..=b'f').contains(&byte)));
+    if kind!="message/user-accepted" || version!=1 || producer!="session_api" || correlation!=input.as_ref()
+        || !valid_key || has_channel || has_source {
+        return Err(SessionStoreError::InvalidEvent("queue routing source lost its ordinary accepted provenance".into()));
+    }
+    validate_uuidv7(input.as_ref(),"queue routing source")?;
+    let intent:SessionInputDeliveryIntent=serde_json::from_str(intent.as_deref()
+        .ok_or_else(||SessionStoreError::InvalidPayload("queue routing source lost its delivery intent".into()))?)?;
+    validate_delivery_target_tx(tx,session,&intent).await?;
+    Ok(AcceptedRouting {seq:as_u64(seq,"queue routing sequence")?,intent})
+}
+
+async fn validate_routing_references_tx(tx:&mut Transaction<'_,Sqlite>,event:&SessionEventRecord,
+    change:&QueueChange,owner:&PrincipalRef)->Result<BTreeMap<EventId,AcceptedRouting>,SessionStoreError> {
+    let mut ids=match &change.action {
+        Change::Replace {message_id,replacement_message_id}=>vec![message_id.clone(),replacement_message_id.clone()],
+        Change::Control(action)=>match action {
+            SessionInputQueueAction::Remove {message_id}|SessionInputQueueAction::Promote {message_id,..}=>vec![message_id.clone()],
+            SessionInputQueueAction::Reorder {message_ids}=>message_ids.clone(),
+            _=>Vec::new(),
+        },
+    };
+    ids.extend(change.except_message_ids.iter().cloned());
+    if ids.iter().collect::<BTreeSet<_>>().len()!=ids.len() {
+        return Err(SessionStoreError::InvalidPayload("queue change duplicates an input identity".into()));
+    }
+    let mut routing=BTreeMap::new();
+    for id in ids {
+        let input=accepted_routing_tx(tx,&event.agent_session_id,&id,owner).await?;
+        if input.seq>=event.seq {return Err(SessionStoreError::InvalidEvent("queue routing reference is not prior to its change".into()));}
+        routing.insert(id,input);
+    }
+    if let Change::Replace {message_id,replacement_message_id}=&change.action {
+        let original=&routing[message_id];let replacement=&routing[replacement_message_id];
+        let identity=format!("session-input-blocked:{}:cancelled_by_owner",message_id.as_ref());
+        let cancellation=event_by_event_id_tx(tx,&identity).await?.map(event_from_row).transpose()?
+            .ok_or_else(||SessionStoreError::InvalidEvent("replacement lost original cancellation".into()))?;
+        let payload=payload_value_for_event_tx(tx,&cancellation).await?;
+        if cancellation.agent_session_id!=event.agent_session_id || cancellation.seq<=original.seq
+            || cancellation.seq>=replacement.seq || cancellation.kind.0!="message/input-blocked" || cancellation.kind_version!=1
+            || cancellation.producer_id.as_ref()!="runtime_supervisor" || cancellation.idempotency_key.as_ref()!=identity
+            || cancellation.causation_event_id.as_ref()!=Some(message_id) || cancellation.correlation_id.as_ref()!=message_id.as_ref()
+            || payload["input_event_id"].as_str()!=Some(message_id.as_ref()) || payload["reason"]!="CANCELLED_BY_OWNER"
+            || original.intent!=replacement.intent {
+            return Err(SessionStoreError::InvalidEvent("replacement lost its original routing or writer order".into()));
+        }
+    }
+    if let Change::Control(SessionInputQueueAction::Promote {turn_id,..})=&change.action {
+        validate_delivery_target_tx(tx,&event.agent_session_id,&SessionInputDeliveryIntent::PreferCurrent {turn_id:turn_id.clone()}).await?;
+    }
+    Ok(routing)
+}
+
+/// Validate the full immutable envelope only along the selected input's edit
+/// ancestry. Callers must invoke this after resolving their exact accepted
+/// input, not recursively from the low-level accepted-input reader.
+pub(super) async fn validate_selected_replacement_tx(tx:&mut Transaction<'_,Sqlite>,session:&AgentSessionId,input:&EventId)
+    ->Result<(),SessionStoreError> {
+    let mut selected=input.clone();
+    loop {
+        let rows=sqlx::query_as::<_,StoredEventRow>("SELECT e.session_id,e.seq,e.event_id,e.producer_id,e.idempotency_key,e.kind,e.kind_version,e.correlation_id,e.causation_event_id,e.inline_json,e.payload_id \
+            FROM agent_events e LEFT JOIN agent_payloads p ON p.payload_id=e.payload_id AND p.session_id=e.session_id \
+            WHERE e.session_id=? AND e.kind='message/input-queue-changed' AND \
+            COALESCE(json_extract(e.inline_json,'$.action.replacement_message_id'),json_extract(CAST(p.body AS TEXT),'$.value.action.replacement_message_id'))=? LIMIT 2")
+            .bind(session.as_ref()).bind(selected.as_ref()).fetch_all(&mut **tx).await?;
+        if rows.len()>1 {return Err(SessionStoreError::InvalidEvent("replacement has multiple queue owners".into()));}
+        let Some(row)=rows.into_iter().next() else {return Ok(());};
+        let event=event_from_row(row)?;let payload=payload_value_for_event_tx(tx,&event).await?;
+        validate_event(&event,&payload)?;validate_references_tx(tx,&event,&payload).await?;
+        let change:QueueChange=serde_json::from_value(payload)?;
+        let Change::Replace {message_id,replacement_message_id}=change.action else {
+            return Err(SessionStoreError::InvalidEvent("replacement source has a different queue action".into()));
+        };
+        if replacement_message_id!=selected {return Err(SessionStoreError::InvalidEvent("replacement lineage changed its selected input".into()));}
+        selected=message_id;
+    }
+}
+
 pub(super) async fn queue_state_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId) -> Result<QueueState, SessionStoreError> {
+    let owner=require_live_session_tx(tx,session.as_ref()).await?.owner_ref;
     let floor: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=? AND kind='context/cleared'")
         .bind(session.as_ref()).fetch_one(&mut **tx).await?;
     let rows = sqlx::query_as::<_, StoredEventRow>("SELECT session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events WHERE session_id=? AND kind='message/input-queue-changed' AND seq>? ORDER BY seq")
@@ -66,22 +173,37 @@ pub(super) async fn queue_state_tx(tx: &mut Transaction<'_, Sqlite>, session: &A
         let event = event_from_row(row)?;
         let payload=payload_value_for_event_tx(tx, &event).await?;
         validate_event(&event,&payload)?;
-        validate_references_tx(tx,&event,&payload).await?;
         let change: QueueChange = serde_json::from_value(payload)?;
+        let routing=validate_routing_references_tx(tx,&event,&change,&owner).await?;
         match change.action {
+            Change::Replace {message_id,replacement_message_id} => {
+                if let Some(index)=state.order.iter().position(|id|id==&message_id) {state.order[index]=replacement_message_id.clone();}
+                // Replacement cannot release a user's held batch merely
+                // because its newly accepted identity has a later sequence.
+                let original=&routing[&message_id];
+                state.replacement_order.insert(replacement_message_id.clone(),state.replacement_order.get(&message_id).copied().unwrap_or(original.seq));
+                if state.held_metadata(&message_id,original.seq,&original.value())? {state.replacement_holds.insert(replacement_message_id.clone());}
+                if state.released.remove(&message_id) {state.released.insert(replacement_message_id.clone());}
+                if let Some(intent)=state.delivery_overrides.remove(&message_id) {state.delivery_overrides.insert(replacement_message_id.clone(),intent);}
+                state.intent_sequences.insert(replacement_message_id,event.seq);
+            },
+            Change::Control(action) => match action {
             SessionInputQueueAction::Pause {} => {
                 let cutoff = change.through_seq.filter(|seq| *seq < event.seq)
                     .ok_or_else(|| SessionStoreError::InvalidPayload("queue hold has no prior input cutoff".into()))?;
                 state.held_through = Some(state.held_through.unwrap_or(0).max(cutoff));
-                state.released.clear();
+                state.released=change.except_message_ids.into_iter().collect();
             }
-            SessionInputQueueAction::Resume {} => state.held_through = None,
+            SessionInputQueueAction::Resume {} => {state.held_through = None;state.replacement_holds.clear();},
             SessionInputQueueAction::Reorder { message_ids } => state.order = message_ids,
             SessionInputQueueAction::Promote { message_id, turn_id } => {
                 state.released.insert(message_id.clone());
+                state.replacement_holds.remove(&message_id);
+                state.intent_sequences.insert(message_id.clone(),event.seq);
                 state.delivery_overrides.insert(message_id, SessionInputDeliveryIntent::PreferCurrent { turn_id });
             }
             SessionInputQueueAction::Remove { .. } | SessionInputQueueAction::Clear {} => {},
+            },
         }
         state.version = event.seq;
     }
@@ -89,12 +211,13 @@ pub(super) async fn queue_state_tx(tx: &mut Transaction<'_, Sqlite>, session: &A
 }
 
 impl QueueState {
+    pub(super) fn intent_sequence(&self,input:&EventId)->Option<u64>{self.intent_sequences.get(input).copied()}
     pub(super) fn held(&self, input: &PendingSessionInput) -> Result<bool, SessionStoreError> {
         self.held_metadata(&input.event.event_id,input.event.seq,&input.input.0)
     }
     fn held_metadata(&self,id:&EventId,seq:u64,routing:&Value)->Result<bool,SessionStoreError> {
         Ok(desktop_delivery_intent(routing)?.is_some() && !self.released.contains(id)
-            && self.held_through.is_some_and(|cutoff| seq<=cutoff))
+            && (self.replacement_holds.contains(id)||self.held_through.is_some_and(|cutoff| seq<=cutoff)))
     }
     pub(super) fn intent(&self, input: &PendingSessionInput) -> Result<Option<SessionInputDeliveryIntent>, SessionStoreError> {
         self.intent_metadata(&input.event.event_id,&input.input.0)
@@ -103,15 +226,44 @@ impl QueueState {
         Ok(self.delivery_overrides.get(id).cloned().or(desktop_delivery_intent(routing)?))
     }
     pub(super) fn sort(&self, inputs: &mut [PendingSessionInput]) -> Result<(),SessionStoreError> {
+        // Restore replacement positions across every source before applying
+        // the user's composer-only permutation to its original slots.
+        inputs.sort_by_key(|input|self.replacement_order.get(&input.event.event_id).copied().unwrap_or(input.event.seq));
         let rank: BTreeMap<_, _> = self.order.iter().enumerate().map(|(index,id)| (id,index)).collect();
         let mut slots=Vec::new();let mut composer=Vec::new();
         for (index,input) in inputs.iter().enumerate() {
             if desktop_delivery_intent(&input.input.0)?.is_some() {slots.push(index);composer.push(input.clone());}
         }
-        composer.sort_by_key(|input| (rank.get(&input.event.event_id).copied().unwrap_or(usize::MAX), input.event.seq));
+        composer.sort_by_key(|input| (rank.get(&input.event.event_id).copied().unwrap_or(usize::MAX),
+            self.replacement_order.get(&input.event.event_id).copied().unwrap_or(input.event.seq)));
         for (index,input) in slots.into_iter().zip(composer) {inputs[index]=input;}
         Ok(())
     }
+}
+
+/// Presentation selects the first eligible root using routing metadata only.
+/// A delivery read at a model boundary must not hydrate every queued body.
+pub(super) async fn first_eligible_root_tx(tx:&mut Transaction<'_,Sqlite>,session:&AgentSessionId,state:&QueueState)
+    ->Result<Option<EventId>,SessionStoreError> {
+    let owner=require_live_session_tx(tx,session.as_ref()).await?.owner_ref;
+    let prefix=session_input::session_input_namespace(&owner,session);
+    let query=format!("SELECT input.event_id,input.seq,COALESCE(json_extract(input.inline_json,'$.delivery_intent'),json_extract(CAST(p.body AS TEXT),'$.value.delivery_intent')) FROM agent_events input LEFT JOIN agent_payloads p ON p.payload_id=input.payload_id AND p.session_id=input.session_id{} ORDER BY input.seq",session_input::PENDING_INPUT_PREDICATE);
+    let rows=sqlx::query_as::<_,(String,i64,Option<String>)>(&query).bind(session.as_ref()).bind(&prefix).bind(&prefix).bind(false).bind(Option::<&str>::None).fetch_all(&mut **tx).await?;
+    let mut eligible=Vec::new();
+    for (id,seq,intent) in rows {
+        let id=EventId::from(id);let seq=as_u64(seq,"input routing order")?;
+        let mut routing=json!({});
+        if let Some(intent)=intent {routing["delivery_intent"]=serde_json::from_str(&intent)?;}
+        if let Some(intent)=desktop_delivery_intent(&routing)? {validate_delivery_target_tx(tx,session,&intent).await?;}
+        if !state.held_metadata(&id,seq,&routing)? {eligible.push((id,seq,routing.get("delivery_intent").is_some()));}
+    }
+    eligible.sort_by_key(|(id,seq,_)|state.replacement_order.get(id).copied().unwrap_or(*seq));
+    let Some((first,_,composer_first))=eligible.first() else {return Ok(None);};
+    if !composer_first {return Ok(Some(first.clone()));}
+    let rank:BTreeMap<_,_>=state.order.iter().enumerate().map(|(i,id)|(id,i)).collect();
+    Ok(eligible.iter().filter(|(_,_,composer)|*composer).min_by_key(|(id,seq,_)|(
+        rank.get(id).copied().unwrap_or(usize::MAX),state.replacement_order.get(id).copied().unwrap_or(*seq)))
+        .map(|(id,_,_)|id.clone()))
 }
 
 pub(super) async fn steering_eligible_tx(
@@ -183,7 +335,8 @@ pub(super) async fn pending_steering_inputs_tx(tx:&mut Transaction<'_,Sqlite>,se
 
 async fn queue_snapshot_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId) -> Result<SessionInputQueueSnapshot, SessionStoreError> {
     let owner = require_live_session_tx(tx, session.as_ref()).await?.owner_ref;
-    let state = queue_state_tx(tx, session).await?;
+    let context=session_input::InputViewContext::load(tx,session).await?;
+    let state=&context.queue;
     let floor: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=? AND kind='context/cleared'")
         .bind(session.as_ref()).fetch_one(&mut **tx).await?;
     let prefix=session_input::session_input_namespace(&owner,session);
@@ -197,21 +350,61 @@ async fn queue_snapshot_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentSess
         OR (e.kind='turn/started' AND e.causation_event_id IN (SELECT event_id FROM composer_inputs)) \
         OR (e.kind IN ('message/input-blocked','turn/steer-accepted') AND COALESCE(json_extract(e.inline_json,'$.input_event_id'),json_extract(CAST(p.body AS TEXT),'$.value.input_event_id')) IN (SELECT event_id FROM composer_inputs)))")
         .bind(session.as_ref()).bind(floor).bind(&prefix).bind(&prefix).bind(session.as_ref()).fetch_one(&mut **tx).await?;
-    let version = state.version.max(as_u64(changed,"queue mutation sequence")?);
+    let boundary:i64=sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=? AND kind IN ('turn/started','turn/completed','turn/failed','turn/cancelled','turn/paused','turn/resume-authorized','message/input-blocked')")
+        .bind(session.as_ref()).fetch_one(&mut **tx).await?;
+    let version = state.version.max(as_u64(changed.max(boundary),"queue mutation sequence")?);
     let mut items = Vec::new();
-    for original in session_input::pending_inputs_tx(tx,session,None,true).await? {
+    let mut originals=session_input::pending_inputs_tx(tx,session,None,true).await?;
+    state.sort(&mut originals)?;
+    for original in originals {
         let Some(delivery) = state.intent(&original)? else { continue; };
-        let (input_delivery, _) = session_input::delivery_state_tx(tx, session, &original.event.event_id).await?;
+        let input_delivery=serde_json::to_value(session_input::input_view_tx(tx,session,&original.event.event_id,&context).await?)?;
         items.push(SessionInputQueueItem { message_id: original.event.event_id.clone(), held: state.held(&original)?,
             input: original.input, delivery, input_delivery });
     }
-    let rank: BTreeMap<_, _> = state.order.iter().enumerate().map(|(index,id)| (id,index)).collect();
-    // The input query already supplies canonical order for newly accepted items.
-    items.sort_by_key(|item| rank.get(&item.message_id).copied().unwrap_or(usize::MAX));
     Ok(SessionInputQueueSnapshot { version, items })
 }
 
 impl AgentSessionStore {
+    pub async fn read_session_input_queue_command_receipt(&self,owner:&PrincipalRef,session:&AgentSessionId,
+        key:&IdempotencyKey,command:&Command,expected_version:Option<u64>)->Result<Option<SessionInputQueueSnapshot>,SessionStoreError> {
+        if let Command::Control(action)=command {return self.read_session_input_queue_receipt(owner,session,key,action,expected_version).await;}
+        let Command::Replace {message_id,content}=command else {unreachable!()};
+        let mut tx=self.pool.begin().await?;
+        if require_live_session_tx(&mut tx,session.as_ref()).await?.owner_ref!=*owner {return Err(SessionStoreError::ExecutionFenced);}
+        let matched=replacement_receipt_tx(&mut tx,session,&queue_command_key(owner,session,key)?,message_id,content,expected_version).await?;
+        let result=if matched {Some(queue_snapshot_tx(&mut tx,session).await?)} else {None};
+        tx.commit().await?;Ok(result)
+    }
+
+    pub async fn update_session_input_queue_command(&self,owner:&PrincipalRef,session:&AgentSessionId,
+        key:&IdempotencyKey,command:&Command,expected_version:Option<u64>)->Result<SessionInputQueueSnapshot,SessionStoreError> {
+        if let Command::Control(action)=command {return self.update_session_input_queue(owner,session,key,action,expected_version).await;}
+        let Command::Replace {message_id,content}=command else {unreachable!()};
+        if content.trim().is_empty() || content.len()>16*1024 {return Err(SessionStoreError::InvalidPayload("replacement text requires non-empty content within 16 KiB".into()));}
+        let mut tx=self.begin_write_transaction().await?;
+        if require_live_session_tx(&mut tx,session.as_ref()).await?.owner_ref!=*owner {return Err(SessionStoreError::ExecutionFenced);}
+        let identity=queue_command_key(owner,session,key)?;
+        if replacement_receipt_tx(&mut tx,session,&identity,message_id,content,expected_version).await? {
+            let snapshot=queue_snapshot_tx(&mut tx,session).await?;tx.commit().await?;return Ok(snapshot);
+        }
+        let snapshot=queue_snapshot_tx(&mut tx,session).await?;
+        if expected_version.is_some_and(|version|version!=snapshot.version) {return Err(SessionStoreError::Conflict("input queue changed; refresh before editing".into()));}
+        if !snapshot.items.iter().any(|item|item.message_id==*message_id) {return Err(SessionStoreError::Conflict("input is no longer pending".into()));}
+        let mut replacement=session_input::accepted_input_tx(&mut tx,session,message_id).await?.input;
+        replacement.0["content"]=json!(content);
+        if canonical_json_bytes(&replacement.0)?.len()>MAX_INLINE_JSON_BYTES {return Err(SessionStoreError::InvalidPayload("replacement input envelope exceeds its bound".into()));}
+        let cause=latest_turn_boundary_event_tx(&mut tx,session.as_ref()).await?;
+        let id=new_event_id();
+        let accepted=SessionEventAppend {agent_session_id:session.clone(),event_id:id.clone(),producer_id:"session_api".into(),
+            idempotency_key:session_input::command_key(owner,session,&format!("queue-replacement:{identity}").into())?,
+            semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {kind:SessionEventKind("message/user-accepted".into()),kind_version:1,
+                correlation_id:CorrelationId::from(id.as_ref()),causation_event_id:Some(cause),payload:SessionEventPayloadRef::InlineJson(replacement)}};
+        self.cancel_pending_input_tx(&mut tx,session,message_id).await?;
+        self.append_event_tx(&mut tx,&accepted,None).await?;
+        self.append_queue_change_tx(&mut tx,session,&identity,QueueChange {action:Change::Replace {message_id:message_id.clone(),replacement_message_id:id},expected_version,through_seq:None,except_message_ids:Vec::new()}).await?;
+        let snapshot=queue_snapshot_tx(&mut tx,session).await?;tx.commit().await?;Ok(snapshot)
+    }
     pub async fn session_input_queue(&self, owner: &PrincipalRef, session: &AgentSessionId) -> Result<SessionInputQueueSnapshot, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
         if require_live_session_tx(&mut tx, session.as_ref()).await?.owner_ref != *owner { return Err(SessionStoreError::ExecutionFenced); }
@@ -275,11 +468,16 @@ impl AgentSessionStore {
         match action {
             SessionInputQueueAction::Remove { message_id } => self.cancel_pending_input_tx(&mut tx, session, message_id).await?,
             SessionInputQueueAction::Clear {} => {
-                for item in &snapshot.items { self.cancel_pending_input_tx(&mut tx, session, &item.message_id).await?; }
+                for item in snapshot.items.iter().filter(|item|item.input_delivery["placement"]=="queued") {
+                    self.cancel_pending_input_tx(&mut tx, session, &item.message_id).await?;
+                }
             }
             _ => {},
         }
-        self.append_queue_change_tx(&mut tx, session, &identity, QueueChange { action: action.clone(), expected_version, through_seq }).await?;
+        let except_message_ids=if matches!(action,SessionInputQueueAction::Pause {}) {
+            snapshot.items.iter().filter(|item|item.input_delivery["placement"]!="queued").map(|item|item.message_id.clone()).collect()
+        } else {Vec::new()};
+        self.append_queue_change_tx(&mut tx, session, &identity, QueueChange { action: action.clone().into(), expected_version, through_seq,except_message_ids }).await?;
         let snapshot = queue_snapshot_tx(&mut tx, session).await?;
         tx.commit().await?; Ok(snapshot)
     }
@@ -296,7 +494,7 @@ impl AgentSessionStore {
         self.append_event_tx(tx, &append, None).await?; Ok(())
     }
 
-    async fn cancel_pending_input_tx(&self, tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId, input: &EventId) -> Result<(), SessionStoreError> {
+    pub(super) async fn cancel_pending_input_tx(&self, tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId, input: &EventId) -> Result<(), SessionStoreError> {
         if session_input::input_claimed_tx(tx, session, input).await? { return Err(SessionStoreError::Conflict("input has already been claimed".into())); }
         let identity = format!("session-input-blocked:{}:cancelled_by_owner", input.as_ref());
         let append = SessionEventAppend { agent_session_id: session.clone(), event_id: identity.clone().into(), producer_id: "runtime_supervisor".into(),
@@ -329,8 +527,8 @@ impl AgentSessionStore {
         // authored later remain new user intents; no domain input is held.
         let identity = format!("session-input-queue-stop:{}:{}:{}", session.as_ref(), target.as_ref(), digest_payload(key)?.as_ref());
         let cutoff = head_by_id_tx(tx, session.as_ref()).await?.last_seq;
-        self.append_queue_change_tx(tx, session, &identity, QueueChange { action: SessionInputQueueAction::Pause {},
-            expected_version: None, through_seq: Some(cutoff) }).await
+        self.append_queue_change_tx(tx, session, &identity, QueueChange { action: SessionInputQueueAction::Pause {}.into(),
+            expected_version: None, through_seq: Some(cutoff),except_message_ids:Vec::new() }).await
     }
 }
 
@@ -349,10 +547,25 @@ async fn queue_receipt_matches_tx(tx:&mut Transaction<'_,Sqlite>,session:&AgentS
     let payload=payload_value_for_event_tx(tx,&event).await?;
     validate_event(&event,&payload)?;
     let original:QueueChange=serde_json::from_value(payload)?;
-    if original.action!=*action || original.expected_version!=expected_version {
+    if original.action!=Change::Control(action.clone()) || original.expected_version!=expected_version {
         return Err(SessionStoreError::IdempotencyConflict("queue key was reused for another command".into()));
     }
     Ok(true)
+}
+
+async fn replacement_receipt_tx(tx:&mut Transaction<'_,Sqlite>,session:&AgentSessionId,identity:&str,
+    message_id:&EventId,content:&str,expected_version:Option<u64>)->Result<bool,SessionStoreError> {
+    let Some(row)=event_by_producer_key_tx(tx,"session_api",identity).await? else {return Ok(false);};
+    let event=event_from_row(row)?;
+    let payload=payload_value_for_event_tx(tx,&event).await?;
+    if event.agent_session_id!=*session || event.kind.0!=QUEUE_CHANGED {return Err(SessionStoreError::IdempotencyConflict("queue key belongs to another fact".into()));}
+    validate_event(&event,&payload)?;validate_references_tx(tx,&event,&payload).await?;
+    let change:QueueChange=serde_json::from_value(payload)?;
+    if change.expected_version==expected_version && let Change::Replace {message_id:old,replacement_message_id}=change.action {
+        let replacement=session_input::accepted_input_tx(tx,session,&replacement_message_id).await?;
+        if old==*message_id && replacement.input.0["content"].as_str()==Some(content) {return Ok(true);}
+    }
+    Err(SessionStoreError::IdempotencyConflict("queue key was reused for another replacement".into()))
 }
 
 pub(super) fn validate_event(event: &SessionEventRecord, payload: &Value) -> Result<(), SessionStoreError> {
@@ -360,9 +573,12 @@ pub(super) fn validate_event(event: &SessionEventRecord, payload: &Value) -> Res
     let change: QueueChange = serde_json::from_value(payload.clone())?;
     if event.kind_version != 1 || event.producer_id.as_ref() != "session_api"
         || event.correlation_id.as_ref() != event.agent_session_id.as_ref()
-        || (matches!(change.action, SessionInputQueueAction::Pause {}) != change.through_seq.is_some())
+        || (matches!(change.action, Change::Control(SessionInputQueueAction::Pause {})) != change.through_seq.is_some())
         || change.through_seq.is_some_and(|seq| seq >= event.seq) {
         return Err(SessionStoreError::InvalidEvent("queue change has invalid original authority or cutoff".into()));
+    }
+    if !change.except_message_ids.is_empty() && !matches!(change.action,Change::Control(SessionInputQueueAction::Pause {})) {
+        return Err(SessionStoreError::InvalidEvent("only explicit queue pause may exempt visible input".into()));
     }
     Ok(())
 }
@@ -371,11 +587,15 @@ pub(super) async fn validate_references_tx(tx:&mut Transaction<'_,Sqlite>,event:
     ->Result<(),SessionStoreError> {
     if event.kind.0!=QUEUE_CHANGED {return Ok(());}
     let change:QueueChange=serde_json::from_value(payload.clone())?;
-    let ids=match &change.action {
+    let mut ids=match &change.action {
+        Change::Replace {message_id,replacement_message_id}=>vec![message_id.clone(),replacement_message_id.clone()],
+        Change::Control(action)=>match action {
         SessionInputQueueAction::Remove {message_id}|SessionInputQueueAction::Promote {message_id,..}=>vec![message_id.clone()],
         SessionInputQueueAction::Reorder {message_ids}=>message_ids.clone(),
         _=>Vec::new(),
+        },
     };
+    ids.extend(change.except_message_ids.iter().cloned());
     if ids.iter().collect::<BTreeSet<_>>().len()!=ids.len() {return Err(SessionStoreError::InvalidPayload("queue change duplicates an input identity".into()));}
     for id in ids {
         let original=session_input::accepted_input_tx(tx,&event.agent_session_id,&id).await?;
@@ -383,7 +603,17 @@ pub(super) async fn validate_references_tx(tx:&mut Transaction<'_,Sqlite>,event:
             return Err(SessionStoreError::InvalidEvent("queue change lost its prior ordinary input source".into()));
         }
     }
-    if let SessionInputQueueAction::Promote {turn_id,..}=change.action {
+    if let Change::Replace {message_id,replacement_message_id}=&change.action {
+        let original=session_input::accepted_input_tx(tx,&event.agent_session_id,message_id).await?;
+        let replacement=session_input::accepted_input_tx(tx,&event.agent_session_id,replacement_message_id).await?;
+        let cancelled=session_input::cancelled_input_tx(tx,&original.event).await?
+            .ok_or_else(||SessionStoreError::InvalidEvent("replacement lost original cancellation".into()))?;
+        let mut inherited=replacement.input.0.clone();inherited["content"]=original.input.0["content"].clone();
+        if cancelled.seq>=replacement.event.seq || inherited!=original.input.0 || replacement.event.seq<=original.event.seq {
+            return Err(SessionStoreError::InvalidEvent("replacement lost its original envelope or writer order".into()));
+        }
+    }
+    if let Change::Control(SessionInputQueueAction::Promote {turn_id,..})=change.action {
         validate_delivery_target_tx(tx,&event.agent_session_id,&SessionInputDeliveryIntent::PreferCurrent {turn_id}).await?;
     }
     Ok(())

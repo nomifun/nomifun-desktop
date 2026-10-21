@@ -1,9 +1,11 @@
-/** Read-only progress of one accepted input, ordered by canonical facts. */
-export type InputDelivery = {
-  state: 'pending' | 'blocked' | 'claimed' | 'discarded' | 'cancelled';
-  reason?: string;
-  /** Missing only on an optimistic local echo. */
-  event_seq?: number;
+import { parseMessageId, type MessageId } from '@/common/types/ids';
+import type { SessionInputView } from '@/common/protocolBindings/SessionInputView';
+
+/** Read-only progress and placement of one accepted input. Local submission
+ * echoes have no host observation cursor; they never select execution. */
+export type InputDelivery = Pick<SessionInputView, 'state'>
+  & Partial<Omit<SessionInputView, 'state' | 'turn_id'>> & {
+  turn_id?: MessageId;
 };
 
 export function normalizeInputDelivery(raw: unknown): InputDelivery | undefined {
@@ -12,10 +14,21 @@ export function normalizeInputDelivery(raw: unknown): InputDelivery | undefined 
   if (typeof value.state !== 'string' || !['pending', 'blocked', 'claimed', 'discarded', 'cancelled'].includes(value.state)) return undefined;
   if (value.event_seq !== undefined &&
       (typeof value.event_seq !== 'number' || !Number.isSafeInteger(value.event_seq) || value.event_seq <= 0)) return undefined;
+  if (value.placement !== undefined && !['queued', 'steering', 'transcript'].includes(value.placement as string)) return undefined;
+  if (value.kind !== undefined && !['root', 'steering'].includes(value.kind as string)) return undefined;
+  if (value.order_seq !== undefined && (typeof value.order_seq !== 'number' || !Number.isSafeInteger(value.order_seq) || value.order_seq <= 0)) return undefined;
+  let turnId: MessageId | undefined;
+  if (value.turn_id !== undefined && value.turn_id !== null) {
+    try { turnId = parseMessageId(value.turn_id); } catch { return undefined; }
+  }
   return {
     state: value.state as InputDelivery['state'],
     ...(typeof value.reason === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(value.reason) ? { reason: value.reason } : {}),
     ...(typeof value.event_seq === 'number' ? { event_seq: value.event_seq } : {}),
+    ...(value.placement ? { placement: value.placement as InputDelivery['placement'] } : {}),
+    ...(value.kind ? { kind: value.kind as InputDelivery['kind'] } : {}),
+    ...(turnId ? { turn_id: turnId } : {}),
+    ...(typeof value.order_seq === 'number' ? { order_seq: value.order_seq } : {}),
   };
 }
 

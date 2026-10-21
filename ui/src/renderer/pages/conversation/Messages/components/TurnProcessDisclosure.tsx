@@ -19,6 +19,7 @@ export interface TurnProcessDisclosureView<T> {
   state: TurnDisclosureProcessState;
   running: boolean;
   defaultCollapsed: boolean;
+  earlierSegment?: boolean;
   hasInterruptedReply?: boolean;
 }
 
@@ -177,7 +178,9 @@ function TurnProcessDisclosure<T>({
   useEffect(() => { if (disclosureExpanded) setBodyMounted(true); }, [disclosureExpanded]);
   const headerContent = (
     <>
-      <TurnWorkDuration startAt={item?.startAt} endAt={item?.endAt} running={running} state={item?.state ?? 'completed'} preparationLabel={!item ? preparationLabel : undefined} />
+      {item?.earlierSegment
+        ? <span className='turn-process-disclosure__label'>{t('messages.turnProcess.previous')}</span>
+        : <TurnWorkDuration startAt={item?.startAt} endAt={item?.endAt} running={running} state={item?.state ?? 'completed'} preparationLabel={!item ? preparationLabel : undefined} />}
       {hasProcessItems && (
         <Right
           theme='outline'

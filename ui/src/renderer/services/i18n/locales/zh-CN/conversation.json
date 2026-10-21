@@ -984,7 +984,7 @@
     "dropNoFiles": "未检测到可添加的文件，请拖入文件而非文件夹。",
     "retrySend": "重试原消息（保留原投递意图）",
     "guide": "引导",
-    "guideHint": "提交，但不中断模型运行"
+    "guideHint": "在安全边界补充到当前任务"
   },
   "hoverCard": {
     "id": "会话 ID",
@@ -1026,16 +1026,20 @@
     "addInput": "补充信息"
   },
   "inputDelivery": {
-    "pending": "已保存，等待处理",
     "blocked": "此输入已保存但未处理，检查问题后重新发送。",
     "attachment": "请检查附件是否可用。",
     "skill": "请检查所选技能是否可用。",
     "budget": "请缩短内容或减少附件。",
     "discarded": "已随上下文清空取消处理",
-    "cancelled": "这条消息已在处理前取消。若要重新执行，请发送一条新消息。"
+    "cancelled": "这条消息已在处理前取消。若要重新执行，请发送一条新消息。",
+    "starting": "正在开始",
+    "steering": "等待当前任务接收",
+    "received": "当前任务已接收",
+    "deferred": "当前任务已结束，将随后处理",
+    "waiting": "等待任务收尾"
   },
   "inputQueue": {
-    "title": "待处理消息（{{count}}）",
+    "title": "{{count}} 条排队消息",
     "pause": "暂停队列",
     "resume": "继续队列",
     "clear": "清空队列",
@@ -1046,15 +1050,16 @@
     "remove": "移除",
     "held": "已暂停",
     "blocked": "等待处理问题",
-    "steering": "等待当前回合接收",
-    "queued": "排队等待独立回合",
     "files": "{{count}} 个附件",
-    "finishDraftFirst": "请先处理当前草稿，再编辑排队消息。",
     "showFull": "查看全文",
     "guide": "引导",
-    "more": "更多队列操作",
+    "more": "此消息的更多操作",
     "skills": "技能",
     "skillCount": "{{count}} 项技能",
-    "emptyInput": "待处理输入"
+    "emptyInput": "待处理输入",
+    "queueActions": "整个队列的操作",
+    "edit": "编辑排队消息",
+    "editPreservesAttachments": "保留原附件与技能",
+    "editUnavailable": "原消息已开始处理或已变更。编辑内容已保留，可复制后另行发送。"
   }
 }

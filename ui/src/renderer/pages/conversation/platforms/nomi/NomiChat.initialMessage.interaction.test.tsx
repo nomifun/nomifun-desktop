@@ -245,7 +245,7 @@ test('slow preparation and acceptance keep the real transcript mounted without a
       state: 'running', is_processing: true, can_send_message: false, active_turn_id: messageId,
     },
   } as TChatConversation);
-  await act(async () => { accepted.resolve({ msg_id: messageId, replayed: false }); });
+  await act(async () => { accepted.resolve({ msg_id: messageId, replayed: false, input_delivery: { state: 'pending', placement: 'transcript', kind: 'root', event_seq: 1, order_seq: 1 } }); });
   await waitFor(() => expect(page.pending()).toBeNull());
   expect(page.getByTestId('message-list-scroller')).toBe(scroller);
   expect(page.getAllByTestId('message-text-content')).toHaveLength(1);
@@ -284,7 +284,7 @@ test('a Pending initial delivery prepares once through its owner and focus canno
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
   expect(warmup).toHaveBeenCalledTimes(1);
   expect(send).toHaveBeenCalledTimes(1);
-  await act(async () => { accepted.resolve({ msg_id: messageId, replayed: false }); });
+  await act(async () => { accepted.resolve({ msg_id: messageId, replayed: false, input_delivery: { state: 'pending', placement: 'transcript', kind: 'root', event_seq: 1, order_seq: 1 } }); });
 });
 
 test.each(['unmount', 'conversation-change'] as const)('shared composer cancels the previous focus warmup on %s', async (transition) => {
@@ -348,7 +348,7 @@ test.each([false, true])('a user-created event before the send receipt cannot le
   expect(page.getByTestId('message-list-scroller')).toBe(scroller);
   const runtime = deferred<TChatConversation>();
   spyOn(ipcBridge.conversation.get, 'invoke').mockReturnValue(runtime.promise);
-  await act(async () => accepted.resolve({ msg_id: messageId, replayed: false }));
+  await act(async () => accepted.resolve({ msg_id: messageId, replayed: false, input_delivery: { state: 'pending', placement: 'transcript', kind: 'root', event_seq: 1, order_seq: 1 } }));
   await waitFor(() => expect(page.pending()).toBeNull());
   expect(page.container.textContent).not.toContain('Worked for');
   expect(page.getAllByTestId('message-text-content')).toHaveLength(1);
@@ -455,7 +455,7 @@ test.each([false, true])('Turn completion preserves an active composer and IME d
   expect(page.getByTestId('sendbox-input')).toBe(editor);
   expect(document.activeElement).toBe(editor);
   expect(send).toHaveBeenCalledTimes(1);
-  await act(async () => accepted.resolve({ msg_id: messageId, replayed: false }));
+  await act(async () => accepted.resolve({ msg_id: messageId, replayed: false, input_delivery: { state: 'pending', placement: 'transcript', kind: 'root', event_seq: 1, order_seq: 1 } }));
   await waitFor(() => expect(editor.value).toBe(''));
 });
 
