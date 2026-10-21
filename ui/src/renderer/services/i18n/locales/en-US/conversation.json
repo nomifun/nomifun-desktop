@@ -1028,17 +1028,7 @@
     "addInput": "Add information"
   },
   "inputDelivery": {
-    "blocked": "This input was saved but not processed. Check the issue before sending it again.",
-    "attachment": "Check that the attachments are available.",
-    "skill": "Check that the selected skills are available.",
-    "budget": "Shorten the message or reduce the attachments.",
-    "discarded": "No longer pending after the context was cleared",
-    "cancelled": "This message was cancelled before processing. Send a new message to start again.",
-    "starting": "Starting…",
-    "steering": "Waiting for the current task to receive",
-    "received": "Received by the current task",
-    "deferred": "The current task ended; this message will run next",
-    "waiting": "Waiting for task cleanup"
+    "deferred": "The current task ended; this message will run next"
   },
   "inputQueue": {
     "title": "Queued messages ({{count}})",

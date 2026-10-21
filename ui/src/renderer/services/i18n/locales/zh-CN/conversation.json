@@ -1026,17 +1026,7 @@
     "addInput": "补充信息"
   },
   "inputDelivery": {
-    "blocked": "此输入已保存但未处理，检查问题后重新发送。",
-    "attachment": "请检查附件是否可用。",
-    "skill": "请检查所选技能是否可用。",
-    "budget": "请缩短内容或减少附件。",
-    "discarded": "已随上下文清空取消处理",
-    "cancelled": "这条消息已在处理前取消。若要重新执行，请发送一条新消息。",
-    "starting": "正在开始",
-    "steering": "等待当前任务接收",
-    "received": "当前任务已接收",
-    "deferred": "当前任务已结束，将随后处理",
-    "waiting": "等待任务收尾"
+    "deferred": "当前任务已结束，将随后处理"
   },
   "inputQueue": {
     "title": "{{count}} 条排队消息",

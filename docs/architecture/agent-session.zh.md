@@ -519,8 +519,9 @@ native exact steering 和必要同代历史解释保留。
 
 受理回执、输入通知、队列查询与历史读取使用同一 typed `SessionInputView`：`placement` 区分 `queued`、`steering`、`transcript`，
 `kind`、原 Turn source 与 `order_seq` 明确根输入／引导归属和实际边界，`event_seq` 防止迟到 ACK、旧通知或分页回退新状态。
-该只读视图不写入 accepted payload，也不提供准入权。空闲首项在正文显示准备状态；真正排队项只进入 composer 队列条；引导在正文尾部等待接收，
-取得原生交付事实后保持同一身份进入原 Turn 的准确过程边界。历史、增量补读及重连均保留此归属，不把每条用户输入推断成新 Turn。
+该只读视图不写入 accepted payload，也不提供准入权。空闲首项直接进入正文；真正排队项只进入 composer 队列条；引导先以同一消息身份出现在正文尾部，
+取得原生交付事实后进入原 Turn 的准确过程边界。用户消息气泡下不显示输入投递或执行状态文字；typed 元数据仍用于精确投递、队列控制与编辑权限判断。
+历史、增量补读及重连均保留此归属，不把每条用户输入推断成新 Turn。
 UI/API contract 46 固定这份输入受理／替换／准备停止的读取合同；它不改变 Agent 数据代际、原生 checkpoint 或物理表结构。
 队列为空不显示，单项紧凑、多项默认折叠；全队列操作与单项操作明确分开，不新增发送模式设置。
 准备读取和模型边界只获取资格所需 routing metadata，不因投影视图读取无关队列正文。输入或控制提交后先把 wake 交给原 Host owner，

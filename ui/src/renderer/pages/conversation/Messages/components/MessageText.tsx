@@ -104,17 +104,6 @@ const MessageText: React.FC<{
   const [showCopyAlert, setShowCopyAlert] = useState(false);
   const isUserMessage = message.position === 'right';
   const inputDelivery = isUserMessage ? message.content.input_delivery : undefined;
-  const deliveryLabel = inputDelivery?.state === 'cancelled' ? 'cancelled'
-    : inputDelivery?.state === 'discarded' ? 'discarded'
-    : inputDelivery?.state === 'blocked' ? 'blocked'
-    : inputDelivery?.placement === 'steering' ? 'steering'
-    : inputDelivery?.state === 'claimed' && inputDelivery.kind === 'steering' ? 'received'
-    : inputDelivery?.state === 'pending' && inputDelivery.reason === 'WAITING_FOR_EFFECT_SETTLEMENT' ? 'waiting'
-    : inputDelivery?.state === 'pending' && inputDelivery.reason === 'TARGET_TURN_ENDED' ? 'deferred'
-    : inputDelivery?.state === 'pending' ? 'starting' : undefined;
-  const deliveryReason = inputDelivery?.state === 'blocked' ? ({
-    ATTACHMENT_PREPARATION_FAILED: 'attachment', SKILL_UNAVAILABLE: 'skill', INPUT_BUDGET_EXCEEDED: 'budget',
-  } as const)[inputDelivery.reason as 'ATTACHMENT_PREPARATION_FAILED' | 'SKILL_UNAVAILABLE' | 'INPUT_BUDGET_EXCEEDED'] : undefined;
   const hasMultipleNarrationRanges = !isUserMessage
     && (message.content.timeline?.segments.filter(segment => segment.kind === 'narration').length ?? 0) > 1;
   const decision = isUserMessage ? message.content.idmm_decision : undefined;
@@ -323,11 +312,6 @@ const MessageText: React.FC<{
           </div>
         )}
         {presentation.hasToolPayload && <AssistantProtocolNotice />}
-        {deliveryLabel && <div
-          role='status' data-testid='message-input-delivery' className='mt-4px text-12px text-t-secondary'>
-          {t(`conversation.inputDelivery.${deliveryLabel}`)}
-          {deliveryLabel === 'blocked' && deliveryReason ? ` ${t(`conversation.inputDelivery.${deliveryReason}`)}` : ''}
-        </div>}
         {message.content.observations?.map((observation) => (
           <div key={observation.image.id} className='mt-8px flex max-w-full flex-col gap-6px rd-8px border border-solid border-arco-2 p-10px'>
             <span className='text-12px text-t-secondary'>{t('nomi.robot.visualObservation')}</span>

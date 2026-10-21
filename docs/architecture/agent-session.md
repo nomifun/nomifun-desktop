@@ -317,9 +317,10 @@ express root/steering ownership and the execution boundary. `event_seq` fences l
 notifications and history. The view grants no execution authority and is never written into input payloads.
 UI/API contract 46 covers input acceptance, replacement and preparation-stop responses without
 changing the Agent data generation, native checkpoints or physical database schema.
-Only queued inputs render in the compact composer dock; an idle first input renders as starting,
-and pending steering renders once at the transcript tail before its native receipt places that same
-identity between the preceding and following process segments. Empty docks disappear, one row is
+Only queued inputs render in the compact composer dock; an idle first input appears directly in the
+transcript, and pending steering renders once at its tail before the native receipt places that same
+identity between the preceding and following process segments. User message bubbles do not show input-delivery
+or execution-state captions; typed metadata still serves exact delivery, queue controls and edit eligibility. Empty docks disappear, one row is
 compact, multiple rows initially collapse, and queue-wide operations have a separate scope.
 
 Queue controls use stable keys and versions derived from relevant input/control and Turn-boundary

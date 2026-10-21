@@ -1072,11 +1072,12 @@ test('queued input stays out of history and the same steering identity moves fro
   fireEvent.click(page.getByRole('button', { name: 'Guide queued input' }));
   const pending = await history.findByText('Prioritize the visual design.');
   expect(history.getAllByText('Prioritize the visual design.')).toHaveLength(1);
-  expect(page.getByTestId('message-input-delivery').textContent).toBe(conversationLocale.inputDelivery.steering);
+  expect(page.queryByTestId('message-input-delivery')).toBeNull();
   expect(page.container.querySelector('[data-process-segment-id="guide-before"]')!.compareDocumentPosition(pending)
     & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   fireEvent.click(page.getByRole('button', { name: 'Receive guide at the boundary' }));
-  await waitFor(() => expect(page.getByTestId('message-input-delivery').textContent).toBe(conversationLocale.inputDelivery.received));
+  await waitFor(() => expect(page.container.querySelector('[data-process-segment-id="guide-after"]')).not.toBeNull());
+  expect(page.queryByTestId('message-input-delivery')).toBeNull();
   expect(history.getAllByText('Prioritize the visual design.')).toHaveLength(1);
   expect(history.getByText('Prioritize the visual design.') === pending).toBe(true);
   const before = page.container.querySelector('[data-process-segment-id="guide-before"]')!;

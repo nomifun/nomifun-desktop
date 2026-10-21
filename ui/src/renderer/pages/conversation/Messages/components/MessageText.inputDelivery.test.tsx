@@ -26,59 +26,39 @@ const mount = (message: IMessageText) => {
     </ConversationProvider>
   </I18nextProvider></MemoryRouter>);
 };
-test('an opening input shows preparation beside its original bubble without declaring execution', () => {
-  const page = mount({ ...base, content: { ...base.content, input_delivery: { state: 'pending' } } });
-  expect(page.getByTestId('message-input-delivery').textContent).toBe(en.inputDelivery.starting);
+test.each([
+  { state: 'pending' },
+  { state: 'pending', placement: 'transcript', kind: 'root' },
+  { state: 'pending', placement: 'steering', kind: 'steering' },
+  { state: 'claimed', placement: 'transcript', kind: 'steering' },
+  { state: 'pending', reason: 'WAITING_FOR_EFFECT_SETTLEMENT' },
+  { state: 'pending', reason: 'TARGET_TURN_ENDED' },
+  { state: 'blocked', reason: 'ATTACHMENT_PREPARATION_FAILED' },
+  { state: 'discarded', reason: 'CONTEXT_CLEARED' },
+] as const)('message metadata omits execution status for %j while keeping content and actions', input_delivery => {
+  const page = mount({ ...base, content: { ...base.content, input_delivery } });
+  expect(page.queryByTestId('message-input-delivery')).toBeNull();
+  expect(page.queryByRole('status')).toBeNull();
   expect(page.getByTestId('message-text-content').textContent).toBe(base.content.content);
-  expect(page.queryByRole('alert')).toBeNull();
+  expect(page.getByTestId('message-actions').textContent).toMatch(/\d{2}:\d{2}/);
+  expect(page.getByTestId('message-copy-action')).toBeTruthy();
   expect(page.queryByTestId('message-edit-action')).not.toBeNull();
 });
-test.each([
-  ['WAITING_FOR_EFFECT_SETTLEMENT', 'waiting'], ['TARGET_TURN_ENDED', 'deferred'],
-] as const)('an unclaimed input explains %s without claiming to be executing', (reason, label) => {
-  const page = mount({ ...base, content: { ...base.content, input_delivery: {
-    state: 'pending', placement: 'transcript', kind: 'root', reason,
-  } } });
-  expect(page.getByTestId('message-input-delivery').textContent).toBe(en.inputDelivery[label]);
-});
-test('blocked input keeps its saved body and offers a concrete corrective step', () => {
-  const page = mount({ ...base, content: { ...base.content, input_delivery: { state: 'blocked', reason: 'ATTACHMENT_PREPARATION_FAILED' } } });
-  expect(page.getByTestId('message-input-delivery').textContent).toContain('saved but not processed');
-  expect(page.getByTestId('message-input-delivery').textContent).toContain('attachments are available');
-  expect(page.queryByRole('alert')).toBeNull();
-});
-test('claimed history clears the pending label even when a longer live body wins presentation', () => {
+
+test('claimed history retains canonical delivery when a longer live body wins presentation', () => {
   const canonical = { ...base, content: { ...base.content, input_delivery: { state: 'claimed' as const } } };
-  const optimistic = { ...base, content: { content: `${base.content.content} longer live fragment`, input_delivery: { state: 'pending' as const } } };
+  const optimistic = { ...base, content: { content: base.content.content + ' longer live fragment', input_delivery: { state: 'pending' as const } } };
   const merged = preferTextMessageVersion(canonical, optimistic);
   expect(merged.content.input_delivery).toEqual({ state: 'claimed' });
   const page = mount(merged);
   expect(page.queryByTestId('message-input-delivery')).toBeNull();
 });
 
-test.each([
-  [{ state: 'pending', placement: 'transcript', kind: 'root' }, 'starting'],
-  [{ state: 'pending', placement: 'steering', kind: 'steering' }, 'steering'],
-  [{ state: 'claimed', placement: 'transcript', kind: 'steering' }, 'received'],
-] as const)('an input shows its actual delivery stage %j without a generic saved/queued label', (input_delivery, label) => {
-  const page = mount({ ...base, content: { ...base.content, input_delivery } });
-  expect(page.getByTestId('message-input-delivery').textContent).toBe(en.inputDelivery[label]);
-  expect(page.queryByText('Saved, waiting to be processed')).toBeNull();
-});
-test('context-cleared input has a neutral discarded state without a pending or execution failure label', () => {
-  const page = mount({ ...base, content: { ...base.content, input_delivery: { state: 'discarded', reason: 'CONTEXT_CLEARED' } } });
-  expect(page.getByTestId('message-input-delivery').textContent).toBe('No longer pending after the context was cleared');
-  expect(page.queryByRole('alert')).toBeNull();
-  expect(page.getByTestId('message-text-content').textContent).toBe(base.content.content);
-});
-
-test('an owner-cancelled accepted input keeps its body and shows cancellation without preparation failure or original-input retry actions', () => {
+test('owner-cancelled input keeps its body without a status label or edit and retry actions', () => {
   const page = mount({ ...base, content: { ...base.content, input_delivery: { state: 'cancelled', reason: 'CANCELLED_BY_OWNER', event_seq: 20 } } });
-  expect(page.getByTestId('message-input-delivery').textContent).toBe(en.inputDelivery.cancelled);
+  expect(page.queryByTestId('message-input-delivery')).toBeNull();
   expect(page.getByTestId('message-text-content').textContent).toBe(base.content.content);
   expect(page.queryByRole('alert')).toBeNull();
   expect(page.queryByTestId('message-edit-action')).toBeNull();
   expect(page.queryByRole('button')).toBeNull();
-  expect(page.queryByText(en.inputDelivery.blocked)).toBeNull();
-  expect(page.queryByText(en.inputDelivery.skill)).toBeNull();
 });
