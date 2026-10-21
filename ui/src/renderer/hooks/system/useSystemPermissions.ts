@@ -16,11 +16,16 @@ type PermissionSnapshot = {
 export const useSystemPermissions = (enabled = true, scope = '') => {
   const [snapshot, setSnapshot] = useState<PermissionSnapshot>({ scope, status: null, loading: enabled, error: null });
   const generation = useRef(0);
+  const inFlightRequest = useRef<{ scope: string; generation: number } | null>(null);
   const mounted = useRef(true);
   const current = useRef({ enabled, scope });
   current.current = { enabled, scope };
   const isCurrent = useCallback((requestGeneration: number) => mounted.current && current.current.enabled &&
     current.current.scope === scope && generation.current === requestGeneration, [scope]);
+  const hasCurrentRequest = useCallback(() => {
+    const owner = inFlightRequest.current;
+    return owner?.scope === scope && isCurrent(owner.generation);
+  }, [isCurrent, scope]);
   const begin = useCallback(() => {
     const requestGeneration = ++generation.current;
     setSnapshot(previous => ({ scope, status: previous.scope === scope ? previous.status : null,
@@ -29,7 +34,9 @@ export const useSystemPermissions = (enabled = true, scope = '') => {
   }, [scope]);
 
   const refresh = useCallback(async () => {
-    if (!enabled || !mounted.current || !current.current.enabled || current.current.scope !== scope) return null;
+    // A TCC prompt can refocus the window before its POST settles. A GET must
+    // not invalidate that result or unlock another explicit native request.
+    if (!enabled || !mounted.current || !current.current.enabled || current.current.scope !== scope || hasCurrentRequest()) return null;
     const requestGeneration = begin();
     try {
       const next = await ipcBridge.systemPermissions.get.invoke();
@@ -41,11 +48,11 @@ export const useSystemPermissions = (enabled = true, scope = '') => {
         error: caught instanceof Error ? caught.message : String(caught) }));
       return null;
     }
-  }, [begin, enabled, isCurrent, scope]);
+  }, [begin, enabled, hasCurrentRequest, isCurrent, scope]);
 
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; generation.current++; };
+    return () => { mounted.current = false; generation.current++; inFlightRequest.current = null; };
   }, []);
 
   useEffect(() => {
@@ -63,8 +70,11 @@ export const useSystemPermissions = (enabled = true, scope = '') => {
   }, [enabled, refresh]);
 
   const request = useCallback(async (kind: SystemPermissionKind, onError?: () => void) => {
-    if (!enabled || !mounted.current || !current.current.enabled || current.current.scope !== scope) return null;
+    if (!enabled || !mounted.current || !current.current.enabled || current.current.scope !== scope || hasCurrentRequest()) return null;
     const requestGeneration = begin();
+    const owner = { scope, generation: requestGeneration };
+    // Set this before invoking IPC, including before React commits loading.
+    inFlightRequest.current = owner;
     try {
       const next = await ipcBridge.systemPermissions.request.invoke({ kind });
       if (!isCurrent(requestGeneration)) return null;
@@ -77,11 +87,14 @@ export const useSystemPermissions = (enabled = true, scope = '') => {
         onError?.();
       }
       return null;
+    } finally {
+      // An old scope's response cannot release a newer scope's request.
+      if (inFlightRequest.current === owner) inFlightRequest.current = null;
     }
-  }, [begin, enabled, isCurrent, scope]);
+  }, [begin, enabled, hasCurrentRequest, isCurrent, scope]);
 
   const openSettings = useCallback(async (kind: SystemPermissionKind) => {
-    if (!enabled || !mounted.current || !current.current.enabled || current.current.scope !== scope) return;
+    if (!enabled || !mounted.current || !current.current.enabled || current.current.scope !== scope || hasCurrentRequest()) return;
     const requestGeneration = ++generation.current;
     setSnapshot(previous => ({ ...previous, scope, loading: false, error: null }));
     try {
@@ -90,7 +103,7 @@ export const useSystemPermissions = (enabled = true, scope = '') => {
       if (isCurrent(requestGeneration)) setSnapshot(previous => ({ ...previous,
         error: caught instanceof Error ? caught.message : String(caught) }));
     }
-  }, [enabled, isCurrent, scope]);
+  }, [enabled, hasCurrentRequest, isCurrent, scope]);
 
   const currentSnapshot = snapshot.scope === scope ? snapshot : { scope, status: null, loading: enabled, error: null };
   return { error: currentSnapshot.error, loading: enabled && currentSnapshot.loading,

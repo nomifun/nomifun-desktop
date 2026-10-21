@@ -638,6 +638,10 @@ worker 环境变量白名单以私有运行时目录收敛写入：`CUA_DRIVER_R
 - **捕获接缝的实际变更**：0007通过native account lookup分离只读OS authority home与worker私有HOME/XDG，缺失/不可读状态保持Missing/Unknown，不写系统审批或开放环境绕过。原权限POST增加同一Actor/private stdio的显式16×16探测，非Agent动作/Session/ledger；GET不启动。10s原生探测、11s宿主通信预算与退出信号联动，所有结局都退休原代际/缓存/绑定，超时精确回收，退出后的late ready按Cancelled处理。UI在已授予Screen Recording时提供“验证截图”，失败沿原错误通路显示，不自动重复探测；系统直接捕获确认仍由用户处理。
 - **实际自动化与构建**：接缝单项 **44/44**（Computer37、router5、worker状态1及真实worker非法host-op1，后者含3次拒绝），不执行合法截图/桌面动作；UI/hook **11/11、42 assertions**、类型/桌面边界和i18n **6/6**通过。修复输入上的 `bun --no-env-file run build:ui` **exit0/29.16s、API44**、全量 `bun --no-env-file run check` **exit0/73.17s**，以及带custom-protocol的Dev Host/两个controller例子 **exit0/5m45s**。实际arm64 debug worker重建 **exit0/12.41s**，self-check **59/协议1**、freeze **22动作**一致；这些为合并前输入，不冒充最终包。合并后重跑 `cargo test --locked -p nomifun-computer --lib` **37/37、0 ignored、1.63s**。证据均在本轮根 `direct-capture-fix-v2/`，后续最终新包另列身份；旧Dev与正式v1包保持原hash及成功/失败边界。
 
+- **复核发现的UI竞态**：焦点事件触发的GET曾能覆盖在途POST的generation并提前解锁按钮，令真实失败提示被丢弃、产生重复显式请求。现按同consumer/scope的同步in-flight owner挡住在途refresh/open-settings与重复请求，保留卸载/换scope fence；旧scope finally不释放新owner。最小hook+设置交互 **14/14、80断言、0fail**，typecheck及桌面边界 **2247 sources/880×600**通过，source `useSystemPermissions.ts` SHA256 `e4a21ce1da019222f2e13c97b907d170d82d5ec54fc6228a5485d6825d95b0f6`。接缝宿主/worker复核未发现其他具体缺陷；证据 `screen-capture-permission-ui-race/`。
+
+- **最终构建前门槛**：上述合并main `c9854fcee68e379fffb1909ad078e49b6321b05d` 与UI竞态修复输入，最新 `bun --no-env-file run check` **exit0/69.46s**、`build:ui` **exit0/36.94s**。固定UI **444文件/API44/build-id `5bc45e2e-4871-44da-bf66-dc35bbd428c2`**，manifest SHA256 `75576c01f43d379807c50a2494f6c81a87767481228ba5bfaade1a414a2bfcc0`。合并后arm64 debug实际worker的真实协议 **13/13、0 ignored/2.28s**，未做桌面动作；冻结副本 **77,711,576B/SHA256 `d8994403542bcfb38402b65ac0a610f1cb0535685c6e99179d3480f40dcb3866`**，后续新Dev包从该确定实物嵌入签名。
+
 ### 未执行项与下一动作
 
 1. 本机S2完整替换与S3已通过上述门槛，源码与进展文档已同步origin/main并核对身份；后续按发布范围补S4。旧Computer专测直接删除，受影响混合验证保留非Computer部分，未保留旧实现兜底。
