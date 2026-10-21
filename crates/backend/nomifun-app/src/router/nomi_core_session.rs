@@ -142,8 +142,10 @@ use nomifun_api_types::{
     UpdateAgentSessionReasoningResponseDto,
     SendMessageRequest,
     TypedResourceBindingDto, UpdateConversationRequest, WebSocketMessage, WorkspaceBrowseQuery, WorkspaceEntry,
-    CreateAgentPresetFromTemplateRequest, PutAgentBindingRequest,
+    PutAgentBindingRequest,
 };
+#[cfg(test)]
+use nomifun_api_types::CreateAgentPresetFromTemplateRequest;
 use nomifun_common::{
     AgentKillReason, AppError, ConversationStatus, MessagePosition, MessageStatus, MessageType,
     PaginatedResult,
@@ -643,19 +645,18 @@ impl NomiCoreProductAgentResolver {
     /// resource preparation lane may turn it into an executable binding.
     async fn materialize_binding_candidate(&self, owner: &UserId, selection: &ProductAgentSelection, model: Option<&AgentChatModelSelectionDto>, companion: bool) -> Result<AgentBindingValueDto, AppError> {
         self.control_plane.validate_product_selection(owner, selection.template_id(), selection.preset_id(), model).await.map_err(control_plane_error_to_app)?;
-        let preset_id = match selection {
-            ProductAgentSelection::Preset { preset_id } => preset_id.clone(),
-            ProductAgentSelection::Template { template_key } => self.control_plane.create_from_template(owner, template_key,
-                CreateAgentPresetFromTemplateRequest {
-                    model: model.cloned(), reuse_existing: true, display_name: template_key.clone(), description: None,
-                    model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
-                }).await.map_err(control_plane_error_to_app)?.preset.preset_id,
-        };
+        let binding = match selection {
+            ProductAgentSelection::Template { template_key } => self.control_plane
+                .prepare_template_base_binding(owner, template_key, model).await,
+            ProductAgentSelection::Preset { preset_id } => self.control_plane
+                .prepare_preset_base_binding(owner, preset_id, model).await,
+        }.map_err(control_plane_error_to_app)?;
         if companion {
-            self.control_plane.resolve_companion_session_binding_with_model(owner, &preset_id, model)
+            self.control_plane.resolve_companion_session_capabilities_binding(owner, &binding)
                 .await.map_err(control_plane_error_to_app)
         } else {
-            self.control_plane.resolve_agent_session_binding_with_model(owner, &preset_id, model).await.map_err(control_plane_error_to_app)
+            self.control_plane.resolve_agent_session_capabilities_binding(owner, &binding, None)
+                .await.map_err(control_plane_error_to_app)
         }
     }
 }
@@ -721,8 +722,8 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             }
         }
         if selection.is_none() && let Some(record) = existing.as_ref() {
-            // An implicit official choice uses the same owner-saved configuration
-            // as an explicit template choice. Other saved bindings stay pinned.
+            // An implicit official choice follows the current published template.
+            // Explicit Preset selections and other saved bindings stay pinned.
             if let Some(key) = self.control_plane.internal_official_template(&owner,
                 &record.agent_binding.preset_revision_ref.preset_id).await.map_err(control_plane_error_to_app)? {
                 selection = Some(ProductAgentSelection::Template { template_key: key.as_str().to_owned() });
@@ -779,33 +780,12 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
                 existing.agent_binding
             }
         } else {
-            let editor = self
-                .control_plane
-                .create_from_template(
-                    &owner,
-                    &target.default_template_key,
-                    CreateAgentPresetFromTemplateRequest {
-                        model: requested_model.map(|model| AgentChatModelSelectionDto {
-                            provider_id: model.provider_id.clone(),
-                            model: model.model.clone(),
-                        }),
-                        reuse_existing: true,
-                        display_name: target.default_template_key.clone(),
-                        description: None,
-                        model_route_refs: BTreeMap::new(),
-                        chat_route_records: BTreeMap::new(),
-                    },
-                )
-                .await
-                .map_err(control_plane_error_to_app)?;
-            let binding = if target.target_kind == "companion" {
-                self.control_plane.resolve_companion_session_binding_with_model(&owner, &editor.preset.preset_id, None)
-                    .await.map_err(control_plane_error_to_app)?
-            } else { self
-                .control_plane
-                .resolve_agent_session_binding(&owner, &editor.preset.preset_id)
-                .await
-                .map_err(control_plane_error_to_app)? };
+            let model = requested_model.map(|model| AgentChatModelSelectionDto {
+                provider_id: model.provider_id.clone(), model: model.model.clone(),
+            });
+            let binding = self.materialize_binding_candidate(&owner,
+                &ProductAgentSelection::Template { template_key: target.default_template_key.clone() },
+                model.as_ref(), target.target_kind == "companion").await?;
             let (_, _, unbound_snapshot) = self
                 .control_plane
                 .saved_binding_artifacts(&owner, &binding)
@@ -8951,36 +8931,12 @@ impl nomifun_gateway::ConversationCapabilityPort for GatewayAgentSessionCapabili
             provider_id: model.provider_id.clone(),
             model: model.use_model.clone().unwrap_or_else(|| model.model.clone()),
         });
-        let editor = self
-            .state
-            .control_plane
-            .create_from_template(
-                &owner,
-                "chat.minimal",
-                CreateAgentPresetFromTemplateRequest {
-                    model: model.clone(),
-                    reuse_existing: true,
-                    display_name: request
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| "Assistant".to_owned()),
-                    description: None,
-                    model_route_refs: BTreeMap::new(),
-                    chat_route_records: BTreeMap::new(),
-                },
-            )
-            .await
-            .map_err(control_plane_error_to_app)?;
-        let mut binding = self
-            .state
-            .control_plane
-            .resolve_agent_session_binding_with_model(
-                &owner,
-                editor.preset.preset_id.as_ref(),
-                model.as_ref(),
-            )
-            .await
-            .map_err(control_plane_error_to_app)?;
+        let binding = self.state.control_plane.prepare_template_base_binding(
+            &owner, "chat.minimal", model.as_ref(),
+        ).await.map_err(control_plane_error_to_app)?;
+        let mut binding = self.state.control_plane.resolve_agent_session_capabilities_binding(
+            &owner, &binding, None,
+        ).await.map_err(control_plane_error_to_app)?;
         binding = self.state.resource_bindings.prepare_new_session_binding(
             &self.state.control_plane, &owner, binding, &[],
         ).await.map_err(super::nomi_core_resource_bindings::ResourceSelectionResolutionError::into_app_error)?;
@@ -9269,6 +9225,7 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             "/api/agent-sessions",
             get(list_nomi_core_agent_sessions).post(create_nomi_core_agent_session),
         )
+        .route("/api/agent-sessions/ssh", post(create_nomi_core_ssh_agent_session))
         .route(
             "/api/agent-session-messages/search",
             get(search_canonical_agent_session_messages),
@@ -9480,6 +9437,9 @@ async fn product_agent_options(
             (ProductAgentSelection::Template { template_key: key.clone() }, key)
         }).collect::<Vec<_>>();
         candidates.extend(library.user_presets.iter().map(|preset| (ProductAgentSelection::Preset { preset_id: preset.preset_id.clone() }, preset.display_name.clone())));
+        candidates.extend(library.official_presets.values()
+            .filter(|preset| preset.current_stable_revision.is_some())
+            .map(|preset| (ProductAgentSelection::Preset { preset_id: preset.preset_id.clone() }, preset.display_name.clone())));
         candidates
     };
     let saved_selection = state.product_agent_resolver.selection(&owner, &kind, &id).await?;
@@ -9604,13 +9564,10 @@ async fn require_companion_agent_selection(
     let has_companion = match selection {
         ProductAgentSelection::Template { template_key } => {
             let library = control_plane.library(owner).await?;
-            if let Some(preset) = library.official_presets.iter()
-                .find(|(key, _)| serde_json::to_value(key).ok().as_ref().and_then(Value::as_str) == Some(template_key))
-                .map(|(_, preset)| preset)
-            {
-                control_plane.editor(owner, &preset.preset_id, None).await?
-                    .draft.document.enabled_capabilities.iter().any(|capability| capability.capability.id == "companion")
-            } else { false }
+            library.official_templates.iter()
+                .find(|template| serde_json::to_value(template.template_key).ok().as_ref().and_then(Value::as_str) == Some(template_key))
+                .is_some_and(|template| template.seed.enabled_capabilities.iter()
+                    .any(|capability| capability.capability.id == "companion"))
         }
         ProductAgentSelection::Preset { preset_id } => control_plane.editor(owner, preset_id, None).await?
             .draft.document.enabled_capabilities.iter().any(|capability| capability.capability.id == "companion"),
@@ -12344,6 +12301,9 @@ pub(crate) async fn management_create_agent_session(
     title: Option<String>,
     idempotency_key: &str,
 ) -> Result<CreateAgentSessionResponseDto, NomiCoreApiError> {
+    if owner_id != state.authoritative_user_id.as_ref() {
+        return Err(AppError::Forbidden("Session management owner mismatch".into()).into());
+    }
     nomifun_common::UserId::parse(owner_id.to_owned())
         .map_err(|error| AppError::Forbidden(format!("invalid Session management owner: {error}")))?;
     nomifun_common::validate_uuidv7(preset_id)
@@ -12351,11 +12311,14 @@ pub(crate) async fn management_create_agent_session(
     let mut headers = HeaderMap::new();
     headers.insert("idempotency-key", axum::http::HeaderValue::from_str(idempotency_key)
         .map_err(|error| AppError::BadRequest(format!("invalid Session creation key: {error}")))?);
+    let prepared = state.control_plane.prepare_preset_session_binding(
+        &UserId::from(owner_id.to_owned()), preset_id, model.as_ref(),
+    ).await?;
     let request = CreateAgentSessionRequestDto {
         session_capabilities: None,
         required_modules: BTreeSet::new(),
         model,
-        preset_id: preset_id.to_owned(),
+        preset_id: prepared.preset_revision_ref.preset_id,
         title,
         reasoning_effort: None,
         resource_selections: Vec::new(),
@@ -12374,27 +12337,60 @@ async fn create_nomi_core_agent_session(
     headers: HeaderMap,
     Json(request): Json<CreateAgentSessionRequestDto>,
 ) -> Result<Json<ApiResponse<CreateAgentSessionResponseDto>>, NomiCoreApiError> {
-    create_nomi_core_agent_session_owned(state, owner, headers, request, None).await
+    create_nomi_core_agent_session_owned(state, owner, headers, request, None, None).await
 }
 
-/// Application ownership is supplied only by the application owner while its
-/// project gate and directory fence are held, never by the public create DTO.
+async fn create_nomi_core_ssh_agent_session(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    headers: HeaderMap,
+    Json(request): Json<nomifun_api_types::CreateSshAgentSessionRequestDto>,
+) -> Result<Json<ApiResponse<CreateAgentSessionResponseDto>>, NomiCoreApiError> {
+    let host_id = nomifun_common::SshHostId::parse(request.ssh_host_id.clone())
+        .map_err(|_| AppError::BadRequest("Invalid SSH host identity".into()))?;
+    let host = state.ssh_pool.host_service().get(owner.as_ref(), &host_id).await
+        .map_err(|error| match error {
+            nomifun_ssh::SshServiceError::NotFound => AppError::NotFound("SSH host not found".into()),
+            nomifun_ssh::SshServiceError::BadRequest(detail) => AppError::BadRequest(detail),
+            nomifun_ssh::SshServiceError::Internal(detail) => AppError::Internal(detail),
+        })?;
+    let binding = state.control_plane.prepare_ssh_session_base_binding(
+        &owner.0, request.model.as_ref(),
+    ).await?;
+    create_nomi_core_agent_session_owned(state, owner, headers,
+        CreateAgentSessionRequestDto {
+            preset_id: binding.preset_revision_ref.preset_id.clone(), title: Some(host.name),
+            model: request.model, reasoning_effort: None,
+            resource_selections: vec![AgentResourceSelectionDto {
+                resource_kind: "ssh_host".into(), resource_id: request.ssh_host_id,
+            }],
+            knowledge_policy: None, workspace: None, session_capabilities: None,
+            required_modules: BTreeSet::from(["ssh".into()]),
+        }, None, Some(binding)).await
+}
+
+/// Product owners may supply an exact prepared Agent without reselecting its
+/// latest pointer. Application scope is supplied only while its project fence
+/// is held, never by the public create DTO.
 async fn create_nomi_core_agent_session_owned(
     state: NomiCoreAgentApiState,
     owner: AuthenticatedOwner,
     headers: HeaderMap,
     request: CreateAgentSessionRequestDto,
     app_project_id: Option<&str>,
+    prepared_binding: Option<AgentBindingValueDto>,
 ) -> Result<Json<ApiResponse<CreateAgentSessionResponseDto>>, NomiCoreApiError> {
     let creation_key = request_idempotency_key(&headers, "nomi-core-agent-session-create")?;
     if app_project_id.is_none() && creation_key.starts_with("app-development:") {
         return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST, "APP_PROJECT_CREATION_KEY_RESERVED",
             "Application project Sessions must be created through the application's development entry"));
     }
-    let binding = state
-        .control_plane
-        .resolve_agent_session_binding_with_capabilities(&owner.0, &request.preset_id, request.model.as_ref(), request.session_capabilities.as_ref())
-        .await?;
+    let binding = match prepared_binding {
+        Some(binding) => state.control_plane.resolve_agent_session_capabilities_binding(
+            &owner.0, &binding, request.session_capabilities.as_ref()).await?,
+        None => state.control_plane.resolve_agent_session_binding_with_capabilities(
+            &owner.0, &request.preset_id, request.model.as_ref(), request.session_capabilities.as_ref()).await?,
+    };
     let mut binding = state
         .resource_bindings
         .prepare_new_session_binding(
@@ -12572,12 +12568,8 @@ pub(super) async fn resolve_app_development_session_selection(
     if replay_fallback && let Some(conversation) = app_development_session_replay(state, &owner, app, workspace,
         &idempotency_key, model.as_ref(), reasoning_effort).await? { return Ok(conversation); }
 
-    let editor = state.control_plane.create_from_template(&owner.0, "app.developer",
-        CreateAgentPresetFromTemplateRequest { model: model.clone(), reuse_existing: true,
-            display_name: "app.developer".into(), description: None,
-            model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new() }).await?;
-    let binding = state.control_plane.resolve_agent_session_binding_with_model(&owner.0,
-        editor.preset.preset_id.as_ref(), model.as_ref()).await?;
+    let binding = state.control_plane.prepare_template_base_binding(&owner.0,
+        "app.developer", model.as_ref()).await?;
     let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner.0, &binding).await?;
     let mut resource_selections = Vec::new();
     let required_kinds = snapshot.content.required_resource_kinds.iter()
@@ -12590,10 +12582,10 @@ pub(super) async fn resolve_app_development_session_selection(
     headers.insert("Idempotency-Key", idempotency_key.parse()
         .map_err(|_| AppError::Conflict("Invalid application development Session identity".into()))?);
     let Json(opened) = create_nomi_core_agent_session_owned(state.clone(), owner.clone(), headers,
-        CreateAgentSessionRequestDto { preset_id: editor.preset.preset_id, title: Some(app.name.clone()),
+        CreateAgentSessionRequestDto { preset_id: binding.preset_revision_ref.preset_id.clone(), title: Some(app.name.clone()),
             model, reasoning_effort, resource_selections, knowledge_policy: None,
             workspace: Some(workspace.to_owned()), session_capabilities: Some(Default::default()),
-            required_modules: BTreeSet::from(["app.hosting".to_owned(), "workspace.files".to_owned(), "workspace.process".to_owned()]) }, Some(&app.id)).await?;
+            required_modules: BTreeSet::from(["app.hosting".to_owned(), "workspace.files".to_owned(), "workspace.process".to_owned()]) }, Some(&app.id), Some(binding)).await?;
     let opened = opened.data.ok_or_else(|| AppError::Conflict("Application development Session was not created".into()))?;
     load_owned_nomi_core_session(state, &owner, &parse_agent_session_id(&opened.agent_session_id)?).await
 }
@@ -13553,18 +13545,17 @@ fn freeze_carried_agent_switch_workspace(
     }
 }
 
-/// A Companion keeps its product identity while explicitly accepting a newer
-/// saved configuration of the same official Agent. The template proof comes
-/// from the owned immutable Revision; resource names or presentation extras
+/// A Companion keeps its product identity while explicitly accepting the
+/// current template or saved configuration of the same official Agent. Both
+/// identities come from owner-validated artifacts; resource names or presentation extras
 /// alone never authorize this exception to product-bound Agent switching.
 fn companion_agent_refresh_selection(
     binding: &AgentBindingValue,
     official_template_key: Option<&str>,
-    selection: &AgentSwitchSelectionDto,
+    selected_official_template_key: Option<&str>,
 ) -> bool {
     if official_template_key != Some("companion.default")
-        || !matches!(selection, AgentSwitchSelectionDto::Template { template_key }
-            if template_key == "companion.default")
+        || selected_official_template_key != Some("companion.default")
     {
         return false;
     }
@@ -13675,7 +13666,7 @@ mod agent_switch_resource_tests {
         ResolvedSnapshotId, ResolvedSnapshotRef, ResourceBindingId, ResourceId,
         ResourceKind, TypedResourceBinding,
     };
-    use nomifun_api_types::{AgentBindingValueDto, AgentSwitchSelectionDto};
+    use nomifun_api_types::AgentBindingValueDto;
     use std::collections::{BTreeMap, BTreeSet};
 
     fn companion_binding() -> AgentBindingValue {
@@ -13706,21 +13697,19 @@ mod agent_switch_resource_tests {
     #[test]
     fn companion_refresh_only_admits_the_same_verified_official_identity() {
         let mut binding = companion_binding();
-        let selection = AgentSwitchSelectionDto::Template {
-            template_key: "companion.default".to_owned(),
-        };
-        assert!(companion_agent_refresh_selection(&binding, Some("companion.default"), &selection));
-        assert!(!companion_agent_refresh_selection(&binding, None, &selection),
+        let selected = Some("companion.default");
+        assert!(companion_agent_refresh_selection(&binding, Some("companion.default"), selected));
+        assert!(!companion_agent_refresh_selection(&binding, None, selected),
             "matching product resources alone do not establish official identity");
-        assert!(!companion_agent_refresh_selection(&binding, Some("chat.minimal"), &selection));
+        assert!(!companion_agent_refresh_selection(&binding, Some("chat.minimal"), selected));
         assert!(!companion_agent_refresh_selection(&binding, Some("companion.default"),
-            &AgentSwitchSelectionDto::Template { template_key: "chat.minimal".to_owned() }));
+            Some("chat.minimal")));
         assert!(!companion_agent_refresh_selection(&binding, Some("companion.default"),
-            &AgentSwitchSelectionDto::Preset { preset_id: binding.preset_revision_ref.preset_id.as_ref().to_owned() }));
+            None), "an owned Preset without verified official identity cannot refresh the product binding");
         binding.typed_resource_bindings[1].resource_id = ResourceId::from("companion-2");
-        assert!(!companion_agent_refresh_selection(&binding, Some("companion.default"), &selection));
+        assert!(!companion_agent_refresh_selection(&binding, Some("companion.default"), selected));
         binding.typed_resource_bindings.pop();
-        assert!(!companion_agent_refresh_selection(&binding, Some("companion.default"), &selection));
+        assert!(!companion_agent_refresh_selection(&binding, Some("companion.default"), selected));
     }
 
     #[test]
@@ -14240,10 +14229,16 @@ async fn prepare_agent_session_switch(
     let (_, current_official_template) = state.control_plane
         .saved_binding_presentation(&owner.0, &current_dto)
         .await?;
+    let selected_official_template = match selection {
+        AgentSwitchSelectionDto::Template { template_key } => Some(template_key.clone()),
+        AgentSwitchSelectionDto::Preset { preset_id } => state.control_plane
+            .internal_official_template(&owner.0, preset_id).await?
+            .map(|key| key.as_str().to_owned()),
+    };
     let companion_refresh = companion_agent_refresh_selection(
         &observation.session.agent_binding,
         current_official_template.as_ref().map(|key| key.as_str()),
-        selection,
+        selected_official_template.as_deref(),
     );
     let current_knowledge =
         agent_session_knowledge_binding(&observation.session.agent_binding)?;
@@ -14262,33 +14257,32 @@ async fn prepare_agent_session_switch(
             "Refreshing the Companion Agent preserves the current Chat model",
         ));
     }
-    let target_preset_id = match selection {
-        AgentSwitchSelectionDto::Preset { preset_id } => preset_id.clone(),
-        AgentSwitchSelectionDto::Template { template_key } => state
-            .control_plane
-            .create_from_template(
-                &owner.0,
-                template_key,
-                CreateAgentPresetFromTemplateRequest {
-                    model: explicit_model.cloned().or_else(|| current_model.clone()),
-                    reuse_existing: true,
-                    display_name: template_key.clone(),
-                    description: None,
-                    model_route_refs: BTreeMap::new(),
-                    chat_route_records: BTreeMap::new(),
-                },
-            )
-            .await?
-            .preset
-            .preset_id,
-    };
-    let raw_target = if companion_target.is_some() {
-        state.control_plane.resolve_agent_session_agent_binding_candidate(
-            &owner.0, &current_dto, &target_preset_id, explicit_model).await
-    } else {
-        state.control_plane.resolve_agent_session_agent_binding(
-            &owner.0, &current_dto, &target_preset_id, explicit_model).await
-    }.map_err(|error| {
+    let target: Result<(String, AgentBindingValueDto), ControlPlaneError> = async {
+        match selection {
+            AgentSwitchSelectionDto::Preset { preset_id } => {
+                let binding = if companion_target.is_some() {
+                    state.control_plane.resolve_agent_session_agent_binding_candidate(
+                        &owner.0, &current_dto, preset_id, explicit_model).await?
+                } else {
+                    state.control_plane.resolve_agent_session_agent_binding(
+                        &owner.0, &current_dto, preset_id, explicit_model).await?
+                };
+                Ok((preset_id.clone(), binding))
+            }
+            AgentSwitchSelectionDto::Template { template_key } => {
+                let model = explicit_model.cloned().or_else(|| current_model.clone());
+                let base = state.control_plane.prepare_template_base_binding(
+                    &owner.0, template_key, model.as_ref()).await?;
+                let target_id = base.preset_revision_ref.preset_id.clone();
+                let binding = state.control_plane.resolve_agent_session_capabilities_binding(
+                    &owner.0, &base, None).await?;
+                let binding = state.control_plane.resolve_prepared_agent_session_agent_binding_candidate(
+                    &owner.0, &current_dto, &binding).await?;
+                Ok((target_id, binding))
+            }
+        }
+    }.await;
+    let (target_preset_id, raw_target) = target.map_err(|error| {
             if error.code().as_ref().starts_with("MODEL_") {
                 NomiCoreApiError::with_details(
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -17032,20 +17026,9 @@ pub(super) async fn prepare_app_agent_binding(
     existing_binding_id: Option<&str>,
 ) -> Result<AppAgentBindingChange, NomiCoreApiError> {
     let owner = UserId::from(owner_id.to_owned());
-    let official = state.control_plane.library(&owner).await?.official_presets.into_iter()
-        .find(|(_, preset)| preset.preset_id == agent_id);
-    let preset_id = if let Some((key, _)) = official {
-        let key = serde_json::to_value(key)?;
-        let template = key.as_str().ok_or_else(|| AppError::Internal("official Agent template key is not a string".into()))?;
-        // First use materializes an execution configuration through the same
-        // launch path as other official Agent consumers. It preserves saved
-        // official defaults and keeps inherited models in hidden variants.
-        state.control_plane.create_from_template(&owner, template, CreateAgentPresetFromTemplateRequest {
-            model: None, reuse_existing: true, display_name: template.to_owned(), description: None,
-            model_route_refs: BTreeMap::new(), chat_route_records: BTreeMap::new(),
-        }).await?.preset.preset_id
-    } else { agent_id.to_owned() };
-    let mut binding = state.control_plane.resolve_agent_session_binding_with_model(&owner, &preset_id, None).await?;
+    // Application settings identify an explicit owned Preset. A saved official
+    // configuration is still that exact user choice, never a Template alias.
+    let mut binding = state.control_plane.prepare_preset_session_binding(&owner, agent_id, None).await?;
     let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner, &binding).await?;
     let selections = snapshot.content.required_resource_kinds.iter().filter_map(|kind| {
         automatic_agent_resource_id(kind.as_ref()).map(|resource_id| AgentResourceSelectionDto {

@@ -104,6 +104,21 @@ async fn real_owner_creation_and_send_replay_use_exact_input_without_starting_a_
         "initial_model":{"model":"fixture-chat","enabled":true,"capabilities":[{"task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default"}]}
     })).await;
     let model = json!({"provider_id":provider["provider_id"],"model":"fixture-chat"});
+    let library = request(&router, "GET", "/api/agent-preset-templates", Value::Null).await;
+    let official_id = library["official_presets"]["chat.minimal"]["preset_id"].as_str().unwrap();
+    assert!(library["official_presets"]["chat.minimal"]["current_stable_revision"].is_null());
+    let official_key = uuid::Uuid::now_v7().to_string();
+    let official_create = || super::super::nomi_core_session::management_create_agent_session(
+        api.clone(), &services.authoritative_user_id, official_id,
+        Some(serde_json::from_value(model.clone()).unwrap()), Some("Current official management target".into()),
+        &official_key,
+    );
+    let official = official_create().await.unwrap();
+    assert_eq!(official_create().await.unwrap().agent_session_id, official.agent_session_id);
+    assert!(!official.agent_binding.typed_resource_bindings.is_empty(), "listed official Agents must prepare real canonical resources on first use");
+    let library = request(&router, "GET", "/api/agent-preset-templates", Value::Null).await;
+    assert!(library["official_presets"]["chat.minimal"]["current_stable_revision"].is_null(),
+        "management preparation cannot publish the official author's configuration");
     let preset = request(
         &router,
         "POST",

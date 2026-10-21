@@ -150,7 +150,7 @@ const AgentSettingsPage: React.FC = () => {
       return;
     }
     void navigate('/guid', {
-      state: templateKey ? { selectedAgentTemplateKey: templateKey } : { selectedAgentPresetId: preset.preset_id },
+      state: { selectedAgentPresetId: preset.preset_id },
     });
   };
 

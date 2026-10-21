@@ -12,12 +12,13 @@ import type {
 } from '@/common/types/agentPlatform';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
 import agentSettings from '@/renderer/services/i18n/locales/en-US/agentSettings.json';
+import guid from '@/renderer/services/i18n/locales/en-US/guid.json';
 import GuidDefaultAgentSetting from './GuidDefaultAgentSetting';
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({
   lng: 'en-US',
-  resources: { 'en-US': { translation: { common, agentSettings } } },
+  resources: { 'en-US': { translation: { common, agentSettings, guid } } },
   interpolation: { escapeValue: false },
 });
 
@@ -134,6 +135,24 @@ describe('Guid default Agent workbench setting', () => {
     expect((page.getByRole('combobox', {
       name: agentSettings.defaultAgent.title,
     }) as HTMLSelectElement).value).toBe('template:assistant.general');
+  });
+
+  test('offers the saved official customization separately from the current template', async () => {
+    const customization = { ...stablePreset, source: 'official', display_name: 'assistant.general' } as AgentPresetSummary;
+    const save = spyOn(configService, 'set').mockResolvedValue(undefined);
+    try {
+      const page = render(<I18nextProvider i18n={i18n}>
+        <GuidDefaultAgentSetting library={{ ...library, user_presets: [], official_presets: { 'assistant.general': customization } }} />
+      </I18nextProvider>);
+      const select = page.getByRole('combobox', { name: agentSettings.defaultAgent.title }) as HTMLSelectElement;
+      expect(select.value).toBe('template:assistant.general');
+      const savedOption = [...select.options].find(option => option.value === `preset:${customization.preset_id}`);
+      expect(savedOption?.text).toBe(i18n.t('guid.agentEntries.savedCustomization', { name: agentSettings.template.assistant.general.name }));
+      await act(async () => { fireEvent.change(select, { target: { value: `preset:${customization.preset_id}` } }); });
+      expect(save).toHaveBeenCalledWith('guid.defaultAgentSelection', { kind: 'preset', presetId: customization.preset_id });
+    } finally {
+      save.mockRestore();
+    }
   });
 
   test('blocks overlapping changes and restores the previous default after a failed save', async () => {

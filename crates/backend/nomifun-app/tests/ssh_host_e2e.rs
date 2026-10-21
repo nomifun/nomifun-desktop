@@ -49,6 +49,77 @@ async fn create_host(
 }
 
 #[tokio::test]
+async fn ssh_session_launch_freezes_only_exec_for_an_owned_host_without_connecting() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "fixture-password").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let host_id = create_host(&app, json!({
+        "name":"SSH launch fixture", "host":"127.0.0.1", "port":port,
+        "username":"fixture", "authType":"password"
+    }), &token, &csrf).await;
+    let response = app.clone().oneshot(json_with_token("POST", "/api/providers", json!({
+        "platform":"openai", "name":"No-request SSH launch model",
+        "base_url":"https://example.invalid/v1", "auth_scheme":"bearer",
+        "credentials":{"api_keys":["fixture-only"]}, "enabled":true,
+        "initial_model":{"model":"ssh-launch-model", "enabled":true, "capabilities":[{
+            "task":"chat", "traits":[], "protocol":"openai.chat_text",
+            "connection_role":"default", "context_limit":128000
+        }]}
+    }), &token, &csrf)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let provider = body_json(response).await;
+    let model = json!({"provider_id":provider["data"]["provider_id"], "model":"ssh-launch-model"});
+    let key = uuid::Uuid::now_v7().to_string();
+    let request = || {
+        let mut request = json_with_token("POST", "/api/agent-sessions/ssh",
+            json!({"ssh_host_id":host_id, "model":model}), &token, &csrf);
+        request.headers_mut().insert("idempotency-key", key.parse().unwrap());
+        request
+    };
+    let response = app.clone().oneshot(request()).await.unwrap();
+    let status = response.status();
+    let opened = body_json(response).await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    let session = opened["data"]["agent_session_id"].as_str().unwrap();
+    let response = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await["data"], opened["data"], "same-key creation reuses the canonical receipt");
+    let binding = &opened["data"]["agent_binding"];
+    assert!(binding["typed_resource_bindings"].as_array().unwrap().iter().any(|resource|
+        resource["resource_kind"] == "ssh_host" && resource["resource_id"] == host_id
+            && resource["owner_id"] == services.authoritative_user_id.as_ref()));
+    let response = app.clone().oneshot(get_with_token(
+        &format!("/api/agent-sessions/{session}/projection"), &token)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let projection = body_json(response).await;
+    assert_eq!(projection["data"]["agent_snapshot"]["enabled_capability_actions"]["ssh"], json!(["ssh/exec"]));
+    let store = nomifun_agent_session::AgentSessionStore::from_pool(services.database.pool().clone()).await.unwrap();
+    let session_id = nomifun_agent_contracts::AgentSessionId::from(session.to_owned());
+    let canonical = store.get_live_session(&session_id).await.unwrap();
+    assert_eq!(serde_json::to_value(canonical.agent_binding).unwrap(), *binding);
+    assert!(store.head(&session_id).await.unwrap().active_turn_id.is_none());
+    assert_eq!(services.ssh_pool.active_link_count(), 0);
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(20), listener.accept()).await.is_err(),
+        "preparing the SSH Session must not connect to the selected host");
+    let response = app.clone().oneshot(get_with_token("/api/agent-preset-templates", &token)).await.unwrap();
+    let library = body_json(response).await;
+    assert_eq!(library["data"]["user_presets"], json!([]), "SSH preparation creates no visible personal Agent");
+    assert!(library["data"]["official_presets"]["chat.minimal"]["current_stable_revision"].is_null());
+
+    let foreign_owner = nomifun_common::UserId::new();
+    let foreign = services.ssh_pool.host_service().create(foreign_owner.as_str(),
+        serde_json::from_value(json!({"name":"Other owner's host", "host":"127.0.0.1", "port":port,
+            "username":"fixture", "authType":"password"})).unwrap()).await.unwrap();
+    let response = app.clone().oneshot(json_with_token("POST", "/api/agent-sessions/ssh",
+        json!({"ssh_host_id":foreign.ssh_host_id, "model":model}), &token, &csrf)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND, "host ownership is checked before creating a Session");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions").fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(count, 1);
+    services.cleanup_after_startup_failure(anyhow::anyhow!("SSH Session launch fixture ended")).await;
+}
+
+#[tokio::test]
 async fn unauthenticated_requests_are_rejected() {
     let (app, _services) = build_app().await;
     let req = get_with_token("/api/ssh-hosts", "not-a-real-token");

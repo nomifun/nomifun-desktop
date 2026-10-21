@@ -7,6 +7,7 @@ import { ipcBridge } from '@/common';
 import { parseConversationId, type ConversationId } from '@/common/types/ids';
 import type { useGuidAgentSelection } from '@/renderer/pages/guid/hooks/useGuidAgentSelection';
 import { prepareOfficialAgent } from '@/renderer/pages/guid/hooks/officialAgentLaunch';
+import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import { resolveAgentResourceSelections } from '@/renderer/hooks/agent/agentResourceSelection';
 import { seedConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { emitter } from '@/renderer/utils/emitter';
@@ -40,8 +41,8 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
   const sending = useRef(false);
   const pendingSession = useRef<ConversationId | null>(null);
   const isCreative = agent.selection.kind === 'template' && agent.selection.templateKey === 'creative-studio.default';
-  const capabilitiesReady = capabilityRequirements?.ready ?? !agent.selectedOfficialPreset;
   const template = agent.officialTemplates.find(value => value.template_key === 'creative-studio.default');
+  const capabilitiesReady = capabilityRequirements?.ready ?? Boolean(template);
   const resourceAdmission = resolveAgentResourceSelections(
     capabilityRequirements?.requiredResourceKinds ?? template?.seed?.required_resource_kinds ?? [],
     {},
@@ -127,7 +128,7 @@ export function useGuidCreation(agent: ReturnType<typeof useGuidAgentSelection>,
       if (conversation) seedConversationCache(conversation);
       emitter.emit('chat.history.refresh');
       await navigate(`/conversation/${id}`);
-    } catch (error) { Message.error(error instanceof Error ? error.message : String(error)); }
+    } catch (error) { Message.error(getConversationCreateErrorMessage(error, t)); }
     finally { sending.current = false; setLoading(false); }
   }, [enabled, template, isCreative, capabilitiesReady, disabledReason, resourceAdmission.selections, creation.draft, creation.update, files, input, model.ready, model.selected, navigate, onAccepted, t]);
   return { ...creation,

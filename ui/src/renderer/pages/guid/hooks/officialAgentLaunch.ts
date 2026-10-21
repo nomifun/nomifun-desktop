@@ -3,33 +3,22 @@ import type { TProviderWithModel } from '@/common/config/storage';
 import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import type { ExecutableAgentPreset } from '../types';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
-import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
+import { getAgentPreparationDiagnostics, getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import { conversationConfigurationErrorCode } from '@/renderer/pages/conversation/utils/conversationConfigurationError';
 import type { TFunction } from 'i18next';
 
 export function officialAgentLaunchError(error: unknown, t: TFunction): string {
+  if (isBackendHttpError(error) && conversationConfigurationErrorCode({ code: error.code, error: error.backendMessage })) {
+    return getConversationCreateErrorMessage(error, t);
+  }
   const codes: string[] = [];
   const reasons: string[] = [];
   if (isBackendHttpError(error)) {
-    if (error.code) codes.push(error.code);
+    const diagnostics = getAgentPreparationDiagnostics(error);
+    codes.push(...diagnostics.codes);
+    reasons.push(...diagnostics.reasons);
     const configurationCode = conversationConfigurationErrorCode({ code: error.code, error: error.backendMessage });
     if (configurationCode) codes.push(configurationCode);
-    // The HTTP bridge has already redacted these fields. Keep the concrete
-    // reason without rendering arbitrary response bodies or diagnostic data.
-    reasons.push([error.code ? `[${error.code}]` : '', error.backendMessage].filter(Boolean).join(' '));
-    const details = error.details as { diagnostics?: unknown[] } | undefined;
-    if (Array.isArray(details?.diagnostics)) {
-      for (const entry of details.diagnostics) {
-        if (!entry || typeof entry !== 'object') continue;
-        const diagnostic = entry as { code?: unknown; subject?: unknown; message?: unknown };
-        if (typeof diagnostic.code === 'string') codes.push(diagnostic.code);
-        if (reasons.length <= 5) {
-          reasons.push([diagnostic.code, diagnostic.subject, diagnostic.message]
-            .filter((value): value is string => typeof value === 'string' && Boolean(value.trim()))
-            .join(': '));
-        }
-      }
-    }
   } else {
     reasons.push(getConversationCreateErrorMessage(error, t));
   }

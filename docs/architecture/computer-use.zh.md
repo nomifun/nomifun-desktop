@@ -48,4 +48,4 @@ vendor 固定 commit `4d959bbfa57f0c89f310330e849500b222084194`；本地变更�
 
 依赖已退役 Computer 契约的会话不转换或修复，使用既有契约拒绝路径提示新建会话，历史保留。个人 Agent 需在工作台重新勾选新动作；官方 General 与 Companion 模板为新会话授予全部冻结动作。canonical 存储、数据代际和原有历史不因本重构改写。
 
-各平台构建先独立构建 worker，从 Cargo 实际 executable 产物复制为 Tauri externalBin。开发入口注入 `NOMIFUN_COMPUTER_WORKER`；macOS 开发 App 使用其 bundle 内已签名副本。worker 先签、再封 App；正式证书、公证、安装包、真实模型与各端原生验收分别记录，脚本和单元测试不能替代这些证据。UI/API 契约版本为 44。
+各平台构建先独立构建 worker，从 Cargo 实际 executable 产物复制为 Tauri externalBin。开发入口注入 `NOMIFUN_COMPUTER_WORKER`；macOS 开发 App 使用其 bundle 内已签名副本。worker 先签、再封 App；正式证书、公证、安装包、真实模型与各端原生验收分别记录，脚本和单元测试不能替代这些证据。UI/API 契约版本为 45。

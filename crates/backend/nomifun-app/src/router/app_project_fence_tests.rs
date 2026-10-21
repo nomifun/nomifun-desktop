@@ -353,7 +353,7 @@ async fn personal_app_developer_project_opening_releases_idle_cache_without_beco
         CreateAgentSessionRequestDto { preset_id: preset_id.clone(), title: Some("Personal application developer".into()),
             model: None, reasoning_effort: None, resource_selections: Vec::new(), knowledge_policy: None,
             workspace: Some(fixture.app.directory.to_str().unwrap().to_owned()), session_capabilities: Some(Default::default()),
-            required_modules: BTreeSet::from(["app.hosting".to_owned(), "workspace.files".to_owned(), "workspace.process".to_owned()]) }, Some(&fixture.app.id)).await.unwrap();
+            required_modules: BTreeSet::from(["app.hosting".to_owned(), "workspace.files".to_owned(), "workspace.process".to_owned()]) }, Some(&fixture.app.id), None).await.unwrap();
     let opened = opened.data.unwrap();
     let session = parse_agent_session_id(&opened.agent_session_id).unwrap();
     let (_, template) = fixture.state.control_plane.saved_binding_presentation(&owner.0, &opened.agent_binding).await.unwrap();

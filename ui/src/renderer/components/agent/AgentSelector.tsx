@@ -15,6 +15,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 import type { ExecutableAgentPreset, AgentSelection } from './types';
 import { isConversationAgentTemplate } from '@/renderer/components/agent/conversationAgentCatalog';
+import { agentPresetDisplayName } from './agentPresetPresentation';
 import styles from './AgentSelector.module.css';
 
 const DEFAULT_VISIBLE_PERSONAL_AGENTS = 3;
@@ -23,7 +24,7 @@ export type AgentSelectorProps = {
   presets: ExecutableAgentPreset[];
   draftPresets?: AgentPresetSummary[];
   officialTemplates?: OfficialPresetTemplate[];
-  selection: AgentSelection;
+  selection?: AgentSelection;
   isLoading?: boolean;
   loadError?: Error;
   onRetry?: () => Promise<void>;
@@ -77,12 +78,12 @@ const AgentSelector: React.FC<AgentSelectorProps> = ({
   const searchRef = useRef<HTMLInputElement>(null);
   const mineHeading = useId();
   const templateHeading = useId();
-  const selectedPreset = selection.kind === 'preset'
+  const selectedPreset = selection?.kind === 'preset'
     ? presets.find((preset) => preset.preset_id === selection.presetId)
     : undefined;
-  const selectedLabel = selectedLabelOverride ?? (selection.kind === 'template'
+  const selectedLabel = selectedLabelOverride ?? (selection?.kind === 'template'
     ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`)
-    : selectedPreset?.display_name ?? t('guid.agentEntries.choose'));
+    : selectedPreset ? agentPresetDisplayName(selectedPreset, t) : t('guid.agentEntries.choose'));
 
   const changeOpen = (next: boolean) => {
     setOpen(next);
@@ -130,7 +131,7 @@ const AgentSelector: React.FC<AgentSelectorProps> = ({
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const matches = (name: string, description = '') =>
     `${name} ${description}`.toLocaleLowerCase().includes(normalizedQuery);
-  const savedMatches = presets.filter((preset) => matches(preset.display_name, preset.description));
+  const savedMatches = presets.filter((preset) => matches(agentPresetDisplayName(preset, t), preset.description));
   const draftMatches = draftPresets.filter((preset) => matches(preset.display_name, preset.description));
   const templates = useMemo(() => officialTemplates
     .filter(isConversationAgentTemplate)
@@ -145,7 +146,7 @@ const AgentSelector: React.FC<AgentSelectorProps> = ({
     ...draftMatches.map((preset) => ({ kind: 'draft' as const, preset })),
   ];
   const collapsedMineMatches = mineMatches.slice(0, DEFAULT_VISIBLE_PERSONAL_AGENTS);
-  if (selection.kind === 'preset') {
+  if (selection?.kind === 'preset') {
     const selectedIndex = mineMatches.findIndex((entry) => entry.preset.preset_id === selection.presetId);
     if (selectedIndex >= DEFAULT_VISIBLE_PERSONAL_AGENTS) {
       collapsedMineMatches.splice(
@@ -242,7 +243,7 @@ const AgentSelector: React.FC<AgentSelectorProps> = ({
                     <h3 id={templateHeading} className={styles.heading}>{t('guid.agentEntries.fromTemplate')}</h3>
                     <div className={styles.templateGrid}>
                       {templateMatches.map((template) => (
-                        <AgentRow key={template.template_key} name={template.name} icon={templateIcon(template.template_key)} selected={selection.kind === 'template' && selection.templateKey === template.template_key} onClick={() => choose(() => onSelectTemplate(template.template_key))} />
+                        <AgentRow key={template.template_key} name={template.name} icon={templateIcon(template.template_key)} selected={selection?.kind === 'template' && selection.templateKey === template.template_key} onClick={() => choose(() => onSelectTemplate(template.template_key))} />
                       ))}
                     </div>
                   </section>
@@ -251,7 +252,7 @@ const AgentSelector: React.FC<AgentSelectorProps> = ({
                   <section role='group' aria-labelledby={mineHeading} className={templateMatches.length > 0 ? styles.personalSection : undefined}>
                     <h3 id={mineHeading} className={styles.heading}>{t('agentSettings.library.mine')}</h3>
                     {visibleMineMatches.map(({ kind, preset }) => kind === 'saved' ? (
-                      <AgentRow key={`saved:${preset.preset_id}`} name={preset.display_name} description={preset.description} icon={<User theme='outline' size={21} fill='currentColor' />} selected={selection.kind === 'preset' && selection.presetId === preset.preset_id} onClick={() => choose(() => onSelectPreset(preset.preset_id))} />
+                      <AgentRow key={`saved:${preset.preset_id}`} name={agentPresetDisplayName(preset, t)} description={preset.description} icon={<User theme='outline' size={21} fill='currentColor' />} selected={selection?.kind === 'preset' && selection.presetId === preset.preset_id} onClick={() => choose(() => onSelectPreset(preset.preset_id))} />
                     ) : (
                       <AgentRow key={`draft:${preset.preset_id}`} name={preset.display_name} description={preset.description} icon={<Edit theme='outline' size={20} fill='currentColor' />} status={t('guid.agentEntries.needsSetup')} onClick={() => choose(() => navigate(`/agent?preset=${encodeURIComponent(preset.preset_id)}`))} />
                     ))}

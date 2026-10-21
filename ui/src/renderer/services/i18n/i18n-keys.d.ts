@@ -3760,6 +3760,7 @@ export type I18nKey =
   | 'guid.agentEntries.modelCompatibility.viewChatModels'
   | 'guid.agentEntries.modelNeeded'
   | 'guid.agentEntries.needsSetup'
+  | 'guid.agentEntries.savedCustomization'
   | 'guid.agentEntries.search'
   | 'guid.agentEntries.showFewerPersonal'
   | 'guid.agentEntries.showMorePersonal'

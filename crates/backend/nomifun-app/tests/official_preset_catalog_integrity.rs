@@ -401,6 +401,141 @@ async fn nomifun_app_development_is_optional_and_preserves_personal_grants_and_f
 }
 
 #[tokio::test]
+async fn current_template_and_explicit_saved_official_create_distinct_canonical_bindings() {
+    let root = tempfile::tempdir().expect("allocate isolated template selection root");
+    std::fs::create_dir_all(root.path().join("work")).unwrap();
+    let database = nomifun_db::init_database_memory().await.unwrap();
+    let services = AppServices::from_config(database, &AppConfig {
+        data_dir: root.path().join("data"), work_dir: root.path().join("work"),
+        auth_policy: AuthPolicy::TrustLocalToken,
+        local_trust_secret: Some(Arc::from(LOCAL_TRUST_SECRET)), ..AppConfig::default()
+    }).await.unwrap();
+    let model = seed_search_and_vision_ready_chat_route(&services.database, &services.encryption_key).await;
+    let (states, _channel_components) = build_module_states(&services).await;
+    let router = create_router_with_states(&services, states);
+    let library: AgentPresetLibraryResponse = get_data(&router, "/api/agent-preset-templates").await;
+    let official = &library.official_presets[&nomifun_api_types::OfficialPresetKeyDto::ChatMinimal];
+    let author: AgentPresetEditorResponse = get_data(&router,
+        &format!("/api/agent-presets/{}/editor", official.preset_id)).await;
+    let template: AgentPresetEditorResponse = post_data(&router,
+        "/api/agent-presets/from-template/chat.minimal", &serde_json::json!({
+            "model": model, "reuse_existing": true, "display_name": "Current Minimal"
+        })).await;
+    assert!(official.current_stable_revision.is_none());
+    let untouched_selection = serde_json::json!({"kind":"preset", "preset_id":official.preset_id});
+    let first_product: serde_json::Value = write_data(&router, "PUT",
+        "/api/product-agent-bindings/customer/template-selection-fixture", &serde_json::json!({
+            "selection": untouched_selection, "model": model,
+        })).await;
+    let first_cron: serde_json::Value = post_data(&router, "/api/cron/jobs", &serde_json::json!({
+        "name":"Untouched official Preset first use", "message":"Do not execute this fixture",
+        "schedule":{"kind":"at", "at_ms":4_102_444_800_000_i64},
+        "created_by":"user", "execution_mode":"new_conversation",
+        "agent_selection":untouched_selection, "model":model,
+    })).await;
+    for binding in [&first_product["agent_binding"], &first_cron["metadata"]["agent_binding"]] {
+        assert!(!binding["typed_resource_bindings"].as_array().unwrap().is_empty());
+        let reference = &binding["preset_revision_ref"];
+        let revision: AgentPresetRevisionDto = get_data(&router, &format!(
+            "/api/agent-presets/{}/revisions/{}", reference["preset_id"].as_str().unwrap(),
+            reference["revision"].as_u64().unwrap())).await;
+        assert_eq!(revision.document.instructions, template.draft.document.instructions);
+        for selection in &template.draft.document.enabled_capabilities {
+            assert!(revision.document.enabled_capabilities.contains(selection),
+                "a valid untouched official Preset preserves each published baseline grant on first use");
+        }
+    }
+    let after_first_use: AgentPresetLibraryResponse = get_data(&router, "/api/agent-preset-templates").await;
+    assert!(after_first_use.official_presets[&nomifun_api_types::OfficialPresetKeyDto::ChatMinimal]
+        .current_stable_revision.is_none(), "first use cannot author the stable official configuration");
+    let mut draft = author.draft;
+    draft.document = template.draft.document.clone();
+    draft.document.instructions = "EXPLICIT_SAVED_OFFICIAL_INSTRUCTIONS".into();
+    let process = draft.document.enabled_capabilities.iter_mut()
+        .find(|selection| selection.capability.id == "workspace.process").unwrap();
+    assert!(process.action_allowlist.remove("workspace.process/resize"));
+    let saved: SaveAgentPresetRevisionResponse = post_data(&router,
+        &format!("/api/agent-presets/{}/revisions", official.preset_id), &serde_json::json!({
+            "expected_current_revision": draft.current_revision, "draft": draft,
+            "reason": "Explicit current-generation official customization"
+        })).await;
+    let options: serde_json::Value = get_data(&router,
+        &format!("/api/product-agent-bindings/customer/template-selection-fixture?provider_id={}&model={}",
+            model.provider_id, model.model)).await;
+    assert!(options["options"].as_array().unwrap().iter().any(|option|
+        option["selection"] == serde_json::json!({"kind":"template", "template_key":"chat.minimal"})),
+        "the current Template remains a distinct product choice: {options}");
+    assert!(options["options"].as_array().unwrap().iter().any(|option|
+        option["selection"] == serde_json::json!({"kind":"preset", "preset_id":official.preset_id})),
+        "the saved official customization remains explicitly selectable: {options}");
+    for (selection, instructions) in [
+        (serde_json::json!({"kind":"template", "template_key":"chat.minimal"}), template.draft.document.instructions.as_str()),
+        (serde_json::json!({"kind":"preset", "preset_id":official.preset_id}), "EXPLICIT_SAVED_OFFICIAL_INSTRUCTIONS"),
+    ] {
+        let product: serde_json::Value = write_data(&router, "PUT",
+            "/api/product-agent-bindings/customer/template-selection-fixture", &serde_json::json!({
+                "selection": selection, "model": model,
+            })).await;
+        let cron: serde_json::Value = post_data(&router, "/api/cron/jobs", &serde_json::json!({
+            "name":"Template selection admission", "message":"Do not execute this fixture",
+            "schedule":{"kind":"at", "at_ms":4_102_444_800_000_i64},
+            "created_by":"user", "execution_mode":"new_conversation",
+            "agent_selection":selection, "model":model,
+        })).await;
+        for binding in [&product["agent_binding"], &cron["metadata"]["agent_binding"]] {
+            assert!(!binding["typed_resource_bindings"].as_array().unwrap().is_empty());
+            let reference = &binding["preset_revision_ref"];
+            let revision: AgentPresetRevisionDto = get_data(&router, &format!(
+                "/api/agent-presets/{}/revisions/{}", reference["preset_id"].as_str().unwrap(),
+                reference["revision"].as_u64().unwrap())).await;
+            assert_eq!(revision.document.instructions, instructions,
+                "product and Cron admission must honor the same explicit selection");
+        }
+    }
+
+    // Both choices traverse the production HTTP resource preparation and
+    // canonical opening owners. Template selection never reads the saved draft.
+    let open = |preset_id: &str| serde_json::json!({
+        "preset_id": preset_id, "model": model,
+        "resource_selections": official_session_resources("chat.minimal", "", ""),
+    });
+    let explicit: CreateAgentSessionResponseDto = post_data(&router, "/api/agent-sessions", &open(&official.preset_id)).await;
+    let explicit_projection: ConversationResponse = get_data(&router,
+        &format!("/api/agent-sessions/{}/projection", explicit.agent_session_id)).await;
+    let explicit_snapshot = explicit_projection.agent_snapshot.unwrap();
+    assert_eq!(explicit_snapshot.instructions, "EXPLICIT_SAVED_OFFICIAL_INSTRUCTIONS");
+    assert!(!explicit_snapshot.enabled_capability_actions["workspace.process"].contains("workspace.process/resize"));
+    assert!(!explicit.agent_binding.typed_resource_bindings.is_empty());
+
+    let current: AgentPresetEditorResponse = post_data(&router,
+        "/api/agent-presets/from-template/chat.minimal", &serde_json::json!({
+            "model": model, "reuse_existing": true, "display_name": "Current Minimal"
+        })).await;
+    assert_eq!(current.draft.document, template.draft.document);
+    assert_ne!(current.preset.preset_id, official.preset_id);
+    let opened: CreateAgentSessionResponseDto = post_data(&router, "/api/agent-sessions", &open(&current.preset.preset_id)).await;
+    let current_projection: ConversationResponse = get_data(&router,
+        &format!("/api/agent-sessions/{}/projection", opened.agent_session_id)).await;
+    let current_snapshot = current_projection.agent_snapshot.unwrap();
+    assert_eq!(current_snapshot.instructions, template.draft.document.instructions);
+    assert!(current_snapshot.enabled_capability_actions["workspace.process"].contains("workspace.process/resize"));
+    assert!(!opened.agent_binding.typed_resource_bindings.is_empty());
+    let store = nomifun_agent_session::AgentSessionStore::from_pool(services.database.pool().clone()).await.unwrap();
+    for response in [&explicit, &opened] {
+        let canonical = store.get_live_session(&nomifun_agent_contracts::AgentSessionId::from(response.agent_session_id.clone())).await.unwrap();
+        assert_eq!(serde_json::to_value(canonical.agent_binding).unwrap(), serde_json::to_value(&response.agent_binding).unwrap());
+    }
+    let unchanged: AgentPresetEditorResponse = get_data(&router,
+        &format!("/api/agent-presets/{}/editor", official.preset_id)).await;
+    assert_eq!(unchanged.revision.unwrap().reference, saved.revision.reference);
+    assert_eq!(unchanged.draft.document.instructions, "EXPLICIT_SAVED_OFFICIAL_INSTRUCTIONS");
+    let unchanged: ConversationResponse = get_data(&router,
+        &format!("/api/agent-sessions/{}/projection", explicit.agent_session_id)).await;
+    assert_eq!(unchanged.agent_snapshot.unwrap(), explicit_snapshot);
+    services.cleanup_after_startup_failure(anyhow::anyhow!("template selection fixture ended")).await;
+}
+
+#[tokio::test]
 async fn every_published_official_preset_stays_available_after_ordinary_app_import() {
     let root = tempfile::tempdir().expect("allocate isolated product root");
     let database = nomifun_db::init_database_memory()
@@ -914,35 +1049,43 @@ where
     T: serde::de::DeserializeOwned,
     B: serde::Serialize,
 {
+    write_data(router, "POST", path, body).await
+}
+
+async fn write_data<T, B>(router: &axum::Router, method: &str, path: &str, body: &B) -> T
+where
+    T: serde::de::DeserializeOwned,
+    B: serde::Serialize,
+{
     let response = router
         .clone()
         .oneshot(
             Request::builder()
-                .method("POST")
+                .method(method)
                 .uri(path)
                 .header("x-nomi-local-trust", LOCAL_TRUST_SECRET)
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(body).expect("serialize request body"),
                 ))
-                .expect("build POST request"),
+                .expect("build write request"),
         )
         .await
-        .expect("dispatch POST request");
+        .expect("dispatch write request");
     let status = response.status();
     let bytes = response
         .into_body()
         .collect()
         .await
-        .expect("read POST response")
+        .expect("read write response")
         .to_bytes();
     assert!(
         status.is_success(),
-        "POST {path} returned {status}: {}",
+        "{method} {path} returned {status}: {}",
         String::from_utf8_lossy(&bytes)
     );
     let response: ApiResponse<T> =
-        serde_json::from_slice(&bytes).expect("decode typed POST response");
-    assert!(response.success, "POST {path} returned an error envelope");
-    response.data.expect("successful POST response data")
+        serde_json::from_slice(&bytes).expect("decode typed write response");
+    assert!(response.success, "{method} {path} returned an error envelope");
+    response.data.expect("successful write response data")
 }

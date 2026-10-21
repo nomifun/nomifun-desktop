@@ -4,6 +4,7 @@
     "choose": "Choose an Agent",
     "search": "Search Agents",
     "fromTemplate": "Official Agents",
+    "savedCustomization": "{{name}} (saved customization)",
     "showMorePersonal": "Show more ({{count}})",
     "showFewerPersonal": "Show fewer custom Agents",
     "manage": "Manage Agents",
@@ -25,7 +26,7 @@
       "targetNotFound": "The model to configure was not found. The provider and model list is open instead."
     },
     "capabilitiesNeeded": "Some capabilities required by this official Agent are not implemented in this build. Your message and selection have been kept. Choose another Agent or adjust capabilities in Manage Agents.",
-    "contractChanged": "This session relies on capabilities that have changed. Start a new session to continue; your existing records will be kept.",
+    "contractChanged": "The selected Agent configuration references capabilities that have changed, so a session could not be created. Review and save its configuration in Agent Workbench, or choose another Agent. Your message and selection have been kept.",
     "launchFailed": "This official Agent could not start. Check the service and retry. Your message and selection have been kept."
   },
   "noAgentAvailable": "No Main Agent is available. Please login to Google or install Claude/Codex CLI. Go to settings?",

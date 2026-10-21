@@ -28,13 +28,12 @@ import { useConversationAgentCatalog } from '@/renderer/components/agent/useConv
 import {
   saveNomiDefaultModel,
 } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
-import type { GuidAgentSelection } from '@/renderer/pages/guid/types';
 import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { CreationComposerContext } from '@/renderer/creation/CreationComposerContext';
 import { useCreationDraft } from '@/renderer/creation/useCreationDraft';
 import type { CreationMode } from '@/renderer/creation/types';
 import { useConversationAgentSwitch } from './useConversationAgentSwitch';
-import { officialConversationTemplateKey } from './conversationAgentIdentity';
+import { frozenConversationAgentSelection, officialConversationTemplateKey } from './conversationAgentIdentity';
 import {
   capabilityOf,
   capabilitySupportsTechnicalCapability,
@@ -125,14 +124,7 @@ const NomiConversationPanel: React.FC<{
   }), [conversation.id]);
   const { presets: executableAgentPresets, officialTemplates: conversationOfficialTemplates, isLoading: agentsLoading, error: agentsError, refresh: refreshAgents } = useConversationAgentCatalog();
   const officialTemplateKey = officialConversationTemplateKey(conversation.extra);
-  const frozenAgentSelection = useMemo<GuidAgentSelection>(() =>
-    officialTemplateKey
-      ? { kind: 'template', templateKey: officialTemplateKey }
-      : conversation.preset_id
-      ? { kind: 'preset', presetId: conversation.preset_id }
-      : { kind: 'template', templateKey: 'chat.minimal' },
-    [conversation.preset_id, officialTemplateKey],
-  );
+  const frozenAgentSelection = frozenConversationAgentSelection(conversation);
   const { t } = useTranslation();
   const [modelSwitching, setModelSwitching] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<SessionReasoningEffort | undefined>(
@@ -217,7 +209,6 @@ const NomiConversationPanel: React.FC<{
   const { info: presetPresetInfo } = useAgentInfo(conversation);
   const { switching: agentSwitching, switchAgent: switchCurrentConversationAgent } = useConversationAgentSwitch({
     sessionId: conversation.id,
-    currentSelection: frozenAgentSelection,
     processing: isConversationBindingBlocked(conversation),
     switchingRef: agentSwitchingRef,
     configurationChangingRef: modelSwitchingRef,

@@ -14,7 +14,7 @@ import AgentSelector from '@/renderer/components/agent/AgentSelector';
 import { DEFAULT_AGENT_SELECTION, type AgentSelection } from '@/renderer/components/agent/types';
 import { agentSelectionFromWire, agentSelectionToWire } from '@/renderer/components/agent/agentSelection';
 import { useConversationAgentCatalog } from '@/renderer/components/agent/useConversationAgentCatalog';
-import { useAgentPresetCapabilities } from '@/renderer/components/agent/useAgentPresetCapabilities';
+import { useAgentLaunchCapabilities } from '@/renderer/components/agent/useAgentLaunchCapabilities';
 import { useAgentLaunchModel } from '@/renderer/components/agent/useAgentLaunchModel';
 import { scheduledWorkspace, scheduledAgentName } from './scheduledAgentPresentation';
 import dayjs from 'dayjs';
@@ -187,17 +187,21 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   const [agentChoiceChanged, setAgentChoiceChanged] = useState(false);
   const usesAuthoringSelection = !editJob || agentChoiceChanged;
   const isSpecifiedMode = execution_mode === 'specified';
-  const selectedPreset = selection.kind === 'template'
-    ? agentCatalog.library?.official_presets[selection.templateKey]
-    : agentCatalog.presets.find(preset => preset.preset_id === selection.presetId);
-  const presetCapabilities = useAgentPresetCapabilities(
-    isSpecifiedMode || isBoundConversation || !usesAuthoringSelection ? undefined : selectedPreset?.preset_id,
-    selectedPreset?.current_stable_revision?.revision_digest,
+  const selectedTemplate = selection.kind === 'template'
+    ? agentCatalog.officialTemplates.find(template => template.template_key === selection.templateKey)
+    : undefined;
+  const selectedPreset = selection.kind === 'preset'
+    ? agentCatalog.presets.find(preset => preset.preset_id === selection.presetId)
+    : undefined;
+  const presetCapabilities = useAgentLaunchCapabilities(
+    isSpecifiedMode || isBoundConversation || !usesAuthoringSelection ? undefined : selectedPreset,
+    isSpecifiedMode || isBoundConversation || !usesAuthoringSelection ? undefined : selectedTemplate,
   );
+  const requiresToolCalls = presetCapabilities.actionIds.size > 0;
   const modelSelection = useAgentLaunchModel({
     defaultModel: presetCapabilities.defaultModel,
     ready: usesAuthoringSelection && !presetCapabilities.isLoading && !presetCapabilities.error && !agentCatalog.isLoading,
-    requiresToolCalls: usesAuthoringSelection && presetCapabilities.actionIds.size > 0,
+    requiresToolCalls: usesAuthoringSelection && requiresToolCalls,
   });
 
   // A session owns its draft and submission; live updates to the same job do
@@ -446,7 +450,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       readOnlyLabel={!modelSelection.currentModel ? modelSelection.selection?.model : undefined}
       getAvailableModels={provider => modelSelection.groups.find(group => group.provider.id === provider.id)?.models ?? []}
       disabled={isBoundConversation}
-      requiredTechnicalCapabilities={presetCapabilities.actionIds.size > 0 ? ['function_calling'] : []}
+      requiredTechnicalCapabilities={requiresToolCalls ? ['function_calling'] : []}
       onSelectModel={async (provider, model) => modelSelection.select(provider.id, model)} />
     {modelSelection.selection && !modelSelection.isLoading && (!modelSelection.available || !modelSelection.compatible) &&
       <div role='alert' className='text-12px text-t-secondary'>{t(modelSelection.available ? 'cron.page.form.modelIncompatible' : 'cron.page.form.modelUnavailable')}</div>}

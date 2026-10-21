@@ -1,11 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import type {
   AgentBindingSummary,
+  AgentPresetLibraryResponse,
   AgentPresetSummary,
   OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
 import {
   filterConversationAgentPresets,
+  savedAgentPresets,
+  conversationAgentPresets,
   isConversationAgentTemplate,
   isConversationAgentTemplateKey,
 } from './conversationAgentCatalog';
@@ -58,5 +61,21 @@ describe('Conversation Agent catalog boundary', () => {
         binding('companion', companionBound.preset_id),
       ],
     )).toEqual([ordinary, companionBound]);
+  });
+
+  test('saved official customizations are explicit Presets and product configurations keep their own ingress', () => {
+    const saved = (presetId: string): AgentPresetSummary => ({ ...preset(presetId, 'Saved configuration'), source: 'official',
+      current_stable_revision: { preset_id: presetId, revision: 1, revision_digest: 'a'.repeat(64) },
+    } as AgentPresetSummary);
+    const personal = preset('personal', 'My Agent');
+    const general = saved('general');
+    const companion = saved('companion');
+    const customer = saved('customer');
+    const data = { user_presets: [personal], active_bindings: [], official_presets: {
+      'assistant.general': general, 'companion.default': companion, 'customer-service.default': customer,
+      'chat.minimal': { ...preset('empty', 'Chat'), source: 'official' },
+    } } as unknown as AgentPresetLibraryResponse;
+    expect(savedAgentPresets(data)).toEqual([personal, general, companion, customer]);
+    expect(conversationAgentPresets(data)).toEqual([personal, general]);
   });
 });

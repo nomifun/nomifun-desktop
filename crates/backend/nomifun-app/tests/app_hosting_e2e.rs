@@ -159,6 +159,34 @@ async fn hosted_application_accepts_official_agents_without_authoring_their_defa
         })).send().await.unwrap().json().await.unwrap();
     assert_eq!(personal["success"], true, "{personal}");
     let personal_id = personal["data"]["preset"]["preset_id"].as_str().unwrap();
+    // Application settings carry a Preset identity, including a saved official
+    // customization. They must not reinterpret it as a current Template.
+    let editor: Value = client.get(format!("{url}/api/agent-presets/{chat}/editor"))
+        .header("x-nomi-local-trust", proof.as_ref()).send().await.unwrap().json().await.unwrap();
+    let mut draft = editor["data"]["draft"].clone();
+    draft["document"] = personal["data"]["draft"]["document"].clone();
+    draft["document"]["instructions"] = json!("APPLICATION_EXPLICIT_SAVED_OFFICIAL");
+    let saved: Value = client.post(format!("{url}/api/agent-presets/{chat}/revisions"))
+        .header("x-nomi-local-trust", proof.as_ref()).json(&json!({
+            "expected_current_revision":draft["current_revision"], "draft":draft,
+            "reason":"Explicit current-generation application Agent customization"
+        })).send().await.unwrap().json().await.unwrap();
+    assert_eq!(saved["success"], true, "{saved}");
+    let selected: Value = client.put(&endpoint).header("x-nomi-local-trust", proof.as_ref())
+        .json(&json!({"settings":{"agent_id":chat}})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(selected["success"], true, "{selected}");
+    assert_eq!(selected["data"]["settings"]["agent_id"], chat);
+    assert_eq!(selected["data"]["settings"]["agent_binding_id"], binding_id.as_deref().unwrap());
+    let remotes: Value = client.get(format!("{url}/api/remote-bindings"))
+        .header("x-nomi-local-trust", proof.as_ref()).send().await.unwrap().json().await.unwrap();
+    let remote = remotes["data"].as_array().unwrap().iter()
+        .find(|binding| binding["remote_binding_id"] == binding_id.as_deref().unwrap()).unwrap();
+    assert!(!remote["agent_binding"]["typed_resource_bindings"].as_array().unwrap().is_empty());
+    let reference = &remote["agent_binding"]["preset_revision_ref"];
+    let revision: Value = client.get(format!("{url}/api/agent-presets/{}/revisions/{}",
+        reference["preset_id"].as_str().unwrap(), reference["revision"].as_u64().unwrap()))
+        .header("x-nomi-local-trust", proof.as_ref()).send().await.unwrap().json().await.unwrap();
+    assert_eq!(revision["data"]["document"]["instructions"], "APPLICATION_EXPLICIT_SAVED_OFFICIAL");
     let selected: Value = client.put(&endpoint).header("x-nomi-local-trust", proof.as_ref())
         .json(&json!({"settings":{"agent_id":personal_id}})).send().await.unwrap().json().await.unwrap();
     assert_eq!(selected["success"], true, "{selected}");

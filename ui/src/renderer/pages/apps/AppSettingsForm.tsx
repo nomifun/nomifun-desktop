@@ -8,6 +8,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { openExternalUrl } from '@/renderer/utils/platform';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
+import { agentPresetDisplayName } from '@/renderer/components/agent/agentPresetPresentation';
 import { appErrorMessage, editableAppSettings, parseAppEnvironment } from './appHostingModel';
 import styles from './AppsPage.module.css';
 
@@ -36,7 +37,7 @@ export default function AppSettingsForm({ app, onSaved, compact = false, develop
     const preset = library?.official_presets?.[template.template_key];
     if (preset) agents.set(preset.preset_id, t(`agentSettings.template.${TEMPLATE_I18N_PATH[template.template_key]}.name`));
   }
-  for (const preset of presets) agents.set(preset.preset_id, preset.display_name);
+  for (const preset of presets) agents.set(preset.preset_id, agentPresetDisplayName(preset, t));
   useEffect(() => {
     if (!dirtyFields.has('name')) setName(app.name);
     if (!dirtyFields.has('description')) setDescription(app.description ?? '');

@@ -17,7 +17,7 @@
 
 从方案第 12 节接续：
 - S1：确认 AGENTS.md 现役入口；固定上游 commit 4d959bbfa57f0c89f310330e849500b222084194（版本标签 cua-driver-rs-v0.37.0，标签解析差异按 SOURCE.json 记录），用 --filter=blob:none --sparse 按 D03 导入 vendor/cua-driver。只读参考可用 C:/Users/rika0/code/nomifun/main/resources/cua。保留 D04 去默认 features 补丁及已授权的必要最小缺陷补丁，全部登记并经 sync 应用；不再限定只能一个。完成独立 apps/computer-worker、MIT 署名、DPI manifest、self-check、真实 worker 协议测试、冻结清单和精简覆盖。Windows 构建/self-check/协议与一致性检查通过后进入 S2，其他平台和额外原生 POC 并行补验。
-- S2：一次完整替换落地：删除第 7 节旧实现/旧测试/夹具/配置/引用；由冻结清单生成 22 Action 和契约；实现 nomifun-computer 五模块、computer_host、效果/Stop/分档/生命周期；UI 旧动作/路由/许可接新契约；接入 worker 构建、externalBin 与各平台适用签名脚本；上线 check:computer-boundary。资源种类为 computer，ResourceId 为 local-desktop。当前交付的 UI/API 版本为 44；接续时以实际 HEAD 为准，保留并发递增，不重复执行历史的 42→43，也不回退版本。本机正式产品链路先用专用计算器/文本编辑窗口和临时数据跑通，有受控模型凭据即补真实模型；缺凭据不阻塞代码接入。
+- S2：一次完整替换落地：删除第 7 节旧实现/旧测试/夹具/配置/引用；由冻结清单生成 22 Action 和契约；实现 nomifun-computer 五模块、computer_host、效果/Stop/分档/生命周期；UI 旧动作/路由/许可接新契约；接入 worker 构建、externalBin 与各平台适用签名脚本；上线 check:computer-boundary。资源种类为 computer，ResourceId 为 local-desktop。当前交付的 UI/API 版本为 45；接续时以实际 HEAD 为准，保留并发递增，不重复执行历史的 42→43，也不回退版本。本机正式产品链路先用专用计算器/文本编辑窗口和临时数据跑通，有受控模型凭据即补真实模型；缺凭据不阻塞代码接入。
 - S3：补齐驱动状态卡、GET /api/computer/status、能力工作台分组、“前台”标记、中英文文案与文档。核实旧会话实际拒绝错误码命中新建会话文案，不为旧会话/升级路径写测试。可与本机 S2 收尾并行。
 - S4：按拟发布平台/架构补齐适用签名、公证、安装包、依赖、原生和真实模型验收；不把固定厂商数量或全平台排列组合变成日常开发门槛，未验平台只记待验，不冒充已支持。
 - S5：发布说明（含升级影响）、CHANGELOG、版本与架构定稿，按既有发布授权交付并退役本专项入口。
@@ -39,7 +39,7 @@
 ## macOS 并行补验 prompt
 
 ```text
-请从包含本文件的最新 main 接续 Computer Use 的 macOS 剩余实现与 S4。先查 git status、HEAD、分支并 git pull --ff-only；每阶段同步，保护并发工作，不 stash/reset/覆盖/清理。当前 UI/API44，以实际 HEAD 为准，不回退版本；Linux 已验源码基线 9b8706f71 只作证据身份，不要求 checkout 回旧提交。
+请从包含本文件的最新 main 接续 Computer Use 的 macOS 剩余实现与 S4。先查 git status、HEAD、分支并 git pull --ff-only；每阶段同步，保护并发工作，不 stash/reset/覆盖/清理。当前 UI/API45，以实际 HEAD 为准，不回退版本；Linux 已验源码基线 9b8706f71 只作证据身份，不要求 checkout 回旧提交。
 
 阅读 AGENTS.md、唯一方案 docs/handoffs/computer-use-rebuild.zh.md（尤其§8/9/12）、docs/architecture/computer-use.zh.md 及其会话/许可架构引用、docs/handoffs/agent-lifecycle-reliability.zh.md（U01–U13）。从最新§12接续已定 C01–C08/D01–D14，不恢复旧 Computer 或旧数据兼容、不改 canonical 存储。vendor 仅通过登记补丁修改，动作/schema/标题仍由冻结输入生成。
 
@@ -55,7 +55,7 @@ Windows S1–S3及 Full/显式 NoImage 共享模型链路已有证据；Linux x6
 ## Linux 并行补验 prompt
 
 ```text
-请从包含本文件的最新 main 接续 Computer Use 的 Linux 原生产品与 S4。先查 git status、HEAD、分支并 git pull --ff-only；每阶段同步，保护并发工作，不 stash/reset/覆盖/清理。当前 UI/API44，以实际 HEAD 为准，不回退到历史源码或版本。
+请从包含本文件的最新 main 接续 Computer Use 的 Linux 原生产品与 S4。先查 git status、HEAD、分支并 git pull --ff-only；每阶段同步，保护并发工作，不 stash/reset/覆盖/清理。当前 UI/API45，以实际 HEAD 为准，不回退到历史源码或版本。
 
 阅读 AGENTS.md、唯一方案 docs/handoffs/computer-use-rebuild.zh.md（尤其§8/9/12）、docs/architecture/computer-use.zh.md 及其会话/许可架构引用、docs/handoffs/agent-lifecycle-reliability.zh.md（U01–U13）。遵循已定 C01–C08/D01–D14，不恢复旧 Computer/数据兼容、不改 canonical；vendor 只用登记补丁，动作/schema/标题由冻结输入派生。
 
