@@ -1,5 +1,5 @@
 import { Collapse } from '@arco-design/web-react';
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import type { IMcpServer } from '@/common/config/storage';
 import type { McpServerId } from '@/common/types/ids';
 import McpServerHeader from './McpServerHeader';
@@ -10,13 +10,14 @@ import styles from './McpServerList.module.css';
 
 interface McpServerItemProps {
   server: IMcpServer;
-  isCollapsed: boolean;
+  expanded: boolean;
+  highlighted?: boolean;
   isTestingConnection: boolean;
   oauthStatus?: McpOAuthStatus;
   oauthAttempt?: McpOAuthAttempt;
   isLoggingIn?: boolean;
   isTogglingEnabled?: boolean;
-  onToggleCollapse: () => void;
+  onToggleExpanded: () => void;
   onTestConnection: (server: IMcpServer) => void;
   onEditServer: (server: IMcpServer) => void;
   onDeleteServer: (serverId: McpServerId) => void;
@@ -30,13 +31,14 @@ interface McpServerItemProps {
 
 const McpServerItem: React.FC<McpServerItemProps> = ({
   server,
-  isCollapsed,
+  expanded,
+  highlighted = false,
   isTestingConnection,
   oauthStatus,
   oauthAttempt,
   isLoggingIn,
   isTogglingEnabled,
-  onToggleCollapse,
+  onToggleExpanded,
   onTestConnection,
   onEditServer,
   onDeleteServer,
@@ -47,12 +49,17 @@ const McpServerItem: React.FC<McpServerItemProps> = ({
   onOAuthContinue,
   onToggleEnabled,
 }) => {
+  const rowRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (highlighted) rowRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+  }, [highlighted]);
   const diagnostic = oauthStatus?.diagnostic ?? oauthAttempt?.diagnostic ?? oauthStatus?.auth?.diagnostic;
   return (
+    <div ref={rowRef} className={highlighted ? styles.highlighted : undefined} data-mcp-server-id={server.mcp_server_id}>
     <Collapse
       key={server.mcp_server_id}
-      activeKey={isCollapsed ? ['1'] : []}
-      onChange={onToggleCollapse}
+      activeKey={expanded ? ['1'] : []}
+      onChange={onToggleExpanded}
       className={styles.item}
     >
       <Collapse.Item
@@ -84,6 +91,7 @@ const McpServerItem: React.FC<McpServerItemProps> = ({
         <McpServerToolsList server={server} />
       </Collapse.Item>
     </Collapse>
+    </div>
   );
 };
 

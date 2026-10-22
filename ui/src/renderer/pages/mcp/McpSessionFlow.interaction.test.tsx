@@ -20,7 +20,7 @@ import SessionCapabilityPicker, {
 import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
 import conversation from '@/renderer/services/i18n/locales/en-US/conversation.json';
-import McpPage from './index';
+import EnhancedToolsPage from '../enhancedTools';
 import { getMcpMarketOrigin } from '@/renderer/services/mcp/mcpMarket';
 
 const locale = createInstance();
@@ -118,6 +118,7 @@ function fixture() {
     is_custom: true,
   }]));
   track(spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([]));
+  track(spyOn(ipcBridge.fs.getSkillPaths, 'invoke').mockResolvedValue({ user_skills_dir: '/fixture/skills', builtin_skills_dir: '/fixture/builtin' }));
   track(spyOn(appHosting.mcpSources, 'invoke').mockResolvedValue([]));
   track(spyOn(agentHooks, 'getAgents').mockResolvedValue([]));
   track(spyOn(themeContext, 'useThemeContext').mockReturnValue({
@@ -146,9 +147,9 @@ function fixture() {
     let view!: ReturnType<typeof render>;
     await act(async () => {
       view = render(<I18nextProvider i18n={locale}>
-        <MemoryRouter initialEntries={['/mcp?tab=market']}>
+        <MemoryRouter initialEntries={['/enhanced-tools?category=mcp&view=market']}>
           <Session />
-          <Routes><Route path='/mcp' element={<McpPage />} /></Routes>
+          <Routes><Route path='/enhanced-tools' element={<EnhancedToolsPage />} /></Routes>
         </MemoryRouter>
       </I18nextProvider>);
     });

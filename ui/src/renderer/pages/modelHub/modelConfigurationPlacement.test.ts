@@ -14,17 +14,15 @@ describe('model-owned tool configuration placement', () => {
     expect(hubSource.includes("to='/settings/execution-engines'")).toBe(true);
   });
 
-  test('the MCP page contains only MCP server management', () => {
-    const source = readSource(
-      '../../components/settings/SettingsModal/contents/ToolsModalContent.tsx'
-    );
+  test('MCP management remains independent of model configuration', () => {
+    const source = readSource('../enhancedTools/McpManagementPanel.tsx');
 
     expect(source.includes('SpeechToTextSettingsSection')).toBe(false);
     expect(source.includes('settings.imageGeneration')).toBe(false);
     expect(source.includes('tools.speechToText')).toBe(false);
     expect(source.includes('tools.imageGenerationModel')).toBe(false);
-    expect(source.includes('ModalMcpManagementSection')).toBe(true);
-    expect(source.includes('const visibleMcpServers = useMemo(() => mcpServers, [mcpServers])')).toBe(true);
+    expect(source.includes('useMcpServerCRUD(saveMcpServers)')).toBe(true);
+    expect(source.includes('<McpServerItem')).toBe(true);
   });
 
   test('every model capability is its own section; no host page hides categories', () => {
@@ -65,10 +63,10 @@ describe('model-owned tool configuration placement', () => {
     expect(providerSource.includes('SpeechToTextCloudSettings')).toBe(false);
   });
 
-  test('session capability management links to the dedicated Skills and MCP pages', () => {
+  test('session capability management opens the corresponding enhanced tools category', () => {
     const source = readSource('../../components/chat/SessionCapabilityPicker/index.tsx');
 
-    expect(source.includes("navigate(isSkills ? '/skills' : '/mcp')")).toBe(true);
+    expect(source.includes('navigate(enhancedToolsUrl(kind))')).toBe(true);
     expect(source.includes('/settings/capabilities?tab=tools')).toBe(false);
   });
 

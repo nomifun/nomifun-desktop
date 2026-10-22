@@ -179,18 +179,28 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
 
   return (
     <div className={styles.header}>
-      <div className={styles.summary}>
+      <div
+        className={styles.summary}
+        onClick={(event) => {
+          if ((event.target as Element).closest('button')) event.stopPropagation();
+        }}
+        onKeyDown={(event) => {
+          if ((event.target as Element).closest('button')) event.stopPropagation();
+        }}
+      >
         <span className={styles.name} title={displayName}>{displayName}</span>
         {statusPopoverContent ? (
           <Popover content={statusPopoverContent} trigger='hover' position='top'>
             <span role='img' aria-label={statusText} className={styles.status}>
               {statusIcon}
+              <span aria-hidden='true'>{statusText}</span>
             </span>
           </Popover>
         ) : (
           <Tooltip content={statusText} position='top'>
             <span role='img' aria-label={statusText} className={styles.status}>
               {statusIcon}
+              <span aria-hidden='true'>{statusText}</span>
             </span>
           </Tooltip>
         )}
@@ -248,17 +258,19 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
             size='mini'
             type='text'
             icon={<Refresh size={'16'} />}
-            className={styles.iconButton}
+            className={styles.testButton}
             title={t('settings.mcpTestConnection')}
             aria-label={t('settings.mcpTestConnection')}
             loading={isTestingConnection}
             disabled={isTogglingEnabled}
             onClick={() => onTestConnection(server)}
-          />
+          >
+            {t('settings.mcpTestConnection')}
+          </Button>
         )}
         {(!server.builtin || oauthCapable) && (
           <Dropdown
-            trigger='hover'
+            trigger='click'
             droplist={
               <Menu>
                 {oauthCapable && onOAuthConfigure && <Menu.Item key='oauth-config' disabled={isLoggingIn} onClick={() => onOAuthConfigure(server)}>
@@ -287,6 +299,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
               type='text'
               icon={<Setting size={'18'} />}
               className={styles.iconButton}
+              title={t('settings.mcpEditServer')}
               aria-label={t('settings.mcpEditServer')}
             />
           </Dropdown>

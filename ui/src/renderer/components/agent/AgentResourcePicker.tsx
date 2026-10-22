@@ -1,6 +1,7 @@
 import { ipcBridge } from '@/common';
 import type { IApiRobotPermissions, IApiRobotPhase } from '@/common/adapter/ipcBridge';
 import { creativeStudioCanvasApi } from '@/renderer/pages/creativeStudio/services/canvasApi';
+import { enhancedToolsUrl } from '@/renderer/pages/enhancedTools/routes';
 import { Button, Select, Spin } from '@arco-design/web-react';
 import { LinkOne } from '@icon-park/react';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -156,7 +157,7 @@ const routeForKind = (kind: UserAgentResourceKind, value: AgentResourceSelection
   if (kind === 'companion' || kind === 'robot') return '/nomi';
   if (kind === 'customer') return '/customer-service';
   if (kind === 'knowledge_base') return value.customer ? `/customer-service/${value.customer}` : '/knowledge';
-  if (kind === 'mcp_server') return '/mcp';
+  if (kind === 'mcp_server') return enhancedToolsUrl('mcp');
   if (kind === 'canvas') return '/creative-studio/canvases';
   return '/guid';
 };

@@ -1,6 +1,7 @@
 import type { IMcpServer } from '@/common/config/storage';
 import { useSkillDisplay } from '@/renderer/services/skills/useSkillDisplay';
 import { useMcpDisplayName } from '@/renderer/services/mcp/useMcpDisplayName';
+import { enhancedToolsUrl } from '@/renderer/pages/enhancedTools/routes';
 import { Button, Checkbox, Spin, Tooltip } from '@arco-design/web-react';
 import { autoUpdate, flip, FloatingFocusManager, FloatingPortal, offset, shift, size, useDismiss, useFloating, useInteractions, useRole } from '@floating-ui/react';
 import { CheckOne, CloseSmall, Lightning, Puzzle, Right } from '@icon-park/react';
@@ -298,7 +299,7 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
             onClick={() => {
               setOpen(undefined);
               if (onManage) onManage(kind);
-              else void navigate(isSkills ? '/skills' : '/mcp');
+              else void navigate(enhancedToolsUrl(kind));
             }}
           >
             {isSkills

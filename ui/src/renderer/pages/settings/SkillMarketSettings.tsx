@@ -14,54 +14,31 @@ import { useInstalledMarketState } from '@/renderer/services/skills/useSkillDisp
 import {
   notifySkillMarketCacheChanged,
   readInstalledMarketState,
-  reconcileInstalledMarketState,
   recordInstalledMarketItem,
   SKILL_MARKET_CACHE_KEY,
   writeInstalledMarketState,
 } from '@/renderer/services/skills/skillMarketProvenance';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 const AUTO_SYNC_KEY = 'nomifun.skillMarket.autoSynced.v4';
 const notifyMarketCacheUpdated = () => notifySkillMarketCacheChanged(SKILL_MARKET_CACHE_KEY);
 
 type SkillMarketSettingsProps = {
-  active?: boolean;
-  onInstalled?: () => void;
+  addedStateLoading?: boolean;
+  onInstalled?: (skillNames: string[]) => void;
 };
 
-const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true, onInstalled }) => {
+const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ addedStateLoading = false, onInstalled }) => {
   const { t } = useTranslation();
   const [message, messageHolder] = useArcoMessage();
   const installedMarketState = useInstalledMarketState();
-  const [installedStateLoading, setInstalledStateLoading] = useState(true);
+  const mounted = useRef(true);
 
   useEffect(() => {
-    if (!active) return;
-    let disposed = false;
-    setInstalledStateLoading(true);
-    // Installation targets Nomi's managed Skill Library. External Agent
-    // directories can be slow or unavailable and must not gate this flow.
-    void ipcBridge.fs.listAvailableSkills
-      .invoke()
-      .then((skills) => {
-        if (disposed) return;
-        const names = new Set(skills.map((skill) => skill.name));
-        const reconciled = reconcileInstalledMarketState(readInstalledMarketState(), names);
-        writeInstalledMarketState(reconciled);
-      })
-      .catch((error) => {
-        // Keep Add available. The backend installer remains the authority and
-        // will reject a real conflict without overwriting the existing skill.
-        console.error('Failed to load Nomi skills for the market:', error);
-      })
-      .finally(() => {
-        if (!disposed) setInstalledStateLoading(false);
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [active]);
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const isAdded = useCallback(
     (item: ISkillMarketItem) => Boolean(installedMarketState[item.id]),
@@ -82,7 +59,8 @@ const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true
           installed.skill_names
         );
         writeInstalledMarketState(nextState);
-        onInstalled?.();
+        onInstalled?.(installed.skill_names);
+        if (!mounted.current) return;
         message.success(
           t('settings.skillsMarket.installSuccess', {
             count: installed.skill_names.length,
@@ -91,6 +69,7 @@ const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true
         );
       } catch (error) {
         console.error('Failed to install Skill Market item:', error);
+        if (!mounted.current) throw error;
         const reason = parseError(error).replace(/\s+/g, ' ').trim().slice(0, 240);
         message.error(
           reason
@@ -127,7 +106,7 @@ const SkillMarketSettings: React.FC<SkillMarketSettingsProps> = ({ active = true
           onAdd={handleAdd}
           showInstallCommand={false}
           isAdded={isAdded}
-          addedStateLoading={installedStateLoading}
+          addedStateLoading={addedStateLoading}
           testIdPrefix='skill-market'
           text={{
             syncSuccess: t('settings.skillsMarket.syncSuccess', { defaultValue: '技能市场已更新' }),

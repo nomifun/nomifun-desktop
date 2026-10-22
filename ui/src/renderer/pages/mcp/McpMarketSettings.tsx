@@ -13,7 +13,6 @@ import type { IMcpServer, IMcpServerTransport } from '@/common/config/storage';
 import { Alert, Message, Modal, Tag } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 import MarketSettingsPanel from '@/renderer/pages/settings/MarketSettingsPanel';
 import { MCP_MARKET_SOURCES } from '@/renderer/services/skills/skillMarket';
 import { useMcpServerCRUD } from '@/renderer/hooks/mcp';
@@ -36,6 +35,7 @@ type McpMarketSettingsProps = {
   saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
   mcpServers: IMcpServer[];
   addedStateLoading?: boolean;
+  onImported?: (servers: IMcpServer[]) => void;
 };
 
 export const isLocalMcpEndpoint = (transport: IMcpServerTransport): boolean => {
@@ -125,9 +125,9 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
   saveMcpServers,
   mcpServers,
   addedStateLoading = false,
+  onImported,
 }) => {
   const { t } = useTranslation();
-  const navigate = useNavigate();
   const getDisplayName = useMcpDisplayName();
   const { handleBatchImportMcpServers, handleEditMcpServer } = useMcpServerCRUD(saveMcpServers);
 
@@ -264,7 +264,7 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
                   'Imported {{count}} MCP server(s) in a disabled state. Review the command and config before enabling or testing.',
               })
         );
-        navigate('/mcp');
+        onImported?.([...updated, ...imported]);
       }
     } catch (error) {
       if (!mounted.current || request !== revision.current) return;
@@ -278,7 +278,7 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
       importInFlight.current = false;
       if (mounted.current) setImporting(false);
     }
-  }, [handleBatchImportMcpServers, handleEditMcpServer, mcpServers, navigate, pendingMarketItem, pendingServers, t]);
+  }, [handleBatchImportMcpServers, handleEditMcpServer, mcpServers, onImported, pendingMarketItem, pendingServers, t]);
 
   const hasStdioServer = (pendingServers ?? []).some((server) => server.transport.type === 'stdio');
   const hasLocalNetworkServer = (pendingServers ?? []).some((server) => isLocalMcpEndpoint(server.transport));

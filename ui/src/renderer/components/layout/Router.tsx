@@ -4,6 +4,7 @@ import { HashRouter, Navigate, Route, Routes, useLocation, useParams } from 'rea
 import AppLoader from '@renderer/components/layout/AppLoader';
 import ProtectedAppRuntime from '@renderer/components/layout/ProtectedAppRuntime';
 import RouteErrorBoundary from '@renderer/components/layout/RouteErrorBoundary';
+import LegacyEnhancedToolsRedirect from '@renderer/pages/enhancedTools/LegacyEnhancedToolsRedirect';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
 import { CANVASES_PATH, CANVAS_PATTERN, ASSET_LIBRARY_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH, resourceSectionForPath } from '@renderer/pages/creativeStudio/app/resourceRoutes';
 import {
@@ -20,9 +21,8 @@ const Conversation = React.lazy(loadConversationRoute);
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
 const AgentSettingsPage = React.lazy(() => import('@renderer/pages/agentSettings'));
 const AgentSessionPage = React.lazy(() => import('@renderer/pages/agentSession/AgentSessionPage'));
-const SkillsSettingsPage = React.lazy(() => import('@renderer/pages/settings/SkillsSettingsPage'));
+const EnhancedToolsPage = React.lazy(() => import('@renderer/pages/enhancedTools'));
 const ModelHubPage = React.lazy(() => import('@renderer/pages/modelHub'));
-const McpPage = React.lazy(() => import('@renderer/pages/mcp'));
 const AppsPage = React.lazy(() => import('@renderer/pages/apps'));
 const AppWorkspaceRoute = React.lazy(() => import('@renderer/pages/apps/AppWorkspaceRoute'));
 const OpenCapabilitiesPage = React.lazy(() => import('@renderer/pages/openCapabilities'));
@@ -155,14 +155,15 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/agent' element={withRouteFallback(AgentSettingsPage)} />
             <Route path='/agent-sessions/:agentSessionId' element={withRouteFallback(AgentSessionPage)} />
             <Route path='/models' element={withRouteFallback(ModelHubPage)} />
-            <Route path='/mcp' element={withRouteFallback(McpPage)} />
+            <Route path='/enhanced-tools' element={withRouteFallback(EnhancedToolsPage)} />
+            <Route path='/mcp' element={<LegacyEnhancedToolsRedirect category='mcp' />} />
             <Route path='/apps' element={withRouteFallback(AppsPage)} />
             <Route path='/apps/new' element={withRouteFallback(AppWorkspaceRoute)} />
             <Route path='/apps/import' element={withRouteFallback(AppWorkspaceRoute)} />
             <Route path='/apps/:id' element={withRouteFallback(AppWorkspaceRoute)} />
             <Route path='/connections' element={withRouteFallback(OpenCapabilitiesPage)} />
             <Route path='/open-capabilities' element={<Navigate to='/connections?task=browser' replace />} />
-            <Route path='/skills' element={withRouteFallback(SkillsSettingsPage)} />
+            <Route path='/skills' element={<LegacyEnhancedToolsRedirect category='skills' />} />
             {/* Session section — the secondary sidebar (ContentSider) persists across these routes */}
             <Route element={<SessionShellRoute />}>
               <Route path='/guid' element={withRouteFallback(Guid)} />
@@ -172,8 +173,8 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             </Route>
             {/* Relocated to the capability rail. */}
             <Route path='/settings/model' element={<Navigate to='/models?section=models' replace />} />
-            <Route path='/settings/capabilities' element={<Navigate to='/skills' replace />} />
-            <Route path='/settings/skills-hub' element={<Navigate to='/skills' replace />} />
+            <Route path='/settings/capabilities' element={<LegacyEnhancedToolsRedirect category='skills' />} />
+            <Route path='/settings/skills-hub' element={<LegacyEnhancedToolsRedirect category='skills' />} />
             <Route path='/settings/tools' element={<Navigate to='/connections?task=tools' replace />} />
             <Route path='/settings/display' element={<Navigate to='/settings/system' replace />} />
             <Route path='/settings/webui' element={<Navigate to='/connections?task=browser' replace />} />

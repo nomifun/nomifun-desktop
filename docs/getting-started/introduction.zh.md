@@ -59,8 +59,7 @@ NomiFun 更适合已经在用 agent 做真实工作的用户。它要求你理�
   会话在 `/agent-sessions/:id` 运行。
 - **创作**：`/nomi/canvases` 管理无限 Canvas；`/asset-library/*` 管理
   素材、提示词与私有模板。
-- **技能**：`/skills` 独立管理技能。
-- **MCP**：`/mcp` 管理 MCP server、连接测试、OAuth 和 agent 配置同步。
+- **MCP & 技能**：`/enhanced-tools` 内切换 MCP 与技能，保留各自导入、市场、详情和管理操作；MCP 支持连接测试、OAuth 与启停。
 - **连接与设备**：`/connections` 连接手机（同网或中继）、其他电脑浏览器与外部 MCP/REST 工具。
 - **桌面伙伴**：`/nomi` 管理伙伴、远程频道绑定和 companion 相关设置。
 - **终端**：`/terminal-new` 创建、`/terminal/:id` 运行后端 PTY。

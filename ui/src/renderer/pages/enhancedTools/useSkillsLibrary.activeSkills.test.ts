@@ -9,9 +9,10 @@ import { describe, expect, test } from 'bun:test';
 
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 
-describe('SkillsHubSettings active skill focus', () => {
+describe('Skills library active skill focus', () => {
   test('does not add a conversation-only activeSkills focus mode to the management page', () => {
-    const source = readSource(new URL('./SkillsHubSettings.tsx', import.meta.url));
+    const source = readSource(new URL('./useSkillsLibrary.tsx', import.meta.url)) +
+      readSource(new URL('./SkillsLibraryPanel.tsx', import.meta.url));
 
     expect(source.includes("searchParams.get('activeSkills')")).toBe(false);
     expect(source.includes('activeSkillNames')).toBe(false);

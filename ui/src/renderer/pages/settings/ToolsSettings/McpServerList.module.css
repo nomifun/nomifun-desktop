@@ -1,6 +1,6 @@
 .surface {
   box-sizing: border-box;
-  margin-top: 4px;
+  width: 100%;
   padding: 0 18px;
   border: 1px solid var(--color-border-2);
   border-radius: 18px;
@@ -19,7 +19,7 @@
   background: transparent;
 }
 
-.item + .item {
+.list > div + div {
   border-top: 1px solid var(--color-border-2);
 }
 
@@ -28,8 +28,8 @@
 }
 
 .item :global(.arco-collapse-item-header) {
-  min-height: 48px;
-  padding: 8px 0 8px 24px;
+  min-height: 68px;
+  padding: 12px 0 12px 24px;
   border: 0;
   background: transparent;
 }
@@ -72,6 +72,7 @@
   flex: 1;
   min-width: 0;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -88,11 +89,13 @@
 
 .status {
   display: inline-flex;
-  width: 20px;
   height: 24px;
   flex: none;
   align-items: center;
-  justify-content: center;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
   cursor: default;
 }
 
@@ -118,6 +121,27 @@
 .iconButton :global(.arco-btn-icon) {
   display: inline-flex;
   align-items: center;
+}
+
+.testButton:global(.arco-btn) {
+  display: inline-flex;
+  height: 28px;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border-radius: 8px;
+  color: var(--text-secondary);
+}
+
+.testButton :global(.arco-btn-icon) {
+  display: inline-flex;
+  align-items: center;
+}
+
+.highlighted {
+  border-radius: 8px;
+  background: var(--color-primary-light-1);
 }
 
 .stateAction:global(.arco-btn) {

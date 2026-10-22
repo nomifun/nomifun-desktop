@@ -23,7 +23,7 @@ interface SiderSectionHeaderProps {
 
 /**
  * SiderSectionHeader — the small-text group label that segments the primary
- * navigation rail (常用 / 数据空间 / 自动化 / 增强工具 / 设置).
+ * navigation rail (常用 / 数据空间 / 自动化 / 扩展 / 设置).
  *
  * Shared by the app rail, Settings and workspace navigation. Collapsed rails
  * retain a separator in place of the group caption.

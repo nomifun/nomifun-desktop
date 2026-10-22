@@ -106,8 +106,8 @@ describe('MCP management enabled control', () => {
     const collapse = mock(() => {});
     const view = render(
       <I18nextProvider i18n={locale}>
-        <McpServerItem server={current} isCollapsed={false} isTestingConnection={false}
-          onToggleCollapse={collapse} onTestConnection={() => {}} onToggleEnabled={toggle}
+        <McpServerItem server={current} expanded={false} isTestingConnection={false}
+          onToggleExpanded={collapse} onTestConnection={() => {}} onToggleEnabled={toggle}
           onEditServer={() => {}} onDeleteServer={() => {}} />
       </I18nextProvider>
     );

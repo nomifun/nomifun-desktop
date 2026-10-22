@@ -1,37 +1,53 @@
-/**
- * @license
- * Copyright 2025-2026 NomiFun (nomifun.com)
- * SPDX-License-Identifier: Apache-2.0
- */
+import { afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
+import { cleanup, fireEvent, render, within } from '@testing-library/react';
+import { createElement as h } from 'react';
+import { createInstance } from 'i18next';
+import { I18nextProvider } from 'react-i18next';
+import type { SkillInfo } from '@/common/types/skill';
+import common from '@/renderer/services/i18n/locales/en-US/common.json';
+import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
+import SkillCard from './SkillCard';
 
-import { readFileSync } from 'node:fs';
-import { describe, expect, test } from 'bun:test';
+const locale = createInstance();
+beforeAll(async () => {
+  await locale.init({ lng: 'en-US', resources: { 'en-US': { translation: { common, settings } } } });
+});
+afterEach(cleanup);
+
+const custom: SkillInfo = { name: 'example-skill', description: 'Reusable instructions', location: '/skills/example/SKILL.md', is_custom: true, source: 'custom' };
+function card(skill: SkillInfo, onOpenDetails = mock(() => {}), onDelete = mock(() => {}), isAutoInjected = false) {
+  return h(I18nextProvider, { i18n: locale }, h(SkillCard, { skill, localeKey: 'en-US', isAutoInjected, onOpenDetails, onDelete }));
+}
 
 describe('SkillCard interaction ownership', () => {
-  test('opens details from the card and reserves deletion for its explicit action', () => {
-    const source = readFileSync(new URL('./SkillCard.tsx', import.meta.url), 'utf8');
-    const cardClick = source.indexOf('onClick={() => onOpenDetails(skill)}');
-    const footerStop = source.indexOf('onClick={(e) => e.stopPropagation()}');
-    const deleteClick = source.indexOf('onClick={() => onDelete(skill)}');
+  test('opens details with mouse or keyboard and keeps deletion a separate visible action', () => {
+    const open = mock(() => {});
+    const remove = mock(() => {});
+    const view = render(card(custom, open, remove));
+    const item = view.getByTestId('skill-card-example-skill');
+    const details = within(item).getByRole('button', { name: /Skill Details: example-skill/ });
+    fireEvent.click(details);
+    fireEvent.keyDown(details, { key: 'Enter' });
+    fireEvent.keyDown(details, { key: ' ' });
+    expect(open).toHaveBeenCalledTimes(3);
+    expect(open).toHaveBeenLastCalledWith(custom);
 
-    expect(cardClick).toBeGreaterThanOrEqual(0);
-    expect(footerStop).toBeGreaterThan(cardClick);
-    expect(deleteClick).toBeGreaterThan(footerStop);
-    expect(source.includes('onEditTags')).toBe(false);
-    expect(source.includes('border-t border-solid border-[var(--color-border-1)]')).toBe(false);
-    expect(source.includes('absolute bottom-10px right-12px flex items-center justify-end')).toBe(true);
-    expect(source.includes('p-12px pb-34px cursor-pointer outline-none')).toBe(true);
-    expect(source.includes('hover:text-danger-6')).toBe(true);
+    fireEvent.click(within(item).getByRole('button', { name: 'Delete example-skill' }));
+    expect(remove).toHaveBeenCalledWith(custom);
+    expect(open).toHaveBeenCalledTimes(3);
+    expect(within(item).queryByRole('switch')).toBeNull();
+    expect(within(item).getByText('Custom')).toBeTruthy();
   });
 
-  test('separates the title and compact source badge while centering them with the icon', () => {
-    const source = readFileSync(new URL('./SkillCard.tsx', import.meta.url), 'utf8');
-
-    expect(source.includes("<div className='flex items-center gap-10px'>")).toBe(true);
-    expect(source.includes("<div className='flex h-36px min-w-0 flex-1 flex-col justify-between'>")).toBe(true);
-    expect(source.includes("<div className='flex h-20px min-w-0 items-center'>")).toBe(true);
-    expect(source.includes("<div className='flex h-14px items-center'>")).toBe(true);
-    expect(source.includes('!h-14px !text-9px !leading-12px !px-5px')).toBe(true);
-    expect(source.includes("className='mt-6px text-12px leading-18px")).toBe(true);
+  test('keeps built-in and auto-injected skills inspectable without delete or enable controls', () => {
+    const builtin: SkillInfo = { ...custom, source: 'builtin', is_custom: false };
+    const view = render(card(builtin));
+    expect(view.queryByTestId('btn-delete-example-skill')).toBeNull();
+    expect(view.getByText('Built-in')).toBeTruthy();
+    expect(view.queryByRole('switch')).toBeNull();
+    view.rerender(card(builtin, mock(() => {}), mock(() => {}), true));
+    expect(view.getByText(settings.skillsHub.sourceAuto)).toBeTruthy();
+    expect(view.getByRole('button', { name: /Skill Details: example-skill/ })).toBeTruthy();
+    expect(view.queryByTestId('btn-delete-example-skill')).toBeNull();
   });
 });

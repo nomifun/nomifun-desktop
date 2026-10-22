@@ -24,17 +24,13 @@
   "outputLimitCustomHint": "可直接选择常用上限，也可选择“自定义”后输入数值并切换单位；清空则恢复默认。",
   "outputLimitRequired": "此协议要求数字输出上限；尚无供应商/模型推荐值，请按该模型文档填写，应用不会猜默认。",
   "skillsHub": {
-    "title": "技能中心",
-    "railTitle": "技能",
-    "description": "集中管理独立的 Agent Skill 能力包，可由任意设定引用。",
     "mySkillsTitle": "我的技能",
     "noSkills": "未发现技能。请导入技能以开始使用。",
     "custom": "自定义",
     "builtin": "内置",
     "manualImport": "导入技能",
     "importZip": "导入 .zip",
-    "tipTitle": "使用贴士：",
-    "tipContent": "Skill 独立安装和管理，可在设定中按需组合；支持导入单个技能目录、父目录或 zip 压缩包。",
+    "tipContent": "技能独立安装，在会话中按需选择；支持导入技能目录、父目录或 ZIP 压缩包。",
     "fetchError": "获取技能失败",
     "importSuccess": "技能导入成功",
     "importSuccessDetailed": "已导入 {{count}} 个技能：{{names}}",
@@ -47,7 +43,7 @@
     "deleteErrorDetailed": "删除技能出错：{{detail}}",
     "deleteConfirmTitle": "删除技能",
     "deleteConfirmContent": "确定要删除 \"{{name}}\" 吗？",
-    "manageInHub": "前往技能中心管理",
+    "manageInHub": "前往 MCP & 技能",
     "recommend": "智能推荐",
     "recommendSuccess": "推荐成功：根据规则自动为您勾选了 {{count}} 个技能",
     "noRecommendations": "未发现匹配的技能，请手动勾选",
@@ -58,10 +54,9 @@
     "searchPlaceholder": "搜索技能...",
     "noSearchResults": "未找到相关技能",
     "gridTitle": "技能",
-    "gridDescription": "可被 Agent、设定和伙伴复用的独立能力包。",
     "noDescription": "暂无描述。",
     "noMatch": "没有符合当前筛选条件的技能。",
-    "sourceAuto": "自动",
+    "sourceAuto": "默认选中",
     "editTags": "编辑标签",
     "editTagsTitle": "标签",
     "editTagsDesc": "为该技能打上标签，让它出现在对应的人群与场景筛选下。",
@@ -76,10 +71,6 @@
     "detailLoadFailedHint": "文件可能已移动或暂时无法读取。请刷新技能列表后重试。",
     "tagsSaved": "标签已保存",
     "tagsSaveFailed": "保存标签失败"
-  },
-  "skillsPage": {
-    "libraryTab": "已安装技能",
-    "marketTab": "技能市场"
   },
   "skillsMarket": {
     "title": "技能市场",
@@ -138,8 +129,6 @@
     "empty": "点击刷新获取 MCP 市场列表。"
   },
   "mcpPage": {
-    "installedMcpTab": "已安装MCP",
-    "mcpMarketTab": "MCP市场",
     "loadFailed": "加载 MCP 服务失败，请重试。"
   },
   "agentSkillImport": {
@@ -1046,7 +1035,7 @@
   "mcpJsonUrlRequiredError": "HTTP 和 SSE MCP 服务必须提供非空 \"url\"。",
   "mcpJsonStdioCommandRequiredError": "Stdio MCP 服务必须提供非空 \"command\"。",
   "mcpGetApi": "获取 API",
-  "mcpTestConnection": "检测MCP可用状态",
+  "mcpTestConnection": "检测连接",
   "mcpEnabled": "已启用",
   "mcpDisabled": "已停用",
   "mcpEnableServer": "启用 {{name}}",
@@ -1093,7 +1082,7 @@
   "mcpCheckReasonLabel": "可能原因：",
   "mcpCheckPurposeHint": "用于检查 MCP 配置是否可用，不代表实际运行时状态。",
   "mcpCheckAvailableSimple": "可用",
-  "mcpCheckPassedSimple": "手动检测该 MCP 可用",
+  "mcpCheckPassedSimple": "上次检测通过",
   "mcpCheckFailedSimple": "失败",
   "mcpCheckPassedSummary": "手动检测该 MCP 可用",
   "mcpCheckFailedSummary": "手动检测该 MCP 不可用",
@@ -1592,11 +1581,6 @@
     "title": "设定",
     "subtitle": "将 Agent、模型、Skill 与知识范围固化为可一键启动的复用配置。",
     "railTitle": "设定"
-  },
-  "mcpHub": {
-    "title": "MCP",
-    "subtitle": "管理已安装 MCP 与 MCP 市场。",
-    "railTitle": "MCP"
   },
   "openCapabilities": {
     "flowWebuiTitle": "先打开 WebUI",
@@ -2257,5 +2241,16 @@
     "audio_capturing": "系统麦克风录音中",
     "audio_stopping": "正在停止系统录音",
     "audio_error": "系统录音失败"
+  },
+  "enhancedTools": {
+    "title": "MCP & 技能",
+    "skills": "技能",
+    "add": "添加",
+    "searchMcp": "搜索 MCP 服务器",
+    "servers": "服务器",
+    "installedSkills": "已安装技能",
+    "mcpHint": "启用并检测通过、发现工具后，可在会话中选择使用。",
+    "skillsHint": "独立安装，在会话中按需选择。",
+    "backToList": "返回列表"
   }
 }

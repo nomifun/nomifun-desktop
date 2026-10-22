@@ -64,7 +64,6 @@ const OneClickImportModal: React.FC<OneClickImportModalProps> = ({
   onBatchImport,
 }) => {
   const { t } = useTranslation();
-  const [detectedAgents, setDetectedAgents] = useState<Array<{ backend: string; name: string }>>([]);
   const [selectedAgent, setSelectedAgent] = useState<string>('');
   const [fetchedServers, setFetchedServers] = useState<DetectedMcpServer[]>([]);
   const [importedServers, setImportedServers] = useState<IMcpServer[]>([]);
@@ -173,7 +172,6 @@ const OneClickImportModal: React.FC<OneClickImportModalProps> = ({
       setDetectionError(null);
       setFetchedServers([]);
       setImportedServers([]);
-      setDetectedAgents([...IMPORTABLE_AGENTS]);
       setLoadingImport(false);
       setSubmittingImport(false);
     }
@@ -290,7 +288,7 @@ const OneClickImportModal: React.FC<OneClickImportModalProps> = ({
         className='w-full'
         size='large'
       >
-        {detectedAgents.map((agent) => (
+        {IMPORTABLE_AGENTS.map((agent) => (
           <Select.Option key={agent.backend} value={agent.backend}>
             {agent.name}
           </Select.Option>

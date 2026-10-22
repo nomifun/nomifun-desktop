@@ -13,6 +13,7 @@ import { useAuth } from '@renderer/hooks/context/AuthContext';
 import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
 import { CANVASES_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH } from '@renderer/pages/creativeStudio/app/resourceRoutes';
+import { ENHANCED_TOOLS_PATH, enhancedToolsUrl } from '@renderer/pages/enhancedTools/routes';
 import { FileText, FullScreen, PageTemplate } from '@icon-park/react';
 import SiderNavItem from './SiderNav/SiderNavItem';
 import { requestCreativeStudioBeforeLeave } from '@renderer/pages/creativeStudio/app/beforeLeave';
@@ -20,11 +21,10 @@ import { readCanvasResumeLocation, rememberCanvasResumeLocation } from '@rendere
 import {
   SiderAssetLibraryEntry,
   SiderAgentEntry,
-  SiderSkillsEntry,
+  SiderEnhancedToolsEntry,
   SiderConversationEntry,
   SiderCustomerServiceEntry,
   SiderKnowledgeEntry,
-  SiderMcpEntry,
   SiderModelHubEntry,
   SiderNomiEntry,
   SiderOpenCapabilitiesEntry,
@@ -51,7 +51,7 @@ interface SiderProps {
  * reached via the "会话" entry. The rail holds top-level destinations grouped
  * by small-text section headers (`SiderSectionHeader`): 常用 (会话 / 桌面伙伴),
  * 数据空间 (知识库), 自动化 (定时任务 / 需求平台),
- * 增强工具 (设定 / Skill / MCP), 服务 (应用 / 客服), and a bottom-pinned 设置 group
+ * 扩展 (MCP & 技能), 服务 (应用 / 客服), and a bottom-pinned 设置 group
  * (模型管理 + the footer). Execution engines live as an
  * independent tab inside Settings rather than being mixed into model
  * management.
@@ -123,9 +123,8 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   };
   const handleCustomerServiceClick = () => navTo('/customer-service');
   const handleAgentClick = () => navTo('/agent');
-  const handleSkillsClick = () => navTo('/skills');
+  const handleEnhancedToolsClick = () => navTo(enhancedToolsUrl('mcp'));
   const handleAppClick = () => navTo('/apps');
-  const handleMcpClick = () => navTo('/mcp');
   const handleOpenCapabilitiesClick = () => navTo('/connections');
   const handleModelHubClick = () => navTo('/models');
   const handleSettingsClick = () => navTo(isSettings ? lastNonSettingsPathRef.current || '/guid' : '/settings/system');
@@ -259,21 +258,13 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleRequirementsClick}
             />
-            {/* 增强工具 — extension capabilities */}
+            {/* 扩展 — MCP & 技能 */}
             <SiderSectionHeader label={t('common.siderSection.tools')} collapsed={collapsed} />
-            {/* Skills and MCP remain platform capability destinations. */}
-            <SiderSkillsEntry
-              isActive={pathname.startsWith('/skills')}
+            <SiderEnhancedToolsEntry
+              isActive={pathname.startsWith(ENHANCED_TOOLS_PATH)}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
-              onClick={handleSkillsClick}
-            />
-            {/* MCP — MCP tool server configuration */}
-            <SiderMcpEntry
-              isActive={pathname.startsWith('/mcp')}
-              collapsed={collapsed}
-              siderTooltipProps={siderTooltipProps}
-              onClick={handleMcpClick}
+              onClick={handleEnhancedToolsClick}
             />
             {/* 服务 — hosted applications and public-facing customer service. */}
             <SiderSectionHeader label={t('common.siderSection.services')} collapsed={collapsed} />
