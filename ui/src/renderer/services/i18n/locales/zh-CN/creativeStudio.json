@@ -13,6 +13,16 @@
     "assets": "资产库",
     "templates": "模板工作台"
   },
+  "resources": {
+    "title": "资源空间",
+    "description": "集中管理素材与模板，积累可复用的创作资源。",
+    "tabsLabel": "资源类型",
+    "materials": "素材",
+    "templates": "模板",
+    "templateTasks": "模板任务",
+    "tasksLoadFailed": "模板任务加载失败",
+    "loading": "正在载入资源…"
+  },
   "agent": {
     "activity": {
       "completing": "Agent 正在完成本轮任务",

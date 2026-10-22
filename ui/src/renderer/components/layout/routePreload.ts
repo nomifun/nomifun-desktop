@@ -11,6 +11,8 @@ export const loadConversationRoute = () => conversationRoute ??= import('@render
 
 export const loadResourcePageBoundary = () =>
   import('@renderer/pages/creativeStudio/app/ResourcePageBoundary');
+export const loadResourceSpaceRoute = () =>
+  import('@renderer/pages/creativeStudio/app/ResourceSpaceRoute');
 export const loadCreativeStudioCanvasesRoute = () =>
   import('@renderer/pages/creativeStudio/canvases/CreativeStudioCanvasesRoute');
 export const loadCreativeStudioPromptsRoute = () =>
@@ -48,7 +50,11 @@ export const preloadResourceRoute = (path: string): Promise<void> => {
   if (!loader) return Promise.resolve();
 
   return ignorePreloadFailure(
-    Promise.all([loadResourcePageBoundary(), loader()])
+    Promise.all([
+      loadResourcePageBoundary(),
+      section === 'assets' || section === 'templates' ? loadResourceSpaceRoute() : undefined,
+      loader(),
+    ])
   );
 };
 

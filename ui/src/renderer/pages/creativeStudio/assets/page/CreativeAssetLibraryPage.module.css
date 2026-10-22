@@ -15,6 +15,10 @@
   flex: 1;
 }
 
+.embedded {
+  background: transparent;
+}
+
 .modalForm,
 .modalBody {
   display: flex;

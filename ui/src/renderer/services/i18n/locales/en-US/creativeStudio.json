@@ -13,6 +13,16 @@
     "assets": "Asset library",
     "templates": "Template studio"
   },
+  "resources": {
+    "title": "Resource space",
+    "description": "Keep reusable materials and templates together for your next creation.",
+    "tabsLabel": "Resource types",
+    "materials": "Materials",
+    "templates": "Templates",
+    "templateTasks": "Template tasks",
+    "tasksLoadFailed": "Could not load template tasks",
+    "loading": "Loading resources…"
+  },
   "agent": {
     "activity": {
       "completing": "Agent is completing this task",

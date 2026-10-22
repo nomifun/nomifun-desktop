@@ -1439,3 +1439,77 @@
     animation: none !important;
   }
 }
+
+.embeddedHeaderActions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.embeddedHeaderActions > :global(.arco-btn) {
+  flex: 0 0 auto;
+}
+
+.embeddedSearch {
+  width: clamp(180px, 22vw, 300px);
+  min-height: 32px;
+  padding: 0 0 0 10px;
+  gap: 4px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--color-bg-2);
+}
+
+.embeddedSearch input {
+  width: 0;
+  height: 30px;
+}
+
+.embeddedSearch > .clearSearchButton,
+.embeddedSearch > .sourceSearchButton {
+  height: 30px;
+  border-radius: 0;
+}
+
+.embeddedSearch > .sourceSearchButton {
+  width: 32px;
+  flex-basis: 32px;
+  border-left: 1px solid var(--color-border-2);
+}
+
+.root[data-asset-appearance='source-page'][data-resource-space-embedded='true'] {
+  align-items: stretch;
+  overflow: hidden;
+  background: transparent;
+}
+
+.root[data-asset-appearance='source-page'][data-resource-space-embedded='true'] .frame {
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+}
+
+.root[data-asset-appearance='source-page'][data-resource-space-embedded='true'] .filterRow {
+  width: 100%;
+  box-sizing: border-box;
+  align-self: stretch;
+  align-items: center;
+  padding: 16px 24px 12px;
+}
+
+.root[data-asset-appearance='source-page'][data-resource-space-embedded='true'] .sourceActions {
+  align-items: center;
+  gap: 12px;
+}
+
+.root[data-asset-appearance='source-page'][data-resource-space-embedded='true'] .content {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 16px 24px 24px;
+}
+
+.root[data-asset-appearance='source-page'][data-resource-space-embedded='true'] .sourcePagination {
+  border-top: 1px solid var(--color-border-1);
+}

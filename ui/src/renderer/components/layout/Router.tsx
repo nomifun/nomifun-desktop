@@ -8,13 +8,12 @@ import LegacyEnhancedToolsRedirect from '@renderer/pages/enhancedTools/LegacyEnh
 import { useAuth } from '@renderer/hooks/context/AuthContext';
 import { CANVASES_PATH, CANVAS_PATTERN, ASSET_LIBRARY_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH, resourceSectionForPath } from '@renderer/pages/creativeStudio/app/resourceRoutes';
 import {
-  loadCreativeStudioAssetsRoute,
   loadCreativeStudioCanvasRoute,
   loadCreativeStudioCanvasesRoute,
   loadCreativeStudioPromptsRoute,
-  loadCreativeStudioTemplateRoute,
   loadKnowledgeDetailRoute,
   loadResourcePageBoundary,
+  loadResourceSpaceRoute,
   loadConversationRoute,
 } from './routePreload';
 const Conversation = React.lazy(loadConversationRoute);
@@ -49,9 +48,8 @@ const KnowledgeDetailPage = React.lazy(loadKnowledgeDetailRoute);
 const ResourcePageBoundary = React.lazy(loadResourcePageBoundary);
 const CreativeStudioCanvasesRoute = React.lazy(loadCreativeStudioCanvasesRoute);
 const CreativeStudioPromptsRoute = React.lazy(loadCreativeStudioPromptsRoute);
-const CreativeStudioAssetsRoute = React.lazy(loadCreativeStudioAssetsRoute);
+const ResourceSpaceRoute = React.lazy(loadResourceSpaceRoute);
 const CreativeStudioCanvasRoute = React.lazy(loadCreativeStudioCanvasRoute);
-const CreativeStudioTemplateRoute = React.lazy(loadCreativeStudioTemplateRoute);
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
 const ConversationShell = React.lazy(() => import('@renderer/pages/conversation/components/ConversationShell'));
 
@@ -147,9 +145,11 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
               <Route path={CANVASES_PATH} element={withRouteFallback(CreativeStudioCanvasesRoute)} />
               <Route path={CANVAS_PATTERN} element={withRouteFallback(CreativeStudioCanvasRoute)} />
               <Route path={ASSET_LIBRARY_PATH} element={<Navigate to={MATERIALS_PATH} replace />} />
-              <Route path={MATERIALS_PATH} element={withRouteFallback(CreativeStudioAssetsRoute)} />
+              <Route element={withRouteFallback(ResourceSpaceRoute)}>
+                <Route path={MATERIALS_PATH} element={null} />
+                <Route path={TEMPLATES_PATH} element={null} />
+              </Route>
               <Route path={PROMPTS_PATH} element={withRouteFallback(CreativeStudioPromptsRoute)} />
-              <Route path={TEMPLATES_PATH} element={withRouteFallback(CreativeStudioTemplateRoute)} />
             </Route>
             {/* Agent authoring is public; platform capabilities remain separate destinations. */}
             <Route path='/agent' element={withRouteFallback(AgentSettingsPage)} />

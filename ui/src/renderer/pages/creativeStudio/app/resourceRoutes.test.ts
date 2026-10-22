@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { CANVASES_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH, canvasPath, matchCanvasPath, resourceSectionForPath } from './resourceRoutes';
+import { ASSET_LIBRARY_PATH, CANVASES_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH, canvasPath, matchCanvasPath, resourceSectionForPath, resourceSpaceSectionForPath } from './resourceRoutes';
 import { normalizeCanvasResumeLocation, readCanvasResumeLocation, rememberCanvasResumeLocation } from './canvasResumeLocation';
 
 describe('resource destinations', () => {
@@ -13,6 +13,13 @@ describe('resource destinations', () => {
     for (const path of ['/nomi', '/nomi/canvases-other', '/workshop/image', '/workshop/video', '/workshop/canvas/id']) {
       expect(resourceSectionForPath(path)).toBeNull();
     }
+  });
+  test('matches only materials and templates as resource space tabs', () => {
+    expect(resourceSpaceSectionForPath(ASSET_LIBRARY_PATH)).toBe('assets');
+    expect(resourceSpaceSectionForPath(`${MATERIALS_PATH}?q=reference`)).toBe('assets');
+    expect(resourceSpaceSectionForPath(TEMPLATES_PATH)).toBe('templates');
+    expect(resourceSpaceSectionForPath(PROMPTS_PATH)).toBeNull();
+    expect(resourceSpaceSectionForPath(CANVASES_PATH)).toBeNull();
   });
   test('validates canvas resume paths and rejects non-canvas/external destinations', () => {
     expect(normalizeCanvasResumeLocation('/nomi/canvases/a?tab=agent#node')).toBe('/nomi/canvases/a?tab=agent#node');

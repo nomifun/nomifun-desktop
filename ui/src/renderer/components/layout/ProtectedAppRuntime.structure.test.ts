@@ -109,7 +109,7 @@ describe('protected application runtime boundary', () => {
     expect(focusShellSource.includes('<Outlet />')).toBe(true);
     expect(siderSource.includes('CreativeStudioSider')).toBe(false);
     expect(siderSource.includes('handleCanvasClick')).toBe(true);
-    expect(siderSource.includes('SiderAssetLibraryEntry')).toBe(true);
+    expect(siderSource.includes('SiderResourceSpaceEntry')).toBe(true);
     expect(siderSource.includes('requestCreativeStudioBeforeLeave')).toBe(true);
   });
 

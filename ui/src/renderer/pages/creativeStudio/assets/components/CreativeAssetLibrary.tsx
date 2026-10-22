@@ -31,6 +31,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { CreativeAsset, CreativeAssetKind } from '../types';
 import { NOMI_PAGINATION_CLASS_NAME } from '@/renderer/components/base/NomiPagination';
+import { ResourceSpaceHeaderActions, useResourceSpaceChrome } from '../../app/ResourceSpaceChrome';
 import { creativeAssetDisplayTitle, formatCreativeAssetBytes } from '../presentation';
 import CreativeAssetMedia, { creativeAssetKindIcon } from './CreativeAssetMedia';
 import CreativeAssetActionsMenu from './CreativeAssetActionsMenu';
@@ -304,6 +305,8 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
         ? 'empty'
         : 'ready';
   const sourceAppearance = appearance === 'source-page';
+  const resourceSpaceChrome = useResourceSpaceChrome();
+  const embedded = sourceAppearance && resourceSpaceChrome?.section === 'assets';
   const kindFilters = sourceAppearance
     ? SOURCE_KIND_ORDER.map((filter) => KIND_FILTERS.find((option) => option.value === filter)!)
     : KIND_FILTERS;
@@ -330,6 +333,37 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
     if (next.length) onUploadFiles?.(next);
   };
 
+  const sourceSearch = (
+    <form
+      className={classNames(styles.searchBox, embedded && styles.embeddedSearch)}
+      role='search'
+      onSubmit={(event) => submitCreativeAssetLibrarySearch(event, search, onSearchSubmit)}
+    >
+      <Search theme='outline' size={17} fill='currentColor' strokeWidth={3} />
+      <input
+        type='search'
+        aria-label={labels.search}
+        value={search}
+        placeholder={labels.searchPlaceholder}
+        disabled={disabled}
+        onChange={(event) => onSearchChange(event.target.value)}
+      />
+      {search ? (
+        <button type='button' className={styles.clearSearchButton} aria-label={labels.clearSearch} onClick={() => onSearchChange('')}>
+          <Close theme='outline' size={14} fill='currentColor' strokeWidth={3} />
+        </button>
+      ) : null}
+      <button
+        type='submit'
+        className={styles.sourceSearchButton}
+        aria-label={labels.search}
+        disabled={disabled}
+      >
+        <Search theme='outline' size={18} fill='currentColor' strokeWidth={3} />
+      </button>
+    </form>
+  );
+
   return (
     <section
       className={classNames(styles.root, className)}
@@ -338,6 +372,7 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
       data-asset-scope={scope}
       data-asset-state={visibleState}
       data-asset-appearance={appearance}
+      data-resource-space-embedded={embedded || undefined}
       aria-busy={state.loading || state.loadingMore || state.mutating}
       onDragEnter={(event) => {
         if (busy || !onUploadFiles || !event.dataTransfer.types.includes('Files')) return;
@@ -361,7 +396,33 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
         acceptFiles(event.dataTransfer.files);
       }}
     >
+      {embedded ? (
+        <ResourceSpaceHeaderActions>
+          <div className={styles.embeddedHeaderActions} data-asset-header-actions>
+            {sourceSearch}
+            {onCreateText ? (
+              <Button disabled={busy} onClick={onCreateText} icon={<Plus theme='outline' size={16} fill='currentColor' strokeWidth={3} />}>
+                {labels.createText}
+              </Button>
+            ) : null}
+            {onUploadFiles ? (
+              <Button
+                type='primary'
+                disabled={busy}
+                title={uploadHint}
+                aria-describedby={uploadHint ? uploadHintId : undefined}
+                onClick={() => inputRef.current?.click()}
+                icon={<Upload theme='outline' size={16} fill='currentColor' strokeWidth={3} />}
+              >
+                {labels.upload}
+              </Button>
+            ) : null}
+            {uploadHint ? <span id={uploadHintId} className={styles.srOnly}>{uploadHint}</span> : null}
+          </div>
+        </ResourceSpaceHeaderActions>
+      ) : null}
       <div className={styles.frame}>
+        {!embedded ? (
         <header className={styles.header}>
           <div className={styles.titleBlock}>
             <h1>{labels.title}</h1>
@@ -392,37 +453,12 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
             </div>
           ) : null}
         </header>
+        ) : null}
 
+      {!embedded ? (
       <div className={styles.toolbar}>
         {sourceAppearance ? (
-          <form
-            className={styles.searchBox}
-            role='search'
-            onSubmit={(event) => submitCreativeAssetLibrarySearch(event, search, onSearchSubmit)}
-          >
-            <Search theme='outline' size={17} fill='currentColor' strokeWidth={3} />
-            <input
-              type='search'
-              aria-label={labels.search}
-              value={search}
-              placeholder={labels.searchPlaceholder}
-              disabled={disabled}
-              onChange={(event) => onSearchChange(event.target.value)}
-            />
-            {search ? (
-              <button type='button' className={styles.clearSearchButton} aria-label={labels.clearSearch} onClick={() => onSearchChange('')}>
-                <Close theme='outline' size={14} fill='currentColor' strokeWidth={3} />
-              </button>
-            ) : null}
-            <button
-              type='submit'
-              className={styles.sourceSearchButton}
-              aria-label={labels.search}
-              disabled={disabled}
-            >
-              <Search theme='outline' size={18} fill='currentColor' strokeWidth={3} />
-            </button>
-          </form>
+          sourceSearch
         ) : (
           <>
             <label className={styles.searchBox}>
@@ -479,6 +515,7 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
           </>
         )}
       </div>
+      ) : null}
 
       <div className={styles.filterRow}>
         <div className={styles.sourceFilterGroup}>
@@ -536,7 +573,7 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
                 ) : null}
               </div>
             ) : null}
-            {onUploadFiles ? (
+            {!embedded && onUploadFiles ? (
               <button
                 type='button'
                 disabled={busy}
@@ -547,10 +584,10 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
                 {labels.upload}
               </button>
             ) : null}
-            {onCreateText ? (
+            {!embedded && onCreateText ? (
               <button type='button' disabled={busy} onClick={onCreateText}>{labels.createText}</button>
             ) : null}
-            {uploadHint ? <span id={uploadHintId} className={styles.srOnly}>{uploadHint}</span> : null}
+            {!embedded && uploadHint ? <span id={uploadHintId} className={styles.srOnly}>{uploadHint}</span> : null}
           </div>
         ) : (
           <span className={styles.resultCount}>{labels.resultCount(state.assets.length, state.total)}</span>

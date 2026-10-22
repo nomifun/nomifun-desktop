@@ -14,6 +14,7 @@ import { SWRConfig } from 'swr';
 
 import { ipcBridge } from '@/common';
 
+import { ResourceSpaceChromeProvider, type ResourceSpaceChrome } from '../../app/ResourceSpaceChrome';
 import { cloneTemplateDefinition, type CreativeTemplateDefinitionV1 } from '../domain';
 import { createExecutableTemplateFixture, createTemplateFixture } from '../domain/testFixtures';
 import type { CreativeTemplateRepository } from '../services';
@@ -95,6 +96,51 @@ const goToPage = (container: HTMLElement, page: number) =>
   fireEvent.click(within(pagination(container)).getByText(String(page), { selector: 'li' }));
 
 describe('Creative Template workspace interactions', () => {
+  test('keeps template filters and task controls live across the shared resource tabs', async () => {
+    const templates = paginatedTemplates(3);
+    const headerActions = document.createElement('div');
+    const taskActions = document.createElement('div');
+    document.body.append(headerActions, taskActions);
+    const chrome: ResourceSpaceChrome = { section: 'templates', headerActions, taskActions };
+    const renderPage = (value: ResourceSpaceChrome) => <I18nextProvider i18n={testI18n}>
+      <SWRConfig value={{ provider: () => new Map(), fallback: { providers: [] }, revalidateOnMount: false }}>
+        <ResourceSpaceChromeProvider value={value}>
+          <CreativeTemplateWorkspacePage autoLoad={false} initialTemplates={templates} runCenter={{
+            snapshot: { loading: false, loadError: null, runs: [], activities: {} },
+            assetUrl: () => '', resume: async () => {}, cancel: async () => {}, review: async () => {}, retry: async () => {},
+          }} />
+        </ResourceSpaceChromeProvider>
+      </SWRConfig>
+    </I18nextProvider>;
+    const view = render(renderPage(chrome));
+    try {
+      expect(view.container.querySelector('main')).toBeNull();
+      expect(view.queryByRole('heading', { name: 'Template Studio' })).toBeNull();
+      expect(within(view.container).queryByRole('textbox', { name: 'Search names, categories, and descriptions' })).toBeNull();
+      fireEvent.change(within(headerActions).getByRole('textbox', { name: 'Search names, categories, and descriptions' }), { target: { value: 'Campaign 2' } });
+      expect(visibleNames(view.container)).toEqual(['Campaign 2']);
+
+      view.rerender(renderPage({ ...chrome, section: 'assets' }));
+      expect(headerActions.textContent).toBe('');
+      const taskTrigger = within(taskActions).getByRole('button', { name: 'Template tasks' });
+      fireEvent.click(taskTrigger);
+      expect(await view.findByRole('dialog', { name: 'Template runs' })).toBeTruthy();
+      fireEvent.click(taskTrigger);
+
+      view.rerender(renderPage(chrome));
+      expect((within(headerActions).getByRole('textbox') as HTMLInputElement).value).toBe('Campaign 2');
+      expect(visibleNames(view.container)).toEqual(['Campaign 2']);
+      fireEvent.click(within(headerActions).getByRole('button', { name: 'New template' }));
+      fireEvent.click(await view.findByRole('menuitem', { name: 'New multi-image template' }));
+      const editor = within(await view.findByRole('dialog', { name: 'New template' }));
+      expect(editor.getByRole('combobox', { name: 'Template type' }).textContent).toContain('Multi-image template');
+    } finally {
+      view.unmount();
+      headerActions.remove();
+      taskActions.remove();
+    }
+  });
+
   test('uses shared pagination to navigate templates and resets to the first page when its size changes', async () => {
     const view = renderWorkspace(paginatedTemplates(41));
     expect(visibleNames(view.container)).toHaveLength(20);

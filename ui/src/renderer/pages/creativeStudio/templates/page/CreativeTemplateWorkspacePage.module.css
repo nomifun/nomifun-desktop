@@ -17,6 +17,21 @@
   flex-direction: column;
   gap: 16px;
 }
+.embeddedPage {
+  padding: 16px 24px 24px;
+}
+.resourceHeaderActions {
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+.resourceHeaderActions .search {
+  width: 220px;
+  min-width: 160px;
+  flex: 1;
+}
+.resourceHeaderActions :global(.arco-btn) {
+  flex: none;
+}
 .header {
   display: flex;
   align-items: flex-start;
