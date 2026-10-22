@@ -90,11 +90,18 @@ const cronCancellationForwardMigration = 'crates/backend/nomifun-db/migrations/0
 const cronWorkbenchForwardMigration = 'crates/backend/nomifun-db/migrations/012_unify_cron_agent_binding.sql';
 const modelInputConstraintsForwardMigration = 'crates/backend/nomifun-db/migrations/013_model_input_constraints.sql';
 const queueSettingForwardMigration = 'crates/backend/nomifun-db/migrations/014_retire_command_queue_setting.sql';
-if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration, mcpOAuthForwardMigration, cronCancellationForwardMigration, cronWorkbenchForwardMigration, modelInputConstraintsForwardMigration, queueSettingForwardMigration].includes(path))) {
+const executionPlanGateForwardMigration = 'crates/backend/nomifun-db/migrations/015_retire_execution_plan_gate.sql';
+if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration, mcpOAuthForwardMigration, cronCancellationForwardMigration, cronWorkbenchForwardMigration, modelInputConstraintsForwardMigration, queueSettingForwardMigration, executionPlanGateForwardMigration].includes(path))) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward migrations');
 }
 const migrationStatements = (path) => readFileSync(resolve(ROOT, path), 'utf8')
   .replace(/--[^\r\n]*/g, '').split(';').map((statement) => statement.replace(/\s+/g, ' ').trim()).filter(Boolean);
+if (migrations.includes(executionPlanGateForwardMigration)
+  && JSON.stringify(migrationStatements(executionPlanGateForwardMigration)) !== JSON.stringify([
+    'ALTER TABLE agent_executions DROP COLUMN plan_gate',
+  ])) {
+  failures.push('Execution plan gate retirement may only drop its unused column; identities, policies, canonical Agent facts and lineage receipts stay unchanged');
+}
 if (migrations.includes(queueSettingForwardMigration)
   && JSON.stringify(migrationStatements(queueSettingForwardMigration)) !== JSON.stringify([
     'ALTER TABLE system_settings DROP COLUMN command_queue_enabled',

@@ -86,8 +86,7 @@ mod tests {
             {"type":"object","additionalProperties":false,"required":["strategy","tasks"],
                 "properties":{"strategy":{"type":"string","const":"parallel"},
                     "tasks":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,
-                        "properties":{"name":{"type":"string"},"prompt":{"type":"string"}},"required":["name","prompt"]}},
-                    "synthesize":{"type":"boolean"}}}
+                        "properties":{"name":{"type":"string"},"prompt":{"type":"string"}},"required":["name","prompt"]}}}}
         ]}))
     }
 
@@ -97,7 +96,6 @@ mod tests {
         let projected = model_tool_schema(&original);
         assert_eq!(projected.0["oneOf"], original.0["oneOf"]);
         assert_eq!(projected.0["properties"]["tasks"]["type"], "array");
-        assert_eq!(projected.0["properties"]["synthesize"]["type"], "boolean");
         assert_eq!(projected.0["properties"]["strategy"]["enum"], json!(["planned","parallel"]));
         assert_eq!(projected.0["required"], json!(["strategy"]));
         assert_eq!(model_tool_schema(&projected), projected, "projection is idempotent");
@@ -113,19 +111,17 @@ mod tests {
         for strategy in [json!("planned"), json!("parallel"), json!("unknown"), Value::Null] {
             for goal in &choices {
                 for tasks in &choices {
-                    for synthesize in &choices {
-                        for mask in 0..8 {
+                        for mask in 0..4 {
                             let mut input = json!({"strategy":strategy});
                             if mask & 1 != 0 { input["goal"] = goal.clone(); }
                             if mask & 2 != 0 { input["tasks"] = tasks.clone(); }
-                            if mask & 4 != 0 { input["synthesize"] = synthesize.clone(); }
                             assert_eq!(before.is_valid(&input), after.is_valid(&input), "{input}");
                         }
-                    }
                 }
             }
         }
-        for input in [json!({}), json!([]), json!("text"), json!({"strategy":"parallel","tasks":[{}],"extra":true})] {
+        for input in [json!({}), json!([]), json!("text"), json!({"strategy":"parallel","tasks":[{}],"extra":true}),
+            json!({"strategy":"parallel","tasks":[{"name":"marker","prompt":"Reply OK"}],"synthesize":true})] {
             assert_eq!(before.is_valid(&input), after.is_valid(&input));
         }
     }

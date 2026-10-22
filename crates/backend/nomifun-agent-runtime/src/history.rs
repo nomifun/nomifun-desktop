@@ -190,6 +190,9 @@ fn replay_into(
     let mut recovery_tail_safe = true;
     let mut recovery_proposals = std::collections::BTreeSet::new();
     let mut last_execution_fence = 0;
+    let mut awaiting_children: Option<crate::AgentChildrenWait> = None;
+    let mut collaboration = crate::AgentCollaborationProgress::default();
+    let mut delegation_calls = std::collections::BTreeSet::new();
     for (index,event) in events.iter().enumerate() {
         // Kept separate from control-result scope. Only normal CLOSED model
         // history is labelled; isolated validation and executable recovery
@@ -210,6 +213,13 @@ fn replay_into(
             }
         }
         match event {
+            AgentEngineEvent::CollaborationInherited { progress } => {
+                if index != 1 || model_steps != 0 || !collaboration.is_empty() {
+                    return Err(invalid("collaboration inheritance is outside the original Turn entry"));
+                }
+                progress.validate()?;
+                collaboration = progress.clone();
+            }
             AgentEngineEvent::CompletionDelivered { step, text } => {
                 let report = batch.completion_report.as_ref().ok_or_else(|| invalid("completion delivery has no accepted report"))?;
                 if batch.step != Some(*step) || batch.calls.len() != batch.results.len()
@@ -346,6 +356,9 @@ fn replay_into(
                 capability_id,
                 ..
             } if *step > 0 => {
+                if capability_id.as_ref() == "agent.collaboration" && matches!(action_id.as_ref(), "agent/delegate"|"agent/fork") {
+                    delegation_calls.insert(call_id.clone());
+                }
                 if batch.discarded {
                     return Err(AgentEngineError::ReplayContract(
                         "tool dispatch after output-limit discard".into(),
@@ -513,6 +526,16 @@ fn replay_into(
                         "persisted tool result has no call".into(),
                     ));
                 }
+                if !result.is_error && batch.calls[&result.call_id].name == crate::collaboration::WAIT {
+                    awaiting_children = Some(crate::collaboration::from_wait_call(&batch.calls[&result.call_id])?);
+                }
+                if !result.is_error {
+                    if batch.calls[&result.call_id].name == crate::collaboration::STATUS {
+                        collaboration.observe_status(&crate::collaboration::snapshot_from_result(result)?)?;
+                    } else if batch.calls[&result.call_id].name == crate::collaboration::MESSAGE {
+                        collaboration.accept_message(result)?;
+                    } else if delegation_calls.contains(&result.call_id) { collaboration.accept(result)?; }
+                }
                 if let Some(action) = batch.process_actions.get(&result.call_id) {
                     process_records.observe(action, &batch.calls[&result.call_id], result);
                 }
@@ -628,6 +651,21 @@ fn replay_into(
                 observation.validate()?;
                 batch.flush(history, false)?;
                 history.push(crate::wait::observation_message(observation)?);
+            }
+            AgentEngineEvent::AwaitingChildren { model_steps: through_step, request } => {
+                if *through_step != model_steps || (awaiting_children.as_ref() != Some(request)
+                    && collaboration.wait().as_ref() != Some(request)) {
+                    return Err(invalid("child wait differs from its exact accepted control"));
+                }
+                request.validate()?;
+                awaiting_children = Some(request.clone());
+            }
+            AgentEngineEvent::ChildrenWaitResolved { model_steps: through_step, cursor } => {
+                if *through_step != model_steps || awaiting_children.is_none() { return Err(invalid("child wake has no exact pending wait")); }
+                batch.flush(history, false)?;
+                history.push(crate::collaboration::wake_message(cursor)?);
+                collaboration.wake_cursor = Some(cursor.clone());
+                awaiting_children = None;
             }
             AgentEngineEvent::EndIntentReview { .. } => {
                 batch.flush(history, false)?;
@@ -1267,7 +1305,7 @@ mod tests {
             version: 1, binding: binding(), turn_operation_id: "turn".into(), active_set_generation: 0,
             model_steps: 1, tool_call_count: 0, accepted_input_count: 1, applied_steering_receipts: vec![],
             plan: Default::default(), work: Default::default(), patch_recovery: Default::default(),
-            segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None,
+            segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None, awaiting_children: None, collaboration: Default::default(),
         };
         let recovery = crate::AgentTurnRecovery::new(checkpoint, 1, 1, prefix.clone(), vec![], vec![]).unwrap();
         let expected = vec![requirement(), crate::context_lifecycle::text_message(ChatRole::Assistant, text.into())];

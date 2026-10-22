@@ -2247,6 +2247,25 @@ mod tests {
     }
 
     #[test]
+    fn newly_observed_child_workspace_effect_invalidates_parent_current_file_and_check_freshness() {
+        let mut tracker=CompletionTracker::default();
+        let mut work=AgentWorkStatus {command_observed_after_latest_mutation:true,..Default::default()};
+        let call=ChatToolCall {call_id:"parent-read-before-children".into(),name:"read_file".into(),provider_metadata:None,
+            arguments:StrictJsonValue(serde_json::json!({"path":"integrated.txt"}))};
+        let result=AgentToolResult::text(call.call_id.clone(),serde_json::json!({"path":"integrated.txt",
+            "workspace_path":{"root_sha256":"a".repeat(64),"path":"integrated.txt","case_resolved":true},
+            "sha256":"b".repeat(64),"total_bytes":3,"offset":0,"eof":true,"content":"OLD"}).to_string(),false);
+        let before=tracker.observe(&work,&file_binding("workspace.files/read"),&call,&result,true);
+        assert!(tracker.is_usable(&before,work.workspace_observation_epoch));
+        work.observe_child_workspace_change();
+        tracker.invalidate();
+        assert_eq!(work.workspace_observation_epoch,1);
+        assert!(!work.command_observed_after_latest_mutation,"a parent test before the newly observed child effect cannot verify the new workspace state");
+        assert!(!tracker.is_usable(&before,work.workspace_observation_epoch));
+        assert!(context_value(&tracker,&work)["available_evidence"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
     fn missing_file_scope_retains_absence_without_claiming_content_or_freshness() {
         let mut tracker=CompletionTracker::default();
         let call=ChatToolCall {call_id:"absent-copy".into(),name:"read_file".into(),provider_metadata:None,

@@ -457,7 +457,7 @@ async fn delegated_provider_pause_reaches_scheduler_without_waiting_thirty_minut
                     tool["function"]["description"].as_str().unwrap_or("").contains("Action: agent/delegate."))
                     .expect("coding preset exposes its admitted collaboration tool");
                 stream(Some(("delegate-once", delegate["function"]["name"].as_str().unwrap(), json!({
-                    "strategy":"parallel", "tasks":[{"name":"Create file","prompt":"Create answer.txt containing ok"}], "synthesize":false,
+                    "strategy":"parallel", "tasks":[{"name":"Create file","prompt":"Create answer.txt containing ok"}],
                 }))), "")
             } else {
                 wiremock::ResponseTemplate::new(400).set_body_json(json!({"error":{"message":"fixture rejects child request","type":"invalid_request_error"}}))

@@ -20,7 +20,7 @@ pub const MAX_VISIBLE_TOOL_DEFINITIONS: usize = 128;
 /// ToolSearch, plan/report, history/search/read/load, prior-task, context and
 /// the three authenticated MCP resource controls and opt-in silent Robot
 /// completion can coexist on one step.
-pub const RUNTIME_CONTROL_TOOL_SLOTS: usize = 13;
+pub const RUNTIME_CONTROL_TOOL_SLOTS: usize = 16;
 pub const MAX_VISIBLE_AUTHORIZED_TOOL_DEFINITIONS: usize =
     MAX_VISIBLE_TOOL_DEFINITIONS - RUNTIME_CONTROL_TOOL_SLOTS;
 /// Leave enough presentation slots for every result of one ToolSearch call.

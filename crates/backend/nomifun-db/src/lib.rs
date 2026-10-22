@@ -14,6 +14,10 @@ mod repository;
 pub use repository::agent_execution_admission::{AgentExecutionReservation, execution_capacity_available_tx,
     execution_reservations_tx, native_execution_claim_admitted_tx, native_resume_capacity_available_tx,
     native_resume_target_eligible_tx};
+pub use repository::agent_source_reply::agent_reply_source_turns_tx;
+pub use repository::agent_source_reply::agent_message_command_tx;
+pub use repository::agent_source_reply::agent_message_command_bound_tx;
+pub use repository::agent_execution_admission::execution_attempt_turn_key_tx;
 mod provider_cleanup;
 pub use provider_cleanup::insert_agent_preset_revision_tx;
 mod session_projection;
@@ -99,7 +103,7 @@ pub use repository::{
     ConversationCleanupCursor, ConversationCleanupTurnTarget, PendingConversationCleanup, PendingConversationCleanupPage,
     AgentExecutionLeaseToken, AgentExecutionTurnAuthority, AgentExecutionTaskRetirementFacts,
     AppendAgentExecutionStepsFromAttemptParams, AppendAgentExecutionStepsFromAttemptResult,
-    AppendAgentExecutionStepsParams,
+    AppendAgentExecutionStepsParams, AgentExecutionSourceAppend, AgentExecutionClosedTurn, AgentExecutionMessageSource, AgentExecutionContinuationTarget,
     AttemptConversationEffectParams, CreateAgentExecutionAttemptParams,
     CreateAgentExecutionParams, IAgentExecutionRepository,
     CreateAgentExecutionTemplateParams, IAgentExecutionTemplateRepository,

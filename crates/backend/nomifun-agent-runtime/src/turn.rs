@@ -53,6 +53,13 @@ pub struct AgentTurnRequest {
     pub unscoped_tool_hooks: bool,
     pub input_port: Option<Arc<dyn crate::AgentInputPort>>,
     pub wait_port: Option<Arc<dyn crate::AgentWaitPort>>,
+    pub collaboration_port: Option<Arc<dyn crate::AgentCollaborationPort>>,
+    /// Supplied only after the host validates an exact canonical human reply
+    /// to the original question and unchanged binding. It grants no tools.
+    pub prior_collaboration: Option<crate::AgentCollaborationProgress>,
+    /// One explicit original-user operational request, selected by the host
+    /// from the frozen Action name. It does not narrow the tool authority.
+    pub required_delegation: Option<String>,
     pub user_input_request_port: Option<Arc<dyn crate::AgentUserInputRequestPort>>,
     /// Strict opt-in, supplied only for an explicitly voice-started Turn.
     pub voice_immediate: Option<Arc<dyn crate::AgentImmediateCorrectionPort>>,
@@ -101,6 +108,9 @@ impl AgentTurnRequest {
             input_port: None,
             user_input_request_port: None,
             wait_port: None,
+            collaboration_port: None,
+            prior_collaboration: None,
+            required_delegation: None,
             voice_immediate: None,
             live_context_port: None,
             resource_port: None,
@@ -154,6 +164,21 @@ impl AgentTurnRequest {
 
     pub fn with_wait_port(mut self, port: Arc<dyn crate::AgentWaitPort>) -> Self {
         self.wait_port = Some(port);
+        self
+    }
+
+    pub fn with_collaboration_port(mut self, port: Arc<dyn crate::AgentCollaborationPort>) -> Self {
+        self.collaboration_port = Some(port);
+        self
+    }
+
+    pub fn with_prior_collaboration(mut self, progress: crate::AgentCollaborationProgress) -> Self {
+        self.prior_collaboration = Some(progress);
+        self
+    }
+
+    pub fn with_required_delegation(mut self, required: Option<String>) -> Self {
+        self.required_delegation = required;
         self
     }
 
@@ -247,6 +272,13 @@ impl AgentTurnRequest {
             prior.validate_for(binding, self.model_request.causality.turn_operation_id.as_ref())?;
         }
         self.patch_recovery.validate().map_err(AgentEngineError::InvalidContract)?;
+        if let Some(progress) = &self.prior_collaboration { progress.validate()?; }
+        if let Some(name) = &self.required_delegation {
+            if self.tool_plan.binding(name).is_none_or(|binding|binding.capability_id.as_ref()!="agent.collaboration"
+                || !matches!(binding.action_id.as_ref(),"agent/delegate"|"agent/fork")) {
+                return Err(AgentEngineError::InvalidContract("required delegation does not name an admitted collaboration Action".into()));
+            }
+        }
         if let Some(recovery) = &self.recovery {
             recovery.validate_for(binding, &self.model_request.causality.turn_operation_id, self.active_set_generation)?;
             if let Some(segments) = &recovery.checkpoint.segments {
@@ -345,6 +377,9 @@ pub(crate) async fn run_turn(
         event_sink.emit(AgentEngineEvent::TurnStarted {
             binding: binding.clone(), turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
         }).await?;
+        if let Some(progress) = &request.prior_collaboration {
+            event_sink.emit(AgentEngineEvent::CollaborationInherited { progress:progress.clone() }).await?;
+        }
     }
     let mut recovered_handoff_inputs = Vec::new();
     if let Some(pending) = recovery.as_ref().and_then(|state| state.checkpoint.pending_user_input.clone()) {
@@ -370,7 +405,8 @@ pub(crate) async fn run_turn(
             version: 1, binding: binding.clone(), turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
             active_set_generation: request.active_set_generation, model_steps: 0, tool_call_count: 0,
             accepted_input_count: 1, applied_steering_receipts: Vec::new(), plan: Default::default(), work: Default::default(),
-            patch_recovery: request.patch_recovery.clone(), segments: segments.clone(), control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None,
+            patch_recovery: request.patch_recovery.clone(), segments: segments.clone(), control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None, awaiting_children: None,
+            collaboration: request.prior_collaboration.clone().unwrap_or_default(),
         });
         if let Some(recovery) = &recovery { initial.model_steps = recovery.last_model_step; }
         // A committed model-only recovery tail can extend past the old soft
@@ -478,6 +514,10 @@ pub(crate) async fn run_turn(
     crate::tool_discovery::preactivate_deferred_tools(
         &request.tool_plan, &mut discovered_tools, &request.preactivated_tools,
     )?;
+    if let Some(name) = &request.required_delegation {
+        crate::tool_discovery::preactivate_deferred_tools(&request.tool_plan,&mut discovered_tools,
+            &BTreeSet::from([name.clone()]))?;
+    }
 
     // The host supplies canonical facts; the engine selects its model context.
     // Do this only at turn entry: trimming individual messages inside an active
@@ -526,6 +566,7 @@ pub(crate) async fn run_turn(
     let mut adaptive_slots = AdaptiveContextSlots {
         user_input_enabled: crate::user_input_request::enabled(request.user_input_request_port.as_ref()),
         silent_robot_enabled: silent_robot.enabled,
+        collaboration_enabled: request.collaboration_port.is_some(),
         ..Default::default()
     };
     let live_context_slot = if let Some(port) = &request.live_context_port {
@@ -590,6 +631,11 @@ pub(crate) async fn run_turn(
     let mut tool_call_count = recovery.as_ref().map_or(0, |state| state.checkpoint.tool_call_count);
     let mut provider_round_id = None;
     let mut pending_user_input: Option<nomifun_agent_contracts::AgentUserInputRequest> = None;
+    let mut awaiting_children = recovery.as_ref().and_then(|state| state.checkpoint.awaiting_children.clone());
+    let mut collaboration = recovery.as_ref().map(|state| state.checkpoint.collaboration.clone())
+        .or_else(|| request.prior_collaboration.clone()).unwrap_or_default();
+    let mut delegation_attempted = recovery.as_ref().is_some_and(|state|
+        crate::collaboration::delegation_attempted(state.prefix.iter().chain(&state.tail)));
     let had_recovered_handoff_input = !recovered_handoff_inputs.is_empty();
     if had_recovered_handoff_input {
         crate::steering::incorporate(recovered_handoff_inputs, &mut model_request, &mut retained_inputs,
@@ -676,7 +722,7 @@ pub(crate) async fn run_turn(
                         crate::stop_resolution::StopResolution::Pause => {
                             let receipt = persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
                                 request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
-                                &steering_receipt_order, Some(state), &patch_recovery, segments.as_ref(), &control_rejections, None).await?;
+                                &steering_receipt_order, Some(state), &patch_recovery, segments.as_ref(), &control_rejections, None, None, &collaboration).await?;
                             let past_deferred_window = segments.as_ref().is_some_and(|segment| model_steps > segment.window_end());
                             if event_sink.supports_checkpoints() && receipt.is_none() && !past_deferred_window {
                                 return Err(AgentEngineError::EventSink("intervention checkpoint was not durably acknowledged".into()));
@@ -709,6 +755,34 @@ pub(crate) async fn run_turn(
                 provider_round_id.clone(),
             )
             .await;
+        }
+
+        if let Some(wait) = awaiting_children.as_ref() {
+            wait.validate()?;
+            let port = request.collaboration_port.as_ref().ok_or_else(||
+                AgentEngineError::InvalidContract("the original collaboration owner is unavailable for this child wait".into()))?;
+            persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
+                request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
+                &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, segments.as_ref(),
+                &control_rejections, None, Some(wait), &collaboration).await?;
+            event_sink.emit(AgentEngineEvent::AwaitingChildren { model_steps, request: wait.clone() }).await?;
+            let snapshot = tokio::select! { biased;
+                _ = cancellation.cancelled() => {
+                    return cancelled_turn(&event_sink, &agent_session_id, &turn_operation_id,
+                        model_steps, &output_text, &reasoning_text, tool_call_count, provider_round_id.clone()).await;
+                },
+                result = port.wait(&model_request.causality, wait, cancellation.clone()) => result?,
+            };
+            crate::collaboration::validate_snapshot(&snapshot)?;
+            event_sink.emit(AgentEngineEvent::ChildrenWaitResolved { model_steps, cursor: snapshot.cursor.clone() }).await?;
+            collaboration.wake_cursor = Some(snapshot.cursor.clone());
+            model_request.input.messages.push(crate::collaboration::wake_message(&snapshot.cursor)?);
+            model_request.input.provider_round_parent = None;
+            awaiting_children = None;
+            persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
+                request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
+                &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, segments.as_ref(),
+                &control_rejections, None, None, &collaboration).await?;
         }
 
         // Incorporate an already accepted owner reply before consulting a
@@ -755,7 +829,7 @@ pub(crate) async fn run_turn(
             if next.is_some() || stop.is_some() {
                 let receipt = persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
                     request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
-                    &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, next.as_ref().or(Some(current)), &control_rejections, pending_user_input.as_ref()).await?;
+                    &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, next.as_ref().or(Some(current)), &control_rejections, pending_user_input.as_ref(), awaiting_children.as_ref(), &collaboration).await?;
                 if stop.is_none() && receipt.is_none() { stop = Some(crate::AgentExecutionStopReason::CheckpointUnavailable); }
                 if let Some(reason) = stop {
                     event_sink.emit(AgentEngineEvent::ExecutionBudgetExhausted {
@@ -893,6 +967,14 @@ pub(crate) async fn run_turn(
             long_horizon.as_ref().is_some_and(|state| state.completion.review.phase != AgentExecutionPhase::Execution) || account_repair || report_only_locked, review_can_report,
             plan_blocks_report, review_has_running_processes, continuing_planned_task, report_only_locked || account_repair);
         let phase = synchronize_delivery_review(&mut model_request, &mut adaptive_slots, delivery_review_step, phase);
+        let requires_child_results = collaboration.wake_cursor.is_some() && !collaboration.pending_child_executions.is_empty();
+        let phase = if requires_child_results {
+            model_request.input.tools = crate::collaboration::definitions().into_iter()
+                .filter(|tool| tool.name == crate::collaboration::STATUS).collect();
+            model_request.input.tool_choice = ChatToolChoice::Specific { name:crate::collaboration::STATUS.into() };
+            AgentExecutionPhase::Execution
+        } else { phase };
+        let delivery_review_step = delivery_review_step && !requires_child_results;
         let requires_input_handoff=long_horizon.as_ref().is_some_and(|state| state.completion.current(
             &state.execution_plan, &state.work_status, retained_inputs.len()).is_some_and(|report| report.is_blocked()))
             && adaptive_slots.user_input_enabled && !patch_recovery.pending() && !patch_recovery.unresolved()
@@ -914,6 +996,18 @@ pub(crate) async fn run_turn(
         );
         protocol_recovery.constrain_exposed_tool(&mut model_request.input.tool_choice, &model_request.input.tools);
         protocol_recovery.narrow_repair_surface(&model_request.input.tool_choice, &mut model_request.input.tools);
+        let must_delegate = request.required_delegation.is_some() && !delegation_attempted
+            && collaboration.pending_child_executions.is_empty() && collaboration.results.is_empty();
+        if let Some(name) = &request.required_delegation {
+            if must_delegate {
+                model_request.input.tool_choice = ChatToolChoice::Specific { name:name.clone() };
+            } else if matches!(&model_request.input.tool_choice,ChatToolChoice::Specific{name:current} if current==name) {
+                // A failed owner attempt can be uncertain. It removes this
+                // one-shot preference; only original owner facts can permit
+                // another effect, never a repeated forced model choice.
+                model_request.input.tool_choice = ChatToolChoice::Auto;
+            }
+        }
         if adaptive_slots.silent_robot_enabled {
             let visible = model_request.input.tools.iter().any(|tool| tool.name == crate::silent_completion::TOOL_NAME);
             upsert_instruction(&mut model_request.input.instructions, &mut adaptive_slots.silent_robot_policy,
@@ -953,7 +1047,7 @@ pub(crate) async fn run_turn(
         }
         persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
             request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
-            &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, segments.as_ref(), &control_rejections, pending_user_input.as_ref()).await?;
+            &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, segments.as_ref(), &control_rejections, pending_user_input.as_ref(), awaiting_children.as_ref(), &collaboration).await?;
         if cancellation.is_cancelled() {
             return cancelled_turn(&event_sink, &agent_session_id, &turn_operation_id,
                 model_steps, &output_text, &reasoning_text, tool_call_count, provider_round_id.clone()).await;
@@ -1555,6 +1649,28 @@ pub(crate) async fn run_turn(
             && !step.has_tool_calls()
             && !step.assistant_content.iter().any(|part|
                 matches!(part, ChatContentPart::Text { text } if !text.trim().is_empty()));
+        if !step.has_tool_calls() && matches!(finish_reason,ChatFinishReason::Completed) && must_delegate {
+            let prepared=protocol_recovery.prepare_rejection(model_steps,vec![],AgentModelResponseRejection::RequiredDelegation,
+                request.required_delegation.clone(),model_steps<total_model_limit)?;
+            let continuation=prepared.continuation();
+            event_sink.emit(prepared.event().clone()).await?;
+            model_request.input.messages.push(protocol_recovery.commit_rejection(prepared)?);
+            model_request.input.provider_round_parent=None;
+            if !continuation {intervene!(long_horizon.get_or_insert_with(LongHorizonState::default));}
+            continue 'model_steps;
+        }
+        if !step.has_tool_calls() && matches!(finish_reason,ChatFinishReason::Completed)
+            && (requires_child_results || collaboration.has_ready_unread_results()) {
+                let prepared = protocol_recovery.prepare_rejection(model_steps, vec![],
+                    AgentModelResponseRejection::RequiredChildResults, Some(crate::collaboration::STATUS.into()),
+                    model_steps < total_model_limit)?;
+                let continuation = prepared.continuation();
+                event_sink.emit(prepared.event().clone()).await?;
+                model_request.input.messages.push(protocol_recovery.commit_rejection(prepared)?);
+                model_request.input.provider_round_parent = None;
+                if !continuation { intervene!(long_horizon.get_or_insert_with(LongHorizonState::default)); }
+                continue 'model_steps;
+        }
         if !step.has_tool_calls() && matches!(finish_reason,ChatFinishReason::Completed) && requires_input_handoff {
             // Specific tool_choice is a provider request, not proof of a
             // native declaration. Reject this stop through the same durable,
@@ -1769,6 +1885,9 @@ pub(crate) async fn run_turn(
                 request.user_input_request_port.as_deref(),
                 phase,
                 &mut pending_user_input,
+                request.collaboration_port.as_deref(),
+                &mut awaiting_children,
+                &collaboration,
                 request.voice_immediate.as_deref(),
                 request.prior_task.as_ref(),
                 request.resource_port.as_deref(),
@@ -1806,12 +1925,36 @@ pub(crate) async fn run_turn(
             };
             tool_call_count = tool_call_count.saturating_add(results.len() as u32);
             let single_call_batch = step.call_order.len() == 1;
-            let mut terminal_collaboration_accepted = false;
             let mut terminal_completion_requested = false;
             let mut terminal_silent_requested = false;
             let mut repeated_control_rejection = None;
             for (expected_call_id, result) in results {
                 result.validate_for(&expected_call_id)?;
+                if let Some(call)=step.calls.get(&expected_call_id).and_then(|pending|pending.completed.as_ref()) {
+                    if request.tool_plan.binding(&call.name).is_some_and(|binding|
+                        binding.capability_id.as_ref()=="agent.collaboration" && matches!(binding.action_id.as_ref(),"agent/delegate"|"agent/fork"))
+                        && dispatch.attempted(&expected_call_id)? {
+                        delegation_attempted=true;
+                    }
+                }
+                if !result.is_error {
+                    if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
+                        if call.name == crate::collaboration::STATUS {
+                            if collaboration.observe_status(&crate::collaboration::snapshot_from_result(&result)?)? {
+                                state.work_status.observe_child_workspace_change();
+                                state.completion.invalidate();
+                                scoped_instructions.invalidate();
+                            }
+                        } else if call.name == crate::collaboration::MESSAGE {
+                            collaboration.accept_message(&result)?;
+                        } else if request.tool_plan.binding(&call.name).is_some_and(|binding|
+                            binding.capability_id.as_ref() == "agent.collaboration"
+                                && matches!(binding.action_id.as_ref(), "agent/delegate" | "agent/fork"))
+                            && dispatch.attempted(&expected_call_id)? {
+                            collaboration.accept(&result)?;
+                        }
+                    }
+                }
                 if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
                     let tool_binding = request.tool_plan.binding(&call.name);
                     let attempted = tool_binding.is_some() && dispatch.attempted(&expected_call_id)?;
@@ -1861,10 +2004,6 @@ pub(crate) async fn run_turn(
                                 && crate::execution_policy::failed_process_observation(binding, &result);
                             let process_not_applied = attempted
                                 && crate::execution_policy::process_operation_not_applied(binding, &result);
-                            terminal_collaboration_accepted |= single_call_batch
-                                && attempted
-                                && !result.is_error
-                                && crate::execution_policy::completes_turn_on_success(binding);
                             if attempted {
                                 if let Some(segments) = segments.as_mut() { segments.observe(call, &result)?; }
                                 process_settlement.observe(binding, call, &result);
@@ -2058,7 +2197,7 @@ pub(crate) async fn run_turn(
             }
             let terminal_report = terminal_completion_requested.then(|| state.completion.current(
                 &state.execution_plan,&state.work_status,retained_inputs.len()).cloned()).flatten();
-            if delivery_review_step && terminal_report.is_none() {
+            if delivery_review_step && terminal_report.is_none() && awaiting_children.is_none() {
                 return fail_turn(&event_sink, model_steps,
                     "the single report-only delivery review did not produce a valid final account; the candidate was not delivered").await;
             }
@@ -2086,18 +2225,11 @@ pub(crate) async fn run_turn(
                 // a missing human response is never fabricated as success.
                 intervene!(state);
             }
-            let terminal_handoff = terminal_collaboration_accepted
-                && (!adaptive.task_ledger()
-                    || (state.execution_plan.revision == 0
-                        && !state.execution_plan.needs_replan
-                        && state.work_status.successful_workspace_mutations == 0
-                        && state.work_status.successful_commands == 0
-                        && retained_inputs.len() == 1));
             let terminal_silent = terminal_silent_requested && silent_robot.ready()
                 && output_text.trim().is_empty() && !state.execution_plan.needs_replan
                 && !state.execution_plan.is_open() && state.work_status.failed_tools == 0
                 && !patch_recovery.unresolved();
-            if (terminal_handoff || terminal_report.is_some() || terminal_silent)
+            if (terminal_report.is_some() || terminal_silent) && collaboration.pending_child_executions.is_empty()
                 && state.work_status.running_processes.is_empty()
                 && (!patch_recovery.pending() || terminal_report.as_ref().is_some_and(|report| report.is_blocked()))
             {
@@ -2123,11 +2255,8 @@ pub(crate) async fn run_turn(
                     }
                     if output_text.trim().is_empty()
                         && state.work_status.failed_tools == 0
-                        && (terminal_silent || (request.silent_robot_actions && terminal_handoff)) {
-                        let tool_call_ids = if terminal_silent { silent_robot.tool_call_ids.clone() }
-                            else { completed.iter().filter(|call| request.tool_plan.binding(&call.name)
-                                .is_some_and(crate::execution_policy::completes_turn_on_success))
-                                .map(|call| call.call_id.clone()).collect() };
+                        && terminal_silent {
+                        let tool_call_ids = silent_robot.tool_call_ids.clone();
                         event_sink.emit(AgentEngineEvent::SilentCompletion { step: model_steps, tool_call_ids }).await?;
                     }
                     let finish_reason = ChatFinishReason::Completed;
@@ -2179,6 +2308,13 @@ pub(crate) async fn run_turn(
                 .validate()
                 .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
             continue;
+        }
+
+        if matches!(finish_reason, ChatFinishReason::Completed) && !collaboration.pending_child_executions.is_empty() {
+            if !empty_task_response { append_assistant_step(&mut model_request, &step)?; }
+            awaiting_children = collaboration.wait();
+            model_request.input.provider_round_parent = None;
+            continue 'model_steps;
         }
 
         // Rejected reasoning-only terminals are not factual assistant history.
@@ -2333,6 +2469,8 @@ async fn persist_execution_checkpoint(
     segments: Option<&crate::AgentExecutionSegmentState>,
     control_rejections: &AgentControlRejectionState,
     pending_user_input: Option<&nomifun_agent_contracts::AgentUserInputRequest>,
+    awaiting_children: Option<&crate::AgentChildrenWait>,
+    collaboration: &crate::AgentCollaborationProgress,
 ) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
     if !sink.supports_checkpoints() { return Ok(None); }
     let work = state.map(|state| state.work_status.clone()).unwrap_or_default();
@@ -2350,6 +2488,8 @@ async fn persist_execution_checkpoint(
         control_rejections: control_rejections.clone(),
         completion_review: state.map(|state| state.completion.review.clone()).unwrap_or_default(),
         pending_user_input: pending_user_input.cloned(),
+        awaiting_children: awaiting_children.cloned(),
+        collaboration: collaboration.clone(),
     };
     checkpoint.validate()?;
     sink.save_checkpoint(checkpoint).await
@@ -2442,6 +2582,7 @@ impl AgentControlRejectionState {
 struct AdaptiveContextSlots {
     user_input_enabled: bool,
     silent_robot_enabled: bool,
+    collaboration_enabled: bool,
     silent_robot_policy: Option<usize>,
     long_horizon_policy: Option<usize>,
     scoped_instructions: Option<usize>,
@@ -2571,6 +2712,12 @@ fn synchronize_adaptive_context(
         slots.silent_robot_enabled,
         discovered_tools,
     )?;
+    if slots.collaboration_enabled {
+        request.input.tools.extend(crate::collaboration::definitions());
+        if request.input.tools.len() > crate::tool_discovery::MAX_VISIBLE_TOOL_DEFINITIONS {
+            return Err(AgentEngineError::InvalidContract("collaboration controls exceed the reserved Runtime tool window".into()));
+        }
+    }
     let workspace_mutation_forbidden =
         crate::requirements::workspace_mutation_forbidden(accepted_inputs);
     let requested_workspace_mutation = match requested_tool_choice {
@@ -2896,7 +3043,7 @@ fn configure_tools(
 ) -> Result<(), AgentEngineError> {
     // Retired capability-control names remain reserved so a host cannot
     // accidentally restore the old dynamic authority surface as ordinary tools.
-    if [crate::planning::TOOL_NAME, crate::completion::TOOL_NAME, crate::user_input_request::TOOL_NAME, crate::silent_completion::TOOL_NAME, crate::context_resources::TOOL_NAME, crate::tool_discovery::TOOL_NAME, "search_capabilities", "activate_capability", crate::task_continuation::TOOL_NAME, crate::remote_resources::LIST, crate::remote_resources::READ, crate::remote_resources::TEMPLATES, crate::tool_archive::SEARCH, crate::tool_archive::READ, crate::tool_archive::LOAD]
+    if [crate::planning::TOOL_NAME, crate::completion::TOOL_NAME, crate::user_input_request::TOOL_NAME, crate::silent_completion::TOOL_NAME, crate::context_resources::TOOL_NAME, crate::tool_discovery::TOOL_NAME, crate::collaboration::STATUS, crate::collaboration::WAIT, crate::collaboration::MESSAGE, "search_capabilities", "activate_capability", crate::task_continuation::TOOL_NAME, crate::remote_resources::LIST, crate::remote_resources::READ, crate::remote_resources::TEMPLATES, crate::tool_archive::SEARCH, crate::tool_archive::READ, crate::tool_archive::LOAD]
         .iter().any(|name| plan.binding(name).is_some()) {
         return Err(AgentEngineError::InvalidContract("engine control tool names cannot be shadowed".into()));
     }
@@ -3109,6 +3256,9 @@ async fn invoke_tool_calls(
     user_input_request_port: Option<&dyn crate::AgentUserInputRequestPort>,
     phase: AgentExecutionPhase,
     pending_user_input: &mut Option<nomifun_agent_contracts::AgentUserInputRequest>,
+    collaboration_port: Option<&dyn crate::AgentCollaborationPort>,
+    awaiting_children: &mut Option<crate::AgentChildrenWait>,
+    collaboration: &crate::AgentCollaborationProgress,
     voice_immediate: Option<&dyn crate::AgentImmediateCorrectionPort>,
     prior_task: Option<&crate::AgentPriorTask>,
     resource_port: Option<&dyn nomifun_engine_core::EngineResourcePort>,
@@ -3149,6 +3299,15 @@ async fn invoke_tool_calls(
             recorded.push(record_tool_result_with_hold(call_id, result, Some(reason), event_sink, model_step).await?);
         }
         return Ok(recorded);
+    }
+    if !collaboration.pending_child_executions.is_empty()
+        && completed.iter().any(|call| call.name == crate::completion::TOOL_NAME) {
+        if !collaboration.has_ready_unread_results() { *awaiting_children = collaboration.wait(); }
+        completion.invalidate_report();
+        let results = completed.iter().map(|call| (call.call_id.clone(), Ok(AgentToolResult::text(call.call_id.clone(),
+            "Task completion was deferred while accepted children remain unresolved or unread. Read exact results with agent_status; continue every result_page in order until next_offset is null. Running children use the original native wait. Integrate and verify before submitting a new completion account.", true)))).collect();
+        return finish_tool_results_with_hold(results, Some(crate::RuntimeToolHoldReason::RuntimeGate),
+            event_sink, model_step, cancellation).await;
     }
     let silent_finish = completed.iter().find(|call| call.name == crate::silent_completion::TOOL_NAME);
     if silent_finish.is_some() && (!silent_robot.allows_batch(&completed, plan)
@@ -3211,6 +3370,38 @@ async fn invoke_tool_calls(
         };
         let results = completed.iter().map(|call| (call.call_id.clone(), Ok(AgentToolResult::text(call.call_id.clone(), result.output_text(), result.is_error)))).collect();
         return finish_tool_results_with_hold(results, runtime_hold, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| matches!(call.name.as_str(), crate::collaboration::STATUS | crate::collaboration::WAIT | crate::collaboration::MESSAGE)) {
+        let controls_only = completed.iter().all(|call| matches!(call.name.as_str(),
+            crate::collaboration::STATUS | crate::collaboration::WAIT | crate::collaboration::MESSAGE));
+        let wait_alone = !completed.iter().any(|call| call.name == crate::collaboration::WAIT) || completed.len() == 1;
+        if !controls_only || !wait_alone {
+            let results = completed.iter().map(|call| (call.call_id.clone(), Ok(AgentToolResult::text(call.call_id.clone(),
+                "Not executed: submit agent_wait alone; batch other collaboration controls only together, without workspace actions or completion controls.", true)))).collect();
+            return finish_tool_results_with_hold(results, Some(crate::RuntimeToolHoldReason::BatchRejected),
+                event_sink, model_step, cancellation).await;
+        }
+        let mut results = Vec::with_capacity(completed.len());
+        for call in &completed {
+            let result = match collaboration_port {
+                Some(port) => tokio::select! { biased;
+                    _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
+                    result = crate::collaboration::execute(call, port, &model_request.causality, cancellation.clone(), awaiting_children) => result,
+                },
+                None => Ok(AgentToolResult::text(call.call_id.clone(), "The original collaboration owner is unavailable for this Turn.", true)),
+            };
+            results.push((call.call_id.clone(), result));
+        }
+        let results = finish_tool_results_with_hold(results, None, event_sink, model_step, cancellation).await?;
+        if completed.len() == 1 && completed[0].name == crate::collaboration::WAIT
+            && awaiting_children.is_some() && !results[0].1.is_error {
+            // The exact native wait has accepted and recorded its result. Its
+            // completed model prefix can be spoken while this Turn keeps its
+            // original child obligation; rejected or unsettled waits never
+            // make a public commitment.
+            event_sink.emit(AgentEngineEvent::PublicOutputCommitted { step:model_step, source:None }).await?;
+        }
+        return Ok(results);
     }
     let protected=|call:&ChatToolCall|plan.binding(&call.name).is_some_and(|binding|
         crate::execution_policy::affects_workspace(binding)&&!matches!(binding.effect_class,AgentEffectClass::ReadOnly)
@@ -5403,7 +5594,7 @@ mod tests {
             }),
             "agent/delegate" | "agent/fork" => json!({
                 "execution_id":"0190f5fe-7c00-7a00-8000-000000000002",
-                "status":"planning"
+                "status":"planning", "message":"The exact delegated work was accepted."
             }),
             other => panic!("unexpected fixture capability: {other}"),
         };
@@ -7778,6 +7969,7 @@ mod tests {
             &(0..5).map(|index| format!("deferred_{index:03}")).collect::<Vec<_>>()).unwrap();
         let mut request = request();
         configure_tools(&mut request, &plan, true, true, true, true, true, true, true, true, true, &activated).unwrap();
+        request.input.tools.extend(crate::collaboration::definitions());
         assert_eq!(request.input.tools.len(), crate::tool_discovery::MAX_VISIBLE_TOOL_DEFINITIONS,
             "the reserved control count must match the actual full Runtime surface");
 
@@ -8415,7 +8607,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_single_collaboration_handoff_completes_without_another_model_step() {
+    async fn accepted_delegation_keeps_the_parent_turn_open_for_coordination() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![
                 control_step(
@@ -8423,7 +8615,8 @@ mod tests {
                     "delegate",
                     json!({"strategy":"parallel","tasks":[{"name":"a","prompt":"A"}]}),
                 ),
-                text_step("must not be generated after the handoff"),
+                read_ready_delegation(),
+                text_step("I am coordinating the accepted delegated work."),
             ]),
             requests: std::sync::Mutex::new(Vec::new()),
         });
@@ -8433,25 +8626,25 @@ mod tests {
                 collaboration_plan(false),
                 principal(),
                 0,
-            ))
+            ).with_collaboration_port(Arc::new(ReadyCollaborationPort)))
             .await
             .unwrap();
 
-        assert_eq!(result.model_steps, 1);
-        assert_eq!(result.tool_call_count, 1);
-        assert_eq!(result.output_text, "");
+        assert_eq!(result.model_steps, 3);
+        assert_eq!(result.tool_call_count, 2);
+        assert_eq!(result.output_text, "I am coordinating the accepted delegated work.");
         assert!(matches!(
             result.terminal,
             AgentTurnTerminal::Completed {
                 finish_reason: ChatFinishReason::Completed
             }
         ));
-        assert_eq!(model.requests.lock().unwrap().len(), 1);
-        assert_eq!(model.steps.lock().unwrap().len(), 1);
+        assert_eq!(model.requests.lock().unwrap().len(), 3);
+        assert_eq!(model.steps.lock().unwrap().len(), 0);
     }
 
     #[tokio::test]
-    async fn accepted_steer_is_incorporated_before_collaboration_handoff_closes_the_turn() {
+    async fn accepted_steer_after_delegation_reaches_the_next_parent_model_boundary() {
         let plan = control_step(
             "plan-after-delegate",
             crate::planning::TOOL_NAME,
@@ -8481,14 +8674,21 @@ mod tests {
                     "delegate",
                     json!({"strategy":"planned","goal":"work"}),
                 ),
+                read_ready_delegation(),
                 plan,
                 completion,
                 text_step("steered after handoff"),
             ]),
             requests: std::sync::Mutex::new(Vec::new()),
         });
-        let port = Arc::new(TerminalFenceSteer {
-            input: std::sync::Mutex::new(Some(crate::AgentSteeringInput {
+        let port = Arc::new(OneSteer { input: std::sync::Mutex::new(None) });
+        struct SteerAfterDelegate(Arc<OneSteer>);
+        #[async_trait]
+        impl AgentToolInvoker for SteerAfterDelegate {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken)
+                -> Result<AgentToolResult, AgentEngineError> {
+                if invocation.binding.action_id.as_ref() == "agent/delegate" {
+                    *self.0.input.lock().unwrap() = Some(crate::AgentSteeringInput {
                 receipt_operation_id: "steer-receipt-after-delegate".into(),
                 message_id: "steer-message-after-delegate".into(),
                 text: "also explain".into(),
@@ -8497,9 +8697,12 @@ mod tests {
                 image_count: 0,
                 prepared_images: Vec::new(),
                 prepared_skill_instructions: Vec::new(),
-            })),
-        });
-        let result = open_session(model.clone(), Arc::new(EchoTool))
+                    });
+                }
+                Ok(instruction_result(&invocation).unwrap_or_else(|| workspace_result(invocation)))
+            }
+        }
+        let result = open_session(model.clone(), Arc::new(SteerAfterDelegate(port.clone())))
             .run_turn(
                 AgentTurnRequest::new(
                     request(),
@@ -8507,14 +8710,14 @@ mod tests {
                     principal(),
                     0,
                 )
-                .with_input_port(port),
+                .with_input_port(port).with_collaboration_port(Arc::new(ReadyCollaborationPort)),
             )
             .await
             .unwrap();
 
-        assert_eq!(result.model_steps, 3);
+        assert_eq!(result.model_steps, 4);
         assert!(result.output_text.contains("The accepted correction was incorporated."));
-        assert_eq!(model.requests.lock().unwrap().len(), 3);
+        assert_eq!(model.requests.lock().unwrap().len(), 4);
         assert_eq!(model.steps.lock().unwrap().len(), 1, "no further model request after the accepted report");
     }
 
@@ -8527,6 +8730,7 @@ mod tests {
                     "delegate",
                     json!({"strategy":"planned","goal":"work"}),
                 ),
+                read_ready_delegation(),
                 control_step(
                     "plan-with-ledger",
                     crate::planning::TOOL_NAME,
@@ -8573,14 +8777,14 @@ mod tests {
                     principal(),
                     0,
                 )
-                .with_input_port(port),
+                .with_input_port(port).with_collaboration_port(Arc::new(ReadyCollaborationPort)),
             )
             .await
             .unwrap();
 
-        assert_eq!(result.model_steps, 3);
+        assert_eq!(result.model_steps, 4);
         assert!(result.output_text.contains("Both accepted inputs were accounted for."));
-        assert_eq!(model.requests.lock().unwrap().len(), 3);
+        assert_eq!(model.requests.lock().unwrap().len(), 4);
         assert_eq!(model.steps.lock().unwrap().len(), 1);
     }
 
@@ -8636,7 +8840,7 @@ mod tests {
             }),
         ];
         let mixed = Arc::new(ObservingModel {
-            steps: std::sync::Mutex::new(vec![mixed_step, text_step("mixed batch reviewed")]),
+            steps: std::sync::Mutex::new(vec![mixed_step, read_ready_delegation(), text_step("mixed batch reviewed")]),
             requests: std::sync::Mutex::new(Vec::new()),
         });
         let mixed_result = open_session(mixed.clone(), Arc::new(EchoTool))
@@ -8645,13 +8849,13 @@ mod tests {
                 collaboration_plan(true),
                 principal(),
                 0,
-            ))
+            ).with_collaboration_port(Arc::new(ReadyCollaborationPort)))
             .await
             .unwrap();
-        assert_eq!(mixed_result.model_steps, 2);
+        assert_eq!(mixed_result.model_steps, 3);
         assert_eq!(mixed_result.output_text, "mixed batch reviewed");
-        assert_eq!(mixed_result.tool_call_count, 2);
-        assert_eq!(mixed.requests.lock().unwrap().len(), 2);
+        assert_eq!(mixed_result.tool_call_count, 3);
+        assert_eq!(mixed.requests.lock().unwrap().len(), 3);
     }
 
     #[tokio::test]
@@ -9013,23 +9217,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inspection_then_handoff_does_not_require_a_second_completion_owner() {
+    async fn inspection_then_delegation_preserves_the_parent_completion_owner() {
+        let mut steps = vec![
+            control_step("inspect-1", "read_file", json!({"path":"a"})),
+            control_step("inspect-2", "read_file", json!({"path":"b"})),
+            control_step("delegate", "delegate", json!({"strategy":"planned","goal":"work"})),
+        ];
+        steps.push(read_ready_delegation());
+        steps.extend(completion_steps("inspect", &["inspect-1", "inspect-2"], true));
         let model = Arc::new(ObservingModel {
-            steps: std::sync::Mutex::new(vec![
-                control_step("inspect-1", "read_file", json!({"path":"a"})),
-                control_step("inspect-2", "read_file", json!({"path":"b"})),
-                control_step("delegate", "delegate", json!({"strategy":"planned","goal":"work"})),
-            ]), requests: std::sync::Mutex::new(Vec::new()),
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
         });
         let plan = AgentToolPlan::new([
             tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
             tool_binding("delegate", "agent.collaboration", "agent/delegate", AgentEffectClass::ManagedEffect, false),
         ]).unwrap();
         let result = open_session(model.clone(), Arc::new(EchoTool)).run_turn(
-            AgentTurnRequest::new(request(), plan, principal(), 0),
+            AgentTurnRequest::new(request(), plan, principal(), 0).with_collaboration_port(Arc::new(ReadyCollaborationPort)),
         ).await.unwrap();
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
-        assert_eq!(result.model_steps, 3);
+        assert_eq!(result.model_steps, 6);
         assert!(model.requests.lock().unwrap()[2].input.tools.iter().any(|tool| tool.name == "update_plan"));
     }
 
@@ -10443,4 +10650,5 @@ mod tests {
     include!("turn_wait_tests.rs");
     include!("turn_user_input_continuation_tests.rs");
     include!("turn_silent_completion_tests.rs");
+    include!("turn_collaboration_tests.rs");
 }

@@ -158,6 +158,67 @@ struct EffectIdentity {
 }
 #[derive(Deserialize)]
 struct ToolAdmission { operation_id: String, call_id: String, capability_id: String, action_id: String }
+
+/// Whether this exact Turn admitted workspace work that may have changed the
+/// parent's observations. Failed/unknown effects are deliberately included:
+/// neither a failed reply nor process cleanup proves that writes did not occur.
+/// A process owner's typed pre-I/O rejection can prove that command did not run.
+/// This reads canonical dispatch/effect facts, never tool policy or current files.
+pub fn canonical_turn_workspace_changed(
+    facts: &ChatCausalityFacts, receipt: &TurnReceipt,
+) -> Result<bool, AppError> {
+    let (start, terminal) = boundaries(facts, receipt)?;
+    let terminal = terminal.ok_or_else(|| invalid("workspace observation requires a closed Turn"))?;
+    let selected: Vec<_> = facts.events.iter()
+        .filter(|event| event.seq > start.seq && event.seq < terminal.seq).collect();
+    let mut process_calls = HashMap::new();
+    for event in &selected {
+        if event.kind.0 == "tool/call-started" && event.causation_event_id.as_ref() == Some(&start.event_id) {
+            let call: ToolAdmission = decode(payload(facts, event)?)?;
+            if call.capability_id == "workspace.process" {
+                if process_calls.insert(call.operation_id.clone(), (call, event.seq)).is_some() {
+                    return Err(invalid("duplicate process operation admission"));
+                }
+            }
+        }
+    }
+    let mut not_executed = HashSet::new();
+    for event in &selected {
+        if event.kind.0 == "runtime/progress-recorded" && event.correlation_id.as_ref() == receipt.operation_id.as_ref() {
+            let value = payload(facts, event)?.get("event").ok_or_else(|| invalid("Runtime record has no event"))?;
+            if value.get("event").and_then(Value::as_str) == Some("host_tool_settled") {
+                if let Some((call, admitted_seq)) = value.get("operation_id").and_then(Value::as_str).and_then(|id| process_calls.get(id)) {
+                    if event.seq > *admitted_seq && value.get("call_id").and_then(Value::as_str) == Some(call.call_id.as_str()) {
+                        if let Some(result) = value.get("result").filter(|value| !value.is_null()) {
+                            let result: nomifun_agent_runtime::AgentToolResult = decode(result)?;
+                            if result.call_id.as_ref() == call.call_id
+                                && nomifun_agent_runtime::workspace_process_operation_not_applied(&call.action_id, &result) {
+                                not_executed.insert(call.operation_id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if process_calls.keys().any(|operation| !not_executed.contains(operation)) { return Ok(true); }
+    for event in &selected {
+        if event.kind.0 != "effect/started" { continue; }
+        let identity: EffectIdentity = decode(payload(facts, event)?)?;
+        if identity.turn_id != receipt.operation_id.as_ref() || identity.owner_domain != "workspace"
+            || !matches!(identity.capability_module.as_str(), "workspace.files" | "workspace.vcs" | "workspace.artifacts" | "workspace.process") { continue; }
+        let call_event = event.causation_event_id.as_ref().and_then(|cause|
+            selected.iter().copied().find(|candidate| &candidate.event_id == cause))
+            .ok_or_else(|| invalid("workspace effect has no in-Turn tool admission"))?;
+        let call: ToolAdmission = decode(payload(facts, call_event)?)?;
+        if event.correlation_id.as_ref() != identity.effect_id || call_event.kind.0 != "tool/call-started"
+            || call_event.causation_event_id.as_ref() != Some(&start.event_id) || call_event.seq >= event.seq
+            || call.operation_id != identity.operation_id || call.capability_id != identity.capability_module
+            || call.action_id != identity.action_id { return Err(invalid("workspace effect differs from its exact admission")); }
+        if identity.capability_module != "workspace.process" || !not_executed.contains(&identity.operation_id) { return Ok(true); }
+    }
+    Ok(false)
+}
 #[derive(Deserialize)]
 struct EffectOutcome {
     result: Option<Value>, observation_truncated: Option<bool>, observation_digest: Option<String>,
@@ -499,6 +560,58 @@ mod tests {
         fixture.write(root.path(), "report.md", b"final");
         std::fs::write(root.path().join("unclaimed.txt"), "existing").unwrap();
         assert_eq!(fixture.files(root.path()).unwrap(), [std::fs::canonicalize(root.path().join("report.md")).unwrap().to_str().unwrap()]);
+    }
+
+    #[test]
+    fn workspace_change_uses_exact_effects_including_partial_or_unknown_work() {
+        let mut fixture = Fixture::new();
+        assert!(!canonical_turn_workspace_changed(&fixture.facts, &fixture.receipt).unwrap());
+        fixture.mutation("workspace.files/write", json!({"written":false}));
+        let settlement = fixture.facts.events.iter_mut().find(|event| event.kind.0 == "effect/succeeded").unwrap();
+        settlement.kind.0 = "effect/uncertain".into();
+        assert!(canonical_turn_workspace_changed(&fixture.facts, &fixture.receipt).unwrap(),
+            "unknown owner outcome may already have invalidated observations");
+        for event in &mut fixture.facts.events {
+            if matches!(event.kind.0.as_str(), "effect/started" | "effect/uncertain") {
+                fixture.facts.event_payloads.get_mut(event.event_id.as_ref()).unwrap()["turn_id"] = json!("another-turn");
+            }
+        }
+        assert!(!canonical_turn_workspace_changed(&fixture.facts, &fixture.receipt).unwrap(),
+            "another Turn's facts never invalidate this exact result");
+    }
+
+    #[test]
+    fn process_owner_typed_nonexecution_is_the_only_pre_io_exclusion() {
+        let mut fixture = Fixture::new();
+        let output = json!({"schema":"nomifun.process-start-observation.v1", "state":"not_started",
+            "user_code_started":false, "success":false});
+        fixture.mutation("workspace.process/start", output.clone());
+        let admission = fixture.facts.events.iter().find(|event| event.kind.0 == "tool/call-started").unwrap();
+        let call: ToolAdmission = decode(payload(&fixture.facts, admission).unwrap()).unwrap();
+        assert!(canonical_turn_workspace_changed(&fixture.facts, &fixture.receipt).unwrap(),
+            "tool text alone is not proof that native I/O did not start");
+        fixture.push("runtime/progress-recorded", TURN, None, json!({"event":{
+            "event":"host_tool_settled", "operation_id":call.operation_id, "call_id":call.call_id,
+            "result":AgentToolResult::text(call.call_id.clone().into(), output.to_string(), true), "error":null}}));
+        assert!(!canonical_turn_workspace_changed(&fixture.facts, &fixture.receipt).unwrap());
+        let settled = fixture.facts.events.iter().rev().find(|event|
+            event.kind.0 == "runtime/progress-recorded").unwrap().event_id.as_ref().to_owned();
+        fixture.facts.event_payloads.get_mut(&settled).unwrap()["event"]["call_id"] = json!("different-call");
+        assert!(canonical_turn_workspace_changed(&fixture.facts, &fixture.receipt).unwrap(),
+            "another command's nonexecution receipt cannot exclude this command");
+    }
+
+    #[test]
+    fn readonly_external_and_post_terminal_work_do_not_count_as_workspace_mutation() {
+        let mut fixture = Fixture::new();
+        let root = fixture.receipt.started_event.as_ref().unwrap().event_id.clone();
+        fixture.push("tool/call-started", "read", Some(root.as_ref()), json!({
+            "operation_id":"read", "call_id":"read", "capability_id":"workspace.files", "action_id":"workspace.files/read"}));
+        fixture.mutation("media.generation/submit", json!({"accepted":true}));
+        assert!(!canonical_turn_workspace_changed(&fixture.facts, &fixture.receipt).unwrap());
+        fixture.next = 1001;
+        fixture.mutation("workspace.files/write", json!({"written":true}));
+        assert!(!canonical_turn_workspace_changed(&fixture.facts, &fixture.receipt).unwrap());
     }
 
     #[test]

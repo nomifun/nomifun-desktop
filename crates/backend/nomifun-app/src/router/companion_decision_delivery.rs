@@ -7,7 +7,7 @@ use nomifun_agent_contracts::{AgentInputSource,AgentSessionId,CompanionSessionRo
     PrincipalRef,SessionEventAppend,SemanticSessionEventDraft,SessionEventKind,SessionEventPayloadRef,
     StrictJsonValue,digest_bytes};
 use nomifun_agent_execution::{AgentExecutionInput,AgentExecutionSource};
-use nomifun_agent_session::{AgentEffectState,TurnReceiptStatus};
+use nomifun_agent_session::TurnReceiptStatus;
 use nomifun_common::AppError;
 use nomifun_db::sqlx;
 use nomifun_voice_contracts::{ApprovalInteractionMode,ApprovalTarget,VoiceApprovalAnswer,
@@ -25,7 +25,7 @@ fn invalid(detail:impl std::fmt::Display)->AppError {AppError::Conflict(format!(
 #[derive(Clone)]
 pub(crate) struct RobotExecutionQuestionSource {
     pub(crate) companion_id:String,pub(crate) robot_id:String,pub(crate) connection_id:String,
-    session_id:AgentSessionId,parent_terminal:String,binding_version:u64,context_floor:u64,
+    session_id:AgentSessionId,delegation_event_id:String,binding_version:u64,context_floor:u64,
 }
 pub(crate) struct PreparedExecutionQuestion {
     pub(crate) source:RobotExecutionQuestionSource,pub(crate) text:String,pub(crate) speech_source:VoiceSpeechSourceRef,
@@ -90,32 +90,17 @@ impl NomiCoreSessionOwner {
         let session=AgentSessionId::from(source.agent_session_id.clone());
         let observation=self.canonical.get(&PrincipalRef{principal_kind:"user".into(),principal_id:owner_id.into()},&session).await?;
         let Some(scope)=canonical_companion_origin(owner_id,&observation)?.filter(|scope|scope.role==CompanionSessionRole::Robot) else {return Ok(None);};
-        let effect=self.canonical.store().read_effect(&session,&source.effect_id).await.map_err(agent_session_store_error)?
-            .ok_or_else(||invalid("original delegation Effect is missing"))?;
-        if effect.state!=AgentEffectState::Returned||effect.turn_id.as_ref()!=source.turn_operation_id
-            ||effect.operation_id.as_ref()!=source.tool_operation_id||effect.owner_domain!="wave5.product"
-            ||effect.capability_module.as_ref()!="agent.collaboration"||!matches!(effect.action_id.as_ref(),"agent/delegate"|"agent/fork") {
-            return Err(invalid("question source differs from its exact delegation Effect"));
-        }
-        let operation=OperationId::from(source.turn_operation_id.clone());
-        let receipt=self.canonical.store().read_turn_receipt(&session,&operation).await.map_err(agent_session_store_error)?;
-        let start=receipt.started_event.as_ref().ok_or_else(||invalid("source Turn has no start"))?;
-        if receipt.status!=TurnReceiptStatus::Completed {return Err(invalid("original Robot Turn has not normally completed"));}
-        let (floor,context_floor):(i64,i64)=sqlx::query_as("SELECT COALESCE(MAX(seq),0),COALESCE(MAX(CASE WHEN kind='context/cleared' THEN seq END),0) FROM agent_events WHERE session_id=? AND kind IN ('context/cleared','session/agent-binding-changed') AND kind_version=1")
-            .bind(session.as_ref()).fetch_one(&self.pool).await.map_err(|error|AppError::Internal(error.to_string()))?;
-        if u64::try_from(floor).map_err(invalid)?>start.seq {return Ok(None);}
-        let (_,accepted)=self.canonical.store().turn_accepted_input(&session,&operation).await.map_err(agent_session_store_error)?;
-        let mut started=self.canonical.store().resolved_event_payloads(&session,std::slice::from_ref(&start.event_id)).await.map_err(agent_session_store_error)?;
-        let started=started.remove(start.event_id.as_ref()).ok_or_else(||invalid("source claim admission is missing"))?;
-        if !super::companion_report_delivery::reply_authority_matches(&started,
-            &nomifun_agent_contracts::AgentHandoffBindingRefV1::from(&observation.session.agent_binding),start.seq,u64::try_from(floor).map_err(invalid)?)? {return Ok(None);}
-        let Some(input)=accepted.0.get("input_source").filter(|source|!source.is_null()).cloned()
+        let mut tx=self.pool.begin().await.map_err(|error|AppError::Internal(error.to_string()))?;
+        let authority=playback::source_authority_tx(self,&mut tx,owner_id,&session,source,&observation.session.agent_binding).await?;
+        tx.commit().await.map_err(|error|AppError::Internal(error.to_string()))?;
+        let Some(authority)=authority else {return Ok(None);};
+        let Some(input)=authority.input.get("input_source").filter(|source|!source.is_null()).cloned()
             else{return Ok(None);}; // its existing desktop task card owns this handoff
         let AgentInputSource::AuthenticatedRobot{companion_id,robot_id,connection_id,..}=serde_json::from_value(input).map_err(invalid)?;
         if companion_id!=scope.companion_id||scope.robot_id.as_deref()!=Some(robot_id.as_str()) {return Err(invalid("question belongs to another device"));}
         Ok(Some(RobotExecutionQuestionSource{companion_id,robot_id,connection_id,session_id:session,
-            parent_terminal:receipt.terminal_event.as_ref().ok_or_else(||invalid("source terminal is missing"))?.event_id.as_ref().into(),
-            binding_version:observation.session.agent_binding.binding_version,context_floor:u64::try_from(context_floor).map_err(invalid)?}))
+            delegation_event_id:authority.delegation_event_id,
+            binding_version:observation.session.agent_binding.binding_version,context_floor:authority.context_floor}))
     }
 
     pub(crate) async fn prepare_execution_question_notice(&self,owner_id:&str,input:&AgentExecutionInput)->Result<Option<PreparedExecutionQuestion>,AppError> {
@@ -151,7 +136,7 @@ impl NomiCoreSessionOwner {
             let id=uuid::Uuid::now_v7().to_string();
             let ack=self.canonical.store().append_event(&SessionEventAppend{agent_session_id:source.session_id.clone(),event_id:id.clone().into(),
                 producer_id:"session_api".into(),idempotency_key:key.into(),semantic_event:SemanticSessionEventDraft{kind:SessionEventKind("message/assistant-projected".into()),kind_version:1,
-                    correlation_id:id.clone().into(),causation_event_id:Some(source.parent_terminal.clone().into()),
+                    correlation_id:id.clone().into(),causation_event_id:Some(source.delegation_event_id.clone().into()),
                     payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(serde_json::to_value(&payload).map_err(invalid)?))}}).await.map_err(agent_session_store_error)?;
             self.user_events.send_to_user(owner_id,Self::canonical_projected_assistant_wire_event(&source.session_id,&id,&payload.content));
             (id,ack.cursor.seq,payload.content)
@@ -196,13 +181,15 @@ impl NomiCoreSessionOwner {
         Ok(Some(target.presentation_id.clone()))
     }
 
-    pub(crate) async fn answer_execution_question(&self,owner_id:&str,session_id:&AgentSessionId,turn_id:&OperationId,key:&str)->Result<VoiceWorkReceipt,AppError> {
+    pub(crate) async fn answer_execution_question(&self,owner_id:&str,session_id:&AgentSessionId,turn_id:&OperationId,
+        tool_operation:&OperationId,key:&str)->Result<VoiceWorkReceipt,AppError> {
         let principal=PrincipalRef{principal_kind:"user".into(),principal_id:owner_id.into()};
         let observation=self.canonical.get(&principal,session_id).await?;
         let scope=canonical_companion_origin(owner_id,&observation)?.filter(|scope|scope.role==CompanionSessionRole::Robot).ok_or_else(||invalid("answer requires canonical Robot ingress"))?;
         let receipt=self.canonical.store().read_turn_receipt(session_id,turn_id).await.map_err(agent_session_store_error)?;
         if receipt.status!=TurnReceiptStatus::Running {return Err(invalid("answer no longer belongs to the active Robot Turn"));}
-        let (root_event,accepted)=self.canonical.store().turn_accepted_input(session_id,turn_id).await.map_err(agent_session_store_error)?;
+        let (root_event,accepted)=super::execution_source_context::canonical_input_at_tool(self.canonical.store(),session_id,turn_id,
+            tool_operation,&"session.management".into(),&"session.management/execution_answer_decision".into()).await?;
         let input=&accepted.0;
         let answer=input.get("content").and_then(Value::as_str).filter(|text|text.len()<=16384&&substantive_answer(text)).ok_or_else(||invalid("backchannels do not answer a task question"))?;
         let AgentInputSource::AuthenticatedRobot{companion_id,robot_id,connection_id,presented_question_id}=serde_json::from_value(input.get("input_source").cloned().ok_or_else(||invalid("answer has no authenticated device source"))?).map_err(invalid)?;

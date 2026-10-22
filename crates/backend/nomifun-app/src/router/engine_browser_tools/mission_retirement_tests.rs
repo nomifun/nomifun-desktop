@@ -228,9 +228,9 @@ impl Mission {
                 assignment_rationale: None, assignment_source: Some(nomifun_common::ParticipantAssignmentSource::Planner), assignment_locked: false,
                 failure_policy: nomifun_common::StepFailurePolicy::FailExecution, preset_prompt: None, graph_x: None, graph_y: None }],
         }, &delegation).await.unwrap();
-        // Full workspace mutators remain exclusive. The root durably appends
-        // its child first, then ends its own invocation before the child's
-        // original Attempt is allowed to claim that workspace reservation.
+        // This retirement case deliberately closes the root before starting
+        // its independent child. Full permission does not serialize their
+        // lifetimes or transfer the child's Browser ownership to the root.
         self.terminal(ExecutionAttemptStatus::Completed).await;
         self.settle(ExecutionAttemptStatus::Completed, ExecutionStepStatus::Completed, None, None, false).await;
         let child = self.sessions.open(self.principal.clone(), AgentBindingValue {

@@ -59,10 +59,18 @@ pub(crate) fn canonical_turn_waiting_outcome(events: &[SessionEventRecord], payl
                 }
                 waiting = Some(AgentTurnOutcome::Waiting { wait_seq:event.seq, request_id, reason });
             }
+            Some("awaiting_children") => {
+                let ids=progress.pointer("/request/execution_ids").and_then(Value::as_array)
+                    .ok_or_else(||invalid("child wait has no exact Execution selection"))?;
+                if ids.is_empty() || ids.len()>64 || ids.iter().any(|id|id.as_str().is_none_or(str::is_empty)) {
+                    return Err(invalid("child wait selection is invalid"));
+                }
+                waiting=Some(AgentTurnOutcome::Waiting {wait_seq:event.seq,request_id:None,reason:AgentWaitReason::ExternalResource});
+            }
             Some("steering_inputs") if progress.get("inputs").and_then(Value::as_array).is_some_and(|inputs| !inputs.is_empty()) => {
                 waiting = None; pending_request = None;
             },
-            Some("turn_wait_resolved" | "model_step_started" | "tool_started") => { waiting = None; pending_request = None; },
+            Some("turn_wait_resolved" | "children_wait_resolved" | "model_step_started" | "tool_started") => { waiting = None; pending_request = None; },
             _ => {},
         }
     }

@@ -209,6 +209,7 @@ mod tests {
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
 
         let actual = database
             .prepare(
@@ -238,6 +239,7 @@ mod tests {
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
 
         for (table, _, _, _) in TABLES {
             let quoted_table = table.replace('"', "\"\"");
@@ -375,6 +377,7 @@ mod tests {
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
 
         let columns = database
             .prepare("PRAGMA table_info(agent_runtime_snapshots)")
@@ -403,6 +406,7 @@ mod tests {
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
         database.execute_batch(include_str!("../../nomifun-db/migrations/008_retire_payload_object_placeholder.sql"))
             .expect("current payload schema");
         database
@@ -481,6 +485,7 @@ mod tests {
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
 
         let columns = database
             .prepare("PRAGMA table_info(installation_role_bindings)")

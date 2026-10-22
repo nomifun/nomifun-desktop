@@ -128,12 +128,10 @@ enum DelegateParams {
         #[serde(default)]
         max_parallel: Option<i64>,
     },
-    /// Execute independent Agent steps, optionally followed by one synthesis.
+    /// Execute independent child steps; the parent owns integration.
     Parallel {
         #[schemars(length(min = 1, max = 16))]
         tasks: Vec<AgentDelegationTask>,
-        #[serde(default)]
-        synthesize: bool,
     },
 }
 
@@ -171,8 +169,6 @@ enum ExecutionUpdateParams {
         execution_id: AgentExecutionId,
         expected_version: i64,
         steps: Vec<AgentDelegationTask>,
-        #[serde(default)]
-        synthesize: bool,
     },
     Rename {
         #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
@@ -527,13 +523,11 @@ async fn create_context(
 
 fn explicit_plan(
     steps: Vec<AgentDelegationTask>,
-    synthesize: bool,
 ) -> Result<Vec<PlannedExecutionStep>, String> {
     nomifun_agent_execution::AgentExecutionEngine::materialize_parallel_delegation(
         ParallelDelegationRequest {
             strategy: ParallelDelegationStrategy::Parallel,
             tasks: steps,
-            synthesize,
         },
     )
     .map(|(_, steps)| steps)
@@ -570,7 +564,7 @@ async fn delegate(
                 max_parallel,
                 None,
             ),
-            DelegateParams::Parallel { tasks, synthesize } => {
+            DelegateParams::Parallel { tasks } => {
                 if tasks.is_empty() || tasks.len() > MAX_EXPLICIT_STEPS {
                     return json!({
                         "error": format!(
@@ -593,7 +587,7 @@ async fn delegate(
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
-                let steps = match explicit_plan(tasks, synthesize) {
+                let steps = match explicit_plan(tasks) {
                     Ok(value) => Some(value),
                     Err(error) => return json!({"error":error}),
                 };
@@ -834,8 +828,7 @@ async fn execution_update(
             execution_id,
             expected_version,
             steps,
-            synthesize,
-        } => match explicit_plan(steps, synthesize) {
+        } => match explicit_plan(steps) {
             Ok(steps) => deps
                 .engine
                 .add_steps(
@@ -1068,7 +1061,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_delegate",
             "agent_execution",
-            "Delegate work into one Agent Execution. Choose exactly one native-JSON shape. planned: strategy='planned' plus goal and optional work_dir/model_pool(object)/adaptation_policy/max_parallel(integer); never send tasks or synthesize. parallel: strategy='parallel' plus tasks(array of 1-16 objects) and optional synthesize(boolean); never send planned aggregate settings. At a top-level Conversation this creates an execution; inside an active Attempt it atomically appends Steps and returns immediately, so end the turn without polling. Returns the canonical execution receipt.",
+            "Delegate work into one Agent Execution. Choose exactly one native-JSON shape. planned: strategy='planned' plus goal and optional work_dir/model_pool(object)/adaptation_policy/max_parallel(integer); never send tasks. parallel: strategy='parallel' plus tasks(array of 1-16 objects); never send planned aggregate settings. At a top-level Conversation this creates an execution; inside an active Attempt it atomically appends Steps and returns immediately, so continue independent parent work, join through the native collaboration controls, and integrate exact results before completion. Returns the canonical acceptance receipt.",
             EffectClass::Write,
         ),
         adapt(delegate),
@@ -1097,7 +1090,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 mod tests {
     use super::*;
     use crate::registry::{Registry, Surface};
-    use nomifun_common::{AgentStepMode, AgentToolPolicy};
+    use nomifun_common::AgentToolPolicy;
 
     const ATTEMPT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000003";
     const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
@@ -1172,7 +1165,7 @@ mod tests {
             .get("properties")
             .and_then(Value::as_object)
             .expect("nomi_delegate must advertise root properties");
-        for field in ["strategy", "goal", "tasks", "synthesize"] {
+        for field in ["strategy", "goal", "tasks"] {
             assert!(
                 properties.contains_key(field),
                 "nomi_delegate root projection is missing {field}"
@@ -1194,8 +1187,7 @@ mod tests {
                 "tasks": [
                     {"name": "planner", "prompt": "make a plan"},
                     {"name": "reviewer", "prompt": "review the result"}
-                ],
-                "synthesize": true
+                ]
             }),
         ] {
             assert!(
@@ -1227,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_parallel_plan_has_one_optional_synthesis_node() {
+    fn explicit_parallel_plan_contains_only_the_requested_children() {
         let steps = explicit_plan(
             vec![
                 AgentDelegationTask {
@@ -1243,16 +1235,12 @@ mod tests {
                     tool_policy: AgentToolPolicy::ReadOnly,
                 },
             ],
-            true,
         )
         .unwrap();
-        assert_eq!(steps.len(), 3);
-        assert_eq!(steps[2].depends_on, vec![0, 1]);
-        assert_eq!(steps[2].agent_mode, Some(AgentStepMode::Synthesis));
+        assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].tool_policy, AgentToolPolicy::Full);
         assert_eq!(steps[1].tool_policy, AgentToolPolicy::ReadOnly);
-        assert_eq!(steps[2].tool_policy, AgentToolPolicy::ReadOnly);
-        assert!(steps.iter().all(|step| step.participant_index.is_none()));
+        assert!(steps.iter().all(|step| step.participant_index.is_none() && step.depends_on.is_empty()));
     }
 
     #[test]
@@ -1277,7 +1265,7 @@ mod tests {
                 tool_policy: AgentToolPolicy::Full,
             },
         ] {
-            assert!(explicit_plan(vec![task], false).is_err());
+            assert!(explicit_plan(vec![task]).is_err());
         }
     }
 
@@ -1297,13 +1285,12 @@ mod tests {
     fn parallel_delegate_uses_the_shared_strict_request_without_aggregate_overrides() {
         let parsed = serde_json::from_value::<DelegateParams>(json!({
             "strategy": "parallel",
-            "tasks": [{"name":"scan","prompt":"inspect"}],
-            "synthesize": true
+            "tasks": [{"name":"scan","prompt":"inspect"}]
         }))
         .unwrap();
         assert!(matches!(parsed, DelegateParams::Parallel { .. }));
 
-        for forbidden in ["work_dir", "model_pool", "adaptation_policy", "max_parallel"] {
+        for forbidden in ["work_dir", "model_pool", "adaptation_policy", "max_parallel", "synthesize"] {
             let mut request = json!({
                 "strategy": "parallel",
                 "tasks": [{"name":"scan","prompt":"inspect"}]
@@ -1356,7 +1343,6 @@ mod tests {
                     tool_policy: AgentToolPolicy::ReadOnly,
                 },
             ],
-            false,
         )
         .unwrap();
         assert_eq!(steps[0].role.as_deref(), Some("builder"));

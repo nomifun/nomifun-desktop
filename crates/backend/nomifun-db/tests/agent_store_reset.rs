@@ -94,6 +94,7 @@ async fn main_database_agent_store_tables_match_the_forward_migrated_baseline() 
         include_str!("../migrations/010_mcp_oauth_authority.sql"),
         include_str!("../migrations/011_cron_run_cancellation.sql"),
         include_str!("../migrations/012_unify_cron_agent_binding.sql"),
+        include_str!("../migrations/015_retire_execution_plan_gate.sql"),
     ] {
         sqlx::raw_sql(migration).execute(&baseline).await.unwrap();
     }

@@ -20,9 +20,8 @@ const parallel = {
   properties: {
     strategy: { type: 'string', const: 'parallel' },
     tasks: { type: 'array', minItems: 1, maxItems: 16, items: task },
-    synthesize: { type: 'boolean' },
   },
-  required: ['strategy', 'tasks', 'synthesize'],
+  required: ['strategy', 'tasks'],
 };
 const cases = [
   ['flat', parallel],
@@ -76,7 +75,7 @@ async function main() {
         headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', Authorization: `Bearer ${rawKey.trim()}` },
         body: JSON.stringify({
           model: 'step-3.7-flash', temperature: 0, max_tokens: 4096, stream: true,
-          messages: [{ role: 'user', content: 'Call probe_tool exactly once with strategy="parallel", tasks=[{"name":"marker","prompt":"Reply OK"}], synthesize=false. Use a native tool call, no prose. The client will not execute this diagnostic proposal.' }],
+          messages: [{ role: 'user', content: 'Call probe_tool exactly once with strategy="parallel", tasks=[{"name":"marker","prompt":"Reply OK"}]. Use a native tool call, no prose. The client will not execute this diagnostic proposal.' }],
           tools: [{ type: 'function', function: { name: 'probe_tool', description: 'Return a structured diagnostic proposal; it will not be executed.', parameters: schema } }],
           tool_choice: 'auto',
         }),
@@ -105,15 +104,15 @@ async function main() {
       if (!parsed) args = {};
       const exact = parsed && Array.isArray(calls) && calls.length === 1
         && call.function?.name === 'probe_tool' && data?.choices?.[0]?.finish_reason === 'tool_calls'
-        && args.strategy === 'parallel' && args.synthesize === false
+        && args.strategy === 'parallel'
         && Array.isArray(args.tasks) && args.tasks.length === 1
         && args.tasks[0]?.name === 'marker' && args.tasks[0]?.prompt === 'Reply OK'
         && Object.keys(args.tasks[0]).every(key => ['name', 'prompt'].includes(key))
-        && Object.keys(args).every(key => ['strategy', 'tasks', 'synthesize'].includes(key));
+        && Object.keys(args).every(key => ['strategy', 'tasks'].includes(key));
       console.log(JSON.stringify({
         probe: name, status: response.status, native_call: Boolean(call), parsed,
         strategy: args.strategy === 'parallel' ? 'parallel' : 'other',
-        tasks_type: kind(args.tasks), synthesize_type: kind(args.synthesize), exact,
+        tasks_type: kind(args.tasks), exact,
       }));
       if (!exact) process.exitCode = 1;
     } catch {

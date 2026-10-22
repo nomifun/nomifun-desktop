@@ -1,8 +1,8 @@
 use super::*;
 
 async fn insert_task(services: &crate::services::AppServices, owner: &PrincipalRef, execution: &str, step: &str, old: &str, current: &str) {
-    sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,plan_gate,adaptation_policy,decision_policy,delegation_policy,initial_plan_input,created_at,updated_at) \
-        VALUES(?,?,'exact task inspection','running','automatic','fixed','automatic','automatic','{}',1,1)")
+    sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,adaptation_policy,decision_policy,delegation_policy,initial_plan_input,created_at,updated_at) \
+        VALUES(?,?,'exact task inspection','running','fixed','automatic','automatic','{}',1,1)")
         .bind(execution).bind(&owner.principal_id).execute(services.database.pool()).await.unwrap();
     sqlx::query("INSERT INTO agent_execution_steps(step_id,execution_id,title,spec,kind,status,introduced_in_revision,created_at,updated_at) \
         VALUES(?,?,'Original task','inspect original resource owner','agent','running',0,1,1)")

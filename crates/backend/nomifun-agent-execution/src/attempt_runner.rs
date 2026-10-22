@@ -50,9 +50,16 @@ pub(crate) enum AttemptSessionTarget {
     /// Source-authored child preserves exact canonical request provenance and
     /// any established Companion affiliation. Resources alone grant neither.
     SourceChildAttempt { source: crate::AgentExecutionSource },
+    /// An explicit new work unit continues the original child's own history.
+    ExistingChild { target: nomifun_db::AgentExecutionContinuationTarget },
     /// AutoWork drives the exact AgentSession selected by the user. The
     /// Session is not created, renamed, or later cleaned up as an Attempt.
     AutomationLead { conversation_id: String },
+}
+
+enum ChildInputPreparation<'a> {
+    Delegated(&'a crate::AgentExecutionSource),
+    Continuation,
 }
 
 fn attempt_turn_input(
@@ -211,6 +218,19 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         Err(AppError::Conflict("canonical source-child creator is unavailable".into()))
     }
 
+    /// Read the exact source input selections after the child link is committed.
+    /// The normal child input owner still validates its frozen Skills and
+    /// prepares attachments; this cannot choose resources or copy a transcript.
+    async fn prepare_source_child_input(
+        &self,
+        _owner_id: &str,
+        _child_session_id: &str,
+        _source: Option<&crate::AgentExecutionSource>,
+        _request: SendMessageRequest,
+    ) -> Result<SendMessageRequest, AppError> {
+        Err(AppError::Conflict("canonical source-child input preparer is unavailable".into()))
+    }
+
     async fn discard_unlinked_creation(
         &self,
         owner_id: &str,
@@ -268,6 +288,13 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         conversation_id: &str,
     ) -> Result<ConversationResponse, AppError>;
 
+    /// Return the child's own saved Snapshot only after its current binding
+    /// matches the original Attempt's exact canonical admission.
+    async fn get_original_child(&self,_owner_id:&str,_execution_id:&str,
+        _target:&nomifun_db::AgentExecutionContinuationTarget)->Result<ConversationResponse,AppError> {
+        Err(AppError::Conflict("original child admission reader is unavailable".into()))
+    }
+
     fn take_turn_tokens(&self, conversation_id: &str) -> Option<i64>;
 
     /// Cleanup remains bound to the original Attempt invocation even if a
@@ -302,7 +329,7 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         operation_id: &str,
         target_operation_id: &str,
         request: SendMessageRequest,
-    ) -> Result<String, AppError>;
+    ) -> Result<crate::AgentExecutionSteerDelivery, AppError>;
 
     async fn project_assistant_message_idempotent(
         &self,
@@ -312,19 +339,6 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         content: &str,
         origin: &str,
     ) -> Result<String, AppError>;
-
-    /// Execution reports preserve the exact task/source references. A Host
-    /// without that canonical writer must not silently degrade to plain text.
-    async fn project_execution_report_idempotent(
-        &self,
-        _owner_id: &str,
-        _conversation_id: &str,
-        _operation_id: &str,
-        _content: &str,
-        _report: &crate::AgentExecutionReport,
-    ) -> Result<String, AppError> {
-        Err(AppError::Conflict("canonical execution-report writer is unavailable".into()))
-    }
 
     /// Project the exact persisted DecisionRequested event to its original
     /// request. Recovery repeats this identity, never a newly authored question.
@@ -396,7 +410,25 @@ impl AgentSessionAttemptRunner {
         origin: &str,
         hidden: bool,
         timeout: Duration,
+        preparation: Option<ChildInputPreparation<'_>>,
     ) -> Result<AttemptOutcome, AppError> {
+        let request = SendMessageRequest {
+            content: content.to_owned(),
+            files: vec![],
+            inject_skills: vec![],
+            hidden,
+            origin: Some(origin.to_owned()),
+            channel_platform: None,
+        };
+        let request = match preparation {
+            Some(preparation) => self.session.prepare_source_child_input(
+                owner_id, conversation_id, match preparation {
+                    ChildInputPreparation::Delegated(source) => Some(source),
+                    ChildInputPreparation::Continuation => None,
+                }, request,
+            ).await?,
+            None => request,
+        };
         let delivery = self
             .session
             .deliver_turn(
@@ -404,14 +436,7 @@ impl AgentSessionAttemptRunner {
                 conversation_id,
                 operation_id,
                 authority,
-                SendMessageRequest {
-                    content: content.to_owned(),
-                    files: vec![],
-                    inject_skills: vec![],
-                    hidden,
-                    origin: Some(origin.to_owned()),
-                    channel_platform: None,
-                },
+                request,
             )
             .await?;
         let boundary_message_id = delivery.message_id.clone();
@@ -591,16 +616,23 @@ impl AttemptRunner for AgentSessionAttemptRunner {
                     }
                 }
             }
+            AttemptSessionTarget::ExistingChild { target } => {
+                let conversation=self.session.get_original_child(owner_id,&participant.execution_id,target).await?;
+                if conversation.conversation_id!=target.conversation_id {
+                    return Err(AppError::Conflict("original child reader returned a different Session".into()));
+                }
+                conversation
+            }
             AttemptSessionTarget::AutomationLead { conversation_id } => {
                 let conversation = self.session.get(owner_id, conversation_id).await?;
                 if conversation.conversation_id != *conversation_id {
                     return Err(AppError::Conflict(
-                        "AutoWork Session lookup returned a different AgentSession".to_owned(),
+                        "existing Session lookup returned a different AgentSession".to_owned(),
                     ));
                 }
                 if conversation.agent_snapshot.as_ref() != participant.agent_snapshot.as_ref() {
                     return Err(AppError::Conflict(
-                        "AutoWork lead Agent snapshot changed after execution admission".to_owned(),
+                        "existing Agent snapshot changed after execution admission".to_owned(),
                     ));
                 }
                 conversation
@@ -647,6 +679,11 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             origin,
             hidden,
             timeout,
+            match &session_target {
+                AttemptSessionTarget::SourceChildAttempt { source } => Some(ChildInputPreparation::Delegated(source)),
+                AttemptSessionTarget::ExistingChild { .. } => Some(ChildInputPreparation::Continuation),
+                _ => None,
+            },
         )
         .await
     }
@@ -669,6 +706,7 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             "agent_execution_decision",
             false,
             timeout,
+            None,
         )
         .await
     }
@@ -913,6 +951,7 @@ mod tests {
         create_calls: AtomicUsize,
         created_request: Mutex<Option<CreateConversationRequest>>,
         request_source: Mutex<Option<crate::AgentExecutionSource>>,
+        prepared_source: Mutex<Option<crate::AgentExecutionSource>>,
         delivered: Mutex<Option<(String, SendMessageRequest)>>,
         delivery_calls: AtomicUsize,
         receipt: Mutex<Option<AgentExecutionDelivery>>,
@@ -955,6 +994,20 @@ mod tests {
         ) -> Result<ConversationResponse, AppError> {
             *self.request_source.lock().unwrap() = Some(source.clone());
             self.create_from_agent_snapshot_idempotent(owner_id, request, snapshot, creation_key).await
+        }
+
+        async fn prepare_source_child_input(
+            &self, _owner_id: &str, child_session_id: &str,
+            source: Option<&crate::AgentExecutionSource>, mut request: SendMessageRequest,
+        ) -> Result<SendMessageRequest, AppError> {
+            assert_eq!(child_session_id, CONVERSATION_ID);
+            assert!(request.files.is_empty() && request.inject_skills.is_empty());
+            if let Some(source)=source {
+                *self.prepared_source.lock().unwrap() = Some(source.clone());
+                request.files.push("exact-source-image".into());
+                request.inject_skills.push("exact-source-skill".into());
+            }
+            Ok(request)
         }
 
         async fn discard_unlinked_creation(
@@ -1021,6 +1074,11 @@ mod tests {
             Ok(self.conversation.clone())
         }
 
+        async fn get_original_child(&self,owner_id:&str,_execution_id:&str,target:&nomifun_db::AgentExecutionContinuationTarget)
+            ->Result<ConversationResponse,AppError> {
+            self.get(owner_id,&target.conversation_id).await
+        }
+
         fn take_turn_tokens(&self, _conversation_id: &str) -> Option<i64> {
             None
         }
@@ -1062,8 +1120,8 @@ mod tests {
             _operation_id: &str,
             _target_operation_id: &str,
             _request: SendMessageRequest,
-        ) -> Result<String, AppError> {
-            Ok(generate_id())
+        ) -> Result<crate::AgentExecutionSteerDelivery, AppError> {
+            Ok(crate::AgentExecutionSteerDelivery::Delivered { event_id:generate_id() })
         }
 
         async fn project_assistant_message_idempotent(
@@ -1139,6 +1197,7 @@ mod tests {
             conversation,
             created_request: Mutex::new(None),
             request_source: Mutex::new(None),
+            prepared_source: Mutex::new(None),
             create_calls: AtomicUsize::new(0),
             delivered: Mutex::new(None),
             delivery_calls: AtomicUsize::new(0),
@@ -1150,6 +1209,30 @@ mod tests {
             progress_release: tokio::sync::Notify::new(),
             progress_error: Mutex::new(None),
         })
+    }
+
+    #[tokio::test]
+    async fn source_child_uses_the_ordinary_input_with_exact_prepared_selections() {
+        let session = recording_session(Some(AgentExecutionDelivery {
+            message_id: CURRENT_USER_TURN_ID.into(), replayed: false, completed: true,
+            turn_outcome: None, user_input_request: None, result_ok: None, result_text: None,
+            result_error: None, result_error_code: None, result_error_retryable: None,
+        }));
+        let runner = AgentSessionAttemptRunner::new(session.clone());
+        let source = crate::AgentExecutionSource { agent_session_id:"exact-parent".into(),
+            turn_operation_id:"parent-turn".into(),tool_operation_id:"delegate-tool".into(),effect_id:"delegate-effect".into() };
+        runner.deliver_turn("owner", CONVERSATION_ID, "child-initial-turn",
+            AgentExecutionTurnAuthority { execution_id:generate_id(),step_id:generate_id(),attempt_id:generate_id(),
+                expected_step_version:1,expected_attempt_version:1,lease_owner:"owner".into() },
+            "child step remains its own input", "agent_execution", true, Duration::from_secs(1),
+            Some(ChildInputPreparation::Delegated(&source))).await.unwrap();
+        assert_eq!(session.prepared_source.lock().unwrap().as_ref(), Some(&source));
+        let (child, input) = session.delivered.lock().unwrap().take().unwrap();
+        assert_eq!(child, CONVERSATION_ID);
+        assert_eq!(input.content, "child step remains its own input");
+        assert_eq!(input.files, ["exact-source-image"]);
+        assert_eq!(input.inject_skills, ["exact-source-skill"]);
+        assert_eq!(session.delivery_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1174,7 +1257,7 @@ mod tests {
             turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Answered { message_ids: vec![CURRENT_USER_TURN_ID.into()] }), ..pending };
         *session.output.lock().unwrap() = Some(AgentExecutionTurnOutput {
             canonical_operation_id: "exact-original-operation".into(), terminal_event_id: Some("original-terminal".into()),
-            delivery: completed, output_files: Vec::new(), integrity_ok: true,
+            delivery: completed, output_files: Vec::new(), integrity_ok: true, workspace_changed: false,
         });
         session.progress_release.notify_one();
         let result = observer.await.unwrap();
@@ -1210,7 +1293,7 @@ mod tests {
         let result = runner.deliver_turn("owner", CONVERSATION_ID, "original-operation",
             AgentExecutionTurnAuthority { execution_id: generate_id(), step_id: generate_id(), attempt_id: generate_id(),
                 expected_step_version: 1, expected_attempt_version: 1, lease_owner: "original-owner".into() },
-            "original accepted input", "agent_execution", false, Duration::from_secs(1)).await;
+            "original accepted input", "agent_execution", false, Duration::from_secs(1), None).await;
         assert!(matches!(result, Err(AppError::Timeout(_))));
         assert_eq!(session.delivery_calls.load(Ordering::SeqCst), 1);
         assert_eq!(session.output_reads.load(Ordering::SeqCst), 0);
@@ -1346,6 +1429,37 @@ mod tests {
         assert_eq!(request.origin.as_deref(), Some("autowork"));
         assert!(request.hidden);
         assert_eq!(request.content, "[AutoWork] perform exact requirement");
+    }
+
+    #[tokio::test]
+    async fn completed_child_followup_delivers_a_new_input_in_the_original_session() {
+        let session=recording_session(None);
+        let runner=AgentSessionAttemptRunner::new(session.clone());
+        let participant=ExecutionParticipant {
+            participant_id:generate_id(),execution_id:generate_id(),source_agent_id:generate_id(),
+            preset_id:None,preset_revision:None,agent_snapshot:None,provider_id:Some(generate_id()),model:Some("model".into()),
+            role:Some("original child".into()),capability:None,constraints:None,description:None,system_prompt:None,
+            enabled_skills:vec![],disabled_builtin_skills:vec![],sort_order:0,introduced_in_revision:0,retired_in_revision:None,created_at:1,
+        };
+        let execution_id=participant.execution_id.clone();
+        let step_id=generate_id();let attempt_id=generate_id();let callback_attempt=attempt_id.clone();
+        let result=runner.execute("owner",AttemptSessionTarget::ExistingChild {target:nomifun_db::AgentExecutionContinuationTarget {
+            conversation_id:CONVERSATION_ID.into(),original_step_id:generate_id(),original_attempt_id:generate_id()}},
+            &participant,&[],None,"continued child",AgentToolPolicy::Full,false,DelegationPolicy::Automatic,1,
+            DecisionPolicy::Automatic,&attempt_id,"the new Step","Continue with the next independent input",Duration::from_millis(1),
+            Box::new(move|conversation|Box::pin(async move {
+                assert_eq!(conversation,CONVERSATION_ID);
+                Ok(AgentExecutionTurnAuthority {execution_id,step_id,attempt_id:callback_attempt,
+                    expected_step_version:1,expected_attempt_version:1,lease_owner:"lease".into()})
+            }))).await;
+        assert!(matches!(result,Err(AppError::Conflict(message)) if message=="captured AutoWork turn"));
+        assert_eq!(session.create_calls.load(Ordering::SeqCst),0,"continuing a child cannot fork its transcript");
+        let (conversation,input)=session.delivered.lock().unwrap().take().unwrap();
+        assert_eq!(conversation,CONVERSATION_ID);
+        assert_eq!(input.origin.as_deref(),Some("agent_execution"));
+        assert!(!input.hidden);
+        assert_eq!(input.content,"Continue with the next independent input");
+        assert!(session.request_source.lock().unwrap().is_none(),"the original source attachments are already in this child's history");
     }
 
     #[test]
@@ -1503,7 +1617,7 @@ mod tests {
                 user_input_request:Some(request.clone()),
                 result_ok:Some(true), result_text:Some("请补充姓名。".into()),
                 result_error:None, result_error_code:None, result_error_retryable:Some(false),
-            }, output_files:vec!["/workspace/draft.pptx".into()], integrity_ok:true,
+            }, output_files:vec!["/workspace/draft.pptx".into()], integrity_ok:true, workspace_changed:false,
         };
         let outcome = completed_delivery_outcome(CONVERSATION_ID, output, Some(7));
         assert_eq!(outcome.disposition, AttemptDisposition::InputRequired);
@@ -1525,7 +1639,7 @@ mod tests {
                     result_error: Some("The caller cancelled or a timeout occurred".into()),
                     result_error_code: Some(if typed_cancelled {"USER_LLM_PROVIDER_TIMEOUT"} else {"cancelled"}.into()),
                     result_error_retryable: Some(true),
-                }, output_files: Vec::new(), integrity_ok: true,
+                }, output_files: Vec::new(), integrity_ok: true, workspace_changed: false,
             };
             let outcome = completed_delivery_outcome(CONVERSATION_ID, output, Some(7));
             assert_eq!(outcome.disposition, if typed_cancelled {AttemptDisposition::Cancelled} else {AttemptDisposition::Failed});
@@ -1544,7 +1658,7 @@ mod tests {
                 message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: true, result_ok: Some(true), result_text: Some("done".into()),
                 result_error: None, result_error_code: None, result_error_retryable: Some(false),
             },
-            output_files: Vec::new(), integrity_ok: false,
+            output_files: Vec::new(), integrity_ok: false, workspace_changed: false,
         };
         let outcome = completed_delivery_outcome(CONVERSATION_ID, output, Some(7));
         assert_eq!(outcome.disposition, AttemptDisposition::Failed);
@@ -1563,7 +1677,7 @@ mod tests {
                 user_input_request: None, result_ok: Some(true),
                 result_text: Some("Earlier progress is not a final result".into()),
                 result_error: None, result_error_code: None, result_error_retryable: Some(false),
-            }, output_files: vec![], integrity_ok: true,
+            }, output_files: vec![], integrity_ok: true, workspace_changed: false,
         };
         let outcome = completed_delivery_outcome(CONVERSATION_ID, output, None);
         assert_eq!(outcome.disposition, AttemptDisposition::Failed);

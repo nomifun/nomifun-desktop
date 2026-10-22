@@ -58,10 +58,14 @@ pub fn reconcile_execution_tail(
     let mut input_requests = BTreeMap::new();
     let mut live_wait_unresolved = false;
     let mut phase_correction_steps = BTreeSet::new();
+    let mut delegation_calls = BTreeSet::new();
     for event in tail {
         match event {
+            AgentEngineEvent::CollaborationInherited { .. } =>
+                return Err(invalid("collaboration inheritance must precede the original Turn entry checkpoint")),
             AgentEngineEvent::ModelStepStarted { step: current, correction_source, .. } => {
                 if next.pending_user_input.is_some() { return Err(invalid("pending input handoff crossed a model boundary without accepted input")); }
+                if next.awaiting_children.is_some() { return Err(invalid("pending child wait crossed a model boundary without its exact owner wake")); }
                 if *current != step.checked_add(1).ok_or_else(|| invalid("model counter exhausted"))?
                     || (!discarded && !proposed.is_empty() && proposed != current_results) {
                     return Err(invalid("a model step crossed an unresolved previous batch"));
@@ -92,9 +96,12 @@ pub fn reconcile_execution_tail(
                 if calls.insert(call.call_id.clone(), (*current, call.clone())).is_some() { return Err(invalid("duplicate completed call identity")); }
                 if *current > 0 && proposed.insert(call.call_id.clone()) { order.push(call.call_id.clone()); }
             }
-            AgentEngineEvent::ToolStarted { step: current, call_id, .. } => {
+            AgentEngineEvent::ToolStarted { step: current, call_id, capability_id, action_id } => {
                 if calls.get(call_id).is_none_or(|(recorded, _)| recorded != current) { return Err(invalid("tool admission has no exact completed proposal")); }
                 admitted.insert(call_id.clone());
+                if capability_id.as_ref() == "agent.collaboration" && matches!(action_id.as_ref(), "agent/delegate"|"agent/fork") {
+                    delegation_calls.insert(call_id.clone());
+                }
             }
             AgentEngineEvent::ToolCompleted {step:current,result,runtime_hold:Some(crate::RuntimeToolHoldReason::PhaseRestricted)} => {
                 let (recorded_step,_) = calls.get(&result.call_id).ok_or_else(|| invalid("phase correction has no proposal"))?;
@@ -115,6 +122,18 @@ pub fn reconcile_execution_tail(
                 let (recorded_step, call) = calls.get(&result.call_id).ok_or_else(|| invalid("result has no proposal"))?;
                 if recorded_step != current || !completed.insert(result.call_id.clone()) { return Err(invalid("duplicate or mismatched result")); }
                 result.validate_for(&result.call_id)?;
+                if call.name == crate::collaboration::WAIT && !result.is_error {
+                    next.awaiting_children = Some(crate::collaboration::from_wait_call(call)?);
+                }
+                if !result.is_error {
+                    if call.name == crate::collaboration::STATUS {
+                        if next.collaboration.observe_status(&crate::collaboration::snapshot_from_result(result)?)? {
+                            next.work.observe_child_workspace_change();
+                        }
+                    }
+                    else if call.name == crate::collaboration::MESSAGE { next.collaboration.accept_message(result)?; }
+                    else if delegation_calls.contains(&result.call_id) { next.collaboration.accept(result)?; }
+                }
                 if input_requests.contains_key(&result.call_id) && result.is_error {
                     return Err(invalid("accepted native input request has a contradicting failed result"));
                 }
@@ -173,6 +192,22 @@ pub fn reconcile_execution_tail(
                 live_wait_unresolved = true;
             }
             AgentEngineEvent::TurnWaitResolved { .. } => { live_wait_unresolved = false; },
+            AgentEngineEvent::AwaitingChildren { model_steps, request } => {
+                request.validate()?;
+                if *model_steps != step || (next.awaiting_children.as_ref() != Some(request)
+                    && next.collaboration.wait().as_ref() != Some(request)) {
+                    return Err(invalid("child wait differs from its exact accepted control"));
+                }
+                next.awaiting_children = Some(request.clone());
+            }
+            AgentEngineEvent::ChildrenWaitResolved { model_steps, cursor } => {
+                if *model_steps != step || next.awaiting_children.is_none() {
+                    return Err(invalid("child wake has no exact pending child wait"));
+                }
+                crate::collaboration::wake_message(cursor)?;
+                next.collaboration.wake_cursor = Some(cursor.clone());
+                next.awaiting_children = None;
+            }
             AgentEngineEvent::OwnedProcessObserved { observation, .. } => {
                 observation.validate()?;
                 next.work.observe_owned_process(observation)?;
@@ -200,7 +235,12 @@ pub fn reconcile_execution_tail(
             _ => {}
         }
     }
-    let keep_batch = !current_results.is_empty() || proposed.iter().any(|id| admitted.contains(id) || input_requests.contains_key(id));
+    if !discarded && calls.iter().any(|(id,(call_step,call))| *call_step==step && call.name==crate::collaboration::MESSAGE
+        && !completed.contains(id) && !outcomes.contains_key(id)) {
+        return Err(invalid("an unpaired child message requires its exact original command owner reconciliation before any proposal can be discarded"));
+    }
+    let keep_batch = !current_results.is_empty() || proposed.iter().any(|id| admitted.contains(id) || input_requests.contains_key(id)
+        || calls.get(id).is_some_and(|(_,call)|call.name==crate::collaboration::MESSAGE && outcomes.contains_key(id)));
     if keep_batch && proposed.iter().any(|id| !calls.contains_key(id)) { return Err(invalid("admitted batch contains incomplete arguments")); }
     let mut observations = Vec::new();
     for (id, (call_step, call)) in &calls {
@@ -217,11 +257,37 @@ pub fn reconcile_execution_tail(
                 source: AgentReconciliationSource::NativeControlReceipt, evidence_event_id: None, owner_operation_id: None }
         } else if let Some(outcome) = outcomes.get(id) {
             outcome.clone()
+        } else if call.name == crate::collaboration::MESSAGE {
+            return Err(invalid("the original child-message owner has no reconciled command receipt; absence of a Kernel admission cannot prove this internal control was not applied"));
         } else if !admitted.contains(id) {
             AgentReconciledOutcome { result: AgentToolResult::text(id.clone(), "Not dispatched: the paused execution never admitted this proposal. Reconsider under the current task before any new call.", true),
                 source: AgentReconciliationSource::NotDispatched, evidence_event_id: None, owner_operation_id: None }
         } else { return Err(invalid("admitted invocation has no owner-backed reconciliation outcome")); };
         outcome.result.validate_for(id)?;
+        if call.name == crate::collaboration::MESSAGE
+            && (!matches!(outcome.source, AgentReconciliationSource::NativeControlReceipt
+                | AgentReconciliationSource::OwnerReceipt | AgentReconciliationSource::OwnerAttestation)
+                || outcome.evidence_event_id.as_deref().is_none_or(str::is_empty)
+                || outcome.owner_operation_id.as_ref().is_none_or(|id|id.as_ref().is_empty())) {
+            return Err(invalid("a child message requires the exact command owner's receipt or fenced attestation; NotDispatched is not an internal-control outcome proof"));
+        }
+        if call.name == crate::collaboration::MESSAGE && outcome.result.is_error {
+            let proof:serde_json::Value=serde_json::from_str(&outcome.result.output_text())
+                .map_err(|_|invalid("child message non-application needs a typed owner proof"))?;
+            if proof["state"]!="not_executed" || proof["control_applied"]!=false || proof["code"]!="CHILD_MESSAGE_NOT_COMMITTED" {
+                return Err(invalid("unknown child guidance is not proof that no command was committed"));
+            }
+            next.work.observe_deferred();
+        }
+        if !outcome.result.is_error {
+            if call.name == crate::collaboration::MESSAGE { next.collaboration.accept_message(&outcome.result)?; }
+            else if call.name == crate::collaboration::STATUS {
+                if next.collaboration.observe_status(&crate::collaboration::snapshot_from_result(&outcome.result)?)? {
+                    next.work.observe_child_workspace_change();
+                }
+            }
+            else if delegation_calls.contains(id) { next.collaboration.accept(&outcome.result)?; }
+        }
         if admitted.contains(id) && matches!(outcome.source, AgentReconciliationSource::NotDispatched)
             && outcome.evidence_event_id.is_none() { return Err(invalid("missing dispatch needs a fenced journal witness")); }
         next.plan.apply_exact_outcome(call,&outcome.result,

@@ -257,7 +257,7 @@ async fn context_clear_rechecks_the_active_lead_owner_and_allows_terminal_or_ina
     store.append_event(&append(&session, "clear-lead-ready", "runtime_supervisor", "clear-lead-ready", "session/ready",
         "session-clear-lead-owner", Some(created.opening_ack.event_id), json!({}))).await.unwrap();
     let execution = Uuid::now_v7().to_string();
-    sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,plan_gate,adaptation_policy,decision_policy,delegation_policy,initial_plan_input,created_at,updated_at) VALUES(?,?,'lead context fixture','completed','automatic','fixed','automatic','automatic','{}',1,1)")
+    sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,adaptation_policy,decision_policy,delegation_policy,initial_plan_input,created_at,updated_at) VALUES(?,?,'lead context fixture','completed','fixed','automatic','automatic','{}',1,1)")
         .bind(&execution).bind(&expected_owner.principal_id).execute(store.test_pool()).await.unwrap();
     sqlx::query("INSERT INTO conversation_execution_links(conversation_id,execution_id,relation,active,created_at,updated_at) VALUES(?,?,'lead',1,1,1)")
         .bind(session.as_ref()).bind(&execution).execute(store.test_pool()).await.unwrap();

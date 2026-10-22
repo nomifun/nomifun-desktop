@@ -53,7 +53,7 @@ async fn fixture() -> Fixture {
     sqlx::query("INSERT INTO agent_sessions(agent_session_id,owner_ref_json,state,title,archived,pinned,agent_binding_json,next_seq,created_at) VALUES(?,?,'live','source',0,0,'{}',1,1)")
         .bind(&session).bind(json!({"principal_kind":"user","principal_id":owner}).to_string())
         .execute(database.pool()).await.unwrap();
-    sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,plan_gate,adaptation_policy,decision_policy,delegation_policy,max_parallel,initial_plan_input,version,event_sequence,created_at,updated_at) VALUES(?,?,'captured background task','running','automatic','adaptive','ask_user','disabled',1,?,4,1,1,1)")
+    sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,adaptation_policy,decision_policy,delegation_policy,max_parallel,initial_plan_input,version,event_sequence,created_at,updated_at) VALUES(?,?,'captured background task','running','adaptive','ask_user','disabled',1,?,4,1,1,1)")
         .bind(&execution).bind(&owner).bind(initial_plan.to_string())
         .execute(database.pool()).await.unwrap();
     sqlx::query("INSERT INTO conversation_execution_links(conversation_id,execution_id,relation,active,created_at,updated_at) VALUES(?,?,'lead',1,1,1)")

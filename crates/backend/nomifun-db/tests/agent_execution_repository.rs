@@ -482,14 +482,19 @@ async fn agent_execution_row_model_excludes_retired_plan_gate_mapping() {
     let db = database().await;
     let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
     let created = create_execution(&repository).await;
-    let legacy_plan_gate: String = nomifun_db::sqlx::query_scalar(
-        "SELECT plan_gate FROM agent_executions WHERE execution_id = ?",
+    let columns: Vec<String> = nomifun_db::sqlx::query_scalar(
+        "SELECT name FROM pragma_table_info('agent_executions')",
     )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    assert!(!columns.iter().any(|column|column=="plan_gate"));
+    let count: i64 = nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM agent_executions WHERE execution_id=?")
     .bind(&created.execution_id)
     .fetch_one(db.pool())
     .await
     .unwrap();
-    assert_eq!(legacy_plan_gate, "automatic");
+    assert_eq!(count,1);
     let participant_id = repository
         .get_execution_detail(OWNER_ID, &created.execution_id)
         .await
@@ -1014,9 +1019,11 @@ async fn recovered_input_handoff_waits_on_the_same_attempt_without_marking_work_
     let saved:serde_json::Value=serde_json::from_str(&events.last().unwrap().payload).unwrap();
     assert_eq!(saved["turn_operation_key"],answer,"the original verified Turn supplies its identity, not caller metadata");
     let mut tx=db.pool().begin().await.unwrap();
+    assert_eq!(nomifun_db::execution_attempt_turn_key_tx(&mut tx,OWNER_ID,&execution_id,&waiting.detail.step.step_id,&attempt.attempt_id).await.unwrap(),answer,
+        "readers share claim/resume's exact persisted continuation key after retiring the pending delivery");
     let reservations=nomifun_db::execution_reservations_tx(&mut tx,&execution_id).await.unwrap();
     assert_eq!(reservations.len(),1);
-    assert!(!reservations[0].capacity_held&&reservations[0].workspace_held,
+    assert!(!reservations[0].capacity_held,
         "a second typed question uses its original saved continuation identity after the delivery queue retires");
     tx.commit().await.unwrap();
     let mut pending=nomifun_db::AttemptConversationEffects::decode(attempt.runtime_state.as_deref()).unwrap();
@@ -1439,8 +1446,20 @@ mod automation_stop_admission;
 #[path = "agent_execution_repository/recovery_handoff.rs"]
 mod recovery_handoff;
 
-#[path = "agent_execution_repository/waiting_writer_reservations.rs"]
-mod waiting_writer_reservations;
+#[path = "agent_execution_repository/capacity_reservations.rs"]
+mod capacity_reservations;
+
+#[path = "agent_execution_repository/delegation_creation.rs"]
+mod delegation_creation;
+
+#[path = "agent_execution_repository/source_continuation.rs"]
+mod source_continuation;
+
+#[path = "agent_execution_repository/source_reply.rs"]
+mod source_reply;
+
+#[path = "agent_execution_repository/closed_steer.rs"]
+mod closed_steer;
 
 #[path = "agent_execution_repository/task_retirement.rs"]
 mod task_retirement;

@@ -9,6 +9,10 @@
 mod agents_md;
 mod adaptive;
 mod checkpoint;
+mod collaboration;
+pub use collaboration::{AgentChildrenWait, AgentChildrenWaitMode, AgentCollaborationMessage,
+    AgentCollaborationPort, AgentCollaborationSelection, AgentCollaborationResultPage, AgentCollaborationSnapshot,
+    AgentCollaborationProgress, AgentChildResultConsumption, AgentChildResultCoverage, collaboration_progress_from_events};
 mod segments;
 pub use segments::{AgentExecutionPressure, AgentExecutionSegmentState, AgentExecutionStopReason, AgentSegmentPolicy, AgentSegmentReason};
 mod recovery;
@@ -39,6 +43,7 @@ mod engine;
 mod error;
 mod events;
 mod execution_policy;
+pub use execution_policy::workspace_process_operation_not_applied;
 mod kernel;
 mod history;
 mod history_port;

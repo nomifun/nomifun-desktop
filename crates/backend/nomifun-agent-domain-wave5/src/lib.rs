@@ -1268,7 +1268,7 @@ const MODULES: &[ModuleSpec] = &[
     ModuleSpec {
         id: AGENT_COLLABORATION_MODULE_ID,
         display_name: "Agent Collaboration",
-        description: "Create one persistent AgentExecution. For parallel fan-out, call agent/delegate exactly once with {\"strategy\":\"parallel\",\"tasks\":[{\"name\":\"upstream-a\",\"prompt\":\"...\"},{\"name\":\"upstream-b\",\"prompt\":\"...\"}],\"synthesize\":true}. The field is tasks (plural) and must be a JSON array; synthesize is a JSON boolean, never a string. true adds one downstream Agent that receives every upstream result. For one automatically planned goal use {\"strategy\":\"planned\",\"goal\":\"...\"}. Use agent/fork only for one isolated delegated Agent; never issue sibling collaboration calls concurrently.",
+        description: "Delegate bounded child work while the parent keeps the original task. For independent fan-out use one agent/delegate request with strategy=parallel and a tasks JSON array of non-overlapping tasks. For a goal needing a dependency plan use strategy=planned and goal. Acceptance is not completion: keep the execution identity, continue independent work, join through agent_wait, read exact results through agent_status, then integrate and verify in the parent. Use agent/fork for one isolated child; never repeat work whose native receipt already records acceptance.",
         actions: AGENT_COLLABORATION_ACTIONS,
     },
     ModuleSpec {
@@ -1945,11 +1945,6 @@ pub fn action_input_schema_for(action_id: &str) -> Result<StrictJsonValue, Strin
                                 },
                                 "required": ["name", "prompt"]
                             }
-                        },
-                        "synthesize": {
-                            "type":"boolean",
-                            "default":false,
-                            "description":"JSON boolean. true creates one downstream read-only Agent that depends on and receives every task result; do not encode it as a string."
                         }
                     },
                     "required": ["strategy", "tasks"]
@@ -2438,7 +2433,7 @@ mod tests {
     }
 
     #[test]
-    fn delegate_schema_accepts_one_parallel_fanout_with_optional_synthesis() {
+    fn delegate_schema_keeps_fanout_and_parent_completion_separate() {
         let schema = action_input_schema_for(AGENT_DELEGATE_ACTION_ID).unwrap();
         let validator = jsonschema::options()
             .build(&schema.0)
@@ -2450,9 +2445,8 @@ mod tests {
         })));
         assert!(validator.is_valid(&serde_json::json!({
             "strategy": "parallel",
-            "tasks": [{"name":"marker","prompt":"Reply with the exact marker"}],
-            "synthesize": false
-        })), "the live single-child/no-synthesis contract must be accepted exactly");
+            "tasks": [{"name":"marker","prompt":"Reply with the exact marker"}]
+        })), "the live single-child contract must be accepted exactly");
         assert!(validator.is_valid(&serde_json::json!({
             "strategy": "parallel",
             "tasks": [
@@ -2463,10 +2457,10 @@ mod tests {
                     "role": "critic",
                     "tool_policy": "read_only"
                 }
-            ],
-            "synthesize": true
+            ]
         })));
         for invalid in [
+            serde_json::json!({"strategy":"parallel","tasks":[{"name":"a","prompt":"work"}],"synthesize":true}),
             serde_json::json!({"strategy":"planned","goal":"work","target_role":"desktop"}),
             serde_json::json!({"strategy":"planned","goal":"work","target_role":"robot"}),
             serde_json::json!({"strategy":"parallel","tasks":[{"name":"a","prompt":"work"}],"target_role":"desktop"}),

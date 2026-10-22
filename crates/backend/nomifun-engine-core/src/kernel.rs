@@ -399,7 +399,7 @@ fn kernel_error(error: KernelError) -> EngineToolError {
         return EngineToolError::Cancelled;
     }
     let message = match code.as_str() {
-        "AGENT_EXECUTION_ALREADY_ACTIVE" => "This conversation already has an active AgentExecution. Do not start sibling collaboration calls; put all independent tasks in one agent/delegate request with strategy=parallel and use synthesize=true when a downstream Agent must combine them.".to_owned(),
+        "AGENT_EXECUTION_ALREADY_ACTIVE" => "This conversation already has an active AgentExecution. Preserve its exact execution identity. Put independent child work in one strategy=parallel tasks array, then use agent_wait and agent_status to join the accepted work and integrate it in the parent; do not submit accepted work again.".to_owned(),
         _ => error.capability_execution_failure().map(|failure| owner_failure_detail(&failure.message, 4096))
             .unwrap_or_else(|| error.to_string()),
     };

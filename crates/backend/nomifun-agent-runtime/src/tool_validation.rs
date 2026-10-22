@@ -351,11 +351,11 @@ mod tests {
             {"type":"object","additionalProperties":false,"required":["strategy","goal"],
                 "properties":{"strategy":{"const":"planned"},"goal":{"type":"string"}}},
             {"type":"object","additionalProperties":false,"required":["strategy","tasks"],
-                "properties":{"strategy":{"const":"parallel"},"tasks":{"type":"array"},"synthesize":{"type":"boolean"}}}
+                "properties":{"strategy":{"const":"parallel"},"tasks":{"type":"array"},"retain_context":{"type":"boolean"}}}
         ]}));
         let mut validators = ToolArgumentValidators::default();
         let results = validators.reject_invalid_batch(&[call("wrong", json!({
-            "strategy":"parallel","task":[],"synthesize":"false","private_key":"DO_NOT_REFLECT"
+            "strategy":"parallel","task":[],"retain_context":"false","private_key":"DO_NOT_REFLECT"
         }))], &plan, &exposed).unwrap().unwrap();
         let text = results[0].1.as_ref().unwrap().output_text();
         assert!(text.contains("/oneOf/1"));
@@ -365,7 +365,7 @@ mod tests {
         assert!(text.contains("allowed_properties"));
         assert!(!text.contains("DO_NOT_REFLECT") && !text.contains("private_key"));
         assert!(validators.reject_invalid_batch(&[call("fixed", json!({
-            "strategy":"parallel","tasks":[],"synthesize":false
+            "strategy":"parallel","tasks":[],"retain_context":false
         }))], &plan, &exposed).unwrap().is_none());
     }
 

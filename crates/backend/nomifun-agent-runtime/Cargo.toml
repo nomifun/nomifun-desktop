@@ -14,6 +14,7 @@ nomifun-agent-contracts.workspace = true
 nomifun-agent-kernel.workspace = true
 nomifun-chat-model-broker.workspace = true
 nomifun-engine-core.workspace = true
+nomi-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

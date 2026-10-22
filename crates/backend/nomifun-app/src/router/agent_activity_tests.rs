@@ -824,8 +824,8 @@ async fn automation_cleanup_stays_discoverable_and_preserves_active_source_and_s
             .await
             .unwrap();
         let initial = json!({"mode":"automation","source":{"requirement_id":requirement,"claim_generation":1,"operation_id":"autowork:old-cleanup"},"plan":{"steps":[]}});
-        nomifun_db::sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,plan_gate,adaptation_policy,decision_policy,delegation_policy,initial_plan_input,created_at,updated_at) \
-        VALUES(?,?,'old automation cleanup',?,'automatic','fixed','automatic','automatic',?,1,1)")
+        nomifun_db::sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,adaptation_policy,decision_policy,delegation_policy,initial_plan_input,created_at,updated_at) \
+        VALUES(?,?,'old automation cleanup',?,'fixed','automatic','automatic',?,1,1)")
         .bind(&execution).bind(&principal.principal_id).bind(original_status).bind(initial.to_string()).execute(services.database.pool()).await.unwrap();
         nomifun_db::sqlx::query("INSERT INTO conversation_execution_links(conversation_id,execution_id,relation,active,created_at,updated_at) VALUES(?,?,'lead',1,1,1)")
             .bind(session.as_ref()).bind(&execution).execute(services.database.pool()).await.unwrap();
@@ -904,8 +904,8 @@ async fn cancelled_planning_handle_projection_checks_original_owner_and_admitted
         (&foreign, uuid::Uuid::now_v7().to_string()),
         (&future, principal.principal_id.clone()),
     ] {
-        nomifun_db::sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,plan_gate,adaptation_policy,decision_policy,delegation_policy,initial_plan_input,version,created_at,updated_at) \
-            VALUES(?,?,'original planning owner','cancelled','automatic','fixed','automatic','automatic',?,2,1,1)")
+        nomifun_db::sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,adaptation_policy,decision_policy,delegation_policy,initial_plan_input,version,created_at,updated_at) \
+            VALUES(?,?,'original planning owner','cancelled','fixed','automatic','automatic',?,2,1,1)")
             .bind(id).bind(owner).bind(json!({"mode":"automatic"}).to_string()).execute(services.database.pool()).await.unwrap();
     }
     let observations = vec![

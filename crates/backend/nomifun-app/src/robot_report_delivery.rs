@@ -1,10 +1,9 @@
-//! Exact-source asynchronous execution results delivered through the existing
-//! Robot connection actor. The Execution report outbox supplies retry/lifetime.
+//! Exact-source task questions delivered through the original Robot connection.
+//! Child results are integrated and spoken through the parent Runtime.
 
 use super::*;
 use crate::router::nomi_core_session::ExecutionReportDeliveryPort;
 use nomifun_common::AppError;
-use nomifun_voice_contracts::VoiceSpeechSourceRef;
 
 #[async_trait::async_trait]
 impl ExecutionReportDeliveryPort for AppRobotBackend {
@@ -28,54 +27,6 @@ impl ExecutionReportDeliveryPort for AppRobotBackend {
         }
         // Queue acceptance is not a presentation. The connection actor calls
         // question_presented only after this exact sentence enters its writer.
-        Ok(())
-    }
-    async fn deliver_report(&self, owner_id: &str, session_id: &str,
-        operation_id: &str, report_message_id: &str) -> Result<(), AppError> {
-        if owner_id != self.owner_user_id.as_ref() {
-            return Err(AppError::Forbidden("Robot report belongs to another installation owner".into()));
-        }
-        let Some(prepared)=self.sessions.prepare_execution_report_delivery(owner_id,session_id,
-            operation_id,report_message_id).await? else { return Ok(()); };
-        // Automatic delivery stays on the original authenticated connection.
-        // Offline/reconnected devices keep the report in history, without a
-        // second attempt at physical speech on another connection or device.
-        if !self.registry.connection_matches(prepared.robot_id(),prepared.connection_id()).await {
-            return Ok(());
-        }
-        if !self.registry.get(prepared.robot_id()).await.is_some_and(|record|
-            record.companion_id.as_deref()==Some(prepared.companion_id())) { return Ok(()); }
-        // Retain the original connection while reading its immutable public
-        // report. Reading never schedules a model or creates another Turn.
-        let Some(admission_connection)=self.hold_input_connection(owner_id,prepared.companion_id(),
-            prepared.robot_id(),prepared.connection_id()).await? else{return Ok(());};
-        let result=self.sessions.read_execution_report_speech(&prepared).await;
-        drop(admission_connection);
-        let Some(speech)=result? else { return Ok(()); };
-        for answer in speech {
-            // Context clear, rebind and disconnect can occur during report
-            // reading. Recheck immediately before transport acceptance.
-            if self.sessions.prepare_execution_report_delivery(owner_id,session_id,
-                operation_id,report_message_id).await?.is_none() { return Ok(()); }
-            let Some(_connection)=self.registry.hold_action_connection(prepared.robot_id(),prepared.connection_id()).await
-                else { return Ok(()); };
-            if !self.registry.get(prepared.robot_id()).await.is_some_and(|current|
-                current.companion_id.as_deref()==Some(prepared.companion_id())
-                    ) {
-                return Ok(());
-            }
-            let source=VoiceSpeechSourceRef {message_id:answer.message_id,revision:answer.revision,
-                through_seq:answer.through_seq};
-            if let Err(error)=self.registry.speak_requested_context_source(prepared.robot_id(),prepared.connection_id(),answer.text,source,None,prepared.playback_context()).await {
-                if error.can_retry_same_source() {
-                    return Err(AppError::Conflict(format!("Robot result playback was not accepted: {error}")));
-                }
-                tracing::debug!(%error, "automatic Robot report playback was suppressed");
-                return Ok(());
-            }
-        }
-        // Acceptance is all the transport proves. The connection actor handles
-        // barge-in, TTS failures and cleanup; none of those reopens the task.
         Ok(())
     }
 }

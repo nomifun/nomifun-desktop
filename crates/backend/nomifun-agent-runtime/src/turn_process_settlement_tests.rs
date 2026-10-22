@@ -345,7 +345,7 @@ async fn process_boundary_model_only_recovery_tail_keeps_consumed_steps_past_the
         version:1, binding:binding(), turn_operation_id:"turn".into(), active_set_generation:0, model_steps:0, tool_call_count:0,
         accepted_input_count:1, applied_steering_receipts:vec![], plan:Default::default(), work:Default::default(), patch_recovery:Default::default(),
         segments:Some(crate::AgentExecutionSegmentState::new(1, crate::AgentSegmentPolicy { max_segments:8, max_no_progress_segments:2 }).unwrap()),
-        control_rejections:Default::default(), completion_review:Default::default(), pending_user_input:None,
+        control_rejections:Default::default(), completion_review:Default::default(), pending_user_input:None, awaiting_children: None, collaboration: Default::default(),
     };
     let prefix = vec![AgentEngineEvent::TurnStarted { binding:binding(), turn_operation_id:"turn".into() },
         AgentEngineEvent::ExecutionCheckpointSaved { step:0, revision:1, digest:"a".repeat(64).into() }];

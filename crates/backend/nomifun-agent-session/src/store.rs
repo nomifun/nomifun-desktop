@@ -49,7 +49,7 @@ use crate::types::{
 };
 
 pub const MAX_INLINE_JSON_BYTES: usize = 64 * 1024;
-pub const MAX_SINGLE_PAYLOAD_BYTES: usize = 1024 * 1024;
+pub const MAX_SINGLE_PAYLOAD_BYTES: usize = nomifun_agent_contracts::CANONICAL_PAYLOAD_MAX_BYTES as usize;
 pub const MAX_SESSION_PAYLOAD_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_EVENT_PAGE_SIZE: u32 = 500;
 
@@ -409,6 +409,7 @@ impl AgentSessionStore {
         sqlx::raw_sql(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).execute(&pool).await?;
         sqlx::raw_sql(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).execute(&pool).await?;
         sqlx::raw_sql(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).execute(&pool).await?;
+        sqlx::raw_sql(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).execute(&pool).await?;
         seed_test_schema_metadata(&pool).await?;
         Self::from_pool(pool).await
     }
@@ -2663,7 +2664,16 @@ impl AgentSessionStore {
         effect_id: &str,
     ) -> Result<Option<AgentEffectRecord>, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
-        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let result = self.read_effect_in_transaction(&mut tx, session_id, effect_id).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// The original lifecycle reader, sharing the caller's source/stop fence.
+    pub async fn read_effect_in_transaction(
+        &self, tx: &mut Transaction<'_, Sqlite>, session_id: &AgentSessionId, effect_id: &str,
+    ) -> Result<Option<AgentEffectRecord>, SessionStoreError> {
+        require_live_session_tx(tx, session_id.as_ref()).await?;
         let row = sqlx::query_as::<_, StoredEffectRow>(
             "SELECT effect_id, session_id, turn_id, operation_id, owner_domain, \
                     capability_module, action_id, resource_binding_id, resource_key, \
@@ -2673,11 +2683,9 @@ impl AgentSessionStore {
         )
         .bind(session_id.as_ref())
         .bind(effect_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
-        let result = match row { Some(row) => Some(effect_from_row(&mut tx, row).await?), None => None };
-        tx.commit().await?;
-        Ok(result)
+        match row { Some(row) => Ok(Some(effect_from_row(tx, row).await?)), None => Ok(None) }
     }
 
     pub async fn has_unsettled_effects(
@@ -2820,6 +2828,13 @@ impl AgentSessionStore {
         let result = Self::turn_accepted_input_tx(&mut tx, session, operation).await?;
         tx.commit().await?;
         Ok(result)
+    }
+
+    /// Reuse the exact accepted-root proof inside a consumer's transaction.
+    pub async fn turn_accepted_input_in_transaction(
+        &self, tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId, operation: &OperationId,
+    ) -> Result<(SessionEventRecord, StrictJsonValue), SessionStoreError> {
+        Self::turn_accepted_input_tx(tx, session, operation).await
     }
 
     async fn turn_accepted_input_tx(

@@ -25,6 +25,10 @@ mod steering;
 mod voice_correction;
 #[path = "runtime_history_port.rs"]
 mod history_port;
+#[path = "runtime_collaboration.rs"]
+mod collaboration_port;
+#[path = "runtime_collaboration_inheritance.rs"]
+mod collaboration_inheritance;
 #[path = "robot_interaction.rs"]
 pub(super) mod robot_interaction;
 
@@ -146,11 +150,19 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-runtime/src/lib.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/user_input.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/wait.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/collaboration.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/user_input.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/turn_outcome.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/shared_tool_content.rs"),
                     include_str!("../../../nomifun-agent-execution/src/user_input.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/engine.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/source_continuation.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/scheduler.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/production.rs"),
                     include_str!("../../../nomifun-db/src/repository/agent_execution.rs"),
+                    include_str!("../../../nomifun-db/src/repository/agent_source_reply.rs"),
                     include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution.rs"),
+                    include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution_source.rs"),
                     include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution_stop.rs"),
                     include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution_cleanup.rs"),
                     include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution_retirement.rs"),
@@ -183,7 +195,8 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("robot_background_control.rs"),
                     include_str!("session_admission.rs"),
                     include_str!("companion_report_delivery.rs"),
-                    include_str!("companion_directed_reports.rs"),
+                    include_str!("runtime_collaboration.rs"),
+                    include_str!("runtime_collaboration_inheritance.rs"),
                     include_str!("companion_decision_delivery.rs"),
                     include_str!("execution_question_playback.rs"),
                     include_str!("../../../nomifun-companion/src/memory_context.rs"),
@@ -415,6 +428,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-mcp/src/owner_stdio.rs"),
                     include_str!("../../../nomifun-mcp/src/owner_discovery.rs"),
                     include_str!("../../../../shared/nomi-process-runtime/src/command_builder.rs"),
+                    include_str!("../../../../shared/nomi-process-runtime/src/platform/windows.rs"),
                     include_str!("../../../nomifun-mcp/src/connection_test/mod.rs"),
                     include_str!("../../../nomifun-mcp/src/connection_test/protocol.rs"),
                     include_str!("agent_wave2_host.rs"),
@@ -480,6 +494,9 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-db/migrations/010_mcp_oauth_authority.sql"),
                     include_str!("../../../nomifun-db/migrations/011_cron_run_cancellation.sql"),
                     include_str!("../../../nomifun-db/migrations/012_unify_cron_agent_binding.sql"),
+                    include_str!("../../../nomifun-db/migrations/013_model_input_constraints.sql"),
+                    include_str!("../../../nomifun-db/migrations/014_retire_command_queue_setting.sql"),
+                    include_str!("../../../nomifun-db/migrations/015_retire_execution_plan_gate.sql"),
                     include_str!("engine_mcp_resources.rs"),
                     include_str!("engine_mcp_media.rs"),
                     include_str!("engine_workspace_media.rs"),
@@ -1197,6 +1214,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         ).await?;
         let mut messages = robot_interaction::bounded_history(history.messages, compact_interaction)?;
         let prior_task = history.prior_task;
+        let prior_collaboration=collaboration_inheritance::load(self,&admitted).await?;
         if let Some(text) = handoff_context {
             messages.push(ChatMessage {
                 role: ChatRole::Assistant,
@@ -1259,14 +1277,15 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             self.options.delegation_policy,
             turn_plan,
         );
+        let required_delegation = collaboration.required_delegation;
         let turn_plan = collaboration.tool_plan;
         instructions.extend(super::engine_skills::component_launch_instruction(&turn_plan));
-        let tool_choice = collaboration.tool_choice;
+        let tool_choice = ChatToolChoice::Auto;
         instructions.extend(collaboration.instructions);
         // Media intent is a presentation hint. Keep the full authorized
         // surface: text classification must not erase workspace or other tools.
         let mut preactivated_tools = selected_application_tools(&turn_plan);
-        if !collaboration.forced {
+        {
             if let Some(route) =
                 super::automatic_creation_route::classify(&message.content).filter(|route| {
                     turn_plan
@@ -1332,6 +1351,12 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             .with_user_input_request_port(Arc::new(UserInputRequestPort {
                 host:self.self_reference.clone(), enabled:!matches!(receipt.get("origin").and_then(Value::as_str), Some("cron" | "channel_guest")),
             }));
+        if request.tool_plan.model_name_for_action("agent.collaboration", "agent/delegate").is_some()
+            || request.tool_plan.model_name_for_action("agent.collaboration", "agent/fork").is_some() {
+            request = request.with_collaboration_port(Arc::new(collaboration_port::HostPort(self.self_reference.clone())));
+            request = request.with_required_delegation(required_delegation);
+            if let Some(progress)=prior_collaboration {request=request.with_prior_collaboration(progress);}
+        }
         request = if channel_guest {
             // This trusted ingress is a single model-only chat exchange. A
             // provider's unadvertised tool proposal is rejected without an
@@ -1831,6 +1856,15 @@ mod build_identity_tests {
         let source = include_str!("unified_runtime_host.rs");
         for required in [
             "../../../nomifun-agent-runtime/src/lib.rs",
+            "../../../nomifun-agent-runtime/src/collaboration.rs",
+            "../../../nomifun-agent-contracts/src/shared_tool_content.rs",
+            "../../../nomifun-agent-execution/src/engine.rs",
+            "../../../nomifun-agent-execution/src/source_continuation.rs",
+            "../../../nomifun-agent-execution/src/scheduler.rs",
+            "../../../nomifun-agent-execution/src/production.rs",
+            "../../../nomifun-db/src/repository/agent_source_reply.rs",
+            "../../../nomifun-db/src/repository/sqlite_agent_execution_source.rs",
+            "../../../../shared/nomi-process-runtime/src/platform/windows.rs",
             "mod.rs",
             "../../../nomifun-agent-contracts/src/package.rs",
             "../../../nomifun-agent-kernel/src/plugin.rs",
@@ -1917,6 +1951,9 @@ mod build_identity_tests {
             "../../../nomifun-db/migrations/010_mcp_oauth_authority.sql",
             "../../../nomifun-db/migrations/011_cron_run_cancellation.sql",
             "../../../nomifun-db/migrations/012_unify_cron_agent_binding.sql",
+            "../../../nomifun-db/migrations/013_model_input_constraints.sql",
+            "../../../nomifun-db/migrations/014_retire_command_queue_setting.sql",
+            "../../../nomifun-db/migrations/015_retire_execution_plan_gate.sql",
         ] {
             assert!(
                 source.contains(&format!("include_str!(\"{required}\")")),

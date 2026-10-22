@@ -44,6 +44,8 @@ mod live_input_queue;
 
 #[path = "support/live_scheduled_tasks.rs"]
 mod live_scheduled_tasks;
+#[path = "support/live_subagent.rs"]
+mod live_subagent;
 
 #[cfg(all(feature = "browser-use", feature = "computer-use"))]
 #[path = "support/live_general_desktop.rs"]
@@ -86,6 +88,7 @@ struct LiveFixture {
 
 #[derive(Clone, Copy)]
 enum LiveCase {
+    SubagentIntegration,
     ScheduledTasks,
     SelectedModel,
     WorkspaceFile,
@@ -1377,7 +1380,7 @@ fn collaboration_argument_shape(arguments: &Value) -> String {
     let strategy = match arguments.get("strategy").and_then(Value::as_str) {
         Some("parallel") => "parallel", Some("planned") => "planned", _ => "other",
     };
-    format!("{strategy}:{}:{}", kind(arguments.get("tasks")), kind(arguments.get("synthesize")))
+    format!("{strategy}:{}", kind(arguments.get("tasks")))
 }
 
 async fn emit_live_runtime_progress_trace(root: &Path) {
@@ -2041,7 +2044,7 @@ async fn run_live_agent_collaboration(
         session_id,
         &uuid::Uuid::now_v7().to_string(),
         format!(
-            "Use a subagent now to exercise the real persistent collaboration runtime. Invoke the Agent collaboration delegation Action exactly once with strategy=parallel, one task named marker, synthesize=false, and this exact task prompt: Do not call tools and do not ask a question. Reply with exactly {COLLABORATION_MODEL_MARKER} and no other text. Do not answer this parent turn in prose."
+            "Use a subagent now to exercise the real persistent collaboration runtime. Invoke the Agent collaboration delegation Action exactly once with strategy=parallel, one task named marker, and this exact task prompt: Do not call tools and do not ask a question. Reply with exactly {COLLABORATION_MODEL_MARKER} and no other text. After acceptance, join the exact child with agent_wait and agent_status, then report its verified result from this parent Turn."
         ),
     )
     .await?;
@@ -3260,6 +3263,7 @@ fn live_case_future<'a>(case: LiveCase, router: &'a Router, api_key: &'a str,
     application: &'a NomiCoreApplication, local_proof: Option<&'a str>,
 ) -> futures_util::future::LocalBoxFuture<'a, Result<(), SmokeFailure>> {
     match case {
+        LiveCase::SubagentIntegration => live_subagent::run(router, api_key, model, root, work_dir).boxed_local(),
         LiveCase::ScheduledTasks => live_scheduled_tasks::run(router, api_key, model, root, work_dir).boxed_local(),
         LiveCase::WorkspaceFile | LiveCase::CodingPreset | LiveCase::SnakeGame => run_live_workspace_file_chain(
             router, api_key, model, work_dir,
@@ -3333,7 +3337,9 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
                 // A bounded category is enough to identify the shutdown owner;
                 // never print arbitrary service/provider error text here.
                 let text = error.to_string().to_ascii_lowercase();
-                let owner = if text.contains("storage") { "storage" }
+                let owner = if text.contains("background task") { "background_tasks" }
+                    else if text.contains("session background process") { "session_processes" }
+                    else if text.contains("storage") { "storage" }
                     else if text.contains("mcp") { "mcp_auth" }
                     else if text.contains("terminal") { "terminal" }
                     else if text.contains("background") { "background" }
@@ -3380,6 +3386,15 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
 #[ignore = "requires a live credential on stdin; use the runner --cron-smoke"]
 async fn nomi_core_scheduled_tasks_reach_live_stepfun() {
     if let Err(error)=run_live_provider_smoke(LiveCase::ScheduledTasks).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {error}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an authorized Step Plan credential on stdin; use the runner --subagent-smoke"]
+async fn nomi_core_subagent_integration_reaches_live_stepfun() {
+    if let Err(error)=run_live_provider_smoke(LiveCase::SubagentIntegration).await {
         eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {error}");
         panic!("NOMIFUN_LIVE_SMOKE_FAILED");
     }
@@ -3691,11 +3706,11 @@ mod evidence_tests {
     #[test]
     fn collaboration_diagnostics_expose_only_fixed_shape_categories() {
         let shape = collaboration_argument_shape(&json!({
-            "strategy":"SENSITIVE_VALUE", "tasks":"SENSITIVE_VALUE", "synthesize":false,
+            "strategy":"SENSITIVE_VALUE", "tasks":"SENSITIVE_VALUE",
             "extra":"SENSITIVE_VALUE"
         }));
-        assert_eq!(shape, "other:string:boolean");
-        assert_eq!(collaboration_argument_shape(&json!({"strategy":"parallel","tasks":[]})), "parallel:array:missing");
+        assert_eq!(shape, "other:string");
+        assert_eq!(collaboration_argument_shape(&json!({"strategy":"parallel","tasks":[]})), "parallel:array");
     }
 
     #[test]

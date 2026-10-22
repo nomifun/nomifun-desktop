@@ -150,6 +150,12 @@ impl AgentWorkStatus {
         self.invalidate_workspace_observation();
     }
 
+    /// A newly read exact child source changed or revoked delegated work.
+    /// This fences old completion assumptions, not a new mutation receipt.
+    pub(crate) fn observe_child_workspace_change(&mut self) {
+        self.invalidate_workspace_observation();
+    }
+
     pub(crate) fn observe(
         &mut self,
         binding: &AgentToolBinding,

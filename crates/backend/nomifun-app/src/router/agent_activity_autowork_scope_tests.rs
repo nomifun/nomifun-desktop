@@ -156,6 +156,11 @@ fn activity<'a>(snapshot: &'a Value, id: &str) -> &'a Value {
     snapshot["items"].as_array().unwrap().iter().find(|row| row["target"]["step_id"] == id).unwrap()
 }
 
+fn assert_same_workspace(actual:&str,expected:&str) {
+    assert!(nomifun_common::paths::paths_equivalent(std::path::Path::new(actual),std::path::Path::new(expected)),
+        "the frozen physical workspace must remain the same: {actual:?} vs {expected:?}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn autowork_local_task_stop_preserves_source_root_and_sibling_and_old_attempt_cannot_retarget() {
     let model = OriginalModel::start().await;
@@ -286,9 +291,27 @@ async fn autowork_local_task_stop_preserves_source_root_and_sibling_and_old_atte
     // Use the existing internal retry writers to stage a legitimate queued
     // successor without starting a second model call or changing concurrency.
     let completed_root = completed.steps.iter().find(|step| &step.step_id == root_id).unwrap();
-    let reset = repository.reset_steps_for_retry(owner, execution, completed.execution.version,
-        &[RetryAgentExecutionStep { step_id: root_id.clone(), expected_step_version: completed_root.version }],
-        &event(AgentExecutionEventKind::StepChanged)).await.unwrap();
+    let reset = tokio::time::timeout(Duration::from_secs(15),async {
+        loop {
+            let current=repository.get_execution_detail(owner,execution).await.unwrap().unwrap();
+            let root=current.steps.iter().find(|step|&step.step_id==root_id).unwrap();
+            assert_eq!(root.status,"completed");
+            assert_eq!(root.version,completed_root.version,"cleanup may advance only unrelated execution observations");
+            let target=repository.get_step_detail(owner,execution,root_id).await.unwrap().unwrap();
+            assert_eq!(target.current_attempt.as_ref().unwrap().attempt.attempt_id,original_attempt.attempt.attempt_id,
+                "the fixture retry must retain the exact original root until its own writer commits");
+            match repository.reset_steps_for_retry(owner,execution,current.execution.version,
+                &[RetryAgentExecutionStep {step_id:root_id.clone(),expected_step_version:root.version}],
+                &event(AgentExecutionEventKind::StepChanged)).await {
+                Ok(reset)=>break reset,
+                Err(nomifun_db::DbError::Conflict(error))=>{
+                    let after=repository.get_execution(owner,execution).await.unwrap().unwrap();
+                    assert!(after.version>current.execution.version,"a same-version conflict is not cleanup progress: {error}");
+                },
+                Err(error)=>panic!("staging the exact successor failed: {error}"),
+            }
+        }
+    }).await.expect("the original completed root can stage one queued successor while cleanup finishes");
     let pending = reset.steps.iter().find(|step| &step.step_id == root_id).unwrap();
     let successor = repository.create_attempt(owner, execution, root_id, pending.version, None,
         &CreateAgentExecutionAttemptParams { participant_id: pending.assigned_participant_id.clone(),
@@ -394,7 +417,7 @@ async fn autowork_running_child_stop_keeps_its_independent_session_root_result_a
     let repository = nomifun_db::SqliteAgentExecutionRepository::new(services.database.pool().clone());
     let original = repository.get_execution_detail(owner, execution).await.unwrap().unwrap();
     assert_eq!(original.execution.max_parallel, 1);
-    assert_eq!(original.execution.work_dir.as_deref(), Some(workspace.as_str()));
+    assert_same_workspace(original.execution.work_dir.as_deref().unwrap(),&workspace);
     assert_eq!(original.attempts.len(), 1);
     let original_attempt = &original.attempts[0].attempt;
     let root_id = &original_attempt.step_id;
@@ -484,13 +507,15 @@ async fn autowork_running_child_stop_keeps_its_independent_session_root_result_a
         if workspace_bearing {
             let mut expected_parameters = original_resource.typed_parameters.clone();
             expected_parameters.remove(nomifun_agent_contracts::MANAGED_WORKSPACE_LOCATION_PARAMETER);
-            expected_parameters.insert("workspace_root".into(), workspace.clone());
+            let inherited_root=resource.typed_parameters.get("workspace_root").unwrap();
+            assert_same_workspace(inherited_root,&workspace);
+            expected_parameters.insert("workspace_root".into(), inherited_root.clone());
             assert_eq!(resource.typed_parameters, expected_parameters);
         } else {
             assert_eq!(resource, original_resource);
         }
     }
-    assert_eq!(child_projection.extra["workspace"], workspace, "the delegate retains the admitted physical workspace");
+    assert_same_workspace(child_projection.extra["workspace"].as_str().unwrap(),&workspace);
     let constraints = nomifun_api_types::ExecutionConstraints::from_extra(&child_projection.extra).unwrap();
     assert_eq!(constraints.tool_scope, AgentToolPolicy::Full);
     let effective: Value = serde_json::from_str(&running.attempt.effective_config).unwrap();

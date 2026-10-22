@@ -3,43 +3,14 @@
 //! References are never accepted from an append draft or followed recursively.
 use super::*;
 use serde::{Deserialize, Serialize};
+use nomifun_agent_contracts::{SharedToolContentKind as ContentKind,SharedToolContentReference as ContentReference};
 
 #[path = "shared_input_content.rs"]
 mod input_content;
 
-const KEY: &str = "_canonical_shared_content";
-const MIN_BYTES: usize = 1024;
+const KEY: &str = nomifun_agent_contracts::SHARED_TOOL_CONTENT_KEY;
+const MIN_BYTES: usize = nomifun_agent_contracts::SHARED_TOOL_CONTENT_MIN_BYTES as usize;
 const MAX_REFERENCES: usize = 4096;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ContentKind { ToolOutput, ToolArguments }
-
-impl ContentKind {
-    fn media_type(self) -> &'static str {
-        match self {
-            Self::ToolOutput => "application/vnd.nomifun.tool-output+json",
-            Self::ToolArguments => "application/vnd.nomifun.tool-arguments+json",
-        }
-    }
-    fn id(self, session: &AgentSessionId, digest: &DigestHex) -> ArtifactId {
-        let kind = match self { Self::ToolOutput => "output", Self::ToolArguments => "arguments" };
-        format!("shared-tool:{}:{kind}:{}", session.as_ref(), digest.as_ref()).into()
-    }
-    fn accepts(self, value: &Value) -> bool {
-        match self { Self::ToolOutput => value.is_array(), Self::ToolArguments => value.is_object() }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ContentReference {
-    pointer: String,
-    kind: ContentKind,
-    payload_id: ArtifactId,
-    digest: DigestHex,
-    byte_len: u64,
-}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -190,8 +161,7 @@ pub(super) async fn hydrate(tx: &mut Transaction<'_, Sqlite>, event: &SessionEve
     let mut seen = BTreeSet::new();
     for reference in metadata.references {
         if !seen.insert(reference.pointer.clone()) || !allowed.contains(&(reference.pointer.clone(), reference.kind))
-            || reference.payload_id != reference.kind.id(&event.agent_session_id, &reference.digest)
-            || reference.byte_len < MIN_BYTES as u64 || reference.byte_len > MAX_SINGLE_PAYLOAD_BYTES as u64 {
+            || !reference.is_for_slot(&event.agent_session_id,&reference.pointer,reference.kind) {
             return Err(invalid("shared content reference is outside its exact Session and typed slot"));
         }
         expanded_bytes=expanded_bytes.saturating_sub(4).saturating_add(reference.byte_len as usize);

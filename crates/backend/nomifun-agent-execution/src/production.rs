@@ -6,7 +6,6 @@
 //! strategies directly.
 
 use std::path::PathBuf;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -77,7 +76,7 @@ impl ConversationEffects for ProductionConversationEffects {
         operation_id: &str,
         target_operation_id: &str,
         text: &str,
-    ) -> Result<(), AppError> {
+    ) -> Result<crate::AgentExecutionSteerDelivery, AppError> {
         self.session
             .steer_turn_for_execution(
                 owner_id,
@@ -94,7 +93,6 @@ impl ConversationEffects for ProductionConversationEffects {
                 },
             )
             .await
-            .map(|_| ())
     }
     async fn stop_attempt_turn(
         &self,
@@ -128,61 +126,16 @@ impl ConversationEffects for ProductionConversationEffects {
             if source.agent_session_id != conversation_id {
                 return Err(AppError::Conflict("execution report source differs from its lead Session".into()));
             }
-            let mut turn_keys = HashMap::new();
-            let mut cursor = 0;
-            loop {
-                let events = self.repository.list_events(owner_id, &detail.execution.execution_id, cursor, 500).await?;
-                for event in &events {
-                    if let Some(attempt) = &event.attempt_id {
-                        let payload: serde_json::Value = serde_json::from_str(&event.payload)
-                            .map_err(|error| AppError::Internal(format!("invalid execution report source event: {error}")))?;
-                        if let Some(key) = payload.get("turn_operation_key").and_then(serde_json::Value::as_str) {
-                            turn_keys.insert(attempt.clone(), key.to_owned());
-                        }
-                    }
-                }
-                let Some(last) = events.last() else { break; };
-                cursor = last.sequence;
-                if events.len() < 500 { break; }
-            }
-            let mut attempts = Vec::new();
-            let mut verified_completed_delivery = false;
-            for attempt in detail.attempts.iter().filter(|attempt| attempt.status.is_terminal()) {
-                let Some(session_id) = attempt.conversation_id.as_deref() else { continue; };
-                let key = turn_keys.get(&attempt.attempt_id).cloned()
-                    .unwrap_or_else(|| format!("{}:initial-turn", attempt.attempt_id));
-                let Some(output) = self.session.read_turn_output(owner_id, session_id, Some(&key)).await? else { continue; };
-                let Some(terminal_event_id) = output.terminal_event_id else { continue; };
-                if !output.delivery.completed { continue; }
-                verified_completed_delivery |= attempt.status == nomifun_common::ExecutionAttemptStatus::Completed
-                    && output.delivery.result_ok == Some(true) && output.delivery.user_input_request.is_none();
-                attempts.push(crate::AgentExecutionAttemptReport {
-                    step_id: attempt.step_id.clone(), attempt_id: attempt.attempt_id.clone(),
-                    agent_session_id: session_id.into(), turn_operation_id: output.canonical_operation_id,
-                    terminal_event_id, result_ok: output.delivery.result_ok,
-                    output_integrity_ok: output.integrity_ok,
-                    output_files: output.output_files,
-                });
-            }
-            if detail.execution.status == nomifun_common::AgentExecutionStatus::Completed
-                && !verified_completed_delivery {
-                return Err(AppError::Conflict("execution completion has no exact canonical delivery".into()));
-            }
-            let sequence = operation_id.rsplit(':').next().and_then(|value| value.parse().ok())
-                .ok_or_else(|| AppError::Conflict("execution report has no terminal execution event".into()))?;
-            let report = crate::AgentExecutionReport {
-                source, execution_id: detail.execution.execution_id.clone(),
-                execution_event_sequence: sequence, status: detail.execution.status.to_string(), attempts,
-            };
-            return self.session.project_execution_report_idempotent(
-                owner_id, conversation_id, operation_id, result, &report,
-            ).await.map(|_| ());
+            // The parent keeps its original Turn and reads these settled domain
+            // results through the canonical collaboration port. Publishing them
+            // here as its final answer would bypass integration and duplicate
+            // the parent's normal Runtime output.
+            return Ok(());
         }
         // The persisted terminal summary is already the synthesis/sole
-        // business output selected by the scheduler. Project it as the final
-        // assistant message; never feed it back through the lead model. Do not
-        // cancel by Session identity here: the original delegation turn may
-        // have ended and a later user turn may now own the active slot.
+        // business output of a directly created, non-source Execution. Keep
+        // that UI summary projection without creating a hidden model Turn or
+        // cancelling another Turn that now owns the lead Session's slot.
         self.session
             .project_assistant_message_idempotent(
                 owner_id,
@@ -246,14 +199,13 @@ pub(crate) mod tests {
     };
     use nomifun_db::{AgentExecutionTurnAuthority, SqliteAgentExecutionRepository};
     use serde_json::json;
-    use crate::{AgentExecutionDelivery, AgentExecutionInput, AgentExecutionReport,
+    use crate::{AgentExecutionDelivery, AgentExecutionInput,
         AgentExecutionSource, AgentExecutionTurnOutput};
 
     #[derive(Default)]
     struct RecordingSessionPort {
-        output: Mutex<Option<AgentExecutionTurnOutput>>,
         reads: Mutex<Vec<(String, String, Option<String>)>>,
-        reports: Mutex<Vec<(String, String, String, String, AgentExecutionReport)>>,
+        projections: Mutex<Vec<(String, String, String, String, String)>>,
         inputs: Mutex<Vec<(String, AgentExecutionInput)>>,
     }
 
@@ -297,7 +249,7 @@ pub(crate) mod tests {
         async fn read_turn_output(&self, owner: &str, session: &str,
             operation: Option<&str>) -> Result<Option<AgentExecutionTurnOutput>, AppError> {
             self.reads.lock().unwrap().push((owner.into(), session.into(), operation.map(str::to_owned)));
-            Ok(self.output.lock().unwrap().clone())
+            Ok(None)
         }
         async fn get(&self, _: &str, _: &str) -> Result<ConversationResponse, AppError> {
             panic!("report must not read mutable Session configuration")
@@ -311,14 +263,10 @@ pub(crate) mod tests {
         async fn steer_turn(&self, _: &str, _: &str, _: &str,
             _: SendMessageRequest) -> Result<String, AppError> { panic!("report must not steer a Turn") }
         async fn steer_turn_for_execution(&self, _: &str, _: &str, _: &str,
-            _: &str, _: SendMessageRequest) -> Result<String, AppError> { panic!("report must not steer a Turn") }
-        async fn project_assistant_message_idempotent(&self, _: &str, _: &str,
-            _: &str, _: &str, _: &str) -> Result<String, AppError> {
-            panic!("source report must retain typed canonical provenance")
-        }
-        async fn project_execution_report_idempotent(&self, owner: &str, session: &str,
-            operation: &str, content: &str, report: &AgentExecutionReport) -> Result<String, AppError> {
-            self.reports.lock().unwrap().push((owner.into(), session.into(), operation.into(), content.into(), report.clone()));
+            _: &str, _: SendMessageRequest) -> Result<crate::AgentExecutionSteerDelivery, AppError> { panic!("report must not steer a Turn") }
+        async fn project_assistant_message_idempotent(&self, owner: &str, session: &str,
+            operation: &str, content: &str, origin: &str) -> Result<String, AppError> {
+            self.projections.lock().unwrap().push((owner.into(), session.into(), operation.into(), content.into(), origin.into()));
             Ok(generate_id())
         }
         async fn notify_execution_input_required_idempotent(&self, owner: &str,
@@ -336,7 +284,6 @@ pub(crate) mod tests {
         source: AgentExecutionSource,
         detail: AgentExecutionDetail,
         request: AgentExecutionEvent,
-        public_turn_key: String,
     }
 
     async fn fixture(mode: &str) -> Fixture {
@@ -355,7 +302,7 @@ pub(crate) mod tests {
             "explicit" => json!({"mode":mode,"source":source,"plan":{"steps":[]}}),
             _ => panic!("fixture must exercise generic planning modes"),
         };
-        sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,plan_gate,adaptation_policy,decision_policy,delegation_policy,max_parallel,initial_plan_input,summary,created_at,updated_at) VALUES(?,?,'background task','completed','automatic','adaptive','ask_user','disabled',1,?,'canonical task result',1,1)")
+        sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,adaptation_policy,decision_policy,delegation_policy,max_parallel,initial_plan_input,summary,created_at,updated_at) VALUES(?,?,'background task','completed','adaptive','ask_user','disabled',1,?,'canonical task result',1,1)")
             .bind(&execution).bind(&owner).bind(initial_plan.to_string())
             .execute(database.pool()).await.unwrap();
         let public_turn_key = format!("{attempt}:decision-continuation");
@@ -389,63 +336,22 @@ pub(crate) mod tests {
         };
         let session = Arc::new(RecordingSessionPort::default());
         let effects = ProductionConversationEffects { session: session.clone(), repository };
-        Fixture { database, effects, session, owner, source, detail, request, public_turn_key }
-    }
-
-    fn verified_output() -> AgentExecutionTurnOutput {
-        AgentExecutionTurnOutput {
-            canonical_operation_id: "canonical-child-turn".into(),
-            terminal_event_id: Some("canonical-child-terminal".into()),
-            output_files: vec!["report.txt".into()], integrity_ok: true,
-            delivery: AgentExecutionDelivery {
-                message_id: generate_id(), replayed: false, completed: true,
-                turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Answered {
-                    message_ids: vec!["canonical-child-message".into()],
-                }),
-                user_input_request: None, result_ok: Some(true), result_text: Some("canonical task result".into()),
-                result_error: None, result_error_code: None, result_error_retryable: None,
-            },
-        }
+        Fixture { database, effects, session, owner, source, detail, request }
     }
 
     #[tokio::test]
-    async fn generic_source_reports_use_exact_canonical_attempts_without_another_model_turn() {
+    async fn source_results_stay_in_the_domain_until_the_parent_integrates_them() {
         for mode in ["automatic", "explicit"] {
             let fixture = fixture(mode).await;
-            *fixture.session.output.lock().unwrap() = Some(verified_output());
-            let execution = &fixture.detail.execution.execution_id;
-            let operation = format!("exec-lead-report:{execution}:event:11");
+            let operation = format!("exec-lead-report:{}:event:11", fixture.detail.execution.execution_id);
             fixture.effects.report_lead(&fixture.owner, &fixture.detail, &operation).await.unwrap();
-            assert_eq!(*fixture.session.reads.lock().unwrap(), vec![(
-                fixture.owner.clone(), fixture.detail.attempts[0].conversation_id.clone().unwrap(),
-                Some(fixture.public_turn_key.clone()),
-            )]);
-            let reports = fixture.session.reports.lock().unwrap();
-            assert_eq!(reports.len(), 1);
-            let (owner, session, key, content, report) = &reports[0];
-            assert_eq!(owner, &fixture.owner);
-            assert_eq!(session, &fixture.source.agent_session_id);
-            assert_eq!(key, &operation);
-            assert_eq!(content, "canonical task result");
-            assert_eq!(report.source, fixture.source);
-            assert_eq!(&report.execution_id, execution);
-            assert_eq!(report.execution_event_sequence, 11);
-            assert_eq!(report.status, "completed");
-            assert_eq!(report.attempts.len(), 1);
-            let attempt = &report.attempts[0];
-            assert_eq!(attempt.step_id, fixture.detail.attempts[0].step_id);
-            assert_eq!(attempt.attempt_id, fixture.detail.attempts[0].attempt_id);
-            assert_eq!(attempt.agent_session_id, fixture.detail.attempts[0].conversation_id.clone().unwrap());
-            assert_eq!(attempt.turn_operation_id, "canonical-child-turn");
-            assert_eq!(attempt.terminal_event_id, "canonical-child-terminal");
-            assert_eq!(attempt.result_ok, Some(true));
-            assert!(attempt.output_integrity_ok);
-            assert_eq!(attempt.output_files, ["report.txt"]);
-            drop(reports);
+            assert!(fixture.session.projections.lock().unwrap().is_empty(),
+                "a child's settled result cannot become the parent's final answer");
+            assert!(fixture.session.reads.lock().unwrap().is_empty(),
+                "the collaboration consumer reads exact results only when requested by the parent");
             fixture.database.close().await;
         }
     }
-
     #[tokio::test]
     async fn generic_source_waiting_input_notifies_the_original_request_with_exact_decision_identity() {
         for mode in ["automatic", "explicit"] {
@@ -459,21 +365,23 @@ pub(crate) mod tests {
                 step_id: fixture.request.step_id.clone().unwrap(),
                 attempt_id: fixture.request.attempt_id.clone().unwrap(),
             })]);
-            assert!(fixture.session.reports.lock().unwrap().is_empty());
+            assert!(fixture.session.projections.lock().unwrap().is_empty());
             assert!(fixture.session.reads.lock().unwrap().is_empty());
             fixture.database.close().await;
         }
     }
 
     #[tokio::test]
-    async fn generic_source_completion_cannot_project_success_without_exact_canonical_delivery() {
-        for mode in ["automatic", "explicit"] {
-            let fixture = fixture(mode).await;
-            let operation = format!("exec-lead-report:{}:event:11", fixture.detail.execution.execution_id);
-            let error = fixture.effects.report_lead(&fixture.owner, &fixture.detail, &operation).await.unwrap_err();
-            assert!(matches!(error, AppError::Conflict(_)));
-            assert!(fixture.session.reports.lock().unwrap().is_empty());
-            fixture.database.close().await;
-        }
+    async fn non_source_execution_keeps_its_direct_public_summary() {
+        let fixture = fixture("automatic").await;
+        sqlx::query("UPDATE agent_executions SET initial_plan_input=? WHERE execution_id=?")
+            .bind(json!({"mode":"automatic"}).to_string()).bind(&fixture.detail.execution.execution_id)
+            .execute(fixture.database.pool()).await.unwrap();
+        let operation = format!("exec-lead-report:{}:event:11", fixture.detail.execution.execution_id);
+        fixture.effects.report_lead(&fixture.owner, &fixture.detail, &operation).await.unwrap();
+        assert_eq!(*fixture.session.projections.lock().unwrap(), vec![(fixture.owner.clone(),
+            fixture.source.agent_session_id.clone(), operation, "canonical task result".into(), "agent_execution_report".into())]);
+        assert!(fixture.session.reads.lock().unwrap().is_empty());
+        fixture.database.close().await;
     }
 }

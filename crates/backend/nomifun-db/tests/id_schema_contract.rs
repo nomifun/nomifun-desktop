@@ -72,6 +72,8 @@ fn migration_directory_contains_the_canonical_forward_migration_chain() {
         "011_cron_run_cancellation.sql",
         "012_unify_cron_agent_binding.sql",
         "013_model_input_constraints.sql",
+        "014_retire_command_queue_setting.sql",
+        "015_retire_execution_plan_gate.sql",
     ]);
 }
 

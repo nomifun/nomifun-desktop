@@ -94,7 +94,7 @@ fn existing_current_generation_unclassified_rejection_remains_readable() {
 fn checkpoint() -> AgentExecutionCheckpoint {
     AgentExecutionCheckpoint { version: 1, binding: binding(), turn_operation_id: "turn".into(), active_set_generation: 0,
         model_steps: 0, tool_call_count: 0, accepted_input_count: 1, applied_steering_receipts: vec![], plan: Default::default(),
-        work: Default::default(), patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None }
+        work: Default::default(), patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None, awaiting_children: None, collaboration: Default::default() }
 }
 
 #[test]

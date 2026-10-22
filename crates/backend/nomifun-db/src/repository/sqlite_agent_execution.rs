@@ -27,7 +27,7 @@ use crate::repository::agent_execution::{
     AttemptConversationEffectParams, AttemptConversationEffectResult,
     CreateAgentExecutionAttemptParams, CreateAgentExecutionParams, IAgentExecutionRepository,
     LoopRepeatResetParams,
-    NewAgentExecutionEvent, NewAgentExecutionParticipant, NewAgentExecutionStep,
+    AgentExecutionSourceAppend, NewAgentExecutionEvent, NewAgentExecutionParticipant, NewAgentExecutionStep,
     NewAgentExecutionStepDependency, ReconcileAgentExecutionPlanParams,
     ConversationCleanupCursor, ConversationCleanupTurnTarget, PendingConversationCleanup, PendingConversationCleanupPage,
     RetryAgentExecutionStep, SettleAgentExecutionAttemptParams,
@@ -44,6 +44,9 @@ mod conversation_cleanup;
 #[path = "sqlite_agent_execution_retirement.rs"]
 mod task_retirement;
 
+#[path = "sqlite_agent_execution_source.rs"]
+mod source_continuation;
+
 #[derive(Clone, Debug)]
 pub struct SqliteAgentExecutionRepository {
     pool: SqlitePool,
@@ -59,6 +62,47 @@ fn conflict(entity: &str) -> DbError {
     DbError::Conflict(format!(
         "{entity} changed concurrently, does not belong to the caller, or no longer exists"
     ))
+}
+
+struct DelegationCreationIdentity {
+    session_id: String,
+    turn_operation_id: String,
+    digest: String,
+}
+
+// The immutable Created event retains only this command digest. Current goal,
+// policies and the prepared workspace may change after creation and cannot
+// identify a replay of the original delegation.
+fn delegation_creation_identity(params: &CreateAgentExecutionParams) -> Result<Option<DelegationCreationIdentity>, DbError> {
+    let mut initial: serde_json::Value = serde_json::from_str(&params.initial_plan_input)
+        .map_err(|error| DbError::Conflict(format!("invalid initial planning input: {error}")))?;
+    if !matches!(initial.get("mode").and_then(serde_json::Value::as_str), Some("automatic" | "explicit")) {
+        return Ok(None);
+    }
+    let Some(source) = initial.get("source").filter(|source| !source.is_null()) else { return Ok(None); };
+    let session_id = source.get("agent_session_id").and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty()).ok_or_else(|| conflict("delegation source Session"))?.to_owned();
+    let turn_operation_id = source.get("turn_operation_id").and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty()).ok_or_else(|| conflict("delegation source Turn"))?.to_owned();
+    if params.lead_conversation_id.as_deref() != Some(session_id.as_str()) {
+        return Err(conflict("delegation source and lead Session"));
+    }
+    initial.as_object_mut().ok_or_else(|| conflict("initial planning input"))?.remove("source");
+    let command = serde_json::json!({
+        "schema":"delegation-creation-v1",
+        "agent_session_id":session_id,
+        "turn_operation_id":turn_operation_id,
+        "goal":params.goal.trim(),
+        "adaptation_policy":params.adaptation_policy,
+        "decision_policy":params.decision_policy,
+        "delegation_policy":params.delegation_policy,
+        "max_parallel":params.max_parallel,
+        "work_dir":params.work_dir.as_deref().map(str::trim).filter(|value| !value.is_empty()),
+        "initial_plan":initial,
+    });
+    let digest = nomifun_agent_contracts::digest_payload(&command)
+        .map_err(|error| DbError::Conflict(format!("delegation command cannot be canonicalized: {error}")))?.0;
+    Ok(Some(DelegationCreationIdentity { session_id, turn_operation_id, digest }))
 }
 
 async fn verify_terminal_turn_tx(
@@ -774,15 +818,7 @@ async fn append_event_tx(
                             .to_owned(),
                     ));
                 }
-                let actor_attempt_id = match (attempt_id.is_some(), event.attempt_id.as_ref()) {
-                    (true, Some(attempt_id)) => Some(attempt_id.clone()),
-                    (false, None) => None,
-                    _ => {
-                        return Err(DbError::Conflict(
-                            "Agent actor attempt context does not match the event".to_owned(),
-                        ));
-                    }
-                };
+                let actor_attempt_id = attempt_id.clone();
                 let links = sqlx::query_as::<_, (String, Option<String>)>(
                     "SELECT link.relation, link.attempt_id \
                      FROM conversation_execution_links link \
@@ -869,15 +905,7 @@ async fn append_event_tx(
                 "agent".to_owned(),
                 Some(agent_id.clone()),
                 conversation_id.clone(),
-                match (attempt_id.is_some(), event.attempt_id.as_ref()) {
-                    (true, Some(attempt_id)) => Some(attempt_id.clone()),
-                    (false, None) => None,
-                    _ => {
-                        return Err(DbError::Conflict(
-                            "Agent actor attempt context does not match the event".to_owned(),
-                        ));
-                    }
-                },
+                attempt_id.clone(),
             )
         }
     };
@@ -1690,6 +1718,168 @@ async fn load_execution_detail_tx(
     }))
 }
 
+fn validate_step_append(params: &AppendAgentExecutionStepsParams, event: &NewAgentExecutionEvent, source_followup: bool) -> Result<HashSet<String>, DbError> {
+    if params.new_steps.is_empty() {
+        return Err(DbError::Conflict(
+            "append must introduce at least one Step".to_owned(),
+        ));
+    }
+    if event.event_type != AgentExecutionEventKind::PlanChanged {
+        return Err(DbError::Conflict(
+            "Step append requires a PlanChanged event".to_owned(),
+        ));
+    }
+    if !source_followup && matches!(
+        &event.actor,
+        AgentExecutionActor::Agent {
+            attempt_id: Some(_),
+            ..
+        }
+    ) {
+        return Err(DbError::Conflict(
+            "an Attempt Agent must use append_steps_from_attempt".to_owned(),
+        ));
+    }
+    let new_step_ids =
+        validate_new_ids("Step", params.new_steps.iter().map(|step| step.step_id.as_str()))?;
+    if params
+        .new_steps
+        .iter()
+        .any(|step| step.status != ExecutionStepStatus::Pending)
+    {
+        return Err(DbError::Conflict(
+            "appended Step ids must be unique UUIDv7 values and every new Step must be Pending"
+                .to_owned(),
+        ));
+    }
+    validate_dependency_graph(&new_step_ids, &params.new_dependencies)?;
+
+    Ok(new_step_ids)
+}
+
+async fn append_steps_tx(tx: &mut Transaction<'_, Sqlite>, user_id: &str, execution_id: &str,
+    expected_version: i64, params: &AppendAgentExecutionStepsParams, event: &NewAgentExecutionEvent,
+    new_step_ids: &HashSet<String>, now: i64) -> Result<AgentExecutionDetailRows, DbError> {
+    let (previous_status, current_revision): (String, i64) = sqlx::query_as(
+        "SELECT status, plan_revision FROM agent_executions WHERE execution_id = ?",
+    )
+    .bind(execution_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let active_steps: Vec<AgentExecutionStepRow> = sqlx::query_as(
+        "SELECT * FROM agent_execution_steps \
+         WHERE execution_id = ? AND superseded_in_revision IS NULL",
+    )
+    .bind(execution_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    if active_steps.len() + params.new_steps.len() > MAX_AGENT_EXECUTION_STEPS {
+        return Err(DbError::Conflict(format!(
+            "active Agent Execution DAG exceeds {MAX_AGENT_EXECUTION_STEPS} steps"
+        )));
+    }
+    let active_participant_ids: HashSet<String> = sqlx::query_scalar(
+        "SELECT participant_id FROM agent_execution_participants \
+         WHERE execution_id = ? AND retired_in_revision IS NULL",
+    )
+    .bind(execution_id)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .collect();
+    for step in &params.new_steps {
+        if step.kind == ExecutionStepKind::Agent
+            && !step
+                .assigned_participant_id
+                .as_ref()
+                .is_some_and(|id| active_participant_ids.contains(id))
+        {
+            return Err(DbError::Conflict(
+                "an appended Agent Step must reference an active Participant".to_owned(),
+            ));
+        }
+    }
+    let active_dependencies: Vec<AgentExecutionStepDependencyRow> = sqlx::query_as(
+        "SELECT * FROM agent_execution_step_dependencies \
+         WHERE execution_id = ? AND superseded_in_revision IS NULL",
+    )
+    .bind(execution_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let full_step_ids: HashSet<String> = active_steps
+        .iter()
+        .map(|step| step.step_id.clone())
+        .chain(new_step_ids.iter().cloned())
+        .collect();
+    let full_dependencies: Vec<NewAgentExecutionStepDependency> = active_dependencies
+        .iter()
+        .map(|dependency| NewAgentExecutionStepDependency {
+            blocker_step_id: dependency.blocker_step_id.clone(),
+            blocked_step_id: dependency.blocked_step_id.clone(),
+        })
+        .chain(params.new_dependencies.iter().cloned())
+        .collect();
+    validate_dependency_graph(&full_step_ids, &full_dependencies)?;
+
+    let new_revision: Option<i64> = sqlx::query_scalar(
+        "UPDATE agent_executions SET \
+            status = CASE \
+                WHEN status IN ('completed', 'completed_with_failures', 'failed') \
+                THEN 'running' ELSE status END, \
+            plan_revision = plan_revision + 1, version = version + 1, updated_at = ? \
+         WHERE execution_id = ? AND user_id = ? AND version = ? AND plan_revision = ? \
+           AND deleted_at IS NULL \
+           AND status IN (\
+               'running', 'paused', 'waiting_input', 'completed', \
+               'completed_with_failures', 'failed'\
+           ) \
+         RETURNING plan_revision",
+    )
+    .bind(now)
+    .bind(execution_id)
+    .bind(user_id)
+    .bind(expected_version)
+    .bind(current_revision)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(new_revision) = new_revision else {
+        return Err(conflict("Agent Execution Step append"));
+    };
+    for step in &params.new_steps {
+        insert_step_tx(
+            tx,
+            execution_id,
+            step,
+            step.assigned_participant_id.as_deref(),
+            0,
+            new_revision,
+            now,
+        )
+        .await?;
+    }
+    for dependency in &params.new_dependencies {
+        sqlx::query(
+            "INSERT INTO agent_execution_step_dependencies (\
+                execution_id, blocker_step_id, blocked_step_id, introduced_in_revision\
+             ) VALUES (?, ?, ?, ?)",
+        )
+        .bind(execution_id)
+        .bind(&dependency.blocker_step_id)
+        .bind(&dependency.blocked_step_id)
+        .bind(new_revision)
+        .execute(&mut **tx)
+        .await?;
+    }
+    if is_terminal_execution_status(&previous_status) {
+        activate_execution_lead_tx(tx, user_id, execution_id, now).await?;
+    }
+    append_event_tx(tx, execution_id, event, now).await?;
+    let detail = load_execution_detail_tx(tx, user_id, execution_id)
+        .await?
+        .ok_or_else(|| conflict("Agent Execution"))?;
+    Ok(detail)
+}
+
 #[async_trait::async_trait]
 impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
     async fn create_execution_with_participants(
@@ -1719,6 +1909,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                 "max_parallel must be between 1 and {MAX_AGENT_EXECUTION_PARALLELISM}"
             )));
         }
+        let delegation = delegation_creation_identity(params)?;
         let execution_id = nomifun_common::AgentExecutionId::new().into_string();
         let now = now_ms();
         let mut tx = self.pool.begin().await?;
@@ -1733,6 +1924,12 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         }
         super::agent_execution_admission::require_autowork_admitted_tx(
             &mut tx,user_id,&params.initial_plan_input,params.lead_conversation_id.as_deref()).await?;
+        if let Some(identity) = &delegation {
+            if let Some(prior) = source_continuation::find_command_tx(&mut tx,user_id,identity).await? {
+                tx.commit().await?;
+                return Ok(prior);
+            }
+        }
         if let Some(conversation_id) = params.lead_conversation_id.as_deref() {
             let is_attempt_conversation: i64 = sqlx::query_scalar(
                 "SELECT EXISTS( \
@@ -1777,11 +1974,11 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         }
         sqlx::query(
             "INSERT INTO agent_executions (\
-                execution_id, user_id, goal, status, plan_gate, adaptation_policy, decision_policy, \
+                execution_id, user_id, goal, status, adaptation_policy, decision_policy, \
                 delegation_policy, max_parallel, work_dir, initial_plan_input, \
                 version, plan_revision, event_sequence, \
                 created_at, updated_at\
-             ) VALUES (?, ?, ?, ?, 'automatic', ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?)",
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?)",
         )
         .bind(&execution_id)
         .bind(user_id)
@@ -1804,7 +2001,19 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             switch_current_lead_tx(&mut tx, user_id, &execution_id, conversation_id, now)
                 .await?;
         }
-        append_event_tx(&mut tx, &execution_id, event, now).await?;
+        let mut created_event = event.clone();
+        let mut payload: serde_json::Value = serde_json::from_str(&created_event.payload)
+            .map_err(|error| DbError::Conflict(format!("invalid creation event payload: {error}")))?;
+        if let Some(object) = payload.as_object_mut() {
+            object.remove("delegation_command_digest");
+            if let Some(identity) = delegation {
+                object.insert("delegation_command_digest".into(), identity.digest.into());
+            }
+            created_event.payload = payload.to_string();
+        } else if delegation.is_some() {
+            return Err(conflict("delegation creation event payload"));
+        }
+        append_event_tx(&mut tx, &execution_id, &created_event, now).await?;
         let row = sqlx::query_as::<_, AgentExecutionRow>(
             "SELECT * FROM agent_executions WHERE execution_id = ?",
         )
@@ -3036,41 +3245,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         params: &AppendAgentExecutionStepsParams,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionDetailRows, DbError> {
-        if params.new_steps.is_empty() {
-            return Err(DbError::Conflict(
-                "append must introduce at least one Step".to_owned(),
-            ));
-        }
-        if event.event_type != AgentExecutionEventKind::PlanChanged {
-            return Err(DbError::Conflict(
-                "Step append requires a PlanChanged event".to_owned(),
-            ));
-        }
-        if matches!(
-            &event.actor,
-            AgentExecutionActor::Agent {
-                attempt_id: Some(_),
-                ..
-            }
-        ) {
-            return Err(DbError::Conflict(
-                "an Attempt Agent must use append_steps_from_attempt".to_owned(),
-            ));
-        }
-        let new_step_ids =
-            validate_new_ids("Step", params.new_steps.iter().map(|step| step.step_id.as_str()))?;
-        if params
-            .new_steps
-            .iter()
-            .any(|step| step.status != ExecutionStepStatus::Pending)
-        {
-            return Err(DbError::Conflict(
-                "appended Step ids must be unique UUIDv7 values and every new Step must be Pending"
-                    .to_owned(),
-            ));
-        }
-        validate_dependency_graph(&new_step_ids, &params.new_dependencies)?;
-
+        let new_step_ids = validate_step_append(params, event, false)?;
         let now = now_ms();
         let mut tx = self.pool.begin().await?;
         let locked = sqlx::query(
@@ -3089,125 +3264,65 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         if locked.rows_affected() != 1 {
             return Err(conflict("Agent Execution Step append"));
         }
-        let (previous_status, current_revision): (String, i64) = sqlx::query_as(
-            "SELECT status, plan_revision FROM agent_executions WHERE execution_id = ?",
-        )
-        .bind(execution_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        let active_steps: Vec<AgentExecutionStepRow> = sqlx::query_as(
-            "SELECT * FROM agent_execution_steps \
-             WHERE execution_id = ? AND superseded_in_revision IS NULL",
-        )
-        .bind(execution_id)
-        .fetch_all(&mut *tx)
-        .await?;
-        if active_steps.len() + params.new_steps.len() > MAX_AGENT_EXECUTION_STEPS {
-            return Err(DbError::Conflict(format!(
-                "active Agent Execution DAG exceeds {MAX_AGENT_EXECUTION_STEPS} steps"
-            )));
-        }
-        let active_participant_ids: HashSet<String> = sqlx::query_scalar(
-            "SELECT participant_id FROM agent_execution_participants \
-             WHERE execution_id = ? AND retired_in_revision IS NULL",
-        )
-        .bind(execution_id)
-        .fetch_all(&mut *tx)
-        .await?
-        .into_iter()
-        .collect();
-        for step in &params.new_steps {
-            if step.kind == ExecutionStepKind::Agent
-                && !step
-                    .assigned_participant_id
-                    .as_ref()
-                    .is_some_and(|id| active_participant_ids.contains(id))
-            {
-                return Err(DbError::Conflict(
-                    "an appended Agent Step must reference an active Participant".to_owned(),
-                ));
-            }
-        }
-        let active_dependencies: Vec<AgentExecutionStepDependencyRow> = sqlx::query_as(
-            "SELECT * FROM agent_execution_step_dependencies \
-             WHERE execution_id = ? AND superseded_in_revision IS NULL",
-        )
-        .bind(execution_id)
-        .fetch_all(&mut *tx)
-        .await?;
-        let full_step_ids: HashSet<String> = active_steps
-            .iter()
-            .map(|step| step.step_id.clone())
-            .chain(new_step_ids.iter().cloned())
-            .collect();
-        let full_dependencies: Vec<NewAgentExecutionStepDependency> = active_dependencies
-            .iter()
-            .map(|dependency| NewAgentExecutionStepDependency {
-                blocker_step_id: dependency.blocker_step_id.clone(),
-                blocked_step_id: dependency.blocked_step_id.clone(),
-            })
-            .chain(params.new_dependencies.iter().cloned())
-            .collect();
-        validate_dependency_graph(&full_step_ids, &full_dependencies)?;
-
-        let new_revision: Option<i64> = sqlx::query_scalar(
-            "UPDATE agent_executions SET \
-                status = CASE \
-                    WHEN status IN ('completed', 'completed_with_failures', 'failed') \
-                    THEN 'running' ELSE status END, \
-                plan_revision = plan_revision + 1, version = version + 1, updated_at = ? \
-             WHERE execution_id = ? AND user_id = ? AND version = ? AND plan_revision = ? \
-               AND deleted_at IS NULL \
-               AND status IN (\
-                   'running', 'paused', 'waiting_input', 'completed', \
-                   'completed_with_failures', 'failed'\
-               ) \
-             RETURNING plan_revision",
-        )
-        .bind(now)
-        .bind(execution_id)
-        .bind(user_id)
-        .bind(expected_version)
-        .bind(current_revision)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some(new_revision) = new_revision else {
-            return Err(conflict("Agent Execution Step append"));
-        };
-        for step in &params.new_steps {
-            insert_step_tx(
-                &mut tx,
-                execution_id,
-                step,
-                step.assigned_participant_id.as_deref(),
-                0,
-                new_revision,
-                now,
-            )
-            .await?;
-        }
-        for dependency in &params.new_dependencies {
-            sqlx::query(
-                "INSERT INTO agent_execution_step_dependencies (\
-                    execution_id, blocker_step_id, blocked_step_id, introduced_in_revision\
-                 ) VALUES (?, ?, ?, ?)",
-            )
-            .bind(execution_id)
-            .bind(&dependency.blocker_step_id)
-            .bind(&dependency.blocked_step_id)
-            .bind(new_revision)
-            .execute(&mut *tx)
-            .await?;
-        }
-        if is_terminal_execution_status(&previous_status) {
-            activate_execution_lead_tx(&mut tx, user_id, execution_id, now).await?;
-        }
-        append_event_tx(&mut tx, execution_id, event, now).await?;
-        let detail = load_execution_detail_tx(&mut tx, user_id, execution_id)
-            .await?
-            .ok_or_else(|| conflict("Agent Execution"))?;
+        let detail = append_steps_tx(&mut tx, user_id, execution_id, expected_version, params, event, &new_step_ids, now).await?;
         tx.commit().await?;
         Ok(detail)
+    }
+
+    async fn find_source_command(&self, user_id: &str, command: &CreateAgentExecutionParams)
+        -> Result<Option<AgentExecutionRow>, DbError> {
+        let Some(identity)=delegation_creation_identity(command)? else {return Ok(None);};
+        let mut tx=self.pool.begin().await?;
+        let row=source_continuation::find_command_tx(&mut tx,user_id,&identity).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    async fn append_source_steps(&self,user_id:&str,execution_id:&str,expected_version:i64,
+        source:&AgentExecutionSourceAppend,params:&AppendAgentExecutionStepsParams,event:&NewAgentExecutionEvent)
+        ->Result<AppendAgentExecutionStepsFromAttemptResult,DbError> {
+        source_continuation::append(&self.pool,user_id,execution_id,expected_version,source,params,event).await
+    }
+
+    async fn continuation_target(&self,user_id:&str,execution_id:&str,step_id:&str)->Result<Option<crate::AgentExecutionContinuationTarget>,DbError> {
+        source_continuation::target(&self.pool,user_id,execution_id,step_id).await
+    }
+
+    async fn original_child_binding(&self,user_id:&str,execution_id:&str,target:&crate::AgentExecutionContinuationTarget)
+        ->Result<nomifun_agent_contracts::AgentHandoffBindingRefV1,DbError> {
+        let mut tx=self.pool.begin().await?;
+        let binding=source_continuation::original_child_binding_tx(&mut tx,user_id,execution_id,target).await?;
+        tx.commit().await?;Ok(binding)
+    }
+
+    async fn step_source(&self,user_id:&str,execution_id:&str,step_id:&str)->Result<Option<nomifun_common::AgentExecutionSource>,DbError> {
+        source_continuation::step_source(&self.pool,user_id,execution_id,step_id).await
+    }
+
+    async fn step_session_available(&self,user_id:&str,execution_id:&str,step_id:&str)->Result<bool,DbError> {
+        let mut tx=self.pool.begin().await?;
+        let owned:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_executions WHERE execution_id=? AND user_id=? AND deleted_at IS NULL)")
+            .bind(execution_id).bind(user_id).fetch_one(&mut *tx).await?;
+        if !owned {return Err(conflict("Step Session admission owner"));}
+        let available=super::agent_execution_admission::continuation_input_available_tx(&mut tx,execution_id,step_id).await?;
+        tx.commit().await?;Ok(available)
+    }
+
+    async fn source_reply_turns(&self,user_id:&str,session_id:&str,current_turn:&str)->Result<Vec<String>,DbError> {
+        let mut tx=self.pool.begin().await?;
+        let turns=crate::agent_reply_source_turns_tx(&mut tx,user_id,session_id,current_turn).await?;
+        tx.commit().await?;Ok(turns)
+    }
+
+    async fn step_message_source(&self,user_id:&str,execution_id:&str,step_id:&str)->Result<Option<crate::AgentExecutionMessageSource>,DbError> {
+        let payload:Option<String>=sqlx::query_scalar("SELECT json_extract(event.payload,'$.message_source') FROM agent_execution_events event JOIN agent_executions execution ON execution.execution_id=event.execution_id WHERE event.execution_id=? AND execution.user_id=? AND execution.deleted_at IS NULL AND event.event_type='plan_changed' AND json_extract(event.payload,'$.continuation_step_id')=? AND json_type(event.payload,'$.message_source')='object' ORDER BY event.sequence LIMIT 1")
+            .bind(execution_id).bind(user_id).bind(step_id).fetch_optional(&self.pool).await?;
+        payload.map(|value|serde_json::from_str(&value).map_err(|error|DbError::Init(format!("invalid Step message source: {error}")))).transpose()
+    }
+
+    async fn redirect_closed_steer(&self,user_id:&str,execution_id:&str,step_id:&str,attempt_id:&str,
+        operation_id:&str,closed:&crate::AgentExecutionClosedTurn)->Result<(),DbError> {
+        source_continuation::redirect_closed_steer(&self.pool,user_id,execution_id,step_id,attempt_id,operation_id,closed).await
     }
 
     async fn get_step(
@@ -3770,8 +3885,11 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         let detail = load_step_detail_tx(&mut tx, user_id, execution_id, step_id)
             .await?
             .ok_or_else(|| conflict("agent execution step"))?;
+        let event_sequence:i64=sqlx::query_scalar("SELECT event_sequence FROM agent_executions WHERE execution_id=?")
+            .bind(execution_id).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         Ok(AttemptConversationEffectResult {
+            event_sequence,
             detail,
             conversation_id,
         })
@@ -3834,6 +3952,24 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         let now = now_ms();
         let mut conn=self.pool.acquire().await?;
         let mut tx=Transaction::begin(&mut *conn,Some("BEGIN IMMEDIATE".into())).await?;
+        let payload:serde_json::Value=serde_json::from_str(&event.payload).map_err(|error|DbError::Init(error.to_string()))?;
+        if let Some(source)=payload.get("message_source").filter(|source|!source.is_null()) {
+            let source:crate::AgentExecutionMessageSource=serde_json::from_value(source.clone()).map_err(|error|DbError::Conflict(error.to_string()))?;
+            if !matches!(&event.actor,AgentExecutionActor::Agent {conversation_id:Some(session),..} if session==&source.agent_session_id) {
+                return Err(conflict("Agent message source actor"));
+            }
+            let operation=payload.get("operation_id").and_then(serde_json::Value::as_str).ok_or_else(||conflict("Agent message operation"))?;
+            let digest=payload.get("content_digest").and_then(serde_json::Value::as_str).ok_or_else(||conflict("Agent message content digest"))?;
+            crate::repository::agent_source_reply::verify_message_command_tx(&mut tx,user_id,&source,execution_id,step_id,operation,digest).await?;
+            let effects=AttemptConversationEffects::decode(params.runtime_state.as_deref()).map_err(|error|DbError::Init(error.to_string()))?;
+            if !effects.pending_conversation_effects.iter().any(|effect|matches!(effect,crate::PendingConversationEffect::Steer {operation_id,content,..}
+                if operation_id==operation&&nomifun_agent_contracts::digest_bytes(content.as_bytes()).as_ref()==digest)) {
+                return Err(conflict("Agent message pending guidance content"));
+            }
+        } else if matches!(&event.actor,AgentExecutionActor::Agent {..})
+            &&payload.get("content_digest").is_some_and(|value|!value.is_null()) {
+            return Err(conflict("Agent message requires its original native epoch"));
+        }
         let conversation_id = active_attempt_conversation_tx(
             &mut tx,
             user_id,
@@ -3893,12 +4029,13 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             return Err(conflict("agent execution"));
         }
         let event = scoped_event(event, step_id, Some(attempt_id));
-        append_event_tx(&mut tx, execution_id, &event, now).await?;
+        let committed = append_event_tx(&mut tx, execution_id, &event, now).await?;
         let detail = load_step_detail_tx(&mut tx, user_id, execution_id, step_id)
             .await?
             .ok_or_else(|| conflict("agent execution step"))?;
         tx.commit().await?;
         Ok(AttemptConversationEffectResult {
+            event_sequence: committed.sequence,
             detail,
             conversation_id,
         })
@@ -4185,6 +4322,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                 return Err(conflict("AutoWork lead AgentSession"));
             }
         }
+        source_continuation::verify_child_binding_tx(&mut tx,user_id,execution_id,step_id,conversation_id).await?;
         let link_result = sqlx::query(
             "INSERT INTO conversation_execution_links (\
                 conversation_id, execution_id, relation, step_id, attempt_id, \

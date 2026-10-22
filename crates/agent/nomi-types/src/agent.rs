@@ -1,15 +1,10 @@
 use std::fmt;
 use std::str::FromStr;
 
-use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::message::TokenUsage;
-
-/// The one lifecycle vocabulary for an Agent Execution, independent of
-/// whether a platform host persists it or an embedded host projects it
-/// synchronously for the current turn.
+/// The lifecycle vocabulary for one durable Agent Execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentExecutionStatus {
@@ -125,30 +120,16 @@ impl FromStr for AgentExecutionStatus {
     }
 }
 
-/// Minimal receipt returned by every successful `nomi_delegate` deployment.
-///
-/// Platform deployments may return an active status while durable work runs;
-/// embedded deployments return a terminal projection after synchronous work.
-/// Deployment names are deliberately absent from the wire contract.
+/// Acceptance receipt for one durable Agent Execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentExecutionReceipt {
     pub execution_id: String,
     pub status: AgentExecutionStatus,
     pub message: String,
-    /// Steps appended to an already-running execution. Empty for a new
-    /// execution and for embedded terminal projection.
+    /// Steps appended to an already-running execution. Empty for a new execution.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub step_ids: Vec<String>,
-    /// Terminal per-step outputs returned by an embedded deployment.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub results: Vec<AgentExecutionStepResult>,
-    /// Optional read-only consolidation output from an embedded deployment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub synthesis: Option<AgentExecutionStepResult>,
-    /// Terminal aggregate counts and usage from an embedded deployment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<AgentExecutionSummary>,
 }
 
 impl AgentExecutionReceipt {
@@ -162,9 +143,6 @@ impl AgentExecutionReceipt {
             status,
             message: message.into(),
             step_ids: Vec::new(),
-            results: Vec::new(),
-            synthesis: None,
-            summary: None,
         }
     }
 
@@ -172,62 +150,6 @@ impl AgentExecutionReceipt {
         self.step_ids = step_ids;
         self
     }
-
-    pub fn with_terminal_projection(
-        mut self,
-        summary: AgentExecutionSummary,
-        results: Vec<AgentExecutionStepResult>,
-        synthesis: Option<AgentExecutionStepResult>,
-    ) -> Self {
-        self.summary = Some(summary);
-        self.results = results;
-        self.synthesis = synthesis;
-        self
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentExecutionStepResultStatus {
-    Completed,
-    Failed,
-}
-
-/// Terminal projection of one embedded execution step.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AgentExecutionStepResult {
-    pub name: String,
-    pub status: AgentExecutionStepResultStatus,
-    pub text: String,
-    pub turns: usize,
-    pub usage: TokenUsage,
-}
-
-impl From<&AgentInvocationOutput> for AgentExecutionStepResult {
-    fn from(output: &AgentInvocationOutput) -> Self {
-        Self {
-            name: output.name.clone(),
-            status: if output.is_error {
-                AgentExecutionStepResultStatus::Failed
-            } else {
-                AgentExecutionStepResultStatus::Completed
-            },
-            text: output.text.clone(),
-            turns: output.turns,
-            usage: output.usage.clone(),
-        }
-    }
-}
-
-/// Aggregate terminal projection for an embedded Agent Execution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AgentExecutionSummary {
-    pub step_count: usize,
-    pub completed_count: usize,
-    pub failed_count: usize,
-    pub usage: TokenUsage,
 }
 
 /// Fixed wire discriminator for the shared parallel delegation request.
@@ -248,9 +170,6 @@ pub struct ParallelDelegationRequest {
     /// A native JSON array of independent Agent task objects, never a JSON string.
     #[schemars(length(min = 1, max = 16))]
     pub tasks: Vec<AgentDelegationTask>,
-    /// Whether to add one synthesis step after every task completes.
-    #[serde(default)]
-    pub synthesize: bool,
 }
 
 impl ParallelDelegationRequest {
@@ -374,58 +293,12 @@ impl AgentDelegationTask {
     }
 }
 
-/// Input for one Agent invocation primitive.
-///
-/// This is intentionally below both embedded fan-out and skill fork
-/// mode. It describes one call, not an execution aggregate or a second Agent
-/// product. `exact_tools` exists for skill metadata and is intersected with
-/// both the inherited host scope and `tool_policy`.
-#[derive(Debug, Clone)]
-pub struct AgentInvocationInput {
-    pub name: String,
-    pub prompt: String,
-    pub max_turns: usize,
-    pub system_prompt: Option<String>,
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    pub tool_policy: AgentToolPolicy,
-    /// Optional exact tool set from a skill manifest. Empty means no additional
-    /// restriction; a non-empty set is always intersected and can never widen.
-    pub exact_tools: Vec<String>,
-}
-
-/// Output from one Agent invocation primitive.
-#[derive(Debug)]
-pub struct AgentInvocationOutput {
-    pub name: String,
-    pub text: String,
-    pub usage: TokenUsage,
-    pub turns: usize,
-    /// Successful state-changing effects observed inside this exact delegated
-    /// invocation. This is machine evidence for the parent completion gate;
-    /// the delegate's prose is deliberately not treated as proof of work.
-    pub durable_effect_targets: Vec<String>,
-    pub is_error: bool,
-}
-
-/// Executes one Agent invocation.
-///
-/// Fan-out strategy, persistence, private progress projection, and worktree
-/// isolation live in hosts above this seam. Skill fork mode uses the same
-/// primitive.
-#[async_trait]
-pub trait AgentInvocationRunner: Send + Sync {
-    async fn invoke(&self, input: AgentInvocationInput) -> AgentInvocationOutput;
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         AgentDelegationTask, AgentExecutionReceipt, AgentExecutionStatus,
-        AgentExecutionStepResult, AgentExecutionStepResultStatus, AgentExecutionSummary,
         AgentToolPolicy, ParallelDelegationRequest, apply_agent_role_context,
     };
-    use crate::message::TokenUsage;
 
     #[test]
     fn shared_task_role_is_free_form_and_policy_is_strict() {
@@ -480,8 +353,7 @@ mod tests {
     fn parallel_request_is_one_strict_shared_wire_contract() {
         let request: ParallelDelegationRequest = serde_json::from_value(serde_json::json!({
             "strategy": "parallel",
-            "tasks": [{"name":"scan","prompt":"inspect"}],
-            "synthesize": true
+            "tasks": [{"name":"scan","prompt":"inspect"}]
         }))
         .unwrap();
         assert!(request.validate().is_ok());
@@ -510,33 +382,14 @@ mod tests {
     }
 
     #[test]
-    fn receipt_terminal_projection_and_step_ids_are_typed_extensions() {
-        let result = AgentExecutionStepResult {
-            name: "scan".to_owned(),
-            status: AgentExecutionStepResultStatus::Completed,
-            text: "done".to_owned(),
-            turns: 1,
-            usage: TokenUsage::default(),
-        };
+    fn receipt_keeps_exact_appended_step_ids() {
         let receipt = AgentExecutionReceipt::new(
-            "exec_test",
-            AgentExecutionStatus::Completed,
-            "done",
-        )
-        .with_step_ids(vec!["execstep_1".to_owned()])
-        .with_terminal_projection(
-            AgentExecutionSummary {
-                step_count: 1,
-                completed_count: 1,
-                failed_count: 0,
-                usage: TokenUsage::default(),
-            },
-            vec![result],
-            None,
-        );
+            "exec_test", AgentExecutionStatus::Running, "accepted",
+        ).with_step_ids(vec!["execstep_1".to_owned()]);
         let value = serde_json::to_value(receipt).unwrap();
         assert_eq!(value["step_ids"][0], "execstep_1");
-        assert_eq!(value["results"][0]["status"], "completed");
-        assert_eq!(value["summary"]["completed_count"], 1);
+        assert!(serde_json::from_value::<AgentExecutionReceipt>(serde_json::json!({
+            "execution_id":"exec_test", "status":"running", "message":"accepted", "results":[]
+        })).is_err(), "retired synchronous results cannot reenter the receipt contract");
     }
 }

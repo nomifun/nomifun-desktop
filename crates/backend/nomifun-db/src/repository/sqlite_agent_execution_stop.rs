@@ -8,7 +8,8 @@ async fn delegated_steps_tx(
 ) -> Result<HashSet<String>, DbError> {
     let events: Vec<(Option<String>, String)> = sqlx::query_as(
         "SELECT step_id,payload FROM agent_execution_events \
-         WHERE execution_id=? AND event_type='plan_changed' AND actor_attempt_id IS NOT NULL \
+         WHERE execution_id=? AND event_type='plan_changed' \
+           AND (actor_attempt_id IS NOT NULL OR json_type(payload,'$.continuation_of_step_id')='text') \
          ORDER BY sequence",
     ).bind(execution_id).fetch_all(&mut **tx).await?;
     let mut ownership: HashMap<String, Vec<String>> = HashMap::new();
@@ -16,7 +17,8 @@ async fn delegated_steps_tx(
         let value: serde_json::Value = serde_json::from_str(&payload)
             .map_err(|_| conflict("delegation event payload"))?;
         if value.get("added_step_ids").is_none() { continue; }
-        let caller = caller.ok_or_else(|| conflict("delegation caller Step"))?;
+        let caller = value.get("continuation_of_step_id").and_then(serde_json::Value::as_str).map(str::to_owned)
+            .or(caller).ok_or_else(|| conflict("delegation caller Step"))?;
         ownership.entry(caller).or_default().extend(delegation_added_step_ids(&payload)?);
     }
     let mut selected = HashSet::from([root.to_owned()]);

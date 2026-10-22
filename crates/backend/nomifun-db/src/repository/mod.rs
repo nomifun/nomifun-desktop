@@ -67,6 +67,7 @@ pub mod workshop;
 
 pub use agent_metadata::IAgentMetadataRepository;
 pub use agent_execution::*;
+pub mod agent_source_reply;
 pub use agent_execution_template::*;
 pub use attachment::IAttachmentRepository;
 pub use channel::{

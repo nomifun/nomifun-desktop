@@ -750,7 +750,7 @@ mod tests {
         };
         assert_eq!(code, "AGENT_EXECUTION_ALREADY_ACTIVE");
         assert!(message.contains("strategy=parallel"));
-        assert!(message.contains("synthesize=true"));
+        assert!(message.contains("agent_wait"));
         assert!(!message.contains("sqlite"));
         assert!(!message.contains("api_key"));
     }

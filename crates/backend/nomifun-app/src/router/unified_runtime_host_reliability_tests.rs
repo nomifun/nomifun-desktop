@@ -28,6 +28,22 @@ mod companion_directed_flow_tests;
 #[path = "robot_authored_execution_tests.rs"]
 mod robot_authored_execution_tests;
 
+#[path = "runtime_collaboration_tests.rs"]
+pub(super) mod runtime_collaboration_tests;
+
+#[path = "runtime_message_recovery_tests.rs"]
+mod runtime_message_recovery_tests;
+
+#[path = "execution_source_input_tests.rs"]
+mod execution_source_input_tests;
+
+#[path = "runtime_cancelled_delivery_tests.rs"]
+mod runtime_cancelled_delivery_tests;
+
+pub(super) async fn child_message_cutpoint(session:&str,committed:bool) {
+    runtime_message_recovery_tests::cutpoint(session,committed).await;
+}
+
 #[path = "unified_session_input_tests.rs"]
 mod unified_session_input_tests;
 #[path = "input_queue_host_tests.rs"]
@@ -147,10 +163,14 @@ impl Fixture {
         ).await
     }
 
-    async fn build_delivery_with_options(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool,model_base_override:Option<&str>, knowledge: bool,
+    fn build_delivery_with_options<'a>(scenario: &'a str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool,model_base_override:Option<&'a str>, knowledge: bool,
         #[cfg(feature = "browser-use")] browser: Option<(Arc<dyn nomifun_browser_platform::runtime::BrowserRuntimeFactory>, String)>,
         search:Option<Arc<dyn nomifun_ai_agent::web_search::SearchProvider>>,process:bool,
-    ) -> Self {
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output=Self>+'a>> {
+        // Keep the installed App construction state behind one shared heap
+        // boundary instead of embedding it through every fixture builder. The
+        // default Windows test stack must also fit the real router/owner polls.
+        Box::pin(async move {
         let directory = tempfile::tempdir().unwrap();
         let root = std::env::var_os("NOMIFUN_RELIABILITY_EVIDENCE_DIR")
             .map(|root| PathBuf::from(root).join(scenario))
@@ -266,6 +286,7 @@ impl Fixture {
             source_message_id:Some(root.as_ref().into()), files, inject_skills, origin };
         println!("CLEANUP_FIXTURE scenario={scenario} session={id} operation=cleanup-retry-turn database={}", database_path.display());
         Self { _directory:directory, _router:router, runtime, services, host, owner,api_state,voice_control,voice_execution, message, database_path, knowledge_base }
+        })
     }
 
     fn pool(&self) -> &nomifun_db::SqlitePool { self.services.database.pool() }
@@ -766,7 +787,9 @@ async fn cancellation_replay_and_delayed_stop_preserve_the_real_successor_runtim
             content:"This belongs only to the cancelled original task".into(),files:vec![],inject_skills:vec![],
             hidden:false,origin:Some("agent_execution".into()),channel_platform:None,
         }).await.unwrap();
-    assert_eq!(late_steer, first["message_id"].as_str().unwrap());
+    assert!(matches!(late_steer,nomifun_agent_execution::AgentExecutionSteerDelivery::TargetClosed {target}
+        if target.canonical_operation_id=="cleanup-retry-turn" && target.terminal_event_id==first["message_id"].as_str().unwrap()),
+        "a closed original target is never acknowledged as delivered guidance");
     assert_eq!(store.head(&session).await.unwrap().active_turn_id.as_deref(), Some("successor-operation"));
     assert_eq!(runtimes.active_turn_generation(session.as_ref()), Some(successor_generation));
     assert!(runtimes.get_runtime(session.as_ref()).is_some(), "late/replayed stop must not quarantine a successor runtime");
@@ -883,8 +906,11 @@ async fn steering_replay_recovers_the_commit_to_runtime_queue_gap_once() {
     for _ in 0..2 {
         let delivered = fixture.owner.steer_turn_for_execution(fixture.services.authoritative_user_id.as_ref(), session.as_ref(),
             "stable-steering-effect", target.as_ref(), request()).await.unwrap();
-        assert_eq!(delivered, receipt.event_id.as_ref());
-        assert_eq!(host.active.lock().await.as_ref().unwrap().steering.pending_receipt_ids(), vec![delivered]);
+        let nomifun_agent_execution::AgentExecutionSteerDelivery::Delivered {event_id}=delivered else {
+            panic!("the exact committed input receipt must retain its native delivery owner");
+        };
+        assert_eq!(event_id, receipt.event_id.as_ref());
+        assert_eq!(host.active.lock().await.as_ref().unwrap().steering.pending_receipt_ids(), vec![event_id]);
     }
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/steer-accepted'")
         .bind(session.as_ref()).fetch_one(fixture.pool()).await.unwrap();
@@ -1870,7 +1896,7 @@ async fn turn_file_api_requires_owner_and_returns_no_final_list_for_paused_turns
         active_set_generation:fixture.host.capability_state.snapshot().unwrap().generation,
         model_steps:0, tool_call_count:0, accepted_input_count:1, applied_steering_receipts:vec![],
         plan:Default::default(), work:Default::default(), patch_recovery:Default::default(), segments:None,
-        control_rejections:Default::default(), pending_user_input: None, completion_review:Default::default(),
+        control_rejections:Default::default(), pending_user_input: None, awaiting_children: None, collaboration: Default::default(), completion_review:Default::default(),
     };
     fixture.host.save_execution_checkpoint(&fixture.message, &checkpoint).await.unwrap().unwrap();
     fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();

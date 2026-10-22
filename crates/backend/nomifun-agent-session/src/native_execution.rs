@@ -193,6 +193,24 @@ impl AgentSessionStore {
         }
         let mut tx = self.begin_write_transaction().await?;
         check_native_lease_tx(&mut tx, lease, true).await?;
+        if append.semantic_event.kind.0 == "runtime/progress-recorded" {
+            let value = match &append.semantic_event.payload {
+                SessionEventPayloadRef::InlineJson(value) => Some(&value.0),
+                SessionEventPayloadRef::Stored(_) => match payload.map(|payload| &payload.body) {
+                    Some(SessionPayloadBody::Json(value)) => Some(&value.0),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if value.and_then(|value|value.pointer("/event/event")).and_then(Value::as_str) == Some("children_wait_resolved") {
+                let session = live_session_by_id_tx(&mut tx, lease.session_id.as_ref()).await?;
+                if !nomifun_db::native_resume_capacity_available_tx(&mut tx, &session.owner_ref.principal_id,
+                    lease.session_id.as_ref(), lease.operation_id.as_ref()).await
+                    .map_err(|error|SessionStoreError::InvalidEvent(error.to_string()))? {
+                    return Err(SessionStoreError::ExecutionCapacityPending);
+                }
+            }
+        }
         let result = self.append_event_tx(&mut tx, append, payload).await?;
         tx.commit().await?;
         Ok(result)

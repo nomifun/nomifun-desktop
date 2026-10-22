@@ -234,15 +234,16 @@ async fn silent_robot_cancellation_at_the_terminal_fence_wins_over_finish_intent
 }
 
 #[tokio::test]
-async fn silent_robot_accepted_delegate_marks_waiting_without_claiming_child_completion() {
-    let model = silent_model(vec![control_step("delegate", "delegate", json!({"strategy":"planned","goal":"weather"}))]);
+async fn silent_robot_delegation_does_not_silently_finish_the_parent_turn() {
+    let model = silent_model(vec![control_step("delegate", "delegate", json!({"strategy":"planned","goal":"weather"})),
+        read_ready_delegation(), text_step("The delegated work remains under coordination.")]);
     let journal = Arc::new(SettlementJournal::default());
     let result = input_session(model.clone(), Arc::new(EchoTool), journal.clone()).run_turn(
-        AgentTurnRequest::new(request(), collaboration_plan(false), principal(), 0).with_silent_robot_actions(true)).await.unwrap();
-    assert_eq!(result.model_steps, 1);
-    assert!(result.output_text.is_empty());
-    assert_eq!(silent_markers(&journal), [(1, vec!["delegate".into()])]);
-    assert_eq!(model.requests.lock().unwrap().len(), 1);
+        AgentTurnRequest::new(request(), collaboration_plan(false), principal(), 0).with_silent_robot_actions(true).with_collaboration_port(Arc::new(ReadyCollaborationPort))).await.unwrap();
+    assert_eq!(result.model_steps, 3);
+    assert_eq!(result.output_text, "The delegated work remains under coordination.");
+    assert!(silent_markers(&journal).is_empty());
+    assert_eq!(model.requests.lock().unwrap().len(), 3);
 }
 
 #[derive(Debug)]

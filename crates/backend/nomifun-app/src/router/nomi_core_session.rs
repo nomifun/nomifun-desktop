@@ -17,6 +17,14 @@ mod completed_runtime_retirement;
 mod source_browser_retirement;
 #[path = "execution_progress_observer.rs"]
 mod execution_progress_observer;
+
+impl NomiCoreSessionOwner {
+    pub(super) fn collaboration_database(&self) -> &nomifun_db::SqlitePool { &self.pool }
+    pub(super) fn collaboration_engine(&self) -> Result<Arc<nomifun_agent_execution::AgentExecutionEngine>, AppError> {
+        self.execution_progress.get().and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| AppError::Conflict("Agent Execution owner is unavailable".into()))
+    }
+}
 #[path = "agent_activities.rs"]
 mod agent_activities;
 #[path = "session_capability_selection.rs"]
@@ -46,10 +54,10 @@ pub(super) mod native_execution_control;
 #[path = "companion_sessions.rs"]
 mod companion_sessions;
 pub(super) use companion_sessions::canonical_companion_origin;
-#[path = "companion_directed_reports.rs"]
-mod companion_directed_reports;
 #[path = "execution_source_context.rs"]
 mod execution_source_context;
+#[cfg(test)]
+pub(super) use execution_source_context::{canonical_source_input,canonical_input_at_tool};
 pub(super) use execution_source_context::scheduled_turn_instructions;
 #[path = "companion_binding_evolution.rs"]
 mod companion_binding_evolution;
@@ -3105,7 +3113,19 @@ impl NomiCoreSessionOwner {
         let principal=PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.into()};
         if let Some(input)=self.canonical.session_input_by_key(&principal,&session_id,idempotency_key).await? {
             if let Some(claim)=self.canonical.store().session_input_claim(&session_id,&input.event.event_id).await.map_err(agent_session_store_error)? {
-                return self.canonical_delivery_state_for_operation(owner_id,&session_id,&claim.operation_id,true).await;
+                let state=self.canonical_delivery_state_for_operation(owner_id,&session_id,&claim.operation_id,true).await?;
+                // One Turn can consume several independently keyed inputs.
+                // Its output belongs to that original operation, while this
+                // receipt still names the exact accepted input being replayed.
+                let message_id=input.event.event_id.as_ref().to_owned();
+                return Ok(match state {
+                    PublicTurnDeliveryState::Accepted {..}=>PublicTurnDeliveryState::Accepted {message_id},
+                    PublicTurnDeliveryState::Completed(mut delivery)=>{
+                        delivery.message_id=message_id;
+                        PublicTurnDeliveryState::Completed(delivery)
+                    },
+                    state=>state,
+                });
             }
             let state=self.canonical.store().session_input_delivery(&session_id,&input.event.event_id).await.map_err(agent_session_store_error)?;
             if let Some(cause)=session_input_intake::unclaimed_input_unavailability(&state)? {
@@ -4987,8 +5007,8 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         self.canonical.store().committed_tool_call_causation(&source_session,&effect.turn_id,&effect.operation_id,
             &effect.capability_module,&effect.action_id).await.map_err(agent_session_store_error)?;
         let source_receipt=self.canonical.store().read_turn_receipt(&source_session,&effect.turn_id).await.map_err(agent_session_store_error)?;
-        if !matches!(source_receipt.status,nomifun_agent_session::TurnReceiptStatus::Running|nomifun_agent_session::TurnReceiptStatus::Completed) {
-            return Err(AppError::Forbidden("Execution source request was cancelled or did not complete normally".into()));
+        if !execution_source_context::source_child_turn_is_admitted(effect.state,source_receipt.status) {
+            return Err(AppError::Forbidden("Execution source delegation has no confirmed independent child admission".into()));
         }
         let binding = snapshot.canonical_binding.as_ref().ok_or_else(|| AppError::Conflict("Execution target has no frozen binding".into()))?;
         let binding: AgentBindingValue = serde_json::to_value(binding).and_then(serde_json::from_value).map_err(|error| AppError::Internal(error.to_string()))?;
@@ -5001,6 +5021,34 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         } else { None };
         let key = format!("execution-source:{creation_key}");
         self.create_session_idempotent_scoped(owner_id, request, Some(snapshot), &key, scope, Some(&source_session)).await
+    }
+
+    async fn prepare_source_child_input(
+        &self, owner_id: &str, child_session_id: &str,
+        source: Option<&nomifun_agent_execution::AgentExecutionSource>, request: SendMessageRequest,
+    ) -> Result<SendMessageRequest, AppError> {
+        self.prepare_execution_child_input(owner_id, &child_session_id.to_owned().into(), source, request).await
+    }
+
+    async fn get_original_child(
+        &self,owner_id:&str,execution_id:&str,target:&nomifun_db::AgentExecutionContinuationTarget,
+    )->Result<ConversationResponse,AppError> {
+        let repository=nomifun_db::SqliteAgentExecutionRepository::new(self.pool.clone());
+        let original=nomifun_db::IAgentExecutionRepository::original_child_binding(&repository,owner_id,execution_id,target).await?;
+        let session=AgentSessionId::from(target.conversation_id.clone());
+        let current=self.canonical.get(&PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.into()},&session).await?;
+        if AgentHandoffBindingRefV1::from(&current.session.agent_binding)!=original {
+            return Err(AppError::Conflict("child continuation binding differs from its original native admission".into()));
+        }
+        let response=self.get_session(owner_id,session.as_ref()).await?;
+        let binding=response.agent_snapshot.as_ref().and_then(|snapshot|snapshot.canonical_binding.as_ref())
+            .ok_or_else(||AppError::Conflict("original child has no exact frozen binding".into()))?;
+        let binding:AgentBindingValue=serde_json::to_value(binding).and_then(serde_json::from_value)
+            .map_err(|error|AppError::Internal(error.to_string()))?;
+        if AgentHandoffBindingRefV1::from(&binding)!=original {
+            return Err(AppError::Conflict("child continuation snapshot changed during preparation".into()));
+        }
+        Ok(response)
     }
 
     async fn discard_unlinked_creation(
@@ -5181,6 +5229,9 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         let facts = self.canonical.store().turn_output_facts(&session_id, &operation_id)
             .await.map_err(agent_session_store_error)?;
         let delivery = nomifun_agent_execution::canonical_turn_delivery(&facts, &receipt, true)?;
+        let workspace_changed = if delivery.completed {
+            nomifun_agent_execution::canonical_turn_workspace_changed(&facts, &receipt)?
+        } else { false };
         let (output_files, integrity_ok) = if delivery.completed {
             let workspace = frozen_workspace_root(
                 &self.managed_workspace_root, owner_id, &session_id, &facts.session.agent_binding,
@@ -5205,7 +5256,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         Ok(Some(nomifun_agent_execution::AgentExecutionTurnOutput {
             canonical_operation_id: operation_id.as_ref().to_owned(),
             terminal_event_id: receipt.terminal_event.as_ref().map(|event| event.event_id.as_ref().to_owned()),
-            delivery, output_files, integrity_ok,
+            delivery, output_files, integrity_ok, workspace_changed,
         }))
     }
 
@@ -5319,19 +5370,44 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         operation_id: &str,
         target_operation_id: &str,
         request: SendMessageRequest,
-    ) -> Result<String, AppError> {
+    ) -> Result<nomifun_agent_execution::AgentExecutionSteerDelivery, AppError> {
         let session_id = AgentSessionId::from(conversation_id.to_owned());
         let principal=PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.into()};
         let target=OperationId::from(target_operation_id.to_owned());
-        if let Some(receipt)=self.canonical.read_steer_receipt(&principal,&session_id,operation_id,Some(&target),&canonical_turn_input(&request),None).await? {
+        let request=self.prepare_execution_steering_input(owner_id,&session_id,operation_id,request).await?;
+        let input=canonical_turn_input(&request);
+        if let Some(receipt)=self.canonical.read_steer_receipt(&principal,&session_id,operation_id,Some(&target),&input,None).await? {
             self.queue_receipted_steering(&session_id,&receipt).await?;
-            return Ok(receipt.event_id.as_ref().to_owned());
+            return Ok(nomifun_agent_execution::AgentExecutionSteerDelivery::Delivered {event_id:receipt.event_id.as_ref().to_owned()});
         }
         let original=self.canonical.turn_receipt(&principal,&session_id,&target).await?;
-        if let Some(terminal)=original.terminal_event {return Ok(terminal.event_id.as_ref().to_owned());}
-        let admitted=self.admit_live_steering(&principal,&session_id,operation_id,&target,request,SteeringAuthority::Domain).await?;
+        if let Some(terminal)=original.terminal_event {
+            return Ok(nomifun_agent_execution::AgentExecutionSteerDelivery::TargetClosed {
+                target:nomifun_db::AgentExecutionClosedTurn {conversation_id:conversation_id.into(),
+                    canonical_operation_id:target_operation_id.into(),terminal_event_id:terminal.event_id.as_ref().into()},
+            });
+        }
+        let admitted=match self.admit_live_steering(&principal,&session_id,operation_id,&target,request,SteeringAuthority::Domain).await {
+            Ok(admitted)=>admitted,
+            Err(error)=>{
+                // Admission may race this exact native terminal. A committed
+                // steering receipt remains its original delivery responsibility;
+                // only proven absence of that receipt permits a new followup.
+                if let Some(receipt)=self.canonical.read_steer_receipt(&principal,&session_id,operation_id,Some(&target),&input,None).await? {
+                    self.queue_receipted_steering(&session_id,&receipt).await?;
+                    return Ok(nomifun_agent_execution::AgentExecutionSteerDelivery::Delivered {event_id:receipt.event_id.as_ref().to_owned()});
+                }
+                if let Some(terminal)=self.canonical.turn_receipt(&principal,&session_id,&target).await?.terminal_event {
+                    return Ok(nomifun_agent_execution::AgentExecutionSteerDelivery::TargetClosed {
+                        target:nomifun_db::AgentExecutionClosedTurn {conversation_id:conversation_id.into(),
+                            canonical_operation_id:target_operation_id.into(),terminal_event_id:terminal.event_id.as_ref().into()},
+                    });
+                }
+                return Err(error);
+            },
+        };
         admitted.delivery?;
-        Ok(admitted.receipt.event_id.as_ref().to_owned())
+        Ok(nomifun_agent_execution::AgentExecutionSteerDelivery::Delivered {event_id:admitted.receipt.event_id.as_ref().to_owned()})
     }
 
     async fn project_assistant_message_idempotent(
@@ -5414,16 +5490,6 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
                 content,
             ),
         );
-        Ok(message_id)
-    }
-
-    async fn project_execution_report_idempotent(&self, owner_id: &str,
-        conversation_id: &str, operation_id: &str, content: &str,
-        report: &nomifun_agent_execution::AgentExecutionReport,
-    ) -> Result<String, AppError> {
-        let message_id = companion_directed_reports::project_execution_report(self, owner_id, conversation_id,
-            operation_id, content, report).await?;
-        self.deliver_committed_execution_report(owner_id, conversation_id, operation_id, &message_id).await?;
         Ok(message_id)
     }
 
@@ -6788,7 +6854,7 @@ mod session_boundary_tests {
         let step = uuid::Uuid::now_v7().to_string();
         let attempt = uuid::Uuid::now_v7().to_string();
         let now = super::now_ms();
-        nomifun_db::sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,plan_gate,adaptation_policy,decision_policy,delegation_policy,initial_plan_input,lease_owner,lease_expires_at,created_at,updated_at) VALUES(?,?,'authority fixture','running','automatic','fixed','automatic','automatic','{}','authority-fixture',?,?,?)")
+        nomifun_db::sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,adaptation_policy,decision_policy,delegation_policy,initial_plan_input,lease_owner,lease_expires_at,created_at,updated_at) VALUES(?,?,'authority fixture','running','fixed','automatic','automatic','{}','authority-fixture',?,?,?)")
             .bind(&execution_id).bind(services.authoritative_user_id.as_ref()).bind(now + 60_000)
             .bind(now).bind(now).execute(pool).await.unwrap();
         nomifun_db::sqlx::query("INSERT INTO agent_execution_steps(step_id,execution_id,title,spec,kind,status,version,introduced_in_revision,created_at,updated_at) VALUES(?,?,'fixture','Answer in chat','agent','running',3,1,?,?)")

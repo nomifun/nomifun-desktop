@@ -192,6 +192,35 @@ fn canonical_event_payload(
 }
 
 impl EngineTurnJournal {
+    #[cfg(test)]
+    pub(super) async fn pause_message_recovery_for_test(&self)->Result<nomifun_agent_session::NativePauseState,AppError> {
+        self.0.store.pause_native_execution(&self.0.lease,"NATIVE_RECOVERY_RECONCILIATION_REQUIRED",true)
+            .await.map_err(failure)
+    }
+
+    pub(super) async fn message_source_for_call(&self,call_id:&nomifun_chat_model_broker::ToolCallId)
+        ->Result<nomifun_db::AgentExecutionMessageSource,AppError> {
+        self.verify_execution_lease().await?;
+        let facts=self.0.store.turn_output_facts(&self.0.session,&self.0.operation).await.map_err(failure)?;
+        let mut command=None;
+        for event in &facts.events {
+            if event.kind.0!="runtime/progress-recorded" || event.kind_version!=1
+                || event.producer_id.as_ref()!="runtime_supervisor" || event.correlation_id.as_ref()!=self.0.operation.as_ref() {continue;}
+            let value=facts.event_payloads.get(event.event_id.as_ref()).and_then(|value|value.get("event"))
+                .ok_or_else(||failure("message command has no canonical Runtime payload"))?;
+            if value.get("event").and_then(Value::as_str)!=Some("tool_call_completed") {continue;}
+            let AgentEngineEvent::ToolCallCompleted {call,..}=serde_json::from_value(value.clone()).map_err(failure)?
+                else {unreachable!()};
+            if call.call_id!=*call_id {continue;}
+            if call.name!="agent_message" || command.replace(event.event_id.as_ref().to_owned()).is_some() {
+                return Err(failure("message command has no unique exact native proposal"));
+            }
+        }
+        Ok(nomifun_db::AgentExecutionMessageSource {agent_session_id:self.0.session.as_ref().into(),
+            turn_operation_id:self.0.operation.as_ref().into(),native_fence:self.0.lease.fence(),
+            native_generation:self.0.lease.generation(),
+            command_event_id:command.ok_or_else(||failure("message has no original completed native proposal"))?})
+    }
     /// Persist a presentation observation without extending the native journal.
     pub(super) async fn observe_workspace_files(
         &self,
@@ -635,7 +664,18 @@ impl EngineTurnJournal {
             },
         };
         let appended = if kind == EngineJournalWrite::Progress {
-            journal.store.append_native_event(&journal.lease, &append, payload.as_ref()).await?
+            loop {
+                match journal.store.append_native_event(&journal.lease, &append, payload.as_ref()).await {
+                    Err(nomifun_agent_session::SessionStoreError::ExecutionCapacityPending)
+                        if event.get("event").and_then(Value::as_str) == Some("children_wait_resolved") => {
+                            tokio::select! {
+                                _ = journal.cancellation.cancelled() => return Err(nomifun_agent_session::SessionStoreError::ExecutionFenced),
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+                            }
+                        },
+                    result => break result?,
+                }
+            }
         } else {
             journal.store.append_native_observation(&journal.lease, &append, payload.as_ref()).await?
         };
@@ -1498,7 +1538,7 @@ mod history_display_tests {
             turn_operation_id: journal.0.operation.clone(), active_set_generation: 0,
             model_steps: 0, tool_call_count: 0, accepted_input_count: 1, applied_steering_receipts: vec![],
             plan: Default::default(), work: Default::default(), patch_recovery: Default::default(),
-            segments: None, control_rejections: Default::default(), pending_user_input: None, completion_review: Default::default(),
+            segments: None, control_rejections: Default::default(), pending_user_input: None, awaiting_children: None, collaboration: Default::default(), completion_review: Default::default(),
         };
         let receipt = journal.save_execution_checkpoint(checkpoint.clone(), owner.clone()).await.unwrap().unwrap();
         assert_eq!(receipt.revision, 1);

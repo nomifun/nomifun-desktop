@@ -88,10 +88,7 @@ pub(crate) fn failed_process_observation(
 pub(crate) fn process_did_not_start(binding: &AgentToolBinding, result: &AgentToolResult) -> bool {
     binding.capability_id.as_ref() == "workspace.process"
         && binding.action_id.as_ref() == "workspace.process/start"
-        && serde_json::from_str::<serde_json::Value>(&result.output_text()).is_ok_and(|value|
-            value["schema"] == "nomifun.process-start-observation.v1"
-                && value["state"] == "not_started" && value["user_code_started"] == false
-                && value["success"] == false && value.get("process_id").is_none())
+        && workspace_process_operation_not_applied(binding.action_id.as_ref(), result)
 }
 
 /// A command outcome that can be reported without another effect/recovery
@@ -125,8 +122,21 @@ pub(crate) fn settled_reportable_process(binding: &AgentToolBinding, result: &Ag
 /// This says nothing about whether another, already started process is alive.
 pub(crate) fn process_operation_not_applied(binding: &AgentToolBinding, result: &AgentToolResult) -> bool {
     if process_did_not_start(binding, result) { return true; }
-    if binding.capability_id.as_ref() != "workspace.process" { return false; }
-    let operation = match binding.action_id.as_ref() {
+    binding.capability_id.as_ref() == "workspace.process"
+        && workspace_process_operation_not_applied(binding.action_id.as_ref(), result)
+}
+
+/// Typed process-owner proof shared by Runtime discipline and exact canonical
+/// child-result readers. The caller must establish the original workspace
+/// process action and match this receipt to its admitted command.
+pub fn workspace_process_operation_not_applied(action: &str, result: &AgentToolResult) -> bool {
+    if action == "workspace.process/start" {
+        return serde_json::from_str::<serde_json::Value>(&result.output_text()).is_ok_and(|value|
+            value["schema"] == "nomifun.process-start-observation.v1"
+                && value["state"] == "not_started" && value["user_code_started"] == false
+                && value["success"] == false && value.get("process_id").is_none());
+    }
+    let operation = match action {
         "workspace.process/poll" => "poll",
         "workspace.process/input" => "stdin",
         "workspace.process/close_stdin" => "close_stdin",
@@ -172,15 +182,6 @@ pub(crate) fn requires_replanning_after_result(
         return plan_revision == 0;
     }
     result.is_error && !matches!(binding.effect_class, nomifun_engine_core::EngineEffectClass::ReadOnly)
-}
-
-/// A successful collaboration handoff transfers completion ownership to the
-/// durable AgentExecution. The parent turn must stop after the accepted
-/// single-call batch so it cannot poll, create sibling Executions, or publish
-/// a speculative answer ahead of the authoritative terminal projection.
-pub(crate) fn completes_turn_on_success(binding: &AgentToolBinding) -> bool {
-    binding.capability_id.as_ref() == "agent.collaboration"
-        && matches!(binding.action_id.as_ref(), "agent/delegate" | "agent/fork")
 }
 
 #[cfg(test)]
@@ -328,17 +329,10 @@ mod tests {
         assert!(affects_workspace(&process_poll));
 
         let delegation = binding("agent.collaboration", "agent/delegate");
-        // AgentExecution is already the durable plan, scheduler, completion
-        // ledger, and terminal-report owner. Requiring a second parent-turn
-        // plan blocks the first delegation call and later competes with the
-        // authoritative synthesis report.
+        // Delegation has its own durable work graph. Accepting that work
+        // neither mutates local files nor completes the parent task.
         assert!(!requires_task_ledger(&delegation));
         assert!(!affects_workspace(&delegation));
-        assert!(completes_turn_on_success(&delegation));
-
-        let fork = binding("agent.collaboration", "agent/fork");
-        assert!(completes_turn_on_success(&fork));
-        assert!(!completes_turn_on_success(&workspace));
     }
 
     #[test]

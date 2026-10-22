@@ -91,6 +91,26 @@ pub struct AgentExecutionInput {
     pub attempt_id: String,
 }
 
+/// Receipt of the original durable guidance command, not a later observation
+/// whose read failure could disguise an already committed child followup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionMessageReceipt {
+    pub execution_id: String,
+    pub step_ids: Vec<String>,
+    pub sequence: i64,
+    pub operation_id: String,
+    pub replayed: bool,
+}
+
+/// A guidance command either reached its exact native input boundary or must
+/// be redirected from that closed target through its original durable outbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentExecutionSteerDelivery {
+    Delivered { event_id: String },
+    TargetClosed { target: nomifun_db::AgentExecutionClosedTurn },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentExecutionDelivery {
     pub message_id: String,
@@ -124,6 +144,8 @@ pub struct AgentExecutionTurnOutput {
     pub delivery: AgentExecutionDelivery,
     pub output_files: Vec<String>,
     pub integrity_ok: bool,
+    /// Exact-Turn workspace effects may have invalidated parent observations.
+    pub workspace_changed: bool,
 }
 
 /// Read-only progress of one exact canonical operation. The cursor is only a

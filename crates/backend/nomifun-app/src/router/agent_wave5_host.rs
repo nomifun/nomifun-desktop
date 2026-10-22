@@ -89,7 +89,6 @@ impl NomiCoreWave5Host {
         let context = request.context;
         match request.operation {
             Wave5CapabilityOperation::AgentDelegate { input } => {
-                let input = normalize_agent_delegate_input(input);
                 let effect_input = input.clone();
                 let input: AgentDelegateInput = decode(input)?;
                 self.require_collaboration_source(&context).await?;
@@ -99,25 +98,28 @@ impl NomiCoreWave5Host {
                     None,
                     nomifun_agent_session::EffectStrategy::ManagedEffect,
                     async {
+                        let source = execution_source(&context)?;
                         let execution = match input {
                             AgentDelegateInput::Planned(PlannedCollaborationInput { strategy, goal }) => {
                                 let _strategy = strategy;
                                 self.execution()?.collaborate_from_exact_source(
-                                    &context.principal.principal_id, execution_source(&context)?, goal, false,
+                                    &context.principal.principal_id, source.clone(), goal, false,
                                 ).await
                             }
                             AgentDelegateInput::Parallel(input) => {
                                 self.execution()?.collaborate_parallel_from_exact_source(
-                                    &context.principal.principal_id, execution_source(&context)?, input,
+                                    &context.principal.principal_id, source.clone(), input,
                                 ).await
                             }
                         }
                         .map_err(app_error)?;
+                        let step_ids = self.accepted_step_ids(&context.principal.principal_id,
+                            &execution.execution_id, &source).await.map_err(accepted_receipt_error)?;
                         encode(nomifun_common::AgentExecutionReceipt::new(
                             execution.execution_id,
                             execution.status,
-                            "Delegated work was accepted as one AgentExecution. End this turn now: do not poll, call agent/fork, inspect tool history, or report completion. The terminal result will be delivered to this exact source automatically and the collaboration panel will show the complete dependency graph.",
-                        ))
+                            "Delegated work was accepted. Keep this execution_id and any exact step_ids; acceptance is not completion. Continue independent work with your selected tools, use agent_wait to join these children and agent_status to read their exact canonical results, then integrate and verify before completing the original task. Do not repeat accepted work with new delegation calls.",
+                        ).with_step_ids(step_ids))
                     },
                 )
                 .await
@@ -131,21 +133,23 @@ impl NomiCoreWave5Host {
                     None,
                     nomifun_agent_session::EffectStrategy::ManagedEffect,
                     async {
+                        let source = execution_source(&context)?;
                         let execution = self
                             .execution()?
                             .collaborate_from_exact_source(
                                 &context.principal.principal_id,
-                                execution_source(&context)?,
+                                source.clone(),
                                 input.goal,
                                 true,
                             )
                             .await
                             .map_err(app_error)?;
-                        encode(json!({
-                            "execution_id": execution.execution_id,
-                            "status": execution.status,
-                            "mode": "fork",
-                        }))
+                        let step_ids = self.accepted_step_ids(&context.principal.principal_id,
+                            &execution.execution_id, &source).await.map_err(accepted_receipt_error)?;
+                        encode(nomifun_common::AgentExecutionReceipt::new(
+                            execution.execution_id, execution.status,
+                            "The isolated child was accepted. Continue the original task, join this execution with agent_wait and read exact results with agent_status, then integrate and verify. Do not treat acceptance or child prose as final completion.",
+                        ).with_step_ids(step_ids))
                     },
                 )
                 .await
@@ -421,6 +425,33 @@ impl NomiCoreWave5Host {
         validate_collaboration_source(&accepted.0)
     }
 
+    async fn accepted_step_ids(&self, owner_id: &str, execution_id: &str,
+        source: &nomifun_agent_execution::AgentExecutionSource) -> Result<Vec<String>, Wave5HostPortError> {
+        const PAGE: i64 = 200;
+        let expected = serde_json::to_value(source)
+            .map_err(|error| Wave5HostPortError::invalid_request(error.to_string()))?;
+        let mut after = 0;
+        let mut ids = std::collections::BTreeSet::new();
+        loop {
+            let events = self.execution()?.events(owner_id, execution_id, Some(after), Some(PAGE)).await.map_err(app_error)?;
+            for event in &events {
+                if event.payload.get("delegation_source") == Some(&expected) {
+                    let added = event.payload.get("added_step_ids").and_then(Value::as_array)
+                        .ok_or_else(|| Wave5HostPortError::unavailable("accepted delegation has no committed Step identities"))?;
+                    for id in added {
+                        ids.insert(id.as_str().ok_or_else(|| Wave5HostPortError::unavailable("accepted Step identity is invalid"))?.to_owned());
+                    }
+                }
+            }
+            let Some(last) = events.last() else { break; };
+            after = last.sequence;
+            if events.len() < PAGE as usize { break; }
+        }
+        // New executions materialize their plan asynchronously. Only an exact
+        // committed append event supplies IDs; status reveals later plan IDs.
+        Ok(ids.into_iter().collect())
+    }
+
     async fn run_effect<F>(
         &self,
         context: &Wave5HostContext,
@@ -658,98 +689,6 @@ fn decode<T: for<'de> Deserialize<'de>>(input: StrictJsonValue) -> Result<T, Wav
         .map_err(|error| Wave5HostPortError::invalid_request(error.to_string()))
 }
 
-/// Recover only lossless provider stringification allowed by the exact
-/// `strategy=parallel` schema. Some OpenAI-compatible endpoints return nested
-/// arrays/objects and booleans as JSON strings even when their advertised
-/// types are native. Unknown fields are preserved, singular `task` is not
-/// guessed, and the strict shared DTO still performs final validation.
-fn normalize_agent_delegate_input(mut input: StrictJsonValue) -> StrictJsonValue {
-    let Some(object) = input.0.as_object_mut() else {
-        return input;
-    };
-    if object.get("strategy").and_then(Value::as_str) != Some("parallel") {
-        return input;
-    }
-    if let Some(Value::String(raw)) = object.get("tasks")
-        && let Some(parsed) = parse_provider_stringified_array(raw)
-    {
-        object.insert("tasks".to_owned(), parsed);
-    }
-    if let Some(Value::String(raw)) = object.get("synthesize") {
-        let normalized = if raw.trim().eq_ignore_ascii_case("true") {
-            Some(true)
-        } else if raw.trim().eq_ignore_ascii_case("false") {
-            Some(false)
-        } else {
-            None
-        };
-        if let Some(value) = normalized {
-            object.insert("synthesize".to_owned(), Value::Bool(value));
-        }
-    }
-    input
-}
-
-fn parse_provider_stringified_array(raw: &str) -> Option<Value> {
-    if let Ok(parsed) = serde_json::from_str::<Value>(raw)
-        && parsed.is_array()
-    {
-        return Some(parsed);
-    }
-
-    // Some OpenAI-compatible providers stringify the nested JSON and then
-    // lose escapes around quotes inside a task prompt, for example
-    // `"prompt":"describe "AI""`. Repair only quote tokens that cannot end
-    // the current JSON string because the next non-whitespace character is
-    // not a structural delimiter. serde_json and the strict shared DTO still
-    // validate the complete repaired value; truncated or structurally
-    // ambiguous payloads remain rejected.
-    let chars = raw.chars().collect::<Vec<_>>();
-    let mut repaired = String::with_capacity(raw.len());
-    let mut in_string = false;
-    let mut escaped = false;
-    for (index, ch) in chars.iter().copied().enumerate() {
-        if !in_string {
-            if ch == '"' {
-                in_string = true;
-            }
-            repaired.push(ch);
-            continue;
-        }
-        if escaped {
-            repaired.push(ch);
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            repaired.push(ch);
-            escaped = true;
-            continue;
-        }
-        if ch != '"' {
-            repaired.push(ch);
-            continue;
-        }
-        let next = chars[index + 1..]
-            .iter()
-            .copied()
-            .find(|candidate| !candidate.is_whitespace());
-        if matches!(next, Some(':' | ',' | '}' | ']') | None) {
-            in_string = false;
-            repaired.push(ch);
-        } else {
-            repaired.push('\\');
-            repaired.push(ch);
-        }
-    }
-    if in_string || escaped {
-        return None;
-    }
-    serde_json::from_str::<Value>(&repaired)
-        .ok()
-        .filter(Value::is_array)
-}
-
 fn encode(value: impl serde::Serialize) -> Result<StrictJsonValue, Wave5HostPortError> {
     serde_json::to_value(value)
         .map(StrictJsonValue)
@@ -763,11 +702,18 @@ fn app_error(error: nomifun_common::AppError) -> Wave5HostPortError {
         {
             Wave5HostPortError::new(
                 AGENT_EXECUTION_ALREADY_ACTIVE,
-                "This conversation already has an active AgentExecution. Do not start sibling collaboration calls; put all independent tasks in one agent/delegate request with strategy=parallel and use synthesize=true when a downstream Agent must combine them.",
+                "This conversation already has an active AgentExecution. Preserve its exact execution identity. Put independent child work in one strategy=parallel tasks array, then use agent_wait and agent_status to join the accepted work and integrate it in the parent; do not submit accepted work again.",
             )
         }
         error => Wave5HostPortError::new("WAVE5_OWNER_REJECTED", error.to_string()),
     }
+}
+
+fn accepted_receipt_error(error: Wave5HostPortError) -> Wave5HostPortError {
+    // The Execution already committed. A failed receipt observation cannot
+    // settle that admitted Effect as rejected or authorize replaying its work.
+    Wave5HostPortError::new(WAVE5_EFFECT_OUTCOME_UNKNOWN,
+        format!("delegated work was accepted but its exact receipt is unconfirmed: {}", error.code))
 }
 
 fn schedule_error(error: nomifun_cron::ScheduleActionError) -> Wave5HostPortError {
@@ -1078,60 +1024,47 @@ mod tests {
         ));
         assert_eq!(error.code, AGENT_EXECUTION_ALREADY_ACTIVE);
         assert!(error.message.contains("strategy=parallel"));
-        assert!(error.message.contains("synthesize=true"));
+        assert!(error.message.contains("agent_wait"));
     }
 
     #[test]
     fn collaboration_delegate_input_consumes_the_parallel_schema_it_advertises() {
-        let normalized = normalize_agent_delegate_input(StrictJsonValue(json!({
+        let parsed: AgentDelegateInput = decode(StrictJsonValue(json!({
             "strategy": "parallel",
-            "tasks": "[{\"name\":\"upstream-a\",\"prompt\":\"produce A\"},{\"name\":\"upstream-b\",\"prompt\":\"produce B\",\"tool_policy\":\"read_only\"}]",
-            "synthesize": "True"
-        })));
-        let parsed: AgentDelegateInput = decode(normalized)
-        .unwrap();
+            "tasks": [{"name":"upstream-a","prompt":"请描述你眼中的\"人工智能\"是什么。"},
+                {"name":"upstream-b","prompt":"produce B","tool_policy":"read_only"}]
+        }))).unwrap();
         let AgentDelegateInput::Parallel(request) = parsed else {
             panic!("parallel delegation was decoded as a planned goal");
         };
         assert_eq!(request.tasks.len(), 2);
-        assert!(request.synthesize);
+        assert_eq!(request.tasks[0].prompt,"请描述你眼中的\"人工智能\"是什么。");
         let (_, steps) = nomifun_agent_execution::AgentExecutionEngine::materialize_parallel_delegation(request)
             .expect("Wave 5 parallel input must reach the shared DAG materializer");
-        assert_eq!(steps.len(), 3);
+        assert_eq!(steps.len(), 2);
         assert!(steps[0].depends_on.is_empty());
         assert!(steps[1].depends_on.is_empty());
-        assert_eq!(steps[2].depends_on, vec![0, 1]);
 
-        let provider_quotes = normalize_agent_delegate_input(StrictJsonValue(json!({
-            "strategy":"parallel",
-            "tasks":r#"[{"name":"upstream-a","prompt":"请描述你眼中的"人工智能"是什么。"},{"name":"upstream-b","prompt":"请说明"开源软件"的影响。"}]"#,
-            "synthesize":"True"
-        })));
-        let parsed: AgentDelegateInput = decode(provider_quotes)
-            .expect("provider-lost prompt quote escapes must be recovered losslessly");
-        let AgentDelegateInput::Parallel(request) = parsed else {
-            panic!("provider-quoted parallel delegation decoded as planned");
-        };
-        assert_eq!(request.tasks[0].prompt, "请描述你眼中的\"人工智能\"是什么。");
-        assert_eq!(request.tasks[1].prompt, "请说明\"开源软件\"的影响。");
+        for tasks in [r#"[{"name":"upstream-a","prompt":"work"}]"#,
+            r#"[{"name":"upstream-a","prompt":"describe "AI""}]"#,
+            r#"[{"name":"upstream-a","prompt":"unterminated}]"#] {
+            assert!(decode::<AgentDelegateInput>(StrictJsonValue(json!({"strategy":"parallel","tasks":tasks}))).is_err(),
+                "Host and Runtime must reject the same invalid input without guessing provider intent");
+        }
 
-        let singular = normalize_agent_delegate_input(StrictJsonValue(json!({
+        assert!(decode::<AgentDelegateInput>(StrictJsonValue(json!({
+            "strategy":"parallel","tasks":[{"name":"retired-switch","prompt":"work"}],"synthesize":true
+        }))).is_err(), "the retired automatic synthesis switch cannot be ignored");
+        let singular = StrictJsonValue(json!({
             "strategy":"parallel",
-            "task":"do not guess this field",
-            "synthesize":"True"
-        })));
+            "task":"do not guess this field"
+        }));
         assert!(decode::<AgentDelegateInput>(singular).is_err());
         assert!(decode::<AgentDelegateInput>(StrictJsonValue(json!({
             "strategy":"parallel",
             "tasks":[{"name":"upstream","prompt":"work"}],
             "goal":"mixed variants are forbidden"
         }))).is_err());
-        let truncated = normalize_agent_delegate_input(StrictJsonValue(json!({
-            "strategy":"parallel",
-            "tasks":r#"[{"name":"upstream","prompt":"unterminated}]"#,
-            "synthesize":"true"
-        })));
-        assert!(decode::<AgentDelegateInput>(truncated).is_err());
     }
 
     #[test]

@@ -3871,7 +3871,13 @@ impl PreparedCommand {
                 }
             } else {
                 let line = if is_system_program(&resolved_program, Path::new("cmd.exe")) {
-                    encode_cmd_command_line(&program, &args)?
+                    // cmd parses its own argv[0] as shell source. A legal
+                    // mixed-separator executable spelling can therefore be
+                    // misread as /cmd.exe options even though CreateProcessW
+                    // starts the correct application. Use the already-proven
+                    // native system interpreter identity for this one branch;
+                    // ordinary programs retain their requested argv[0].
+                    encode_cmd_command_line(&resolved_program, &args)?
                 } else {
                     encode_command_line(&program, &args)?
                 };

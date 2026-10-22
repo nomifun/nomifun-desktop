@@ -28,6 +28,9 @@
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --input-queue-smoke
  * Uses step-5-preview to verify queue/steer, exact Stop, durable hold across a
  * complete Host restart, explicit resume and original-key replay fences.
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --subagent-smoke
+ * Uses step-5-preview for two concurrent Full children, same-Turn parent join,
+ * file integration and a real native verification process in a disposable workspace.
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --input-handoff-smoke
  * The input handoff smoke defaults to step-5-preview. It requires an existing
  * dev component selected by NOMIFUN_OFFICECLI_PATH or an embedded OfficeCLI
@@ -96,6 +99,7 @@ const COMPONENT_TEST_NAME = 'nomi_core_managed_component_reaches_live_stepfun';
 const INPUT_HANDOFF_TEST_NAME = 'nomi_core_user_input_handoff_reaches_live_stepfun';
 const RESOURCE_WAIT_TEST_NAME = 'nomi_core_resource_wait_reaches_live_stepfun';
 const INPUT_QUEUE_TEST_NAME = 'nomi_core_input_queue_reaches_live_stepfun';
+const SUBAGENT_TEST_NAME = 'nomi_core_subagent_integration_reaches_live_stepfun';
 const INPUT_QUEUE_PHASES = ['mixed_turns_verified', 'stop_hold_verified', 'restart_hold_verified', 'resume_verified'];
 const INPUT_QUEUE_PROOF = 'NOMIFUN_INPUT_QUEUE_LIVE_OK model=step-5-preview queue_turns=2 exact_steer=true stop_hold=true host_restarts=1 resumed_turns=1 idempotency=true cancelled_replay_fenced=true';
 const COMPONENT_EVIDENCE = 'NOMIFUN_LIVE_COMPONENT_EVIDENCE ';
@@ -131,6 +135,7 @@ const componentSmoke = process.argv.includes('--component-smoke');
 const inputHandoffSmoke = process.argv.includes('--input-handoff-smoke');
 const resourceWaitSmoke = process.argv.includes('--resource-wait-smoke');
 const inputQueueSmoke = process.argv.includes('--input-queue-smoke');
+const subagentSmoke = process.argv.includes('--subagent-smoke');
 const reasoningSmoke = process.argv.includes('--reasoning-smoke');
 const reasoningNavigation = process.argv.includes('--reasoning-navigation');
 const codingSmoke = process.argv.includes('--coding-smoke');
@@ -148,13 +153,13 @@ const artifactIndex = process.argv.indexOf('--artifact-dir');
 const artifactDir = artifactIndex >= 0 && process.argv[artifactIndex + 1] ? resolve(process.argv[artifactIndex + 1]) : null;
 const reportIndex = process.argv.indexOf('--report');
 const reportPath = reportIndex >= 0 && process.argv[reportIndex + 1] ? resolve(process.argv[reportIndex + 1]) : null;
-const selectedSmokeTest = cronSmoke ? CRON_TEST_NAME : appWorkspaceUiFixture ? APP_WORKSPACE_UI_TEST_NAME : appHostingSmoke ? APP_HOSTING_TEST_NAME : reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : componentSmoke ? COMPONENT_TEST_NAME : inputQueueSmoke ? INPUT_QUEUE_TEST_NAME : resourceWaitSmoke ? RESOURCE_WAIT_TEST_NAME : inputHandoffSmoke ? INPUT_HANDOFF_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
-const selectedSmokeMode = cronSmoke ? 'scheduled_tasks' : appWorkspaceUiFixture ? 'app_workspace_ui_host' : appHostingSmoke ? 'app_workspace_generation' : reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : componentSmoke ? 'managed_component' : inputQueueSmoke ? 'input_queue' : resourceWaitSmoke ? 'resource_wait' : inputHandoffSmoke ? 'user_input_handoff' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
+const selectedSmokeTest = cronSmoke ? CRON_TEST_NAME : appWorkspaceUiFixture ? APP_WORKSPACE_UI_TEST_NAME : appHostingSmoke ? APP_HOSTING_TEST_NAME : reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : componentSmoke ? COMPONENT_TEST_NAME : inputQueueSmoke ? INPUT_QUEUE_TEST_NAME : subagentSmoke ? SUBAGENT_TEST_NAME : resourceWaitSmoke ? RESOURCE_WAIT_TEST_NAME : inputHandoffSmoke ? INPUT_HANDOFF_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
+const selectedSmokeMode = cronSmoke ? 'scheduled_tasks' : appWorkspaceUiFixture ? 'app_workspace_ui_host' : appHostingSmoke ? 'app_workspace_generation' : reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : componentSmoke ? 'managed_component' : inputQueueSmoke ? 'input_queue' : subagentSmoke ? 'subagent' : resourceWaitSmoke ? 'resource_wait' : inputHandoffSmoke ? 'user_input_handoff' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
 const retainNativeFixture = process.argv.includes('--retain-native-fixture');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
 
 function selectedSmokeModel(value) {
-  return value ?? (cronSmoke || componentSmoke || inputHandoffSmoke || resourceWaitSmoke || inputQueueSmoke ? 'step-5-preview' : DEFAULT_MODEL);
+  return value ?? (cronSmoke || componentSmoke || inputHandoffSmoke || resourceWaitSmoke || inputQueueSmoke || subagentSmoke ? 'step-5-preview' : DEFAULT_MODEL);
 }
 
 function cargoFailureCode(stderr) {
@@ -460,6 +465,14 @@ function inputQueueEvidence(output) {
     stop_hold:true,host_restarts:1,resumed_turns:1,idempotency:true,cancelled_replay_fenced:true};
 }
 
+function subagentEvidence(output) {
+  const lines = output.split(/\r?\n/).filter(line => line.startsWith('NOMIFUN_SUBAGENT_LIVE_OK'));
+  const match = lines.length === 1 && lines[0].match(/^NOMIFUN_SUBAGENT_LIVE_OK model=step-5-preview full_children=2 overlap_ms=([1-9][0-9]{0,8}) parent_turns=1 native_write_sessions=3 final_projection=0 integrated=true verification_process=true$/);
+  if (!match) throw new Error('subagent integration evidence incomplete');
+  return {model:'step-5-preview',full_children:2,overlap_ms:Number(match[1]),parent_turns:1,
+    final_projection:0,integrated:true,verification_process:true};
+}
+
 function loopbackUrl(value, expectedPath = null) {
   if (typeof value !== 'string' || value.length > 180 || /[\r\n]/.test(value)) return false;
   try {
@@ -639,7 +652,7 @@ function managedComponentEvidence(stderr) {
 
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--cron-smoke', '--model-smoke', '--file-smoke', '--component-smoke', '--input-handoff-smoke', '--resource-wait-smoke', '--input-queue-smoke', '--reasoning-smoke', '--reasoning-navigation', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture', '--app-hosting-smoke', '--app-hosting-browser-hold', '--app-workspace-ui-fixture'];
+  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--cron-smoke', '--model-smoke', '--file-smoke', '--component-smoke', '--input-handoff-smoke', '--resource-wait-smoke', '--input-queue-smoke', '--subagent-smoke', '--reasoning-smoke', '--reasoning-navigation', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture', '--app-hosting-smoke', '--app-hosting-browser-hold', '--app-workspace-ui-fixture'];
   if (userArgs.some((arg, index) => {
     if (arg === '--report') return (!idmmSmoke && !appHostingSmoke && !componentSmoke && !inputQueueSmoke) || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--report') return false;
@@ -655,7 +668,7 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, cronSmoke, modelSmoke, fileSmoke, componentSmoke, inputHandoffSmoke, resourceWaitSmoke, inputQueueSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke, appHostingSmoke, appWorkspaceUiFixture].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke) || (reasoningNavigation && !reasoningSmoke) || (appHostingBrowserHold && !appHostingSmoke)) {
+  if (([browser, browserGui, cronSmoke, modelSmoke, fileSmoke, componentSmoke, inputHandoffSmoke, resourceWaitSmoke, inputQueueSmoke, subagentSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke, appHostingSmoke, appWorkspaceUiFixture].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke) || (reasoningNavigation && !reasoningSmoke) || (appHostingBrowserHold && !appHostingSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_MODE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -672,7 +685,7 @@ async function main() {
   const model = selectedSmokeModel(process.env[MODEL_ENVIRONMENT_NAME]);
   // The separate native-browser fixture still pins its own provider model.
   // Never label that existing acceptance path as a different selected model.
-  if (!ALLOWED_MODELS.has(model) || (browser && model !== DEFAULT_MODEL) || ((componentSmoke || cronSmoke || inputQueueSmoke) && model !== 'step-5-preview')) {
+  if (!ALLOWED_MODELS.has(model) || (browser && model !== DEFAULT_MODEL) || ((componentSmoke || cronSmoke || inputQueueSmoke || subagentSmoke) && model !== 'step-5-preview')) {
     emitFailure('live_smoke_status=not_run', 'LIVE_MODEL_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -720,7 +733,7 @@ async function main() {
       'nomifun-app',
       '--test',
       TEST_TARGET,
-      ...((resourceWaitSmoke || cronSmoke || inputQueueSmoke) ? ['--no-default-features'] : []),
+      ...((resourceWaitSmoke || cronSmoke || inputQueueSmoke || subagentSmoke) ? ['--no-default-features'] : []),
       ...(generalDesktopSmoke ? ['--features', 'browser-use,computer-use'] : []),
       '--no-run',
       '--message-format=json-render-diagnostics',
@@ -993,6 +1006,13 @@ async function main() {
         }
       } catch {
         emitFailure('live_smoke_status=fail', 'INPUT_QUEUE_EVIDENCE_OR_REPORT_INVALID', 503);
+        process.exitCode = 2; return;
+      }
+    }
+    if (subagentSmoke) {
+      try { console.log('live_smoke_subagent_evidence=' + JSON.stringify(subagentEvidence(test.stderr))); }
+      catch {
+        emitFailure('live_smoke_status=fail', 'SUBAGENT_EVIDENCE_INVALID', 503);
         process.exitCode = 2; return;
       }
     }
@@ -1276,14 +1296,23 @@ function runSelfTest() {
     let rejected = false; try { inputQueueEvidence(invalid); } catch { rejected = true; }
     if (!rejected) throw new Error('incomplete input queue proof accepted');
   }
-  if (selectedSmokeModel(undefined) !== (cronSmoke || componentSmoke || inputHandoffSmoke || resourceWaitSmoke || inputQueueSmoke ? 'step-5-preview' : DEFAULT_MODEL)
+  const subagentProof = 'NOMIFUN_SUBAGENT_LIVE_OK model=step-5-preview full_children=2 overlap_ms=1245 parent_turns=1 native_write_sessions=3 final_projection=0 integrated=true verification_process=true';
+  if (subagentEvidence(subagentProof).overlap_ms !== 1245) throw new Error('subagent evidence self-test failed');
+  for (const invalid of ['', subagentProof + '\n' + subagentProof, subagentProof.replace('overlap_ms=1245', 'overlap_ms=0'),
+      subagentProof.replace('parent_turns=1', 'parent_turns=2'), subagentProof.replace('integrated=true', 'integrated=false')]) {
+    let rejected = false; try { subagentEvidence(invalid); } catch { rejected = true; }
+    if (!rejected) throw new Error('incomplete subagent proof accepted');
+  }
+  if (selectedSmokeModel(undefined) !== (cronSmoke || componentSmoke || inputHandoffSmoke || resourceWaitSmoke || inputQueueSmoke || subagentSmoke ? 'step-5-preview' : DEFAULT_MODEL)
       || selectedSmokeModel(DEFAULT_MODEL) !== DEFAULT_MODEL || selectedSmokeModel('step-5-preview') !== 'step-5-preview'
       || inputHandoffSmoke && (selectedSmokeTest !== INPUT_HANDOFF_TEST_NAME || selectedSmokeMode !== 'user_input_handoff'
         || !selectedTestPassed(`test ${INPUT_HANDOFF_TEST_NAME} ... ok\n`, selectedSmokeTest))
       || resourceWaitSmoke && (selectedSmokeTest !== RESOURCE_WAIT_TEST_NAME || selectedSmokeMode !== 'resource_wait'
         || !selectedTestPassed(`test ${RESOURCE_WAIT_TEST_NAME} ... ok\n`, selectedSmokeTest))
       || inputQueueSmoke && (selectedSmokeTest !== INPUT_QUEUE_TEST_NAME || selectedSmokeMode !== 'input_queue'
-        || !selectedTestPassed(`test ${INPUT_QUEUE_TEST_NAME} ... ok\n`, selectedSmokeTest))) {
+        || !selectedTestPassed(`test ${INPUT_QUEUE_TEST_NAME} ... ok\n`, selectedSmokeTest))
+      || subagentSmoke && (selectedSmokeTest !== SUBAGENT_TEST_NAME || selectedSmokeMode !== 'subagent'
+        || !selectedTestPassed(`test ${SUBAGENT_TEST_NAME} ... ok\n`, selectedSmokeTest))) {
     throw new Error('input handoff selection and model default self-test failed');
   }
   const scrubbed = environmentWithoutCredential({

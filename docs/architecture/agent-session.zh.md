@@ -89,6 +89,24 @@ Windows 显式 native 文件修改的目标证明保存在原 Effect started 的
 
 应用工作区的内置应用 Agent 复用普通 coding、Skill、MCP 和 typed resources；个人 Agent 也可明确选入同一应用开发能力。托管工具直接调用 UI 同一命令与进程 owner，不建立专属计划、预览资格、交付证明或 checkpoint。空闲会话的 Agent、资源、知识库与扩展选择走同一 canonical binding transition，仍受活动 Turn、Remote、Attempt、未知效果与原生 checkpoint 校验约束。应用工作区固定模板的产品要求不允许借重开入口替换已有 binding。当前会话效果和产物继续读取精确 Turn 的 typed canonical event/payload，不从工具提示或网页状态补造成功。
 
+### 子 Agent 与父 Turn 的连续性
+
+子 Agent 使用独立 canonical Session 和 Runtime，继承原不可变 Revision／Snapshot、精确模型和 typed resource bindings，再应用该 Attempt 明确选择的权限上限。父工具的显示窗口、一次路由提示或暂时缺少某个 schema 不会成为子会话的新 binding。冻结授权、Session active capability、Attempt 权限上限和 Turn schema 呈现窗口分别校验；ToolSearch 只改变已有授权的呈现，不恢复未选能力，也不替代权限证明。
+
+原来源已受理的附件与显式 Skill 选择沿确切 delegation Effect、Turn 和委派前已实际应用的 steering 引用交给子输入准备；Skill 仍从子 Snapshot 的冻结内容读取，附件仍使用子模型及资源的普通准备路径。后续工作保留原子历史与 binding，但选择发送者本次确切 accepted 输入及原 native 命令事件前已应用的 steering，不重注第一次来源的选择，也不按最新工作猜测。自己的 Step spec 保持为子任务输入，原用户约束通过 canonical 来源读取。不存在另存父 transcript、复制工具结果镜像或从当前 UI 恢复上下文的路径。
+
+委派受理后父 Turn 继续持有原任务和完整已授权工具。成功回执表示接受工作，不终结任务或强制下一模型步骤再次委派。父 Agent 用 `agent_status` 读取确切子任务结果，以 `agent_message` 协调所属 Step，并在需要时使用 `agent_wait`。详细执行与并发合同见 [Agent Execution](agent-execution.zh.md)。子任务结果保持原 Execution／Step／Attempt／Session／Turn／terminal 引用，父 Agent 整合和核验后沿普通 Runtime 输出最终回答；来源委派不另写一个后台结果报告来冒充父回答。
+
+长子结果正文具有明确的 32 KiB UTF-8 分页及不可变来源、完整正文摘要，只有连续完整覆盖才能消费该终态，遗漏字节或单独末片不能当作交付。native checkpoint 只保存覆盖引用，不另存正文。新读取的确切子来源包含真实工作区效果或 native process ownership 时，父任务先前的工作区观察、completion 证据与 scoped instructions 观察只失效一次；无关领域序号增长不触发这一结论。
+
+`agent_wait` 在同一个 Turn 保存 typed `AwaitingChildren` 与配对的 `ChildrenWaitResolved`，checkpoint 保留原 operation、模型步骤、预算、计划、工具观察与等待范围。崩溃恢复只继续原等待，不重复创建或提交子任务，不重置模型预算。等待和唤醒沿原 native journal 记录，唤醒是数据观察，不是新真人输入；随后状态查询核验确切结果，不能从通知或状态文字推断交付成功。正常排队维持 FIFO，已受理 steering 在原 Turn 安全边界优先处理；停止围栏阻断迟到唤醒，不借用后继 Turn。
+
+父 Agent 真正请求用户输入后，新的真人 Turn 只有携带合法 `reply_to` 且逐跳验证同一问题终态、原受理来源、当前精确 binding 和 context clear 围栏时，才延续那些原子任务范围及未消费结果引用。历史问题关联本身仍只是数据，不能赋予 Session 全局任务权限，普通新话题也不接管旧协作。读者与命令 writer 共用同一 canonical 证明，不按最新活动任务或自然语言猜来源。
+
+子等待可以按原 native owner 证明让出模型容量，继续计算前由原 writer 重新准入。它不证明进程已退出、文件修改已结算或 Browser／Computer 已释放，资源 owner 和 pending／unknown Effect 仍保留责任。用户 Pause、普通 InputRequired、资源等待和子等待各有其确切合同。状态查询、缓存重建、通知或 idle 不能创建新的任务或自动重跑已关闭 Turn。
+
+确切 delegation Effect 已 Returned 且原工具因果可验证时，已准入的子任务具有独立生命周期；父 Turn 后续 Failed 或仅停止父任务，不撤销子任务原准入。停止委派工作或整个 Execution 仍由其确切持久范围围栏阻断派发及继续。Pending 来源只保留父 Turn 正在运行或正常完成时的既有准入边界，Unknown、Rejected 或 Cancelled Effect 不能被当作 Returned 放行；取消受理、任务终结和实际资源清理继续分开证明。
+
 ### 回合完成后的知识回写
 
 主 Turn 在原工具效果、原生任务和资源清理确认后正常提交终态并释放输入；知识提炼与回写由
@@ -664,7 +682,7 @@ emoji、表情包/贴纸标记、装饰符号和动作、神态、舞台描写�
 
 能力授权、schema 展示、上下文预算和物理资源装配分离。紧凑交互投影取决于本轮可信入口，不再通过固定弱 Robot 模块集合分类；增加搜索、知识或文件不丢失简洁交互策略，也不撤下普通工具。延迟展示不改变完整冻结权限；未绑或离线设备不阻断普通工作。初始窗口保留常用普通工具及已绑设备 Action，大 schema、Skill 正文和历史结果按需展开。
 
-普通问题与工作直接在当前 Session 使用已授权工具。复杂任务按实际持久执行、隔离或并行收益使用通用 AgentExecution，保留必要用户约束和确切任务引用；不因物理入口或普通能力缺口强制转交另一个 Agent。结果沿原来源直接交付，不固定创建隐藏模型总结 Turn；正常成功事件推进，持久恢复不替代正常事件路径。
+普通问题与工作直接在当前 Session 使用已授权工具。复杂任务按实际持久执行、隔离或并行收益使用通用 AgentExecution，保留必要用户约束和确切任务引用；不因物理入口或普通能力缺口强制转交另一个 Agent。来源子任务由父 Turn 读取确切结果、整合核验后通过普通 Runtime 交付，不另写后台报告或创建隐藏结果总结 Turn；用户直接创建且无工具来源的 Execution 保留原摘要投影。正常事件推进与持久恢复使用同一原事实。
 
 Robot ASR 以现有受监管任务执行，每连接最多一个识别任务和两个待识别录音。设备收帧循环持续处理
 MCP 回执、abort、断连和 ping。abort 清除尚未提交的录音并等待识别任务退出；连接被替换或宿主关闭时，
@@ -672,7 +690,7 @@ MCP 回执、abort、断连和 ping。abort 清除尚未提交的录音并等待
 
 App 的编译消费面始终是 desktop，不由 Browser/Computer 适配器是否编译决定。可选设备授权上限只对精确固定的 bundled 公开 Provider 延迟物理平台判断：必须是单公开成员、单资源种类、完整 Action 操作合同，且没有私有实现、依赖、Context 或 Event。物理平台不支持的成员只记为当前编译对象内的不可执行集合，不写入 Snapshot 或 checkpoint；资源绑定和调用仍拒绝它。其他 Provider、缺失合同和非 Agent 直接操作继续使用严格准入。
 
-授权目录不按模块或动作总数 128 截断。启用 ToolSearch 时，初始 schema 展示按 24 KiB 和 110 个工具投影，给 Runtime 控制和一次五个搜索匹配留位；完整绑定及 schema 保留在原 ToolPlan。后继搜索成组保留最新最多五个匹配，旧展示工具填充剩余窗口，未展示的工具仍可再次搜索。Host 显式预激活直接使用最终已授权的冻结调用名，一次原子展示整个请求集合，不拆成五项搜索批次而让组内工具相互逐出。最新搜索集合与 Host 显式集合都可超过 24 KiB 软目标，但仍受最多 115 个授权定义、含 Runtime 控制最多 128 个可见工具，以及完整请求上下文预算的硬限制；超限时整组拒绝，不部分修改展示集合。canonical 恢复按原事实重建展示状态并应用相应集合规则；没有 ToolSearch 时只检查实际组装后的可见工具数。搜索窗口是展示状态，不是第二套授权或持久账本。
+授权目录不按模块或动作总数 128 截断。启用 ToolSearch 时，初始 schema 展示按 24 KiB 和 107 个工具投影，给 16 个 Runtime 控制槽和一次五个搜索匹配留位；完整绑定及 schema 保留在原 ToolPlan。后继搜索成组保留最新最多五个匹配，旧展示工具填充剩余窗口，未展示的工具仍可再次搜索。Host 显式预激活直接使用最终已授权的冻结调用名，一次原子展示整个请求集合，不拆成五项搜索批次而让组内工具相互逐出。最新搜索集合与 Host 显式集合都可超过 24 KiB 软目标，但仍受最多 112 个授权定义、含 Runtime 控制最多 128 个可见工具，以及完整请求上下文预算的硬限制；超限时整组拒绝，不部分修改展示集合。canonical 恢复按原事实重建展示状态并应用相应集合规则；没有 ToolSearch 时只检查实际组装后的可见工具数。搜索窗口是展示状态，不是第二套授权或持久账本。
 
 ### 同一现役数据集的位置迁移
 
@@ -953,7 +971,7 @@ Cron 私有 dispatcher 将已由服务端验证的 job／run／Session 引用作
 
 已绑定机器人的语音进入该设备的机器人 Session，不以摄像头或 `robot/vision` 授权为前提。宿主在当前设备连接围栏内校验 canonical 伙伴、角色与设备，正式输入保存 `AuthenticatedRobot` 来源；普通输入不能自行声明该来源或伪造 robot origin。语音输入不修改冻结授权；工具仍校验已选资源、当前 Turn、精确连接和设备许可。采集器区分真人设备输入和 Agent/系统内容，不能仅按 origin 是否非空判断是谁说话。
 
-后台结果提交携带原 Execution/Step/Attempt/Session/Turn 引用的 canonical 报告，沿原请求关系直接交付；不创建专属隐藏总结 Turn。问题通知引用原 `DecisionRequested` 与可验证 presentation。问题身份在真实录音/ASR 边界冻结并贯穿准入，只绑定当时已在原连接受理的问题。慢识别不晚绑新问题，旧 `None` 或旧 question ID 不升级为后继问题的答案；重复 source 不回滚当前问题。
+来源子任务的结果由原父 Turn 读取其确切 canonical 引用并整合，公开回答和物理播报继续通过父 Runtime 的普通交付链；子终态、通知或用户会话暂时空闲不能自动制造新的模型 Turn。问题通知仍引用原 `DecisionRequested` 与可验证 presentation。问题身份在真实录音/ASR 边界冻结并贯穿准入，只绑定当时已在原连接受理的问题。慢识别不晚绑新问题，旧 `None` 或旧 question ID 不升级为后继问题的答案；重复 source 不回滚当前问题。
 
 直接设备调用的普通 `request_user_input` 使用同一 typed canonical 交接，不能因物理入口禁用。回答读取确切 accepted root 与 question identity，不接收模型生成的真人答案。多 pending、后继问题、其他连接和要求点击的审批不借语音获得授权。已完成父 Turn 的来源查询使用原只读 accepted-input API，不借 native 活动回合权限。
 

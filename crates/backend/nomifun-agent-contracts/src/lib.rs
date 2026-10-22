@@ -54,6 +54,8 @@ pub mod remote;
 pub mod runtime;
 pub mod schema;
 pub mod session;
+pub mod shared_tool_content;
+pub use shared_tool_content::*;
 pub mod supervision;
 pub mod system_execution;
 pub use system_execution::SystemExecutionFailure;

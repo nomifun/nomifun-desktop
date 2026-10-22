@@ -64,6 +64,70 @@ async fn payload_tx(
         .ok_or_else(|| invalid("question's exact canonical Payload is missing"))
 }
 
+pub(super) struct QuestionSourceAuthority {
+    pub(super) input: Value,
+    pub(super) delegation_event_id: String,
+    pub(super) context_floor: u64,
+    notice_causes: Vec<String>,
+}
+
+/// Notice creation and actual playback share the original delegation proof.
+/// A waiting parent stays in its original Turn; a terminal is not required to
+/// authorize the already-returned Effect's pending child question.
+pub(super) async fn source_authority_tx(
+    owner: &NomiCoreSessionOwner, tx: &mut Transaction<'_, Sqlite>, owner_id: &str,
+    session: &AgentSessionId, source: &AgentExecutionSource, binding: &AgentBindingValue,
+) -> Result<Option<QuestionSourceAuthority>, AppError> {
+    if source.agent_session_id != session.as_ref() { return Err(invalid("question delegation belongs to another Session")); }
+    let parent:Option<(String,String,Option<String>,String,i64)>=sqlx::query_as("SELECT turn.state,turn.started_event_id,turn.terminal_event_id,turn.source_message_id,started.seq FROM agent_turns turn JOIN agent_events started ON started.event_id=turn.started_event_id AND started.session_id=turn.session_id WHERE turn.session_id=? AND turn.operation_id=? AND started.kind='turn/started' AND started.kind_version=1 AND started.producer_id='session_api' AND started.correlation_id=turn.operation_id AND started.causation_event_id=turn.source_message_id")
+        .bind(session.as_ref()).bind(&source.turn_operation_id).fetch_optional(&mut **tx).await.map_err(db)?;
+    let Some((state,started_id,terminal_id,root_id,start_seq))=parent else {return Err(invalid("question source Turn is missing"));};
+    if !matches!(state.as_str(),"running"|"completed") {return Ok(None);}
+    let (floor,context_floor):(i64,i64)=sqlx::query_as("SELECT COALESCE(MAX(seq),0),COALESCE(MAX(CASE WHEN kind='context/cleared' THEN seq END),0) FROM agent_events WHERE session_id=? AND kind IN ('context/cleared','session/agent-binding-changed') AND kind_version=1")
+        .bind(session.as_ref()).fetch_one(&mut **tx).await.map_err(db)?;
+    if start_seq<=floor {return Ok(None);}
+    if state=="running" {
+        let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_session_heads WHERE session_id=? AND status='running' AND active_turn_id=?)")
+            .bind(session.as_ref()).bind(&source.turn_operation_id).fetch_one(&mut **tx).await.map_err(db)?;
+        if !active||!nomifun_db::native_resume_target_eligible_tx(tx,owner_id,session.as_ref(),&source.turn_operation_id).await? {return Ok(None);}
+    }
+    let started=payload_tx(owner,tx,session,&started_id).await?;
+    if started.get("operation_id").and_then(Value::as_str)!=Some(source.turn_operation_id.as_str())
+        ||started.get("source_message_id").and_then(Value::as_str)!=Some(root_id.as_str()) {return Err(invalid("source Turn claim differs from its input"));}
+    if super::super::canonical_admission_binding_ref(&started)?.as_ref()!=Some(&AgentHandoffBindingRefV1::from(binding)) {return Ok(None);}
+    let (root,input)=owner.canonical.store().turn_accepted_input_in_transaction(tx,session,&source.turn_operation_id.clone().into())
+        .await.map_err(agent_session_store_error)?;
+    if root.event_id.as_ref()!=root_id {return Err(invalid("source accepted root differs from its exact Turn"));}
+    let effect=owner.canonical.store().read_effect_in_transaction(tx,session,&source.effect_id).await.map_err(agent_session_store_error)?
+        .ok_or_else(||invalid("question source Effect is missing"))?;
+    if effect.turn_id.as_ref()!=source.turn_operation_id||effect.operation_id.as_ref()!=source.tool_operation_id
+        ||effect.owner_domain!="wave5.product"||effect.capability_module.as_ref()!="agent.collaboration"
+        ||!matches!(effect.action_id.as_ref(),"agent/delegate"|"agent/fork") {return Err(invalid("question source Effect identity changed"));}
+    match effect.state {
+        nomifun_agent_session::AgentEffectState::Returned=>{},
+        nomifun_agent_session::AgentEffectState::Pending|nomifun_agent_session::AgentEffectState::Unknown=>{
+            // A fast child can ask before its parent's delegation receipt has
+            // settled. Keep the existing notice outbox responsible until the
+            // original owner proves its outcome; do not acknowledge absence.
+            return Err(invalid("delegation outcome awaits its original owner's confirmed receipt"));
+        },
+        nomifun_agent_session::AgentEffectState::Rejected|nomifun_agent_session::AgentEffectState::Cancelled=>return Ok(None),
+    }
+    let delegation_event_id=effect.terminal_event_id.ok_or_else(||invalid("returned delegation has no original terminal event"))?.as_ref().to_owned();
+    let mut notice_causes=vec![delegation_event_id.clone()];
+    if state=="completed" {
+        let terminal_id=terminal_id.ok_or_else(||invalid("completed question source has no terminal"))?;
+        let terminal_valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_events WHERE session_id=? AND event_id=? AND kind='turn/completed' AND kind_version=1 AND correlation_id=? AND seq>?)")
+            .bind(session.as_ref()).bind(&terminal_id).bind(&source.turn_operation_id).bind(start_seq).fetch_one(&mut **tx).await.map_err(db)?;
+        if !terminal_valid {return Err(invalid("question source terminal differs from its original Turn"));}
+        // Existing canonical notices may cite this genuine completed boundary.
+        // New notices always cite the same returned delegation event.
+        notice_causes.push(terminal_id);
+    }
+    Ok(Some(QuestionSourceAuthority {input:input.0,delegation_event_id,
+        context_floor:u64::try_from(context_floor).map_err(invalid)?,notice_causes}))
+}
+
 pub(super) struct ValidQuestion {
     pub(super) seq: u64,
 }
@@ -184,37 +248,10 @@ pub(super) async fn pending_question_tx(
     {
         return Ok(None);
     }
-    let parent:Option<(String,String,String,String,i64)>=sqlx::query_as("SELECT turn.state,turn.started_event_id,turn.terminal_event_id,turn.source_message_id,started.seq FROM agent_turns turn JOIN agent_events started ON started.event_id=turn.started_event_id AND started.session_id=turn.session_id WHERE turn.session_id=? AND turn.operation_id=? AND started.kind='turn/started' AND started.kind_version=1 AND started.producer_id='session_api' AND started.correlation_id=turn.operation_id AND started.causation_event_id=turn.source_message_id")
-        .bind(session.as_ref()).bind(&notice.source.turn_operation_id).fetch_optional(&mut **tx).await.map_err(db)?;
-    let Some((state, started_id, terminal_id, root_id, start_seq)) = parent else {
-        return Err(invalid("question source Turn is missing"));
-    };
-    if state != "completed" || cause.as_deref() != Some(terminal_id.as_str()) {
-        return Ok(None);
-    }
-    if start_seq <= floor {
-        return Ok(None);
-    }
-    let terminal_valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_events WHERE session_id=? AND event_id=? AND kind='turn/completed' AND kind_version=1 AND correlation_id=? AND seq>?)")
-        .bind(session.as_ref()).bind(&terminal_id).bind(&notice.source.turn_operation_id).bind(start_seq).fetch_one(&mut **tx).await.map_err(db)?;
-    if !terminal_valid {
-        return Err(invalid(
-            "question source terminal differs from its original Turn",
-        ));
-    }
-    let started = payload_tx(owner, tx, &session, &started_id).await?;
-    if started.get("operation_id").and_then(Value::as_str)
-        != Some(notice.source.turn_operation_id.as_str())
-        || started.get("source_message_id").and_then(Value::as_str) != Some(root_id.as_str())
-    {
-        return Err(invalid("source Turn claim differs from its input"));
-    }
-    if super::super::canonical_admission_binding_ref(&started)?.as_ref()
-        != Some(&AgentHandoffBindingRefV1::from(&binding))
-    {
-        return Ok(None);
-    }
-    let input = payload_tx(owner, tx, &session, &root_id).await?;
+    let Some(source_authority)=source_authority_tx(owner,tx,owner_id,&session,&notice.source,&binding).await?
+        else {return Ok(None);};
+    if !cause.as_ref().is_some_and(|cause|source_authority.notice_causes.contains(cause)) {return Ok(None);}
+    let input = source_authority.input;
     let input: AgentInputSource = serde_json::from_value(
         input
             .get("input_source")
@@ -225,23 +262,6 @@ pub(super) async fn pending_question_tx(
     if !matches!(input,AgentInputSource::AuthenticatedRobot{companion_id,robot_id,connection_id,..}
         if companion_id==request.companion_id&&robot_id==request.robot_id&&connection_id==request.connection_id)
     {
-        return Ok(None);
-    }
-    let effect:Option<(String,String,String,String,String,String)>=sqlx::query_as("SELECT session_id,turn_id,operation_id,owner_domain,action_id,state FROM agent_effects WHERE effect_id=? AND capability_module='agent.collaboration'")
-        .bind(&notice.source.effect_id).fetch_optional(&mut **tx).await.map_err(db)?;
-    let Some((effect_session, effect_turn, effect_operation, domain, action, state)) = effect
-    else {
-        return Err(invalid("question source Effect is missing"));
-    };
-    if effect_session != session.as_ref()
-        || effect_turn != notice.source.turn_operation_id
-        || effect_operation != notice.source.tool_operation_id
-        || domain != "wave5.product"
-        || !matches!(action.as_str(), "agent/delegate" | "agent/fork")
-    {
-        return Err(invalid("question source Effect identity changed"));
-    }
-    if state != "returned" {
         return Ok(None);
     }
     let execution:Option<(String,String,String,Option<i64>)>=sqlx::query_as("SELECT status,decision_policy,initial_plan_input,deleted_at FROM agent_executions WHERE execution_id=? AND user_id=?")

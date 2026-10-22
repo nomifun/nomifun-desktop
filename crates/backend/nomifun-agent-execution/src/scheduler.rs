@@ -19,7 +19,7 @@ use nomifun_api_types::{
 };
 use nomifun_common::{
     AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, AgentStepMode,
-    AgentToolPolicy, AppError, ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus,
+    AppError, ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus,
     StepFailurePolicy, apply_agent_role_context, generate_id, now_ms,
 };
 use nomifun_db::{
@@ -97,7 +97,8 @@ fn attempt_session_target(
 }
 
 fn should_project_lead_report(initial_plan_input: &str) -> Result<bool, AppError> {
-    Ok(!is_automation_initial_plan(initial_plan_input)?)
+    Ok(!is_automation_initial_plan(initial_plan_input)?
+        && crate::engine::execution_source_from_initial_plan(initial_plan_input)?.is_none())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,7 +238,7 @@ pub(crate) trait ConversationEffects: Send + Sync {
         operation_id: &str,
         target_operation_id: &str,
         text: &str,
-    ) -> Result<(), AppError>;
+    ) -> Result<crate::AgentExecutionSteerDelivery, AppError>;
 
     async fn stop_attempt_turn(
         &self,
@@ -1112,7 +1113,11 @@ impl ExecutionScheduler {
                 }
                 let ready_capacity_wait = ready.iter().any(|step| step.kind == ExecutionStepKind::Agent);
                 let reservations=repository.attempt_reservations(execution_id).await?;
-                let agent_steps = select_agent_steps_with_reservations(&detail, ready, &in_flight_step_ids, &reservations);
+                let mut admitted=Vec::with_capacity(ready.len());
+                for step in ready {
+                    if repository.step_session_available(owner_id,execution_id,&step.step_id).await? {admitted.push(step);}
+                }
+                let agent_steps = select_agent_steps_with_reservations(&detail, admitted, &in_flight_step_ids, &reservations);
                 for step in agent_steps {
                     let step_id = step.step_id.clone();
                     // Reserve synchronously before the future is first polled.
@@ -1577,7 +1582,22 @@ impl ExecutionScheduler {
                     self.inner.deps.conversation_effects.stop_attempt_turn(owner_id, conversation_id, operation_id, target_operation_id).await?;
                 }
                 PendingConversationEffect::Steer { operation_id, target_operation_id, content } => {
-                    self.inner.deps.conversation_effects.steer_attempt(owner_id, conversation_id, operation_id, target_operation_id, content).await?;
+                    match self.inner.deps.conversation_effects.steer_attempt(owner_id, conversation_id, operation_id, target_operation_id, content).await? {
+                        crate::AgentExecutionSteerDelivery::Delivered { .. }=>{},
+                        crate::AgentExecutionSteerDelivery::TargetClosed { target }=>{
+                            // The native target closed before this intent could
+                            // reach its input boundary. Append its exact message
+                            // as a new owned input before releasing the original
+                            // settlement hold; never acknowledge a terminal ID
+                            // as if it were a delivered steering receipt.
+                            self.inner.deps.repository.redirect_closed_steer(owner_id,execution_id,&step.step_id,
+                                attempt_id,operation_id,&target).await?;
+                            *delivered=None;
+                            self.inner.conversation_control_changed.notify_waiters();
+                            self.publish().await;
+                            return Ok(true);
+                        },
+                    }
                 }
                 PendingConversationEffect::DecisionInput { .. } => unreachable!(),
             }
@@ -2016,11 +2036,17 @@ impl ExecutionScheduler {
             .get_execution(owner_id, execution_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
-        let (session_target, session_kind) = attempt_session_target(
-            &execution_row.initial_plan_input,
-            detail.automation_control.as_ref(),
-            &current_step.step_id,
-        )?;
+        let (session_target, session_kind) = match self.inner.deps.repository
+            .continuation_target(owner_id, execution_id, &current_step.step_id).await? {
+            Some(target) => (AttemptSessionTarget::ExistingChild { target }, AgentExecutionAttemptSessionKind::ChildAttempt),
+            None => {
+                let (target,kind)=attempt_session_target(&execution_row.initial_plan_input, detail.automation_control.as_ref(), &current_step.step_id)?;
+                if matches!(target,AttemptSessionTarget::ChildAttempt|AttemptSessionTarget::SourceChildAttempt {..}) {
+                    let source=self.inner.deps.repository.step_source(owner_id,execution_id,&current_step.step_id).await?;
+                    (source.map_or(AttemptSessionTarget::ChildAttempt,|source|AttemptSessionTarget::SourceChildAttempt {source}),kind)
+                } else {(target,kind)}
+            },
+        };
         let model_pool = execution_model_pool(&detail.participants);
         let previous_attempts = detail
             .attempts
@@ -2658,11 +2684,9 @@ impl ExecutionScheduler {
         } else {
             AgentExecutionStatus::Completed
         };
-        // Final-answer ownership is singular: reuse a completed synthesis, then
-        // a single business step, otherwise persist a deterministic digest.
-        // The Engine never performs an extra LLM summary. A lead Conversation,
-        // when present, receives one idempotent assistant-message projection;
-        // Remote callers read this persisted summary directly.
+        // Preserve the domain summary for ordinary UI/remote executions.
+        // Source-owned collaboration is joined through exact canonical child
+        // results; its parent retains final delivery and integration ownership.
         let summary = terminal_summary(detail);
         self.inner
             .deps
@@ -3251,8 +3275,6 @@ fn select_agent_steps_with_reservations(
         .collect();
     let mut selected_per_participant: HashMap<&str, i64> = HashMap::new();
     let mut active_count = 0usize;
-    let mut workspace_reservation_count = 0usize;
-    let mut workspace_mutator_active = false;
     let mut active_step_ids: HashSet<&str> = HashSet::new();
     for attempt in detail.attempts.iter().filter(|attempt| {
         matches!(
@@ -3269,17 +3291,11 @@ fn select_agent_steps_with_reservations(
         if !active_step_ids.insert(attempt.step_id.as_str()) {
             continue;
         }
-        // The same read projection used by the admission writer distinguishes
-        // model yield from retained workspace responsibility. Missing facts
-        // remain held; a WaitingInput display alone grants no release.
+        // The admission writer and scheduler use the same capacity proof.
+        // Missing facts remain held; a WaitingInput display grants no release.
         let reservation=reservations.iter().find(|reservation|reservation.attempt_id==attempt.attempt_id);
-        let workspace_held=reservation.is_none_or(|reservation|reservation.workspace_held);
-        if workspace_held {workspace_reservation_count += 1;}
         let model_held=reservation.is_none_or(|reservation|reservation.capacity_held);
         if model_held { active_count += 1; }
-        workspace_mutator_active |= workspace_held && current_steps
-            .get(attempt.step_id.as_str())
-            .is_some_and(|step| step.tool_policy != AgentToolPolicy::ReadOnly);
         if model_held { *selected_per_participant.entry(participant_id).or_default() += 1; }
     }
     // Futures are reserved before their first poll, so a just-pushed Step may
@@ -3296,10 +3312,6 @@ fn select_agent_steps_with_reservations(
             continue;
         };
         active_count += 1;
-        workspace_reservation_count += 1;
-        workspace_mutator_active |= current_steps
-            .get(step_id.as_str())
-            .is_some_and(|step| step.tool_policy != AgentToolPolicy::ReadOnly);
         *selected_per_participant.entry(participant_id).or_default() += 1;
     }
     let mut selected = Vec::new();
@@ -3310,29 +3322,11 @@ fn select_agent_steps_with_reservations(
     if available == 0 {
         return selected;
     }
-    // All Steps in one AgentExecution share one canonical workspace. Full
-    // tools can write directly and ReadShell is explicitly not an OS
-    // read-only sandbox, so overlapping either class with a sibling can race
-    // patches, commands, tests, Git state, or source observations. Until a
-    // real per-Step worktree/merge owner exists, only ReadOnly siblings may
-    // overlap. This preserves useful parallel exploration while making coding
-    // execution deterministic instead of merely hoping writers touch
-    // different files.
-    if workspace_mutator_active {
-        return selected;
-    }
     for step in ready
         .into_iter()
         .filter(|step| step.kind == ExecutionStepKind::Agent)
         .filter(|step| !in_flight_step_ids.contains(&step.step_id))
     {
-        let workspace_mutator = step.tool_policy != AgentToolPolicy::ReadOnly;
-        if workspace_reservation_count > 0 && workspace_mutator {
-            continue;
-        }
-        if workspace_mutator && !selected.is_empty() {
-            continue;
-        }
         let Some(participant_id) = step.assigned_participant_id.as_deref() else {
             continue;
         };
@@ -3350,7 +3344,7 @@ fn select_agent_steps_with_reservations(
         }
         *count += 1;
         selected.push(step.clone());
-        if workspace_mutator || selected.len() == available {
+        if selected.len() == available {
             break;
         }
     }
@@ -3709,7 +3703,7 @@ mod tests {
             let encoded = input.to_string();
             assert_eq!(attempt_session_target(&encoded, None, child).unwrap(),
                 (AttemptSessionTarget::SourceChildAttempt { source: source.clone() }, AgentExecutionAttemptSessionKind::ChildAttempt));
-            assert!(should_project_lead_report(&encoded).unwrap());
+            assert!(!should_project_lead_report(&encoded).unwrap());
         }
         let retired = serde_json::json!({"mode":"directed","source":source,"plan":{"steps":[]}}).to_string();
         assert!(attempt_session_target(&retired, None, child).is_err());
@@ -4371,13 +4365,13 @@ mod tests {
             operation_id: &str,
             _target_operation_id: &str,
             _text: &str,
-        ) -> Result<(), AppError> {
+        ) -> Result<crate::AgentExecutionSteerDelivery, AppError> {
             self.conversation_operations.lock().unwrap().push(operation_id.to_owned());
             self.steer_started.store(true, Ordering::SeqCst);
             if self.block_steer.load(Ordering::SeqCst) {
                 self.steer_release.notified().await;
             }
-            Ok(())
+            Ok(crate::AgentExecutionSteerDelivery::Delivered {event_id:operation_id.to_owned()})
         }
 
         async fn stop_attempt_turn(
@@ -4631,12 +4625,13 @@ mod tests {
                 .lock()
                 .expect("harness brief log is not poisoned")
                 .push((step_title.to_owned(), brief.to_owned()));
-            let creates_child = !matches!(&session_target, AttemptSessionTarget::AutomationLead { .. });
+            let creates_child = !matches!(&session_target, AttemptSessionTarget::AutomationLead { .. } | AttemptSessionTarget::ExistingChild { .. });
             let conversation_id = match session_target {
                 AttemptSessionTarget::ChildAttempt | AttemptSessionTarget::SourceChildAttempt { .. } => {
                     nomifun_common::ConversationId::new().into_string()
                 }
                 AttemptSessionTarget::AutomationLead { conversation_id } => conversation_id,
+                AttemptSessionTarget::ExistingChild { target } => target.conversation_id,
             };
             let owner_id = self
                 .owner_id
@@ -6396,34 +6391,61 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn scheduler_serializes_workspace_mutators_but_keeps_read_only_parallelism() {
-        let runner = Arc::new(HarnessAttemptRunner::overlap_probe());
-        let runner_guard = runner.clone();
-        let (scheduler, repository, execution_id, _data_dir, owner_id) =
-            make_scheduler_harness_with_policies(
-                runner,
-                &["writer", "shell-verifier"],
-                &[],
-                2,
-                AdaptationPolicy::Fixed,
-                None,
-                &[
-                    ("writer", AgentToolPolicy::Full),
-                    ("shell-verifier", AgentToolPolicy::ReadShell),
-                ],
-            )
-            .await;
+    async fn scheduler_runs_full_and_shell_agents_in_parallel_before_their_dependency() {
+        for second_policy in [AgentToolPolicy::Full, AgentToolPolicy::ReadShell] {
+            let runner = Arc::new(HarnessAttemptRunner::parallel());
+            let runner_guard = runner.clone();
+            let (scheduler, repository, execution_id, _data_dir, owner_id) =
+                make_scheduler_harness_with_policies(
+                    runner,
+                    &["upstream-a", "upstream-b", "downstream"],
+                    &[("upstream-a", "downstream"), ("upstream-b", "downstream")],
+                    2,
+                    AdaptationPolicy::Fixed,
+                    None,
+                    &[
+                        ("upstream-a", AgentToolPolicy::Full),
+                        ("upstream-b", second_policy),
+                        ("downstream", AgentToolPolicy::Full),
+                    ],
+                ).await;
 
-        scheduler.start(owner_id.clone(), execution_id.clone());
-        let detail = wait_for_terminal(&repository, &owner_id, &execution_id).await;
-        assert_eq!(detail.execution.status, "completed");
-        assert_eq!(runner_guard.call_count("writer"), 1);
-        assert_eq!(runner_guard.call_count("shell-verifier"), 1);
-        assert_eq!(
-            runner_guard.max_active(),
-            1,
-            "Full and ReadShell Steps share one workspace and must never overlap",
-        );
+            scheduler.start(owner_id.clone(), execution_id.clone());
+            let detail = wait_for_terminal(&repository, &owner_id, &execution_id).await;
+            assert_eq!(detail.execution.status, "completed");
+            assert_eq!(runner_guard.call_count("upstream-a"), 1);
+            assert_eq!(runner_guard.call_count("upstream-b"), 1);
+            assert_eq!(runner_guard.call_count("downstream"), 1);
+            assert_eq!(runner_guard.max_active(), 2,
+                "independent Full and {second_policy} tasks must reach their shared barrier together");
+            assert!(!runner_guard.downstream_started_too_early(),
+                "concurrent tool authority cannot bypass declared dependencies");
+            scheduler.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scheduler_preserves_execution_and_participant_limits_for_full_agents() {
+        for (max_parallel, participant_limit) in [(1, None), (2, Some(1))] {
+            let runner = Arc::new(HarnessAttemptRunner::overlap_probe());
+            let (scheduler, repository, execution_id, _data_dir, owner_id) = make_scheduler_harness(
+                runner.clone(), &["first-full", "second-full"], &[], max_parallel,
+                AdaptationPolicy::Fixed, None,
+            ).await;
+            if let Some(limit) = participant_limit {
+                let pool = runner.pool.lock().unwrap().clone().unwrap();
+                sqlx::query("UPDATE agent_execution_participants SET constraints=? WHERE execution_id=?")
+                    .bind(json!({"max_concurrency":limit}).to_string()).bind(&execution_id)
+                    .execute(&pool).await.unwrap();
+            }
+            scheduler.start(owner_id.clone(), execution_id.clone());
+            let detail = wait_for_terminal(&repository, &owner_id, &execution_id).await;
+            assert_eq!(detail.execution.status, "completed");
+            assert_eq!(runner.call_count("first-full"), 1);
+            assert_eq!(runner.call_count("second-full"), 1);
+            assert_eq!(runner.max_active(), 1, "existing user concurrency settings remain authoritative");
+            scheduler.shutdown().await.unwrap();
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

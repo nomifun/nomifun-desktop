@@ -534,8 +534,8 @@ async fn native_pause_yields_capacity_only_after_real_owner_handoff_and_resume_r
     nomifun_db::sqlx::query("UPDATE agent_execution_steps SET tool_policy='full' WHERE step_id=?")
         .bind(&parked.step.step_id).execute(fixture.db.pool()).await.unwrap();
     let mut tx = fixture.db.pool().begin().await.unwrap();
-    assert!(!execution_capacity_available_tx(&mut tx, &fixture.execution_id, &candidate.step_id, None).await.unwrap(),
-        "yielding model capacity cannot release a possible retained shell writer");
+    assert!(execution_capacity_available_tx(&mut tx, &fixture.execution_id, &candidate.step_id, None).await.unwrap(),
+        "tool authority does not reserve model capacity after the original owner proves native parking");
     tx.commit().await.unwrap();
     nomifun_db::sqlx::query("UPDATE agent_execution_steps SET tool_policy='read_only' WHERE step_id=?")
         .bind(&parked.step.step_id).execute(fixture.db.pool()).await.unwrap();

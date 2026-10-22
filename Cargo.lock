@@ -5180,7 +5180,6 @@ dependencies = [
 name = "nomi-types"
 version = "0.8.14"
 dependencies = [
- "async-trait",
  "chrono",
  "schemars 1.2.1",
  "serde",
@@ -5339,6 +5338,7 @@ dependencies = [
  "async-trait",
  "futures",
  "jsonschema",
+ "nomi-types",
  "nomifun-agent-contracts",
  "nomifun-agent-domain-wave2",
  "nomifun-agent-kernel",

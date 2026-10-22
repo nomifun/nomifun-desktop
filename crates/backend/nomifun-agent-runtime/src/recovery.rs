@@ -34,6 +34,7 @@ pub(crate) fn discardable_model_event(event: &AgentEngineEvent) -> bool {
         | AgentEngineEvent::ExecutionResumed { .. } | AgentEngineEvent::ExecutionBudgetPrepared { .. }
         | AgentEngineEvent::ExecutionSegmentRenewed { .. } | AgentEngineEvent::ContextPrepared { .. }
         | AgentEngineEvent::RuntimeModulesActivated { .. })
+        || matches!(event, AgentEngineEvent::AwaitingChildren { .. })
 }
 
 impl AgentTurnRecovery {
@@ -57,9 +58,17 @@ impl AgentTurnRecovery {
         }
         crate::stream_limits::serialized_size(&prefix, nomifun_agent_contracts::MAX_NATIVE_APPROVED_JOURNAL_BYTES as usize)?;
         crate::stream_limits::serialized_size(&tail, 8 * 1024 * 1024)?;
-        if crate::user_input_request::recorded_pending(&prefix)? != checkpoint.pending_user_input
+        let (collaboration, awaiting_children) = crate::collaboration::recorded_progress(&prefix)?;
+        if collaboration != checkpoint.collaboration
+            || (awaiting_children != checkpoint.awaiting_children
+                && collaboration.wait().as_ref() != checkpoint.awaiting_children.as_ref())
+            || crate::user_input_request::recorded_pending(&prefix)? != checkpoint.pending_user_input
             || (checkpoint.pending_user_input.is_some() && tail.iter().any(|event|
                 matches!(event, AgentEngineEvent::ModelStepStarted { .. }))) {
+            return Err(fail());
+        }
+        if tail.iter().any(|event| matches!(event, AgentEngineEvent::AwaitingChildren { model_steps, request }
+            if *model_steps != checkpoint.model_steps || checkpoint.awaiting_children.as_ref() != Some(request))) {
             return Err(fail());
         }
         if let Some(request) = &checkpoint.pending_user_input {
@@ -200,7 +209,7 @@ mod tests {
                 nomifun_agent_contracts::ResolvedSnapshotRef { snapshot_id: "snapshot".into(), snapshot_digest: "b".repeat(64).into() }).unwrap(),
             turn_operation_id: "turn".into(), active_set_generation: 0, model_steps: 0, tool_call_count: 0,
             accepted_input_count: 1, applied_steering_receipts: vec![], plan: Default::default(), work: Default::default(),
-            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None,
+            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None, awaiting_children: None, collaboration: Default::default(),
         }
     }
 

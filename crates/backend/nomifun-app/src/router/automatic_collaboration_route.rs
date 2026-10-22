@@ -4,12 +4,11 @@
 //! delegation policy. Ordinary work stays in the receiving Session; durable
 //! collaboration is selected for an explicit request or actual task benefit.
 //!
-//! Explicit routing is deliberately conservative. A positive match requires
-//! both collaboration vocabulary and a current execution verb. Explanations,
-//! comparisons, and direct negations stay on the ordinary model route.
+//! Intent hints never replace the frozen tool plan or force every model step
+//! into another delegation. Native collaboration receipts, not tool choice,
+//! record that an explicit request has been fulfilled.
 
 use nomifun_agent_runtime::AgentToolPlan;
-use nomifun_chat_model_broker::ChatToolChoice;
 use nomifun_common::DelegationPolicy;
 
 pub(super) const COLLABORATION_CAPABILITY_ID: &str = "agent.collaboration";
@@ -24,9 +23,8 @@ enum ExplicitCollaborationIntent {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct CollaborationTurnRoute {
     pub(super) tool_plan: AgentToolPlan,
-    pub(super) tool_choice: ChatToolChoice,
     pub(super) instructions: Vec<String>,
-    pub(super) forced: bool,
+    pub(super) required_delegation: Option<String>,
 }
 
 fn contains_any(input: &str, values: &[&str]) -> bool {
@@ -179,7 +177,7 @@ fn classify(input: &str) -> Option<ExplicitCollaborationIntent> {
 
 fn policy_instruction(policy: DelegationPolicy, tool_name: &str) -> String {
     let base = format!(
-        "Agent collaboration is available through the advertised function `{tool_name}` whose canonical Action is `agent/delegate`. Treat an explicit current-user request to use, start, build, design, test, or run multi-agent, multiple-agent, Agent-team, subagent, 多 Agent、多代理、Agent 集群、子 Agent, or 子代理 work as an operational request to invoke that Action, not as a request to merely describe sample code. For independent work call it exactly once with `strategy=parallel`, a `tasks` JSON array of non-overlapping tasks, and `synthesize=true` when one downstream Agent should combine every result. For a complex goal whose dependency graph should be planned, call it once with `strategy=planned` and `goal`. A successful receipt transfers completion to the durable AgentExecution: end the turn without polling or claiming that delegated work is already complete. For an ordinary short or indivisible request, answer directly."
+        "Agent collaboration is available through the advertised function `{tool_name}` whose canonical Action is `agent/delegate`. Treat an explicit current-user request to use, start, build, design, test, or run multi-agent, multiple-agent, Agent-team, subagent, 多 Agent、多代理、Agent 集群、子 Agent, or 子代理 work as an operational request to invoke that Action. For independent work submit one `strategy=parallel` request with a `tasks` JSON array of bounded, non-overlapping tasks. The parent combines child results after joining them. For a goal needing a dependency plan use `strategy=planned` and `goal`. A successful receipt proves acceptance, not task completion. Once the requested work has been accepted, do not delegate it again with fresh call IDs. Continue useful independent work with the remaining selected tools, join the exact accepted children through the native collaboration controls, then integrate and verify their results before completing the original task. Do not replace a native wait with polling, repeated delegation, or speculative completion. For an ordinary short or indivisible request, answer directly."
     );
     match policy {
         DelegationPolicy::Automatic => base,
@@ -190,21 +188,20 @@ fn policy_instruction(policy: DelegationPolicy, tool_name: &str) -> String {
     }
 }
 
-fn forced_instruction(intent: ExplicitCollaborationIntent, tool_name: &str) -> String {
+fn explicit_instruction(intent: ExplicitCollaborationIntent, tool_name: &str) -> String {
     match intent {
         ExplicitCollaborationIntent::MultiAgent => format!(
-            "The current accepted user input explicitly requests a multi-Agent execution. You MUST invoke `{tool_name}` (canonical Action `agent/delegate`) exactly once in this model step instead of returning only a design, example, or explanation. Preserve the user's requested deliverable. Use `strategy=parallel` with at least two bounded, non-overlapping tasks when the work can fan out, normally with `synthesize=true`; otherwise use `strategy=planned` with the full goal so the execution planner can create a dependency DAG."
+            "The current accepted user input explicitly requests a multi-Agent execution. You MUST invoke `{tool_name}` (canonical Action `agent/delegate`) once for the requested work, unless its native receipt already records acceptance. Preserve the user's deliverable. Use `strategy=parallel` with at least two bounded, non-overlapping tasks when the work can fan out; otherwise use `strategy=planned` with the full goal. Acceptance satisfies this invocation requirement: continue the original task and join its children instead of issuing the same delegation again."
         ),
         ExplicitCollaborationIntent::Subagent => format!(
-            "The current accepted user input explicitly requests subagent execution. You MUST invoke `{tool_name}` (canonical Action `agent/delegate`) exactly once in this model step instead of claiming that a subagent was started or returning only instructions. Preserve the requested work in one or more bounded tasks; use `strategy=parallel` for explicit task fan-out and `strategy=planned` when the execution planner should decompose the goal."
+            "The current accepted user input explicitly requests subagent execution. You MUST invoke `{tool_name}` (canonical Action `agent/delegate`) once for the requested work, unless its native receipt already records acceptance. Preserve the requested work in bounded tasks; use `strategy=parallel` for explicit fan-out and `strategy=planned` when the execution planner should decompose the goal. Acceptance satisfies this invocation requirement: keep the parent's tools available for independent work and final integration, and join the exact children without repeating the delegation."
         ),
     }
 }
 
 /// Apply the frozen conversation delegation policy to the already-admitted
-/// model tool plan. This can only narrow the plan. An explicit request also
-/// selects the exact generated function name so provider behavior is not left
-/// to probabilistic tool choice.
+/// model tool plan. Disabled policy can only narrow the plan; positive intent
+/// supplies instructions without taking away the parent's remaining tools.
 pub(super) fn route(
     input: &str,
     policy: DelegationPolicy,
@@ -215,12 +212,11 @@ pub(super) fn route(
     {
         return CollaborationTurnRoute {
             tool_plan: tool_plan.without_capability(COLLABORATION_CAPABILITY_ID),
-            tool_choice: ChatToolChoice::Auto,
             instructions: vec![
                 "Agent collaboration is disabled for this Session. Do not start or claim to have started subagents, multiple Agents, or an AgentExecution. If the user explicitly requests them, state that collaboration must be enabled in a new Session."
                     .to_owned(),
             ],
-            forced: false,
+            required_delegation: None,
         };
     }
 
@@ -230,30 +226,17 @@ pub(super) fn route(
     else {
         return CollaborationTurnRoute {
             tool_plan,
-            tool_choice: ChatToolChoice::Auto,
             instructions: Vec::new(),
-            forced: false,
+            required_delegation: None,
         };
     };
 
     let intent = classify(input);
     let mut instructions = vec![policy_instruction(policy, &tool_name)];
     if let Some(intent) = intent {
-        instructions.push(forced_instruction(intent, &tool_name));
-        CollaborationTurnRoute {
-            tool_plan: tool_plan.for_action(COLLABORATION_CAPABILITY_ID, DELEGATE_ACTION_ID),
-            tool_choice: ChatToolChoice::Specific { name: tool_name },
-            instructions,
-            forced: true,
-        }
-    } else {
-        CollaborationTurnRoute {
-            tool_plan,
-            tool_choice: ChatToolChoice::Auto,
-            instructions,
-            forced: false,
-        }
+        instructions.push(explicit_instruction(intent, &tool_name));
     }
+    CollaborationTurnRoute { tool_plan, instructions, required_delegation:intent.map(|_|tool_name) }
 }
 
 
@@ -321,14 +304,13 @@ mod tests {
             let original = plan();
             let result = route(input, DelegationPolicy::Automatic, original.clone());
             assert_eq!(result.tool_plan, original);
-            assert_eq!(result.tool_choice, ChatToolChoice::Auto);
-            assert!(!result.forced);
+            assert!(result.required_delegation.is_none());
             assert!(result.instructions.join("\n").contains("ordinary short or indivisible request, answer directly"));
         }
     }
 
     #[test]
-    fn routes_the_reported_chinese_multi_agent_and_subagent_requests() {
+    fn explicit_requests_preserve_parent_tools_and_require_only_one_accepted_delegation() {
         for input in [
             "设计一个简单的多agent集群测试示例",
             "请使用 subagent 来完成这个工作",
@@ -337,13 +319,13 @@ mod tests {
             "Use multiple agents to review these packages",
         ] {
             let routed = route(input, DelegationPolicy::Automatic, plan());
-            assert!(routed.forced, "{input}");
-            assert_eq!(routed.tool_plan.len(), 1, "{input}");
-            assert!(matches!(
-                routed.tool_choice,
-                ChatToolChoice::Specific { ref name } if name == "plugin_delegate_hash"
-            ));
-            assert!(routed.instructions.join("\n").contains("MUST invoke"));
+            assert_eq!(routed.tool_plan, plan(), "parent tools remain available: {input}");
+            assert_eq!(routed.required_delegation.as_deref(),Some("plugin_delegate_hash"));
+            let instructions = routed.instructions.join("\n");
+            assert!(instructions.contains("MUST invoke"));
+            assert!(instructions.contains("unless its native receipt already records acceptance"));
+            assert!(instructions.contains("integrate and verify"));
+            assert!(!instructions.contains("end the turn"));
         }
     }
 
@@ -357,17 +339,16 @@ mod tests {
             "Where is the subagent implementation?",
         ] {
             let routed = route(input, DelegationPolicy::Automatic, plan());
-            assert!(!routed.forced, "{input}");
             assert_eq!(routed.tool_plan.len(), 2, "{input}");
-            assert_eq!(routed.tool_choice, ChatToolChoice::Auto);
+            assert!(routed.required_delegation.is_none());
         }
         let background = serde_json::json!({
             "task_brief":"Use subagents to build the whole product",
             "step_spec":"Implement the HTML game",
         }).to_string();
         let routed = route(&background, DelegationPolicy::Automatic, plan());
-        assert!(!routed.forced);
         assert_eq!(routed.tool_plan.len(), 2);
+        assert!(routed.required_delegation.is_none(),"delegation mentioned only in the brief is source data");
     }
 
     #[test]
@@ -408,7 +389,6 @@ mod tests {
             DelegationPolicy::Disabled,
             plan,
         );
-        assert!(!routed.forced);
         assert_eq!(routed.tool_plan.len(), 1);
         assert!(routed
             .tool_plan
@@ -443,8 +423,6 @@ mod tests {
             only_workspace.clone(),
         );
         assert_eq!(routed.tool_plan, only_workspace);
-        assert_eq!(routed.tool_choice, ChatToolChoice::Auto);
         assert!(routed.instructions.is_empty());
-        assert!(!routed.forced);
     }
 }

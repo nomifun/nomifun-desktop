@@ -54,6 +54,7 @@ pub(crate) struct AgentExecutionEventPublisher {
     drain_gate: Arc<tokio::sync::Mutex<()>>,
     retry_worker_started: Arc<AtomicBool>,
     retry_notify: Arc<tokio::sync::Notify>,
+    changed: Arc<tokio::sync::Notify>,
     lifecycle: AgentExecutionLifecycle,
 }
 
@@ -64,6 +65,7 @@ impl AgentExecutionEventPublisher {
             drain_gate: Arc::new(tokio::sync::Mutex::new(())),
             retry_worker_started: Arc::new(AtomicBool::new(false)),
             retry_notify: Arc::new(tokio::sync::Notify::new()),
+            changed: Arc::new(tokio::sync::Notify::new()),
             lifecycle: AgentExecutionLifecycle::new(),
         }
     }
@@ -74,6 +76,7 @@ impl AgentExecutionEventPublisher {
     }
 
     fn publish_change(&self, owner_id: &str, event: AgentExecutionChangedEvent) {
+        self.changed.notify_waiters();
         let payload = to_value(event)
             .expect("AgentExecutionChangedEvent must remain JSON serializable");
         self.sink.send_to_user(owner_id, WebSocketMessage::new(
@@ -81,6 +84,8 @@ impl AgentExecutionEventPublisher {
             payload,
         ));
     }
+
+    pub(crate) fn changed(&self) -> Arc<tokio::sync::Notify> { self.changed.clone() }
 
     /// Drain committed outbox rows in sequence order. Safe to call after every
     /// mutation and once during boot; publication markers make it idempotent.

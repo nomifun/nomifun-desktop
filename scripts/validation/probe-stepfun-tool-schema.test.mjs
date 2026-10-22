@@ -10,8 +10,8 @@ function stream(argumentsJson) {
     + 'data: [DONE]\r\n\r\n';
 }
 
-test('raw streaming probe preserves native arrays and booleans across chunks', () => {
-  const args = { strategy: 'parallel', tasks: [{ name: 'marker', prompt: 'Reply OK' }], synthesize: false };
+test('raw streaming probe preserves native task arrays across chunks', () => {
+  const args = { strategy: 'parallel', tasks: [{ name: 'marker', prompt: 'Reply OK' }] };
   const decoded = decodeStream(stream(JSON.stringify(args)));
   assert.equal(decoded.choices[0].finish_reason, 'tool_calls');
   assert.equal(decoded.choices[0].message.tool_calls[0].function.name, 'probe_tool');
@@ -19,7 +19,7 @@ test('raw streaming probe preserves native arrays and booleans across chunks', (
 });
 
 test('diagnostic does not repair stringified provider arguments', () => {
-  const args = { strategy: 'parallel', tasks: '[]', synthesize: 'false' };
+  const args = { strategy: 'parallel', tasks: '[]' };
   const decoded = decodeStream(stream(JSON.stringify(args)));
   assert.deepEqual(JSON.parse(decoded.choices[0].message.tool_calls[0].function.arguments), args);
 });

@@ -192,8 +192,10 @@ mod tests {
         async fn wait_completed(&self, key: &str) {
             tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
-                    if matches!(self.owner.session_turn_delivery_state(&self.principal.principal_id,self.session.as_ref(),key)
-                        .await.unwrap(),PublicTurnDeliveryState::Completed(_)) { break; }
+                    if let PublicTurnDeliveryState::Completed(delivery)=self.owner.session_turn_delivery_state(&self.principal.principal_id,self.session.as_ref(),key).await.unwrap() {
+                        assert_eq!(delivery.result_ok,Some(true),"the fixture must complete its actual model request: {delivery:?}");
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }).await.unwrap();
@@ -273,12 +275,13 @@ mod tests {
         f.seed_prior_turn("prior").await;
         let job = Uuid::now_v7().to_string();
         let run = Uuid::now_v7().to_string();
+        let turn_key=format!("cron:{run}:turn");
         sqlx::query("INSERT INTO cron_jobs(cron_job_id,user_id,name,schedule_kind,schedule_value,payload_message,created_by,created_at,updated_at,conversation_id) VALUES(?,?,'fixture','every','60000','scheduled','user',1,1,?)")
             .bind(&job).bind(&f.principal.principal_id).bind(f.session.as_ref()).execute(&f.owner.pool).await.unwrap();
         sqlx::query("INSERT INTO cron_run_reservations(cron_job_run_id,cron_job_id,trigger_kind,operation_key,request_fingerprint,conversation_id,created_at_ms,updated_at_ms) VALUES(?,?,'run_now',?,'fixture',?,1,1)")
             .bind(&run).bind(&job).bind(&run).bind(f.session.as_ref()).execute(&f.owner.pool).await.unwrap();
         let request = CronRuntimePreparationRequest {
-            owner_id:f.principal.principal_id.clone(),agent_session_id:f.session.clone(),idempotency_key:"cron-turn".into(),
+            owner_id:f.principal.principal_id.clone(),agent_session_id:f.session.clone(),idempotency_key:turn_key.clone(),
             turn:CronTurnRequest { message:CronTurnMessage { content:"Scheduled fixture request".into(),files:vec![],inject_skills:vec![],hidden:false,origin:Some("cron".into()),channel_platform:None },
                 runtime:CronTurnRuntimePreparation { overlay:CronTurnRuntimeOverlay {cron_job_id:job,cron_job_run_id:run},clear_context:true } },
         };
@@ -289,7 +292,7 @@ mod tests {
         f.warm().await;
         let delivered=f.owner.prepare_runtime_and_send(request.clone()).await.unwrap();
         assert!(!delivered.delivery.replayed);
-        f.wait_completed("cron-turn").await;
+        f.wait_completed(&turn_key).await;
         assert_eq!(f.clear_count().await,1);
         let requests=model.state.requests.lock().unwrap().clone();
         assert!(!requests.is_empty());
@@ -320,7 +323,7 @@ mod tests {
         // different user request. Retrying that unaccepted run must preserve it.
         let mut interrupted=request;
         let run=Uuid::now_v7().to_string();
-        interrupted.idempotency_key="interrupted-run".into();
+        interrupted.idempotency_key=format!("cron:{run}:turn");
         interrupted.turn.runtime.overlay.cron_job_run_id=run.clone();
         sqlx::query("INSERT INTO cron_run_reservations(cron_job_run_id,cron_job_id,trigger_kind,operation_key,request_fingerprint,conversation_id,created_at_ms,updated_at_ms) VALUES(?,?,'run_now',?,'fixture',?,1,1)")
             .bind(&run).bind(&interrupted.turn.runtime.overlay.cron_job_id).bind(&run)
@@ -330,6 +333,7 @@ mod tests {
         let intervening=f.owner.runtime_sessions.get_runtime(f.session.as_ref()).unwrap();
         let intervening_carrier=f.owner.runtime_sessions.observe_runtime_carrier(f.session.as_ref());
         let before_rejection=model.calls();
+        let interrupted_key=interrupted.idempotency_key.clone();
         assert!(f.owner.prepare_runtime_and_send(interrupted).await.is_err());
         assert_eq!(f.clear_count().await,2);
         assert!(f.owner.runtime_sessions.has_owned_runtime(f.session.as_ref()));
@@ -341,7 +345,7 @@ mod tests {
         assert!(!observed.stop_requested&&!observed.teardown_pending);
         assert_eq!(f.owner.canonical.store().head(&f.session).await.unwrap().active_turn_id.as_deref(),Some(intervening_operation.as_ref()));
         assert_eq!(model.calls(),before_rejection,"a rejected interrupted run neither replays itself nor the live successor");
-        let missing=NomiCoreSessionOwner::turn_operation_id(&f.principal.principal_id,f.session.as_ref(),"interrupted-run");
+        let missing=NomiCoreSessionOwner::turn_operation_id(&f.principal.principal_id,f.session.as_ref(),&interrupted_key);
         assert_eq!(f.owner.canonical.store().read_turn_receipt(&f.session,&missing).await.unwrap().status,nomifun_agent_session::TurnReceiptStatus::NotFound);
         model.state.release.add_permits(1);
         f.wait_completed("live-after-interrupted-clear").await;

@@ -20,7 +20,7 @@ impl PlanProducer for HangingPlanner {
 
 async fn seed(pool: &nomifun_db::SqlitePool, owner: &str, goal: &str, status: &str) -> String {
     let id = generate_id();
-    sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,plan_gate,adaptation_policy,decision_policy,delegation_policy,max_parallel,initial_plan_input,version,event_sequence,created_at,updated_at) VALUES(?,?,?,?,'automatic','adaptive','ask_user','automatic',1,'{\"mode\":\"automatic\"}',1,1,1,1)")
+    sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,adaptation_policy,decision_policy,delegation_policy,max_parallel,initial_plan_input,version,event_sequence,created_at,updated_at) VALUES(?,?,?,?,'adaptive','ask_user','automatic',1,'{\"mode\":\"automatic\"}',1,1,1,1)")
         .bind(&id).bind(owner).bind(goal).bind(status).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO agent_execution_events(execution_id,sequence,event_type,actor_type,on_behalf_of_user_id,payload,created_at) VALUES(?,1,'created','system',?,'{}',1)")
         .bind(&id).bind(owner).execute(pool).await.unwrap(); id

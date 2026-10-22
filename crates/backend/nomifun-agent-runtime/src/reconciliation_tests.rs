@@ -9,7 +9,7 @@ fn checkpoint() -> AgentExecutionCheckpoint {
             nomifun_agent_contracts::ResolvedSnapshotRef { snapshot_id: "snapshot".into(), snapshot_digest: "b".repeat(64).into() }).unwrap(),
         turn_operation_id: "turn".into(), active_set_generation: 0, model_steps: 0, tool_call_count: 0,
         accepted_input_count: 1, applied_steering_receipts: vec![], plan: Default::default(), work: Default::default(),
-        patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None }
+        patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None, awaiting_children: None, collaboration: Default::default() }
 }
 
 fn proposal(id: &str) -> AgentEngineEvent {
@@ -196,4 +196,55 @@ fn real_tool_progress_after_end_review_restores_the_same_review_phase_as_live_ex
         &BTreeMap::from([("written".into(), outcome("written"))]), &Default::default()).unwrap();
     assert_eq!(result.checkpoint.completion_review.phase, crate::AgentExecutionPhase::Execution,
         "an actual owner result ends declaration-only correction in both live and recovered execution");
+}
+
+#[test]
+fn accepted_child_wait_recovers_its_exact_request_without_replaying_a_tool_or_resetting_budget() {
+    let wait = crate::AgentChildrenWait { execution_ids: vec!["owned".into()], after_cursor:Some("canonical:4".into()),
+        mode:crate::AgentChildrenWaitMode::All };
+    let mut tail = vec![started(), AgentEngineEvent::ToolCallCompleted { step:1, call:ChatToolCall {
+        call_id:"wait".into(),name:crate::collaboration::WAIT.into(),provider_metadata:None,
+        arguments:StrictJsonValue(serde_json::to_value(&wait).unwrap()),
+    } }, AgentEngineEvent::ToolCompleted { step:1, runtime_hold:None,
+        result:AgentToolResult::text("wait".into(),"accepted",false) },
+        AgentEngineEvent::AwaitingChildren { model_steps:1, request:wait.clone() }];
+    let recovered = reconcile_execution_tail(&checkpoint(),1,&tail,&Default::default(),&Default::default(),&Default::default()).unwrap();
+    assert_eq!(recovered.checkpoint.awaiting_children, Some(wait));
+    assert_eq!(recovered.checkpoint.model_steps,1);
+    assert_eq!(recovered.checkpoint.tool_call_count,1);
+    assert!(!recovered.observations.iter().any(|event|matches!(event,AgentEngineEvent::ToolOutcomeReconciled {..})));
+    tail.push(AgentEngineEvent::ChildrenWaitResolved { model_steps:1,cursor:"canonical:5".into() });
+    let awakened = reconcile_execution_tail(&checkpoint(),1,&tail,&Default::default(),&Default::default(),&Default::default()).unwrap();
+    assert!(awakened.checkpoint.awaiting_children.is_none());
+    assert_eq!(awakened.checkpoint.model_steps,1);
+    tail.pop();
+    tail.push(AgentEngineEvent::ModelStepStarted { step:2, operation_id:"turn:model:2".into(),correction_source:None });
+    assert!(reconcile_execution_tail(&checkpoint(),1,&tail,&Default::default(),&Default::default(),&Default::default()).is_err());
+}
+
+#[test]
+fn child_message_needs_its_original_domain_receipt_even_without_kernel_admission() {
+    let tail=vec![started(),AgentEngineEvent::ToolCallCompleted{step:1,call:ChatToolCall{
+        call_id:"guide".into(),name:crate::collaboration::MESSAGE.into(),provider_metadata:None,
+        arguments:StrictJsonValue(json!({"execution_id":"execution","step_id":"child","content":"Continue original work.","idempotency_key":"once"})),
+    }}];
+    assert!(reconcile_execution_tail(&checkpoint(),1,&tail,&Default::default(),&Default::default(),&Default::default()).is_err());
+    let result=AgentReconciledOutcome{result:AgentToolResult::text("guide".into(),json!({"execution_id":"execution","sequence":7,"accepted":true}).to_string(),false),
+        source:AgentReconciliationSource::NativeControlReceipt,evidence_event_id:Some("original-command-event".into()),owner_operation_id:Some("original-guidance-command".into())};
+    let mut fake=result.clone();fake.source=AgentReconciliationSource::NotDispatched;
+    assert!(reconcile_execution_tail(&checkpoint(),1,&tail,&Default::default(),&BTreeMap::from([("guide".into(),fake)]),&Default::default()).is_err(),
+        "missing Kernel admission cannot turn a possibly committed guidance into non-dispatch");
+    let mut fake=result.clone();fake.evidence_event_id=None;
+    assert!(reconcile_execution_tail(&checkpoint(),1,&tail,&Default::default(),&BTreeMap::from([("guide".into(),fake)]),&Default::default()).is_err());
+    let mut unknown=result.clone();unknown.result=AgentToolResult::text("guide".into(),json!({"state":"unknown","control_applied":null}).to_string(),true);
+    assert!(reconcile_execution_tail(&checkpoint(),1,&tail,&Default::default(),&BTreeMap::from([("guide".into(),unknown)]),&Default::default()).is_err());
+    let mut not_applied=result.clone();not_applied.result=AgentToolResult::text("guide".into(),json!({"state":"not_executed","control_applied":false,
+        "code":"CHILD_MESSAGE_NOT_COMMITTED"}).to_string(),true);
+    let closed=reconcile_execution_tail(&checkpoint(),1,&tail,&Default::default(),&BTreeMap::from([("guide".into(),not_applied)]),&Default::default()).unwrap();
+    assert!(closed.checkpoint.collaboration.pending_child_executions.is_empty());
+    assert_eq!(closed.checkpoint.work.failed_tools,1);
+    let recovered=reconcile_execution_tail(&checkpoint(),1,&tail,&Default::default(),&BTreeMap::from([("guide".into(),result)]),&Default::default()).unwrap();
+    assert!(recovered.checkpoint.collaboration.pending_child_executions.contains("execution"));
+    assert_eq!(recovered.checkpoint.tool_call_count,1);
+    assert!(recovered.observations.iter().any(|event|matches!(event,AgentEngineEvent::ToolOutcomeReconciled{source:AgentReconciliationSource::NativeControlReceipt,..})));
 }

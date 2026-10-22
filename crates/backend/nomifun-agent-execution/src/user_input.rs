@@ -78,7 +78,7 @@ mod tests {
         assert!(matches!(validate_user_input_handoff_policy(db.pool(),&foreign,&session,&operation).await,Err(AppError::Conflict(_))));
         assert!(validate_user_input_handoff_policy(db.pool(),&owner,&session,&OperationId::from("source-message-uuid")).await.is_err());
 
-        query("INSERT INTO agent_executions(execution_id,user_id,goal,status,plan_gate,adaptation_policy,decision_policy,delegation_policy,initial_plan_input,created_at,updated_at) VALUES(?,?,'policy','running','automatic','fixed','automatic','disabled','{}',1,1)")
+        query("INSERT INTO agent_executions(execution_id,user_id,goal,status,adaptation_policy,decision_policy,delegation_policy,initial_plan_input,created_at,updated_at) VALUES(?,?,'policy','running','fixed','automatic','disabled','{}',1,1)")
             .bind(&execution).bind(&owner.principal_id).execute(db.pool()).await.unwrap();
         query("INSERT INTO agent_execution_steps(step_id,execution_id,title,spec,kind,status,introduced_in_revision,created_at,updated_at) VALUES(?,?,'policy','task','agent','running',0,1,1)")
             .bind(&step).bind(&execution).execute(db.pool()).await.unwrap();

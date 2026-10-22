@@ -4,6 +4,9 @@
 //! attempt runner are private strategies behind it, so callers cannot assemble
 //! partial lifecycle writes or invent a second execution state machine.
 
+#[path = "source_continuation.rs"]
+mod source_continuation;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -326,6 +329,10 @@ impl AgentExecutionEngine {
     pub async fn shutdown(&self) -> Result<(), AppError> {
         self.scheduler.shutdown().await
     }
+
+    /// A wake hint only. Consumers subscribe before reading owner-scoped facts
+    /// and retain a bounded re-read when a notification is lost.
+    pub fn changed(&self) -> Arc<tokio::sync::Notify> { self.publisher.changed() }
 
     /// Host-only observations of original local planning request owners.
     /// Callers authorize each Execution in its canonical repository before
@@ -664,21 +671,25 @@ impl AgentExecutionEngine {
             .work_dir
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
-        let row = self
+        let params = CreateAgentExecutionParams {
+            goal,
+            status: AgentExecutionStatus::Planning,
+            adaptation_policy: request.adaptation_policy,
+            decision_policy: request.decision_policy,
+            delegation_policy: request.delegation_policy,
+            max_parallel,
+            work_dir,
+            lead_conversation_id: request.lead_conversation_id.clone(),
+            initial_plan_input,
+        };
+        if let Some(execution)=self.append_source_batch(owner_id,&params).await? {
+            return Ok(execution);
+        }
+        let created = self
             .repository
             .create_execution_with_participants(
                 owner_id,
-                &CreateAgentExecutionParams {
-                    goal,
-                    status: AgentExecutionStatus::Planning,
-                    adaptation_policy: request.adaptation_policy,
-                    decision_policy: request.decision_policy,
-                    delegation_policy: request.delegation_policy,
-                    max_parallel,
-                    work_dir,
-                    lead_conversation_id: request.lead_conversation_id.clone(),
-                    initial_plan_input,
-                },
+                &params,
                 &participants,
                 &actor_event(
                     actor,
@@ -688,10 +699,21 @@ impl AgentExecutionEngine {
                     json!({"status":"planning"}),
                 ),
             )
-            .await?;
+            .await;
+        let row=match created {
+            Ok(row)=>row,
+            Err(nomifun_db::DbError::Conflict(message))=>{
+                if let Some(execution)=self.append_source_batch(owner_id,&params).await? {return Ok(execution);}
+                return Err(AppError::Conflict(message));
+            },
+            Err(error)=>return Err(error.into()),
+        };
         self.publish().await;
+        let original_creation = row.initial_plan_input == params.initial_plan_input;
         let execution = domain_mapper::execution(row, request.lead_conversation_id)?;
-        self.spawn_initial_plan(owner_id.to_owned(), execution.execution_id.clone());
+        if execution.status == AgentExecutionStatus::Planning && original_creation {
+            self.spawn_initial_plan(owner_id.to_owned(), execution.execution_id.clone());
+        }
         Ok(execution)
     }
 
@@ -2542,9 +2564,77 @@ impl AgentExecutionEngine {
         step_id: &str,
         request: SteerExecutionStepRequest,
     ) -> Result<(), AppError> {
+        self.enqueue_steer(owner_id, actor, execution_id, step_id, request, generate_id(), None, None).await.map(|_|())
+    }
+
+    /// Model-authored guidance uses a stable command identity, independent of
+    /// provider call IDs. The original Step event is the delivery outbox.
+    pub async fn message_step(&self, owner_id: &str, source: &nomifun_db::AgentExecutionMessageSource,
+        execution_id: &str, step_id: &str, content: &str, key: &str) -> Result<crate::AgentExecutionMessageReceipt, AppError> {
+        let sender_session=source.agent_session_id.as_str();
+        let sender_turn=source.turn_operation_id.as_str();
+        let (operation,digest)=message_command_identity(sender_session,sender_turn,execution_id,step_id,content,key)?;
+        loop {
+            if let Some(receipt)=self.message_receipt(owner_id,sender_session,sender_turn,execution_id,step_id,content,key).await? {
+                return Ok(receipt);
+            }
+            let detail=self.detail(owner_id,execution_id).await?;
+            let step=current_step(&detail,step_id)?;
+            if step.status==ExecutionStepStatus::Completed {
+                return self.followup_completed_child(owner_id,source,execution_id,step_id,
+                    content,&operation,&digest).await;
+            }
+            let actor=self.authorize_agent_caller(owner_id,execution_id,sender_session).await?;
+            let request=SteerExecutionStepRequest {text:content.into(),expected_execution_version:detail.execution.version,
+                expected_step_version:step.version};
+            match self.enqueue_steer(owner_id,&actor,execution_id,step_id,request,operation.clone(),Some(digest.clone()),Some(source)).await {
+                Err(AppError::Conflict(_)) => {
+                    let after=self.detail(owner_id,execution_id).await?;
+                    if after.execution.version!=detail.execution.version {continue;}
+                    return Err(AppError::Conflict("the target child cannot accept guidance in its current state".into()));
+                },
+                Ok(sequence)=>return Ok(crate::AgentExecutionMessageReceipt {execution_id:execution_id.into(),step_ids:vec![step_id.into()],
+                    sequence,operation_id:operation,replayed:false}),
+                Err(error)=>return Err(error),
+            }
+        }
+    }
+
+    /// Observe the original durable command after a lost Runtime reply. This
+    /// never sends guidance, creates work, or resumes a Session.
+    pub async fn message_receipt(&self, owner_id:&str, sender_session:&str,sender_turn:&str,
+        execution_id:&str,step_id:&str,content:&str,key:&str)->Result<Option<crate::AgentExecutionMessageReceipt>,AppError> {
+        let (operation,digest)=message_command_identity(sender_session,sender_turn,execution_id,step_id,content,key)?;
+        let mut cursor=0;
+        loop {
+            let events=self.events(owner_id,execution_id,Some(cursor),Some(200)).await?;
+            for event in &events {
+                if event.payload.get("operation_id").and_then(serde_json::Value::as_str)!=Some(operation.as_str()) {continue;}
+                if event.payload.get("content_digest").and_then(serde_json::Value::as_str)!=Some(digest.as_str())
+                    ||event.payload.get("continuation_of_step_id").and_then(serde_json::Value::as_str).or(event.step_id.as_deref())!=Some(step_id) {
+                    return Err(AppError::Conflict("guidance identity was reused with different content or target".into()));
+                }
+                let step_ids=event.payload.get("added_step_ids").and_then(serde_json::Value::as_array)
+                    .map(|ids|ids.iter().filter_map(|id|id.as_str().map(str::to_owned)).collect()).unwrap_or_else(||vec![step_id.into()]);
+                return Ok(Some(crate::AgentExecutionMessageReceipt {execution_id:execution_id.into(),step_ids,
+                    sequence:event.sequence,operation_id:operation,replayed:true}));
+            }
+            let count=events.len();if let Some(last)=events.last(){cursor=last.sequence;}
+            if count<200 {return Ok(None);}
+        }
+    }
+
+    async fn enqueue_steer(&self,owner_id:&str,actor:&AgentExecutionActor,execution_id:&str,step_id:&str,
+        request:SteerExecutionStepRequest,operation_id:String,content_digest:Option<String>,
+        message_source:Option<&nomifun_db::AgentExecutionMessageSource>) -> Result<i64,AppError> {
         self.reject_automation_external_command(owner_id, execution_id, actor, "steer")
             .await?;
-        let text = non_empty("text", request.text)?;
+        if request.text.trim().is_empty() {
+            return Err(AppError::BadRequest("text must not be empty".to_owned()));
+        }
+        // The source digest and any closed-target redirect refer to these exact
+        // bytes. Whitespace can also be meaningful in a child's next input.
+        let text = request.text;
         let detail = self.detail(owner_id, execution_id).await?;
         let step = current_step(&detail, step_id)?;
         if detail.execution.version != request.expected_execution_version
@@ -2574,7 +2664,6 @@ impl AgentExecutionEngine {
                 AppError::Internal(format!("invalid persisted attempt conversation effects: {error}"))
             })?
             .unwrap_or_default();
-        let operation_id = generate_id();
         let operation_key = effects.current_turn_operation_key(&attempt.attempt_id)?;
         let target_operation_id = self.session.read_turn_output(owner_id, attempt.conversation_id.as_deref()
             .ok_or_else(|| AppError::Conflict("running attempt has no Session".to_owned()))?, Some(&operation_key))
@@ -2582,7 +2671,7 @@ impl AgentExecutionEngine {
             .map(|output| output.canonical_operation_id)
             .ok_or_else(|| AppError::Conflict("the Attempt has no exact canonical Turn to steer".to_owned()))?;
         effects.push_steer(operation_id.clone(), target_operation_id.clone(), text.clone())?;
-        self
+        let committed=self
             .repository
             .enqueue_attempt_conversation_effect(
                 owner_id,
@@ -2604,6 +2693,8 @@ impl AgentExecutionEngine {
                         "change":"conversation_effect_requested",
                         "effect":"steer",
                         "operation_id":operation_id,
+                        "content_digest":content_digest,
+                        "message_source":message_source,
                     }),
                 ),
             )
@@ -2614,7 +2705,7 @@ impl AgentExecutionEngine {
         // never races the scheduler with a second copy of the same command.
         self.scheduler
             .start(owner_id.to_owned(), execution_id.to_owned());
-        Ok(())
+        Ok(committed.event_sequence)
     }
 
     pub async fn request_user_decision(
@@ -3290,8 +3381,8 @@ impl AgentExecutionEngine {
 
 impl AgentExecutionEngine {
     /// Materialize the shared `strategy=parallel` request into one explicit
-    /// AgentExecution DAG. Every task is an independent root; optional
-    /// synthesis is one read-only downstream Agent blocked on every root.
+    /// AgentExecution DAG. Every task is an independent root. Integration and
+    /// final delivery remain with the caller; reviewers are explicit tasks.
     pub fn materialize_parallel_delegation(
         request: ParallelDelegationRequest,
     ) -> Result<(String, Vec<PlannedExecutionStep>), AppError> {
@@ -3305,7 +3396,7 @@ impl AgentExecutionEngine {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let mut steps = request
+        let steps = request
             .tasks
             .into_iter()
             .map(|task| PlannedExecutionStep {
@@ -3332,25 +3423,6 @@ impl AgentExecutionEngine {
                 failure_policy: StepFailurePolicy::FailExecution,
             })
             .collect::<Vec<_>>();
-        if request.synthesize {
-            let depends_on = (0..steps.len()).collect();
-            steps.push(PlannedExecutionStep {
-                title: "Synthesize results".to_owned(),
-                spec: "Synthesize all upstream results into one coherent answer for the goal."
-                    .to_owned(),
-                profile: None,
-                kind: ExecutionStepKind::Agent,
-                agent_mode: Some(nomifun_common::AgentStepMode::Synthesis),
-                depends_on,
-                participant_index: None,
-                assignment_rationale: Some("synthesis".to_owned()),
-                role: Some("synthesis".to_owned()),
-                tool_policy: nomifun_common::AgentToolPolicy::ReadOnly,
-                fanout_group: None,
-                control_policy: None,
-                failure_policy: StepFailurePolicy::FailExecution,
-            });
-        }
         Ok((goal, steps))
     }
 
@@ -3393,7 +3465,7 @@ impl AgentExecutionEngine {
             source,
             goal,
             steps,
-            single_step.then_some(1),
+            None,
         )
         .await
     }
@@ -4089,6 +4161,16 @@ fn collaboration_step(goal: &str) -> PlannedExecutionStep {
         control_policy: None,
         failure_policy: StepFailurePolicy::FailExecution,
     }
+}
+
+fn message_command_identity(sender_session:&str,sender_turn:&str,execution_id:&str,
+    step_id:&str,content:&str,key:&str)->Result<(String,String),AppError> {
+    if key.is_empty() || key.len()>128 || content.trim().is_empty() || content.len()>64*1024 {
+        return Err(AppError::BadRequest("invalid collaboration guidance".into()));
+    }
+    let identity=serde_json::to_vec(&(sender_session,sender_turn,execution_id,step_id,key))
+        .map_err(|error|AppError::Internal(error.to_string()))?;
+    Ok((format!("agent-message:{:x}",Sha256::digest(identity)),format!("{:x}",Sha256::digest(content.as_bytes()))))
 }
 
 fn non_empty(field: &str, value: String) -> Result<String, AppError> {
@@ -4846,7 +4928,7 @@ mod tests {
         TypedResourceBindingDto,
     };
     use nomifun_common::{
-        AgentDelegationTask, AgentExecutionActor, AgentStepMode, AgentToolPolicy,
+        AgentDelegationTask, AgentExecutionActor, AgentToolPolicy,
         MAX_AGENT_EXECUTION_PARALLELISM, ParallelDelegationRequest,
         ParallelDelegationStrategy,
     };
@@ -4954,7 +5036,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_delegation_materializes_two_roots_and_one_read_only_join() {
+    fn parallel_delegation_materializes_roots_without_transferring_final_delivery() {
         let (goal, steps) = AgentExecutionEngine::materialize_parallel_delegation(
             ParallelDelegationRequest {
                 strategy: ParallelDelegationStrategy::Parallel,
@@ -4972,18 +5054,14 @@ mod tests {
                         tool_policy: AgentToolPolicy::ReadOnly,
                     },
                 ],
-                synthesize: true,
             },
         )
         .unwrap();
 
         assert_eq!(goal, "Complete the delegated work: upstream-a, upstream-b");
-        assert_eq!(steps.len(), 3);
+        assert_eq!(steps.len(), 2);
         assert!(steps[0].depends_on.is_empty());
         assert!(steps[1].depends_on.is_empty());
-        assert_eq!(steps[2].depends_on, vec![0, 1]);
-        assert_eq!(steps[2].agent_mode, Some(AgentStepMode::Synthesis));
-        assert_eq!(steps[2].tool_policy, AgentToolPolicy::ReadOnly);
     }
 
     #[test]

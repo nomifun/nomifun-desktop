@@ -53,7 +53,7 @@ async fn held_execution(
     server: &CompanionFlowModelServer,
     key: &str,
 ) -> nomifun_api_types::AgentExecutionDetail {
-    send_and_complete_robot_turn(
+    send_and_start_robot_turn(
         &flow.fixture,
         &flow.owner,
         &flow.request(key, BACKGROUND_INPUT),
@@ -123,13 +123,14 @@ async fn background_voice_cancel_uses_original_recording_target_and_never_replay
             .unwrap()
             .background_work_ambiguous
     );
-    send_and_complete_robot_turn(
+    let followup=send_and_observe_robot_reply(
         &flow.fixture,
         &flow.owner,
         &flow.request("continue-while-held", FOLLOWUP_INPUT),
         "continue-while-held",
     )
     .await;
+    assert!(followup.steering,"the same Robot conversation continues through exact native steering");
     let store = flow.fixture.owner.canonical().store();
     let turns_before: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM agent_turns WHERE session_id=?")
@@ -142,6 +143,7 @@ async fn background_voice_cancel_uses_original_recording_target_and_never_replay
         .cancel_robot_background_work(&flow.owner, &control, "spoken-cancel-one")
         .await
         .unwrap();
+    wait_for_original_parent(&flow,&first.execution.execution_id).await;
     assert_eq!(
         flow.fixture
             .voice_execution
@@ -260,13 +262,14 @@ async fn background_voice_cancel_uses_original_recording_target_and_never_replay
         nomifun_common::AgentExecutionStatus::Running,
         "a late replay cannot cancel a successor Execution"
     );
-    send_and_complete_robot_turn(
+    let after_control=send_and_observe_robot_reply(
         &flow.fixture,
         &flow.owner,
         &flow.request("after-control-talk", FOLLOWUP_INPUT),
         "after-control-talk",
     )
     .await;
+    assert!(after_control.steering);
     assert!(
         store
             .pending_session_inputs(&flow.robot_id, None)
@@ -297,7 +300,7 @@ async fn pending_question_writer_lease_serializes_cancel_and_late_presentation_i
         .unwrap();
     let input =
         "QUESTION_BACKGROUND_REQUEST: Run the isolated report and ask me for its missing name.";
-    send_and_complete_robot_turn(
+    send_and_start_robot_turn(
         &flow.fixture,
         &flow.owner,
         &flow.request("question-cancel-request", input),
@@ -626,13 +629,14 @@ async fn background_correction_keeps_real_input_in_exact_native_attempt_without_
         child_head,
         "exact input redelivery does not append a second constraint"
     );
-    send_and_complete_robot_turn(
+    let followup=send_and_observe_robot_reply(
         &flow.fixture,
         &flow.owner,
         &flow.request("talk-with-corrected-background", FOLLOWUP_INPUT),
         "talk-with-corrected-background",
     )
     .await;
+    assert!(followup.steering);
     server.state.held_release.notify_one();
     tokio::time::timeout(Duration::from_secs(25), async {
         loop {
@@ -655,6 +659,7 @@ async fn background_correction_keeps_real_input_in_exact_native_attempt_without_
     .unwrap();
     assert_eq!(flow.fixture.voice_execution.get(&flow.owner,&captured.execution_id).await.unwrap().execution.status,
         nomifun_common::AgentExecutionStatus::Completed);
+    wait_for_original_parent(&flow,&captured.execution_id).await;
     let complete = store.turn_output_facts(&child, &operation).await.unwrap();
     let child_session = store.get_live_session(&child).await.unwrap();
     let root = child_session.agent_binding.typed_resource_bindings.iter()
@@ -727,56 +732,20 @@ async fn background_correction_keeps_real_input_in_exact_native_attempt_without_
             .await
             .is_err()
     );
-    // Completion and its original report outbox are independent commits. The
-    // report may arrive after the source Turn's terminal while this rejected
-    // control is observed; it is not a new user input or a reopened task.
-    let (source_after, payloads) = tokio::time::timeout(Duration::from_secs(25), async {
-        loop {
-            let events = store.read_events(&flow.robot_id, None, 500).await.unwrap().events;
-            assert!(events.len() < 500);
-            let ids = events.iter().map(|event| event.event_id.clone()).collect::<Vec<_>>();
-            let payloads = store.resolved_event_payloads(&flow.robot_id, &ids).await.unwrap();
-            if events.iter().any(|event| event.kind.0 == "message/assistant-projected"
-                && payloads[event.event_id.as_ref()]["delegation_report"]["execution_id"] == captured.execution_id) {
-                break (events, payloads);
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }).await.expect("the original completed Execution directly delivers its own report");
-    let reports = source_after.iter().filter(|event| event.kind.0 == "message/assistant-projected"
-        && payloads[event.event_id.as_ref()]["delegation_report"]["execution_id"] == captured.execution_id).collect::<Vec<_>>();
-    assert_eq!(reports.len(), 1, "the original completion report is published exactly once");
-    let report_event = reports[0];
-    let payload = &payloads[report_event.event_id.as_ref()];
-    assert_eq!(report_event.producer_id.as_ref(), "session_api");
-    assert_eq!(report_event.kind_version, 1);
-    assert_eq!(payload["origin"], "agent_execution_report");
-    let report: nomifun_agent_execution::AgentExecutionReport = serde_json::from_value(payload["delegation_report"].clone()).unwrap();
-    assert_eq!(report.source, nomifun_agent_execution::AgentExecutionSource {
-        agent_session_id:flow.robot_id.as_ref().to_owned(),turn_operation_id:captured.source_turn_operation_id.clone(),
-        tool_operation_id:captured.source_tool_operation_id.clone(),effect_id:captured.source_effect_id.clone(),
-    });
-    assert_eq!(report.execution_id, captured.execution_id);
-    assert_eq!(report.status, "completed");
-    assert_eq!(payload["operation_id"], format!("exec-lead-report:{}:event:{}", report.execution_id, report.execution_event_sequence));
-    let execution_events = flow.fixture.voice_execution.events(&flow.owner, &captured.execution_id, None, Some(128)).await.unwrap();
-    assert!(execution_events.iter().any(|event| event.sequence == report.execution_event_sequence
-        && event.event_type == nomifun_common::AgentExecutionEventKind::StatusChanged && event.payload["status"] == "completed"));
-    let source_terminal = store.read_turn_receipt(&flow.robot_id, &captured.source_turn_operation_id.clone().into())
-        .await.unwrap().terminal_event.unwrap();
-    assert_eq!(report_event.causation_event_id.as_ref(), Some(&source_terminal.event_id));
-    assert_eq!(report.attempts.len(), 1);
-    assert_eq!(report.attempts[0].step_id, attempt.step_id);
-    assert_eq!(report.attempts[0].attempt_id, attempt.attempt_id);
-    assert_eq!(report.attempts[0].agent_session_id, child.as_ref());
-    assert_eq!(report.attempts[0].turn_operation_id, operation.as_ref());
-    assert_eq!(report.attempts[0].terminal_event_id,
-        store.read_turn_receipt(&child, &operation).await.unwrap().terminal_event.unwrap().event_id.as_ref());
-    assert_eq!(report.attempts[0].result_ok, Some(true));
-    assert!(report.attempts[0].output_integrity_ok);
+    // Parent integration uses its existing Runtime; an expired correction
+    // cannot publish a separate report or create a successor input.
+    let source_after=store.read_events(&flow.robot_id,None,500).await.unwrap().events;
     assert!(source_after.starts_with(&source_before), "previous canonical facts stay immutable");
-    assert!(source_after[source_before.len()..].iter().all(|event| event.event_id == report_event.event_id),
-        "the rejected expired control cannot append input, Turn, steer or public output; only the original report may arrive");
+    assert!(source_after[source_before.len()..].iter().all(|event| !matches!(event.kind.0.as_str(),
+        "message/user-accepted"|"turn/started"|"turn/steer-accepted"|"message/assistant-projected")),
+        "expired control cannot append another parent task or a separate projected report");
+    let execution_events=flow.fixture.voice_execution.events(&flow.owner,&captured.execution_id,None,Some(128)).await.unwrap();
+    assert!(execution_events.iter().any(|event|event.event_type==nomifun_common::AgentExecutionEventKind::StatusChanged
+        &&event.payload["status"]=="completed"));
+    let receipt=store.read_turn_receipt(&child,&operation).await.unwrap();
+    let result=nomifun_agent_session::canonical_turn_public_result(&complete,&receipt).unwrap();
+    assert!(matches!(result.turn_outcome,Some(nomifun_agent_contracts::AgentTurnOutcome::Answered {..})));
+    assert!(receipt.terminal_event.is_some());
     let child_after = store.read_events(&child, None, 500).await.unwrap().events;
     let controls = |events: &[nomifun_agent_contracts::SessionEventRecord]| events.iter()
         .filter(|event| matches!(event.kind.0.as_str(), "message/user-accepted" | "turn/started" | "turn/steer-accepted"))

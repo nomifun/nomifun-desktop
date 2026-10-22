@@ -1159,7 +1159,7 @@ mod tests {
                             "type": "array",
                             "items": {"type": "object"}
                         },
-                        "synthesize": {"type": "boolean"}
+                        "enabled": {"type": "boolean"}
                     },
                     "required": ["strategy", "tasks"],
                     "additionalProperties": false
@@ -1187,7 +1187,7 @@ mod tests {
         assert_eq!(sanitized["properties"]["strategy"]["type"], "string");
         assert_eq!(sanitized["properties"]["goal"]["type"], "string");
         assert_eq!(sanitized["properties"]["tasks"]["type"], "array");
-        assert_eq!(sanitized["properties"]["synthesize"]["type"], "boolean");
+        assert_eq!(sanitized["properties"]["enabled"]["type"], "boolean");
         assert!(sanitized["properties"]["model_pool"]["anyOf"].is_array());
         assert_eq!(sanitized["required"], json!(["strategy"]));
     }

@@ -1426,6 +1426,29 @@ async fn windows_cmd_c_preserves_a_quoted_workspace_path() {
 
 #[cfg(windows)]
 #[tokio::test]
+async fn windows_cmd_mixed_separator_program_preserves_unicode_space_paths_and_reaps() {
+    let workspace=tempfile::Builder::new().prefix("命令 mixed repo ").tempdir().unwrap();
+    fs::create_dir(workspace.path().join("资料 空格")).unwrap();
+    let content=b"CMD_MIXED_PROGRAM_73921\r\n";
+    let file=workspace.path().join("资料 空格/样本.txt");
+    fs::write(&file,content).unwrap();
+    let program=std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
+    assert!(program.is_file());
+    let mut process=request(program,["/d","/c","type","资料 空格\\样本.txt"].map(OsString::from));
+    process.cwd=workspace.path().to_owned();
+    let supervisor=ProcessSupervisor::new(SupervisorConfig::default());
+    let handle=supervisor.start(process).await.expect("the native system cmd alias starts");
+    let outcome=wait_for_terminal(&supervisor,&handle).await;
+    let ProcessOutcome::Exited{code,output,cleanup,..}=outcome else {panic!("cmd alias should exit: {outcome:?}");};
+    assert_eq!(code,Some(0),"cmd output: {}",output.text());
+    assert_eq!(output.text().as_bytes(),content);
+    assert!(cleanup.reaped);
+    assert!(cleanup.errors.is_empty());
+    assert_eq!(fs::read(file).unwrap(),content);
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn windows_powershell_autoloads_hash_cmdlet_under_managed_owner() {
     let workspace = tempfile::Builder::new().prefix("任务 hash ").tempdir().unwrap();
     fs::write(workspace.path().join("normal.txt"), b"fixture").unwrap();

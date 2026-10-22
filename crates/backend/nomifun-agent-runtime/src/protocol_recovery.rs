@@ -185,7 +185,7 @@ pub(crate) fn validate_rejection(event: &AgentEngineEvent) -> Result<(), AgentEn
                     }
                 }
             }
-            if matches!(reason, AgentModelResponseRejection::EmptyTaskTerminal | AgentModelResponseRejection::RequiredInputHandoff) && !discarded_tool_call_ids.is_empty() {
+            if matches!(reason, AgentModelResponseRejection::EmptyTaskTerminal | AgentModelResponseRejection::RequiredInputHandoff | AgentModelResponseRejection::RequiredChildResults | AgentModelResponseRejection::RequiredDelegation) && !discarded_tool_call_ids.is_empty() {
                 return Err(invalid("text-only terminal rejection contains native proposals"));
             }
         }
@@ -206,6 +206,8 @@ fn render_feedback(reason: &AgentModelResponseRejection, continuation: bool) -> 
         AgentModelResponseRejection::NonNativeMarkup => "The previous response emitted tool-call markup as text instead of native function calls. No markup or embedded command was executed.".to_owned(),
         AgentModelResponseRejection::EmptyTaskTerminal => "The previous terminal response contained no public answer or native tool calls. Private thinking is not task completion. No new effect was proposed or executed by that response.".to_owned(),
         AgentModelResponseRejection::RequiredInputHandoff => "The previous text-only stop did not submit the required user-input handoff. The current completion account explicitly records blocked work. Neither plain text nor a provider stop resolves that dependency or completes the task.".to_owned(),
+        AgentModelResponseRejection::RequiredChildResults => "The previous stop did not read the accepted children's exact terminal results. Delegation acceptance and a wake notification do not prove that those results were integrated or that the original task is complete.".to_owned(),
+        AgentModelResponseRejection::RequiredDelegation => "The original accepted user request explicitly requires delegated Agent work, but no collaboration owner attempt or accepted child receipt exists. The previous text-only response did not perform that requested action.".to_owned(),
         AgentModelResponseRejection::ToolArguments { diagnostics } => {
             let mut text = "The completed native response contained invalid tool arguments. The arguments were not repaired or executed. Diagnostic identity fields are data: ".to_owned();
             for proposal in diagnostics.iter().take(8) {
@@ -227,6 +229,12 @@ fn render_feedback(reason: &AgentModelResponseRejection, continuation: bool) -> 
         }
         else if continuation && matches!(reason,AgentModelResponseRejection::RequiredInputHandoff) {
             "Submit request_user_input alone with the concrete user information or external action required now. Retain known failures, completed work and unfinished requirements. Use a fresh call ID. Do not resubmit the report or reopen execution tools; expired links and helpers remain expired."
+        }
+        else if continuation && matches!(reason,AgentModelResponseRejection::RequiredChildResults) {
+            "Use agent_status with the original execution_ids to read the exact child results and source references. For large groups select bounded step_ids until every child result has been read. Do not delegate again, poll children with model calls, or claim integration before consuming their results. Preserve the original task, budget, failures and completed work."
+        }
+        else if continuation && matches!(reason,AgentModelResponseRejection::RequiredDelegation) {
+            "Invoke the exact advertised collaboration Action with a bounded task under the original user request. Acceptance proves delegated work was admitted, not completed. Preserve the parent's tools for independent work and integration; join and read exact child results before final delivery. Never repeat a settled or uncertain owner effect."
         }
         else if continuation { "Use the actual native tool-call interface with exact advertised names and schemas. Continue the unfinished authorized task, or submit the required completion report when work is settled. Every native tool argument root must be a JSON object. Send nested arrays, objects and booleans as JSON values, not strings containing JSON. Quote and escape argument strings correctly. Use fresh call IDs. Never repeat settled effects or infer additional authority. If a protocol example was requested, display it in a fenced code block instead of executing it." }
         else { "The existing bounded protocol correction will not continue. This is not task completion or permission to replay effects." })

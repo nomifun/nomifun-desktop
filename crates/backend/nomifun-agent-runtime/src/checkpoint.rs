@@ -31,6 +31,10 @@ pub struct AgentExecutionCheckpoint {
     /// canonical terminal was not committed. Ordinary input handoff does not
     /// save a checkpoint or use native resume to accept the next message.
     pub pending_user_input: Option<nomifun_agent_contracts::AgentUserInputRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_children: Option<crate::AgentChildrenWait>,
+    #[serde(default, skip_serializing_if = "crate::AgentCollaborationProgress::is_empty")]
+    pub collaboration: crate::AgentCollaborationProgress,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +50,13 @@ impl AgentExecutionCheckpoint {
         self.patch_recovery.validate().map_err(AgentEngineError::InvalidContract)?;
         if let Some(segments) = &self.segments { segments.validate(self.model_steps)?; }
         self.control_rejections.validate()?;
+        self.collaboration.validate()?;
+        if let Some(wait) = &self.awaiting_children {
+            wait.validate()?;
+            if self.pending_user_input.is_some() {
+                return Err(AgentEngineError::InvalidContract("child wait and user input handoff cannot share a checkpoint".into()));
+            }
+        }
         if let Some(request) = &self.pending_user_input {
             request.validate().map_err(AgentEngineError::InvalidContract)?;
             if !self.patch_recovery.targets.is_empty()
@@ -110,7 +121,7 @@ mod tests {
             turn_operation_id: "turn".into(), active_set_generation: 0, model_steps: 1, tool_call_count: 1,
             accepted_input_count: 1, applied_steering_receipts: vec![], plan: AgentPlan::default(),
             work: AgentWorkStatus { running_processes: std::collections::BTreeSet::from(["live-process".into()]), ..Default::default() },
-            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None,
+            patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None, awaiting_children: None, collaboration: Default::default(),
         };
         assert!(checkpoint.validate().is_err());
     }

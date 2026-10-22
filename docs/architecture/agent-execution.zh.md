@@ -22,12 +22,11 @@ AgentExecution 是一次目标执行的领域聚合；AgentSession 是唯一会�
 
 ## 策略与有界调度
 
-四类顶层策略保持正交：
+三类现役顶层策略保持正交：
 
 | 策略 | 作用 |
 | --- | --- |
 | `delegation_policy` | `disabled` / `automatic` / `prefer_parallel` |
-| `plan_gate` | 自动执行计划或等待明确审批 |
 | `decision_policy` | 自动决定或请求用户 |
 | `adaptation_policy` | 固定计划或允许有界重试、改派、重规划 |
 
@@ -35,13 +34,47 @@ Step 的自由文本 role 只作展示和路由提示；独立 typed tool policy
 
 共享上限来自 [agent_execution.rs](../../crates/backend/nomifun-common/src/agent_execution.rs)：16 个模型、64 个当前 Participant、128 个当前 Step、64 并行度、4 层委派深度。历史 revision 不计入当前工作集，也不能为满足上限而删除。保存的模板同样受可执行 Participant、模型与并发上限约束。
 
+## 原 Turn 内的子 Agent 协作
+
+`agent/delegate` 的 `strategy=parallel` 接受有界、互不重叠的 `tasks`；每项物化为没有人为前置依赖的普通 Agent Step。`strategy=planned` 由现役 Planner 为 `goal` 产生真实依赖 DAG。自动附加汇总 Agent 的旧 `synthesize` 开关已退役，旧字段拒绝受理；用户明确配置的 synthesis Step 和模板仍按普通 DAG 执行。父 Agent 保留任务所有权，负责整合、检查和最终回答。
+
+受理回执保存 `execution_id` 和已有确切 `step_ids`；新聚合的计划尚未物化时，Step ID 可暂缺，后续由状态查询读取。回执只证明工作已受理，不表示已启动或完成。显式协作意图不截断父 Turn 的冻结工具表，也不把每个模型步骤固定为再次调用委派工具。已经受理的命令不能换新调用身份反复提交；相同原命令的恢复仍使用原 Effect 与领域幂等事实。Attempt 内追加及同一来源 Turn 的后续工作复用原 Execution，委派归属来自原工具 Effect 和 `PlanChanged`，不能从标题、目录或 DAG 顺序猜测。
+
+`agent_status` 只读取本次确切来源 Turn 所属的协作，可进一步选择确切 Step。结果包含原 Execution、Step、Attempt、子 Session、Turn 和 canonical terminal 引用；正文与产物通过原 Session 输出读者读取，不把 UI 摘要、截短展示或模型自述当作结果。`agent_message` 只向该所属范围的确切 Step 发送有幂等身份的控制消息，复用现役 Step／Session 命令，不获得其他任务权限。
+
+父 Agent 可以先做独立工作，再用 `agent_wait` 等待任一新状态或全部子工作。等待保存 typed `AwaitingChildren` 和配对的 `ChildrenWaitResolved`，保留原 Turn、operation、任务计划、已结算工具、模型步骤与预算。恢复只重挂原等待，不重发委派、创建新 Attempt 或重置预算；恢复的等待结果仍须以 `agent_status` 读取和整合。它不是用户 Pause、`InputRequired` 或一个伪造的用户消息。通知只是重读提示，状态、结果和停止围栏仍来自 canonical 事实；普通排队输入维持原 FIFO，显式 steering 在原安全边界接入。
+
+新的真实问题或调度暂停以原问题／控制事件唤醒父 Agent 一次，未发生变化的注意事项不反复采样模型。计划阶段已正式失败或取消而没有生成 Step 时，状态读取返回原聚合终态事件，不能把空集合当作成功，也不能永久等待不存在的孩子。结果游标依据全部所属工作的真实终结／问题身份，不受本次选择读取哪些正文影响；控制器结果与普通 Agent 的 canonical Turn 输出分别读取。
+
+结果正文按 UTF-8 字节分页，每片最多 32 KiB。`result_page` 固定不可变 Attempt／native terminal 来源、完整正文 SHA-256、长度和精确 offset；本次正文预算耗尽时，明确返回尚未阅读的首片引用，不把截断文本当作完整结果。父 Agent 只有连续覆盖从零到完整长度后才能消费该终态，单独读取末片不能解除义务。native checkpoint 只保存有界来源、摘要和覆盖范围引用，正文仍在原 canonical 事件内。选择不同正文页不改变全部所属工作及唤醒游标。
+
+确切子结果同时报告该 Turn 的工作区 Effect 或 native process 命令是否可能改变工作区；部分或 unknown 效果同样使旧观察失效，仅原进程 owner 的精确 typed 执行前拒绝能排除未执行命令。每个新的不可变来源只推进父任务工作代次一次，并使旧 completion 证据与 scoped instructions 观察失效；重复读取同一结果不反复失效。工具策略或无关 Execution 事件增长不能证明工作区发生修改。
+
+`workspace_change_sources` 覆盖该 Step 所有原 Attempt 及其确切 initial／问题／decision Turns，与当前结果正文分开。最新 Attempt 尚未启动就被取消，不能抹掉更早 Attempt 的真实写入。业务已终结但原 native Turn 仍运行的 Agent 保持 `delivery_pending` 注意状态，不计入可消费终态；确切 native closed 回执，或持久领域准入围栏加该原 Turn 确实不存在的证明，才解除交付等待。`started_at`、最新 Turn 猜测或显示取消不能证明零启动；native 结果关闭与重资源清理继续分开。
+
+来源委派的子任务终态保存在原 Execution 与子 Session 链，不能由独立报告 writer 直接成为父会话的最终回答，也不自动创建隐藏结果模型 Turn。父 Turn 继续后的正常 Runtime 输出负责公开交付；Robot／Channel 使用其原输入与连接权限。无工具来源、由用户直接创建的 Execution 仍可幂等投影聚合摘要，AutoWork root 仍复用其原 lead Session，避免重复结果。查询、通知或 Session 暂时 idle 均不授权启动另一项任务。
+
+父 Turn 后续失败或仅停止自身，不撤回已 Returned 且确切因果可验证的委派；子任务仍受原 Step、委派范围、Execution 和自身 native 准入围栏控制。真正的人类问题交接只通过已验证 `reply_to` 的递减来源链延续任务权限及结果引用，原问题终态、当前精确 binding 和 clear floor 任一不符均不继承旧范围。它不是无关新 Turn 对旧协作的通用权限。
+
+已经消费完结果的 Execution 被删除后，其旧消费索引不成为下一次真人回答的活范围准入前提。尚待交接的已删除工作仍须通过原来源证明；父 Agent 只能读取原 `Deleted` 事件及真实持久终态，得到用户撤销、结果不可用的确切观察。该回执解除待交接义务，不声明子任务成功，不恢复普通详情／工具，不允许继续消息或重新调度。缺失、跨 owner 或损坏的删除证据仍拒绝读取。
+
+每个 ChildAttempt 从原不可变 Snapshot 和 typed resource bindings 建立独立 Session／Runtime，不继承父 Turn 临时缩窄的 schema 呈现窗口。原受理输入及委派前已实际应用的 steering 附件、显式 Skill 选择经过确切 source／Effect／Turn／owner 核验后，进入子会话的普通输入准备；Skill 必须仍属于子 Snapshot，附件仍按其真实模型和资源权限准备。任务正文保持自己的 Step spec，原用户约束通过来源引用读取，不复制父 transcript 或把来源数据当成新授权。
+
+明确的后续工作复用原子 Session 及经核验的冻结 binding，保留其原 canonical 历史。`message_source.command_event_id` 指向本次真实 native `ToolCallCompleted` 提案；委派归属仍是原来源，输入准备则读取发送者本次确切 accepted Turn 及该命令前已应用的 steering，不重注第一次委派的选择，也不按最新输入猜测。运行中孩子的消息从其原 StepChanged／Attempt／命令读取同一选择，完成后的续发与首次派发共用 canonical 输入准备；不得在运行中消息路径丢掉附件或显式 Skill。没有模型来源元数据的直接 UI 续发保留自己的输入，不借用旧选择。读者与 writer 共用不可变命令引用、目标、内容摘要及幂等身份的绑定证明；当前 native 代际检查只负责新命令准入。
+
+父 Agent 同一 Turn 接收明确引导后，问题回答与录音交接读取当前工具原因果之前最后一个已应用的 typed SteeringInputs 的原始输入；没有已应用引导时才读取原 Turn 输入。尚在队列或命令之后到达的输入不能成为本次回答、展示问题或录音权限的依据。
+
+Robot 子任务问题的通知与实际播放共用事务内的源授权核验，以原委派 Returned Effect 的真实终结事件为新通知的因果，不要求协调中的父 Turn 先结束。运行父回合须仍是原 active Turn 并通过领域准入；原已完成回合的现役 canonical 通知保留真实终态证明。Store 的原受理输入与 Effect 读者提供唯一事实校验，当前 binding、clear floor、设备、连接、确切待问 Step／Attempt 和播放 writer lease 继续约束交付；停止或过期展示不能重放。
+
+并行容量由用户的 `max_parallel`、Participant 限制、真实 DAG 和原预约共同决定，不再因 `Full`／`ReadShell` 的工具类型把整个工作区的 Step 串行化。工具策略仍是权限上限，不能为了获得并发自动降成 ReadOnly 而撤走本来选中的能力。模型 slot 与真实资源责任分开：确切 `AwaitingChildren` 可以让出模型容量，恢复前在原 writer 内重新准入；文件、进程、Browser、Computer 和未知 Effect 的 owner 围栏仍独立生效，等待或 checkpoint 不证明它们已释放。同一 Session 的模型 Turn 仍串行，多子 Session 可以同时运行。
+
 ## 生命周期与恢复
 
 `planning`、`running`、`paused`、`waiting_input` 和终态由 Engine 的状态机与 optimistic version 共同控制。Scheduler 每次派发前在事务内复核依赖、Step 版本、活动 Attempt 与重试时间；同一 Execution 只保留一个活动调度循环，同一 Session 仍串行接收 Turn。
 
 Execution 暂停只关闭新派发；已开始的 Attempt 保留原 Session、Turn、活动 Link、预约和运行 owner，由原调度代继续观察与结算。暂停不撤销活租约、不制造 review、不触发取消清理，也不表示原生操作已经冻结。已准入工作结算后可释放调度租约，聚合仍保持暂停，直到用户继续调度。恢复不新建已完成 Attempt，也不重放已执行效果；未回答问题继续保留。原 Turn 的安全停车与无损继续使用 Session 的 native pause、checkpoint 和明确 resume 合同，与调度暂停分别表达。
 
-模型容量与工作区责任使用同一原事实的不同预约字段。确切 typed InputRequired 终态、无后继／活动 Turn／未结算效果且没有 review 围栏时，等待中的 Attempt 可以让出模型容量；Full／ReadShell 仍保留可能继续写入的工作区责任。ReadOnly 的已闭交接可让其他任务正常准入。仅有 WaitingInput 状态、未知结果或缓存为空均不构成释放证明；继续交接从原 Execution Event 读取同一 Attempt 的确切 Turn 引用。
+模型容量从同一原 Attempt、Turn 与 native owner 事实派生。确切 typed InputRequired 终态、无后继／活动 Turn／未结算效果且没有 review 围栏时，可以让出模型容量；确切 native child-wait 也可让出该 slot，配对结束后须重新准入。资源是否仍在执行由各原 owner 独立证明，不用 tool policy、WaitingInput 显示状态或缓存缺席代替。继续交接从原 Execution Event 读取同一 Attempt 的确切 Turn 引用。
 
 AutoWork 原 Requirement claim 的显式取消在原 writer 内围住 Execution 创建、Attempt 派发与继续，
 复核确切 requirement、generation、lead Session 和 owner。停止先于 Execution 创建或 queued Attempt
@@ -136,9 +169,11 @@ Runtime、进程、Browser、SSH、知识回写和 Effect 分项观察，任一 
 
 Step spec 是任务输入；完成要求交给唯一 Runtime 的 typed requirements、completion 与 delivery。调度器不从自然语言文件名、格式或数量再猜一套验收规则。`request_user_input` 总是以 InputRequired 正常闭轮交还输入，原 Session 后台进程独立保留；交接不代表 Step 完成。问题即时交付；后台输出、退出及超时都不代替用户回复，不自动开启模型或重试命令。纯机器资源观察与人工交接分开，实际回复仍通过 canonical owner 和领域准入。
 
+活动父 Turn 可以把真实物理入口跟进作为 steering 接入，发布正常中间回复并保留原子等待。执行问题的回答读取本次确切工具因果界前已实际应用的原输入，保留该次录音的 presentation ID、socket 与受理序号；不借最初请求、尚未应用的排队输入或较晚的播放证明获得回答权限。
+
 取消先由 canonical owner 固定精确 Operation。StopTurn write-ahead intent 保存稳定取消身份与目标，迟到 StopTurn 不能命中后继 Turn。每个 Attempt 的常规 StopTurn／Steer 由现役 TaskTracker 持有一个投递任务，按原持久队列保序；慢调用和失败只保留本项，不阻挡其他 Attempt 结算。原调用在调度代退出后仍由该 owner 收束，不能通过丢弃 Future 冒充停止；确认时复读队列，只移除确切原命令，保留并发追加。用户直接停止的持久围栏与宿主取消信号独立于这条业务 FIFO，能够抢占挂起的 Steer；迟到回执不能重新打开停止范围。租约丢失、取消和其他任务结算继续由调度循环处理。
 
-结果通过稳定 operation 幂等投影到 lead Session，不发送隐藏用户消息触发第二次模型总结。模型入口复用 `nomi_delegate`、`nomi_execution_get` 和 `nomi_execution_update`；HTTP 位于 `/api/agent-executions`，模板位于 `/api/agent-execution-templates`。前端通过 Link 读取关系，按 `agentExecution.changed` sequence 去重和补拉，不保存第二份执行状态。
+工具来源的子任务结果通过原父 Turn 的协作读者返回，由父 Runtime 整合后交付；用户直接创建且无工具来源的 Execution 保留稳定 operation 的摘要投影。两者不通过隐藏用户消息触发另一条总结流水线。Gateway 管理入口复用 `nomi_delegate`、`nomi_execution_get` 和 `nomi_execution_update`；原生父 Turn 使用 `agent_status`、`agent_wait` 和 `agent_message` 控制自己的孩子。HTTP 位于 `/api/agent-executions`，模板位于 `/api/agent-execution-templates`。前端通过 Link 读取关系，按 `agentExecution.changed` sequence 去重和补拉，不保存第二份执行状态。
 
 聊天过程只显示已接受委派与真实任务终结记录，不再附加当前任务列表、运行／等待行、动态进度或常驻控制。开始记录来自原 PlanChanged 提交的任务；它只表示已委派，不把 write-ahead ToolStarted 或 Attempt running 当作真实启动。完成来自 Step 的业务结算，单次 Attempt 结束、循环继续、重试或父 Turn 结束均不能替代。正常结算、恢复收养及采用结果在原领域事件写事务保留必要的 typed 变更引用和父 Session 游标锚点，不新增生命周期表或展示日志。停止接受和清理观察留在原控制详情，不伪装为成功完成。
 

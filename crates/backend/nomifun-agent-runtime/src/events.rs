@@ -54,6 +54,10 @@ pub enum AgentModelResponseRejection {
     EmptyTaskTerminal,
     /// A current blocked account still requires its explicit user-input declaration.
     RequiredInputHandoff,
+    /// Accepted children cannot be treated as integrated without their exact
+    /// terminal source results being consumed by this parent Turn.
+    RequiredChildResults,
+    RequiredDelegation,
     ToolArguments { diagnostics: Vec<AgentRejectedToolProposal> },
     /// Existing current-generation facts did not record their precise reason.
     /// Reading them preserves that uncertainty instead of inspecting prose.
@@ -67,6 +71,10 @@ pub enum AgentEngineEvent {
         binding: EngineBinding,
         turn_operation_id: OperationId,
     },
+    /// The host verified an exact canonical human question reply and the same
+    /// binding before carrying unresolved child references into this Turn.
+    /// This event carries no input body, resource grant or execution authority.
+    CollaborationInherited { progress: crate::AgentCollaborationProgress },
     ExecutionBudgetPrepared {
         /// Zero means provider-defined/undeclared, never a zero-token ceiling.
         context_window_tokens: u32,
@@ -349,6 +357,10 @@ pub enum AgentEngineEvent {
         reason: nomifun_agent_contracts::AgentWaitReason,
     },
     TurnWaitResolved { model_steps: u16 },
+    /// The model is quiescent while this exact Turn awaits owned children.
+    /// No resource cleanup, user-input handoff or terminal is implied.
+    AwaitingChildren { model_steps: u16, request: crate::AgentChildrenWait },
+    ChildrenWaitResolved { model_steps: u16, cursor: String },
     OwnedProcessObserved { model_steps: u16, observation: crate::AgentOwnedProcessObservation },
     TurnInputRequired {
         model_steps: u16,

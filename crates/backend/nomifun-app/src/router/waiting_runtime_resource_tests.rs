@@ -167,7 +167,6 @@ async fn waiting_writer_survives(cache_fault: bool) {
         assert_eq!(delivery.user_input_request.as_ref().unwrap().request_id.as_ref(),"waiting-writer-question");
         let mut tx=fixture.pool().begin().await.unwrap();let reservations=nomifun_db::execution_reservations_tx(&mut tx,&admitted.execution_id).await.unwrap();tx.commit().await.unwrap();
         assert_eq!(reservations.len(),1);assert_eq!(reservations[0].attempt_id,attempt.attempt_id);
-        assert!(reservations[0].workspace_held&&reservations[0].workspace_mutator,"Full policy retains the legitimate writer's workspace responsibility");
         assert!(!reservations[0].capacity_held,"a typed closed InputRequired handoff releases only model capacity");
         let first=writer_grows(&output,0).await;let host=fixture.host.session_host.clone();
         let process=host.process_resource_instances(&owner,&session).unwrap().into_iter().find(|process|process.process_id==*server.state.process.get().unwrap()).unwrap();
@@ -206,7 +205,7 @@ async fn waiting_writer_survives(cache_fault: bool) {
         assert_eq!(stopped["accepted"],true);drop(failure);
         let turns:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_turns WHERE session_id=?").bind(&lead).fetch_one(fixture.pool()).await.unwrap();assert_eq!(turns,1);
         assert_eq!(server.state.requests.lock().unwrap().len(),model_calls);
-        println!("WAITING_NATIVE_WRITER cache_fault={cache_fault} workspace_held=true capacity_held=false attempts=1 turns=1 process_starts=1 original_terminal_seq={} model_calls={model_calls} exact_stop=true",terminal.seq);
+        println!("WAITING_NATIVE_WRITER cache_fault={cache_fault} original_process_owner_retained=true capacity_held=false attempts=1 turns=1 process_starts=1 original_terminal_seq={} model_calls={model_calls} exact_stop=true",terminal.seq);
     }).catch_unwind().await;
     fixture.finish().await;
     server.close().await;

@@ -167,6 +167,9 @@ async fn input_queue_promoted_input_reaches_the_next_request_of_the_exact_runnin
     server.wait_for_requests(2).await;
     let delivered=fixture.owner.canonical().store().session_input_claim(&session,&supplement["message_id"].as_str().unwrap().into()).await.unwrap().unwrap();
     assert!(delivered.steering);assert_eq!(delivered.operation_id,root.operation_id);
+    assert!(matches!(fixture.owner.session_turn_delivery_state(&fixture.host.options.user_id,session.as_ref(),"promote-original").await.unwrap(),
+        nomifun_conversation::PublicTurnDeliveryState::Accepted {message_id} if message_id==supplement["message_id"].as_str().unwrap()),
+        "an applied input retains its own keyed receipt while sharing the original running Turn");
     let requests=server.requests.lock().unwrap().clone();
     assert!(!requests[0]["messages"].to_string().contains("promoted-current"));
     assert!(requests[1]["messages"].to_string().contains("promoted-current"));

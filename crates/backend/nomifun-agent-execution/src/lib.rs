@@ -28,7 +28,7 @@ mod scheduler;
 mod template_routes;
 
 pub use attempt_runner::AgentExecutionSessionPort;
-pub use canonical_output::{canonical_turn_delivery, canonical_turn_output_files};
+pub use canonical_output::{canonical_turn_delivery, canonical_turn_output_files, canonical_turn_workspace_changed};
 pub use automation::{
     AgentExecutionAutomationPort, AutomationExecutionAdmission, AutomationExecutionReceipt,
     AutomationExecutionRequest, AutomationExecutionSource, admit_frozen_automation_workspace,
@@ -36,6 +36,7 @@ pub use automation::{
     resolve_frozen_session_workspace,
 };
 pub use delivery::{AgentExecutionDelivery, AgentExecutionTurnOutput, AgentExecutionTurnProgress, AgentExecutionSource,
+    AgentExecutionMessageReceipt, AgentExecutionSteerDelivery,
     AgentExecutionAttemptReport, AgentExecutionReport, AgentExecutionInput,
     AgentExecutionControlSource, AgentExecutionControlReceipt};
 mod user_input;

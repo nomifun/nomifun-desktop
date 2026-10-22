@@ -1,5 +1,41 @@
 use super::*;
 
+#[tokio::test]
+async fn collaboration_message_proof_reads_store_factored_arguments_and_rejects_corrupt_references() {
+    for mutation in ["valid","digest","length","session","slot","body","payload_digest"] {
+        let store=AgentSessionStore::open_in_memory().await.unwrap();
+        let (session,started)=context(&store,"shared-message-source").await;
+        let sid=&session.agent_session_id;
+        let arguments=json!({"execution_id":"execution","step_id":"child","content":"保留这次原始续发输入😀".repeat(200),"idempotency_key":"message-key"});
+        let command=progress(sid,&started,"shared-message-source","message-command",1,
+            json!({"event":"tool_call_completed","step":1,"call":{"call_id":"message-call","name":"agent_message","arguments":arguments}}));
+        store.append_event(&command).await.unwrap();
+        assert_eq!(leaves(&store,sid).await.0,1,"the normal Store must really factor >1KiB arguments");
+        let raw:String=sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE session_id=? AND event_id=?")
+            .bind(sid.as_ref()).bind(command.event_id.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+        let mut envelope:serde_json::Value=serde_json::from_str(&raw).unwrap();
+        assert!(envelope.pointer("/event/call/arguments").unwrap().is_null());
+        match mutation {
+            "digest"=>{envelope["_canonical_shared_content"]["references"][0]["digest"]=json!("0".repeat(64));},
+            "length"=>{let len=envelope["_canonical_shared_content"]["references"][0]["byte_len"].as_u64().unwrap();envelope["_canonical_shared_content"]["references"][0]["byte_len"]=json!(len+1);},
+            "session"=>{let reference=&mut envelope["_canonical_shared_content"]["references"][0];let digest=reference["digest"].as_str().unwrap();reference["payload_id"]=json!(format!("shared-tool:other-session:arguments:{digest}"));},
+            "slot"=>{envelope["_canonical_shared_content"]["references"][0]["pointer"]=json!("/event/call/name");},
+            "body"=>{sqlx::query("UPDATE agent_payloads SET body=? WHERE session_id=? AND payload_id LIKE 'shared-tool:%'")
+                .bind(serde_json::to_vec(&SessionPayloadBody::Json(StrictJsonValue(json!({"content":"tampered"})))).unwrap()).bind(sid.as_ref()).execute(store.test_pool()).await.unwrap();},
+            "payload_digest"=>{sqlx::query("UPDATE agent_payloads SET digest=? WHERE session_id=? AND payload_id LIKE 'shared-tool:%'")
+                .bind("0".repeat(64)).bind(sid.as_ref()).execute(store.test_pool()).await.unwrap();},
+            _=>{},
+        }
+        sqlx::query("UPDATE agent_events SET inline_json=? WHERE session_id=? AND event_id=?")
+            .bind(envelope.to_string()).bind(sid.as_ref()).bind(command.event_id.as_ref()).execute(store.test_pool()).await.unwrap();
+        let source=nomifun_db::AgentExecutionMessageSource {command_event_id:command.event_id.as_ref().into(),agent_session_id:sid.as_ref().into(),
+            turn_operation_id:"shared-message-source".into(),native_fence:0,native_generation:0};
+        let mut tx=store.test_pool().begin().await.unwrap();
+        let result=nomifun_db::agent_message_command_tx(&mut tx,&source).await;
+        if mutation=="valid" {assert_eq!(result.unwrap().1.0,arguments);} else {assert!(result.is_err(),"{mutation} must fail closed");}
+    }
+}
+
 async fn context(store: &AgentSessionStore, key: &str) -> (AgentSessionLiveRecord, EventId) {
     let (session, _) = create_ready(store, key).await;
     let (_, started) = store.start_turn(&session.agent_session_id, "session_api".into(), key.into(), key.into(),

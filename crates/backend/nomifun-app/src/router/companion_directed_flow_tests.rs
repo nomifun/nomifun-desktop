@@ -29,6 +29,7 @@ const BACKGROUND_SOURCE_CONSTRAINT:&str="SOURCE-CONSTRAINT-48173";
 const BACKGROUND_GOAL:&str="BACKGROUND_WORK: Prepare the report in isolation and return the verified result.";
 const BACKGROUND_RESULT:&str="BACKGROUND-CANONICAL-73921: The isolated report is ready.";
 const FOLLOWUP_INPUT:&str="FOLLOWUP_WHILE_BACKGROUND: Answer this independent message.";
+const FOLLOWUP_REPLY:&str="The independent message is answered.";
 const FILE_INPUT:&str="FILE_ROUNDTRIP: Write the exact random marker and read it back from our workspace.";
 const PROCESS_INPUT:&str="NATIVE_PROCESS_OUTPUT: Run the authorized local echo program and verify its real output.";
 const MEMORY_QUERY: &str = "CANONICAL-MEMORY-8426";
@@ -67,6 +68,63 @@ fn tool_call(name:&str,id:&str,arguments:Value)->(Value,&'static str) {
 fn selected_tool(body:&Value,name:&str,id:&str,action:&str,arguments:Value)->(Value,&'static str) {
     if tool_available(body,name) {tool_call(name,id,arguments)}
     else {tool_call("ToolSearch",&format!("{id}-find"),json!({"query":action}))}
+}
+
+fn joined_parent_step(body:&Value,ordinal:usize,fork_id:&str,goal:&str,intermediate:Option<&str>)->(Value,&'static str) {
+    let results=body["messages"].as_array().unwrap();
+    let root=results.iter().rposition(|message|message["role"]=="user"
+        &&message["content"].to_string().contains("BACKGROUND_REQUEST:")).unwrap_or(0);
+    let results=&results[root+1..];
+    let recorded=|prefix:&str|results.iter().rev().filter(|message|message["role"]=="tool")
+        .find(|message|message["tool_call_id"].as_str().is_some_and(|id|id==prefix||(prefix.ends_with('-')&&id.starts_with(prefix))))
+        .map(|message|serde_json::from_str::<Value>(message["content"].as_str().unwrap()).unwrap());
+    let Some(receipt)=recorded(fork_id) else {
+        return selected_tool(body,"fork_agent",fork_id,"agent/fork",json!({"goal":goal}));
+    };
+    let execution=receipt["execution_id"].as_str().expect("the source delegation returns its original domain receipt");
+    let status_only=body["tools"].as_array().unwrap().iter().all(|tool|tool["function"]["name"]=="agent_status");
+    let status_prefix=format!("{fork_id}-status-");
+    let status=recorded(&status_prefix);
+    if status_only {return tool_call("agent_status",&format!("{status_prefix}{ordinal}"),json!({"execution_ids":[execution]}));}
+    if let Some(status)=status.as_ref().filter(|status|status["result"]["all_ready"]==true) {
+        let children=status["result"]["executions"][0]["children"].as_array().unwrap();
+        let result=children.iter().filter(|child|child["status"]=="completed"&&child["result_ok"]==true)
+            .filter_map(|child|child["result"].as_str()).collect::<Vec<_>>().join("\n");
+        let result=if result.is_empty() {"The original background work was stopped; no successful child result is claimed.".into()}
+            else {format!("Parent integration: {result}")};
+        let plan_prefix=format!("{fork_id}-close-plan-");
+        if tool_available(body,"update_plan")&&recorded(&plan_prefix).is_none() {
+            return tool_call("update_plan",&format!("{plan_prefix}{ordinal}"),json!({
+                "explanation":"The exact child terminal state has been read. Retain the accepted original task and conversational followup, and report only the recorded result or cancellation; do not restart work.",
+                "plan":[{"step":"Read the original child outcome and deliver the recorded result or stopped state.","status":"completed"}]
+            }));
+        }
+        if let Some(plan)=recorded(&plan_prefix) {
+            assert!(matches!(plan["status"].as_str(),Some("updated"|"unchanged")),
+                "the native parent must settle its real replan before reporting: {plan}");
+        }
+        if let Some(report)=body["tools"].as_array().unwrap().iter().find(|tool|tool["function"]["name"]=="report_completion") {
+            let properties=&report["function"]["parameters"]["properties"];
+            assert!(properties["criteria"].is_object(),"the active parent uses its current completion account");
+            let mut account=json!({"summary":result,"criteria":[{"disposition":"unverified",
+                "rationale":"The summary preserves the exact recorded child outcome and earlier conversational reply. It claims no separate parent workspace verification and no successful result for cancelled work."}]});
+            for field in ["observed_tool_error_count","observed_command_failure_count"] {
+                if !properties[field]["const"].is_null() {account[field]=properties[field]["const"].clone();}
+                else if let Some(value)=properties[field]["enum"].as_array().and_then(|values|values.first()) {account[field]=value.clone();}
+            }
+            return tool_call("report_completion",&format!("{fork_id}-close-report-{ordinal}"),account);
+        }
+        return (json!({"role":"assistant","content":result}),"stop");
+    }
+    let mut wait=json!({"execution_ids":[execution],"mode":"all"});
+    if let Some(status)=status {wait["after_cursor"]=status["cursor"].clone();}
+    let (mut delta,reason)=tool_call("agent_wait",&format!("{fork_id}-wait-{ordinal}"),wait);
+    if let Some(text)=intermediate {delta["content"]=json!(text);}
+    (delta,reason)
+}
+
+fn background_parent_step(body:&Value,ordinal:usize,user:&str)->(Value,&'static str) {
+    joined_parent_step(body,ordinal,"background-fork",BACKGROUND_GOAL,user.contains(FOLLOWUP_INPUT).then_some(FOLLOWUP_REPLY))
 }
 fn native_echo_launch(marker:&str)->Value {
     #[cfg(windows)]
@@ -207,9 +265,9 @@ impl CompanionFlowModelServer {
                     } else {selected_tool(&body,"start_process","native-process-start","workspace.process/start",native_echo_launch(&state.file_marker))}
                 } else if user.contains(BACKGROUND_GOAL) {
                     (json!({"role":"assistant","content":BACKGROUND_RESULT}),"stop")
-                } else if user.contains(BACKGROUND_INPUT) {
-                    if tool_result(&body,"background-fork").is_some() {(json!({"role":"assistant","content":"The work is accepted. You can continue here."}),"stop")}
-                    else {selected_tool(&body,"fork_agent","background-fork","agent/fork",json!({"goal":BACKGROUND_GOAL}))}
+                } else if user.contains(BACKGROUND_INPUT) || ((user.contains("Original collaboration owner wake")||user.contains(FOLLOWUP_INPUT))
+                    && body["messages"].as_array().unwrap().iter().any(|message|message["role"]=="tool"&&message["tool_call_id"]=="background-fork")) {
+                    background_parent_step(&body,ordinal,&user)
                 } else if matches!(user.trim(),SILENT_ACTION_QUERY|SILENT_ACTION_PAIR_QUERY) {
                     assert!(tool_available(&body,"robot_dog_action"));assert!(tool_available(&body,"finish_without_reply"));
                     let mut calls=vec![json!({"index":0,"id":"silent-motion-sit","type":"function",
@@ -219,7 +277,7 @@ impl CompanionFlowModelServer {
                     calls.push(json!({"index":calls.len(),"id":"silent-motion-finish","type":"function",
                         "function":{"name":"finish_without_reply","arguments":"{}"}}));
                     (json!({"role":"assistant","tool_calls":calls}),"tool_calls")
-                } else {(json!({"role":"assistant","content":if user.contains(BACKGROUND_GOAL) {BACKGROUND_RESULT}else {"The independent message is answered."}}),"stop")};
+                } else {(json!({"role":"assistant","content":if user.contains(BACKGROUND_GOAL) {BACKGROUND_RESULT}else {FOLLOWUP_REPLY}}),"stop")};
                 let chunk=json!({"id":format!("shared-{ordinal}"),"object":"chat.completion.chunk","created":1,"model":COMPANION_MODEL,
                     "choices":[{"index":0,"delta":delta,"finish_reason":null}]});
                 let end=json!({"id":format!("shared-{ordinal}"),"object":"chat.completion.chunk","created":1,"model":COMPANION_MODEL,
@@ -432,6 +490,25 @@ fn robot_message(text: &str) -> SendMessageRequest {
 
 async fn send_and_complete_robot_turn(fixture: &Fixture, owner: &str, request: &nomifun_robot::services::RobotTurnRequest,
     key: &str) -> OperationId {
+    let operation=send_and_start_robot_turn(fixture,owner,request,key).await;
+    wait_for_completed_turn(fixture,&AgentSessionId::from(request.conversation_id.clone()),&operation).await;
+    operation
+}
+
+async fn send_and_start_robot_turn(fixture: &Fixture, owner: &str, request: &nomifun_robot::services::RobotTurnRequest,
+    key: &str) -> OperationId {
+    accept_robot_input(fixture,owner,request,key).await.operation
+}
+
+struct AcceptedRobotInput {
+    operation:OperationId,
+    event:nomifun_agent_contracts::SessionEventRecord,
+    input:StrictJsonValue,
+    steering:bool,
+}
+
+async fn accept_robot_input(fixture:&Fixture,owner:&str,request:&nomifun_robot::services::RobotTurnRequest,key:&str)
+    ->AcceptedRobotInput {
     let accepted = fixture.owner.send_robot_session_message_idempotent(owner,request,key,robot_message(&request.text)).await.unwrap();
     assert!(!accepted.completed); assert!(!accepted.replayed,"this is a new authenticated root, not a completed delivery");
     let session=AgentSessionId::from(request.conversation_id.clone());
@@ -439,8 +516,8 @@ async fn send_and_complete_robot_turn(fixture: &Fixture, owner: &str, request: &
     let store=fixture.owner.canonical().store();
     let started=tokio::time::Instant::now();
     let mut observed_delivery=None;
-    let operation=loop {
-        if let Some(claim)=store.session_input_claim(&session,&root).await.unwrap() {break claim.operation_id;}
+    let claim=loop {
+        if let Some(claim)=store.session_input_claim(&session,&root).await.unwrap() {break claim;}
         let delivery=store.session_input_delivery(&session,&root).await.unwrap();
         if observed_delivery.as_ref()!=Some(&delivery) {
             eprintln!("SESSION_INPUT_DELIVERY session={} input={} delivery={delivery}",session.as_ref(),root.as_ref());
@@ -452,8 +529,48 @@ async fn send_and_complete_robot_turn(fixture: &Fixture, owner: &str, request: &
             "accepted physical input has no canonical Turn claim: session={}, input={}, delivery={delivery}",session.as_ref(),root.as_ref());
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    wait_for_completed_turn(fixture,&session,&operation).await;
-    operation
+    let (event,input)=if claim.steering {
+        tokio::time::timeout(Duration::from_secs(15),async {loop {
+            let facts=store.turn_output_facts(&session,&claim.operation_id).await.unwrap();
+            if facts.events.iter().any(|event|event.kind.0=="runtime/progress-recorded"&&facts.event_payloads
+                .get(event.event_id.as_ref()).and_then(|value|value.get("event")).is_some_and(|value|
+                    value["event"]=="steering_inputs"&&value["inputs"].as_array().is_some_and(|inputs|inputs.iter().any(|input|
+                        input["receipt_operation_id"]==claim.claim_event_id.as_ref()&&input["message_id"]==root.as_ref())))) {break;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.expect("the same native parent must apply this exact accepted physical input as steering");
+        store.steering_input_source(&session,&claim.claim_event_id).await.unwrap()
+    } else {store.turn_accepted_input(&session,&claim.operation_id).await.unwrap()};
+    assert_eq!(event.event_id,root);
+    AcceptedRobotInput {operation:claim.operation_id,event,input,steering:claim.steering}
+}
+
+async fn wait_for_public_after(fixture:&Fixture,session:&AgentSessionId,input:&AcceptedRobotInput,text:&str) {
+    tokio::time::timeout(Duration::from_secs(15),async {loop {
+        let facts=fixture.owner.canonical().store().turn_output_facts(session,&input.operation).await.unwrap();
+        let reply=facts.events.iter().find(|event|event.seq>input.event.seq&&event.kind.0=="message/content-part"
+            &&facts.event_payloads.get(event.event_id.as_ref()).is_some_and(|payload|
+                payload["content"].as_str().is_some_and(|content|content.contains(text))));
+        if let Some(reply)=reply {if facts.events.iter().any(|event|event.seq>reply.seq&&event.kind.0=="runtime/progress-recorded"
+            &&facts.event_payloads.get(event.event_id.as_ref()).and_then(|payload|payload.get("event")).is_some_and(|value|
+                value["event"]=="public_output_committed"&&value["source"]["message_id"]==reply.correlation_id.as_ref())) {break;}}
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }}).await.expect("the active parent publishes this exact input's intermediate answer without ending its original task");
+}
+
+async fn send_and_observe_robot_reply(fixture:&Fixture,owner:&str,request:&nomifun_robot::services::RobotTurnRequest,key:&str)
+    ->AcceptedRobotInput {
+    let input=accept_robot_input(fixture,owner,request,key).await;
+    wait_for_public_after(fixture,&request.conversation_id.clone().into(),&input,FOLLOWUP_REPLY).await;
+    input
+}
+
+async fn wait_for_original_parent(flow:&PhysicalEntryFixture,execution:&str) {
+    let input:String=sqlx::query_scalar("SELECT initial_plan_input FROM agent_executions WHERE execution_id=? AND user_id=?")
+        .bind(execution).bind(&flow.owner).fetch_one(flow.fixture.pool()).await.unwrap();
+    let input:Value=serde_json::from_str(&input).unwrap();
+    let source:nomifun_common::AgentExecutionSource=serde_json::from_value(input["source"].clone()).unwrap();
+    assert_eq!(source.agent_session_id,flow.robot_id.as_ref());
+    wait_for_completed_turn(&flow.fixture,&flow.robot_id,&source.turn_operation_id.into()).await;
 }
 
 #[tokio::test]
@@ -650,13 +767,13 @@ async fn physical_entry_executes_an_authorized_native_process_and_consumes_its_r
 }
 
 #[tokio::test]
-async fn background_execution_keeps_exact_source_grants_and_projects_once_without_a_result_model_turn() {
+async fn background_execution_keeps_exact_source_grants_without_publishing_a_child_as_the_parent() {
     let server=CompanionFlowModelServer::with_held_work().await;
     let flow=PhysicalEntryFixture::new(&server,"unified-background-source").await;
     let store=flow.fixture.owner.canonical().store();
     let original_binding=store.get_live_session(&flow.robot_id).await.unwrap().agent_binding;
     let request=flow.request("background-request",BACKGROUND_INPUT);
-    let original=send_and_complete_robot_turn(&flow.fixture,&flow.owner,&request,"background-input").await;
+    let original=send_and_start_robot_turn(&flow.fixture,&flow.owner,&request,"background-input").await;
     tokio::time::timeout(Duration::from_secs(15),server.state.held_entered.notified()).await.unwrap();
     let executions=flow.fixture.voice_execution.list(&flow.owner,Some(20),Some(0)).await.unwrap();
     assert_eq!(executions.len(),1);let execution=&executions[0];
@@ -668,22 +785,33 @@ async fn background_execution_keeps_exact_source_grants_and_projects_once_withou
     assert_eq!(child_binding.preset_revision_ref,original_binding.preset_revision_ref);
     assert_eq!(child_binding.typed_resource_bindings,original_binding.typed_resource_bindings,
         "the exact owned device and work resources survive isolation");
-    let followup=flow.request("background-followup",FOLLOWUP_INPUT);
-    let followup_operation=send_and_complete_robot_turn(&flow.fixture,&flow.owner,&followup,"background-followup-input").await;
-    assert_ne!(followup_operation,original,"the source Session remains available while its isolated work is held");
+    assert_eq!(store.read_turn_receipt(&flow.robot_id,&original).await.unwrap().status,nomifun_agent_session::TurnReceiptStatus::Running,
+        "the original parent retains its task while the child is held");
+    let followup=send_and_observe_robot_reply(&flow.fixture,&flow.owner,
+        &flow.request("same-robot-followup",FOLLOWUP_INPUT),"same-robot-followup").await;
+    assert!(followup.steering);assert_eq!(followup.operation,original,
+        "continued physical conversation is applied to the exact active parent, not a fabricated second Turn");
+    assert_eq!(followup.input.0["content"],FOLLOWUP_INPUT);
+    assert_eq!(store.read_turn_receipt(&flow.robot_id,&original).await.unwrap().status,nomifun_agent_session::TurnReceiptStatus::Running);
+    let followup=api(&flow.fixture._router,&format!("/api/agent-sessions/{}/turns",flow.desktop_id.as_ref()),json!({
+        "idempotency_key":"background-followup-input","input":{"content":FOLLOWUP_INPUT},
+    })).await;
+    let followup_operation=OperationId::from(followup["operation_id"].as_str().unwrap());
+    wait_for_completed_turn(&flow.fixture,&flow.desktop_id,&followup_operation).await;
+    assert_ne!(followup_operation,original,"independent canonical Sessions remain available during the parent's native join");
     server.state.held_release.notify_one();
-    let (event,payload)=tokio::time::timeout(Duration::from_secs(25),async {loop {
-        let facts=store.chat_causality_facts(&flow.robot_id,&original).await.unwrap();
-        if let Some((event,payload))=facts.events.iter().find_map(|event|facts.event_payloads.get(event.event_id.as_ref())
-            .filter(|payload|event.kind.0=="message/assistant-projected"&&payload["origin"]=="agent_execution_report")
-            .map(|payload|(event.clone(),payload.clone()))) {break (event,payload);}
+    let completed=tokio::time::timeout(Duration::from_secs(25),async {loop {
+        let detail=flow.fixture.voice_execution.get(&flow.owner,&execution.execution_id).await.unwrap();
+        if detail.execution.status.is_terminal() {break detail;}
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }}).await.expect("the canonical execution event directly publishes its report");
-    assert!(payload["content"].as_str().unwrap().contains(BACKGROUND_RESULT));
-    let report:nomifun_agent_execution::AgentExecutionReport=serde_json::from_value(payload["delegation_report"].clone()).unwrap();
-    assert_eq!(report.source.agent_session_id,flow.robot_id.as_ref());assert_eq!(report.source.turn_operation_id,original.as_ref());
-    assert_eq!(report.execution_id,execution.execution_id);assert_eq!(report.attempts.len(),1);
-    assert_eq!(report.attempts[0].agent_session_id,child.as_ref());
+    }}).await.expect("the exact child settles in its Execution");
+    assert_eq!(completed.execution.status,nomifun_common::AgentExecutionStatus::Completed);
+    wait_for_completed_turn(&flow.fixture,&flow.robot_id,&original).await;
+    let attempt=&completed.attempts[0];
+    let output=nomifun_agent_execution::AgentExecutionSessionPort::read_turn_output(flow.fixture.owner.as_ref(),
+        &flow.owner,child.as_ref(),Some(&format!("{}:initial-turn",attempt.attempt_id))).await.unwrap().unwrap();
+    assert!(output.delivery.result_text.as_deref().unwrap().contains(BACKGROUND_RESULT));
+    assert!(output.terminal_event_id.is_some());
     let captured = server.state.requests.lock().unwrap().clone();
     let worker = captured.iter().find(|body| last_user_text(body).contains(BACKGROUND_GOAL))
         .expect("the isolated Attempt issued an actual main-model request");
@@ -692,18 +820,25 @@ async fn background_execution_keeps_exact_source_grants_and_projects_once_withou
         .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
     assert!(instructions.contains(BACKGROUND_SOURCE_CONSTRAINT) && instructions.contains(original.as_ref()),
         "the child consumes the exact canonical original constraint and source Turn, even when its goal omits them");
-    let effect=store.read_effect(&flow.robot_id,&report.source.effect_id).await.unwrap().unwrap();
-    assert_eq!(effect.operation_id.as_ref(),report.source.tool_operation_id);assert_eq!(effect.turn_id,original);
-    assert_eq!(effect.action_id.as_ref(),"agent/fork");assert_eq!(effect.state,nomifun_agent_session::AgentEffectState::Returned);
+    let effects=store.list_effects(&flow.robot_id).await.unwrap();
+    let effect=effects.iter().find(|effect|effect.turn_id==original&&effect.action_id.as_ref()=="agent/fork").unwrap();
+    assert_eq!(effect.state,nomifun_agent_session::AgentEffectState::Returned);
     let source_turns:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_turns WHERE session_id=?")
         .bind(flow.robot_id.as_ref()).fetch_one(flow.fixture.pool()).await.unwrap();
-    assert_eq!(source_turns,2,"a report is a typed assistant projection, never a third hidden model Turn");
-    let calls=server.state.requests.lock().unwrap().len();
-    let replay=nomifun_agent_execution::AgentExecutionSessionPort::project_execution_report_idempotent(flow.fixture.owner.as_ref(),
-        &flow.owner,flow.robot_id.as_ref(),payload["operation_id"].as_str().unwrap(),payload["content"].as_str().unwrap(),&report).await.unwrap();
-    assert_eq!(replay,event.event_id.as_ref());assert_eq!(server.state.requests.lock().unwrap().len(),calls);
+    assert_eq!(source_turns,1,"the parent resumes its original Turn and no hidden result model Turn is created");
     let source=store.chat_causality_facts(&flow.robot_id,&original).await.unwrap();
-    assert_eq!(source.events.iter().filter(|event|event.kind.0=="message/assistant-projected").count(),1);
+    assert!(source.events.iter().all(|event|event.kind.0!="message/assistant-projected"),
+        "a source child never publishes its own result as the parent answer");
+    assert!(source.event_payloads.values().any(|payload|payload["content"].as_str().is_some_and(|text|text.contains(FOLLOWUP_REPLY))),
+        "the same Robot conversation's intermediate public answer remains in canonical history after the join");
+    let mut committed=std::collections::BTreeSet::new();
+    for event in source.events.iter().filter_map(|event|source.event_payloads.get(event.event_id.as_ref()))
+        .filter_map(|payload|payload.get("event")) {
+        if event["event"]=="public_output_committed" {committed.insert(event["step"].as_u64().unwrap());}
+        if matches!(event["event"].as_str(),Some("voice_model_step_superseded"|"delivery_review_superseded")) {
+            assert!(!committed.contains(&event["step"].as_u64().unwrap()),"joining a child cannot retract an already committed physical response");
+        }
+    }
     assert!(server.state.requests.lock().unwrap().iter().all(|body|body["model"]==COMPANION_MODEL));
     record_fixture_cost("physical_background_source",&server.state.requests.lock().unwrap(),&flow);
     flow.finish().await;server.close().await;

@@ -7,6 +7,13 @@ use nomifun_chat_model_broker::ToolCallId;
 #[path = "native_resume_waiter.rs"]
 mod native_resume_waiter;
 
+#[cfg(test)]
+pub(in crate::router) async fn prepare_resume_for_test(owner:&NomiCoreSessionOwner,
+    principal:&PrincipalRef,session:&AgentSessionId,request:&NativeResumeRequest)
+    ->Result<NativeResumePreparation,AppError> {
+    owner.prepare_native_resume(principal,session,request).await
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PauseRequest {
@@ -265,6 +272,41 @@ impl NomiCoreSessionOwner {
                     "No host dispatch occurred before the canonical pause fence. The proposal was not executed.",true),source:AgentReconciliationSource::NotDispatched,
                     evidence_event_id:Some(pause_event.clone()),owner_operation_id:None });
             }
+        }
+        // Internal child guidance has a real durable domain owner even though
+        // it does not dispatch an OS Action. Absence of a Kernel Effect alone
+        // cannot classify it as untouched after a lost Runtime reply.
+        let completed_controls=tail.iter().filter_map(|event|match event {
+            AgentEngineEvent::ToolCompleted {result,..}|AgentEngineEvent::ToolOutcomeReconciled {result,..}=>Some(result.call_id.clone()),
+            _=>None,
+        }).collect::<BTreeSet<_>>();
+        for event in &tail {
+            let AgentEngineEvent::ToolCallCompleted {call,..}=event else {continue;};
+            if call.name!="agent_message"||completed_controls.contains(&call.call_id)||owner_results.contains_key(&call.call_id) {continue;}
+            let command:nomifun_agent_runtime::AgentCollaborationMessage=serde_json::from_value(call.arguments.0.clone())
+                .map_err(|_|reject("the original child-message command is not readable"))?;
+            let engine=self.collaboration_engine()?;
+            let known=engine.message_receipt(&owner.principal_id,session.as_ref(),request.operation_id.as_ref(),
+                &command.execution_id,&command.step_id,&command.content,&command.idempotency_key).await?;
+            let (body,failed,witness,operation)=if let Some(receipt)=known {
+                let witness=format!("agent-execution-event:{}:{}",receipt.execution_id,receipt.sequence);
+                let operation=receipt.operation_id.clone();
+                let mut body=serde_json::to_value(receipt).map_err(|error|reject(&error.to_string()))?;
+                body["accepted"]=serde_json::json!(true);
+                (body,false,witness,operation)
+            } else {
+                // Preparation requires the exact committed pause fence.
+                // Every new message write checks that producer's original
+                // native epoch in the writer, so it cannot commit afterward.
+                (serde_json::json!({"state":"not_executed","control_applied":false,
+                    "code":"CHILD_MESSAGE_NOT_COMMITTED"}),true,pause_event.clone(),
+                    format!("{}:internal-message:{}",request.operation_id.as_ref(),call.call_id.as_ref()))
+            };
+            owner_results.insert(call.call_id.clone(),AgentReconciledOutcome {
+                result:AgentToolResult::text(call.call_id.clone(),body.to_string(),failed),
+                source:AgentReconciliationSource::NativeControlReceipt,evidence_event_id:Some(witness),
+                owner_operation_id:Some(operation.into()),
+            });
         }
         let mut reconciled = nomifun_agent_runtime::reconcile_execution_tail(&checkpoint,saved.revision,&tail,&dispatched,&owner_results,&request.budget)
             .map_err(|error| reject(&error.to_string()))?;

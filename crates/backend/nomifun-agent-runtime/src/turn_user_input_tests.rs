@@ -255,7 +255,7 @@ async fn user_input_recovered_locked_report_phase_keeps_communication_without_re
     let cp = crate::AgentExecutionCheckpoint {version:1,binding:binding(),turn_operation_id:"turn".into(),active_set_generation:0,
         model_steps:0,tool_call_count:0,accepted_input_count:1,applied_steering_receipts:vec![],plan:Default::default(),work:Default::default(),
         patch_recovery:Default::default(),segments:None,control_rejections:Default::default(),
-        completion_review:crate::AgentCompletionReviewState{phase:AgentExecutionPhase::CompletionReview,input_revision:1,..Default::default()},pending_user_input:None};
+        completion_review:crate::AgentCompletionReviewState{phase:AgentExecutionPhase::CompletionReview,input_revision:1,..Default::default()},pending_user_input:None, awaiting_children: None, collaboration: Default::default()};
     let prefix = vec![AgentEngineEvent::TurnStarted{binding:binding(),turn_operation_id:"turn".into()},
         AgentEngineEvent::RuntimeModulesActivated{modules:crate::adaptive::LEDGER_MODULES.to_vec(),reason:crate::AgentRuntimeActivationReason::ExplicitPlan},
         AgentEngineEvent::ExecutionCheckpointSaved{step:0,revision:1,digest:"d".repeat(64).into()}];
@@ -349,7 +349,7 @@ async fn blocked_timeout_account_requires_an_explicit_handoff_and_keeps_executio
 fn user_input_reconciliation_rebuilds_only_committed_source_and_new_input_retires_it() {
     let cp = crate::AgentExecutionCheckpoint { version:1,binding:binding(),turn_operation_id:"turn".into(),active_set_generation:0,
         model_steps:0,tool_call_count:0,accepted_input_count:1,applied_steering_receipts:vec![],plan:Default::default(),work:Default::default(),
-        patch_recovery:Default::default(),segments:None,control_rejections:Default::default(),completion_review:Default::default(),pending_user_input:None };
+        patch_recovery:Default::default(),segments:None,control_rejections:Default::default(),completion_review:Default::default(),pending_user_input:None, awaiting_children: None, collaboration: Default::default() };
     let call = ChatToolCall {call_id:"question".into(),name:crate::user_input_request::TOOL_NAME.into(),
         arguments:nomifun_agent_contracts::StrictJsonValue(json!({"question":"Your name?","remaining_work":"Create PPT."})),provider_metadata:None};
     let question = crate::user_input_request::from_call(&call).unwrap();

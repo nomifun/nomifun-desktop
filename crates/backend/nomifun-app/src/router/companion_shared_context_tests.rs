@@ -604,7 +604,7 @@ async fn retired_hidden_result_history_proves_report_and_original_human_without_
     let execution=uuid::Uuid::now_v7().to_string();let report_id=uuid::Uuid::now_v7().to_string();
     let report_operation=format!("exec-lead-report:{execution}:event:7");
     let source=json!({"agent_session_id":session,"turn_operation_id":parent,"tool_operation_id":"historical-tool-op","effect_id":"historical-effect"});
-    sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,plan_gate,adaptation_policy,decision_policy,delegation_policy,max_parallel,initial_plan_input,created_at,updated_at) VALUES(?,?,'historical request','completed','automatic','adaptive','ask_user','disabled',1,?,1,1)")
+    sqlx::query("INSERT INTO agent_executions(execution_id,user_id,goal,status,adaptation_policy,decision_policy,delegation_policy,max_parallel,initial_plan_input,created_at,updated_at) VALUES(?,?,'historical request','completed','adaptive','ask_user','disabled',1,?,1,1)")
         .bind(&execution).bind(&owner.principal_id).bind(json!({"mode":"directed","source":source,"plan":{"steps":[]}}).to_string()).execute(database.pool()).await.unwrap();
     sqlx::query("INSERT INTO conversation_execution_links(conversation_id,execution_id,relation,created_at,updated_at) VALUES(?,?,'lead',1,1)")
         .bind(session.as_ref()).bind(&execution).execute(database.pool()).await.unwrap();

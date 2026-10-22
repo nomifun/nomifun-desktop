@@ -70,7 +70,7 @@
 | R03 | Session 异步恢复原 Turn 与 Execution 恢复并行；后者可能先退休关联、停车并清理原 Turn。两类租约分别为 90s、30s。 | [state](../../crates/backend/nomifun-app/src/router/state.rs) 310、633；[native recovery](../../crates/backend/nomifun-app/src/router/native_turn_recovery.rs) 8；[scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs) 1458。 |
 | R04 | Stop／Steer 在主循环 inline await，会阻止兄弟 jobs 被 poll；错误还可能退出整代并触发兄弟的中断恢复。 | [scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs) 996、1046、1339、1414、2685。 |
 | R05 | Waiting／Paused 会延长观察 deadline 并每 500ms 查询；Attempt 仍占现有并发和工作区预约。 | [attempt runner](../../crates/backend/nomifun-agent-execution/src/attempt_runner.rs) 317；[scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs) 2973、3016、3050。 |
-| R06 | Full／ReadShell 不是只读沙箱，任意命令与后台写者无法靠当前工具状态完整推断，因此共享工作区现有保守顺序有明确原因。 | [scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs) 3021；[全局 OS 能力](../architecture/global-os-capabilities.zh.md)。 |
+| R06 | 旧 Full／ReadShell 把完整 Step 当成工作区独占，独立任务也被串行。2026-10-22 按用户新授权替换为原并发容量与真实操作 owner；任意 shell 及后台效果仍按其原责任核验。 | [scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs)；[全局 OS 能力](../architecture/global-os-capabilities.zh.md)。 |
 | R07 | Attached Chrome provider 的锁跨整次命令执行；disconnect、close、shutdown 也先取该锁。managed Browser 则已有按 Session 的隔离，不能混为全局锁。 | [attached provider](../../crates/backend/nomifun-app/src/browser_workspace_provider/attached_provider.rs) 261、359、436、690。 |
 | R08 | 旧 Computer 的控制缺口由新私有 Cua worker 接入承接；排队撤回、在途真实结果、超时 unknown 与退出退休沿原 InvocationControl，平台验收另计。 | [Wave2 contract](../../crates/backend/nomifun-agent-domain-wave2/src/lib.rs)、[Computer host](../../crates/backend/nomifun-app/src/router/computer_host.rs)、[worker owner](../../crates/backend/nomifun-computer/src/worker.rs)。 |
 | R09 | 固定最旧 100 项的 cleanup 查询会被持续失败项占住。此前原 SQL 内存复核连续三轮取不到第 101 项；执行阶段须固化为仓库回归测试。 | [scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs) 442、584；[repository](../../crates/backend/nomifun-db/src/repository/sqlite_agent_execution.rs) 4550、4573。 |
@@ -136,7 +136,7 @@
 4. 唤醒排队继续原任务，不能因为暂时没有预约而失败、kill、新建 Attempt 或反复暂停。保留用户原有 max_parallel、participant concurrency 等设置，不新增整机限额。
 5. 预约重新准入闭环和并发测试未完成前，禁止只修改 active count 排除 Waiting／Paused。相应目标不能标为已完成或悄悄降级成“不做”。
 6. 不按“现在没工具调用”推断任意 shell 没有后台写者。保持共享目录和原有 shell 权限，不要求预声明文件 footprint；不得将 Full 或 ReadShell 自动降级。
-7. 修复错误阻塞不等于宣称任意共享写者可安全并行。保留现有必要一致性策略；对可证明独立的 target／Session 提升并行，完整解决共享写并发需要另有明确一致性方案，不能混入本次生命周期重构。
+7. 2026-10-22 用户已授权完整子 Agent 并行重构：删除工具策略导致的整 Step 工作区独占，保留原并发设置、DAG 与实际 I/O／原生 target／效果 owner。共享目录和任意 shell 能力保持；同一产物的修改由父 Agent 协调集成，不能以强制 worktree、预声明 footprint 或只读降级替代并发。
 
 ### 4.5 控制投递与恢复交接
 
@@ -440,6 +440,26 @@ macOS 复用现有 darwin_registered／darwin_application 与 WK／AppKit fixtur
 实现稳定后将现役合同合并进 architecture 文档，移除根 AGENTS.md 的本专项活动入口，按仓库要求退役已被替代的施工／启动说明，不保留多版旧计划作为当前开发或生成器输入。需要追溯时使用 Git 历史；本步不得顺带清理用户数据或无关文档。
 
 ## 10. 单份执行进展
+
+### 2026-10-22 子 Agent 并发与继续执行（已实施并验证）
+
+用户已授权完整替换：保留既有能力、用户并发设置和 canonical 事实链；参考本地 DeepSeek Harness 的独立子会话与消息协作，复用现有 Session／Execution／资源 owner，不引入 Team 账本、固定驻留配额或 best-effort 交付。起点为 `f5a57a602ffbe0a67ed271d2b81435194480a0da`，工作区干净。使用隔离数据库、目录、受控 HTTP 模型及正式 Step Plan `step-5-preview`；实模凭据只经标准输入进入测试内存，未写入源码、命令参数或证据。用户随后授权仅本地 commit；提交身份以 Git 记录为准，不 push、打包安装或发布。
+
+现役合同：Full/ReadShell 只限制权限，不独占完整 Step；真实 I/O、原生目标、Unknown、取消与清理围栏保持。父 Agent 保留完整工具；首次明确委派只约束一次，受理后继续原 Turn，以 typed AwaitingChildren 让出模型容量并等待，恢复前在原 writer 取得既有 Execution/Participant 容量，预算不重置。`agent_status` 消费确切 Session／Turn／terminal 的完整分页结果，`agent_message` 通过原命令事实幂等指导运行中孩子，或以新 Step／Attempt 继续原子 Session；纯 FIFO 不伪装 DAG 依赖。父 Agent 自己整合、检查并正常交付。
+
+完整继承与交接：首次派发、运行中消息和完成后续发共用原 accepted 输入及命令前实际应用的 SteeringInputs；附件和显式 Skill 进入普通输入准备，工具来自冻结 Snapshot，队列与未来输入不越过因果边界。自然答案／录音交接读取本次工具之前最后一个已应用输入，保留原 presentation／socket／binding 校验；同一引导 key 在 Running／Completed 重投仍返回自己的原输入 ID，操作与结果继续引用原 claim，读回执不新增事件或模型调用。等待前的正文通过原 PublicOutputCommitted 取得公开交付证明。Robot 问题通知／播放以唯一事务校验器读取原正式 Store 输入与 Effect 证明，以 Returned Effect 真实事件授权，不再等待父回合结束；Pending／Unknown 保留原投递责任，明确撤权则拒绝交付。MESSAGE 共享长参数、目标、内容摘要与稳定身份校验；丢回复只观察原 owner 回执，不重发。取消读取所有原 Attempt／问题／Decision Turns 的确切 native 终态；业务取消不冒充结果交付，早期真实写入不会被新 queued Attempt 遮掉。workspace_change_sources 是唯一来源数组；删除读取原撤销事实，不恢复控制权限。
+
+退役：整 Step 工作区互斥、未调用 embedded invocation 类型、synthesize 自动开关、source 自动最终报告 writer、Robot 子结果回播、字符串化 tasks 修补分支，以及 plan_gate DTO／配置／物理列均已移除；015 前向迁移保留既有 baseline／迁移字节及其他配置。明确的 synthesis DAG、问题与控制、历史只读、非 source 现役报告保留。现役中英文 Agent Session／Execution 文档已同步。
+
+验证：最终 App 完整 lib **1171 通过／0 失败／4 原 ignored／0 filtered**，**474.64s**，无跳过，含全部 Companion／Question／Robot、HTTP 并行 barrier、同子 Session 续发、fork-only、精确 Stop、丢回复恢复、选择继承与全部原消费者。固定独立测试副本 SHA-256 `837f4cc25523626af0acb17841364331ae854ed351bb323682f76a82a492580c`，日志 `build.noindex/session-evidence-app-final-full.log`。Runtime **513 通过／1 原 ignored**、Execution **166/166**、Session **372/372**；最后事务读取器接线后，原受理输入 **4/4** 与 Effect **31/31** 定向复核通过（属于前述 Session 用例，不重复累加）。DB Execution **76/76**、迁移／ID／reset **13/13**、Contracts **126/126**、Wave5 **8/8**、EngineCore **67 通过／1 原 ignored**、Gateway **110/110**、nomi-types **6/6**。Windows cmd 混合分隔符原生回归 **2/2**，live 证据辅助单测 **24 通过／17 显式实模用例默认 ignored**。保留失败记录；首轮 App 15 失败、后续仅剩 Question 的 1170／1／4 均不是最终通过证据。
+
+验证边界：后端 libtest 使用既有两线程参数，真实并发用例内部的并发不变；一次默认 32 核并发批次变慢后主动停止，不计通过或具体用例失败。Windows debug 栈以原生展开证实为测试 poll 临时帧叠加，只在共享 Fixture 构造边界盒化；默认栈、场景与断言保留，两个 fatal 用例在最终整包中通过。人工 crash 撤权测试明确保留旧 writer 的正常关闭拒绝与可发现身份，不把已恢复业务回执当作完整 cleanup 证明。App `--lib --tests --no-default-features --features browser-use,computer-use` 检查通过，**4m46s**；未以此声明真实 Browser／Computer 操作或其他平台原生验收。正式生成器、Session／Desktop／process 边界、文档、raw schema probe 与 live runner 自检均通过。
+
+正式最终图实模 **1/1、116.37s**：`nomi_core_subagent_integration_reaches_live_stepfun` 经生产 Session／Runtime／Execution 路径，两个 Full 子 Agent 实际重叠 **22127ms**，各自写入并读回独立文件；原父 Turn 收齐结果、集成、运行严格完整内容验证，确切进程 exit=0／reaped=true。证据为 `full_children=2 parent_turns=1 native_write_sessions=3 final_projection=0 integrated=true verification_process=true`，应用正常关闭及凭据明文审计通过。最终测试程序 SHA-256 `76c7730fc87386583485f91ec7014fc5f850032d593d048b4a966db9400b4265`，运行 build digest `eebf820e2a782e238484f345a05c4bc987d91e08f268c0e40e7091343789f973`，证据在本任务 `subagent-live-result.json`。首轮 findstr /x 误判无末尾换行文件，未完成父交付且关闭报 background；失败记录保留。修正测试为完整内容比较并以本机正确／额外换行／错误内容三例验证后，中间图曾取得 82.06s／23279ms 通过；最后 Robot／回执修正重新构建后才取得上述最终证据。正式 runner 为 `--subagent-smoke`，未操作真实用户库或重启现役桌面进程。
+
+首次失败实模的隔离 Profile `C:/Users/rika0/AppData/Local/Temp/.tmptnVsmH` 清理被执行工具自动安全审核以 `blocked by policy` 拒绝，未提供更具体原因，目录保留；没有绕过审核。其余验证产物保留于本任务证据目录与忽略的 build.noindex，不冒称测试产物已全部删除。
+
+宿主整包复现命令：`cargo test --offline -p nomifun-app --lib --no-default-features -- --test-threads=2`。本次先生成程序，再对校验 SHA 的独立副本执行相同完整集合，避免 Windows 运行中程序锁阻碍另一构建；未过滤用例。默认 Channel transport features 和桌面 Browser／Computer 条件编译与这组运行证据分别记录。
 
 本节是唯一接续点；实现事实来自当前源码和实际执行证据。逻辑、隔离原生与未运行项分别记录，不将一次 Windows 通过扩大为三平台通过。
 

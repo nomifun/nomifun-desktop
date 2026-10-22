@@ -298,6 +298,43 @@ pub struct AppendAgentExecutionStepsParams {
     pub new_dependencies: Vec<NewAgentExecutionStepDependency>,
 }
 
+/// Source-authored new work uses the same append transaction and original
+/// execution events. A followup creates a new Step, preserving its predecessor.
+#[derive(Debug, Clone)]
+pub enum AgentExecutionSourceAppend {
+    Delegation { command: CreateAgentExecutionParams },
+    ChildFollowup {
+        message_source: AgentExecutionMessageSource,
+        original_step_id: String,
+        operation_id: String,
+        content_digest: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionMessageSource {
+    pub command_event_id:String,
+    pub agent_session_id: String,
+    pub turn_operation_id: String,
+    pub native_fence: u64,
+    pub native_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentExecutionClosedTurn {
+    pub conversation_id: String,
+    pub canonical_operation_id: String,
+    pub terminal_event_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentExecutionContinuationTarget {
+    pub conversation_id: String,
+    pub original_step_id: String,
+    pub original_attempt_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReconcileAgentExecutionPlanParams {
     pub goal: Option<String>,
@@ -340,6 +377,7 @@ pub struct AttemptConversationEffectParams {
 
 #[derive(Debug, Clone)]
 pub struct AttemptConversationEffectResult {
+    pub event_sequence: i64,
     pub detail: AgentExecutionStepDetailRow,
     pub conversation_id: String,
 }
@@ -650,6 +688,24 @@ pub trait IAgentExecutionRepository: Send + Sync {
         params: &AppendAgentExecutionStepsParams,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionDetailRows, DbError>;
+
+    async fn find_source_command(&self, user_id: &str, command: &CreateAgentExecutionParams)
+        -> Result<Option<AgentExecutionRow>, DbError>;
+    async fn append_source_steps(&self, user_id: &str, execution_id: &str, expected_version: i64,
+        source: &AgentExecutionSourceAppend, params: &AppendAgentExecutionStepsParams,
+        event: &NewAgentExecutionEvent) -> Result<AppendAgentExecutionStepsFromAttemptResult, DbError>;
+    async fn continuation_target(&self, user_id: &str, execution_id: &str, step_id: &str)
+        -> Result<Option<AgentExecutionContinuationTarget>, DbError>;
+    async fn original_child_binding(&self,user_id:&str,execution_id:&str,target:&AgentExecutionContinuationTarget)
+        ->Result<nomifun_agent_contracts::AgentHandoffBindingRefV1,DbError>;
+    async fn step_source(&self, user_id: &str, execution_id: &str, step_id: &str)
+        -> Result<Option<nomifun_common::AgentExecutionSource>, DbError>;
+    async fn step_session_available(&self, user_id: &str, execution_id: &str, step_id: &str)
+        -> Result<bool, DbError>;
+    async fn source_reply_turns(&self,user_id:&str,session_id:&str,current_turn:&str)->Result<Vec<String>,DbError>;
+    async fn step_message_source(&self,user_id:&str,execution_id:&str,step_id:&str)->Result<Option<AgentExecutionMessageSource>,DbError>;
+    async fn redirect_closed_steer(&self,user_id:&str,execution_id:&str,step_id:&str,attempt_id:&str,
+        operation_id:&str,closed:&AgentExecutionClosedTurn)->Result<(),DbError>;
 
     async fn get_step(
         &self,
