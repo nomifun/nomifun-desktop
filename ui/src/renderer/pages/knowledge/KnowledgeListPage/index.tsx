@@ -376,26 +376,28 @@ const KnowledgeListPage: React.FC = () => {
           )}
         />
 
-        <KnowledgeTagFilterBar
-          kindFilter={kindFilter}
-          tagFilter={tagFilter}
-          onKindChange={setKindFilter}
-          onTagChange={setTagFilter}
-          kindCounts={kindCounts}
-          tagCounts={tagCounts}
-          tags={tags}
-          sort={sort}
-          onSortChange={setSort}
-          sortDirection={sortDirection}
-          onSortDirectionChange={setSortDirection}
-          resultCount={displayBases.length === bases.length
-            ? t('knowledge.listCount', { count: bases.length, defaultValue: '{{count}} 个知识库' })
-            : t('knowledge.filteredListCount', {
-              visible: displayBases.length,
-              total: bases.length,
-              defaultValue: '{{visible}} / {{total}} 个知识库',
-            })}
-        />
+        {bases.length > 0 && (
+          <KnowledgeTagFilterBar
+            kindFilter={kindFilter}
+            tagFilter={tagFilter}
+            onKindChange={setKindFilter}
+            onTagChange={setTagFilter}
+            kindCounts={kindCounts}
+            tagCounts={tagCounts}
+            tags={tags}
+            sort={sort}
+            onSortChange={setSort}
+            sortDirection={sortDirection}
+            onSortDirectionChange={setSortDirection}
+            resultCount={displayBases.length === bases.length
+              ? t('knowledge.listCount', { count: bases.length, defaultValue: '{{count}} 个知识库' })
+              : t('knowledge.filteredListCount', {
+                visible: displayBases.length,
+                total: bases.length,
+                defaultValue: '{{visible}} / {{total}} 个知识库',
+              })}
+          />
+        )}
 
         {/* Error state */}
         {error && <KnowledgeErrorNotice error={error} onRetry={() => void refresh()} />}
