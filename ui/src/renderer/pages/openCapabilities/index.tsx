@@ -13,6 +13,7 @@ import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
 import InstanceAccessTokenPanel from '@/renderer/components/layout/Sider/InstanceAccessTokenPanel';
 import WebuiControlPanel from '@/renderer/components/layout/Sider/WebuiControlPanel';
+import WebuiAccessAddresses from '@/renderer/components/layout/Sider/WebuiAccessAddresses';
 import { WorkspaceFolderSelect } from '@/renderer/components/workspace';
 import { useWebuiServer } from '@/renderer/hooks/context/WebuiServerContext';
 import RegisterKnowledgeButton from '@/renderer/pages/terminal/RegisterKnowledgeButton';
@@ -253,10 +254,7 @@ const OpenCapabilitiesPage: React.FC = () => {
 
             <div className='flex flex-col gap-12px'>
               <InfoPanel icon={<WebPage theme='outline' size='17' fill='currentColor' />} title={t('settings.deviceConnections.browserStepsTitle')} body={t('settings.deviceConnections.browserSteps')} />
-              <EndpointBlock
-                label={t('settings.openCapabilities.currentAccessBase', { defaultValue: '当前访问基址' })}
-                value={baseUrl}
-              />
+              <WebuiAccessAddresses className='rd-10px border border-solid border-arco-2 bg-fill-0 px-12px py-10px' />
               <details className='rd-12px border border-solid border-arco-2 p-12px'>
                 <summary className='cursor-pointer text-13px text-t-secondary'>{t('settings.deviceConnections.addressAdvanced')}</summary>
                 <CapabilityNote

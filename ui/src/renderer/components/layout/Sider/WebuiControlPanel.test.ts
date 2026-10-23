@@ -7,14 +7,18 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
-import { createElement } from 'react';
+import { createElement, useState } from 'react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
+import { Message } from '@arco-design/web-react';
 import * as webuiContext from '@/renderer/hooks/context/WebuiServerContext';
 import * as themeContext from '@/renderer/hooks/context/ThemeContext';
+import * as clipboard from '@/renderer/utils/ui/clipboard';
 import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
 import WebuiControlPanel from './WebuiControlPanel';
+import WebuiQrLoginPanel from './WebuiQrLoginPanel';
+import { buildWebuiQrLoginUrl } from './webuiQrLinks';
 
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 const i18n = createInstance();
@@ -26,21 +30,21 @@ const userResponse = (status: number, body: unknown) => new Response(JSON.string
   status, headers: { 'Content-Type': 'application/json' },
 });
 
-function accountFixture(native = false) {
+function accountFixture(native = false, mode: 'page' | 'popover' = 'page', initialPassword: string | null = null) {
   const theme = spyOn(themeContext, 'useThemeContext').mockReturnValue({
     theme: 'light', setTheme: async () => {}, colorScheme: 'default', setColorScheme: async () => {}, fontScale: 1, setFontScale: async () => {},
   });
   const context = spyOn(webuiContext, 'useWebuiServer').mockReturnValue({
     // A browser must ignore even a default status value that says "admin".
     status: { running: false, port: 25808, allowRemote: false, localUrl: 'http://127.0.0.1:25808', adminUsername: native ? 'desktop-owner' : 'admin' },
-    running: false, starting: false, lifecycleSupported: native, initialPassword: null,
+    running: false, starting: false, lifecycleSupported: native, initialPassword,
     accessUrls: [], start: async () => {}, stop: async () => {}, refresh: async () => {}, clearInitialPassword: () => {},
   });
   let finish!: (response: Response) => void;
   const pending = new Promise<Response>((resolve) => { finish = resolve; });
   const fetching = spyOn(globalThis, 'fetch').mockReturnValue(pending);
   restore.push(() => theme.mockRestore(), () => context.mockRestore(), () => fetching.mockRestore());
-  const view = render(createElement(I18nextProvider, { i18n }, createElement(WebuiControlPanel, { mode: 'page' })));
+  const view = render(createElement(I18nextProvider, { i18n }, createElement(WebuiControlPanel, { mode })));
   const row = within(view.getByText('Username:').parentElement!);
   return { ...view, row, fetching, finish: async (status: number, body: unknown) => {
     await act(async () => { finish(userResponse(status, body)); });
@@ -49,7 +53,19 @@ function accountFixture(native = false) {
 
 describe('WebuiControlPanel authenticated browser account', () => {
   test('reads the authenticated username and uses it to initialize editing instead of the desktop admin default', async () => {
-    const view = accountFixture();
+    const desktopInitialPassword = 'desktop-only-initial-fixture';
+    const view = accountFixture(false, 'page', desktopInitialPassword);
+    expect(Boolean(view.queryByText(settings.webui, { exact: true }))).toBe(false);
+    expect(Boolean(view.queryByText(settings['webui.featureRemoteDesc']))).toBe(false);
+    expect(Boolean(view.queryByText(window.location.origin, { exact: true }))).toBe(false);
+    const passwordRow = within(view.getByText(`${settings['webui.password']}:`).parentElement!.parentElement!);
+    expect(passwordRow.getByText(settings['webui.passwordConfigured'])).toBeTruthy();
+    expect(view.getByText(settings['webui.passwordUnavailableHint'])).toBeTruthy();
+    expect(Boolean(view.queryByText(settings['webui.passwordHidden']))).toBe(false);
+    expect(Boolean(view.queryByText(desktopInitialPassword))).toBe(false);
+    expect(Boolean(passwordRow.queryByRole('button', { name: settings['webui.showPassword'] }))).toBe(false);
+    expect(Boolean(passwordRow.queryByRole('button', { name: settings['webui.hidePassword'] }))).toBe(false);
+    expect(Boolean(passwordRow.queryByRole('button', { name: settings['webui.copyPasswordTooltip'] }))).toBe(false);
     expect(view.row.getByText(common.loading)).toBeTruthy();
     expect(view.queryByText('admin')).toBeNull();
     expect((view.row.getByRole('button', { name: common.copy }) as HTMLButtonElement).disabled).toBe(true);
@@ -82,8 +98,15 @@ describe('WebuiControlPanel authenticated browser account', () => {
   });
 
   test('native status keeps the desktop account without probing browser authentication', () => {
-    const view = accountFixture(true);
+    const view = accountFixture(true, 'popover');
+    expect(view.getByText(settings.webui, { exact: true })).toBeTruthy();
+    expect(view.getByText(settings['webui.featureRemoteDesc'])).toBeTruthy();
     expect(view.row.getByText('desktop-owner')).toBeTruthy();
+    const passwordRow = within(view.getByText(`${settings['webui.password']}:`).parentElement!.parentElement!);
+    expect(passwordRow.getByText(settings['webui.passwordConfigured'])).toBeTruthy();
+    expect(Boolean(view.queryByText(settings['webui.passwordHidden']))).toBe(false);
+    expect(Boolean(passwordRow.queryByRole('button', { name: settings['webui.showPassword'] }))).toBe(false);
+    expect(Boolean(passwordRow.queryByRole('button', { name: settings['webui.copyPasswordTooltip'] }))).toBe(false);
     expect(view.fetching).not.toHaveBeenCalled();
     expect((view.row.getByRole('button', { name: settings['webui.editUsernameTooltip'] }) as HTMLButtonElement).disabled).toBe(false);
   });
@@ -94,28 +117,75 @@ describe('WebuiControlPanel QR login URL selection', () => {
     const source = readSource(new URL('./WebuiControlPanel.tsx', import.meta.url));
 
     expect(source.includes('getWebuiQrBaseUrls(status, accessUrls, port)')).toBe(true);
+    expect(source.includes('buildWebuiQrLoginUrl(selectedQrBaseUrl, qrToken)')).toBe(true);
+    expect(source.includes('webui.generateQRToken.invoke()')).toBe(true);
+    expect(source.includes('4 * 60 * 1000')).toBe(true);
     expect(source.includes('status.allowRemote && status.networkUrl')).toBe(false);
   });
 
-  test('makes the QR base URL selector a visible address decision', () => {
-    const source = readSource(new URL('./WebuiControlPanel.tsx', import.meta.url));
-
-    expect(source.includes('settings.webui.qrAddressPickerTitle')).toBe(true);
-    expect(source.includes('settings.webui.qrAddressPickerDesc')).toBe(true);
-    expect(source.includes('qr-address-picker')).toBe(true);
-    expect(source.includes('border-[rgba(var(--primary-6),0.30)]')).toBe(true);
+  test('copies the selected login address and disables copy and refresh while loading', async () => {
+    const baseUrls = ['http://192.168.1.50:25808', 'http://10.0.0.50:25808'];
+    const copy = spyOn(clipboard, 'copyText').mockResolvedValue(undefined);
+    const success = spyOn(Message, 'success').mockReturnValue(() => {});
+    restore.push(() => copy.mockRestore(), () => success.mockRestore());
+    let refreshes = 0;
+    function ControlledPanel({ loading }: { loading: boolean }) {
+      const [selectedBaseUrl, setSelectedBaseUrl] = useState(baseUrls[0]);
+      return createElement(WebuiQrLoginPanel, {
+        baseUrls,
+        selectedBaseUrl,
+        onBaseUrlChange: setSelectedBaseUrl,
+        qrUrl: buildWebuiQrLoginUrl(selectedBaseUrl, 'synthetic-token'),
+        expiresAt: Date.now() + 60_000,
+        loading,
+        onRefresh: () => { refreshes += 1; },
+      });
+    }
+    const panel = (loading: boolean) => createElement(I18nextProvider, { i18n }, createElement(ControlledPanel, { loading }));
+    const view = render(panel(false));
+    const select = view.getByRole('combobox', { name: settings['webui.loginAddress'] });
+    fireEvent.click(select);
+    fireEvent.click(view.getByRole('option', { name: baseUrls[1] }));
+    await waitFor(() => expect(select.textContent).toContain(baseUrls[1]));
+    const copyButton = view.getByRole('button', { name: settings['webui.copyQrLink'] }) as HTMLButtonElement;
+    const refreshButton = view.getByRole('button', { name: settings['webui.refreshQr'] }) as HTMLButtonElement;
+    expect(copyButton.disabled).toBe(false);
+    expect(refreshButton.disabled).toBe(false);
+    fireEvent.click(copyButton);
+    await waitFor(() => expect(copy).toHaveBeenCalledWith('http://10.0.0.50:25808/qr-login?token=synthetic-token'));
+    fireEvent.click(refreshButton);
+    expect(refreshes).toBe(1);
+    view.rerender(panel(true));
+    const disabledCopy = view.getByRole('button', { name: settings['webui.copyQrLink'] }) as HTMLButtonElement;
+    const disabledRefresh = view.getByRole('button', { name: settings['webui.refreshQr'] }) as HTMLButtonElement;
+    expect(disabledCopy.disabled).toBe(true);
+    expect(disabledRefresh.disabled).toBe(true);
+    fireEvent.click(disabledCopy);
+    fireEvent.click(disabledRefresh);
+    expect(copy).toHaveBeenCalledTimes(1);
+    expect(refreshes).toBe(1);
   });
 });
 
 describe('WebuiControlPanel credential controls', () => {
-  test('keeps credential pills compact while separating text from grouped icons', () => {
-    const source = readSource(new URL('./WebuiControlPanel.tsx', import.meta.url));
-
-    expect(source.includes("px-8px py-2px'")).toBe(true);
-    expect(source.includes("'ml-6px inline-flex shrink-0 items-center gap-0'")).toBe(true);
-    expect(source.includes('!h-20px !w-20px !min-w-20px !p-0')).toBe(true);
-    expect(source.includes('<Copy size={13} />')).toBe(true);
-    expect(source.includes('<EditTwo size={13} />')).toBe(true);
+  test('the native initial password stays masked until revealed and can be copied without a duplicate plaintext block', async () => {
+    const initialPassword = 'generated-initial-password-fixture';
+    const copy = spyOn(clipboard, 'copyText').mockResolvedValue(undefined);
+    const success = spyOn(Message, 'success').mockReturnValue(() => {});
+    restore.push(() => copy.mockRestore(), () => success.mockRestore());
+    const view = accountFixture(true, 'page', initialPassword);
+    const passwordRow = within(view.getByText(`${settings['webui.password']}:`).parentElement!.parentElement!);
+    expect(Boolean(view.queryByText(initialPassword))).toBe(false);
+    expect(passwordRow.getByText(settings['webui.passwordHidden'])).toBeTruthy();
+    expect(view.getByText(settings['webui.initialPasswordHint'])).toBeTruthy();
+    fireEvent.click(passwordRow.getByRole('button', { name: settings['webui.showPassword'] }));
+    expect(view.getAllByText(initialPassword)).toHaveLength(1);
+    expect(Boolean(passwordRow.queryByRole('button', { name: settings['webui.showPassword'] }))).toBe(false);
+    fireEvent.click(passwordRow.getByRole('button', { name: settings['webui.hidePassword'] }));
+    expect(Boolean(view.queryByText(initialPassword))).toBe(false);
+    fireEvent.click(passwordRow.getByRole('button', { name: settings['webui.copyPasswordTooltip'] }));
+    await waitFor(() => expect(copy).toHaveBeenCalledWith(initialPassword));
+    expect(Boolean(view.queryByText(initialPassword))).toBe(false);
   });
 
   test('uses content-height small modals with the current shared header contract', () => {
@@ -141,6 +211,10 @@ describe('Open Capabilities WebUI entry', () => {
     expect(webuiTabStart).toBeGreaterThan(-1);
     expect(mcpTabStart).toBeGreaterThan(webuiTabStart);
     expect(webuiTabSource.includes("<WebuiControlPanel mode='page' />")).toBe(true);
+    expect(webuiTabSource.includes('<WebuiAccessAddresses')).toBe(true);
+    expect(webuiTabSource.indexOf('<WebuiAccessAddresses')).toBeGreaterThan(webuiTabSource.indexOf('<InfoPanel'));
+    expect(webuiTabSource.includes('<EndpointBlock')).toBe(false);
+    expect(webuiTabSource.includes('currentAccessBase')).toBe(false);
     expect(webuiTabSource.includes('RegisterKnowledgeButton')).toBe(false);
     expect(webuiTabSource.includes('projectRegisterTitle')).toBe(false);
   });
@@ -186,8 +260,7 @@ describe('Open Capabilities WebUI entry', () => {
 
 describe('WebuiControlPanel password change scope warning', () => {
   const openSetPasswordModal = (view: ReturnType<typeof accountFixture>) => {
-    const row = within(view.getByText(`${settings['webui.initialPassword']}:`).parentElement!);
-    fireEvent.click(row.getByRole('button'));
+    fireEvent.click(view.getByRole('button', { name: settings['webui.changePassword'] }));
   };
 
   test('a browser session warns that the password change signs out every paired phone', async () => {
