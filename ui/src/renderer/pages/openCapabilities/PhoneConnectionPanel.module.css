@@ -1,0 +1,43 @@
+.steps {
+  display: grid;
+  grid-template-columns: minmax(0, 9fr) minmax(0, 11fr);
+  align-items: stretch;
+  gap: 12px;
+}
+
+.step {
+  min-width: 0;
+  container: phone-connection-step / inline-size;
+}
+
+.stepTitle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 32px;
+  line-height: 22px;
+}
+
+.addressSelect :global(.arco-select-view) {
+  border: 1px solid var(--control-idle-border, var(--color-border-3));
+  border-radius: 6px;
+}
+
+.addressSelect:not(:global(.arco-select-disabled)):hover :global(.arco-select-view),
+.addressSelect:global(.arco-select-focused) :global(.arco-select-view) {
+  border-color: rgb(var(--primary-6));
+}
+
+.qrContent {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+@container phone-connection-step (max-width: 420px) {
+  .qrContent {
+    flex-direction: column;
+    gap: 8px;
+  }
+}

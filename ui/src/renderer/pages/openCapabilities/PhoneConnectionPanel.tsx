@@ -1,17 +1,20 @@
 import React, { Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Modal, Radio, Select, Spin, Tag } from '@arco-design/web-react';
+import { CheckOne } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { IRelayPairingStatus } from '@/common/adapter/ipcBridge';
 import { buildMobilePairingUrl, connections, type ConnectionDevice, type ConnectionInfo, type ConnectionPairing, type ConnectionPairingStatus } from '@/common/adapter/connections';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import RelayPairingPanel from '@/renderer/components/layout/Sider/RelayPairingPanel';
+import ConnectionHint from '@/renderer/components/layout/Sider/ConnectionHint';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import { getWebuiQrBaseUrls } from '@/renderer/components/layout/Sider/webuiQrLinks';
 import { useWebuiServer } from '@/renderer/hooks/context/WebuiServerContext';
+import styles from './PhoneConnectionPanel.module.css';
 
 const QRCode = React.lazy(async () => ({ default: (await import('qrcode.react')).QRCodeSVG }));
-const PANEL = 'rd-12px border border-solid border-arco-2 bg-fill-0 p-16px';
+const PANEL = 'rd-12px border border-solid border-arco-2 bg-fill-0';
 const DEVICE_LIST_POLL_MS = 15_000;
 
 const PhoneConnectionPanel: React.FC = () => {
@@ -172,90 +175,119 @@ const PhoneConnectionPanel: React.FC = () => {
 
   return (
     <div className='flex flex-col gap-16px' data-testid='phone-connection-panel'>
-      <section className={PANEL}>
+      <section className={`${PANEL} p-16px`}>
         <div className='flex items-center justify-between gap-12px'>
           <div>
             <div className='text-12px text-t-tertiary'>{t('settings.deviceConnections.thisDesktop')}</div>
-            <h2 className='m-0 mt-4px text-17px font-600 text-t-primary'>{info?.desktop_name || t('settings.deviceConnections.desktopLoading')}</h2>
+            <div className='mt-4px flex items-center gap-6px'>
+              <h2 className='m-0 text-17px font-600 text-t-primary'>{info?.desktop_name || t('settings.deviceConnections.desktopLoading')}</h2>
+              <ConnectionHint label={t('settings.deviceConnections.thisDesktop')} content={t('settings.deviceConnections.phoneIntro')} />
+            </div>
           </div>
           <Tag>{t('settings.deviceConnections.desktopAuthority')}</Tag>
         </div>
-        <p className='mb-0 text-13px leading-20px text-t-secondary'>{t('settings.deviceConnections.phoneIntro')}</p>
         {infoError && <Alert className='mt-12px' type='error' content={t('settings.deviceConnections.infoFailed')} />}
         {!lifecycleSupported && <Alert className='mt-12px' type='info' content={t('settings.deviceConnections.browserOwnerHint')} />}
         {managementAllowed === false && <Alert className='mt-12px' type='warning' content={t('settings.deviceConnections.ownerRequired')} />}
       </section>
 
-      <>
-        <section className={PANEL}>
-          <h2 className='m-0 mb-12px text-15px font-600 text-t-primary'>{t(lifecycleSupported ? 'settings.deviceConnections.choosePath' : 'settings.deviceConnections.confirmAddress')}</h2>
-          {lifecycleSupported && <Radio.Group type='button' value={path} onChange={selectPath}>
-            <Radio value='lan'>{t('settings.deviceConnections.sameNetwork')}</Radio>
-            <Radio value='relay'>{t('settings.deviceConnections.crossNetwork')}</Radio>
-          </Radio.Group>}
-          {lifecycleSupported && <p className='mb-0 text-13px leading-20px text-t-secondary'>{t(path === 'lan' ? 'settings.deviceConnections.lanHint' : 'settings.deviceConnections.crossHint')}</p>}
-          <div className='mt-16px'>
+      <div className={styles.steps}>
+        <section className={`${PANEL} ${styles.step} p-12px`}>
+          <div className={`${styles.stepTitle} mb-8px`}>
+            <h2 className='m-0 text-15px font-600 text-t-primary'>{t(lifecycleSupported ? 'settings.deviceConnections.choosePath' : 'settings.deviceConnections.confirmAddress')}</h2>
+            {lifecycleSupported && <ConnectionHint
+              label={t('settings.deviceConnections.choosePath')}
+              content={<span className='flex flex-col gap-8px'>
+                <span><strong className='block'>{t('settings.deviceConnections.sameNetwork')}</strong><span>{t('settings.deviceConnections.lanHint')}</span></span>
+                <span><strong className='block'>{t('settings.deviceConnections.crossNetwork')}</strong><span>{t('settings.deviceConnections.crossHint')}</span></span>
+              </span>}
+            />}
+          </div>
+          {lifecycleSupported && <div className='flex flex-wrap items-center gap-8px'>
+            <Radio.Group className='min-w-0' type='button' value={path} onChange={selectPath}>
+              <Radio value='lan'>{t('settings.deviceConnections.sameNetwork')}</Radio>
+              <Radio value='relay'>{t('settings.deviceConnections.crossNetwork')}</Radio>
+            </Radio.Group>
+          </div>}
+          <div className='mt-8px'>
             {!lifecycleSupported ? <>
-              <code className='block break-all text-13px text-t-primary' data-testid='browser-pairing-address'>{browserBaseUrl}</code>
-              <p className='mb-0 text-12px leading-18px text-t-tertiary'>{t('settings.deviceConnections.browserAddressHint')}</p>
+              <div className='flex items-center gap-6px'>
+                <code className='break-all text-13px text-t-primary' data-testid='browser-pairing-address'>{browserBaseUrl}</code>
+                <ConnectionHint label={t('settings.deviceConnections.confirmAddress')} content={t('settings.deviceConnections.browserAddressHint')} />
+              </div>
             </> : path === 'lan' ? <>
-              {!running && <Alert type='info' content={t('settings.deviceConnections.lanOff')} action={<Button type='primary' loading={starting} onClick={() => void start()}>{t('settings.deviceConnections.lanEnable')}</Button>} />}
+              {!running && <div className='flex flex-col items-start gap-8px'>
+                <Alert type='info' content={t('settings.deviceConnections.lanOff')} />
+                <Button className='h-auto max-w-full whitespace-normal py-6px' type='primary' loading={starting} onClick={() => void start()}>{t('settings.deviceConnections.lanEnable')}</Button>
+              </div>}
               {running && urls.length === 0 && <Alert type='warning' content={t('settings.deviceConnections.noLanAddress')} />}
-              {running && urls.length > 0 && <div className='flex flex-col gap-6px text-13px text-t-secondary'>
-                <span id={`${addressFieldId}-label`}>{t('settings.deviceConnections.addressLabel')}</span>
+              {running && urls.length > 0 && <div className='flex flex-col gap-4px text-13px text-t-secondary'>
+                <div className='flex items-center gap-6px'>
+                  <span id={`${addressFieldId}-label`}>{t('settings.deviceConnections.addressLabel')}</span>
+                  <ConnectionHint id={`${addressFieldId}-hint`} label={t('settings.deviceConnections.addressLabel')} content={t('settings.deviceConnections.addressHint')} />
+                </div>
                 <Select
+                  className={styles.addressSelect}
                   aria-labelledby={`${addressFieldId}-label`}
                   aria-describedby={`${addressFieldId}-hint`}
                   value={baseUrl}
                   onChange={(value) => { setBaseUrl(value); setPairing(null); setError(null); }}
                   options={urls.map((url) => ({ value: url, label: url }))}
                 />
-                <span id={`${addressFieldId}-hint`} className='text-12px text-t-tertiary'>{t('settings.deviceConnections.addressHint')}</span>
               </div>}
             </> : <RelayPairingPanel onStatusChange={setRelay} />}
           </div>
         </section>
 
-        <section className={PANEL} data-testid='mobile-pairing'>
-          <div className='flex flex-wrap items-center justify-between gap-12px'>
-            <h2 className='m-0 text-15px font-600 text-t-primary'>{t('settings.deviceConnections.scanStep')}</h2>
-            <Button data-testid='generate-phone-pairing' type='primary' disabled={!ready || !info} loading={busy} onClick={() => void generate()}>{t(qrUrl ? 'settings.deviceConnections.pairRefresh' : 'settings.deviceConnections.pairGenerate')}</Button>
+        <section className={`${PANEL} ${styles.step} flex flex-col gap-8px p-12px`} data-testid='mobile-pairing'>
+          <div className='flex flex-wrap items-center justify-between gap-8px'>
+            <div className={styles.stepTitle}>
+              <h2 className='m-0 text-15px font-600 text-t-primary'>{t('settings.deviceConnections.scanStep')}</h2>
+              <ConnectionHint label={t('settings.deviceConnections.scanStep')} content={t('settings.deviceConnections.phonePermissions')} />
+            </div>
+            <div className='flex flex-wrap items-center gap-8px'>
+              {ready && info && !ticketId && !busy && <span className='inline-flex items-center gap-4px text-12px text-t-secondary' role='status'>
+                <CheckOne size={14} className='text-success-6' aria-hidden='true' />
+                {t('settings.deviceConnections.pairReady')}
+              </span>}
+              <Button data-testid='generate-phone-pairing' type='primary' disabled={!ready || !info} loading={busy} onClick={() => void generate()}>{t(qrUrl ? 'settings.deviceConnections.pairRefresh' : 'settings.deviceConnections.pairGenerate')}</Button>
+            </div>
           </div>
-          <p className='text-13px leading-20px text-t-secondary'>{t('settings.deviceConnections.scanHint')}</p>
-          <p className='text-12px leading-18px text-t-tertiary'>{t('settings.deviceConnections.phonePermissions')}</p>
+          <p className='m-0 text-13px leading-20px text-t-secondary'>{t('settings.deviceConnections.scanHint')}</p>
           {receiptRemoved ? <div data-testid='phone-pairing-revoked'><Alert type='warning' showIcon content={t('settings.deviceConnections.pairRemoved')} /></div>
             : used ? <div data-testid='phone-pairing-completed'><Alert type='success' showIcon content={t('settings.deviceConnections.pairUsed', { name: pairedDevice?.device_name || t('settings.deviceConnections.phoneName') })} /></div>
             : pairInvalidated ? <Alert type='warning' showIcon content={t('settings.deviceConnections.pairInvalidated')} />
             : failed ? <Alert type='warning' showIcon content={t(pairStatus?.failure_code === 'DEVICE_LIMIT_REACHED' ? 'settings.deviceConnections.pairFailedLimit' : 'settings.deviceConnections.pairFailed')} />
             : expired ? <Alert type='warning' showIcon content={t('settings.deviceConnections.pairExpired')} />
-              : ready && qrUrl && ticketId ? <div className='flex items-start gap-20px'>
-                <div className='shrink-0 rd-10px bg-white p-10px' data-testid='phone-pairing-qr'><Suspense fallback={<Spin />}><QRCode value={qrUrl} size={172} level='M' /></Suspense></div>
-                <div className='flex min-w-0 flex-col gap-10px text-13px text-t-secondary' aria-live='polite'>
+              : ready && qrUrl && ticketId ? <div className={styles.qrContent}>
+                <div className='flex h-144px w-144px shrink-0 items-center justify-center rd-8px bg-white p-8px' data-testid='phone-pairing-qr'><Suspense fallback={<Spin />}><QRCode value={qrUrl} size={144} level='M' /></Suspense></div>
+                <div className='flex min-w-0 flex-col gap-6px text-13px leading-20px text-t-secondary' aria-live='polite'>
                   <strong>{t('settings.deviceConnections.pairWaiting')}</strong>
                   <span>{t('settings.deviceConnections.pairCountdown', { time: `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` })}</span>
                   <span className='text-12px leading-18px text-t-tertiary'>{t('settings.deviceConnections.pairSingleUse')}</span>
-                  <span className='inline-flex items-center gap-6px'><CopyIconButton text={qrUrl} size={16} tooltip={t('settings.deviceConnections.pairCopy')} />{t('settings.deviceConnections.pairCopy')}</span>
-                  <details className='w-full'>
-                    <summary className='cursor-pointer text-12px text-primary-6'>{t('settings.deviceConnections.pairManualCopy')}</summary>
-                    <label className='mt-8px flex flex-col gap-6px text-12px'>
-                      {t('settings.deviceConnections.pairLinkLabel')}
-                      <textarea data-testid='phone-pairing-link' aria-label={t('settings.deviceConnections.pairLinkLabel')} readOnly value={qrUrl} rows={3} className='w-full box-border rd-6px border border-solid border-arco-2 bg-fill-1 px-8px py-6px font-mono text-12px text-t-secondary resize-none' />
-                    </label>
-                  </details>
+                  <div className='relative w-full'>
+                    <details className='w-full min-w-0'>
+                      <summary className='cursor-pointer pr-32px text-12px leading-24px text-primary-6'>{t('settings.deviceConnections.pairManualCopy')}</summary>
+                      <textarea data-testid='phone-pairing-link' aria-label={t('settings.deviceConnections.pairLinkLabel')} readOnly value={qrUrl} rows={3} className='mt-8px block w-full box-border rd-6px border border-solid border-arco-2 bg-fill-1 px-8px py-6px font-mono text-12px text-t-secondary resize-none' />
+                    </details>
+                    <CopyIconButton className='absolute right-0 top-0 h-24px w-24px' text={qrUrl} size={16} tooltip={t('settings.deviceConnections.pairCopy')} />
+                  </div>
                 </div>
-              </div> : <Alert type='info' content={t(ready ? 'settings.deviceConnections.pairReady' : 'settings.deviceConnections.pairNotReady')} />}
-          {error && <Alert className='mt-12px' type='error' showIcon content={error} />}
-          {pairStatusError && <Alert className='mt-12px' type='warning' showIcon content={pairStatusError} />}
+              </div> : !ready && <p className='m-0 text-12px leading-18px text-t-tertiary' role='status'>{t('settings.deviceConnections.pairNotReady')}</p>}
+          {error && <Alert type='error' showIcon content={error} />}
+          {pairStatusError && <Alert type='warning' showIcon content={pairStatusError} />}
         </section>
-      </>
+      </div>
 
-      <section className={PANEL} data-testid='connection-devices'>
+      <section className={`${PANEL} p-16px`} data-testid='connection-devices'>
         <div className='flex items-center justify-between gap-12px'>
-          <h2 className='m-0 text-15px font-600 text-t-primary'>{t('settings.deviceConnections.devicesTitle', { count: activeDevices.length })}</h2>
+          <div className='flex items-center gap-6px'>
+            <h2 className='m-0 text-15px font-600 text-t-primary'>{t('settings.deviceConnections.devicesTitle', { count: activeDevices.length })}</h2>
+            <ConnectionHint label={t('settings.deviceConnections.devicesTitle', { count: activeDevices.length })} content={t('settings.deviceConnections.devicesHint')} />
+          </div>
           <Button size='small' onClick={() => void refreshDevices()}>{t('settings.deviceConnections.devicesRefresh')}</Button>
         </div>
-        <p className='text-12px leading-18px text-t-tertiary'>{t('settings.deviceConnections.devicesHint')}</p>
-        {deviceError ? <Alert type={managementAllowed === false ? 'warning' : 'error'} content={t(managementAllowed === false ? 'settings.deviceConnections.ownerRequired' : 'settings.deviceConnections.devicesFailed')} /> : activeDevices.length === 0
+        <div className='mt-12px'>{deviceError ? <Alert type={managementAllowed === false ? 'warning' : 'error'} content={t(managementAllowed === false ? 'settings.deviceConnections.ownerRequired' : 'settings.deviceConnections.devicesFailed')} /> : activeDevices.length === 0
           ? <p className='text-13px text-t-secondary'>{t('settings.deviceConnections.devicesEmpty')}</p>
           : <div className='flex flex-col gap-8px'>{activeDevices.map((device) => <div key={device.device_id} data-testid='paired-phone' data-device-id={device.device_id} className='flex items-center justify-between gap-12px rd-8px bg-fill-1 px-12px py-10px'>
             <div className='min-w-0'>
@@ -263,7 +295,7 @@ const PhoneConnectionPanel: React.FC = () => {
               <div className='mt-3px text-12px text-t-tertiary'>{t('settings.deviceConnections.deviceLastSeen', { time: new Date(device.last_seen_at_ms).toLocaleString() })}</div>
             </div>
             <Button data-testid='remove-phone' status='danger' size='small' onClick={() => revoke(device)}>{t('settings.deviceConnections.deviceRemove')}</Button>
-          </div>)}</div>}
+          </div>)}</div>}</div>
       </section>
     </div>
   );

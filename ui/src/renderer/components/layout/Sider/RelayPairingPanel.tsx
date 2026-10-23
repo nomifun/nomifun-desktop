@@ -1,9 +1,11 @@
 /** NomiRelay configuration is installation transport, not a Mobile identity. */
 import { Alert, Button, Input, Modal, Tag } from '@arco-design/web-react';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { IRelayPairingStatus } from '@/common/adapter/ipcBridge';
+import ConnectionHint from './ConnectionHint';
+import styles from './RelayPairingPanel.module.css';
 
 interface RelayPairingPanelProps {
   onStatusChange: (status: IRelayPairingStatus) => void;
@@ -29,6 +31,8 @@ const ACTION_ERROR_MESSAGES: Record<string, string> = {
 
 const RelayPairingPanel: React.FC<RelayPairingPanelProps> = ({ onStatusChange }) => {
   const { t, i18n } = useTranslation();
+  const consoleFieldId = useId();
+  const envelopeFieldId = useId();
   const [consoleUrl, setConsoleUrl] = useState('');
   const [envelope, setEnvelope] = useState('');
   const [status, setStatus] = useState(EMPTY_STATUS);
@@ -135,6 +139,7 @@ const RelayPairingPanel: React.FC<RelayPairingPanelProps> = ({ onStatusChange })
     : null;
   const stateUnreadable = status.errorCode === 'RELAY_STATE_UNREADABLE';
   const canBootstrap = !stateUnreadable && !status.relay && !status.pendingBootstrap;
+  const showHealth = Boolean(status.health && (status.relay || status.pendingBootstrap || status.state !== 'disconnected'));
   const forgettable = stateUnreadable
     || status.actionErrorCode === 'RELAY_REVOKE_UNCONFIRMED'
     || status.actionErrorCode === 'RELAY_STATE_UNREADABLE';
@@ -152,25 +157,27 @@ const RelayPairingPanel: React.FC<RelayPairingPanelProps> = ({ onStatusChange })
 
   return (
     <section className='flex flex-col gap-12px' data-testid='relay-configuration'>
-      <div className='flex items-center justify-between gap-12px'>
-        <strong className='text-14px text-t-primary'>{t('settings.deviceConnections.relayTitle')}</strong>
+      <div className='flex flex-wrap items-center justify-between gap-8px'>
+        <div className='flex items-center gap-4px'>
+          <strong className='text-14px leading-20px text-t-primary'>{t('settings.deviceConnections.relayTitle')}</strong>
+          <ConnectionHint label={t('settings.deviceConnections.relayTitle')} content={t('settings.deviceConnections.relayIntro')} />
+        </div>
         <Tag color={status.state === 'connected' ? 'green' : status.state === 'error' ? 'red' : 'gray'}>{t(statusLabel)}</Tag>
       </div>
-      <p className='m-0 text-13px leading-20px text-t-secondary'>{t('settings.deviceConnections.relayIntro')}</p>
-      <div className='flex gap-8px'>
-        <Input aria-label={t('settings.deviceConnections.consoleUrl')} value={consoleUrl} onChange={setConsoleUrl} placeholder='https://relay.example.com/console' />
-        <Button onClick={openConsole} disabled={!consoleUrl.trim()}>{t('settings.deviceConnections.consoleOpen')}</Button>
+      <div className={styles.field}>
+        <label htmlFor={consoleFieldId}>{t('settings.deviceConnections.consoleUrl')}</label>
+        <div className='flex flex-wrap gap-8px'>
+          <Input id={consoleFieldId} className={`${styles.input} min-w-0 flex-1 basis-160px`} aria-label={t('settings.deviceConnections.consoleUrl')} value={consoleUrl} onChange={setConsoleUrl} placeholder='https://relay.example.com/console' />
+          <Button onClick={openConsole} disabled={!consoleUrl.trim()}>{t('settings.deviceConnections.consoleOpen')}</Button>
+        </div>
       </div>
-      <div className='text-12px text-t-tertiary'>
-        {t('settings.deviceConnections.relayDeploymentHint')}{' '}
-        <Button type='text' size='mini' onClick={() => void ipcBridge.shell.openExternal.invoke(i18n.language.startsWith('zh') ? 'https://www.nomifun.com/zh/docs/guides/net-infra/' : 'https://www.nomifun.com/docs/guides/net-infra/')}>
-          {t('settings.deviceConnections.relayDeploymentGuide')}
-        </Button>
-      </div>
-      {canBootstrap && <label className='flex flex-col gap-6px text-13px text-t-secondary'>
-        {t('settings.deviceConnections.envelopeLabel')}
-        <Input.Password value={envelope} onChange={setEnvelope} placeholder='nomifun-relay-pair:v2:…' autoComplete='off' maxLength={8192} onPressEnter={() => void runAction('bootstrap')} />
-      </label>}
+      {canBootstrap && <div className={styles.field}>
+        <div className='flex items-center gap-4px'>
+          <label htmlFor={envelopeFieldId}>{t('settings.deviceConnections.envelopeLabel')}</label>
+          <ConnectionHint label={t('settings.deviceConnections.envelopeLabel')} content={t('settings.deviceConnections.relayEnrollmentHint')} />
+        </div>
+        <Input.Password id={envelopeFieldId} className={styles.input} aria-label={t('settings.deviceConnections.envelopeLabel')} value={envelope} onChange={setEnvelope} placeholder='nomifun-relay-pair:v2:…' autoComplete='off' maxLength={8192} onPressEnter={() => void runAction('bootstrap')} />
+      </div>}
       <div className='flex flex-wrap gap-8px'>
         {(pendingAction === 'bootstrap' || pendingAction === 'restart') && <Button onClick={() => void runAction('stop')}>{t('common.cancel')}</Button>}
         {canBootstrap && <Button type='primary' loading={loading} disabled={!envelope.trim()} onClick={() => void runAction('bootstrap')}>
@@ -186,10 +193,6 @@ const RelayPairingPanel: React.FC<RelayPairingPanelProps> = ({ onStatusChange })
       {status.state === 'paused' && <Alert type='info' content={t('settings.deviceConnections.relayPauseHint')} />}
       {status.pendingBootstrap && <Alert type='warning' showIcon content={t('settings.deviceConnections.relayPendingHint')} />}
       {status.protocolVersion === 1 && <Alert type='warning' content={t('settings.deviceConnections.relayUpgradeHint')} />}
-      {status.health && <div className='flex flex-wrap gap-12px text-12px text-t-secondary' aria-live='polite'>
-        <span>{t(status.health.backendReachable ? 'settings.deviceConnections.backendReady' : 'settings.deviceConnections.backendUnavailable')}</span>
-        <span>{t(status.health.tunnelReachable ? 'settings.deviceConnections.tunnelReady' : 'settings.deviceConnections.tunnelUnavailable')}</span>
-      </div>}
       {actionMessage && <Alert type='error' showIcon content={actionMessage} />}
       {status.actionErrorCode === 'RELAY_ENTRY_NOT_READY' && !!status.relayReason &&
         <div className='text-12px text-t-tertiary'>{t('settings.deviceConnections.relayReasonDetail', { reason: status.relayReason })}</div>}
@@ -199,7 +202,20 @@ const RelayPairingPanel: React.FC<RelayPairingPanelProps> = ({ onStatusChange })
       {stateUnreadable && status.actionErrorCode !== 'RELAY_STATE_UNREADABLE' &&
         <Alert type='error' showIcon content={t('settings.deviceConnections.relayErrorStateUnreadable')} />}
       {genericAlert && <Alert type='error' showIcon content={genericAlert} />}
+      {showHealth && status.health && <div className={styles.health} aria-live='polite'>
+        <span data-ready={status.health.backendReachable}>{t(status.health.backendReachable ? 'settings.deviceConnections.backendReady' : 'settings.deviceConnections.backendUnavailable')}</span>
+        <span data-ready={status.health.tunnelReachable}>{t(status.health.tunnelReachable ? 'settings.deviceConnections.tunnelReady' : 'settings.deviceConnections.tunnelUnavailable')}</span>
+      </div>}
       {status.businessUrl && <div className='text-12px text-t-tertiary break-all'>{t('settings.deviceConnections.relayBusinessAddress')}: {status.businessUrl}</div>}
+      <details className={styles.setupHelp}>
+        <summary className='cursor-pointer text-12px leading-24px text-primary-6'>{t('settings.deviceConnections.relaySetupHelp')}</summary>
+        <div className='mt-4px flex flex-col items-start gap-4px'>
+          <p className='m-0'>{t('settings.deviceConnections.relayDeploymentHint')}</p>
+          <Button type='text' size='mini' onClick={() => void ipcBridge.shell.openExternal.invoke(i18n.language.startsWith('zh') ? 'https://www.nomifun.com/zh/docs/guides/net-infra/' : 'https://www.nomifun.com/docs/guides/net-infra/')}>
+            {t('settings.deviceConnections.relayDeploymentGuide')}
+          </Button>
+        </div>
+      </details>
     </section>
   );
 };
