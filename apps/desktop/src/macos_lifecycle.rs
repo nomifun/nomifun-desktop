@@ -5,7 +5,7 @@ use std::sync::{Arc, atomic::Ordering};
 use tauri::{AppHandle, Manager};
 
 use crate::{ExitCoordinator, MacosHandoffPurpose, EXIT_PHASE_CLEANUP_FAILED,
-    EXIT_PHASE_COMPLETE, EXIT_PHASE_FATAL, EXIT_PHASE_RESTARTING, EXIT_PHASE_SHUTTING_DOWN,
+    EXIT_PHASE_FATAL, EXIT_PHASE_RESTARTING, EXIT_PHASE_SHUTTING_DOWN,
     macos_appkit_main_loop::post_to_main,
     macos_development_launch::{ApplicationExitReporter, development_application_is_eligible},
     macos_process_commands::MacosProcessRequest};

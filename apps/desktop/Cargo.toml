@@ -104,6 +104,8 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "block2",
+    # NSRunningApplication's processIdentifier and PID lookup use libc::pid_t.
+    "libc",
     "NSApplication",
     "NSGraphics",
     "NSOpenPanel",
