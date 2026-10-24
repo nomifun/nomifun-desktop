@@ -86,6 +86,20 @@ pub enum AgentEngineError {
     #[error("the original wait resource owner is unavailable")]
     WaitOwnerUnavailable,
 
+    /// A pure collaboration observation could not acquire storage temporarily.
+    /// Keep the same child wait and checkpoint; never replay delegated work.
+    #[error("collaboration observation temporarily unavailable: {message}")]
+    ObservationUnavailable { message: String },
+
+    /// An ordinary command admission rejected the model's current target or
+    /// state. This is a tool result, not a broken Runtime invariant.
+    #[error("collaboration command rejected ({code:?}): {message}")]
+    CollaborationCommandRejected {
+        code:nomifun_agent_contracts::AgentCollaborationCommandRejectCode,
+        message:String,
+        observation:Option<nomifun_agent_contracts::StrictJsonValue>,
+    },
+
     #[error("Agent Runtime tool invocation failed: {0}")]
     ToolInvocation(String),
 

@@ -1,11 +1,15 @@
 //! A unified Companion entered through a device uses ordinary collaboration
 //! and management grants from its single saved Agent.
-//! The installed execution scheduler is stopped to make command versions
-//! deterministic; no physical tool, playback or firmware is exercised.
+//! A real initial planning owner is held before its original plan commits to
+//! make command versions deterministic. Stop preempts that exact barrier;
+//! no physical tool, playback or firmware is exercised.
 use super::*;
 use axum::response::IntoResponse;
 use nomifun_agent_contracts::{AgentSessionId, OperationId};
 use nomifun_common::AgentExecutionStatus;
+
+const FORK_ONLY_GOAL:&str="Perform one explicitly authorized isolated task.";
+const MANAGEMENT_GOAL:&str="Create an explicitly authorized ordinary collaboration.";
 
 #[derive(Clone)]
 struct Command {
@@ -133,18 +137,18 @@ struct RobotFixture {
     device: String,
     connection: String,
     parent: tokio::sync::Mutex<Option<OperationId>>,
+    planning_entered:Arc<tokio::sync::Notify>,
+    _planning_release:Arc<tokio::sync::Notify>,
     _device_rx: tokio::sync::mpsc::Receiver<nomifun_robot::link::Frame>,
 }
 
 impl RobotFixture {
-    async fn new(server: &ModelServer, scenario: &str) -> Self {
+    async fn new(server: &ModelServer, scenario: &str,goal:&str) -> Self {
         let fixture = Fixture::with_input_model(scenario,&server.url).await;
         let corpus_version=nomifun_skill_library::builtin_skills_materialize_version(env!("CARGO_PKG_VERSION"));
         nomifun_skill_library::materialize_if_needed(&fixture.services.data_dir,nomifun_skill_library::builtin_skills_corpus(),&corpus_version).await.unwrap();
         assert!(fixture.services.data_dir.join("builtin-skills").is_dir(),"the installed fixture materializes its bundled Skill corpus before Companion launch");
-        // This is the production owner with its background scheduling stopped,
-        // rather than a replacement execution or Session port.
-        fixture.voice_execution.shutdown().await.unwrap();
+        let(planning_entered,planning_release)=fixture.voice_execution.hold_initial_planning_for_test(goal).unwrap();
         let router = &fixture._router;
         let owner = fixture.services.authoritative_user_id.as_ref();
         let projection = fixture.owner.get_session(owner,&fixture.host.options.conversation_id).await.unwrap();
@@ -184,7 +188,8 @@ impl RobotFixture {
             &companion,nomifun_companion::CompanionRole::Robot,Some(&device.robot_id)).await.unwrap();
         let session: AgentSessionId = session.conversation_id.into();
         assert!(fixture.owner.is_companion_robot_session(owner,&session).await.unwrap());
-        Self { fixture,session,companion,device:device.robot_id,connection,parent:tokio::sync::Mutex::new(None),_device_rx:device_rx }
+        Self { fixture,session,companion,device:device.robot_id,connection,parent:tokio::sync::Mutex::new(None),
+            planning_entered,_planning_release:planning_release,_device_rx:device_rx }
     }
 
     async fn invoke(&self, server: &ModelServer, command: Command) -> Value {
@@ -255,6 +260,13 @@ impl RobotFixture {
                 "the owner must retain a normal exact Action result: {receipt:?}");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }}).await.expect("the exact authored Action receives its real canonical owner result");
+        if action=="agent/fork" {
+            tokio::time::timeout(Duration::from_secs(20),self.planning_entered.notified()).await
+                .expect("the installed initial planning task reaches its exact original plan barrier");
+            let execution=self.execution().await;
+            assert!(self.fixture.voice_execution.collaboration_has_dispatch_owner(owner,&execution.execution_id).await.unwrap(),
+                "the parent observes the actual held planning guard, never a fabricated scheduler owner");
+        }
         let replay=self.fixture.owner.send_robot_session_message_idempotent(owner,&input,&key,
             nomifun_api_types::SendMessageRequest {content:input.text.clone(),files:vec![],inject_skills:vec![],hidden:false,
                 origin:Some("robot".into()),channel_platform:Some("robot".into())}).await.unwrap();
@@ -265,7 +277,7 @@ impl RobotFixture {
                 if facts.events.iter().any(|event|event.seq>result_event.seq&&event.kind.0=="runtime/progress-recorded"
                     &&facts.event_payloads.get(event.event_id.as_ref()).is_some_and(|payload|payload["event"]["event"]=="awaiting_children")) {break;}
                 tokio::time::sleep(Duration::from_millis(10)).await;
-            }}).await.expect("a stopped scheduler leaves the real parent parked on its pending children");
+            }}).await.expect("the live held planner leaves the real parent parked on its pending children");
             assert_eq!(store.read_turn_receipt(&self.session,&operation).await.unwrap().status,nomifun_agent_session::TurnReceiptStatus::Running);
         }
         let facts=store.turn_output_facts(&self.session,&operation).await.unwrap();
@@ -300,9 +312,9 @@ fn assert_tool_error(result: &Value, expected: &str) {
 #[tokio::test]
 async fn robot_authored_fork_uses_the_generic_execution_path() {
     let server = ModelServer::new().await;
-    let flow = RobotFixture::new(&server,"robot-authored-fork").await;
+    let flow = RobotFixture::new(&server,"robot-authored-fork",FORK_ONLY_GOAL).await;
     let result = flow.invoke(&server,command("agent/fork","fork_agent","authored-robot-fork",
-        json!({"goal":"Perform one explicitly authorized isolated task."}))).await;
+        json!({"goal":FORK_ONLY_GOAL}))).await;
     assert_tool_success(&result);
     let execution = flow.execution().await;
     assert_eq!(execution.lead_conversation_id.as_deref(),Some(flow.session.as_ref()));
@@ -321,7 +333,7 @@ async fn robot_authored_fork_uses_the_generic_execution_path() {
     assert_eq!(effect.turn_id,source_operation);assert_eq!(effect.state,nomifun_agent_session::AgentEffectState::Returned);
     assert_eq!(effect.bounded_observation.as_ref().unwrap()["result"]["execution_id"],execution.execution_id);
     assert!(flow.fixture.voice_execution.get(flow.fixture.services.authoritative_user_id.as_ref(),&execution.execution_id).await.unwrap().attempts.is_empty(),
-        "observing the accepted fork never reopens the stopped scheduler");
+        "observing the accepted fork never releases its held original plan");
     flow.close().await;
     server.close().await;
 }
@@ -329,12 +341,12 @@ async fn robot_authored_fork_uses_the_generic_execution_path() {
 #[tokio::test]
 async fn robot_authored_generic_execution_management_keeps_active_relation_and_cas() {
     let server = ModelServer::new().await;
-    let flow = RobotFixture::new(&server,"robot-authored-management").await;
+    let flow = RobotFixture::new(&server,"robot-authored-management",MANAGEMENT_GOAL).await;
     assert_tool_success(&flow.invoke(&server,command("agent/fork","fork_agent","authored-robot-management-fork",
-        json!({"goal":"Create an explicitly authorized ordinary collaboration."}))).await);
+        json!({"goal":MANAGEMENT_GOAL}))).await);
     let created = flow.execution().await;
     assert_eq!(created.status,AgentExecutionStatus::Planning);
-    // With the background scheduler stopped, creation has not advanced the
+    // With the original planner held before commit, creation has not advanced the
     // aggregate beyond version zero. Use the ordinary user command to produce
     // a real positive version before testing the model's management Actions.
     let owner = flow.fixture.services.authoritative_user_id.as_ref();
@@ -375,7 +387,11 @@ async fn robot_authored_generic_execution_management_keeps_active_relation_and_c
     // aggregate's cancellation; normal native shutdown closes that carrier.
     let turns:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_turns WHERE session_id=?").bind(flow.session.as_ref()).fetch_one(flow.fixture.pool()).await.unwrap();
     assert_eq!(turns,1,"all explicit management inputs steer their same actual parent");
-    assert!(flow.fixture.voice_execution.get(owner,id).await.unwrap().attempts.is_empty(),"management observations never restart the stopped scheduler");
+    assert!(flow.fixture.voice_execution.get(owner,id).await.unwrap().attempts.is_empty(),"management observations never release or rerun the held plan");
+    tokio::time::timeout(Duration::from_secs(20),async {while flow.fixture.voice_execution.planning_operations().iter().any(|(original,_,_)|original==id) {
+        tokio::task::yield_now().await;
+    }}).await.expect("exact cancellation preempts the real planning barrier without releasing it");
+    assert!(!flow.fixture.voice_execution.collaboration_has_dispatch_owner(owner,id).await.unwrap());
     flow.close().await;
     server.close().await;
 }

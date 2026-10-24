@@ -13,7 +13,7 @@ impl AgentSessionStore {
     pub async fn stop_session_input(&self,owner:&PrincipalRef,session:&AgentSessionId,input:&EventId,key:&str)
         ->Result<SessionInputStop,SessionStoreError> {
         if key.trim().is_empty() || key.len()>256 {return Err(SessionStoreError::InvalidEvent("input Stop requires a bounded identity".into()));}
-        let mut tx=self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if require_live_session_tx(&mut tx,session.as_ref()).await?.owner_ref!=*owner {return Err(SessionStoreError::ExecutionFenced);}
         // Share the existing composer cancellation namespace across the
         // pre-claim and Turn branches, rather than giving one API key two
@@ -29,7 +29,7 @@ impl AgentSessionStore {
                 let source:Option<String>=sqlx::query_scalar("SELECT source_message_id FROM agent_turns WHERE session_id=? AND operation_id=?")
                     .bind(session.as_ref()).bind(target).fetch_optional(&mut *tx).await?;
                 if source.as_deref()!=Some(input.as_ref()) {return Err(SessionStoreError::IdempotencyConflict("Stop key differs from its original source".into()));}
-                let operation_id=OperationId::from(target);tx.commit().await?;
+                let operation_id=OperationId::from(target);db_write_observation.commit(tx).await?;
                 return Ok(SessionInputStop::Turn {operation_id});
             }
             if receipt.agent_session_id!=*session || receipt.kind.0!="message/input-queue-changed"
@@ -44,7 +44,7 @@ impl AgentSessionStore {
             let original=session_input::accepted_input_tx(&mut tx,session,input).await?;
             let event=session_input::cancelled_input_tx(&mut tx,&original.event).await?
                 .ok_or_else(||SessionStoreError::InvalidEvent("input Stop lost its original cancellation".into()))?;
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok(SessionInputStop::Input {event,through_seq:receipt.seq,duplicate:true});
         }
         // A claim that won the writer race is still addressed by the source,
@@ -57,7 +57,7 @@ impl AgentSessionStore {
             WHERE turn.session_id=? AND turn.source_message_id=? LIMIT 2")
             .bind(session.as_ref()).bind(input.as_ref()).fetch_all(&mut *tx).await?;
         match operations.as_slice() {
-            [operation]=>{let operation_id=OperationId::from(operation.clone());tx.commit().await?;return Ok(SessionInputStop::Turn {operation_id});},
+            [operation]=>{let operation_id=OperationId::from(operation.clone());db_write_observation.commit(tx).await?;return Ok(SessionInputStop::Turn {operation_id});},
             []=>{},
             _=>return Err(SessionStoreError::InvalidEvent("input Stop source has more than one owning Turn".into())),
         }
@@ -66,7 +66,7 @@ impl AgentSessionStore {
             return Err(SessionStoreError::ExecutionFenced);
         }
         if let Some(event)=session_input::cancelled_input_tx(&mut tx,&original.event).await? {
-            let through_seq=event.seq;tx.commit().await?;
+            let through_seq=event.seq;db_write_observation.commit(tx).await?;
             return Ok(SessionInputStop::Input {event,through_seq,duplicate:true});
         }
         if session_input::input_claimed_tx(&mut tx,session,input).await? {
@@ -92,7 +92,7 @@ impl AgentSessionStore {
                     action:SessionInputQueueAction::Pause {}.into(),expected_version:None,through_seq:Some(cutoff),except_message_ids:Vec::new(),
                 })?))}};
         let held=self.append_event_tx(&mut tx,&append,None).await?;
-        let through_seq=held.cursor.seq;tx.commit().await?;
+        let through_seq=held.cursor.seq;db_write_observation.commit(tx).await?;
         Ok(SessionInputStop::Input {event,through_seq,duplicate:false})
     }
 }

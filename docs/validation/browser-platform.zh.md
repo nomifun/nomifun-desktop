@@ -158,7 +158,7 @@ session/frame/node、trusted activation、隐藏/导航/框架替换/Agent 接�
 
 原生组件、完整生产 GUI、真实模型、外部站点与安装包分别计证。上述 Windows fixture 不证明安装包行为、
 外部站点兼容或每个子进程退出。macOS 本轮源码、构建身份、实际回执、首次失败和未运行范围统一保存在
-[生命周期方案第 10.5 节](../handoffs/agent-lifecycle-reliability.zh.md#105-macos-接续2026-10-19)，本文只维护当前入口和证据边界。
+[生命周期历史 macOS 验证记录](agent-lifecycle.zh.md#105-macos-接续2026-10-19)，本文只维护当前入口和证据边界。
 
 macOS `macos_browser_compatibility_smoke` 的默认入口保留导航 Stop、queued/claimed popup Pause、
 同文档及跨文档 History、失败保留文档和原生 Save chooser 取消／页面关闭矩阵。跨文档 Back/Forward

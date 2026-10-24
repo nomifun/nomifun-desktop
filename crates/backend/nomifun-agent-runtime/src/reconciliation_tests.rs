@@ -200,20 +200,22 @@ fn real_tool_progress_after_end_review_restores_the_same_review_phase_as_live_ex
 
 #[test]
 fn accepted_child_wait_recovers_its_exact_request_without_replaying_a_tool_or_resetting_budget() {
-    let wait = crate::AgentChildrenWait { execution_ids: vec!["owned".into()], after_cursor:Some("canonical:4".into()),
+    let cursor=|value:char|crate::AgentCollaborationSnapshot::observation_cursor(BTreeMap::from([("owned".into(),crate::AgentCollaborationObservation{
+        state:value.to_string().repeat(64),ready:value.to_string().repeat(64)})])).unwrap();
+    let wait = crate::AgentChildrenWait { execution_ids: vec!["owned".into()], after_cursor:Some(cursor('4')),
         mode:crate::AgentChildrenWaitMode::All };
     let mut tail = vec![started(), AgentEngineEvent::ToolCallCompleted { step:1, call:ChatToolCall {
         call_id:"wait".into(),name:crate::collaboration::WAIT.into(),provider_metadata:None,
         arguments:StrictJsonValue(serde_json::to_value(&wait).unwrap()),
     } }, AgentEngineEvent::ToolCompleted { step:1, runtime_hold:None,
-        result:AgentToolResult::text("wait".into(),"accepted",false) },
+        result:AgentToolResult::text("wait".into(),json!({"state":"awaiting_children","cursor":cursor('4')}).to_string(),false) },
         AgentEngineEvent::AwaitingChildren { model_steps:1, request:wait.clone() }];
     let recovered = reconcile_execution_tail(&checkpoint(),1,&tail,&Default::default(),&Default::default(),&Default::default()).unwrap();
     assert_eq!(recovered.checkpoint.awaiting_children, Some(wait));
     assert_eq!(recovered.checkpoint.model_steps,1);
     assert_eq!(recovered.checkpoint.tool_call_count,1);
     assert!(!recovered.observations.iter().any(|event|matches!(event,AgentEngineEvent::ToolOutcomeReconciled {..})));
-    tail.push(AgentEngineEvent::ChildrenWaitResolved { model_steps:1,cursor:"canonical:5".into() });
+    tail.push(AgentEngineEvent::ChildrenWaitResolved { model_steps:1,cursor:cursor('5') });
     let awakened = reconcile_execution_tail(&checkpoint(),1,&tail,&Default::default(),&Default::default(),&Default::default()).unwrap();
     assert!(awakened.checkpoint.awaiting_children.is_none());
     assert_eq!(awakened.checkpoint.model_steps,1);
@@ -247,4 +249,75 @@ fn child_message_needs_its_original_domain_receipt_even_without_kernel_admission
     assert!(recovered.checkpoint.collaboration.pending_child_executions.contains("execution"));
     assert_eq!(recovered.checkpoint.tool_call_count,1);
     assert!(recovered.observations.iter().any(|event|matches!(event,AgentEngineEvent::ToolOutcomeReconciled{source:AgentReconciliationSource::NativeControlReceipt,..})));
+}
+
+#[test]
+fn returned_delegation_recovers_before_or_after_runtime_consumption_without_repeating_work() {
+    let mut cp = checkpoint();
+    cp.work.failed_tools = 7;
+    let call = ChatToolCall { call_id:"delegate-once".into(), name:"delegate_task".into(),
+        arguments:StrictJsonValue(json!({"goal":"original child work"})), provider_metadata:None };
+    let tail = vec![started(), AgentEngineEvent::ToolCallCompleted {step:1,call:call.clone()},
+        AgentEngineEvent::ToolStarted {step:1,call_id:call.call_id.clone(),capability_id:"agent.collaboration".into(),action_id:"agent/delegate".into()}];
+    let contracts = BTreeMap::from([(("agent.collaboration".into(),"agent/delegate".into()),crate::AgentEffectClass::ManagedEffect)]);
+    let result = AgentToolResult::text(call.call_id.clone(),json!({"execution_id":"original-execution",
+        "status":"running","message":"accepted","step_ids":["original-step"]}).to_string(),false);
+    let outcome = AgentReconciledOutcome {result:result.clone(),source:AgentReconciliationSource::OwnerReceipt,
+        evidence_event_id:Some("original-effect-returned".into()),owner_operation_id:Some("original-delegate-operation".into())};
+    let missing = reconcile_execution_tail_with_contracts(&cp,1,&tail,&BTreeSet::from([call.call_id.clone()]),
+        &BTreeMap::from([(call.call_id.clone(),outcome)]),&Default::default(),&contracts).unwrap();
+    let mut observed = tail;
+    observed.push(AgentEngineEvent::ToolCompleted {step:1,result,runtime_hold:None});
+    let consumed = reconcile_execution_tail_with_contracts(&cp,1,&observed,&BTreeSet::from([call.call_id]),
+        &Default::default(),&Default::default(),&contracts).unwrap();
+    assert_eq!(missing.checkpoint,consumed.checkpoint);
+    assert_eq!(consumed.checkpoint.tool_call_count,1);
+    assert_eq!(consumed.checkpoint.model_steps,1);
+    assert_eq!(consumed.checkpoint.work.failed_tools,7);
+    assert!(consumed.checkpoint.collaboration.pending_child_executions.contains("original-execution"));
+    assert!(missing.observations.iter().any(|event|matches!(event,AgentEngineEvent::ToolOutcomeReconciled {evidence_event_id:Some(id),..} if id=="original-effect-returned")));
+    assert!(!missing.observations.iter().any(|event|matches!(event,AgentEngineEvent::ToolStarted {..}|AgentEngineEvent::ModelStepStarted {..})));
+    assert!(!consumed.observations.iter().any(|event|matches!(event,AgentEngineEvent::ToolOutcomeReconciled {..})));
+}
+
+#[test]
+fn frozen_result_accounting_covers_the_gap_before_the_absolute_work_snapshot() {
+    let mut cp=checkpoint();
+    cp.work.failed_tools=5;
+    cp.work.observed_processes.insert("earlier-reaped".into());
+    let result=AgentToolResult::text("written".into(),"original known rejection",true);
+    let mut tail=vec![started(),proposal("written"),admitted("written"),
+        AgentEngineEvent::ToolCompleted {step:1,result:result.clone(),runtime_hold:None}];
+    let contracts=BTreeMap::from([(("workspace.files".into(),"workspace.files/write".into()),crate::AgentEffectClass::ManagedEffect)]);
+    let recovered=reconcile_execution_tail_with_contracts(&cp,1,&tail,&BTreeSet::from(["written".into()]),
+        &Default::default(),&Default::default(),&contracts).unwrap();
+    let AgentEngineEvent::ToolCallCompleted {call,..}=proposal("written") else {unreachable!()};
+    let mut live=cp.work.clone();
+    live.observe_contract("workspace.files","workspace.files/write",crate::AgentEffectClass::ManagedEffect,
+        &call,&result,&mut crate::workflow::CommandTracker::default());
+    tail.push(AgentEngineEvent::WorkStatus {status:live.clone()});
+    let after_snapshot=reconcile_execution_tail_with_contracts(&cp,1,&tail,&BTreeSet::from(["written".into()]),
+        &Default::default(),&Default::default(),&contracts).unwrap();
+    assert_eq!(recovered.checkpoint.work,live);
+    assert_eq!(recovered.checkpoint,after_snapshot.checkpoint);
+    assert_eq!(recovered.checkpoint.work.failed_tools,6);
+    assert!(recovered.checkpoint.work.observed_processes.contains("earlier-reaped"));
+    assert!(recovered.observations.iter().any(|event|matches!(event,AgentEngineEvent::WorkStatus {status} if status==&live)));
+    assert!(reconcile_execution_tail_with_contracts(&cp,1,&tail,&BTreeSet::from(["written".into()]),
+        &Default::default(),&Default::default(),&Default::default()).is_err(),"a missing frozen contract is never guessed from a tool name");
+}
+
+#[test]
+fn missing_owner_results_are_consumed_in_original_call_order() {
+    let tail=vec![started(),proposal("z-first"),proposal("a-second"),admitted("z-first"),admitted("a-second")];
+    let contracts=BTreeMap::from([(("workspace.files".into(),"workspace.files/write".into()),crate::AgentEffectClass::ManagedEffect)]);
+    let recovered=reconcile_execution_tail_with_contracts(&checkpoint(),1,&tail,
+        &BTreeSet::from(["z-first".into(),"a-second".into()]),
+        &BTreeMap::from([("z-first".into(),outcome("z-first")),("a-second".into(),outcome("a-second"))]),
+        &Default::default(),&contracts).unwrap();
+    let ids=recovered.observations.iter().filter_map(|event|match event {
+        AgentEngineEvent::ToolOutcomeReconciled {result,..}=>Some(result.call_id.as_ref()),_=>None,
+    }).collect::<Vec<_>>();
+    assert_eq!(ids,["z-first","a-second"]);
+    assert_eq!(recovered.checkpoint.tool_call_count,2);
 }

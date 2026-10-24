@@ -56,6 +56,9 @@
   I/O failures and damage to a supported schema fail closed; backup and restore
   never obtain startup rebuild authority. More migration rows do not prove a
   newer application version across destructive baseline changes.
+- Scheduling, delegation, controls and resource retirement follow
+  `docs/architecture/agent-execution.zh.md`; tested scope and remaining platform
+  evidence are recorded in `docs/validation/agent-lifecycle.zh.md`.
 - Read `docs/architecture/agent-session.zh.md` before changing Session storage
   or content. Run `bun run check:agent-session-boundary` and the affected
   canonical history, reset and consumer tests.
@@ -91,30 +94,3 @@
   cases; isolated accounts, displays or VMs are optional tools, not prerequisites.
   Keep automated, native and unexecuted evidence distinct, use targeted checks,
   and retire this scoped entry at S5 after documenting stable contracts.
-
-## Active Agent lifecycle reliability work
-
-- For this lifecycle/recovery/control/resource-retirement implementation,
-  first read the [active implementation plan](docs/handoffs/agent-lifecycle-reliability.zh.md).
-  Its U01-U13 requirements and acceptance matrix are mandatory for this work;
-  the plan records targets, not proof that code has already been delivered.
-- Preserve existing capabilities and user concurrency settings. Do not add
-  platform brokers, duplicate execution ledgers, fixed machine quotas, generic
-  task TTLs, pressure-based task killing, mandatory worktrees or resource
-  declarations. Supporting every pause/force-stop mode is not Agent admission.
-- Every Agent instance needs host-side user stop and visible cleanup progress.
-  Keep single-task, delegation ownership, DAG dependency and whole-Execution
-  control distinct; do not implement local stop through aggregate cancellation.
-  User Stop must preempt stalled controls; ordinary control FIFO must not delay
-  its durable cancellation fence or signal to the exact owner.
-- Cache code must not start, resume or retry tasks. Runtime retirement must
-  preserve legitimate writebacks, exact process owners and necessary live state;
-  neither an idle status nor a checkpoint proves safe release.
-- Completed-task heavy resources must retire automatically without users closing
-  old Sessions. Actual app quit must close app-owned heavy resources, with native
-  parent-death coverage for crashes; preserve user-owned browsers/shared services
-  and persistent data. Do not confuse one Turn ending with a user workspace
-  becoming disposable, or use Session history as a permanent runtime reference.
-- Continue execution from the single progress section in the active plan.
-  Retire this scoped entry and superseded handoff instructions when the stable
-  contracts have been integrated into current architecture documentation.

@@ -57,7 +57,7 @@ impl AgentSessionStore {
         {
             return Err(SessionStoreError::InvalidEvent("checkpoint metadata differs from its state or Turn".into()));
         }
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if let Some(lease) = &request.lease {
             if lease.session_id() != &append.agent_session_id || lease.operation_id() != &request.operation_id
                 || lease.fence() != request.execution_fence { return Err(SessionStoreError::ExecutionFenced); }
@@ -122,7 +122,7 @@ impl AgentSessionStore {
         if updated.rows_affected() != 1 {
             return Err(SessionStoreError::Conflict("checkpoint compare-and-swap lost its Turn".into()));
         }
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(NativeCheckpoint { agent_session_id: append.agent_session_id.clone(), operation_id: request.operation_id,
             revision, through_seq: ack.seq, digest, execution_fence: request.execution_fence, turn_state: "running".into(), state: request.state })
     }

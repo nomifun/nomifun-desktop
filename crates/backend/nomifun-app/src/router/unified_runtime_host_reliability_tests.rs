@@ -31,8 +31,19 @@ mod robot_authored_execution_tests;
 #[path = "runtime_collaboration_tests.rs"]
 pub(super) mod runtime_collaboration_tests;
 
+pub(super) async fn parallel_admission_cutpoint(session: &str) {
+    runtime_collaboration_tests::parallel_read_tests::admission_cutpoint(session).await;
+}
+
+pub(super) fn parallel_result_consuming(session: &str, call_id: &str) {
+    runtime_collaboration_tests::parallel_read_tests::result_consuming(session, call_id);
+}
+
 #[path = "runtime_message_recovery_tests.rs"]
 mod runtime_message_recovery_tests;
+
+#[path = "turn_settlement_owner_tests.rs"]
+mod turn_settlement_owner_tests;
 
 #[path = "execution_source_input_tests.rs"]
 mod execution_source_input_tests;
@@ -458,7 +469,7 @@ async fn voice_running_decision_attempt_fixture(fixture:&Fixture)->(String,Strin
     let queued=repository.create_attempt(owner,&created.execution_id,&step,planned.steps[0].version,None,&CreateAgentExecutionAttemptParams {participant_id:Some(participant),start_immediately:false,
         trigger_reason:"initial".into(),effective_config:"{}".into(),retry_after:None,runtime_state:None},&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
     let attempt=queued.current_attempt.unwrap().attempt;
-    let running=repository.start_attempt(owner,&created.execution_id,&step,queued.step.version,&attempt.attempt_id,attempt.version,session,AgentExecutionAttemptSessionKind::ChildAttempt,None,
+    let running=repository.start_attempt(owner,&created.execution_id,&step,queued.step.version,&attempt.attempt_id,attempt.version,session,AgentExecutionAttemptSessionKind::ChildAttempt,None, None,
         &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
     (created.execution_id,step,running)
 }
@@ -1201,7 +1212,8 @@ async fn cleanup_retry_keeps_half_committed_initialization_after_suspension_faul
     let failure = fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap_err();
     assert!(failure.to_string().contains("fixture input scope write failure"));
     assert_eq!(fixture.host.active.lock().await.as_ref().unwrap().journal.sequence(), 1);
-    assert!(fixture.host.suspend_after_cleanup_failure(&fixture.message).await.is_err());
+    assert!(fixture.host.handoff_turn_settlement(&fixture.message,
+        &nomifun_ai_agent::engine_sdk::EngineTurnOutcome::cancelled(0), "fixture input scope write failure").await.is_err());
     assert_eq!(fixture.state().await, "running");
     sqlx::query("DROP TRIGGER reject_input_scope").execute(fixture.pool()).await.unwrap();
     sqlx::query("DROP TRIGGER reject_cleanup_pause").execute(fixture.pool()).await.unwrap();
@@ -1227,9 +1239,11 @@ async fn cleanup_retry_rejects_unclaimed_turn_under_writer_lock_then_settles() {
     assert_eq!(fixture.state().await, "running");
     assert!(fixture.host.active.lock().await.is_none());
     assert!(result.is_err(), "cleanup must retain the canonical admission/claim error");
-    assert!(result.unwrap_err().to_string().contains("locked"));
+    assert!(matches!(result, Err(AppError::DatabaseUnavailable {
+        reason: nomifun_common::DatabaseUnavailableReason::Busy | nomifun_common::DatabaseUnavailableReason::Locked
+    })), "the external writer must retain its typed storage-contention cause");
     assert!(fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.is_err());
-    assert!(!fixture.host.terminal_already_recorded(fixture.host.root(&fixture.message)).unwrap());
+    assert!(!fixture.host.committed_exit_already_recorded(fixture.host.root(&fixture.message)).unwrap());
     writer.rollback().await.unwrap();
     writer_pool.close().await;
     fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
@@ -1245,7 +1259,7 @@ async fn cleanup_retry_rejects_terminal_ack_without_admitted_turn() {
     let result = fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await;
     assert_eq!(fixture.state().await, "running");
     assert!(result.is_err(), "missing host admission cannot acknowledge a canonical terminal");
-    assert!(!fixture.host.terminal_already_recorded(fixture.host.root(&fixture.message)).unwrap());
+    assert!(!fixture.host.committed_exit_already_recorded(fixture.host.root(&fixture.message)).unwrap());
     fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap();
     fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.unwrap();
     fixture.assert_settled().await;
@@ -1413,7 +1427,7 @@ async fn steering_cleanup_retry_cannot_acknowledge_completed_root_as_cancelled()
     assert!(fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.is_err());
     assert_eq!(fixture.state().await, "completed");
     assert_eq!(store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap(), before);
-    assert!(!fixture.host.terminal_already_recorded(fixture.host.root(&fixture.message)).unwrap());
+    assert!(!fixture.host.committed_exit_already_recorded(fixture.host.root(&fixture.message)).unwrap());
     fixture.finish().await;
 }
 
@@ -1465,7 +1479,8 @@ async fn steering_cleanup_scenario(fault: SteeringCleanupFault) {
     let failure = fixture.host.cleanup_turn(&fixture.message,&nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled).await.unwrap_err();
     assert!(failure.to_string().contains("fixture steering tail write failure"));
     assert!(!fixture.host.queue_steer(delivery).await.unwrap(), "cleanup must keep the inbox closed");
-    let pause_failure = fixture.host.suspend_after_cleanup_failure(&fixture.message).await.unwrap_err();
+    let pause_failure = fixture.host.handoff_turn_settlement(&fixture.message,
+        &nomifun_ai_agent::engine_sdk::EngineTurnOutcome::cancelled(0), "fixture steering tail write failure").await.unwrap_err();
     assert!(pause_failure.to_string().contains("fixture steering pause write failure"));
     assert_eq!(fixture.state().await, "running");
     {

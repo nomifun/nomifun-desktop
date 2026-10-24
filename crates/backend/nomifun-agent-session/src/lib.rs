@@ -23,6 +23,7 @@ pub use snapshot_compatibility::evaluate_snapshot_compatibility;
 pub use context_snapshot::{CanonicalContextMessage, CanonicalContextRole, ForkContextSnapshot, canonical_context_messages};
 pub use error::SessionStoreError;
 pub use store::{
+    EmptyExecutionCreationFence,
     ChannelInputDeliveryDisposition,RecoverableChannelInput,
     AgentSessionStore, PendingSessionInput, SessionInputClaim, SessionInputStop, SessionInputBlockedReason, SessionInputQueueItem, SessionInputQueueSnapshot, canonical_steering_input, is_session_input_event, session_input_namespace, MAX_EVENT_PAGE_SIZE, MAX_INLINE_JSON_BYTES, MAX_SESSION_PAYLOAD_BYTES,
     MAX_SINGLE_PAYLOAD_BYTES,
@@ -35,6 +36,7 @@ pub use store::{
     CommittedNativeToolCallCausation, CommittedToolCallCausation, NativeExecutionScope,
     NativeExecutionInspection, NATIVE_RECOVERY_BLOCKED,
     NativePauseState, NativeResumeRequest, NativeOwnerEvidence, NativeResumeReceipt, NativeResumePreparation,
+    NativeTurnSettlementRequest, NativeTurnSettlementReceipt, PendingNativeTurnSettlement, NativeTurnSettlementBundleReceipt,
     NativeResumeRequestReceipt, PendingNativeResumeRequest, NativeResumeCommandReceipt,
     NativeVerifiedOutcome, NativeEffectReconciliationRequest, NativeEffectReconciliationCandidate, NativeEffectReconciliationCandidates,
 };

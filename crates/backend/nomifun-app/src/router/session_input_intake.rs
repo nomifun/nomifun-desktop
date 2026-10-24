@@ -98,11 +98,13 @@ fn unclaimed_channel_observation(state:&Value)->Result<nomifun_channel::ChannelI
 /// Host provenance remains in the original fact and is read again by admission;
 /// it is not a client-authored SendMessageRequest field.
 pub(super) fn runtime_message_request(input:&nomifun_agent_contracts::StrictJsonValue)->Result<SendMessageRequest,AppError> {
+    super::parent_question_reply::validate_metadata(&input.0)?;
     let mut content=input.0.clone();
     if let Some(object)=content.as_object_mut() {
         object.remove("reply_to");
         object.remove("channel_source");
         object.remove("delivery_intent");
+        object.remove("parent_question_reply");
         if let Some(source)=object.remove("input_source").filter(|source|!source.is_null()) {
             serde_json::from_value::<nomifun_agent_contracts::AgentInputSource>(source)
                 .map_err(|error|AppError::Internal(format!("invalid accepted input provenance: {error}")))?;

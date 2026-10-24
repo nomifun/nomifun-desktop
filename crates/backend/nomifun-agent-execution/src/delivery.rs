@@ -7,6 +7,13 @@
 use serde::{Deserialize, Serialize};
 
 pub use nomifun_common::AgentExecutionSource;
+pub use nomifun_db::AgentExecutionRestartTarget;
+
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub enum AgentExecutionRestartNativeOutcome {
+    ContinuedOriginal {resume_event_id:String,resume_event_seq:u64},
+    OriginalClosed,
+}
 
 /// Missing receipt evidence stays absent. Explicit JSON null is an invalid
 /// original invocation reference to the existing cleanup reader.
@@ -150,10 +157,10 @@ pub struct AgentExecutionTurnOutput {
 
 /// Read-only progress of one exact canonical operation. The cursor is only a
 /// wakeup hint; a terminal output must still pass the canonical output reader.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentExecutionTurnProgress {
     pub found: bool,
     pub terminal: bool,
     pub cursor: u64,
-    pub suspended: bool,
+    pub suspension: Option<nomifun_agent_session::TurnProgressSuspension>,
 }

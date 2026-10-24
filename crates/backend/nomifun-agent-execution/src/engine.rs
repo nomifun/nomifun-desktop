@@ -7,6 +7,16 @@
 #[path = "source_continuation.rs"]
 mod source_continuation;
 
+#[path = "task_control.rs"]
+mod task_control;
+#[path = "restart_step.rs"]
+mod restart_step;
+
+#[path = "collaboration_observation.rs"]
+mod collaboration_observation;
+pub use collaboration_observation::{AgentExecutionCollaborationObservation, AgentExecutionCollaborationState,
+    AgentExecutionCollaborationStep, AgentExecutionCollaborationAttempt};
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -76,7 +86,7 @@ use crate::planner::{
 use crate::participant_router::rank_participants;
 use crate::scheduler::{
     ConversationEffects, DEFAULT_ATTEMPT_TIMEOUT, DEFAULT_MAX_PARALLEL, ExecutionScheduler,
-    ExecutionSchedulerDeps, terminal_transition_payload,
+    ExecutionSchedulerDeps,
     agent_outcome_can_complete,
 };
 
@@ -291,6 +301,7 @@ pub struct AgentExecutionEngine {
     managed_workspace_root: PathBuf,
     automation_transition: Arc<tokio::sync::Mutex<()>>,
     planning_controls: PlanningControls,
+    restart_owners:Arc<dashmap::DashMap<(String,String),std::sync::Weak<restart_step::RestartOwnerToken>>>,
 }
 
 impl AgentExecutionEngine {
@@ -322,6 +333,7 @@ impl AgentExecutionEngine {
             managed_workspace_root,
             automation_transition: Arc::new(tokio::sync::Mutex::new(())),
             planning_controls: PlanningControls::default(),
+            restart_owners:Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -332,13 +344,23 @@ impl AgentExecutionEngine {
 
     /// A wake hint only. Consumers subscribe before reading owner-scoped facts
     /// and retain a bounded re-read when a notification is lost.
-    pub fn changed(&self) -> Arc<tokio::sync::Notify> { self.publisher.changed() }
+    /// Subscribe before observing one exact Execution. This hint does not
+    /// replace owner-scoped canonical reads and cannot start work.
+    pub fn changed_for(&self, owner_id: &str, execution_id: &str) -> Arc<tokio::sync::Notify> {
+        self.publisher.changed_for(owner_id, execution_id)
+    }
 
     /// Host-only observations of original local planning request owners.
     /// Callers authorize each Execution in its canonical repository before
     /// projecting it. A cancellation signal is not a request-join receipt.
     pub fn planning_operations(&self) -> Vec<(String, i64, bool)> {
         self.planning_controls.observations()
+    }
+
+    #[cfg(any(test,feature="test-support"))]
+    #[doc(hidden)]
+    pub fn hold_initial_planning_for_test(&self,goal:&str)->Result<(Arc<tokio::sync::Notify>,Arc<tokio::sync::Notify>),AppError> {
+        self.planning_controls.hold_initial_for_test(goal)
     }
 
     /// Start boot recovery under the same lifecycle tracker as scheduler and
@@ -712,7 +734,7 @@ impl AgentExecutionEngine {
         let original_creation = row.initial_plan_input == params.initial_plan_input;
         let execution = domain_mapper::execution(row, request.lead_conversation_id)?;
         if execution.status == AgentExecutionStatus::Planning && original_creation {
-            self.spawn_initial_plan(owner_id.to_owned(), execution.execution_id.clone());
+            self.spawn_initial_plan(owner_id.to_owned(), execution.execution_id.clone(),execution.version);
         }
         Ok(execution)
     }
@@ -2431,6 +2453,21 @@ impl AgentExecutionEngine {
         step_id: &str,
         request: RetryExecutionStepRequest,
     ) -> Result<AgentExecutionDetail, AppError> {
+        let engine=self.clone();let owner=owner_id.to_owned();let actor=actor.clone();let execution=execution_id.to_owned();let step=step_id.to_owned();
+        self.lifecycle.spawn(async move {engine.retry_step_inner(&owner,&actor,&execution,&step,request).await})
+            .await.map_err(|error|AppError::Internal(format!("task retry owner failed: {error}")))?
+    }
+
+    async fn retry_step_inner(&self,owner_id:&str,actor:&AgentExecutionActor,execution_id:&str,step_id:&str,
+        request:RetryExecutionStepRequest)->Result<AgentExecutionDetail,AppError> {
+        let command_request=json!({"kind":"retry_step","owner_id":owner_id,"execution_id":execution_id,
+            "step_id":step_id,"request":request,"actor":actor});
+        let digest=nomifun_agent_contracts::digest_payload(&command_request)
+            .map_err(|error|AppError::Internal(error.to_string()))?.0;
+        let operation_id=format!("retry-step:{digest}");
+        if self.task_command_was_accepted(owner_id,execution_id,&operation_id,&command_request).await? {
+            return self.detail(owner_id,execution_id).await;
+        }
         let mut detail = self.detail(owner_id, execution_id).await?;
         if detail.execution.version != request.expected_execution_version {
             return Err(AppError::Conflict("stale Agent Execution version".to_owned()));
@@ -2468,7 +2505,7 @@ impl AgentExecutionEngine {
                     AgentExecutionEventKind::StepChanged,
                     Some(step_id),
                     None,
-                    json!({"change":"retry_requested"}),
+                    json!({"change":"retry_requested","operation_id":operation_id,"command_request":command_request}),
                 ),
             )
             .await?;
@@ -2570,16 +2607,59 @@ impl AgentExecutionEngine {
     /// Model-authored guidance uses a stable command identity, independent of
     /// provider call IDs. The original Step event is the delivery outbox.
     pub async fn message_step(&self, owner_id: &str, source: &nomifun_db::AgentExecutionMessageSource,
-        execution_id: &str, step_id: &str, content: &str, key: &str) -> Result<crate::AgentExecutionMessageReceipt, AppError> {
+        command:&nomifun_agent_contracts::AgentCollaborationMessage) -> Result<crate::AgentExecutionMessageReceipt, AppError> {
+        let (execution_id,step_id,content)=(&*command.execution_id,&*command.step_id,&*command.content);
         let sender_session=source.agent_session_id.as_str();
         let sender_turn=source.turn_operation_id.as_str();
-        let (operation,digest)=message_command_identity(sender_session,sender_turn,execution_id,step_id,content,key)?;
+        let (operation,digest)=message_command_identity(sender_session,sender_turn,command)?;
+        if let nomifun_agent_contracts::AgentCollaborationMessageIntent::TaskControl {control}=&command.intent {
+            // A committed command and its scheduler/cleanup signal have one
+            // owner even if the native caller is cancelled before its ACK.
+            let engine=self.clone();let owner=owner_id.to_owned();let source=source.clone();let command=command.clone();let control=control.clone();
+            return self.lifecycle.spawn(async move {
+                engine.control_delegated_task(&owner,&source,&command,&control,&operation,&digest).await
+            }).await.map_err(|error|AppError::Internal(format!("delegated task control owner failed: {error}")))?;
+        }
         loop {
-            if let Some(receipt)=self.message_receipt(owner_id,sender_session,sender_turn,execution_id,step_id,content,key).await? {
+            if let Some(receipt)=self.message_receipt(owner_id,sender_session,sender_turn,command).await? {
                 return Ok(receipt);
             }
             let detail=self.detail(owner_id,execution_id).await?;
             let step=current_step(&detail,step_id)?;
+            if let nomifun_agent_contracts::AgentCollaborationMessageIntent::QuestionReply {question}=&command.intent {
+                if step.status!=ExecutionStepStatus::WaitingInput {
+                    return Err(AppError::Conflict("the exact child question is no longer waiting for this reply".into()));
+                }
+                let attempt=detail.attempts.iter().filter(|attempt|attempt.step_id==step_id).max_by_key(|attempt|attempt.attempt_no)
+                    .filter(|attempt|attempt.status==ExecutionAttemptStatus::WaitingInput&&attempt.conversation_id.as_deref()==Some(question.agent_session_id.as_ref()))
+                    .ok_or_else(||AppError::Conflict("the reply does not target the original waiting Attempt".into()))?;
+                let mut effects=attempt.runtime_state.clone().map(serde_json::from_value::<AttemptConversationEffects>).transpose()
+                    .map_err(|error|AppError::Internal(format!("invalid original question controls: {error}")))?.unwrap_or_default();
+                let parent_reply=nomifun_agent_contracts::AgentParentQuestionReply {question:question.clone(),sender_session_id:sender_session.into(),
+                    sender_turn_operation_id:sender_turn.into(),sender_command_event_id:source.command_event_id.clone().into()};
+                effects.push_parent_reply(operation.clone(),content.into(),parent_reply)?;
+                let actor=self.authorize_agent_caller(owner_id,execution_id,sender_session).await?;
+                let committed=self.repository.resume_waiting_attempt(owner_id,execution_id,detail.execution.version,step_id,step.version,
+                    &attempt.attempt_id,attempt.version,&AttemptConversationEffectParams{runtime_state:Some(effects.encode()?)},
+                    &actor_event(&actor,AgentExecutionEventKind::DecisionAnswered,Some(step_id),Some(&attempt.attempt_id),json!({
+                        "answered":true,"operation_id":operation,"content_digest":digest,"message_source":source,"question_reply":question,
+                        "reply_authority":"parent_agent_guidance"}))).await;
+                match committed {
+                    Ok(committed)=>{
+                        self.publish().await;self.scheduler.start(owner_id.into(),execution_id.into());
+                        return Ok(crate::AgentExecutionMessageReceipt{execution_id:execution_id.into(),step_ids:vec![step_id.into()],
+                            sequence:committed.event_sequence,operation_id:operation,replayed:false});
+                    }
+                    Err(nomifun_db::DbError::Conflict(error))=>{
+                        if self.detail(owner_id,execution_id).await?.execution.version!=detail.execution.version {continue;}
+                        return Err(AppError::Conflict(error));
+                    }
+                    Err(error)=>return Err(error.into()),
+                }
+            }
+            if step.status==ExecutionStepStatus::WaitingInput {
+                return Err(AppError::Conflict("the child requires an exact question reply; guidance cannot answer it".into()));
+            }
             if step.status==ExecutionStepStatus::Completed {
                 return self.followup_completed_child(owner_id,source,execution_id,step_id,
                     content,&operation,&digest).await;
@@ -2589,9 +2669,13 @@ impl AgentExecutionEngine {
                 expected_step_version:step.version};
             match self.enqueue_steer(owner_id,&actor,execution_id,step_id,request,operation.clone(),Some(digest.clone()),Some(source)).await {
                 Err(AppError::Conflict(_)) => {
-                    let after=self.detail(owner_id,execution_id).await?;
-                    if after.execution.version!=detail.execution.version {continue;}
-                    return Err(AppError::Conflict("the target child cannot accept guidance in its current state".into()));
+                    // A lost acknowledgement may only confirm this command.
+                    // Re-reading latest and retrying would silently redirect
+                    // old guidance to a successor Attempt or native Turn.
+                    if let Some(receipt)=self.message_receipt(owner_id,sender_session,sender_turn,command).await? {
+                        return Ok(receipt);
+                    }
+                    return Err(AppError::Conflict("the target child changed before guidance was accepted; read its current identity before issuing a new command".into()));
                 },
                 Ok(sequence)=>return Ok(crate::AgentExecutionMessageReceipt {execution_id:execution_id.into(),step_ids:vec![step_id.into()],
                     sequence,operation_id:operation,replayed:false}),
@@ -2603,8 +2687,9 @@ impl AgentExecutionEngine {
     /// Observe the original durable command after a lost Runtime reply. This
     /// never sends guidance, creates work, or resumes a Session.
     pub async fn message_receipt(&self, owner_id:&str, sender_session:&str,sender_turn:&str,
-        execution_id:&str,step_id:&str,content:&str,key:&str)->Result<Option<crate::AgentExecutionMessageReceipt>,AppError> {
-        let (operation,digest)=message_command_identity(sender_session,sender_turn,execution_id,step_id,content,key)?;
+        command:&nomifun_agent_contracts::AgentCollaborationMessage)->Result<Option<crate::AgentExecutionMessageReceipt>,AppError> {
+        let (execution_id,step_id)=(&*command.execution_id,&*command.step_id);
+        let (operation,digest)=message_command_identity(sender_session,sender_turn,command)?;
         let mut cursor=0;
         loop {
             let events=self.events(owner_id,execution_id,Some(cursor),Some(200)).await?;
@@ -2664,7 +2749,7 @@ impl AgentExecutionEngine {
                 AppError::Internal(format!("invalid persisted attempt conversation effects: {error}"))
             })?
             .unwrap_or_default();
-        let operation_key = effects.current_turn_operation_key(&attempt.attempt_id)?;
+        let operation_key = self.repository.execution_attempt_turn_operation_key(owner_id,execution_id,step_id,&attempt.attempt_id).await?;
         let target_operation_id = self.session.read_turn_output(owner_id, attempt.conversation_id.as_deref()
             .ok_or_else(|| AppError::Conflict("running attempt has no Session".to_owned()))?, Some(&operation_key))
             .await?
@@ -2999,9 +3084,10 @@ impl AgentExecutionEngine {
                     "retired product-directed execution remains stopped for explicit review");
                 continue;
             }
+            self.recover_step_restarts(&row.user_id,&row.execution_id).await?;
             match row.status.parse::<AgentExecutionStatus>() {
                 Ok(AgentExecutionStatus::Planning) => {
-                    self.spawn_initial_plan(row.user_id, row.execution_id);
+                    self.spawn_initial_plan(row.user_id, row.execution_id,row.version);
                 }
                 Ok(AgentExecutionStatus::Running | AgentExecutionStatus::WaitingInput | AgentExecutionStatus::Paused) => {
                     self.scheduler.start(row.user_id, row.execution_id);
@@ -3054,35 +3140,92 @@ impl AgentExecutionEngine {
         delivery_error.map_or(Ok(()), Err)
     }
 
-    fn spawn_initial_plan(&self, owner_id: String, execution_id: String) {
+    fn spawn_initial_plan(&self, owner_id: String, execution_id: String,version:i64) {
         if self.lifecycle.is_cancelled() {
             return;
         }
+        // Publish the real original planning custody synchronously. The first
+        // repository await must not leave an accepted fork looking ownerless.
+        let initial_owner=match self.planning_controls.register(&execution_id,version,None,true,self.lifecycle.cancellation_child()) {
+            Ok(Some(owner))=>Ok(owner),Ok(None)=>return,Err(error)=>Err(error),
+        };
         let engine = self.clone();
         self.lifecycle.spawn(async move {
-            let result = tokio::select! {
-                _ = engine.lifecycle.cancelled() => return,
-                result = engine.plan_initial(&owner_id, &execution_id) => result,
+            let (initial_owner,result) = match initial_owner {
+                Ok(initial_owner)=>{
+                    let result=tokio::select! {
+                        _ = engine.lifecycle.cancelled() => return,
+                        result = engine.plan_initial(&owner_id, &execution_id,&initial_owner) => result,
+                    };
+                    (Some(initial_owner),result)
+                },
+                Err(error)=>(None,Err(error)),
             };
             if let Err(error) = result {
                 tracing::error!(%execution_id, %error, "Agent Execution planning failed");
                 if !engine.lifecycle.is_cancelled() {
                     engine
-                        .fail_planning(&owner_id, &execution_id, &error.to_string())
+                        .fail_planning(&owner_id, &execution_id, &error.to_string(),initial_owner.as_ref())
                         .await;
                 }
             }
+            // The original planning task still owns its failure writeback.
+            // Keep that exact guard visible until settlement/exit, too.
+            drop(initial_owner);
         });
+    }
+
+    /// Retry only an exact database observation/commit owned by this planning
+    /// task. Never wrap a planner invocation: its result may already exist.
+    async fn planning_database<T,F,Fut>(&self,control:Option<&PlanningGuard>,mut operation:F)->Result<T,AppError>
+    where T:Send,F:FnMut()->Fut+Send,Fut:std::future::Future<Output=Result<T,AppError>>+Send {
+        let mut backoff=Duration::from_millis(100);
+        loop {
+            let stopped=async {match control {Some(control)=>control.cancelled().await,None=>self.lifecycle.cancelled().await}};
+            let result=tokio::select! {biased;
+                _=stopped=>return Err(AppError::Conflict("the original planning operation was stopped".into())),
+                result=operation()=>result,
+            };
+            match result {
+                Err(AppError::DatabaseUnavailable {..})=>{
+                    #[cfg(test)]
+                    self.planning_controls.note_database_retry();
+                    let stopped=async {match control {Some(control)=>control.cancelled().await,None=>self.lifecycle.cancelled().await}};
+                    tokio::select! {biased;
+                        _=stopped=>return Err(AppError::Conflict("the original planning operation was stopped".into())),
+                        _=tokio::time::sleep(backoff)=>{},
+                    }
+                    backoff=(backoff*2).min(Duration::from_secs(1));
+                },
+                result=>return result,
+            }
+        }
+    }
+
+    async fn handoff_initial_plan(&self,owner:&str,execution:&str,control:&PlanningGuard)->Result<(),AppError> {
+        loop {
+            let current=self.planning_database(Some(control),||self.require_execution(owner,execution)).await?;
+            if !matches!(current.status,AgentExecutionStatus::Running|AgentExecutionStatus::WaitingInput) {return Ok(());}
+            // This starts/joins only the current canonical plan. It cannot
+            // regenerate the prior plan or bypass Stop, pause or task leases.
+            self.scheduler.start(owner.into(),execution.into());
+            if self.scheduler.has_dispatch_owner(execution) {return Ok(());}
+            // A previous generation may still own its exact unwind and has
+            // registered this restart. Retain the original planning handoff.
+            tokio::select! {biased;
+                _=control.cancelled()=>return Ok(()),
+                _=tokio::time::sleep(Duration::from_millis(100))=>{},
+            }
+        }
     }
 
     async fn plan_initial(
         &self,
         owner_id: &str,
         execution_id: &str,
+        initial_owner:&PlanningGuard,
     ) -> Result<(), AppError> {
-        let row = self
-            .repository
-            .get_execution(owner_id, execution_id)
+        let row = self.planning_database(Some(initial_owner),||async {self.repository.get_execution(owner_id, execution_id).await.map_err(AppError::from)})
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
         let command: InitialPlanningCommand = serde_json::from_str(&row.initial_plan_input)
@@ -3091,15 +3234,22 @@ impl AgentExecutionEngine {
                     "invalid persisted initial planning input for {execution_id}: {error}"
                 ))
             })?;
-        let Some(initial_owner) = self.planning_controls.register(execution_id, row.version, None, true,
-            self.lifecycle.cancellation_child())? else { return Ok(()); };
+        if initial_owner.is_cancelled() {return Ok(());}
+        if row.status!=AgentExecutionStatus::Planning.as_str() {
+            self.handoff_initial_plan(owner_id,execution_id,initial_owner).await?;return Ok(());
+        }
+        #[cfg(any(test,feature="test-support"))]
+        if !self.planning_controls.wait_initial_for_test(&row.goal,initial_owner).await? {return Ok(());}
         let mut automatic_plan: Option<(String, String, PlannedExecution)> = None;
         loop {
             if initial_owner.is_cancelled() { return Ok(()); }
-            let detail = self.detail(owner_id, execution_id).await?;
+            let detail = self.planning_database(Some(initial_owner),||self.detail(owner_id, execution_id)).await?;
             if detail.execution.status != AgentExecutionStatus::Planning {
                 // A concurrent cancel, delete, or explicit replan won the CAS.
-                // It is a normal lifecycle race, not a planning failure.
+                // A lost commit ACK can also expose our now-running plan.
+                // Observe current canonical authority and transfer custody;
+                // status alone never proves another scheduler picked it up.
+                self.handoff_initial_plan(owner_id,execution_id,initial_owner).await?;
                 return Ok(());
             }
             let participants = active_participants(&detail);
@@ -3152,46 +3302,41 @@ impl AgentExecutionEngine {
                 }
             };
             let materialized = plan_materializer::materialize(plan, &participants)?;
-            let result = self
+            let params=ReconcileAgentExecutionPlanParams {
+                goal:None,adaptation_policy:None,decision_policy:None,delegation_policy:None,
+                keep_step_ids:Vec::new(),new_participants:Vec::new(),retire_participant_ids:Vec::new(),
+                new_steps:materialized.steps,new_dependencies:materialized.dependencies,execution_status:AgentExecutionStatus::Running,
+            };
+            let event=system_event(AgentExecutionEventKind::PlanChanged,None,None,json!({"status":"running","change":"initial_plan"}));
+            let result = self.planning_database(Some(initial_owner),||async {let result=self
                 .repository
                 .reconcile_plan(
                     owner_id,
                     execution_id,
                     detail.execution.version,
-                    &ReconcileAgentExecutionPlanParams {
-                        goal: None,
-                        adaptation_policy: None,
-                        decision_policy: None,
-                        delegation_policy: None,
-                        keep_step_ids: Vec::new(),
-                        new_participants: Vec::new(),
-                        retire_participant_ids: Vec::new(),
-                        new_steps: materialized.steps,
-                        new_dependencies: materialized.dependencies,
-                        execution_status: AgentExecutionStatus::Running,
-                    },
-                    &system_event(
-                        AgentExecutionEventKind::PlanChanged,
-                        None,
-                        None,
-                        json!({"status":"running","change":"initial_plan"}),
-                    ),
+                    &params,&event,
                 )
-                .await;
+                .await.map_err(AppError::from);
+                #[cfg(test)]
+                if result.is_ok()&&self.planning_controls.take_lost_plan_ack() {
+                    // Exact isolated commit/ACK fault: the real repository has
+                    // committed, but this original caller did not see its ACK.
+                    return Err(AppError::DatabaseUnavailable {reason:nomifun_common::DatabaseUnavailableReason::Busy});
+                }
+                result}).await;
             match result {
                 Ok(_) => {
+                    self.handoff_initial_plan(owner_id,execution_id,initial_owner).await?;
                     self.publish().await;
-                    self.scheduler
-                        .start(owner_id.to_owned(), execution_id.to_owned());
                     return Ok(());
                 }
-                Err(nomifun_db::DbError::Conflict(_)) => {
+                Err(AppError::Conflict(_)) if !initial_owner.is_cancelled() => {
                     // Reload and either submit against the latest version or,
                     // for automatic planning after a rename, regenerate from
                     // the new goal. Never convert a normal CAS race to Failed.
                     continue;
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             }
         }
     }
@@ -3277,7 +3422,7 @@ impl AgentExecutionEngine {
         let control = self.planning_controls.register(execution_id, target.version,
             target.delegation.map(|(step, _)| step), false, self.lifecycle.cancellation_child())?
             .expect("model planning registrations are not singleflight");
-        let detail = self.detail(owner_id, execution_id).await?;
+        let detail = self.planning_database(Some(&control),||self.detail(owner_id, execution_id)).await?;
         if control.is_cancelled() || detail.execution.status.is_terminal() || detail.execution.version < target.version {
             return Err(AppError::Conflict("planning source is stopped or superseded".into()));
         }
@@ -3288,7 +3433,7 @@ impl AgentExecutionEngine {
             }
             let mut cursor = 0;
             loop {
-                let events = self.repository.list_events(owner_id, execution_id, cursor, 200).await?;
+                let events = self.planning_database(Some(&control),||async {self.repository.list_events(owner_id, execution_id, cursor, 200).await.map_err(AppError::from)}).await?;
                 for event in &events {
                     if event.event_type != AgentExecutionEventKind::StepChanged.as_str() { continue; }
                     let payload: serde_json::Value = serde_json::from_str(&event.payload)
@@ -3307,43 +3452,36 @@ impl AgentExecutionEngine {
         Ok(control)
     }
 
-    async fn fail_planning(&self, owner_id: &str, execution_id: &str, reason: &str) {
+    async fn fail_planning(&self, owner_id: &str, execution_id: &str, reason: &str,control:Option<&PlanningGuard>) {
         loop {
-            let Ok(current) = self.require_execution(owner_id, execution_id).await else {
+            let Ok(current) = self.planning_database(control,||self.require_execution(owner_id, execution_id)).await else {
                 return;
             };
             if current.status != AgentExecutionStatus::Planning {
                 return;
             }
-            match self.repository.update_execution(
+            let payload = match self.planning_database(control,||self.scheduler.terminal_transition_payload(owner_id, &current,
+                AgentExecutionStatus::Failed, Some(reason))).await {
+                Ok(payload) => payload,
+                Err(error) => { tracing::warn!(%execution_id, %error, "failed to prepare planning failure"); return; }
+            };
+            let params=UpdateAgentExecutionParams {status:Some(AgentExecutionStatus::Failed),summary:Some(Some(reason.to_owned())),..Default::default()};
+            let event=system_event(AgentExecutionEventKind::StatusChanged,None,None,payload);
+            match self.planning_database(control,||async {self.repository.update_execution(
                 owner_id,
                 execution_id,
                 current.version,
                 None,
-                &UpdateAgentExecutionParams {
-                    status: Some(AgentExecutionStatus::Failed),
-                    summary: Some(Some(reason.to_owned())),
-                    ..Default::default()
-                },
-                &system_event(
-                    AgentExecutionEventKind::StatusChanged,
-                    None,
-                    None,
-                    terminal_transition_payload(
-                        &current,
-                        AgentExecutionStatus::Failed,
-                        Some(reason),
-                    ),
-                ),
+                &params,&event,
             )
-            .await {
+            .await.map_err(AppError::from)}).await {
                 Ok(_) => {
                     self.scheduler
                         .after_terminal_commit(owner_id, execution_id)
                         .await;
                     return;
                 }
-                Err(nomifun_db::DbError::Conflict(_)) => continue,
+                Err(AppError::Conflict(_)) if control.is_none_or(|control|!control.is_cancelled()) => continue,
                 Err(error) => {
                     tracing::warn!(%execution_id, %error, "failed to persist planning failure");
                     return;
@@ -4163,14 +4301,12 @@ fn collaboration_step(goal: &str) -> PlannedExecutionStep {
     }
 }
 
-fn message_command_identity(sender_session:&str,sender_turn:&str,execution_id:&str,
-    step_id:&str,content:&str,key:&str)->Result<(String,String),AppError> {
-    if key.is_empty() || key.len()>128 || content.trim().is_empty() || content.len()>64*1024 {
-        return Err(AppError::BadRequest("invalid collaboration guidance".into()));
-    }
-    let identity=serde_json::to_vec(&(sender_session,sender_turn,execution_id,step_id,key))
+fn message_command_identity(sender_session:&str,sender_turn:&str,
+    command:&nomifun_agent_contracts::AgentCollaborationMessage)->Result<(String,String),AppError> {
+    command.validate().map_err(AppError::BadRequest)?;
+    let identity=serde_json::to_vec(&(sender_session,sender_turn,&command.execution_id,&command.step_id,&command.idempotency_key))
         .map_err(|error|AppError::Internal(error.to_string()))?;
-    Ok((format!("agent-message:{:x}",Sha256::digest(identity)),format!("{:x}",Sha256::digest(content.as_bytes()))))
+    Ok((format!("agent-message:{:x}",Sha256::digest(identity)),command.content_digest().map_err(AppError::BadRequest)?.as_ref().into()))
 }
 
 fn non_empty(field: &str, value: String) -> Result<String, AppError> {

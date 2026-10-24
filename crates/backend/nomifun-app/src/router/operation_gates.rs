@@ -15,6 +15,10 @@ impl<K,G> Default for WeakGateCache<K,G> {
 }
 
 impl<K:Eq+Hash,G:Default> WeakGateCache<K,G> {
+    /// Observe an existing exact owner gate without creating a cache entry.
+    pub(crate) fn existing<Q:Eq+Hash+?Sized>(&self,key:&Q)->Option<Arc<G>> where K:Borrow<Q> {
+        self.gates.lock().expect("operation gate cache is poisoned").get(key).and_then(Weak::upgrade)
+    }
     pub(crate) fn get<Q:Eq+Hash+ToOwned<Owned=K>+?Sized>(&self,key:&Q)->Arc<G> where K:Borrow<Q> {
         // Upgrade/create and dead-key removal share one short, non-async lock.
         // A waiting future or Owned guard keeps its Arc alive, so another

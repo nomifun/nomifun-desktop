@@ -30,6 +30,8 @@ use crate::projector::reduce_agent_messages;
 
 #[path = "native_checkpoint_tests.rs"]
 mod native_checkpoint_tests;
+#[path = "empty_execution_creation_tests.rs"]
+mod empty_execution_creation_tests;
 #[path = "session_input_stop_tests.rs"]
 mod session_input_stop_tests;
 #[path = "native_execution_tests.rs"]
@@ -3211,7 +3213,7 @@ async fn effect_store_rejects_read_only_lifecycles_and_managed_uncertainty() {
             .record_effect_terminal(uncertain, EffectTerminalState::Uncertain)
             .await,
         Err(SessionStoreError::InvalidEvent(message))
-            if message == "managed effects require process-restart proof before becoming uncertain"
+            if message == "managed effects require native recovery proof before becoming uncertain"
     ));
 
     let failed = EffectEventRequest {

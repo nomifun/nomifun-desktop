@@ -95,37 +95,37 @@ impl AgentSessionStore {
     /// confirmed question's existing provider proof may settle that cut safely.
     pub async fn begin_channel_input_delivery(&self,owner:&PrincipalRef,session:&AgentSessionId,input:&EventId,turn_source:&str,
         subject:ChannelInputDeliverySubject)->Result<ChannelInputDeliveryDisposition,SessionStoreError> {
-        let mut tx=self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let mut state=state_for_input_tx(&mut tx,owner,session,input,turn_source,subject).await?;
         let key=scope(&state)?;
-        if read_state_tx(&mut tx,&format!("{key}:confirmed")).await?.is_some() {tx.commit().await?;return Ok(ChannelInputDeliveryDisposition::Confirmed);}
+        if read_state_tx(&mut tx,&format!("{key}:confirmed")).await?.is_some() {db_write_observation.commit(tx).await?;return Ok(ChannelInputDeliveryDisposition::Confirmed);}
         let proofs=question_receipts_tx(&mut tx,&state).await?;
         if !proofs.is_empty() {
             state.phase=ChannelInputDeliveryPhase::Confirmed {provider_message_ids:proofs};
-            self.append_channel_delivery_tx(&mut tx,state).await?;tx.commit().await?;return Ok(ChannelInputDeliveryDisposition::Confirmed);
+            self.append_channel_delivery_tx(&mut tx,state).await?;db_write_observation.commit(tx).await?;return Ok(ChannelInputDeliveryDisposition::Confirmed);
         }
         if read_state_tx(&mut tx,&format!("{key}:started")).await?.is_some() || read_state_tx(&mut tx,&format!("{key}:unknown")).await?.is_some() {
             if read_state_tx(&mut tx,&format!("{key}:unknown")).await?.is_none() {state.phase=ChannelInputDeliveryPhase::Unknown;self.append_channel_delivery_tx(&mut tx,state).await?;}
-            tx.commit().await?;return Ok(ChannelInputDeliveryDisposition::Unknown);
+            db_write_observation.commit(tx).await?;return Ok(ChannelInputDeliveryDisposition::Unknown);
         }
         let original=session_input::accepted_input_tx(&mut tx,session,input).await?;
         let floor:i64=sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=? AND kind='context/cleared'")
             .bind(session.as_ref()).fetch_one(&mut *tx).await?;
         if original.event.seq<=as_u64(floor,"Channel delivery context floor")? {return Err(SessionStoreError::ExecutionFenced);}
         validate_input_source_tx(&mut tx,session,&original.input.0).await?;
-        self.append_channel_delivery_tx(&mut tx,state).await?;tx.commit().await?;Ok(ChannelInputDeliveryDisposition::Ready)
+        self.append_channel_delivery_tx(&mut tx,state).await?;db_write_observation.commit(tx).await?;Ok(ChannelInputDeliveryDisposition::Ready)
     }
 
     pub async fn finish_channel_input_delivery(&self,owner:&PrincipalRef,session:&AgentSessionId,input:&EventId,turn_source:&str,
         subject:ChannelInputDeliverySubject,confirmed:bool,provider_message_ids:Vec<String>)->Result<(),SessionStoreError> {
-        let mut tx=self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let mut state=state_for_input_tx(&mut tx,owner,session,input,turn_source,subject).await?;let key=scope(&state)?;
-        if read_state_tx(&mut tx,&format!("{key}:confirmed")).await?.is_some() {tx.commit().await?;return Ok(());}
+        if read_state_tx(&mut tx,&format!("{key}:confirmed")).await?.is_some() {db_write_observation.commit(tx).await?;return Ok(());}
         if read_state_tx(&mut tx,&format!("{key}:started")).await?.is_none() || read_state_tx(&mut tx,&format!("{key}:unknown")).await?.is_some() {
             return Err(SessionStoreError::ExecutionFenced);
         }
         state.phase=if confirmed {ChannelInputDeliveryPhase::Confirmed {provider_message_ids}} else {ChannelInputDeliveryPhase::Unknown};
-        self.append_channel_delivery_tx(&mut tx,state).await?;tx.commit().await?;Ok(())
+        self.append_channel_delivery_tx(&mut tx,state).await?;db_write_observation.commit(tx).await?;Ok(())
     }
 
     pub async fn recoverable_channel_inputs(&self,owner:&PrincipalRef)->Result<Vec<RecoverableChannelInput>,SessionStoreError> {

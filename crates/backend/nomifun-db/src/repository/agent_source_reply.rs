@@ -85,15 +85,13 @@ pub async fn agent_message_command_bound_tx(tx:&mut Transaction<'_,Sqlite>,sourc
     execution:&str,step:&str,operation:&str,content_digest:&str)
     ->Result<(u64,nomifun_agent_contracts::StrictJsonValue),DbError> {
     let (sequence,arguments)=agent_message_command_tx(tx,source).await?;
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Command {execution_id:String,step_id:String,content:String,idempotency_key:String}
-    let command:Command=serde_json::from_value(arguments.0.clone()).map_err(invalid)?;
+    let command:nomifun_agent_contracts::AgentCollaborationMessage=serde_json::from_value(arguments.0.clone()).map_err(invalid)?;
+    command.validate().map_err(invalid)?;
     let identity=serde_json::to_vec(&(&source.agent_session_id,&source.turn_operation_id,execution,step,&command.idempotency_key)).map_err(invalid)?;
     let expected=format!("agent-message:{}",nomifun_agent_contracts::digest_bytes(&identity).as_ref());
     if command.execution_id!=execution||command.step_id!=step||command.idempotency_key.is_empty()||command.idempotency_key.len()>128
         ||command.content.trim().is_empty()||command.content.len()>64*1024||expected!=operation
-        ||nomifun_agent_contracts::digest_bytes(command.content.as_bytes()).as_ref()!=content_digest {
+        ||command.content_digest().map_err(invalid)?.as_ref()!=content_digest {
         return Err(DbError::Conflict("Agent message command differs from its exact native proposal".into()));
     }
     Ok((sequence,arguments))
@@ -178,6 +176,47 @@ pub(crate) fn binding(started:&Value)->Result<Option<AgentHandoffBindingRefV1>,D
 
 pub(crate) async fn event_payload_tx(tx:&mut Transaction<'_,Sqlite>,session:&str,event_id:&str)->Result<Value,DbError> {
     event(tx,session,Some(event_id),None).await?.payload()
+}
+
+/// The reply addresses a completed native input handoff, never a live
+/// authorization/consent wait or an unrelated latest question.
+pub async fn agent_parent_question_tx(tx:&mut Transaction<'_,Sqlite>,owner:&str,
+    reference:&nomifun_agent_contracts::AgentQuestionReplyReference)->Result<(AgentUserInputRequest,String,AgentHandoffBindingRefV1),DbError> {
+    let session=reference.agent_session_id.as_ref();let operation=reference.turn_operation_id.as_ref();
+    let row:Option<String>=sqlx::query_scalar("SELECT turn.terminal_event_id FROM agent_turns turn JOIN agent_sessions session ON session.agent_session_id=turn.session_id JOIN agent_session_heads head ON head.session_id=turn.session_id WHERE turn.session_id=? AND turn.operation_id=? AND turn.state='completed' AND session.state='live' AND json_extract(session.owner_ref_json,'$.principal_kind')='user' AND json_extract(session.owner_ref_json,'$.principal_id')=? AND head.status='ready' AND head.active_turn_id IS NULL AND NOT EXISTS(SELECT 1 FROM agent_turns successor WHERE successor.session_id=turn.session_id AND successor.operation_id<>turn.operation_id AND successor.accepted_at>turn.accepted_at) AND NOT EXISTS(SELECT 1 FROM agent_effects effect WHERE effect.session_id=turn.session_id AND effect.state IN ('pending','unknown'))")
+        .bind(session).bind(operation).bind(owner).fetch_optional(&mut **tx).await?;
+    let terminal=row.ok_or_else(||DbError::Conflict("parent reply no longer addresses the original closed question Turn".into()))?;
+    let (_,_,started,start)=input(tx,session,operation).await?;
+    let original_binding=binding(&start)?.ok_or_else(||DbError::Conflict("original question has no exact admitted binding".into()))?;
+    let current:String=sqlx::query_scalar("SELECT agent_binding_json FROM agent_sessions WHERE agent_session_id=? AND state='live'")
+        .bind(session).fetch_one(&mut **tx).await?;
+    let current:AgentBindingValue=serde_json::from_str(&current).map_err(invalid)?;
+    if AgentHandoffBindingRefV1::from(&current)!=original_binding {return Err(DbError::Conflict("original question binding was replaced".into()));}
+    let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_events WHERE session_id=? AND event_id=?)")
+        .bind(session).bind(reference.question_event_id.as_ref()).fetch_one(&mut **tx).await?;
+    if !exists {return Err(DbError::Conflict("parent reply question event is no longer available".into()));}
+    let question=event(tx,session,Some(reference.question_event_id.as_ref()),None).await?;
+    let terminal=event(tx,session,Some(&terminal),None).await?;
+    let floor:i64=sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=? AND kind='context/cleared'")
+        .bind(session).fetch_one(&mut **tx).await?;
+    if question.kind!="runtime/progress-recorded"||question.kind_version!=1||question.producer_id!="runtime_supervisor"
+        ||question.correlation_id!=operation||question.seq<=started.seq||question.seq<=floor||question.seq>=terminal.seq
+        ||(question.causation_event_id.as_ref()!=Some(&started.event_id)&&question.causation_event_id!=started.causation_event_id)
+        ||terminal.kind!="turn/completed"||terminal.kind_version!=1||terminal.producer_id!="runtime_supervisor"||terminal.correlation_id!=operation {
+        return Err(DbError::Conflict("parent reply differs from its exact native question boundary".into()));
+    }
+    let value=question.payload()?;
+    if value.pointer("/event/event").and_then(Value::as_str)!=Some("user_input_requested") {
+        return Err(DbError::Conflict("parent reply does not reference a native input question".into()));
+    }
+    let request:AgentUserInputRequest=serde_json::from_value(value.pointer("/event/request").cloned().ok_or_else(||invalid("native question request is missing"))?).map_err(invalid)?;
+    request.validate().map_err(invalid)?;
+    let terminal_request:AgentUserInputRequest=serde_json::from_value(terminal.payload()?.get("user_input_request").cloned().ok_or_else(||DbError::Conflict("original Turn did not end with an input handoff".into()))?).map_err(invalid)?;
+    terminal_request.validate().map_err(invalid)?;
+    if request.request_id!=reference.request_id||terminal_request!=request {
+        return Err(DbError::Conflict("parent reply no longer matches the original question request".into()));
+    }
+    Ok((request,terminal.event_id,original_binding))
 }
 
 /// Read decreasing explicit reply ancestry. This never selects latest work,

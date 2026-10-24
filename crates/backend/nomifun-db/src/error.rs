@@ -45,7 +45,13 @@ impl From<DbError> for AppError {
         match err {
             DbError::NotFound(msg) => AppError::NotFound(msg),
             DbError::Conflict(msg) => AppError::Conflict(msg),
-            DbError::Query(e) => AppError::Internal(format!("Database error: {e}")),
+            DbError::Query(e) => match crate::database_unavailable_reason(&e) {
+                Some(reason) => {
+                    crate::pool_diagnostics::warn_contended_pools(reason);
+                    AppError::DatabaseUnavailable { reason }
+                },
+                None => AppError::Internal(format!("Database error: {e}")),
+            },
             DbError::Migration(e) => AppError::Internal(format!("Migration error: {e}")),
             DbError::Init(msg) => AppError::Internal(format!("Database init error: {msg}")),
             DbError::SafetyBackup(msg) => {

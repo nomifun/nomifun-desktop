@@ -34,13 +34,17 @@ pub(crate) fn requires_task_ledger_capability(capability_id: &str) -> bool {
 /// workspace/repository. External effects such as media generation, Browser,
 /// Computer, notifications, devices, and schedules are deliberately excluded.
 pub(crate) fn affects_workspace(binding: &AgentToolBinding) -> bool {
-    match binding.capability_id.as_ref() {
+    affects_workspace_contract(binding.capability_id.as_ref(), binding.effect_class)
+}
+
+pub(crate) fn affects_workspace_contract(capability_id: &str, effect_class: crate::AgentEffectClass) -> bool {
+    match capability_id {
         // A process can keep mutating after a read-shaped poll, so every
         // process action invalidates observations until cleanup proves idle.
         "workspace.process" => true,
         "workspace.files" | "workspace.vcs" | "workspace.artifacts" => {
             !matches!(
-                binding.effect_class,
+                effect_class,
                 nomifun_engine_core::EngineEffectClass::ReadOnly
             )
         }
@@ -153,9 +157,8 @@ pub fn workspace_process_operation_not_applied(action: &str, result: &AgentToolR
 
 /// Input was held before I/O, but its real owner's terminal still must be
 /// observed. Invalid references have no such terminal and use the path above.
-pub(crate) fn process_control_rejected_terminal(binding: &AgentToolBinding, result: &AgentToolResult) -> bool {
-    if binding.capability_id.as_ref() != "workspace.process" { return false; }
-    let operation=match binding.action_id.as_ref() {"workspace.process/input"=>"stdin","workspace.process/close_stdin"=>"close_stdin","workspace.process/resize"=>"resize",_=>return false};
+pub(crate) fn process_control_rejected_terminal_action(action_id: &str, result: &AgentToolResult) -> bool {
+    let operation=match action_id {"workspace.process/input"=>"stdin","workspace.process/close_stdin"=>"close_stdin","workspace.process/resize"=>"resize",_=>return false};
     serde_json::from_str::<serde_json::Value>(&result.output_text()).is_ok_and(|value|
         value["schema"]=="nomifun.process-control-observation.v1" && value["code"]=="PROCESS_ALREADY_TERMINATED"
             && value["operation"]==operation && value["control_applied"]==false && value["success"]==false
@@ -197,7 +200,7 @@ mod tests {
         let mut receipt=serde_json::json!({"schema":"nomifun.process-control-observation.v1","code":"PROCESS_ALREADY_TERMINATED",
             "operation":"stdin","process_id":"original","state":"timed_out","success":false,"control_applied":false,"cleanup":{"reaped":true,"errors":[]}});
         let result=crate::AgentToolResult::text(call.call_id.clone(),receipt.to_string(),true);
-        assert!(process_control_rejected_terminal(&input,&result));
+        assert!(process_control_rejected_terminal_action(input.action_id.as_ref(),&result));
         let mut commands=crate::workflow::CommandTracker::default();
         work.observe(&input,&call,&result,&mut commands);
         assert_eq!(work.workspace_observation_epoch,7);
@@ -206,11 +209,11 @@ mod tests {
         assert_eq!(work.failed_commands,1);
         receipt["cleanup"]["reaped"]=serde_json::json!(false);
         let uncertain=crate::AgentToolResult::text(call.call_id.clone(),receipt.to_string(),true);
-        assert!(!process_control_rejected_terminal(&input,&uncertain));
+        assert!(!process_control_rejected_terminal_action(input.action_id.as_ref(),&uncertain));
         receipt["cleanup"]["reaped"]=serde_json::json!(true);
         receipt["control_applied"]=serde_json::json!(true);
         let applied=crate::AgentToolResult::text(call.call_id,receipt.to_string(),true);
-        assert!(!process_control_rejected_terminal(&input,&applied));
+        assert!(!process_control_rejected_terminal_action(input.action_id.as_ref(),&applied));
     }
     use nomifun_agent_contracts::{
         ActionId, CanonicalSchemaRef, CapabilityId, DigestHex, StrictJsonValue,

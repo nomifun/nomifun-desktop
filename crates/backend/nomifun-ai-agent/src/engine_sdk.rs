@@ -120,6 +120,32 @@ pub struct EngineTurnOutcome {
     pub terminal: EngineTurnTerminal,
 }
 
+/// Acknowledges custody of this exact Turn's unfinished settlement, not cleanup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EngineSettlementHandoff {
+    Unsupported,
+    Retained { event_id: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineTurnSettlementStatus {
+    NoPending,
+    Settled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineSettlementControl { PreserveResult, CancellationRequested }
+
+pub fn completed_turn_stop_reason(reason: ChatFinishReason) -> TurnStopReason {
+    match reason {
+        ChatFinishReason::Completed => TurnStopReason::EndTurn,
+        ChatFinishReason::MaxOutputTokens => TurnStopReason::MaxTokens,
+        ChatFinishReason::Refusal => TurnStopReason::Refusal,
+        ChatFinishReason::Cancelled => TurnStopReason::Cancelled,
+        ChatFinishReason::ToolCalls => TurnStopReason::MaxTurnRequests,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EngineTurnTerminal {
@@ -172,9 +198,20 @@ pub trait EngineSessionDriver: Send + Sync {
     /// A native pause requires portable quiescence, never retained live handles.
     async fn cleanup_turn(&self, message: &SendMessageData, terminal: &EngineTurnTerminal) -> Result<(), AppError>;
 
-    /// Optional nonterminal quarantine after failed cleanup. True must mean
-    /// the host persisted a fenced pause with cleanup explicitly UNPROVEN.
-    async fn suspend_after_cleanup_failure(&self, _message: &SendMessageData) -> Result<bool,AppError> { Ok(false) }
+    /// Transfer supervision to the original Session owner. The SDK retains
+    /// its exact result until cleanup and the canonical terminal are committed.
+    async fn handoff_turn_settlement(&self, _message: &SendMessageData,
+        _outcome: &EngineTurnOutcome, _first_failure: &str,
+    ) -> Result<EngineSettlementHandoff, AppError> { Ok(EngineSettlementHandoff::Unsupported) }
+
+    /// The canonical host resolves a Stop against an already-committed exit.
+    /// A transport teardown token cannot overwrite a durable business result.
+    async fn retained_turn_outcome(&self, _message: &SendMessageData, outcome: &EngineTurnOutcome,
+        control: EngineSettlementControl) -> Result<EngineTurnOutcome, AppError> {
+        let mut outcome = outcome.clone();
+        if control == EngineSettlementControl::CancellationRequested { outcome.terminal = EngineTurnTerminal::Cancelled; }
+        Ok(outcome)
+    }
 
     /// Called only after cleanup proof. Store this exact outcome in the
     /// existing Session owner's journal; never start an independent Session DB.
@@ -238,16 +275,23 @@ struct PendingTurnSettlement {
     /// cleanup and terminal receipt are proven. This is diagnostic evidence,
     /// not permission to rerun the driver or release Session resources.
     failure: Option<String>,
+    handoff: Option<String>,
 }
 
 impl PendingTurnSettlement {
     fn remember_failure(&mut self, stage: &str, error: impl std::fmt::Display) -> String {
         self.failure.get_or_insert_with(|| {
-            crate::protocol::send_error::sanitize_error_detail(
-                &nomi_redact::redact_secrets_owned(format!("{stage}: {error}")),
-            )
+            bounded_settlement_diagnostic(&format!("{stage}: {error}"))
         }).clone()
     }
+}
+
+/// Shared diagnostic boundary for SDK and pre-driver settlement owners.
+/// The immutable business outcome is retained separately without truncation.
+pub fn bounded_settlement_diagnostic(detail: &str) -> String {
+    crate::protocol::send_error::sanitize_error_detail(
+        &nomi_redact::redact_secrets_owned(detail.to_owned()),
+    )
 }
 struct SharedRuntime {
     state: AgentRuntimeState,
@@ -255,6 +299,7 @@ struct SharedRuntime {
     active: Mutex<Option<ActiveTurn>>,
     cleanup: Mutex<Option<Arc<CleanupFlight>>>,
     pending_settlement: Mutex<Option<PendingTurnSettlement>>,
+    settlement_gate: tokio::sync::Mutex<()>,
     driver: Arc<dyn EngineSessionDriver>,
 }
 
@@ -289,6 +334,7 @@ impl HostedAgentRuntime {
                 active: Mutex::new(None),
                 cleanup: Mutex::new(None),
                 pending_settlement: Mutex::new(None),
+                settlement_gate: tokio::sync::Mutex::new(()),
                 driver,
             }),
         })
@@ -308,6 +354,13 @@ impl AgentRuntimeControl for HostedAgentRuntime {
     }
     fn status(&self) -> Option<ConversationStatus> {
         self.shared.state.status()
+    }
+    fn current_task_identity(&self) -> Option<AgentRuntimeTurn> {
+        Some(self.shared.state.current_turn_identity())
+    }
+    fn has_live_turn_task(&self) -> bool {
+        self.shared.active.lock().unwrap_or_else(|error|error.into_inner()).as_ref()
+            .is_some_and(|task|!task.done.load(Ordering::Acquire))
     }
     fn is_transport_healthy(&self) -> bool {
         !self.shared.closed.is_cancelled() && self.shared.state.is_transport_healthy()
@@ -369,6 +422,7 @@ impl AgentRuntimeControl for HostedAgentRuntime {
                 message: message.clone(), outcome: outcome.clone(), cleanup_proven: false,
                 cancellation: requested_cancellation.clone(),
                 failure: None,
+                handoff: None,
             });
             let cleanup = AssertUnwindSafe(shared.driver.cleanup_turn(&message,&outcome.terminal))
                 .catch_unwind()
@@ -379,10 +433,11 @@ impl AgentRuntimeControl for HostedAgentRuntime {
                 if let Some(pending) = shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()).as_mut() {
                     cause = pending.remember_failure("Engine turn cleanup failed", &error);
                 }
-                let suspended = AssertUnwindSafe(shared.driver.suspend_after_cleanup_failure(&message)).catch_unwind().await;
-                if matches!(suspended,Ok(Ok(true))) {
-                    // The host retained a fenced nonterminal cleanup witness.
-                    *shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = None;
+                let handed_off = AssertUnwindSafe(shared.driver.handoff_turn_settlement(&message, &outcome, &cause)).catch_unwind().await;
+                if let Ok(Ok(EngineSettlementHandoff::Retained { event_id })) = handed_off {
+                    if let Some(pending) = shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()).as_mut() {
+                        pending.handoff = Some(event_id);
+                    }
                     shared.state.mark_transport_broken();
                     shared.state.emit_finish_for_turn(turn,Some(shared.state.conversation_id().to_owned()),Some(TurnStopReason::Paused));
                     return;
@@ -410,6 +465,15 @@ impl AgentRuntimeControl for HostedAgentRuntime {
                 if let Some(pending) = shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()).as_mut() {
                     cause = pending.remember_failure("Engine terminal receipt failed", &error);
                 }
+                if let Ok(Ok(EngineSettlementHandoff::Retained { event_id })) =
+                    AssertUnwindSafe(shared.driver.handoff_turn_settlement(&message, &outcome, &cause)).catch_unwind().await {
+                    if let Some(pending) = shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()).as_mut() {
+                        pending.handoff = Some(event_id);
+                    }
+                    shared.state.mark_transport_broken();
+                    shared.state.emit_finish_for_turn(turn, Some(shared.state.conversation_id().to_owned()), Some(TurnStopReason::Paused));
+                    return;
+                }
                 break_transport(
                     &shared,
                     turn,
@@ -426,13 +490,7 @@ impl AgentRuntimeControl for HostedAgentRuntime {
                     }));
                     TurnStopReason::InputRequired
                 }
-                EngineTurnTerminal::Completed { finish_reason } => match finish_reason {
-                    ChatFinishReason::Completed => TurnStopReason::EndTurn,
-                    ChatFinishReason::MaxOutputTokens => TurnStopReason::MaxTokens,
-                    ChatFinishReason::Refusal => TurnStopReason::Refusal,
-                    ChatFinishReason::Cancelled => TurnStopReason::Cancelled,
-                    ChatFinishReason::ToolCalls => TurnStopReason::MaxTurnRequests,
-                },
+                EngineTurnTerminal::Completed { finish_reason } => completed_turn_stop_reason(finish_reason),
                 EngineTurnTerminal::Cancelled => TurnStopReason::Cancelled,
                 EngineTurnTerminal::Paused { .. } => TurnStopReason::Paused,
                 EngineTurnTerminal::Failed { message, failure } => {
@@ -511,6 +569,39 @@ fn break_transport(shared: &SharedRuntime, turn: AgentRuntimeTurn, message: Stri
 
 #[async_trait]
 impl OfficialAgentRuntime for HostedAgentRuntime {
+    async fn settle_pending_turn(&self, source_message_id: &str) -> Result<EngineTurnSettlementStatus, AppError> {
+        // Never join the running task from its own handoff callback. This
+        // method is driven by the Session owner's independently tracked job.
+        let completion = self.shared.active.lock().unwrap_or_else(|e|e.into_inner())
+            .as_ref().map(|turn|turn.completion.clone());
+        if let Some(completion) = completion { completion.await.map_err(AppError::Internal)?; }
+        let _gate = self.shared.settlement_gate.lock().await;
+        let pending = self.shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()).clone();
+        let Some(mut pending) = pending else { return Ok(EngineTurnSettlementStatus::NoPending); };
+        if pending.message.source_message_id.as_deref().unwrap_or(&pending.message.msg_id) != source_message_id {
+            return Err(AppError::Conflict("settlement targets another accepted Turn".into()));
+        }
+        if pending.handoff.is_none() {
+            let failure = pending.failure.as_deref().unwrap_or("Original Turn settlement remains unconfirmed");
+            if let EngineSettlementHandoff::Retained { event_id } = self.shared.driver
+                .handoff_turn_settlement(&pending.message, &pending.outcome, failure).await? {
+                pending.handoff = Some(event_id);
+                *self.shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = Some(pending.clone());
+            }
+        }
+        if !pending.cleanup_proven {
+            self.shared.driver.cleanup_turn(&pending.message, &pending.outcome.terminal).await?;
+            pending.cleanup_proven = true;
+        }
+        pending.outcome = self.shared.driver.retained_turn_outcome(&pending.message, &pending.outcome,
+            if pending.cancellation.is_cancelled() { EngineSettlementControl::CancellationRequested }
+            else { EngineSettlementControl::PreserveResult }).await?;
+        *self.shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = Some(pending.clone());
+        self.shared.driver.record_terminal(&pending.message, &pending.outcome).await?;
+        *self.shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = None;
+        Ok(EngineTurnSettlementStatus::Settled)
+    }
+
     fn teardown_proven(&self) -> bool {
         self.shared.cleanup.lock().ok().is_some_and(|flight|
             flight.as_ref().is_some_and(|flight| matches!(flight.completion.peek(), Some(Ok(())))))
@@ -579,6 +670,7 @@ impl OfficialAgentRuntime for HostedAgentRuntime {
                             Err(_) => format!("{join_error}; Session cleanup panicked"),
                         });
                     }
+                    let _settlement = settlement_owner.settlement_gate.lock().await;
                     let pending = settlement_owner.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()).clone();
                     if let Some(mut pending) = pending {
                         if !retry_failed_turn {
@@ -595,9 +687,11 @@ impl OfficialAgentRuntime for HostedAgentRuntime {
                                 .map_err(|_|"Engine turn cleanup retry panicked".to_owned())?
                                 .map_err(|error|error.to_string())?;
                             pending.cleanup_proven = true;
-                            if pending.cancellation.is_cancelled() { pending.outcome.terminal = EngineTurnTerminal::Cancelled; }
-                            *settlement_owner.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = Some(pending.clone());
                         }
+                        pending.outcome = driver.retained_turn_outcome(&pending.message, &pending.outcome,
+                            if pending.cancellation.is_cancelled() { EngineSettlementControl::CancellationRequested }
+                            else { EngineSettlementControl::PreserveResult }).await.map_err(|error|error.to_string())?;
+                        *settlement_owner.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = Some(pending.clone());
                         AssertUnwindSafe(driver.record_terminal(&pending.message,&pending.outcome)).catch_unwind().await
                             .map_err(|_|"Engine terminal retry panicked".to_owned())?
                             .map_err(|error|error.to_string())?;
@@ -646,6 +740,136 @@ pub type EngineDriverFactory = Arc<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RetainedSettlementDriver {
+        runs: std::sync::atomic::AtomicUsize,
+        cleanups: std::sync::atomic::AtomicUsize,
+        cleanup_blocked: AtomicBool,
+        terminal_blocked: AtomicBool,
+        release_blocked: AtomicBool,
+        receipts: Mutex<Vec<EngineTurnOutcome>>,
+        handoffs: Mutex<Vec<(EngineTurnOutcome, String)>>,
+    }
+
+    #[async_trait]
+    impl EngineSessionDriver for RetainedSettlementDriver {
+        async fn run_turn(&self, _: &SendMessageData, _: CancellationToken, _: EngineTurnOutput)
+            -> Result<EngineTurnOutcome, AppError> {
+            self.runs.fetch_add(1, Ordering::AcqRel);
+            Ok(EngineTurnOutcome { model_steps: 7,
+                terminal: EngineTurnTerminal::Completed { finish_reason: ChatFinishReason::Completed } })
+        }
+        async fn cleanup_turn(&self, _: &SendMessageData, _: &EngineTurnTerminal) -> Result<(), AppError> {
+            self.cleanups.fetch_add(1, Ordering::AcqRel);
+            if self.cleanup_blocked.load(Ordering::Acquire) {
+                return Err(AppError::Conflict("original cleanup record unavailable".into()));
+            }
+            Ok(())
+        }
+        async fn handoff_turn_settlement(&self, _: &SendMessageData, outcome: &EngineTurnOutcome, failure: &str)
+            -> Result<EngineSettlementHandoff, AppError> {
+            self.handoffs.lock().unwrap().push((outcome.clone(), failure.to_owned()));
+            Ok(EngineSettlementHandoff::Retained { event_id: "original-settlement-request".into() })
+        }
+        async fn record_terminal(&self, _: &SendMessageData, outcome: &EngineTurnOutcome) -> Result<(), AppError> {
+            if self.terminal_blocked.load(Ordering::Acquire) {
+                return Err(AppError::Conflict("original terminal record unavailable".into()));
+            }
+            let mut receipts = self.receipts.lock().unwrap();
+            if receipts.is_empty() { receipts.push(outcome.clone()); }
+            if self.release_blocked.load(Ordering::Acquire) {
+                return Err(AppError::Conflict("original terminal committed but final release unavailable".into()));
+            }
+            Ok(())
+        }
+        async fn retained_turn_outcome(&self, _: &SendMessageData, outcome: &EngineTurnOutcome,
+            control: EngineSettlementControl) -> Result<EngineTurnOutcome, AppError> {
+            if let Some(committed) = self.receipts.lock().unwrap().first() { return Ok(committed.clone()); }
+            let mut outcome = outcome.clone();
+            if control == EngineSettlementControl::CancellationRequested { outcome.terminal = EngineTurnTerminal::Cancelled; }
+            Ok(outcome)
+        }
+        async fn cleanup_session(&self, _: Option<AgentKillReason>) -> Result<(), AppError> { Ok(()) }
+    }
+
+    fn retained_runtime(cleanup_blocked: bool, terminal_blocked: bool) -> (HostedAgentRuntime, Arc<RetainedSettlementDriver>) {
+        let (original, _) = model_failure_runtime(false, false);
+        let options = AgentRuntimeBuildOptions {
+            user_id: "0190f5fe-7c00-7a00-8000-000000000001".into(), agent_type: AgentType::Nomi,
+            workspace: "fixture".into(), model: None, conversation_id: original.conversation_id().into(),
+            delegation_policy: Default::default(), extra: serde_json::json!({}),
+            conversation_created_at: None, workspace_binding_lease: None,
+        };
+        let driver = Arc::new(RetainedSettlementDriver { runs: 0.into(), cleanups: 0.into(),
+            cleanup_blocked: cleanup_blocked.into(), terminal_blocked: terminal_blocked.into(),
+            release_blocked: false.into(),
+            receipts: Mutex::new(Vec::new()), handoffs: Mutex::new(Vec::new()) });
+        (HostedAgentRuntime::new(&options, driver.clone()).unwrap(), driver)
+    }
+
+    #[tokio::test]
+    async fn successful_cleanup_handoff_retains_original_result_and_serializes_settlement() {
+        let (runtime, driver) = retained_runtime(true, false);
+        let mut events = runtime.subscribe();
+        runtime.send_message(model_failure_message()).await.unwrap();
+        assert!(matches!(next_event(&mut events).await, AgentStreamEvent::Finish(data)
+            if data.stop_reason == Some(TurnStopReason::Paused)));
+        assert!(runtime.shared.pending_settlement.lock().unwrap().is_some());
+        assert!(runtime.settle_pending_turn("successor").await.is_err());
+        assert_eq!(driver.cleanups.load(Ordering::Acquire), 1);
+        driver.cleanup_blocked.store(false, Ordering::Release);
+        let (first, second) = tokio::join!(runtime.settle_pending_turn("root"), runtime.settle_pending_turn("root"));
+        assert_eq!(first.unwrap(), EngineTurnSettlementStatus::Settled);
+        assert_eq!(second.unwrap(), EngineTurnSettlementStatus::NoPending);
+        assert_eq!(driver.runs.load(Ordering::Acquire), 1);
+        assert_eq!(driver.receipts.lock().unwrap().len(), 1);
+        assert_eq!(driver.receipts.lock().unwrap()[0], driver.handoffs.lock().unwrap()[0].0);
+        assert!(runtime.shared.pending_settlement.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn retained_terminal_retry_never_repeats_cleanup_or_business_work() {
+        let (runtime, driver) = retained_runtime(false, true);
+        let mut events = runtime.subscribe();
+        runtime.send_message(model_failure_message()).await.unwrap();
+        assert!(matches!(next_event(&mut events).await, AgentStreamEvent::Finish(data)
+            if data.stop_reason == Some(TurnStopReason::Paused)));
+        driver.terminal_blocked.store(false, Ordering::Release);
+        runtime.settle_pending_turn("root").await.unwrap();
+        assert_eq!(driver.runs.load(Ordering::Acquire), 1);
+        assert_eq!(driver.cleanups.load(Ordering::Acquire), 1);
+        assert_eq!(driver.receipts.lock().unwrap().len(), 1);
+        assert!(driver.handoffs.lock().unwrap()[0].1.contains("terminal record unavailable"));
+    }
+
+    #[tokio::test]
+    async fn exact_stop_preempts_a_retained_success_without_restarting_it() {
+        let (runtime, driver) = retained_runtime(true, false);
+        let mut events = runtime.subscribe();
+        runtime.send_message(model_failure_message()).await.unwrap();
+        next_event(&mut events).await;
+        assert!(runtime.cancel().await.is_err(), "cleanup remains unconfirmed, but the exact cancellation signal is delivered");
+        driver.cleanup_blocked.store(false, Ordering::Release);
+        runtime.settle_pending_turn("root").await.unwrap();
+        assert!(matches!(driver.receipts.lock().unwrap()[0].terminal, EngineTurnTerminal::Cancelled));
+        assert_eq!(driver.runs.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn late_teardown_cannot_replace_a_committed_success_during_release_retry() {
+        let (runtime, driver) = retained_runtime(false, false);
+        driver.release_blocked.store(true, Ordering::Release);
+        let mut events = runtime.subscribe();
+        runtime.send_message(model_failure_message()).await.unwrap();
+        next_event(&mut events).await;
+        runtime.kill(None).unwrap();
+        driver.release_blocked.store(false, Ordering::Release);
+        runtime.settle_pending_turn("root").await.unwrap();
+        assert_eq!(driver.receipts.lock().unwrap().len(), 1);
+        assert!(matches!(driver.receipts.lock().unwrap()[0].terminal, EngineTurnTerminal::Completed { .. }));
+        assert_eq!(driver.runs.load(Ordering::Acquire), 1);
+        assert_eq!(driver.cleanups.load(Ordering::Acquire), 1);
+    }
 
     struct ModelFailureDriver {
         fail_cleanup: bool,

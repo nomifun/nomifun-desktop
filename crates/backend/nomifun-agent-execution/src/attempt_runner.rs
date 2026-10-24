@@ -12,6 +12,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use async_trait::async_trait;
 use nomifun_api_types::{
@@ -25,6 +26,7 @@ use nomifun_common::{
     ProviderWithModel,
 };
 use nomifun_db::AgentExecutionTurnAuthority;
+use nomifun_agent_session::TurnProgressSuspension;
 pub(crate) use nomifun_db::AgentExecutionAttemptDisposition as AttemptDisposition;
 use serde_json::{Value, json};
 
@@ -33,12 +35,29 @@ use crate::delivery::{AgentExecutionDelivery, AgentExecutionTurnOutput};
 const DELIVERY_RECEIPT_GRACE: Duration = Duration::from_secs(5);
 pub(crate) const MISSING_DELIVERY_RECEIPT_CODE: &str = "agent_delivery_receipt_missing";
 
-/// Async callback invoked immediately after the Agent conversation is created
-/// and before its first message is sent. The scheduler uses it to persist the
-/// attempt link and make cancellation/recovery race-free.
-pub(crate) type AttemptStarted = Box<
+/// The original input owner must reconcile these infrastructure observations;
+/// they are neither a business result nor proof that its Session is disposable.
+pub(crate) fn initial_input_admission_is_pending(error:&AppError)->bool {
+    matches!(error,AppError::DatabaseUnavailable {..}|AppError::ExecutionAdmissionPending)
+}
+
+fn unlinked_creation_was_refused(error:&AppError)->bool {
+    matches!(error,AppError::BadRequest(_)|AppError::Unauthorized(_)|AppError::Forbidden(_)
+        |AppError::NotFound(_)|AppError::Conflict(_)|AppError::RevisionConflict(_)
+        |AppError::SessionContractEvolutionRejected {..}|AppError::SessionConfigurationChanged(_)
+        |AppError::AgentResourceBindingIncomplete {..}|AppError::UnprocessableEntity(_)
+        |AppError::ProviderUnavailable(_)|AppError::WorkspaceDirectoryUnavailable(_)
+        |AppError::WorkspaceDirectoryRuntimeUnavailable(_)|AppError::WorkspacePathEdgeWhitespace(_)
+        |AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(_))
+}
+
+/// The Session and exact prepared initial input are ready to link. This is
+/// neither canonical input acceptance nor proof that model work has begun.
+pub(crate) type AttemptLinked = Box<
     dyn FnOnce(
             String,
+            String,
+            SendMessageRequest,
         ) -> Pin<Box<dyn Future<Output = Result<AgentExecutionTurnAuthority, AppError>> + Send>>
         + Send,
 >;
@@ -57,12 +76,7 @@ pub(crate) enum AttemptSessionTarget {
     AutomationLead { conversation_id: String },
 }
 
-enum ChildInputPreparation<'a> {
-    Delegated(&'a crate::AgentExecutionSource),
-    Continuation,
-}
-
-fn attempt_turn_input(
+pub(crate) fn attempt_turn_input(
     session_target: &AttemptSessionTarget,
     canonical: bool,
     brief: &str,
@@ -86,6 +100,9 @@ pub(crate) struct AttemptOutcome {
     pub user_input_request: Option<nomifun_agent_contracts::AgentUserInputRequest>,
     /// Exact source of a handoff, retained only for canonical settlement CAS.
     pub canonical_terminal: Option<(String, String)>,
+    /// Nonterminal decision boundary of this exact Turn. The scheduler must
+    /// verify its canonical pause in its original writer before parking review.
+    pub intervention: Option<TurnProgressSuspension>,
     pub text: Option<String>,
     /// Verified artifact paths observed in this attempt's current turn.
     pub output_files: Vec<String>,
@@ -117,9 +134,16 @@ pub(crate) trait AttemptRunner: Send + Sync {
         attempt_creation_key: &str,
         brief: &str,
         step_spec: &str,
+        initial_input: SendMessageRequest,
         timeout: Duration,
-        on_started: AttemptStarted,
+        on_linked: AttemptLinked,
     ) -> Result<AttemptOutcome, AppError>;
+
+    async fn deliver_initial_input(&self,_owner_id:&str,_conversation_id:&str,_operation_id:&str,
+        _authority:AgentExecutionTurnAuthority,_request:SendMessageRequest,_timeout:Duration)
+        ->Result<AttemptOutcome,AppError> {
+        Err(AppError::Conflict("original initial-input delivery is unavailable".into()))
+    }
 
     /// Continue a waiting attempt in its existing Agent conversation after a
     /// user decision. The same durable attempt and transcript remain attached.
@@ -131,22 +155,17 @@ pub(crate) trait AttemptRunner: Send + Sync {
         _authority: AgentExecutionTurnAuthority,
         _input: &str,
         _timeout: Duration,
+        _observation_stop:CancellationToken,
     ) -> Result<AttemptOutcome, AppError> {
         Err(AppError::BadRequest(
             "this attempt runner cannot continue an existing attempt".to_owned(),
         ))
     }
 
-    /// Best-effort is insufficient here: a queued attempt recovered after a
-    /// process crash must remove any creation-keyed conversation that never
-    /// acquired its durable Execution link.  Implementations may no-op only
-    /// when they cannot create external conversation state.
-    async fn discard_unlinked_creation(
-        &self,
-        _owner_id: &str,
-        _attempt_creation_key: &str,
-    ) -> Result<(), AppError> {
-        Ok(())
+    async fn continue_with_parent_reply(&self,_owner_id:&str,_conversation_id:&str,_operation_id:&str,
+        _authority:AgentExecutionTurnAuthority,_input:&str,_source:&nomifun_agent_contracts::AgentParentQuestionReply,
+        _timeout:Duration,_observation_stop:CancellationToken)->Result<AttemptOutcome,AppError> {
+        Err(AppError::Conflict("this runner cannot deliver an exact Agent-authored question reply".into()))
     }
 
     /// Recover only a terminal output verified through the same canonical query
@@ -189,6 +208,14 @@ pub(crate) trait AttemptRunner: Send + Sync {
 /// application supplies the implementation from its single Session owner.
 #[async_trait]
 pub trait AgentExecutionSessionPort: Send + Sync {
+    /// Consume only the exact persistent Restart command. User-authored
+    /// technical continuation uses the formal native resume gate; an Agent
+    /// command cannot mint that authority. OriginalClosed acknowledges exact
+    /// cancellation/cleanup, never a latest Session or a successful task.
+    async fn recover_attempt_for_restart(&self,_owner:&str,_target:&crate::AgentExecutionRestartTarget)
+        ->Result<crate::AgentExecutionRestartNativeOutcome,AppError> {
+        Err(AppError::Conflict("the exact Restart Session owner is unavailable".into()))
+    }
     async fn create_idempotent(
         &self,
         owner_id: &str,
@@ -218,25 +245,35 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         Err(AppError::Conflict("canonical source-child creator is unavailable".into()))
     }
 
-    /// Read the exact source input selections after the child link is committed.
-    /// The normal child input owner still validates its frozen Skills and
-    /// prepares attachments; this cannot choose resources or copy a transcript.
+    /// Prepare the original queued Attempt before linking. Its exact reservation
+    /// and Session creation/continuation proof authorize source observation only;
+    /// native input admission still requires the committed active link. The
+    /// normal input owner validates frozen Skills and prepares attachments.
     async fn prepare_source_child_input(
         &self,
         _owner_id: &str,
         _child_session_id: &str,
+        _attempt_id: &str,
         _source: Option<&crate::AgentExecutionSource>,
         _request: SendMessageRequest,
     ) -> Result<SendMessageRequest, AppError> {
         Err(AppError::Conflict("canonical source-child input preparer is unavailable".into()))
     }
 
+    /// Retire only this original opening's provably empty Session. The Session
+    /// writer checks opening identity, links and absence of accepted work in
+    /// the same transaction as its retirement fence. Its owner retains any
+    /// pending storage/cleanup acknowledgement after the caller leaves.
     async fn discard_unlinked_creation(
         &self,
         owner_id: &str,
         creation_key: &str,
+        expected_session_id:Option<&str>,
     ) -> Result<(), AppError>;
 
+    /// A successful response acknowledges this exact canonical input and its
+    /// Session-owned delivery. Callers retain the admission future until that
+    /// response; only subsequent read-only observation may be cancelled.
     async fn deliver_turn(
         &self,
         owner_id: &str,
@@ -245,6 +282,12 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         authority: AgentExecutionTurnAuthority,
         request: SendMessageRequest,
     ) -> Result<AgentExecutionDelivery, AppError>;
+
+    async fn deliver_parent_question_reply(&self,_owner_id:&str,_conversation_id:&str,_operation_id:&str,
+        _authority:AgentExecutionTurnAuthority,_request:SendMessageRequest,
+        _source:nomifun_agent_contracts::AgentParentQuestionReply)->Result<AgentExecutionDelivery,AppError> {
+        Err(AppError::Conflict("exact parent question reply delivery is unavailable".into()))
+    }
 
     async fn delivery_result(
         &self,
@@ -261,10 +304,10 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         after_cursor: Option<u64>,
     ) -> Result<crate::AgentExecutionTurnProgress, AppError> {
         let delivery = self.delivery_result(owner_id, conversation_id, operation_id).await?;
+        let suspension = observed_delivery_suspension(delivery.as_ref())?;
         let progress = crate::AgentExecutionTurnProgress {
             found: delivery.is_some(), terminal: delivery.as_ref().is_some_and(|delivery| delivery.completed), cursor: 0,
-            suspended: delivery.as_ref().is_some_and(|delivery| matches!(delivery.turn_outcome,
-                Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { .. } | nomifun_agent_contracts::AgentTurnOutcome::Paused { .. }))),
+            suspension,
         };
         if progress.found && !progress.terminal && after_cursor == Some(progress.cursor) {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -355,9 +398,57 @@ pub(crate) struct AgentSessionAttemptRunner {
     session: Arc<dyn AgentExecutionSessionPort>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeliveryReceiptObservation {
+    Completed,
+    Missing,
+    InterventionRequired(TurnProgressSuspension),
+}
+
+/// A public Waiting result retains the exact typed wait source. Public Paused
+/// deliberately has no reason or native revision and cannot substitute for
+/// the canonical progress reader's exact pause boundary.
+fn observed_delivery_suspension(delivery: Option<&AgentExecutionDelivery>) -> Result<Option<TurnProgressSuspension>, AppError> {
+    if delivery.is_some_and(|delivery| delivery.completed) { return Ok(None); }
+    match delivery.and_then(|delivery| delivery.turn_outcome.as_ref()) {
+        Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { wait_seq, request_id, reason }) =>
+            Ok(Some(TurnProgressSuspension::Waiting { wait_seq:*wait_seq, request_id:request_id.clone(), reason:*reason })),
+        Some(nomifun_agent_contracts::AgentTurnOutcome::Paused { .. }) =>
+            Err(AppError::Conflict("paused Turn progress requires its exact canonical pause boundary".into())),
+        _ => Ok(None),
+    }
+}
+
 impl AgentSessionAttemptRunner {
     pub fn new(session: Arc<dyn AgentExecutionSessionPort>) -> Self {
         Self { session }
+    }
+
+    async fn retire_refused_creation(&self,owner:&str,creation_key:&str,expected_session:Option<&str>,creates_child:bool,error:&AppError) {
+        if !creates_child || !unlinked_creation_was_refused(error) {return;}
+        match self.session.discard_unlinked_creation(owner,creation_key,expected_session).await {
+            Ok(())=>{},
+            // A linked or nonempty original Session is not disposable. Its
+            // existing input/native owner keeps that responsibility.
+            Err(AppError::Conflict(_))=>{},
+            Err(cleanup)=>tracing::warn!(error_code=cleanup.error_code(),
+                "original empty-creation retirement remains with its Session owner"),
+        }
+    }
+
+    async fn prepare_initial_input(&self,owner:&str,session:&str,attempt_id:&str,target:&AttemptSessionTarget,
+        request:SendMessageRequest)->Result<SendMessageRequest,AppError> {
+        let original=request.clone();
+        let prepared=match target {
+            AttemptSessionTarget::SourceChildAttempt {source}=>self.session.prepare_source_child_input(owner,session,attempt_id,Some(source),request).await,
+            AttemptSessionTarget::ExistingChild {..}=>self.session.prepare_source_child_input(owner,session,attempt_id,None,request).await,
+            _=>Ok(request),
+        }?;
+        if prepared.content!=original.content || prepared.origin!=original.origin || prepared.hidden!=original.hidden
+            || prepared.channel_platform!=original.channel_platform {
+            return Err(AppError::Conflict("initial input preparation changed the original accepted task".into()));
+        }
+        Ok(prepared)
     }
 
     /// Wait only on the operation-scoped durable receipt exposed by the
@@ -369,16 +460,25 @@ impl AgentSessionAttemptRunner {
         conversation_id: &str,
         operation_id: &str,
         timeout: Duration,
-    ) -> Result<bool, AppError> {
+        observation_stop:Option<&CancellationToken>,
+    ) -> Result<DeliveryReceiptObservation, AppError> {
         let mut grace_deadline = Instant::now() + timeout + DELIVERY_RECEIPT_GRACE;
         let mut observed_at = Instant::now();
         let mut was_waiting = false;
         let mut cursor = None;
         loop {
-            let progress = self.session.observe_turn_progress(owner_id, conversation_id, operation_id, cursor).await?;
+            let read=self.session.observe_turn_progress(owner_id, conversation_id, operation_id, cursor);
+            let progress=if let Some(stop)=observation_stop {tokio::select! {biased;
+                _=stop.cancelled()=>return Err(AppError::ExecutionAdmissionPending),
+                progress=read=>progress?,
+            }} else {read.await?};
             cursor = Some(progress.cursor);
             let now = Instant::now();
-            let waiting = progress.suspended;
+            if progress.terminal { return Ok(DeliveryReceiptObservation::Completed); }
+            if let Some(boundary) = progress.suspension.as_ref().filter(|boundary| boundary.requires_intervention()) {
+                return Ok(DeliveryReceiptObservation::InterventionRequired(boundary.clone()));
+            }
+            let waiting = progress.suspension.is_some();
             if was_waiting {
                 // Human/resource waiting consumes no execution budget. Keep
                 // observing this exact owner without replaying its tools.
@@ -387,12 +487,9 @@ impl AgentSessionAttemptRunner {
             }
             observed_at = now;
             was_waiting = waiting;
-            if !progress.found { return Ok(false); }
-            if progress.terminal {
-                return Ok(true);
-            }
+            if !progress.found { return Ok(DeliveryReceiptObservation::Missing); }
             if !waiting && now >= grace_deadline {
-                return Ok(false);
+                return Ok(DeliveryReceiptObservation::Missing);
             }
             // The port waits on the existing owner and re-reads its receipt.
             // No wait here hydrates transcript or resubmits business input.
@@ -410,7 +507,8 @@ impl AgentSessionAttemptRunner {
         origin: &str,
         hidden: bool,
         timeout: Duration,
-        preparation: Option<ChildInputPreparation<'_>>,
+        parent_reply:Option<&nomifun_agent_contracts::AgentParentQuestionReply>,
+        observation_stop:Option<CancellationToken>,
     ) -> Result<AttemptOutcome, AppError> {
         let request = SendMessageRequest {
             content: content.to_owned(),
@@ -420,16 +518,18 @@ impl AgentSessionAttemptRunner {
             origin: Some(origin.to_owned()),
             channel_platform: None,
         };
-        let request = match preparation {
-            Some(preparation) => self.session.prepare_source_child_input(
-                owner_id, conversation_id, match preparation {
-                    ChildInputPreparation::Delegated(source) => Some(source),
-                    ChildInputPreparation::Continuation => None,
-                }, request,
-            ).await?,
-            None => request,
-        };
-        let delivery = self
+        self.deliver_prepared_turn(owner_id,conversation_id,operation_id,authority,request,timeout,parent_reply,observation_stop).await
+    }
+
+    async fn deliver_prepared_turn(&self,owner_id:&str,conversation_id:&str,operation_id:&str,
+        authority:AgentExecutionTurnAuthority,request:SendMessageRequest,timeout:Duration,
+        parent_reply:Option<&nomifun_agent_contracts::AgentParentQuestionReply>,observation_stop:Option<CancellationToken>)->Result<AttemptOutcome,AppError> {
+        if observation_stop.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            return Err(AppError::ExecutionAdmissionPending);
+        }
+        let delivery = if let Some(source)=parent_reply {
+            self.session.deliver_parent_question_reply(owner_id,conversation_id,operation_id,authority,request,source.clone()).await?
+        } else {self
             .session
             .deliver_turn(
                 owner_id,
@@ -438,15 +538,24 @@ impl AgentSessionAttemptRunner {
                 authority,
                 request,
             )
-            .await?;
+            .await?};
+        // The port has now acknowledged the exact canonical input. Only its
+        // read-only observer may stop; admission/commit above is never raced
+        // against this token, and the durable input is not acknowledged here.
+        if observation_stop.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            return Err(AppError::ExecutionAdmissionPending);
+        }
         let boundary_message_id = delivery.message_id.clone();
-        let completed = if delivery.completed {
-            true
+        let observation = if delivery.completed {
+            DeliveryReceiptObservation::Completed
         } else {
-            self.await_delivery_receipt(owner_id, conversation_id, operation_id, timeout)
+            self.await_delivery_receipt(owner_id, conversation_id, operation_id, timeout,observation_stop.as_ref())
                 .await?
         };
-        if completed {
+        if let DeliveryReceiptObservation::InterventionRequired(boundary) = &observation {
+            return Ok(intervention_required_outcome(conversation_id, boundary.clone()));
+        }
+        if observation == DeliveryReceiptObservation::Completed {
             let output = self.session.read_turn_output(
                 owner_id, conversation_id, Some(operation_id),
             ).await?;
@@ -497,9 +606,10 @@ impl AttemptRunner for AgentSessionAttemptRunner {
         decision_policy: DecisionPolicy,
         attempt_creation_key: &str,
         brief: &str,
-        step_spec: &str,
+        _step_spec: &str,
+        initial_input: SendMessageRequest,
         timeout: Duration,
-        on_started: AttemptStarted,
+        on_linked: AttemptLinked,
     ) -> Result<AttemptOutcome, AppError> {
         let (Some(provider_id), Some(model)) =
             (participant.provider_id.clone(), participant.model.clone())
@@ -605,13 +715,7 @@ impl AttemptRunner for AgentSessionAttemptRunner {
                 match created {
                     Ok(conversation) => conversation,
                     Err(error) => {
-                        if let Err(cleanup_error) = self
-                            .session
-                            .discard_unlinked_creation(owner_id, attempt_creation_key)
-                            .await
-                        {
-                            tracing::warn!(%cleanup_error, "failed to discard partially-created attempt conversation");
-                        }
+                        self.retire_refused_creation(owner_id,attempt_creation_key,None,creates_child,&error).await;
                         return Err(error);
                     }
                 }
@@ -639,53 +743,30 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             }
         };
 
-        // This callback is awaited before the Agent can start. An outbox/link
-        // failure leaves no untracked in-flight turn.
-        let authority = match on_started(conversation.conversation_id.clone()).await {
+        let operation_id=format!("{attempt_creation_key}:initial-turn");
+        let request=match self.prepare_initial_input(owner_id,&conversation.conversation_id,attempt_creation_key,&session_target,initial_input).await {
+            Ok(request)=>request,
+            Err(error)=>{
+                self.retire_refused_creation(owner_id,attempt_creation_key,Some(&conversation.conversation_id),creates_child,&error).await;
+                return Err(error);
+            }
+        };
+        // The link and this exact prepared request commit together, before
+        // canonical acceptance. Publication is an independent outbox owner.
+        let authority = match on_linked(conversation.conversation_id.clone(),operation_id.clone(),request.clone()).await {
             Ok(authority) => authority,
             Err(error) => {
-            // If the link commit succeeded but its acknowledgement was lost,
-            // the Conversation deletion guard rejects this cleanup.  Otherwise
-            // the creation key and row are removed together, leaving no orphan.
-            if creates_child {
-                match self
-                    .session
-                    .discard_unlinked_creation(owner_id, attempt_creation_key)
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(AppError::Conflict(_)) => {}
-                    Err(cleanup_error) => {
-                        tracing::warn!(%cleanup_error, "failed to discard unlinked attempt conversation");
-                    }
-                }
-            }
-            return Err(error);
+                self.retire_refused_creation(owner_id,attempt_creation_key,Some(&conversation.conversation_id),creates_child,&error).await;
+                return Err(error);
             }
         };
 
-        let operation_id = format!("{attempt_creation_key}:initial-turn");
-        // Durable user input, not a replacement for the Agent's system rules.
-        // JSON boundaries preserve arbitrary brief/step text without delimiters
-        // that can be closed by the task itself. Retries encode the same input.
-        let (task_input, origin, hidden) =
-            attempt_turn_input(&session_target, canonical, brief, step_spec)?;
-        self.deliver_turn(
-            owner_id,
-            &conversation.conversation_id,
-            &operation_id,
-            authority,
-            &task_input,
-            origin,
-            hidden,
-            timeout,
-            match &session_target {
-                AttemptSessionTarget::SourceChildAttempt { source } => Some(ChildInputPreparation::Delegated(source)),
-                AttemptSessionTarget::ExistingChild { .. } => Some(ChildInputPreparation::Continuation),
-                _ => None,
-            },
-        )
-        .await
+        self.deliver_prepared_turn(owner_id,&conversation.conversation_id,&operation_id,authority,request,timeout,None,None).await
+    }
+
+    async fn deliver_initial_input(&self,owner_id:&str,conversation_id:&str,operation_id:&str,
+        authority:AgentExecutionTurnAuthority,request:SendMessageRequest,timeout:Duration)->Result<AttemptOutcome,AppError> {
+        self.deliver_prepared_turn(owner_id,conversation_id,operation_id,authority,request,timeout,None,None).await
     }
 
     async fn continue_with_input(
@@ -696,6 +777,7 @@ impl AttemptRunner for AgentSessionAttemptRunner {
         authority: AgentExecutionTurnAuthority,
         input: &str,
         timeout: Duration,
+        observation_stop:CancellationToken,
     ) -> Result<AttemptOutcome, AppError> {
         self.deliver_turn(
             owner_id,
@@ -707,18 +789,16 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             false,
             timeout,
             None,
+            Some(observation_stop),
         )
         .await
     }
 
-    async fn discard_unlinked_creation(
-        &self,
-        owner_id: &str,
-        attempt_creation_key: &str,
-    ) -> Result<(), AppError> {
-        self.session
-            .discard_unlinked_creation(owner_id, attempt_creation_key)
-            .await
+    async fn continue_with_parent_reply(&self,owner_id:&str,conversation_id:&str,operation_id:&str,
+        authority:AgentExecutionTurnAuthority,input:&str,source:&nomifun_agent_contracts::AgentParentQuestionReply,
+        timeout:Duration,observation_stop:CancellationToken)->Result<AttemptOutcome,AppError> {
+        let content=nomifun_agent_contracts::parent_question_reply_content(input,source).map_err(AppError::BadRequest)?;
+        self.deliver_turn(owner_id,conversation_id,operation_id,authority,&content,"agent_execution_parent_reply",false,timeout,Some(source),Some(observation_stop)).await
     }
 
     async fn read_adoptable_output(
@@ -754,6 +834,9 @@ impl AttemptRunner for AgentSessionAttemptRunner {
                 return Err(AppError::Conflict("original canonical Turn receipt is unavailable; automatic replay is blocked".into()));
             }
             cursor = Some(progress.cursor);
+            if let Some(boundary) = progress.suspension.as_ref().filter(|boundary| boundary.requires_intervention()) {
+                return Ok(intervention_required_outcome(conversation_id, boundary.clone()));
+            }
             if !progress.terminal { continue; }
             let output = self.session.read_turn_output(owner_id, conversation_id, Some(operation_id)).await?
                 .filter(|output| output.delivery.completed)
@@ -867,7 +950,7 @@ fn missing_delivery_receipt_outcome(
     tokens: Option<i64>,
 ) -> AttemptOutcome {
     AttemptOutcome {
-        user_input_request: None, canonical_terminal: None,
+        user_input_request: None, canonical_terminal: None, intervention: None,
         conversation_id: conversation_id.to_owned(),
         text: None,
         output_files: Vec::new(),
@@ -879,6 +962,15 @@ fn missing_delivery_receipt_outcome(
         ),
         error_code: Some(MISSING_DELIVERY_RECEIPT_CODE.to_owned()),
         error_retryable: Some(false),
+    }
+}
+
+fn intervention_required_outcome(conversation_id: &str, boundary: TurnProgressSuspension) -> AttemptOutcome {
+    AttemptOutcome {
+        conversation_id:conversation_id.into(), user_input_request:None, canonical_terminal:None,
+        intervention:Some(boundary), text:None, output_files:Vec::new(),
+        disposition:AttemptDisposition::InterventionRequired, tokens:None,
+        error:None, error_code:None, error_retryable:None,
     }
 }
 
@@ -916,6 +1008,7 @@ fn completed_delivery_outcome(
         if receipt.user_input_request.is_some() { AttemptDisposition::InputRequired } else { AttemptDisposition::Delivered }
     } else { AttemptDisposition::Failed };
     AttemptOutcome {
+        intervention: None,
         canonical_terminal: output.terminal_event_id.clone().map(|terminal| (output.canonical_operation_id.clone(), terminal)),
         user_input_request: receipt.user_input_request,
         conversation_id: conversation_id.to_owned(),
@@ -940,19 +1033,30 @@ pub(crate) struct RecoveredAttemptOutcome {
 mod tests {
     use super::*;
     use nomifun_common::{ConversationStatus, TimestampMs, generate_id};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000201";
     const CURRENT_USER_TURN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000212";
 
+    fn test_initial_input(content:&str,origin:&str,hidden:bool)->SendMessageRequest {
+        SendMessageRequest {content:content.into(),files:vec![],inject_skills:vec![],hidden,origin:Some(origin.into()),channel_platform:None}
+    }
+
     struct RecordingSessionPort {
         conversation: ConversationResponse,
+        allow_child_creation:AtomicBool,
         create_calls: AtomicUsize,
+        discard_calls:AtomicUsize,
+        discarded_keys:Mutex<Vec<(String,Option<String>)>>,
         created_request: Mutex<Option<CreateConversationRequest>>,
         request_source: Mutex<Option<crate::AgentExecutionSource>>,
         prepared_source: Mutex<Option<crate::AgentExecutionSource>>,
+        prepared_attempt:Mutex<Option<String>>,
+        prepared_content_override:Mutex<Option<String>>,
+        preparation_error:Mutex<Option<AppError>>,
         delivered: Mutex<Option<(String, SendMessageRequest)>>,
+        delivery_ack_gate:Mutex<Option<(Arc<tokio::sync::Notify>,Arc<tokio::sync::Notify>)>>,
         delivery_calls: AtomicUsize,
         receipt: Mutex<Option<AgentExecutionDelivery>>,
         output: Mutex<Option<AgentExecutionTurnOutput>>,
@@ -961,6 +1065,7 @@ mod tests {
         progress_waiting: tokio::sync::Notify,
         progress_release: tokio::sync::Notify,
         progress_error: Mutex<Option<AppError>>,
+        progress_suspension: Mutex<Option<TurnProgressSuspension>>,
     }
 
     #[async_trait]
@@ -972,6 +1077,7 @@ mod tests {
             _creation_key: &str,
         ) -> Result<ConversationResponse, AppError> {
             self.create_calls.fetch_add(1, Ordering::SeqCst);
+            if self.allow_child_creation.load(Ordering::SeqCst) {return Ok(self.conversation.clone());}
             Err(AppError::Conflict("unexpected child Session creation".to_owned()))
         }
 
@@ -984,6 +1090,7 @@ mod tests {
         ) -> Result<ConversationResponse, AppError> {
             self.create_calls.fetch_add(1, Ordering::SeqCst);
             *self.created_request.lock().unwrap() = Some(request);
+            if self.allow_child_creation.load(Ordering::SeqCst) {return Ok(self.conversation.clone());}
             Err(AppError::Conflict("unexpected child Session creation".to_owned()))
         }
 
@@ -998,23 +1105,30 @@ mod tests {
 
         async fn prepare_source_child_input(
             &self, _owner_id: &str, child_session_id: &str,
+            attempt_id: &str,
             source: Option<&crate::AgentExecutionSource>, mut request: SendMessageRequest,
         ) -> Result<SendMessageRequest, AppError> {
             assert_eq!(child_session_id, CONVERSATION_ID);
+            *self.prepared_attempt.lock().unwrap()=Some(attempt_id.to_owned());
             assert!(request.files.is_empty() && request.inject_skills.is_empty());
+            if let Some(error)=self.preparation_error.lock().unwrap().take() {return Err(error);}
             if let Some(source)=source {
                 *self.prepared_source.lock().unwrap() = Some(source.clone());
                 request.files.push("exact-source-image".into());
                 request.inject_skills.push("exact-source-skill".into());
             }
+            if let Some(content)=self.prepared_content_override.lock().unwrap().take() {request.content=content;}
             Ok(request)
         }
 
         async fn discard_unlinked_creation(
             &self,
             _owner_id: &str,
-            _creation_key: &str,
+            creation_key: &str,
+            expected_session_id:Option<&str>,
         ) -> Result<(), AppError> {
+            self.discard_calls.fetch_add(1,Ordering::SeqCst);
+            self.discarded_keys.lock().unwrap().push((creation_key.to_owned(),expected_session_id.map(str::to_owned)));
             Ok(())
         }
 
@@ -1028,6 +1142,8 @@ mod tests {
         ) -> Result<AgentExecutionDelivery, AppError> {
             self.delivery_calls.fetch_add(1, Ordering::SeqCst);
             *self.delivered.lock().unwrap() = Some((conversation_id.to_owned(), request));
+            let gate=self.delivery_ack_gate.lock().unwrap().take();
+            if let Some((reached,release))=gate {reached.notify_one();release.notified().await;}
             self.receipt.lock().unwrap().clone().ok_or_else(|| AppError::Conflict("captured AutoWork turn".to_owned()))
         }
 
@@ -1051,10 +1167,12 @@ mod tests {
                 self.progress_release.notified().await;
             }
             let receipt = self.receipt.lock().unwrap().clone();
+            let suspension = if receipt.as_ref().is_some_and(|receipt|receipt.completed) { None }
+                else if let Some(boundary) = self.progress_suspension.lock().unwrap().clone() { Some(boundary) }
+                else { observed_delivery_suspension(receipt.as_ref())? };
             Ok(crate::AgentExecutionTurnProgress { found: receipt.is_some(),
                 terminal: self.output.lock().unwrap().is_some() || receipt.as_ref().is_some_and(|receipt| receipt.completed), cursor: 1,
-                suspended: receipt.as_ref().is_some_and(|receipt| matches!(receipt.turn_outcome,
-                    Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { .. } | nomifun_agent_contracts::AgentTurnOutcome::Paused { .. }))),
+                suspension,
             })
         }
 
@@ -1195,11 +1313,18 @@ mod tests {
         };
         Arc::new(RecordingSessionPort {
             conversation,
+            allow_child_creation:AtomicBool::new(false),
             created_request: Mutex::new(None),
             request_source: Mutex::new(None),
             prepared_source: Mutex::new(None),
+            prepared_attempt:Mutex::new(None),
+            prepared_content_override:Mutex::new(None),
+            preparation_error:Mutex::new(None),
             create_calls: AtomicUsize::new(0),
+            discard_calls:AtomicUsize::new(0),
+            discarded_keys:Mutex::new(Vec::new()),
             delivered: Mutex::new(None),
+            delivery_ack_gate:Mutex::new(None),
             delivery_calls: AtomicUsize::new(0),
             receipt: Mutex::new(receipt),
             output: Mutex::new(None),
@@ -1208,7 +1333,102 @@ mod tests {
             progress_waiting: tokio::sync::Notify::new(),
             progress_release: tokio::sync::Notify::new(),
             progress_error: Mutex::new(None),
+            progress_suspension: Mutex::new(None),
         })
+    }
+
+    #[tokio::test]
+    async fn pending_link_admission_retains_the_original_session_without_dispatch_or_discard() {
+        use nomifun_common::DatabaseUnavailableReason;
+        for (error,pending,discard) in [
+            (AppError::DatabaseUnavailable {reason:DatabaseUnavailableReason::Busy},true,false),
+            (AppError::DatabaseUnavailable {reason:DatabaseUnavailableReason::Locked},true,false),
+            (AppError::DatabaseUnavailable {reason:DatabaseUnavailableReason::PoolTimedOut},true,false),
+            (AppError::ExecutionAdmissionPending,true,false),
+            (AppError::Timeout("original commit acknowledgement is unknown".into()),false,false),
+            (AppError::BadRequest("original input was permanently rejected".into()),false,true),
+        ] {
+            let session=recording_session(None);
+            session.allow_child_creation.store(true,Ordering::SeqCst);
+            let runner=AgentSessionAttemptRunner::new(session.clone());
+            let participant=ExecutionParticipant {
+                participant_id:generate_id(),execution_id:generate_id(),source_agent_id:generate_id(),
+                preset_id:None,preset_revision:None,agent_snapshot:None,provider_id:Some(generate_id()),model:Some("model".into()),
+                role:None,capability:None,constraints:None,description:None,system_prompt:None,
+                enabled_skills:vec![],disabled_builtin_skills:vec![],sort_order:0,introduced_in_revision:0,retired_in_revision:None,created_at:1,
+            };
+            let attempt=generate_id();let key=format!("{attempt}:initial-turn");
+            let linked=Arc::new(AtomicUsize::new(0));let callback=linked.clone();
+            let result=runner.execute("owner",AttemptSessionTarget::ChildAttempt,&participant,&[],None,"original child",
+                AgentToolPolicy::Full,false,DelegationPolicy::Automatic,0,DecisionPolicy::Automatic,&attempt,
+                "original brief","original task",test_initial_input("original task","agent_execution",false),Duration::from_secs(1),
+                Box::new(move|session,operation,input|Box::pin(async move {
+                    assert_eq!(session,CONVERSATION_ID);assert_eq!(operation,key);assert_eq!(input.content,"original task");
+                    callback.fetch_add(1,Ordering::SeqCst);Err(error)
+                }))).await;
+            let error=result.expect_err("a missing link ACK cannot become an Agent result");
+            assert_eq!(initial_input_admission_is_pending(&error),pending);
+            assert_eq!(linked.load(Ordering::SeqCst),1);
+            assert_eq!(session.create_calls.load(Ordering::SeqCst),1);
+            assert_eq!(session.discard_calls.load(Ordering::SeqCst),if discard {1}else{0},
+                "temporary admission observations retain the original Session/key; only permanent refusal may ask the exact empty-creation guard to clean up");
+            assert_eq!(session.delivery_calls.load(Ordering::SeqCst),0);
+            assert!(session.delivered.lock().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn preparation_refusal_retires_only_the_original_new_creation_and_preserves_pending_or_existing_children() {
+        for existing in [false,true] {
+            for (error,refused) in [
+                (AppError::DatabaseUnavailable {reason:nomifun_common::DatabaseUnavailableReason::Busy},false),
+                (AppError::ExecutionAdmissionPending,false),
+                (AppError::Conflict("the original reservation was stopped during preparation".into()),true),
+            ] {
+                let session=recording_session(None);
+                session.allow_child_creation.store(true,Ordering::SeqCst);
+                *session.preparation_error.lock().unwrap()=Some(error);
+                let runner=AgentSessionAttemptRunner::new(session.clone());
+                let snapshot=serde_json::from_value(json!({"preset_id":generate_id(),"preset_revision":1,"preset_name":"frozen child"})).unwrap();
+                let participant=ExecutionParticipant {
+                    participant_id:generate_id(),execution_id:generate_id(),source_agent_id:generate_id(),
+                    preset_id:None,preset_revision:None,agent_snapshot:Some(snapshot),provider_id:Some(generate_id()),model:Some("model".into()),
+                    role:None,capability:None,constraints:None,description:None,system_prompt:None,
+                    enabled_skills:vec![],disabled_builtin_skills:vec![],sort_order:0,introduced_in_revision:0,retired_in_revision:None,created_at:1,
+                };
+                let target=if existing {AttemptSessionTarget::ExistingChild {target:nomifun_db::AgentExecutionContinuationTarget {
+                    conversation_id:CONVERSATION_ID.into(),original_step_id:generate_id(),original_attempt_id:generate_id()}}}
+                    else {AttemptSessionTarget::SourceChildAttempt {source:crate::AgentExecutionSource {
+                        agent_session_id:"parent".into(),turn_operation_id:"parent-turn".into(),tool_operation_id:"delegate".into(),effect_id:"effect".into()}}};
+                let attempt=generate_id();
+                let result=runner.execute("owner",target,&participant,&[],None,"original child",AgentToolPolicy::Full,false,
+                    DelegationPolicy::Automatic,0,DecisionPolicy::Automatic,&attempt,"original brief","original task",
+                    test_initial_input("original task","agent_execution",!existing),Duration::from_secs(1),
+                    Box::new(|_,_,_|Box::pin(async {panic!("preparation failed before link admission")}))).await;
+                assert!(result.is_err());
+                assert_eq!(session.prepared_attempt.lock().unwrap().as_deref(),Some(attempt.as_str()));
+                assert_eq!(session.create_calls.load(Ordering::SeqCst),if existing {0}else{1});
+                let retired=session.discarded_keys.lock().unwrap().clone();
+                assert_eq!(retired,if refused&&!existing {vec![(attempt,Some(CONVERSATION_ID.into()))]}else{vec![]},
+                    "only a permanently refused new opening may enter the exact empty-creation owner; pending and original child history remain intact");
+                assert_eq!(session.delivery_calls.load(Ordering::SeqCst),0);
+                assert!(session.delivered.lock().unwrap().is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_input_preparation_cannot_replace_frozen_content_with_a_later_task() {
+        let session=recording_session(None);
+        *session.prepared_content_override.lock().unwrap()=Some("a later task body".into());
+        let runner=AgentSessionAttemptRunner::new(session.clone());
+        let source=crate::AgentExecutionSource {agent_session_id:"original-parent".into(),
+            turn_operation_id:"original-parent-turn".into(),tool_operation_id:"original-tool".into(),effect_id:"original-effect".into()};
+        let result=runner.prepare_initial_input("owner",CONVERSATION_ID,"original-attempt",&AttemptSessionTarget::SourceChildAttempt {source},
+            test_initial_input("frozen original business input","agent_execution",true)).await;
+        assert!(matches!(result,Err(AppError::Conflict(message)) if message=="initial input preparation changed the original accepted task"));
+        assert_eq!(session.delivery_calls.load(Ordering::SeqCst),0);
+        assert!(session.delivered.lock().unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1221,12 +1441,15 @@ mod tests {
         let runner = AgentSessionAttemptRunner::new(session.clone());
         let source = crate::AgentExecutionSource { agent_session_id:"exact-parent".into(),
             turn_operation_id:"parent-turn".into(),tool_operation_id:"delegate-tool".into(),effect_id:"delegate-effect".into() };
-        runner.deliver_turn("owner", CONVERSATION_ID, "child-initial-turn",
-            AgentExecutionTurnAuthority { execution_id:generate_id(),step_id:generate_id(),attempt_id:generate_id(),
+        let attempt_id=generate_id();
+        let request=runner.prepare_initial_input("owner",CONVERSATION_ID,&attempt_id,&AttemptSessionTarget::SourceChildAttempt {source:source.clone()},
+            test_initial_input("child step remains its own input","agent_execution",true)).await.unwrap();
+        runner.deliver_prepared_turn("owner", CONVERSATION_ID, "child-initial-turn",
+            AgentExecutionTurnAuthority { execution_id:generate_id(),step_id:generate_id(),attempt_id:attempt_id.clone(),
                 expected_step_version:1,expected_attempt_version:1,lease_owner:"owner".into() },
-            "child step remains its own input", "agent_execution", true, Duration::from_secs(1),
-            Some(ChildInputPreparation::Delegated(&source))).await.unwrap();
+            request, Duration::from_secs(1),None,None).await.unwrap();
         assert_eq!(session.prepared_source.lock().unwrap().as_ref(), Some(&source));
+        assert_eq!(session.prepared_attempt.lock().unwrap().as_deref(),Some(attempt_id.as_str()));
         let (child, input) = session.delivered.lock().unwrap().take().unwrap();
         assert_eq!(child, CONVERSATION_ID);
         assert_eq!(input.content, "child step remains its own input");
@@ -1293,24 +1516,60 @@ mod tests {
         let result = runner.deliver_turn("owner", CONVERSATION_ID, "original-operation",
             AgentExecutionTurnAuthority { execution_id: generate_id(), step_id: generate_id(), attempt_id: generate_id(),
                 expected_step_version: 1, expected_attempt_version: 1, lease_owner: "original-owner".into() },
-            "original accepted input", "agent_execution", false, Duration::from_secs(1), None).await;
+            "original accepted input", "agent_execution", false, Duration::from_secs(1), None,None).await;
         assert!(matches!(result, Err(AppError::Timeout(_))));
         assert_eq!(session.delivery_calls.load(Ordering::SeqCst), 1);
         assert_eq!(session.output_reads.load(Ordering::SeqCst), 0);
         assert_eq!(session.create_calls.load(Ordering::SeqCst), 0);
     }
 
+
+    #[tokio::test]
+    async fn shutdown_observation_cannot_drop_admission_before_the_exact_session_ack() {
+        for before_ack in [true,false] {
+            let session=recording_session(Some(AgentExecutionDelivery {message_id:CURRENT_USER_TURN_ID.into(),replayed:false,
+                completed:false,turn_outcome:None,user_input_request:None,result_ok:None,result_text:None,result_error:None,
+                result_error_code:None,result_error_retryable:None}));
+            let reached=Arc::new(tokio::sync::Notify::new());let release=Arc::new(tokio::sync::Notify::new());
+            if before_ack {*session.delivery_ack_gate.lock().unwrap()=Some((reached.clone(),release.clone()));}
+            let runner=AgentSessionAttemptRunner::new(session.clone());let stop=CancellationToken::new();
+            let delivery=runner.continue_with_input("owner",CONVERSATION_ID,"original-decision",
+                AgentExecutionTurnAuthority {execution_id:generate_id(),step_id:generate_id(),attempt_id:generate_id(),
+                    expected_step_version:1,expected_attempt_version:1,lease_owner:"original-owner".into()},
+                "the exact original answer",Duration::from_secs(1),stop.clone());
+            tokio::pin!(delivery);
+            if before_ack {
+                tokio::select! {outcome=&mut delivery=>panic!("admission has not acknowledged: {outcome:?}"),_=reached.notified()=>{}}
+                stop.cancel();
+                assert!(tokio::time::timeout(Duration::from_millis(20),&mut delivery).await.is_err(),
+                    "an outbox entry cannot substitute for the in-flight Session acknowledgement");
+                assert!(session.progress_reads.lock().unwrap().is_empty());
+                release.notify_one();
+            } else {
+                tokio::select! {outcome=&mut delivery=>panic!("only the native observer is blocked: {outcome:?}"),_=session.progress_waiting.notified()=>{}}
+                assert_eq!(session.delivery_calls.load(Ordering::SeqCst),1);
+                stop.cancel();
+            }
+            assert!(matches!(tokio::time::timeout(Duration::from_secs(1),&mut delivery).await.unwrap(),Err(AppError::ExecutionAdmissionPending)));
+            assert_eq!(session.delivery_calls.load(Ordering::SeqCst),1);
+            assert_eq!(session.delivered.lock().unwrap().as_ref().unwrap().1.content,"the exact original answer");
+            assert_eq!(session.output_reads.load(Ordering::SeqCst),0,"stopping an observer cannot fabricate a terminal outcome");
+            assert!(!session.receipt.lock().unwrap().as_ref().unwrap().completed);
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn receipt_observation_freezes_suspension_time_and_preserves_accumulated_running_budget() {
         let pending = AgentExecutionDelivery {
             message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: false,
-            turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Paused { message_ids: Vec::new() }),
+            turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting {wait_seq:1,request_id:Some("original-question".into()),
+                reason:nomifun_agent_contracts::AgentWaitReason::UserInput}),
             user_input_request: None, result_ok: None, result_text: None, result_error: None,
             result_error_code: None, result_error_retryable: None,
         };
         let session = recording_session(Some(pending.clone()));
         let runner = AgentSessionAttemptRunner::new(session.clone());
-        let wait = runner.await_delivery_receipt("owner", CONVERSATION_ID, "budget-original", Duration::from_secs(2));
+        let wait = runner.await_delivery_receipt("owner", CONVERSATION_ID, "budget-original", Duration::from_secs(2),None);
         tokio::pin!(wait);
         tokio::select! {
             result = &mut wait => panic!("paused task cannot settle: {result:?}"),
@@ -1331,14 +1590,14 @@ mod tests {
         }
         tokio::time::advance(Duration::from_secs(4)).await;
         session.progress_release.notify_one();
-        assert!(!wait.await.unwrap(), "repeated reads must not reset the original accumulated budget");
+        assert_eq!(wait.await.unwrap(), DeliveryReceiptObservation::Missing, "repeated reads must not reset the original accumulated budget");
         assert_eq!(session.output_reads.load(Ordering::SeqCst), 0);
         assert!(session.delivered.lock().unwrap().is_none());
         assert_eq!(session.create_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn native_pause_keeps_the_exact_attempt_until_resume_or_cancel() {
+    async fn user_requested_pause_keeps_the_exact_attempt_until_resume_or_cancel() {
         let paused = AgentExecutionDelivery {
             turn_outcome: Some(nomifun_agent_contracts::AgentTurnOutcome::Paused { message_ids: vec![] }),
             user_input_request: None, message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: false,
@@ -1346,8 +1605,9 @@ mod tests {
             result_error_code: None, result_error_retryable: None,
         };
         let session = recording_session(Some(paused.clone()));
+        *session.progress_suspension.lock().unwrap() = Some(native_pause_boundary("EXECUTION_USER_REQUESTED"));
         let runner = AgentSessionAttemptRunner::new(session.clone());
-        let wait = runner.await_delivery_receipt("owner", CONVERSATION_ID, "operation", Duration::from_millis(1));
+        let wait = runner.await_delivery_receipt("owner", CONVERSATION_ID, "operation", Duration::from_millis(1),None);
         tokio::pin!(wait);
         assert!(tokio::time::timeout(Duration::from_millis(30), &mut wait).await.is_err(),
             "a paused receipt must never settle or fail the Attempt");
@@ -1356,7 +1616,74 @@ mod tests {
         *session.receipt.lock().unwrap() = Some(completed.clone());
         session.progress_release.notify_one();
         let observed = tokio::time::timeout(Duration::from_secs(2), &mut wait).await.unwrap().unwrap();
-        assert!(observed);
+        assert_eq!(observed, DeliveryReceiptObservation::Completed);
+    }
+
+    fn native_pause_boundary(reason: &str) -> TurnProgressSuspension {
+        TurnProgressSuspension::NativePause { revision:3, reason:reason.into(), checkpoint_revision:16,
+            execution_fence:7, cleanup_proven:true }
+    }
+
+    #[tokio::test]
+    async fn technical_pause_returns_the_exact_nonterminal_decision_without_replaying_or_failing() {
+        for boundary in [
+            native_pause_boundary("EXECUTION_INTERVENTION_REQUIRED"),
+            native_pause_boundary("NATIVE_RECOVERY_RECONCILIATION_REQUIRED"),
+            TurnProgressSuspension::Waiting {wait_seq:42,request_id:None,
+                reason:nomifun_agent_contracts::AgentWaitReason::InterventionRequired},
+            TurnProgressSuspension::Reconciliation {sequence:43},
+        ] {
+            let session = recording_session(Some(AgentExecutionDelivery {
+                turn_outcome:Some(nomifun_agent_contracts::AgentTurnOutcome::Paused {message_ids:vec![]}),
+                user_input_request:None,message_id:CURRENT_USER_TURN_ID.into(),replayed:true,completed:false,
+                result_ok:None,result_text:None,result_error:None,result_error_code:None,result_error_retryable:None,
+            }));
+            *session.progress_suspension.lock().unwrap() = Some(boundary.clone());
+            let runner = AgentSessionAttemptRunner::new(session.clone());
+            let observed = runner.observe_existing_turn("owner",CONVERSATION_ID,"original-paused-turn").await.unwrap();
+            assert_eq!(observed.intervention,Some(boundary.clone()));
+            assert_eq!(observed.disposition,AttemptDisposition::InterventionRequired);
+            assert!(observed.canonical_terminal.is_none());assert!(observed.error.is_none());assert!(observed.tokens.is_none());
+            assert_eq!(session.progress_reads.lock().unwrap().len(),1);
+            assert_eq!(session.output_reads.load(Ordering::SeqCst),0);
+            assert_eq!(session.delivery_calls.load(Ordering::SeqCst),0);
+            assert_eq!(session.create_calls.load(Ordering::SeqCst),0);
+            assert!(!session.receipt.lock().unwrap().as_ref().unwrap().completed);
+            assert_eq!(runner.await_delivery_receipt("owner",CONVERSATION_ID,"original-paused-turn",Duration::from_secs(1),None).await.unwrap(),
+                DeliveryReceiptObservation::InterventionRequired(boundary));
+        }
+    }
+
+    #[tokio::test]
+    async fn admitted_input_returns_technical_review_without_reading_or_inventing_a_terminal() {
+        let boundary=native_pause_boundary("EXECUTION_INTERVENTION_REQUIRED");
+        let session=recording_session(Some(AgentExecutionDelivery {
+            turn_outcome:Some(nomifun_agent_contracts::AgentTurnOutcome::Paused {message_ids:vec![]}),
+            user_input_request:None,message_id:CURRENT_USER_TURN_ID.into(),replayed:true,completed:false,
+            result_ok:None,result_text:None,result_error:None,result_error_code:None,result_error_retryable:None,
+        }));
+        *session.progress_suspension.lock().unwrap()=Some(boundary.clone());
+        let runner=AgentSessionAttemptRunner::new(session.clone());
+        let outcome=runner.deliver_turn("owner",CONVERSATION_ID,"the-original-input",
+            AgentExecutionTurnAuthority {execution_id:generate_id(),step_id:generate_id(),attempt_id:generate_id(),
+                expected_step_version:1,expected_attempt_version:1,lease_owner:"original-owner".into()},
+            "the exact prepared task","agent_execution",false,Duration::from_secs(1),None,None).await.unwrap();
+        assert_eq!(outcome.disposition,AttemptDisposition::InterventionRequired);
+        assert_eq!(outcome.intervention,Some(boundary));assert!(outcome.canonical_terminal.is_none());
+        assert_eq!(session.delivery_calls.load(Ordering::SeqCst),1);
+        assert_eq!(session.delivered.lock().unwrap().as_ref().unwrap().1.content,"the exact prepared task");
+        assert_eq!(session.output_reads.load(Ordering::SeqCst),0);
+        assert_eq!(session.create_calls.load(Ordering::SeqCst),0);
+    }
+
+    #[test]
+    fn public_paused_text_cannot_replace_the_exact_native_pause_boundary() {
+        let session=recording_session(None);
+        let paused=AgentExecutionDelivery {turn_outcome:Some(nomifun_agent_contracts::AgentTurnOutcome::Paused {message_ids:vec![]}),
+            user_input_request:None,message_id:CURRENT_USER_TURN_ID.into(),replayed:true,completed:false,result_ok:None,
+            result_text:None,result_error:None,result_error_code:None,result_error_retryable:None};
+        assert!(observed_delivery_suspension(Some(&paused)).is_err());
+        assert_eq!(session.output_reads.load(Ordering::SeqCst),0);
     }
 
     #[tokio::test]
@@ -1406,8 +1733,9 @@ mod tests {
                 &attempt_id,
                 "shared wrapper",
                 "[AutoWork] perform exact requirement",
+                test_initial_input("[AutoWork] perform exact requirement","autowork",true),
                 Duration::from_millis(1),
-                Box::new(move |conversation_id| {
+                Box::new(move |conversation_id,_operation,_input| {
                     Box::pin(async move {
                         assert_eq!(conversation_id, CONVERSATION_ID);
                         Ok(AgentExecutionTurnAuthority {
@@ -1446,14 +1774,17 @@ mod tests {
         let result=runner.execute("owner",AttemptSessionTarget::ExistingChild {target:nomifun_db::AgentExecutionContinuationTarget {
             conversation_id:CONVERSATION_ID.into(),original_step_id:generate_id(),original_attempt_id:generate_id()}},
             &participant,&[],None,"continued child",AgentToolPolicy::Full,false,DelegationPolicy::Automatic,1,
-            DecisionPolicy::Automatic,&attempt_id,"the new Step","Continue with the next independent input",Duration::from_millis(1),
-            Box::new(move|conversation|Box::pin(async move {
+            DecisionPolicy::Automatic,&attempt_id,"the new Step","Continue with the next independent input",
+            test_initial_input("Continue with the next independent input","agent_execution",false),Duration::from_millis(1),
+            Box::new(move|conversation,_operation,_input|Box::pin(async move {
                 assert_eq!(conversation,CONVERSATION_ID);
                 Ok(AgentExecutionTurnAuthority {execution_id,step_id,attempt_id:callback_attempt,
                     expected_step_version:1,expected_attempt_version:1,lease_owner:"lease".into()})
             }))).await;
         assert!(matches!(result,Err(AppError::Conflict(message)) if message=="captured AutoWork turn"));
         assert_eq!(session.create_calls.load(Ordering::SeqCst),0,"continuing a child cannot fork its transcript");
+        assert_eq!(session.prepared_attempt.lock().unwrap().as_deref(),Some(attempt_id.as_str()),
+            "preparation uses this new Attempt's queued proof, not the old child's Attempt or an active-link guess");
         let (conversation,input)=session.delivered.lock().unwrap().take().unwrap();
         assert_eq!(conversation,CONVERSATION_ID);
         assert_eq!(input.origin.as_deref(),Some("agent_execution"));
@@ -1513,7 +1844,8 @@ mod tests {
         let result = runner.execute("owner",AttemptSessionTarget::SourceChildAttempt { source:source.clone() },&participant,&[],None,
             "Background task",AgentToolPolicy::Full,false,delegation_policy,0,
             decision_policy,&generate_id(),"task context","do the requested work",
-            Duration::from_secs(1),Box::new(|_|Box::pin(async { panic!("creation is deliberately intercepted") })),
+            test_initial_input("do the requested work","agent_execution",true),
+            Duration::from_secs(1),Box::new(|_,_,_|Box::pin(async { panic!("creation is deliberately intercepted") })),
         ).await;
         assert!(result.is_err());
         let request = session.created_request.lock().unwrap().take().unwrap();

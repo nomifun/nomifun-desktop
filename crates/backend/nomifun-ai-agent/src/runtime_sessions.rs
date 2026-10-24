@@ -106,6 +106,11 @@ pub trait AgentRuntimeSessions: Send + Sync {
     /// alone does not prove that the reusable slot has released this owner.
     fn active_turn_generation(&self, _conversation_id: &str) -> Option<u64> { None }
 
+    /// Read the admission of this exact instance before its relay releases it.
+    /// Session identity alone cannot bind a resumed runtime to an older Turn generation.
+    fn active_turn_generation_if_matches(&self, _conversation_id: &str,
+        _runtime: &AgentRuntimeHandle) -> Option<u64> { None }
+
     /// Get an existing runtime or create one if none exists.
     ///
     /// Concurrent callers with the same `conversation_id` block on a shared
@@ -1528,6 +1533,13 @@ impl InMemoryAgentRuntimeSessions {
 impl AgentRuntimeSessions for InMemoryAgentRuntimeSessions {
     fn active_turn_generation(&self, conversation_id: &str) -> Option<u64> {
         self.turn_admissions.get(conversation_id).map(|admission| admission.generation)
+    }
+
+    fn active_turn_generation_if_matches(&self, conversation_id: &str,
+        expected: &AgentRuntimeHandle) -> Option<u64> {
+        let admission = self.turn_admissions.get(conversation_id)?;
+        let runtime = admission.slot.get()?;
+        std::ptr::eq(runtime.as_runtime(), expected.as_runtime()).then_some(admission.generation)
     }
 
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle> {
@@ -3249,11 +3261,15 @@ mod tests {
             .value()
             .clone();
         assert_eq!(active.generation, 41);
+        assert_eq!(registry.active_turn_generation_if_matches("conv-generation", &first), Some(41));
+        let unrelated = mock_runtime(MockAgent::new("conv-generation", Some(ConversationStatus::Finished)));
+        assert_eq!(registry.active_turn_generation_if_matches("conv-generation", &unrelated), None);
 
         registry
             .release_runtime_turn("conv-generation", 41)
             .await
             .expect("exact completed generation releases its admission");
+        assert_eq!(registry.active_turn_generation_if_matches("conv-generation", &first), None);
         let current = registry
             .get_or_create_runtime_for_turn(
                 "conv-generation",
@@ -3299,6 +3315,8 @@ mod tests {
             )
             .expect("current cancellation quarantines its exact runtime");
         assert!(registry.get_runtime("conv-generation").is_none());
+        assert_eq!(registry.active_turn_generation_if_matches("conv-generation", &current), Some(42),
+            "transport quarantine must not erase the original instance's admission identity");
         registry
             .terminate_and_wait_result(
                 "conv-generation",

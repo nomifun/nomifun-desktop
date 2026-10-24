@@ -83,8 +83,7 @@ async fn lost_reply(committed:bool) {
     // retain recovery/cleanup metadata; that cache reference is not execution
     // evidence. The old epoch can only observe its already committed receipt,
     // or reject an uncommitted write, even before its heartbeat notices pause.
-    let fenced=fixture.voice_execution.message_step(&principal.principal_id,&source,&command.execution_id,
-        &command.step_id,&command.content,&command.idempotency_key).await;
+    let fenced=fixture.voice_execution.message_step(&principal.principal_id,&source,&command).await;
     if committed {assert!(fenced.unwrap().replayed);} else {assert!(fenced.is_err());}
     release.add_permits(1);
     let after_late:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_execution_steps").fetch_one(fixture.pool()).await.unwrap();

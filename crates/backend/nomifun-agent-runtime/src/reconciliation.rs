@@ -31,6 +31,20 @@ pub struct AgentReconciledResume {
     pub observations: Vec<AgentEngineEvent>,
 }
 
+/// Read-only effect classifications from the exact validated frozen Snapshot.
+/// These contracts interpret observations; they never authorize execution.
+pub type AgentReconciliationContracts = BTreeMap<
+    (nomifun_agent_contracts::CapabilityId, nomifun_agent_contracts::ActionId), crate::AgentEffectClass>;
+
+pub fn reconcile_execution_tail_with_contracts(
+    checkpoint: &AgentExecutionCheckpoint, checkpoint_revision: u64, tail: &[AgentEngineEvent],
+    externally_dispatched: &BTreeSet<ToolCallId>, outcomes: &BTreeMap<ToolCallId, AgentReconciledOutcome>,
+    grant: &nomifun_agent_contracts::NativeBudgetIncrease, contracts: &AgentReconciliationContracts,
+) -> Result<AgentReconciledResume, AgentEngineError> {
+    reconcile_tail(checkpoint, checkpoint_revision, tail, externally_dispatched, outcomes, grant, Some(contracts))
+}
+
+#[cfg(test)]
 pub fn reconcile_execution_tail(
     checkpoint: &AgentExecutionCheckpoint,
     checkpoint_revision: u64,
@@ -39,12 +53,21 @@ pub fn reconcile_execution_tail(
     outcomes: &BTreeMap<ToolCallId, AgentReconciledOutcome>,
     grant: &nomifun_agent_contracts::NativeBudgetIncrease,
 ) -> Result<AgentReconciledResume, AgentEngineError> {
+    reconcile_tail(checkpoint, checkpoint_revision, tail, externally_dispatched, outcomes, grant, None)
+}
+
+fn reconcile_tail(
+    checkpoint: &AgentExecutionCheckpoint, checkpoint_revision: u64, tail: &[AgentEngineEvent],
+    externally_dispatched: &BTreeSet<ToolCallId>, outcomes: &BTreeMap<ToolCallId, AgentReconciledOutcome>,
+    grant: &nomifun_agent_contracts::NativeBudgetIncrease, contracts: Option<&AgentReconciliationContracts>,
+) -> Result<AgentReconciledResume, AgentEngineError> {
     checkpoint.validate()?;
     let invalid = |message: &str| AgentEngineError::ReplayContract(format!("resume reconciliation: {message}"));
     let mut next = checkpoint.clone();
     let mut step = checkpoint.model_steps;
     let mut proposed = BTreeSet::new();
     let mut order = Vec::new();
+    let mut journal_call_order = Vec::new();
     let mut calls = BTreeMap::<ToolCallId, (u16, ChatToolCall)>::new();
     let mut completed = BTreeSet::new();
     let mut admitted = externally_dispatched.clone();
@@ -59,6 +82,10 @@ pub fn reconcile_execution_tail(
     let mut live_wait_unresolved = false;
     let mut phase_correction_steps = BTreeSet::new();
     let mut delegation_calls = BTreeSet::new();
+    let mut identities = BTreeMap::new();
+    let mut commands = crate::workflow::CommandTracker::default();
+    let mut last_plan = checkpoint.plan.clone();
+    let mut last_work = checkpoint.work.clone();
     for event in tail {
         match event {
             AgentEngineEvent::CollaborationInherited { .. } =>
@@ -89,16 +116,22 @@ pub fn reconcile_execution_tail(
             }
             AgentEngineEvent::ToolCallDelta { step: current, call_id, .. } if *current > 0 => {
                 if *current != step || discarded { return Err(invalid("proposal is outside its model batch")); }
-                if proposed.insert(call_id.clone()) { order.push(call_id.clone()); }
+                if proposed.insert(call_id.clone()) { order.push(call_id.clone()); journal_call_order.push(call_id.clone()); }
             }
             AgentEngineEvent::ToolCallCompleted { step: current, call } => {
                 if *current > 0 && (*current != step || discarded) { return Err(invalid("completed proposal has no model batch")); }
                 if calls.insert(call.call_id.clone(), (*current, call.clone())).is_some() { return Err(invalid("duplicate completed call identity")); }
-                if *current > 0 && proposed.insert(call.call_id.clone()) { order.push(call.call_id.clone()); }
+                if *current == 0 { journal_call_order.push(call.call_id.clone()); }
+                else if proposed.insert(call.call_id.clone()) { order.push(call.call_id.clone()); journal_call_order.push(call.call_id.clone()); }
             }
             AgentEngineEvent::ToolStarted { step: current, call_id, capability_id, action_id } => {
                 if calls.get(call_id).is_none_or(|(recorded, _)| recorded != current) { return Err(invalid("tool admission has no exact completed proposal")); }
                 admitted.insert(call_id.clone());
+                let identity = (capability_id.clone(), action_id.clone());
+                if contracts.is_some_and(|contracts| !contracts.contains_key(&identity)) {
+                    return Err(invalid("admitted tool has no exact frozen observation contract"));
+                }
+                identities.insert(call_id.clone(), identity);
                 if capability_id.as_ref() == "agent.collaboration" && matches!(action_id.as_ref(), "agent/delegate"|"agent/fork") {
                     delegation_calls.insert(call_id.clone());
                 }
@@ -123,16 +156,20 @@ pub fn reconcile_execution_tail(
                 if recorded_step != current || !completed.insert(result.call_id.clone()) { return Err(invalid("duplicate or mismatched result")); }
                 result.validate_for(&result.call_id)?;
                 if call.name == crate::collaboration::WAIT && !result.is_error {
-                    next.awaiting_children = Some(crate::collaboration::from_wait_call(call)?);
+                    next.awaiting_children = Some(next.collaboration.normalize_wait(&crate::collaboration::from_wait_call(call)?)?);
                 }
-                if !result.is_error {
-                    if call.name == crate::collaboration::STATUS {
-                        if next.collaboration.observe_status(&crate::collaboration::snapshot_from_result(result)?)? {
-                            next.work.observe_child_workspace_change();
-                        }
+                if next.collaboration.observe_tool_result(call, result, delegation_calls.contains(&result.call_id))? {
+                    next.work.observe_child_workspace_change();
+                }
+                if *current > 0 && let Some(contracts) = contracts {
+                    let attempted = admitted.contains(&result.call_id) && !matches!(event,
+                        AgentEngineEvent::ToolOutcomeReconciled { source: AgentReconciliationSource::NotDispatched, .. });
+                    if matches!(event, AgentEngineEvent::ToolOutcomeReconciled {source:AgentReconciliationSource::OwnerAttestation,..}) {
+                        next.work.observe_child_workspace_change();
+                        if result.is_error { next.work.observe_deferred(); }
+                    } else {
+                        observe_work(&mut next.work, &mut commands, call, result, attempted, &identities, contracts)?;
                     }
-                    else if call.name == crate::collaboration::MESSAGE { next.collaboration.accept_message(result)?; }
-                    else if delegation_calls.contains(&result.call_id) { next.collaboration.accept(result)?; }
                 }
                 if input_requests.contains_key(&result.call_id) && result.is_error {
                     return Err(invalid("accepted native input request has a contradicting failed result"));
@@ -204,8 +241,9 @@ pub fn reconcile_execution_tail(
                 if *model_steps != step || next.awaiting_children.is_none() {
                     return Err(invalid("child wake has no exact pending child wait"));
                 }
+                next.awaiting_children.as_ref().expect("checked pending wait").validate_wake(cursor)?;
                 crate::collaboration::wake_message(cursor)?;
-                next.collaboration.wake_cursor = Some(cursor.clone());
+                next.collaboration.record_wake(cursor)?;
                 next.awaiting_children = None;
             }
             AgentEngineEvent::OwnedProcessObserved { observation, .. } => {
@@ -225,8 +263,8 @@ pub fn reconcile_execution_tail(
             AgentEngineEvent::TurnInputRequired { request, .. } => {
                 if next.pending_user_input.as_ref() != Some(request) { return Err(invalid("terminal input disposition has no pending source question")); }
             }
-            AgentEngineEvent::PlanUpdated { plan } => next.plan = plan.clone(),
-            AgentEngineEvent::WorkStatus { status } => next.work = status.clone(),
+            AgentEngineEvent::PlanUpdated { plan } => { next.plan = plan.clone(); last_plan = plan.clone(); },
+            AgentEngineEvent::WorkStatus { status } => { next.work = status.clone(); last_work = status.clone(); },
             AgentEngineEvent::PatchRecoveryUpdated { state } => next.patch_recovery = state.clone(),
             // The host separately proves the canonical Turn is nonterminal.
             // A private terminal proposal can precede a failed terminal commit.
@@ -243,7 +281,8 @@ pub fn reconcile_execution_tail(
         || calls.get(id).is_some_and(|(_,call)|call.name==crate::collaboration::MESSAGE && outcomes.contains_key(id)));
     if keep_batch && proposed.iter().any(|id| !calls.contains_key(id)) { return Err(invalid("admitted batch contains incomplete arguments")); }
     let mut observations = Vec::new();
-    for (id, (call_step, call)) in &calls {
+    for id in &journal_call_order {
+        let Some((call_step,call)) = calls.get(id) else { continue; };
         if completed.contains(id) {continue;}
         if *call_step > 0 && (!keep_batch || *call_step != step) {
             if !admitted.contains(id) {
@@ -279,14 +318,18 @@ pub fn reconcile_execution_tail(
             }
             next.work.observe_deferred();
         }
-        if !outcome.result.is_error {
-            if call.name == crate::collaboration::MESSAGE { next.collaboration.accept_message(&outcome.result)?; }
-            else if call.name == crate::collaboration::STATUS {
-                if next.collaboration.observe_status(&crate::collaboration::snapshot_from_result(&outcome.result)?)? {
-                    next.work.observe_child_workspace_change();
-                }
+        if next.collaboration.observe_tool_result(call, &outcome.result, delegation_calls.contains(id))? {
+            next.work.observe_child_workspace_change();
+        }
+        if *call_step > 0 && let Some(contracts) = contracts {
+            let attempted = admitted.contains(id) && !matches!(outcome.source, AgentReconciliationSource::NotDispatched);
+            // Internal guidance failures were already accounted above.
+            if matches!(outcome.source, AgentReconciliationSource::OwnerAttestation) {
+                next.work.observe_child_workspace_change();
+                if outcome.result.is_error { next.work.observe_deferred(); }
+            } else if call.name != crate::collaboration::MESSAGE || !outcome.result.is_error {
+                observe_work(&mut next.work, &mut commands, call, &outcome.result, attempted, &identities, contracts)?;
             }
-            else if delegation_calls.contains(id) { next.collaboration.accept(&outcome.result)?; }
         }
         if admitted.contains(id) && matches!(outcome.source, AgentReconciliationSource::NotDispatched)
             && outcome.evidence_event_id.is_none() { return Err(invalid("missing dispatch needs a fenced journal witness")); }
@@ -314,7 +357,7 @@ pub fn reconcile_execution_tail(
     let discard_last = !keep_batch;
     next.plan.needs_replan = true;
     crate::exact_actions::close_receivers(&mut next.plan.exact_actions);
-    if next.plan.exact_actions!=checkpoint.plan.exact_actions {
+    if next.plan != last_plan {
         observations.push(AgentEngineEvent::PlanUpdated {plan:next.plan.clone()});
     }
     observations.push(AgentEngineEvent::ExecutionTailReconciled {
@@ -329,11 +372,28 @@ pub fn reconcile_execution_tail(
     next.plan.needs_replan = true;
     // The caller must establish actual owner cleanup before committing this
     // proposal. No command/verification provenance survives the resume.
-    next.work.running_processes.clear(); next.work.observed_processes.clear(); next.work.recent_commands.clear();
+    next.work.running_processes.clear(); next.work.recent_commands.clear();
     next.work.command_observed_after_latest_mutation = false;
+    if next.work != last_work { observations.push(AgentEngineEvent::WorkStatus {status:next.work.clone()}); }
     if grant.retry_stall_guards { next.control_rejections.reset(); }
     if let Some(segments) = next.segments.as_mut() { segments.authorize_resume(grant, step)?; }
     else if grant.additional_segments != 0 { return Err(invalid("no segmented model budget exists at this checkpoint")); }
     next.validate()?;
     Ok(AgentReconciledResume { checkpoint: next, observations })
+}
+
+fn observe_work(work: &mut crate::AgentWorkStatus, commands: &mut crate::workflow::CommandTracker,
+    call: &ChatToolCall, result: &AgentToolResult, attempted: bool,
+    identities: &BTreeMap<ToolCallId,(nomifun_agent_contracts::CapabilityId,nomifun_agent_contracts::ActionId)>,
+    contracts: &AgentReconciliationContracts) -> Result<(),AgentEngineError> {
+    if attempted {
+        let identity = identities.get(&call.call_id).ok_or_else(||
+            AgentEngineError::ReplayContract("dispatched result has no canonical tool identity".into()))?;
+        let effect = contracts.get(identity).ok_or_else(||
+            AgentEngineError::ReplayContract("dispatched result lacks its frozen effect contract".into()))?;
+        work.observe_contract(identity.0.as_ref(),identity.1.as_ref(),*effect,call,result,commands);
+    } else if result.is_error {
+        work.observe_deferred();
+    }
+    Ok(())
 }

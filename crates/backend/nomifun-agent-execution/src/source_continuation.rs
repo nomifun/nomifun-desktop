@@ -9,8 +9,6 @@ impl AgentExecutionEngine {
         let Some(source)=execution_source_from_initial_plan(&command.initial_plan_input)? else {return Ok(None);};
         let actor=AgentExecutionActor::agent(&source.agent_session_id,None);
         loop {
-            let changed=self.changed();
-            let notified=changed.notified();tokio::pin!(notified);notified.as_mut().enable();
             if let Some(row)=self.repository.find_source_command(owner_id,command).await? {
                 self.publish().await;
                 return domain_mapper::execution(row,Some(source.agent_session_id.clone())).map(Some);
@@ -37,10 +35,15 @@ impl AgentExecutionEngine {
             }
             let Some(row)=matching else {return Ok(None);};
             if row.status==AgentExecutionStatus::Planning.as_str() {
+                let changed=self.changed_for(owner_id,&row.execution_id);
+                let notified=changed.notified();tokio::pin!(notified);notified.as_mut().enable();
+                let current=self.repository.get_execution(owner_id,&row.execution_id).await?
+                    .ok_or_else(||AppError::NotFound("original source Execution is unavailable".into()))?;
+                if current.status!=AgentExecutionStatus::Planning.as_str() {continue;}
                 tokio::select! {
                     _=self.lifecycle.cancelled()=>return Err(AppError::Conflict("collaboration owner is shutting down".into())),
                     _=notified=>{},
-                    _=tokio::time::sleep(Duration::from_secs(1))=>{},
+                    _=tokio::time::sleep(Duration::from_secs(30))=>{},
                 }
                 continue;
             }

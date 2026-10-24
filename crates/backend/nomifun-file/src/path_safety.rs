@@ -159,9 +159,11 @@ pub(crate) fn canonical_native_read_entry(path: &Path, authority: &PathAuthority
 }
 
 pub(crate) fn session_path_label(root: &Path, path: &Path) -> Result<String, AppError> {
-    if path == root || std::fs::canonicalize(root).ok().as_deref() == Some(path) { return Ok(String::new()); }
-    if let Some(observation) = crate::WorkspacePathObservation::from_canonical(root, path) { return Ok(observation.path); }
-    path.to_str().map(str::to_owned).ok_or_else(|| AppError::BadRequest("path is not valid UTF-8".into()))
+    let label = if path == root || std::fs::canonicalize(root).ok().as_deref() == Some(path) { String::new() }
+        else if let Some(observation) = crate::WorkspacePathObservation::from_canonical(root, path) { observation.path }
+        else { path.to_str().map(str::to_owned).ok_or_else(|| AppError::BadRequest("path is not valid UTF-8".into()))? };
+    nomifun_agent_contracts::SessionPathLabel::parse(label).map(|label| label.into_string())
+        .map_err(|_| AppError::Conflict("native owner produced an invalid Session path label".into()))
 }
 
 /// Compare actual native targets. Common ancestry is a comparison context,

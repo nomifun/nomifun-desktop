@@ -74,7 +74,7 @@ pub use agent_execution::{
     ExecutionParticipant, ExecutionStep, ExecutionStepDependency, ExecutionStepProfile,
     JudgeAggregation, LoopStopPolicy, ParticipantCapability, ParticipantConstraints,
     PlannedExecution, PlannedExecutionStep, ReassignExecutionStepRequest,
-    RenameAgentExecutionRequest, ReplanAgentExecutionRequest, RetryExecutionStepRequest,
+    RenameAgentExecutionRequest, ReplanAgentExecutionRequest, RetryExecutionStepRequest, RestartExecutionStepRequest, ReplaceExecutionStepWithExistingRequest,
     SteerExecutionStepRequest, StepControlPolicy, UpdateExecutionStepRequest, VerificationPolicy,
     VersionedAgentExecutionCommand,
 };

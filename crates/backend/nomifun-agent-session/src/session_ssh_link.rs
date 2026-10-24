@@ -40,7 +40,7 @@ impl AgentSessionStore {
     pub async fn record_session_ssh_link_close_requested(&self,owner:&PrincipalRef,close:SessionSshLinkCloseV1)
         ->Result<SessionEventAck,SessionStoreError> {
         close.validate().map_err(SessionStoreError::InvalidPayload)?;
-        let mut tx=self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let live=live_from_row(session_row_by_id_tx(&mut tx,close.agent_session_id.as_ref()).await?)?;
         if &close.owner_ref!=owner||live.owner_ref!=*owner {return Err(SessionStoreError::ExecutionFenced);}
         let source:EventId=sqlx::query_scalar::<_,String>("SELECT event_id FROM agent_events WHERE session_id=? AND kind='session/opening' ORDER BY seq LIMIT 1")
@@ -50,12 +50,12 @@ impl AgentSessionStore {
             semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {kind:SessionEventKind(SESSION_SSH_LINK_CLOSE_REQUESTED.into()),kind_version:1,
                 correlation_id:close.agent_session_id.as_ref().into(),causation_event_id:Some(source),payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(serde_json::to_value(close)?))}};
         let ack=required_ack(self.append_event_tx_with_policy(&mut tx,&append,None,AppendSessionStatePolicy::SshLinkClose).await?)?;
-        tx.commit().await?;Ok(ack)
+        db_write_observation.commit(tx).await?;Ok(ack)
     }
 
     pub async fn record_session_ssh_link_closed(&self,owner:&PrincipalRef,closed:SessionSshLinkClosedV1)->Result<SessionEventAck,SessionStoreError> {
         closed.validate().map_err(SessionStoreError::InvalidPayload)?;
-        let mut tx=self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let close=&closed.close;
         let live=live_from_row(session_row_by_id_tx(&mut tx,close.agent_session_id.as_ref()).await?)?;
         if &close.owner_ref!=owner||live.owner_ref!=*owner {return Err(SessionStoreError::ExecutionFenced);}
@@ -65,7 +65,7 @@ impl AgentSessionStore {
                 correlation_id:close.agent_session_id.as_ref().into(),causation_event_id:Some(request_key(close).into()),
                 payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(serde_json::to_value(closed)?))}};
         let ack=required_ack(self.append_event_tx_with_policy(&mut tx,&append,None,AppendSessionStatePolicy::SshLinkClose).await?)?;
-        tx.commit().await?;Ok(ack)
+        db_write_observation.commit(tx).await?;Ok(ack)
     }
 
     /// Metadata-only owner read of exact requested resources. A missing result

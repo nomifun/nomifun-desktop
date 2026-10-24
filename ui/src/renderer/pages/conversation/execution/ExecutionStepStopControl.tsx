@@ -21,7 +21,8 @@ const ExecutionStepStopControl: React.FC<{
   stepStatus: string;
   delegatedOnly?: boolean;
   refetch: () => Promise<void>;
-}> = ({ executionId, executionVersion, executionStatus, stepId, stepVersion, stepStatus, delegatedOnly = false, refetch }) => {
+  onAccepted?: (scope: TExecutionCancellationScope) => void;
+}> = ({ executionId, executionVersion, executionStatus, stepId, stepVersion, stepStatus, delegatedOnly = false, refetch, onAccepted }) => {
   const { t } = useTranslation();
   const [message, messageContext] = useArcoMessage();
   const [stopping, setStopping] = useState(false);
@@ -58,6 +59,7 @@ const ExecutionStepStopControl: React.FC<{
       }
       if (scope !== 'delegated_work') setAcceptedStepId(stepId);
       if (scope !== 'task') setAcceptedDelegatedStepId(stepId);
+      onAccepted?.(scope);
       message.success(t('agentExecution.taskStop.accepted'));
       try {
         await refetch();

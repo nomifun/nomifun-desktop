@@ -237,7 +237,7 @@ pub(crate) mod tests {
         async fn create_from_agent_snapshot_idempotent(&self, _: &str,
             _: CreateConversationRequest, _: AgentResolvedSnapshot,
             _: &str) -> Result<ConversationResponse, AppError> { panic!("report must not create a Session") }
-        async fn discard_unlinked_creation(&self, _: &str, _: &str) -> Result<(), AppError> {
+        async fn discard_unlinked_creation(&self, _: &str, _: &str, _: Option<&str>) -> Result<(), AppError> {
             panic!("report must not discard a Session")
         }
         async fn deliver_turn(&self, _: &str, _: &str, _: &str,

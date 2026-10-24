@@ -1,6 +1,10 @@
 use std::collections::BTreeSet;
 
 pub const MAX_NATIVE_EXECUTION_CHECKPOINT_BYTES: usize = 256 * 1024;
+/// Complete model-authored completion arguments, including the final answer,
+/// criteria, references and JSON escaping. This is a serialized UTF-8 byte
+/// budget, not a separate character limit on the delivered answer.
+pub const MAX_AGENT_COMPLETION_REPORT_BYTES: usize = 48 * 1024;
 // Writer, recovery and closed-history readers share these ceilings. A
 // segment rollover never makes a Turn too large for its own recovery codec.
 pub const MAX_NATIVE_JOURNAL_WINDOW_BYTES: usize = 4 * 1024 * 1024;
@@ -238,17 +242,16 @@ impl AgentHandoffEnvelopeV1 {
                 .historical_completion_account
                 .as_ref()
                 .is_some_and(|account| {
-                    account.summary.chars().count() > 2048
-                        || account.criteria.iter().any(|criterion| {
-                            !bounded_text(&criterion.step, 512)
-                                || !matches!(
-                                    criterion.disposition.as_str(),
-                                    "supported" | "unverified" | "blocked" | "scope_changed"
-                                )
-                                || !bounded_text(&criterion.rationale, 1024)
-                                || criterion.evidence_call_ids.len() > 8
-                                || criterion.requirement_ids.len() > 32
-                        })
+                    account.criteria.iter().any(|criterion| {
+                        !bounded_text(&criterion.step, 512)
+                            || !matches!(
+                                criterion.disposition.as_str(),
+                                "supported" | "unverified" | "blocked" | "scope_changed"
+                            )
+                            || !bounded_text(&criterion.rationale, 1024)
+                            || criterion.evidence_call_ids.len() > 8
+                            || criterion.requirement_ids.len() > 32
+                    })
                 })
             || self.verified_artifacts.iter().any(|item| {
                 !bounded(&item.artifact_id, 256)
@@ -707,7 +710,7 @@ mod agent_handoff_tests {
         });
         value.historical_completion_account = Some(AgentHandoffCompletionAccountV1 {
             plan_revision: 65_536, observation_revision: 1, workspace_epoch: 0,
-            summary: "总结".repeat(1024),
+            summary: "完整交付总结".repeat(1024),
             criteria: vec![AgentHandoffCompletionCriterionV1 {
                 step: "步骤".repeat(256), disposition: "unverified".into(),
                 rationale: "原因".repeat(512), evidence_call_ids: vec![],
@@ -718,8 +721,22 @@ mod agent_handoff_tests {
         let restored: AgentHandoffEnvelopeV1 = serde_json::from_value(serde_json::to_value(&value).unwrap()).unwrap();
         restored.validate().unwrap();
         assert_eq!(restored, value);
+        assert!(restored.historical_completion_account.as_ref().unwrap().summary.chars().count()>2048,
+            "explicit Agent continuation preserves the full accepted answer within the original envelope budget");
         value.requirements[0].source.quote.push('超');
         assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn complete_handoff_answer_remains_bounded_by_serialized_utf8_envelope() {
+        let mut value=envelope();
+        value.historical_completion_account=Some(AgentHandoffCompletionAccountV1 {
+            plan_revision:1,observation_revision:1,workspace_epoch:0,
+            summary:"界".repeat(MAX_AGENT_HANDOFF_ENVELOPE_BYTES/3+1),criteria:vec![],
+        });
+        assert!(value.historical_completion_account.as_ref().unwrap().summary.chars().count()<MAX_AGENT_HANDOFF_ENVELOPE_BYTES);
+        let error=value.validate().unwrap_err();
+        assert!(error.contains(&format!("Agent handoff exceeds {MAX_AGENT_HANDOFF_ENVELOPE_BYTES} bytes")),"{error}");
     }
 
     #[test]

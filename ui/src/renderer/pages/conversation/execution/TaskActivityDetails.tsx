@@ -37,8 +37,9 @@ export function ActivityCleanupProgress({ item, accepted = item.stop_accepted, e
 
 /** Observes only the selected exact Attempt while this inspector is mounted.
  * No global activity walk, latest-Attempt fallback, runtime start or model input. */
-export default function TaskActivityDetails({ executionId, stepId, attemptId }: {
+export default function TaskActivityDetails({ executionId, stepId, attemptId, onTaskStopAccepted }: {
   executionId: ExecutionId; stepId: ExecutionStepId; attemptId: ExecutionAttemptId;
+  onTaskStopAccepted?: () => void;
 }) {
   const { t } = useTranslation();
   const scope = `${executionId}:${stepId}:${attemptId}`;
@@ -53,6 +54,7 @@ export default function TaskActivityDetails({ executionId, stepId, attemptId }: 
   const [receipt, setReceipt] = useState<{ scope: string; accepted: boolean; executionStopped: boolean }>();
   const mutationRunning = useRef(false);
   const retryCommand = useRef<{ scope: string; target: AgentActivityTarget; key: string } | undefined>(undefined);
+  const stopAccepted = useRef(onTaskStopAccepted); stopAccepted.current = onTaskStopAccepted;
   useEffect(() => {
     alive.current = true;
     return () => { alive.current = false; };
@@ -74,6 +76,7 @@ export default function TaskActivityDetails({ executionId, stepId, attemptId }: 
           || item.target.execution_id !== executionId || item.target.step_id !== stepId || item.target.attempt_id !== attemptId)
           throw new Error('The activity source does not match the selected Attempt');
         setSnapshot({ scope, item });setFailed(false);
+        if (item.stop_accepted) stopAccepted.current?.();
         settled = item.execution_stopped && !item.can_retry_cleanup && item.resources.length > 0
           && item.resources.every(resource => resource.state === 'released');
       } catch { if (!disposed) setFailed(true); }

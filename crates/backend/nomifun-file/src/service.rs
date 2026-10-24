@@ -6512,7 +6512,10 @@ mod tests {
     #[test]
     fn remove_entry_sync_file() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("to_delete.txt");
+        // Production prepares canonical native entries before this helper;
+        // Windows handle identity uses the extended DOS spelling.
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let file = root.join("to_delete.txt");
         fs::write(&file, "bye").unwrap();
         assert!(file.exists());
 
@@ -6523,7 +6526,8 @@ mod tests {
     #[test]
     fn remove_entry_sync_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let sub = dir.path().join("sub");
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let sub = root.join("sub");
         fs::create_dir(&sub).unwrap();
         fs::write(sub.join("a.txt"), "a").unwrap();
 
@@ -6544,24 +6548,28 @@ mod tests {
     #[test]
     fn rename_entry_sync_file() {
         let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join("old.txt");
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let old = root.join("old.txt");
         fs::write(&old, "data").unwrap();
 
         let new_path = rename_entry_sync(&old, "new.txt").unwrap();
         assert!(!old.exists());
         assert!(new_path.exists());
+        assert_eq!(new_path, root.join("new.txt"));
         assert_eq!(fs::read_to_string(&new_path).unwrap(), "data");
     }
 
     #[test]
     fn rename_entry_sync_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join("old_dir");
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let old = root.join("old_dir");
         fs::create_dir(&old).unwrap();
 
         let new_path = rename_entry_sync(&old, "new_dir").unwrap();
         assert!(!old.exists());
         assert!(new_path.is_dir());
+        assert_eq!(new_path, root.join("new_dir"));
     }
 
     #[test]

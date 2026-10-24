@@ -1,6 +1,28 @@
 use super::*;
 use crate::MAX_INLINE_JSON_BYTES;
 
+#[tokio::test]
+async fn technical_settlement_never_turns_unknown_business_effect_into_a_failed_or_successful_result() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();let f=fixture(&store,"settlement-unknown").await;
+    let lease=store.claim_native_execution(claim(&f,"original-owner",0,None)).await.unwrap();
+    unknown_effect(&store,&f,&lease).await;
+    let effects=store.list_effects(&f.session.agent_session_id).await.unwrap();
+    let receipt=store.request_native_turn_settlement(&lease,&crate::NativeTurnSettlementRequest {
+        outcome:StrictJsonValue(json!({"model_steps":1,"terminal":{"status":"failed","message":"original failure"}})),
+        first_cleanup_failure:"physical cleanup initially unavailable".into(),
+    }).await.unwrap();
+    let mut cleanup=progress(&f,"settlement-physical-cleanup",json!({"event":"host_cleanup_proven"}));
+    cleanup.semantic_event.causation_event_id=Some(f.root.clone());
+    store.append_native_settlement_observation(&receipt,&cleanup,None).await.unwrap();
+    let message=append(&f.session.agent_session_id,"settlement-empty-message","runtime_supervisor","settlement-empty-message","message/completed","empty",Some(f.root.clone()),json!({"part_count":0,"content_digest":digest_bytes(b"")}));
+    let failed=append(&f.session.agent_session_id,"settlement-must-not-fail","runtime_supervisor","settlement-must-not-fail","turn/failed","lease-turn",Some(message.event_id.clone()),json!({"model_steps":1,"message":"original failure"}));
+    let runtime=progress(&f,"unknown-settlement-runtime",json!({"event":"turn_failed","model_steps":1,"message":"original failure"}));
+    assert!(matches!(store.append_native_settlement_terminal_bundle(&receipt,&runtime,None,Some(&message),Some(&failed)).await,Err(SessionStoreError::RecoveryRequiresReconciliation)));
+    assert_eq!(store.list_effects(&f.session.agent_session_id).await.unwrap(),effects);
+    assert!(store.claim_native_chat_operation(&lease,model(&f,"unknown-never-replays")).await.is_err());
+    assert!(store.complete_native_turn_settlement(&receipt).await.is_err());
+}
+
 fn cancellation(f:&Fixture,key:&str)->SessionEventAppend {
     append(&f.session.agent_session_id,key,"runtime_supervisor",key,"turn/cancelled","lease-turn",Some(f.started.clone()),
         json!({"operation_id":"lease-turn"}))

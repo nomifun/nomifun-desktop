@@ -1,10 +1,14 @@
 use super::*;
 use nomifun_agent_contracts::{NativeRetainedProcess,NativeSessionProcessRetention,SessionProcessOwnerReleasedV1,SESSION_PROCESS_OWNER_RELEASED};
 use crate::{ClearSessionContext,ContextClearPreparation};
+use serde_json::Value;
 #[path="session_process_archive_tests.rs"]
 mod archive_tests;
 #[path="session_process_live_reap_tests.rs"]
 mod live_reap_tests;
+
+#[path="session_process_failed_exit_tests.rs"]
+mod failed_exit_tests;
 
 fn native_terminal()->StrictJsonValue {StrictJsonValue(json!({"state":"exited","exit_code":0,"signal":null,
     "output":{"text":"late original output\n","next_cursor":21,"retained_bytes":21,"dropped_bytes":0,"source_encoding":"utf-8","decode_errors":0},
@@ -161,6 +165,10 @@ async fn ssh_exact_close_requested_and_unknown_result_survive_projection_rebuild
 }
 
 async fn retained_process_fixture() ->(AgentSessionStore,AgentSessionLiveRecord,SessionProcessOwnerReleasedV1,EventId) {
+    retained_process_fixture_with_launch(|running|process_settled("launch-original","launch-model-call",running)).await
+}
+
+async fn retained_process_fixture_with_launch(launch:impl FnOnce(Value)->Value) ->(AgentSessionStore,AgentSessionLiveRecord,SessionProcessOwnerReleasedV1,EventId) {
     let store=AgentSessionStore::open_in_memory().await.unwrap();
     let(session,_)=create_ready(&store,"retained-process").await;
     let sid=&session.agent_session_id;
@@ -173,7 +181,7 @@ async fn retained_process_fixture() ->(AgentSessionStore,AgentSessionLiveRecord,
     process_tool_fact(&store,sid,"retained-launch-dispatch","retained-turn",start.clone(),json!({"event":"host_tool_dispatch","dispatch":{
         "operation_id":"launch-original","call_id":"launch-model-call","capability_id":"workspace.process","action_id":"workspace.process/start"}})).await;
     let running=json!({"process_id":retention.processes[0].process_id,"state":"running","pid":100,"output":process_test_output()});
-    process_tool_fact(&store,sid,"retained-launch-result","retained-turn",start.clone(),process_settled("launch-original","launch-model-call",running)).await;
+    process_tool_fact(&store,sid,"retained-launch-result","retained-turn",start.clone(),launch(running)).await;
     store.append_event(&append(sid,"retained-dispatch","runtime_supervisor","retained-dispatch","runtime/progress-recorded","retained-turn",Some(start.clone()),
         json!({"event":{"event":"host_process_dispatch","operation_id":"launch-original","ordinal":1}}))).await.unwrap();
     let cleanup=append(sid,"retained-cleanup","runtime_supervisor","retained-cleanup","runtime/progress-recorded","retained-turn",Some(start.clone()),

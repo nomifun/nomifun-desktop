@@ -80,6 +80,7 @@ pub struct EngineTurnReceipt {
     turn_started_event_id: String,
     operation_id: String,
     admission_epoch: i64,
+    source_event: nomifun_agent_contracts::SessionEventRecord,
     request_payload: serde_json::Value,
 }
 
@@ -121,6 +122,9 @@ impl EngineTurnReceipt {
     }
     pub fn request_payload(&self) -> &serde_json::Value {
         &self.request_payload
+    }
+    pub(super) fn source_event(&self) -> &nomifun_agent_contracts::SessionEventRecord {
+        &self.source_event
     }
 }
 
@@ -785,19 +789,25 @@ impl EngineSessionHost {
         })
     }
 
-    /// Reuses the same live writer for one exact receipt. This is a journal
-    /// handle cache, not a second Session coordinator or an interrupted-turn
-    /// recovery path. A released writer never resumes a durable prefix.
-    pub async fn open_journal(
-        &self,
-        receipt: &EngineTurnReceipt,
-        cancellation: tokio_util::sync::CancellationToken,
-    ) -> Result<super::engine_journal::EngineTurnJournal, AppError> {
-        let journal = self.claim_journal(receipt, cancellation).await?;
-        journal.refresh_budget().await?;
-        Ok(journal)
+    /// A live Driver attachment, rather than a registry slot or a claim alone,
+    /// is the receipt that transfers an authorized recovery to its Runtime.
+    pub(super) async fn owns_attached_recovery(&self, session:&AgentSessionId,operation:&OperationId,generation:u64)->bool {
+        self.journals.lock().await.get(&(session.as_ref().to_owned(),operation.as_ref().to_owned()))
+            .and_then(Weak::upgrade).is_some_and(|journal| {
+                super::engine_journal::EngineTurnJournal::cached_generation(&journal)==generation
+                    &&super::engine_journal::EngineTurnJournal::cached_is_attached(&journal)
+            })
     }
 
+    pub(super) fn owns_recovery_claim(&self,facts:&nomifun_agent_session::ChatCausalityFacts,generation:u64)->bool {
+        facts.events.iter().find(|event|event.seq==generation&&event.kind.0=="runtime/execution-claimed")
+            .and_then(|event|facts.event_payloads.get(event.event_id.as_ref()))
+            .and_then(|payload|payload.get("holder_digest")).and_then(serde_json::Value::as_str)
+            ==Some(digest_bytes(self.execution_instance_id.as_bytes()).as_ref())
+    }
+
+    /// Return the original writer before awaited preparation. The caller must
+    /// retain it while refreshing budget and restoring the public projection.
     pub(super) async fn claim_journal(
         &self,
         receipt: &EngineTurnReceipt,
@@ -849,6 +859,7 @@ impl EngineSessionHost {
                 | nomifun_agent_session::SessionStoreError::RecoveryRequiresReconciliation) => {
                 self.open_recovered_journal(store, receipt, cancellation).await?
             }
+            Err(nomifun_agent_session::SessionStoreError::Sqlite(error)) => return Err(nomifun_db::DbError::Query(error).into()),
             Err(error) => return Err(AppError::Conflict(format!("Engine execution lease: {error}"))),
         };
         journals.insert(key, journal.downgrade());
@@ -867,6 +878,10 @@ impl EngineSessionHost {
     ) -> Result<EngineTurnReceipt, AppError> {
         let conflict =
             |message: &str| AppError::Conflict(format!("Engine turn receipt: {message}"));
+        let receipt_error=|error:nomifun_agent_session::SessionStoreError|match error {
+            nomifun_agent_session::SessionStoreError::Sqlite(error)=>nomifun_db::DbError::Query(error).into(),
+            error=>conflict(&error.to_string()),
+        };
         let session = self.resolve(options, binding).await?;
         if &session.snapshot.snapshot_ref != expected_snapshot {
             return Err(conflict("Snapshot differs from the open engine Session"));
@@ -887,7 +902,7 @@ impl EngineSessionHost {
             .store()
             .head(&session_id)
             .await
-            .map_err(|error| conflict(&error.to_string()))?;
+            .map_err(receipt_error)?;
         let operation_id = head
             .active_turn_id
             .clone()
@@ -898,7 +913,7 @@ impl EngineSessionHost {
             .store()
             .read_turn_receipt(&session_id, &operation)
             .await
-            .map_err(|error| conflict(&error.to_string()))?;
+            .map_err(receipt_error)?;
         if receipt.status != nomifun_agent_session::TurnReceiptStatus::Running {
             return Err(conflict("active turn is already terminal"));
         }
@@ -910,7 +925,7 @@ impl EngineSessionHost {
             .store()
             .chat_causality_facts(&session_id, &operation)
             .await
-            .map_err(|error| conflict(&error.to_string()))?;
+            .map_err(receipt_error)?;
         let started_payload = facts
             .event_payloads
             .get(started.event_id.as_ref())
@@ -926,6 +941,13 @@ impl EngineSessionHost {
             .event_payloads
             .get(source_message_id)
             .ok_or_else(|| conflict("accepted source message payload is unavailable"))?;
+        let source_event=facts.events.iter().find(|event|event.event_id.as_ref()==source_message_id)
+            .ok_or_else(||conflict("accepted source event is unavailable"))?;
+        if source_event.agent_session_id!=session_id||source_event.kind.0!="message/user-accepted"||source_event.kind_version!=1
+            ||source_event.producer_id.as_ref()!="session_api"||source_event.correlation_id.as_ref()!=source_message_id
+            ||source_event.seq>=started.seq||started.causation_event_id.as_ref()!=Some(&source_event.event_id) {
+            return Err(conflict("accepted source event differs from the original Turn claim"));
+        }
         if source_payload
             .get("content")
             .and_then(serde_json::Value::as_str)
@@ -957,6 +979,7 @@ impl EngineSessionHost {
             operation_id,
             admission_epoch: i64::try_from(if facts.execution_generation > 0 { facts.execution_generation } else { started.seq })
                 .map_err(|_| conflict("turn sequence exceeds runtime generation range"))?,
+            source_event: source_event.clone(),
             request_payload,
         })
     }

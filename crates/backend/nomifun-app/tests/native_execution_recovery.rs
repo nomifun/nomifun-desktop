@@ -877,7 +877,7 @@ async fn startup_recovery_scenario(
         assert_eq!(terminal_kind,"effect/uncertain");
         let terminal_payload: Value = serde_json::from_str(&terminal_payload).unwrap();
         assert_eq!(terminal_payload["outcome"],"unknown");
-        assert_eq!(terminal_payload["recovery"],"process_restart_external_reconciliation_required");
+        assert_eq!(terminal_payload["recovery"],"native_recovery_external_reconciliation_required");
         for (kind,count) in [("effect/uncertain",1i64),("effect/succeeded",0),("effect/failed",0),("effect/reconciled",0)] {
             let actual:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND correlation_id=? AND kind=?")
                 .bind(&id).bind(effect_id).bind(kind).fetch_one(second.database.pool()).await.unwrap();

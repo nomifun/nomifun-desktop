@@ -13,6 +13,14 @@ use super::operation_gates::{OperationGateCache,DeleteCleanupGateCache};
 mod native_turn_recovery;
 #[path = "completed_runtime_retirement.rs"]
 mod completed_runtime_retirement;
+#[path = "turn_settlement_owner.rs"]
+mod turn_settlement_owner;
+#[path = "parent_question_reply.rs"]
+mod parent_question_reply;
+#[path = "attempt_input_owner.rs"]
+mod attempt_input_owner;
+#[path = "empty_execution_retirement.rs"]
+mod empty_execution_retirement;
 #[path = "source_browser_retirement.rs"]
 mod source_browser_retirement;
 #[path = "execution_progress_observer.rs"]
@@ -50,6 +58,8 @@ mod robot_public_output;
 mod robot_saved_response;
 #[path = "native_execution_control.rs"]
 pub(super) mod native_execution_control;
+#[path = "execution_task_restart.rs"]
+mod execution_task_restart;
 
 #[path = "companion_sessions.rs"]
 mod companion_sessions;
@@ -230,6 +240,8 @@ pub(crate) struct NomiCoreSessionOwner {
     input_preparations: session_input_intake::InputPreparationControls,
     #[cfg(test)]
     cancellation_signal_barrier: std::sync::Mutex<Option<(AgentSessionId, Arc<NativeCancellationTestBarrier>)>>,
+    #[cfg(test)]
+    attempt_input_busy_marker: std::sync::Mutex<Option<String>>,
 }
 
 #[cfg(test)]
@@ -955,11 +967,19 @@ impl NomiCoreSessionOwner {
             input_preparations: Default::default(),
             #[cfg(test)]
             cancellation_signal_barrier: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            attempt_input_busy_marker: std::sync::Mutex::new(None),
         }
     }
 
     pub(crate) fn canonical(&self) -> &CanonicalAgentSessionOwner {
         &self.canonical
+    }
+
+    #[cfg(test)]
+    pub(in crate::router) fn inject_attempt_input_busy_for_test(&self,marker:&str) {
+        assert!(!marker.is_empty());
+        *self.attempt_input_busy_marker.lock().unwrap()=Some(marker.into());
     }
 
     #[cfg(test)]
@@ -984,6 +1004,37 @@ impl NomiCoreSessionOwner {
         session_id: &str,
     ) -> Arc<tokio::sync::RwLock<()>> {
         self.session_operation_locks.get(session_id)
+    }
+
+    pub(in crate::router) async fn collaboration_has_native_progress_owner(&self,session:&str,operation:&str)
+        ->Result<bool,AppError> {
+        let held=|key:&str|self.session_operation_locks.existing(key)
+            .is_some_and(|gate|gate.try_write_owned().is_err());
+        if held(&format!("attempt-input:{session}:{operation}")) {return Ok(true);}
+        self.collaboration_has_native_progress_owner_without_input(session,operation).await
+    }
+
+    pub(super) async fn collaboration_has_native_progress_owner_without_input(&self,session:&str,operation:&str)
+        ->Result<bool,AppError> {
+        let held=|key:&str|self.session_operation_locks.existing(key)
+            .is_some_and(|gate|gate.try_write_owned().is_err());
+        let sid=AgentSessionId::from(session);let operation_id=OperationId::from(operation);
+        let receipt=self.canonical.store().read_turn_receipt(&sid,&operation_id).await.map_err(agent_session_store_error)?;
+        let Some(started)=receipt.started_event else {return Ok(false);};
+        let row:Option<(String,i64)>=sqlx::query_as("SELECT source_message_id,execution_generation FROM agent_turns WHERE session_id=? AND operation_id=?")
+            .bind(session).bind(operation).fetch_optional(&self.pool).await.map_err(|error|AppError::from(nomifun_db::DbError::from(error)))?;
+        let Some((root,generation))=row else {return Ok(false);};
+        let generation=if generation>0 {generation as u64}else{started.seq};
+        if held(&format!("native-turn-settlement:{session}:{operation}:{generation}")) {return Ok(true);}
+        if let Some(runtime)=self.runtime_sessions.get_runtime(session) {
+            if self.runtime_sessions.active_turn_generation_if_matches(session,&runtime)==Some(generation)
+                && runtime.as_runtime().has_live_turn_task() {return Ok(true);}
+            if let Some(task)=runtime.as_runtime().current_task_identity() {
+                let identity=std::ptr::from_ref(runtime.as_runtime()) as *const () as usize;
+                if held(&format!("native-turn-settlement-preclaim:{session}:{root}:{identity:x}:{task:?}")) {return Ok(true);}
+            }
+        }
+        Ok(false)
     }
 
     async fn materialize_workspace_for_binding(
@@ -2186,7 +2237,8 @@ impl NomiCoreSessionOwner {
                     // producer owns the Turn. Only a matching canonical
                     // terminal may close the product stream.
                     if !Self::canonical_stream_terminal_agrees(&store, &session_id, &operation_id, turn_generation, &event).await { break; }
-                    committed_terminal = true;
+                    committed_terminal = !matches!(&event, AgentStreamEvent::Finish(data)
+                        if data.stop_reason == Some(nomifun_ai_agent::protocol::events::TurnStopReason::Paused));
                     // The SDK has already closed its execution progress port.
                     // Publish only read-only final references through this
                     // existing, receipt-verified terminal relay.
@@ -2349,18 +2401,19 @@ impl NomiCoreSessionOwner {
         let source = source_browser_retirement::validated_remote_runtime_source(&exact, remote, owner_id, session_id)?;
         self.dispatch_canonical_turn_locked_with_source_ref(owner_id, session_id, idempotency_key, request,
             false, None, None, None, false, None, None,
-            Some(source_browser_retirement::ServerTurnSource::Remote(source))).await
+            Some(source_browser_retirement::ServerTurnSource::Remote(source)),None).await
     }
 
     async fn dispatch_canonical_turn_locked(&self,owner_id:&str,session_id:&AgentSessionId,idempotency_key:&str,request:SendMessageRequest,
         initial_only:bool,voice_binding:Option<u64>,voice_context_floor:Option<u64>,voice_shutdown:Option<&tokio_util::sync::CancellationToken>,voice_supersede:bool,idmm_decision:Option<IdmmDecisionExplanation>,input_source:Option<nomifun_agent_contracts::AgentInputSource>)->Result<IdempotentMessageDelivery,AppError> {
         self.dispatch_canonical_turn_locked_with_source_ref(owner_id,session_id,idempotency_key,request,initial_only,
-            voice_binding,voice_context_floor,voice_shutdown,voice_supersede,idmm_decision,input_source,None).await
+            voice_binding,voice_context_floor,voice_shutdown,voice_supersede,idmm_decision,input_source,None,None).await
     }
 
     async fn dispatch_canonical_turn_locked_with_source_ref(&self,owner_id:&str,session_id:&AgentSessionId,idempotency_key:&str,request:SendMessageRequest,
         initial_only:bool,voice_binding:Option<u64>,voice_context_floor:Option<u64>,voice_shutdown:Option<&tokio_util::sync::CancellationToken>,voice_supersede:bool,
-        idmm_decision:Option<IdmmDecisionExplanation>,input_source:Option<nomifun_agent_contracts::AgentInputSource>,mut source_ref:Option<source_browser_retirement::ServerTurnSource>)
+        idmm_decision:Option<IdmmDecisionExplanation>,input_source:Option<nomifun_agent_contracts::AgentInputSource>,mut source_ref:Option<source_browser_retirement::ServerTurnSource>,
+        execution_authority:Option<&AgentExecutionTurnAuthority>)
         ->Result<IdempotentMessageDelivery,AppError> {
         if idmm_decision.is_some() || request.origin.as_deref() == Some("idmm") {
             self.ensure_channel_guest_idmm_allowed(session_id).await?;
@@ -2421,7 +2474,9 @@ impl NomiCoreSessionOwner {
             principal_kind: "user".to_owned(),
             principal_id: owner_id.to_owned(),
         };
-        let receipt = if let Some(binding)=voice_binding {
+        let receipt = if let Some(authority)=execution_authority {
+            self.canonical.start_execution_turn(&principal,session_id,idempotency_key,input,authority).await?
+        } else if let Some(binding)=voice_binding {
             self.canonical.start_voice_turn(&principal,session_id,idempotency_key,input,&nomifun_agent_session::NativeInputContextFence {binding_version:binding,
                 context_floor:voice_context_floor.ok_or_else(||AppError::Conflict("voice input has no original context proof".into()))?,supersede_model_step:voice_supersede}).await?
         }else if initial_only {
@@ -2433,13 +2488,17 @@ impl NomiCoreSessionOwner {
                 .start_turn(&principal, session_id, idempotency_key, input)
                 .await?
         };
-        self.deliver_claimed_turn(owner_id,session_id,request,receipt).await
+        if execution_authority.is_some() {
+            #[cfg(test)]
+            self.attempt_input_owner_cutpoint(session_id,&request,"admitted").await?;
+            self.deliver_claimed_turn_inner(owner_id,session_id,request,receipt,true).await
+        } else {self.deliver_claimed_turn(owner_id,session_id,request,receipt).await}
     }
 
     pub(in crate::router) async fn deliver_claimed_turn(&self,owner_id:&str,session_id:&AgentSessionId,request:SendMessageRequest,
         receipt:nomifun_conversation::AgentTurnReceipt)->Result<IdempotentMessageDelivery,AppError> {
         let operation=receipt.operation_id.clone();let newly_claimed=!receipt.duplicate;
-        let result=self.deliver_claimed_turn_inner(owner_id,session_id,request,receipt).await;
+        let result=self.deliver_claimed_turn_inner(owner_id,session_id,request,receipt,false).await;
         if let Err(error)=&result && newly_claimed {
             // Covers every fallible pre-dispatch read as well as the original
             // factory/send branches. The exact terminal writer arbitrates a
@@ -2465,7 +2524,9 @@ impl NomiCoreSessionOwner {
     }
 
     async fn deliver_claimed_turn_inner(&self,owner_id:&str,session_id:&AgentSessionId,request:SendMessageRequest,
-        receipt:nomifun_conversation::AgentTurnReceipt)->Result<IdempotentMessageDelivery,AppError> {
+        receipt:nomifun_conversation::AgentTurnReceipt,preserve_unavailable:bool)->Result<IdempotentMessageDelivery,AppError> {
+        #[cfg(test)]
+        if preserve_unavailable {self.attempt_input_owner_cutpoint(session_id,&request,"predispatch").await?;}
         let operation_id = receipt.operation_id.clone();
         let state = self
             .canonical_delivery_state_for_operation(
@@ -2543,6 +2604,7 @@ impl NomiCoreSessionOwner {
         {
             Ok(runtime) => runtime,
             Err(error) => {
+                if preserve_unavailable&&attempt_input_owner::attempt_input_unavailable(&error) {return Err(error);}
                 let detail = error.to_string();
                 let settled_error = self.settle_dispatch_failure(
                     owner_id, session_id, &operation_id, &detail,
@@ -2642,88 +2704,6 @@ impl NomiCoreSessionOwner {
             result_error_retryable: None,
                     user_input_request: None,
         })
-    }
-
-    async fn validate_agent_execution_turn_authority(
-        &self,
-        owner_id: &str,
-        session_id: &str,
-        authority: &AgentExecutionTurnAuthority,
-    ) -> Result<(), AppError> {
-        if authority.lease_owner.trim().is_empty()
-            || authority.expected_step_version < 0
-            || authority.expected_attempt_version < 0
-        {
-            return Err(AppError::Conflict(
-                "invalid AgentExecution turn authority".to_owned(),
-            ));
-        }
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| AppError::Internal(error.to_string()))?;
-        let now = now_ms();
-        let execution = sqlx::query(
-            "UPDATE agent_executions SET lease_owner = lease_owner \
-             WHERE execution_id = ? AND user_id = ? AND lease_owner = ? \
-               AND lease_expires_at > ? AND deleted_at IS NULL \
-               AND status IN ('running', 'waiting_input', 'paused')",
-        )
-        .bind(&authority.execution_id)
-        .bind(owner_id)
-        .bind(&authority.lease_owner)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| AppError::Internal(error.to_string()))?;
-        if execution.rows_affected() != 1 {
-            return Err(AppError::Conflict(
-                "AgentExecution lease generation is no longer authoritative".to_owned(),
-            ));
-        }
-        // Step revision and Attempt identity fence the invocation. Outbox
-        // enqueue/ack may advance only the Attempt's metadata CAS revision.
-        let exact: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) \
-             FROM agent_execution_steps step \
-             JOIN agent_execution_attempts attempt \
-               ON attempt.execution_id = step.execution_id AND attempt.step_id = step.step_id \
-             JOIN conversation_execution_links link \
-               ON link.execution_id = attempt.execution_id \
-              AND link.step_id = attempt.step_id AND link.attempt_id = attempt.attempt_id \
-             JOIN agent_sessions session ON session.agent_session_id = link.conversation_id \
-             WHERE step.execution_id = ? AND step.step_id = ? \
-               AND step.version = ? AND step.status = 'running' \
-               AND step.superseded_in_revision IS NULL \
-               AND attempt.attempt_id = ? AND attempt.version >= ? \
-               AND attempt.status = 'running' \
-               AND link.conversation_id = ? \
-               AND link.relation IN ('attempt', 'automation') AND link.active = 1 \
-               AND session.state = 'live' \
-               AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
-               AND json_extract(session.owner_ref_json, '$.principal_id') = ?",
-        )
-        .bind(&authority.execution_id)
-        .bind(&authority.step_id)
-        .bind(authority.expected_step_version)
-        .bind(&authority.attempt_id)
-        .bind(authority.expected_attempt_version)
-        .bind(session_id)
-        .bind(owner_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|error| AppError::Internal(error.to_string()))?;
-        if exact != 1 {
-            return Err(AppError::Conflict(
-                "AgentExecution no longer owns the exact running Attempt Session"
-                    .to_owned(),
-            ));
-        }
-        tx.commit()
-            .await
-            .map_err(|error| AppError::Internal(error.to_string()))?;
-        Ok(())
     }
 
     /// Materialize the Conversation consumer projection from the canonical
@@ -3001,7 +2981,7 @@ impl NomiCoreSessionOwner {
     }
 
     fn validate_ordinary_message_origin(request: &SendMessageRequest) -> Result<(), AppError> {
-        if matches!(request.origin.as_deref(), Some("idmm" | "robot" | "directed_delegation_result" | "channel_guest")) {
+        if matches!(request.origin.as_deref(), Some("idmm" | "robot" | "directed_delegation_result" | "channel_guest" | "agent_execution_parent_reply")) {
             return Err(AppError::BadRequest("This input origin is reserved for its authenticated host entry".into()));
         }
         Ok(())
@@ -4149,7 +4129,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
         };
         let delivery = self.dispatch_canonical_turn_locked_with_source_ref(
             &owner_id, &agent_session_id, &idempotency_key,
-            message, false, None, None, None, false, None, None, Some(source_browser_retirement::ServerTurnSource::Cron(source)),
+            message, false, None, None, None, false, None, None, Some(source_browser_retirement::ServerTurnSource::Cron(source)),None,
         ).await?;
         Ok(nomifun_cron::CronPreparedTurnDelivery {
             delivery: cron_delivery_from_conversation(delivery),
@@ -4963,13 +4943,18 @@ impl NomiCoreSessionOwner {
             found: progress.status != TurnReceiptStatus::NotFound,
             terminal: matches!(progress.status, TurnReceiptStatus::Completed | TurnReceiptStatus::Failed | TurnReceiptStatus::Cancelled),
             cursor: progress.cursor,
-            suspended: progress.suspended,
+            suspension: progress.suspension,
         })
     }
 }
 
 #[async_trait]
 impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner {
+    async fn recover_attempt_for_restart(&self,owner_id:&str,target:&nomifun_agent_execution::AgentExecutionRestartTarget)
+        ->Result<nomifun_agent_execution::AgentExecutionRestartNativeOutcome,AppError> {
+        self.recover_execution_attempt_for_restart(owner_id,target).await
+    }
+
     async fn create_idempotent(
         &self,
         owner_id: &str,
@@ -5025,9 +5010,10 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
 
     async fn prepare_source_child_input(
         &self, owner_id: &str, child_session_id: &str,
+        attempt_id: &str,
         source: Option<&nomifun_agent_execution::AgentExecutionSource>, request: SendMessageRequest,
     ) -> Result<SendMessageRequest, AppError> {
-        self.prepare_execution_child_input(owner_id, &child_session_id.to_owned().into(), source, request).await
+        self.prepare_execution_child_input(owner_id, &child_session_id.to_owned().into(), attempt_id, source, request).await
     }
 
     async fn get_original_child(
@@ -5055,72 +5041,9 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         &self,
         owner_id: &str,
         creation_key: &str,
+        expected_session_id: Option<&str>,
     ) -> Result<(), AppError> {
-        let scoped = format!("user:{owner_id}:open:{creation_key}");
-        let directed = format!("user:{owner_id}:open:execution-source:{creation_key}");
-        let session_id: Option<String> = sqlx::query_scalar(
-            "SELECT session_id FROM agent_events \
-             WHERE producer_id = 'session_api' AND idempotency_key IN (?, ?) \
-               AND kind = 'session/opening' ORDER BY CASE WHEN idempotency_key = ? THEN 0 ELSE 1 END LIMIT 1",
-        )
-        .bind(scoped)
-        .bind(&directed)
-        .bind(&directed)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| AppError::Internal(error.to_string()))?;
-        let Some(session_id) = session_id else {
-            return Ok(());
-        };
-        let linked: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM conversation_execution_links \
-             WHERE conversation_id = ? AND relation = 'attempt' AND active = 1)",
-        )
-        .bind(&session_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|error| AppError::Internal(error.to_string()))?;
-        if linked != 0 {
-            return Err(AppError::Conflict(
-                "linked AgentExecution Session cannot be discarded".to_owned(),
-            ));
-        }
-        let session_id = AgentSessionId::from(session_id);
-        let principal = PrincipalRef {
-            principal_kind: "user".to_owned(),
-            principal_id: owner_id.to_owned(),
-        };
-        let command = match self
-            .canonical
-            .fence_delete(
-                &principal,
-                &session_id,
-                &format!("discard-unlinked:{creation_key}"),
-                now_ms(),
-            )
-            .await?
-        {
-            PreparedAgentSessionDelete::AlreadyDeleted(_) => {
-                self.remove_idmm_state(session_id.as_ref()).await?;
-                return Ok(());
-            }
-            PreparedAgentSessionDelete::Fenced(command) => command,
-        };
-        let deleting_session = self
-            .canonical
-            .store()
-            .get_deleting_session(&session_id)
-            .await
-            .map_err(agent_session_store_error)?;
-        self.remove_workspace_for_binding(
-            owner_id,
-            &session_id,
-            &deleting_session.agent_binding,
-        )
-        .await?;
-        self.canonical.complete_fenced_delete(&command, now_ms()).await?;
-        self.remove_idmm_state(session_id.as_ref()).await?;
-        Ok(())
+        self.discard_empty_execution_creation(owner_id, creation_key, expected_session_id).await
     }
 
     async fn deliver_turn(
@@ -5131,17 +5054,45 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         authority: AgentExecutionTurnAuthority,
         request: SendMessageRequest,
     ) -> Result<nomifun_agent_execution::AgentExecutionDelivery, AppError> {
-        self.validate_agent_execution_turn_authority(
-            owner_id,
-            conversation_id,
-            &authority,
-        )
-        .await?;
+        #[cfg(test)]
+        {
+            let mut marker=self.attempt_input_busy_marker.lock().unwrap();
+            if marker.as_ref().is_some_and(|marker|request.content.contains(marker)) {
+                marker.take();
+                return Err(AppError::DatabaseUnavailable {reason:nomifun_common::DatabaseUnavailableReason::Busy});
+            }
+        }
         Self::validate_ordinary_message_origin(&request)?;
-        self.dispatch_canonical_turn(owner_id, &AgentSessionId::from(conversation_id.to_owned()),
-            operation_id, request, false, None)
-        .await
-        .map(agent_execution_delivery_from_conversation)
+        let owner=self.native_engines.get().and_then(std::sync::Weak::upgrade)
+            .ok_or_else(||AppError::Conflict("Attempt input Session owner is unavailable".into()))?.session_owner()?;
+        if !std::ptr::eq(self,owner.as_ref()) {return Err(AppError::Conflict("Attempt input targets another Session owner".into()));}
+        let user=owner_id.to_owned();let session=AgentSessionId::from(conversation_id.to_owned());let key=operation_id.to_owned();
+        let (sender,receiver)=tokio::sync::oneshot::channel();
+        // The Session owner retains accepted input through claim/dispatch even
+        // when the scheduler waiter disappears after the canonical commit.
+        let delivery=owner.deliver_execution_input_owned(user,session,key,authority,request);
+        if !self.background_tasks.spawn(Box::pin(async move {
+            let result=delivery.await;
+            let _=sender.send(result);
+        })) {return Err(AppError::Conflict("Session owner is closing before Attempt input admission".into()));}
+        receiver.await.map_err(|_|AppError::Internal("Attempt input owner ended before its receipt".into()))?
+    }
+
+    async fn deliver_parent_question_reply(&self,owner_id:&str,conversation_id:&str,operation_id:&str,
+        authority:AgentExecutionTurnAuthority,request:SendMessageRequest,source:nomifun_agent_contracts::AgentParentQuestionReply)
+        ->Result<nomifun_agent_execution::AgentExecutionDelivery,AppError> {
+        let owner=self.native_engines.get().and_then(std::sync::Weak::upgrade)
+            .ok_or_else(||AppError::Conflict("parent reply Session owner is unavailable".into()))?.session_owner()?;
+        if !std::ptr::eq(self,owner.as_ref()) {return Err(AppError::Conflict("parent reply targets another Session owner".into()));}
+        let owner_id=owner_id.to_owned();let session=conversation_id.to_owned();let operation=operation_id.to_owned();
+        let (sender,receiver)=tokio::sync::oneshot::channel();
+        // Accepted outbox delivery retains admission through native dispatch
+        // even when its scheduler/HTTP waiter disappears between those steps.
+        if !self.background_tasks.spawn(Box::pin(async move {
+            let result=owner.deliver_parent_question_reply_owned(owner_id,session,operation,authority,request,source).await;
+            let _=sender.send(result);
+        })) {return Err(AppError::Conflict("Session owner is closing before parent reply admission".into()));}
+        receiver.await.map_err(|_|AppError::Internal("parent reply owner ended before its delivery receipt".into()))?
     }
 
     async fn observe_turn_progress(
@@ -5312,7 +5263,10 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         let generation = self.canonical.store().native_execution_generation(&session, &target)
             .await.map_err(agent_session_store_error)?;
         if self.runtime_sessions.active_turn_generation(conversation_id) == Some(generation) {
-            return Err(AppError::Conflict("exact Attempt native cleanup is still running".into()));
+            // The exact cleanup owner is still advancing. This is a pending
+            // acknowledgement, not a permanent command refusal or a license
+            // to admit the replacement Attempt.
+            return Err(AppError::ExecutionAdmissionPending);
         }
         // This retry runs after the Execution's domain settlement, whereas a
         // canonical terminal notification may precede that settlement. The
@@ -5323,7 +5277,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
                 // The original Browser has not accepted retirement while a
                 // successor still protects it. Keep this exact outbox item;
                 // acknowledging it here would lose its only later recheck.
-                return Err(AppError::Conflict("Original Browser retirement has not accepted cleanup responsibility yet".into()));
+                return Err(AppError::ExecutionAdmissionPending);
             }
         }
         Ok(())
@@ -6727,6 +6681,7 @@ fn parse_canonical_autowork_revision(revision: &str) -> Result<u64, AppError> {
 
 fn agent_session_store_error(error: nomifun_agent_session::SessionStoreError) -> AppError {
     match error {
+        nomifun_agent_session::SessionStoreError::Sqlite(error) => nomifun_db::DbError::Query(error).into(),
         nomifun_agent_session::SessionStoreError::ExecutionCapacityPending => AppError::ExecutionAdmissionPending,
         nomifun_agent_session::SessionStoreError::NotFound(message) => AppError::NotFound(message),
         nomifun_agent_session::SessionStoreError::Deleted(message)
@@ -6811,6 +6766,8 @@ mod session_boundary_tests {
     #[tokio::test]
     async fn execution_admission_keeps_invocation_authority_across_metadata_revisions() {
         use tower::ServiceExt;
+        use nomifun_agent_contracts::PrincipalRef;
+        use nomifun_api_types::SendMessageRequest;
         const TRUST: &str = "execution-authority-regression";
         async fn post(router: &axum::Router, path: &str, body: serde_json::Value) -> serde_json::Value {
             let response = router.clone().oneshot(axum::http::Request::builder().method("POST").uri(path)
@@ -6868,15 +6825,51 @@ mod session_boundary_tests {
             expected_step_version:3, expected_attempt_version:2, lease_owner:"authority-fixture".into(),
         };
         let user = services.authoritative_user_id.as_ref();
-        owner.validate_agent_execution_turn_authority(user, session, &authority).await.unwrap();
+        async fn validate(pool:&nomifun_db::sqlx::SqlitePool,user:&str,session:&str,authority:&nomifun_db::AgentExecutionTurnAuthority)->Result<(),nomifun_db::DbError> {
+            let mut tx=pool.begin_with("BEGIN IMMEDIATE").await?;
+            let key=nomifun_db::execution_attempt_turn_key_tx(&mut tx,user,&authority.execution_id,&authority.step_id,&authority.attempt_id).await?;
+            nomifun_db::validate_execution_turn_authority_tx(&mut tx,user,session,&key,authority).await?;
+            tx.commit().await?;
+            Ok(())
+        }
+        validate(pool,user,session,&authority).await.unwrap();
         authority.expected_attempt_version = 6;
-        assert!(owner.validate_agent_execution_turn_authority(user, session, &authority).await.is_err(),
+        assert!(validate(pool,user,session,&authority).await.is_err(),
             "metadata revision cannot move backwards relative to captured authority");
         authority.expected_attempt_version = 2;
         nomifun_db::sqlx::query("UPDATE agent_execution_steps SET version=4 WHERE step_id=?")
             .bind(&step).execute(pool).await.unwrap();
-        assert!(owner.validate_agent_execution_turn_authority(user, session, &authority).await.is_err(),
+        assert!(validate(pool,user,session,&authority).await.is_err(),
             "a prior invocation cannot acquire a successor Step generation");
+        let sid=AgentSessionId::from(session);
+        let principal=PrincipalRef {principal_kind:"user".into(),principal_id:user.into()};
+        let mut tx=pool.begin().await.unwrap();
+        let key=nomifun_db::execution_attempt_turn_key_tx(&mut tx,user,&authority.execution_id,&authority.step_id,&authority.attempt_id).await.unwrap();
+        tx.commit().await.unwrap();
+        let request=SendMessageRequest {content:"original child input".into(),files:vec![],inject_skills:vec![],hidden:false,origin:None,channel_platform:None};
+        let input=owner.canonical_turn_input_with_admission(user,&sid,&super::NomiCoreSessionOwner::turn_operation_id(user,session,&key),&request).await.unwrap();
+        let before=owner.canonical.store().current_cursor(&sid).await.unwrap();
+        assert!(owner.canonical.start_execution_turn(&principal,&sid,&key,input.clone(),&authority).await.is_err(),
+            "a sender that passed preflight cannot commit after the Step fence changed");
+        assert_eq!(owner.canonical.store().current_cursor(&sid).await.unwrap(),before);
+        authority.expected_step_version=4;
+        let original=json!({"pending_conversation_effects":[{"kind":"initial_input","request":super::canonical_turn_input(&request)}]});
+        nomifun_db::sqlx::query("UPDATE agent_execution_attempts SET runtime_state=? WHERE attempt_id=?")
+            .bind(original.to_string()).bind(&authority.attempt_id).execute(pool).await.unwrap();
+        let mut changed=input.clone();changed["content"]=json!("changed task after reservation");
+        assert!(owner.canonical.start_execution_turn(&principal,&sid,&key,changed,&authority).await.is_err());
+        assert_eq!(owner.canonical.store().current_cursor(&sid).await.unwrap(),before);
+        let accepted=owner.canonical.start_execution_turn(&principal,&sid,&key,input.clone(),&authority).await.unwrap();
+        assert!(!accepted.duplicate);
+        nomifun_db::sqlx::query("UPDATE agent_executions SET lease_owner='successor' WHERE execution_id=?")
+            .bind(&authority.execution_id).execute(pool).await.unwrap();
+        let duplicate=owner.canonical.start_execution_turn(&principal,&sid,&key,input.clone(),&authority).await.unwrap();
+        assert!(duplicate.duplicate,"lost ACK confirms the original accepted input without old lease authority");
+        assert_eq!(duplicate.operation_id,accepted.operation_id);
+        assert_eq!(owner.canonical.store().current_cursor(&sid).await.unwrap(),accepted.cursor);
+        assert!(owner.canonical.start_execution_turn(&principal,&sid,"different-initial",input,&authority).await.is_err());
+        let turns:i64=nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM agent_turns WHERE session_id=?").bind(session).fetch_one(pool).await.unwrap();
+        assert_eq!(turns,1,"fenced sends and lost ACK cannot create a second Turn");
         services.shutdown_nomi_core_host().await.unwrap();
         services.database.close().await;
     }
@@ -7705,7 +7698,7 @@ mod session_boundary_tests {
 
     #[test]
     fn canonical_agent_session_handlers_do_not_reenter_legacy_conversation_authority() {
-        let source = include_str!("nomi_core_session.rs");
+        let source = include_str!("nomi_core_session.rs").replace("\r\n", "\n");
         // Inspect the actual HTTP handlers, rather than every application
         // helper physically located between the local and remote routes.
         for handler in [
@@ -8619,6 +8612,7 @@ impl NomiCoreAgentApiState {
     }
 
     pub(crate) async fn recover_deleting_agent_sessions(&self) -> Result<(), AppError> {
+        self.session_owner.recover_empty_execution_creations().await?;
         let sessions = self
             .session_owner
             .canonical()
@@ -18626,8 +18620,8 @@ pub(super) fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, Nom
             "turn input must be a string or an object containing content",
         )
     })?;
-    if ["idmm_decision", "idmm_notice", "input_source", "channel_source", "reply_to", "delivery_intent", "cron_runtime_overlay", "remote_runtime_source"].iter().any(|key| object.contains_key(*key))
-        || matches!(object.get("origin").and_then(Value::as_str), Some("idmm" | "robot" | "directed_delegation_result" | "channel_guest")) {
+    if ["idmm_decision", "idmm_notice", "input_source", "channel_source", "reply_to", "delivery_intent", "cron_runtime_overlay", "remote_runtime_source", "parent_question_reply"].iter().any(|key| object.contains_key(*key))
+        || matches!(object.get("origin").and_then(Value::as_str), Some("idmm" | "robot" | "directed_delegation_result" | "channel_guest" | "agent_execution_parent_reply")) {
         return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST,
             "NOMI_CORE_INVALID_REQUEST", "Input source metadata is reserved for its authenticated host"));
     }

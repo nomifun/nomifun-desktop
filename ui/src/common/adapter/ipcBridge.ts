@@ -139,6 +139,7 @@ import type {
   TAgentExecutionDetail,
   TAgentExecutionEvent,
   TAgentExecutionEventsQuery,
+  TAgentExecutionMessageReceipt,
   TAnswerExecutionDecision,
   TCancelExecutionStep,
   TConfigureExecutionStep,
@@ -154,6 +155,7 @@ import type {
   TRenameAgentExecution,
   TReplanAgentExecution,
   TRetryExecutionStep,
+  TRestartExecutionStep,
   TSteerExecutionStep,
   TUpdateExecutionStep,
   TVersionedAgentExecutionCommand,
@@ -4249,6 +4251,21 @@ const fromApiAgentExecutionEvent = (raw: unknown): TAgentExecutionEvent => {
   };
 };
 
+const fromApiAgentExecutionMessageReceipt = (raw: unknown): TAgentExecutionMessageReceipt => {
+  const value = executionWireObject(raw);
+  if (!Array.isArray(value.step_ids) || !Number.isSafeInteger(value.sequence) || (value.sequence as number) < 1
+    || typeof value.operation_id !== 'string' || !value.operation_id.trim() || typeof value.replayed !== 'boolean') {
+    throw new TypeError('agent execution command lacks its exact acceptance receipt');
+  }
+  return {
+    execution_id: parseExecutionId(value.execution_id),
+    step_ids: value.step_ids.map(parseExecutionStepId),
+    sequence: value.sequence as number,
+    operation_id: value.operation_id,
+    replayed: value.replayed,
+  };
+};
+
 const fromApiExecutionTemplate = (raw: unknown): TAgentExecutionTemplate => {
   const value = executionWireObject(raw);
   return {
@@ -4391,6 +4408,23 @@ export const agentExecution = {
       (p) => p.updates
     ),
     fromApiAgentExecutionDetail
+  ),
+  restart: withResponseMap(
+    httpPost<unknown, { execution_id: ExecutionId; step_id: ExecutionStepId; updates: TRestartExecutionStep }>(
+      (p) => `/api/agent-executions/${p.execution_id}/steps/${p.step_id}/restart`, (p) => p.updates
+    ), fromApiAgentExecutionMessageReceipt
+  ),
+  recheck: withResponseMap(
+    httpPost<unknown, { execution_id: ExecutionId; step_id: ExecutionStepId; updates: TRetryExecutionStep }>(
+      (p) => `/api/agent-executions/${p.execution_id}/steps/${p.step_id}/recheck`, (p) => p.updates
+    ), fromApiAgentExecutionDetail
+  ),
+  replaceWithExisting: withResponseMap(
+    httpPost<unknown, { execution_id: ExecutionId; step_id: ExecutionStepId; updates: TRetryExecutionStep & {
+      replacement_step_id: ExecutionStepId; expected_replacement_step_version: number;
+    } }>(
+      (p) => `/api/agent-executions/${p.execution_id}/steps/${p.step_id}/replace-with-existing`, (p) => p.updates
+    ), fromApiAgentExecutionDetail
   ),
   adopt: withResponseMap(
     httpPost<

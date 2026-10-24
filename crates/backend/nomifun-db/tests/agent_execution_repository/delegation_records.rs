@@ -53,7 +53,7 @@ async fn begin(f:&Fixture,index:usize)->nomifun_db::AgentExecutionStepDetailRow 
     },&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
     let attempt=created.current_attempt.unwrap().attempt;
     let child=nomifun_common::generate_id();insert_canonical_session(&f.db,&child,OWNER_ID,"live").await;
-    let started=f.repo.start_attempt(OWNER_ID,&f.execution,&f.steps[index],created.step.version,&attempt.attempt_id,attempt.version,&child,AgentExecutionAttemptSessionKind::ChildAttempt,None,&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
+    let started=f.repo.start_attempt(OWNER_ID,&f.execution,&f.steps[index],created.step.version,&attempt.attempt_id,attempt.version,&child,AgentExecutionAttemptSessionKind::ChildAttempt,None, None,&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
     started
 }
 

@@ -47,7 +47,13 @@ async fn request_is_current_tx(tx: &mut Transaction<'_, Sqlite>, session: &Agent
         && pause.revision == request.expected_pause_revision && revision >= 0
         && revision as u64 == request.expected_checkpoint_revision
         && digest.as_deref() == Some(request.expected_checkpoint_digest.as_ref());
-    Ok(current && target_is_current_tx(tx,session,&request.operation_id).await?)
+    if !current||!target_is_current_tx(tx,session,&request.operation_id).await? {return Ok(false);}
+    let owner=live_session_by_id_tx(tx,session.as_ref()).await?.owner_ref;
+    match native_pause::ensure_restart_resume_tx(tx,&owner,session,request,None).await {
+        Ok(())=>Ok(true),
+        Err(SessionStoreError::Conflict(_)|SessionStoreError::ExecutionFenced)=>Ok(false),
+        Err(error)=>Err(error),
+    }
 }
 
 async fn target_is_current_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId,
@@ -93,6 +99,18 @@ impl AgentSessionStore {
         let mut tx = self.pool.begin().await?;
         if live_session_by_id_tx(&mut tx,session.as_ref()).await?.owner_ref != *owner { return Err(SessionStoreError::ExecutionFenced); }
         let Some(event) = request_record_tx(&mut tx,session,owner,request).await? else { return Ok(None); };
+        if request.idempotency_key.starts_with("execution-task-restart:") {
+            // A queued ACK remains its original historical acceptance even if
+            // the target later changes. It cannot authorize another execution.
+            // Once authorization exists, let the caller absorb that stronger
+            // exact receipt instead of repeatedly returning the old queue ACK.
+            let authorized=native_pause::native_key("resume",session,&request.idempotency_key)?;
+            if event_by_event_id_tx(&mut tx,&authorized).await?.is_some()
+                ||blocked_tx(&mut tx,session,&event.event_id).await? {return Ok(None);}
+            tx.commit().await?;
+            return Ok(Some(NativeResumeRequestReceipt {operation_id:request.operation_id.clone(),
+                request_event_id:event.event_id,seq:event.seq,duplicate:true}));
+        }
         if !request_is_current_tx(&mut tx,session,request).await? || blocked_tx(&mut tx,session,&event.event_id).await? { return Ok(None); }
         tx.commit().await?;
         Ok(Some(NativeResumeRequestReceipt { operation_id: request.operation_id.clone(), request_event_id: event.event_id,
@@ -101,13 +119,19 @@ impl AgentSessionStore {
 
     pub async fn request_native_resume(&self, owner: &PrincipalRef, session: &AgentSessionId,
         request: &NativeResumeRequest) -> Result<NativeResumeRequestReceipt, SessionStoreError> {
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if live_session_by_id_tx(&mut tx,session.as_ref()).await?.owner_ref != *owner { return Err(SessionStoreError::ExecutionFenced); }
         let previous = request_record_tx(&mut tx,session,owner,request).await?;
+        if request.idempotency_key.starts_with("execution-task-restart:")&&let Some(event)=previous.as_ref() {
+            if blocked_tx(&mut tx,session,&event.event_id).await? {return Err(SessionStoreError::Conflict("the original continuation request is blocked; inspect its control result".into()));}
+            db_write_observation.commit(tx).await?;
+            return Ok(NativeResumeRequestReceipt {operation_id:request.operation_id.clone(),request_event_id:event.event_id.clone(),seq:event.seq,duplicate:true});
+        }
+        native_pause::ensure_restart_resume_tx(&mut tx,owner,session,request,None).await?;
         if !request_is_current_tx(&mut tx,session,request).await? { return Err(SessionStoreError::ExecutionFenced); }
         if let Some(event) = previous {
             if blocked_tx(&mut tx,session,&event.event_id).await? { return Err(SessionStoreError::Conflict("the original continuation request is blocked; inspect its control result".into())); }
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok(NativeResumeRequestReceipt { operation_id:request.operation_id.clone(),request_event_id:event.event_id,seq:event.seq,duplicate:true });
         }
         // Also fences a Stop that won the writer after an earlier capacity
@@ -118,7 +142,7 @@ impl AgentSessionStore {
         let id = native_pause::native_key("resume-request",session,&request.idempotency_key)?;
         let ack = required_ack(self.append_event_tx(&mut tx,&native_pause::native_control_event(session,&request.operation_id,
             id,"turn/resume-requested",cause.into(),json!({"request":request,"request_digest":digest_payload(request)?,"owner_digest":digest_payload(owner)?})),None).await?)?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(NativeResumeRequestReceipt {operation_id:request.operation_id.clone(),request_event_id:ack.event_id,seq:ack.seq,duplicate:false})
     }
 
@@ -184,15 +208,22 @@ impl AgentSessionStore {
 
     pub async fn block_native_resume_request(&self, owner: &PrincipalRef, session: &AgentSessionId,
         request: &NativeResumeRequest, reason: &str) -> Result<(), SessionStoreError> {
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if live_session_by_id_tx(&mut tx,session.as_ref()).await?.owner_ref != *owner { return Err(SessionStoreError::ExecutionFenced); }
         let Some(event) = request_record_tx(&mut tx,session,owner,request).await? else { return Err(SessionStoreError::ExecutionFenced); };
-        if !request_is_current_tx(&mut tx,session,request).await? || blocked_tx(&mut tx,session,&event.event_id).await? { return Ok(()); }
+        if blocked_tx(&mut tx,session,&event.event_id).await? {return Ok(());}
+        if request.idempotency_key.starts_with("execution-task-restart:") {
+            let authorized=native_pause::native_key("resume",session,&request.idempotency_key)?;
+            if event_by_event_id_tx(&mut tx,&authorized).await?.is_some() {return Ok(());}
+            // A frozen Restart target that became invalid still needs its
+            // original queued rejection receipt. Recording that observation
+            // grants nothing and does not alter a later pause or checkpoint.
+        } else if !request_is_current_tx(&mut tx,session,request).await? {return Ok(());}
         let reason = reason.chars().take(2048).collect::<String>();
         let id = native_pause::native_key("resume-blocked",session,&request.idempotency_key)?;
         self.append_event_tx(&mut tx,&native_pause::native_control_event(session,&request.operation_id,id,"turn/resume-blocked",event.event_id,
             json!({"request_digest":digest_payload(request)?,"reason":reason})),None).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(())
     }
 }
@@ -213,5 +244,15 @@ pub(super) async fn queue_state_tx(tx: &mut Transaction<'_, Sqlite>, session: &A
          ORDER BY request.seq DESC LIMIT 1",
     ).bind(session.as_ref()).bind(operation.as_ref()).bind(as_i64(pause.revision,"queued pause revision")?)
         .fetch_optional(&mut **tx).await?;
-    Ok(match row { Some((_,reason)) => (reason.is_none(),reason),None => (false,None) })
+    if let Some((id,reason))=row {
+        let event=event_by_event_id_tx(tx,&id).await?.map(event_from_row).transpose()?
+            .ok_or_else(||SessionStoreError::InvalidEvent("queued resume state has no original event".into()))?;
+        let payload=payload_value_for_event_tx(tx,&event).await?;
+        if payload.pointer("/request/idempotency_key").and_then(Value::as_str).is_some_and(|key|key.starts_with("execution-task-restart:")) {
+            let request:NativeResumeRequest=serde_json::from_value(payload.get("request").cloned()
+                .ok_or_else(||SessionStoreError::InvalidEvent("queued resume state has no original request".into()))?)?;
+            if !request_is_current_tx(tx,session,&request).await? {return Ok((false,reason));}
+        }
+        Ok((reason.is_none(),reason))
+    } else {Ok((false,None))}
 }

@@ -259,6 +259,18 @@ export type TVersionedExecutionStepCommand = {
   expected_step_version: number;
 };
 export type TRetryExecutionStep = TVersionedExecutionStepCommand;
+export type TRestartExecutionStep = TVersionedExecutionStepCommand & {
+  idempotency_key: string;
+  expected_attempt_id: ExecutionAttemptId | null;
+};
+/** Acceptance of an immutable command, never proof that its task has restarted. */
+export type TAgentExecutionMessageReceipt = {
+  execution_id: ExecutionId;
+  step_ids: ExecutionStepId[];
+  sequence: number;
+  operation_id: string;
+  replayed: boolean;
+};
 export type TExecutionCancellationScope = 'task' | 'delegated_work' | 'task_and_delegated';
 export type TCancelExecutionStep = TVersionedExecutionStepCommand & { scope: TExecutionCancellationScope };
 export type TAdoptExecutionStepOutput = TVersionedExecutionStepCommand;

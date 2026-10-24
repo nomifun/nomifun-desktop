@@ -269,6 +269,51 @@ mod tests {
         assert!(!root.path().join("future").exists());
     }
 
+    #[tokio::test]
+    async fn nested_unicode_scope_labels_round_trip_through_the_native_file_owner() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let directory = workspace.join("项目").join("层一").join("层二");
+        let outside = fixture.path().join("outside").join("外部");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(directory.join("file.txt"), b"original file").unwrap();
+        std::fs::write(directory.join("AGENTS.md"), "nested Unicode rules").unwrap();
+        std::fs::write(outside.join("file.txt"), b"outside file").unwrap();
+        let root = std::fs::canonicalize(&workspace).unwrap();
+        let target = std::fs::canonicalize(directory.join("file.txt")).unwrap();
+        let scope = crate::workspace_binding(nomifun_common::generate_id(), "binding", "workspace", "owner",
+            [WORKSPACE_READ_OPERATION], &root).unwrap();
+        let files = FileService::new(Arc::new(NullEvents), vec![]);
+        let portable = "项目/层一/层二/file.txt";
+        let native_relative = Path::new("项目").join("层一").join("层二").join("file.txt");
+        for requested in [portable, native_relative.to_str().unwrap(), target.to_str().unwrap()] {
+            let observed = files.instruction_scope_for_agent_session(&scope,
+                AgentInstructionScopeRequest { path: requested.into(), recursive: false, path_semantics: Default::default() }).await.unwrap();
+            assert_eq!(observed.path, requested, "the accepted request spelling is preserved");
+            assert_eq!(observed.canonical_path, portable);
+            let label = nomifun_agent_contracts::SessionPathLabel::parse(observed.canonical_path).unwrap();
+            assert_eq!(root.join(label.native_path()), target);
+            let directory_label = nomifun_agent_contracts::SessionPathLabel::parse(observed.directories.iter().next().unwrap()).unwrap();
+            let instruction = directory_label.native_path().join("AGENTS.md");
+            let read = files.read_text_page_for_agent_session(&scope,
+                serde_json::from_value(serde_json::json!({"path":instruction.to_str().unwrap()})).unwrap())
+                .await.unwrap().unwrap();
+            assert_eq!(read.content, "nested Unicode rules");
+        }
+        let outside_file = std::fs::canonicalize(outside.join("file.txt")).unwrap();
+        let observed = files.instruction_scope_for_agent_session(&scope,
+            AgentInstructionScopeRequest { path: outside_file.to_str().unwrap().into(), recursive: false, path_semantics: Default::default() }).await.unwrap();
+        let label = nomifun_agent_contracts::SessionPathLabel::parse(observed.canonical_path).unwrap();
+        assert!(label.native_path().is_absolute());
+        assert_eq!(label.native_path(), outside_file);
+        assert!(!label.native_path().starts_with(&root), "an external observation does not adopt project ownership");
+        let denied = crate::workspace_binding(nomifun_common::generate_id(), "binding", "workspace", "owner",
+            [crate::WORKSPACE_WRITE_OPERATION], &root).unwrap();
+        assert!(files.instruction_scope_for_agent_session(&denied,
+            AgentInstructionScopeRequest { path: portable.into(), recursive: false, path_semantics: Default::default() }).await.is_err());
+    }
+
     #[cfg(windows)]
     async fn transient_directory_escape(replace_root: bool) {
         use std::sync::atomic::{AtomicBool, Ordering};

@@ -40,7 +40,13 @@ pub trait UnifiedRuntimeHost: Send + Sync {
     fn requires_turn_boundary_recycle(&self) -> bool { false }
 
     async fn recoverable_preparation_step(&self, _message:&SendMessageData) -> Result<Option<u16>,AppError> { Ok(None) }
-    async fn suspend_after_cleanup_failure(&self, _message: &SendMessageData) -> Result<bool,AppError> { Ok(false) }
+    async fn handoff_turn_settlement(&self, _message: &SendMessageData,
+        _outcome: &EngineTurnOutcome, _first_failure: &str,
+    ) -> Result<crate::engine_sdk::EngineSettlementHandoff, AppError> {
+        Ok(crate::engine_sdk::EngineSettlementHandoff::Unsupported)
+    }
+    async fn retained_turn_outcome(&self, _message: &SendMessageData, outcome: &EngineTurnOutcome,
+        _control: crate::engine_sdk::EngineSettlementControl) -> Result<EngineTurnOutcome, AppError> { Ok(outcome.clone()) }
     fn supports_execution_checkpoints(&self) -> bool { false }
     async fn execution_pressure(&self, _message: &SendMessageData)
         -> Result<nomifun_agent_runtime::AgentExecutionPressure, AppError> {
@@ -456,9 +462,14 @@ impl EngineSessionDriver for UnifiedSessionDriver {
     async fn cleanup_turn(&self, message: &SendMessageData, terminal: &EngineTurnTerminal) -> Result<(), AppError> {
         self.host.cleanup_turn(message,terminal).await
     }
-    async fn suspend_after_cleanup_failure(&self, message: &SendMessageData) -> Result<bool,AppError> {
+    async fn handoff_turn_settlement(&self, message: &SendMessageData, outcome: &EngineTurnOutcome,
+        first_failure: &str) -> Result<crate::engine_sdk::EngineSettlementHandoff,AppError> {
         self.closed_terminal.store(false, std::sync::atomic::Ordering::Release);
-        self.host.suspend_after_cleanup_failure(message).await
+        self.host.handoff_turn_settlement(message, outcome, first_failure).await
+    }
+    async fn retained_turn_outcome(&self, message: &SendMessageData, outcome: &EngineTurnOutcome,
+        control: crate::engine_sdk::EngineSettlementControl) -> Result<EngineTurnOutcome, AppError> {
+        self.host.retained_turn_outcome(message, outcome, control).await
     }
     async fn record_terminal(&self, message: &SendMessageData, outcome: &EngineTurnOutcome) -> Result<(), AppError> {
         self.host.record_event(message, &runtime_terminal(outcome)).await?;
@@ -499,7 +510,7 @@ fn model_turn_failure(error: AgentEngineError) -> (String, nomifun_agent_runtime
     }
 }
 
-fn runtime_terminal(outcome: &EngineTurnOutcome) -> AgentEngineEvent {
+pub fn runtime_terminal(outcome: &EngineTurnOutcome) -> AgentEngineEvent {
     match &outcome.terminal {
         EngineTurnTerminal::Completed { finish_reason } => AgentEngineEvent::TurnCompleted {
             model_steps: outcome.model_steps, finish_reason: finish_reason.clone(),
@@ -521,6 +532,7 @@ impl AgentRuntimeControl for UnifiedAgentRuntime {
     fn conversation_id(&self) -> &str { self.runtime.conversation_id() }
     fn workspace(&self) -> &str { self.runtime.workspace() }
     fn status(&self) -> Option<ConversationStatus> { self.runtime.status() }
+    fn current_task_identity(&self) -> Option<crate::AgentRuntimeTurn> { self.runtime.current_task_identity() }
     fn is_transport_healthy(&self) -> bool { self.runtime.is_transport_healthy() }
     fn last_activity_at(&self) -> TimestampMs { self.runtime.last_activity_at() }
     fn touch_activity(&self) { self.runtime.touch_activity(); }
@@ -535,6 +547,10 @@ impl AgentRuntimeControl for UnifiedAgentRuntime {
 
 #[async_trait]
 impl OfficialAgentRuntime for UnifiedAgentRuntime {
+    async fn settle_pending_turn(&self, source_message_id: &str)
+        -> Result<crate::engine_sdk::EngineTurnSettlementStatus, AppError> {
+        self.runtime.settle_pending_turn(source_message_id).await
+    }
     fn teardown_proven(&self) -> bool { self.runtime.teardown_proven() }
 
     fn requires_turn_boundary_recycle(&self) -> bool {

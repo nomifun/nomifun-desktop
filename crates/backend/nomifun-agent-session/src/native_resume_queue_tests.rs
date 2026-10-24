@@ -1,5 +1,7 @@
 use super::*;
 use nomifun_db::IAgentExecutionRepository;
+#[path = "native_restart_resume_tests.rs"]
+mod native_restart_resume_tests;
 
 fn domain_event(kind: &str) -> nomifun_db::NewAgentExecutionEvent {
     nomifun_db::NewAgentExecutionEvent {event_type:kind.parse().unwrap(),step_id:None,attempt_id:None,
@@ -69,7 +71,7 @@ impl QueueFixture {
         let attempt=queued.current_attempt.as_ref().unwrap().attempt.attempt_id.clone();
         repository.start_attempt(&principal.principal_id,&execution,&root,queued.step.version,&attempt,
             queued.current_attempt.as_ref().unwrap().attempt.version,sid.as_ref(),nomifun_db::AgentExecutionAttemptSessionKind::ChildAttempt,
-            None,&domain_event("attempt_changed")).await.unwrap();
+            None, None,&domain_event("attempt_changed")).await.unwrap();
         let operation=OperationId::from(format!("turn:user:{}:{}:{attempt}:initial-turn",principal.principal_id,sid.as_ref()));
         let input=store.append_event(&append(sid,&format!("input-{key}"),"session-api",&format!("input-{key}"),
             "message/user-accepted",operation.as_ref(),None,json!({"content":"Continue the original work"}))).await.unwrap().ack.unwrap();
@@ -101,7 +103,7 @@ impl QueueFixture {
         let peer_attempt=&peer_queued.current_attempt.as_ref().unwrap().attempt;
         repository.start_attempt(&principal.principal_id,&execution,&peer,peer_queued.step.version,&peer_attempt.attempt_id,
             peer_attempt.version,peer_created.session.agent_session_id.as_ref(),nomifun_db::AgentExecutionAttemptSessionKind::ChildAttempt,
-            None,&domain_event("attempt_changed")).await.unwrap();
+            None, None,&domain_event("attempt_changed")).await.unwrap();
         let detail=repository.get_execution_detail(&principal.principal_id,&execution).await.unwrap().unwrap();
         assert_eq!(detail.participants.len(),1);assert_eq!(detail.steps.len(),2);assert_eq!(detail.attempts.len(),2);
         Self {session,owner:principal,request:NativeResumeRequest {operation_id:operation,idempotency_key:format!("resume-{key}"),

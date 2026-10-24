@@ -5,7 +5,8 @@
 //! `(execution_id, sequence)` for ordering and fetch the canonical detail again;
 //! the UI no longer mirrors separate lifecycle event families.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -54,18 +55,22 @@ pub(crate) struct AgentExecutionEventPublisher {
     drain_gate: Arc<tokio::sync::Mutex<()>>,
     retry_worker_started: Arc<AtomicBool>,
     retry_notify: Arc<tokio::sync::Notify>,
-    changed: Arc<tokio::sync::Notify>,
+    changes: Arc<Mutex<HashMap<(String, String), Weak<tokio::sync::Notify>>>>,
     lifecycle: AgentExecutionLifecycle,
 }
 
 impl AgentExecutionEventPublisher {
+    #[cfg(test)]
+    pub(crate) async fn hold_drain_for_test(&self)->tokio::sync::OwnedMutexGuard<()> {
+        self.drain_gate.clone().lock_owned().await
+    }
     pub fn new(sink: Arc<dyn UserEventSink>) -> Self {
         Self {
             sink,
             drain_gate: Arc::new(tokio::sync::Mutex::new(())),
             retry_worker_started: Arc::new(AtomicBool::new(false)),
             retry_notify: Arc::new(tokio::sync::Notify::new()),
-            changed: Arc::new(tokio::sync::Notify::new()),
+            changes: Arc::default(),
             lifecycle: AgentExecutionLifecycle::new(),
         }
     }
@@ -76,7 +81,7 @@ impl AgentExecutionEventPublisher {
     }
 
     fn publish_change(&self, owner_id: &str, event: AgentExecutionChangedEvent) {
-        self.changed.notify_waiters();
+        self.notify_observation_changed(owner_id,&event.execution_id);
         let payload = to_value(event)
             .expect("AgentExecutionChangedEvent must remain JSON serializable");
         self.sink.send_to_user(owner_id, WebSocketMessage::new(
@@ -85,7 +90,31 @@ impl AgentExecutionEventPublisher {
         ));
     }
 
-    pub(crate) fn changed(&self) -> Arc<tokio::sync::Notify> { self.changed.clone() }
+    /// Native receipt/cleanup can advance after the domain outcome was
+    /// published. Wake only existing scoped observers to reread canonical
+    /// facts; this is neither another event nor execution/cleanup authority.
+    pub(crate) fn notify_observation_changed(&self,owner_id:&str,execution_id:&str) {
+        let changed = {
+            let mut changes = self.changes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let key = (owner_id.to_owned(), execution_id.to_owned());
+            let changed = changes.get(&key).and_then(Weak::upgrade);
+            if changed.is_none() { changes.remove(&key); }
+            changed
+        };
+        if let Some(changed) = changed { changed.notify_waiters(); }
+    }
+
+    /// A disposable wake hint for one owner and Execution, never a result or
+    /// admission receipt. Callers subscribe before reading canonical state.
+    pub(crate) fn changed_for(&self, owner_id: &str, execution_id: &str) -> Arc<tokio::sync::Notify> {
+        let mut changes = self.changes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        changes.retain(|_, changed| changed.strong_count() > 0);
+        let entry = changes.entry((owner_id.to_owned(), execution_id.to_owned())).or_default();
+        if let Some(changed) = entry.upgrade() { return changed; }
+        let changed = Arc::new(tokio::sync::Notify::new());
+        *entry = Arc::downgrade(&changed);
+        changed
+    }
 
     /// Drain committed outbox rows in sequence order. Safe to call after every
     /// mutation and once during boot; publication markers make it idempotent.
@@ -97,6 +126,14 @@ impl AgentExecutionEventPublisher {
         if !self.drain_once(repository.as_ref()).await {
             self.retry_notify.notify_one();
         }
+    }
+
+    /// Hand committed publication to the existing outbox owner. A business
+    /// acknowledgement must never wait for unrelated WebSocket/outbox work.
+    pub(crate) fn notify_pending(&self, repository: Arc<dyn IAgentExecutionRepository>) {
+        if self.lifecycle.is_cancelled() { return; }
+        self.ensure_retry_worker(repository);
+        self.retry_notify.notify_one();
     }
 
     async fn drain_once(&self, repository: &dyn IAgentExecutionRepository) -> bool {
@@ -223,6 +260,7 @@ impl AgentExecutionEventPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::FutureExt;
     use nomifun_common::{
         AdaptationPolicy, AgentExecutionActor, AgentExecutionEventKind,
         AgentExecutionStatus, DecisionPolicy, DelegationPolicy,
@@ -237,6 +275,50 @@ mod tests {
     const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
     const USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000003";
     const NOMI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
+
+    #[tokio::test]
+    async fn committed_changes_wake_only_the_exact_owner_and_execution() {
+        let publisher=AgentExecutionEventPublisher::new(Arc::new(RecordingSink(std::sync::Mutex::new(vec![]))));
+        let exact=publisher.changed_for(USER_ID,EXECUTION_ID);
+        let sibling=publisher.changed_for(USER_ID,"another-execution");
+        let foreign=publisher.changed_for("another-owner",EXECUTION_ID);
+        let exact=exact.notified();tokio::pin!(exact);exact.as_mut().enable();
+        let sibling=sibling.notified();tokio::pin!(sibling);sibling.as_mut().enable();
+        let foreign=foreign.notified();tokio::pin!(foreign);foreign.as_mut().enable();
+        publisher.publish_change(USER_ID,AgentExecutionChangedEvent {execution_id:EXECUTION_ID.into(),sequence:2,
+            change_kind:AgentExecutionEventKind::StepChanged});
+        assert!(exact.now_or_never().is_some(),"an enabled subscriber retains a commit that wins before await");
+        assert!(sibling.now_or_never().is_none());
+        assert!(foreign.now_or_never().is_none());
+    }
+
+    #[tokio::test]
+    async fn native_observation_hint_wakes_its_existing_reader_without_a_domain_event_or_new_owner() {
+        let sink=Arc::new(RecordingSink(std::sync::Mutex::new(vec![])));
+        let publisher=AgentExecutionEventPublisher::new(sink.clone());
+        let exact=publisher.changed_for(USER_ID,EXECUTION_ID);
+        let sibling=publisher.changed_for(USER_ID,"unrelated-work");
+        let foreign=publisher.changed_for("another-owner",EXECUTION_ID);
+        let exact=exact.notified();tokio::pin!(exact);exact.as_mut().enable();
+        let sibling=sibling.notified();tokio::pin!(sibling);sibling.as_mut().enable();
+        let foreign=foreign.notified();tokio::pin!(foreign);foreign.as_mut().enable();
+        publisher.notify_observation_changed(USER_ID,EXECUTION_ID);
+        assert!(exact.now_or_never().is_some());
+        assert!(sibling.now_or_never().is_none()&&foreign.now_or_never().is_none());
+        assert!(sink.0.lock().unwrap().is_empty(),"a native observation is not another published domain outcome");
+        publisher.notify_observation_changed(USER_ID,"finished-work-without-readers");
+        assert!(!publisher.changes.lock().unwrap().contains_key(&(USER_ID.into(),"finished-work-without-readers".into())),
+            "a hint cannot install a persistent observer or task owner");
+    }
+
+    #[test]
+    fn discarded_observers_do_not_pin_completed_executions() {
+        let publisher=AgentExecutionEventPublisher::new(Arc::new(RecordingSink(std::sync::Mutex::new(vec![]))));
+        for index in 0..100 { drop(publisher.changed_for(USER_ID,&format!("completed-{index}"))); }
+        let observer=publisher.changed_for(USER_ID,EXECUTION_ID);
+        assert_eq!(publisher.changes.lock().unwrap().len(),1);
+        assert_eq!(Arc::strong_count(&observer),1,"the publisher retains no observer or execution owner");
+    }
 
     struct RecordingSink(std::sync::Mutex<Vec<(String, WebSocketMessage<serde_json::Value>)>>);
 

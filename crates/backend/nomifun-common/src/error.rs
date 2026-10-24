@@ -54,6 +54,11 @@ pub enum AppError {
     #[error("Agent execution continuation is waiting for its original reservation")]
     ExecutionAdmissionPending,
 
+    /// Preserve temporary storage admission failures across service boundaries.
+    /// Only an explicitly read-only caller may retry an observation.
+    #[error("Database temporarily unavailable: {reason}")]
+    DatabaseUnavailable { reason: crate::DatabaseUnavailableReason },
+
     /// A safe forward contract transition could not preserve frozen authority.
     #[error("{message}")]
     SessionContractEvolutionRejected {
@@ -171,6 +176,7 @@ impl AppError {
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
             Self::Conflict(_) | Self::ExecutionAdmissionPending => StatusCode::CONFLICT,
+            Self::DatabaseUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::SessionContractEvolutionRejected { .. } => StatusCode::CONFLICT,
             Self::ComponentUnavailable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::SessionConfigurationChanged(_) => StatusCode::CONFLICT,
@@ -218,6 +224,7 @@ impl AppError {
             }
             Self::Conflict(_) => "CONFLICT",
             Self::ExecutionAdmissionPending => "AGENT_EXECUTION_ADMISSION_PENDING",
+            Self::DatabaseUnavailable { .. } => "DATABASE_UNAVAILABLE",
             Self::SessionContractEvolutionRejected { .. } => "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED",
             Self::ComponentUnavailable { .. } => "COMPONENT_UNAVAILABLE",
             Self::SessionConfigurationChanged(_) => "NOMIFUN_SESSION_CONFIGURATION_CHANGED",
@@ -252,6 +259,7 @@ impl AppError {
     /// context in addition to the top-level error code.
     pub fn error_details(&self) -> Option<Value> {
         match self {
+            Self::DatabaseUnavailable { reason } => Some(json!({ "database_unavailable": reason })),
             Self::SystemExecution(failure) => Some(json!({"system_execution_error": failure})),
             Self::AgentResourceBindingIncomplete { missing_resource_kinds, missing_resource_operations, .. } => Some(json!({
                 "stage": "resource_preparation",

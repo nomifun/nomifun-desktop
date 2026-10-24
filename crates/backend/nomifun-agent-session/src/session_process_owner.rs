@@ -143,7 +143,7 @@ impl AgentSessionStore {
         if &receipt.retention.owner_ref!=owner {return Err(SessionStoreError::ExecutionFenced);}
         let session=receipt.retention.agent_session_id.clone();
         let key=release_key(&session,&receipt.retention.owner_generation);
-        let mut tx=self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let live=retained_session_tx(&mut tx,&session).await?;
         if &live.owner_ref!=owner {return Err(SessionStoreError::ExecutionFenced);}
         let supplied:BTreeMap<_,_>=receipt.retention.processes.iter().map(|process|(process.process_id.clone(),process.clone())).collect();
@@ -155,7 +155,7 @@ impl AgentSessionStore {
                 || original.retention.processes.iter().any(|process| supplied.get(&process.process_id)!=Some(process)) {
                 return Err(SessionStoreError::IdempotencyConflict("Session process release differs from its original owner receipt".into()));
             }
-            let ack=event_ack(&event);tx.commit().await?;return Ok(Some(ack));
+            let ack=event_ack(&event);db_write_observation.commit(tx).await?;return Ok(Some(ack));
         }
         let (retained,last)=retained_tx(&mut tx,&session,&receipt.retention.owner_generation,i64::MAX as u64).await?;
         if retained.is_empty() {return Err(SessionStoreError::InvalidPayload("Session process release has no original retained owner generation".into()));}
@@ -167,7 +167,7 @@ impl AgentSessionStore {
             semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {kind:SessionEventKind(SESSION_PROCESS_OWNER_RELEASED.into()),kind_version:1,
                 correlation_id:session.as_ref().into(),causation_event_id:last,payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(serde_json::to_value(&receipt)?))}};
         let ack=required_ack(self.append_event_tx_with_policy(&mut tx,&append,None,AppendSessionStatePolicy::ProcessOwnerRelease).await?)?;
-        tx.commit().await?;Ok(Some(ack))
+        db_write_observation.commit(tx).await?;Ok(Some(ack))
     }
 }
 
@@ -413,6 +413,7 @@ impl AgentSessionStore {
         self.record_session_process_reaped_inner(owner,receipt,Some(output)).await
     }
 
+    #[tracing::instrument(name = "canonical.process_reaped", skip_all, fields(session_id = %receipt.retention.agent_session_id.as_ref()))]
     async fn record_session_process_reaped_inner(&self,owner:&PrincipalRef,mut receipt:nomifun_agent_contracts::SessionProcessReapedV1,
         native_output:Option<&nomifun_engine_core::EngineProcessOutputReplay>)->Result<SessionEventAck,SessionStoreError> {
         receipt.validate().map_err(SessionStoreError::InvalidPayload)?;
@@ -431,7 +432,9 @@ impl AgentSessionStore {
         }
         let archive_bytes=output.map(serde_json::to_vec).transpose()?;
         let key=reaped_key(&receipt);let session=receipt.retention.agent_session_id.clone();
-        let mut tx=self.begin_write_transaction().await?;
+        let db_observation=nomifun_db::DatabaseOperationGuard::new(&self.pool);
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
+        db_observation.acquired();
         let live=retained_session_tx(&mut tx,&session).await?;
         if &live.owner_ref!=owner {return Err(SessionStoreError::ExecutionFenced);}
         if let Some(row)=event_by_event_id_tx(&mut tx,&key).await? {
@@ -472,7 +475,7 @@ impl AgentSessionStore {
                 if stored.as_ref()!=Some(chunk) {return Err(SessionStoreError::InvalidPayload("original native output archive is missing or differs from its committed receipt".into()));}
             }
             validate_reaped_tx(&mut tx,&event,&original).await?;
-            let ack=event_ack(&event);tx.commit().await?;return Ok(ack);
+            let ack=event_ack(&event);db_write_observation.commit(tx).await?;return Ok(ack);
         }
         let native_terminal=match &receipt.terminal {
             Some(terminal)=>serde_json::from_value::<nomifun_engine_core::EngineProcessPoll>(terminal.0.clone())?,
@@ -500,7 +503,7 @@ impl AgentSessionStore {
             semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {kind:SessionEventKind(nomifun_agent_contracts::SESSION_PROCESS_REAPED.into()),kind_version:1,
                 correlation_id:session.as_ref().into(),causation_event_id:Some(source),payload:SessionEventPayloadRef::Stored(payload.payload_id.clone())}};
         let ack=required_ack(self.append_event_tx_with_policy(&mut tx,&append,None,AppendSessionStatePolicy::ProcessOwnerRelease).await?)?;
-        tx.commit().await?;Ok(ack)
+        db_write_observation.commit(tx).await?;Ok(ack)
     }
 }
 

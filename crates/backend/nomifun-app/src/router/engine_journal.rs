@@ -35,6 +35,10 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::engine_session_host::EngineTurnReceipt;
+#[path = "engine_journal_settlement.rs"]
+mod settlement;
+#[path = "engine_journal_write.rs"]
+mod write;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineJournalWrite {
@@ -56,8 +60,11 @@ struct Cursor {
     bytes: usize,
     draining: bool,
     terminal: bool,
+    terminal_finished_at_ms: Option<i64>,
     uncertain: bool,
-    pending_cleanup_write: Option<(String, Option<String>, EngineJournalWrite)>,
+    pending_write: Option<(String, Option<String>, EngineJournalWrite)>,
+    pending_checkpoint: Option<(SessionEventAppend, u64, u64, usize, u16, bool)>,
+    owner_settlement_receipts: BTreeMap<String, (nomifun_agent_contracts::DigestHex, Option<u64>)>,
     assistant_step: Option<AssistantStepCursor>,
     public_committed_steps: std::collections::BTreeSet<u16>,
     current_model_step: Option<u16>,
@@ -84,6 +91,7 @@ pub(super) struct Journal {
     /// 0 preclaimed, 1 attached, 2 abandoned. Attachment and pre-driver
     /// failure must not both win ownership of cleanup.
     attachment: AtomicU8,
+    unattached_cleanup:Mutex<UnattachedRecoveryCleanup>,
     attached_notify: tokio::sync::Notify,
     recovery: Option<Arc<nomifun_agent_runtime::AgentTurnRecovery>>,
     user: String,
@@ -99,13 +107,26 @@ pub(super) struct Journal {
     error_context: super::nomi_core_session::TurnErrorContext,
     cancellation: CancellationToken,
     cursor: Mutex<Cursor>,
+    settlement: Mutex<Option<nomifun_agent_session::NativeTurnSettlementReceipt>>,
+    projection_retry: Mutex<Option<SessionEventAppend>>,
     sequence: AtomicU64,
     pending: Arc<Semaphore>,
     pending_bytes: Arc<Semaphore>,
+    #[cfg(test)]
+    contention_observed: tokio::sync::Notify,
 }
 
 #[derive(Clone)]
 pub struct EngineTurnJournal(Arc<Journal>);
+
+#[derive(Default)]
+struct UnattachedRecoveryCleanup { cleanup_proven:bool, settled:bool }
+
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(super) enum UnattachedRecoverySettlement { Settled, Attached }
+
+#[cfg(test)]
+static LOST_TERMINAL_ACKS:std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>>=std::sync::OnceLock::new();
 
 impl Drop for Journal {
     fn drop(&mut self) {
@@ -116,11 +137,27 @@ impl Drop for Journal {
 
 impl Journal {
     async fn append_projection(&self, append: &SessionEventAppend) -> Result<nomifun_agent_session::SessionEventAppendResult, nomifun_agent_session::SessionStoreError> {
-        if append.semantic_event.kind.0 == "tool/call-started" {
-            self.store.append_native_event(&self.lease, append, None).await
-        } else {
-            self.store.append_native_observation(&self.lease, append, None).await
-        }
+        // All content producers share the canonical inline/stored boundary.
+        // Persist a large body atomically with its event, just as runtime
+        // progress does; provider chunk size must not truncate an answer.
+        let mut pending=self.projection_retry.lock().await;
+        let mut append = if let Some(original)=pending.as_ref() {
+            let mut proposed=append.clone();
+            if let (SessionEventPayloadRef::InlineJson(original_body),SessionEventPayloadRef::InlineJson(proposed_body))=(&original.semantic_event.payload,&mut proposed.semantic_event.payload)
+                &&let Some(display)=original_body.0.get("display_at_ms") {proposed_body.0["display_at_ms"]=display.clone();}
+            if proposed!=*original {return Err(nomifun_agent_session::SessionStoreError::IdempotencyConflict("a different projection cannot replace the original unsettled write".into()));}
+            original.clone()
+        } else {append.clone()};
+        *pending=Some(append.clone());
+        let payload = if let SessionEventPayloadRef::InlineJson(value) = &append.semantic_event.payload {
+            let (reference, payload) = canonical_event_payload(&self.session, value.0.clone())
+                .map_err(|error| nomifun_agent_session::SessionStoreError::InvalidPayload(error.to_string()))?;
+            append.semantic_event.payload = reference;
+            payload
+        } else { None };
+        let result=self.append_immutable(&append,payload.as_ref(),if append.semantic_event.kind.0=="tool/call-started" {EngineJournalWrite::Progress} else {EngineJournalWrite::Settlement}).await;
+        if result.is_ok() {*pending=None;}
+        result
     }
 }
 
@@ -232,7 +269,7 @@ impl EngineTurnJournal {
             serde_json::to_value(&observation).map_err(failure)?)?;
         let identity = format!("workspace-files:{}:{}:{}", journal.session.as_ref(),
             journal.operation.as_ref(), journal.lease.generation());
-        journal.store.append_native_observation(&journal.lease, &SessionEventAppend {
+        journal.append_immutable(&SessionEventAppend {
             agent_session_id: journal.session.clone(),
             event_id: EventId::from(identity.clone()),
             producer_id: EventProducerId::from("runtime_supervisor"),
@@ -244,7 +281,7 @@ impl EngineTurnJournal {
                 causation_event_id: Some(journal.turn_started.clone()),
                 payload,
             },
-        }, stored.as_ref()).await.map_err(failure)?;
+        }, stored.as_ref(),EngineJournalWrite::Settlement).await.map_err(write::store_error)?;
         Ok(())
     }
 
@@ -342,7 +379,7 @@ impl EngineTurnJournal {
         let assistant_message_id = canonical_assistant_step_message_id(receipt.root_message_id(), response_step)?;
         let journal = Self(Arc::new(Journal {
             store, lease, heartbeat: Default::default(), cancellation_link: Default::default(),
-            attachment: AtomicU8::new(0), attached_notify: Default::default(), recovery: recovery.map(Arc::new),
+            attachment: AtomicU8::new(0), unattached_cleanup:Default::default(),attached_notify: Default::default(), recovery: recovery.map(Arc::new),
             user: receipt.session().principal().principal_id.clone(),
             session: AgentSessionId::from(
                 receipt.session().session().conversation_id.clone(),
@@ -362,6 +399,8 @@ impl EngineTurnJournal {
                 receipt.session().session(), Some(receipt.session().workspace()),
             ),
             cancellation,
+            settlement: Mutex::new(None),
+            projection_retry: Mutex::new(None),
             cursor: Mutex::new(Cursor {
                 assistant_message_id: Some(assistant_message_id),
                 sequence, window_start_sequence: sequence, segment, total_bytes, checkpoint_revision, empty_response_step: Some(response_step),
@@ -370,6 +409,8 @@ impl EngineTurnJournal {
             sequence: AtomicU64::new(sequence),
             pending: Arc::new(Semaphore::new(64)),
             pending_bytes: Arc::new(Semaphore::new(8 * 1024 * 1024)),
+            #[cfg(test)]
+            contention_observed: tokio::sync::Notify::new(),
         }));
         journal.start_heartbeat();
         Ok(journal)
@@ -377,8 +418,76 @@ impl EngineTurnJournal {
 
     pub(super) fn recovery(&self) -> Option<Arc<nomifun_agent_runtime::AgentTurnRecovery>> { self.0.recovery.clone() }
     pub(super) fn generation(&self) -> u64 { self.0.lease.generation() }
-    pub(super) async fn pause_with_unproven_cleanup(&self) -> Result<(),AppError> {
-        self.0.store.pause_native_execution(&self.0.lease,"EXECUTION_CLEANUP_UNPROVEN",false).await.map_err(failure)?;
+    #[cfg(test)]
+    pub(super) fn lose_next_terminal_ack_for_test(&self) {
+        LOST_TERMINAL_ACKS.get_or_init(Default::default).lock().unwrap().insert(self.0.session.as_ref().into());
+    }
+    /// Transfer the original exit and first cleanup rejection to the canonical
+    /// owner. The returned capability permits settlement, never producer work.
+    pub(super) async fn handoff_failed_cleanup(&self,outcome:StrictJsonValue,first_failure:&str)
+        ->Result<nomifun_agent_session::NativeTurnSettlementReceipt,AppError> {
+        let _:nomifun_ai_agent::engine_sdk::EngineTurnOutcome=serde_json::from_value(outcome.0.clone()).map_err(failure)?;
+        let mut cursor=self.0.cursor.lock().await;
+        let request=nomifun_agent_session::NativeTurnSettlementRequest {outcome,
+            first_cleanup_failure:nomifun_ai_agent::engine_sdk::bounded_settlement_diagnostic(first_failure)};
+        let receipt=self.0.store.request_native_turn_settlement(&self.0.lease,&request).await.map_err(failure)?;
+        *self.0.settlement.lock().await=Some(receipt.clone());
+        cursor.draining=true;
+        Ok(receipt)
+    }
+
+    /// Commit the exact result retained by a native owner. A failed admission
+    /// that never invoked native code cannot manufacture an orphan result.
+    pub async fn append_owner_settlement(&self,payload:String)->Result<(),AppError> {
+        self.retry_pending_owner_observations().await?;
+        let value:Value=serde_json::from_str(&payload).map_err(failure)?;
+        if !matches!(value["event"].as_str(),Some("host_tool_settled"|"host_resource_settled")) {return Err(failure("owner settlement has another event kind"));}
+        let operation=value["operation_id"].as_str().ok_or_else(||failure("owner settlement lost its invocation identity"))?;
+        let call=if value["event"]=="host_resource_settled" {value["call_id"].as_str().unwrap_or("")}
+            else {value["call_id"].as_str().ok_or_else(||failure("owner settlement lost its original call identity"))?};
+        let admitted=self.0.store.native_owner_dispatch_recorded(&self.0.lease,operation,call).await.map_err(failure)?;
+        if !admitted {
+            return if value.get("owner_invoked")==Some(&Value::Bool(false)) {Ok(())}
+                else {Err(failure("returned owner result has no original dispatch fact"))};
+        }
+        self.append(payload,None,EngineJournalWrite::Settlement).await
+    }
+
+    /// Resolve immutable pending writes before cleanup. Progress is only
+    /// confirmed, never newly admitted after a technical pause; exited native
+    /// work is not invoked again to obtain another result.
+    pub async fn retry_pending_owner_observations(&self)->Result<(),AppError> {
+        let (pending,checkpoint)={let cursor=self.0.cursor.lock().await;(cursor.pending_write.clone(),cursor.pending_checkpoint.clone())};
+        if let Some((append,next,revision,bytes,segment,renew))=checkpoint {
+            let receipt=self.0.settlement.lock().await.clone();
+            let found=match receipt.as_ref() {
+                Some(receipt)=>self.0.store.confirm_native_settlement_event(receipt,&append,None).await,
+                None=>self.0.store.confirm_native_owner_event(&self.0.lease,&append,None).await,
+            }.map_err(failure)?.is_some();
+            let mut cursor=self.0.cursor.lock().await;
+            if found {
+                cursor.sequence=next;cursor.checkpoint_revision=revision;cursor.segment=segment;cursor.total_bytes+=bytes;
+                if renew {cursor.window_start_sequence=next;cursor.bytes=0;} else {cursor.bytes+=bytes;}
+                self.0.sequence.store(next,Ordering::Release);
+            }
+            cursor.pending_checkpoint=None;cursor.uncertain=false;
+        }
+        if let Some((payload,operation,kind))=pending {
+            if kind==EngineJournalWrite::Progress {
+                let value:Value=serde_json::from_str(&payload).map_err(failure)?;
+                let (append,stored)={let cursor=self.0.cursor.lock().await;Self::progress_append(&self.0,&cursor,&value).map_err(failure)?};
+                let receipt=self.0.settlement.lock().await.clone();
+                let found=match receipt.as_ref() {
+                    Some(receipt)=>self.0.store.confirm_native_settlement_event(receipt,&append,stored.as_ref()).await,
+                    None=>self.0.store.confirm_native_owner_event(&self.0.lease,&append,stored.as_ref()).await,
+                }.map_err(failure)?.is_some();
+                if !found {
+                    let mut cursor=self.0.cursor.lock().await;cursor.pending_write=None;cursor.uncertain=false;
+                    return Ok(());
+                }
+            }
+            self.append(payload,operation,kind).await?;
+        }
         Ok(())
     }
 
@@ -442,6 +551,7 @@ impl EngineTurnJournal {
     }
 
     pub(super) fn is_attached(&self) -> bool { self.0.attachment.load(Ordering::Acquire) == 1 }
+    pub(super) fn cached_is_attached(journal:&Journal)->bool {journal.attachment.load(Ordering::Acquire)==1}
 
     pub(super) fn attach_runtime(&self, cancellation: CancellationToken) -> Result<(), AppError> {
         match self.0.attachment.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire) {
@@ -466,17 +576,47 @@ impl EngineTurnJournal {
         }
     }
 
-    pub(super) async fn fail_unattached_recovery(&self) -> Result<(), AppError> {
-        if self.0.attachment.compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire).is_err() {
-            return Err(failure("runtime attachment or abandonment already owns cleanup"));
+    pub(super) async fn fail_unattached_recovery(&self,first_failure:&str) -> Result<UnattachedRecoverySettlement, AppError> {
+        match self.0.attachment.compare_exchange(0,2,Ordering::AcqRel,Ordering::Acquire) {
+            Ok(_)|Err(2)=>{},
+            Err(1)=>return Ok(UnattachedRecoverySettlement::Attached),
+            Err(_)=>return Err(failure("recovery attachment has an invalid owner state")),
         }
-        self.append(json!({"event":"host_cleanup_proven","reason":"turn_resources_not_opened"}).to_string(), None, EngineJournalWrite::Cleanup).await?;
-        let event = if let Some(recovery) = &self.0.recovery {
-            AgentEngineEvent::TurnPaused { model_steps: recovery.last_model_step(), reason: "EXECUTION_ATTACH_FAILED".into() }
-        } else {
-            AgentEngineEvent::TurnFailed { model_steps: 0, message: "Recovery could not attach an uninitialized runtime".into(), failure: None }
-        };
-        self.append(serde_json::to_string(&event).map_err(failure)?, None, EngineJournalWrite::Terminal).await
+        // This is the original pre-driver owner's retained phase, not another
+        // producer. Serializing retries preserves the exact pending journal
+        // event and never fabricates not-opened proof for an attached Runtime.
+        let mut cleanup=self.0.unattached_cleanup.lock().await;
+        if cleanup.settled {return Ok(UnattachedRecoverySettlement::Settled);}
+        let original_projection=self.0.projection_retry.lock().await.clone();
+        if let Some(original)=original_projection {
+            if original.semantic_event.kind.0!="message/completed" {return Err(failure("unattached cleanup cannot admit another original projection kind"));}
+            self.0.append_projection(&original).await.map_err(failure)?;
+        }
+        use nomifun_ai_agent::engine_sdk::{EngineTurnOutcome,EngineTurnTerminal};
+        let mut outcome=if let Some(recovery)=&self.0.recovery {
+            EngineTurnOutcome {model_steps:recovery.last_model_step(),terminal:EngineTurnTerminal::Paused {reason:"EXECUTION_ATTACH_FAILED".into()}}
+        } else {EngineTurnOutcome::failed("Recovery could not attach an uninitialized runtime")};
+        let retained=self.0.settlement.lock().await.clone();
+        let receipt=match retained {Some(receipt)=>receipt,None=>self.handoff_failed_cleanup(StrictJsonValue(serde_json::to_value(&outcome).map_err(failure)?),first_failure).await?};
+        if self.0.cursor.lock().await.terminal {
+            self.0.store.complete_native_turn_settlement(&receipt).await.map_err(failure)?;
+            cleanup.settled=true;return Ok(UnattachedRecoverySettlement::Settled);
+        }
+        if !cleanup.cleanup_proven {
+            self.append(json!({"event":"host_cleanup_proven","reason":"turn_resources_not_opened"}).to_string(),None,EngineJournalWrite::Cleanup).await?;
+            cleanup.cleanup_proven=true;
+        }
+        let actual=self.0.store.read_turn_receipt(&self.0.session,&self.0.operation).await.map_err(failure)?;
+        if actual.status==TurnReceiptStatus::Cancelled {outcome.terminal=EngineTurnTerminal::Cancelled;}
+        else if self.0.store.native_turn_settlement_user_pause_committed(&receipt).await.map_err(failure)?
+            ||(self.0.store.native_turn_settlement_current(&receipt).await.map_err(failure)?
+                &&self.0.store.native_turn_settlement_requires_user_pause(&receipt).await.map_err(failure)?) {
+            outcome.terminal=EngineTurnTerminal::Paused {reason:"EXECUTION_USER_REQUESTED".into()};
+        }
+        let event=nomifun_ai_agent::unified_runtime::runtime_terminal(&outcome);
+        self.append(serde_json::to_string(&event).map_err(failure)?,None,EngineJournalWrite::Terminal).await?;
+        cleanup.settled=true;
+        Ok(UnattachedRecoverySettlement::Settled)
     }
 
     pub(super) async fn verify_execution_lease(&self) -> Result<(), AppError> {
@@ -593,7 +733,8 @@ impl EngineTurnJournal {
                 },
             };
             cursor.uncertain = true;
-            let saved = journal.store.save_native_checkpoint(&append, nomifun_agent_session::NativeCheckpointWrite {
+            cursor.pending_checkpoint=Some((append.clone(),next,revision,metadata_bytes,segment,renew_window));
+            let saved = journal.save_immutable_checkpoint(&append, nomifun_agent_session::NativeCheckpointWrite {
                 owner, operation_id: journal.operation.clone(), snapshot: journal.snapshot.clone(),
                 active_set_generation: checkpoint.active_set_generation,
                 expected_revision: cursor.checkpoint_revision, execution_fence: journal.lease.fence(),
@@ -603,6 +744,7 @@ impl EngineTurnJournal {
                 Ok(saved) => saved,
                 Err(nomifun_agent_session::SessionStoreError::CheckpointNotQuiescent) => {
                     cursor.uncertain = false;
+                    cursor.pending_checkpoint=None;
                     return Ok(None);
                 }
                 Err(error @ nomifun_agent_session::SessionStoreError::ExecutionFenced) => {
@@ -611,9 +753,10 @@ impl EngineTurnJournal {
                     // not an ambiguous checkpoint write. Preserve cleanup's
                     // authority without admitting/replaying any model work.
                     cursor.uncertain = false;
-                    return Err(failure(error));
+                    cursor.pending_checkpoint=None;
+                    return Err(write::store_error(error));
                 }
-                Err(error) => return Err(failure(error)),
+                Err(error) => return Err(write::store_error(error)),
             };
             cursor.sequence = next;
             cursor.checkpoint_revision = saved.revision;
@@ -624,6 +767,7 @@ impl EngineTurnJournal {
                 cursor.bytes = 0;
             } else { cursor.bytes += metadata_bytes; }
             cursor.uncertain = false;
+            cursor.pending_checkpoint=None;
             journal.sequence.store(next, Ordering::Release);
             Ok(Some(nomifun_agent_runtime::AgentCheckpointReceipt {
                 revision: saved.revision, through_seq: saved.through_seq, digest: saved.digest,
@@ -632,40 +776,27 @@ impl EngineTurnJournal {
         task.await.map_err(failure)?
     }
 
+    fn progress_append(journal:&Journal,cursor:&Cursor,event:&Value)
+        ->Result<(SessionEventAppend,Option<SessionPayloadRecord>),nomifun_agent_session::SessionStoreError> {
+        let value=json!({"producer_seq":cursor.sequence.saturating_add(1),"event":event});
+        let (reference,payload)=canonical_event_payload(&journal.session,value)
+            .map_err(|error|nomifun_agent_session::SessionStoreError::InvalidPayload(error.to_string()))?;
+        let identity=format!("runtime-progress:{}:{}:{}",journal.session.as_ref(),journal.operation.as_ref(),cursor.sequence.saturating_add(1));
+        Ok((SessionEventAppend {agent_session_id:journal.session.clone(),event_id:identity.clone().into(),producer_id:"runtime_supervisor".into(),idempotency_key:identity.into(),
+            semantic_event:SemanticSessionEventDraft {kind:SessionEventKind("runtime/progress-recorded".into()),kind_version:1,
+                correlation_id:journal.operation.as_ref().into(),causation_event_id:Some(journal.root.clone()),payload:reference}},payload))
+    }
+
     async fn append_progress(
         journal: &Journal,
         cursor: &Cursor,
         event: &Value,
         kind: EngineJournalWrite,
     ) -> Result<Option<u64>, nomifun_agent_session::SessionStoreError> {
-        let next = cursor.sequence.saturating_add(1);
-        let value = json!({
-            "producer_seq": next,
-            "event": event,
-        });
-        let (payload_ref, payload) = canonical_event_payload(&journal.session, value)
-            .map_err(|error|nomifun_agent_session::SessionStoreError::InvalidPayload(error.to_string()))?;
-        let identity = format!(
-            "runtime-progress:{}:{}:{next}",
-            journal.session.as_ref(),
-            journal.operation.as_ref(),
-        );
-        let append = SessionEventAppend {
-            agent_session_id: journal.session.clone(),
-            event_id: EventId::from(identity.clone()),
-            producer_id: EventProducerId::from("runtime_supervisor"),
-            idempotency_key: IdempotencyKey::from(identity),
-            semantic_event: SemanticSessionEventDraft {
-                kind: SessionEventKind("runtime/progress-recorded".to_owned()),
-                kind_version: 1,
-                correlation_id: CorrelationId::from(journal.operation.as_ref().to_owned()),
-                causation_event_id: Some(journal.root.clone()),
-                payload: payload_ref,
-            },
-        };
+        let (append,payload)=Self::progress_append(journal,cursor,event)?;
         let appended = if kind == EngineJournalWrite::Progress {
             loop {
-                match journal.store.append_native_event(&journal.lease, &append, payload.as_ref()).await {
+                match journal.append_immutable(&append,payload.as_ref(),kind).await {
                     Err(nomifun_agent_session::SessionStoreError::ExecutionCapacityPending)
                         if event.get("event").and_then(Value::as_str) == Some("children_wait_resolved") => {
                             tokio::select! {
@@ -677,7 +808,7 @@ impl EngineTurnJournal {
                 }
             }
         } else {
-            journal.store.append_native_observation(&journal.lease, &append, payload.as_ref()).await?
+            journal.append_immutable(&append,payload.as_ref(),kind).await?
         };
         Ok(appended.ack.map(|ack| ack.seq))
     }
@@ -761,32 +892,7 @@ impl EngineTurnJournal {
         journal: &Journal,
         step: &AssistantStepCursor,
     ) -> SessionEventAppend {
-        let identity = format!(
-            "assistant-complete:{}:{}:{}",
-            journal.session.as_ref(),
-            journal.operation.as_ref(),
-            step.step,
-        );
-        SessionEventAppend {
-            agent_session_id: journal.session.clone(),
-            event_id: EventId::from(identity.clone()),
-            producer_id: EventProducerId::from("runtime_supervisor"),
-            idempotency_key: IdempotencyKey::from(identity),
-            semantic_event: SemanticSessionEventDraft {
-                kind: SessionEventKind("message/completed".to_owned()),
-                kind_version: 1,
-                correlation_id: CorrelationId::from(step.message_id.clone()),
-                causation_event_id: Some(
-                    step.last_event_id
-                        .clone()
-                        .unwrap_or_else(|| journal.root.clone()),
-                ),
-                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                    "part_count": step.parts,
-                    "content_digest": digest_bytes(&step.text),
-                }))),
-            },
-        }
+        settlement::completion_event(&journal.session,&journal.operation,&journal.root,step)
     }
 
     async fn append_thinking_part(
@@ -809,10 +915,6 @@ impl EngineTurnJournal {
             journal.session.as_ref(),
             journal.operation.as_ref(),
         );
-        let (payload_ref, payload) = canonical_event_payload(
-            &journal.session,
-            json!({ "content": text, "turn_id": journal.root.as_ref() }),
-        )?;
         let append = SessionEventAppend {
             agent_session_id: journal.session.clone(),
             event_id: EventId::from(identity.clone()),
@@ -823,14 +925,10 @@ impl EngineTurnJournal {
                 kind_version: 1,
                 correlation_id: CorrelationId::from(message_id.clone()),
                 causation_event_id: Some(journal.turn_started.clone()),
-                payload: payload_ref,
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({ "content": text, "turn_id": journal.root.as_ref() }))),
             },
         };
-        journal
-            .store
-            .append_native_observation(&journal.lease, &append, payload.as_ref())
-            .await
-            .map_err(failure)?;
+        journal.append_projection(&append).await.map_err(failure)?;
         *previous_parts = part;
         Ok(())
     }
@@ -1027,15 +1125,22 @@ impl EngineTurnJournal {
 
     async fn append_terminal(
         journal: &Journal,
-        cursor: &Cursor,
+        cursor: &mut Cursor,
         event: &AgentEngineEvent,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<u64>, AppError> {
+        let settlement=journal.settlement.lock().await.clone();
+        let mut runtime_ack=None;
+        let scoped_runtime=if settlement.is_some() {Some(Self::progress_append(journal,cursor,&serde_json::to_value(event).map_err(failure)?).map_err(failure)?)} else {None};
         match event {
             AgentEngineEvent::TurnPaused { reason, .. } => {
-                if let Some(step) = cursor.assistant_step.as_ref() {
-                    journal.append_projection(&Self::assistant_completion_event(journal, step)).await.map_err(failure)?;
+                let message=cursor.assistant_step.as_ref().map(|step|Self::assistant_completion_event(journal,step));
+                if let Some(receipt)=settlement.as_ref() {
+                    let (runtime,payload)=scoped_runtime.as_ref().expect("scoped runtime prepared");
+                    runtime_ack=Self::append_scoped_terminal(journal,cursor,receipt,runtime,payload.as_ref(),message.as_ref(),None).await?;
+                } else {
+                    if let Some(message)=message {journal.append_projection(&message).await.map_err(failure)?;}
+                    journal.store.pause_native_execution(&journal.lease, reason, true).await.map_err(failure)?;
                 }
-                journal.store.pause_native_execution(&journal.lease, reason, true).await.map_err(failure)?;
                 Ok(())
             }
             AgentEngineEvent::TurnCancelled { .. } => {
@@ -1046,7 +1151,7 @@ impl EngineTurnJournal {
                     .map_err(failure)?;
                 if receipt.status != TurnReceiptStatus::Cancelled {
                     let identity = format!("runtime-cancel:{}:{}", journal.session.as_ref(), journal.operation.as_ref());
-                    journal.store.append_native_cancellation_after_cleanup(&journal.lease, &SessionEventAppend {
+                    let cancellation=SessionEventAppend {
                         agent_session_id: journal.session.clone(), event_id: identity.clone().into(),
                         producer_id: "runtime_supervisor".into(), idempotency_key: identity.into(),
 
@@ -1055,7 +1160,14 @@ impl EngineTurnJournal {
                             correlation_id: journal.operation.as_ref().into(), causation_event_id: Some(journal.turn_started.clone()),
                             payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"operation_id":journal.operation}))),
                         },
-                    }).await.map_err(failure)?;
+                    };
+                    if let Some(receipt)=settlement.as_ref() {
+                        let (runtime,payload)=scoped_runtime.as_ref().expect("scoped runtime prepared");
+                        runtime_ack=Self::append_scoped_terminal(journal,cursor,receipt,runtime,payload.as_ref(),None,Some(&cancellation)).await?;
+                    }
+                    else {journal.store.append_native_cancellation_after_cleanup(&journal.lease,&cancellation).await.map_err(failure)?;}
+                } else if let Some(receipt)=settlement.as_ref() {
+                    journal.store.complete_native_turn_settlement(receipt).await.map_err(failure)?;
                 }
                 Ok(())
             }
@@ -1086,39 +1198,7 @@ impl EngineTurnJournal {
                     cursor.assistant_step.as_ref().filter(|current|final_step.is_none_or(|step|current.step==step)).unwrap_or(&empty_step),
                 );
                 let message_event_id = message.event_id.clone();
-                let (kind, payload) = match event {
-                    AgentEngineEvent::TurnInputRequired { model_steps, request } => {
-                        request.validate().map_err(failure)?;
-                        ("turn/completed", json!({ "model_steps": model_steps,
-                            "finish_reason": nomifun_chat_model_broker::ChatFinishReason::Completed,
-                            "user_input_request": request, "finished_at_ms": now_ms() }))
-                    }
-                    AgentEngineEvent::TurnCompleted { model_steps, finish_reason } => (
-                        "turn/completed",
-                        json!({
-                            "model_steps": model_steps,
-                            "finish_reason": finish_reason,
-                            "finished_at_ms": now_ms(),
-                        }),
-                    ),
-                    AgentEngineEvent::TurnFailed { model_steps, message, failure: typed_failure } => {
-                        let mut error = nomifun_ai_agent::AgentSendError::from_runtime_turn_failure(
-                            message.clone(), typed_failure.as_ref(),
-                        )
-                        .into_stream_error();
-                        journal.error_context.apply(&mut error);
-                        (
-                            "turn/failed",
-                            json!({
-                                "model_steps": model_steps,
-                                "message": message,
-                                "error": error,
-                                "finished_at_ms": now_ms(),
-                            }),
-                        )
-                    }
-                    _ => unreachable!(),
-                };
+                let (kind,payload)=settlement::terminal_payload(event,&journal.error_context,cursor.terminal_finished_at_ms.unwrap_or_else(now_ms))?;
                 let turn_identity = format!(
                     "turn-terminal:{}:{}",
                     journal.session.as_ref(),
@@ -1137,14 +1217,38 @@ impl EngineTurnJournal {
                         payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(payload)),
                     },
                 };
-                journal
-                    .store
-                    .append_native_chat_completion(&journal.lease, &message, &turn)
-                    .await
-                    .map_err(failure)?;
+                if let Some(receipt)=settlement.as_ref() {
+                    let (runtime,payload)=scoped_runtime.as_ref().expect("scoped runtime prepared");
+                    runtime_ack=Self::append_scoped_terminal(journal,cursor,receipt,runtime,payload.as_ref(),Some(&message),Some(&turn)).await?;
+                }
+                else {journal.store.append_native_chat_completion(&journal.lease,&message,&turn).await.map_err(failure)?;}
                 Ok(())
             }
             _ => Err(failure("terminal write did not contain a terminal Runtime event")),
+        }
+        ?;
+        Ok(runtime_ack)
+    }
+
+    async fn append_scoped_terminal(journal:&Journal,cursor:&mut Cursor,receipt:&nomifun_agent_session::NativeTurnSettlementReceipt,
+        runtime:&SessionEventAppend,payload:Option<&SessionPayloadRecord>,message:Option<&SessionEventAppend>,terminal:Option<&SessionEventAppend>)
+        ->Result<Option<u64>,AppError> {
+        match journal.store.append_native_settlement_terminal_bundle(receipt,runtime,payload,message,terminal).await {
+            Ok(ack)=>{
+                #[cfg(test)]
+                if LOST_TERMINAL_ACKS.get_or_init(Default::default).lock().unwrap().remove(journal.session.as_ref()) {
+                    return Err(failure("fixture original committed terminal acknowledgement lost"));
+                }
+                Ok(ack.runtime_seq)
+            },
+            Err(error @ nomifun_agent_session::SessionStoreError::ExecutionFenced)=>{
+                // The entire bundle is transactionally rejected. Keep the
+                // saved exit, while allowing a newly verified user control to
+                // select its own closure on the next owner retry.
+                cursor.uncertain=false;cursor.pending_write=None;
+                Err(failure(error))
+            }
+            Err(error)=>Err(failure(error)),
         }
     }
 
@@ -1194,10 +1298,25 @@ impl EngineTurnJournal {
             let _permit = permit;
             let _byte_permit = byte_permit;
             let mut cursor = journal.cursor.lock().await;
+            if kind==EngineJournalWrite::Terminal&&journal.settlement.lock().await.is_some()
+                &&journal.store.read_turn_receipt(&journal.session,&journal.operation).await.map_err(failure)?.status==TurnReceiptStatus::Cancelled {
+                let receipt=journal.settlement.lock().await.clone().expect("checked above");
+                journal.store.complete_native_turn_settlement(&receipt).await.map_err(failure)?;
+                cursor.terminal=true;cursor.uncertain=false;cursor.pending_write=None;
+                return Ok(None);
+            }
+            let owner_key=matches!(event_value["event"].as_str(),Some("host_tool_settled"|"host_resource_settled"))
+                .then(||event_value["operation_id"].as_str().map(|operation|format!("{}:{operation}",event_value["event"].as_str().unwrap()))).flatten();
+            let owner_digest=owner_key.as_ref().map(|_|canonical_json_bytes(&event_value).map(|bytes|digest_bytes(&bytes))).transpose().map_err(failure)?;
+            if let Some(key)=owner_key.as_ref()&&let Some((digest,receipt))=cursor.owner_settlement_receipts.get(key) {
+                if Some(digest)!=owner_digest.as_ref() {return Err(failure("original owner settlement changed after acknowledgement"));}
+                return Ok(*receipt);
+            }
             if let Some(AgentEngineEvent::PublicOutputCommitted {step,source})=&runtime_event {
                 if *step==0||cursor.current_model_step!=Some(*step)||cursor.withdrawn_model_steps.contains(step) {return Err(failure("public commitment differs from its current exact model source"));}
-                if source.is_some() {return Err(failure("Runtime cannot author its own canonical public proof"));}
-                if let Some(current)=cursor.assistant_step.as_ref().filter(|current|current.step==*step&&current.parts>0) {
+                let retained=cursor.uncertain&&cursor.pending_write.as_ref().is_some_and(|pending|pending.0==payload&&pending.1==model_operation&&pending.2==kind);
+                if source.is_some()&&!retained {return Err(failure("Runtime cannot author its own canonical public proof"));}
+                if source.is_none()&&let Some(current)=cursor.assistant_step.as_ref().filter(|current|current.step==*step&&current.parts>0) {
                     let live=journal.store.get_live_session(&journal.session).await.map_err(failure)?;
                     if live.agent_binding.resolved_snapshot_ref!=journal.snapshot {return Err(failure("public source Snapshot was replaced"));}
                     let source=nomifun_agent_runtime::AgentPublicOutputSource {message_id:current.message_id.clone(),part_count:current.parts,
@@ -1213,13 +1332,27 @@ impl EngineTurnJournal {
             }
             if let Some(AgentEngineEvent::ModelResponseRejected {step,..}|AgentEngineEvent::ModelOutputTruncated {step,..}|AgentEngineEvent::DeliveryReviewSuperseded {step,..})=&runtime_event
                 &&cursor.public_committed_steps.contains(step) {return Err(failure("an irrevocable public source cannot be discarded"));}
-            let retry_cleanup = cursor.uncertain && cursor.pending_cleanup_write.as_ref()
-                .is_some_and(|pending|pending.0==payload && pending.1==model_operation && pending.2==kind);
+            if kind==EngineJournalWrite::Terminal&&cursor.uncertain
+                &&matches!(runtime_event.as_ref(),Some(AgentEngineEvent::TurnPaused {reason,..}) if reason=="EXECUTION_USER_REQUESTED")
+                &&cursor.pending_write.as_ref().is_some_and(|(pending,_,_)|serde_json::from_str::<Value>(pending).ok().as_ref()!=Some(&event_value))
+                &&let Some(receipt)=journal.settlement.lock().await.clone()
+                &&journal.store.native_turn_settlement_requires_user_pause(&receipt).await.map_err(failure)? {
+                if let Some((pending,_,EngineJournalWrite::Terminal))=cursor.pending_write.as_ref() {
+                    let previous:Value=serde_json::from_str(pending).map_err(failure)?;
+                    let (append,payload)=Self::progress_append(&journal,&cursor,&previous).map_err(failure)?;
+                    if journal.store.confirm_native_settlement_event(&receipt,&append,payload.as_ref()).await.map_err(failure)?.is_some() {
+                        cursor.sequence+=1;journal.sequence.store(cursor.sequence,Ordering::Release);
+                    }
+                    cursor.pending_write=None;cursor.uncertain=false;
+                }
+            }
+            let retry_cleanup = cursor.uncertain && cursor.pending_write.as_ref()
+                .is_some_and(|pending|serde_json::from_str::<Value>(&pending.0).ok().as_ref()==Some(&event_value) && pending.1==model_operation && pending.2==kind);
             if (cursor.uncertain && !retry_cleanup) || cursor.terminal {
                 return Err(failure("journal is closed or uncertain"));
             }
             if kind == EngineJournalWrite::Progress
-                && (cursor.draining || journal.cancellation.is_cancelled())
+                && (cursor.draining || journal.cancellation.is_cancelled()) && !retry_cleanup
             {
                 return Err(failure("turn no longer admits progress"));
             }
@@ -1242,12 +1375,11 @@ impl EngineTurnJournal {
                 || next_total_bytes as u64 > total_limit || cursor.sequence >= cursor.budget.journal_records.saturating_add(if reserved { 4000 } else { 0 }) {
                 return Err(failure("bounded evidence journal exhausted"));
             }
-            if matches!(kind,EngineJournalWrite::Cleanup | EngineJournalWrite::Terminal) {
-                cursor.pending_cleanup_write = Some((payload.clone(),model_operation.clone(),kind));
-            }
+            cursor.pending_write = Some((serde_json::to_string(&event_value).map_err(failure)?,model_operation.clone(),kind));
             let was_uncertain=cursor.uncertain;
             cursor.uncertain = true;
-            let event_seq = match Self::append_progress(&journal, &cursor, &event_value, kind).await {
+            let scoped_terminal=kind==EngineJournalWrite::Terminal&&journal.settlement.lock().await.is_some();
+            let mut event_seq = if scoped_terminal {None} else {match Self::append_progress(&journal, &cursor, &event_value, kind).await {
                 Ok(receipt)=>receipt,
                 Err(error)=> {
                     if !was_uncertain && matches!(&error,nomifun_agent_session::SessionStoreError::ExecutionFenced) {
@@ -1256,11 +1388,11 @@ impl EngineTurnJournal {
                         // beat a late callback to the writer. An earlier unknown
                         // or partially committed projection remains uncertain.
                         cursor.uncertain=false;
-                        cursor.pending_cleanup_write=None;
+                        cursor.pending_write=None;
                     }
-                    return Err(failure(error));
+                    return Err(write::store_error(error));
                 }
-            };
+            }};
             Self::append_tool_projection(&journal, &mut cursor, &event_value).await?;
             if let Some(AgentEngineEvent::ModelStepStarted {step,..})=&runtime_event {cursor.current_model_step=Some(*step);}
             if let Some(AgentEngineEvent::ModelResponseRejected {step,..}|AgentEngineEvent::ModelOutputTruncated {step,..}|AgentEngineEvent::DeliveryReviewSuperseded {step,..}|AgentEngineEvent::VoiceModelStepSuperseded {step,..})=&runtime_event {
@@ -1286,20 +1418,25 @@ impl EngineTurnJournal {
                 Self::append_thinking_part(&journal, &mut cursor, *step, text).await?;
             }
             if kind == EngineJournalWrite::Terminal {
-                Self::append_terminal(
+                cursor.terminal_finished_at_ms.get_or_insert_with(now_ms);
+                let terminal_ack=Self::append_terminal(
                     &journal,
-                    &cursor,
+                    &mut cursor,
                     runtime_event.as_ref().expect("terminal Runtime event checked above"),
                 )
                 .await?;
+                if scoped_terminal {event_seq=terminal_ack;}
             }
-            cursor.sequence = cursor.sequence.saturating_add(1);
-            cursor.bytes = next_bytes;
-            cursor.total_bytes = next_total_bytes;
+            if !scoped_terminal||event_seq.is_some() {
+                cursor.sequence = cursor.sequence.saturating_add(1);
+                cursor.bytes = next_bytes;
+                cursor.total_bytes = next_total_bytes;
+            }
             cursor.draining |= matches!(kind, EngineJournalWrite::Cleanup | EngineJournalWrite::Terminal);
             cursor.terminal = kind == EngineJournalWrite::Terminal;
             cursor.uncertain = false;
-            cursor.pending_cleanup_write = None;
+            cursor.pending_write = None;
+            if let (Some(key),Some(digest))=(owner_key,owner_digest) {cursor.owner_settlement_receipts.insert(key,(digest,event_seq));}
             journal.sequence.store(cursor.sequence, Ordering::Release);
             Ok(event_seq)
         });
@@ -1476,7 +1613,7 @@ pub(super) async fn test_fixture_for_operation(
     }).await.unwrap();
     let journal = EngineTurnJournal(Arc::new(Journal {
         store, lease, heartbeat: Default::default(), cancellation_link: Default::default(),
-        attachment: AtomicU8::new(0), attached_notify: Default::default(), recovery: None,
+        attachment: AtomicU8::new(0), unattached_cleanup:Default::default(),attached_notify: Default::default(), recovery: None,
         user: owner.principal_id,
         session: session_id,
         operation: OperationId::from(operation),
@@ -1493,9 +1630,12 @@ pub(super) async fn test_fixture_for_operation(
         },
         cancellation: CancellationToken::new(),
         cursor: Mutex::new(Cursor::default()),
+        settlement: Mutex::new(None),
+        projection_retry: Mutex::new(None),
         sequence: AtomicU64::new(0),
         pending: Arc::new(Semaphore::new(64)),
         pending_bytes: Arc::new(Semaphore::new(8 * 1024 * 1024)),
+        contention_observed: tokio::sync::Notify::new(),
     }));
     (journal, pool)
 }

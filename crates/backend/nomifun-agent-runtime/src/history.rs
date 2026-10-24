@@ -527,7 +527,8 @@ fn replay_into(
                     ));
                 }
                 if !result.is_error && batch.calls[&result.call_id].name == crate::collaboration::WAIT {
-                    awaiting_children = Some(crate::collaboration::from_wait_call(&batch.calls[&result.call_id])?);
+                    collaboration.accept_wait(&batch.calls[&result.call_id],result)?;
+                    awaiting_children = Some(collaboration.normalize_wait(&crate::collaboration::from_wait_call(&batch.calls[&result.call_id])?)?);
                 }
                 if !result.is_error {
                     if batch.calls[&result.call_id].name == crate::collaboration::STATUS {
@@ -662,9 +663,10 @@ fn replay_into(
             }
             AgentEngineEvent::ChildrenWaitResolved { model_steps: through_step, cursor } => {
                 if *through_step != model_steps || awaiting_children.is_none() { return Err(invalid("child wake has no exact pending wait")); }
+                awaiting_children.as_ref().expect("checked pending wait").validate_wake(cursor)?;
                 batch.flush(history, false)?;
                 history.push(crate::collaboration::wake_message(cursor)?);
-                collaboration.wake_cursor = Some(cursor.clone());
+                collaboration.record_wake(cursor)?;
                 awaiting_children = None;
             }
             AgentEngineEvent::EndIntentReview { .. } => {

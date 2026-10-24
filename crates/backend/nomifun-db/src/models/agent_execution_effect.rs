@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PendingConversationEffect {
+    /// The exact prepared first input, retained only until canonical admission
+    /// acknowledges this stable operation. This is an outbox, not history.
+    InitialInput {
+        request: serde_json::Value,
+    },
     StopTurn {
         operation_id: String,
         target_operation_id: String,
@@ -17,6 +22,8 @@ pub enum PendingConversationEffect {
     DecisionInput {
         operation_id: String,
         content: String,
+        #[serde(default,skip_serializing_if="Option::is_none")]
+        parent_reply:Option<nomifun_agent_contracts::AgentParentQuestionReply>,
     },
     Steer {
         operation_id: String,
@@ -30,8 +37,9 @@ pub enum PendingConversationEffect {
 pub struct AttemptConversationEffects {
     pub pending_conversation_effects: Vec<PendingConversationEffect>,
     /// Fail-closed recovery marker written by the repository when a formerly
-    /// Running invocation cannot prove that its external effect was untouched.
-    /// There is intentionally no automatic resolution path.
+    /// Running invocation cannot prove its original outcome. This never
+    /// authorizes business replay; exact verified original facts may reconcile
+    /// or settle this same Attempt through its existing owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_blocked: Option<RecoveryReviewBlock>,
 }
@@ -49,10 +57,14 @@ impl AttemptConversationEffects {
     /// The current invocation identity is either its initial key or the one
     /// durable decision continuation. Never select an unrelated latest Turn.
     pub fn current_turn_operation_key(&self, attempt_id: &str) -> Result<String, AppError> {
+        let initial=self.pending_conversation_effects.iter().filter(|effect|matches!(effect,PendingConversationEffect::InitialInput {..})).count();
         let decisions = self.pending_conversation_effects.iter().filter_map(|effect| match effect {
             PendingConversationEffect::DecisionInput { operation_id, .. } => Some(operation_id),
             _ => None,
         }).collect::<Vec<_>>();
+        if initial>1 || (initial==1&&!decisions.is_empty()) {
+            return Err(AppError::Conflict("attempt has ambiguous initial/decision delivery identity".into()));
+        }
         match decisions.as_slice() {
             [] => Ok(format!("{attempt_id}:initial-turn")),
             [operation] if !operation.trim().is_empty() => Ok((*operation).clone()),
@@ -80,6 +92,16 @@ impl AttemptConversationEffects {
         operation_id: String,
         content: String,
     ) -> Result<(), AppError> {
+        self.push_decision_with_source(operation_id,content,None)
+    }
+
+    pub fn push_parent_reply(&mut self,operation_id:String,content:String,
+        parent_reply:nomifun_agent_contracts::AgentParentQuestionReply)->Result<(),AppError> {
+        self.push_decision_with_source(operation_id,content,Some(parent_reply))
+    }
+
+    fn push_decision_with_source(&mut self,operation_id:String,content:String,
+        parent_reply:Option<nomifun_agent_contracts::AgentParentQuestionReply>)->Result<(),AppError> {
         if self.review_blocked.is_some() {
             return Err(AppError::Conflict(
                 "this interrupted Agent turn is blocked for manual review and cannot be resumed automatically"
@@ -99,6 +121,7 @@ impl AttemptConversationEffects {
             .push(PendingConversationEffect::DecisionInput {
                 operation_id,
                 content,
+                parent_reply,
             });
         Ok(())
     }

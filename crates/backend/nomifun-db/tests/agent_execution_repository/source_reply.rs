@@ -148,13 +148,13 @@ async fn continued_child_binding_comes_from_its_original_admission_and_rechecks_
     sqlx::query("UPDATE agent_sessions SET agent_binding_json=? WHERE agent_session_id=?")
         .bind(serde_json::to_string(&child).unwrap()).bind(session).execute(fixture.db.pool()).await.unwrap();
     assert!(fixture.repository.start_attempt(&fixture.owner,&fixture.execution_id,&queued.step.step_id,queued.step.version,
-        &queued_attempt.attempt.attempt_id,queued_attempt.attempt.version,session,AgentExecutionAttemptSessionKind::ChildAttempt,None,
+        &queued_attempt.attempt.attempt_id,queued_attempt.attempt.version,session,AgentExecutionAttemptSessionKind::ChildAttempt,None, None,
         &super::event(AgentExecutionEventKind::AttemptChanged)).await.is_err(),"rebind after preflight cannot enter the new Turn");
     child.binding_version=1;
     sqlx::query("UPDATE agent_sessions SET agent_binding_json=? WHERE agent_session_id=?")
         .bind(serde_json::to_string(&child).unwrap()).bind(session).execute(fixture.db.pool()).await.unwrap();
     let started=fixture.repository.start_attempt(&fixture.owner,&fixture.execution_id,&queued.step.step_id,queued.step.version,
-        &queued_attempt.attempt.attempt_id,queued_attempt.attempt.version,session,AgentExecutionAttemptSessionKind::ChildAttempt,None,
+        &queued_attempt.attempt.attempt_id,queued_attempt.attempt.version,session,AgentExecutionAttemptSessionKind::ChildAttempt,None, None,
         &super::event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
     assert_eq!(started.current_attempt.unwrap().conversation_id.as_deref(),Some(session.as_str()));
 }

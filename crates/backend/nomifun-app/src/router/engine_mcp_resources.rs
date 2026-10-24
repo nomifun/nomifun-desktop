@@ -2,15 +2,50 @@
 //! authority. Frozen typed server bindings and the live model turn must all
 //! match before the retained task may contact the MCP owner.
 use super::*;
-use nomifun_agent_contracts::digest_payload;
+use nomifun_agent_contracts::{StrictJsonValue, digest_payload};
 use nomifun_engine_core::{
     EngineResourceImageRead, EngineResourceQuery, EngineResourceRead, EngineToolResult,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::sync::atomic::Ordering;
+use std::collections::BTreeMap;
+use super::super::engine_tool_host::owned_settlement::OwnedJournalSettlement;
+
+type ResourceSettlement = OwnedJournalSettlement<Result<StrictJsonValue, AppError>>;
+pub(super) type ResourceSettlements = Mutex<BTreeMap<String, Arc<ResourceSettlement>>>;
 
 impl EngineKernelSession {
+    pub(super) fn resource_settlements_unconfirmed(&self) -> Result<bool, AppError> {
+        let pending = self.resource_settlements.lock().map_err(|_| failure("resource settlement owner lock poisoned"))?;
+        for settlement in pending.values() {
+            if settlement.is_unconfirmed()? { return Ok(true); }
+        }
+        Ok(false)
+    }
+
+    async fn commit_resource_settlement(&self, operation: &str, settlement: &Arc<ResourceSettlement>)
+        -> Result<(), AppError> {
+        settlement.commit().await?;
+        let mut pending = self.resource_settlements.lock().map_err(|_| failure("resource settlement owner lock poisoned"))?;
+        if pending.get(operation).is_some_and(|current| Arc::ptr_eq(current, settlement)) {
+            pending.remove(operation);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn retry_resource_settlements(&self) -> Result<(), AppError> {
+        let pending = self.resource_settlements.lock().map_err(|_| failure("resource settlement owner lock poisoned"))?
+            .iter().map(|(operation, settlement)| (operation.clone(), settlement.clone())).collect::<Vec<_>>();
+        let mut first_failure = None;
+        for (operation, settlement) in pending {
+            if let Err(error) = self.commit_resource_settlement(&operation, &settlement).await {
+                first_failure.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_failure { return Err(error); }
+        Ok(())
+    }
+
     /// Frozen product identities only; no endpoint, credential or connection
     /// discovery. Engines choose how to expose this index to their models.
     pub fn mcp_resource_server_ids(&self) -> Vec<String> {
@@ -174,7 +209,7 @@ impl EngineKernelSession {
                 .state
                 .lock()
                 .map_err(|_| failure("resource state poisoned"))?;
-            if state.release.is_some() || self.resource_settlement_failed.load(Ordering::Acquire) {
+            if state.release.is_some() || self.resource_settlements_unconfirmed()? {
                 return Err(failure("resource admission is closed"));
             }
             let turn = state
@@ -199,23 +234,26 @@ impl EngineKernelSession {
                 let dispatch = json!({"event":"host_resource_dispatch","operation_id":operation,"call_id":call_id,
                     "resource_kind":"mcp_server","resource_binding_id":resource.binding_id,
                     "request_sha256":request_digest,"model_operation_id":causality.operation_id,"causality":causality});
-                if let Err(error) = journal.append(dispatch.to_string(), None, super::super::engine_journal::EngineJournalWrite::Progress).await {
-                    owner.resource_settlement_failed.store(true, Ordering::Release);
-                    return Err(error);
-                }
+                let dispatch_receipt = journal.append(dispatch.to_string(), None, super::super::engine_journal::EngineJournalWrite::Progress).await;
                 let query = resource_operation(&request.query);
-                let result = owner.wave2.read_mcp_resource(owner.principal.clone(), owner.session_id.clone(),
-                    operation.clone().into(), resource, query,
-                    nomifun_agent_kernel::InvocationControl::new(cancellation),
-                    causality.turn_operation_id.clone(), causality.resolved_snapshot_ref.clone()).await;
-                if let Err(error) = journal.append(json!({"event":"host_resource_settled","operation_id":operation,
-                    "owner_returned":result.is_ok()}).to_string(), None, super::super::engine_journal::EngineJournalWrite::Settlement).await {
-                    owner.resource_settlement_failed.store(true, Ordering::Release);
-                    return Err(error);
-                }
+                let (result, owner_invoked) = match dispatch_receipt {
+                    Ok(()) => (owner.wave2.read_mcp_resource(owner.principal.clone(), owner.session_id.clone(),
+                        operation.clone().into(), resource, query,
+                        nomifun_agent_kernel::InvocationControl::new(cancellation),
+                        causality.turn_operation_id.clone(), causality.resolved_snapshot_ref.clone()).await, true),
+                    Err(error) => (Err(error), false),
+                };
+                let mut payload = json!({"event":"host_resource_settled","operation_id":operation,
+                    "owner_returned":result.is_ok()});
+                if !owner_invoked { payload["owner_invoked"] = Value::Bool(false); }
+                let payload = payload.to_string();
+                let settlement = Arc::new(ResourceSettlement::new(journal, payload, result));
+                owner.resource_settlements.lock().map_err(|_| failure("resource settlement owner lock poisoned"))?
+                    .insert(operation.clone(), settlement.clone());
+                owner.commit_resource_settlement(&operation, &settlement).await?;
                 // Projection happens after owner cleanup and durable receipts.
                 // A stale page is not permission to undo/repeat the transaction.
-                let value = result?.0;
+                let value = settlement.take_outcome()??.0;
                 if image { owner.admit_mcp_image(generation)?; }
                 let projected = project(value, request).await?;
                 if image { owner.admit_mcp_image(generation)?; }

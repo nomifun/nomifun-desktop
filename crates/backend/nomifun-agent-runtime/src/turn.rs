@@ -688,8 +688,10 @@ pub(crate) async fn run_turn(
         // disposition. A response/control failure cannot turn completed work
         // into a failed task or release its original live process owners.
         macro_rules! intervene {
-            ($state:expr) => {{
+            ($state:expr) => {intervene!($state,None::<String>)};
+            ($state:expr,$blocked_child_cursor:expr) => {{
                 let state = $state;
+                let blocked_child_cursor=$blocked_child_cursor;
                 loop {
                     match crate::stop_resolution::attention(!state.work_status.running_processes.is_empty()) {
                         crate::stop_resolution::StopResolution::Park => {
@@ -709,6 +711,16 @@ pub(crate) async fn run_turn(
                                 protocol_recovery.observe_new_input();
                                 control_rejections.reset();
                                 state.completion.invalidate();
+                                if let Some(cursor)=blocked_child_cursor.as_ref() {
+                                    // The accepted input is the real decision
+                                    // handoff. Consuming it while process owners
+                                    // settle must not leave the old wait in
+                                    // front of the model that can act on it.
+                                    event_sink.emit(AgentEngineEvent::ChildrenWaitResolved {model_steps,cursor:cursor.clone()}).await?;
+                                    collaboration.record_wake(cursor)?;
+                                    model_request.input.messages.push(crate::collaboration::wake_message(cursor)?);
+                                    awaiting_children=None;
+                                }
                             } else { state.completion.invalidate_report(); }
                             model_request.input.provider_round_parent = None;
                             if !accepted && control_rejections.is_exhausted() {
@@ -722,7 +734,7 @@ pub(crate) async fn run_turn(
                         crate::stop_resolution::StopResolution::Pause => {
                             let receipt = persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
                                 request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
-                                &steering_receipt_order, Some(state), &patch_recovery, segments.as_ref(), &control_rejections, None, None, &collaboration).await?;
+                                &steering_receipt_order, Some(state), &patch_recovery, segments.as_ref(), &control_rejections, None, awaiting_children.as_ref(), &collaboration).await?;
                             let past_deferred_window = segments.as_ref().is_some_and(|segment| model_steps > segment.window_end());
                             if event_sink.supports_checkpoints() && receipt.is_none() && !past_deferred_window {
                                 return Err(AgentEngineError::EventSink("intervention checkpoint was not durably acknowledged".into()));
@@ -771,11 +783,14 @@ pub(crate) async fn run_turn(
                     return cancelled_turn(&event_sink, &agent_session_id, &turn_operation_id,
                         model_steps, &output_text, &reasoning_text, tool_call_count, provider_round_id.clone()).await;
                 },
-                result = port.wait(&model_request.causality, wait, cancellation.clone()) => result?,
+                result = crate::collaboration_wait::wait_for_children(port.as_ref(), &model_request.causality, wait,&collaboration, cancellation.clone()) => result?,
             };
             crate::collaboration::validate_snapshot(&snapshot)?;
+            if snapshot.decision_blocked()? {
+                intervene!(long_horizon.get_or_insert_with(LongHorizonState::default),Some(snapshot.cursor.clone()));
+            }
             event_sink.emit(AgentEngineEvent::ChildrenWaitResolved { model_steps, cursor: snapshot.cursor.clone() }).await?;
-            collaboration.wake_cursor = Some(snapshot.cursor.clone());
+            collaboration.record_wake(&snapshot.cursor)?;
             model_request.input.messages.push(crate::collaboration::wake_message(&snapshot.cursor)?);
             model_request.input.provider_round_parent = None;
             awaiting_children = None;
@@ -967,7 +982,7 @@ pub(crate) async fn run_turn(
             long_horizon.as_ref().is_some_and(|state| state.completion.review.phase != AgentExecutionPhase::Execution) || account_repair || report_only_locked, review_can_report,
             plan_blocks_report, review_has_running_processes, continuing_planned_task, report_only_locked || account_repair);
         let phase = synchronize_delivery_review(&mut model_request, &mut adaptive_slots, delivery_review_step, phase);
-        let requires_child_results = collaboration.wake_cursor.is_some() && !collaboration.pending_child_executions.is_empty();
+        let requires_child_results = !collaboration.unread_wakes.is_empty() && !collaboration.pending_child_executions.is_empty();
         let phase = if requires_child_results {
             model_request.input.tools = crate::collaboration::definitions().into_iter()
                 .filter(|tool| tool.name == crate::collaboration::STATUS).collect();
@@ -1940,18 +1955,18 @@ pub(crate) async fn run_turn(
                 if !result.is_error {
                     if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
                         if call.name == crate::collaboration::STATUS {
-                            if collaboration.observe_status(&crate::collaboration::snapshot_from_result(&result)?)? {
+                            if collaboration.observe_tool_result(call, &result, false)? {
                                 state.work_status.observe_child_workspace_change();
                                 state.completion.invalidate();
                                 scoped_instructions.invalidate();
                             }
-                        } else if call.name == crate::collaboration::MESSAGE {
-                            collaboration.accept_message(&result)?;
+                        } else if matches!(call.name.as_str(),crate::collaboration::MESSAGE|crate::collaboration::WAIT) {
+                            collaboration.observe_tool_result(call, &result, false)?;
                         } else if request.tool_plan.binding(&call.name).is_some_and(|binding|
                             binding.capability_id.as_ref() == "agent.collaboration"
                                 && matches!(binding.action_id.as_ref(), "agent/delegate" | "agent/fork"))
                             && dispatch.attempted(&expected_call_id)? {
-                            collaboration.accept(&result)?;
+                            collaboration.observe_tool_result(call, &result, true)?;
                         }
                     }
                 }
@@ -2815,7 +2830,7 @@ fn synchronize_adaptive_context(
         }
         if failure_stop_gate && !crate::delivery_review::delivery_slots(accepted_inputs).is_empty() {
             if let Some(slot) = slots.failure_stop {
-                request.input.instructions[slot].push_str(" For this numbered task, extend that minimal shape with the REQUIRED delivery_items from the advertised schema: include every advertised item_id, status=missing, results=[], and a plain explanation. Copy required exact observed error counts too. This is a blocked account, not permission to retry or discover results.");
+                request.input.instructions[slot].push_str(" If explicitly publishing selected raw results with delivery_items, include every advertised item_id; missing results use status=missing, results=[], and a plain explanation. Numbered functional requirements do not require this optional field. Copy required exact observed error counts too. This is a blocked account, not permission to retry or discover results.");
             }
         }
         // Temporary workflow gates do not revoke tools from the frozen
@@ -3386,7 +3401,7 @@ async fn invoke_tool_calls(
             let result = match collaboration_port {
                 Some(port) => tokio::select! { biased;
                     _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
-                    result = crate::collaboration::execute(call, port, &model_request.causality, cancellation.clone(), awaiting_children) => result,
+                    result = crate::collaboration::execute(call, port, &model_request.causality, cancellation.clone(), awaiting_children, collaboration) => result,
                 },
                 None => Ok(AgentToolResult::text(call.call_id.clone(), "The original collaboration owner is unavailable for this Turn.", true)),
             };
@@ -3621,16 +3636,6 @@ async fn invoke_tool_calls(
             let cleanup = matches!(binding.action_id.as_ref(),
                 "workspace.process/poll" | "workspace.process/cancel" | "workspace.process/close_stdin");
             if let Some(reason) = patch_recovery.gate(binding, call) { Some(reason) }
-            else if task_ledger_active && crate::delivery_review::multi_item_task(accepted_inputs)
-                && matches!(binding.action_id.as_ref(),"workspace.files/write"|"workspace.files/patch"|"workspace.process/input")
-                && crate::exact_actions::pending(&execution_plan.exact_actions).is_none_or(|action|!action.matches(call)) {
-                Some("Not executed: declare the NEXT source-bound exact_actions commitment in update_plan ALONE before this numbered task's mutation/stdin phase. Keep intermediate states and final LF. For stdin, declare receiver_ref to an earlier start_process action before launching, or use its fresh owned process_id; only a digest is retained. No success flags, credentials, fabricated/cold handles or authority. Actual byte/order requirements still need independent verification.")
-            }
-            else if task_ledger_active && execution_plan.revision == 0
-                && crate::delivery_review::multi_item_task(accepted_inputs)
-                && matches!(binding.action_id.as_ref(), "workspace.files/write" | "workspace.files/patch" | "workspace.process/input") {
-                Some("Not executed: this explicit multi-item task needs a concise update_plan ALONE before its first file mutation or stdin write. Keep each requested intermediate state as a separate ordered step; do not replace create-then-modify with only the final state. Retain exact requested bytes, including each final LF, and compute stdin as input plus append_newline (never specify one LF twice). The plan is model interpretation, not proof, permission or a receipt. No action in this batch ran; use fresh call IDs after the plan result, without replaying earlier settled effects.")
-            }
             else if task_ledger_active
                 && !cleanup
                 && crate::execution_policy::requires_task_ledger(binding)
@@ -3711,15 +3716,21 @@ async fn invoke_tool_calls(
             (index, call_id, result, runtime_hold)
         });
         let mut pending = invocations.collect::<futures::stream::FuturesUnordered<_>>();
+        let mut returned = std::collections::VecDeque::new();
         let mut ordered = vec![None; completed.len()];
         // Owners retain admitted tasks independently of these waiter futures.
-        // Record each returned read without waiting for an unrelated slow read;
-        // scoped instruction postprocessing remains serial and precedes output.
-        while !pending.is_empty() {
-            let next = tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
-                next = pending.next() => next,
+        // A caller may still own an admission lock while awaiting its writer.
+        // Keep polling every caller while serially projecting a returned read;
+        // otherwise that projection can wait for a lock held by a suspended
+        // sibling in this same FuturesUnordered. Only this bounded batch's
+        // returned values are buffered; native ownership stays with the Host.
+        while !pending.is_empty() || !returned.is_empty() {
+            let next = if let Some(result) = returned.pop_front() { Some(result) } else {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
+                    next = pending.next() => next,
+                }
             };
             let Some((index, call_id, result, runtime_hold)) = next else { break; };
             let call = completed.get(index).ok_or_else(|| AgentEngineError::InvalidContract(
@@ -3727,15 +3738,27 @@ async fn invoke_tool_calls(
             if call.call_id != call_id || ordered[index].is_some() {
                 return Err(AgentEngineError::InvalidContract("parallel result identity is inconsistent".into()));
             }
-            let result = match result {
-                Ok(result) => {
-                    result.validate_for(&call_id)?;
-                    Ok(scoped_instructions.after_call(call, result, invoker, event_sink, cancellation.clone()).await?.0)
-                }
-                Err(AgentEngineError::VoiceCorrectionBoundary)=>return Err(AgentEngineError::VoiceCorrectionBoundary),
-                Err(error) => Err(error),
+            let record = async {
+                let result = match result {
+                    Ok(result) => {
+                        result.validate_for(&call_id)?;
+                        Ok(scoped_instructions.after_call(call, result, invoker, event_sink, cancellation.clone()).await?.0)
+                    }
+                    Err(error) => Err(error),
+                };
+                record_tool_result_with_hold(call_id, result, runtime_hold, event_sink, model_step).await
             };
-            ordered[index] = Some(record_tool_result_with_hold(call_id, result, runtime_hold, event_sink, model_step).await?);
+            tokio::pin!(record);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
+                    result = &mut record => { ordered[index] = Some(result?); break; }
+                    next = pending.next(), if !pending.is_empty() => {
+                        if let Some(result) = next { returned.push_back(result); }
+                    }
+                }
+            }
         }
         if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
         let results = ordered.into_iter().map(|result| result.ok_or_else(||
@@ -8118,6 +8141,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn numbered_feature_requirements_allow_an_ordinary_plan_and_file_implementation() {
+        #[derive(Default)] struct Files(std::sync::Mutex<Vec<String>>);
+        #[async_trait] impl AgentToolInvoker for Files {
+            async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation){return Ok(result);}
+                self.0.lock().unwrap().push(invocation.call.call_id.as_ref().into());
+                if invocation.binding.action_id.as_ref()=="workspace.files/read" {return Ok(workspace_result(invocation));}
+                let content=invocation.call.arguments.0["content"].as_str().unwrap();
+                Ok(AgentToolResult::text(invocation.call.call_id.clone(),json!({"path":invocation.call.arguments.0["path"],"written":true,
+                    "bytes":content.len(),"sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes())}).to_string(),false))
+            }
+        }
+        let account=json!({"summary":"The independent module implementation was saved.",
+            "observed_tool_error_count":0,"observed_command_failure_count":0,
+            "criteria":[{"disposition":"unverified","rationale":"Both module implementations are saved; no additional validation was requested."}]});
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("inspect-module","read_file",json!({"path":"a"})),
+            control_step("module-write","write_file",json!({"path":"a","content":"export const start = () => {};\n"})),
+            control_step("ordinary-plan","update_plan",json!({"plan":[{"step":"Implement the independent modules","status":"in_progress"}]})),
+            control_step("independent-write","write_file",json!({"path":"b","content":"export const control = () => {};\n"})),
+            control_step("report","report_completion",account.clone()),
+            control_step("review","report_completion",account),
+        ])});
+        let tools=Arc::new(Files::default());
+        let plan=AgentToolPlan::new([tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false)]).unwrap();
+        let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {
+            text:"1. Inspect and implement the canvas module.\n2. Implement an independent control module and keep its interface separate.".into()}];
+        let result=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(initial,plan,principal(),0)).await
+            .unwrap_or_else(|error|panic!("ordinary numbered task failed: {error:?}; final model request={:?}",model.requests.lock().unwrap().last()));
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed {..}));
+        assert_eq!(*tools.0.lock().unwrap(),["inspect-module","module-write","independent-write"]);
+        assert!(model.requests.lock().unwrap()[2].input.tools.iter().any(|tool|tool.name=="update_plan"));
+        assert_eq!(model.requests.lock().unwrap().len(),6,"one bounded delivery review follows the ordinary completion account");
+        assert_eq!(model.requests.lock().unwrap()[5].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),["report_completion"]);
+        assert_attempt_counts_remain_accounted_without_public_notices(&model,&result,0,0);
+    }
+
+    #[tokio::test]
     async fn exact_action_preflight_rejects_wrong_bytes_and_replay_before_dispatch() {
         #[derive(Default)] struct Files(std::sync::Mutex<Vec<String>>);
         #[async_trait] impl AgentToolInvoker for Files {
@@ -8184,17 +8246,16 @@ mod tests {
             "criteria":[{"disposition":"unverified","rationale":"Only the earlier recorded command result is disclosed."}],
             "delivery_items":[{"item_id":"input_0_part_0_line_0","status":"delivered","results":[{"result_ref":"original","label":"Known command"}]},
                 {"item_id":"input_0_part_0_line_1","status":"delivered","results":[{"result_ref":"original","label":"Known command"}]}]});
+        let mut invalid_report=report(0);
+        invalid_report["criteria"][0]["rationale"]=json!(42);
         let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
-            control_step("premature-write","write_file",json!({"path":"a","content":"premature-final"})),
-            control_step("ordered-plan","update_plan",json!({"plan":[{"step":"Create original then run the specified command","status":"in_progress"}],
-                "exact_actions":[{"id":"create","source":{"input":0,"quote":"Create a once."},"tool":"write_file","expected_arguments":{"path":"a","content":"original"}},
-                    {"id":"command","source":{"input":0,"quote":"Run the original command"},"tool":"start_process","expected_arguments":{"command":"bun","args":["test"]}}]})),
             control_step("created","write_file",json!({"path":"a","content":"original"})),
+            control_step("ordered-plan","update_plan",json!({"plan":[{"step":"Create original then run the specified command","status":"in_progress"}]})),
             control_step("original","start_process",json!({"command":"bun","args":["test"]})),
             control_step("settled-plan","update_plan",json!({"plan":[{"step":"Create original then run the specified command","status":"completed"}]})),
-            control_step("bad-report","report_completion",report(2)),
+            control_step("bad-report","report_completion",invalid_report),
             control_step("recreated-file","write_file",json!({"path":"a","content":"replayed"})),
-            control_step("fixed-report","report_completion",report(2)),
+            control_step("fixed-report","report_completion",report(1)),
             text_step("must not replay completed work"),
         ])});
         let tools=Arc::new(HealthyTools::default());
@@ -8206,18 +8267,15 @@ mod tests {
         let mut initial=request();initial.input.messages[0].content=vec![ChatContentPart::Text {
             text:"1. Create a once.\n2. Run the original command and report without repeating it.".into()}];
         let result=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(initial,plan,principal(),0)).await;
-        let feedback = model.requests.lock().unwrap()[6].input.messages.iter().flat_map(|message|&message.content)
+        let feedback = model.requests.lock().unwrap()[5].input.messages.iter().flat_map(|message|&message.content)
             .find(|part|matches!(part,ChatContentPart::ToolResult{call_id,..} if call_id.as_ref()=="bad-report")).cloned();
         assert_eq!(*tools.calls.lock().unwrap(),["created","original"],"a parameter refusal cannot authorize a new write after a healthy settled command; feedback={feedback:?}");
         let result=result.unwrap();
-        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
-        assert_eq!(model.requests.lock().unwrap()[6].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::completion::TOOL_NAME]);
-        assert_attempt_counts_remain_accounted_without_public_notices(&model, &result, 2, 0);
-        let requests=model.requests.lock().unwrap();
-        assert!(requests[1].input.tools.iter().any(|tool|tool.name=="update_plan"));
-        assert!(requests[1].input.messages.iter().flat_map(|message|&message.content).any(|part|
-            matches!(part,ChatContentPart::ToolResult {call_id,output,is_error:true} if call_id.as_ref()=="premature-write"
-                && output.iter().any(|part|matches!(part,nomifun_chat_model_broker::ChatToolResultPart::Text {text} if text.contains("exact_actions"))))));
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}),"original result={result:?}; report feedback={feedback:?}; model tool replies={:?}",
+            model.requests.lock().unwrap().iter().flat_map(|request|&request.input.messages).flat_map(|message|&message.content)
+                .filter(|part|matches!(part,ChatContentPart::ToolResult {..})).collect::<Vec<_>>());
+        assert_eq!(model.requests.lock().unwrap()[5].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::completion::TOOL_NAME]);
+        assert_attempt_counts_remain_accounted_without_public_notices(&model, &result, 1, 0);
         assert!(!result.output_text.contains("Unsuccessful command attempts"));
     }
 
@@ -9064,6 +9122,63 @@ mod tests {
         assert_eq!(results, vec![(first, false), (second, false)]);
         assert_eq!(requests[0].input.parallel_tool_calls,Some(true),"ordinary tool surfaces retain the caller preference");
         assert!(model.steps.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_fast_parallel_read_is_recorded_before_its_unrelated_slow_sibling_returns() {
+        struct Tools { entered: CancellationToken, release: CancellationToken, calls: AtomicUsize }
+        #[async_trait]
+        impl AgentToolInvoker for Tools {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                if let Some(result) = instruction_result(&invocation) { return Ok(result); }
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if invocation.call.call_id.as_ref() == "slow-read" {
+                    self.entered.cancel(); self.release.cancelled().await;
+                } else {
+                    assert_eq!(invocation.call.call_id.as_ref(), "fast-read");
+                    self.entered.cancelled().await;
+                }
+                Ok(workspace_result(invocation))
+            }
+        }
+        struct Sink { fast: CancellationToken, events: std::sync::Mutex<Vec<AgentEngineEvent>> }
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                if matches!(&event, AgentEngineEvent::ToolCompleted { result, .. } if result.call_id.as_ref() == "fast-read") { self.fast.cancel(); }
+                self.events.lock().unwrap().push(event); Ok(())
+            }
+        }
+        let mut burst = control_step("fast-read", "read_file", json!({"path":"a"}));
+        burst.pop(); burst.extend(control_step("slow-read", "read_file", json!({"path":"b"})));
+        let mut steps = vec![burst]; steps.extend(completion_steps("inspect", &["fast-read", "slow-read"], true));
+        let model = Arc::new(ObservingModel { steps: std::sync::Mutex::new(steps), requests: Default::default() });
+        let tools = Arc::new(Tools { entered: CancellationToken::new(), release: CancellationToken::new(), calls: AtomicUsize::new(0) });
+        let sink = Arc::new(Sink { fast: CancellationToken::new(), events: Default::default() });
+        let plan = AgentToolPlan::new([tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true)]).unwrap();
+        let execution = run_turn(binding(), model.clone(), tools.clone(), sink.clone(),
+            AgentTurnRequest::new(request(), plan, principal(), 0), AgentContextBudget::default(), CancellationToken::new());
+        tokio::pin!(execution);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                result = &mut execution => panic!("the held slow owner cannot have completed: {result:?}"),
+                _ = sink.fast.cancelled() => {}
+            }
+        }).await.expect("the fast original result is persisted without draining a slow sibling");
+        assert!(!tools.release.is_cancelled());
+        assert!(!sink.events.lock().unwrap().iter().any(|event| matches!(event,
+            AgentEngineEvent::ToolCompleted { result, .. } if result.call_id.as_ref() == "slow-read")));
+        tools.release.cancel();
+        let result = execution.await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 2, "both original reads run once");
+        let requests = model.requests.lock().unwrap();
+        let results = requests[1].input.messages.iter().flat_map(|message| &message.content).filter_map(|part| match part {
+            ChatContentPart::ToolResult { call_id, .. } => Some(call_id.as_ref()), _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(results, ["fast-read", "slow-read"], "the next model retains proposal order");
+        assert!(sink.events.lock().unwrap().iter().any(|event| matches!(event,
+            AgentEngineEvent::ToolResultsOrdered { call_ids, .. } if call_ids.iter().map(|id| id.as_ref()).collect::<Vec<&str>>() == ["fast-read", "slow-read"])));
     }
 
     #[tokio::test]

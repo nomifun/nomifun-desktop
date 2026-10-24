@@ -9,6 +9,8 @@
 mod attempt_runner;
 mod automation;
 mod canonical_output;
+pub use engine::{AgentExecutionCollaborationObservation, AgentExecutionCollaborationState,
+    AgentExecutionCollaborationStep, AgentExecutionCollaborationAttempt};
 mod control_steps;
 mod control;
 mod conversation_effect;
@@ -39,6 +41,7 @@ pub use delivery::{AgentExecutionDelivery, AgentExecutionTurnOutput, AgentExecut
     AgentExecutionMessageReceipt, AgentExecutionSteerDelivery,
     AgentExecutionAttemptReport, AgentExecutionReport, AgentExecutionInput,
     AgentExecutionControlSource, AgentExecutionControlReceipt};
+pub use delivery::{AgentExecutionRestartTarget,AgentExecutionRestartNativeOutcome};
 mod user_input;
 pub use user_input::validate_user_input_handoff_policy;
 pub use engine::{AgentExecutionEngine, execution_source_from_initial_plan,automation_control_from_rows};

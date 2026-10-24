@@ -1159,6 +1159,30 @@
       "replay_rule": "rebuild_projection"
     },
     {
+      "kind": "runtime/native-settlement-requested",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/runtime-native-settlement-requested/v1",
+      "producer": { "allowed": ["runtime_supervisor"] },
+      "predecessor": { "mode": "any_of", "kinds": ["turn/started"] },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": { "required": false, "reducers": [] },
+      "replay_rule": "no_effect"
+    },
+    {
+      "kind": "runtime/native-settlement-settled",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/runtime-native-settlement-settled/v1",
+      "producer": { "allowed": ["runtime_supervisor"] },
+      "predecessor": { "mode": "any_of", "kinds": ["runtime/native-settlement-requested"] },
+      "correlation": "turn",
+      "idempotency": "operation_scoped_required",
+      "projector": { "required": false, "reducers": [] },
+      "replay_rule": "no_effect"
+    },
+    {
       "kind": "runtime/progress-recorded",
       "version": 1,
       "persistence": "persistent",

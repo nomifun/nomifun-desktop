@@ -59,7 +59,7 @@ async fn native_effect_cross_project_aliases_and_execution_domains_share_pending
     store.record_effect_started_with_native_targets(first.clone(), original.clone()).await.unwrap();
     conflicted(store.record_effect_started_with_native_targets(alias.clone(), alias_targets.clone()).await);
     store.record_effect_started_with_native_targets(disjoint, footprint(vec![target(Some("volume:file-43"), "parent-one", &["OTHER.TXT"], &["root", "parent-one"], false)])).await.unwrap();
-    store.record_effect_terminal(settlement(&first, "unknown", json!({"recovery":"process_restart_external_reconciliation_required"})), EffectTerminalState::Uncertain).await.unwrap();
+    store.record_effect_terminal(settlement(&first, "unknown", json!({"recovery":"native_recovery_external_reconciliation_required"})), EffectTerminalState::Uncertain).await.unwrap();
     conflicted(store.record_effect_started_with_native_targets(alias.clone(), alias_targets.clone()).await);
     let reopened = AgentSessionStore::from_pool(store.test_pool().clone()).await.unwrap();
     conflicted(reopened.record_effect_started_with_native_targets(alias, alias_targets).await);
@@ -91,7 +91,7 @@ async fn native_effect_two_independent_database_pools_have_one_atomic_winner_and
     let reopened = AgentSessionStore::connect_existing(&path).await.unwrap();
     conflicted(reopened.record_effect_started_with_native_targets(loser.clone(), shared.clone()).await);
     assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_effects WHERE state='pending'").fetch_one(reopened.test_pool()).await.unwrap(), 1);
-    reopened.record_effect_terminal(settlement(&winner,"unknown-after-reopen",json!({"recovery":"process_restart_external_reconciliation_required"})),EffectTerminalState::Uncertain).await.unwrap();
+    reopened.record_effect_terminal(settlement(&winner,"unknown-after-reopen",json!({"recovery":"native_recovery_external_reconciliation_required"})),EffectTerminalState::Uncertain).await.unwrap();
     reopened.test_pool().close().await;
     let reopened_again=AgentSessionStore::connect_existing(&path).await.unwrap();
     conflicted(reopened_again.record_effect_started_with_native_targets(loser, shared).await);
@@ -199,7 +199,7 @@ async fn native_effect_publication_unknown_fences_unobserved_new_object_hardlink
     assert!(matches!(store.record_effect_started_with_native_targets(publication.clone(),footprint(vec![target_before_publication.clone()])).await,Err(SessionStoreError::InvalidEvent(_))));
     target_before_publication.volume_wide=true;
     store.record_effect_started_with_native_targets(publication.clone(),footprint(vec![target_before_publication])).await.unwrap();
-    store.record_effect_terminal(settlement(&publication,"unknown",json!({"recovery":"process_restart_external_reconciliation_required"})),EffectTerminalState::Uncertain).await.unwrap();
+    store.record_effect_terminal(settlement(&publication,"unknown",json!({"recovery":"native_recovery_external_reconciliation_required"})),EffectTerminalState::Uncertain).await.unwrap();
     let external_alias=request(&store,"native-published-hardlink","workspace.files/delete","administrator").await;
     conflicted(store.record_effect_started_with_native_targets(external_alias,footprint(vec![target(Some("new-object-not-in-start-facts"),"unrelated-parent", &["HARDLINK"], &["unrelated-parent"],false)])).await);
     let disjoint=request(&store,"native-publication-other-volume","workspace.files/patch","administrator").await;

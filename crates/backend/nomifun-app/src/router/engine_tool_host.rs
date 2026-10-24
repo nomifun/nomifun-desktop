@@ -1,11 +1,10 @@
 //! Engine-neutral ownership of tool dispatch and durable settlement. This is
 //! not a resource factory: application assembly must supply the canonical
 //! Kernel or composite owner invoker with exact Session/Snapshot/tool bindings.
-use std::collections::BTreeSet;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use nomifun_ai_agent::engine_sdk::EngineTaskGroup;
@@ -18,6 +17,44 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use super::engine_journal::{EngineJournalWrite, EngineTurnJournal};
+
+#[path = "engine_owned_settlement.rs"]
+pub(super) mod owned_settlement;
+use owned_settlement::OwnedJournalSettlement;
+#[path = "engine_tool_return.rs"]
+mod tool_return;
+
+struct ToolSettlement {
+    call_id: String,
+    rejection: Option<tool_return::ToolReturnRejection>,
+    write: OwnedJournalSettlement<Result<EngineToolResult, EngineToolError>>,
+}
+type ToolSettlements = Mutex<BTreeMap<String, Arc<ToolSettlement>>>;
+
+fn has_unconfirmed_settlements(settlements: &ToolSettlements) -> Result<bool, AppError> {
+    let pending = settlements.lock().map_err(|_| failure("settlement owner lock poisoned"))?;
+    for settlement in pending.values() {
+        if settlement.write.is_unconfirmed()? { return Ok(true); }
+    }
+    Ok(false)
+}
+
+async fn commit_tool_settlement(settlements: &ToolSettlements, unobserved: &Mutex<BTreeSet<String>>,
+    operation: &str, settlement: &Arc<ToolSettlement>) -> Result<(), AppError> {
+    settlement.write.commit().await?;
+    match unobserved.lock() {
+        Ok(mut observations) => { observations.insert(settlement.call_id.clone()); }
+        Err(_) => {
+            settlement.write.retain_owner_failure("observation lock poisoned after the original record committed")?;
+            return Err(failure("observation lock poisoned"));
+        }
+    }
+    let mut pending = settlements.lock().map_err(|_| failure("settlement owner lock poisoned"))?;
+    if pending.get(operation).is_some_and(|current| Arc::ptr_eq(current, settlement)) {
+        pending.remove(operation);
+    }
+    Ok(())
+}
 
 /// Durable dispatch intent, NOT proof of Kernel authorization, committed
 /// effects, or process exit. Arguments/credentials are deliberately absent.
@@ -57,7 +94,7 @@ pub struct EngineToolHost {
     tasks: EngineTaskGroup,
     execution: Arc<tokio::sync::RwLock<()>>,
     turn: Mutex<Option<Turn>>,
-    settlement_failed: Arc<AtomicBool>,
+    settlements: Arc<ToolSettlements>,
     unobserved: Arc<Mutex<BTreeSet<String>>>,
 }
 
@@ -99,7 +136,7 @@ impl EngineToolInvoker for EngineToolHost {
             if turn.closed
                 || !turn.journal.matches_tool(&invocation)
                 || turn.operation != invocation.turn_operation_id.as_ref()
-                || self.settlement_failed.load(Ordering::Acquire)
+                || has_unconfirmed_settlements(&self.settlements).map_err(tool_error)?
             {
                 return Err(tool_error("tool differs from its healthy admitted turn"));
             }
@@ -117,11 +154,11 @@ impl EngineToolInvoker for EngineToolHost {
                 .insert(invocation.operation_id.as_ref().to_owned());
             turn.calls
                 .insert(invocation.call.call_id.as_ref().to_owned());
-            let (inner, policy, journal, failed, unobserved) = (
+            let (inner, policy, journal, settlements, unobserved) = (
                 self.inner.clone(),
                 self.policy.clone(),
                 turn.journal.clone(),
-                self.settlement_failed.clone(),
+                self.settlements.clone(),
                 self.unobserved.clone(),
             );
             let execution = self.execution.clone();
@@ -158,27 +195,31 @@ impl EngineToolInvoker for EngineToolHost {
                 let intent = serde_json::json!({"event":"host_tool_dispatch", "dispatch":dispatch}).to_string();
                 // This insert enforces the current accepted root/epoch. It is
                 // dispatch intent only; the inner Kernel owns actual admission.
-                journal.append(intent, None, EngineJournalWrite::Progress).await.map_err(tool_error)?;
+                let dispatch_receipt = journal.append(intent, None, EngineJournalWrite::Progress).await;
                 // Cancellation is cooperative, never rollback proof. Retain
                 // this owner task through the actual result while still
                 // forwarding the turn's cancellation to Service/process
                 // owners so they can stop bounded work and be reaped.
-                let result = inner.invoke(invocation.clone(), effect_cancellation).await
-                    .and_then(|result| { result.validate_for(&invocation.call.call_id)?; Ok(result) });
-                let recorded = result.as_ref().ok().map(|result| policy.project(&invocation, result));
-                let message = result.as_ref().err().map(|error| bounded_error(&error.to_string()));
-                let payload = serde_json::json!({"event":"host_tool_settled", "operation_id":dispatch.operation_id,
-                    "call_id":dispatch.call_id, "result":recorded, "error":message}).to_string();
-                // A policy cannot grow the platform log or substitute another
-                // call's observation. Failure quarantines cleanup, not the effect.
-                if payload.len() > 64 * 1024 || recorded.as_ref().is_some_and(|result| result.call_id != invocation.call.call_id)
-                    || journal.append(payload, None, EngineJournalWrite::Settlement).await.is_err() {
-                    failed.store(true, Ordering::Release);
-                    return Err(tool_error("tool settlement could not be persisted"));
-                }
-                unobserved.lock().map_err(|_| { failed.store(true, Ordering::Release); tool_error("observation lock poisoned") })?
-                    .insert(dispatch.call_id);
-                result
+                let (result, owner_invoked) = match dispatch_receipt {
+                    Ok(()) => (inner.invoke(invocation.clone(), effect_cancellation).await, true),
+                    Err(error) => (Err(tool_error(format!("native invocation not started; original dispatch receipt unconfirmed: {error}"))), false),
+                };
+                let projection = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                    result.as_ref().ok().map(|result| policy.project(&invocation, result))));
+                let (recorded, policy_panicked) = match projection {
+                    Ok(recorded) => (recorded, false),
+                    Err(_) => (None, true),
+                };
+                let (payload,rejection) = tool_return::settlement_payload(&dispatch,&invocation,&result,
+                    recorded.as_ref(),policy_panicked,owner_invoked);
+                let settlement = Arc::new(ToolSettlement { call_id: dispatch.call_id.clone(), rejection,
+                    write: OwnedJournalSettlement::new(journal, payload, result) });
+                settlements.lock().map_err(|_| tool_error("settlement owner lock poisoned"))?
+                    .insert(dispatch.operation_id.clone(), settlement.clone());
+                commit_tool_settlement(&settlements, &unobserved, &dispatch.operation_id, &settlement)
+                    .await.map_err(tool_error)?;
+                if let Some(rejection) = &settlement.rejection { return Err(rejection.error()); }
+                settlement.write.take_outcome().map_err(tool_error)?
             }).map_err(tool_error)?
         };
         tokio::select! {
@@ -822,6 +863,197 @@ mod tests {
         assert!(owner.join().await.is_err());
         assert!(owner.join().await.is_err());
     }
+
+    struct CountedReturn { calls: Arc<std::sync::atomic::AtomicUsize> }
+
+    #[async_trait]
+    impl EngineToolInvoker for CountedReturn {
+        async fn invoke(&self, invocation: EngineToolInvocation, _: CancellationToken)
+            -> Result<EngineToolResult, EngineToolError> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Ok(EngineToolResult::text(invocation.call.call_id, "original immutable owner result", false))
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_tool_settlement_retries_original_return_without_invoking_again() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let owner = tools(Arc::new(CountedReturn { calls: calls.clone() }));
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        owner.bind_turn("turn".into(), journal).unwrap();
+        sqlx::query("CREATE TRIGGER reject_original_tool_return BEFORE INSERT ON agent_events WHEN NEW.kind='runtime/progress-recorded' AND json_extract(NEW.inline_json,'$.event.event')='host_tool_settled' BEGIN SELECT RAISE(FAIL,'fixture original return write unavailable'); END")
+            .execute(&pool).await.unwrap();
+        assert!(owner.invoke(cancellation_invocation(), CancellationToken::new()).await.is_err());
+        owner.close_turn().unwrap();
+        assert!(owner.join().await.is_err());
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        sqlx::query("DROP TRIGGER reject_original_tool_return").execute(&pool).await.unwrap();
+        owner.join().await.unwrap();
+        owner.join().await.unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        let records: Vec<String> = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='host_tool_settled'")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(records.len(), 1);
+        let value: Value = serde_json::from_str(&records[0]).unwrap();
+        let result: EngineToolResult = serde_json::from_value(value["event"]["result"].clone()).unwrap();
+        assert_eq!(result, EngineToolResult::text("queued-call".into(), "original immutable owner result", false));
+        owner.discard_closed_observations().unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn committed_dispatch_with_failed_projection_closes_as_not_invoked() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let owner = tools(Arc::new(CountedReturn { calls: calls.clone() }));
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        owner.bind_turn("turn".into(), journal).unwrap();
+        sqlx::query("CREATE TRIGGER reject_original_dispatch_projection BEFORE INSERT ON agent_events WHEN NEW.kind='tool/call-started' BEGIN SELECT RAISE(FAIL,'fixture dispatch projection unavailable'); END")
+            .execute(&pool).await.unwrap();
+        assert!(owner.invoke(cancellation_invocation(), CancellationToken::new()).await.is_err());
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        owner.close_turn().unwrap();
+        sqlx::query("DROP TRIGGER reject_original_dispatch_projection").execute(&pool).await.unwrap();
+        owner.join().await.unwrap();
+        owner.join().await.unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        let records: Vec<String> = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='host_tool_settled'")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(records.len(), 1);
+        let value: Value = serde_json::from_str(&records[0]).unwrap();
+        assert_eq!(value["event"]["owner_invoked"], false);
+        assert!(value["event"]["result"].is_null());
+        assert!(value["event"]["error"].as_str().unwrap().contains("native invocation not started"));
+        owner.discard_closed_observations().unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn rejected_dispatch_without_native_call_does_not_fabricate_a_settlement() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let owner = tools(Arc::new(CountedReturn { calls: calls.clone() }));
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        owner.bind_turn("turn".into(), journal).unwrap();
+        sqlx::query("CREATE TRIGGER reject_original_dispatch BEFORE INSERT ON agent_events WHEN NEW.kind='runtime/progress-recorded' AND json_extract(NEW.inline_json,'$.event.event')='host_tool_dispatch' BEGIN SELECT RAISE(FAIL,'fixture dispatch never committed'); END")
+            .execute(&pool).await.unwrap();
+        assert!(owner.invoke(cancellation_invocation(), CancellationToken::new()).await.is_err());
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        owner.close_turn().unwrap();
+        sqlx::query("DROP TRIGGER reject_original_dispatch").execute(&pool).await.unwrap();
+        owner.join().await.unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        let records: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE kind IN ('tool/call-started','tool/result-recorded') OR (kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event') IN ('host_tool_dispatch','host_tool_settled'))")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(records, 0, "uncommitted intent and an uninvoked native call cannot become history");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn contract_rejection_records_an_error_observation_and_releases_the_original_return() {
+        struct ForeignProjection;
+        impl EngineToolObservationPolicy for ForeignProjection {
+            fn project(&self, _: &EngineToolInvocation, _: &EngineToolResult) -> EngineToolResult {
+                EngineToolResult::text("foreign-call".into(), "invalid observation", false)
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let owner = EngineToolHost::new(Arc::new(CountedReturn { calls: calls.clone() }), Arc::new(ForeignProjection));
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        owner.bind_turn("turn".into(), journal).unwrap();
+        let error = owner.invoke(cancellation_invocation(), CancellationToken::new()).await.unwrap_err();
+        assert!(matches!(error, EngineToolError::InvalidContract(ref message) if message.contains("HOST_TOOL_RETURN_CONTRACT_REJECTED")));
+        owner.close_turn().unwrap();
+        owner.join().await.unwrap();
+        owner.join().await.unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(owner.settlements.lock().unwrap().is_empty(), "the original error observation was confirmed");
+        let records: Vec<String> = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='host_tool_settled'")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(records.len(), 1);
+        let value: Value = serde_json::from_str(&records[0]).unwrap();
+        let event = &value["event"];
+        assert_eq!(event["call_id"], "queued-call");
+        assert!(event["result"].is_null(), "the foreign projection is not an accepted result");
+        assert_eq!(event["contract_rejection"]["kind"], "observation_call_mismatch");
+        assert_eq!(event["contract_rejection"]["owner_returned"], true);
+        let original = EngineToolResult::text("queued-call".into(), "original immutable owner result", false);
+        assert_eq!(event["contract_rejection"]["original_return"]["sha256"],
+            serde_json::to_value(nomifun_agent_contracts::digest_payload(&original).unwrap()).unwrap());
+        assert!(!records[0].contains("invalid observation"));
+        owner.discard_closed_observations().unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn stopped_call_keeps_rejected_native_return_until_its_error_observation_commits() {
+        struct ForeignOwner { calls: Arc<std::sync::atomic::AtomicUsize> }
+        #[async_trait]
+        impl EngineToolInvoker for ForeignOwner {
+            async fn invoke(&self, _: EngineToolInvocation, _: CancellationToken)
+                -> Result<EngineToolResult,EngineToolError> {
+                self.calls.fetch_add(1,Ordering::AcqRel);
+                Ok(EngineToolResult::text("foreign-native-call".into(),"raw return is not this call's result",false))
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let owner = tools(Arc::new(ForeignOwner { calls: calls.clone() }));
+        let (journal,pool) = super::super::engine_journal::test_fixture().await;
+        let store = journal.canonical_store();
+        let invocation = cancellation_invocation();
+        let session = invocation.agent_session_id.clone();
+        let operation = invocation.turn_operation_id.clone();
+        owner.bind_turn("turn".into(),journal).unwrap();
+        sqlx::query("CREATE TRIGGER reject_contract_observation BEFORE INSERT ON agent_events WHEN NEW.kind='runtime/progress-recorded' AND json_extract(NEW.inline_json,'$.event.event')='host_tool_settled' BEGIN SELECT RAISE(FAIL,'fixture rejection observation unavailable'); END")
+            .execute(&pool).await.unwrap();
+        assert!(owner.invoke(invocation,CancellationToken::new()).await.is_err());
+        assert_eq!(owner.settlements.lock().unwrap().len(),1);
+        store.cancel_exact_turn(&session,&operation,"stop-rejected-return".into(),"session_api".into()).await.unwrap();
+        owner.close_turn().unwrap();
+        assert!(owner.join().await.is_err(),"Stop does not manufacture a missing error-observation receipt");
+        sqlx::query("DROP TRIGGER reject_contract_observation").execute(&pool).await.unwrap();
+        owner.join().await.unwrap();
+        owner.join().await.unwrap();
+        assert!(owner.settlements.lock().unwrap().is_empty());
+        assert_eq!(calls.load(Ordering::Acquire),1);
+        assert_eq!(store.read_turn_receipt(&session,&operation).await.unwrap().status,
+            nomifun_agent_session::TurnReceiptStatus::Cancelled);
+        let records: Vec<String> = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='host_tool_settled'")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(records.len(),1);
+        let value: Value = serde_json::from_str(&records[0]).unwrap();
+        assert_eq!(value["event"]["contract_rejection"]["kind"],"owner_call_mismatch");
+        assert_eq!(value["event"]["call_id"],"queued-call");
+        assert!(value["event"]["result"].is_null());
+        owner.discard_closed_observations().unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn oversized_observation_is_recorded_as_rejected_instead_of_pinning_cleanup() {
+        struct OversizedProjection;
+        impl EngineToolObservationPolicy for OversizedProjection {
+            fn project(&self, invocation: &EngineToolInvocation, _: &EngineToolResult) -> EngineToolResult {
+                EngineToolResult::text(invocation.call.call_id.clone(), "x".repeat(70*1024), false)
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let owner = EngineToolHost::new(Arc::new(CountedReturn { calls: calls.clone() }),Arc::new(OversizedProjection));
+        let (journal,pool) = super::super::engine_journal::test_fixture().await;
+        owner.bind_turn("turn".into(),journal).unwrap();
+        assert!(matches!(owner.invoke(cancellation_invocation(),CancellationToken::new()).await,
+            Err(EngineToolError::InvalidContract(message)) if message.contains("HOST_TOOL_RETURN_CONTRACT_REJECTED")));
+        owner.close_turn().unwrap();
+        owner.join().await.unwrap();
+        assert_eq!(calls.load(Ordering::Acquire),1);
+        let raw: String = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='host_tool_settled'")
+            .fetch_one(&pool).await.unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["event"]["contract_rejection"]["kind"],"observation_result_too_large");
+        assert!(value["event"]["result"].is_null());
+        assert!(raw.len()<4096);
+        assert!(value["event"]["contract_rejection"]["rejected_observation"]["bytes"].as_u64().unwrap()>64*1024);
+        owner.discard_closed_observations().unwrap();
+        pool.close().await;
+    }
 }
 
 fn bounded_error(message: &str) -> String {
@@ -851,7 +1083,7 @@ impl EngineToolHost {
             tasks: EngineTaskGroup::new(128).expect("fixed engine task bound is valid"),
             execution: Arc::new(tokio::sync::RwLock::new(())),
             turn: Mutex::new(None),
-            settlement_failed: Arc::new(false.into()),
+            settlements: Arc::new(Mutex::new(BTreeMap::new())),
             unobserved: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
@@ -863,7 +1095,7 @@ impl EngineToolHost {
             .turn
             .lock()
             .map_err(|_| failure("turn lock poisoned"))?;
-        if self.settlement_failed.load(Ordering::Acquire)
+        if has_unconfirmed_settlements(&self.settlements)?
             || !self.tasks.is_quiescent()?
             || self.has_unobserved()?
             || turn
@@ -905,10 +1137,17 @@ impl EngineToolHost {
         self.tasks.close()
     }
     pub async fn join(&self) -> Result<(), AppError> {
-        self.tasks.join().await?;
-        if self.settlement_failed.load(Ordering::Acquire) {
-            return Err(failure("settlement persistence is uncertain"));
+        let joined = self.tasks.join().await;
+        let pending = self.settlements.lock().map_err(|_| failure("settlement owner lock poisoned"))?
+            .iter().map(|(operation, settlement)| (operation.clone(), settlement.clone())).collect::<Vec<_>>();
+        let mut first_failure = None;
+        for (operation, settlement) in pending {
+            if let Err(error) = commit_tool_settlement(&self.settlements, &self.unobserved, &operation, &settlement).await {
+                first_failure.get_or_insert(error);
+            }
         }
+        joined?;
+        if let Some(error) = first_failure { return Err(error); }
         Ok(())
     }
     pub fn has_unobserved(&self) -> Result<bool, AppError> {
@@ -935,7 +1174,7 @@ impl EngineToolHost {
             .map_err(|_| failure("turn lock poisoned"))?;
         if turn.as_ref().is_some_and(|turn| !turn.closed)
             || !self.tasks.is_quiescent()?
-            || self.settlement_failed.load(Ordering::Acquire)
+            || !self.settlements.lock().map_err(|_| failure("settlement owner lock poisoned"))?.is_empty()
         {
             return Err(failure("cannot discard open or uncertain outcomes"));
         }

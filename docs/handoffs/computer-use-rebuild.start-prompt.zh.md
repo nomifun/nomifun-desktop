@@ -13,7 +13,7 @@
 
 直接在 main 开发。先检查 git status、HEAD 和当前分支，确认 main，并 git pull --ff-only；每个阶段开始前再次同步。保护无关改动，不 stash、reset、覆盖或清理用户工作。重叠文件按实际 HEAD 合并意图。每次落到 main 的改动自洽、可编译、受影响测试通过、开发平台应用可构建打包，不出现“旧实现已删、新实现未接上”的状态。
 
-完整阅读一次 AGENTS.md、docs/handoffs/computer-use-rebuild.zh.md（唯一施工说明）、docs/architecture/agent-session.zh.md、global-os-capabilities.zh.md、system-permissions.zh.md、docs/handoffs/agent-lifecycle-reliability.zh.md（U01–U13 同样适用）、docs/contributing/development.md。接续时核对最新进展和实际源码，不机械重做已完成的阅读/测试。按修订后的 C01–C08、D01–D14 与本机阶段条件执行；只有必须改变产品合同或缺少无法推断的关键事实时才提出具体问题，同时继续不受阻的工作。
+完整阅读一次 AGENTS.md、docs/handoffs/computer-use-rebuild.zh.md（唯一施工说明）、docs/architecture/agent-session.zh.md、global-os-capabilities.zh.md、system-permissions.zh.md、docs/architecture/agent-execution.zh.md（生命周期约束 U01–U13 同样适用）、docs/contributing/development.md。接续时核对最新进展和实际源码，不机械重做已完成的阅读/测试。按修订后的 C01–C08、D01–D14 与本机阶段条件执行；只有必须改变产品合同或缺少无法推断的关键事实时才提出具体问题，同时继续不受阻的工作。
 
 从方案第 12 节接续：
 - S1：确认 AGENTS.md 现役入口；固定上游 commit 4d959bbfa57f0c89f310330e849500b222084194（版本标签 cua-driver-rs-v0.37.0，标签解析差异按 SOURCE.json 记录），用 --filter=blob:none --sparse 按 D03 导入 vendor/cua-driver。只读参考可用 C:/Users/rika0/code/nomifun/main/resources/cua。保留 D04 去默认 features 补丁及已授权的必要最小缺陷补丁，全部登记并经 sync 应用；不再限定只能一个。完成独立 apps/computer-worker、MIT 署名、DPI manifest、self-check、真实 worker 协议测试、冻结清单和精简覆盖。Windows 构建/self-check/协议与一致性检查通过后进入 S2，其他平台和额外原生 POC 并行补验。
@@ -41,7 +41,7 @@
 ```text
 请从包含本文件的最新 main 接续 Computer Use 的 macOS 剩余实现与 S4。先查 git status、HEAD、分支并 git pull --ff-only；每阶段同步，保护并发工作，不 stash/reset/覆盖/清理。当前 UI/API45，以实际 HEAD 为准，不回退版本；Linux 已验源码基线 9b8706f71 只作证据身份，不要求 checkout 回旧提交。
 
-阅读 AGENTS.md、唯一方案 docs/handoffs/computer-use-rebuild.zh.md（尤其§8/9/12）、docs/architecture/computer-use.zh.md 及其会话/许可架构引用、docs/handoffs/agent-lifecycle-reliability.zh.md（U01–U13）。从最新§12接续已定 C01–C08/D01–D14，不恢复旧 Computer 或旧数据兼容、不改 canonical 存储。vendor 仅通过登记补丁修改，动作/schema/标题仍由冻结输入生成。
+阅读 AGENTS.md、唯一方案 docs/handoffs/computer-use-rebuild.zh.md（尤其§8/9/12）、docs/architecture/computer-use.zh.md 及其会话/许可架构引用、docs/architecture/agent-execution.zh.md（生命周期约束 U01–U13）。从最新§12接续已定 C01–C08/D01–D14，不恢复旧 Computer 或旧数据兼容、不改 canonical 存储。vendor 仅通过登记补丁修改，动作/schema/标题仍由冻结输入生成。
 
 Windows S1–S3及 Full/显式 NoImage 共享模型链路已有证据；Linux x64 release 三包、40项 Rust 测试、离线资源/ELF核验和3份 release lock 已完成。复用对应源码的有效证据，不机械重跑无关矩阵；这些不证明 macOS 原生、安装或正式身份通过。
 
@@ -57,7 +57,7 @@ Windows S1–S3及 Full/显式 NoImage 共享模型链路已有证据；Linux x6
 ```text
 请从包含本文件的最新 main 接续 Computer Use 的 Linux 原生产品与 S4。先查 git status、HEAD、分支并 git pull --ff-only；每阶段同步，保护并发工作，不 stash/reset/覆盖/清理。当前 UI/API45，以实际 HEAD 为准，不回退到历史源码或版本。
 
-阅读 AGENTS.md、唯一方案 docs/handoffs/computer-use-rebuild.zh.md（尤其§8/9/12）、docs/architecture/computer-use.zh.md 及其会话/许可架构引用、docs/handoffs/agent-lifecycle-reliability.zh.md（U01–U13）。遵循已定 C01–C08/D01–D14，不恢复旧 Computer/数据兼容、不改 canonical；vendor 只用登记补丁，动作/schema/标题由冻结输入派生。
+阅读 AGENTS.md、唯一方案 docs/handoffs/computer-use-rebuild.zh.md（尤其§8/9/12）、docs/architecture/computer-use.zh.md 及其会话/许可架构引用、docs/architecture/agent-execution.zh.md（生命周期约束 U01–U13）。遵循已定 C01–C08/D01–D14，不恢复旧 Computer/数据兼容、不改 canonical；vendor 只用登记补丁，动作/schema/标题由冻结输入派生。
 
 §12已闭合源码 9b8706f71 的 Linux x64 release worker、协议12/12和宿主28/28共40项 Rust 测试、deb/rpm/AppImage 构建、真实离线提取、依赖/资源/ELF核验及3/3 release lock。优先取得实物并核对既有SHA后复用；无输入变化不重编三包或重跑40项。AppImage有已验证的ELF改写，按各包自身身份验收，不要求三包 Host/worker 原始SHA相等。离线包与锁不证明安装、分发签名或真实桌面通过。
 

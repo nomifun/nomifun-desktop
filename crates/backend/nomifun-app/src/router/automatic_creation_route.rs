@@ -180,7 +180,10 @@ mod tests {
         }).to_string();
         assert_eq!(classify(&input), None);
         let media = serde_json::json!({"task_brief":"Read the design code", "step_spec":"生成一段猫咪视频"}).to_string();
-        assert_eq!(classify(&media), Some(AutomaticCreationRoute::Video));
+        assert_eq!(classify(&media), None,"an arbitrary source document cannot author a media task");
+        let accepted=serde_json::json!({"origin":"agent_execution","content":media});
+        let task=super::super::automatic_turn_intent::delegated_input_fixture(&accepted);
+        assert_eq!(classify(task.task()), Some(AutomaticCreationRoute::Video));
         assert_eq!(classify(r#"{"example":"generate a video"}"#), None);
     }
 }

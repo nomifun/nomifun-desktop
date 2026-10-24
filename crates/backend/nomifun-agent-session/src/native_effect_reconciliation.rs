@@ -69,7 +69,7 @@ impl AgentSessionStore {
         }
         let id = native_key("effect-attestation",session,&request.idempotency_key)?;
         let request_digest = digest_payload(request)?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let live = live_session_by_id_tx(&mut tx,session.as_ref()).await?;
         if &live.owner_ref != owner { return Err(SessionStoreError::ExecutionFenced); }
         if let Some(row) = event_by_event_id_tx(&mut tx,&id).await? {
@@ -107,7 +107,7 @@ impl AgentSessionStore {
                     "authority":"session_owner_verified","verifier_digest":digest_payload(owner)?,"outcome":request.outcome,"evidence":request.evidence,
                     "does_not_resolve_unknown_effect_rows":true,
                 })),None).await?)?;
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok(ack);
         }
         let row = sqlx::query_as::<_, StoredEffectRow>(
@@ -192,7 +192,7 @@ impl AgentSessionStore {
             record.causation_event_id = Some(uncertainty.event_id);
         }
         self.append_event_tx_with_policy(&mut tx,&effect_append(record,"effect/reconciled")?,None,AppendSessionStatePolicy::EffectSettlement).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(ack)
     }
 }

@@ -1,7 +1,7 @@
 //! Instruction reads use the same authorized Kernel tool as model reads.
 //! There is no native filesystem fallback or implicit grant of fs.read.
 use async_trait::async_trait;
-use nomifun_agent_contracts::StrictJsonValue;
+use nomifun_agent_contracts::{SessionPathLabel, StrictJsonValue};
 use nomifun_chat_model_broker::ChatToolCall;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -448,12 +448,12 @@ struct DiscoveredScope {
 #[derive(serde::Deserialize)]
 struct ScopeResponse {
     path: String,
-    canonical_path: String,
+    canonical_path: SessionPathLabel,
     kind: String,
     recursive: bool,
     #[serde(default)]
     path_semantics: InstructionPathSemantics,
-    directories: Vec<String>,
+    directories: Vec<SessionPathLabel>,
     complete: bool,
     incomplete_reasons: Vec<String>,
 }
@@ -500,8 +500,6 @@ impl ScopedInstructions {
             || scope.path_semantics != path_semantics
             || !(matches!(scope.kind.as_str(), "file" | "directory" | "missing")
                 || (scope.kind == "link" && path_semantics == InstructionPathSemantics::Entry))
-            || crate::agents_md::normalize_native_instruction_path(&scope.canonical_path)?
-                != scope.canonical_path
         {
             return Err(AgentEngineError::WorkspaceContext(
                 "instruction scope does not match the requested observation".into(),
@@ -515,17 +513,21 @@ impl ScopedInstructions {
                 serde_json::to_string(requested).unwrap_or_default(),
             )));
         }
-        let base = if scope.kind == "directory" { scope.canonical_path.clone() }
-            else { crate::agents_md::parent_directory(&scope.canonical_path) };
+        // The file owner publishes portable Session-relative labels and
+        // native absolute labels. Convert that typed observation once; a
+        // separator difference is neither a changed target nor authorization.
+        let canonical_path = scope.canonical_path.native_spelling();
+        let base = if scope.kind == "directory" { canonical_path.clone() }
+            else { crate::agents_md::parent_directory(&canonical_path) };
         if scope.directories.is_empty() || scope.directories.len() > 64 {
             return Err(AgentEngineError::WorkspaceContext(
                 "invalid instruction directory count".into(),
             ));
         }
         let mut directories = BTreeSet::new();
-        for directory in scope.directories {
-            if crate::agents_md::normalize_native_instruction_path(&directory)? != directory
-                || (directory != base
+        for label in scope.directories {
+            let directory = label.native_spelling();
+            if (directory != base
                     && !(recursive && scope.kind == "directory" && in_scope(&directory, &base)))
                 || !directories.insert(directory)
             {
@@ -540,7 +542,7 @@ impl ScopedInstructions {
             ));
         }
         Ok(DiscoveredScope {
-            canonical_path: scope.canonical_path,
+            canonical_path,
             kind: scope.kind,
             directories,
         })
@@ -1156,6 +1158,12 @@ mod tests {
         std::path::Path::new(protected_directory()).join(leaf).to_str().unwrap().to_owned()
     }
 
+    fn owner_label(path: &str) -> String {
+        let native = std::path::Path::new(path);
+        if native.is_absolute() { path.to_owned() }
+        else { native.components().map(|part| part.as_os_str().to_str().unwrap()).collect::<Vec<_>>().join("/") }
+    }
+
     #[derive(Default)]
     struct RecordingSink(Mutex<Vec<AgentEngineEvent>>);
     #[async_trait]
@@ -1189,9 +1197,9 @@ mod tests {
             let value = if args["format"] == "instruction_scope" {
                 let canonical = self.aliases.lock().unwrap().get(path).cloned().unwrap_or_else(|| path.to_owned());
                 let directory = if canonical == protected_directory() { canonical.clone() } else { crate::agents_md::parent_directory(&canonical) };
-                json!({"path":path,"canonical_path":canonical,"kind":if canonical == protected_directory() {"directory"} else {"file"},
+                json!({"path":path,"canonical_path":owner_label(&canonical),"kind":if canonical == protected_directory() {"directory"} else {"file"},
                     "recursive":args["recursive"],"path_semantics":args.get("path_semantics").cloned().unwrap_or(json!("follow")),
-                    "directories":[directory],"complete":true,"incomplete_reasons":[]})
+                    "directories":[owner_label(&directory)],"complete":true,"incomplete_reasons":[]})
             } else if protected && identity == InstructionIdentity::CurrentUser {
                 return Ok(AgentToolResult::text(invocation.call.call_id, "Permission denied (os error 13)", true));
             } else if path == protected_path("AGENTS.md") {
@@ -1244,6 +1252,56 @@ mod tests {
             else { json!({"command":if cfg!(windows) {"powershell.exe"} else {"/bin/sh"},"cwd":protected_directory()}) };
         if let Some(identity) = identity { arguments["execution_identity"] = identity.into(); }
         ChatToolCall { call_id: "proposed-call".into(), name: name.into(), arguments: StrictJsonValue(arguments), provider_metadata: None }
+    }
+
+    #[tokio::test]
+    async fn portable_owner_labels_load_nested_rules_and_preserve_native_read_and_entry_calls() {
+        struct PortableOwner { reads: Mutex<Vec<String>> }
+        #[async_trait]
+        impl AgentToolInvoker for PortableOwner {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken)
+                -> Result<AgentToolResult, AgentEngineError> {
+                assert_eq!(invocation.binding.action_id.as_ref(), "workspace.files/read");
+                let args = &invocation.call.arguments.0;
+                let path = args["path"].as_str().unwrap();
+                self.reads.lock().unwrap().push(path.into());
+                let native_directory = std::path::Path::new("项目").join("层一").join("层二");
+                let value = if args["format"] == "instruction_scope" {
+                    let directory = std::path::Path::new(path) == native_directory;
+                    json!({"path":path,"canonical_path":if directory {"项目/层一/层二"} else {"项目/层一/层二/file.txt"},
+                        "kind":if directory {"directory"} else {"file"},"recursive":args["recursive"],
+                        "path_semantics":args.get("path_semantics").cloned().unwrap_or(json!("follow")),
+                        "directories":["项目/层一/层二"],"complete":true,"incomplete_reasons":[]})
+                } else if std::path::Path::new(path) == native_directory.join("AGENTS.md") {
+                    let content = "NESTED_UNICODE_OWNER_RULE";
+                    json!({"kind":"workspace_file_text_page","path":path,"content":content,"offset":0,
+                        "total_bytes":content.len(),"eof":true,"next_offset":null,
+                        "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes())})
+                } else { json!({"kind":"workspace_file_absent","path":path}) };
+                Ok(AgentToolResult::text(invocation.call.call_id, value.to_string(), false))
+            }
+        }
+        let mut instructions = instructions();
+        let owner = PortableOwner { reads: Mutex::default() };
+        let sink = RecordingSink::default();
+        instructions.before_model(&owner, &sink, CancellationToken::new()).await.unwrap();
+        let native = std::path::Path::new("项目").join("层一").join("层二").join("file.txt");
+        let first = ChatToolCall { arguments: StrictJsonValue(json!({"path":"项目/层一/层二/file.txt"})), ..call("read_file", None) };
+        let original = first.arguments.clone();
+        let held = instructions.before_calls(&[first.clone()], &owner, &sink, CancellationToken::new()).await.unwrap().unwrap();
+        assert!(held.contains("Repository instructions changed"));
+        assert!(instructions.context().contains("NESTED_UNICODE_OWNER_RULE"));
+        assert_eq!(first.arguments, original);
+        let fresh = ChatToolCall { call_id:"fresh-native-read".into(), arguments:StrictJsonValue(json!({"path":native.to_str().unwrap()})), ..first };
+        assert!(instructions.before_calls(&[fresh], &owner, &sink, CancellationToken::new()).await.unwrap().is_none());
+        let entry = ChatToolCall { call_id:"fresh-entry-delete".into(), name:"delete_path".into(),
+            arguments:StrictJsonValue(json!({"path":"项目/层一/层二/file.txt"})), provider_metadata:None };
+        let original = entry.arguments.clone();
+        assert!(instructions.before_calls(&[entry.clone()], &owner, &sink, CancellationToken::new()).await.unwrap().is_none());
+        assert_eq!(entry.arguments, original, "instruction observation cannot rewrite a proposed mutation");
+        assert!(owner.reads.lock().unwrap().iter().any(|path| std::path::Path::new(path) == native.parent().unwrap().join("AGENTS.md")));
+        assert!(sink.0.lock().unwrap().iter().all(|event| !matches!(event, AgentEngineEvent::ToolStarted {action_id,..}
+            if action_id.as_ref() == "workspace.files/delete")), "preflight itself never performs the proposed entry mutation");
     }
 
     #[tokio::test]
@@ -1415,9 +1473,9 @@ mod tests {
                 let kind = if path == link { if entry { "link" } else { "directory" } }
                     else if path == protected_directory() { "directory" } else { "file" };
                 let directory = if kind == "directory" { canonical.clone() } else { crate::agents_md::parent_directory(&canonical) };
-                json!({"path":path,"canonical_path":canonical,"kind":kind,"recursive":args["recursive"],
+                json!({"path":path,"canonical_path":owner_label(&canonical),"kind":kind,"recursive":args["recursive"],
                     "path_semantics":if self.mismatch {json!("follow")} else {semantics},
-                    "directories":[directory],"complete":true,"incomplete_reasons":[]})
+                    "directories":[owner_label(&directory)],"complete":true,"incomplete_reasons":[]})
             } else { json!({"kind":"workspace_file_absent","path":path}) };
             Ok(AgentToolResult::text(invocation.call.call_id, value.to_string(), false))
         }
@@ -1562,8 +1620,8 @@ mod tests {
                     else if path == "." { String::new() } else { path.to_owned() };
                 let kind = if path == "." || path == protected_directory() || path.ends_with("independent") { "directory" } else { "file" };
                 let directory = if kind == "directory" { canonical.clone() } else { crate::agents_md::parent_directory(&canonical) };
-                json!({"path":path,"canonical_path":canonical,"kind":kind,"recursive":args["recursive"],
-                    "path_semantics":args.get("path_semantics").cloned().unwrap_or(json!("follow")),"directories":[directory],"complete":true,"incomplete_reasons":[]})
+                json!({"path":path,"canonical_path":owner_label(&canonical),"kind":kind,"recursive":args["recursive"],
+                    "path_semantics":args.get("path_semantics").cloned().unwrap_or(json!("follow")),"directories":[owner_label(&directory)],"complete":true,"incomplete_reasons":[]})
             } else if path == protected_path("AGENTS.md") {
                 let content = format!("{}_{}", self.content.lock().unwrap(), identity.label());
                 json!({"path":path,"content":content,"offset":0,"total_bytes":content.len(),"eof":true,"next_offset":null,

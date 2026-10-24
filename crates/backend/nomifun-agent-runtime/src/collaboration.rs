@@ -8,6 +8,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::AgentEngineError;
 
+#[path = "collaboration_cursor.rs"]
+mod cursor;
+#[cfg(test)]
+pub(crate) use cursor::test_snapshot;
+
 pub(crate) const STATUS: &str = "agent_status";
 pub(crate) const WAIT: &str = "agent_wait";
 pub(crate) const MESSAGE: &str = "agent_message";
@@ -58,14 +63,21 @@ pub struct AgentCollaborationSnapshot {
     pub result: StrictJsonValue,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Two bounded identities of the same observation. State tracks Attempt and
+/// admitted-command changes; ready tracks exact results/decisions, so unrelated
+/// progress cannot re-notify a question that the parent already observed.
+#[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentCollaborationMessage {
-    pub execution_id: String,
-    pub step_id: String,
-    pub content: String,
-    pub idempotency_key: String,
+pub struct AgentCollaborationObservation {
+    pub state:String,
+    pub ready:String,
 }
+
+impl AgentCollaborationObservation {
+    fn validate(&self)->bool {valid_digest(&self.state)&&valid_digest(&self.ready)}
+}
+
+pub use nomifun_agent_contracts::AgentCollaborationMessage;
 
 /// Bounded references derived from accepted owner receipts and successful
 /// status tool results. Bodies remain only in the original event journal.
@@ -74,10 +86,8 @@ pub struct AgentCollaborationMessage {
 pub struct AgentCollaborationProgress {
     pub pending_child_executions: std::collections::BTreeSet<String>,
     pub results: std::collections::BTreeMap<String, AgentChildResultConsumption>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wake_cursor: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_read_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub unread_wakes: std::collections::BTreeSet<String>,
     #[serde(default,skip_serializing_if="std::collections::BTreeMap::is_empty")]
     /// One watermark of each selected Step's complete immutable source set.
     /// Deletion has a distinct key and clears the Execution's old Step index.
@@ -88,6 +98,13 @@ pub struct AgentCollaborationProgress {
 #[serde(deny_unknown_fields)]
 pub struct AgentChildResultConsumption {
     pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_cursor: Option<AgentCollaborationObservation>,
+    /// Complete ready source heads from the latest successful status, never
+    /// bodies. Reading a head acknowledges its decision version, not delivery
+    /// of that Step's result bytes or resolution of its question.
+    #[serde(default,skip_serializing_if="std::collections::BTreeMap::is_empty")]
+    pub ready_source_digests: std::collections::BTreeMap<String,String>,
     pub source_digests: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub result_pages: std::collections::BTreeMap<String, AgentChildResultCoverage>,
@@ -107,7 +124,7 @@ pub struct AgentChildResultCoverage {
 
 impl AgentCollaborationProgress {
     pub fn is_empty(&self) -> bool { self.pending_child_executions.is_empty() && self.results.is_empty()
-        && self.wake_cursor.is_none() && self.last_read_cursor.is_none() && self.workspace_observations.is_empty() }
+        && self.unread_wakes.is_empty() && self.workspace_observations.is_empty() }
 
     pub fn validate(&self) -> Result<(), AgentEngineError> {
         if self.pending_child_executions.len() > 64 || self.results.len() > 64
@@ -117,7 +134,9 @@ impl AgentCollaborationProgress {
                     || !digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
                 || result.result_pages.len() > 128 || result.result_pages.iter().any(|(id,page)|
                     !valid_id(id) || !valid_digest(&page.source_digest) || !valid_digest(&page.sha256)
-                        || page.contiguous_bytes > page.total_bytes)) {
+                        || page.contiguous_bytes > page.total_bytes)
+                || result.ready_source_digests.len()>129 || result.ready_source_digests.iter().any(|(id,digest)|
+                    (id!="@execution"&&id.strip_prefix("step:").is_none_or(|id|!valid_id(id)))||!valid_digest(digest))) {
             return Err(AgentEngineError::InvalidContract("invalid bounded collaboration progress references".into()));
         }
         if self.workspace_observations.len()>64 || self.workspace_observations.iter().any(|(execution,steps)|
@@ -126,7 +145,9 @@ impl AgentCollaborationProgress {
                 (key!="@deleted" && key.strip_prefix("step:").is_none_or(|step|!valid_id(step))) || !valid_digest(digest))) {
             return Err(AgentEngineError::InvalidContract("invalid bounded child workspace observation references".into()));
         }
-        if self.wake_cursor.iter().chain(self.last_read_cursor.iter()).any(|cursor| cursor.is_empty() || cursor.len() > 8192 || cursor.contains('\0')) {
+        if self.unread_wakes.len()>64 || self.unread_wakes.iter().any(|id| !valid_id(id)
+            || (!self.pending_child_executions.contains(id)&&!self.results.contains_key(id)))
+            || self.results.values().filter_map(|read|read.observation_cursor.as_ref()).any(|cursor|!cursor.validate()) {
             return Err(AgentEngineError::InvalidContract("invalid child consumption cursor".into()));
         }
         Ok(())
@@ -145,6 +166,20 @@ impl AgentCollaborationProgress {
         self.validate()
     }
 
+    /// Consume one exact, already-settled tool observation in live execution
+    /// and native reconstruction alike. The caller proves delegation admission;
+    /// names alone cannot turn an unrelated result into delegated authority.
+    pub(crate) fn observe_tool_result(&mut self, call: &nomifun_chat_model_broker::ChatToolCall,
+        result: &crate::AgentToolResult, admitted_delegation: bool) -> Result<bool, AgentEngineError> {
+        result.validate_for(&call.call_id)?;
+        if result.is_error { return Ok(false); }
+        if call.name == WAIT { self.accept_wait(call,result)?; return Ok(false); }
+        if call.name == STATUS { return self.observe_status(&snapshot_from_result(result)?); }
+        if call.name == MESSAGE { self.accept_message(result)?; }
+        else if admitted_delegation { self.accept(result)?; }
+        Ok(false)
+    }
+
     pub(crate) fn accept_message(&mut self, result: &crate::AgentToolResult) -> Result<(), AgentEngineError> {
         #[derive(Deserialize)]
         struct Receipt { execution_id: String, sequence: Option<u64> }
@@ -156,22 +191,44 @@ impl AgentCollaborationProgress {
                 receipt.sequence.is_some_and(|sequence|sequence <= read.sequence));
         if !already_consumed {
             if let Some(read)=self.results.get_mut(&receipt.execution_id) {read.all_terminal_observed=false;}
-            self.pending_child_executions.insert(receipt.execution_id);
-            self.wake_cursor = None;
+            self.pending_child_executions.insert(receipt.execution_id.clone());
+            self.unread_wakes.remove(&receipt.execution_id);
         }
+        self.validate()
+    }
+
+    pub(crate) fn accept_wait(&mut self,call:&nomifun_chat_model_broker::ChatToolCall,result:&crate::AgentToolResult)->Result<(),AgentEngineError> {
+        let ack:serde_json::Value=serde_json::from_str(&result.output_text())
+            .map_err(|_|AgentEngineError::ReplayContract("accepted wait has no original acknowledgement".into()))?;
+        if ack["state"]!="awaiting_children" {return Err(AgentEngineError::ReplayContract("accepted wait acknowledgement differs".into()));}
+        let wait=self.normalize_wait(&from_wait_call(call)?)?;
+        let references=AgentCollaborationSnapshot::observation_references(ack["cursor"].as_str()
+            .ok_or_else(||AgentEngineError::ReplayContract("accepted wait has no scoped owner acknowledgement".into()))?)?;
+        if references.keys().cloned().collect::<std::collections::BTreeSet<_>>()
+            !=wait.execution_ids.iter().cloned().collect() {
+            return Err(AgentEngineError::ReplayContract("accepted wait acknowledgement belongs to another source scope".into()));
+        }
+        for id in wait.execution_ids {self.pending_child_executions.insert(id);}
         self.validate()
     }
 
     pub(crate) fn observe_status(&mut self, snapshot: &AgentCollaborationSnapshot) -> Result<bool, AgentEngineError> {
         let mut workspace_changed=false;
+        let mut ready_sources=snapshot.ready_sources()?;
+        let mut references=AgentCollaborationSnapshot::observation_references(&snapshot.cursor)?;
         let rows = snapshot.result.0.get("executions").and_then(serde_json::Value::as_array)
             .ok_or_else(|| AgentEngineError::InvalidContract("collaboration status has no exact Execution observations".into()))?;
         for row in rows {
             let id = row["execution_id"].as_str().ok_or_else(|| AgentEngineError::InvalidContract("collaboration status has no Execution identity".into()))?;
+            let reference=references.remove(id).ok_or_else(||AgentEngineError::InvalidContract("status cursor omits its exact Execution".into()))?;
+            if row["observation_cursor"]!=serde_json::to_value(&reference).map_err(|error|AgentEngineError::InvalidContract(error.to_string()))? {
+                return Err(AgentEngineError::InvalidContract("status observation differs from its scoped cursor".into()));
+            }
             if !self.pending_child_executions.contains(id) && !self.results.contains_key(id) { continue; }
             self.pending_child_executions.insert(id.into());
             let sequence = row["sequence"].as_u64().filter(|sequence|*sequence>0)
                 .ok_or_else(|| AgentEngineError::InvalidContract("collaboration status has no canonical sequence".into()))?;
+            self.unread_wakes.remove(id);
             if row["deleted"]==true {
                 let receipt=&row["execution_terminal_receipt"];
                 if receipt["execution_id"].as_str()!=Some(id) || receipt["event_type"].as_str()!=Some("deleted")
@@ -193,6 +250,8 @@ impl AgentCollaborationProgress {
                 observed.clear();
                 observed.insert("@deleted".into(),invalidation.as_ref().into());
                 let consumed=self.results.entry(id.into()).or_default();
+                consumed.observation_cursor=Some(reference);
+                consumed.ready_source_digests=ready_sources.remove(id).unwrap_or_default();
                 consumed.sequence=sequence;
                 consumed.source_digests.clear();
                 consumed.result_pages.clear();
@@ -215,9 +274,16 @@ impl AgentCollaborationProgress {
             let observations=self.workspace_observations.entry(id.into()).or_default();
             observations.retain(|key,_|key.strip_prefix("step:").is_some_and(|step|owned.contains(step)));
             let consumed = self.results.entry(id.into()).or_default();
+            consumed.observation_cursor=Some(reference);
+            consumed.ready_source_digests=ready_sources.remove(id).unwrap_or_default();
             consumed.all_terminal_observed = !owned.is_empty() && owned==terminal;
-            if consumed.sequence != sequence { consumed.sequence = sequence; consumed.source_digests.clear(); }
-            consumed.result_pages.retain(|step,_|owned.contains(step));
+            consumed.sequence=consumed.sequence.max(sequence);
+            let heads:std::collections::BTreeMap<String,cursor::StepObservation>=serde_json::from_value(row["step_observations"].clone())
+                .map_err(|error|AgentEngineError::InvalidContract(format!("status has no complete Step source headers: {error}")))?;
+            if heads.keys().cloned().collect::<std::collections::BTreeSet<_>>()!=owned {return Err(AgentEngineError::InvalidContract("Step source headers differ from the full owned scope".into()));}
+            for head in heads.values() {head.validate()?;}
+            consumed.source_digests.retain(|step,digest|heads.get(step).is_some_and(|head|head.terminal_digest.as_ref()==Some(digest)));
+            consumed.result_pages.retain(|step,page|heads.get(step).is_some_and(|head|head.page_source_digest.as_ref()==Some(&page.source_digest)));
             if owned.is_empty() {
                 let receipt=&row["execution_terminal_receipt"];
                 if !receipt.is_null() {
@@ -265,26 +331,33 @@ impl AgentCollaborationProgress {
                 let identity = serde_json::json!({"terminal_receipt":receipt,"attempt_id":child["attempt_id"],"source":child["source"]});
                 let digest = nomifun_agent_contracts::digest_payload(&identity)
                     .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
+                if heads.get(step).and_then(|head|head.terminal_digest.as_deref())!=Some(digest.as_ref()) {
+                    return Err(AgentEngineError::InvalidContract("returned result differs from its full-scope source header".into()));
+                }
                 if !result_delivered(consumed,step,child)? {
                     consumed.source_digests.remove(step);
                     continue;
                 }
                 consumed.source_digests.insert(step.into(), digest.as_ref().into());
             }
+            // A fully delivered terminal source already has its exact hash in
+            // source_digests. Do not retain a second copy as an observation.
+            consumed.ready_source_digests.retain(|key,digest|key.strip_prefix("step:")
+                .is_none_or(|step|consumed.source_digests.get(step)!=Some(digest)));
             if !owned.is_empty() && terminal == owned && owned.iter().all(|step| consumed.source_digests.contains_key(step)) {
                 self.pending_child_executions.remove(id);
             }
         }
-        self.wake_cursor = None;
-        self.last_read_cursor = Some(snapshot.cursor.clone());
+        if !references.is_empty() {return Err(AgentEngineError::InvalidContract("status cursor contains observations outside returned Executions".into()));}
         self.validate()?;
         Ok(workspace_changed)
     }
 
     pub(crate) fn wait(&self) -> Option<AgentChildrenWait> {
-        (!self.pending_child_executions.is_empty()).then(|| AgentChildrenWait {
-            execution_ids:self.pending_child_executions.iter().cloned().collect(),after_cursor:self.last_read_cursor.clone(),mode:AgentChildrenWaitMode::All,
-        })
+        if self.pending_child_executions.is_empty() {return None;}
+        Some(self.normalize_wait(&AgentChildrenWait {
+            execution_ids:self.pending_child_executions.iter().cloned().collect(),after_cursor:None,mode:AgentChildrenWaitMode::All,
+        }).expect("validated collaboration references normalize"))
     }
 
     pub(crate) fn has_ready_unread_results(&self)->bool {
@@ -391,9 +464,17 @@ impl AgentCollaborationSelection {
 }
 
 impl AgentChildrenWait {
+    pub(crate) fn validate_wake(&self,cursor:&str)->Result<(),AgentEngineError> {
+        let references=AgentCollaborationSnapshot::observation_references(cursor)?;
+        if references.keys().cloned().collect::<std::collections::BTreeSet<_>>()
+            !=self.execution_ids.iter().cloned().collect() {
+            return Err(AgentEngineError::ReplayContract("child wake differs from the original selected Execution scope".into()));
+        }
+        Ok(())
+    }
     pub fn validate(&self) -> Result<(), AgentEngineError> {
         AgentCollaborationSelection { execution_ids: self.execution_ids.clone(), step_ids:vec![], result_page:None }.validate()?;
-        if self.after_cursor.as_ref().is_some_and(|cursor| cursor.is_empty() || cursor.len() > 8192 || cursor.contains('\0')) {
+        if self.after_cursor.as_ref().is_some_and(|cursor| cursor.is_empty() || cursor.len() > 16384 || cursor.contains('\0')) {
             return Err(AgentEngineError::InvalidContract("collaboration wait cursor is invalid".into()));
         }
         Ok(())
@@ -401,15 +482,13 @@ impl AgentChildrenWait {
 }
 
 pub(crate) fn validate_snapshot(snapshot: &AgentCollaborationSnapshot) -> Result<(), AgentEngineError> {
-    if snapshot.cursor.is_empty() || snapshot.cursor.len() > 8192 || snapshot.cursor.contains('\0') {
-        return Err(AgentEngineError::InvalidContract("collaboration owner returned an invalid cursor".into()));
-    }
+    AgentCollaborationSnapshot::observation_references(&snapshot.cursor)?;
     crate::stream_limits::serialized_size(snapshot, 512 * 1024)?;
     Ok(())
 }
 
 pub(crate) fn wake_message(cursor: &str) -> Result<nomifun_chat_model_broker::ChatMessage, AgentEngineError> {
-    if cursor.is_empty() || cursor.len() > 8192 || cursor.contains('\0') {
+    if cursor.is_empty() || cursor.len() > 16384 || cursor.contains('\0') {
         return Err(AgentEngineError::ReplayContract("child wait resolved without an exact owner cursor".into()));
     }
     Ok(crate::context_lifecycle::text_message(nomifun_chat_model_broker::ChatRole::User,
@@ -475,10 +554,8 @@ pub(crate) fn recorded_progress(events: &[crate::AgentEngineEvent]) -> Result<(A
             crate::AgentEngineEvent::ToolCompleted { result, .. }
             | crate::AgentEngineEvent::ToolOutcomeReconciled { result, .. } if !result.is_error => {
                 if let Some(call) = proposals.get(&result.call_id) {
-                    if call.name == WAIT { pending = Some(from_wait_call(call)?); }
-                    else if call.name == STATUS { progress.observe_status(&snapshot_from_result(result)?)?; }
-                    else if call.name == MESSAGE { progress.accept_message(result)?; }
-                    else if admitted.contains(&result.call_id) { progress.accept(result)?; }
+                    if call.name == WAIT { progress.accept_wait(call,result)?; pending = Some(progress.normalize_wait(&from_wait_call(call)?)?); }
+                    else { progress.observe_tool_result(call, result, admitted.contains(&result.call_id))?; }
                 }
             }
             crate::AgentEngineEvent::AwaitingChildren { request, .. } => {
@@ -488,11 +565,9 @@ pub(crate) fn recorded_progress(events: &[crate::AgentEngineEvent]) -> Result<(A
                 pending = Some(request.clone());
             }
             crate::AgentEngineEvent::ChildrenWaitResolved { cursor, .. } => {
-                if pending.is_none() {
-                    return Err(AgentEngineError::ReplayContract("child wake has no pending native wait".into()));
-                }
+                pending.as_ref().ok_or_else(||AgentEngineError::ReplayContract("child wake has no pending native wait".into()))?.validate_wake(cursor)?;
                 wake_message(cursor)?;
-                progress.wake_cursor = Some(cursor.clone());
+                progress.record_wake(cursor)?;
                 pending = None;
             }
             _ => {}
@@ -505,37 +580,51 @@ pub(crate) async fn execute(
     call: &nomifun_chat_model_broker::ChatToolCall, port: &dyn AgentCollaborationPort,
     causality: &ChatCausality, cancellation: CancellationToken,
     awaiting_children: &mut Option<AgentChildrenWait>,
+    progress: &AgentCollaborationProgress,
 ) -> Result<crate::AgentToolResult, AgentEngineError> {
     let value = match call.name.as_str() {
         STATUS => {
             let selection: AgentCollaborationSelection = serde_json::from_value(call.arguments.0.clone())
                 .map_err(|error| AgentEngineError::InvalidContract(format!("invalid collaboration selection: {error}")))?;
             selection.validate()?;
-            let snapshot = port.status(causality, &selection, cancellation).await?;
+            let snapshot = crate::collaboration_wait::read_status(port, causality, &selection, cancellation).await?;
             validate_snapshot(&snapshot)?;
             serde_json::to_value(snapshot).map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?
         }
         WAIT => {
-            let wait = from_wait_call(call)?;
+            let wait = match progress.normalize_wait(&from_wait_call(call)?) {
+                Ok(wait)=>wait,
+                Err(error)=>return Ok(crate::AgentToolResult::text(call.call_id.clone(),serde_json::json!({"code":"WAIT_SCOPE_MISMATCH","message":error.to_string()}).to_string(),true)),
+            };
             // Validate ownership now; waiting itself begins only after the ACK
             // and native checkpoint have settled in the original journal.
             let selection = AgentCollaborationSelection { execution_ids: wait.execution_ids.clone(), step_ids:vec![], result_page:None };
-            let snapshot = port.status(causality, &selection, cancellation).await?;
+            let snapshot = crate::collaboration_wait::read_status(port, causality, &selection, cancellation).await?;
             validate_snapshot(&snapshot)?;
+            if snapshot.result.0["all_ready"]==true && !progress.has_new_ready_source(&snapshot)? {
+                return Ok(crate::AgentToolResult::text(call.call_id.clone(),serde_json::json!({
+                    "code":"WAIT_ALREADY_TERMINAL","cursor":snapshot.cursor,
+                    "message":"Selected original work already has verified terminal outcomes. Read any remaining result pages and perform the parent's integration or truthful failure handoff; another wait cannot produce unread bytes or turn failure into success."
+                }).to_string(),true));
+            }
             let cursor = snapshot.cursor;
             *awaiting_children = Some(wait);
             serde_json::json!({"state":"awaiting_children","cursor":cursor,
+                "wait_state":snapshot.result.0["wait_state"],"progress_boundary":snapshot.result.0["progress_boundary"],
                 "message":"Child wait accepted. The original Turn remains active; read exact results with agent_status after the owner wakes this wait."})
         }
         MESSAGE => {
             let message: AgentCollaborationMessage = serde_json::from_value(call.arguments.0.clone())
                 .map_err(|error| AgentEngineError::InvalidContract(format!("invalid collaboration message: {error}")))?;
-            if !valid_id(&message.execution_id) || !valid_id(&message.step_id)
-                || message.content.trim().is_empty() || message.content.len() > 64 * 1024
-                || !valid_id(&message.idempotency_key) || message.idempotency_key.len() > 128 {
-                return Err(AgentEngineError::InvalidContract("collaboration message is outside its bounded contract".into()));
+            message.validate().map_err(AgentEngineError::InvalidContract)?;
+            match port.send(causality, &call.call_id, &message, cancellation).await {
+                Ok(result)=>result.0,
+                Err(AgentEngineError::CollaborationCommandRejected {code,message,observation})=>{
+                    return Ok(crate::AgentToolResult::text(call.call_id.clone(),serde_json::json!({
+                        "accepted":false,"code":code,"message":message,"observation":observation}).to_string(),true));
+                }
+                Err(error)=>return Err(error),
             }
-            port.send(causality, &call.call_id, &message, cancellation).await?.0
         }
         _ => return Err(AgentEngineError::InvalidContract("unknown collaboration control".into())),
     };
@@ -548,6 +637,13 @@ pub(crate) fn definitions() -> Vec<ChatToolDefinition> {
     let definition = |name: &str, description: &str, schema| ChatToolDefinition {
         name:name.into(),description:description.into(),input_schema:StrictJsonValue(schema),deferred:false,
     };
+    let task_actions=serde_json::json!({"oneOf":[
+        {"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"enum":["retry","recheck","stop"]}}},
+        {"type":"object","additionalProperties":false,"required":["kind","expected_attempt_id"],"properties":{
+            "kind":{"const":"restart"},"expected_attempt_id":{"type":["string","null"],"minLength":1,"maxLength":256}}},
+        {"type":"object","additionalProperties":false,"required":["kind","replacement_step_id","expected_replacement_step_version"],"properties":{
+            "kind":{"const":"replace_with_existing"},"replacement_step_id":{"type":"string","minLength":1,"maxLength":256},
+            "expected_replacement_step_version":{"type":"integer","minimum":0}}}]});
     vec![
         definition(STATUS,"Read status and exact canonical results of delegated executions owned by this source Turn. Read here after agent_wait wakes. Optionally select step_ids. Large results include result_page metadata: continue in order by copying execution_id, step_id, source_digest and next_offset into result_page.offset, selecting only that execution_id and step_id. Read all bytes before integrating or reporting completion. This does not create, resume, retry or cancel work.",
             serde_json::json!({"type":"object","additionalProperties":false,"required":["execution_ids"],"properties":{"execution_ids":ids,
@@ -555,20 +651,29 @@ pub(crate) fn definitions() -> Vec<ChatToolDefinition> {
                 "result_page":{"type":"object","additionalProperties":false,"required":["execution_id","step_id","source_digest","offset"],"properties":{
                     "execution_id":{"type":"string","minLength":1,"maxLength":256},"step_id":{"type":"string","minLength":1,"maxLength":256},
                     "source_digest":{"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-f]{64}$"},"offset":{"type":"integer","minimum":0}}}}})),
-        definition(WAIT,"Wait without model polling for owned delegated executions. Submit alone. The original Turn, budget and resources remain owned; this is not task completion or user-input handoff. When awakened, call agent_status to read exact results before integrating them. mode=all waits for all selected work; any waits for a selected terminal result. Copy after_cursor from agent_status when waiting for subsequent changes.",
+        definition(WAIT,"Wait without model polling for owned delegated executions. Submit alone. all waits for verified outcomes, including failure or cancellation, not all-success. New questions, native owner-control boundaries and failed Restart receipts return control once. A verified owner Restart boundary keeps the original subscription while its human control is pending; it does not grant permission to resume. Repeated waiting cannot resolve other decisions without a progress owner and pauses for intervention. After a wake read agent_status and all result pages before integration. after_cursor is optional; the Runtime uses its latest successful observation for each selected execution, including when an older explicit cursor is supplied.",
             serde_json::json!({"type":"object","additionalProperties":false,"required":["execution_ids"],"properties":{
-                "execution_ids":ids,"after_cursor":{"type":"string","minLength":1,"maxLength":8192},"mode":{"type":"string","enum":["any","all"]}}})),
-        definition(MESSAGE,"Send guidance to one exact owned delegated Step. This does not start work or prove completion. Keep the same idempotency_key when checking an uncertain delivery; never address a sibling owned by another source.",
+                "execution_ids":ids,"after_cursor":{"type":"string","minLength":1,"maxLength":16384},"mode":{"type":"string","enum":["any","all"]}}})),
+        definition(MESSAGE,"Send a source-scoped command to one exact owned delegated Step. To answer an ordinary question copy agent_status.question_reply_reference into intent={kind:question_reply,question:...}; guidance cannot answer WaitingInput or grant human permission. For retry, restart, recheck, stop or replace_with_existing use intent.kind=task_control, copying exact execution/Step versions from status; restart also pins expected_attempt_id, and replacement requires its existing Step/version. Restart cannot grant native resume on behalf of a human; original pause/unknown effects retain their gates. Retry creates a new Attempt only after effects are proven safe. Recheck observes the original execution. Stop is task-local. Reuse idempotency_key only for the same immutable command, never silently retarget a new Attempt.",
             serde_json::json!({"type":"object","additionalProperties":false,"required":["execution_id","step_id","content","idempotency_key"],"properties":{
                 "execution_id":{"type":"string","minLength":1,"maxLength":256},"step_id":{"type":"string","minLength":1,"maxLength":256},
-                "content":{"type":"string","minLength":1,"maxLength":16384},"idempotency_key":{"type":"string","minLength":1,"maxLength":128}}})),
+                "content":{"type":"string","minLength":1,"maxLength":16384},"idempotency_key":{"type":"string","minLength":1,"maxLength":128},
+                "intent":{"oneOf":[{"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"const":"guidance"}}},
+                    {"type":"object","additionalProperties":false,"required":["kind","question"],"properties":{"kind":{"const":"question_reply"},
+                        "question":{"type":"object","additionalProperties":false,"required":["agent_session_id","turn_operation_id","question_event_id","request_id"],"properties":{
+                            "agent_session_id":{"type":"string","minLength":1,"maxLength":256},"turn_operation_id":{"type":"string","minLength":1,"maxLength":256},
+                            "question_event_id":{"type":"string","minLength":1,"maxLength":256},"request_id":{"type":"string","minLength":1,"maxLength":256}}}}},
+                    {"type":"object","additionalProperties":false,"required":["kind","control"],"properties":{"kind":{"const":"task_control"},
+                        "control":{"type":"object","additionalProperties":false,"required":["expected_execution_version","expected_step_version","action"],"properties":{
+                            "expected_execution_version":{"type":"integer","minimum":0},"expected_step_version":{"type":"integer","minimum":0},
+                            "action":task_actions}}}}]}}})),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json,Value};
 
     fn accepted() -> AgentCollaborationProgress {
         let mut progress = AgentCollaborationProgress::default();
@@ -577,14 +682,16 @@ mod tests {
     }
 
     fn page(sequence:u64, selected:&[&str], terminal:&[&str]) -> AgentCollaborationSnapshot {
-        AgentCollaborationSnapshot { cursor:format!("source:{sequence}"), result:StrictJsonValue(json!({"executions":[{
+        let mut snapshot=test_snapshot(json!({"executions":[{
             "execution_id":"execution","sequence":sequence,"owned_step_ids":["a","b"],"owned_terminal_step_ids":terminal,
-            "children":selected.iter().map(|id|json!({"step_id":id,"attempt_id":format!("attempt-{sequence}-{id}"),
+            "children":(["a","b"].iter().map(|id|json!({"step_id":id,"attempt_id":format!("attempt-{sequence}-{id}"),
                 "source":{"agent_session_id":format!("session-{id}"),"turn_operation_id":format!("turn-{sequence}-{id}"),"terminal_event_id":format!("terminal-{sequence}-{id}")},
                 "terminal_receipt":{"execution_id":"execution","execution_event_sequence":sequence,"step_id":id,"status":"completed"},
                 "workspace_change_sources":[],
-                "result":"PRIVATE_RESULT_BODY_NOT_CHECKPOINT_DATA"})).collect::<Vec<_>>()
-        }]})) }
+                "result":"PRIVATE_RESULT_BODY_NOT_CHECKPOINT_DATA"})).collect::<Vec<_>>())
+        }]}));
+        snapshot.result.0["executions"][0]["children"].as_array_mut().unwrap().retain(|child|selected.contains(&child["step_id"].as_str().unwrap()));
+        snapshot
     }
 
     #[test]
@@ -599,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_execution_sequence_cannot_reuse_an_old_attempt_consumption() {
+    fn changed_attempt_sources_cannot_reuse_an_old_consumption() {
         let mut progress=accepted();
         progress.observe_status(&page(7,&["a"],&["a","b"])).unwrap();
         progress.observe_status(&page(8,&["b"],&["a","b"])).unwrap();
@@ -607,6 +714,105 @@ mod tests {
         assert!(!progress.results["execution"].source_digests.contains_key("a"));
         progress.observe_status(&page(8,&["a"],&["a","b"])).unwrap();
         assert!(progress.pending_child_executions.is_empty());
+    }
+
+    #[test]
+    fn unrelated_sequence_and_one_step_retry_preserve_other_steps_and_their_long_result_pages() {
+        let mut progress=accepted();
+        let first=body_page(0,"中文",9);
+        progress.observe_status(&first).unwrap();
+        assert_eq!(progress.results["execution"].result_pages["a"].contiguous_bytes,6);
+        assert!(progress.results["execution"].source_digests.contains_key("b"));
+        let mut unrelated=first.clone();
+        unrelated.result.0["executions"][0]["sequence"]=json!(99);
+        unrelated.result.0["executions"][0]["children"]=json!([]);
+        progress.observe_status(&unrelated).unwrap();
+        assert_eq!(progress.results["execution"].result_pages["a"].contiguous_bytes,6);
+        assert!(progress.results["execution"].source_digests.contains_key("b"));
+
+        // Only b changes identity; the selected body remains a's next page.
+        let mut retry=body_page(6,"abc",9);
+        retry.result.0["executions"][0]["sequence"]=json!(100);
+        let head=&mut retry.result.0["executions"][0]["step_observations"]["b"];
+        head["attempt_id"]=json!("attempt-b-next");head["terminal_digest"]=Value::Null;head["page_source_digest"]=Value::Null;head["ready_digest"]=Value::Null;
+        retry.result.0["executions"][0]["owned_terminal_step_ids"]=json!(["a"]);
+        retry.result.0["executions"][0]["children"].as_array_mut().unwrap().retain(|child|child["step_id"]=="a");
+        retry=test_snapshot(retry.result.0);
+        progress.observe_status(&retry).unwrap();
+        assert_eq!(progress.results["execution"].result_pages["a"].contiguous_bytes,9);
+        assert!(progress.results["execution"].source_digests.contains_key("a"));
+        assert!(!progress.results["execution"].source_digests.contains_key("b"));
+        assert!(progress.pending_child_executions.contains("execution"));
+        assert!(!serde_json::to_string(&progress).unwrap().contains("中文"));
+    }
+
+    #[test]
+    fn wait_normalization_uses_per_execution_watermarks_across_scope_changes_and_old_explicit_cursors() {
+        let cursor=|pairs:Vec<(&str,char)>|AgentCollaborationSnapshot::observation_cursor(pairs.into_iter()
+            .map(|(id,c)|(id.into(),AgentCollaborationObservation{state:c.to_string().repeat(64),ready:c.to_string().repeat(64)})).collect()).unwrap();
+        let mut progress=accepted();
+        progress.results.entry("execution".into()).or_default().observation_cursor=Some(AgentCollaborationObservation{state:"b".repeat(64),ready:"b".repeat(64)});
+        progress.results.entry("other".into()).or_default().observation_cursor=Some(AgentCollaborationObservation{state:"d".repeat(64),ready:"d".repeat(64)});
+        let request=|ids:Vec<&str>,after_cursor|AgentChildrenWait{execution_ids:ids.into_iter().map(str::to_owned).collect(),after_cursor,mode:AgentChildrenWaitMode::All};
+        let a=progress.normalize_wait(&request(vec!["execution"],None)).unwrap();
+        assert_eq!(a.after_cursor,Some(cursor(vec![("execution",'b')])));
+        let ab=progress.normalize_wait(&request(vec!["other","execution"],Some(cursor(vec![("execution",'a'),("other",'c')])))).unwrap();
+        assert_eq!(ab.execution_ids,["execution","other"]);
+        assert_eq!(ab.after_cursor,Some(cursor(vec![("execution",'b'),("other",'d')])));
+        assert_eq!(progress.normalize_wait(&request(vec!["execution"],Some(cursor(vec![("execution",'a')])))).unwrap(),a);
+        assert!(progress.normalize_wait(&request(vec!["execution"],ab.after_cursor)).is_err(),"foreign scope cannot be spliced into A");
+        let encoded=serde_json::to_string(&progress).unwrap();
+        let resumed:AgentCollaborationProgress=serde_json::from_str(&encoded).unwrap();
+        assert_eq!(resumed.normalize_wait(&request(vec!["execution"],None)).unwrap(),a);
+    }
+
+    #[test]
+    fn an_existing_review_cannot_borrow_an_unrelated_attempt_start_to_wake_the_model_again() {
+        let observation=|state:&str,ready:&str|AgentCollaborationSnapshot {
+            cursor:AgentCollaborationSnapshot::observation_cursor(std::collections::BTreeMap::from([("execution".into(),
+                AgentCollaborationObservation{state:state.repeat(64),ready:ready.repeat(64)})])).unwrap(),
+            result:StrictJsonValue(json!({})),
+        };
+        let seen=observation("a","b");
+        assert!(seen.has_new_ready_observation(None).unwrap());
+        let healthy_sibling_started=observation("c","b");
+        assert!(!healthy_sibling_started.has_new_ready_observation(Some(&seen.cursor)).unwrap());
+        let new_attempt_failed=observation("d","e");
+        assert!(new_attempt_failed.has_new_ready_observation(Some(&healthy_sibling_started.cursor)).unwrap(),
+            "a new Attempt's own verified failure is a new decision, even with the same title or error prose");
+        let scope=(0..64).map(|index|(format!("01a16826-0000-7000-8000-{index:012}"),
+            AgentCollaborationObservation{state:"a".repeat(64),ready:"b".repeat(64)})).collect();
+        let cursor=AgentCollaborationSnapshot::observation_cursor(scope).unwrap();
+        assert!(cursor.len()<=16384);assert_eq!(AgentCollaborationSnapshot::observation_references(&cursor).unwrap().len(),64);
+    }
+
+    #[test]
+    fn removing_an_old_failure_is_not_a_new_ready_source_but_the_next_attempt_failure_is() {
+        let mut initial=page(7,&["a","b"],&["a","b"]);
+        let row=&mut initial.result.0["executions"][0];
+        row["owned_step_ids"]=json!(["a","b","review"]);
+        row["children"].as_array_mut().unwrap().push(json!({"step_id":"review","status":"waiting_input",
+            "attempt_id":"review-original","review_blocked":{"reason":"missing_receipt"},"workspace_change_sources":[]}));
+        initial=test_snapshot(initial.result.0);
+        let mut progress=accepted();progress.observe_status(&initial).unwrap();
+        assert!(!progress.has_new_ready_source(&initial).unwrap());
+        assert_eq!(progress.results["execution"].ready_source_digests.len(),1,
+            "delivered terminal refs reuse the existing consumption map instead of being copied");
+        let mut removed=initial.clone();
+        let row=&mut removed.result.0["executions"][0];row["sequence"]=json!(8);row["owned_terminal_step_ids"]=json!(["a"]);
+        let retry=&mut row["children"][1];retry["status"]=json!("pending");retry["attempt_id"]=json!("retry-accepted-not-started");
+        removed=test_snapshot(removed.result.0);
+        assert_ne!(removed.cursor,initial.cursor);
+        assert!(!progress.has_new_ready_source(&removed).unwrap(),"the unchanged Review cannot borrow another Step's removed old outcome");
+        let mut failed=removed.clone();
+        let row=&mut failed.result.0["executions"][0];row["sequence"]=json!(9);row["owned_terminal_step_ids"]=json!(["a","b"]);
+        let retry=&mut row["children"][1];retry["status"]=json!("failed");retry["terminal_receipt"]=json!({
+            "execution_id":"execution","step_id":"b","status":"failed","execution_event_sequence":9});
+        failed=test_snapshot(failed.result.0);
+        assert!(progress.has_new_ready_source(&failed).unwrap(),"a new exact failure must still return control");
+        let replayed:AgentCollaborationProgress=serde_json::from_slice(&serde_json::to_vec(&progress).unwrap()).unwrap();
+        assert!(!replayed.has_new_ready_source(&removed).unwrap());
+        assert!(replayed.has_new_ready_source(&failed).unwrap());
     }
 
     #[test]
@@ -628,13 +834,14 @@ mod tests {
     #[test]
     fn attention_status_restores_coordination_without_claiming_child_completion() {
         let mut progress=accepted();
-        progress.wake_cursor=Some("attention:6".into());
+        progress.unread_wakes.insert("execution".into());
         let mut snapshot=page(7,&["a"],&["a"]);
         snapshot.result.0["executions"][0]["children"][0]["status"]=json!("waiting_input");
         snapshot.result.0["executions"][0]["owned_terminal_step_ids"]=json!([]);
+        snapshot=test_snapshot(snapshot.result.0);
         progress.observe_status(&snapshot).unwrap();
-        assert!(progress.wake_cursor.is_none());
-        assert_eq!(progress.wait().unwrap().after_cursor.as_deref(),Some("source:7"));
+        assert!(progress.unread_wakes.is_empty());
+        assert_eq!(progress.wait().unwrap().after_cursor.as_ref(),Some(&snapshot.cursor));
         assert!(progress.pending_child_executions.contains("execution"));
     }
 
@@ -650,9 +857,9 @@ mod tests {
     #[test]
     fn an_empty_delegation_needs_its_real_failure_receipt_and_is_never_vacuously_completed() {
         let mut progress=accepted();
-        let mut snapshot=AgentCollaborationSnapshot{cursor:"failed:7".into(),result:StrictJsonValue(json!({"executions":[{
+        let mut snapshot=test_snapshot(json!({"executions":[{
             "execution_id":"execution","sequence":7,"status":"planning","owned_step_ids":[],"owned_terminal_step_ids":[],"children":[]
-        }]}))};
+        }]}));
         progress.observe_status(&snapshot).unwrap();
         assert!(progress.pending_child_executions.contains("execution"));
         let row=&mut snapshot.result.0["executions"][0];
@@ -702,6 +909,7 @@ mod tests {
         assert!(progress.observe_status(&changed).is_err());
         let child=&mut changed.result.0["executions"][0]["children"][0];
         child["result_page"]["source_digest"]=json!(nomifun_agent_contracts::digest_payload(&json!({"attempt_id":child["attempt_id"],"source":child["source"]})).unwrap());
+        changed=test_snapshot(changed.result.0);
         progress.observe_status(&changed).unwrap();
         assert_eq!(progress.results["execution"].result_pages["a"].contiguous_bytes,0);
         assert!(progress.pending_child_executions.contains("execution"));
@@ -733,6 +941,7 @@ mod tests {
             {"attempt_id":"old-failed-writer","source":{"agent_session_id":"original-child","turn_operation_id":"failed-turn","terminal_event_id":"failed-terminal"}},
             {"attempt_id":"old-cancelled-writer","source":{"agent_session_id":"original-child","turn_operation_id":"cancelled-turn","terminal_event_id":"cancelled-terminal"}}
         ]);
+        snapshot=test_snapshot(snapshot.result.0);
         let mut progress=accepted();
         assert!(progress.observe_status(&snapshot).unwrap());
         assert_eq!(progress.workspace_observations["execution"].len(),2);
@@ -763,11 +972,13 @@ mod tests {
             let sources=(0..32).map(|attempt|json!({"attempt_id":format!("attempt-{index}-{attempt}"),"source":{
                 "agent_session_id":format!("session-{index}"),"turn_operation_id":format!("writer-{index}-{attempt}"),
                 "terminal_event_id":format!("closed-{index}-{attempt}")}})).collect::<Vec<_>>();
-            let snapshot=AgentCollaborationSnapshot {cursor:"bounded:7".into(),result:StrictJsonValue(json!({"executions":[{
+            let mut snapshot=test_snapshot(json!({"executions":[{
                 "execution_id":"execution","sequence":7,"owned_step_ids":owned,"owned_terminal_step_ids":owned,
-                "children":[{"step_id":step,"attempt_id":format!("never-started-{index}"),"status":"cancelled",
-                    "terminal_receipt":{"execution_id":"execution","execution_event_sequence":7,"step_id":step,"status":"cancelled"},
-                    "workspace_change_sources":sources}]}]}))};
+                "children":owned.iter().enumerate().map(|(number,id)|json!({"step_id":id,"attempt_id":format!("never-started-{number}"),"status":"cancelled",
+                    "terminal_receipt":{"execution_id":"execution","execution_event_sequence":7,"step_id":id,"status":"cancelled"},
+                    "workspace_change_sources":[]})).collect::<Vec<_>>()}]}));
+            let children=snapshot.result.0["executions"][0]["children"].as_array_mut().unwrap();
+            children.retain(|child|child["step_id"]==*step);children[0]["workspace_change_sources"]=json!(sources);
             validate_snapshot(&snapshot).unwrap();
             assert!(progress.observe_status(&snapshot).unwrap());
             last=Some(snapshot);
@@ -783,6 +994,7 @@ mod tests {
         assert!(!recovered.observe_status(&last).unwrap());
         let row=&mut last.result.0["executions"][0];row["sequence"]=json!(8);
         row["owned_step_ids"]=json!([owned[127]]);row["owned_terminal_step_ids"]=json!([owned[127]]);
+        last=test_snapshot(last.result.0);
         assert!(!recovered.observe_status(&last).unwrap());
         assert_eq!(recovered.workspace_observations["execution"].keys().cloned().collect::<Vec<_>>(),["step:step-127"]);
     }

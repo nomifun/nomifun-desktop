@@ -12,6 +12,8 @@ pub mod dir_config;
 pub mod dataset_roots;
 mod enums;
 mod error;
+mod database_unavailable;
+pub use database_unavailable::DatabaseUnavailableReason;
 mod execution_authority;
 pub mod factory_reset;
 mod fsname;

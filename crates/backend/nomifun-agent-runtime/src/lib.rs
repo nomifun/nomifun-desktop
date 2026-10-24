@@ -10,14 +10,18 @@ mod agents_md;
 mod adaptive;
 mod checkpoint;
 mod collaboration;
+mod collaboration_wait;
 pub use collaboration::{AgentChildrenWait, AgentChildrenWaitMode, AgentCollaborationMessage,
-    AgentCollaborationPort, AgentCollaborationSelection, AgentCollaborationResultPage, AgentCollaborationSnapshot,
+    AgentCollaborationPort, AgentCollaborationSelection, AgentCollaborationResultPage, AgentCollaborationSnapshot,AgentCollaborationObservation,
     AgentCollaborationProgress, AgentChildResultConsumption, AgentChildResultCoverage, collaboration_progress_from_events};
 mod segments;
 pub use segments::{AgentExecutionPressure, AgentExecutionSegmentState, AgentExecutionStopReason, AgentSegmentPolicy, AgentSegmentReason};
 mod recovery;
 mod reconciliation;
-pub use reconciliation::{AgentReconciledOutcome, AgentReconciledResume, AgentReconciliationSource, reconcile_execution_tail};
+pub use reconciliation::{AgentReconciledOutcome, AgentReconciledResume, AgentReconciliationSource,
+    AgentReconciliationContracts, reconcile_execution_tail_with_contracts};
+#[cfg(test)]
+pub use reconciliation::reconcile_execution_tail;
 pub use recovery::AgentTurnRecovery;
 pub use checkpoint::{AgentCheckpointReceipt, AgentExecutionCheckpoint};
 pub use adaptive::{AgentRuntimeActivationReason, AgentRuntimeModule};

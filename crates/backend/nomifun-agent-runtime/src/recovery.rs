@@ -37,6 +37,30 @@ pub(crate) fn discardable_model_event(event: &AgentEngineEvent) -> bool {
         || matches!(event, AgentEngineEvent::AwaitingChildren { .. })
 }
 
+/// Validate a parked child boundary with the existing typed progress reducer.
+/// Its explicit-resume proposal is not applied: automatic attachment retains
+/// the original checkpoint, budget, counters, plan and result coverage.
+fn validate_child_wait_tail(checkpoint:&AgentExecutionCheckpoint,revision:u64,tail:&[AgentEngineEvent])
+    ->Result<(),AgentEngineError> {
+    let Some(wait)=checkpoint.awaiting_children.as_ref() else {return Ok(());};
+    let invalid=||AgentEngineError::ReplayContract("waiting checkpoint crossed an execution or different child-wait boundary".into());
+    if !checkpoint.work.running_processes.is_empty() || tail.iter().any(|event|match event {
+        AgentEngineEvent::AwaitingChildren {model_steps,request}=>*model_steps!=checkpoint.model_steps||request!=wait,
+        AgentEngineEvent::ExecutionResumed {..}|AgentEngineEvent::ExecutionBudgetPrepared {..}
+            |AgentEngineEvent::ExecutionSegmentRenewed {..}|AgentEngineEvent::ContextPrepared {..}
+            |AgentEngineEvent::RuntimeModulesActivated {..}=>false,
+        _=>true,
+    }) {return Err(invalid());}
+    let reduced=crate::reconcile_execution_tail_with_contracts(checkpoint,revision,tail,&BTreeSet::new(),&BTreeMap::new(),
+        &nomifun_agent_contracts::NativeBudgetIncrease::default(),&crate::AgentReconciliationContracts::new())?;
+    if reduced.checkpoint.model_steps!=checkpoint.model_steps||reduced.checkpoint.tool_call_count!=checkpoint.tool_call_count
+        ||reduced.checkpoint.accepted_input_count!=checkpoint.accepted_input_count
+        ||reduced.checkpoint.applied_steering_receipts!=checkpoint.applied_steering_receipts
+        ||reduced.checkpoint.awaiting_children!=checkpoint.awaiting_children||reduced.checkpoint.collaboration!=checkpoint.collaboration
+        ||reduced.checkpoint.control_rejections!=checkpoint.control_rejections {return Err(invalid());}
+    Ok(())
+}
+
 impl AgentTurnRecovery {
     pub fn checkpoint(&self) -> &AgentExecutionCheckpoint { &self.checkpoint }
     pub fn checkpoint_revision(&self) -> u64 { self.checkpoint_revision }
@@ -56,6 +80,7 @@ impl AgentTurnRecovery {
             || tail.iter().any(|event| !discardable_model_event(event)) {
             return Err(fail());
         }
+        validate_child_wait_tail(&checkpoint,checkpoint_revision,&tail)?;
         crate::stream_limits::serialized_size(&prefix, nomifun_agent_contracts::MAX_NATIVE_APPROVED_JOURNAL_BYTES as usize)?;
         crate::stream_limits::serialized_size(&tail, 8 * 1024 * 1024)?;
         let (collaboration, awaiting_children) = crate::collaboration::recorded_progress(&prefix)?;
@@ -211,6 +236,69 @@ mod tests {
             accepted_input_count: 1, applied_steering_receipts: vec![], plan: Default::default(), work: Default::default(),
             patch_recovery: Default::default(), segments: None, control_rejections: Default::default(), completion_review: Default::default(), pending_user_input: None, awaiting_children: None, collaboration: Default::default(),
         }
+    }
+
+    fn child_wait_checkpoint() -> (AgentExecutionCheckpoint,Vec<AgentEngineEvent>) {
+        let mut checkpoint=checkpoint();
+        checkpoint.model_steps=1;checkpoint.tool_call_count=1;
+        let wait=crate::AgentChildrenWait {execution_ids:vec!["original-execution".into()],after_cursor:None,
+            mode:crate::AgentChildrenWaitMode::All};
+        let cursor=crate::AgentCollaborationSnapshot::observation_cursor(BTreeMap::from([("original-execution".into(),
+            crate::AgentCollaborationObservation {state:"4".repeat(64),ready:"5".repeat(64)})])).unwrap();
+        let mut prefix=vec![AgentEngineEvent::TurnStarted {binding:checkpoint.binding.clone(),turn_operation_id:checkpoint.turn_operation_id.clone()},
+            AgentEngineEvent::ModelStepStarted {step:1,operation_id:"turn:model:1".into(),correction_source:None},
+            AgentEngineEvent::ToolCallCompleted {step:1,call:nomifun_chat_model_broker::ChatToolCall {call_id:"original-wait".into(),
+                name:crate::collaboration::WAIT.into(),arguments:nomifun_agent_contracts::StrictJsonValue(serde_json::to_value(&wait).unwrap()),provider_metadata:None}},
+            AgentEngineEvent::ToolCompleted {step:1,runtime_hold:None,result:crate::AgentToolResult::text("original-wait".into(),
+                serde_json::json!({"state":"awaiting_children","cursor":cursor}).to_string(),false)}];
+        (checkpoint.collaboration,checkpoint.awaiting_children)=crate::collaboration::recorded_progress(&prefix).unwrap();
+        assert_eq!(checkpoint.awaiting_children.as_ref(),Some(&wait));
+        let digest=nomifun_agent_contracts::digest_payload(&checkpoint).unwrap();
+        prefix.push(AgentEngineEvent::ExecutionCheckpointSaved {step:1,revision:1,digest});
+        (checkpoint,prefix)
+    }
+
+    #[test]
+    fn automatic_recovery_validates_the_same_pure_child_wait_without_spending_or_replaying_work() {
+        let (checkpoint,prefix)=child_wait_checkpoint();
+        let wait=AgentEngineEvent::AwaitingChildren {model_steps:checkpoint.model_steps,request:checkpoint.awaiting_children.clone().unwrap()};
+        let tail=vec![wait.clone(),AgentEngineEvent::ExecutionResumed {checkpoint_revision:1,checkpoint_step:1,
+            model_steps:1,execution_fence:1,discarded_tool_call_ids:vec![]},
+            AgentEngineEvent::ExecutionBudgetPrepared {context_window_tokens:32768,max_output_tokens:4096,max_model_steps:32},wait];
+        let recovered=AgentTurnRecovery::new(checkpoint.clone(),1,2,prefix,tail,vec![]).unwrap();
+        assert_eq!(recovered.checkpoint(),&checkpoint,"validation cannot apply the explicit-resume plan, work or budget rewrite");
+        assert_eq!(recovered.last_model_step(),1);
+        assert!(recovered.discarded_call_ids.is_empty());
+        assert_eq!(recovered.reserved_call_ids,BTreeSet::from(["original-wait".into()]));
+    }
+
+    #[test]
+    fn automatic_child_wait_recovery_rejects_changed_requests_and_any_execution_tail() {
+        let (checkpoint,prefix)=child_wait_checkpoint();
+        let wait=checkpoint.awaiting_children.clone().unwrap();
+        let mut changed_scope=wait.clone();changed_scope.execution_ids=vec!["another-execution".into()];
+        let mut changed_mode=wait.clone();changed_mode.mode=crate::AgentChildrenWaitMode::Any;
+        let mut changed_cursor=wait.clone();changed_cursor.after_cursor=Some(crate::AgentCollaborationSnapshot::observation_cursor(
+            BTreeMap::from([("original-execution".into(),crate::AgentCollaborationObservation {state:"6".repeat(64),ready:"7".repeat(64)})])).unwrap());
+        let rejected=vec![
+            AgentEngineEvent::AwaitingChildren {model_steps:1,request:changed_scope},
+            AgentEngineEvent::AwaitingChildren {model_steps:1,request:changed_mode},
+            AgentEngineEvent::AwaitingChildren {model_steps:1,request:changed_cursor},
+            AgentEngineEvent::AwaitingChildren {model_steps:2,request:wait},
+            AgentEngineEvent::ModelStepStarted {step:2,operation_id:"turn:model:2".into(),correction_source:None},
+            AgentEngineEvent::ToolCallCompleted {step:1,call:nomifun_chat_model_broker::ChatToolCall {call_id:"new-tool".into(),name:"read_file".into(),
+                arguments:nomifun_agent_contracts::StrictJsonValue(serde_json::json!({"path":"source.txt"})),provider_metadata:None}},
+            AgentEngineEvent::ChildrenWaitResolved {model_steps:1,cursor:crate::AgentCollaborationSnapshot::observation_cursor(BTreeMap::from([
+                ("original-execution".into(),crate::AgentCollaborationObservation {state:"8".repeat(64),ready:"9".repeat(64)})])).unwrap()},
+            AgentEngineEvent::WorkStatus {status:Default::default()},
+        ];
+        for event in rejected {
+            assert!(AgentTurnRecovery::new(checkpoint.clone(),1,1,prefix.clone(),vec![event.clone()],vec![]).is_err(),"unsafe tail: {event:?}");
+        }
+        let mut live=checkpoint.clone();live.work.running_processes.insert("unreaped-original-owner".into());
+        assert!(AgentTurnRecovery::new(live,1,1,prefix.clone(),vec![],vec![]).is_err());
+        let mut wrong_prefix=prefix;wrong_prefix[0]=AgentEngineEvent::TurnStarted {binding:checkpoint.binding.clone(),turn_operation_id:"another-turn".into()};
+        assert!(AgentTurnRecovery::new(checkpoint,1,1,wrong_prefix,vec![],vec![]).is_err());
     }
 
     #[test]

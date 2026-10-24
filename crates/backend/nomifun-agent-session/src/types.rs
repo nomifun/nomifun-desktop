@@ -213,11 +213,44 @@ pub enum TurnReceiptStatus {
 
 /// Bounded metadata for observing one existing Turn. This view grants no
 /// execution authority and does not hydrate transcript or public output.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TurnProgressObservation {
     pub status: TurnReceiptStatus,
     pub cursor: u64,
-    pub suspended: bool,
+    pub suspension: Option<TurnProgressSuspension>,
+}
+
+/// A read-only boundary of the original Turn, derived from its canonical pause
+/// or typed wait event. An observer is never itself a producer or resume grant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TurnProgressSuspension {
+    NativePause {
+        revision: u64,
+        reason: String,
+        checkpoint_revision: u64,
+        execution_fence: u64,
+        cleanup_proven: bool,
+    },
+    Waiting {
+        wait_seq: u64,
+        reason: nomifun_agent_contracts::AgentWaitReason,
+        request_id: Option<String>,
+    },
+    Reconciliation { sequence: u64 },
+}
+
+impl TurnProgressSuspension {
+    /// User Pause and an actual external input/resource wait retain their
+    /// original subscription. Technical pauses must return a decision boundary
+    /// without failing, replacing or replaying the original Turn.
+    pub fn requires_intervention(&self) -> bool {
+        match self {
+            Self::NativePause { reason, .. } => !matches!(reason.as_str(), "EXECUTION_USER_REQUESTED" | "USER_REQUESTED"),
+            Self::Waiting { reason, .. } => *reason == nomifun_agent_contracts::AgentWaitReason::InterventionRequired,
+            Self::Reconciliation { .. } => true,
+        }
+    }
 }
 
 /// A bounded, read-only view of the canonical turn facts for one

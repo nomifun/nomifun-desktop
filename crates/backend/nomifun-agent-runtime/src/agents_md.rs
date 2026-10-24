@@ -185,6 +185,8 @@ pub async fn load_agents_md(
 /// Validate native path spelling without reading the host filesystem. Actual
 /// canonical identity belongs to the Session file owner, including links and
 /// parent components. Runtime must not impose a workspace containment policy.
+/// This accepts request spellings. Owner-returned Session labels use the typed
+/// `SessionPathLabel` codec before conversion to this native representation.
 pub(crate) fn normalize_native_instruction_path(value: &str) -> Result<String, AgentEngineError> {
     if value.len() > 4096 || value.contains('\0') {
         return Err(AgentEngineError::WorkspaceContext("native instruction path is invalid or exceeds 4096 bytes".into()));

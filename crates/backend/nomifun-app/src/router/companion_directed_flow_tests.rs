@@ -70,20 +70,33 @@ fn selected_tool(body:&Value,name:&str,id:&str,action:&str,arguments:Value)->(Va
     else {tool_call("ToolSearch",&format!("{id}-find"),json!({"query":action}))}
 }
 
+fn parent_tool_observation(message:&Value,retry_superseded_read:bool)->Option<Value> {
+    let content=message["content"].as_str().expect("the fixture receives the real textual tool observation");
+    let plain=content.strip_prefix("[tool error]\n").unwrap_or(content);
+    if retry_superseded_read&&content.starts_with("[tool error]\n")&&plain==
+        "Not executed: a new accepted user instruction arrived. Reconsider the task and update_plan before further effects." {
+        // This native proposal was never executed. Retain the real feedback
+        // in history and issue a new read identity; it is not a JSON result.
+        return None;
+    }
+    Some(serde_json::from_str(plain).unwrap_or_else(|error|panic!(
+        "native parent tool {} returned an unexpected observation: {error}; content={content}",message["tool_call_id"])))
+}
+
 fn joined_parent_step(body:&Value,ordinal:usize,fork_id:&str,goal:&str,intermediate:Option<&str>)->(Value,&'static str) {
     let results=body["messages"].as_array().unwrap();
     let root=results.iter().rposition(|message|message["role"]=="user"
         &&message["content"].to_string().contains("BACKGROUND_REQUEST:")).unwrap_or(0);
     let results=&results[root+1..];
+    let status_prefix=format!("{fork_id}-status-");
     let recorded=|prefix:&str|results.iter().rev().filter(|message|message["role"]=="tool")
         .find(|message|message["tool_call_id"].as_str().is_some_and(|id|id==prefix||(prefix.ends_with('-')&&id.starts_with(prefix))))
-        .map(|message|serde_json::from_str::<Value>(message["content"].as_str().unwrap()).unwrap());
+        .and_then(|message|parent_tool_observation(message,prefix==status_prefix));
     let Some(receipt)=recorded(fork_id) else {
         return selected_tool(body,"fork_agent",fork_id,"agent/fork",json!({"goal":goal}));
     };
     let execution=receipt["execution_id"].as_str().expect("the source delegation returns its original domain receipt");
     let status_only=body["tools"].as_array().unwrap().iter().all(|tool|tool["function"]["name"]=="agent_status");
-    let status_prefix=format!("{fork_id}-status-");
     let status=recorded(&status_prefix);
     if status_only {return tool_call("agent_status",&format!("{status_prefix}{ordinal}"),json!({"execution_ids":[execution]}));}
     if let Some(status)=status.as_ref().filter(|status|status["result"]["all_ready"]==true) {
@@ -121,6 +134,27 @@ fn joined_parent_step(body:&Value,ordinal:usize,fork_id:&str,goal:&str,intermedi
     let (mut delta,reason)=tool_call("agent_wait",&format!("{fork_id}-wait-{ordinal}"),wait);
     if let Some(text)=intermediate {delta["content"]=json!(text);}
     (delta,reason)
+}
+
+#[test]
+fn superseded_parent_status_is_reread_with_a_fresh_identity_and_other_errors_stay_visible() {
+    let held="[tool error]\nNot executed: a new accepted user instruction arrived. Reconsider the task and update_plan before further effects.";
+    let status=json!({"role":"tool","tool_call_id":"question-fork-status-4","content":held});
+    assert!(parent_tool_observation(&status,true).is_none());
+    assert!(std::panic::catch_unwind(||parent_tool_observation(&status,false)).is_err(),
+        "a fixed-identity delegation or command cannot silently be resent as a status read");
+    let rejected=json!({"role":"tool","tool_call_id":"rejected-command","content":"[tool error]\n{\"accepted\":false,\"code\":\"TARGET_STATE_CHANGED\"}"});
+    assert_eq!(parent_tool_observation(&rejected,false).unwrap()["accepted"],false,"a real rejected command is never converted into success");
+    let bad=json!({"role":"tool","tool_call_id":"question-fork-status-5","content":"[tool error]\nunrecognized native rejection"});
+    assert!(std::panic::catch_unwind(||parent_tool_observation(&bad,true)).is_err(),"only the exact known non-execution observation is retryable here");
+    let body=json!({"tools":[{"function":{"name":"agent_status"}}],"messages":[
+        {"role":"user","content":"BACKGROUND_REQUEST: original parent"},
+        {"role":"tool","tool_call_id":"question-fork","content":"{\"execution_id\":\"original-execution\"}"},status]});
+    let (next,reason)=joined_parent_step(&body,9,"question-fork","original-child-work",None);
+    assert_eq!(reason,"tool_calls");assert_eq!(next["tool_calls"][0]["function"]["name"],"agent_status");
+    assert_eq!(next["tool_calls"][0]["id"],"question-fork-status-9");
+    assert_eq!(serde_json::from_str::<Value>(next["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap(),
+        json!({"execution_ids":["original-execution"]}));
 }
 
 fn background_parent_step(body:&Value,ordinal:usize,user:&str)->(Value,&'static str) {
@@ -901,7 +935,7 @@ async fn execution_cleanup_retries_a_canonical_cancelled_turn_that_still_has_a_l
         match nomifun_agent_execution::AgentExecutionSessionPort::cancel_attempt_for_execution(flow.fixture.owner.as_ref(),
             &flow.owner,session.as_ref(),"fixture-attempt",operation.as_ref()).await {
             Ok(()) => break,
-            Err(nomifun_common::AppError::Conflict(_)) => tokio::time::sleep(Duration::from_millis(10)).await,
+            Err(nomifun_common::AppError::ExecutionAdmissionPending) => tokio::time::sleep(Duration::from_millis(10)).await,
             Err(error) => panic!("exact native cleanup failed unexpectedly: {error}"),
         }
     }}).await.expect("cleanup must retry the closed exact Turn instead of acknowledging its empty canonical head");
@@ -926,7 +960,7 @@ async fn retired_attempt_cleanup_never_selects_the_successor_turn() {
             match nomifun_agent_execution::AgentExecutionSessionPort::cancel_attempt_for_execution(
                 port,&flow.owner,session.as_ref(),"original-attempt",original.as_ref()).await {
                 Ok(()) => break,
-                Err(nomifun_common::AppError::Conflict(_)) => tokio::task::yield_now().await,
+                Err(nomifun_common::AppError::ExecutionAdmissionPending) => tokio::task::yield_now().await,
                 Err(error) => panic!("original cleanup failed: {error}"),
             }
         }

@@ -178,7 +178,7 @@ async fn autowork_attempt_reuses_lead_without_becoming_disposable_attempt_transc
         nomifun_db::sqlx::query("UPDATE agent_session_heads SET status=?,active_turn_id='original-user-turn' WHERE session_id=?")
             .bind(status).bind(CANONICAL_LEAD_ID).execute(db.pool()).await.unwrap();
         assert!(repository.start_attempt(OWNER_ID,&created.execution_id,&planned.steps[0].step_id,queued.step.version,
-            &attempt.attempt_id,attempt.version,CANONICAL_LEAD_ID,AgentExecutionAttemptSessionKind::AutomationLead,None,
+            &attempt.attempt_id,attempt.version,CANONICAL_LEAD_ID,AgentExecutionAttemptSessionKind::AutomationLead,None, None,
             &event(AgentExecutionEventKind::AttemptChanged)).await.is_err(),"{status} cannot acquire automation input ownership");
         assert_eq!(repository.list_conversation_links(OWNER_ID,&created.execution_id).await.unwrap().len(),1);
     }
@@ -194,7 +194,7 @@ async fn autowork_attempt_reuses_lead_without_becoming_disposable_attempt_transc
             attempt.version,
             CANONICAL_LEAD_ID,
             AgentExecutionAttemptSessionKind::AutomationLead,
-            None,
+            None, None,
             &event(AgentExecutionEventKind::AttemptChanged),
         )
         .await
@@ -587,7 +587,7 @@ async fn agent_execution_row_model_excludes_retired_plan_gate_mapping() {
             queued_attempt.version,
             &conversation_id,
             AgentExecutionAttemptSessionKind::ChildAttempt,
-            None,
+            None, None,
             &event(AgentExecutionEventKind::AttemptChanged),
         )
         .await
@@ -789,7 +789,7 @@ async fn recovery_fixture_for_owner(
     let running = repository.start_attempt(
         owner_id, &created.execution_id, &queued.step.step_id, queued.step.version,
         &attempt.attempt_id, attempt.version, &conversation_id,
-        AgentExecutionAttemptSessionKind::ChildAttempt, None, &event(AgentExecutionEventKind::AttemptChanged),
+        AgentExecutionAttemptSessionKind::ChildAttempt, None, None, &event(AgentExecutionEventKind::AttemptChanged),
     ).await.unwrap();
     let operation_id = format!("turn:user:{owner_id}:{conversation_id}:{}:initial-turn", attempt.attempt_id);
     let terminal_event_id = nomifun_common::generate_id();
@@ -1457,6 +1457,12 @@ mod source_continuation;
 
 #[path = "agent_execution_repository/source_reply.rs"]
 mod source_reply;
+
+#[path = "agent_execution_repository/parent_question_reply.rs"]
+mod parent_question_reply;
+
+#[path = "agent_execution_repository/task_control_reliability.rs"]
+mod task_control_reliability;
 
 #[path = "agent_execution_repository/closed_steer.rs"]
 mod closed_steer;

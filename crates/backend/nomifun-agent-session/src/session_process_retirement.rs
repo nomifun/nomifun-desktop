@@ -37,14 +37,24 @@ struct ProcessOutcomes {
 fn process_observation(value: &Value, dispatch: &Dispatch) -> Option<(String, EngineProcessPoll)> {
     if value.get("error").is_some_and(|error| !error.is_null()) { return None; }
     let result: EngineToolResult = serde_json::from_value(value.get("result")?.clone()).ok()?;
-    if result.call_id.as_ref() != dispatch.call || result.is_error || result.validate_for(&result.call_id).is_err() { return None; }
+    if result.call_id.as_ref() != dispatch.call || result.validate_for(&result.call_id).is_err() { return None; }
     let mut output: Value = serde_json::from_str(&result.output_text()).ok()?;
     let id = output.get("process_id")?.as_str()?.to_owned();
     let object = output.as_object_mut()?;
     for field in ["process_id", "success", "component_identity", "schema", "operation", "control_applied", "code", "message"] {
         object.remove(field);
     }
-    Some((id, serde_json::from_value(output).ok()?))
+    let poll: EngineProcessPoll = serde_json::from_value(output).ok()?;
+    // A command's failed business result is independent of its native
+    // lifetime. A first-party nonzero exit/cancellation/timeout can still
+    // prove the original process existed and was physically reaped. Keep
+    // owner failures and unknown/non-executed outcomes outside that proof;
+    // the caller still requires the exact original dispatch/creator tuple,
+    // and reaped() separately checks the complete native cleanup report.
+    if result.is_error && !matches!(poll,
+        EngineProcessPoll::Exited { .. } | EngineProcessPoll::Cancelled { .. }
+            | EngineProcessPoll::TimedOut { .. }) { return None; }
+    Some((id, poll))
 }
 
 fn reaped(poll: &EngineProcessPoll) -> bool {

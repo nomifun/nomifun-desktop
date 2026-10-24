@@ -3,6 +3,9 @@ name = "nomifun-agent-execution"
 version.workspace = true
 edition.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 nomifun-common.workspace = true
 nomifun-agent-contracts.workspace = true

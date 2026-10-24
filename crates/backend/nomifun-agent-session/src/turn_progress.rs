@@ -36,7 +36,7 @@ impl AgentSessionStore {
         ).bind(session.as_ref()).bind(operation.as_ref()).fetch_optional(&mut *tx).await?;
         let Some((identity, state, started, terminal, native_pause)) = row else {
             tx.commit().await?;
-            return Ok(TurnProgressObservation { status: TurnReceiptStatus::NotFound, cursor: head.last_seq, suspended: false });
+            return Ok(TurnProgressObservation { status: TurnReceiptStatus::NotFound, cursor: head.last_seq, suspension: None });
         };
         if identity != operation.as_ref() { return Err(SessionStoreError::InvalidSession("Turn progress identity differs".into())); }
         let start = event_by_event_id_tx(&mut tx, &started).await?.map(event_from_row).transpose()?
@@ -52,13 +52,30 @@ impl AgentSessionStore {
             "cancelled" | "interrupted" => TurnReceiptStatus::Cancelled,
             _ => return Err(SessionStoreError::InvalidSession("Turn progress state invalid".into())),
         };
-        let mut suspended = false;
+        let mut suspension = None;
         if status == TurnReceiptStatus::Running {
             if terminal.is_some() { return Err(SessionStoreError::InvalidSession("running Turn progress has a terminal".into())); }
-            let native_paused = native_pause.map(|value| serde_json::from_str::<NativePauseState>(&value)).transpose()?.is_some();
-            suspended = native_paused || (head.active_turn_id.as_deref() == Some(operation.as_ref())
-                && matches!(head.status.as_str(), "paused" | "reconciliation"));
-            if !suspended && let Some(boundary) = latest_boundary_tx(&mut tx, session, operation, start.seq, head.last_seq, "turn_waiting").await? {
+            let native_paused = native_pause.map(|value| serde_json::from_str::<NativePauseState>(&value)).transpose()?;
+            suspension = native_paused.map(|pause| TurnProgressSuspension::NativePause {
+                revision: pause.revision, reason: pause.reason, checkpoint_revision: pause.checkpoint_revision,
+                execution_fence: pause.execution_fence, cleanup_proven: pause.cleanup_proven,
+            });
+            if suspension.is_none() && head.active_turn_id.as_deref() == Some(operation.as_ref())
+                && matches!(head.status.as_str(), "paused" | "reconciliation") {
+                if head.status=="paused" {return Err(SessionStoreError::InvalidSession("paused Turn progress has no canonical native pause".into()));}
+                let source:Option<String>=sqlx::query_scalar("SELECT event.event_id FROM agent_effects effect JOIN agent_events event ON event.session_id=effect.session_id AND event.event_id=effect.terminal_event_id WHERE effect.session_id=? AND effect.turn_id=? AND effect.state='unknown' AND event.kind='effect/uncertain' AND event.kind_version=1 AND event.seq<=? ORDER BY event.seq DESC LIMIT 1")
+                    .bind(session.as_ref()).bind(operation.as_ref()).bind(as_i64(head.last_seq,"reconciliation progress cursor")?).fetch_optional(&mut *tx).await?;
+                let source=source.ok_or_else(||SessionStoreError::InvalidEvent("reconciliation progress has no original uncertain Effect".into()))?;
+                let source=event_by_event_id_tx(&mut tx,&source).await?.map(event_from_row).transpose()?
+                    .ok_or_else(||SessionStoreError::InvalidEvent("reconciliation progress source is missing".into()))?;
+                let payload=payload_value_for_event_tx(&mut tx,&source).await?;
+                if payload.get("turn_id").and_then(Value::as_str)!=Some(operation.as_ref())
+                    ||payload.get("recovery").and_then(Value::as_str)==Some("native_owner_verified_reconciliation") {
+                    return Err(SessionStoreError::InvalidEvent("reconciliation progress differs from its unresolved Effect".into()));
+                }
+                suspension = Some(TurnProgressSuspension::Reconciliation { sequence: source.seq });
+            }
+            if suspension.is_none() && let Some(boundary) = latest_boundary_tx(&mut tx, session, operation, start.seq, head.last_seq, "turn_waiting").await? {
                 let value = payload_value_for_event_tx(&mut tx, &boundary).await?;
                 if value.pointer("/event/event").and_then(Value::as_str) == Some("turn_waiting") {
                     let mut events = Vec::with_capacity(2);
@@ -69,7 +86,10 @@ impl AgentSessionStore {
                     }
                     payloads.insert(boundary.event_id.as_ref().to_owned(), value);
                     events.push(boundary);
-                    suspended = crate::turn_outcome::canonical_turn_waiting_outcome(&events, &payloads, operation, head.last_seq)?.is_some();
+                    if let Some(nomifun_agent_contracts::AgentTurnOutcome::Waiting { wait_seq, request_id, reason }) =
+                        crate::turn_outcome::canonical_turn_waiting_outcome(&events, &payloads, operation, head.last_seq)? {
+                        suspension = Some(TurnProgressSuspension::Waiting { wait_seq, reason, request_id });
+                    }
                 }
             }
         } else {
@@ -83,6 +103,6 @@ impl AgentSessionStore {
             }
         }
         tx.commit().await?;
-        Ok(TurnProgressObservation { status, cursor: head.last_seq, suspended })
+        Ok(TurnProgressObservation { status, cursor: head.last_seq, suspension })
     }
 }

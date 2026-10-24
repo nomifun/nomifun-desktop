@@ -61,6 +61,17 @@ pub trait AgentRuntimeControl: Send + Sync {
     /// transitioned into a known status yet.
     fn status(&self) -> Option<ConversationStatus>;
 
+    /// Opaque local SDK task identity, unchanged by settlement or registry
+    /// release. This grants no canonical execution authority. Unsupported
+    /// runtimes return `None`; callers must not treat absence as a match.
+    fn current_task_identity(&self) -> Option<crate::AgentRuntimeTurn> {
+        None
+    }
+
+    /// Read-only liveness of this SDK's current driver task. Cached status or
+    /// a retained task identity alone cannot prove that a caller is advancing.
+    fn has_live_turn_task(&self) -> bool { false }
+
     /// Whether the runtime still has a functioning event transport. Required
     /// for every manager so a newly added/reworked backend cannot silently
     /// inherit "healthy" after its process or relay has been quarantined.
@@ -279,6 +290,15 @@ impl AgentRuntimeHandle {
             Self::Official(runtime) => runtime.teardown_proven(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(runtime) => runtime.teardown_proven(),
+        }
+    }
+
+    pub async fn settle_pending_turn(&self, source_message_id: &str)
+        -> Result<crate::engine_sdk::EngineTurnSettlementStatus, AppError> {
+        match self {
+            Self::Official(runtime) => runtime.settle_pending_turn(source_message_id).await,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mock(_) => Err(AppError::Conflict("Mock Runtime has no retained Turn settlement owner".into())),
         }
     }
 

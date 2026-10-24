@@ -58,6 +58,12 @@ pub struct RuntimeSteerAdmissionOutcome {
 /// that silently treats a kill request as a completed cleanup.
 #[async_trait]
 pub trait OfficialAgentRuntime: AgentRuntimeControl {
+    /// Retry only the retained exact Turn's cleanup and canonical receipt.
+    /// This must never run a model, tool, or original input again.
+    async fn settle_pending_turn(&self, _source_message_id: &str)
+        -> Result<crate::engine_sdk::EngineTurnSettlementStatus, AppError> {
+        Err(AppError::Conflict("Runtime has no retained Turn settlement owner".into()))
+    }
     fn kill_and_wait(&self, reason: Option<AgentKillReason>) -> RuntimeTeardown;
 
     /// Observe success of this exact instance's retained full teardown flight.

@@ -47,7 +47,7 @@ pub use context_contributor::{ContextContributor, TurnContext};
 pub use nomi_config;
 pub use nomi_types;
 
-pub use runtime_state::AgentRuntimeState;
+pub use runtime_state::{AgentRuntimeState, AgentRuntimeTurn};
 pub use runtime_instance::{OfficialAgentRuntime, RuntimeSteerDelivery, RuntimeSteerAdmission, RuntimeSteerCommitted, RuntimeSteerAdmissionOutcome, RuntimeTeardown};
 pub use runtime_admission::{RuntimeAdmission, RuntimeSupport};
 pub use runtime_driver::{

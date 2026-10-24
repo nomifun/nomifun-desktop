@@ -1,6 +1,6 @@
 import type { ConversationId, ExecutionId, ExecutionStepId } from '@/common/types/ids';
 import type { TChatConversation } from '@/common/config/storage';
-import type { TAgentExecutionDetail } from '@/common/types/agentExecution/agentExecutionTypes';
+import type { TAgentExecutionDetail, TRestartExecutionStep } from '@/common/types/agentExecution/agentExecutionTypes';
 import React, { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { OpenStepPayload } from './DagCanvas';
 import type { LeadThinkingState } from './useLeadThinking';
@@ -21,6 +21,9 @@ export interface ExecutionContextValue {
   canvasOpen: boolean;
   setCanvasOpen: (open: boolean) => void;
   toggleCanvas: () => void;
+  /** Unacknowledged HTTP request drafts survive task-inspector navigation.
+   * They contain no execution status and never dispatch without a user click. */
+  restartDrafts: Map<string, TRestartExecutionStep>;
 }
 
 const ExecutionContext = createContext<ExecutionContextValue | null>(null);
@@ -35,6 +38,7 @@ export const ExecutionProvider: React.FC<{
   const projectionIntent = useRef(0);
   const mounted = useRef(false);
   const session = useRef(conversation.id);
+  const restartDrafts = useRef(new Map<string, TRestartExecutionStep>());
 
   const projectStep = useCallback((payload: OpenStepPayload) => {
     if (!mounted.current || session.current !== conversation.id) return;
@@ -65,6 +69,7 @@ export const ExecutionProvider: React.FC<{
     session.current = conversation.id;
     projectionIntent.current += 1;
     setProjectedPayload(null);
+    restartDrafts.current.clear();
     return () => { mounted.current = false; projectionIntent.current += 1; };
   }, [conversation.id]);
 
@@ -90,6 +95,7 @@ export const ExecutionProvider: React.FC<{
       canvasOpen,
       setCanvasOpen,
       toggleCanvas,
+      restartDrafts: restartDrafts.current,
     }),
     [
       canvasOpen,

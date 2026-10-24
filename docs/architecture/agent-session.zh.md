@@ -81,6 +81,10 @@ flowchart LR
 
 工具正文服务模型上下文、效果核验、恢复和用户按需只读查看。Store 在原 Event/Payload 链内提取正式工具参数、结果及压缩上下文中对应的内容槽；相同 Session 内相同类型、相同字节的内容复用按摘要标识的 Payload，事件仍保留各自的调用身份、顺序、宿主结算与 Runtime 观察语义。读者在同一事务内验证来源、类型、长度、摘要和精确槽位后恢复原 typed 内容；不读取当前磁盘来补造历史，不增加内容表、旁路日志或恢复账本。保留的存储引用由 Store 作者，提交草稿不能提供保留的引用元数据；缺失或损坏拒绝读取。唯一内容计入原 Payload 预算，展开后的内容与日志仍受原有边界约束，内容共享不扩大可执行 checkpoint 的 build、binding 或权限范围。
 
+助手正文、思考与工具内容事件统一使用现有 canonical Payload 编码边界：不超过 64 KiB 的 JSON 内联，更大的合法内容连同 Stored 引用在原事务内写入 `agent_payloads`；单 Payload 仍受 1 MiB 上限约束。供应商一次输出较长片段不能仅因内容事件误用内联分支而丢失结果，不要求供应商切小片段规避正式存储合同。
+
+Canonical 追加写入在共享入口将异步校验状态放到堆上，避免 Session 创建、Turn 与 Effect 调用方逐层内嵌整个校验状态而耗尽默认线程栈。校验继续借用调用方的原事务，顺序和规则保持，不派生后台写入任务，也不改变事务及取消边界。
+
 Turn 与 Effect 索引只保留生命周期及精确 `terminal_event_id`，不镜像终态正文；读取在原事务内验证起止事件、归属、状态和索引边界后解析原 Payload。Payload 只保存数据库中的非空内容，不声明未实现的对象目录。前向迁移只删除这些冗余列，物理替换 Payload 表时逐字节保留已有内容、身份及事件引用；无法读取的对象模式数据拒绝迁移。原 baseline 和已提交迁移 checksum 不变，不转换退役 Agent 数据，也不清除现役 Session。
 
 Windows 显式 native 文件修改的目标证明保存在原 Effect started 的 typed `native_mutation_targets`，不增加目标表或第二账本。Windows Store 在原写事务内读取并验证 pending/unknown 的原 Event/Payload，再原子检查跨项目、Session 与执行身份的物理重叠及提交准入；结算不能替换或给旧事实倒填目标。实际执行持有同一次捕获的 native pins，数据库事务不跨 I/O。原 owner、project/resource、Snapshot 和幂等身份继续校验。publication 与动态目录采用明确的原生卷保守范围，普通 Entry 比较对象与命名空间；缺失充分旧证明时拒绝无法证明不相交的新文件修改，不读取当前磁盘重建过去。其他平台保留原文件 owner 和项目围栏，本次不声明 Unix mount 目标证明。精确范围和 opaque process 边界见[全局操作系统能力](global-os-capabilities.zh.md)。
@@ -89,7 +93,39 @@ Windows 显式 native 文件修改的目标证明保存在原 Effect started 的
 
 应用工作区的内置应用 Agent 复用普通 coding、Skill、MCP 和 typed resources；个人 Agent 也可明确选入同一应用开发能力。托管工具直接调用 UI 同一命令与进程 owner，不建立专属计划、预览资格、交付证明或 checkpoint。空闲会话的 Agent、资源、知识库与扩展选择走同一 canonical binding transition，仍受活动 Turn、Remote、Attempt、未知效果与原生 checkpoint 校验约束。应用工作区固定模板的产品要求不允许借重开入口替换已有 binding。当前会话效果和产物继续读取精确 Turn 的 typed canonical event/payload，不从工具提示或网页状态补造成功。
 
+### 原 Turn 的异常收尾与责任交接
+
+计算退出、原操作结算、Turn 正式闭轮和重资源退休分别取得证明。原 SDK 在清理或终态写入失败后保留同一输入、原出口、首个错误和原资源现场；原 Session owner 独立监督 exact Runtime 的收尾。原 Event/Payload 中的 `runtime/native-settlement-requested` 保存这次退出及交接身份，`runtime/native-settlement-settled` 确认这份收尾责任已结清；二者不创建任务、第二账本或恢复输入，不表示业务成功。写入确认丢失时按原稳定身份复读，不能重跑模型、工具或委派。
+
+暂停撤销旧 producer 的新增执行权，但不丢弃已经准入的结果和清理责任。只结算能力由 Store 从原事实构造，每次写入重验原 Session/Turn、producer generation、pause revision、资源归属及控制围栏；只能补原观察、原清理证明和正式原出口。用户 Stop 与后继始终优先，迟到结果不改写已提交终态。用户 Pause 保留其正式请求；收尾完成可以确认同一 Pause 的 cleanup proof，不能自动恢复计算。纯收尾不重新申请模型容量，也不等待其自身 SDK task、独立孩子或等待主终态的知识回写。
+
+工具及 MCP owner 保留实际返回和待补交记录，区分暂态存储失败、合同拒绝与未知外部效果。任务 future 已 join、业务返回失败、结果已持久化、原生资源已释放是不同事实；不得把一次写入失败压成永久的全局 cleanup 布尔。正常执行、显式恢复和已证明安全的历史归约共用 typed 结果消费及原冻结效果合同，保持调用顺序、预算、计数、分页覆盖和来源。恢复读取确切原 Effect 结果，不用泛化成功文字代替结构化委派回执；缺证明仍拒绝执行。运行中不可重建的句柄继续由原资源 owner 保留，checkpoint 不能重建这些句柄。
+
+暂态 SQLite Busy／Locked／借连接超时只允许原 writer 重试同一不可变事件、投影或 checkpoint，先按原身份确认提交结果；取消可抢占退避，不丢弃已经进入数据库的操作。损坏与 I/O 失败仍关闭准入。工具返回的结构拒绝可在原调用上记录可信错误观察，确认后释放原待结算结果；不能把无效正文当作成功，也不能抹掉未知 Effect 或缺失清理证明。
+
+原生恢复的效果核验使用 `native_recovery_external_reconciliation_required`，适用于同进程交接和重启恢复，不据此宣称发生过进程重启。当前 schema 中已落盘的合法旧 `process_restart_external_reconciliation_required` 仅可作为原不可变 uncertain 事实被核验读取，仍须原 runtime producer、Effect 身份、输入摘要和因果证明；新准入拒绝旧标签。此读侧识别不重写历史、不迁移退役数据，也不授予重跑权。
+
+并行只读的 caller future 在准入或 writer 等待期间仍可能持有宿主锁。Runtime 串行核验和记录一份返回时，同时继续推进原批次其余 caller；不能停掉它们的 poll 后再等它们持有的锁。原批次已返回值只作临时缓冲，资源责任继续由原 Host 持有，快结果无需等待无关慢调用；下一次模型输入和恢复仍使用原提案顺序。
+
+显式恢复从原排队请求、原授权到运行环境接回连续保留负责人。暂态准备错误保留同一请求，原权限失效后退出本地等待者；授权落库不等于接回完成。claim 后先保留原 Journal，再准备与交接，失败只能用该原 writer 收尾。SDK 明确接受任务后，由它负责原执行与出口；外层只等待真实 attachment 或原 SDK 的 canonical 结束证明，不能因等待时长再造一个暂停出口。诊断使用统一有界脱敏边界，原业务结果保持完整。
+
+首次原 Runtime 初始化记录尚未确认时，先保留原 owner 并补交该原初始化前缀，再改变暂停围栏；不得把缺失前缀变成暂停后永远无法补交的记录。恢复后的 SDK 在交接回调内从确切 Runtime 实例捕获其现役代次，不能再用第一次 Turn start 的序号代替；收尾后的通知和自动资源退休继续使用这个原代次。
+
+同一 SDK 暖恢复后仍可复用 accepted root，因此已提交出口和原收尾单飞同时绑定该 SDK 既有的 opaque task identity。原发送才递增此本地身份；registry admission 释放及同一任务的结算重试不改变它，身份缺失不能放行。旧 Pause 不能证明新任务清理完成；本地身份也不授执行权，canonical writer 仍核验原 native generation。交接直接传递该原 Runtime，不按 Session 再挑实例。冷结算保留并校验完整原 journal 的连续序列，仅将原 receipt 代次内的出口与保存结果比较，不能把旧代真实 Pause 当成本代冲突或忽略本代矛盾出口。
+
+### Attempt 输入准入与连续交接
+
+领域 `Running` 表示原 Session 关联与预约已落库，不证明模型或工具已启动。首次输入复用原 Attempt 的 `InitialInput` outbox：先固定原任务与选择，准备后将完整请求和原 link 一起提交；不从最新 Step 文本重建旧请求，也不另存历史正文。canonical `message/user-accepted` 与 `turn/started` 的同一 SQLite writer 消费 `AgentExecutionTurnAuthority`，复核 owner、有效租约、精确 Execution／Step／Attempt、适用版本、唯一 Session link、原调用 key 和停止／替代围栏。独立 preflight 不能代替这次准入。原稳定 key 已存在时，先完整校验输入及启动事实，再仅确认原回执；旧权限不能据此启动新执行。
+
+初始输入与已受理的父问题回复都由原 Session 生命周期托管投递任务。调用方退出、提交 ACK 丢失或准备读取暂时失败，不能结束这段责任。owner 保留完整 prepared request 和当前阶段：尚未受理时仍须现役准入；已经受理时只核验原事实、跟随真实 SDK／收尾 owner，或通过同一原 Turn 的正式 native claim 接管。重复的 Accepted 回执不授权再次 `send_message`。恢复锁内重新核验 custody，保护等待锁期间才被 SDK 接受、但 Driver 尚未 attach 的原任务。
+
+退避和正式恢复之前释放 Session 业务 gate，不跨数据库事务等待；用户 Stop 仍可先提交精确围栏。查询推进者时不把本输入任务自己的 gate 当作 SDK 已接管证明。有效的旧 native 租约是 typed 暂态等待，期满后仍核验原 claim；不能把一次 `ExecutionLeaseActive` 当成永久拒绝。无 checkpoint 的首次 claim 仅适用于原事实证明尚无执行前缀与效果的同一 Turn；已有 checkpoint、build、Snapshot、未知效果及 UserPause 围栏保持不变。恢复无法合法接回时，沿原 writer 保留明确核验／暂停与收尾责任，不伪造业务失败或安全重跑证明。
+
+Session 输入交接 ACK 只结束输入投递阶段；原 Step job 仍由 Execution 的现役生命周期负责到 Attempt 结算 ACK 或明确接管。canonical 终态、领域结算、原生清理及资源退休分别确认。Review 可由受控核验重新读取原操作事实，并按原 Step／Attempt CAS 对账；缺失回执不永久等同 Unknown，也不因空 Session 自动重发。真实 Unknown、损坏、取消和用户暂停继续受保护。具体调度与任务操作见 [Agent Execution](agent-execution.zh.md)。
+
 ### 子 Agent 与父 Turn 的连续性
+
+需求采用编号，不自动要求模型发布逐项原始数据，也不强制事前声明 exact actions。完成报告省略 `delivery_items` 时，仍校验 criteria／真实 evidence，并经过现有一次有界交付审核。显式选择发布 `delivery_items` 时，仍校验编号覆盖、顺序、真实结果引用及原值；不能虚构引用或额外执行命令来满足格式。
 
 子 Agent 使用独立 canonical Session 和 Runtime，继承原不可变 Revision／Snapshot、精确模型和 typed resource bindings，再应用该 Attempt 明确选择的权限上限。父工具的显示窗口、一次路由提示或暂时缺少某个 schema 不会成为子会话的新 binding。冻结授权、Session active capability、Attempt 权限上限和 Turn schema 呈现窗口分别校验；ToolSearch 只改变已有授权的呈现，不恢复未选能力，也不替代权限证明。
 
@@ -97,11 +133,31 @@ Windows 显式 native 文件修改的目标证明保存在原 Effect started 的
 
 委派受理后父 Turn 继续持有原任务和完整已授权工具。成功回执表示接受工作，不终结任务或强制下一模型步骤再次委派。父 Agent 用 `agent_status` 读取确切子任务结果，以 `agent_message` 协调所属 Step，并在需要时使用 `agent_wait`。详细执行与并发合同见 [Agent Execution](agent-execution.zh.md)。子任务结果保持原 Execution／Step／Attempt／Session／Turn／terminal 引用，父 Agent 整合和核验后沿普通 Runtime 输出最终回答；来源委派不另写一个后台结果报告来冒充父回答。
 
-长子结果正文具有明确的 32 KiB UTF-8 分页及不可变来源、完整正文摘要，只有连续完整覆盖才能消费该终态，遗漏字节或单独末片不能当作交付。native checkpoint 只保存覆盖引用，不另存正文。新读取的确切子来源包含真实工作区效果或 native process ownership 时，父任务先前的工作区观察、completion 证据与 scoped instructions 观察只失效一次；无关领域序号增长不触发这一结论。
+首次委派的强制意图只从当前正式真人受理事件及其已准入来源解释，复用 canonical human-intake 的 producer、owner、命名空间和消息身份校验，不能仅凭正文或客户端自填 `origin` 获得。父任务背景、子 Agent 角色称谓和 Host 续发不是新的真人委派要求。只有既有读者核验过的 Execution 来源 scope 配合内部输入，才解析任务信封中的当前 Step；该 scope 不增加 Turn 或工具权限。完整工具、并发配置及并行偏好保留，用户真正要求的嵌套委派和模型按当前任务选择进一步分工仍可执行。
+
+长子结果正文具有明确的 32 KiB UTF-8 分页及不可变来源、完整正文摘要，只有连续完整覆盖才能消费该终态，遗漏字节或单独末片不能当作交付。每次观察提供全范围的轻量 Step 来源头，正文筛选不确认未返回的字节。仅换代或真实变化的 Step 失效其旧消费引用，其他 Step 的有效正文与分页覆盖保留；Execution 总序号变化不清空全部成果。native checkpoint 只保存覆盖与来源引用，不另存正文；已经完整交付的终态复用原消费摘要，不再镜像一份。新读取的确切子来源包含真实工作区效果或 native process ownership 时，父任务先前的工作区观察、completion 证据与 scoped instructions 观察只失效一次；无关领域序号增长不触发这一结论。
 
 `agent_wait` 在同一个 Turn 保存 typed `AwaitingChildren` 与配对的 `ChildrenWaitResolved`，checkpoint 保留原 operation、模型步骤、预算、计划、工具观察与等待范围。崩溃恢复只继续原等待，不重复创建或提交子任务，不重置模型预算。等待和唤醒沿原 native journal 记录，唤醒是数据观察，不是新真人输入；随后状态查询核验确切结果，不能从通知或状态文字推断交付成功。正常排队维持 FIFO，已受理 steering 在原 Turn 安全边界优先处理；停止围栏阻断迟到唤醒，不借用后继 Turn。
 
+checkpoint 之后再次记录同一停车等待，是可恢复边界。Runtime 用现役 typed progress reducer 核验尾部，保留原 checkpoint 不变；canonical claim writer 在原租约事务内另行核验完整 wait request、模型计数、checkpoint 摘要和原 producer 的连续序列，不能仅凭事件名称放行。范围、游标或模式改变，新模型／工具／效果、已经唤醒的等待、不兼容 build／Snapshot、活资源以及 Stop／用户暂停围栏仍走原核验或控制路径。纯等待不授权新建孩子、重发原命令或增加预算。
+
+`all` 等待所选工作都有可验证终局，包含失败与取消，不要求全部成功；它也不证明父任务已经整合交付。显式、自动和重放 WAIT 共用按原来源与 Execution 规范化的观察引用，省略 `after_cursor` 使用最新成功观察，旧显式游标不能覆盖 journal 顺序上更新的水位。至多 64 个 Execution 的组合游标有 16 KiB 边界，不保存按集合组合扩张的缓存。每个引用区分当前 Attempt／Turn／已受理管理命令的 state 与原终局／问题／Review 的 ready 身份；不再共用无范围的全局游标。
+
+状态变化不总是新决策。旧失败因重试退出当前 ready 集合时，Runtime 比较原成功观察的轻量来源头，只推进本次只读订阅水位，不发 `ChildrenWaitResolved`、不采样模型、不丢结果正文义务。崩溃最多重复这次读取。真实新增／变更的终局或问题才交回一次控制，原输入已受理的通知和无 owner 的决策出口分别处理，不能被这层去重吞掉。
+
+真正等待必须有能推进所选工作的现役 dispatcher、精确 Step／Attempt job、输入投递或 native 执行／收尾 owner；状态文字、未过期租约或缓存条目不是活任务证明。另一个合法边界是仍可回答、且与当前精确 DecisionRequested 配对的 canonical InputRequired：剩余未终局工作全部具有该真实问题边界时，原 WAIT 保留现役 Decision 与来源输入订阅，不再重复唤醒模型。这不报告活 job，也不授权代答；原真人呈现、权限和回复验证继续生效。一个问题不能替其他 Review、未结算投递或无人 Running／Queued 借权。已看到的决策既无推进者、也无该外部输入边界时，重复 WAIT 沿现役 intervention 路径停车／暂停，保留原 `awaiting_children`、pending 结果、预算和控制入口，不继续空等或反复唤醒模型。只有真正请求用户回答才形成正式 InputRequired；技术 Review 不变成人类 question，UserPause 不自动解除。
+
+已经受理、正等待 native 容量的 DecisionInput 不再是未答问题。即使 Step 暂仍为 WaitingInput，状态读取和现役 WAIT 都要核对其真实 dispatcher；只有活 owner 才证明可推进，原 outbox 本身不证明。父 native 等待释放原容量，供同一 Attempt 继续投递。
+
+初始计划在 scheduler 产生前也有真实负责人。现役 PlanningGuard 在任务首次 await 前同步登记，持续持有到原结果结算或 scheduler 确切接手；一条 Planning 状态记录本身不证明。数据库 typed 暂态只在该 owner 内重试原读取或提交，保留已产计划或确定失败候选，Stop 仍可抢占，不从外层重新调用 planner。提交 ACK 丢失后，原 owner 观察 canonical 当前计划并实际启动／加入其现役 scheduler 后才能退出；先交接、再发布通知，不新增规划结果、Step、输入或执行账本。
+
+等待先订阅确切 owner／Execution 及原 Turn 的输入通知，再读 canonical 状态，避免读取期间漏掉提交。领域取消已提交后的原 native 终结及 cleanup ACK 仍唤醒原观察者重新核验事实，不追加第二次领域终态、不启动任务。通知缺失时由 30 秒兜底批量检查领域／native 游标；游标不变复用内容观察，有变化才读取每 Execution 的窄快照并合并新增的最小来源证明索引，不加载 Participant Snapshot 或 launch config 大对象。活 owner 可以在没有新事件时退出，故只读句柄核验独立于内容缓存水位；未绑定 Attempt 的 Step 预约仅在其精确创建 CAS 版本吻合时提供证明。观察缓存和通知都可丢弃，不是第二事实链或交付回执。
+
+纯等待和状态读取遇到 typed `PoolTimedOut`、SQLite `Busy`／`Locked` 时，在原 Turn 做可由取消抢占的退避重读，不重派孩子、重置预算或采样模型来轮询。该处理不重试 `MESSAGE` 写入，也不把损坏、I/O、缺失事实或权限失败解释为暂态成功；原分页完整消费与持久回执仍是交付依据。数据库操作诊断只观察原操作的准入、持有与结束阶段及连接池计数，不新增 SQLx acquire／release hooks、SQLite 调用或事实账本。
+
 父 Agent 真正请求用户输入后，新的真人 Turn 只有携带合法 `reply_to` 且逐跳验证同一问题终态、原受理来源、当前精确 binding 和 context clear 围栏时，才延续那些原子任务范围及未消费结果引用。历史问题关联本身仍只是数据，不能赋予 Session 全局任务权限，普通新话题也不接管旧协作。读者与命令 writer 共用同一 canonical 证明，不按最新活动任务或自然语言猜来源。
+
+父管理关系绑定原委派的逻辑 Step，而不是固定第一次 Attempt。`agent_message` 的 typed `task_control` 使用状态返回的正式 Execution／Step 版本，在原 native 命令与来源范围内连接重试、核验、精确停止或使用已完成任务替代。命令保存稳定受理身份与原目标；重发只确认该命令，普通 guidance 的旧目标冲突不能静默改投后继。合法重试保留同一 Step、建立新 Attempt；受理后尚未生成 Attempt 的意图已是未完成工作，旧失败不能满足本轮 `all`。替代保留原结果来源和正式 DAG 修订，不复制成果、吞掉 Unknown 效果或改写已经启动的下游。管理入口不扩展工具授权或人类许可，跨父 Turn／实例只沿正式来源与控制交接；不同 build 不能借继承引用越过原 checkpoint 安全校验。
 
 子等待可以按原 native owner 证明让出模型容量，继续计算前由原 writer 重新准入。它不证明进程已退出、文件修改已结算或 Browser／Computer 已释放，资源 owner 和 pending／unknown Effect 仍保留责任。用户 Pause、普通 InputRequired、资源等待和子等待各有其确切合同。状态查询、缓存重建、通知或 idle 不能创建新的任务或自动重跑已关闭 Turn。
 
@@ -320,6 +376,7 @@ Session 的 64 个进程上限只约束仍活动或尚无清理证明的句柄�
 原 Supervisor 的 terminal watch 唤醒 Session 资源 owner，在主 Turn／Runtime 之外结算
 `session/process-reaped`，只扣除同代际的单个原进程，不把部分 reap 当作 whole-owner release。
 原 first-party ToolResult 已有终态时只引用其 Event；否则保存原 native terminal。
+命令业务失败与物理进程生命周期独立：正式原启动结果即使 `is_error=true`，其已验证的 Exited／Cancelled／TimedOut 仍可贡献原启动及清理事实，最终 reap 仍须原归属和完整 cleanup 证明。非零退出及失败正文保持原值，不改成成功；owner error、Lost、未执行、错误身份或结构不能成为这类证明，不能因物理回收仍否认真实启动而永久重试写回。
 活动 Turn 尚未提交 retention 时，原 `host_process_dispatch` 的 typed `process_owner` 可提供
 spawn 时冻结的 owner generation 与 resource binding digest；它必须与原返回的 start ToolResult、
 Effect、creator、Turn Snapshot 和 native FrozenOutput 精确一致，才允许真实结束后的归档。
@@ -402,6 +459,15 @@ Turn，不进入进程等待循环，也不要求普通用户输入走 native ch
 但不擦除失败证据、不开放执行工具、不解除 Patch 或未知效果。blocked 完成报告先交付真实
 部分结果，再要求精确结构化交接，不能以普通 Answered 冒充任务完成，也不直接转技术暂停。
 有界声明机会耗尽才按协议/预算原因保留技术暂停。
+
+常规 `report_completion.summary` 就是本次完整最终答复，不再另设 2048 字符的摘要上限；
+模型提交的 summary、criteria、引用及 JSON 转义共同使用原有 48KiB 序列化 UTF-8 参数预算。
+此处按实际编码字节计算，不能以字符数冒充字节数。超过整包预算时拒绝完整报告并说明原预算，
+不截断正文、不提前关闭计划，也不授权重跑已完成操作。原有证据、失败计数及四次纠正保护保持。
+严格历史发布的 `short_summary` 只是附在宿主选定原始结果前的短引言，仍有独立的 2048 字符上限；
+原始结果继续沿现役引用与发布预算交付。显式 Agent 切换保留完整历史报告，沿用 80KiB handoff
+整包预算，不再对其中的完整 summary 再设短摘要限制。所有内容仍经原 Event/Payload 链存储，
+64KiB inline 与 1MiB 单 Payload 存储边界及 native checkpoint 预算均不变。
 
 AgentExecution、Cron、IDMM 和普通界面消费同一 typed 交接。确切的人工输入交接在 AskUser
 和 Automatic 策略下都进入原有 WaitingInput 人工处理边界，不能将 Automatic 不能代答的
@@ -1060,6 +1126,8 @@ Agent 不展示这些工具，连接指南正文按需读取。提前展示不�
 ## 数据切换与物理删除
 
 会话删除先提交 canonical `deleting` 准入围栏，再由各资源 owner 完成清理，最后原子清除私有内容并提交精确 tombstone。围栏和最终删除事务在读取、验证前取得 SQLite 写锁；不同会话的并发删除以及其他领域写入必须等待同一个数据库写边界，不能在读取快照后升级写锁而丢失部分删除。资源清理失败或未知效果继续保持围栏，只能由原 owner 重试或明确的效果对账完成删除。
+
+尚未准入输入的 Attempt 创建会话，使用现役删除生命周期中的专用 Store 准入：在与输入、link 共用的 SQLite writer 内证明原 owner、Attempt、opening key、领域持久终局／替代裁决，并且只存在原 opening、generation-zero activation 与可选 ready 的确切身份和因果链。任何历史 link、输入、Turn、Effect 或后续事件都会保留会话。仍由新 owner 准备的 Queued 预留等待原领域裁决，不能因旧调用方失去 lease 而删除。落围栏后，原生命周期 owner 在最终 purge 之前完成确切 warm Runtime／进程资源、托管工作区和 IDMM 清理；Busy、调用方退出均保留此责任。重启从原 Attempt／opening 发现围栏前候选，围栏后复用 `deleting` 恢复，不另建账本。
 
 重构采用同库 Agent 数据 clean cut：旧 Agent Session、消息、日志、Execution、Preset 与绑定不迁移、不展示、不兼容读取；非 Agent 配置按它们的 owner 和明确的数据切换合同保留。清理代码与文件不能直接操作开发者或用户正在使用的数据目录。
 

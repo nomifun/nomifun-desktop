@@ -205,7 +205,7 @@ impl AgentSessionStore {
         let work = root_string(source_work_root)?;
         let target = root_string(target_data_root)?;
         validate_uuidv7(relocation_id.as_ref(), "relocation_id")?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let apps = managed_app_namespaces_tx(&mut tx, app_ids).await?;
         require_relocation_idle_tx(&mut tx).await?;
         require_native_storage_quiescent_tx(&mut tx, None).await?;
@@ -313,7 +313,7 @@ impl AgentSessionStore {
             }
             changed += 1;
         }
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(WorkspaceRelocationOutcome { changed_sessions: changed, managed_namespaces, app_workspaces })
     }
 }

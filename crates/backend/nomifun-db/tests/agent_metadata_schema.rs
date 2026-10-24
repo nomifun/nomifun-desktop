@@ -1,4 +1,5 @@
 use nomifun_db::{init_database, validate_current_migration_lineage};
+use std::borrow::Cow;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -15,7 +16,7 @@ async fn previous_database(path: &std::path::Path) -> sqlx::SqlitePool {
     ).await.unwrap();
     sqlx::raw_sql("CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, success BOOLEAN NOT NULL, checksum BLOB NOT NULL, execution_time BIGINT NOT NULL)")
         .execute(&pool).await.unwrap();
-    for migration in MIGRATOR.iter().take(2) {
+    for migration in MIGRATOR.iter().take_while(|migration| migration.version < 3) {
         sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES (?,?,1,?,0)")
             .bind(migration.version).bind(migration.description.as_ref()).bind(migration.checksum.as_ref())
@@ -44,9 +45,20 @@ async fn removes_discovery_cache_preserves_metadata_and_known_lineage_on_restart
     let previous = previous_database(&path).await;
     let before: Vec<(String, String)> = sqlx::query_as("SELECT name,sql FROM sqlite_schema WHERE type='table' AND name LIKE 'agent_%' AND name<>'agent_metadata' ORDER BY name")
         .fetch_all(&previous).await.unwrap();
+    // Isolate the retirement migration from later legitimate Agent schema
+    // evolution. Its own before/after contract is that only metadata changes.
+    Migrator { migrations: Cow::Owned(MIGRATOR.iter().take_while(|migration| migration.version <= 3).cloned().collect()), ..Migrator::DEFAULT }
+        .run(&previous).await.unwrap();
+    let retired: Vec<(String, String)> = sqlx::query_as("SELECT name,sql FROM sqlite_schema WHERE type='table' AND name LIKE 'agent_%' AND name<>'agent_metadata' ORDER BY name")
+        .fetch_all(&previous).await.unwrap();
+    assert_eq!(retired, before, "the discovery cache retirement alone must not change canonical Agent tables");
+    let retired_columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('agent_metadata')")
+        .fetch_all(&previous).await.unwrap();
+    assert!(RETIRED_COLUMNS.iter().all(|name| !retired_columns.iter().any(|column| column == name)));
     previous.close().await;
 
-    for _ in 0..2 {
+    let mut current_schema = None;
+    for _ in 0..3 {
         let database = init_database(&path).await.unwrap();
         let pool = database.pool();
         validate_current_migration_lineage(pool).await.unwrap();
@@ -60,7 +72,11 @@ async fn removes_discovery_cache_preserves_metadata_and_known_lineage_on_restart
             .fetch_one(pool).await.unwrap(), "preserved");
         let after: Vec<(String, String)> = sqlx::query_as("SELECT name,sql FROM sqlite_schema WHERE type='table' AND name LIKE 'agent_%' AND name<>'agent_metadata' ORDER BY name")
             .fetch_all(pool).await.unwrap();
-        assert_eq!(after, before, "retiring discovery metadata must not change canonical Agent tables");
+        if let Some(expected) = current_schema.as_ref() {
+            assert_eq!(&after, expected, "ordinary restart must preserve the fully migrated Agent schema");
+        } else {
+            current_schema = Some(after);
+        }
         let receipts: Vec<(i64, Vec<u8>)> = sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
             .fetch_all(pool).await.unwrap();
         assert_eq!(receipts, MIGRATOR.iter().map(|migration| (migration.version, migration.checksum.to_vec())).collect::<Vec<_>>());

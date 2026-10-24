@@ -117,7 +117,7 @@ impl AgentSessionStore {
     /// Release only a recovery claim that never admitted any new native/model
     /// work. A failed loader must not strand its own live 90-second lease.
     pub async fn release_unattached_native_claim(&self, lease: &NativeExecutionLease) -> Result<(), SessionStoreError> {
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         native_execution::check_native_lease_tx(&mut tx, lease, false).await?;
         let activity: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND seq>? \
             AND (kind IN ('runtime/progress-recorded','context/model-visible-applied','tool/call-started','effect/started'))")
@@ -125,7 +125,7 @@ impl AgentSessionStore {
         if activity != 0 { return Err(SessionStoreError::RecoveryRequiresReconciliation); }
         sqlx::query("UPDATE agent_turns SET execution_lease_until=0 WHERE session_id=? AND operation_id=?")
             .bind(lease.session_id().as_ref()).bind(lease.operation_id().as_ref()).execute(&mut *tx).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(())
     }
 
@@ -134,7 +134,7 @@ impl AgentSessionStore {
     /// and latest checkpoint remain. Another live/replacement producer wins.
     pub async fn quarantine_native_recovery(&self, owner: &PrincipalRef, session_id: &AgentSessionId,
         operation_id: &OperationId, expected_fence: u64) -> Result<bool, SessionStoreError> {
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let session = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
         if &session.owner_ref != owner { return Err(SessionStoreError::ExecutionFenced); }
         let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
@@ -164,7 +164,7 @@ impl AgentSessionStore {
                 event_id: format!("native-recovery-effect:{}:{}:{next_fence}", session_id.as_ref(), effect.effect_id).into(),
                 producer_id: "runtime_supervisor".into(), idempotency_key: started.idempotency_key.into(),
                 correlation_id: effect.effect_id.into(), strategy: effect.strategy, causation_event_id: Some(effect.started_event_id),
-                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"outcome":"unknown","recovery":"process_restart_external_reconciliation_required"}))),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"outcome":"unknown","recovery":"native_recovery_external_reconciliation_required"}))),
             };
             self.append_event_tx_with_policy(&mut tx, &effect_append(request, "effect/uncertain")?, None, AppendSessionStatePolicy::EffectSettlement).await?;
         }
@@ -183,7 +183,7 @@ impl AgentSessionStore {
         let ack = required_ack(self.append_event_tx(&mut tx, &diagnostic, None).await?)?;
         let _ = ack;
         self.pause_native_execution_tx(&mut tx,session_id,operation_id,expected_fence,NATIVE_RECOVERY_BLOCKED,false).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(true)
     }
 }

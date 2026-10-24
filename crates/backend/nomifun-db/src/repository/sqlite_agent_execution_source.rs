@@ -31,13 +31,13 @@ fn initial_source(row: &AgentExecutionRow) -> Result<Option<nomifun_common::Agen
         .map_err(|error| DbError::Init(format!("invalid original delegation source: {error}")))
 }
 
-async fn owning_source_tx(tx:&mut Transaction<'_,Sqlite>,row:&AgentExecutionRow,step_id:&str,
+pub(super) async fn owning_source_tx(tx:&mut Transaction<'_,Sqlite>,row:&AgentExecutionRow,step_id:&str,
     sender_session:&str,sender_turn:&str)->Result<nomifun_common::AgentExecutionSource,DbError> {
     let original=initial_source(row)?;
     if let Some(source)=original.as_ref().filter(|source|source.agent_session_id==sender_session&&source.turn_operation_id==sender_turn) {
         return Ok(source.clone());
     }
-    let step=step_source_tx(tx,&row.user_id,&row.execution_id,step_id).await?;
+    let step=step_source_tx(tx,&row.user_id,&row.execution_id,step_id,false).await?;
     if let Some(source)=step.as_ref().filter(|source|source.agent_session_id==sender_session&&source.turn_operation_id==sender_turn) {
         return Ok(source.clone());
     }
@@ -208,14 +208,14 @@ pub(super) async fn verify_child_binding_tx(tx:&mut Transaction<'_,Sqlite>,user_
 pub(super) async fn step_source(pool:&SqlitePool,user_id:&str,execution_id:&str,step_id:&str)
     ->Result<Option<nomifun_common::AgentExecutionSource>,DbError> {
     let mut tx=pool.begin().await?;
-    let source=step_source_tx(&mut tx,user_id,execution_id,step_id).await?;
+    let source=step_source_tx(&mut tx,user_id,execution_id,step_id,false).await?;
     tx.commit().await?;Ok(source)
 }
 
-async fn step_source_tx(tx:&mut Transaction<'_,Sqlite>,user_id:&str,execution_id:&str,step_id:&str)
+pub(super) async fn step_source_tx(tx:&mut Transaction<'_,Sqlite>,user_id:&str,execution_id:&str,step_id:&str,include_deleted:bool)
     ->Result<Option<nomifun_common::AgentExecutionSource>,DbError> {
-    let origin:Option<(String,i64,i64)>=sqlx::query_as("SELECT execution.initial_plan_input,step.introduced_in_revision,(SELECT MIN(root.introduced_in_revision) FROM agent_execution_steps root WHERE root.execution_id=execution.execution_id) FROM agent_execution_steps step JOIN agent_executions execution ON execution.execution_id=step.execution_id WHERE step.execution_id=? AND step.step_id=? AND execution.user_id=? AND execution.deleted_at IS NULL")
-        .bind(execution_id).bind(step_id).bind(user_id).fetch_optional(&mut **tx).await?;
+    let origin:Option<(String,i64,i64)>=sqlx::query_as("SELECT execution.initial_plan_input,step.introduced_in_revision,(SELECT MIN(root.introduced_in_revision) FROM agent_execution_steps root WHERE root.execution_id=execution.execution_id) FROM agent_execution_steps step JOIN agent_executions execution ON execution.execution_id=step.execution_id WHERE step.execution_id=? AND step.step_id=? AND execution.user_id=? AND (execution.deleted_at IS NULL OR ?)")
+        .bind(execution_id).bind(step_id).bind(user_id).bind(include_deleted).fetch_optional(&mut **tx).await?;
     let Some((initial,introduced,first))=origin else {return Err(conflict("Step source target"));};
     let appended:Option<String>=sqlx::query_scalar("SELECT event.payload FROM agent_execution_events event WHERE event.execution_id=? AND event.event_type='plan_changed' AND EXISTS(SELECT 1 FROM json_each(event.payload,'$.added_step_ids') child WHERE child.value=?) ORDER BY event.sequence LIMIT 1")
         .bind(execution_id).bind(step_id).fetch_optional(&mut **tx).await?;
@@ -288,7 +288,7 @@ pub(super) async fn redirect_closed_steer(pool:&SqlitePool,user_id:&str,executio
         assignment_source:step.assignment_source.as_ref().map(|value|value.parse()).transpose().map_err(|error|DbError::Init(format!("invalid original assignment: {error}")))?,
         assignment_locked:true,failure_policy:step.failure_policy.parse().map_err(|error|DbError::Init(format!("invalid original failure policy: {error}")))?,
         preset_prompt:step.preset_prompt.clone(),graph_x:None,graph_y:None};
-    let source=step_source_tx(&mut tx,user_id,execution_id,step_id).await?;
+    let source=step_source_tx(&mut tx,user_id,execution_id,step_id,false).await?;
     let event=NewAgentExecutionEvent {event_type:AgentExecutionEventKind::PlanChanged,step_id:Some(step_id.into()),attempt_id:Some(attempt_id.into()),
         actor:AgentExecutionActor::system(),payload:serde_json::json!({"change":"source_followup_appended","operation_id":operation_id,
             "content_digest":digest,"delegation_source":source,"added_step_ids":[next.step_id],"continuation_of_step_id":step_id,

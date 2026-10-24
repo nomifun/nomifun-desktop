@@ -36,19 +36,22 @@ await i18n.use(initReactI18next).init({
   lng: 'en-US', resources: { 'en-US': { translation: { messages, agentExecution } } },
 });
 const restores: Array<() => void> = [];
+let activityStopAccepted = false;
 beforeEach(() => {
+  activityStopAccepted = false;
   const activity = spyOn(ipcBridge.agentActivities.list, 'invoke').mockImplementation(async query => {
     if (!query.execution_id || !query.step_id || !query.attempt_id) throw new Error('Expected an exact task activity read');
     return { items: [{ key: `execution:${query.attempt_id}`, title: 'Selected task', kind: 'delegated_task', state: 'completed',
       agent_session_id: childConversationId, target: { kind: 'execution_task', execution_id: query.execution_id,
         step_id: query.step_id, attempt_id: query.attempt_id, expected_execution_version: 1, expected_step_version: 1 },
-      continuation: 'none', waiting_reason: null, stop_accepted: false, execution_stopped: true,
+      continuation: 'none', waiting_reason: null, stop_accepted: activityStopAccepted, execution_stopped: true,
       resources: [{ kind: 'runtime', state: 'released', detail: null }], can_stop: false, can_retry_cleanup: false, updated_at_ms: null,
     }], next_cursor: null };
   });
   const changed = spyOn(ipcBridge.agentExecution.events.changed, 'on').mockReturnValue(() => {});
   const reconnect = spyOn(ipcBridge.conversation.reconnected, 'on').mockReturnValue(() => {});
-  for (const spy of [activity, changed, reconnect]) restores.push(() => spy.mockRestore());
+  const events = spyOn(ipcBridge.agentExecution.listEvents, 'invoke').mockResolvedValue([]);
+  for (const spy of [activity, changed, reconnect, events]) restores.push(() => spy.mockRestore());
 });
 afterEach(() => {
   cleanup();
@@ -391,7 +394,8 @@ test('an older message projects and retries its own execution while the provider
   const transcript = spyOn(readonlyTranscript, 'default').mockImplementation(({ conversation: row, agent_name }) => (
     <section aria-label='Read-only task transcript' data-session-id={row.id}><p>{agent_name}</p></section>
   ));
-  const retry = spyOn(ipcBridge.agentExecution.retry, 'invoke').mockResolvedValue(authoritative);
+  const restart = spyOn(ipcBridge.agentExecution.restart, 'invoke').mockResolvedValue({ execution_id: executionId,
+    step_ids: [authoritativeStep.step_id], sequence: 9, operation_id: 'restart-original-step', replayed: false });
   const unsubscribeChanged = mock(() => {});
   const unsubscribeReconnect = mock(() => {});
   const changed = spyOn(ipcBridge.agentExecution.events.changed, 'on').mockReturnValue(unsubscribeChanged);
@@ -399,7 +403,7 @@ test('an older message projects and retries its own execution while the provider
   const success = mock(() => () => {});
   const error = mock(() => () => {});
   const notices = spyOn(Message, 'useMessage').mockReturnValue([{ success, error }, <></>]);
-  for (const spy of [getExecution, state, getChild, transcript, retry, changed, reconnect, notices]) {
+  for (const spy of [getExecution, state, getChild, transcript, restart, changed, reconnect, notices]) {
     restores.push(() => spy.mockRestore());
   }
 
@@ -416,7 +420,7 @@ test('an older message projects and retries its own execution while the provider
   expect(getExecution.mock.calls[0][0]).toEqual({ execution_id: executionId });
   expect(getChild).not.toHaveBeenCalled();
   expect(transcript).not.toHaveBeenCalled();
-  expect(view.queryByRole('button', { name: 'Retry' })).toBeNull();
+  expect(view.queryByRole('button', { name: 'Restart task' })).toBeNull();
 
   await act(async () => { resolveOldDetail(authoritative); });
   const projected = await view.findByRole('region', { name: 'Read-only task transcript' });
@@ -447,17 +451,19 @@ test('an older message projects and retries its own execution while the provider
   expect(getChild).toHaveBeenCalledTimes(1);
   expect(lifecycle).toEqual({ mounted: 1, unmounted: 0 });
 
-  fireEvent.click(view.getByRole('button', { name: 'Retry' }));
+  fireEvent.click(await view.findByRole('button', { name: 'Restart task' }));
   await waitFor(() => expect(getExecution).toHaveBeenCalledTimes(3));
-  expect(retry).toHaveBeenCalledTimes(1);
-  expect(retry.mock.calls[0][0]).toEqual({
+  expect(restart).toHaveBeenCalledTimes(1);
+  expect(restart.mock.calls[0][0]).toEqual({
     execution_id: executionId,
     step_id: authoritativeStep.step_id,
-    updates: { expected_execution_version: authoritative.execution.version, expected_step_version: authoritativeStep.version },
+    updates: { expected_execution_version: authoritative.execution.version, expected_step_version: authoritativeStep.version,
+      expected_attempt_id: authoritativeAttempt.attempt_id, idempotency_key: expect.any(String) },
   });
   expect(getExecution.mock.calls.map(call => call[0])).toEqual([{ execution_id: executionId }, { execution_id: executionId }, { execution_id: executionId }]);
   expect(refreshCurrent).not.toHaveBeenCalled();
-  await waitFor(() => expect(success).toHaveBeenCalledTimes(1));
+  expect(view.getAllByRole('status').some(element => element.textContent === agentExecution.restart.accepted)).toBe(true);
+  expect(success).not.toHaveBeenCalled();
   expect(error).not.toHaveBeenCalled();
 
   fireEvent.click(view.getByRole('button', { name: 'Back to main conversation' }));
@@ -465,11 +471,11 @@ test('an older message projects and retries its own execution while the provider
   expect(input.value).toBe('Keep this draft while inspecting the earlier task');
   expect(lifecycle).toEqual({ mounted: 1, unmounted: 0 });
   expect(view.queryByRole('region', { name: 'Read-only task transcript' })).toBeNull();
-  expect(unsubscribeChanged).toHaveBeenCalledTimes(2);
-  expect(unsubscribeReconnect).toHaveBeenCalledTimes(2);
+  expect(unsubscribeChanged).toHaveBeenCalledTimes(3);
+  expect(unsubscribeReconnect).toHaveBeenCalledTimes(3);
 });
 
-test('an interrupted older task can be stopped from its projection without answering or cancelling the newer task', async () => {
+test('an interrupted older task can be rechecked and stopped without answering or controlling the newer task', async () => {
   const step = makeStep(1, { status: 'waiting_input' });
   const attempt = makeAttempt(step, { status: 'waiting_input', question: 'Raw recovery diagnostic', runtime_state: {
     pending_conversation_effects: [], review_blocked: { kind: 'interrupted_turn', operation_id: 'exact-operation',
@@ -500,11 +506,12 @@ test('an interrupted older task can be stopped from its projection without answe
     return authoritative;
   });
   const decision = spyOn(ipcBridge.agentExecution.answerDecision, 'invoke');
+  const recheck = spyOn(ipcBridge.agentExecution.recheck, 'invoke').mockResolvedValue(older);
   const changed = spyOn(ipcBridge.agentExecution.events.changed, 'on').mockReturnValue(() => {});
   const reconnect = spyOn(ipcBridge.conversation.reconnected, 'on').mockReturnValue(() => {});
   const success = mock(() => () => {}), error = mock(() => () => {});
   const notices = spyOn(Message, 'useMessage').mockReturnValue([{ success, error }, <></>]);
-  for (const spy of [state, getExecution, getChild, transcript, cancel, decision, changed, reconnect, notices]) restores.push(() => spy.mockRestore());
+  for (const spy of [state, getExecution, getChild, transcript, cancel, decision, recheck, changed, reconnect, notices]) restores.push(() => spy.mockRestore());
   const lifecycle: MountCounter = { mounted: 0, unmounted: 0 };
   const view = render(<MemoryRouter><I18nextProvider i18n={i18n}>
     <ExecutionProvider conversation={{ ...leadConversation, linked_execution_id: newerId }}>
@@ -521,10 +528,15 @@ test('an interrupted older task can be stopped from its projection without answe
   expect(view.queryByRole('button', { name: 'Submit decision' })).toBeNull();
   expect(view.queryByRole('textbox')).toBeNull();
   expect(view.getByText('The exact prior operation result is unknown.')).toBeTruthy();
+  fireEvent.click(view.getByRole('button', { name: agentExecution.recovery.recheck }));
+  await waitFor(() => expect(recheck).toHaveBeenCalledTimes(1));
+  expect(recheck.mock.calls[0][0]).toEqual({ execution_id: executionId, step_id: step.step_id,
+    updates: { expected_execution_version: 23, expected_step_version: step.version } });
+  await waitFor(() => expect(getExecution).toHaveBeenCalledTimes(3));
   fireEvent.click(view.getByRole('button', { name: 'Stop collaboration' }));
   await waitFor(() => expect(view.queryByRole('button', { name: 'Stop collaboration' })).toBeNull());
   expect(cancel.mock.calls[0][0]).toEqual({ execution_id: executionId, updates: { expected_version: 23 } });
-  expect(getExecution.mock.calls.map(call => call[0])).toEqual([{ execution_id: executionId }, { execution_id: executionId }, { execution_id: executionId }]);
+  expect(getExecution.mock.calls.map(call => call[0])).toEqual([{ execution_id: executionId }, { execution_id: executionId }, { execution_id: executionId }, { execution_id: executionId }]);
   expect(refreshNewer).not.toHaveBeenCalled();
   expect(decision).not.toHaveBeenCalled();
   expect(error).not.toHaveBeenCalled();
@@ -578,7 +590,7 @@ for (const selection of ['root', 'completed_root', 'child'] as const) test(`an o
   expect(view.queryByRole('button', { name: 'Stop current automatic run' })).toBeNull();
   fireEvent.click(view.getByRole('button', { name: i18n.t('messages.delegation.openRecord', { title: selected.title }) }));
   await view.findByRole('region', { name: 'Original task record' });
-  expect(view.queryByRole('button', { name: 'Retry' })).toBeNull();
+  expect(view.queryByRole('button', { name: 'Restart task' })).toBeNull();
   expect(view.queryByRole('button', { name: 'Adopt current result' })).toBeNull();
   if (selection === 'child') {
     expect(view.getByRole('button', { name: 'Stop task' })).toBeTruthy();
@@ -600,4 +612,133 @@ for (const selection of ['root', 'completed_root', 'child'] as const) test(`an o
   expect(cancelAll).not.toHaveBeenCalled();
   expect(refreshNewer).not.toHaveBeenCalled();
   expect(error).not.toHaveBeenCalled();
+});
+
+for (const selection of ['running', 'technical_review', 'native_pause_unknown', 'interrupted_review', 'future_review', 'failed', 'completed', 'cancelled', 'stopped_attempt', 'observed_user_stop', 'superseded', 'automatic', 'history', 'non_agent'] as const) {
+  test(`formal task restart eligibility follows the exact ${selection} projection`, async () => {
+    activityStopAccepted = selection === 'observed_user_stop';
+    const step = makeStep(1, { title: `Selected ${selection}`, status: selection === 'failed' ? 'failed'
+      : selection === 'completed' || selection === 'history' ? 'completed' : selection === 'cancelled' ? 'cancelled'
+        : selection === 'technical_review' ? 'waiting_input' : 'running',
+      kind: selection === 'non_agent' ? 'verify' : 'agent', superseded_in_revision: selection === 'superseded' ? 2 : null });
+    const attempt = makeAttempt(step, { status: selection === 'stopped_attempt' || selection === 'cancelled' ? 'cancelled'
+      : selection === 'technical_review' ? 'waiting_input' : selection === 'failed' ? 'failed'
+        : selection === 'completed' || selection === 'history' ? 'completed' : 'running',
+      runtime_state: ['technical_review', 'native_pause_unknown', 'interrupted_review', 'future_review'].includes(selection) ? { pending_conversation_effects: [],
+        review_blocked: { kind: selection === 'interrupted_review' ? 'interrupted_turn' : selection === 'future_review' ? 'future_review' : 'native_pause',
+          operation_id: 'original-paused-turn', receipt_state: selection === 'native_pause_unknown' ? 'unknown' : 'paused', reason: 'Completion account needs repair' } } : null });
+    const detail = makeDetail({ steps: [step], attempts: [attempt], ...(selection === 'automatic' ? { automation_control: {
+      root_step_id: step.step_id, lead_conversation_id: leadConversation.id, requirement_id: 'original-run', claim_generation: 7 } } : {}) });
+    const state = spyOn(executionState, 'useConversationExecution').mockReturnValue({ executionId, detail, refetch: async () => {}, loading: false,
+      leadThinking: { phase: null, reasoning: '', active: false, textHeartbeat: false } });
+    const get = spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ ...leadConversation, id: childConversationId,
+      linked_execution_id: undefined, execution_step_id: step.step_id, execution_attempt_id: attempt.attempt_id });
+    const transcript = spyOn(readonlyTranscript, 'default').mockImplementation(() => <section aria-label='Eligibility task record' />);
+    const restart = spyOn(ipcBridge.agentExecution.restart, 'invoke');
+    for (const spy of [state, get, transcript, restart]) restores.push(() => spy.mockRestore());
+    const lifecycle: MountCounter = { mounted: 0, unmounted: 0 };
+    const view = render(<MemoryRouter><I18nextProvider i18n={i18n}><ExecutionProvider conversation={leadConversation}>
+      <ExecutionContentSwitcher><CompanionMainConversation lifecycle={lifecycle} completed={selection === 'history'} /></ExecutionContentSwitcher>
+    </ExecutionProvider></I18nextProvider></MemoryRouter>);
+    fireEvent.click(view.getByRole('button', { name: i18n.t('messages.delegation.openRecord', { title: step.title }) }));
+    await view.findByRole('region', { name: 'Eligibility task record' });
+    if (['running', 'technical_review', 'native_pause_unknown', 'interrupted_review', 'future_review', 'failed', 'completed'].includes(selection)) {
+      expect(await view.findByRole('button', { name: 'Restart task' })).toBeTruthy();
+    } else expect(view.queryByRole('button', { name: 'Restart task' })).toBeNull();
+    if (selection === 'technical_review') {
+      expect(view.getByText(agentExecution.recovery.pausedTitle)).toBeTruthy();
+      expect(view.getByText(agentExecution.recovery.pausedDescription)).toBeTruthy();
+      expect(view.getByText(agentExecution.recovery.pausedHint)).toBeTruthy();
+      expect(view.queryByText(agentExecution.recovery.title)).toBeNull();
+      expect(view.queryByText(agentExecution.recovery.description)).toBeNull();
+      expect(view.queryByRole('button', { name: 'Submit decision' })).toBeNull();
+    } else if (['native_pause_unknown', 'interrupted_review', 'future_review'].includes(selection)) {
+      expect(view.getByText(agentExecution.recovery.title)).toBeTruthy();
+      expect(view.getByText(agentExecution.recovery.description)).toBeTruthy();
+      expect(view.queryByText(agentExecution.recovery.pausedTitle)).toBeNull();
+      expect(view.queryByText(agentExecution.recovery.pausedHint)).toBeNull();
+    }
+    expect(view.queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(restart).not.toHaveBeenCalled();
+  });
+}
+
+for (const outcome of ['lost_ack', 'accepted'] as const) test(`reopening the same task preserves its ${outcome} restart identity without automatic dispatch`, async () => {
+  const step = makeStep(1), attempt = makeAttempt(step), detail = makeDetail({ steps: [step], attempts: [attempt] });
+  const state = spyOn(executionState, 'useConversationExecution').mockReturnValue({ executionId, detail, refetch: async () => {}, loading: false,
+    leadThinking: { phase: null, reasoning: '', active: false, textHeartbeat: false } });
+  const get = spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ ...leadConversation, id: childConversationId,
+    linked_execution_id: undefined, execution_step_id: step.step_id, execution_attempt_id: attempt.attempt_id });
+  const transcript = spyOn(readonlyTranscript, 'default').mockImplementation(() => <section aria-label='Reopened task record' />);
+  const receipt = { execution_id: executionId, step_ids: [step.step_id], sequence: 12, operation_id: 'restart-navigation', replayed: false };
+  const restart = spyOn(ipcBridge.agentExecution.restart, 'invoke').mockImplementationOnce(async () => {
+    if (outcome === 'lost_ack') throw new TypeError('Lost response');
+    return receipt;
+  }).mockResolvedValue(receipt);
+  const events = spyOn(ipcBridge.agentExecution.listEvents, 'invoke').mockResolvedValue([]);
+  for (const spy of [state, get, transcript, restart, events]) restores.push(() => spy.mockRestore());
+  const lifecycle: MountCounter = { mounted: 0, unmounted: 0 };
+  const scene = () => <MemoryRouter><I18nextProvider i18n={i18n}><ExecutionProvider conversation={leadConversation}>
+    <ExecutionContentSwitcher><CompanionMainConversation lifecycle={lifecycle} /></ExecutionContentSwitcher>
+  </ExecutionProvider></I18nextProvider></MemoryRouter>;
+  const view = render(scene());
+  const open = () => fireEvent.click(view.getByRole('button', { name: i18n.t('messages.delegation.openRecord', { title: step.title }) }));
+  open(); await view.findByRole('region', { name: 'Reopened task record' });
+  fireEvent.click(await view.findByRole('button', { name: 'Restart task' }));
+  await waitFor(() => expect(view.container.textContent).toContain(outcome === 'lost_ack' ? agentExecution.restart.unconfirmed : agentExecution.restart.accepted));
+  const original = structuredClone(restart.mock.calls[0][0]);
+  fireEvent.click(view.getByRole('button', { name: 'Back to main conversation' }));
+  state.mockReturnValue({ executionId, detail: { ...detail, execution: { ...detail.execution, version: 34 }, steps: [{ ...step, version: 8 }] },
+    refetch: async () => {}, loading: false, leadThinking: { phase: null, reasoning: '', active: false, textHeartbeat: false } });
+  if (outcome === 'accepted') events.mockImplementation(async ({ query }) => (query?.after_sequence ?? 0) < 12 ? [{
+    execution_id: executionId, step_id: step.step_id, attempt_id: attempt.attempt_id, sequence: 12, event_type: 'step_changed',
+    actor_type: 'user', actor_id: null, actor_conversation_id: null, actor_attempt_id: null,
+    on_behalf_of_user_id: 'test-user' as import('@/common/types/agentExecution/agentExecutionTypes').TAgentExecutionEvent['on_behalf_of_user_id'],
+    created_at: 3000, payload: { change: 'restart_requested', operation_id: receipt.operation_id,
+      command_request: { request: original.updates } },
+  }] : []);
+  view.rerender(scene()); open();
+  await view.findByRole('region', { name: 'Reopened task record' });
+  expect(restart).toHaveBeenCalledTimes(1);
+  if (outcome === 'lost_ack') {
+    fireEvent.click(await view.findByRole('button', { name: 'Restart task' }));
+    await waitFor(() => expect(restart).toHaveBeenCalledTimes(2));
+    expect(restart.mock.calls[1][0]).toEqual(original);
+  } else {
+    await waitFor(() => expect(view.container.textContent).toContain(agentExecution.restart.accepted));
+    expect((view.getByRole('button', { name: 'Restarting…' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(restart).toHaveBeenCalledTimes(1);
+  }
+  expect(lifecycle).toEqual({ mounted: 1, unmounted: 0 });
+});
+
+for (const scope of ['task', 'delegated_work'] as const) test(`accepted ${scope} stop controls restart before the canonical GET refreshes`, async () => {
+  const step = makeStep(1), attempt = makeAttempt(step), detail = makeDetail({ steps: [step], attempts: [attempt] });
+  const state = spyOn(executionState, 'useConversationExecution').mockReturnValue({ executionId, detail, refetch: async () => {}, loading: false,
+    leadThinking: { phase: null, reasoning: '', active: false, textHeartbeat: false } });
+  const get = spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue({ ...leadConversation, id: childConversationId,
+    linked_execution_id: undefined, execution_step_id: step.step_id, execution_attempt_id: attempt.attempt_id });
+  const transcript = spyOn(readonlyTranscript, 'default').mockImplementation(() => <section aria-label='Stop guarded task record' />);
+  const stop = spyOn(ipcBridge.agentExecution.cancelStep, 'invoke').mockResolvedValue(scope === 'task'
+    ? { ...detail, steps: [{ ...step, status: 'cancelled' }] } : detail);
+  const success = mock(() => () => {}), error = mock(() => () => {});
+  const notices = spyOn(Message, 'useMessage').mockReturnValue([{ success, error }, <></>]);
+  for (const spy of [state, get, transcript, stop, notices]) restores.push(() => spy.mockRestore());
+  const lifecycle: MountCounter = { mounted: 0, unmounted: 0 };
+  const view = render(<MemoryRouter><I18nextProvider i18n={i18n}><ExecutionProvider conversation={leadConversation}>
+    <ExecutionContentSwitcher><CompanionMainConversation lifecycle={lifecycle} /></ExecutionContentSwitcher>
+  </ExecutionProvider></I18nextProvider></MemoryRouter>);
+  fireEvent.click(view.getByRole('button', { name: i18n.t('messages.delegation.openRecord', { title: step.title }) }));
+  await view.findByRole('region', { name: 'Stop guarded task record' });
+  await view.findByRole('button', { name: 'Restart task' });
+  if (scope === 'task') fireEvent.click(view.getByRole('button', { name: 'Stop task' }));
+  else {
+    fireEvent.click(view.getByRole('button', { name: 'Choose task stop scope' }));
+    fireEvent.click(await view.findByText('Stop only its delegated work'));
+  }
+  await waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(success).toHaveBeenCalledTimes(1));
+  if (scope === 'task') expect(view.queryByRole('button', { name: 'Restart task' })).toBeNull();
+  else expect(view.getByRole('button', { name: 'Restart task' })).toBeTruthy();
+  expect(stop.mock.calls[0][0].updates.scope).toBe(scope);
 });

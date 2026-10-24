@@ -692,7 +692,9 @@ fn validate_binding_contract(
     Ok(())
 }
 
-fn engine_effect(effect: EffectClass) -> (EngineEffectClass, bool) {
+/// Interpret a frozen Action's effect contract for execution and read-only
+/// native reconstruction. This mapping does not grant an Action admission.
+pub fn engine_effect(effect: EffectClass) -> (EngineEffectClass, bool) {
     match effect {
         EffectClass::Pure | EffectClass::ReadLocal => (EngineEffectClass::ReadOnly, true),
         EffectClass::ReadSensitive => (EngineEffectClass::ReadOnly, false),

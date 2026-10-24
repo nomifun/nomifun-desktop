@@ -145,8 +145,15 @@ impl std::fmt::Debug for AgentExecutionTurnAuthority {
 /// Result of reconciling a pre-existing attempt during scheduler recovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentExecutionAttemptRecoveryDisposition {
-    /// A queued reservation had not started and was safely returned to Pending.
-    QueuedRescheduled,
+    /// Keep the exact unstarted reservation; recovery must not manufacture a
+    /// cancelled Attempt followed by a new one.
+    QueuedReservationRetained,
+    /// The original durable input has not been admitted. A same-writer Step
+    /// version fence excluded old senders; deliver the same key and Attempt.
+    InitialDeliveryPending,
+    /// The canonical terminal committed after the caller's read. Re-read its
+    /// typed result without changing the original Attempt or Session link.
+    ReReadRequired,
     /// The original canonical Turn still owns its live Session. Follow its
     /// receipt without retiring its link or admitting another invocation.
     OngoingTurnObserved,
@@ -170,7 +177,7 @@ pub struct AgentExecutionAttemptRecoveryResult {
 /// One reduction of an exact canonical terminal for Execution consumption.
 /// This transient value is never a second persisted outcome ledger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentExecutionAttemptDisposition { Delivered, InputRequired, Cancelled, Failed }
+pub enum AgentExecutionAttemptDisposition { Delivered, InputRequired, Cancelled, Failed, InterventionRequired }
 
 /// Exact terminal output read through the canonical Session owner. This is
 /// transient reconciliation input, not a second completion receipt or log.
@@ -396,6 +403,45 @@ pub struct PendingConversationCleanup {
     pub target: ConversationCleanupTurnTarget,
 }
 
+#[derive(Debug,Clone,PartialEq,Eq,serde::Serialize,serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionRestartPauseRef {
+    pub revision:u64,
+    pub checkpoint_revision:u64,
+    pub checkpoint_digest:Option<String>,
+    pub execution_fence:u64,
+}
+
+/// Frozen command target read from the original writer, not a latest Session.
+#[derive(Debug,Clone,PartialEq,Eq,serde::Serialize,serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentExecutionRestartTarget {
+    pub execution_id:String,
+    pub step_id:String,
+    pub attempt_id:String,
+    pub conversation_id:String,
+    pub canonical_operation_id:String,
+    pub command_operation_id:String,
+    pub command_sequence:i64,
+    pub pause:Option<AgentExecutionRestartPauseRef>,
+}
+
+/// Existing command event plus its exact current Step; no persisted stage mirror.
+#[derive(Debug,Clone)]
+pub struct AgentExecutionRestartCommand {
+    pub event:AgentExecutionEventRow,
+    pub target:Option<AgentExecutionRestartTarget>,
+    pub replayed:bool,
+}
+
+#[derive(Debug,Clone)]
+pub enum AgentExecutionRestartCompletion {
+    ContinuedOriginal {resume_event_id:String,resume_event_seq:u64},
+    OriginalPending,
+    RetryOriginalStep,
+    Blocked {code:String},
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationCleanupTurnTarget {
     Exact { operation_id: String },
@@ -504,6 +550,15 @@ pub struct RetryAgentExecutionStep {
     pub expected_step_version: i64,
 }
 
+#[derive(Debug,Clone)]
+pub struct ReplaceAgentExecutionStepWithExistingParams {
+    pub old_step_id:String,
+    pub expected_old_step_version:i64,
+    pub replacement_step_id:String,
+    pub expected_replacement_step_version:i64,
+    pub replacement_terminal:AgentExecutionClosedTurn,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewAgentExecutionEvent {
     pub event_type: AgentExecutionEventKind,
@@ -515,6 +570,14 @@ pub struct NewAgentExecutionEvent {
 
 #[async_trait]
 pub trait IAgentExecutionRepository: Send + Sync {
+    async fn execution_attempt_turn_operation_key(&self,user_id:&str,execution_id:&str,step_id:&str,attempt_id:&str)->Result<String,DbError>;
+    /// Read original collaboration metadata and events after the prior exact
+    /// cursor in one snapshot. Deleted rows remain read-only revocation facts.
+    async fn collaboration_observation(&self, user_id: &str, execution_id: &str, after: Option<i64>)
+        -> Result<Option<super::AgentExecutionObservationRows>, DbError>;
+    /// Cheap fallback for missed notifications; includes exact native Sessions.
+    async fn collaboration_revisions(&self, user_id: &str, execution_ids: &[String], session_ids: &[String])
+        -> Result<super::AgentCollaborationObservationRevisions, DbError>;
     async fn create_execution_with_participants(
         &self,
         user_id: &str,
@@ -741,6 +804,17 @@ pub trait IAgentExecutionRepository: Send + Sync {
         steps: &[RetryAgentExecutionStep],
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionDetailRows, DbError>;
+    async fn request_step_reconciliation(&self,user_id:&str,execution_id:&str,expected_execution_version:i64,
+        step_id:&str,expected_step_version:i64,event:&NewAgentExecutionEvent)->Result<AgentExecutionDetailRows,DbError>;
+    async fn request_step_restart(&self,user_id:&str,execution_id:&str,step_id:&str,
+        expected_execution_version:i64,expected_step_version:i64,expected_attempt_id:Option<&str>,
+        event:&NewAgentExecutionEvent)->Result<AgentExecutionRestartCommand,DbError>;
+    async fn pending_step_restarts(&self,user_id:&str,execution_id:&str)
+        ->Result<Vec<AgentExecutionRestartCommand>,DbError>;
+    async fn complete_step_restart(&self,user_id:&str,execution_id:&str,operation_id:&str,
+        completion:&AgentExecutionRestartCompletion)->Result<AgentExecutionDetailRows,DbError>;
+    async fn replace_step_with_existing(&self,user_id:&str,execution_id:&str,expected_execution_version:i64,
+        params:&ReplaceAgentExecutionStepWithExistingParams,event:&NewAgentExecutionEvent)->Result<AgentExecutionDetailRows,DbError>;
     async fn adopt_step_output(
         &self,
         user_id: &str,
@@ -804,6 +878,15 @@ pub trait IAgentExecutionRepository: Send + Sync {
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionStepDetailRow, DbError>;
 
+    /// Acknowledge only the exact InitialInput admission pair. The writer
+    /// verifies original accepted bytes and Turn start; no terminal is needed.
+    /// False means no original admission is available yet (or it was ACKed).
+    async fn acknowledge_initial_input_admission(&self,_user_id:&str,_execution_id:&str,_step_id:&str,
+        _attempt_id:&str,_expected_attempt_version:i64,_lease:&AgentExecutionLeaseToken,_event:&NewAgentExecutionEvent)
+        ->Result<bool,DbError> {
+        Err(DbError::Init("original InitialInput admission acknowledgement is unavailable".into()))
+    }
+
     /// Scheduler-internal mutation. It CASes the step, then advances the
     /// aggregate version without requiring an execution-version snapshot so
     /// different ready steps can be persisted concurrently.
@@ -834,6 +917,7 @@ pub trait IAgentExecutionRepository: Send + Sync {
         conversation_id: &str,
         session_kind: AgentExecutionAttemptSessionKind,
         lease: Option<&AgentExecutionLeaseToken>,
+        initial_input: Option<&crate::PendingConversationEffect>,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionStepDetailRow, DbError>;
 

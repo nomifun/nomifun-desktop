@@ -15,14 +15,14 @@ impl AgentSessionStore {
         if &delivery.owner_ref != owner {return Err(SessionStoreError::ExecutionFenced);}
         let session=&delivery.agent_session_id;
         let key=delivery_key(session,&delivery.platform,&delivery.channel_plugin_id,&delivery.chat_id,&delivery.provider_message_id)?;
-        let mut tx=self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let live=live_session_by_id_tx(&mut tx,session.as_ref()).await?;
         if &live.owner_ref!=owner {return Err(SessionStoreError::ExecutionFenced);}
         if let Some(row)=event_by_event_id_tx(&mut tx,&key).await? {
             let event=event_from_row(row)?;
             let previous=read_delivery_tx(&mut tx,&event).await?;
             if previous!=delivery {return Err(SessionStoreError::IdempotencyConflict("Channel message was already delivered for another question".into()));}
-            let ack=event_ack(&event);tx.commit().await?;return Ok(ack);
+            let ack=event_ack(&event);db_write_observation.commit(tx).await?;return Ok(ack);
         }
         // The platform ACK can arrive after another surface answered the
         // question. Record its original presentation identity even then; this
@@ -35,7 +35,7 @@ impl AgentSessionStore {
                 correlation_id:delivery.operation_id.as_ref().into(),causation_event_id:Some(wait_id.into()),
                 payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(serde_json::to_value(&delivery)?))}};
         let ack=required_ack(self.append_event_tx(&mut tx,&append,None).await?)?;
-        tx.commit().await?;Ok(ack)
+        db_write_observation.commit(tx).await?;Ok(ack)
     }
 
     /// Return the original immutable target even after another question/Turn

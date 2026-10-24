@@ -8,6 +8,11 @@ use nomifun_chat_model_broker::ToolCallId;
 mod native_resume_waiter;
 
 #[cfg(test)]
+type AttachmentFailure=(AppError,Arc<tokio::sync::Notify>);
+#[cfg(test)]
+static ATTACHMENT_FAILURES:std::sync::OnceLock<std::sync::Mutex<BTreeMap<(String,String),AttachmentFailure>>>=std::sync::OnceLock::new();
+
+#[cfg(test)]
 pub(in crate::router) async fn prepare_resume_for_test(owner:&NomiCoreSessionOwner,
     principal:&PrincipalRef,session:&AgentSessionId,request:&NativeResumeRequest)
     ->Result<NativeResumePreparation,AppError> {
@@ -91,6 +96,7 @@ pub(super) async fn reconcile(
     let _operation_guard = state.session_owner.session_operation_lock(session.as_ref()).write_owned().await;
     let ack = state.session_owner.canonical().store().reconcile_native_effect_by_owner(
         &authenticated_principal(&owner), &session, &request).await.map_err(agent_session_store_error)?;
+    state.session_owner.schedule_native_settlement_recovery().await?;
     state.session_owner.schedule_session_input_drain(owner.as_ref().to_owned(),session,None);
     Ok(Json(ApiResponse::ok(ack)))
 }
@@ -100,25 +106,36 @@ pub(in crate::router) async fn resume(
     Path(id): Path<String>, Json(request): Json<NativeResumeRequest>,
 ) -> Result<Json<ApiResponse<nomifun_agent_session::NativeResumeCommandReceipt>>, NomiCoreApiError> {
     let session = parse_agent_session_id(&id)?;
-    let _operation_guard = state.session_owner.session_operation_lock(session.as_ref()).write_owned().await;
     let principal = authenticated_principal(&owner);
-    let store = state.session_owner.canonical().store();
+    let receipt=state.session_owner.submit_native_resume(principal,session,request).await?;
+    Ok(Json(ApiResponse::ok(receipt)))
+}
+
+impl NomiCoreSessionOwner {
+    /// One owner command boundary shared by the native control endpoint and
+    /// the authenticated logical-task restart command. Preparation itself
+    /// never runs business work or changes the original checkpoint identity.
+    pub(super) async fn submit_native_resume(self:&Arc<Self>, principal:PrincipalRef,
+        session:AgentSessionId, request:NativeResumeRequest)
+        ->Result<nomifun_agent_session::NativeResumeCommandReceipt,AppError> {
+    let _operation_guard = self.session_operation_lock(session.as_ref()).write_owned().await;
+    let store = self.canonical().store();
     if let Some(receipt) = store.native_resume_request_receipt(&principal,&session,&request).await.map_err(agent_session_store_error)? {
-        state.session_owner.enqueue_requested_native_resume(principal,session,request)?;
-        return Ok(Json(ApiResponse::ok(nomifun_agent_session::NativeResumeCommandReceipt::Queued {receipt})));
+        self.enqueue_requested_native_resume(principal,session,request)?;
+        return Ok(nomifun_agent_session::NativeResumeCommandReceipt::Queued {receipt});
     }
     let receipt = if let Some(receipt) = store.native_resume_receipt(&principal,&session,&request).await.map_err(agent_session_store_error)? {
         receipt
     } else {
-        match state.session_owner.prepare_native_resume(&principal,&session,&request).await {
+        match self.prepare_native_resume(&principal,&session,&request).await {
             Ok(prepared) => match store.commit_native_resume(&principal,&session,&request,prepared).await {
                 Ok(receipt) => receipt,
                 Err(nomifun_agent_session::SessionStoreError::ExecutionCapacityPending) => {
                     let receipt = store.request_native_resume(&principal,&session,&request).await.map_err(agent_session_store_error)?;
-                    state.session_owner.enqueue_requested_native_resume(principal,session,request)?;
-                    return Ok(Json(ApiResponse::ok(nomifun_agent_session::NativeResumeCommandReceipt::Queued {receipt})));
+                    self.enqueue_requested_native_resume(principal,session,request)?;
+                    return Ok(nomifun_agent_session::NativeResumeCommandReceipt::Queued {receipt});
                 }
-                Err(error) => return Err(agent_session_store_error(error).into()),
+                Err(error) => return Err(agent_session_store_error(error)),
             },
             Err(error) => {
                 // A concurrent identical authorization may have changed the
@@ -126,13 +143,14 @@ pub(in crate::router) async fn resume(
                 // Only its exact authenticated receipt makes this a replay.
                 match store.native_resume_receipt(&principal,&session,&request).await.map_err(agent_session_store_error)? {
                     Some(receipt) => receipt,
-                    None => return Err(error.into()),
+                    None => return Err(error),
                 }
             }
         }
     };
-    state.session_owner.enqueue_authorized_native_resume(session,request.operation_id,receipt.seq).await?;
-    Ok(Json(ApiResponse::ok(nomifun_agent_session::NativeResumeCommandReceipt::Authorized {receipt})))
+    self.enqueue_authorized_native_resume(session,request.operation_id,receipt.seq).await?;
+    Ok(nomifun_agent_session::NativeResumeCommandReceipt::Authorized {receipt})
+    }
 }
 
 impl NomiCoreSessionOwner {
@@ -179,6 +197,25 @@ impl NomiCoreSessionOwner {
             || checkpoint.binding.build_id().as_ref() != installed.build_id || checkpoint.binding.build_digest().as_ref() != installed.build_digest {
             return Err(reject("resume cannot change build, Snapshot, capability generation or task identity"));
         }
+        let control_plane = self.runtime_control_plane.get().and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| reject("the original Snapshot reader is unavailable"))?;
+        let binding = agent_binding_dto(&facts.session.agent_binding).map_err(|error|AppError::Conflict(error.message))?;
+        let (_, _, snapshot) = control_plane.saved_binding_artifacts(
+            &UserId::from(owner.principal_id.clone()), &binding)
+            .await.map_err(control_plane_error_to_app)?;
+        if snapshot.snapshot_ref != facts.session.agent_binding.resolved_snapshot_ref {
+            return Err(reject("frozen observation contracts differ from the original Snapshot"));
+        }
+        let mut contracts = nomifun_agent_runtime::AgentReconciliationContracts::new();
+        for capability in &snapshot.content.enabled_capabilities {
+            for action in capability.actions.iter().filter(|action| capability.action_allowlist.contains(&action.action_id)) {
+                let identity = (capability.capability.id.clone(), action.action_id.clone());
+                let effect = nomifun_engine_core::engine_effect(action.effect_class).0;
+                if contracts.insert(identity, effect).is_some() {
+                    return Err(reject("frozen observation contracts contain duplicate Action identities"));
+                }
+            }
+        }
         let effect_rows = store.list_effects(session).await.map_err(agent_session_store_error)?;
         let effects: Vec<_> = effect_rows.iter().filter(|effect| effect.turn_id == request.operation_id).collect();
         let mut tail = Vec::new();
@@ -186,7 +223,7 @@ impl NomiCoreSessionOwner {
         let mut bytes = 0usize;
         let mut intents = BTreeMap::<ToolCallId,(OperationId,String)>::new();
         let mut owner_results = BTreeMap::<ToolCallId,AgentReconciledOutcome>::new();
-        let mut native_started = BTreeMap::<ToolCallId,String>::new();
+        let mut native_started = BTreeMap::<ToolCallId,(nomifun_agent_contracts::CapabilityId,nomifun_agent_contracts::ActionId)>::new();
         let mut attestations = BTreeMap::<String,(&Value,String)>::new();
         let pause_event = facts.events.iter().rev().find(|event| event.kind.0 == "turn/paused" && event.correlation_id.as_ref() == request.operation_id.as_ref())
             .ok_or_else(|| reject("pause event missing"))?.event_id.as_ref().to_owned();
@@ -236,7 +273,9 @@ impl NomiCoreSessionOwner {
                 Some("host_process_dispatch" | "host_process_quiescent" | "host_cleanup_proven") => {},
                 _ => {
                     let native: AgentEngineEvent = serde_json::from_value(value.clone()).map_err(|error| reject(&error.to_string()))?;
-                    if let AgentEngineEvent::ToolStarted { call_id,action_id,.. } = &native { native_started.insert(call_id.clone(),action_id.as_ref().to_owned()); }
+                    if let AgentEngineEvent::ToolStarted { call_id,capability_id,action_id,.. } = &native {
+                        native_started.insert(call_id.clone(),(capability_id.clone(),action_id.clone()));
+                    }
                     tail.push(native);
                 }
             }
@@ -244,7 +283,9 @@ impl NomiCoreSessionOwner {
         let dispatched: BTreeSet<_> = intents.keys().cloned().collect();
         for (call_id,(operation,witness)) in &intents {
             if owner_results.contains_key(call_id) { continue; }
-            if let Some((attestation,event_id)) = attestations.get(call_id.as_ref()) {
+            let delegation = native_started.get(call_id).is_some_and(|(capability,action)|
+                capability.as_ref() == "agent.collaboration" && matches!(action.as_ref(),"agent/delegate"|"agent/fork"));
+            if !delegation && let Some((attestation,event_id)) = attestations.get(call_id.as_ref()) {
                 let succeeded = attestation.get("outcome").and_then(Value::as_str) == Some("confirmed_succeeded");
                 owner_results.insert(call_id.clone(),AgentReconciledOutcome { result:AgentToolResult::text(call_id.clone(),
                     "Session owner explicitly verified this prior invocation. This attestation is not a fresh tool result; inspect current state before completion.",!succeeded),
@@ -255,12 +296,22 @@ impl NomiCoreSessionOwner {
             if !owned.is_empty() {
                 if owned.iter().any(|effect| matches!(effect.state,AgentEffectState::Pending|AgentEffectState::Unknown)) { return Err(reject("effect outcome is still unknown")); }
                 let attested = owned.iter().find_map(|effect| attestations.get(&effect.effect_id));
-                let returned = owned.iter().all(|effect| effect.state == AgentEffectState::Returned);
-                owner_results.insert(call_id.clone(),AgentReconciledOutcome { result:AgentToolResult::text(call_id.clone(),
-                    format!("Historical canonical owner receipts for operation {} confirm {}. No invocation was replayed; re-observe current state before claiming completion.",operation.as_ref(),if returned { "a returned outcome" } else { "a non-success outcome" }),!returned),
+                if owned.len() != 1 { return Err(reject("the invocation has no unique exact Effect result")); }
+                let effect = owned[0];
+                let identity = native_started.get(call_id).ok_or_else(|| reject("Effect has no original native Action admission"))?;
+                if effect.capability_module != identity.0 || effect.action_id != identity.1 {
+                    return Err(reject("Effect differs from the original native Action admission"));
+                }
+                store.committed_tool_call_causation(session,&request.operation_id,operation,
+                    &effect.capability_module,&effect.action_id).await.map_err(agent_session_store_error)?;
+                let result = original_effect_result(effect,call_id).map_err(|error| reject(&error))?;
+                if delegation && !result.is_error {
+                    self.verify_recovered_delegation(owner, effect, &result).await?;
+                }
+                owner_results.insert(call_id.clone(),AgentReconciledOutcome { result,
                     source:if attested.is_some() { AgentReconciliationSource::OwnerAttestation } else { AgentReconciliationSource::OwnerReceipt },
                     evidence_event_id:attested.map(|(_,id)|id.clone()).or_else(||owned[0].terminal_event_id.as_ref().map(|id|id.as_ref().to_owned())),owner_operation_id:Some(operation.clone()) });
-            } else if native_started.get(call_id).is_some_and(|action| action == "workspace.files/read") {
+            } else if native_started.get(call_id).is_some_and(|(_,action)| action.as_ref() == "workspace.files/read") {
                 owner_results.insert(call_id.clone(),AgentReconciledOutcome { result:AgentToolResult::text(call_id.clone(),
                     "The read outcome was not durably observed; it was not repeated during reconciliation. Perform a fresh authorized read if needed.",true),
                     source:AgentReconciliationSource::ReadOutcomeUnavailable,evidence_event_id:Some(witness.clone()),owner_operation_id:Some(operation.clone()) });
@@ -286,8 +337,7 @@ impl NomiCoreSessionOwner {
             let command:nomifun_agent_runtime::AgentCollaborationMessage=serde_json::from_value(call.arguments.0.clone())
                 .map_err(|_|reject("the original child-message command is not readable"))?;
             let engine=self.collaboration_engine()?;
-            let known=engine.message_receipt(&owner.principal_id,session.as_ref(),request.operation_id.as_ref(),
-                &command.execution_id,&command.step_id,&command.content,&command.idempotency_key).await?;
+            let known=engine.message_receipt(&owner.principal_id,session.as_ref(),request.operation_id.as_ref(),&command).await?;
             let (body,failed,witness,operation)=if let Some(receipt)=known {
                 let witness=format!("agent-execution-event:{}:{}",receipt.execution_id,receipt.sequence);
                 let operation=receipt.operation_id.clone();
@@ -308,7 +358,8 @@ impl NomiCoreSessionOwner {
                 owner_operation_id:Some(operation.into()),
             });
         }
-        let mut reconciled = nomifun_agent_runtime::reconcile_execution_tail(&checkpoint,saved.revision,&tail,&dispatched,&owner_results,&request.budget)
+        let mut reconciled = nomifun_agent_runtime::reconcile_execution_tail_with_contracts(
+            &checkpoint,saved.revision,&tail,&dispatched,&owner_results,&request.budget,&contracts)
             .map_err(|error| reject(&error.to_string()))?;
         let mut notices = Vec::new();
         for (payload,event_id) in attestations.values() {
@@ -345,36 +396,171 @@ impl NomiCoreSessionOwner {
             observations:reconciled.observations.into_iter().map(|event|serde_json::to_value(event).map(StrictJsonValue)).collect::<Result<Vec<_>,_>>().map_err(|error|reject(&error.to_string()))? })
     }
 
-    async fn enqueue_authorized_native_resume(self: &Arc<Self>, session: AgentSessionId, operation: OperationId, authorization_generation: u64) -> Result<(),AppError> {
-        let engines = self.native_engines.get().cloned().ok_or_else(||AppError::Conflict("native recovery scheduler is not installed".into()))?;
-        let owner = Arc::downgrade(self);
-        if !self.background_tasks.spawn(Box::pin(async move {
-            for _ in 0..300 {
-                let (Some(owner),Some(engines)) = (owner.upgrade(),engines.upgrade()) else { return; };
-                // The authorization cursor is replaced by the execution claim
-                // cursor. A duplicate request must not dispatch that owner a
-                // second time or wait until its long task times out.
-                match owner.canonical.store().native_execution_generation(&session,&operation).await {
-                    Ok(generation) if generation != authorization_generation => return,
-                    Err(_) => return,
-                    _ => {}
-                }
-                if owner.canonical.store().native_pause_state(&session,&operation).await.ok().flatten().is_some() { return; }
-                if owner.runtime_sessions.active_turn_generation(session.as_ref()).is_some()
-                    || owner.runtime_sessions.get_runtime(session.as_ref()).is_some_and(|runtime| runtime.status() == Some(ConversationStatus::Running)) {
-                    drop(owner); tokio::time::sleep(Duration::from_millis(100)).await; continue;
-                }
-                if let Err(error) = owner.recover_native_turn(engines,&session,&operation,Some(authorization_generation)).await {
-                    tracing::warn!(session_id=session.as_ref(),%error,"authorized native resume was not attached");
-                }
-                return;
+    async fn verify_recovered_delegation(&self, owner: &PrincipalRef,
+        effect: &nomifun_agent_session::AgentEffectRecord, result: &AgentToolResult) -> Result<(),AppError> {
+        let reject = |message:&str| AppError::Conflict(format!("Native delegation recovery: {message}"));
+        if effect.owner_domain != "wave5.product" || effect.state != AgentEffectState::Returned {
+            return Err(reject("the original delegation Effect has no returned owner result"));
+        }
+        let receipt: nomifun_common::AgentExecutionReceipt = serde_json::from_str(&result.output_text())
+            .map_err(|_| reject("the original delegation has no typed Execution receipt"))?;
+        let observation = self.collaboration_engine()?.collaboration_observation(
+            &owner.principal_id, &receipt.execution_id, None).await?;
+        let expected = nomifun_common::AgentExecutionSource {
+            agent_session_id:effect.agent_session_id.as_ref().into(), turn_operation_id:effect.turn_id.as_ref().into(),
+            tool_operation_id:effect.operation_id.as_ref().into(), effect_id:effect.effect_id.clone(),
+        };
+        let mut sources = Vec::new();
+        if let Some(source) = nomifun_agent_execution::execution_source_from_initial_plan(&observation.execution.initial_plan_input)? {
+            sources.push(source);
+        }
+        let state = observation.state.ok_or_else(|| reject("delegation source snapshot is unavailable"))?;
+        for event in &state.events {
+            if let Some(source) = event.payload.get("delegation_source") {
+                sources.push(serde_json::from_value(source.clone()).map_err(|_| reject("delegation source is malformed"))?);
             }
-            if let Some(owner) = owner.upgrade() {
-                if let Ok(facts) = owner.canonical.store().native_recovery_facts(&session,&operation).await {
-                    let _ = owner.canonical.store().quarantine_native_recovery(&facts.session.owner_ref,&session,&operation,facts.execution_fence).await;
+        }
+        if !sources.iter().any(|source| source == &expected)
+            || receipt.step_ids.iter().any(|id| !state.steps.iter().any(|step| &step.step_id == id)) {
+            return Err(reject("the original Effect receipt differs from its domain source"));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(in crate::router) fn inject_authorized_native_resume_attachment_error(session:&str,stage:&str,error:AppError)->Arc<tokio::sync::Notify> {
+        let reached=Arc::new(tokio::sync::Notify::new());
+        ATTACHMENT_FAILURES.get_or_init(Default::default).lock().unwrap().insert((session.into(),stage.into()),(error,reached.clone()));
+        reached
+    }
+
+    #[cfg(test)]
+    pub(super) async fn authorized_resume_attachment_cutpoint(&self,session:&AgentSessionId,stage:&str)->Result<(),AppError> {
+        let failure=ATTACHMENT_FAILURES.get_or_init(Default::default).lock().unwrap().remove(&(session.as_ref().into(),stage.into()));
+        if let Some((error,reached))=failure {reached.notify_one();return Err(error);}
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(in crate::router) async fn join_authorized_native_resume_for_test(&self,session:&AgentSessionId,operation:&OperationId,generation:u64) {
+        let _joined=self.session_operation_lock(&format!("native-resume-attach:{}:{}:{generation}",session.as_ref(),operation.as_ref())).write_owned().await;
+    }
+
+    pub(in crate::router) async fn enqueue_authorized_native_resume(self: &Arc<Self>, session: AgentSessionId, operation: OperationId, authorization_generation: u64) -> Result<(),AppError> {
+        let engines = self.native_engines.get().cloned().ok_or_else(||AppError::Conflict("native recovery scheduler is not installed".into()))?;
+        let key=format!("native-resume-attach:{}:{}:{authorization_generation}",session.as_ref(),operation.as_ref());
+        let Ok(flight)=self.session_operation_lock(&key).try_write_owned() else {return Ok(());};
+        let owner = Arc::downgrade(self);
+        let tasks=self.background_tasks.clone();
+        if !self.background_tasks.spawn(Box::pin(async move {
+            let _flight=flight;
+            let mut preparation_rejected=false;
+            loop {
+                let (Some(owner),Some(engines)) = (owner.upgrade(),engines.upgrade()) else { return; };
+                let result=async {
+                    let store=owner.canonical.store();
+                    let receipt=match store.read_turn_receipt(&session,&operation).await {
+                        Err(nomifun_agent_session::SessionStoreError::Deleted(_)|nomifun_agent_session::SessionStoreError::NotFound(_))=>return Ok(true),
+                        result=>result.map_err(agent_session_store_error)?,
+                    };
+                    if receipt.status!=nomifun_agent_session::TurnReceiptStatus::Running {return Ok(true);}
+                    #[cfg(test)]
+                    owner.authorized_resume_attachment_cutpoint(&session,"generation").await?;
+                    let generation=store.native_execution_generation(&session,&operation).await.map_err(agent_session_store_error)?;
+                    if store.native_pause_state(&session,&operation).await.map_err(agent_session_store_error)?.is_some() {return Ok(true);}
+                    if engines.owns_attached_recovery(&session,&operation,generation).await {return Ok(true);}
+                    if generation!=authorization_generation||preparation_rejected {
+                        // Claim is not attachment. A failed loader may have
+                        // changed the generation, and its reply may be lost.
+                        // Only inspect that exact claim; never invoke recovery
+                        // again with another generation or another input.
+                        let facts=store.native_recovery_facts(&session,&operation).await.map_err(agent_session_store_error)?;
+                        if generation!=facts.execution_generation {return Ok(false);}
+                        if generation!=authorization_generation&&!engines.owns_recovery_claim(&facts,generation) {return Ok(true);}
+                        if store.native_execution_deadline(&session,&operation).await.map_err(agent_session_store_error)?>now_ms() {return Ok(false);}
+                        if store.quarantine_native_recovery(&facts.session.owner_ref,&session,&operation,facts.execution_fence).await.map_err(agent_session_store_error)? {
+                            if let Some(root)=receipt.started_event.as_ref().and_then(|start|facts.event_payloads.get(start.event_id.as_ref()))
+                                .and_then(|payload|payload.get("source_message_id")).and_then(Value::as_str) {
+                                owner.user_events.send_to_user(&facts.session.owner_ref.principal_id,Self::canonical_turn_paused_wire_event(&session,root));
+                            }
+                        }
+                        return Ok(true);
+                    }
+                    if owner.runtime_sessions.active_turn_generation(session.as_ref()).is_some()
+                        ||owner.runtime_sessions.get_runtime(session.as_ref()).is_some_and(|runtime|runtime.status()==Some(ConversationStatus::Running)) {return Ok(false);}
+                    let attached=tokio::select! {
+                        _=tasks.shutdown_signal()=>return Ok(true),
+                        result=owner.recover_native_turn(engines.clone(),&session,&operation,Some(authorization_generation))=>result,
+                    };
+                    if let Err(error)=attached {
+                        preparation_rejected=!matches!(error,AppError::DatabaseUnavailable{..}|AppError::ExecutionAdmissionPending);
+                        return Err(error);
+                    }
+                    Ok::<bool,AppError>(false)
+                }.await;
+                match result {
+                    Ok(true)=>return,
+                    Ok(false)=>{},
+                    Err(error)=>tracing::warn!(session_id=session.as_ref(),authorization_generation,
+                        error=%nomi_redact::redact_secrets_owned(error.to_string()),"original authorized resume retains attachment responsibility; no business replay"),
                 }
+                drop(owner);
+                tokio::select! {_=tasks.shutdown_signal()=>return,_=tokio::time::sleep(Duration::from_secs(1))=>{}}
             }
         })) { return Err(AppError::Conflict("resume authorization is durable but the local scheduler is shutting down".into())); }
         Ok(())
+    }
+}
+
+fn original_effect_result(effect:&nomifun_agent_session::AgentEffectRecord,call_id:&ToolCallId)
+    ->Result<AgentToolResult,String> {
+    let observation=effect.bounded_observation.as_ref().ok_or_else(||"Effect has no original bounded observation".to_owned())?;
+    match effect.state {
+        AgentEffectState::Returned => {
+            let result=observation.get("result").ok_or_else(||"returned Effect has no original typed result; it cannot be replaced by a success summary".to_owned())?;
+            Ok(AgentToolResult::text(call_id.clone(),serde_json::to_string(result).map_err(|error|error.to_string())?,false))
+        }
+        AgentEffectState::Rejected | AgentEffectState::Cancelled => {
+            let error=observation.get("error").ok_or_else(||"settled Effect has no original rejection observation".to_owned())?;
+            Ok(AgentToolResult::text(call_id.clone(),serde_json::to_string(error).map_err(|error|error.to_string())?,true))
+        }
+        AgentEffectState::Pending | AgentEffectState::Unknown => Err("Effect outcome is not settled".into()),
+    }
+}
+
+#[cfg(test)]
+mod original_effect_result_tests {
+    use super::*;
+
+    fn effect(state:AgentEffectState,observation:Value)->nomifun_agent_session::AgentEffectRecord {
+        nomifun_agent_session::AgentEffectRecord {effect_id:"original-effect".into(),agent_session_id:"session".into(),
+            turn_id:"turn".into(),operation_id:"delegate-operation".into(),owner_domain:"wave5.product".into(),
+            capability_module:"agent.collaboration".into(),action_id:"agent/delegate".into(),resource_binding_id:None,
+            resource_key:Some("agent-collaboration".into()),input_digest:"a".repeat(64).into(),
+            strategy:nomifun_agent_session::EffectStrategy::ManagedEffect,state,bounded_observation:Some(observation),
+            started_event_id:"original-start".into(),terminal_event_id:Some("original-returned".into()),created_at:1,settled_at:Some(2)}
+    }
+
+    #[test]
+    fn returned_delegation_restores_the_original_json_without_an_owner_invocation() {
+        let body=json!({"execution_id":"original-execution","status":"running","message":"accepted","step_ids":["child"]});
+        let record=effect(AgentEffectState::Returned,json!({"result":body}));
+        let result=original_effect_result(&record,&"original-call".into()).unwrap();
+        assert!(!result.is_error);
+        assert_eq!(serde_json::from_str::<Value>(&result.output_text()).unwrap(),body);
+        let typed:nomifun_common::AgentExecutionReceipt=serde_json::from_str(&result.output_text()).unwrap();
+        assert_eq!(typed.execution_id,"original-execution");
+        assert_eq!(typed.step_ids,["child"]);
+    }
+
+    #[test]
+    fn absent_or_unknown_effect_output_never_becomes_a_success_summary() {
+        for state in [AgentEffectState::Pending,AgentEffectState::Unknown,AgentEffectState::Returned] {
+            assert!(original_effect_result(&effect(state,json!({"observation_truncated":true})),&"original-call".into()).is_err());
+        }
+        let original=json!({"code":"ORIGINAL_REJECTION","message":"declined before execution"});
+        let result=original_effect_result(&effect(AgentEffectState::Rejected,json!({"error":original})),&"original-call".into()).unwrap();
+        assert!(result.is_error);
+        assert_eq!(serde_json::from_str::<Value>(&result.output_text()).unwrap(),original);
     }
 }

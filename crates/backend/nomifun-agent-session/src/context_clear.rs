@@ -74,10 +74,10 @@ impl AgentSessionStore {
         expected: &ContextClearBoundary,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         validate_request(request)?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         validate_owner_tx(&mut tx, owner, session).await?;
         if let Some(existing) = existing_clear_tx(&mut tx, session, request).await? {
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok(existing);
         }
         if &validate_clear_tx(&mut tx, session, true).await? != expected {
@@ -106,7 +106,7 @@ impl AgentSessionStore {
             },
         };
         let result = self.append_event_tx(&mut tx, &append, None).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
@@ -118,7 +118,7 @@ impl AgentSessionStore {
         &self, owner: &PrincipalRef, session: &AgentSessionId, request: &ClearSessionContext,
     ) -> Result<(), SessionStoreError> {
         validate_request(request)?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         validate_owner_tx(&mut tx, owner, session).await?;
         let original = existing_clear_tx(&mut tx, session, request).await?
             .and_then(|result| result.record)
@@ -133,7 +133,7 @@ impl AgentSessionStore {
         {
             return Err(SessionStoreError::Conflict("Session context changed after the original clear; continuation is not authorized".into()));
         }
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(())
     }
 }

@@ -145,10 +145,16 @@
     "updated": "Collaborator updated",
     "error": "Failed to update collaborator: {{error}}"
   },
-  "retry": {
-    "button": "Retry",
-    "ok": "Task retried",
-    "error": "Retry failed: {{error}}"
+  "restart": {
+    "button": "Restart task",
+    "checking": "Checking task…",
+    "pending": "Restarting…",
+    "accepted": "Restart request accepted; processing the original task",
+    "unconfirmed": "Acceptance is unconfirmed. Click again to check the same request.",
+    "blocked": "Restart is blocked. View the task record for the reason.",
+    "continueRequired": "Use the original task's Continue action to resume it.",
+    "reconcileRequired": "The original result must be reconciled before another attempt can start.",
+    "resolved": "Restart request processed. The task record shows the current progress."
   },
   "adopt": {
     "button": "Adopt current result",
@@ -171,12 +177,20 @@
     "error": "Failed to submit decision: {{error}}"
   },
   "recovery": {
+    "pausedTitle": "Subtask paused",
+    "pausedDescription": "The original execution is paused. Completed actions and results are retained.",
+    "pausedHint": "Use Restart task to try continuing from the existing progress. The system checks the original execution and resource cleanup first; if it cannot continue safely, it explains why.",
     "title": "Previous result is unconfirmed",
     "task": "Task “{{title}}” has an unconfirmed previous result",
-    "description": "The previous turn was interrupted and its result could not be confirmed. Replying cannot resume this task because repeating its operations could duplicate effects.",
-    "hint": "Review the task record, or stop this collaboration. Stopping does not undo actions that may already have happened.",
+    "description": "The previous result is not yet verified. Reconcile the original execution before continuing or starting another attempt.",
+    "hint": "Recheck the original task, replace it with completed work, or stop this task. Existing effects and cleanup obligations are retained.",
     "settledHint": "This collaboration has ended. Actions that may have happened before the interruption still need to be checked.",
-    "details": "View interruption details"
+    "details": "View interruption details",
+    "recheck": "Recheck original execution",
+    "replacement": "Select completed replacement",
+    "replace": "Use this replacement",
+    "accepted": "Request accepted; reconciling the original task",
+    "error": "Request failed: {{error}}"
   },
   "steer": {
     "placeholder": "Add guidance for the collaborator while it is working…",

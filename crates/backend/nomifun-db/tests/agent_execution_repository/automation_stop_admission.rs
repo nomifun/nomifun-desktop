@@ -43,7 +43,7 @@ async fn original_autowork_stop_fences_creation_and_an_already_queued_attempt_be
     let attempt=&queued.current_attempt.as_ref().unwrap().attempt;
     stop_claim(&db,&claim).await;
     assert!(repository.start_attempt(OWNER_ID,&created.execution_id,&root.step_id,queued.step.version,&attempt.attempt_id,attempt.version,
-        CANONICAL_LEAD_ID,AgentExecutionAttemptSessionKind::AutomationLead,None,&event(AgentExecutionEventKind::AttemptChanged)).await.is_err());
+        CANONICAL_LEAD_ID,AgentExecutionAttemptSessionKind::AutomationLead,None, None,&event(AgentExecutionEventKind::AttemptChanged)).await.is_err());
     let after=repository.get_step_detail(OWNER_ID,&created.execution_id,&root.step_id).await.unwrap().unwrap();
     assert_eq!(after.step.version,queued.step.version);assert_eq!(after.current_attempt.unwrap().attempt.status,"queued");
     assert!(repository.automation_source_cancelled(OWNER_ID,&created.execution_id).await.unwrap(),

@@ -25,7 +25,7 @@ async fn start_on(f:&Fixture,title:&str,session:&str)->nomifun_db::AgentExecutio
             effective_config:"{}".into(),retry_after:None,runtime_state:None},&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
     let attempt=&queued.current_attempt.as_ref().unwrap().attempt;
     f.repository.start_attempt(&f.owner,&f.execution_id,&task.step.step_id,queued.step.version,&attempt.attempt_id,attempt.version,session,
-        AgentExecutionAttemptSessionKind::ChildAttempt,None,&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap()
+        AgentExecutionAttemptSessionKind::ChildAttempt,None, None,&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap()
 }
 
 #[tokio::test]
@@ -89,7 +89,7 @@ async fn task_retirement_keeps_historical_and_current_owners_separate_and_reads_
     let next_session=nomifun_common::generate_id();insert_canonical_session(&f.db,&next_session,&f.owner,"live").await;
     let next=queued.current_attempt.as_ref().unwrap();
     let running=f.repository.start_attempt(&f.owner,&f.execution_id,&queued.step.step_id,queued.step.version,&next.attempt.attempt_id,next.attempt.version,
-        &next_session,AgentExecutionAttemptSessionKind::ChildAttempt,None,&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
+        &next_session,AgentExecutionAttemptSessionKind::ChildAttempt,None, None,&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
     let next=running.current_attempt.as_ref().unwrap();
     f.repository.settle_attempt(&f.owner,&f.execution_id,&running.step.step_id,running.step.version,&next.attempt.attempt_id,next.attempt.version,None,
         &nomifun_db::SettleAgentExecutionAttemptParams {expected_active_session_turn:None,expected_terminal_turn:None,

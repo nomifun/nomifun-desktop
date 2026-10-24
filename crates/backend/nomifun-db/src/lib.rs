@@ -8,16 +8,30 @@ mod cron_binding_normalization;
 mod storage_relocation;
 pub use storage_relocation::{relocate_storage_domain_paths, relocate_storage_domain_paths_with_app_workspaces, validate_storage_relocation_paths};
 mod error;
+mod availability;
+mod pool_diagnostics;
+pub use pool_diagnostics::{DatabaseOperationGuard,begin_agent_write};
+pub use availability::database_unavailable_reason;
 mod id_schema_contract;
 pub mod models;
 mod repository;
 pub use repository::agent_execution_admission::{AgentExecutionReservation, execution_capacity_available_tx,
     execution_reservations_tx, native_execution_claim_admitted_tx, native_resume_capacity_available_tx,
     native_resume_target_eligible_tx};
+pub use repository::agent_execution_restart_resume::ensure_execution_restart_resume_tx;
 pub use repository::agent_source_reply::agent_reply_source_turns_tx;
 pub use repository::agent_source_reply::agent_message_command_tx;
 pub use repository::agent_source_reply::agent_message_command_bound_tx;
+pub use repository::agent_source_reply::agent_parent_question_tx;
 pub use repository::agent_execution_admission::execution_attempt_turn_key_tx;
+pub use repository::agent_execution_admission::validate_execution_turn_authority_tx;
+pub use repository::agent_execution_admission::execution_attempt_turn_key_from_facts;
+pub use repository::original_attempt_creation_source_tx;
+pub use repository::{AgentExecutionRestartCommand,AgentExecutionRestartTarget,
+    AgentExecutionRestartPauseRef,AgentExecutionRestartCompletion};
+pub use repository::{AgentExecutionObservationHeader, AgentExecutionObservationStep,
+    AgentExecutionObservationAttempt, AgentExecutionObservationState, AgentExecutionObservationRows,
+    AgentCollaborationObservationRevisions};
 mod provider_cleanup;
 pub use provider_cleanup::insert_agent_preset_revision_tx;
 mod session_projection;
@@ -112,7 +126,7 @@ pub use repository::{
     NewAgentExecutionTemplateParticipant, UpdateAgentExecutionTemplateParams,
     LoopRepeatResetParams,
     AgentExecutionAttemptDisposition, RecoveredAgentExecutionAttemptOutput,
-    RetryAgentExecutionStep, AgentExecutionActiveTurnGuard, AgentExecutionTerminalTurnGuard, SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
+    RetryAgentExecutionStep, ReplaceAgentExecutionStepWithExistingParams, AgentExecutionActiveTurnGuard, AgentExecutionTerminalTurnGuard, SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
     CreateTerminalParams,
     IAgentMetadataRepository, IAttachmentRepository, ChannelInboundClaim,
     IChannelRepository, PENDING_PROMPT_EXPIRY_MS, PENDING_PROMPT_QUEUE_LIMIT,

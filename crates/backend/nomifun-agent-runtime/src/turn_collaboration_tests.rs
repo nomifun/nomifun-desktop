@@ -8,17 +8,146 @@ struct CollaborationTestPort {
 }
 
 fn ready_children_snapshot(ids: &[String]) -> crate::AgentCollaborationSnapshot {
-    crate::AgentCollaborationSnapshot { cursor:"canonical:7".into(), result:StrictJsonValue(json!({
+    crate::collaboration::test_snapshot(json!({
         "executions":ids.iter().map(|id|json!({"execution_id":id,"sequence":7,"owned_step_ids":["child"],
             "owned_terminal_step_ids":["child"],"children":[{"step_id":"child","status":"completed","attempt_id":"attempt",
                 "terminal_receipt":{"execution_id":id,"execution_event_sequence":7,"step_id":"child","status":"completed"},
                 "source":{"agent_session_id":"child-session","turn_operation_id":"child-turn","terminal_event_id":"child-terminal"},
                 "workspace_change_sources":[],
-                "result":"The child's exact recorded result."}]})).collect::<Vec<_>>(),"all_ready":true,"any_ready":true})) }
+                "result":"The child's exact recorded result."}]})).collect::<Vec<_>>(),"all_ready":true,"any_ready":true}))
 }
 
 #[derive(Debug)]
 struct ReadyCollaborationPort;
+
+#[derive(Debug, Default)]
+struct UnavailableCollaborationPort {
+    calls: AtomicUsize,
+    status_calls: AtomicUsize,
+    failed_status_calls: std::sync::Mutex<std::collections::BTreeSet<usize>>,
+    entered: Notify,
+    available: std::sync::atomic::AtomicBool,
+    invalid_contract: bool,
+}
+
+#[async_trait]
+impl crate::AgentCollaborationPort for UnavailableCollaborationPort {
+    async fn status(&self, _: &ChatCausality, selection: &crate::AgentCollaborationSelection, _: CancellationToken)
+        -> Result<crate::AgentCollaborationSnapshot, AgentEngineError> {
+        let call=self.status_calls.fetch_add(1, Ordering::SeqCst)+1;
+        if self.failed_status_calls.lock().unwrap().remove(&call) {
+            return Err(AgentEngineError::ObservationUnavailable {message:"database is busy".into()});
+        }
+        Ok(ready_children_snapshot(&selection.execution_ids))
+    }
+
+    async fn wait(&self, _: &ChatCausality, request: &crate::AgentChildrenWait, _: CancellationToken)
+        -> Result<crate::AgentCollaborationSnapshot, AgentEngineError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        if self.invalid_contract {
+            return Err(AgentEngineError::InvalidContract("exact child source was revoked".into()));
+        }
+        if !self.available.load(Ordering::SeqCst) {
+            return Err(AgentEngineError::ObservationUnavailable { message: "connection acquisition timed out".into() });
+        }
+        Ok(ready_children_snapshot(&request.execution_ids))
+    }
+
+    async fn send(&self, _: &ChatCausality, _: &ToolCallId, _: &crate::AgentCollaborationMessage, _: CancellationToken)
+        -> Result<StrictJsonValue, AgentEngineError> {
+        unreachable!("read retry must not send another command")
+    }
+}
+
+#[tokio::test]
+async fn collaboration_read_unavailability_preserves_one_wait_turn_checkpoint_and_model_budget() {
+    let model = silent_model(vec![collaboration_wait_step(),
+        control_step("read-result", crate::collaboration::STATUS, json!({"execution_ids":["owned-execution"]})),
+        text_step("Integrated the exact original result.")]);
+    let port = Arc::new(UnavailableCollaborationPort::default());
+    let journal = Arc::new(SettlementJournal::default());
+    let session = Arc::new(input_session(model.clone(), Arc::new(EchoTool), journal.clone()));
+    let running = session.clone();
+    let turn_request = AgentTurnRequest::new(request(), AgentToolPlan::default(), principal(), 0)
+        .with_collaboration_port(port.clone()).with_max_model_steps(4);
+    let task = tokio::spawn(async move { running.run_turn(turn_request).await });
+    tokio::time::timeout(Duration::from_secs(2), port.entered.notified()).await.unwrap();
+    assert!(session.is_turn_active().await);
+    assert!(!task.is_finished());
+    assert_eq!(model.requests.lock().unwrap().len(), 1);
+    let checkpoint = journal.checkpoints.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((checkpoint.model_steps, checkpoint.tool_call_count), (1, 1));
+    assert_eq!(checkpoint.awaiting_children.as_ref().unwrap().execution_ids, ["owned-execution"]);
+    port.available.store(true, Ordering::SeqCst);
+    let result = tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap().unwrap();
+    assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+    assert_eq!((result.model_steps, result.tool_call_count), (3, 2));
+    assert!(port.calls.load(Ordering::SeqCst) >= 2);
+    let requests = model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].causality.turn_operation_id, requests[2].causality.turn_operation_id);
+    let events = journal.events.lock().unwrap();
+    assert_eq!(events.iter().filter(|event| matches!(event, AgentEngineEvent::AwaitingChildren { .. })).count(), 1);
+    assert_eq!(events.iter().filter(|event| matches!(event, AgentEngineEvent::ChildrenWaitResolved { .. })).count(), 1);
+    assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { .. } | AgentEngineEvent::TurnPaused { .. })));
+}
+
+#[tokio::test]
+async fn collaboration_user_stop_preempts_temporary_read_retry_without_waiting_for_backoff() {
+    let model = silent_model(vec![collaboration_wait_step()]);
+    let port = Arc::new(UnavailableCollaborationPort::default());
+    let journal = Arc::new(SettlementJournal::default());
+    let session = Arc::new(input_session(model.clone(), Arc::new(EchoTool), journal.clone()));
+    let running = session.clone();
+    let turn_request = AgentTurnRequest::new(request(), AgentToolPlan::default(), principal(), 0).with_collaboration_port(port.clone());
+    let task = tokio::spawn(async move { running.run_turn(turn_request).await });
+    tokio::time::timeout(Duration::from_secs(2), port.entered.notified()).await.unwrap();
+    assert!(session.cancel().await);
+    let result = tokio::time::timeout(Duration::from_millis(250), task).await.unwrap().unwrap().unwrap();
+    assert!(matches!(result.terminal, AgentTurnTerminal::Cancelled));
+    assert_eq!(port.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(model.requests.lock().unwrap().len(), 1);
+    assert!(!journal.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::ChildrenWaitResolved { .. })));
+}
+
+#[tokio::test]
+async fn collaboration_contract_failure_is_not_retried_as_temporary_storage_contention() {
+    let model = silent_model(vec![collaboration_wait_step()]);
+    let port = Arc::new(UnavailableCollaborationPort { invalid_contract: true, ..Default::default() });
+    let result = open_session(model.clone(), Arc::new(EchoTool)).run_turn(
+        AgentTurnRequest::new(request(), AgentToolPlan::default(), principal(), 0).with_collaboration_port(port.clone())).await;
+    assert!(matches!(result, Err(AgentEngineError::InvalidContract(message)) if message == "exact child source was revoked"));
+    assert_eq!(port.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(model.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn collaboration_read_retries_cover_wait_acceptance_and_result_consumption_without_reinvoking_tools() {
+    let model = silent_model(vec![collaboration_wait_step(),
+        control_step("read-result", crate::collaboration::STATUS, json!({"execution_ids":["owned-execution"]})),
+        text_step("Verified and integrated the original child result.")]);
+    let port = Arc::new(UnavailableCollaborationPort::default());
+    port.available.store(true, Ordering::SeqCst);
+    port.failed_status_calls.lock().unwrap().extend([1,3]);
+    let journal = Arc::new(SettlementJournal::default());
+    let session = input_session(model.clone(), Arc::new(EchoTool), journal.clone());
+    let result = session.run_turn(AgentTurnRequest::new(request(), AgentToolPlan::default(), principal(), 0)
+        .with_collaboration_port(port.clone()).with_max_model_steps(4)).await.unwrap();
+    assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+    assert_eq!((result.model_steps, result.tool_call_count), (3,2));
+    assert_eq!(port.status_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(port.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(model.requests.lock().unwrap().len(), 3);
+    let events = journal.events.lock().unwrap();
+    assert_eq!(events.iter().filter(|event| matches!(event, AgentEngineEvent::ToolCallCompleted { .. })).count(), 2);
+    assert_eq!(events.iter().filter(|event| matches!(event, AgentEngineEvent::ToolStarted { .. })).count(), 0,
+        "pure collaboration reads never acquire a new Kernel effect");
+    assert_eq!(events.iter().filter(|event| matches!(event, AgentEngineEvent::ToolCompleted { .. })).count(), 2);
+    assert_eq!(events.iter().filter(|event| matches!(event, AgentEngineEvent::AwaitingChildren { .. })).count(), 1);
+    assert_eq!(events.iter().filter(|event| matches!(event, AgentEngineEvent::ChildrenWaitResolved { .. })).count(), 1);
+    assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { .. })));
+}
 #[async_trait]
 impl crate::AgentCollaborationPort for ReadyCollaborationPort {
     async fn status(&self, _: &ChatCausality, selection:&crate::AgentCollaborationSelection, _:CancellationToken)
@@ -51,7 +180,7 @@ impl crate::AgentCollaborationPort for CollaborationTestPort {
             _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
             _ = self.ready.notified() => {},
         }
-        Ok(crate::AgentCollaborationSnapshot { cursor:"canonical:8".into(), result:StrictJsonValue(json!({"ready":true})) })
+        Ok(ready_children_snapshot(&wait.execution_ids))
     }
     async fn send(&self, _: &ChatCausality, _: &ToolCallId, message: &crate::AgentCollaborationMessage, _: CancellationToken)
         -> Result<StrictJsonValue, AgentEngineError> {
@@ -62,7 +191,111 @@ impl crate::AgentCollaborationPort for CollaborationTestPort {
 
 fn collaboration_wait_step() -> Vec<Result<ChatModelEvent, ChatModelError>> {
     control_step("wait-children", crate::collaboration::WAIT,
-        json!({"execution_ids":["owned-execution"],"after_cursor":"canonical:6","mode":"all"}))
+        json!({"execution_ids":["owned-execution"],"after_cursor":crate::AgentCollaborationSnapshot::observation_cursor(
+            std::collections::BTreeMap::from([("owned-execution".into(),crate::AgentCollaborationObservation{state:"6".repeat(64),ready:"6".repeat(64)})])).unwrap(),"mode":"all"}))
+}
+
+#[derive(Debug,Default)]
+struct DecisionBoundaryPort { waits:std::sync::Mutex<Vec<crate::AgentChildrenWait>> }
+
+impl DecisionBoundaryPort {
+    fn observation(ids:&[String])->crate::AgentCollaborationSnapshot {
+        crate::collaboration::test_snapshot(json!({"executions":ids.iter().map(|id|json!({
+            "execution_id":id,"sequence":12,"status":"waiting_input","owned_step_ids":["review-child"],
+            "owned_terminal_step_ids":[],"children":[{"step_id":"review-child","attempt_id":"original-attempt",
+                "status":"waiting_input","workspace_change_sources":[],"review_blocked":{"reason":"original_receipt_missing"}}]
+        })).collect::<Vec<_>>(),"all_ready":false,"any_ready":true,"needs_attention":true,"can_progress":false}))
+    }
+}
+
+#[async_trait]
+impl crate::AgentCollaborationPort for DecisionBoundaryPort {
+    async fn status(&self,_:&ChatCausality,selection:&crate::AgentCollaborationSelection,_:CancellationToken)
+        ->Result<crate::AgentCollaborationSnapshot,AgentEngineError> {Ok(Self::observation(&selection.execution_ids))}
+    async fn wait(&self,_:&ChatCausality,request:&crate::AgentChildrenWait,_:CancellationToken)
+        ->Result<crate::AgentCollaborationSnapshot,AgentEngineError> {
+        self.waits.lock().unwrap().push(request.clone());
+        let mut snapshot=Self::observation(&request.execution_ids);
+        if request.after_cursor.as_ref()==Some(&snapshot.cursor) {snapshot.result.0["wait_outcome"]=json!("decision_blocked");}
+        Ok(snapshot)
+    }
+    async fn send(&self,_:&ChatCausality,_:&ToolCallId,_:&crate::AgentCollaborationMessage,_:CancellationToken)
+        ->Result<StrictJsonValue,AgentEngineError> {unreachable!("waiting never submits a task command")}
+}
+
+#[tokio::test]
+async fn repeated_wait_on_the_same_unowned_decision_pauses_without_another_model_or_fake_question() {
+    let model=silent_model(vec![collaboration_wait_step(),
+        control_step("read-review",crate::collaboration::STATUS,json!({"execution_ids":["owned-execution"]})),
+        control_step("wait-same-review",crate::collaboration::WAIT,json!({"execution_ids":["owned-execution"],"mode":"all"}))]);
+    let port=Arc::new(DecisionBoundaryPort::default());
+    let journal=Arc::new(SettlementJournal::default());
+    let session=input_session(model.clone(),Arc::new(EchoTool),journal.clone());
+    let result=session.run_turn(AgentTurnRequest::new(request(),AgentToolPlan::default(),principal(),0)
+        .with_collaboration_port(port.clone()).with_max_model_steps(4)).await.unwrap();
+    assert!(matches!(result.terminal,AgentTurnTerminal::Paused{ref reason} if reason=="EXECUTION_INTERVENTION_REQUIRED"));
+    assert_eq!(result.model_steps,3);
+    assert_eq!(model.requests.lock().unwrap().len(),3,"the same decision does not buy a fourth model sample");
+    let waits=port.waits.lock().unwrap();assert_eq!(waits.len(),2);
+    let current=DecisionBoundaryPort::observation(&["owned-execution".into()]);
+    assert_eq!(waits[1].after_cursor.as_ref(),Some(&current.cursor),"omitted cursor uses the same latest source observation");
+    drop(waits);
+    let checkpoint=journal.checkpoints.lock().unwrap().last().cloned().unwrap();
+    assert!(checkpoint.collaboration.pending_child_executions.contains("owned-execution"));
+    assert!(checkpoint.awaiting_children.is_some(),"pause keeps the exact unresolved original wait");
+    let events=journal.events.lock().unwrap();
+    assert_eq!(events.iter().filter(|event|matches!(event,AgentEngineEvent::ChildrenWaitResolved{..})).count(),1);
+    assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::UserInputRequested{..}|AgentEngineEvent::TurnInputRequired{..}|AgentEngineEvent::TurnCompleted{..})),
+        "a technical decision boundary is neither a human question nor successful delivery");
+    let (replayed,pending)=crate::collaboration::recorded_progress(&events).unwrap();
+    assert_eq!(replayed,checkpoint.collaboration);
+    assert_eq!(pending,checkpoint.awaiting_children);
+}
+
+#[derive(Debug)]
+struct CandidateWaitPort {
+    candidates:std::sync::Mutex<std::collections::VecDeque<crate::AgentCollaborationSnapshot>>,
+    waits:std::sync::Mutex<Vec<crate::AgentChildrenWait>>,
+}
+#[async_trait]
+impl crate::AgentCollaborationPort for CandidateWaitPort {
+    async fn status(&self,_:&ChatCausality,_:&crate::AgentCollaborationSelection,_:CancellationToken)
+        ->Result<crate::AgentCollaborationSnapshot,AgentEngineError> {unreachable!("the original wait subscribes without a new status tool")}
+    async fn wait(&self,_:&ChatCausality,request:&crate::AgentChildrenWait,_:CancellationToken)
+        ->Result<crate::AgentCollaborationSnapshot,AgentEngineError> {
+        self.waits.lock().unwrap().push(request.clone());
+        Ok(self.candidates.lock().unwrap().pop_front().expect("only the original read candidates are used"))
+    }
+    async fn send(&self,_:&ChatCausality,_:&ToolCallId,_:&crate::AgentCollaborationMessage,_:CancellationToken)
+        ->Result<StrictJsonValue,AgentEngineError> {unreachable!("observation cannot submit another task command")}
+}
+
+#[tokio::test]
+async fn removing_old_ready_sources_advances_only_the_local_subscription_and_preserves_real_input_or_blocked_wakes() {
+    let ids=vec!["owned-execution".into()];
+    let mut initial=DecisionBoundaryPort::observation(&ids);
+    let terminal=ready_children_snapshot(&ids).result.0["executions"][0]["children"][0].clone();
+    let row=&mut initial.result.0["executions"][0];
+    row["owned_step_ids"]=json!(["review-child","child"]);row["owned_terminal_step_ids"]=json!(["child"]);
+    row["children"].as_array_mut().unwrap().push(terminal);
+    initial=crate::collaboration::test_snapshot(initial.result.0);
+    let mut progress=crate::AgentCollaborationProgress::default();progress.pending_child_executions.insert(ids[0].clone());
+    progress.observe_status(&initial).unwrap();
+    let original=progress.clone();
+    let wait=progress.wait().unwrap();
+    let mut removed=initial.clone();
+    let row=&mut removed.result.0["executions"][0];row["sequence"]=json!(13);row["owned_terminal_step_ids"]=json!([]);
+    row["children"][1]["status"]=json!("pending");row["children"][1]["attempt_id"]=json!("accepted-new-attempt");
+    removed=crate::collaboration::test_snapshot(removed.result.0);
+    for outcome in ["parent_input_pending","decision_blocked"] {
+        let mut next=removed.clone();next.result.0["wait_outcome"]=json!(outcome);
+        let port=CandidateWaitPort {candidates:std::sync::Mutex::new(std::collections::VecDeque::from([removed.clone(),next])),waits:Default::default()};
+        let result=crate::collaboration_wait::wait_for_children(&port,&request().causality,&wait,&progress,CancellationToken::new()).await.unwrap();
+        assert_eq!(result.result.0["wait_outcome"],outcome,"real input and no-owner intervention cannot be swallowed by readiness deduplication");
+        let waits=port.waits.lock().unwrap();assert_eq!(waits.len(),2);
+        assert_eq!(waits[0],wait);assert_eq!(waits[1].after_cursor.as_ref(),Some(&removed.cursor));
+        assert_eq!(progress,original,"quiet cursor advancement adds no canonical event, checkpoint mutation or second error ledger");
+    }
 }
 
 #[tokio::test]
@@ -86,7 +319,7 @@ async fn collaboration_wait_parks_without_model_polling_then_reads_exact_results
     let checkpoint = journal.checkpoints.lock().unwrap().last().cloned().unwrap();
     assert_eq!(checkpoint.model_steps, 1);
     assert_eq!(checkpoint.tool_call_count, 1);
-    assert_eq!(checkpoint.awaiting_children.as_ref().unwrap().after_cursor.as_deref(), Some("canonical:6"));
+    assert_eq!(crate::AgentCollaborationSnapshot::observation_references(checkpoint.awaiting_children.as_ref().unwrap().after_cursor.as_ref().unwrap()).unwrap()["owned-execution"].state,"6".repeat(64));
     assert!(journal.events.lock().unwrap().iter().any(|event| matches!(event, AgentEngineEvent::AwaitingChildren { model_steps:1, .. })));
     {
         let events=journal.events.lock().unwrap();
@@ -112,7 +345,7 @@ async fn collaboration_wait_parks_without_model_polling_then_reads_exact_results
     assert!(journal.checkpoints.lock().unwrap().last().unwrap().awaiting_children.is_none());
     let mut history = Vec::new();
     crate::replay_closed_turn(&mut history, request().input.messages[0].clone(), &journal.events.lock().unwrap()).unwrap();
-    assert!(serde_json::to_string(&history).unwrap().contains("canonical:8"));
+    assert!(serde_json::to_string(&history).unwrap().contains("Original collaboration owner wake"));
 }
 
 #[tokio::test]
@@ -167,8 +400,12 @@ async fn collaboration_crash_wait_recovers_the_same_checkpoint_and_budget_withou
     let events = journal.events.lock().unwrap().clone();
     let boundary = events.iter().rposition(|event| matches!(event, AgentEngineEvent::ExecutionCheckpointSaved {..})).unwrap() + 1;
     let revision = match &events[boundary-1] { AgentEngineEvent::ExecutionCheckpointSaved { revision, .. } => *revision, _ => unreachable!() };
-    let recovery = crate::AgentTurnRecovery::new(checkpoint, revision, 1,
+    assert!(matches!(&events[boundary..],[AgentEngineEvent::AwaitingChildren {model_steps,request}]
+        if *model_steps==checkpoint.model_steps&&Some(request)==checkpoint.awaiting_children.as_ref()),
+        "the real crash image retains the original post-checkpoint WAIT observation");
+    let recovery = crate::AgentTurnRecovery::new(checkpoint.clone(), revision, 1,
         events[..boundary].to_vec(), events[boundary..].to_vec(), vec![]).unwrap();
+    assert_eq!(recovery.checkpoint(),&checkpoint,"pure WAIT validation preserves the whole original progress image");
     let mut resumed_steps = vec![control_step("read-recovered-children", crate::collaboration::STATUS,
         json!({"execution_ids":["owned-execution"]}))];
     resumed_steps.extend(completion_steps("inspect", &[], false));
@@ -395,10 +632,10 @@ async fn inherited_pending_work_can_observe_explicit_deletion_and_continue_witho
     impl crate::AgentCollaborationPort for DeletedPort {
         async fn status(&self,_:&ChatCausality,_:&crate::AgentCollaborationSelection,_:CancellationToken)
             ->Result<crate::AgentCollaborationSnapshot,AgentEngineError> {
-            Ok(crate::AgentCollaborationSnapshot {cursor:"deleted:9".into(),result:StrictJsonValue(json!({"executions":[{
+            Ok(crate::collaboration::test_snapshot(json!({"executions":[{
                 "execution_id":"owned-execution","sequence":9,"status":"cancelled","deleted":true,"user_revoked":true,"outputs_available":false,
                 "owned_step_ids":[],"owned_terminal_step_ids":[],"children":[],"execution_terminal_receipt":{
-                    "execution_id":"owned-execution","execution_event_sequence":9,"status":"cancelled","deleted":true,"event_type":"deleted"}}]}))})
+                    "execution_id":"owned-execution","execution_event_sequence":9,"status":"cancelled","deleted":true,"event_type":"deleted"}}]})))
         }
         async fn wait(&self,_:&ChatCausality,_:&crate::AgentChildrenWait,_:CancellationToken)
             ->Result<crate::AgentCollaborationSnapshot,AgentEngineError>{panic!("revoked delegated work must never be waited for or restarted");}
@@ -416,4 +653,56 @@ async fn inherited_pending_work_can_observe_explicit_deletion_and_continue_witho
     assert!(result.output_text.contains("unverified"));
     assert!(crate::collaboration_progress_from_events(&journal.events.lock().unwrap()).unwrap().pending_child_executions.is_empty());
     assert!(model.requests.lock().unwrap().iter().all(|request|request.input.tool_choice==ChatToolChoice::Auto));
+}
+
+#[derive(Debug)]
+struct RejectedChildCommandPort {calls:AtomicUsize,corrupt:bool}
+
+#[async_trait]
+impl crate::AgentCollaborationPort for RejectedChildCommandPort {
+    async fn status(&self,_:&ChatCausality,selection:&crate::AgentCollaborationSelection,_:CancellationToken)
+        ->Result<crate::AgentCollaborationSnapshot,AgentEngineError> {Ok(ready_children_snapshot(&selection.execution_ids))}
+    async fn wait(&self,_:&ChatCausality,_:&crate::AgentChildrenWait,_:CancellationToken)
+        ->Result<crate::AgentCollaborationSnapshot,AgentEngineError> {unreachable!("a rejected command does not create a child wait")}
+    async fn send(&self,_:&ChatCausality,_:&ToolCallId,_:&crate::AgentCollaborationMessage,_:CancellationToken)
+        ->Result<StrictJsonValue,AgentEngineError> {
+        self.calls.fetch_add(1,Ordering::SeqCst);
+        if self.corrupt {return Err(AgentEngineError::InvalidContract("original source proof is corrupt".into()));}
+        Err(AgentEngineError::CollaborationCommandRejected {
+            code:nomifun_agent_contracts::AgentCollaborationCommandRejectCode::ChildRequiresInput,
+            message:"the original child is waiting for its exact question reply".into(),
+            observation:Some(StrictJsonValue(json!({"status":"waiting_input","question_reply_reference":{
+                "agent_session_id":"child-session","turn_operation_id":"child-turn","question_event_id":"question-event","request_id":"question-call"}}))),
+        })
+    }
+}
+
+#[tokio::test]
+async fn ordinary_child_command_state_rejection_is_a_tool_result_and_does_not_fail_the_parent() {
+    let model=silent_model(vec![control_step("stale-child-guidance",crate::collaboration::MESSAGE,
+        json!({"execution_id":"owned-execution","step_id":"child","content":"Follow the original module boundary.","idempotency_key":"original-guide-once"})),
+        text_step("The guidance was rejected while the exact child question awaits a reply.")]);
+    let port=Arc::new(RejectedChildCommandPort{calls:AtomicUsize::new(0),corrupt:false});
+    let journal=Arc::new(SettlementJournal::default());
+    let session=input_session(model.clone(),Arc::new(EchoTool),journal.clone());
+    let result=session.run_turn(AgentTurnRequest::new(request(),AgentToolPlan::default(),principal(),0).with_collaboration_port(port.clone())).await.unwrap();
+    assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+    assert_eq!(port.calls.load(Ordering::SeqCst),1);assert_eq!(model.requests.lock().unwrap().len(),2);
+    let events=journal.events.lock().unwrap();
+    let output=events.iter().find_map(|event|match event {AgentEngineEvent::ToolCompleted{result,..} if result.call_id.as_ref()=="stale-child-guidance"=>Some(result),_=>None}).unwrap();
+    assert!(output.is_error);let body:serde_json::Value=serde_json::from_str(&output.output_text()).unwrap();
+    assert_eq!(body["accepted"],false);assert_eq!(body["code"],"CHILD_REQUIRES_INPUT");
+    assert!(body["observation"]["question_reply_reference"]["question_event_id"].is_string());
+    assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::TurnFailed{..}|AgentEngineEvent::AwaitingChildren{..})));
+}
+
+#[tokio::test]
+async fn corrupt_child_command_source_is_not_downgraded_to_an_ordinary_state_rejection() {
+    let model=silent_model(vec![control_step("corrupt-source-guidance",crate::collaboration::MESSAGE,
+        json!({"execution_id":"owned-execution","step_id":"child","content":"Original context.","idempotency_key":"original-guide-once"}))]);
+    let port=Arc::new(RejectedChildCommandPort{calls:AtomicUsize::new(0),corrupt:true});
+    let result=open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+        AgentTurnRequest::new(request(),AgentToolPlan::default(),principal(),0).with_collaboration_port(port.clone())).await;
+    assert!(matches!(result,Err(AgentEngineError::InvalidContract(message)) if message=="original source proof is corrupt"));
+    assert_eq!(port.calls.load(Ordering::SeqCst),1);assert_eq!(model.requests.lock().unwrap().len(),1);
 }

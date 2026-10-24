@@ -8,7 +8,8 @@
  * (`stepfun-plan` / `step-3.7-flash`, or explicit `step-5-preview`) in the Rust fixture.
  * NOMIFUN_LIVE_STEPFUN_MODEL is a non-secret, explicitly selected model;
  * it never enables fallback or changes the official endpoint. The only
- * secret input is NOMIFUN_LIVE_STEPFUN_API_KEY from the environment.
+ * secret input is stdin with --credential-stdin, or the existing
+ * NOMIFUN_LIVE_STEPFUN_API_KEY environment input. Never use both.
  *
  * Usage:
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs
@@ -29,8 +30,14 @@
  * Uses step-5-preview to verify queue/steer, exact Stop, durable hold across a
  * complete Host restart, explicit resume and original-key replay fences.
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --subagent-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --subagent-smoke --credential-stdin --report two-subagent.json
+ * Feed the credential through the caller's private stdin pipe, close the pipe,
+ * and never put it in shell source, command arguments or a temporary file.
  * Uses step-5-preview for two concurrent Full children, same-Turn parent join,
  * file integration and a real native verification process in a disposable workspace.
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --subagent-eight-smoke --report eight-subagent.json
+ * Independently verifies eight Full children, unchanged default parallelism,
+ * exact result consumption and parent integration; it does not replace the two-child case.
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --input-handoff-smoke
  * The input handoff smoke defaults to step-5-preview. It requires an existing
  * dev component selected by NOMIFUN_OFFICECLI_PATH or an embedded OfficeCLI
@@ -62,6 +69,8 @@
  * close, and the isolated Provider credential remains encrypted in its store.
  * A cleaned and credential-audited failing run may also retain its fixture;
  * its failure status and exit code remain unchanged.
+ * --subagent-smoke and --subagent-eight-smoke support the same retention flag
+ * and isolated .git fixture parent for canonical failure diagnosis.
  *
  * Cargo always runs first with a credential-free environment and emits JSON
  * metadata. The runner resolves the freshly-built test executable from that
@@ -73,6 +82,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, realpathSync, statSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve, relative, isAbsolute, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { Readable } from 'node:stream';
 import { IDMM_DEMO_CASES, parseIdmmDemoCase, parseIdmmDemoEvidence } from './idmm-demo-evidence.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -100,6 +110,7 @@ const INPUT_HANDOFF_TEST_NAME = 'nomi_core_user_input_handoff_reaches_live_stepf
 const RESOURCE_WAIT_TEST_NAME = 'nomi_core_resource_wait_reaches_live_stepfun';
 const INPUT_QUEUE_TEST_NAME = 'nomi_core_input_queue_reaches_live_stepfun';
 const SUBAGENT_TEST_NAME = 'nomi_core_subagent_integration_reaches_live_stepfun';
+const SUBAGENT_EIGHT_TEST_NAME = 'nomi_core_eight_subagent_integration_reaches_live_stepfun';
 const INPUT_QUEUE_PHASES = ['mixed_turns_verified', 'stop_hold_verified', 'restart_hold_verified', 'resume_verified'];
 const INPUT_QUEUE_PROOF = 'NOMIFUN_INPUT_QUEUE_LIVE_OK model=step-5-preview queue_turns=2 exact_steer=true stop_hold=true host_restarts=1 resumed_turns=1 idempotency=true cancelled_replay_fenced=true';
 const COMPONENT_EVIDENCE = 'NOMIFUN_LIVE_COMPONENT_EVIDENCE ';
@@ -128,6 +139,8 @@ const FAILURE_SENTINEL =
   /^NOMIFUN_LIVE_SMOKE_FAILURE phase=([a-z0-9_.-]+) code=([A-Z0-9_]+) status=([0-9]{3})$/;
 const compileOnly = process.argv.includes('--compile-only');
 const selfTest = process.argv.includes('--self-test');
+const credentialStdin = process.argv.includes('--credential-stdin');
+const CREDENTIAL_INPUT_LIMIT_BYTES = 16 * 1024;
 const cronSmoke = process.argv.includes('--cron-smoke');
 const modelSmoke = process.argv.includes('--model-smoke');
 const fileSmoke = process.argv.includes('--file-smoke');
@@ -136,6 +149,7 @@ const inputHandoffSmoke = process.argv.includes('--input-handoff-smoke');
 const resourceWaitSmoke = process.argv.includes('--resource-wait-smoke');
 const inputQueueSmoke = process.argv.includes('--input-queue-smoke');
 const subagentSmoke = process.argv.includes('--subagent-smoke');
+const subagentEightSmoke = process.argv.includes('--subagent-eight-smoke');
 const reasoningSmoke = process.argv.includes('--reasoning-smoke');
 const reasoningNavigation = process.argv.includes('--reasoning-navigation');
 const codingSmoke = process.argv.includes('--coding-smoke');
@@ -153,13 +167,13 @@ const artifactIndex = process.argv.indexOf('--artifact-dir');
 const artifactDir = artifactIndex >= 0 && process.argv[artifactIndex + 1] ? resolve(process.argv[artifactIndex + 1]) : null;
 const reportIndex = process.argv.indexOf('--report');
 const reportPath = reportIndex >= 0 && process.argv[reportIndex + 1] ? resolve(process.argv[reportIndex + 1]) : null;
-const selectedSmokeTest = cronSmoke ? CRON_TEST_NAME : appWorkspaceUiFixture ? APP_WORKSPACE_UI_TEST_NAME : appHostingSmoke ? APP_HOSTING_TEST_NAME : reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : componentSmoke ? COMPONENT_TEST_NAME : inputQueueSmoke ? INPUT_QUEUE_TEST_NAME : subagentSmoke ? SUBAGENT_TEST_NAME : resourceWaitSmoke ? RESOURCE_WAIT_TEST_NAME : inputHandoffSmoke ? INPUT_HANDOFF_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
-const selectedSmokeMode = cronSmoke ? 'scheduled_tasks' : appWorkspaceUiFixture ? 'app_workspace_ui_host' : appHostingSmoke ? 'app_workspace_generation' : reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : componentSmoke ? 'managed_component' : inputQueueSmoke ? 'input_queue' : subagentSmoke ? 'subagent' : resourceWaitSmoke ? 'resource_wait' : inputHandoffSmoke ? 'user_input_handoff' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
+const selectedSmokeTest = cronSmoke ? CRON_TEST_NAME : appWorkspaceUiFixture ? APP_WORKSPACE_UI_TEST_NAME : appHostingSmoke ? APP_HOSTING_TEST_NAME : reasoningSmoke ? REASONING_TEST_NAME : idmmSmoke ? IDMM_TEST_NAME : beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : componentSmoke ? COMPONENT_TEST_NAME : inputQueueSmoke ? INPUT_QUEUE_TEST_NAME : subagentEightSmoke ? SUBAGENT_EIGHT_TEST_NAME : subagentSmoke ? SUBAGENT_TEST_NAME : resourceWaitSmoke ? RESOURCE_WAIT_TEST_NAME : inputHandoffSmoke ? INPUT_HANDOFF_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
+const selectedSmokeMode = cronSmoke ? 'scheduled_tasks' : appWorkspaceUiFixture ? 'app_workspace_ui_host' : appHostingSmoke ? 'app_workspace_generation' : reasoningSmoke ? 'reasoning_lifecycle' : idmmSmoke ? 'idmm' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : componentSmoke ? 'managed_component' : inputQueueSmoke ? 'input_queue' : subagentEightSmoke ? 'subagent_eight' : subagentSmoke ? 'subagent' : resourceWaitSmoke ? 'resource_wait' : inputHandoffSmoke ? 'user_input_handoff' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model';
 const retainNativeFixture = process.argv.includes('--retain-native-fixture');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
 
 function selectedSmokeModel(value) {
-  return value ?? (cronSmoke || componentSmoke || inputHandoffSmoke || resourceWaitSmoke || inputQueueSmoke || subagentSmoke ? 'step-5-preview' : DEFAULT_MODEL);
+  return value ?? (cronSmoke || componentSmoke || inputHandoffSmoke || resourceWaitSmoke || inputQueueSmoke || subagentSmoke || subagentEightSmoke ? 'step-5-preview' : DEFAULT_MODEL);
 }
 
 function cargoFailureCode(stderr) {
@@ -187,6 +201,36 @@ function environmentWithoutCredential(source) {
 function removeCredentialFromCurrentEnvironment() {
   for (const name of Object.keys(process.env)) {
     if (isCredentialEnvironmentName(name)) delete process.env[name];
+  }
+}
+
+function credentialInputBuffer(raw) {
+  try {
+    if (raw.length > CREDENTIAL_INPUT_LIMIT_BYTES) throw new Error('LIVE_CREDENTIAL_TOO_LARGE');
+    const value = raw.toString('utf8').trim();
+    if (!value) throw new Error('LIVE_CREDENTIAL_MISSING');
+    if (/[\r\n]/.test(value)) throw new Error('LIVE_CREDENTIAL_INVALID');
+    return Buffer.from(`${value}\n`, 'utf8');
+  } finally {
+    raw.fill(0);
+  }
+}
+
+async function credentialInputFromStream(stream, timeoutMs) {
+  const chunks = [];
+  let length = 0;
+  const timer = setTimeout(() => stream.destroy(new Error('LIVE_CREDENTIAL_STDIN_TIMEOUT')), timeoutMs);
+  try {
+    for await (const chunk of stream) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      chunks.push(bytes);
+      length += bytes.length;
+      if (length > CREDENTIAL_INPUT_LIMIT_BYTES) throw new Error('LIVE_CREDENTIAL_TOO_LARGE');
+    }
+    return credentialInputBuffer(Buffer.concat(chunks));
+  } finally {
+    clearTimeout(timer);
+    for (const bytes of chunks) bytes.fill(0);
   }
 }
 
@@ -427,7 +471,7 @@ function validateFixtureParent(value) {
   return parent;
 }
 
-function retainedFixtureFromOutput(output, parent) {
+function retainedFixtureFromOutput(output, parent, prefix = 'before-tool-native-') {
   const lines = output.split(/\r?\n/).filter((line) => line.startsWith(NATIVE_FIXTURE_MARKER));
   if (lines.length !== 1) throw new Error('missing or duplicate fixture evidence');
   const payload = JSON.parse(lines[0].slice(NATIVE_FIXTURE_MARKER.length));
@@ -438,7 +482,8 @@ function retainedFixtureFromOutput(output, parent) {
   const fixtureRoot = canonicalDirectory(payload.fixture_root);
   const dataRoot = canonicalDirectory(payload.data_root);
   const workRoot = canonicalDirectory(payload.work_root);
-  if (dirname(fixtureRoot) !== parent || !basename(fixtureRoot).startsWith('before-tool-native-') ||
+  if (!['before-tool-native-', 'subagent-native-'].includes(prefix) ||
+      dirname(fixtureRoot) !== parent || !basename(fixtureRoot).startsWith(prefix) ||
       !pathIsInside(parent, fixtureRoot) || !pathIsInside(fixtureRoot, dataRoot) || !pathIsInside(fixtureRoot, workRoot) ||
       dataRoot !== resolve(fixtureRoot, 'data') || workRoot !== resolve(fixtureRoot, 'work')) {
     throw new Error('fixture evidence is outside the exact isolated root');
@@ -467,10 +512,52 @@ function inputQueueEvidence(output) {
 
 function subagentEvidence(output) {
   const lines = output.split(/\r?\n/).filter(line => line.startsWith('NOMIFUN_SUBAGENT_LIVE_OK'));
-  const match = lines.length === 1 && lines[0].match(/^NOMIFUN_SUBAGENT_LIVE_OK model=step-5-preview full_children=2 overlap_ms=([1-9][0-9]{0,8}) parent_turns=1 native_write_sessions=3 final_projection=0 integrated=true verification_process=true$/);
-  if (!match) throw new Error('subagent integration evidence incomplete');
-  return {model:'step-5-preview',full_children:2,overlap_ms:Number(match[1]),parent_turns:1,
-    final_projection:0,integrated:true,verification_process:true};
+  const match = lines.length === 1 && lines[0].match(/^NOMIFUN_SUBAGENT_LIVE_OK model=step-5-preview build_digest=([a-f0-9]{64}) full_children=2 role_labeled_children=2 child_required_delegation_rejections=0 overlap_ms=([1-9][0-9]{0,8}) parent_turns=1 native_write_sessions=3 final_projection=0 integrated=true verification_process=true attempts=2 delegations=1 exact_results_consumed=2 wait_calls=([1-9][0-9]{0,5}) status_calls=([1-9][0-9]{0,5}) waits=([1-9][0-9]{0,5}) wakes=([1-9][0-9]{0,5}) parent_model_steps=([1-9][0-9]{0,5}) wait_model_calls=0$/);
+  if (!match || match[5] !== match[6]) throw new Error('subagent integration evidence incomplete');
+  return {model:'step-5-preview',full_children:2,overlap_ms:Number(match[2]),parent_turns:1,
+    build_digest:match[1],role_labeled_children:2,child_required_delegation_rejections:0,
+    final_projection:0,integrated:true,verification_process:true,attempts:2,delegations:1,exact_results_consumed:2,
+    wait_calls:Number(match[3]),status_calls:Number(match[4]),waits:Number(match[5]),wakes:Number(match[6]),
+    parent_model_steps:Number(match[7]),wait_model_calls:0};
+}
+
+function subagentEightEvidence(output) {
+  const prefix = 'NOMIFUN_SUBAGENT_EIGHT_LIVE_OK ';
+  const lines = output.split(/\r?\n/).filter(line => line.startsWith(prefix));
+  if (lines.length !== 1 || lines[0].length > 4096) throw new Error('eight-child integration evidence missing');
+  const proof = JSON.parse(lines[0].slice(prefix.length));
+  const expected = {schema_version:1,model:'step-5-preview',full_children:8,child_completed:8,attempts:8,
+    delegations:1,configured_max_parallel:4,native_peak:4,domain_peak:4,parent_turns:1,native_write_sessions:9,
+    final_projection:0,exact_results_consumed:8,parent_read_originals:8,parent_authored_child_files:0,
+    integrated:true,verification_process:true,verification_reaped:true,wait_model_calls:0};
+  const extraKeys = ['build_digest','four_way_overlap_ms','wait_calls','status_calls','waits','wakes','parent_model_steps'];
+  if (!proof || typeof proof !== 'object' || Array.isArray(proof) ||
+      Object.entries(expected).some(([key,value]) => proof[key] !== value) ||
+      !/^[a-f0-9]{64}$/.test(proof.build_digest) ||
+      ['four_way_overlap_ms','wait_calls','status_calls','waits','wakes','parent_model_steps'].some(key => !Number.isSafeInteger(proof[key]) || proof[key] < 1) ||
+      proof.waits !== proof.wakes || Object.keys(proof).length !== Object.keys(expected).length + extraKeys.length ||
+      Object.keys(proof).some(key => !(key in expected) && !extraKeys.includes(key))) {
+    throw new Error('eight-child integration evidence incomplete');
+  }
+  return proof;
+}
+
+function subagentDiagnostic(line) {
+  const final = line.match(/^NOMIFUN_SUBAGENT_FINAL_RESULT children=(2|8) text_present=(true|false) text_nonempty=(true|false) text_bytes=([0-9]{1,9}) marker_present=(true|false)$/);
+  if (final) {
+    const proof = {children:Number(final[1]),text_present:final[2]==='true',text_nonempty:final[3]==='true',
+      text_bytes:Number(final[4]),marker_present:final[5]==='true'};
+    if ((!proof.text_present && (proof.text_bytes!==0 || proof.text_nonempty || proof.marker_present)) ||
+        (proof.text_nonempty && proof.text_bytes===0) || (proof.marker_present && !proof.text_nonempty)) return null;
+    return {kind:'final_result',...proof};
+  }
+  try {
+    if (line.startsWith('NOMIFUN_SUBAGENT_FACTS ')) return {kind:'workload_facts',children:2,
+      proof:subagentEvidence(line.replace('NOMIFUN_SUBAGENT_FACTS ', 'NOMIFUN_SUBAGENT_LIVE_OK '))};
+    if (line.startsWith('NOMIFUN_SUBAGENT_EIGHT_FACTS ')) return {kind:'workload_facts',children:8,
+      proof:subagentEightEvidence(line.replace('NOMIFUN_SUBAGENT_EIGHT_FACTS ', 'NOMIFUN_SUBAGENT_EIGHT_LIVE_OK '))};
+  } catch { return null; }
+  return null;
 }
 
 function loopbackUrl(value, expectedPath = null) {
@@ -652,9 +739,9 @@ function managedComponentEvidence(stderr) {
 
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--cron-smoke', '--model-smoke', '--file-smoke', '--component-smoke', '--input-handoff-smoke', '--resource-wait-smoke', '--input-queue-smoke', '--subagent-smoke', '--reasoning-smoke', '--reasoning-navigation', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture', '--app-hosting-smoke', '--app-hosting-browser-hold', '--app-workspace-ui-fixture'];
+  const allowedFlags = ['--compile-only', '--self-test', '--credential-stdin', '--browser', '--browser-gui', '--cron-smoke', '--model-smoke', '--file-smoke', '--component-smoke', '--input-handoff-smoke', '--resource-wait-smoke', '--input-queue-smoke', '--subagent-smoke', '--subagent-eight-smoke', '--reasoning-smoke', '--reasoning-navigation', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--idmm-smoke', '--retain-native-fixture', '--app-hosting-smoke', '--app-hosting-browser-hold', '--app-workspace-ui-fixture'];
   if (userArgs.some((arg, index) => {
-    if (arg === '--report') return (!idmmSmoke && !appHostingSmoke && !componentSmoke && !inputQueueSmoke) || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
+    if (arg === '--report') return (!idmmSmoke && !appHostingSmoke && !componentSmoke && !inputQueueSmoke && !subagentSmoke && !subagentEightSmoke) || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--report') return false;
     if (arg === '--artifact-dir') return !appHostingSmoke || !userArgs[index + 1] || userArgs[index + 1].startsWith('--') || !isAbsolute(userArgs[index + 1]);
     if (index > 0 && userArgs[index - 1] === '--artifact-dir') return false;
@@ -668,12 +755,18 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, cronSmoke, modelSmoke, fileSmoke, componentSmoke, inputHandoffSmoke, resourceWaitSmoke, inputQueueSmoke, subagentSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke, appHostingSmoke, appWorkspaceUiFixture].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke) || (reasoningNavigation && !reasoningSmoke) || (appHostingBrowserHold && !appHostingSmoke)) {
+  if (([browser, browserGui, cronSmoke, modelSmoke, fileSmoke, componentSmoke, inputHandoffSmoke, resourceWaitSmoke, inputQueueSmoke, subagentSmoke, subagentEightSmoke, reasoningSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke, idmmSmoke, appHostingSmoke, appWorkspaceUiFixture].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke && !subagentSmoke && !subagentEightSmoke) || (reasoningNavigation && !reasoningSmoke) || (appHostingBrowserHold && !appHostingSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_MODE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
   }
   let fixtureParent = null;
+  if (!compileOnly && credentialStdin && Object.keys(process.env).some(isCredentialEnvironmentName)) {
+    removeCredentialFromCurrentEnvironment();
+    emitFailure('live_smoke_status=not_run', 'LIVE_CREDENTIAL_SOURCES_CONFLICT', 412);
+    process.exitCode = 2;
+    return;
+  }
   if (retainNativeFixture) {
     try { fixtureParent = validateFixtureParent(process.env[FIXTURE_PARENT_ENVIRONMENT_NAME]); }
     catch {
@@ -685,7 +778,7 @@ async function main() {
   const model = selectedSmokeModel(process.env[MODEL_ENVIRONMENT_NAME]);
   // The separate native-browser fixture still pins its own provider model.
   // Never label that existing acceptance path as a different selected model.
-  if (!ALLOWED_MODELS.has(model) || (browser && model !== DEFAULT_MODEL) || ((componentSmoke || cronSmoke || inputQueueSmoke || subagentSmoke) && model !== 'step-5-preview')) {
+  if (!ALLOWED_MODELS.has(model) || (browser && model !== DEFAULT_MODEL) || ((componentSmoke || cronSmoke || inputQueueSmoke || subagentSmoke || subagentEightSmoke) && model !== 'step-5-preview')) {
     emitFailure('live_smoke_status=not_run', 'LIVE_MODEL_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -733,7 +826,7 @@ async function main() {
       'nomifun-app',
       '--test',
       TEST_TARGET,
-      ...((resourceWaitSmoke || cronSmoke || inputQueueSmoke || subagentSmoke) ? ['--no-default-features'] : []),
+      ...((resourceWaitSmoke || cronSmoke || inputQueueSmoke || subagentSmoke || subagentEightSmoke) ? ['--no-default-features'] : []),
       ...(generalDesktopSmoke ? ['--features', 'browser-use,computer-use'] : []),
       '--no-run',
       '--message-format=json-render-diagnostics',
@@ -798,32 +891,27 @@ async function main() {
   }
   console.log('live_smoke_compile_status=pass code=OK status=200');
 
-  // Deliberately read the credential only after Cargo and every build script
-  // have exited. Remove it from this runner's environment before launching any
-  // further process, then send one newline-terminated value over stdin.
-  let credential = process.env[API_KEY_ENVIRONMENT_NAME];
-  if (typeof credential !== 'string' || credential.trim().length === 0) {
-    emitFailure(
-      'live_smoke_status=not_run',
-      'LIVE_CREDENTIAL_MISSING',
-      412,
-    );
+  // Read only after Cargo/build scripts exit. The runner's stdin is a
+  // separate private pipe; it is never inherited by those child processes.
+  let credentialInput;
+  try {
+    if (credentialStdin) {
+      if (process.stdin.isTTY) throw new Error('LIVE_CREDENTIAL_MISSING');
+      credentialInput = await credentialInputFromStream(process.stdin, Math.max(1, globalDeadline - Date.now()));
+    } else {
+      let credential = process.env[API_KEY_ENVIRONMENT_NAME] ?? '';
+      removeCredentialFromCurrentEnvironment();
+      try { credentialInput = credentialInputBuffer(Buffer.from(credential, 'utf8')); }
+      finally { credential = ''; }
+    }
+  } catch (error) {
+    removeCredentialFromCurrentEnvironment();
+    const allowed = ['LIVE_CREDENTIAL_TOO_LARGE', 'LIVE_CREDENTIAL_MISSING', 'LIVE_CREDENTIAL_INVALID', 'LIVE_CREDENTIAL_STDIN_TIMEOUT'];
+    const code = allowed.includes(error?.message) ? error.message : 'LIVE_CREDENTIAL_STDIN_READ_FAILED';
+    emitFailure('live_smoke_status=not_run', code, 412);
     process.exitCode = 2;
     return;
   }
-  credential = credential.trim();
-  if (/[\r\n]/.test(credential)) {
-    emitFailure(
-      'live_smoke_status=not_run',
-      'LIVE_CREDENTIAL_INVALID',
-      412,
-    );
-    process.exitCode = 2;
-    return;
-  }
-  removeCredentialFromCurrentEnvironment();
-  const credentialInput = Buffer.from(`${credential}\n`, 'utf8');
-  credential = '';
 
   let test;
   let navigationRun = null;
@@ -962,6 +1050,8 @@ async function main() {
     if (turnFailure) console.log(`live_smoke_turn_failure=${turnFailure[0].slice('NOMIFUN_LIVE_SMOKE_TURN_FAILURE '.length)}`);
     const runtimeProgress = line.match(/^NOMIFUN_LIVE_SMOKE_RUNTIME_PROGRESS steps=([0-9]{1,5}) compact_calls=([0-9]{1,5}) compacted=([0-9]{1,5}) degraded=([0-9]{1,5}) reads=([0-9]{1,5}) execs=([0-9]{1,5}) writes=([0-9]{1,5}) reports=([0-9]{1,5})$/);
     if (runtimeProgress) console.log(`live_smoke_runtime_progress=${runtimeProgress[0].slice('NOMIFUN_LIVE_SMOKE_RUNTIME_PROGRESS '.length)}`);
+    const subagentFacts = subagentDiagnostic(line);
+    if (subagentFacts) console.log(`live_smoke_subagent_diagnostic=${JSON.stringify(subagentFacts)}`);
 
     const controlErrors = line.match(/^NOMIFUN_LIVE_SMOKE_CONTROL_ERRORS sequence=([A-Z_:,]{1,450})$/);
     if (controlErrors) console.log(`live_smoke_control_errors=${controlErrors[1]}`);
@@ -1010,9 +1100,29 @@ async function main() {
       }
     }
     if (subagentSmoke) {
-      try { console.log('live_smoke_subagent_evidence=' + JSON.stringify(subagentEvidence(test.stderr))); }
+      try {
+        const evidence = subagentEvidence(test.stderr);
+        console.log('live_smoke_subagent_evidence=' + JSON.stringify(evidence));
+        if (reportPath) {
+          writeFileSync(reportPath, JSON.stringify({...evidence,status:'pass',completed_at:new Date().toISOString()},null,2)+'\n',{mode:0o600});
+          console.log('live_smoke_subagent_report=' + JSON.stringify(reportPath));
+        }
+      }
       catch {
         emitFailure('live_smoke_status=fail', 'SUBAGENT_EVIDENCE_INVALID', 503);
+        process.exitCode = 2; return;
+      }
+    }
+    if (subagentEightSmoke) {
+      try {
+        const evidence = subagentEightEvidence(test.stderr);
+        console.log('live_smoke_subagent_eight_evidence=' + JSON.stringify(evidence));
+        if (reportPath) {
+          writeFileSync(reportPath, JSON.stringify({...evidence,status:'pass',completed_at:new Date().toISOString()},null,2)+'\n',{mode:0o600});
+          console.log('live_smoke_subagent_eight_report=' + JSON.stringify(reportPath));
+        }
+      } catch {
+        emitFailure('live_smoke_status=fail', 'SUBAGENT_EIGHT_EVIDENCE_OR_REPORT_INVALID', 503);
         process.exitCode = 2; return;
       }
     }
@@ -1074,7 +1184,7 @@ async function main() {
     }
     if (retainNativeFixture) {
       try {
-        const paths = retainedFixtureFromOutput(test.stderr, validateFixtureParent(fixtureParent));
+        const paths = retainedFixtureFromOutput(test.stderr, validateFixtureParent(fixtureParent), subagentSmoke || subagentEightSmoke ? 'subagent-native-' : 'before-tool-native-');
         // Paths only: the retained disposable Provider credential remains
         // encrypted by the ordinary store for this native acceptance session.
         console.log(`live_smoke_native_fixture=${JSON.stringify(paths)}`);
@@ -1140,7 +1250,7 @@ async function main() {
   }
   if (retainNativeFixture && test.stderr.split(/\r?\n/).some((line) => line.startsWith(NATIVE_FIXTURE_MARKER))) {
     try {
-      const paths = retainedFixtureFromOutput(test.stderr, validateFixtureParent(fixtureParent));
+      const paths = retainedFixtureFromOutput(test.stderr, validateFixtureParent(fixtureParent), subagentSmoke || subagentEightSmoke ? 'subagent-native-' : 'before-tool-native-');
       console.log(`live_smoke_native_fixture=${JSON.stringify(paths)}`);
     } catch {
       emitFailure('live_smoke_status=fail', 'NATIVE_FIXTURE_EVIDENCE_INVALID', 503);
@@ -1169,7 +1279,19 @@ function navigationFixtureReady(line) {
     ? { port: ready[1], session: ready[2] } : null;
 }
 
-function runSelfTest() {
+async function runSelfTest() {
+  const chunks = [Buffer.from('fixture-only-'), Buffer.from('credential\n')];
+  const input = await credentialInputFromStream(Readable.from(chunks), 1000);
+  if (input.toString('utf8') !== 'fixture-only-credential\n' || chunks.some(chunk => chunk.some(byte => byte !== 0))) {
+    throw new Error('stdin credential transport or input buffer cleanup failed');
+  }
+  input.fill(0);
+  for (const [value, expected] of [['', 'LIVE_CREDENTIAL_MISSING'], ['one\ntwo', 'LIVE_CREDENTIAL_INVALID'], ['x'.repeat(CREDENTIAL_INPUT_LIMIT_BYTES + 1), 'LIVE_CREDENTIAL_TOO_LARGE']]) {
+    let code;
+    try { (await credentialInputFromStream(Readable.from([Buffer.from(value)]), 1000)).fill(0); }
+    catch (error) { code = error?.message; }
+    if (code !== expected) throw new Error('stdin credential bound/format validation failed');
+  }
   const component = {schema_version:1,provider:'stepfun-plan',model:'step-5-preview',component:'officecli',
     action_id:'workspace.process/start',source:'managed',version:'1.0.156',digest:'a'.repeat(64),
     canonical_component_argument:true,exit_code:0,cleanup_reaped:true,completed_turns:2,
@@ -1248,6 +1370,14 @@ function runSelfTest() {
     mkdirSync(resolve(root, 'data')); mkdirSync(resolve(root, 'work'));
     const marker = NATIVE_FIXTURE_MARKER + JSON.stringify({fixture_root: root, data_root: resolve(root, 'data'), work_root: resolve(root, 'work')});
     if (retainedFixtureFromOutput(marker, parent).fixture_root !== root) throw new Error('fixture proof self-test failed');
+    const subagentRoot = mkdtempSync(resolve(parent, 'subagent-native-'));
+    mkdirSync(resolve(subagentRoot, 'data')); mkdirSync(resolve(subagentRoot, 'work'));
+    const subagentMarker = NATIVE_FIXTURE_MARKER + JSON.stringify({fixture_root:subagentRoot,
+      data_root:resolve(subagentRoot,'data'),work_root:resolve(subagentRoot,'work')});
+    if (retainedFixtureFromOutput(subagentMarker,parent,'subagent-native-').fixture_root!==subagentRoot) throw new Error('subagent fixture proof self-test failed');
+    let wrongModeRejected=false;
+    try {retainedFixtureFromOutput(subagentMarker,parent,'before-tool-native-');} catch {wrongModeRejected=true;}
+    if (!wrongModeRejected) throw new Error('retained fixture mode identity was not checked');
     for (const invalid of [marker + '\n' + marker, NATIVE_FIXTURE_MARKER + JSON.stringify({fixture_root: root, data_root: parent, work_root: resolve(root, 'work')}),
         NATIVE_FIXTURE_MARKER + JSON.stringify({fixture_root: '', data_root: resolve(root, 'data'), work_root: resolve(root, 'work')})]) {
       let rejected = false;
@@ -1296,14 +1426,46 @@ function runSelfTest() {
     let rejected = false; try { inputQueueEvidence(invalid); } catch { rejected = true; }
     if (!rejected) throw new Error('incomplete input queue proof accepted');
   }
-  const subagentProof = 'NOMIFUN_SUBAGENT_LIVE_OK model=step-5-preview full_children=2 overlap_ms=1245 parent_turns=1 native_write_sessions=3 final_projection=0 integrated=true verification_process=true';
-  if (subagentEvidence(subagentProof).overlap_ms !== 1245) throw new Error('subagent evidence self-test failed');
+  const subagentProof = `NOMIFUN_SUBAGENT_LIVE_OK model=step-5-preview build_digest=${'a'.repeat(64)} full_children=2 role_labeled_children=2 child_required_delegation_rejections=0 overlap_ms=1245 parent_turns=1 native_write_sessions=3 final_projection=0 integrated=true verification_process=true attempts=2 delegations=1 exact_results_consumed=2 wait_calls=1 status_calls=2 waits=1 wakes=1 parent_model_steps=10 wait_model_calls=0`;
+  const subagentParsed = subagentEvidence(subagentProof);
+  const twoFacts = subagentProof.replace('NOMIFUN_SUBAGENT_LIVE_OK ', 'NOMIFUN_SUBAGENT_FACTS ');
+  if (subagentDiagnostic(twoFacts)?.proof?.attempts!==2) throw new Error('two-child diagnostic proof missing');
+  let diagnosticAccepted=false;
+  try {subagentEvidence(twoFacts);diagnosticAccepted=true;} catch {}
+  if (diagnosticAccepted) throw new Error('workload diagnostics cannot substitute final acceptance');
+  const emptyFinal='NOMIFUN_SUBAGENT_FINAL_RESULT children=8 text_present=false text_nonempty=false text_bytes=0 marker_present=false';
+  const unmarkedFinal='NOMIFUN_SUBAGENT_FINAL_RESULT children=8 text_present=true text_nonempty=true text_bytes=250 marker_present=false';
+  if (subagentDiagnostic(emptyFinal)?.text_nonempty!==false || subagentDiagnostic(unmarkedFinal)?.text_nonempty!==true
+      || subagentDiagnostic(unmarkedFinal+' secret=DO_NOT_EMIT')!==null) throw new Error('final diagnostics must distinguish empty from unmarked and redact arbitrary data');
+  if (subagentParsed.overlap_ms !== 1245 || subagentParsed.build_digest !== 'a'.repeat(64)
+      || subagentParsed.role_labeled_children !== 2 || subagentParsed.child_required_delegation_rejections !== 0) throw new Error('subagent evidence self-test failed');
   for (const invalid of ['', subagentProof + '\n' + subagentProof, subagentProof.replace('overlap_ms=1245', 'overlap_ms=0'),
-      subagentProof.replace('parent_turns=1', 'parent_turns=2'), subagentProof.replace('integrated=true', 'integrated=false')]) {
+      subagentProof.replace('parent_turns=1', 'parent_turns=2'), subagentProof.replace('integrated=true', 'integrated=false'),
+      subagentProof.replace('role_labeled_children=2', 'role_labeled_children=1'),
+      subagentProof.replace('child_required_delegation_rejections=0', 'child_required_delegation_rejections=1')]) {
     let rejected = false; try { subagentEvidence(invalid); } catch { rejected = true; }
     if (!rejected) throw new Error('incomplete subagent proof accepted');
   }
-  if (selectedSmokeModel(undefined) !== (cronSmoke || componentSmoke || inputHandoffSmoke || resourceWaitSmoke || inputQueueSmoke || subagentSmoke ? 'step-5-preview' : DEFAULT_MODEL)
+  const eightProof = {schema_version:1,model:'step-5-preview',build_digest:'a'.repeat(64),full_children:8,
+    child_completed:8,attempts:8,delegations:1,configured_max_parallel:4,native_peak:4,domain_peak:4,
+    four_way_overlap_ms:1200,parent_turns:1,native_write_sessions:9,final_projection:0,exact_results_consumed:8,
+    wait_calls:1,status_calls:1,parent_read_originals:8,parent_authored_child_files:0,integrated:true,
+    verification_process:true,verification_reaped:true,waits:1,wakes:1,parent_model_steps:12,wait_model_calls:0};
+  const eightLine = value => 'NOMIFUN_SUBAGENT_EIGHT_LIVE_OK ' + JSON.stringify(value);
+  if (subagentEightEvidence(eightLine(eightProof)).native_peak !== 4) throw new Error('eight-child evidence self-test failed');
+  const eightFacts=eightLine(eightProof).replace('NOMIFUN_SUBAGENT_EIGHT_LIVE_OK ','NOMIFUN_SUBAGENT_EIGHT_FACTS ');
+  if (subagentDiagnostic(eightFacts)?.proof?.exact_results_consumed!==8) throw new Error('eight-child diagnostic proof missing');
+  let eightDiagnosticAccepted=false;
+  try {subagentEightEvidence(eightFacts);eightDiagnosticAccepted=true;} catch {}
+  if (eightDiagnosticAccepted) throw new Error('eight-child diagnostics cannot substitute final acceptance');
+  for (const invalid of ['', eightLine(eightProof)+'\n'+eightLine(eightProof),
+      ...[{child_completed:7},{attempts:9},{delegations:2},{native_peak:3},{four_way_overlap_ms:0},
+        {configured_max_parallel:8},{exact_results_consumed:7},{parent_turns:2},{parent_authored_child_files:1},
+        {verification_reaped:false},{build_digest:'invalid'},{unreviewed_extra:true}].map(change => eightLine({...eightProof,...change}))]) {
+    let rejected = false; try { subagentEightEvidence(invalid); } catch { rejected = true; }
+    if (!rejected) throw new Error('incomplete eight-child proof accepted');
+  }
+  if (selectedSmokeModel(undefined) !== (cronSmoke || componentSmoke || inputHandoffSmoke || resourceWaitSmoke || inputQueueSmoke || subagentSmoke || subagentEightSmoke ? 'step-5-preview' : DEFAULT_MODEL)
       || selectedSmokeModel(DEFAULT_MODEL) !== DEFAULT_MODEL || selectedSmokeModel('step-5-preview') !== 'step-5-preview'
       || inputHandoffSmoke && (selectedSmokeTest !== INPUT_HANDOFF_TEST_NAME || selectedSmokeMode !== 'user_input_handoff'
         || !selectedTestPassed(`test ${INPUT_HANDOFF_TEST_NAME} ... ok\n`, selectedSmokeTest))
@@ -1312,7 +1474,9 @@ function runSelfTest() {
       || inputQueueSmoke && (selectedSmokeTest !== INPUT_QUEUE_TEST_NAME || selectedSmokeMode !== 'input_queue'
         || !selectedTestPassed(`test ${INPUT_QUEUE_TEST_NAME} ... ok\n`, selectedSmokeTest))
       || subagentSmoke && (selectedSmokeTest !== SUBAGENT_TEST_NAME || selectedSmokeMode !== 'subagent'
-        || !selectedTestPassed(`test ${SUBAGENT_TEST_NAME} ... ok\n`, selectedSmokeTest))) {
+        || !selectedTestPassed(`test ${SUBAGENT_TEST_NAME} ... ok\n`, selectedSmokeTest))
+      || subagentEightSmoke && (selectedSmokeTest !== SUBAGENT_EIGHT_TEST_NAME || selectedSmokeMode !== 'subagent_eight'
+        || !selectedTestPassed(`test ${SUBAGENT_EIGHT_TEST_NAME} ... ok\n`, selectedSmokeTest))) {
     throw new Error('input handoff selection and model default self-test failed');
   }
   const scrubbed = environmentWithoutCredential({
@@ -1351,5 +1515,5 @@ function runSelfTest() {
   console.log('live_smoke_runner_self_test_status=pass code=OK status=200');
 }
 
-if (selfTest) runSelfTest();
+if (selfTest) await runSelfTest();
 else await main();

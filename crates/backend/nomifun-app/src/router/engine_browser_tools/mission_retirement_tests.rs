@@ -152,7 +152,7 @@ impl Mission {
                     effective_config: "{}".into(), retry_after: None, runtime_state: None }, &event(AgentExecutionEventKind::AttemptChanged, json!({}))).await.unwrap();
             let attempt = queued.current_attempt.unwrap().attempt;
             repository.start_attempt(&owner_id, &created.execution_id, &step, queued.step.version, &attempt.attempt_id, attempt.version,
-                session.as_ref(), kind, None, &event(AgentExecutionEventKind::AttemptChanged, json!({}))).await.unwrap();
+                session.as_ref(), kind, None, None, &event(AgentExecutionEventKind::AttemptChanged, json!({}))).await.unwrap();
             (Some(created.execution_id), step, attempt.attempt_id)
         } else { (None, String::new(), String::new()) };
         let turn_key = if execution.is_some() { format!("{attempt}:initial-turn") } else { "ordinary-user-turn".into() };
@@ -243,7 +243,7 @@ impl Mission {
                 effective_config: "{}".into(), retry_after: None, runtime_state: None }, &event(AgentExecutionEventKind::AttemptChanged, json!({}))).await.unwrap();
         let attempt = queued.current_attempt.unwrap().attempt;
         self.repository.start_attempt(owner, execution, &child_step, queued.step.version, &attempt.attempt_id, attempt.version, child.as_ref(),
-            AgentExecutionAttemptSessionKind::ChildAttempt, None, &event(AgentExecutionEventKind::AttemptChanged, json!({}))).await.unwrap();
+            AgentExecutionAttemptSessionKind::ChildAttempt, None, None, &event(AgentExecutionEventKind::AttemptChanged, json!({}))).await.unwrap();
         let turn = self.sessions.start_turn(&self.principal, &child, &format!("{}:initial-turn", attempt.attempt_id), json!({"content":"child work"})).await.unwrap();
         let started = self.owner.effect_store.read_turn_receipt(&child, &turn.operation_id).await.unwrap().started_event.unwrap().event_id;
         let mut admission = super::tests::render_admission(owner, child.as_ref());
@@ -394,7 +394,7 @@ impl Mission {
             resolved_snapshot_ref: self.admission.snapshot.clone(), typed_resource_bindings: vec![self.admission.binding.clone()], binding_version: 1,
         }, None, vec![], "explicit successor", 1).await.unwrap().session.agent_session_id;
         self.repository.start_attempt(owner, execution, &self.step, queued.step.version, &attempt.attempt_id, attempt.version,
-            session.as_ref(), AgentExecutionAttemptSessionKind::ChildAttempt, None, &event(AgentExecutionEventKind::AttemptChanged, json!({}))).await.unwrap();
+            session.as_ref(), AgentExecutionAttemptSessionKind::ChildAttempt, None, None, &event(AgentExecutionEventKind::AttemptChanged, json!({}))).await.unwrap();
         let turn = self.sessions.start_turn(&self.principal, &session, &key, json!({"content":"explicit successor attempt"})).await.unwrap();
         let started = self.owner.effect_store.read_turn_receipt(&session, &turn.operation_id).await.unwrap().started_event.unwrap().event_id;
         RetryTurn { attempt: attempt.attempt_id, key, turn: Some((session, turn.operation_id, started)) }

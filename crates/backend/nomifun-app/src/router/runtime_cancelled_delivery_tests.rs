@@ -125,7 +125,7 @@ async fn a_new_queued_cancel_does_not_hide_an_earlier_failed_attempt_workspace_c
     assert!(output.workspace_changed,"the latest zero-start cancellation cannot erase an earlier exact writer");
     assert_eq!(output.terminal_event_id.as_deref(),Some(original.native.as_ref().unwrap().1.as_str()));
     assert!(repository.start_attempt(principal,&execution,&step,queued.step.version,&queued_attempt.attempt_id,queued_attempt.version,
-        session.as_ref(),AgentExecutionAttemptSessionKind::ChildAttempt,None,
+        session.as_ref(),AgentExecutionAttemptSessionKind::ChildAttempt,None, None,
         &NewAgentExecutionEvent {event_type:AgentExecutionEventKind::AttemptChanged,step_id:Some(step.clone()),attempt_id:Some(queued_attempt.attempt_id.clone()),
             actor:AgentExecutionActor::system(),payload:"{}".into()}).await.is_err(),"the durable Stop blocks a late queued startup");
     fixture.finish().await;

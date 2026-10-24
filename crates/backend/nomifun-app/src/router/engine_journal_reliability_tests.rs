@@ -1,5 +1,7 @@
 use super::*;
 use nomifun_agent_runtime::{AgentExecutionCheckpoint, AgentExecutionSegmentState, AgentSegmentPolicy, EngineBinding};
+#[path = "engine_journal_settlement_tests.rs"]
+mod settlement_tests;
 
 fn checkpoint(journal:&EngineTurnJournal, renewed:bool) -> AgentExecutionCheckpoint {
     AgentExecutionCheckpoint { version:1,
@@ -15,6 +17,52 @@ fn checkpoint(journal:&EngineTurnJournal, renewed:bool) -> AgentExecutionCheckpo
 
 fn owner(journal:&EngineTurnJournal) -> nomifun_agent_contracts::PrincipalRef {
     nomifun_agent_contracts::PrincipalRef { principal_kind:"user".into(),principal_id:journal.0.user.clone() }
+}
+
+#[tokio::test]
+async fn production_journal_pure_child_wait_tail_reclaims_the_same_turn_without_replaying_any_input_or_tool() {
+    use nomifun_agent_runtime::{AgentChildrenWait,AgentChildrenWaitMode,AgentCollaborationObservation,AgentCollaborationSnapshot,AgentToolResult,AgentTurnRecovery};
+    use nomifun_chat_model_broker::ChatToolCall;
+    let (journal,pool)=test_fixture().await;
+    let mut checkpoint=checkpoint(&journal,false);checkpoint.segments=None;checkpoint.model_steps=1;checkpoint.tool_call_count=1;
+    let wait=AgentChildrenWait {execution_ids:vec!["original-delegation".into()],after_cursor:None,mode:AgentChildrenWaitMode::All};
+    let cursor=AgentCollaborationSnapshot::observation_cursor(std::collections::BTreeMap::from([("original-delegation".into(),
+        AgentCollaborationObservation {state:"4".repeat(64),ready:"5".repeat(64)})])).unwrap();
+    let prefix=vec![AgentEngineEvent::TurnStarted {binding:checkpoint.binding.clone(),turn_operation_id:journal.0.operation.clone()},
+        AgentEngineEvent::ModelStepStarted {step:1,operation_id:"original:model:1".into(),correction_source:None},
+        AgentEngineEvent::ToolCallCompleted {step:1,call:ChatToolCall {call_id:"original-wait".into(),name:"agent_wait".into(),
+            arguments:StrictJsonValue(serde_json::to_value(&wait).unwrap()),provider_metadata:None}},
+        AgentEngineEvent::ToolCompleted {step:1,runtime_hold:None,result:AgentToolResult::text("original-wait".into(),
+            json!({"state":"awaiting_children","cursor":cursor}).to_string(),false)}];
+    for event in &prefix {journal.append(serde_json::to_string(event).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();}
+    checkpoint.collaboration.pending_child_executions.insert("original-delegation".into());checkpoint.awaiting_children=Some(wait.clone());
+    let saved=journal.save_execution_checkpoint(checkpoint.clone(),owner(&journal)).await.unwrap().unwrap();
+    let wait_event=AgentEngineEvent::AwaitingChildren {model_steps:1,request:wait};
+    journal.append(serde_json::to_string(&wait_event).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
+    let original_root=journal.0.root.clone();let original_operation=journal.0.operation.clone();
+    let store=journal.0.store.clone();
+    sqlx::query("UPDATE agent_turns SET execution_lease_until=0 WHERE session_id=? AND operation_id=?")
+        .bind(journal.0.session.as_ref()).bind(journal.0.operation.as_ref()).execute(&pool).await.unwrap();
+    let lease=store.claim_native_execution(nomifun_agent_session::NativeExecutionClaim {owner:owner(&journal),
+        agent_session_id:journal.0.session.clone(),operation_id:original_operation.clone(),snapshot:journal.0.snapshot.clone(),
+        active_set_generation:0,holder:"same-original-wait-recovery".into(),expected_fence:journal.0.lease.fence(),
+        checkpoint:Some((saved.revision,saved.digest.clone(),saved.through_seq))}).await.unwrap();
+    let facts=store.native_recovery_facts(&journal.0.session,&original_operation).await.unwrap();
+    let mut before=Vec::new();let mut after=Vec::new();
+    for event in facts.events.iter().filter(|event|event.kind.0=="runtime/progress-recorded"&&event.correlation_id.as_ref()==original_operation.as_ref()) {
+        let typed=serde_json::from_value::<AgentEngineEvent>(facts.event_payloads[event.event_id.as_ref()]["event"].clone()).unwrap();
+        if event.seq<=saved.through_seq {before.push(typed);}else {after.push(typed);}
+    }
+    assert_eq!(after,vec![wait_event]);
+    let recovery=AgentTurnRecovery::new(checkpoint.clone(),saved.revision,lease.fence(),before,after,vec![]).unwrap();
+    assert_eq!(recovery.checkpoint(),&checkpoint);assert_eq!(recovery.last_model_step(),1);
+    assert_eq!(facts.head.active_turn_id.as_deref(),Some(original_operation.as_ref()));
+    assert!(facts.events.iter().any(|event|event.event_id==original_root&&event.kind.0=="message/user-accepted"));
+    let counts:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT COUNT(*) FROM agent_turns WHERE session_id=?),\
+        (SELECT COUNT(*) FROM agent_effects WHERE session_id=?),(SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='message/user-accepted')")
+        .bind(journal.0.session.as_ref()).bind(journal.0.session.as_ref()).bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    assert_eq!(counts,(1,0,1));
+    assert!(journal.append(json!({"event":"model_step_started","step":2,"operation_id":"late-old-owner"}).to_string(),None,EngineJournalWrite::Progress).await.is_err());
 }
 
 #[tokio::test]

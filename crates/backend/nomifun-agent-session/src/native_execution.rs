@@ -26,6 +26,7 @@ impl NativeExecutionLease {
     pub fn operation_id(&self) -> &OperationId { &self.operation_id }
     pub fn fence(&self) -> u64 { self.fence }
     pub fn generation(&self) -> u64 { self.generation }
+    pub(super) fn holder(&self) -> &str { &self.holder }
 }
 
 #[derive(Clone, Debug)]
@@ -87,7 +88,7 @@ impl AgentSessionStore {
         if claim.holder.is_empty() || claim.holder.len() > 128 || claim.holder.trim() != claim.holder {
             return Err(SessionStoreError::InvalidSession("invalid native execution holder".into()));
         }
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let session = live_session_by_id_tx(&mut tx, claim.agent_session_id.as_ref()).await?;
         let head = head_by_id_tx(&mut tx, claim.agent_session_id.as_ref()).await?;
         if session.owner_ref != claim.owner || session.agent_binding.resolved_snapshot_ref != claim.snapshot
@@ -123,7 +124,7 @@ impl AgentSessionStore {
             }
             let state: Value = serde_json::from_str(row.7.as_deref().ok_or_else(|| SessionStoreError::Conflict("checkpoint body missing".into()))?)?;
             if digest_bytes(&canonical_json_bytes(&state)?) != *digest { return Err(SessionStoreError::InvalidPayload("recovery checkpoint digest mismatch".into())); }
-            verify_recovery_tail_tx(&mut tx, &claim.agent_session_id, &claim.operation_id, *through_seq).await?;
+            verify_recovery_tail_tx(&mut tx, &claim.agent_session_id, &claim.operation_id, *through_seq,&state).await?;
             current_fence.checked_add(1).ok_or_else(|| SessionStoreError::Conflict("execution fence exhausted".into()))?
         } else if recover_empty {
             if row.1.is_some() && row.2 > now { return Err(SessionStoreError::ExecutionLeaseActive); }
@@ -159,22 +160,22 @@ impl AgentSessionStore {
             .bind(as_i64(generation, "execution generation")?)
             .bind(claim.agent_session_id.as_ref()).bind(claim.operation_id.as_ref()).bind(row.0).execute(&mut *tx).await?;
         if updated.rows_affected() != 1 { return Err(SessionStoreError::ExecutionFenced); }
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(NativeExecutionLease { session_id: claim.agent_session_id, operation_id: claim.operation_id, holder: claim.holder, fence, generation })
     }
 
     pub async fn renew_native_execution(&self, lease: &NativeExecutionLease) -> Result<(), SessionStoreError> {
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         check_native_lease_tx(&mut tx, lease, true).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(())
     }
 
     pub async fn heartbeat_native_execution(&self, lease: &NativeExecutionLease) -> Result<bool, SessionStoreError> {
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if check_native_identity_tx(&mut tx, lease).await? != "running" { return Ok(false); }
         check_native_lease_tx(&mut tx, lease, true).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         return Ok(true);
     }
 
@@ -191,7 +192,7 @@ impl AgentSessionStore {
             || !matches!(append.semantic_event.kind.0.as_str(), "runtime/progress-recorded" | "tool/call-started" | "turn/cancelled") {
             return Err(SessionStoreError::ExecutionFenced);
         }
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         check_native_lease_tx(&mut tx, lease, true).await?;
         if append.semantic_event.kind.0 == "runtime/progress-recorded" {
             let value = match &append.semantic_event.payload {
@@ -212,7 +213,7 @@ impl AgentSessionStore {
             }
         }
         let result = self.append_event_tx(&mut tx, append, payload).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
@@ -230,7 +231,7 @@ impl AgentSessionStore {
             ||payload.0.get("operation_id").and_then(Value::as_str)!=Some(lease.operation_id.as_ref()) {
             return Err(SessionStoreError::ExecutionFenced);
         }
-        let mut tx=self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx,lease.session_id.as_ref()).await?;
         let state=check_native_identity_tx(&mut tx,lease).await?;
         let (started_id,generation,terminal_id):(String,i64,Option<String>)=sqlx::query_as(
@@ -273,7 +274,7 @@ impl AgentSessionStore {
             }
             // Validate the existing terminal's original Payload before ACK.
             if !payload_value_for_event_tx(&mut tx,&terminal).await?.is_object() {return Err(SessionStoreError::ExecutionFenced);}
-            let ack=event_ack(&terminal);tx.commit().await?;
+            let ack=event_ack(&terminal);db_write_observation.commit(tx).await?;
             return Ok(SessionEventAppendResult {cursor:ack.cursor.clone(),record:Some(terminal),ack:Some(ack),persisted:true,duplicate:true});
         }
         if state!="running"||terminal_id.is_some()||duplicate.is_some()
@@ -281,7 +282,7 @@ impl AgentSessionStore {
             return Err(SessionStoreError::ExecutionFenced);
         }
         let result=self.append_event_tx(&mut tx,append,None).await?;
-        tx.commit().await?;Ok(result)
+        db_write_observation.commit(tx).await?;Ok(result)
     }
 
     /// Close an already-admitted observation after cancellation. This cannot
@@ -329,14 +330,14 @@ impl AgentSessionStore {
                 | "runtime_modules_activated" | "completion_review" | "end_intent_review" | "execution_budget_prepared" | "tool_results_ordered" | "usage"
             )) { return Err(SessionStoreError::ExecutionFenced); }
         }
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let state = check_native_identity_tx(&mut tx, lease).await?;
         if append.semantic_event.kind.0 == nomifun_agent_contracts::TURN_WORKSPACE_FILES_OBSERVED
             && !matches!(state.as_str(), "running" | "paused") {
             return Err(SessionStoreError::ExecutionFenced);
         }
         let result = self.append_event_tx(&mut tx, append, payload).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 }
@@ -381,17 +382,68 @@ pub(super) async fn check_native_lease_tx(tx: &mut Transaction<'_, Sqlite>, leas
     Ok(())
 }
 
-async fn verify_recovery_tail_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId, operation: &OperationId, through_seq: u64) -> Result<(), SessionStoreError> {
+async fn verify_recovery_tail_tx(tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId, operation: &OperationId,
+    through_seq: u64,checkpoint:&Value) -> Result<(), SessionStoreError> {
     let unsettled: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_effects WHERE session_id = ? AND state IN ('pending','unknown')")
         .bind(session.as_ref()).fetch_one(&mut **tx).await?;
     if unsettled != 0 { return Err(SessionStoreError::RecoveryRequiresReconciliation); }
     let rows = event_rows_for_session_tx(tx, session.as_ref()).await?;
+    let waiting=checkpoint.get("awaiting_children").filter(|request|!request.is_null());
+    let mut producer_sequence=None;
+    let mut wait_cause=None;
+    if let Some(request)=waiting {
+        // Runtime validates the complete typed checkpoint/tail before and
+        // after claim. The original writer independently pins the exact
+        // encoded request and counter to its acknowledged checkpoint, rather
+        // than granting authority from an event-name whitelist.
+        if !request.is_object()||checkpoint.get("model_steps").and_then(Value::as_u64).is_none_or(|step|step>u16::MAX as u64) {
+            return Err(SessionStoreError::RecoveryRequiresReconciliation);
+        }
+        let checkpoint_seq=as_i64(through_seq,"checkpoint sequence")?;
+        let checkpoint_digest=digest_bytes(&canonical_json_bytes(checkpoint)?);
+        let metadata=rows.iter().find(|row|row.seq==checkpoint_seq)
+            .ok_or(SessionStoreError::RecoveryRequiresReconciliation)?;
+        let metadata=event_from_row(metadata.clone())?;
+        let payload=payload_value_for_event_tx(tx,&metadata).await?;
+        if metadata.kind.0!="runtime/progress-recorded"||metadata.kind_version!=1
+            ||metadata.producer_id.as_ref()!="runtime_supervisor"||metadata.correlation_id.as_ref()!=operation.as_ref()
+            ||payload.pointer("/event/event").and_then(Value::as_str)!=Some("execution_checkpoint_saved")
+            ||payload.pointer("/event/step")!=checkpoint.get("model_steps")
+            ||payload.pointer("/event/digest").and_then(Value::as_str)!=Some(checkpoint_digest.as_ref()) {
+            return Err(SessionStoreError::RecoveryRequiresReconciliation);
+        }
+        producer_sequence=payload.get("producer_seq").and_then(Value::as_u64);
+        if producer_sequence.is_none_or(|seq|seq==0) {return Err(SessionStoreError::RecoveryRequiresReconciliation);}
+        wait_cause=Some(sqlx::query_as::<_,(String,Option<String>)>("SELECT started_event_id,source_message_id FROM agent_turns WHERE session_id=? AND operation_id=?")
+            .bind(session.as_ref()).bind(operation.as_ref()).fetch_one(&mut **tx).await?);
+    }
     for row in rows {
         let event = event_from_row(row)?;
         if event.seq <= through_seq { continue; }
         if event.kind.0 == "tool/call-started" { return Err(SessionStoreError::RecoveryRequiresReconciliation); }
+        if waiting.is_some() && (event.kind.0=="context/model-visible-applied"||event.kind.0.starts_with("effect/")) {
+            return Err(SessionStoreError::RecoveryRequiresReconciliation);
+        }
         if event.kind.0 != "runtime/progress-recorded" || event.correlation_id.as_ref() != operation.as_ref() { continue; }
         let value = payload_value_for_event_tx(tx, &event).await?;
+        if let Some(wait)=waiting {
+            let (started,root)=wait_cause.as_ref().expect("waiting checkpoint cause checked");
+            let next=producer_sequence.and_then(|seq|seq.checked_add(1)).ok_or(SessionStoreError::RecoveryRequiresReconciliation)?;
+            if event.kind_version!=1||event.producer_id.as_ref()!="runtime_supervisor"
+                ||event.causation_event_id.as_ref().is_none_or(|cause|cause.as_ref()!=started&&Some(cause.as_ref())!=root.as_deref())
+                ||value.get("producer_seq").and_then(Value::as_u64)!=Some(next) {
+                return Err(SessionStoreError::RecoveryRequiresReconciliation);
+            }
+            producer_sequence=Some(next);
+            match value.pointer("/event/event").and_then(Value::as_str) {
+                Some("awaiting_children") if value.pointer("/event/model_steps")==checkpoint.get("model_steps")
+                    &&value.pointer("/event/request")==Some(wait)
+                    &&value.get("event").and_then(Value::as_object).is_some_and(|body|body.len()==3)=>{},
+                Some("execution_resumed"|"execution_budget_prepared"|"execution_segment_renewed"|"context_prepared"|"runtime_modules_activated")=>{},
+                _=>return Err(SessionStoreError::RecoveryRequiresReconciliation),
+            }
+            continue;
+        }
         // Only an unexecuted model prefix can be discarded automatically.
         // Effects/controls outside this list require owner reconciliation, not
         // replaying a stale checkpoint over work that may already have run.

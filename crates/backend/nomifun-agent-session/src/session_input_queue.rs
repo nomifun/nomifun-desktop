@@ -382,11 +382,11 @@ impl AgentSessionStore {
         if let Command::Control(action)=command {return self.update_session_input_queue(owner,session,key,action,expected_version).await;}
         let Command::Replace {message_id,content}=command else {unreachable!()};
         if content.trim().is_empty() || content.len()>16*1024 {return Err(SessionStoreError::InvalidPayload("replacement text requires non-empty content within 16 KiB".into()));}
-        let mut tx=self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if require_live_session_tx(&mut tx,session.as_ref()).await?.owner_ref!=*owner {return Err(SessionStoreError::ExecutionFenced);}
         let identity=queue_command_key(owner,session,key)?;
         if replacement_receipt_tx(&mut tx,session,&identity,message_id,content,expected_version).await? {
-            let snapshot=queue_snapshot_tx(&mut tx,session).await?;tx.commit().await?;return Ok(snapshot);
+            let snapshot=queue_snapshot_tx(&mut tx,session).await?;db_write_observation.commit(tx).await?;return Ok(snapshot);
         }
         let snapshot=queue_snapshot_tx(&mut tx,session).await?;
         if expected_version.is_some_and(|version|version!=snapshot.version) {return Err(SessionStoreError::Conflict("input queue changed; refresh before editing".into()));}
@@ -403,7 +403,7 @@ impl AgentSessionStore {
         self.cancel_pending_input_tx(&mut tx,session,message_id).await?;
         self.append_event_tx(&mut tx,&accepted,None).await?;
         self.append_queue_change_tx(&mut tx,session,&identity,QueueChange {action:Change::Replace {message_id:message_id.clone(),replacement_message_id:id},expected_version,through_seq:None,except_message_ids:Vec::new()}).await?;
-        let snapshot=queue_snapshot_tx(&mut tx,session).await?;tx.commit().await?;Ok(snapshot)
+        let snapshot=queue_snapshot_tx(&mut tx,session).await?;db_write_observation.commit(tx).await?;Ok(snapshot)
     }
     pub async fn session_input_queue(&self, owner: &PrincipalRef, session: &AgentSessionId) -> Result<SessionInputQueueSnapshot, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
@@ -429,12 +429,12 @@ impl AgentSessionStore {
     pub async fn update_session_input_queue(&self, owner: &PrincipalRef, session: &AgentSessionId,
         key: &IdempotencyKey, action: &SessionInputQueueAction, expected_version: Option<u64>,
     ) -> Result<SessionInputQueueSnapshot, SessionStoreError> {
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if require_live_session_tx(&mut tx, session.as_ref()).await?.owner_ref != *owner { return Err(SessionStoreError::ExecutionFenced); }
         let identity = queue_command_key(owner, session, key)?;
         if queue_receipt_matches_tx(&mut tx,session,&identity,action,expected_version).await? {
             let snapshot = queue_snapshot_tx(&mut tx, session).await?;
-            tx.commit().await?; return Ok(snapshot);
+            db_write_observation.commit(tx).await?; return Ok(snapshot);
         }
         let snapshot = queue_snapshot_tx(&mut tx, session).await?;
         if expected_version.is_some_and(|version| version != snapshot.version) {
@@ -479,7 +479,7 @@ impl AgentSessionStore {
         } else {Vec::new()};
         self.append_queue_change_tx(&mut tx, session, &identity, QueueChange { action: action.clone().into(), expected_version, through_seq,except_message_ids }).await?;
         let snapshot = queue_snapshot_tx(&mut tx, session).await?;
-        tx.commit().await?; Ok(snapshot)
+        db_write_observation.commit(tx).await?; Ok(snapshot)
     }
 
     async fn append_queue_change_tx(&self, tx: &mut Transaction<'_, Sqlite>, session: &AgentSessionId,

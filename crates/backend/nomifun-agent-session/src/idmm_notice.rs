@@ -20,7 +20,7 @@ impl AgentSessionStore {
         }
         let producer = EventProducerId::from("session_api");
         let key = IdempotencyKey::from(format!("idmm-notice:{}:{key}", session_id.as_ref()));
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
         require_owner(&row, owner)?;
         require_live_row(row)?;
@@ -36,7 +36,7 @@ impl AgentSessionStore {
                 return Err(SessionStoreError::IdempotencyConflict("IDMM notice replay changed its question or status".into()));
             }
             let ack = event_ack(&record);
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok(Some(SessionEventAppendResult {
                 cursor: ack.cursor.clone(), record: Some(record), ack: Some(ack),
                 persisted: true, duplicate: true,
@@ -45,7 +45,7 @@ impl AgentSessionStore {
 
         let question = notice.decision.question.as_ref().expect("validated notice question");
         if !question_is_current_tx(&mut tx, session_id, question).await? {
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok(None);
         }
         let cause: String = sqlx::query_scalar(
@@ -64,7 +64,7 @@ impl AgentSessionStore {
             },
         };
         let result = self.append_event_tx(&mut tx, &append, None).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(Some(result))
     }
 }

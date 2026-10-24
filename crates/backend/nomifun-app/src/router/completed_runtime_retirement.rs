@@ -2,6 +2,8 @@
 //! This owner never sends input, creates a Runtime or resumes a checkpoint.
 use super::*;
 
+enum RuntimeRetirement { Retired, Inapplicable }
+
 impl NomiCoreSessionOwner {
     pub(in crate::router) fn schedule_completed_runtime_retirement(
         self: &Arc<Self>, owner_id: String, session: AgentSessionId,
@@ -14,12 +16,13 @@ impl NomiCoreSessionOwner {
             let mut workspace_ticket=None;
             loop {
                 match owner.retire_completed_runtime_with_workspace_ticket(&owner_id, &session, &operation, &expected_runtime,&mut workspace_ticket).await {
-                    Ok(()) => {
+                    Ok(RuntimeRetirement::Retired) => {
                         tracing::info!(session_id=session.as_ref(), operation_id=operation.as_ref(),
                             native_teardown_proven=expected_runtime.teardown_proven(),
                             "completed Runtime retirement owner settled");
                         return;
                     }
+                    Ok(RuntimeRetirement::Inapplicable) => return,
                     Err(error) => tracing::warn!(session_id=session.as_ref(),operation_id=operation.as_ref(),%error,
                         "completed Runtime retirement remains unconfirmed; exact owner retained"),
                 }
@@ -37,19 +40,19 @@ impl NomiCoreSessionOwner {
         expected_runtime: &nomifun_ai_agent::AgentRuntimeHandle,
     ) -> Result<(), AppError> {
         let mut ticket=None;
-        self.retire_completed_runtime_with_workspace_ticket(owner_id,session,operation,expected_runtime,&mut ticket).await
+        self.retire_completed_runtime_with_workspace_ticket(owner_id,session,operation,expected_runtime,&mut ticket).await.map(|_| ())
     }
 
     async fn retire_completed_runtime_with_workspace_ticket(
         &self,owner_id:&str,session:&AgentSessionId,operation:&OperationId,
         expected_runtime:&nomifun_ai_agent::AgentRuntimeHandle,
         workspace_ticket:&mut Option<crate::router::nomi_core_wave2::WorkspaceHostRetirementTicket>,
-    )->Result<(),AppError> {
+    )->Result<RuntimeRetirement,AppError> {
         let engines = self.native_engines.get().and_then(std::sync::Weak::upgrade)
             .ok_or_else(|| AppError::Conflict("Runtime retirement has no original resource owner".into()))?;
         if self.runtime_sessions.get_runtime(session.as_ref()).as_ref()
             .is_some_and(|runtime| !std::ptr::eq(runtime.as_runtime(), expected_runtime.as_runtime())) {
-            return Ok(());
+            return Ok(RuntimeRetirement::Inapplicable);
         }
         // A delayed terminal relay can reach this owner after the same
         // carrier has accepted a successor. Reject that obsolete request
@@ -58,19 +61,19 @@ impl NomiCoreSessionOwner {
         let observed = match self.canonical.store().head(session).await {
             Ok(head) => head,
             Err(nomifun_agent_session::SessionStoreError::NotFound(_)
-                | nomifun_agent_session::SessionStoreError::Deleted(_)) => return Ok(()),
+                | nomifun_agent_session::SessionStoreError::Deleted(_)) => return Ok(RuntimeRetirement::Inapplicable),
             Err(error) => return Err(agent_session_store_error(error)),
         };
-        if observed.active_turn_id.is_some() { return Ok(()); }
+        if observed.active_turn_id.is_some() { return Ok(RuntimeRetirement::Inapplicable); }
         let latest: Option<String> = sqlx::query_scalar(
             "SELECT operation_id FROM agent_turns WHERE session_id=? ORDER BY rowid DESC LIMIT 1",
         ).bind(session.as_ref()).fetch_optional(&self.pool).await
             .map_err(|error| AppError::Internal(error.to_string()))?;
-        if latest.as_deref() != Some(operation.as_ref()) { return Ok(()); }
+        if latest.as_deref() != Some(operation.as_ref()) { return Ok(RuntimeRetirement::Inapplicable); }
         // Natural post-answer work can outlive the main result. Waiting here
         // holds no Session/registry gate and does not delay a successor input.
         tokio::select! {
-            _ = self.background_tasks.shutdown_signal() => return Ok(()),
+            _ = self.background_tasks.shutdown_signal() => return Ok(RuntimeRetirement::Inapplicable),
             result = engines.join_completed_runtime_background(session) => result?,
         }
         let _operation_guard = self.session_operation_lock(session.as_ref()).write_owned().await;
@@ -79,7 +82,7 @@ impl NomiCoreSessionOwner {
             // Canonical deletion has its own retained resource owner. Do not
             // retain an obsolete retirement waiter/Arc after that handoff.
             Err(nomifun_agent_session::SessionStoreError::NotFound(_)
-                | nomifun_agent_session::SessionStoreError::Deleted(_)) => return Ok(()),
+                | nomifun_agent_session::SessionStoreError::Deleted(_)) => return Ok(RuntimeRetirement::Inapplicable),
             Err(error) => return Err(agent_session_store_error(error)),
         };
         if record.owner_ref.principal_kind != "user" || record.owner_ref.principal_id != owner_id {
@@ -88,22 +91,22 @@ impl NomiCoreSessionOwner {
         let head = self.canonical.store().head(session).await.map_err(agent_session_store_error)?;
         // A paused/recovering Turn retains its canonical active identity.
         if head.active_turn_id.is_some() {
-            return Ok(());
+            return Ok(RuntimeRetirement::Inapplicable);
         }
         let latest: Option<String> = sqlx::query_scalar(
             "SELECT operation_id FROM agent_turns WHERE session_id=? ORDER BY rowid DESC LIMIT 1",
         ).bind(session.as_ref()).fetch_optional(&self.pool).await
             .map_err(|error| AppError::Internal(error.to_string()))?;
-        if latest.as_deref() != Some(operation.as_ref()) { return Ok(()); }
+        if latest.as_deref() != Some(operation.as_ref()) { return Ok(RuntimeRetirement::Inapplicable); }
         let receipt = self.canonical.store().read_turn_receipt(session, operation).await.map_err(agent_session_store_error)?;
         if !matches!(receipt.status, nomifun_agent_session::TurnReceiptStatus::Completed
             | nomifun_agent_session::TurnReceiptStatus::Failed | nomifun_agent_session::TurnReceiptStatus::Cancelled) {
-            return Ok(());
+            return Ok(RuntimeRetirement::Inapplicable);
         }
         if let Some(active) = self.runtime_sessions.active_turn_generation(session.as_ref()) {
             let original = self.canonical.store().native_execution_generation(session, operation)
                 .await.map_err(agent_session_store_error)?;
-            if active != original { return Ok(()); }
+            if active != original { return Ok(RuntimeRetirement::Inapplicable); }
             // Retry the relay's failed release only for its exact completed
             // generation; the registry independently fences a successor.
             self.runtime_sessions.release_runtime_turn(session.as_ref(), original).await?;
@@ -123,7 +126,7 @@ impl NomiCoreSessionOwner {
         }
         let current = self.runtime_sessions.get_runtime(session.as_ref());
         if current.as_ref().is_some_and(|current| !std::ptr::eq(current.as_runtime(), expected_runtime.as_runtime())) {
-            return Ok(());
+            return Ok(RuntimeRetirement::Inapplicable);
         }
         // Quarantined instances are intentionally absent from get_runtime.
         // The registry still owns their exact slot and retry proof below.
@@ -142,7 +145,7 @@ impl NomiCoreSessionOwner {
             tracing::debug!(session_id=session.as_ref(),%error,"native Runtime retired; shared workspace cache cleanup remains owned");
             engines.schedule_workspace_host_retirement(ticket,&self.background_tasks)?;
         }
-        Ok(())
+        Ok(RuntimeRetirement::Retired)
     }
 }
 

@@ -62,7 +62,7 @@ impl Fixture {
         insert_canonical_session(&self.db, &session, &self.owner, "live").await;
         self.repository.start_attempt(&self.owner, &self.execution_id, &queued.step.step_id, queued.step.version,
             &attempt.attempt.attempt_id, attempt.attempt.version, &session,
-            AgentExecutionAttemptSessionKind::ChildAttempt, None, &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap()
+            AgentExecutionAttemptSessionKind::ChildAttempt, None, None, &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap()
     }
 
     fn stop_event(&self) -> NewAgentExecutionEvent {

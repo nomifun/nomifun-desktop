@@ -1,254 +1,92 @@
-# 多 Agent 生命周期可靠性与用户控制：最终实施方案
+# Agent 生命周期验证记录
 
-日期：2026-10-18；2026-10-19 启动实施。状态：代码实施及当前 Windows 可执行验收完成，macOS／Linux 原生待验；分项证据见第 10 节。
+更新时间：2026-10-24。稳定行为合同属于 [Agent Execution](../architecture/agent-execution.zh.md#生命周期约束) 和 [Agent Session](../architecture/agent-session.zh.md)，资源与退出边界同时遵守 [Browser](../architecture/browser-platform.zh.md)、[全局 OS](../architecture/global-os-capabilities.zh.md) 和 [Computer Use](../architecture/computer-use.zh.md)。本页仅记录验证范围、构建证据和未验项，不是施工计划，也不授予安装、提权、提交、推送、发布或修改真实数据的权限。
 
-审计基线：249082fe78caf771116f11f4206ac0595c22b61c（0.8.14）。执行者必须核对实际 HEAD、工作区改动和现役实现，不能把下面的基线行号当作永远不变的证据。
+原 lifecycle 施工计划与启动 prompt 已由上述正式合同及本验证页替代，历史设计可查 Git。U01–U13 长期约束保存在 Execution 架构；Computer 专项的实施阶段、授权和新 worker 验证继续由其[现役专项](../handoffs/computer-use-rebuild.zh.md#12-单份执行进展)管理，不继承旧 Computer 的原生通过记录。
 
-本文件是本专项唯一现役施工与验收说明，整合用户要求及最终复审，取代此前对话中的草案。源码、正式类型、canonical 事实和实测结果共同决定实现事实；本文件区分目标与现状，不替代现行安全合同。不宣称未经比较与实测的“全局最优”。
+## 当前 Windows 验证与恢复
 
-启动入口见[干净会话启动 prompt](agent-lifecycle-reliability.start-prompt.zh.md)。执行前阅读根目录 [AGENTS.md](../../AGENTS.md)、[Agent Session](../architecture/agent-session.zh.md)、[AgentExecution](../architecture/agent-execution.zh.md)、[伙伴架构](../architecture/companion.zh.md)和[浏览器架构](../architecture/browser-platform.zh.md)。涉及全局文件、进程或 Computer 时同时阅读[全局 OS 能力](../architecture/global-os-capabilities.zh.md)。
+以下各项按其真实构建和执行集合计证，不能把重叠用例相加，也不能将早期通过扩大到后续改动。私有日志、可执行文件身份、隔离 fixture 与报告留在原 `build.noindex`／`.git` 证据目录；本页不复制数据库、凭据、用户正文或工作产物。
 
-## 1. 要解决的问题与交付边界
-
-解决伙伴及其他多 Agent 场景中的 subagent 长期停留运行／等待、无法准确停止、局部控制故障扩散、重启恢复冲突、共享能力无关阻塞、完成对象无人退休以及清理饥饿。
-
-最终交付必须同时满足：
-
-1. 所有 Agent 执行实例可发现、可由用户直接控制停止、可查看实际执行与清理进度，包括 root、subagent、伙伴委派、自动任务、恢复／异常／清理中的任务。
-2. 独立停止一个任务不默认取消整个 Execution；明确选择整个协作时维持整组取消语义。
-3. 恢复继续原任务，不把状态未知、缓存缺失或暂停变成隐式从头执行。
-4. 慢 Stop／Steer、某个清理失败或某个浏览器 target 的慢操作，不拖住无关健康任务。
-5. Turn 终结、Runtime 退休、Session 后台资源释放分别取得真实依据；正常授权的后台工作不被回收误杀。
-6. 相同工作负载反复创建并完成后，废弃运行实例、任务、订阅、句柄和缓存不持续累积。合法持续工作的资源不要求归零。
-7. 维护路径减少、职责收敛；不以禁工具、降低并发、缩短任务寿命或添加操作门槛换取通过。
-8. 不依赖用户关闭已完成会话：使命已完成且无剩余使用责任的托管重资源自动退休；NomiFun 真正退出时回收其持有的全部应用生命周期资源。保留历史会话不等于保留重型运行载体。
-
-本专项允许在现有 owner、合同、UI、测试与文档中做完整必要调整，不等于只改按钮或补几个 timeout。它不授权建设通用资源治理平台，也不授权改写现役数据、清理真实用户数据目录或发布上线。
-
-## 2. 用户要求与执行偏好
-
-### 2.1 对话明确的产品要求：不可被实现便利性覆盖
-
-| 编号 | 要求 | 执行约束 |
+| 范围 | 最新已完成结果 | 证据与边界 |
 | --- | --- | --- |
-| U01 | 全面追到根因，不能打补丁 | 修复跨层责任和真实故障路径，替换旧的错误裁决；不能只修改显示状态、增加重试或掩盖异常。 |
-| U02 | 架构简单、强大、易维护 | 复用现役 owner、TaskTracker、进程 Supervisor、outbox 和事实链；不新增平台级 Broker、万能生命周期服务、总状态机或第二账本。 |
-| U03 | 能力不下降，体验不损失且提升 | 保留工具、权限、模型选择、任意 shell、共享目录、长任务、后台执行及已有明确配置；不以支持全部控制动作作为 Agent 的运行资格。 |
-| U04 | 不因资源压力误杀合法任务 | 不新增按 CPU、内存、空闲、等待时长、数量或深度自动 kill；不新增固定整机配额和统一硬 TTL。已有用户设置及工具真实期限保留。 |
-| U05 | 协作保持灵活 | 不强制 worktree、读写路径声明、只读降级或新的资源选择步骤。不能假装任意 shell 的副作用可被完整推断。 |
-| U06 | 已授权委派不被父回合误停 | 父 Turn 正常结束、模型返回、前台页面关闭不能成为取消后台委派的新增理由；用户明确选择的取消范围才生效。 |
-| U07 | 缓存不能使任务重新开始或循环 | 缓存层没有启动、恢复、重试、新建 Attempt、发送原始输入或执行工具的权限；加载失败不 fallback 到重跑。 |
-| U08 | 不丢失活任务现场 | 等待、暂停、恢复及未知效果中的不可重建现场必须保留；不能仅凭 Finished、空闲、checkpoint 或 active count 决定回收。 |
-| U09 | 不能完全信任 Agent 自己管理生命周期 | 每个 Agent 实例都有宿主侧用户停止入口，控制不经过模型，不等待 Agent 同意或在途 Steer 的业务响应；异常态也不能隐藏或失去操作入口。 |
-| U10 | 停止不能误伤其他任务，也不能自动复活 | 精确目标、持久作用范围和迟到事件围栏必须完整；独立兄弟保留，已停止范围不能被恢复、重试或派生绕过。 |
-| U11 | 继续与重新开始严格分开 | 不能用 cancel＋retry 假装暂停／继续；原进度、效果与计数不因缓存或恢复失败重置。用户现有显式预算调整与合法重试策略仍保留。 |
-| U12 | 不增加面向用户的工程门槛 | 用户看到清晰的任务、等待原因、停止与清理状态；内部代际、owner、checkpoint 校验不变成普通工作前的额外配置或确认流程。 |
-| U13 | 用户不手动关闭也必须自动回收重资源 | 完成使命的任务／会话不因仍在列表就永久保留浏览器、进程、连接等；真正退出应用必须收束所有应用自有重资源，异常退出有原生父死兜底。保护活任务不是无限保留废弃资源的理由。 |
+| App 完整 lib | **1307 通过／4 原 ignored／0 失败** | `task-restart-app-full2.log`，桌面实际Browser／Computer features，默认测试栈、2线程。完整运行正常结束，未出现native AV；原ignored不计通过。 |
+| Execution／Runtime | **193 通过／535 通过＋1 原 ignored** | 子任务重启修复后的完整集合；保留用户并发、原预算及正常控制；原 ignored 不计通过。 |
+| Session | **402 通过／0 失败** | `task-restart-session-full2.log`；当前完整运行通过。更早393项的分批记录仅属于历史构建，不再作为本轮总计。 |
+| DB／UI／静态 | **DB lib321、Execution repository90、UI交互51通过；完整 `bun run check` 通过** | `task-restart-db-full1.log`、`task-restart-db-repository-full1.log`、`task-restart-ui-final.log`；集合分列，不累计重叠用例。 |
+| Step Plan 真实2子 | **2 Full／2 Attempt／1 delegate／1父Turn；重叠23284ms** | 两份原结果完整消费，父整合文件并真实进程验证；wait_calls=1、status_calls=1、parent_model_steps=10、wait_model_calls=0。报告 `attempt-handoff-live-two.json`，build `6cd8a8f054dabbaa96ee0de1f243a7740c2c81f8d35a0aa2a52d6d0646b454ce`。 |
+| Step Plan 真实8子 | **8 Full／8 Attempt0／1 delegate／1父Turn；默认max_parallel=4，domain/native peak=4，四路重叠35969ms** | 八份原结果完整消费，父读取八原文件、只写集成文件，验证进程exit=0/reaped=true；wait_calls=1、status_calls=1、parent_model_steps=9、wait_model_calls=0；最终答复2879 bytes且含验收标记。报告 `attempt-handoff-live-eight-evidence.json`，build `d14262bceb5e2bd17629424037ca90374e81888c5e5b08ca67eb548b401208ce`。两子与八子的build分别保留，不冒称同一构建。 |
+| 实模隔离与保留 | **正常关闭、明文凭据审计通过** | step-5-preview凭据仅私有stdin进入测试；8子隔离fixture `subagent-native-30POzj` 在专用`.git`目录保留，供原canonical事实复核。保留选项不放宽测试、关停或凭据审计。 |
+| 指定真实会话恢复 | **`01a16826-d942-73b0-b9a3-557c69215e6b` 原Turn在seq3081完成，Attempt仍12，其他会话保持原样** | 正式ReplaceWithExisting与原native resume，未重跑子任务或假造终态；原数据／工作目录备份与逐表审计留原位置。证据 `attempt-handoff-real-final-delivery.json`。 |
+| 原游戏产物复核 | **独立副本10项JS语法／47项冒烟通过** | 只运行副本中的原canonical脚本，不修改真实工作目录。证据 `attempt-handoff-restored-game-verification.json`。 |
+| Desktop／worker | **子任务重启版本的dev Desktop与独立worker构建通过** | `task-restart-desktop-build.log`／`task-restart-worker-build.log`，身份见`task-restart-desktop-identity.json`；channel=dev、OfficeCLI内置开启、官方Vite模式。未对真实数据启动新构建或迁移旧checkpoint。01:18原build的启动核验仍保留，但不能当作本轮新build启动证明。构建不等于安装、发布或各平台原生支持证明。 |
 
-这些是本专项强制产品约束。不得通过删除测试、调低负载、降低并发、关掉能力、增加默认超时或人工确认来取得表面正确。
+本轮受控贯通验证包括原输入Busy/丢ACK、prelink准备、旧owner失权、同Step幂等Retry、兄弟不重跑、父来源控制、真实问题回答、纯WAIT冷恢复、精确Stop与最终父交付。空创建退休覆盖原Attempt持久裁决、Queued后继保留、同writer输入/link竞争与真实两连接WAL。完整实现合同见架构；模拟故障与真实模型证据分别保留。
 
-### 2.2 本专项的执行约定
+最终dev宿主于2026-10-24 01:18（Asia/Shanghai）启动，Desktop SHA256为`09e4d842623a5465854e90022566e438a88d0072d53784c11b9c7c4a81a39fad`，相邻worker为`4031cc7a2e4d05297fa1913307dfc9c10b7a1624d548271f988be457abd7123c`。真实目标仍为原Turn的`turn/completed` seq3081、Execution completed/version40、12 Attempts及max_parallel=4；九个子Session的canonical历史逐行与备份一致。另两条受保护会话的状态及seq137/1588未推进。过程中的raw Cargo首次候选误用stable身份，已通过现有认证退出接口正常关闭并按正式dev配置重建；只撤销了确切指向该误启动候选的stable协议command/icon值，其启动前的stable handler未留快照，未猜测重建。正确dev协议现指向最终候选，共享键盘服务保留。开发窗口标题仍沿现有源码显示`NomiFun`，不能用窗口标题代替编译身份核验。
 
-以下用于可靠地完成本任务，不应伪称为用户对所有未来任务的全局偏好：
+## 2026-10-24 子任务重启与技术暂停交接
 
-- 使用启动 prompt 后即进入实施，持续完成必要代码、测试、清理和文档。不能反复审查计划代替实施，也不能只输出建议后结束。
-- 常规实现选择自主解决；只有必须改变上述产品合同、需要破坏性／外部发布动作，或缺少无法推断的关键事实时才提出具体问题。说明依据，同时继续不受阻的工作。
-- 先保护和识别无关改动；不覆盖、回滚、格式化或清理不属于本专项的工作。
-- 不使用真实用户会话、已登录浏览器、生产数据根或凭据做破坏性故障实验。使用任务专用临时数据、mock provider、受控本地进程和浏览器测试实例。
-- 保持可审阅差异。默认不自动提交、推送、合并、打包安装或发布；后续若用户明确授权，再按根 AGENTS.md 的身份与 Git 规则操作。
-- 定期说明已证实的变化、当前不确定点和下一步；更新本文件第 10 节的单份进展。上下文压缩或换会话后从已完成位置继续。
-- 不把源码、模拟测试、实机测试和生产用户故障复现混为一谈。未运行、平台不可用、测试被过滤为空，都必须如实记录。
+对应真实诊断会话`01a16b9b-c3e5-7312-a110-a499a9c00a0e`：7个孩子已交付，SA-3的模块自测71/71通过，但4次完整报告的summary依次2371／2363／2130／2130字符，均被旧2048字符字段限制拒绝。原native Turn以`EXECUTION_INTERVENTION_REQUIRED`暂停，领域Attempt仍Running；纯观察job被计为推进者，父All等待继续Park；已受理的“重启执行”Steer又排在未ACK的InitialInput之后。只读证据`session-01a16b9b-wait-audit.json`保留在私有`build.noindex`。本轮未改写该真实会话或跨build恢复其checkpoint，旧匹配Runtime可执行文件与身份已单独保留。
 
-## 3. 现状基线：实施者需复核的证据
+正式合同现归[子任务重启与暂停交接](../architecture/agent-execution.zh.md#子任务重启与暂停交接)。完整报告沿既有48KiB整包预算，移除独立2048字符上限；handoff沿原80KiB整包预算，严格历史发布的短引言仍是短引言。重启只使用原Execution事件派生pending，保留原Step与父来源；没有新表、第二执行账本或并发调整。原InitialInput按精确canonical准入ACK；技术暂停保留typed身份，真人native恢复、普通重试、原生清理和User Stop分别验证。成功受理不反复唤模型，新blocked回执按原来源交给父一次。
 
-下面是源码审计依据，不是已交付修复。CPU／RSS 实际上涨的归因仍需指标与实测；running／waiting 持久状态不证明旧 OS 进程仍活着。
-
-| ID | 基线事实与风险 | 实现入口与基线位置 |
+| 范围 | 本轮结果 | 私有证据与边界 |
 | --- | --- | --- |
-| R01 | canonical Attempt cancelled 会将整个 Execution 取消，并终止其他孩子；单任务按钮不能直接复用此语义。 | [scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs) 2073；[repository](../../crates/backend/nomifun-db/src/repository/sqlite_agent_execution.rs) 4427；现有 canonical cancellation 测试也锁定该行为。 |
-| R02 | Execution pause 会撤销调度、reconcile 运行 Attempt 并触发 cleanup；没有可信终态时可能进入 review_blocked，resume 明确拒绝。 | [engine](../../crates/backend/nomifun-agent-execution/src/engine.rs) 1382、1442；[repository](../../crates/backend/nomifun-db/src/repository/sqlite_agent_execution.rs) 1867、1898。 |
-| R03 | Session 异步恢复原 Turn 与 Execution 恢复并行；后者可能先退休关联、停车并清理原 Turn。两类租约分别为 90s、30s。 | [state](../../crates/backend/nomifun-app/src/router/state.rs) 310、633；[native recovery](../../crates/backend/nomifun-app/src/router/native_turn_recovery.rs) 8；[scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs) 1458。 |
-| R04 | Stop／Steer 在主循环 inline await，会阻止兄弟 jobs 被 poll；错误还可能退出整代并触发兄弟的中断恢复。 | [scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs) 996、1046、1339、1414、2685。 |
-| R05 | Waiting／Paused 会延长观察 deadline 并每 500ms 查询；Attempt 仍占现有并发和工作区预约。 | [attempt runner](../../crates/backend/nomifun-agent-execution/src/attempt_runner.rs) 317；[scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs) 2973、3016、3050。 |
-| R06 | 旧 Full／ReadShell 把完整 Step 当成工作区独占，独立任务也被串行。2026-10-22 按用户新授权替换为原并发容量与真实操作 owner；任意 shell 及后台效果仍按其原责任核验。 | [scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs)；[全局 OS 能力](../architecture/global-os-capabilities.zh.md)。 |
-| R07 | Attached Chrome provider 的锁跨整次命令执行；disconnect、close、shutdown 也先取该锁。managed Browser 则已有按 Session 的隔离，不能混为全局锁。 | [attached provider](../../crates/backend/nomifun-app/src/browser_workspace_provider/attached_provider.rs) 261、359、436、690。 |
-| R08 | 旧 Computer 的控制缺口由新私有 Cua worker 接入承接；排队撤回、在途真实结果、超时 unknown 与退出退休沿原 InvocationControl，平台验收另计。 | [Wave2 contract](../../crates/backend/nomifun-agent-domain-wave2/src/lib.rs)、[Computer host](../../crates/backend/nomifun-app/src/router/computer_host.rs)、[worker owner](../../crates/backend/nomifun-computer/src/worker.rs)。 |
-| R09 | 固定最旧 100 项的 cleanup 查询会被持续失败项占住。此前原 SQL 内存复核连续三轮取不到第 101 项；执行阶段须固化为仓库回归测试。 | [scheduler](../../crates/backend/nomifun-agent-execution/src/scheduler.rs) 442、584；[repository](../../crates/backend/nomifun-db/src/repository/sqlite_agent_execution.rs) 4550、4573。 |
-| R10 | cleanup 的 cancel_for_execution 在无活动 Turn 时可直接返回成功；释放 Turn admission 不等于移除 Runtime。UserCancelled 又明确保留 Session 进程。 | [session owner](../../crates/backend/nomifun-app/src/router/nomi_core_session.rs) 4918、4942；[runtime registry](../../crates/backend/nomifun-ai-agent/src/runtime_sessions.rs) 1475；[runtime host](../../crates/backend/nomifun-app/src/router/unified_runtime_host.rs) 44、1667。 |
-| R11 | Session teardown 会 close 知识回写并 cancel_all；主 Turn 已终结不证明回写已结束。进程 owner 已可独立于 Runtime transport 存续。 | [kernel session](../../crates/backend/nomifun-app/src/router/engine_kernel_session.rs) 1487、1499；[writeback](../../crates/backend/nomifun-app/src/router/engine_knowledge_writeback.rs) 47；[Wave2 owner](../../crates/backend/nomifun-app/src/router/nomi_core_wave2.rs) 498。 |
-| R12 | checkpoint 不保存 live handles；构造异常在资源归属未证明时关闭 registry 是安全围栏，不能为可用性直接删除。 | [checkpoint](../../crates/backend/nomifun-agent-runtime/src/checkpoint.rs) 1、91；[engine recovery](../../crates/backend/nomifun-app/src/router/engine_recovery.rs) 14、50；[acquisition](../../crates/backend/nomifun-ai-agent/src/runtime_session_acquisition.rs) 20。 |
-| R13 | Attempt 再委派是在同一 Execution 追加 DAG Steps，依赖边不等于委派归属。既有事件记录 caller 与 added_step_ids。 | [engine](../../crates/backend/nomifun-agent-execution/src/engine.rs) 954、985；[repository](../../crates/backend/nomifun-db/src/repository/sqlite_agent_execution.rs) 2810、2909。 |
-| R14 | Browser workspace 主要在显式关闭、确认重建、Session 删除及 app shutdown 时释放；没有任务完成自动退休闭环。正常退出已有 browser shutdown，但其他领域前置失败可能跳过浏览器清理。 | [Browser service](../../crates/backend/nomifun-browser-platform/src/workspace.rs) 817、929、969；[AppServices](../../crates/backend/nomifun-app/src/services.rs) 1208、1427。 |
+| Contracts／Runtime | 133通过／535通过＋1原ignored | `task-restart-contracts-full1.log`、`task-restart-runtime-full1.log`；原ignored不计通过。 |
+| Execution | 193通过 | `task-restart-execution-full2.log`；默认测试栈，原并发与控制合同保留。 |
+| Session | 402通过 | `task-restart-session-full2.log`；含7项Restart native writer直达／排队、fence、伪Actor、Stop与丢ACK回归。 |
+| DB／仓储 | 321通过／90通过 | `task-restart-db-full1.log`、`task-restart-db-repository-full1.log`；含原暂停核验、准入ACK、Queued推进竞态、未知效果及Stop优先。 |
+| 父子贯通 | 定向1项通过 | `task-restart-app-e2e7.log`；本地受控provider，Session／Runtime／Effect／命令与恢复使用生产链，不是外部实模。两child、4次真实参数拒绝、一次真人Restart及其同key重放、一次native授权、原child Attempt／Turn与原parent Turn均保持、健康兄弟仅调用一次、原文件仅写一次；父最终交付，两child均completed/result_ok=true。等待不轮询模型；恢复按现役规则做一次必要计划更新及一次有效报告，不重跑原文件操作。 |
+| UI／静态 | 最终单次51项交互通过 | `task-restart-ui-final.log`；取代有重叠的前两次48／41项记录，不累加。typecheck、i18n、desktop boundary通过，完整`bun run check`通过。 |
+| Desktop／worker | dev Desktop及配套worker构建通过 | Desktop SHA256 `115f64ef30d1d1a04dbfa7e0260449edafd058f7086f2516de8aca4fec4bb6bd`，worker `0ffad594e7858a87a0a1b5dc9b3d916753132909db6fa8f0dfab841cba0ca67f`。未启动真实数据、打包或安装。 |
+| App完整 | 1307通过／0失败／4原ignored | `task-restart-app-full2.log`，563.43秒；首次1305通过／2个旧cleanup测试未处理新增的typed pending／4原ignored。两测试已按真实pending合同更新，相关22项及完整重跑均通过；生产代码未因此放宽。 |
 
-基线中已经有效的 MCP cancellation、process Supervisor、target claim、incarnation、Session 归属、效果回执与 checkpoint 校验必须保留。未证实的问题不能写成必现 bug，也不能以旧行号为由重做后续已经完成的修复。
+初轮失败保留：新Scheduler fixture的FK顺序、新Session权限反例的非法actor UUID均已修正测试数据，未放宽生产规则；完整Session及Execution随后通过。首个App筛选为0项，未计证明。后续贯通夹具曾在plan未广告时调用control、或在native恢复后遗漏必要replan，导致本地provider断言退出；修正为正式文件写入／读取后建原plan、native恢复只更新原plan再报告，文件操作仍一次。最终受控贯通通过，失败日志保留，不把夹具错误解释成供应商故障，也不以放宽原交付断言取绿。
 
-## 4. 最终架构与行为合同
+## 当前限制与失败记录
 
-### 4.1 保留三个现有职责，不合并事实域
+- 早期 App 与 Session 候选各出现一次 Windows **0xC0000005**，当时未跑完的集合不能计整体通过。两次访问违规尚未归因；缺少有效现场证明，不能把它归因于已修复的其他栈／布局问题。后续完整App运行和Session完整运行未复现、默认栈重复定向20次通过，只证明这些重跑成功，不能宣称已经证明修复原AV。
+- 8子首轮父状态为completed，但旧`EIGHT_PARENT_FINAL_MISSING`混淆答复缺失与缺验收标记；原fixture未保留，因此无法进一步判定那次具体内容，也不能算通过。测试现区分空答复与非空缺marker，先核验全部工作事实再检查marker；原prompt和验收条件不变，后续独立8子运行完整通过。首次retained runner因SDK定位变量缺失未执行，属于工具链准备失败。
+- 前一构建的dev实际启动已核验；本轮重启修复的新Desktop／worker已构建，未对真实数据启动或跨build恢复旧checkpoint。发布包装以及新整图macOS/Linux原生测试仍须分别记录。Windows测试、旧平台原生通过和早期真实模型均不能代替这些证据。
+- 已证明并替换“SQLite暂态Busy被判为失权，继而丢掉原业务推进责任”的永久卡住链路；真实SQLite屏障用例也证明独立owner能在相同争用下收束。历史最初持锁者、确切SQL及其长持锁原因缺少完整原始记录，仍不能唯一还原。pool耗尽、connection scope总时长均不能独自证明连接泄漏或实际持锁时长。
+- 真实会话的安全恢复是本次明确授权的操作；隔离验收通过不授权对其他真实会话执行恢复、重试或数据修复。另一旧paused会话与受未结算Effect保护的3条输入保持原状态。
 
-| 现有职责 | 保留的权威 | 本次修正 |
+## 平台证据边界与待验项
+
+本表是当前边界。后文历史10.4表中“macOS/Linux未运行”仅是当时快照，已被历史10.5/10.6的实际运行部分更新；不能抹掉后续原生证据。旧平台build通过也不等于本轮新整图通过。
+
+| 平台／范围 | 已有证明 | 仍未证明／适用边界 |
 | --- | --- | --- |
-| Canonical Session owner | 精确 Turn 的输入、执行代际、暂停／恢复、取消与终态／效果事实 | 对原 Turn 恢复，暴露可观察的恢复事实；管理指令精确作用且不经过模型。 |
-| Execution engine／scheduler | DAG、Step／Attempt、策略、租约、预约和业务结算 | 识别原 Turn 正在恢复，跟随同一 receipt；维持本领域结算，不把控制元数据当任务成果。 |
-| 具体资源 owner | 原生操作、句柄、真实互斥、取消能力与清理证明 | 缩小无关锁范围、贯穿控制，准确退休自己的对象。 |
+| Windows | 本轮共通Rust/UI、2/8真实模型和指定会话恢复；历史原构建已有Job/ConPTY/父死、WebView2、Attached Chrome、真实Edge桌面控制及稳态证据 | 当前构建的完整原生组合不能借旧build通过；真实高完整性/UAC多client、权限等待、睡眠／锁屏、系统退出／重启、真实chooser选择与下载字节等未验组合按原证据边界保留。新Computer以其现役专项为准。 |
+| macOS | 历史v4实际AppKit/Cmd-Q、WK basic/pending dialog与chooser取消、精确Stop、父死、Attached Chrome、FD/PTY稳态和桌面WebUI均有原构建证据 | 本轮新整图未在macOS运行；TCC撤销／授权等待取消、SMAppService/XPC管理员多client、睡眠／锁屏与系统注销等受控场景仍待验。Intel、最低macOS14、正式签名/notarization与发布范围未由这些记录证明。chooser取消不等于真实选文件/保存下载字节。 |
+| Linux | 历史WSL2/X11隔离图已验证pipe/PTY、精确Stop、SIGINT/SIGTERM、SIGKILL父死、原生资源退出与稳态 | 本轮新整图未在Linux运行；真实GNOME/KDE Wayland portal授权／拒绝／撤销、pkexec多client、托盘／GUI Quit／重启／系统退出、睡眠／锁屏、桌面浏览器WebUI仍缺证据。WSLg/XWayland、私有D-Bus及mock不替代真实Wayland。 |
+| 当前provider能力 | Desktop provider注入决定适用矩阵 | Linux当前未注入managed/Attached Browser，相关原生项N/A且不新增后端；Computer新worker支持范围、Wayland限制和待验项引用现役Computer架构／专项，旧实现native结果不能当新worker证明。 |
+| 跨平台共同规则 | 原owner、generation、原生退出与资源收据分别验收 | 不按进程名/PID缺席猜清理；不误杀用户Chrome、共享WebContent、合法后台写者或外部owner服务。环境缺失不成为Agent的新运行资格，也不授权安装、提权、锁屏或影响日常桌面。 |
 
-统一入口和语义不等于万能生命周期服务。AutoWork、Cron、伙伴、Remote 等仍走现有正确领域 owner；不能直接按 Session 全部取消绕过领域事务。Session 与 Execution 的状态机均保留，修复的是交接，不是建立总状态机。
+## 现役验证入口
 
-### 4.2 用户控制目标与作用范围
+按实际改动、cfg/features、平台provider和源码／构建身份选择下列入口；检查非零实际用例数。构建、模拟、真实native、实模和发布包装分别计证。
 
-控制目标必须来自已验证的当前事实，根据对象绑定 Session、Operation／Turn、Step／Attempt、execution generation 及必要的 expected version；不要求每种对象虚构不存在的 Attempt。重复命令幂等，旧命令不得临时选择“当前 Turn”。
+```text
+cargo test --locked -p nomifun-agent-execution --lib
+cargo test --locked -p nomifun-agent-session --lib
+cargo test --locked -p nomifun-app --test native_execution_recovery --test desktop_agent_shutdown
+cargo test --locked -p nomi-process-runtime --test parent_death --test pty_contract --test process_contract
+bun run check:agent-session-boundary
+bun run check:process-runtime-boundary
+bun run check:browser-platform-boundary
+bun run check:desktop-ui-boundary
+bun run check:docs
+```
 
-| 产品操作 | 确切语义 |
-| --- | --- |
-| 停止当前回复 | 保留原有单 Turn 语义，不暗中升级成关闭整份 Session 及其所有后台进程。 |
-| 停止此任务 | 通过明确的领域取消意图停止所选 Step／任务，结算不能默认提升为 Execution cancelled。 |
-| 停止该任务委派的工作 | 使用可验证委派归属，不沿 DAG 依赖边猜所有权；并发派生受同一持久范围围栏约束。 |
-| 停止整个协作 | 维持 Execution 整体取消；覆盖其未完成工作，迟到结果不能复活聚合。 |
-| 全部停止 | 对当前用户范围、明确截止点已接受的活动工作进行领域命令聚合；列出处理中／未确认项，不假装跨领域原子事务。 |
-| 停止本次自动运行／停用后续触发 | 分别处理本次实例及未来计划，不能把下一次合法计划触发误称为复活，也不能擅自删除计划。 |
-| 结束任务的后台资源 | 根据原创建者、资源 owner 和代际处理仍归该任务持有的资源，不按 Session 粗暴清掉后继或独立服务。 |
-| 强制结束 | 仅用户明确触发，仅作用于可证明归属且能独立终止的本地 worker／进程等；不杀用户 Chrome、共享 host 或健康兄弟。 |
-| 重试清理 | 重试原对象的释放和结算，不重跑业务。 |
-| 重新开始 | 显式新执行，不冒充继续，不由缓存／恢复失败触发。 |
+macOS还使用原`darwin_registered`、`darwin_application`及[Browser原生入口](browser-platform.zh.md)，需要真实AppKit主循环、原controller与LaunchServices回执；打包或普通cargo run不替代原生运行。Linux沿现役Desktop features和[Linux验证记录](global-os-linux-2026-10-17.zh.md)核对实际X11/Wayland、portal及权限；不默认调用会安装依赖或打包的脚本。真实模型使用现役`run-nomi-core-live-provider-smoke.mjs --subagent-smoke`或`--subagent-eight-smoke`；凭据仅私有stdin，保留fixture必须先正常关停和通过明文审计。
 
-单任务、委派范围、Execution 的取消意图需持久存在于现有领域命令／canonical 控制事实中，投递和结算共同消费。不是新增独立控制账本。已有数据归属不足时做最小正式事实补充，不通过名字、UI 层级或目录猜测。
+环境记录包含OS／架构、源码／构建身份、工具版本、普通／管理员身份、桌面会话、实际provider、权限、隔离范围、命令／非零用例数、失败与原生退出回执。资源稳态记录同负载多轮、合法长期任务、句柄／FD／进程／PTY、cleanup backlog、SQL量及可取得的CPU/RSS，不要求allocator立即返还全部内存。
 
-停止范围内：禁止新增后续派发、重试与委派绕过；停止与派生的竞争由同一适用事务边界处理。与该范围无关的工作继续。确实依赖被取消产物的任务可以等待用户调整／替换，不能伪造依赖完成。
+## 共同行为验证矩阵
 
-所有实例必须始终有可发现的宿主停止路径，异常、恢复和清理中的实例也不例外。UI 统一展示“请求已接收／执行停止已确认／资源释放已确认”；不能仅凭 cancelled 字段隐藏资源状态。持久写入失败不能显示“停止已持久确认”。
-
-### 4.3 暂停与继续：必须真实，不新增执行资格
-
-- 暂停调度：关闭后续派发，已开始的工作由原 owner 监督、结算；不关闭 Runtime 来冒充无损暂停。
-- 暂停原 Turn：请求 native owner 到达真实安全边界并保留可恢复进度。不得复用当前会把任务改为 review 并清理取消的路径假扮此行为。
-- 已请求但尚有不可立即中断操作时，显示“正在暂停／操作仍在结束”，保留停止入口。不能把 Rust Future 被 abort 当作 OS 操作已经结束。
-- 继续使用原任务、适用的原 Turn／checkpoint、原效果和进度；遵守现有 build、Snapshot、cleanup、unknown effect 校验。缺少可恢复依据时说明原因，不自动重跑。
-- 缓存或普通恢复不能重置预算／进度；用户通过现役明确恢复合同调整预算等能力仍保留。
-- “不支持立即冻结／强制结束所有操作”不能成为拒绝该 Agent 正常工作的理由。所有 Agent 的可控制性底线是可发现、可提交精确停止、可查看收束结果；暂停／继续能力按真实阶段和 owner 支持呈现。
-
-### 4.4 等待、预约与工作区
-
-逻辑任务存续、当前可运行预约、实际资源占用是不同事实的派生观察，不另存一套运行真相。
-
-1. 优先移除 500ms 全量 history hydration。用现有 typed receipt／canonical cursor 与 owner 通知等待；订阅后复读，断线补读，通知丢失时低成本兜底，不因丢通知永久挂住。
-2. 通知仅唤醒，最终状态以 canonical receipt 为准。不能让 UI WebSocket 成为执行唯一唤醒来源。
-3. 只有真实静止且完成交接时才可让出运行预约。唤醒、native resume、问题续执行、重启恢复等全部适用路径须重新获得原 Execution／Participant 的现有预约。
-4. 唤醒排队继续原任务，不能因为暂时没有预约而失败、kill、新建 Attempt 或反复暂停。保留用户原有 max_parallel、participant concurrency 等设置，不新增整机限额。
-5. 预约重新准入闭环和并发测试未完成前，禁止只修改 active count 排除 Waiting／Paused。相应目标不能标为已完成或悄悄降级成“不做”。
-6. 不按“现在没工具调用”推断任意 shell 没有后台写者。保持共享目录和原有 shell 权限，不要求预声明文件 footprint；不得将 Full 或 ReadShell 自动降级。
-7. 2026-10-22 用户已授权完整子 Agent 并行重构：删除工具策略导致的整 Step 工作区独占，保留原并发设置、DAG 与实际 I/O／原生 target／效果 owner。共享目录和任意 shell 能力保持；同一产物的修改由父 Agent 协调集成，不能以强制 worktree、预声明 footprint 或只读降级替代并发。
-
-### 4.5 控制投递与恢复交接
-
-- 同 Attempt 的常规业务控制投递保持因果顺序、一个在途，使用原稳定幂等键、精确目标和版本确认；跨 Attempt 独立推进。
-- 用户 Stop 的持久取消围栏及宿主取消信号直接到原 owner，必须能够抢占在途／排队的 Steer 或其他控制，不等待其业务响应或投递完成。它不能被实现成普通 FIFO 队尾命令；复用现有取消事实与 token，不新增控制中心。
-- 抢占不代表旧操作已经结束。原 owner 继续收束在途操作并保存真实结果，迟到 Steer／控制回执只能结算原操作，不能覆盖取消、清掉后续意图或重开执行；不能靠 drop Future 伪造停止。
-- 使用现有 tracked control jobs，与工作完成、取消、租约事件同时推进。不能无序 spawn 全部效果，也不能让一个控制错误通过 result? 退出整份调度集合。
-- 原意图成功确认前不丢弃；失败只保留该项待处理，不能重发业务 Turn。取消请求不意味着清理已经完成。
-- Session 恢复原 Turn；Execution 区分有效原租约、正在恢复、已有终态和确需对账，不在恢复途中退休 link 或触发旧 cleanup。
-- 人工停止优先于继续恢复。已有可信终态必须继续经过原 typed output 与业务结算，不能把“native 已结束”当交付成功。
-- 不靠增加启动 sleep 或放宽 checkpoint 校验修竞态，不复制输入、不导入旧代 Agent 数据。
-
-### 4.6 Browser／Computer 等资源
-
-- Attached Chrome 短锁内完成 connection incarnation、关闭准入检查和操作归属注册，锁外执行原生调用；disconnect 先关准入，再取消已登记操作并等待原 owner。
-- 沿用现有 run／target claims 和 settle／finish，不新增 broker，不顺带将同一个 run 的所有操作无序并发。
-- managed Browser 已有 Session 隔离，应保持；失败 release 的责任由现有 owner 继续持有，不能删除证明或要求模型再发一轮才能尝试收敛。
-- Wave2／Computer 贯穿现有取消控制。队列取消应及时退出；已经进入 OS 的操作如不能立即中断，显示真实收束状态，不假称可回滚。
-- 同一物理桌面必要输入串行保留，缩短无关状态锁持有；管理控制不排在业务长锁后面。
-- MCP、Terminal 和 Process 已有有效 owner／Supervisor 能力优先复用。不得为了统一强杀按钮让所有工具改为独立进程，或改变正常工具使用步骤。
-
-### 4.7 Runtime 退休、后台资源和缓存
-
-必须分别确认：Turn 已终结、exact Runtime 已退休、Session 仍合法持有／已释放哪些后台资源。现有 cleanup ack、Finished、active count=0、保存过 checkpoint 都不足以同时证明三者。
-
-正常完成的临时 Attempt：由原 owner 触发退休检查；防止后继准入竞争；待属于该载体的后续责任自然结算后，执行正确范围的 teardown 并注销无用句柄／缓存。不能只 cancel 不存在的 active Turn 就宣布全部释放。
-
-知识回写、文件发布、未提交结算等合法责任不能因主 Turn 已成功而自动 cancel_all。主任务成功可以先正常展示，后台责任单独可见并自然收束；用户明确停止／清空／删除时沿既有适用合同取消和 join。
-
-保留 Session process owner 不等于永久保留整个 Runtime transport。沿用已经证明安全的闭轮重建／soft recycle；不得误停进程、丢句柄后靠 PID 或重启命令补回现场。
-
-| 对象 | 处理规则 |
-| --- | --- |
-| 纯派生、可重读数据缓存 | 可回收；重新加载只有读取／反序列化权限。 |
-| 已退休、无后续责任的对象 | 精确释放并删除 registry／Host 缓存等引用，保留 canonical 历史。 |
-| 活动／等待／暂停 Runtime 的不可重建现场 | 本次不新增 idle／LRU／内存压力自动淘汰策略。 |
-| 独立 Session owner 已承接的合法后台工作 | 保持原责任与控制入口；不以其存在为由永久 pin 所有上层对象。 |
-| checkpoint、输入、效果、暂停／取消和委派归属 | 不是缓存，不删、不回退、不重新解释。 |
-
-缓存加载前后任务身份、cursor、工具／模型调用计数、重试、预算和控制事实不因缓存变化。加载失败保留原任务，明确错误；缓存模块不能调用 send、resume、retry、start 或业务进程启动。
-
-### 4.8 清理公平性、异常与数据安全
-
-- 优先在现有单个 cleanup worker 使用稳定 keyset cursor 遍历待处理项，失败项进入后续轮次；保留已有幂等、single-flight、精确校验与合理重试节奏。
-- 不能每次失败都从最旧 100 项开始。动态新增项在有界后续轮次获得机会，不能扫描到空之前一直占满调度线程。
-- 不预建通用持久 claim／重试基础设施。只有现有字段无法表达必要事实，或确实存在跨进程调度需求时，说明最小 schema 扩展理由并沿现有表演进。
-- cleanup 调用者等待超时不等于真实操作已退出；owner 保留清理任务及结果证明，不能用 timeout 或 drop Future 假释放。
-- 普通失败及可证明归属的异常按 exact instance 隔离。构造资源尚无法归属时，先补原 owner 登记闭环，再缩小围栏，不能直接删除 uncertain_acquisition 保护。
-- 数据库 I/O 失败、现役 schema／数据损坏、效果未知仍遵守根 AGENTS.md 的 fail-closed 合同。不能把“其他 Agent 继续”扩写成对共享基础设施损坏的无条件可用承诺。
-
-### 4.9 重型资源的自动退休与应用退出：不依赖用户关会话
-
-这是用户明确补充的强制合同。禁止把“用户没有关会话”“以后可能继续问”“Profile 要保留”作为浏览器／进程／连接永久常驻的理由。也不能把保护合法后台工作的规则扩大成所有重资源不回收。
-
-#### 生命周期触发
-
-| 触发 | 自动行为 | 必须保留的边界 |
-| --- | --- | --- |
-| 任务／委派使命完成 | 原 owner 在原生操作与后置责任结算后自动退休任务专用重资源，不等待用户关闭 Session 或 Agent 发 close。 | 任务完成来自正式领域结果，不从一句模型 final、一个工具完成或面板隐藏猜测。 |
-| 后台下载、回写或阶段性进程自然完成 | 完成事件再次触发退休，删除无用引用和句柄；主任务结束时暂留不等于永久留存。 | 当前确有工作的责任保留；不能为回收截断写入、下载或服务。 |
-| 旧 Session 不再承载任务与用户使用责任 | 持久历史保留，已无责任的重型载体自动释放；重新使用按正常准入懒创建。 | “仍在会话列表”不是资源引用；不能重放原输入、原网页动作或后台命令来恢复载体。 |
-| 关闭主窗到托盘／WebUI 断开 | 不改变活任务授权；已完成资源的自动退休仍照常进行。 | 这不是真正退出，不能杀合法后台工作，也不能解释为保留所有旧重资源。 |
-| 明确 Quit／应用重启前退出 | 关闭各域准入，向全部应用自有资源发送停止／关闭并分别收束；包括隐藏面板、旧 Session、已终态但尚驻留的资源。 | 应用退出的范围大于停止一个 Turn；普通 Session 后台标记不能使应用私有资源逃逸退出。 |
-| crash／OS 强制终止宿主 | 复用原 Job、watchdog、parent-death、连接断开与原生销毁机制，精确收束独占子资源；重启仅补偿核对尚不确定的清理。 | 不能依赖已死亡进程执行 finally／Future，也不能只寄望下次启动才处理活着的自有子进程；不扫杀用户共享进程。 |
-
-#### 按真实归属释放，不新增用户配置
-
-| 资源 | 默认退休与退出规则 |
-| --- | --- |
-| 任务专用 browser view／context、headless、临时渲染实例 | 任务完成且责任结清自动释放；真正 app 退出全部收束。 |
-| 用户在 NomiFun 内手工使用的 BrowserWorkspace | 属于应用托管原生载体，真正 app 退出必须关闭；运行中自动退休须先区分实际使用／待保留编辑现场，不能以一次 Turn 结束直接销毁。 |
-| 用户原有 Attached Chrome／既有网页 | 释放 NomiFun 的连接、claims、overrides 与可证明独占的临时辅助资源；不关闭用户 Chrome 或原有页面。 |
-| 在用户 Chrome 中新建的临时网页 | 仅对有真实创建归属、仍归本任务持有且未转为用户工作区的页面自动关闭；不能按 URL、标题或整个窗口推断所有权。 |
-| 进程／PTY、MCP 子进程、SSH／采集连接、Computer worker、watcher、订阅及其他现役重型实例 | 按原 owner 与实际用途在任务责任结束后自动收束；应用退出时释放应用持有部分，不因 Session 记录保留而常驻。 |
-| 现役支持的独立系统服务／外部持续作业 | 只有既有明确语义及真实独立 owner 已承接才可跨 app 退出；普通 Agent 说“后台运行”不足以形成例外。关闭本应用控制连接不等于删除已安装服务。 |
-| 历史、用户文件、已交付产物、持久 Profile／登录资料 | 保留数据；释放原生进程／view 不等于删除资料。不能承诺完整保存任意网页 JS、未提交表单或未完成动作。 |
-
-实施前核对现行 Browser 合同：Agent 与用户使用同一个 BrowserWorkspace，隐藏面板仅 detach；现行 close_idle 是明确确认重建入口，并不是任务结束 GC API。不得伪造“用户确认”直接复用它，也不能新加一套用户接管模式或让每次浏览都增加配置。
-
-需要在现有 Browser／资源 owner 中用真实创建来源、任务／Session 责任、原生操作、用户使用和现有 UI 交互事实，补齐最小的退休依据。任务专用、用户仍在使用／保留现场、外部借用必须可区分；优先复用既有事实，缺少必要归属时在原领域补最小正式事实，不建立全局资源账本。
-
-用户打开过或 Session 仍存在不能永久 pin 全部载体；用户正在编辑、跨 Turn 继续浏览、未完成下载、暂停恢复或 unknown 则不能被误判为废弃。无法证明可以无损关闭的用户工作区不准以“缓存优化”破坏性释放，必须具体列出未覆盖范围并完成相应生命周期设计，不能据此虚称旧会话驻留问题已全部解决。相关稳定合同与 browser-platform 文档须在实现时同批正式更新。
-
-#### 退出收敛不能被无关领域错误跳过
-
-复用现有 shutdown owner：先封住各资源新准入，再独立发取消／关闭并收集结果。某个 SSH、知识源或其他领域失败，不应使已可安全关闭的 Browser、PTY 等连清理都没有发起。实际依赖仍保留：原生共享设施只有在依赖 producer 收束后才能最终销毁，不能简单删除所有 shutdown prerequisites。
-
-正常退出成功必须有相应 native 关闭、任务／进程树退出及句柄注销依据；不能隐藏窗口、丢 Arc、清空 registry 或关闭数据库就显示完成。失败保持真实清理状态与可重试责任，不反复发业务操作。强制退出的清理保证依靠已有 OS owner，不承诺退出钩子会运行。
-
-Windows／macOS 的 WebView2／WK 共享进程由 OS 引擎管理，应释放自己的 controller／view／context／连接，不为实现“零进程”杀掉系统共享 WebContent 或用户浏览器。验收看本应用自有载体、精确子进程和可归属资源，无权处理的共享进程不计为可随意杀掉的对象。
-
-## 5. 实施工作包与退出标准
-
-采用完整纵向链路的可审阅改动；各包独立验证，不等待一场大重构才交付。包内替换必须同步类型、调用方、测试和当前文档，不保留两套裁决或双写。
-
-| 工作包 | 主要工作 | 退出标准 |
-| --- | --- | --- |
-| P0 基线与失败用例 | 复核 R01–R14，盘点所有 Agent 入口、重资源寿命及正确 owner；建立现有能力基线和针对真实缺陷的失败测试 | 每项问题有现役路径、适用范围和可验证标准；不以继续写计划替代实施。 |
-| P1 精确用户停止 | 明确 Step／委派／Execution 范围；修正取消结算；处理并发派生；区分 Turn stop 与其后台资源结束；补所有实例停止入口 | 单 child 停止不误停兄弟；整组取消语义保留；旧按钮不命中新代；停止事实重启后不复活。 |
-| P2 真实暂停与预约 | 替换不真实的 pause→review/cleanup 路径；区分调度暂停／native 停车；打通原任务继续和预约重新获取 | 不 cancel＋retry；支持路径无损继续，不能即时停车时真实可见；唤醒不超出现有并发、不反复开新 Attempt。 |
-| P3 调度与恢复 | 每 Attempt 保序业务控制 jobs；用户 Stop 可抢占；失败局部化；Session／Execution 恢复交接；可靠通知和 cursor 补读 | 控制卡顿不挡兄弟和同一任务的用户停止；恢复不同租约交错不误停、不重放；丢通知不挂死。 |
-| P4 资源与释放 | Chrome 原子准入＋短锁；Computer control；公平 cleanup；任务完成自动退休重资源；全应用退出／父死收敛；exact Runtime 与 Host 缓存释放；保护回写及 Session owner | target 隔离有效；第 101 项能清理；用户不关旧会话也不累积废弃重资源；退出覆盖所有应用自有载体；不误杀合法工作或共享浏览器。 |
-| P5 控制体验闭环 | 复用任务面板，汇总各域；补 subagent、后台／异常／恢复／清理中任务；展示阶段与范围，区分自动运行和计划 | 所有 Agent 可发现可停止，管理操作独立于模型；不把工程字段或新配置变成普通工作步骤。 |
-| P6 集成与交付 | 执行第 6–8 节验证、修复回归，删除被替代代码与文档，更新现役架构 | 已列目标都有证据；能力保持、资源稳态、正确控制及收敛均通过；未运行项清楚列明。 |
-
-P1 的后端与对应入口必须形成完整链路，不等 P2 的全部增强才使用户可停止。P2 不允许以“暂不处理”悄悄划掉目标；确实无法兼容当前 native 合同的部分，要记录具体原因、实现真实控制语义并明确尚未达到的验收，不能虚称完成。P3、P4 可按文件／owner 边界并行，但必须消费相同的精确身份和取消语义。
-
-涉及 API／schema 的变更，同批更新现役调用方及 wire tests；保留支持中的功能语义，不以丢弃合法调用或删除历史解决兼容问题。数据库确需演进时使用现行合法迁移路径，不改已提交 baseline checksum，不导入退役数据，不为本专项执行数据 clean cut。
-
-## 6. 验收矩阵
-
-以下均为待执行。测试应验证行为与竞争结果，不是镜像私有实现或仅断言字段。专用 mock／临时数据库验证与实机验证分别报告。
+以下ID保留原验收含义，与具体构建结果分离。新改动只补其相关竞争与负向验证；不能把矩阵中的目标直接记为已通过。
 
 | ID | 场景 | 必须满足 |
 | --- | --- | --- |
@@ -292,84 +130,7 @@ P1 的后端与对应入口必须形成完整链路，不等 P2 的全部增强�
 
 故障注入尽量使用屏障、可控通知和虚拟时间，不通过随机 sleep 得到偶然绿色。检查实际执行的测试数与 feature，不能接受“命令成功但相关用例被过滤为零”。
 
-## 7. 复杂度与能力退化审查
-
-每个纵向改动交付前回答：
-
-1. 修复了哪个 R／T？现有 owner 为什么不能直接完成，新增结构是否确有必要？
-2. 是否复制了状态、日志、checkpoint、取消账本、全局协调或影子资源归属？若是，收回设计。
-3. 普通用户或 Agent 是否多了配置、授权、资源声明或支持全部控制的前置要求？若是，违反 U03／U05／U12。
-4. 是否通过默认超时、自动 kill、降并发、关工具、强制隔离获得通过？若是，违反用户要求。
-5. 是否取消了回写、后台服务，或暗中创建新 Turn／Attempt？若是，先补生命周期语义，不能掩盖。
-6. 是否保留了两个相互竞争的旧 reader／writer／DTO／测试／设计分支？替换时同批退役。
-
-下列内容不作为本专项前提：新全局资源平台、万能暂停／强杀引擎、全量 shell footprint 推断、所有工具独立进程化、固定整机限额、统一任务 TTL、为队列公平性预建分布式任务系统。
-
-新增必需的控制 scope／正式事实可以有少量真实复杂度；必须置于现有 owner 与同一事务／事件链，删掉被替代的重复裁决。不能声称新增独立控制能力完全不需要实现成本，也不能用复杂度理由遗漏用户要求。
-
-## 8. 验证与完成标准
-
-按变更选最小有效定向测试，阶段通过后只因新改动／失败／未解风险扩大检查。以下是入口示例，执行时核对实际 Cargo features、资产依赖与新增测试名称：
-
-    cargo test --locked -p nomifun-agent-execution --lib
-    cargo test --locked -p nomifun-agent-session --lib
-    cargo test --locked -p nomifun-ai-agent --lib
-    cargo test --locked -p nomifun-app --test native_execution_recovery
-    cargo test --locked -p nomifun-app --test desktop_agent_shutdown
-
-UI 对相关控制、投影、伙伴和重连用例做定向验证。涉及合同／wire／生成绑定时执行仓库现役生成与 check 流程，不手工制造不一致 DTO。
-
-适用的边界检查：
-
-    bun run check:agent-session-boundary
-    bun run check:process-runtime-boundary
-    bun run check:browser-platform-boundary
-    bun run check:uarc-boundary
-    bun run check:desktop-ui-boundary
-    bun run check:docs
-
-Session 内容／storage 变更同时运行受影响 canonical history、reset、consumer 测试。整合阶段属于跨层变更，运行 bun run check 及受影响 Rust／UI 集成测试；UI 文案、类型与合同同步检查。renderer 只支持桌面，最小 880×600，不添加手机布局、模拟或低于 880px 的断点。
-
-Windows 可作为首轮实机入口，但不能用其通过推断 macOS／Linux 通过。平台开发边界、原生验收和周期见本节后续补充。其他平台环境缺失不阻止已独立验证的修复交付，也不能因此声称相关三平台验收已经完成；这属于验证证据边界，不是运行 Agent 的新资格要求。
-
-资源验证记录原运行构建、负载、轮数、正常长期任务、存活对象／句柄／进程／浏览器资源、cleanup backlog、数据库查询量和可获得的 CPU／RSS；相同负载前后比较。无需让 allocator 立即返还所有内存，更不能要求仍在运行的合法任务不占资源。判断废弃对象是否持续累积，不能只看 healthy active_runtime_count。
-
-满足以下条件才可报告本专项完成：
-
-- P0–P6 的适用交付、U01–U13 和 T01–T37 有明确结果；未满足的目标不能改名为“不适用”来掩盖。
-- 每个 Agent 用户控制闭环实际可用；停止与资源释放范围正确。
-- 没有隐式重跑、错误取消、重复效果、新能力门槛或合法后台工作被 GC 中断。
-- 相关测试通过，实机／模拟证据分开；环境限制和剩余风险具体可审阅。
-- 声明跨平台全部验收完成时，适用的 OS01–OS10 必须有对应原生证据；环境缺失只能报告实现或局部验收完成，并保留尚待验证项，不能冒称全平台通过。
-- 旧错误路径已退役，现役架构文档与实现一致，差异只包含本专项。
-
-### 8.1 操作系统差异：共用合同，适配现有原生 owner
-
-Session／Execution、精确取消范围、DAG 归属、Stop 抢占、等待预约、缓存与清理公平性保持一份实现合同；不得复制三套生命周期状态机。差异收敛到既有 platform adapter、资源 owner 和桌面退出入口。
-
-| 范围 | Windows | macOS | Linux |
-| --- | --- | --- | --- |
-| 进程退出证明 | 复用 Job、exact process handle、创建后登记再运行和 Job 成员终态证明。不能用 taskkill 或进程名扫杀代替。 | 复用 session／process-group、watchdog、generation 与原句柄；不能按缓存 PGID 杀掉未知组。 | 复用 watchdog、pidfd／受支持的身份核验 fallback 和原进程组；不能退回裸 PID kill。 |
-| PTY／标准输入 | ConPTY 没有通用 Unix stdin EOF 语义；中断、关闭输入、取消、强停和 HPCON close 分别验证。 | 验证 PTY 前台／后台 job、终端退出和 watchdog；逃离原登记组的进程不能假称已被完整回收。 | 分别验证 pipe／PTY、leader 先退出、watchdog 异常及实际 reaping；保留 PID／PGID 复用保护。 |
-| managed Browser | 当前 Desktop 的 WebView2；COM controller 关闭与 Tauri／Wry 注销分别确认，不能只隐藏窗口。 | 当前 Desktop 的 WKWebView；AppKit 主线程创建／操作／销毁，保留 WK 回调与实际收束证明，不能 kill 系统共享 WebContent。 | 当前 Desktop 组合没有注入此 provider；GTK／WebKit renderer 不等于 Agent managed Browser。本专项不补新后端。 |
-| Attached Chrome | 当前 Desktop 已注入，验收目标独立性、原子准入、断连与 incarnation 竞争。 | 当前 Desktop 已注入，同样验收；不能以 Chrome 通过替代 WK 验收。 | 当前 Desktop 组合未注入。保留现状 unavailable，不以“跨平台一致”为由新增支持或变成其他修复的门槛。 |
-| Computer | 普通完整性私有 worker；提权目标结构化拒绝，不再使用管理员桌面桥。 | App 直接启动同签名 worker，实际 TCC 与退出回收独立验收。 | X11/XWayland、AT-SPI 与原生资源清理；原生 Wayland capture 未启用，不以源码代替授权证明。 |
-| 管理员设施 | 原 UAC runner，按 logical client 保留独立 Supervisor 和 handle。 | 原 SMAppService daemon／XPC，按连接与原进程收束；设施批准不等于任务成功。 | 原 pkexec／系统设施路径；专用创建线程寿命覆盖 child，不能改为临时线程导致父线程死亡保护误杀合法 runner。 |
-| 桌面退出 | 关闭到托盘、明确退出、重启等分别走原 coordinator；事件线程在原生关闭确认前不能停。 | 加测 Cmd-Q、Dock／AppKit termination、重启与开发启动者退出；WK／Computer 收束期间主循环仍须服务。 | 加测正常退出、Unix signal 与重启；GTK 主循环和 native worker 停止不互相阻塞。 |
-
-支持矩阵必须由当前 checkout 重新核对。已确认的源码入口：
-
-- [Desktop provider 注入](../../apps/desktop/src/main.rs) 3407–3428、关闭到托盘 3793 附近；[browser surface 模块](../../apps/desktop/src/browser_surface/mod.rs)。
-- [Windows process](../../crates/shared/nomi-process-runtime/src/platform/windows.rs)、[ConPTY](../../crates/shared/nomi-process-runtime/src/platform/windows/conpty.rs)、[WebView2 native close](../../apps/desktop/src/browser_surface/windows.rs)。
-- [macOS session](../../crates/shared/nomi-process-runtime/src/platform/macos_session.rs)、[macOS watchdog](../../crates/shared/nomi-process-runtime/src/platform/macos_watchdog.rs)、[AppKit 生命周期](../../apps/desktop/src/macos_lifecycle.rs)、[WK 释放](../../apps/desktop/src/browser_surface/macos/lifecycle.rs)、[Computer worker 生命周期](../../crates/backend/nomifun-computer/src/worker.rs)。
-- [Linux watchdog](../../crates/shared/nomi-process-runtime/src/platform/linux_watchdog.rs)、[Linux recovery](../../crates/shared/nomi-process-runtime/src/platform/linux_recovery.rs)、[Cua 私有 worker](../../apps/computer-worker/src/main.rs)、[原生补丁登记](../../vendor/CUA-DRIVER-PATCHES.md)。
-- [三平台全局 OS 合同](../architecture/global-os-capabilities.zh.md)、[现有 Browser 验证](../validation/browser-platform.zh.md)、[Computer worker 架构](../architecture/computer-use.zh.md)。退役 Computer 的源码与测试记录不作为新 worker 的验收；非 Computer 的存量记录与现役责任保持。
-
-不得为平台一致性把所有工具进程化、增加权限模式或禁用缺少“立即强停”的能力。统一底线是用户能发现、精确发出 Stop、禁止后续新动作、看到真实收束和未确认资源；系统原生限制如实呈现。
-
-### 8.2 分平台补充验收矩阵
-
-T01–T37 的共通逻辑回归在适用平台运行；下面 OS01–OS10 是原生证据补充，不建立另一套产品行为。
+## 原生平台验证矩阵
 
 | ID | 场景 | 平台要求与通过标准 |
 | --- | --- | --- |
@@ -384,62 +145,94 @@ T01–T37 的共通逻辑回归在适用平台运行；下面 OS01–OS10 是原
 | OS09 | Runtime 退休与资源稳定性 | Windows 记录 native handles／Job／ConPTY；Unix 记录 FDs、进程、watchdog、PTY；按实际支持记录 WebView／WK、portal／PipeWire／worker。固定负载结束后无废弃资源逐轮累积，后台服务不误杀。 |
 | OS10 | Desktop 与桌面级 WebUI 的用户控制 | 共享后端合同保持一致；UI 卡住／重连不使控制依赖模型，原生主线程繁忙不阻止宿主接收控制；WebUI 断开不是取消任务，renderer 不新增移动端规则。 |
 
-环境记录至少包括：源码／构建身份、OS 与架构、相关运行时版本、普通／管理员身份、桌面会话种类、实际 provider、权限状态和测试数据隔离方式。沿现役部署基线验证，不随意引入新最低系统版本。
+## 历史构建与平台证据
 
-Windows 主机可完成共通 Rust／UI 及 Windows 实测，但交叉编译不替代 macOS／Linux native 运行。macOS 原生主循环／权限需要真实 macOS 会话；Linux Xvfb 可用于确定性 X11 用例，WSLg／XWayland 不证明完整 Wayland portal／用户桌面授权。Wayland 至少需要实际支持桌面的一组真实授权与拒绝／撤销测试；改动触及 GNOME／KDE 不同后端时分别补验。
+以下保留原构建身份、命令、计数、原生回执、首次失败与未运行边界。原编号仅用于识别历史记录；其中“当前／最终／正在／待验”等词限定在该记录的日期和构建，不构成新的施工入口。是否已由后续验证覆盖，以本页前部和各原始报告为准。原提交／推送授权仅属于当时任务，不向后续工作转授。
 
-可复用的进程测试入口示例，仍须核对 cfg／feature 与实际用例数量：
+### 2026-10-23／24 启动交接修复的中间构建与恢复记录
 
-    cargo test --locked -p nomi-process-runtime --test parent_death
-    cargo test --locked -p nomi-process-runtime --test pty_contract
-    cargo test --locked -p nomi-process-runtime --test process_contract
+用户已授权完整实施、继续定位数据库争用并安全恢复 Session `01a16826-d942-73b0-b9a3-557c69215e6b`。起点 `c3eb1a85b0970e868f47d84d15007e08c3d5c87e`，保留已有 129 项工作区改动，不提交／推送。以下替换此前仅设计阶段的进展说明；不对真实库注入故障、不跳过 checkpoint build 围栏、不伪造终态。
 
-macOS 复用现有 darwin_registered／darwin_application 与 WK／AppKit fixtures；Linux 复用现有 X11／Wayland fixtures。测试专用进程和浏览器可以受控结束；本专项仍不授权安装替换日常 App、修改系统权限、关闭用户浏览器或破坏用户数据。
+**根因证据。** 原 Execution 仍为用户配置 max_parallel=4。17:51:42.687 原04提交 Running，17:51:58.555 heartbeat 的 SQLite Busy 被错误裁决为失去租约，旧代丢弃借用的 running_jobs；17:52:10.100 新代把 Missing 当作永久 Review 并停用 link，实际应用没有重启。原04只有 opening/active-set/ready，0 accepted/Turn/Effect；Running 不证明模型执行。on_started 还等待 UI outbox drain，Running 的发布延迟27.404秒，业务交接不应依赖发布完成。新建04b不会正式结清原04，且历史 delegated_work 取消选择为空，不等于取消自身。显式WAIT省略cursor时错误重复报告相同Review，形成33次wait/34次status；自动WAIT在model99沿原cursor停驻。原始只读证据保留在 `build.noindex/session-01a16826-*-evidence.json`，不再保留一份竞争设计。
 
-环境无法获得时逐项记录“未运行／原因／需要的机器或桌面”，保留当前平台能力，不将其改成禁用条件。可先交付已独立验证的纵向修复；只有相关 OS 原生证据齐备，才声明对应三平台全部验收完成。
+**已实现合同。** 原 TaskTracker 独立托管 Step job；heartbeat 区分暂未确认和确定失租约，换代不丢原调用。InitialInput只保存完整原request，operation key从原Attempt派生；on_linked原writer提交精确link和原意图，不等待发布。canonical accepted+started同writer核验lease/Step/Attempt/link与完整原输入。Session输入owner持续负责至原native claim/SDK接管或精确终态；重复accepted ACK不是重新发送许可，父问题回复共用该owner。稳定Step下幂等Retry、精确历史Attempt控制、父来源TaskControl、Review正式核验与ReplaceWithExisting均沿现有事实链；未新增表或第二账本。显式／自动／重放WAIT共用scope cursor，逐Step保留消费与分页，不因租约元数据或已消费结果移除重复调用模型。UI接入核验及正式已有成果替代。
 
-### 8.3 实施周期与关键路径
+**数据库争用。** begin_agent_write诊断贯穿原事务，区分pool等待、BEGIN等待、writer持有及commit/rollback ACK；不改pool、timeout或用户并发，不加诊断SQL。真实SQLite、5连接、1原writer+3 peers+outer waiter回归2/2通过：旧borrowed future停止poll时，即使release已到writer仍无法COMMIT；独立owner同负载可以完成。历史首个writer未能唯一确认，不能用包含BEGIN等待的27.463秒connection scope冒充实际持锁时长。Busy→后续明确永久准备拒绝也必须重新分类，不能永远沿用第一次Busy；已补反例，待最终运行。
 
-以下为基于当前源码规模与风险的工程工作量区间，不是 AI 运行小时数，也不是对某次连续会话的完成承诺。按熟悉 Rust／Tauri 的主要执行者、有自动化测试、三平台测试环境现成、范围保持不扩项估算；P0 和第一条精确停止链路完成后必须更新。
+**已完成验证。** 默认线程栈、2测试线程：Session383/383、DB lib315/315、Runtime fresh 533通过/1原ignored（含纯WAIT新矩阵）、Execution lib181/181、Execution repository86/86。App输入owner故障6/6；父重试完整交付及原输入Busy恢复2项通过；ExistingChild续作、四Full子并行、同writer authority及WAIT分类均通过。UI交互14/14，typecheck、desktop UI boundary、canonical boundary与fresh `bun run check`通过。最后补充的prelink准备Busy、Busy→永久拒绝和纯WAIT冷恢复尚待fresh编译重验；当前不把旧二进制通过扩大到后续修改。首次失败的时钟fixture、旧outbox观察、source准备错误依赖Running link及输入owner迟到terminal竞态均已按真实合同修复，失败记录保留在私有build.noindex证据。
 
-| 工作包 | 估算有效工程人日 | 主要不确定性 |
+**编译边界。** App check3 rustc栈失败；拆出boxed输入owner后check4给出async layout深度130超过既有限制128；共享Session writer再加boxed边界后check5通过（3m08s）。未提高编译器栈或recursion limit，测试exe运行前移除RUST_MIN_STACK。candidate3测试构建完成；等待最后修改冻结后统一编译lib和实模integration。
+
+**真实恢复。** 原库和工作目录已备份至 `build.noindex/attempt-handoff-original-preserved/`：DB SHA256 `342fa312bbabec22f972b6d7c42205eaf31c18b8ed05fa9eee01b3a7c1573fb0`；ZIP SHA256 `c4582b70e0b3a864cb5786380a1acc459e6fc146fb4fc168326d0ad0427720a5`。先在副本执行正式ReplaceWithExisting，逐表确认仅领域变动、canonical及非Agent数据不变；随后对真实库执行同一正式命令。原04的0准入与04b原typed成功正文均核实，Execution38→39→40并completed，Attempt仍12，8份真实成果未重跑。临时维护example已删除，driver仅留ignored证据。
+
+原checkpoint168/seq2996/model99的build为bd51…，匹配旧exe SHA256 `26AECC3B4DDF31E799C286A40D4D6105E194119481E0347FE8D9AEB41FCE78D2`。原版本自动恢复被seq2997同request的纯AwaitingChildren尾部挡住，正规quarantine写2998/2999并暂停；不是未决业务效果。逐项验证14个process Effect的exited/reaped、33个returned Effect、原host正常退出及无exact Session残留进程，形成 `attempt-handoff-original-cleanup-proof.json`（SHA256 `54b46e6cc2955829ac70583770a7701409766d18ad6cbfce0fb9ec36c06e973c`）。通过原WebView既有认证fetch调用正式execution/resume，HTTP200 authorized、seq3004；未提取或修改认证秘密。保留原Turn/build/Snapshot/预算，父从model99继续到104，最终在seq3076/3080写入完整答复、seq3081写turn/completed并回到ready。真实恢复已完成：Attempt仍12、max_parallel仍4、9个子Session全部canonical事件与备份逐条一致，未重新执行孩子。恢复后仅发生状态核对、计划修正和完成报告；原回合host_cleanup_proven也已写入。证据 `attempt-handoff-real-final-delivery.json`。在独立文件副本重新运行原canonical测试脚本，10个JS语法和47项冒烟均通过，真实工作目录未改；证据 `attempt-handoff-restored-game-verification.json`。已通过原WebView正式process exit关闭本轮启动的兼容host，调试端口已退出，未杀共享键盘服务。另一旧paused Session保持seq1588，另一受未结算Effect保护的3条输入仍未领取且head137；不得借恢复顺带执行。
+
+最后交叉审查补充：Stop与prelink准备竞争时，通用删除前仅事务外读link不足以证明空，且prepare失败漏清理；现正替换为原opening/零输入/零Turn/零Effect/零link同writer的空创建退休，合法新输入获胜则保留，先退休则拒迟到输入，使用原deleting恢复责任而不新建账本。candidate3全App回归已超过1000项通过，发现一个已有静态边界测试对CRLF不兼容，已仅规范测试读取的行尾，待fresh重验。
+
+全App candidate3实测未整体通过：1301项中1103通过后，除CRLF静态测试外，后台问题回复用例稳定复现真实活性断层——无推进者分类把合法等待用户回答误判成技术暂停，第三条已accepted输入因原Turn paused不能claim，正在修复等待分类与原输入接回合同。随后test进程以Windows 0xC0000005退出，未运行尾部不能算通过，已单独分配按原产物和默认栈诊断；不提高栈或放宽deadline掩盖。新源码最终验收须覆盖这两处。
+
+分层 fresh 进展：Runtime533通过/1原ignored，Execution185/185通过；`bun run check`再次全过。Session393项候选在374通过、1条旧错误文案断言失败（已修为native recovery proof）后发生同类0xC0000005，不能计整体通过。纯WAIT三个Store定向已过；空创建第一版fixture的FK破坏方式已修，另补queued successor不得删除，并将输入竞争加强为真实两连接WAL（仅测试后改，待重编）。原生崩溃已跨App/Session复现；只读检查未找到仓库直接SQLite句柄共享或hook，diagnostic guard未改变原事务连接流程。现有dump缺失，因此已用独立故障夹具验证私有DEBUG_ONLY_THIS_PROCESS取证runner，正运行Session完整测试取得现场；不更改栈、并发、超时或全局WER。
+
+candidate4 App定向新证据：后台真实问题入口原稳定失败例已通过（32.1s），生产Journal纯WAIT恢复1/1及CRLF边界1/1通过；runtime_collaboration 18/19通过，单槽已受理回答误标attention暴露dispatcher观察遗漏。已按原typed DecisionInput证明修 snapshot/live WAIT 两处：只能据此查询真实dispatcher，getter为真才can_progress，outbox本身不授执行权；原单槽断言/并发/超时保留。为避免陈旧产物，精确中止尚未使用凭据的live compile-only App rustc并保留依赖，开始candidate5 App lib+live integration同图编译。
+
+原生崩溃取证的边界：一条子Agent深入转储诊断被平台安全检查拦截，后续仅普通日志/源码/限定测试，不绕过。受控Session完整393项已正常跑完，392通过/1旧文案失败、无nativeAV；原plain两项最早未结束候选按默认栈/双线程重复10轮共20次全过。故仍未定位原AV，不能把受控重跑当作已修复。
+
+2026-10-24 继续验收：Session最新plain完整393项中392通过，仅新WAL fixture使用OPEN_MEMORY源VACUUM造成目标不落盘；已改正式init_database创建，再双连接WAL重开，7项相关定向全过（其余392的生产代码未变）。App完整1305项：1300通过/1机器人管理fixture失败/4原ignored，无nativeAV；失败fixture刻意shutdown整个Execution，新的无owner出口正确暂停，另审计确认真实initial planner此前漏计owner。现已实现同步规划guard、局部typed数据库重试、原已产plan保留、确定失败结算责任保留、commit丢ACK后的实际scheduler交接及先交接再publish；fixture以真实规划barrier保活、Stop抢占，正在candidate7编译/测试，不假装status等于owner。
+
+StepFun Plan step-5-preview真实2子完整通过：1次delegate/2个Attempt/1父Turn，Full孩子真实重叠23284ms，2份原结果消费、父文件整合及原生进程验证均完成；WAIT期间0模型调用。证据 `attempt-handoff-live-two.json`，build digest `6cd8a8f054dabbaa96ee0de1f243a7740c2c81f8d35a0aa2a52d6d0646b454ce`。真实8子首轮父state completed、0工具/参数/Kernel拒绝，但EIGHT_PARENT_FINAL_MISSING失败；该旧断言混淆正文缺失与marker缺失，不能推断没交付，也不能计通过。仅测试/runner已分开FINAL_EMPTY/FINAL_MARKER_MISSING，在保持原prompt/所有断言的前提下先核验全部工作事实再查marker；加入原flag的受控保留与明文凭据审计，待同任务取证重跑。首次retained启动的白名单环境缺Windows SDK定位变量，报WINDOWS_TOOLCHAIN_UNAVAILABLE且未执行；已从宿主仅收集非敏感工具链/系统路径并验证TOOLCHAIN_OK，不改变用户环境。
+
+桌面dev候选已在独立输出目录编译成功（不覆盖仍被共享键盘服务持有的旧exe），路径见 `attempt-handoff-desktop-executable.json`；规划owner新修复后需fresh构建，不计最终候选。真实指定会话已交付且本轮未再重放，其他真实任务不用于故障测试。
+
+当时待验的纯WAIT、空创建退休与隔离2/8子实模已由本页最新Windows结果更新；该记录中的中间构建不升级为最终证据。macOS/Linux新整图原生验证仍单列。
+
+### 2026-10-23 父 Turn 收尾责任与结果恢复（已实施并完成 Windows 验收）
+
+用户授权完整实施。起点为 `c3eb1a85b0970e868f47d84d15007e08c3d5c87e`，保留原工作区 55 项已修改／未跟踪内容；未改写真实故障会话、用户数据库或重启现役桌面进程，未 commit／push／发布。隔离实模使用用户指定 StepFun Plan `step-5-preview`，凭据仅经无回显 stdin 进入测试内存，未进入源码、日志、环境或参数。
+
+原 SDK 现在保留真实输入、原出口、首个有界脱敏错误及未完成资源现场，原 Session owner 接管确切 Runtime 的收尾。`runtime/native-settlement-requested`／`settled` 复用 canonical Event／Payload，不新增表、列、第二账本或启动权限。暂停后只准补交已准入观察、清理及原出口；Stop 和后继围栏优先，真人 Pause 保持暂停。初始化前缀先确认再改变围栏，claim 后先保留原 Journal；SDK 受理后持续负责，外层不再以固定超时制造第二次暂停。ACK 丢失只确认原事实，不重跑模型、工具、输入或委派。
+
+同 root／同 SDK 的恢复使用既有 opaque SDK task identity 识别原任务，原发送才更换身份；registry release 与收尾重试不改变它。出口缓存和 preclaim 单飞绑定确切 SDK／task，身份缺失不放行。worker 等待后重新核验身份，canonical native generation 继续独立约束写入／通知。冷结算校验完整 journal 序列，仅比较原 receipt 代内的出口，保留旧代真实 Pause。原工具及 MCP owner 保留真实返回及原待补交记录，业务失败、返回合同错误和物理释放分别结算；typed Busy／Locked／PoolTimedOut 只重交原不可变写入，不改变池容量或期限。
+
+调度故障恢复局限于原 Step／Attempt，健康兄弟、原控制及 Stop 继续推进；正常与恢复共用 typed canonical 结果消费，预算／进度不重置。父指导与精确 QuestionReply 区分：明确答案引用原子 Session／Turn／Question Event／request，复用原 Attempt 的 DecisionInput outbox，保留 Agent 来源，不伪造真人同意。已答待容量不再误报未答，原父等待让出既有容量；native 取消及 cleanup ACK 在领域终态之后仍唤醒原观察者，不追加镜像终态或模型轮询。
+
+八子实模另触发 HEAD 已存在的并行 caller 自锁：消费首结果时停 poll 兄弟，兄弟的准入 future 却可能持有首结果写入所需的 Host 锁。现于原循环同时推进剩余 caller 和单一串行结果处理；不新增 spawn／资源 owner，临时返回队列限于原批次，快结果不等无关慢调用，下一模型及重放保持原提案顺序。旧 cutpoint 实证 21.51s 失败，同 cutpoint 新图 1.76s 通过；暖恢复旧缓存 observed=1 及正式 release 后 21.12s 永久重试均先反证，新图三个真实冷／暖／release 回归各通过。原语音取消超时亦已转绿。
+
+退役了 bool cleanup-pause 交接、永久 settlement failure 标记、按 Session 再挑 Runtime 的交接分叉、旧 admission=None 缓存放行、source 空 lead-report／suppressed ACK、编号任务的强制预承诺，以及没有生产调用者的 `open_journal` 包装入口。显式编号交付校验、非 source 真实报告、知识回写、资源及 native checkpoint 安全仍保留；Windows 路径使用统一正式 codec。现役中英文 [Agent Session](../architecture/agent-session.zh.md)／[Execution](../architecture/agent-execution.zh.md) 文档已同步。
+
+| 最终受影响验证 | 结果 | 说明 |
 | --- | --- | --- |
-| P0 | 1–2 | 当前 HEAD 差异、现役失败测试与平台准备。 |
-| P1 | 4–6 | 单任务取消语义、DAG 委派归属、停止与派生竞争、完整停止链路。 |
-| P2 | 5–8 | 原 Turn 真实暂停、无损继续、全部恢复入口重新预约；风险最高。 |
-| P3 | 4–6 | 同 Attempt 保序且人工 Stop 抢占、双域恢复、通知补读与代际竞争。 |
-| P4 | 5–9 | Browser／Computer 平台适配、退休与回写责任、清理公平及原生异常循环。 |
-| P5 | 3–5 | 跨领域完整可见性、作用范围及停止／释放阶段呈现，区别于 P1 的基本停止入口。 |
-| P6 | 4–7 | 三平台原生、资源稳定性、回归修复与合同收敛。 |
-| 合计 | 26–43 | 可并行的工作量之和，不直接等于日历时间。 |
+| App 完整 lib | **1224 通过／0 失败／4 原 ignored／0 filtered** | 默认栈、2 线程、519.33s；SHA `32423E73F29E2E640198DF260D93B3ACE9F9D493CFFA806A100A31225F1D8B08`。 |
+| SDK／Session | **357／383 全部通过** | 最终 token 图、默认栈、2 线程、各 exit 0。 |
+| Runtime／Execution | **525／173 通过** | Runtime 保留 1 项原 ignored；含并行 caller、快结果、局部恢复及精确取消通知。 |
+| Contracts／DB repository | **131／78 全部通过** | DB 最后 writer／reader 变更以 fresh 78 为准，包含精确问题、binding／clear floor／Stop 拒绝矩阵。 |
+| File／EngineCore | **433／67 通过** | 各保留 3／1 项原 ignored；Windows canonical path 夹具修正后通过。 |
+| Native recovery／desktop shutdown／MCP | **8／2／17 全部通过** | 最终 clean 图、默认栈、2 线程、各 exit 0。 |
+| Journal 冷恢复 | **14/14 通过** | 包含 Pause→resume→新 claim→handoff→cold 正反例；属于 App 全包，不重复累计。 |
+| 八子验收 SQL 合同 | **1/1 通过** | 正式全迁移内存库逐条 prepare 同一组 SQL，并拒绝空时间、错绑定及重复身份。 |
 
-建议日历安排：
+先前 DB lib 314/314 是较早图的阶段证据，最后 narrow proof／export 变更由上述 fresh DB repository 78 覆盖。不同构建图不合成虚假的全量总数，定向回归不重复计数，原 ignored 不算通过。完整 `bun run check`、正式 contract generator、桌面 Browser／Computer feature 编译及 live runner 自检通过；最后文档修改另跑文档校验。
 
-- 第一批可审阅且可用的纵向改进：约 1–2 周。优先单子任务精确停止、Stop 不被挂起 Steer 挡住、清理公平和真实释放状态；不等待全部增强一起完成。
-- 一个主要执行者串行推进、由 Agent 辅助：完整范围先按约 6–9 个工作周安排。
-- 2–3 条有效工程工作线并行、三平台环境已经可用：完整范围先按约 4–6 个工作周安排。
+最终生产 build digest 为 `bd51c316fc7a7d6bdea845c7eb95bf121ce417e77f1ab83c757b015e6aa91e36`。双子实模 **1/1、87.74s**：两 Full、重叠 **19017ms**、原父 **1 Turn**、原生写入 Session **3**、最终投影补写 **0**。八子实模 **1/1、133.46s**：**8 Full／8 唯一 Attempt0／1 次委派**，既有 max_parallel **4**、domain／native 实际 peak **4**、四路重叠 **32886ms**；父同一 Turn 消费八份确切结果、读八个原文件并整合第九个文件，真实验证进程 exit=0 且 reaped=true；原生写入 Session **9**、最终投影补写 **0**、父未代写子文件。两实模均正常关闭、通过文件凭据审计和外层日志审计。双子 exe SHA `94A6BBA06DD8C8462AB02144E19590F9B93D65708B2EB3759D7087D8401AADBF`；八子 exe SHA `B861E3BF3D879C0F305D1574792FBEF38570F222317163378731142AD371445D`，仅八子测试读者修正使测试 exe 不同，生产 digest 相同。
 
-以上是排期参考，不是必须等待的最低周期；实现提前通过可以提前交付。也不能以到期为由降低能力、跳过 native 验收或宣布完成。AI／子 Agent 数量不线性缩短周期：取消 scope、暂停／预约、Runtime 退休合同需要共同确定，Rust 构建资源和实机故障验证也有串行部分。
+中间失败证据保留：首次八子 903.76s 暴露旧 caller 锁环；修后首轮八子九个 Turn 正常完成，却因测试误读不存在的 attempt.conversation_id 列而失败，未计成功。验收读者改走现役 exact link／nullable 时间后先通过上述无凭据合同测试，再取得最终八子成功，没有添加冗余列或放宽断言。Journal 同副本曾一次 Windows 原生 **0x80000003**，原样重跑 14/14、最终 App 全包及 native 27 均通过。匹配 exe／PDB 和 COFF 离线定位不能解释触发原因，WER 无 dump；该一次异常仍未归因，不能宣称已解决或修改 SQLite／线程栈来掩盖。见 `build.noindex/turn-settlement-journal-native-trap-evidence.json`。
 
-关键路径：P0 → P1 的取消与归属合同 → P2／P3／P4 的一致实现 → P5 完整控制闭环 → P6 平台集成。P3、P4 的独立 owner 与平台测试可提前并行，避免多个执行者同时修改同一合同或争用同一浏览器／编译目录。
+统一验收证据为 `build.noindex/turn-settlement-acceptance.json`，具体 SHA／参数／退出码／日志分项保存于 `build.noindex/turn-settlement-*`；实模 proof 分别为 `turn-settlement-live-two-clean-final-evidence.json` 和 `turn-settlement-live-eight-contract-final-evidence.json`。源码／模拟故障／隔离真实模型／未验证平台保持区分。没有重放原故障会话，不宣称新验证了 macOS／Linux；整个 lifecycle 专项既有平台待验沿本节其余记录，不以本次父任务切片验收代替。
 
-2026-10-19 按 P0 和第一条停止链路后的实际证据更新：P0 已复核拉取后的 HEAD，P1 已形成 API／原事件与 SQLite writer／宿主／UI 的三种精确 scope；主要剩余风险已转到 P2 的全部恢复入口、P4 的非空用户页面责任与真正退出、P5 的跨领域截止点和 P6 原生资源稳态。上述区间保留为原范围工作量参考，不再代表“全部尚未开始”。当前三条实现线已并行，Windows 定向测试在运行；用户确认暂无 macOS／Linux 主机，相关原生环境等待须单列，不能据此给出全平台完成日期或压缩掉验收。
+### 2026-10-22／23 Codex 协作架构复核与可靠性修复（已实施并验证）
 
-若缺 macOS 主机、真实 Linux Wayland 桌面或现役 build 的必要权限，单列环境等待，不把等待时间伪装成开发人日，也不通过删除支持、重写所有平台或扩大本专项范围来“消除阻塞”。存量原生缺陷仅修与本次行为直接相关者；新发现会改变预算或交付范围时更新本节并说明依据。U13 已将自动退休与真正退出回收明确为 P4 的必要交付；P0 若发现现行 BrowserWorkspace 用途归属不足，须将补齐合同的真实工作量计入估算，不能沿用旧估算假称已经包含所有原生改造。
+本轮从已本地提交、未 push 的 `c3eb1a85b` 接续。用户授权保留现有能力、并发设置和 Canonical Session，参考本地 Codex 的独立运行及通知协调，完整修复来源误判、等待查询放大、暂态数据库读取失败和交接问题。没有改连接池容量、借连接期限、SQLite 锁期限或数据库代际，没有触碰真实用户库、重启现役桌面进程或重放旧任务；实模凭据仅允许 stdin。
 
-## 9. 长周期执行与交接规则
+当前实现：真人一次委派要求依据原 canonical intake、owner、producer 与命名空间，内部任务信封还须既有确切 Execution 来源 scope，角色文字和 Host 续发不会制造强制递归。按 owner／Execution 和原 ActiveTurn 通知等待，先订阅后读；稳定无变化的 30 秒兜底仅两条批量 domain／native cursor SELECT，变化后读取四条同事务窄状态及增量最小证明，不再逐秒读取配置／参与者／全事件日志。WAIT 准入、等待与 STATUS 消费共用可取消的 typed 只读退避；写命令、损坏、I/O 和撤权不被伪装成读取重试。原来源、分页完整覆盖、回执、模型预算和恢复围栏保持。DB 诊断在已接入的读取事务及写锁准入边界记录等待／连接范围、pool 状态和来源，不插入 SQLx driver hooks、额外 SQL 或控制权；返回写事务之后的全部 writer 持有期尚非该准入 guard 的覆盖范围，不能据此声称已得到完整连接持有链。
 
-1. 启动先读本文件和根 AGENTS.md，核对 git status、实际 HEAD、现有 diff、当前进展及相关源码；不要重做已完成的纵向链路。
-2. 从最重要且可验证的用户控制与真实故障开始。可以并行委派独立只读审计／不同文件实现／测试，但共享合同、编辑边界、编译资源和最终集成由主执行者协调。
-3. 每完成一个工作包或发现关键新事实，更新第 10 节：完成内容、验证命令及结果、剩余问题和下一动作。用短证据替代连续日志；敏感内容不写入。
-4. 技术难度、上下文不足或耗时较长不是提前停止理由。上下文压缩后继续原目标；如必须换会话，交接到同一进展表，不再写一套竞争方案。
-5. 发现基线与当前实现不同，先修正具体事实和受影响步骤；不因此反复从头做“全局最优”讨论。普通实现判断自主完成，实质产品合同冲突才向用户说明。
-6. 不把 review 通过、文档写完、mock 通过或预算将尽当作实现完成。清楚区分已完成、待验证、真实阻塞。
-7. 最终报告列出行为变化、验收证据、能力保持结果、剩余局限和真实文件路径；不夸大为数学意义的全局最优。
+只读排查又确证 12 个旧进程均为原 first-party failed exit（exit=1、is_error=true、已 reaped、无 cleanup errors），其共享正文逐叶摘要正确；旧读者否认启动而反复写回，构成已证实的额外写事务压力。现将业务失败与物理生命周期分离，保留原失败和原归属，不导入或改写旧记录。旧日志仍缺当时各连接的持有跨度，不能宣称该重试源是全部阻塞的唯一原因。端到端还发现合法约 81 KiB 单段助手内容误走 64 KiB 内联分支，已统一既有 canonical Payload 写入；整包发现 clean-cut 先于 Cron 012 迁移却使用新列，已通过正式阶段类型修复清除顺序，保留作者配置，不转换旧 Agent 值。
 
-实现稳定后将现役合同合并进 architecture 文档，移除根 AGENTS.md 的本专项活动入口，按仓库要求退役已被替代的施工／启动说明，不保留多版旧计划作为当前开发或生成器输入。需要追溯时使用 Git 历史；本步不得顺带清理用户数据或无关文档。
+最终整包曾在 1007 项通过后因 Question 用例栈溢出中止，未算通过。固定测试 exe SHA `0bef193b…f7be3f`、不设置 `RUST_MIN_STACK` 的 Windows 调试三次复现 `0xC00000FD`：216 层有限调用链仍在 Session 初始化，未进入模型或 WAIT；默认约 2 MiB 栈已用 2,033,416 B，Knowledge validator 再申请 37,072 B 时触顶。不是递归委派。已在唯一 `append_event_tx_with_policy` 建立 boxed Future 边界；原 body 规范 LF 后逐字节相同，原 borrowed transaction、校验顺序、Send 与取消语义保持，不 spawn、不提高线程栈、不跳过用例。修后 fresh Session、App 与实模均已完成，证据如下。
 
-## 10. 单份执行进展
+验证：Runtime 完整 **517 通过／0 失败／1 原 ignored**，DB **314/314**、Common **260/260**、Gateway **110/110**；这些包完成验证后未再修改其源码。共享 append 堆边界之后，fresh Session **374/374**、Execution **168/168**，均为默认栈／2 线程／无过滤。新 App 副本 SHA `b3ff74bc28d5f12a9cf0c6a8f579fea203aee99834f00d08d3b7a805e22c6dea`：完整 **1181 通过／0 失败／4 原 ignored／0 filtered**，436.36 秒；另先行确认原 Question 默认栈 **1/1**、HTTP 新回归 **3/3**（四 Full 实际 peak=4、冻结 Skill／附件／工具发现、重复委派、81,042 B 单段／分段结果、三页完整覆盖与父原 Turn 集成进程）。以上主包合计 **2924 通过、5 原 ignored**，定向复跑不重复计数。App 四项为原 restart child helper、ACP936夹具、标准 token／LanmanServer夹具和手动真实浏览器夹具，本轮未新增或修改 ignore。前轮夹具发现调用未呈现 plan 控制及误计 Kernel effect 已修夹具，合法长段、clean-cut 顺序和栈溢出的真实失败均保留记录，没有调高存储／栈上限或跳过失败。
+
+最终 `bun run check` 全部通过；`cargo check --offline -p nomifun-app --lib --tests --no-default-features --features browser-use,computer-use` 通过，2 分 18 秒，只有原 browser_workspace 测试支持的三条 dead-code warning。此项是桌面 feature 编译证明，不冒充 Browser／Computer 或 macOS／Linux 原生验收。最终日志：`build.noindex/subagent-{runtime-final,db-verified,common-verified,gateway-verified,session-heap-full,execution-heap-full,heap-app-full,desktop-features-heap-final,static-heap-final}.log`。本轮未 commit／push，未重启现役桌面程序或修改真实会话数据；整个 lifecycle 专项的其他原生平台待验仍沿本节既有记录。
+
+最终堆边界图实模 **1/1**，77.26 秒：Step Plan `step-5-preview`，两个 Full 子任务保留带动作词的 SubAgent 角色前缀，实际重叠 **18,836 ms**，强制委派拒绝 0、一个 Execution／两个 Attempt，父 **1 Turn**、三个原生写入 Session、最终投影补写 0，真实文件整合和进程验收成功；正常关闭与明文凭据审计通过。native build digest `d756308aa50a3dcc912131074b1b4e46b5e54d8205fa72dd6466c393aea85282`，实模 exe SHA `8346b9ad0c2414775e4b0fae91725825708d36b72a8181be08f4d653b7b48f51`。凭据只走无回显 stdin，不进环境、参数、源码或证据。完整 JSON 证据位于本机任务证据目录的 `subagent-codex-reliability/subagent-live-result.json`；旧图的 21,719 ms 实模与 1007 项后中止整包单独保留，不能混用为最终图证明。
 
 ### 2026-10-22 子 Agent 并发与继续执行（已实施并验证）
 
@@ -461,9 +254,9 @@ macOS 复用现有 darwin_registered／darwin_application 与 WK／AppKit fixtur
 
 宿主整包复现命令：`cargo test --offline -p nomifun-app --lib --no-default-features -- --test-threads=2`。本次先生成程序，再对校验 SHA 的独立副本执行相同完整集合，避免 Windows 运行中程序锁阻碍另一构建；未过滤用例。默认 Channel transport features 和桌面 Browser／Computer 条件编译与这组运行证据分别记录。
 
-本节是唯一接续点；实现事实来自当前源码和实际执行证据。逻辑、隔离原生与未运行项分别记录，不将一次 Windows 通过扩大为三平台通过。
+以下为原平台交付时的证据快照；历史编号保留用于识别原证据。当前结果与剩余边界以本页前部为准，不把旧构建或一次 Windows 通过扩大为新构建或三平台通过。
 
-| 项目 | 当前值 |
+| 项目 | 该次记录值 |
 | --- | --- |
 | HEAD／分支 | 原实施由8c3a5cb93快进至cfee705634ccd59ae1d621b13d9ed1f95709478e，实施／平台prompt保存为a9c41c38fa276654d34ce020cd22a4a3c3b730f9。交付前整合origin/main084c7dc8d0962567075be6bcc089b39bd032fba8的8个提交；实际交付HEAD及推送状态以Git记录为准。用户仅明确授权本次commit＋push，后续平台任务不继承此授权；未安装或发布 |
 | 工作区保护 | 初始AGENTS.md及两份专项文档已保留并纳入用户授权的本次提交。故障注入只用临时DB、目录、专用新Profile及受控进程；未操作日常用户数据。整合保留上游OAuth010，尚未发布的Cron迁移改011；新native一律新dataset，不改写旧临时库或真实数据的迁移回执 |
@@ -472,7 +265,7 @@ macOS 复用现有 darwin_registered／darwin_application 与 WK／AppKit fixtur
 | 已验证构建快照 | 最终合并图App libtest SHA256 `74f6c91bd4b5dda83f64239844608b9616f6bc37c94ebc62dfba0487661b9537`（UTC2026-10-19T06:04:05.4224637Z，346943488B）；production Desktop `661681a63e3b15fa4190ebefcf78268940b533c4b4f69cd36809426193bdf84a`（UTC2026-10-19T06:14:41.4297828Z，341702144B）。构建时为a9c41c38f＋084c7dc8d的冻结合并工作树，后续仅更新文档。debug夹具原setup/login发普通JWT，不导出trust |
 | 已收束验证 | 当前App **1218通过／5原ignored／0失败，363.18s**；Contracts **118/118、0.22s**；Session **331/331、107.84s**；Cron **169/169、13.49s**；DB **73/73**（执行53、reset2、ID6、OAuth迁移3／仓储9）。MCP单元 **248/248、0.82s**，auth integration **19/19、13.71s**，connection integration **11/11、3.45s**。原Execution155/155库源未变；合并图另以当前App／DB执行53／恢复8覆盖整合链路 |
 | 环境限制 | 原Windows交付时暂无macOS/Linux主机；该历史限制不覆盖10.5／10.6实跑。Linux为WSL2/WSLg，无真实Wayland portal后端、pkexec或桌面浏览器，具体阻塞见10.6。各平台不擅自提权、锁屏、睡眠、安装或启停服务 |
-| 接续范围 | 本机无正在运行的编译或验收；Linux本轮修复为未提交工作区差异，提交与推送需用户另行授权。后续按10.4–10.6各自余项在独立受控环境补验（真实GNOME/KDE Wayland portal、pkexec管理员、托盘／GUI Quit／重启／系统退出入口、睡眠/锁屏、桌面浏览器WebUI），核对同一交付提交及新增差异，不重复已完成实施；有具体失败再修。待验不成为Agent门槛；整体稳定后按第9节退役施工入口 |
+| 该次遗留边界 | Linux修复当时为未提交差异；后续提交与推送不继承历史授权。真实GNOME/KDE Wayland portal、pkexec管理员、托盘／GUI Quit／重启／系统退出入口、睡眠/锁屏、桌面浏览器WebUI未验。验证需核对源码／构建身份；缺证据不成为Agent运行门槛。当前状态见本页平台边界。 |
 
 ### 10.1 实现与验证
 
@@ -486,7 +279,7 @@ macOS 复用现有 darwin_registered／darwin_application 与 WK／AppKit fixtur
 | P4 Browser结算补齐 | 原repository单读快照及typed结束证明覆盖Completed automation根、Failed、canonical/scoped/aggregate取消与softdelete/fatal/source取消；无新ledger或普通API可见性变化。同Session活动任务、合法重试、用户页面与下载仍保护，跨Session委派不误当根Browser用途。当前dispatcher／BrowserService **28/28、27.57s**（14项新使命回归）；早期DB并发过载按测试并发2修正，未改产品并发／期限／断言 |
 | P4 使命闭合交接 | 旧Attempt／真实current分离、Step终结重唤醒原outbox、正式replan/supersede/skip/adopt证明及active后继deferred已落。当前DB执行 **53/53、48.18s**；原Execution **155/155**库源未变。target读取原正式System DecisionRequested／settlement的canonical引用，清queue仍同continuation，不回initial；App使命14例包含于当前Browser28和完整1223，保留Question Completed及原Attempt事实 |
 | P4 来源结束补齐 | Cron NewConversation创建路径捕获原tuple，正式结算封存live回执，跨合法job/run删除保原清理权限；当前Cron169/169含10项来源／删除竞争。私有互斥Cron／Remote typed来源写原accepted input，普通请求不能声明，旧重放不retrofit，不扩AgentInputSource。Remote取消沿原coordinator singleflight／shutdown，不占business64 semaphore，NeverInstalled不warmup或永久重试。Existing/InputRequired、Remote Ready保持续用途。当前source **3/3、3.26s**及完整App通过；无新ledger／TTL／重跑／声明门槛 |
-| P4 Computer | 本专项旧 Computer 路径与其原生/桥接测试已经退役。由新的私有 Cua worker、宿主 InvocationControl、公平队列和 canonical Effect 承接；当前源码与分层证据只见[Computer 专项进展](computer-use-rebuild.zh.md#12-单份执行进展)，旧计数不作为新实现证明。 |
+| P4 Computer | 本专项旧 Computer 路径与其原生/桥接测试已经退役。由新的私有 Cua worker、宿主 InvocationControl、公平队列和 canonical Effect 承接；当前源码与分层证据只见[Computer 专项进展](../handoffs/computer-use-rebuild.zh.md#12-单份执行进展)，旧计数不作为新实现证明。 |
 | P4 Quit | Terminal、MCP auth原worker与Runtime／producer／Browser独立清理，挂起auth不挡Terminal实际delete hook或Browser close；仅观察超时不abort／重发原worker，drop外waiter后仍join。聚合前收原worker真实settled结果，native/storage仅在所有原owner已证明后关闭，域错误不跳过可独立释放资源。新增实际auth guard竞争与当前全量／三native通过 |
 | P5 | 只读Activity汇总原domain/runtime/resource owners，逐实例Stop及cleanup/unknown可见；AllStop是有限原源快照。Cron停原reservation，AutoWork停原claim、保配置。AutoWork仅原root用lead Session，child独立ChildAttempt，root/child/整组控制不混淆，Remote走原binding fence |
 | P6 | 现役架构及正式schema/event同步，替代路径/fixtures同批退役；强Workspace缓存按原Weak实例票据退休，Session/Companion/delete纯gate缓存不启动任务。资源稳态、原生退出、真实Edge控制、生成/边界检查见下 |
@@ -572,7 +365,7 @@ macOS 复用现有 darwin_registered／darwin_application 与 WK／AppKit fixtur
 | 当前收束状态 | 本轮本机授权范围内的实施、编译、适用回归和原生验收已完成；原生验收生产图为下述v4。受控睡眠/锁屏、权限撤销/授权等待、管理员设施及跨平台余项仍明确待验，不能称全矩阵或发布验收完成。下方首失败与v1–v3是各自冻结图的历史证据，不改名为v4。实施阶段未自动交付；用户随后明确授权本次commit＋push，Git交付见本节记录。未安装、提权或发布 |
 | 本次 Git 交付授权 | 用户在本轮验收完成后明确要求commit＋push。交付前fetch发现origin/main新增设置UI提交a7a7e0110及整合提交1b28fb1e6；19上游文件与本轮59专项文件无交叉，已安全快进并逐一复核59文件SHA保持。只暂存本轮明确清单，使用原配置NomiFun noreply身份，不改写历史或force-push。上游仅UI/i18n变化，Rust及原生验收源码未漂移；v4原生回执仍归原构建，合并图UI检查单独记录，最终提交与远端SHA以Git记录和交付回执为准 |
 | 合并图交付检查 | 快进至1b28fb1e6后的完整 `bun run check`、`bun run build:ui`（22.11s）均exit0；Browser/ChatLayout原204项与5个上游设置测试文件的合并定向UI共263/263、1629断言、13文件、6.02s。最后文档检查与暂存差异检查另执行。仅UI/i18n上游整合，原43份apps/crates验收源码SHA未漂移，未重复Rust530或将旧v4原生App冒称新设置UI整图的原生复验。日志在原根证据目录 `git-delivery-{check,ui-build,ui-tests}.log` |
-| 稳定合同与后续入口 | Runtime原flight、Browser用途/门禁及HTTP/资源/storage关停合同已并入现役Execution/Browser/Companion架构。跨平台新整图及独立受控场景尚待验，本轮保留同一专项入口与启动文件供原10节接续；整体稳定后按第9节退役，不另存竞争计划或让旧平台结果冒充当前证明 |
+| 稳定合同与后续入口 | Runtime原flight、Browser用途/门禁及HTTP/资源/storage关停合同已并入现役Execution/Browser/Companion架构。当时跨平台新整图及独立受控场景尚待验；现役合同归入架构，平台缺口归入本验证页，不以旧平台结果冒充当前证明 |
 | 最终 v4 构建／源码身份 | 同test/browser-conformance/custom-protocol构建exit0，1m29s；preparer增量构建exit0，7.47s。Desktop source `a5ee8ae5be100052727d00ad894c348f9e0a77d0a0a9679b6a5ccf0481fd0187`（513962912B），独立ad-hoc App `768bfbeabf82f7190fffb8e457ed5d1fa8e54e1ff3b2a5b7b91e32fbd3f27b50`，controller仍`8ff8cec0…`；preparer `40e83927ddf8ffd14d1778ef056478928cda6dea944d7449ed82fc05507a6c4f`。metadata `/tmp/nomifun-lifecycle-macos-20261019-root/desktop-static-package-v4.json`，源码/fixture变更SHA集合 `source-build-v4-identity.json`，无安装/发布 |
 | 最终 v4 SDK／App／必跑集成 | App libtest `b068b3abc1e18e89787c7e8e8c28338a08f767864d9900e8258ca51207917b4a`（506618560B，发现1230）；不重叠定向142=Runtime reliability92＋新double direct/background retirement1＋journal15/MCP10/effect receipt13/workspace8/writeback3，全过。AI全库360通过／1原公网search ignored，联合fixture18/18；最终desktop_agent_shutdown2/2、25.69s（`b336f6b5…`），native_execution_recovery8/8、42.18s（`847069d2…`）。合计530通过／0失败／1原ignored，不把App1230发现数计通过。新case证明原Kernel weak已evict后两个直接及两个后台退休都结束，旧Runtime Weak归零；真Bun后台writer原identity/持续写、模型数、canonical Unknown/cursor与后继warmup保持。无carrier的资源retry缺完整flight仍保守Conflict，不以None放行。证据 `/tmp/lifecycle-macos-retirement-v4-final-evidence.json` |
 | 最终 v4 T36／真实 Computer 拒绝 | 同b068 AppServices T36 1/1、2.11s，外部原Chrome92609及两页DOM/draft保留，claims/override/连接/storage闭合后仅夹具原owner关闭自己的Chrome，证据 `/tmp/nomifun-macos-attached-t36-v4-final-identity.json`。同签名768bf实际App AX94744／Screen95341两新root均PASS：各自实时bundle/PID/权限before/after `not_granted`，正式typed `SYSTEM_PERMISSION_REQUIRED / not_executed`，原Kernel result23与Runtime result24精确关联，单proposal/单结果、provider2calls/hold1；原Turn Stop→cancelled/producer=false/pending0/unknown0/noReplay，原hold结束。两App/controller/preparer正常exit0/cleanup/final_verified，随机password删除。证据 `/tmp/nomifun-lifecycle-macos-20261019-computer/actual-app-denial-summary.json`；这是host preflight真实拒绝，不冒称AX遍历/capture API内核拒绝或授权弹窗/撤销。首AX driver错把MessageProjection当renderer DTO的失败保留，修原canonical引用读取后换root，未改产品/权限 |

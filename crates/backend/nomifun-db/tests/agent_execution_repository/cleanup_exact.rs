@@ -10,7 +10,7 @@ async fn start_on(fixture:&Fixture,title:&str,session:&str)->nomifun_db::AgentEx
         &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
     let attempt=&queued.current_attempt.as_ref().unwrap().attempt;
     fixture.repository.start_attempt(&fixture.owner,&fixture.execution_id,&queued.step.step_id,queued.step.version,
-        &attempt.attempt_id,attempt.version,session,AgentExecutionAttemptSessionKind::ChildAttempt,None,
+        &attempt.attempt_id,attempt.version,session,AgentExecutionAttemptSessionKind::ChildAttempt,None, None,
         &event(AgentExecutionEventKind::AttemptChanged)).await.unwrap()
 }
 

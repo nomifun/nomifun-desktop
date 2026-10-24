@@ -36,7 +36,8 @@ pub(super) async fn cancel_step(
     expected_execution_version: i64, step_id: &str, expected_step_version: i64,
     scope: AgentExecutionCancellationScope, event: &NewAgentExecutionEvent,
 ) -> Result<AgentExecutionDetailRows, DbError> {
-    if !matches!(&event.actor, AgentExecutionActor::User { user_id: actor } if actor == user_id)
+    let parent_control=matches!(&event.actor,AgentExecutionActor::Agent {..})&&scope==AgentExecutionCancellationScope::Task;
+    if (!matches!(&event.actor, AgentExecutionActor::User { user_id: actor } if actor == user_id)&&!parent_control)
         || event.event_type != AgentExecutionEventKind::StepChanged {
         return Err(conflict("user Step cancellation authority"));
     }
@@ -48,6 +49,12 @@ pub(super) async fn cancel_step(
         "UPDATE agent_executions SET version=version WHERE execution_id=? AND user_id=? AND deleted_at IS NULL",
     ).bind(execution_id).bind(user_id).execute(&mut *tx).await?;
     if locked.rows_affected() != 1 { return Err(conflict("Agent Execution")); }
+    if parent_control {
+        if let Some(detail)=task_control::replay_tx(&mut tx,user_id,execution_id,event).await? {tx.commit().await?;return Ok(detail);}
+        let payload:serde_json::Value=serde_json::from_str(&event.payload).map_err(|error|DbError::Init(error.to_string()))?;
+        if payload.get("message_source").is_none() {return Err(conflict("parent Stop requires its exact native source"));}
+        task_control::authorize_tx(&mut tx,user_id,execution_id,step_id,event,"stop",expected_step_version).await?;
+    }
     let root: AgentExecutionStepRow = sqlx::query_as(
         "SELECT * FROM agent_execution_steps WHERE execution_id=? AND step_id=? AND superseded_in_revision IS NULL",
     ).bind(execution_id).bind(step_id).fetch_optional(&mut *tx).await?
@@ -110,9 +117,12 @@ pub(super) async fn cancel_step(
             .bind(now).bind(execution_id).bind(selected_step).execute(&mut *tx).await?;
     }
     let mut event = scoped_event(event, step_id, None);
-    event.payload = serde_json::json!({"action":"cancel_step","scope":scope,
+    let mut payload:serde_json::Value=serde_json::from_str(&event.payload).map_err(|error|DbError::Init(error.to_string()))?;
+    let fields=serde_json::json!({"action":"cancel_step","scope":scope,
         "expected_execution_version":expected_execution_version,"expected_step_version":expected_step_version,
-        "cancelled_step_ids":cancelled_step_ids}).to_string();
+        "cancelled_step_ids":cancelled_step_ids});
+    payload.as_object_mut().ok_or_else(||conflict("task Stop command payload"))?.extend(fields.as_object().expect("object").clone());
+    event.payload=payload.to_string();
     append_event_tx(&mut tx, execution_id, &event, now).await?;
     let detail = load_execution_detail_tx(&mut tx, user_id, execution_id).await?
         .ok_or_else(|| conflict("Agent Execution"))?;

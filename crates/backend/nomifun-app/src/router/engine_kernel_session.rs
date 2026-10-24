@@ -191,7 +191,7 @@ pub struct EngineKernelSession {
     computer_attempt: Arc<super::computer_host::ComputerAttemptSurface>,
     resource_tasks: nomifun_ai_agent::engine_sdk::EngineTaskGroup,
     knowledge_writebacks: knowledge_writeback::KnowledgeWritebacks,
-    resource_settlement_failed: std::sync::atomic::AtomicBool,
+    resource_settlements: mcp_resources::ResourceSettlements,
     source: Arc<()>,
     session_id: AgentSessionId,
     principal: nomifun_agent_contracts::PrincipalRef,
@@ -430,7 +430,7 @@ impl EngineKernelSession {
             computer_attempt: Arc::new(super::computer_host::ComputerAttemptSurface::new(session_id.clone(), compiled.snapshot_ref().clone())),
             resource_tasks: nomifun_ai_agent::engine_sdk::EngineTaskGroup::new(32)?,
             knowledge_writebacks: knowledge_writeback::KnowledgeWritebacks::new(session.agent_binding().binding_version)?,
-            resource_settlement_failed: false.into(),
+            resource_settlements: Default::default(),
             source,
             session_id,
             principal: principal.clone(),
@@ -723,7 +723,7 @@ impl EngineKernelSession {
     }
 
     pub async fn ensure_hosted_effects_settled(&self) -> Result<(), AppError> {
-        if self.resource_settlement_failed.load(std::sync::atomic::Ordering::Acquire) {
+        if self.resource_settlements_unconfirmed()? {
             return Err(failure("resource settlement journal is unproven"));
         }
         if let Some(root) = &self.git_root {
@@ -738,7 +738,7 @@ impl EngineKernelSession {
     /// dispatch or resume. A joined MCP owner may have closed its resources
     /// while its canonical external business result remains Unknown.
     pub(super) async fn ensure_effect_resources_closed(&self) -> Result<(), AppError> {
-        if self.resource_settlement_failed.load(std::sync::atomic::Ordering::Acquire) {
+        if self.resource_settlements_unconfirmed()? {
             return Err(failure("resource settlement journal is unproven"));
         }
         if let Some(root) = &self.git_root {
@@ -1331,18 +1331,17 @@ impl EngineKernelSession {
         let browser_turn = self
             .state
             .lock()
-            .map_err(|_| failure("resource state poisoned"))?
-            .turn
-            .as_ref()
-            .map(|turn| turn.operation.clone());
+            .map(|state| state.turn.as_ref().map(|turn| turn.operation.clone()))
+            .map_err(|_| failure("resource state poisoned"));
         #[cfg(feature = "browser-use")]
-        let browser_cancel = match browser_turn.as_deref() {
-            Some(turn_id) => self.browser.cancel_turn(
+        let browser_cancel = match &browser_turn {
+            Ok(Some(turn_id)) => self.browser.cancel_turn(
                 &self.principal.principal_id,
                 self.session_id.as_ref(),
                 turn_id,
             ),
-            None => Ok(()),
+            Ok(None) => Ok(()),
+            Err(error) => Err(failure(error)),
         };
         // Catch each owner separately: the outer retained task alone would
         // preserve failure, but an unwind would skip all subsequent owners.
@@ -1367,21 +1366,25 @@ impl EngineKernelSession {
         }).await;
         #[cfg(feature = "browser-use")]
         let browser = guard_effect_settlement(|| async {
-            match browser_turn.as_deref() {
-                Some(turn_id) => {
+            match browser_turn {
+                Ok(Some(turn_id)) => {
                     self.browser
                         .settle_turn(
                             &self.principal.principal_id,
                             self.session_id.as_ref(),
-                            turn_id,
+                            &turn_id,
                         )
                         .await
                 }
-                None => Ok(()),
+                Ok(None) => Ok(()),
+                Err(error) => Err(error),
             }
         })
         .await;
         let resource_tasks = guard_effect_settlement(|| self.resource_tasks.join()).await;
+        // Even an abnormal sibling task must not discard another operation's
+        // already-returned result. Retry only these original journal records.
+        let resource_settlements = guard_effect_settlement(|| self.retry_resource_settlements()).await;
         let git = guard_effect_settlement(|| async {
             match &self.git_root {
                 Some(root) => self.wave2.settle_workspace_git(root).await,
@@ -1406,8 +1409,14 @@ impl EngineKernelSession {
             ).await
         }).await;
         for (stage,failed) in [("admission",admission.is_err()),("process_owner",processes.is_err()),
-            ("tool_tasks",tasks.is_err()),("resource_tasks",resource_tasks.is_err()),("git_owner",git.is_err()),
+            ("tool_tasks",tasks.is_err()),("resource_tasks",resource_tasks.is_err()),
+            ("resource_settlements",resource_settlements.is_err()),("git_owner",git.is_err()),
+            ("retained_processes",retained_processes.is_err()),
             ("mcp_owner",mcp.is_err()),("hosted_receipts",hosted.is_err())] {
+            if failed {tracing::warn!(stage,session_id=self.session_id.as_ref(),"owned resource cleanup remains unproven");}
+        }
+        #[cfg(feature = "browser-use")]
+        for (stage,failed) in [("browser_cancel",browser_cancel.is_err()),("browser_owner",browser.is_err())] {
             if failed {tracing::warn!(stage,session_id=self.session_id.as_ref(),"owned resource cleanup remains unproven");}
         }
         admission?;
@@ -1419,9 +1428,7 @@ impl EngineKernelSession {
         #[cfg(feature = "browser-use")]
         browser?;
         resource_tasks?;
-        if self.resource_settlement_failed.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(failure("resource settlement journal is unproven"));
-        }
+        resource_settlements?;
         git?;
         mcp?;
         hosted?;

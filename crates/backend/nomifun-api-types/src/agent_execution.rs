@@ -707,6 +707,25 @@ pub struct RetryExecutionStepRequest {
     pub expected_step_version: i64,
 }
 
+/// One immutable logical-task restart, never a request to select a later Attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestartExecutionStepRequest {
+    pub idempotency_key: String,
+    pub expected_execution_version: i64,
+    pub expected_step_version: i64,
+    pub expected_attempt_id: Option<String>,
+}
+
+#[derive(Debug,Clone,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceExecutionStepWithExistingRequest {
+    pub expected_execution_version:i64,
+    pub expected_step_version:i64,
+    pub replacement_step_id:String,
+    pub expected_replacement_step_version:i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdoptExecutionStepOutputRequest {

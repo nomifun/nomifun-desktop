@@ -36,7 +36,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn progress(terminal: bool) -> AgentExecutionTurnProgress {
-        AgentExecutionTurnProgress { found: true, terminal, cursor: if terminal { 2 } else { 1 }, suspended: false }
+        AgentExecutionTurnProgress { found: true, terminal, cursor: if terminal { 2 } else { 1 }, suspension: None }
     }
 
     #[tokio::test(start_paused = true)]

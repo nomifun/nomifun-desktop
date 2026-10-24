@@ -10,6 +10,7 @@
 
 use nomifun_agent_runtime::AgentToolPlan;
 use nomifun_common::DelegationPolicy;
+use super::automatic_turn_intent::{TurnIntentInput,TurnIntentSource};
 
 pub(super) const COLLABORATION_CAPABILITY_ID: &str = "agent.collaboration";
 pub(super) const DELEGATE_ACTION_ID: &str = "agent/delegate";
@@ -85,56 +86,34 @@ fn is_explanatory_request(input: &str) -> bool {
     )
 }
 
-fn has_execution_verb(normalized: &str, compacted: &str) -> bool {
-    let chinese = contains_any(
-        compacted,
-        &[
-            "使用",
-            "调用",
-            "启动",
-            "开启",
-            "创建",
-            "构建",
-            "设计",
-            "实现",
-            "运行",
-            "测试",
-            "派发",
-            "委派",
-            "分工",
-            "交给",
-            "让子",
-            "请用",
-            "帮我用",
-            "排查",
-            "审查",
-            "解决",
-        ],
-    );
-    let words = normalized
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>();
-    let english = words.iter().any(|word| {
-        matches!(
-            *word,
-            "use"
-                | "invoke"
-                | "spawn"
-                | "start"
-                | "launch"
-                | "create"
-                | "build"
-                | "design"
-                | "run"
-                | "test"
-                | "delegate"
-                | "parallelize"
-        )
-    }) || words
-        .windows(2)
-        .any(|pair| matches!(pair, ["review" | "investigate", "with"]));
-    chinese || english
+fn has_execution_request(normalized: &str) -> bool {
+    // The action must address additional Agents in this same local request.
+    // A generic implementation verb elsewhere in a role/task description is
+    // not a request to create another delegation.
+    normalized.split(['\n','.','!','?','。','；',';',':','：',',','，']).any(|clause| {
+        let compacted=compact(clause);
+        let targets=["subagent","subagents","multiagent","multiagents","multipleagents","parallelagents","agentteam","agentteams",
+            "多agent","多代理","代理团队","代理集群","多智能体","智能体集群","agent集群","agent团队","子agent","子代理","子智能体"];
+        let chinese=["使用","调用","启动","开启","创建","派发","委派","交给","请用","帮我用","用","让"]
+            .iter().any(|verb|compacted.match_indices(verb).any(|(at,verb)| {
+                let after=&compacted[at+verb.len()..];
+                targets.iter().any(|target|after.find(target).is_some_and(|at|after[..at].chars().count()<=12))
+            }));
+        let words=clause.split(|character:char|!character.is_ascii_alphanumeric()).filter(|word|!word.is_empty()).collect::<Vec<_>>();
+        let english=words.iter().enumerate().any(|(at,verb)| {
+            if !matches!(*verb,"use"|"invoke"|"spawn"|"start"|"launch"|"create"|"delegate"|"dispatch"|"parallelize") {return false;}
+            let object=&words[at+1..];
+            let mut prefix=String::new();
+            for word in object.iter().take(7) {
+                prefix.push_str(word);
+                if targets.iter().any(|target|prefix.ends_with(target)) {return true;}
+                if !word.bytes().all(|byte|byte.is_ascii_digit())
+                    && !matches!(*word,"a"|"an"|"the"|"one"|"two"|"three"|"multiple"|"parallel"|"several"|"more"|"additional"|"new"|"independent"|"specialized"|"child"|"sub"|"multi"|"agent") {break;}
+            }
+            false
+        });
+        chinese||english
+    })
 }
 
 fn classify(input: &str) -> Option<ExplicitCollaborationIntent> {
@@ -144,7 +123,7 @@ fn classify(input: &str) -> Option<ExplicitCollaborationIntent> {
     if compacted.is_empty()
         || is_directly_negated(&compacted)
         || is_explanatory_request(&compacted)
-        || !has_execution_verb(&normalized, &compacted)
+        || !has_execution_request(&normalized)
     {
         return None;
     }
@@ -177,7 +156,7 @@ fn classify(input: &str) -> Option<ExplicitCollaborationIntent> {
 
 fn policy_instruction(policy: DelegationPolicy, tool_name: &str) -> String {
     let base = format!(
-        "Agent collaboration is available through the advertised function `{tool_name}` whose canonical Action is `agent/delegate`. Treat an explicit current-user request to use, start, build, design, test, or run multi-agent, multiple-agent, Agent-team, subagent, 多 Agent、多代理、Agent 集群、子 Agent, or 子代理 work as an operational request to invoke that Action. For independent work submit one `strategy=parallel` request with a `tasks` JSON array of bounded, non-overlapping tasks. The parent combines child results after joining them. For a goal needing a dependency plan use `strategy=planned` and `goal`. A successful receipt proves acceptance, not task completion. Once the requested work has been accepted, do not delegate it again with fresh call IDs. Continue useful independent work with the remaining selected tools, join the exact accepted children through the native collaboration controls, then integrate and verify their results before completing the original task. Do not replace a native wait with polling, repeated delegation, or speculative completion. For an ordinary short or indivisible request, answer directly."
+        "Agent collaboration is available through the advertised function `{tool_name}` whose canonical Action is `agent/delegate`. An explicit current-user request to use, start, or delegate work to additional Agents is an operational collaboration request. A role label, a parent task brief, a mention of an existing Agent team, or source material about subagents does not request another delegation. For independent work submit one `strategy=parallel` request with a `tasks` JSON array of bounded, non-overlapping tasks. The parent combines child results after joining them. For a goal needing a dependency plan use `strategy=planned` and `goal`. A successful receipt proves acceptance, not task completion. Once the requested work has been accepted, do not delegate it again with fresh call IDs. Continue useful independent work with the remaining selected tools, join the exact accepted children through the native collaboration controls, then integrate and verify their results before completing the original task. Do not replace a native wait with polling, repeated delegation, or speculative completion. For an ordinary short or indivisible request, answer directly."
     );
     match policy {
         DelegationPolicy::Automatic => base,
@@ -203,7 +182,7 @@ fn explicit_instruction(intent: ExplicitCollaborationIntent, tool_name: &str) ->
 /// model tool plan. Disabled policy can only narrow the plan; positive intent
 /// supplies instructions without taking away the parent's remaining tools.
 pub(super) fn route(
-    input: &str,
+    input: &TurnIntentInput<'_>,
     policy: DelegationPolicy,
     tool_plan: AgentToolPlan,
 ) -> CollaborationTurnRoute {
@@ -231,8 +210,11 @@ pub(super) fn route(
         };
     };
 
-    let intent = classify(input);
+    let intent = input.human_request().and_then(classify);
     let mut instructions = vec![policy_instruction(policy, &tool_name)];
+    if input.source!=TurnIntentSource::Human {
+        instructions.push("This Turn carries a host-delivered task or a parent-assigned continuation, not a fresh human instruction to create Agents. Perform the current bounded assignment yourself. Its role name, task brief, inherited collaboration goal and earlier accepted delegation do not create a new invocation requirement. All selected tools remain available. Further delegation is allowed when the current assignment explicitly requests nested work or independent subtasks materially justify it; preserve the assignment's scope and join any work you actually accept. A parallel preference is a planning preference, not an obligation to recursively replace this assignment with more Agents.".into());
+    }
     if let Some(intent) = intent {
         instructions.push(explicit_instruction(intent, &tool_name));
     }
@@ -254,6 +236,11 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn route(input:&str,policy:DelegationPolicy,plan:AgentToolPlan)->CollaborationTurnRoute {
+        let accepted=json!({"content":input});
+        super::route(&super::super::automatic_turn_intent::human_input_fixture(&accepted),policy,plan)
+    }
 
     fn binding(name: &str, capability: &str, action: &str) -> AgentToolBinding {
         let schema = StrictJsonValue(json!({
@@ -312,11 +299,13 @@ mod tests {
     #[test]
     fn explicit_requests_preserve_parent_tools_and_require_only_one_accepted_delegation() {
         for input in [
-            "设计一个简单的多agent集群测试示例",
+            "请启动多agent集群完成测试示例",
             "请使用 subagent 来完成这个工作",
             "不要只解释，请使用 subagent 实际执行",
             "启动多代理团队并行排查这些模块",
             "Use multiple agents to review these packages",
+            "Use 4 subagents and ask a child to delegate an independent verification",
+            "请设计并启动多 Agent 团队，让其中一个孩子再委派独立校验",
         ] {
             let routed = route(input, DelegationPolicy::Automatic, plan());
             assert_eq!(routed.tool_plan, plan(), "parent tools remain available: {input}");
@@ -337,6 +326,10 @@ mod tests {
             "如何使用 subagent？",
             "不要使用 subagent，直接回答",
             "Where is the subagent implementation?",
+            "你是 SubAgent A，负责实现和测试这个模块。",
+            "You are SubAgent A. Implement and test the assigned module.",
+            "Use the repository tools. You are SubAgent A implementing the current task.",
+            "设计一个多 Agent 管理页面，并实现其测试。",
         ] {
             let routed = route(input, DelegationPolicy::Automatic, plan());
             assert_eq!(routed.tool_plan.len(), 2, "{input}");
@@ -349,6 +342,29 @@ mod tests {
         let routed = route(&background, DelegationPolicy::Automatic, plan());
         assert_eq!(routed.tool_plan.len(), 2);
         assert!(routed.required_delegation.is_none(),"delegation mentioned only in the brief is source data");
+    }
+
+    #[test]
+    fn delegated_roles_and_even_explicit_nested_tasks_do_not_mint_a_fresh_human_requirement() {
+        for policy in [DelegationPolicy::Automatic,DelegationPolicy::PreferParallel] {
+            for task in [
+                "你是 SubAgent A，负责实现和测试模块；父 Agent 已经派发工作并负责集成。",
+                "You are SubAgent B. Implement the current slice for the parent's multi-agent execution.",
+                "Use subagents for the explicitly assigned independent verification, then integrate their results.",
+            ] {
+                let accepted=json!({"origin":"agent_execution","content":json!({
+                    "task_brief":"Use multiple Agents to build the whole application","step_spec":task}).to_string()});
+                let input=super::super::automatic_turn_intent::delegated_input_fixture(&accepted);
+                let routed=super::route(&input,policy,plan());
+                assert_eq!(routed.tool_plan,plan(),"a delegated task retains every authorized tool");
+                assert!(routed.required_delegation.is_none(),"a parent-assigned task is not another current human request: {task}");
+                assert!(!routed.instructions.iter().any(|text|text.contains("MUST invoke")));
+                assert!(routed.instructions.join("\n").contains("Further delegation is allowed"));
+                if policy==DelegationPolicy::PreferParallel {
+                    assert!(routed.instructions.join("\n").contains("prefers parallel delegation"));
+                }
+            }
+        }
     }
 
     #[test]

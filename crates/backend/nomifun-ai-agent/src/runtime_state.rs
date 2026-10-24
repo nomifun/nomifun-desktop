@@ -81,6 +81,12 @@ impl AgentRuntimeState {
         self.lifecycle.read().unwrap_or_else(|e| e.into_inner()).status
     }
 
+    /// Observe the existing local task identity without admitting or resetting
+    /// a turn. The initial identity also identifies the pre-turn SDK owner.
+    pub fn current_turn_identity(&self) -> AgentRuntimeTurn {
+        AgentRuntimeTurn(self.lifecycle.read().unwrap_or_else(|e| e.into_inner()).turn)
+    }
+
     pub fn last_activity_at(&self) -> TimestampMs {
         self.last_activity.load(Ordering::Relaxed)
     }

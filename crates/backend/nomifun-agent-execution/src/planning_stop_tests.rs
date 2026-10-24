@@ -29,6 +29,103 @@ async fn next(receiver: &mut mpsc::UnboundedReceiver<String>) -> String {
     tokio::time::timeout(Duration::from_secs(3), receiver.recv()).await.unwrap().unwrap()
 }
 
+struct CountingPlan {calls:std::sync::atomic::AtomicUsize,entered:tokio::sync::Notify,release:tokio::sync::Notify,fail:bool}
+#[async_trait]
+impl PlanProducer for CountingPlan {
+    async fn produce(&self,_:&str,_:&[ExecutionParticipant],_:Option<&LeadThinkingSink>)->Result<PlannedExecution,AppError> {
+        self.calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst);self.entered.notify_one();self.release.notified().await;
+        if self.fail {return Err(AppError::BadRequest("original planner candidate failed".into()));}
+        Ok(serde_json::from_value(json!({"steps":[{"title":"original materialized step","spec":"Observe the fixture's explicit unavailable participant outcome.",
+            "kind":"agent","participant_index":0,"failure_policy":"fail_execution"}]})).unwrap())
+    }
+    async fn adjust(&self,_:&str,_:&AgentExecutionDetail,_:Option<&LeadThinkingSink>)->Result<AdjustedExecutionPlan,AppError> {panic!("initial plan recovery cannot become another adjustment")}
+}
+
+async fn seed_counted_plan(pool:&nomifun_db::SqlitePool,owner:&str)->String {
+    let execution=seed(pool,owner,"original counted plan","planning").await;
+    // A valid original plan can materialize. Its participant intentionally has
+    // no provider/model, so the real scheduler must produce that known failure
+    // without invoking this fixture's forbidden native Session adapter.
+    sqlx::query("INSERT INTO agent_execution_participants(participant_id,execution_id,source_agent_id,introduced_in_revision,created_at) VALUES(?,?,?,0,1)")
+        .bind(generate_id()).bind(&execution).bind(generate_id()).execute(pool).await.unwrap();execution
+}
+
+async fn await_original_planning_exit(engine:&AgentExecutionEngine,owner:&str,execution:&str)->AgentExecutionDetail {
+    tokio::time::timeout(Duration::from_secs(20),async {loop {
+        let detail=engine.get(owner,execution).await.unwrap();
+        if detail.execution.status.is_terminal()&&!engine.planning_operations().iter().any(|(id,_,_)|id==execution) {break detail;}
+        tokio::task::yield_now().await;
+    }}).await.expect("the original planning owner hands off or settles instead of leaving Planning/Running without custody")
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=4)]
+async fn original_planned_result_survives_commit_busy_and_original_failure_busy_without_another_model_call() {
+    for fail in [false,true] {
+        let dir=tempfile::tempdir().unwrap();let db=nomifun_db::init_database(&dir.path().join("planning-busy.sqlite")).await.unwrap();
+        let owner=nomifun_db::installation_owner_id(db.pool()).await.unwrap();let lifecycle=AgentExecutionLifecycle::new();
+        let planner=Arc::new(CountingPlan {calls:Default::default(),entered:Default::default(),release:Default::default(),fail});
+        let engine=crate::production::tests::planning_engine(db.pool().clone(),planner.clone(),lifecycle.clone(),dir.path().to_owned());
+        let execution=seed_counted_plan(db.pool(),&owner).await;engine.spawn_initial_plan(owner.clone(),execution.clone(),1);
+        tokio::time::timeout(Duration::from_secs(3),planner.entered.notified()).await.unwrap();
+        let writer=db.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();planner.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(20),async {while engine.planning_controls.database_retries()==0 {tokio::task::yield_now().await;}}).await
+            .expect("the isolated real SQLite writer returns typed Busy before release");
+        assert_eq!(planner.calls.load(std::sync::atomic::Ordering::SeqCst),1);assert!(engine.planning_controls.has_live_owner(&execution));
+        assert_eq!(engine.get(&owner,&execution).await.unwrap().execution.status,AgentExecutionStatus::Planning,
+            "temporary commit admission is not a new business failure");
+        writer.commit().await.unwrap();let detail=await_original_planning_exit(&engine,&owner,&execution).await;
+        assert_eq!(planner.calls.load(std::sync::atomic::Ordering::SeqCst),1);
+        if fail {assert!(detail.steps.is_empty());assert!(detail.execution.summary.as_deref().unwrap().contains("original planner candidate failed"));}
+        else {assert_eq!(detail.steps.len(),1);assert_eq!(detail.attempts.len(),1);assert!(detail.attempts[0].error.as_deref().unwrap().contains("provider and model"));}
+        lifecycle.shutdown().await.unwrap();db.close().await;
+    }
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=4)]
+async fn initial_plan_commit_ack_loss_and_version_conflict_handoff_the_exact_plan_once() {
+    for lost_ack in [true,false] {
+        let dir=tempfile::tempdir().unwrap();let db=nomifun_db::init_database(&dir.path().join("planning-ack.sqlite")).await.unwrap();
+        let owner=nomifun_db::installation_owner_id(db.pool()).await.unwrap();let lifecycle=AgentExecutionLifecycle::new();
+        let planner=Arc::new(CountingPlan {calls:Default::default(),entered:Default::default(),release:Default::default(),fail:false});
+        let engine=crate::production::tests::planning_engine(db.pool().clone(),planner.clone(),lifecycle.clone(),dir.path().to_owned());
+        let execution=seed_counted_plan(db.pool(),&owner).await;
+        if lost_ack {engine.planning_controls.lose_next_plan_ack();}
+        engine.spawn_initial_plan(owner.clone(),execution.clone(),1);
+        tokio::time::timeout(Duration::from_secs(3),planner.entered.notified()).await.unwrap();
+        if !lost_ack {engine.rename(&owner,&AgentExecutionActor::User {user_id:owner.clone()},&execution,
+            RenameAgentExecutionRequest {goal:"original counted plan".into(),expected_version:1}).await.unwrap();}
+        planner.release.notify_one();let detail=await_original_planning_exit(&engine,&owner,&execution).await;
+        assert_eq!(planner.calls.load(std::sync::atomic::Ordering::SeqCst),1);assert_eq!(detail.steps.len(),1);assert_eq!(detail.attempts.len(),1);
+        let events=engine.events(&owner,&execution,None,Some(200)).await.unwrap();
+        assert_eq!(events.iter().filter(|event|event.payload["change"]=="initial_plan").count(),1,"a lost ACK or stale version cannot duplicate materialized Steps");
+        assert!(detail.attempts[0].error.as_deref().unwrap().contains("provider and model"),"the scheduler actually received the original committed task");
+        lifecycle.shutdown().await.unwrap();db.close().await;
+    }
+}
+
+#[tokio::test]
+async fn initial_planning_owner_is_visible_before_the_first_poll_and_stop_preempts_its_real_barrier() {
+    let db=nomifun_db::init_database_memory().await.unwrap();let owner=nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+    let dir=tempfile::tempdir().unwrap();let lifecycle=AgentExecutionLifecycle::new();
+    let(started,mut starts)=mpsc::unbounded_channel();let(dropped,_drops)=mpsc::unbounded_channel();
+    let engine=crate::production::tests::planning_engine(db.pool().clone(),Arc::new(HangingPlanner {started,dropped}),lifecycle.clone(),dir.path().to_owned());
+    let execution=seed(db.pool(),&owner,"exact-initial-planning-barrier","planning").await;
+    assert!(!engine.collaboration_has_dispatch_owner(&owner,&execution).await.unwrap(),"Planning text alone is not task custody");
+    let(entered,_release)=engine.hold_initial_planning_for_test("exact-initial-planning-barrier").unwrap();
+    engine.spawn_initial_plan(owner.clone(),execution.clone(),1);
+    assert!(engine.planning_controls.has_live_owner(&execution),"registration precedes this async task's first repository read");
+    engine.spawn_initial_plan(owner.clone(),execution.clone(),1);
+    assert_eq!(engine.planning_operations().iter().filter(|(id,_,_)|id==&execution).count(),1,"a duplicate observer cannot create another planner");
+    tokio::time::timeout(Duration::from_secs(3),entered.notified()).await.unwrap();
+    assert!(engine.collaboration_has_dispatch_owner(&owner,&execution).await.unwrap());assert!(starts.try_recv().is_err());
+    engine.cancel(&owner,&AgentExecutionActor::User {user_id:owner.clone()},&execution,VersionedAgentExecutionCommand {expected_version:1}).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3),async {while engine.planning_operations().iter().any(|(id,_,_)|id==&execution) {tokio::task::yield_now().await;}}).await
+        .expect("Stop must drop the original planning guard without releasing the held barrier");
+    assert!(!engine.collaboration_has_dispatch_owner(&owner,&execution).await.unwrap());
+    let detail=engine.get(&owner,&execution).await.unwrap();assert_eq!(detail.execution.status,AgentExecutionStatus::Cancelled);assert!(detail.steps.is_empty());
+    assert!(starts.try_recv().is_err());lifecycle.shutdown().await.unwrap();db.close().await;
+}
+
 #[tokio::test]
 async fn planning_stop_drops_only_original_model_request_and_keeps_durable_cancel() {
     let db = nomifun_db::init_database_memory().await.unwrap();

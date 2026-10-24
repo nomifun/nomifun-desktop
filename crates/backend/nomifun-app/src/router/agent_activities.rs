@@ -656,7 +656,7 @@ async fn project_attempt_activity(
                     && carrier.constructing_generation.is_none()
                     && !carrier.uncertain_acquisition
                     && !carrier.teardown_pending;
-                if !terminal_turn(progress.status) && progress.suspended {
+                if !terminal_turn(progress.status) && progress.suspension.is_some() {
                     row_state = if head.status == "paused" {
                         ActivityState::Paused
                     } else {

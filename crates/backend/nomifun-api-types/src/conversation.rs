@@ -54,7 +54,7 @@ pub struct UpdateConversationRequest {
 /// Body for `POST /api/conversations/:id/messages`.
 ///
 /// `msg_id` is server-generated — clients must not provide one.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
     pub content: String,

@@ -10,6 +10,170 @@ async fn save(fixture:&Fixture,key:&str,text:&str)->nomifun_agent_contracts::Eve
         json!({"content":text,"files":[],"inject_skills":[]})).await.unwrap().ack.unwrap().event_id
 }
 
+async fn queued_resume_fixture(fixture:&Fixture)->nomifun_agent_session::NativeResumeRequest {
+    use nomifun_ai_agent::engine_sdk::EngineTurnTerminal;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let operation=nomifun_agent_contracts::OperationId::from("cleanup-retry-turn");
+    fixture.host.prepare_turn(&fixture.message,CancellationToken::new()).await.unwrap();
+    fixture.host.record_event(&fixture.message,&AgentEngineEvent::TurnStarted {
+        binding:fixture.host.engine_binding.clone(),turn_operation_id:operation.clone(),
+    }).await.unwrap();
+    let checkpoint=AgentExecutionCheckpoint {
+        version:1,binding:fixture.host.engine_binding.clone(),turn_operation_id:operation.clone(),
+        active_set_generation:fixture.host.capability_state.snapshot().unwrap().generation,
+        model_steps:0,tool_call_count:0,accepted_input_count:1,applied_steering_receipts:vec![],
+        plan:Default::default(),work:Default::default(),patch_recovery:Default::default(),segments:None,
+        control_rejections:Default::default(),pending_user_input:None,awaiting_children:None,
+        collaboration:Default::default(),completion_review:Default::default(),
+    };
+    fixture.host.save_execution_checkpoint(&fixture.message,&checkpoint).await.unwrap().unwrap();
+    fixture.host.cleanup_turn(&fixture.message,&EngineTurnTerminal::Paused {reason:"EXECUTION_USER_REQUESTED".into()}).await.unwrap();
+    fixture.host.record_event(&fixture.message,&AgentEngineEvent::TurnPaused {
+        model_steps:0,reason:"EXECUTION_USER_REQUESTED".into(),
+    }).await.unwrap();
+    let store=fixture.owner.canonical().store();
+    let saved=store.load_native_checkpoint(&principal(fixture),&session,&operation).await.unwrap().unwrap();
+    let pause=store.native_pause_state(&session,&operation).await.unwrap().unwrap();
+    assert!(pause.cleanup_proven);
+    let request=nomifun_agent_session::NativeResumeRequest {operation_id:operation,
+        idempotency_key:"original-queued-native-resume".into(),expected_pause_revision:pause.revision,
+        expected_checkpoint_revision:saved.revision,expected_checkpoint_digest:saved.digest,
+        budget:Default::default(),cleanup_attestation:None};
+    store.request_native_resume(&principal(fixture),&session,&request).await.unwrap();
+    request
+}
+
+async fn join_queued_resume_owner(fixture:&Fixture,session:&AgentSessionId,request:&nomifun_agent_session::NativeResumeRequest) {
+    tokio::time::timeout(Duration::from_secs(5),fixture.owner.join_queued_native_resume_for_test(session,request)).await
+        .expect("the original queue owner must release after its authorization or exact Stop");
+}
+
+async fn assert_resume_never_dispatched_work(fixture:&Fixture,session:&AgentSessionId) {
+    let counts:(i64,i64,i64)=sqlx::query_as("SELECT \
+        (SELECT COUNT(*) FROM agent_turns WHERE session_id=?), \
+        (SELECT COUNT(*) FROM agent_effects WHERE session_id=?), \
+        (SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' \
+          AND json_extract(inline_json,'$.event.event') IN ('model_step_started','tool_started','host_tool_dispatch','host_resource_dispatch'))")
+        .bind(session.as_ref()).bind(session.as_ref()).bind(session.as_ref()).fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(counts,(1,0,0),"queue admission must never create replacement inputs, Effects, model work or tool dispatches");
+}
+
+#[tokio::test]
+async fn queued_native_resume_retries_typed_preparation_contention_with_the_original_request() {
+    use crate::router::nomi_core_session::NomiCoreSessionOwner;
+    let fixture=Fixture::new("queued-resume-typed-preparation-contention").await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let request=queued_resume_fixture(&fixture).await;let store=fixture.owner.canonical().store();
+    let original=store.native_resume_request_receipt(&principal(&fixture),&session,&request).await.unwrap().unwrap();
+    // Hold only native attachment, after authorization. This isolates the
+    // real queue/prepare/commit chain without letting a model request start.
+    let recovery=fixture.owner.hold_native_resume_attachment_for_test(&session).await;
+    let reached=NomiCoreSessionOwner::inject_queued_native_resume_preparation_error(session.as_ref(),
+        nomifun_db::DbError::Query(sqlx::Error::PoolTimedOut).into());
+    fixture.owner.enqueue_requested_native_resume(principal(&fixture),session.clone(),request.clone()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5),reached.notified()).await.unwrap();
+    let still_queued=store.native_resume_request_receipt(&principal(&fixture),&session,&request).await.unwrap().unwrap();
+    assert_eq!(still_queued.request_event_id,original.request_event_id);
+    let authorized=tokio::time::timeout(Duration::from_secs(10),async {loop {
+        if let Some(receipt)=store.native_resume_receipt(&principal(&fixture),&session,&request).await.unwrap() {break receipt;}
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }}).await.expect("temporary preparation contention must recover the existing durable continuation without another user request");
+    join_queued_resume_owner(&fixture,&session,&request).await;
+    let facts=store.chat_causality_facts(&session,&request.operation_id).await.unwrap();
+    assert_eq!(facts.events.iter().filter(|event|event.kind.0=="turn/resume-requested").count(),1);
+    assert_eq!(facts.events.iter().filter(|event|event.kind.0=="turn/resume-authorized").count(),1);
+    assert!(!facts.events.iter().any(|event|event.kind.0=="turn/resume-blocked"));
+    assert!(facts.events.iter().any(|event|event.event_id==authorized.authorization_event_id));
+    let saved=store.load_native_checkpoint(&principal(&fixture),&session,&request.operation_id).await.unwrap().unwrap();
+    assert_eq!(saved.revision,request.expected_checkpoint_revision+1);
+    assert_eq!(saved.state.0["model_steps"],0);assert_eq!(saved.state.0["tool_call_count"],0);
+    assert_resume_never_dispatched_work(&fixture,&session).await;
+    store.cancel_active_turn(&session,"stop-after-original-resume-authorization".into(),"session_api".into()).await.unwrap();
+    drop(recovery);fixture.finish().await;
+}
+
+#[tokio::test]
+async fn stop_preempts_queued_native_resume_during_typed_preparation_backoff() {
+    use crate::router::nomi_core_session::NomiCoreSessionOwner;
+    let fixture=Fixture::new("queued-resume-stop-during-preparation-backoff").await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let request=queued_resume_fixture(&fixture).await;let store=fixture.owner.canonical().store();
+    let before=store.chat_causality_facts(&session,&request.operation_id).await.unwrap();
+    let original_checkpoints=before.events.iter().filter(|event|event.kind.0=="runtime/progress-recorded"
+        &&before.event_payloads[event.event_id.as_ref()].pointer("/event/event").and_then(Value::as_str)==Some("execution_checkpoint_saved"))
+        .map(|event|event.event_id.clone()).collect::<Vec<_>>();
+    assert_eq!(original_checkpoints.len(),1);
+    let reached=NomiCoreSessionOwner::inject_queued_native_resume_preparation_error(session.as_ref(),
+        nomifun_db::DbError::Query(sqlx::Error::PoolTimedOut).into());
+    fixture.owner.enqueue_requested_native_resume(principal(&fixture),session.clone(),request.clone()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5),reached.notified()).await.unwrap();
+    let stopped=tokio::time::timeout(Duration::from_secs(2),api(&fixture._router,
+        &format!("/api/agent-sessions/{}/turns/cancel",session.as_ref()),
+        json!({"idempotency_key":"stop-original-queued-resume","expected_turn_id":fixture.message.source_message_id})))
+        .await.expect("user Stop must not wait behind the queue owner's infrastructure backoff");
+    assert_eq!(stopped["target_operation_id"],request.operation_id.as_ref());
+    join_queued_resume_owner(&fixture,&session,&request).await;
+    assert_eq!(store.read_turn_receipt(&session,&request.operation_id).await.unwrap().status,nomifun_agent_session::TurnReceiptStatus::Cancelled);
+    assert!(store.native_resume_request_receipt(&principal(&fixture),&session,&request).await.unwrap().is_none());
+    let facts=store.chat_causality_facts(&session,&request.operation_id).await.unwrap();
+    assert_eq!(facts.events.iter().filter(|event|event.kind.0=="turn/resume-requested").count(),1);
+    assert!(!facts.events.iter().any(|event|matches!(event.kind.0.as_str(),"turn/resume-authorized"|"turn/resume-blocked")));
+    assert!(store.load_native_checkpoint(&principal(&fixture),&session,&request.operation_id).await.unwrap().is_none(),
+        "a cancelled Turn must not retain a live checkpoint that could reopen its work");
+    let retained_checkpoints=facts.events.iter().filter(|event|event.kind.0=="runtime/progress-recorded"
+        &&facts.event_payloads[event.event_id.as_ref()].pointer("/event/event").and_then(Value::as_str)==Some("execution_checkpoint_saved"))
+        .map(|event|event.event_id.clone()).collect::<Vec<_>>();
+    assert_eq!(retained_checkpoints,original_checkpoints,"Stop preserves the one original checkpoint fact without creating another");
+    let original=&facts.event_payloads[original_checkpoints[0].as_ref()]["event"];
+    assert_eq!(original["revision"],request.expected_checkpoint_revision);
+    assert_eq!(original["digest"],request.expected_checkpoint_digest.as_ref());
+    assert_resume_never_dispatched_work(&fixture,&session).await;
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn queued_native_resume_retires_a_worker_without_receipt_authority_and_preserves_the_original_intent() {
+    let fixture=Fixture::new("queued-resume-revoked-receipt-owner").await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let request=queued_resume_fixture(&fixture).await;let store=fixture.owner.canonical().store();
+    let original=store.native_resume_request_receipt(&principal(&fixture),&session,&request).await.unwrap().unwrap();
+    let cursor=store.current_cursor(&session).await.unwrap();
+    let stale_owner=PrincipalRef {principal_kind:"user".into(),principal_id:uuid::Uuid::now_v7().to_string()};
+    assert!(matches!(store.native_resume_request_receipt(&stale_owner,&session,&request).await,
+        Err(nomifun_agent_session::SessionStoreError::ExecutionFenced)),"the real canonical reader must reject this worker's authority");
+    fixture.owner.enqueue_requested_native_resume(stale_owner,session.clone(),request.clone()).unwrap();
+    join_queued_resume_owner(&fixture,&session,&request).await;
+    assert_eq!(store.current_cursor(&session).await.unwrap(),cursor,
+        "an unauthorized local worker cannot append blocked/authorized facts or recreate the input");
+    let retained=store.native_resume_request_receipt(&principal(&fixture),&session,&request).await.unwrap().unwrap();
+    assert_eq!(retained.request_event_id,original.request_event_id,
+        "retiring an unauthorized worker must not discard the actual owner's durable continuation intent");
+    assert_resume_never_dispatched_work(&fixture,&session).await;
+    store.cancel_active_turn(&session,"close-original-revoked-worker-fixture".into(),"session_api".into()).await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn queued_native_resume_contract_failure_stays_blocked_even_when_its_text_mentions_contention() {
+    use crate::router::nomi_core_session::NomiCoreSessionOwner;
+    let fixture=Fixture::new("queued-resume-permanent-preparation-failure").await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let request=queued_resume_fixture(&fixture).await;let store=fixture.owner.canonical().store();
+    let reached=NomiCoreSessionOwner::inject_queued_native_resume_preparation_error(session.as_ref(),
+        AppError::Forbidden("pool timed out; database is busy; original owner authority was revoked".into()));
+    fixture.owner.enqueue_requested_native_resume(principal(&fixture),session.clone(),request.clone()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5),reached.notified()).await.unwrap();
+    join_queued_resume_owner(&fixture,&session,&request).await;
+    let facts=store.chat_causality_facts(&session,&request.operation_id).await.unwrap();
+    assert_eq!(facts.events.iter().filter(|event|event.kind.0=="turn/resume-blocked").count(),1);
+    assert!(!facts.events.iter().any(|event|event.kind.0=="turn/resume-authorized"));
+    assert!(store.request_native_resume(&principal(&fixture),&session,&request).await.is_err(),
+        "a real authority rejection cannot be retried under the same old request");
+    assert_resume_never_dispatched_work(&fixture,&session).await;
+    store.cancel_active_turn(&session,"close-blocked-original-resume".into(),"session_api".into()).await.unwrap();
+    fixture.finish().await;
+}
+
 #[tokio::test]
 async fn a_shared_session_defers_other_channel_receivers_and_desktop_input_to_separate_turns() {
     let fixture=Fixture::new("session-input-receiver-isolation").await;
@@ -202,7 +366,9 @@ async fn native_delivery_write_failure_never_hides_the_claimed_original_input() 
     assert!(!fixture.host.active.lock().await.as_ref().unwrap().steering.permits_resource_dispatch());
     sqlx::query("DROP TRIGGER reject_native_input_delivery").execute(fixture.pool()).await.unwrap();
     let mut message=fixture.message.clone();message.msg_id=message.source_message_id.clone().unwrap();
-    fixture.host.suspend_after_cleanup_failure(&message).await.unwrap();
+    fixture.host.handoff_turn_settlement(&message,
+        &nomifun_ai_agent::engine_sdk::EngineTurnOutcome::cancelled(0),
+        "fixture native input delivery failure").await.unwrap();
     assert_eq!(fixture.owner.canonical().store().head(&session).await.unwrap().status,"paused");
     let replay=save(&fixture,"journal-failure-input","Saved original input after a real DB failure").await;assert_eq!(replay,id);
     assert!(fixture.owner.canonical().store().pending_session_inputs(&session,Some(&id)).await.unwrap().is_empty());
@@ -383,5 +549,207 @@ async fn queued_turn_history_merges_intervening_domain_data_at_the_claim_not_the
     assert!(requirement.contains(b_text) && requirement.contains("queued-reference.txt"),"the scoped history port decodes the same single accepted payload");
     assert_eq!(store.current_cursor(&session).await.unwrap(),before);
     store.cancel_exact_turn(&session,&c_operation,"merge-close-c".into(),"session_api".into()).await.unwrap();
+    fixture.finish().await;
+}
+
+async fn authorize_original_resume_without_attaching(fixture:&Fixture)
+    ->(nomifun_agent_session::NativeResumeRequest,nomifun_agent_session::NativeResumeReceipt) {
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let request=queued_resume_fixture(fixture).await;
+    let prepared=crate::router::nomi_core_session::native_execution_control::prepare_resume_for_test(&fixture.owner,&principal(fixture),&session,&request).await.unwrap();
+    let receipt=fixture.owner.canonical().store().commit_native_resume(&principal(fixture),&session,&request,prepared).await.unwrap();
+    (request,receipt)
+}
+
+#[tokio::test]
+async fn authorized_resume_keeps_its_attach_owner_after_typed_generation_read_failure() {
+    use crate::router::nomi_core_session::NomiCoreSessionOwner;
+    let fixture=Fixture::new("authorized-resume-generation-contention").await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let (request,authorized)=authorize_original_resume_without_attaching(&fixture).await;
+    let read=NomiCoreSessionOwner::inject_authorized_native_resume_attachment_error(session.as_ref(),"generation",
+        nomifun_db::DbError::Query(sqlx::Error::PoolTimedOut).into());
+    // This independent, post-claim cutpoint proves the original owner reached
+    // attachment after its transient read recovered, without sampling a model.
+    let claimed=NomiCoreSessionOwner::inject_authorized_native_resume_attachment_error(session.as_ref(),"claimed",
+        AppError::Conflict("fixture original attachment stops before resource opening".into()));
+    fixture.owner.enqueue_authorized_native_resume(session.clone(),request.operation_id.clone(),authorized.seq).await.unwrap();
+    fixture.owner.enqueue_authorized_native_resume(session.clone(),request.operation_id.clone(),authorized.seq).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5),read.notified()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10),claimed.notified()).await.expect("a transient generation read must not abandon the original authorization");
+    tokio::time::timeout(Duration::from_secs(10),fixture.owner.join_authorized_native_resume_for_test(&session,&request.operation_id,authorized.seq)).await.unwrap();
+    let store=fixture.owner.canonical().store();
+    let pause=store.native_pause_state(&session,&request.operation_id).await.unwrap().unwrap();
+    assert!(pause.cleanup_proven);assert_eq!(pause.reason,"EXECUTION_ATTACH_FAILED");
+    let facts=store.native_recovery_facts(&session,&request.operation_id).await.unwrap();
+    assert_eq!(facts.events.iter().filter(|event|event.seq>authorized.seq&&event.kind.0=="runtime/execution-claimed").count(),1);
+    assert_eq!(facts.events.iter().filter(|event|event.kind.0=="turn/resume-authorized").count(),1);
+    assert_resume_never_dispatched_work(&fixture,&session).await;
+    store.cancel_active_turn(&session,"close-original-attach-read-fixture".into(),"session_api".into()).await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn authorized_resume_retains_the_claimed_journal_until_its_original_cleanup_commits() {
+    use crate::router::nomi_core_session::NomiCoreSessionOwner;
+    let fixture=Fixture::new("authorized-resume-original-claim-cleanup-contention").await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let (request,authorized)=authorize_original_resume_without_attaching(&fixture).await;
+    let claimed=NomiCoreSessionOwner::inject_authorized_native_resume_attachment_error(session.as_ref(),"claimed",
+        nomifun_db::DbError::Query(sqlx::Error::PoolTimedOut).into());
+    sqlx::query("CREATE TRIGGER reject_original_unattached_cleanup BEFORE INSERT ON agent_events WHEN NEW.kind='runtime/progress-recorded' AND json_extract(NEW.inline_json,'$.event.event')='host_cleanup_proven' BEGIN SELECT RAISE(FAIL,'fixture original unattached cleanup not committed'); END")
+        .execute(fixture.pool()).await.unwrap();
+    fixture.owner.enqueue_authorized_native_resume(session.clone(),request.operation_id.clone(),authorized.seq).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10),claimed.notified()).await.unwrap();
+    let store=fixture.owner.canonical().store();
+    tokio::time::timeout(Duration::from_secs(5),async {loop {
+        if store.pending_native_turn_settlements(0,100).await.unwrap().iter().any(|item|item.receipt.session_id()==&session) {break;}
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }}).await.expect("the failed original attachment must durably transfer its cleanup responsibility");
+    let generation=store.native_execution_generation(&session,&request.operation_id).await.unwrap();
+    assert!(generation>authorized.seq);
+    assert!(!store.native_pause_state(&session,&request.operation_id).await.unwrap().unwrap().cleanup_proven);
+    sqlx::query("DROP TRIGGER reject_original_unattached_cleanup").execute(fixture.pool()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10),fixture.owner.join_authorized_native_resume_for_test(&session,&request.operation_id,authorized.seq)).await.unwrap();
+    assert_eq!(store.native_execution_generation(&session,&request.operation_id).await.unwrap(),generation);
+    assert!(store.native_pause_state(&session,&request.operation_id).await.unwrap().unwrap().cleanup_proven);
+    assert!(!store.pending_native_turn_settlements(0,100).await.unwrap().iter().any(|item|item.receipt.session_id()==&session));
+    assert_resume_never_dispatched_work(&fixture,&session).await;
+    store.cancel_active_turn(&session,"close-original-claimed-attach-fixture".into(),"session_api".into()).await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn stop_preempts_the_original_authorized_attach_owner_during_database_backoff() {
+    use crate::router::nomi_core_session::NomiCoreSessionOwner;
+    let fixture=Fixture::new("authorized-resume-stop-during-attachment-backoff").await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let (request,authorized)=authorize_original_resume_without_attaching(&fixture).await;
+    let read=NomiCoreSessionOwner::inject_authorized_native_resume_attachment_error(session.as_ref(),"generation",
+        nomifun_db::DbError::Query(sqlx::Error::PoolTimedOut).into());
+    fixture.owner.enqueue_authorized_native_resume(session.clone(),request.operation_id.clone(),authorized.seq).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5),read.notified()).await.unwrap();
+    fixture.owner.canonical().store().cancel_active_turn(&session,"stop-original-authorized-attach".into(),"session_api".into()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3),fixture.owner.join_authorized_native_resume_for_test(&session,&request.operation_id,authorized.seq)).await
+        .expect("Stop cannot wait for attachment retries or grant another recovery invocation");
+    assert_eq!(fixture.owner.canonical().store().read_turn_receipt(&session,&request.operation_id).await.unwrap().status,nomifun_agent_session::TurnReceiptStatus::Cancelled);
+    assert_resume_never_dispatched_work(&fixture,&session).await;
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn resumed_preclaimed_sdk_receipt_failure_settles_and_retires_its_exact_new_generation_without_a_relay() {
+    preclaimed_sdk_receipt_failure_scenario(true,false).await;
+}
+
+#[tokio::test]
+async fn warm_resumed_sdk_receipt_failure_cannot_reuse_the_prior_paused_exit_or_generation() {
+    preclaimed_sdk_receipt_failure_scenario(false,false).await;
+}
+
+#[tokio::test]
+async fn warm_resumed_sdk_retry_keeps_its_task_scope_after_relay_releases_admission() {
+    preclaimed_sdk_receipt_failure_scenario(false,true).await;
+}
+
+async fn preclaimed_sdk_receipt_failure_scenario(cold_carrier:bool,release_before_retry:bool) {
+    let fixture=Fixture::new(if cold_carrier {"resumed-preclaim-sdk-receipt-failure-retirement"}
+        else {"warm-resumed-preclaim-sdk-receipt-failure-retirement"}).await;
+    let session=AgentSessionId::from(fixture.host.options.conversation_id.clone());
+    let request=queued_resume_fixture(&fixture).await;
+    let store=fixture.owner.canonical().store();
+    // The paused owner has already proved its cleanup. Retire that carrier,
+    // retaining its real canonical checkpoint, before constructing the normal
+    // resumed SDK. Do not erase the old Host's terminal cache by hand.
+    if cold_carrier {fixture.runtime.kill_and_wait(None).await.unwrap();}
+    let prepared=crate::router::nomi_core_session::native_execution_control::prepare_resume_for_test(
+        &fixture.owner,&principal(&fixture),&session,&request).await.unwrap();
+    let authorized=store.commit_native_resume(&principal(&fixture),&session,&request,prepared).await.unwrap();
+    let receipt=fixture.host.session_host.read_turn_receipt(&fixture.host.options,&fixture.host.binding,
+        &fixture.host.snapshot_ref,&fixture.message).await.unwrap();
+    let journal=fixture.host.session_host.claim_journal(&receipt,CancellationToken::new()).await.unwrap();
+    journal.refresh_budget().await.unwrap();
+    journal.restore_public_projection().await.unwrap();
+    let generation=journal.generation();
+    let started=store.read_turn_receipt(&session,&request.operation_id).await.unwrap().started_event.unwrap();
+    assert!(generation>authorized.seq&&generation>started.seq,
+        "the resumed native owner must be the real new canonical claim, not the first Turn start");
+    let runtime=fixture.services.agent_runtime_sessions.get_or_create_runtime_for_turn(session.as_ref(),generation,
+        CancellationToken::new(),fixture.registry_options()).await.unwrap();
+    let host=if cold_carrier {
+        HOSTS.get().unwrap().lock().unwrap().get(session.as_ref()).and_then(Weak::upgrade).unwrap()
+    } else {fixture.host.clone()};
+    assert_eq!(std::ptr::eq(runtime.as_runtime(),fixture.runtime.as_runtime()),!cold_carrier,
+        "warm continuation must retain its actual original SDK, while cold continuation replaces the retired carrier");
+    assert_eq!(std::ptr::eq(host.as_ref(),fixture.host.as_ref()),!cold_carrier);
+    let original_task=runtime.as_runtime().current_task_identity().expect("the exact SDK exposes its local task");
+    if !cold_carrier {
+        let prior=host.last_committed_exit.lock().unwrap().clone().unwrap();
+        assert!(prior.generation<generation,"the old successful Pause remains intact; it cannot prove this resumed generation's cleanup");
+        assert_eq!(prior.task,original_task,"admission alone cannot reset the SDK's local task");
+    }
+    assert!(host.active.lock().await.is_none());
+    assert_eq!(fixture.services.agent_runtime_sessions.active_turn_generation_if_matches(session.as_ref(),&runtime),Some(generation));
+    let settlement_source=if release_before_retry {
+        Some(fixture.owner.hold_turn_settlement_source_for_test(&session,fixture.message.source_message_id.as_ref().unwrap()).await)
+    } else {None};
+    let mut sdk_events=runtime.subscribe();
+    let (failed_reads,release,observed)=host.fail_first_two_receipt_reads_for_test();
+    runtime.send_message(fixture.message.clone()).await.unwrap();
+    let resumed_task=runtime.as_runtime().current_task_identity().expect("the accepted SDK task remains observable");
+    assert_ne!(resumed_task,original_task,"the real send starts a new task on its SDK");
+    let failed=tokio::time::timeout(Duration::from_secs(10),failed_reads.notified()).await;
+    assert!(failed.is_ok(),"the actual SDK must reach both receipt reads for its new admission instead of reusing the old Pause; cold={cold_carrier}, observed={}",observed.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst),2);
+    assert_eq!(runtime.as_runtime().current_task_identity(),Some(resumed_task));
+    assert!(host.active.lock().await.is_none(),"neither failed read may publish an ActiveTurn");
+    assert_eq!(store.native_execution_generation(&session,&request.operation_id).await.unwrap(),generation);
+    release.add_permits(1);
+    if release_before_retry {
+        tokio::time::timeout(Duration::from_secs(5),async {loop {
+            match sdk_events.recv().await {
+                Ok(nomifun_ai_agent::protocol::events::AgentStreamEvent::Finish(_)
+                    |nomifun_ai_agent::protocol::events::AgentStreamEvent::Error(_))=>break,
+                Ok(_)|Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{},
+                Err(error)=>panic!("the original SDK lost its real settlement handoff event: {error}"),
+            }
+        }}).await.expect("handoff must install the original worker before its real SDK terminal frame");
+        // This is the exact production relay's release operation, after that
+        // SDK's local terminal frame. The held source gate guarantees the
+        // retained worker cannot begin its first retry until after release.
+        fixture.services.agent_runtime_sessions.release_runtime_turn(session.as_ref(),generation).await.unwrap();
+        assert!(fixture.services.agent_runtime_sessions.active_turn_generation(session.as_ref()).is_none());
+        assert_eq!(runtime.as_runtime().current_task_identity(),Some(resumed_task),
+            "releasing the native admission cannot change the SDK task's late-ACK identity");
+        assert!(host.active.lock().await.is_none());
+        assert_eq!(store.read_turn_receipt(&session,&request.operation_id).await.unwrap().status,
+            nomifun_agent_session::TurnReceiptStatus::Running);
+    }
+    drop(settlement_source);
+
+    // There is deliberately no stream relay or explicit retirement call. The
+    // retained preclaim owner must publish the original exit and retire exactly
+    // this admitted Runtime, before fixture.finish can help close anything.
+    tokio::time::timeout(Duration::from_secs(20),async {loop {
+        let terminal=store.read_turn_receipt(&session,&request.operation_id).await.unwrap();
+        let carrier=fixture.services.agent_runtime_sessions.observe_runtime_carrier(session.as_ref());
+        if terminal.status==nomifun_agent_session::TurnReceiptStatus::Failed
+            &&!carrier.registered&&!carrier.teardown_pending&&carrier.active_generation.is_none() {break;}
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }}).await.expect("the original preclaim settlement bridge must use the new admission generation to retire its exact resumed SDK");
+    assert!(runtime.teardown_proven());
+    assert_eq!(runtime.as_runtime().current_task_identity(),Some(resumed_task),
+        "settlement and automatic resource retirement must not reset the original task identity");
+    assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst),2);
+    assert_eq!(store.native_execution_generation(&session,&request.operation_id).await.unwrap(),generation);
+    let facts=store.chat_causality_facts(&session,&request.operation_id).await.unwrap();
+    assert_eq!(facts.events.iter().filter(|event|event.kind.0=="turn/failed").count(),1);
+    assert!(!facts.events.iter().any(|event|matches!(event.kind.0.as_str(),"turn/completed"|"turn/cancelled")));
+    assert_eq!(facts.events.iter().filter(|event|event.seq>authorized.seq&&event.kind.0=="runtime/execution-claimed").count(),1);
+    let attempts:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_execution_attempts").fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(attempts,0,"receipt recovery cannot create a replacement Attempt");
+    assert_resume_never_dispatched_work(&fixture,&session).await;
+    assert!(!store.pending_native_turn_settlements(0,100).await.unwrap().iter().any(|item|item.receipt.session_id()==&session));
+    drop(journal);
     fixture.finish().await;
 }

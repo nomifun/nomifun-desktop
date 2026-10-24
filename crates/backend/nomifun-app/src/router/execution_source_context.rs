@@ -201,14 +201,14 @@ impl NomiCoreSessionOwner {
                AND json_extract(event.payload,'$.operation_id')=? \
                AND json_type(event.payload,'$.message_source')='object' LIMIT 2")
             .bind(owner_id).bind(child_session.as_ref()).bind(operation_id)
-            .fetch_all(&self.pool).await.map_err(|error|AppError::Internal(error.to_string()))?;
+            .fetch_all(&self.pool).await.map_err(nomifun_db::DbError::Query)?;
         if commands.len()>1 {return Err(invalid("steering command has multiple original owners"));}
         let Some((execution,step,source))=commands.into_iter().next() else {return Ok(request);};
         let source:nomifun_db::AgentExecutionMessageSource=serde_json::from_str(&source).map_err(invalid)?;
-        let mut tx=self.pool.begin().await.map_err(|error|AppError::Internal(error.to_string()))?;
+        let mut tx=self.pool.begin().await.map_err(nomifun_db::DbError::Query)?;
         let digest=nomifun_agent_contracts::digest_bytes(request.content.as_bytes());
         let (cutoff,_)=nomifun_db::agent_message_command_bound_tx(&mut tx,&source,&execution,&step,operation_id,digest.as_ref()).await?;
-        tx.commit().await.map_err(|error|AppError::Internal(error.to_string()))?;
+        tx.commit().await.map_err(nomifun_db::DbError::Query)?;
         let input=canonical_source_input(self.canonical.store(),&source.agent_session_id.into(),
             &source.turn_operation_id.into(),cutoff).await?;
         input.prepare_request(&mut request);
@@ -229,9 +229,9 @@ impl NomiCoreSessionOwner {
     pub(crate) async fn collaboration_source_turns(
         &self, owner_id: &str, session: &AgentSessionId, current: &OperationId,
     ) -> Result<Vec<OperationId>, AppError> {
-        let mut tx=self.pool.begin().await.map_err(|error|AppError::Internal(error.to_string()))?;
+        let mut tx=self.pool.begin().await.map_err(nomifun_db::DbError::Query)?;
         let sources=nomifun_db::agent_reply_source_turns_tx(&mut tx,owner_id,session.as_ref(),current.as_ref()).await?;
-        tx.commit().await.map_err(|error|AppError::Internal(error.to_string()))?;
+        tx.commit().await.map_err(nomifun_db::DbError::Query)?;
         Ok(sources.into_iter().map(OperationId::from).collect())
     }
     pub(crate) async fn read_execution_source_context(
@@ -247,14 +247,17 @@ impl NomiCoreSessionOwner {
     /// preparation; its own immutable binding remains the permission ceiling.
     pub(crate) async fn prepare_execution_child_input(
         &self, owner_id: &str, child_session_id: &AgentSessionId,
+        attempt_id: &str,
         source: Option<&nomifun_agent_execution::AgentExecutionSource>,
         mut request: SendMessageRequest,
     ) -> Result<SendMessageRequest, AppError> {
+        #[cfg(test)]
+        self.attempt_input_owner_cutpoint(child_session_id,&request,"preparing-source").await?;
         if !request.files.is_empty() || !request.inject_skills.is_empty()
             || request.origin.as_deref()!=Some("agent_execution") {
             return Err(invalid("child selections must come from its exact delegated source"));
         }
-        let prepared = match self.execution_source_context(owner_id, child_session_id).await? {
+        let prepared = match self.preparing_execution_source_context(owner_id, child_session_id, attempt_id).await? {
             Some(prepared)=>prepared,
             None if source.is_none()=>return Ok(request),
             None=>return Err(invalid("child has no current source Attempt")),
@@ -264,6 +267,42 @@ impl NomiCoreSessionOwner {
         }
         prepared.input.prepare_request(&mut request);
         Ok(request)
+    }
+
+    /// Preparation precedes the atomic Running/link/input commit. Its proof
+    /// is the original queued reservation and exact Session creation receipt
+    /// (or formal continuation), not a fabricated active execution link.
+    async fn preparing_execution_source_context(&self,owner_id:&str,child_session_id:&AgentSessionId,attempt_id:&str)
+        ->Result<Option<PreparedExecutionSourceContext>,AppError> {
+        let identity:Option<(String,String)>=sqlx::query_as(
+            "SELECT attempt.execution_id,attempt.step_id FROM agent_execution_attempts attempt \
+             JOIN agent_execution_steps step ON step.execution_id=attempt.execution_id AND step.step_id=attempt.step_id \
+             JOIN agent_executions execution ON execution.execution_id=attempt.execution_id \
+             JOIN agent_sessions child ON child.agent_session_id=? \
+             WHERE attempt.attempt_id=? AND attempt.status='queued' AND step.status='pending' AND step.superseded_in_revision IS NULL \
+               AND execution.user_id=? AND execution.deleted_at IS NULL AND execution.status IN('running','waiting_input','paused') \
+               AND attempt.attempt_no=(SELECT MAX(current.attempt_no) FROM agent_execution_attempts current WHERE current.execution_id=attempt.execution_id AND current.step_id=attempt.step_id) \
+               AND child.state='live' AND json_extract(child.owner_ref_json,'$.principal_kind')='user' AND json_extract(child.owner_ref_json,'$.principal_id')=?")
+            .bind(child_session_id.as_ref()).bind(attempt_id).bind(owner_id).bind(owner_id)
+            .fetch_optional(&self.pool).await.map_err(nomifun_db::DbError::Query)?;
+        let (execution,step)=identity.ok_or_else(||invalid("child preparation has no exact original queued reservation"))?;
+        let repository=nomifun_db::SqliteAgentExecutionRepository::new(self.pool.clone());
+        if let Some(target)=nomifun_db::IAgentExecutionRepository::continuation_target(&repository,owner_id,&execution,&step).await? {
+            if target.conversation_id!=child_session_id.as_ref() {return Err(invalid("prepared continuation names another child Session"));}
+            let original=nomifun_db::IAgentExecutionRepository::original_child_binding(&repository,owner_id,&execution,&target).await?;
+            let child=self.canonical.get(&PrincipalRef {principal_kind:"user".into(),principal_id:owner_id.into()},child_session_id).await?;
+            if nomifun_agent_contracts::AgentHandoffBindingRefV1::from(&child.session.agent_binding)!=original {
+                return Err(invalid("prepared continuation changed its original child binding"));
+            }
+        } else {
+            let source=nomifun_db::IAgentExecutionRepository::step_source(&repository,owner_id,&execution,&step).await?;
+            let creation=if source.is_some() {format!("execution-source:{attempt_id}")} else {attempt_id.to_owned()};
+            let key=format!("user:{owner_id}:open:{creation}");
+            let created:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_events WHERE session_id=? AND producer_id='session_api' AND kind='session/opening' AND kind_version=1 AND idempotency_key=?)")
+                .bind(child_session_id.as_ref()).bind(key).fetch_one(&self.pool).await.map_err(nomifun_db::DbError::Query)?;
+            if !created {return Err(invalid("child preparation differs from the original Attempt creation receipt"));}
+        }
+        self.execution_source_context_for_attempt(owner_id,child_session_id,&execution,&step,attempt_id).await
     }
 
     async fn execution_source_context(
@@ -280,13 +319,20 @@ impl NomiCoreSessionOwner {
                AND session.state='live' AND json_extract(session.owner_ref_json,'$.principal_kind')='user' \
                AND json_extract(session.owner_ref_json,'$.principal_id')=? LIMIT 2")
             .bind(child_session_id.as_ref()).bind(owner_id).bind(owner_id)
-            .fetch_all(&self.pool).await.map_err(|error| AppError::Internal(error.to_string()))?;
+            .fetch_all(&self.pool).await.map_err(nomifun_db::DbError::Query)?;
         if plans.len() > 1 {
             return Err(invalid("child belongs to multiple active Attempts"));
         }
         let Some((execution_id, step_id, attempt_id)) = plans.into_iter().next() else {
             return Ok(None);
         };
+        self.execution_source_context_for_attempt(owner_id,child_session_id,&execution_id,&step_id,&attempt_id).await
+    }
+
+    /// Shared canonical source reader. Callers prove either the exact queued
+    /// preparation or the active Runtime link before reaching this function.
+    async fn execution_source_context_for_attempt(&self,owner_id:&str,child_session_id:&AgentSessionId,
+        execution_id:&str,step_id:&str,attempt_id:&str)->Result<Option<PreparedExecutionSourceContext>,AppError> {
         let repository=nomifun_db::SqliteAgentExecutionRepository::new(self.pool.clone());
         let message_source=nomifun_db::IAgentExecutionRepository::step_message_source(
             &repository,owner_id,&execution_id,&step_id,
@@ -375,9 +421,9 @@ impl NomiCoreSessionOwner {
             return Err(invalid("followup input belongs to another original source Session"));
         }
         let input_cutoff=if let Some(message)=message_source.as_ref() {
-            let mut tx=self.pool.begin().await.map_err(|error|AppError::Internal(error.to_string()))?;
+            let mut tx=self.pool.begin().await.map_err(nomifun_db::DbError::Query)?;
             let (sequence,_)=nomifun_db::agent_message_command_tx(&mut tx,message).await?;
-            tx.commit().await.map_err(|error|AppError::Internal(error.to_string()))?;
+            tx.commit().await.map_err(nomifun_db::DbError::Query)?;
             sequence
         } else {cause.seq};
         let input=canonical_source_input(self.canonical.store(),&source_session,&input_operation,input_cutoff).await?;

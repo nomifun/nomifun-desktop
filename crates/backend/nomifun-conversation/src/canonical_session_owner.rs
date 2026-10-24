@@ -370,6 +370,16 @@ impl CanonicalAgentSessionOwner {
             .await
     }
 
+    pub async fn start_execution_turn(&self, owner:&PrincipalRef, session:&AgentSessionId,
+        key:&str, input:Value, authority:&nomifun_db::AgentExecutionTurnAuthority)->Result<AgentTurnReceipt,AppError> {
+        self.require_executable(owner,session).await?;
+        let scoped=scoped_key(owner,key,session.as_ref())?;
+        let operation_id=OperationId::from(format!("turn:{scoped}"));
+        let (_,result)=self.store.start_execution_turn(session,"session_api".into(),scoped.into(),operation_id.clone(),
+            StrictJsonValue(input),&owner.principal_id,key,authority).await.map_err(store_error)?;
+        Ok(AgentTurnReceipt {operation_id,cursor:result.cursor,duplicate:result.duplicate})
+    }
+
     pub async fn start_voice_turn(&self,owner:&PrincipalRef,session:&AgentSessionId,key:&str,input:Value,fence:&nomifun_agent_session::NativeInputContextFence)->Result<AgentTurnReceipt,AppError> {
         self.require_executable(owner,session).await?;let key=scoped_key(owner,key,session.as_ref())?;let operation_id=OperationId::from(format!("turn:{key}"));
         let (_,result)=self.store.start_voice_turn(session,"session_api".into(),key.into(),operation_id.clone(),StrictJsonValue(input),fence).await.map_err(store_error)?;
@@ -694,6 +704,16 @@ impl CanonicalAgentSessionOwner {
         }
     }
 
+    /// Empty Attempt-created Sessions use one writer for original creation
+    /// proof, absence of admitted work, and the deletion admission fence.
+    pub async fn fence_empty_execution_creation(
+        &self, owner: &PrincipalRef, attempt: &str,
+        expected_session: Option<&AgentSessionId>, requested_at: i64,
+    ) -> Result<nomifun_agent_session::EmptyExecutionCreationFence, AppError> {
+        self.store.fence_empty_execution_creation(owner, attempt, expected_session, requested_at)
+            .await.map_err(store_error)
+    }
+
     pub async fn complete_fenced_delete(
         &self,
         command: &DeleteAgentSessionCommand,
@@ -760,6 +780,7 @@ fn scoped_key(owner: &PrincipalRef, key: &str, scope: &str) -> Result<String, Ap
 
 fn store_error(error: SessionStoreError) -> AppError {
     match error {
+        SessionStoreError::Sqlite(error) => nomifun_db::DbError::Query(error).into(),
         SessionStoreError::NotFound(message) | SessionStoreError::Deleted(message) => {
             AppError::NotFound(message)
         }

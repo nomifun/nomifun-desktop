@@ -4,6 +4,51 @@ use sqlx::{Sqlite, Transaction};
 use crate::{DbError, AttemptConversationEffects};
 use nomifun_agent_contracts::NativePauseState;
 
+/// Consume the exact domain authority under the canonical input writer. A
+/// preflight check cannot fence a sender racing Stop or scheduler takeover.
+/// Existing canonical same-key receipts are checked before calling this guard;
+/// confirming that receipt never grants permission to execute again.
+pub async fn validate_execution_turn_authority_tx(
+    tx: &mut Transaction<'_, Sqlite>, user_id: &str, session_id: &str,
+    operation_key: &str, authority: &crate::AgentExecutionTurnAuthority,
+) -> Result<(), DbError> {
+    if authority.lease_owner.trim().is_empty() || authority.expected_step_version < 0
+        || authority.expected_attempt_version < 0 || operation_key.trim().is_empty() {
+        return Err(DbError::Conflict("invalid exact Attempt input authority".into()));
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| DbError::Init(error.to_string()))?.as_millis() as i64;
+    let valid: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM agent_executions execution \
+         JOIN agent_execution_steps step ON step.execution_id=execution.execution_id \
+         JOIN agent_execution_attempts attempt ON attempt.execution_id=step.execution_id AND attempt.step_id=step.step_id \
+         JOIN conversation_execution_links link ON link.execution_id=attempt.execution_id AND link.step_id=attempt.step_id AND link.attempt_id=attempt.attempt_id \
+         JOIN agent_sessions session ON session.agent_session_id=link.conversation_id \
+         WHERE execution.execution_id=? AND execution.user_id=? AND execution.lease_owner=? AND execution.lease_expires_at>? \
+           AND execution.deleted_at IS NULL AND execution.status IN('running','waiting_input','paused') \
+           AND step.step_id=? AND step.version=? AND step.status='running' AND step.superseded_in_revision IS NULL \
+           AND attempt.attempt_id=? AND attempt.version>=? AND attempt.status='running' \
+           AND link.conversation_id=? AND link.active=1 AND link.relation IN('attempt','automation') \
+           AND session.state='live' AND json_extract(session.owner_ref_json,'$.principal_kind')='user' \
+           AND json_extract(session.owner_ref_json,'$.principal_id')=? \
+           AND (SELECT COUNT(*) FROM conversation_execution_links peer WHERE peer.conversation_id=link.conversation_id \
+             AND peer.active=1 AND peer.relation IN('attempt','automation'))=1 \
+           AND NOT EXISTS(SELECT 1 FROM agent_execution_events event,json_each(event.payload,'$.cancelled_step_ids') stopped \
+             WHERE event.execution_id=execution.execution_id AND event.event_type='step_changed' \
+               AND json_extract(event.payload,'$.action')='cancel_step' AND stopped.value=step.step_id))")
+        .bind(&authority.execution_id).bind(user_id).bind(&authority.lease_owner).bind(now)
+        .bind(&authority.step_id).bind(authority.expected_step_version).bind(&authority.attempt_id)
+        .bind(authority.expected_attempt_version).bind(session_id).bind(user_id).fetch_one(&mut **tx).await?;
+    if !valid { return Err(DbError::Conflict("original Attempt input was fenced by ownership, Stop or takeover".into())); }
+    let exact_key = execution_attempt_turn_key_tx(tx,user_id,&authority.execution_id,&authority.step_id,&authority.attempt_id).await?;
+    if exact_key != operation_key { return Err(DbError::Conflict("input does not name the original Attempt operation".into())); }
+    let (initial, lead): (String, Option<String>) = sqlx::query_as(
+        "SELECT initial_plan_input,(SELECT conversation_id FROM conversation_execution_links WHERE execution_id=execution.execution_id \
+         AND relation='lead' ORDER BY id DESC LIMIT 1) FROM agent_executions execution WHERE execution_id=?")
+        .bind(&authority.execution_id).fetch_one(&mut **tx).await?;
+    require_autowork_admitted_tx(tx,user_id,&initial,lead.as_deref()).await
+}
+
 #[derive(Debug)]
 pub struct AgentExecutionReservation {
     pub attempt_id: String,
@@ -346,14 +391,22 @@ async fn native_attempt_identity_tx(tx: &mut Transaction<'_, Sqlite>, user_id: &
 
 async fn current_attempt_turn_key_tx(tx:&mut Transaction<'_,Sqlite>,execution_id:&str,step_id:&str,attempt_id:&str,
     effects:&AttemptConversationEffects)->Result<String,DbError> {
-    let key=effects.current_turn_operation_key(attempt_id).map_err(|error|DbError::Init(error.to_string()))?;
-    if !effects.pending_conversation_effects.is_empty() {return Ok(key);}
+    if !effects.pending_conversation_effects.is_empty() {return execution_attempt_turn_key_from_facts(attempt_id,effects,None);}
     // A completed handoff retires its delivery queue, not its original Turn
     // identity. Resolve the last exact reference from the existing domain
     // event, just as native claim/resume do; never select the Session's latest.
-    Ok(sqlx::query_scalar::<_,String>("SELECT json_extract(payload,'$.turn_operation_key') FROM agent_execution_events \
+    let reference=sqlx::query_scalar::<_,String>("SELECT json_extract(payload,'$.turn_operation_key') FROM agent_execution_events \
         WHERE execution_id=? AND step_id=? AND attempt_id=? AND json_type(payload,'$.turn_operation_key')='text' ORDER BY sequence DESC LIMIT 1")
-        .bind(execution_id).bind(step_id).bind(attempt_id).fetch_optional(&mut **tx).await?.unwrap_or(key))
+        .bind(execution_id).bind(step_id).bind(attempt_id).fetch_optional(&mut **tx).await?;
+    execution_attempt_turn_key_from_facts(attempt_id,effects,reference)
+}
+
+/// Resolve an exact Attempt key from the original runtime state and its last
+/// committed domain reference, read together by the caller's snapshot.
+pub fn execution_attempt_turn_key_from_facts(attempt_id:&str,effects:&AttemptConversationEffects,reference:Option<String>)
+    ->Result<String,DbError> {
+    let key=effects.current_turn_operation_key(attempt_id).map_err(|error|DbError::Init(error.to_string()))?;
+    Ok(if effects.pending_conversation_effects.is_empty() {reference.unwrap_or(key)} else {key})
 }
 
 /// Observe the original exact Attempt, including after Stop retires its link.

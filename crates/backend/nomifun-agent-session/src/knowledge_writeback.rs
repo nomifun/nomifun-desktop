@@ -52,7 +52,7 @@ impl AgentSessionStore {
             binding_version: request.binding_version, execution_instance_id: request.execution_instance_id,
         };
         payload.validate().map_err(SessionStoreError::InvalidPayload)?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, request.agent_session_id.as_ref()).await?;
         require_owner(&row, &request.owner)?;
         require_live_row(row)?;
@@ -62,7 +62,7 @@ impl AgentSessionStore {
             // A restart cannot use an old dispatch identity, even if the old
             // pending observation has already been marked interrupted.
             if original != payload { return Err(SessionStoreError::IdempotencyConflict("Knowledge write-back start differs from its original frozen input".into())); }
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok(KnowledgeWritebackStartReceipt { start_event_id: record.event_id, event_seq: record.seq, first: false });
         }
         let terminal: Option<String> = sqlx::query_scalar("SELECT terminal_event_id FROM agent_turns WHERE session_id=? AND operation_id=? AND state='completed'")
@@ -71,7 +71,7 @@ impl AgentSessionStore {
         let append = event(&request.agent_session_id, &request.operation_id, false, terminal.into(), serde_json::to_value(payload)?);
         let result = self.append_event_tx(&mut tx, &append, None).await?;
         let ack = required_ack(result)?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(KnowledgeWritebackStartReceipt { start_event_id: ack.event_id, event_seq: ack.seq, first: true })
     }
 
@@ -80,12 +80,12 @@ impl AgentSessionStore {
     pub async fn settle_knowledge_writeback(&self, owner: &PrincipalRef, session: &AgentSessionId,
         start_event_id: &EventId, outcome: KnowledgeWritebackSettledV1) -> Result<SessionEventAppendResult, SessionStoreError> {
         outcome.validate().map_err(SessionStoreError::InvalidPayload)?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, session.as_ref()).await?;
         require_owner(&row, owner)?;
         let append = event(session, &outcome.operation_id, true, start_event_id.clone(), serde_json::to_value(&outcome)?);
         let result = self.append_event_tx_with_policy(&mut tx, &append, None, AppendSessionStatePolicy::KnowledgeWritebackSettlement).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
@@ -94,7 +94,7 @@ impl AgentSessionStore {
     /// records unconfirmed outcome rather than inventing a failed disk write.
     pub async fn interrupt_stale_knowledge_writebacks(&self, execution_instance_id: &str) -> Result<usize, SessionStoreError> {
         validate_knowledge_execution_instance(execution_instance_id).map_err(SessionStoreError::InvalidPayload)?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let rows = sqlx::query_as::<_, StoredEventRow>(
             "SELECT e.session_id,e.seq,e.event_id,e.producer_id,e.idempotency_key,e.kind,e.kind_version,e.correlation_id,e.causation_event_id,e.inline_json,e.payload_id \
              FROM agent_events e JOIN agent_sessions s ON s.agent_session_id=e.session_id \
@@ -117,7 +117,7 @@ impl AgentSessionStore {
             self.append_event_tx_with_policy(&mut tx, &append, None, AppendSessionStatePolicy::KnowledgeWritebackSettlement).await?;
             count += 1;
         }
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(count)
     }
 

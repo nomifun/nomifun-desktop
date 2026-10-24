@@ -267,7 +267,7 @@ async fn ordinary_and_autowork_containers_continue_only_formally_delegated_child
                         effective_config:"{\"session_kind\":\"automation\"}".into(),retry_after:None,runtime_state:None},&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap();
                 let attempt=queued.current_attempt.as_ref().unwrap();
                 fixture.repository.start_attempt(&fixture.owner,&fixture.execution_id,&queued.step.step_id,queued.step.version,
-                    &attempt.attempt.attempt_id,attempt.attempt.version,lead,AgentExecutionAttemptSessionKind::AutomationLead,None,&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap()
+                    &attempt.attempt.attempt_id,attempt.attempt.version,lead,AgentExecutionAttemptSessionKind::AutomationLead,None, None,&event(AgentExecutionEventKind::AttemptChanged)).await.unwrap()
             } else {fixture.start("parent").await};
             let caller=parent.current_attempt.as_ref().unwrap();let sender=caller.conversation_id.as_ref().unwrap();
             let sender_turn=format!("turn:user:{}:{sender}:{}:initial-turn",fixture.owner,caller.attempt.attempt_id);

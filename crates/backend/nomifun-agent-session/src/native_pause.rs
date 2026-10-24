@@ -67,6 +67,20 @@ pub(super) fn native_key(kind: &str, session: &AgentSessionId, key: &str) -> Res
     Ok(format!("native-{kind}:{}:{}", session.as_ref(), digest_bytes(key.as_bytes()).as_ref()))
 }
 
+pub(super) async fn ensure_restart_resume_tx(tx:&mut Transaction<'_,Sqlite>,owner:&PrincipalRef,session:&AgentSessionId,
+    request:&NativeResumeRequest,prepared_fence:Option<u64>)->Result<(),SessionStoreError> {
+    if request.idempotency_key.starts_with("execution-task-restart:") {
+        if owner.principal_kind!="user"||request.cleanup_attestation.is_some()
+            ||request.budget!=(NativeBudgetIncrease {retry_stall_guards:true,..Default::default()}) {
+            return Err(SessionStoreError::Conflict("native Restart must retain its original user command budget and cleanup authority".into()));
+        }
+        nomifun_db::ensure_execution_restart_resume_tx(tx,&owner.principal_id,session.as_ref(),request.operation_id.as_ref(),
+            &request.idempotency_key,request.expected_pause_revision,request.expected_checkpoint_revision,
+            request.expected_checkpoint_digest.as_ref(),prepared_fence).await.map_err(native_resume_queue::admission_error)?;
+    }
+    Ok(())
+}
+
 pub(super) fn native_control_event(session: &AgentSessionId, operation: &OperationId,
     identity: String, kind: &str, started: EventId, payload: Value) -> SessionEventAppend {
     SessionEventAppend {
@@ -150,7 +164,7 @@ impl AgentSessionStore {
         {
             return Err(SessionStoreError::InvalidEvent("native failure settlement requires an exact supervisor failure".into()));
         }
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let live = live_session_by_id_tx(&mut tx, session.as_ref()).await?;
         if &live.owner_ref != owner { return Err(SessionStoreError::ExecutionFenced); }
         let head = head_by_id_tx(&mut tx, session.as_ref()).await?;
@@ -206,7 +220,7 @@ impl AgentSessionStore {
             Err(error)=>return Err(error),
         }
         self.append_event_tx(&mut tx, failure, None).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(true)
     }
 
@@ -228,7 +242,7 @@ impl AgentSessionStore {
         if reason.trim().is_empty() || reason.len() > 1024 { return Err(SessionStoreError::InvalidEvent("pause reason is not bounded".into())); }
         let id = native_key("pause-request", session, key)?;
         let digest = digest_payload(&json!({"operation":operation,"reason":reason}))?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let live = live_session_by_id_tx(&mut tx, session.as_ref()).await?;
         if &live.owner_ref != owner { return Err(SessionStoreError::ExecutionFenced); }
         if let Some(row) = event_by_event_id_tx(&mut tx, &id).await? {
@@ -247,15 +261,15 @@ impl AgentSessionStore {
         let event = native_control_event(session, operation, id, "turn/pause-requested", started.into(),
             json!({"request_digest":digest,"reason":reason,"owner_digest":digest_payload(owner)?}));
         let ack = required_ack(self.append_event_tx(&mut tx, &event, None).await?)?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(ack)
     }
 
     pub async fn pause_native_execution(&self, lease: &NativeExecutionLease, reason: &str, cleanup_proven: bool) -> Result<NativePauseState, SessionStoreError> {
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if native_execution::check_native_identity_tx(&mut tx, lease).await? != "running" { return Err(SessionStoreError::ExecutionFenced); }
         let state = self.pause_native_execution_tx(&mut tx, lease.session_id(), lease.operation_id(), lease.fence(), reason, cleanup_proven).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(state)
     }
 
@@ -302,7 +316,7 @@ impl AgentSessionStore {
         prepared: NativeResumePreparation) -> Result<NativeResumeReceipt, SessionStoreError> {
         if let Some(receipt) = self.native_resume_receipt(owner, session, request).await? { return Ok(receipt); }
         let id = native_key("resume", session, &request.idempotency_key)?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let live = live_session_by_id_tx(&mut tx, session.as_ref()).await?;
         let head = head_by_id_tx(&mut tx, session.as_ref()).await?;
         if &live.owner_ref != owner { return Err(SessionStoreError::ExecutionFenced); }
@@ -313,6 +327,7 @@ impl AgentSessionStore {
             }
             return Ok(NativeResumeReceipt { operation_id:request.operation_id.clone(),authorization_event_id:event.event_id.clone(),seq:event.seq,duplicate:true });
         }
+        ensure_restart_resume_tx(&mut tx,owner,session,request,Some(prepared.expected_fence)).await?;
         if &live.owner_ref != owner || live.agent_binding.resolved_snapshot_ref != prepared.snapshot
             || head.active_set_generation != prepared.active_set_generation || head.status != "paused"
             || head.active_turn_id.as_deref() != Some(request.operation_id.as_ref()) || head.last_seq != prepared.expected_head_seq {
@@ -351,7 +366,7 @@ impl AgentSessionStore {
         let mut sequence: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='runtime/progress-recorded'")
             .bind(session.as_ref()).bind(request.operation_id.as_ref()).fetch_one(&mut *tx).await?;
         for observation in prepared.observations {
-            if !matches!(observation.0.get("event").and_then(Value::as_str), Some("tool_outcome_reconciled" | "owner_outcome_reconciled" | "execution_tail_reconciled" | "turn_wait_resolved")) {
+            if !matches!(observation.0.get("event").and_then(Value::as_str), Some("tool_outcome_reconciled" | "owner_outcome_reconciled" | "execution_tail_reconciled" | "turn_wait_resolved" | "work_status" | "plan_updated")) {
                 return Err(SessionStoreError::InvalidEvent("resume may append observations, never tool admissions".into()));
             }
             sequence += 1;
@@ -376,7 +391,7 @@ impl AgentSessionStore {
         let ack = required_ack(self.append_event_tx(&mut tx,&native_control_event(session,&request.operation_id,id,"turn/resume-authorized",pause_cause.into(),
             json!({"request_digest":digest_payload(request)?,"pause_revision":pause.revision,"budget":budget,"increase":request.budget,
                 "owner_digest":digest_payload(owner)?,"cleanup_attestation":request.cleanup_attestation})),None).await?)?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(NativeResumeReceipt { operation_id: request.operation_id.clone(), authorization_event_id: ack.event_id, seq: ack.seq, duplicate: false })
     }
 

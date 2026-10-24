@@ -21,7 +21,7 @@ struct SearchResponse {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SearchHit {
-    path: String,
+    path: nomifun_agent_contracts::SessionPathLabel,
     line: u64,
     column_bytes: u64,
     byte_offset: u64,
@@ -82,8 +82,7 @@ pub(super) fn hit_paths(
     }
     let mut paths = BTreeSet::new();
     for hit in response.matches {
-        if hit.path.is_empty()
-            || crate::agents_md::normalize_native_instruction_path(&hit.path)? != hit.path
+        if hit.path.as_str().is_empty()
             || hit.line == 0
             || hit.line > 8 * 1024 * 1024 + 1
             || hit.column_bytes == 0
@@ -108,7 +107,7 @@ pub(super) fn hit_paths(
         {
             return Err(invalid());
         }
-        paths.insert(hit.path);
+        paths.insert(hit.path.native_spelling());
     }
     if paths.len() as u64 > response.files_scanned {
         return Err(invalid());
@@ -149,7 +148,7 @@ mod tests {
         let matches = (0..files)
             .map(|index| {
                 json!({
-                    "path": std::path::Path::new("burst").join(format!("file-{index:03}.txt")).to_str().unwrap(),
+                    "path": format!("burst/file-{index:03}.txt"),
                     "line": 1,
                     "column_bytes": 1,
                     "byte_offset": 0,

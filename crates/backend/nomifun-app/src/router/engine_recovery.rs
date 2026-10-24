@@ -13,7 +13,26 @@ fn error(message: impl std::fmt::Display) -> AppError { AppError::Conflict(forma
 fn claim_error(error: nomifun_agent_session::SessionStoreError) -> AppError {
     match error {
         nomifun_agent_session::SessionStoreError::ExecutionCapacityPending => AppError::ExecutionAdmissionPending,
+        nomifun_agent_session::SessionStoreError::ExecutionLeaseActive => AppError::ExecutionAdmissionPending,
+        nomifun_agent_session::SessionStoreError::Sqlite(error) => nomifun_db::DbError::Query(error).into(),
         error => self::error(error),
+    }
+}
+
+async fn release_unopened_claim(store:&AgentSessionStore,lease:&nomifun_agent_session::NativeExecutionLease) {
+    loop {
+        match store.release_unattached_native_claim(lease).await {
+            Ok(())=>return,
+            Err(nomifun_agent_session::SessionStoreError::Sqlite(error)) if nomifun_db::database_unavailable_reason(&error).is_some()=>{
+                // No native work has been opened. Keep the exact claim's
+                // release responsibility instead of losing it with a loader.
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(error)=>{
+                tracing::warn!(session_id=lease.session_id().as_ref(),generation=lease.generation(),%error,"unopened recovery claim could not be released; exact authorization supervisor retains reconciliation responsibility");
+                return;
+            }
+        }
     }
 }
 
@@ -40,16 +59,16 @@ impl EngineSessionHost {
         cancellation: CancellationToken) -> Result<super::super::engine_journal::EngineTurnJournal, AppError> {
         let session_id = receipt.session().session().conversation_id.clone().into();
         let operation = receipt.operation_id().into();
-        let saved = store.load_native_checkpoint(receipt.session().principal(), &session_id, &operation).await.map_err(error)?;
+        let saved = store.load_native_checkpoint(receipt.session().principal(), &session_id, &operation).await.map_err(claim_error)?;
         let Some(saved) = saved else {
-            let facts = store.native_recovery_facts(&session_id, &operation).await.map_err(error)?;
+            let facts = store.native_recovery_facts(&session_id, &operation).await.map_err(claim_error)?;
             let lease = store.claim_native_empty_recovery(NativeExecutionClaim {
                 owner: receipt.session().principal().clone(), agent_session_id: session_id, operation_id: operation,
                 snapshot: receipt.session().snapshot().snapshot_ref.clone(), active_set_generation: receipt.session().active_set_generation(),
                 holder: self.execution_instance_id.clone(), expected_fence: facts.execution_fence, checkpoint: None,
             }).await.map_err(claim_error)?;
             let result = self.bootstrap_empty_recovery(&store, receipt, cancellation, &lease).await;
-            if result.is_err() { let _ = store.release_unattached_native_claim(&lease).await; }
+            if result.is_err() { release_unopened_claim(&store,&lease).await; }
             return result;
         };
         if saved.turn_state != "running" { return Err(error("a terminal Turn cannot be reopened by recovery")); }
@@ -109,15 +128,22 @@ impl EngineSessionHost {
         }).await.map_err(claim_error)?;
         // A model-only prefix could have arrived during preparation. The CAS
         // fenced it; reread the now-stable native tail before choosing IDs.
-        let result = async {
-            let (prefix, tail, sequence, total_bytes) = recovery_records(&store, &saved).await?;
-            require_no_orphaned_live_wait(prefix.iter().chain(&tail))?;
-            let recovery = AgentTurnRecovery::new(checkpoint, saved.revision, lease.fence(), prefix, tail, prepared).map_err(error)?;
-            let journal = super::super::engine_journal::EngineTurnJournal::new_with_recovery(store.clone(), receipt, cancellation, lease.clone(), Some(recovery), sequence, total_bytes)?;
-            journal.restore_public_projection().await?;
-            Ok(journal)
-        }.await;
-        if result.is_err() { let _ = store.release_unattached_native_claim(&lease).await; }
+        let result = loop {
+            let loaded=async {
+                let (prefix, tail, sequence, total_bytes) = recovery_records(&store, &saved).await?;
+                require_no_orphaned_live_wait(prefix.iter().chain(&tail))?;
+                let recovery = AgentTurnRecovery::new(checkpoint.clone(), saved.revision, lease.fence(), prefix, tail, prepared.clone()).map_err(error)?;
+                super::super::engine_journal::EngineTurnJournal::new_with_recovery(store.clone(), receipt, cancellation.clone(), lease.clone(), Some(recovery), sequence, total_bytes)
+            }.await;
+            if matches!(&loaded,Err(AppError::DatabaseUnavailable{..})) {
+                // This is still the same uninvoked claim. Rebuilding its typed
+                // readonly replay is safe; it cannot send input or run work.
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+            break loaded;
+        };
+        if result.is_err() { release_unopened_claim(&store,&lease).await; }
         result
     }
 
@@ -125,7 +151,7 @@ impl EngineSessionHost {
         cancellation: CancellationToken, lease: &nomifun_agent_session::NativeExecutionLease)
         -> Result<super::super::engine_journal::EngineTurnJournal, AppError> {
         use nomifun_agent_contracts::{SessionEventAppend, SemanticSessionEventDraft, SessionEventKind, SessionEventPayloadRef, StrictJsonValue, digest_payload};
-        let facts = store.native_recovery_facts(lease.session_id(), lease.operation_id()).await.map_err(error)?;
+        let facts = store.native_recovery_facts(lease.session_id(), lease.operation_id()).await.map_err(claim_error)?;
         let mut prefix = Vec::new();
         let mut bytes = 0usize;
         for record in facts.events.iter().filter(|event| event.kind.0 == "runtime/progress-recorded" && event.correlation_id.as_ref() == lease.operation_id().as_ref()) {
@@ -168,7 +194,7 @@ impl EngineSessionHost {
             owner: receipt.session().principal().clone(), operation_id: lease.operation_id().clone(),
             snapshot: receipt.session().snapshot().snapshot_ref.clone(), active_set_generation: receipt.session().active_set_generation(),
             expected_revision: 0, execution_fence: lease.fence(), lease: Some(lease.clone()), state: StrictJsonValue(state),
-        }).await.map_err(error)?;
+        }).await.map_err(claim_error)?;
         prefix.push(metadata);
         let recovery = AgentTurnRecovery::new(checkpoint, saved.revision, lease.fence(), prefix, vec![], vec![]).map_err(error)?;
         super::super::engine_journal::EngineTurnJournal::new_with_recovery(store.clone(), receipt, cancellation, lease.clone(), Some(recovery), sequence, bytes)
@@ -196,7 +222,7 @@ mod waiting_recovery_tests {
 
 async fn recovery_records(store: &AgentSessionStore, checkpoint: &NativeCheckpoint)
     -> Result<(Vec<AgentEngineEvent>, Vec<AgentEngineEvent>, u64, usize), AppError> {
-    let facts = store.native_recovery_facts(&checkpoint.agent_session_id, &checkpoint.operation_id).await.map_err(error)?;
+    let facts = store.native_recovery_facts(&checkpoint.agent_session_id, &checkpoint.operation_id).await.map_err(claim_error)?;
     if facts.head.status != "running" || facts.head.active_turn_id.as_deref() != Some(checkpoint.operation_id.as_ref()) {
         return Err(error("recovery lost the active Turn"));
     }

@@ -9,6 +9,8 @@ mod native_pause_tests;
 mod workspace_file_observation_tests;
 #[path = "native_cancellation_cleanup_tests.rs"]
 mod native_cancellation_cleanup_tests;
+#[path = "native_settlement_tests.rs"]
+mod native_settlement_tests;
 
 #[path = "tool_call_causation_tests.rs"]
 mod tool_call_causation_tests;
@@ -74,6 +76,108 @@ async fn expire(store: &AgentSessionStore, f: &Fixture) {
     // callers never select the clock or the lease expiry timestamp.
     sqlx::query("UPDATE agent_turns SET execution_lease_until = 0 WHERE session_id = ?")
         .bind(f.session.agent_session_id.as_ref()).execute(store.test_pool()).await.unwrap();
+}
+
+async fn child_wait_checkpoint(store:&AgentSessionStore,f:&Fixture,lease:&NativeExecutionLease)->NativeCheckpoint {
+    let state=StrictJsonValue(json!({"version":1,"model_steps":7,"tool_call_count":11,"awaiting_children":{
+        "execution_ids":["original-execution"],"after_cursor":"original-scoped-observation","mode":"all"}}));
+    let digest=digest_bytes(&canonical_json_bytes(&state.0).unwrap());
+    store.save_native_checkpoint(&progress(f,"wait-checkpoint",json!({"event":"execution_checkpoint_saved","step":7,"revision":1,"digest":digest})),
+        NativeCheckpointWrite {owner:owner(),operation_id:"lease-turn".into(),snapshot:snapshot_ref(),active_set_generation:0,
+            expected_revision:0,execution_fence:lease.fence(),lease:Some(lease.clone()),state}).await.unwrap()
+}
+
+fn child_wait_tail(f:&Fixture,cp:&NativeCheckpoint)->SessionEventAppend {
+    let mut append=progress(f,"same-child-wait",json!({"event":"awaiting_children","model_steps":7,
+        "request":cp.state.0["awaiting_children"]}));
+    let SessionEventPayloadRef::InlineJson(value)=&mut append.semantic_event.payload else {unreachable!()};
+    value.0["producer_seq"]=json!(2);
+    append
+}
+
+#[tokio::test]
+async fn same_writer_child_wait_recovery_claim_pins_the_exact_checkpoint_request_and_fences_the_old_owner() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();
+    let f=fixture(&store,"pure-child-wait").await;
+    let old=store.claim_native_execution(claim(&f,"original",0,None)).await.unwrap();
+    let cp=child_wait_checkpoint(&store,&f,&old).await;
+    let tail=child_wait_tail(&f,&cp);
+    store.append_native_event(&old,&tail,None).await.unwrap();
+    expire(&store,&f).await;
+    let fresh=store.claim_native_execution(claim(&f,"recovered",0,Some(&cp))).await.unwrap();
+    assert_eq!(fresh.fence(),1);
+    let loaded=store.load_native_checkpoint(&owner(),&f.session.agent_session_id,&"lease-turn".into()).await.unwrap().unwrap();
+    assert_eq!((loaded.revision,&loaded.digest,loaded.through_seq,&loaded.state),(cp.revision,&cp.digest,cp.through_seq,&cp.state),
+        "automatic recovery cannot manufacture another checkpoint or reset progress");
+    assert!(matches!(store.append_native_event(&old,&tail,None).await,Err(SessionStoreError::ExecutionFenced)));
+    assert_eq!(store.read_turn_receipt(&f.session.agent_session_id,&"lease-turn".into()).await.unwrap().status,TurnReceiptStatus::Running);
+    let counts:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT COUNT(*) FROM agent_turns WHERE session_id=?),\
+        (SELECT COUNT(*) FROM agent_effects WHERE session_id=?),(SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='message/user-accepted')")
+        .bind(f.session.agent_session_id.as_ref()).bind(f.session.agent_session_id.as_ref()).bind(f.session.agent_session_id.as_ref())
+        .fetch_one(store.test_pool()).await.unwrap();
+    assert_eq!(counts,(1,0,1),"a WAIT observation grants no new input, Turn or Effect");
+}
+
+#[tokio::test]
+async fn child_wait_recovery_rejects_changed_request_hidden_execution_and_broken_producer_proof() {
+    let changes=vec![
+        ("other-scope",json!({"event":"awaiting_children","model_steps":7,"request":{"execution_ids":["foreign"],"after_cursor":"original-scoped-observation","mode":"all"}})),
+        ("other-cursor",json!({"event":"awaiting_children","model_steps":7,"request":{"execution_ids":["original-execution"],"after_cursor":"new-observation","mode":"all"}})),
+        ("other-mode",json!({"event":"awaiting_children","model_steps":7,"request":{"execution_ids":["original-execution"],"after_cursor":"original-scoped-observation","mode":"any"}})),
+        ("other-counter",json!({"event":"awaiting_children","model_steps":8,"request":{"execution_ids":["original-execution"],"after_cursor":"original-scoped-observation","mode":"all"}})),
+        ("extra-field",json!({"event":"awaiting_children","model_steps":7,"request":{"execution_ids":["original-execution"],"after_cursor":"original-scoped-observation","mode":"all"},"ready":true})),
+        ("new-model",json!({"event":"model_step_started","step":8,"operation_id":"new-model"})),
+        ("new-tool",json!({"event":"tool_started","step":7,"call_id":"new-tool"})),
+        ("new-result",json!({"event":"tool_completed","step":7,"result":{}})),
+        ("resolved-wait",json!({"event":"children_wait_resolved","model_steps":7,"cursor":"unread-result"})),
+        ("foreign-producer",Value::Null),("foreign-cause",Value::Null),("sequence-gap",Value::Null),
+    ];
+    for (key,event) in changes {
+        let store=AgentSessionStore::open_in_memory().await.unwrap();let f=fixture(&store,key).await;
+        let old=store.claim_native_execution(claim(&f,"old",0,None)).await.unwrap();let cp=child_wait_checkpoint(&store,&f,&old).await;
+        let mut tail=child_wait_tail(&f,&cp);
+        if !event.is_null() {
+            let SessionEventPayloadRef::InlineJson(value)=&mut tail.semantic_event.payload else {unreachable!()};value.0["event"]=event;
+        }
+        let event_id=store.append_native_event(&old,&tail,None).await.unwrap().ack.unwrap().event_id;
+        // Isolated corruption fixtures prove the writer does not interpret a
+        // matching event name as ownership, ordering or causal authority.
+        match key {
+            "foreign-producer"=>{sqlx::query("UPDATE agent_events SET producer_id='foreign' WHERE event_id=?").bind(event_id.as_ref()).execute(store.test_pool()).await.unwrap();},
+            "foreign-cause"=>{sqlx::query("UPDATE agent_events SET causation_event_id=NULL WHERE event_id=?").bind(event_id.as_ref()).execute(store.test_pool()).await.unwrap();},
+            "sequence-gap"=>{sqlx::query("UPDATE agent_events SET inline_json=json_set(inline_json,'$.producer_seq',3) WHERE event_id=?").bind(event_id.as_ref()).execute(store.test_pool()).await.unwrap();},
+            _=>{},
+        }
+        expire(&store,&f).await;
+        assert!(store.claim_native_execution(claim(&f,"new",0,Some(&cp))).await.is_err(),"unsafe boundary {key} was admitted");
+        let fence:i64=sqlx::query_scalar("SELECT execution_fence FROM agent_turns WHERE session_id=? AND operation_id='lease-turn'")
+            .bind(f.session.agent_session_id.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+        assert_eq!(fence,0,"rejection cannot take ownership: {key}");
+    }
+}
+
+#[tokio::test]
+async fn child_wait_recovery_never_bypasses_stop_snapshot_or_checkpoint_identity() {
+    for boundary in ["stop","snapshot","checkpoint","missing-original-wait"] {
+        let store=AgentSessionStore::open_in_memory().await.unwrap();let f=fixture(&store,boundary).await;
+        let old=store.claim_native_execution(claim(&f,"old",0,None)).await.unwrap();
+        let cp=if boundary=="missing-original-wait" {checkpoint(&store,&f,&old).await}else {child_wait_checkpoint(&store,&f,&old).await};
+        let tail=if boundary=="missing-original-wait" {
+            let mut tail=progress(&f,"unaccepted-wait",json!({"event":"awaiting_children","model_steps":0,
+                "request":{"execution_ids":["original-execution"],"mode":"all"}}));
+            let SessionEventPayloadRef::InlineJson(value)=&mut tail.semantic_event.payload else {unreachable!()};value.0["producer_seq"]=json!(2);tail
+        }else {child_wait_tail(&f,&cp)};
+        store.append_native_event(&old,&tail,None).await.unwrap();expire(&store,&f).await;
+        let mut request=claim(&f,"recovered",0,Some(&cp));
+        match boundary {
+            "stop"=>{store.cancel_active_turn(&f.session.agent_session_id,"stop-original-wait".into(),"session_api".into()).await.unwrap();},
+            "snapshot"=>request.snapshot.snapshot_digest=digest('c'),
+            "checkpoint"=>request.checkpoint.as_mut().unwrap().1=digest('d'),
+            _=>{},
+        }
+        assert!(store.claim_native_execution(request).await.is_err(),"pure WAIT bypassed {boundary}");
+        if boundary=="stop" {assert_eq!(store.read_turn_receipt(&f.session.agent_session_id,&"lease-turn".into()).await.unwrap().status,TurnReceiptStatus::Cancelled);}
+    }
 }
 
 #[tokio::test]
@@ -350,6 +454,9 @@ async fn orphan_quarantine_marks_pending_effect_unknown_and_never_replays_it() {
     assert!(store.quarantine_native_recovery(&owner(), &session.agent_session_id, &request.turn_id, 0).await.unwrap());
     let effect = store.read_effect(&session.agent_session_id, &request.effect_id).await.unwrap().unwrap();
     assert_eq!(effect.state, crate::AgentEffectState::Unknown);
+    let payload: String=sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE event_id=?")
+        .bind(effect.terminal_event_id.as_ref().unwrap().as_ref()).fetch_one(store.test_pool()).await.unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&payload).unwrap()["recovery"],"native_recovery_external_reconciliation_required");
     let inspection = store.inspect_latest_native_execution(&owner(), &session.agent_session_id).await.unwrap().unwrap();
     assert_eq!(inspection.state, "paused");
     assert_eq!(inspection.turn_state, "running");
@@ -360,6 +467,42 @@ async fn orphan_quarantine_marks_pending_effect_unknown_and_never_replays_it() {
     assert_eq!(inspection.unknown_effects, 1);
     assert!(inspection.recovery_blocked && !inspection.automatic_replay_authorized);
     assert!(store.has_unsettled_effects(&session.agent_session_id).await.unwrap());
+}
+
+#[tokio::test]
+async fn existing_managed_uncertainty_reconciles_its_immutable_old_label_but_new_old_labels_are_rejected() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();
+    let (session,original,started)=create_pending_effect(&store,"historical-managed-uncertainty",EffectStrategy::ManagedEffect).await;
+    let old_label="process_restart_external_reconciliation_required";
+    let mut uncertain=EffectEventRequest {event_id:"historical-managed-uncertain".into(),producer_id:"runtime_supervisor".into(),
+        causation_event_id:Some(started),recorded_at:original.recorded_at+1,
+        payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"recovery":old_label}))),..original.clone()};
+    let before=store.current_cursor(&session.agent_session_id).await.unwrap();
+    assert!(store.record_effect_terminal(uncertain.clone(),EffectTerminalState::Uncertain).await.is_err(),"a legacy spelling cannot authorize new uncertainty");
+    assert_eq!(store.current_cursor(&session.agent_session_id).await.unwrap(),before);
+    uncertain.payload=SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"recovery":"native_recovery_external_reconciliation_required"})));
+    let ack=store.record_effect_terminal(uncertain,EffectTerminalState::Uncertain).await.unwrap().ack.unwrap();
+    // Isolated old-writer fixture: change only its prior immutable label. All
+    // original identities, producer, strategy, input and causal proof remain.
+    sqlx::query("UPDATE agent_events SET inline_json=json_set(inline_json,'$.recovery',?) WHERE event_id=?")
+        .bind(old_label).bind(ack.event_id.as_ref()).execute(store.test_pool()).await.unwrap();
+    let store=AgentSessionStore::from_pool(store.test_pool().clone()).await.unwrap();
+    assert_eq!(store.read_effect(&session.agent_session_id,&original.effect_id).await.unwrap().unwrap().state,AgentEffectState::Unknown);
+    let reconcile=EffectEventRequest {event_id:"historical-managed-reconciled".into(),producer_id:"owning-plugin".into(),
+        causation_event_id:Some(ack.event_id.clone()),recorded_at:original.recorded_at+2,..original.clone()};
+    let outcome=EffectReconcileOutcome::ConfirmedFailed {error:"ORIGINAL_EFFECT_VERIFIED_FAILED".into()};
+    let mut wrong_input=reconcile.clone();wrong_input.input_digest=digest('e');
+    assert!(store.reconcile_effect(wrong_input,outcome.clone()).await.is_err(),"historical label preserves the exact input proof");
+    sqlx::query("UPDATE agent_events SET producer_id='untrusted-producer' WHERE event_id=?")
+        .bind(ack.event_id.as_ref()).execute(store.test_pool()).await.unwrap();
+    assert!(store.reconcile_effect(reconcile.clone(),outcome.clone()).await.is_err(),"the old label is not authority without its original runtime producer");
+    sqlx::query("UPDATE agent_events SET producer_id='runtime_supervisor' WHERE event_id=?")
+        .bind(ack.event_id.as_ref()).execute(store.test_pool()).await.unwrap();
+    store.reconcile_effect(reconcile,outcome).await.unwrap();
+    assert_eq!(store.read_effect(&session.agent_session_id,&original.effect_id).await.unwrap().unwrap().state,AgentEffectState::Rejected);
+    let retained:String=sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE event_id=?")
+        .bind(ack.event_id.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&retained).unwrap()["recovery"],old_label,"reading original facts never rewrites them");
 }
 
 #[tokio::test]

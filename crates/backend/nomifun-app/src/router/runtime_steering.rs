@@ -46,6 +46,15 @@ pub(super) struct Inbox {
     prepared_image_count: usize,
     prepared_skill_bytes: usize,
 }
+
+/// Read-only hints from the original Turn inbox. Durable candidate selection
+/// still belongs to the canonical Store; this value cannot claim an input.
+pub(super) struct PendingInputObservation {
+    pub(super) prepared: bool,
+    pub(super) open: bool,
+    pub(super) retry_inputs: Vec<String>,
+    pub(super) deferred_inputs: BTreeSet<String>,
+}
 impl Default for Inbox {
     fn default() -> Self {
         Self {
@@ -66,6 +75,11 @@ impl Default for Inbox {
 }
 
 impl Inbox {
+    pub(super) fn changed(&self) -> std::sync::Arc<tokio::sync::Notify> { self.changed.clone() }
+    pub(super) fn pending_observation(&self) -> PendingInputObservation {
+        PendingInputObservation {prepared:!self.pending.is_empty(),open:self.open,
+            retry_inputs:self.retry_inputs.iter().cloned().collect(),deferred_inputs:self.deferred_inputs.clone()}
+    }
     pub(super) fn immediate_receipt_ids(&self)->Vec<String>{self.immediate_receipts.iter().cloned().collect()}
     pub(super) fn has_admitted_model_tools(&self,step:u16)->bool{self.admitted_model_steps.contains(&step)}
     pub(super) fn permits_resource_dispatch(&self) -> bool {

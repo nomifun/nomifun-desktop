@@ -28,7 +28,7 @@ use nomifun_agent_contracts::{
 };
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-use sqlx::{Connection, Sqlite, SqlitePool, Transaction};
+use sqlx::{Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use crate::error::SessionStoreError;
@@ -44,7 +44,7 @@ use crate::types::{
     ForkResult, MessageProjection, ResourceCleanupUncertainty,
     SessionCreateResult, SessionEventAppendResult, SessionEventPage,
     ReplaceSessionAgentBinding, SessionAgentBindingTransitionResult, SessionHeadProjection,
-    SessionObservation, SessionRehydrationInput, TurnProgressObservation, TurnReceipt, TurnReceiptStatus,
+    SessionObservation, SessionRehydrationInput, TurnProgressObservation, TurnProgressSuspension, TurnReceipt, TurnReceiptStatus,
     UpdateAgentSessionMetadata,
 };
 
@@ -59,6 +59,10 @@ mod shared_content;
 mod terminal_content;
 #[path = "effect_native_targets.rs"]
 mod effect_native_targets;
+
+#[path = "empty_execution_creation.rs"]
+mod empty_execution_creation;
+pub use empty_execution_creation::EmptyExecutionCreationFence;
 
 #[path = "native_checkpoint.rs"]
 mod native_checkpoint;
@@ -137,6 +141,9 @@ pub use native_recovery::{NativeExecutionInspection, NATIVE_RECOVERY_BLOCKED};
 #[path = "native_pause.rs"]
 mod native_pause;
 pub use native_pause::{NativePauseState, NativeResumeRequest, NativeOwnerEvidence, NativeResumeReceipt, NativeResumePreparation};
+#[path = "native_settlement.rs"]
+mod native_settlement;
+pub use native_settlement::{NativeTurnSettlementRequest, NativeTurnSettlementReceipt, PendingNativeTurnSettlement, NativeTurnSettlementBundleReceipt};
 #[path = "native_resume_queue.rs"]
 mod native_resume_queue;
 pub use native_resume_queue::{NativeResumeRequestReceipt, PendingNativeResumeRequest, NativeResumeCommandReceipt};
@@ -418,31 +425,15 @@ impl AgentSessionStore {
         self.registry.payload()
     }
 
-    async fn begin_write_transaction(
-        &self,
-    ) -> Result<Transaction<'static, Sqlite>, SessionStoreError> {
-        // SQLite's deferred BEGIN allows two writers to validate the same
-        // head snapshot before either one obtains the write lock.  Lifecycle
-        // mutations need one serialized validation/append boundary.
-        // SQLITE_FULL can roll back inside SQLite before sqlx's queued
-        // rollback runs, leaving the worker's tracked depth nonzero. Keep
-        // ownership of the exact connection so a healthy peer cannot hide a
-        // poisoned one during a separate pool scan. The extra acquisition
-        // allows a replacement after every existing connection was evicted.
-        for _ in 0..=self.pool.options().get_max_connections() {
-            let mut connection = self.pool.acquire().await?;
-            if connection.is_in_transaction() {
-                // Drain any queued normal rollback before deciding to evict;
-                // custom pools may disable sqlx's ping on acquisition.
-                connection.ping().await?;
-                if connection.is_in_transaction() {
-                    connection.close().await?;
-                    continue;
-                }
-            }
-            return Ok(Transaction::begin(connection, Some("BEGIN IMMEDIATE".into())).await?);
-        }
-        Err(sqlx::Error::InvalidSavePointStatement.into())
+    #[tracing::instrument(name = "canonical.write_transaction", skip_all)]
+    #[track_caller]
+    fn begin_write_transaction(&self)
+        -> std::pin::Pin<Box<dyn std::future::Future<Output=Result<(Transaction<'static, Sqlite>,nomifun_db::DatabaseOperationGuard),SessionStoreError>> + Send + '_>> {
+        let transaction=nomifun_db::begin_agent_write(&self.pool);
+        // This shared entry sits below every Session lifecycle operation.
+        // Keep SQLx's transaction-acquisition graph out of each outer host
+        // future's layout; ownership and the writer boundary stay unchanged.
+        Box::pin(async move {transaction.await.map_err(SessionStoreError::from)})
     }
 
     #[cfg(test)]
@@ -473,7 +464,7 @@ impl AgentSessionStore {
         // honoring busy_timeout. Parallel AgentExecution roots create child
         // Sessions concurrently, so acquire the writer lock before replay
         // validation and serialize this short atomic boundary.
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if let Some(existing) = event_by_producer_key_tx(
             &mut tx,
             request.producer_id.as_ref(),
@@ -548,7 +539,7 @@ impl AgentSessionStore {
         let activation_ack = required_ack(activation_result)?;
         let session =
             live_session_by_id_tx(&mut tx, request.session.agent_session_id.as_ref()).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
 
         Ok(SessionCreateResult {
             session,
@@ -570,9 +561,9 @@ impl AgentSessionStore {
         append: &SessionEventAppend,
         payload: Option<&SessionPayloadRecord>,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let result = self.append_public_event_tx(&mut tx, append, payload).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
@@ -614,6 +605,9 @@ impl AgentSessionStore {
             || knowledge_writeback::is_event(&append.semantic_event.kind.0) {
             return Err(SessionStoreError::ExecutionFenced);
         }
+        if matches!(append.semantic_event.kind.0.as_str(), "runtime/native-settlement-requested" | "runtime/native-settlement-settled") {
+            return Err(SessionStoreError::ExecutionFenced);
+        }
         if matches!(append.semantic_event.kind.0.as_str(), "runtime/progress-recorded" | "context/model-visible-applied") {
             reject_unleased_native_turn_tx(tx, &append.agent_session_id,
                 &OperationId::from(append.semantic_event.correlation_id.as_ref())).await?;
@@ -642,6 +636,7 @@ impl AgentSessionStore {
             input,
             false,
             None,
+            None,
         )
         .await
     }
@@ -666,13 +661,23 @@ impl AgentSessionStore {
             input,
             true,
             None,
+            None,
         )
         .await
     }
 
     pub async fn start_voice_turn(&self,session:&AgentSessionId,producer:EventProducerId,key:IdempotencyKey,operation:OperationId,input:StrictJsonValue,fence:&NativeInputContextFence)
         ->Result<(SessionEventAppendResult,SessionEventAppendResult),SessionStoreError> {
-        self.start_turn_with_admission(session,producer,key,operation,input,false,Some(fence)).await
+        self.start_turn_with_admission(session,producer,key,operation,input,false,Some(fence),None).await
+    }
+
+    /// The domain input authority is consumed by the same writer as accepted
+    /// input and Turn start; it is never serialized into client-controlled data.
+    pub async fn start_execution_turn(&self, session:&AgentSessionId, producer:EventProducerId,
+        key:IdempotencyKey, operation:OperationId, input:StrictJsonValue,
+        owner:&str, operation_key:&str, authority:&nomifun_db::AgentExecutionTurnAuthority)
+        ->Result<(SessionEventAppendResult,SessionEventAppendResult),SessionStoreError> {
+        self.start_turn_with_admission(session,producer,key,operation,input,false,None,Some((owner,operation_key,authority))).await
     }
 
     async fn start_turn_with_admission(
@@ -684,6 +689,7 @@ impl AgentSessionStore {
         mut input: StrictJsonValue,
         initial_only: bool,
         voice_context:Option<&NativeInputContextFence>,
+        execution_authority:Option<(&str,&str,&nomifun_db::AgentExecutionTurnAuthority)>,
     ) -> Result<(SessionEventAppendResult, SessionEventAppendResult), SessionStoreError> {
         if let Some(fence)=voice_context {
             let admission=input.0.as_object_mut().ok_or_else(||SessionStoreError::InvalidPayload("voice input must be an object".into()))?.entry("admission").or_insert_with(||json!({}));
@@ -731,7 +737,7 @@ impl AgentSessionStore {
             }
             payload
         };
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
 
         let existing_message = event_by_producer_key_tx(
@@ -774,7 +780,7 @@ impl AgentSessionStore {
                 }
                 let message_ack = event_ack(&message);
                 let turn_ack = event_ack(&turn);
-                tx.commit().await?;
+                db_write_observation.commit(tx).await?;
                 return Ok((
                     SessionEventAppendResult {
                         record: Some(message),
@@ -800,6 +806,24 @@ impl AgentSessionStore {
             }
         }
 
+        if let Some((owner,key,authority))=execution_authority {
+            if operation_id.as_ref()!=format!("turn:user:{owner}:{}:{key}",session_id.as_ref()) {
+                return Err(SessionStoreError::Conflict("domain authority names another canonical operation".into()));
+            }
+            nomifun_db::validate_execution_turn_authority_tx(&mut tx,owner,session_id.as_ref(),key,authority)
+                .await.map_err(native_resume_queue::admission_error)?;
+            let state:Option<String>=sqlx::query_scalar("SELECT runtime_state FROM agent_execution_attempts WHERE execution_id=? AND step_id=? AND attempt_id=?")
+                .bind(&authority.execution_id).bind(&authority.step_id).bind(&authority.attempt_id).fetch_one(&mut *tx).await?;
+            let pending=nomifun_db::AttemptConversationEffects::decode(state.as_deref())
+                .map_err(|error|SessionStoreError::InvalidSession(error.to_string()))?;
+            if let Some(nomifun_db::PendingConversationEffect::InitialInput {request})=pending.pending_conversation_effects.first() {
+                let actual=json!({"content":input.0["content"],"files":input.0["files"],"inject_skills":input.0["inject_skills"],
+                    "hidden":input.0["hidden"],"origin":input.0["origin"],"channel_platform":input.0["channel_platform"]});
+                if key!=format!("{}:initial-turn",authority.attempt_id) || request!=&actual {
+                    return Err(SessionStoreError::Conflict("Attempt initial input differs from its durable original envelope".into()));
+                }
+            }
+        }
         if let Some(fence)=voice_context {native_mutation_fence::validate_input_tx(&mut tx,session_id,fence).await?;}
         if let Some(question) = idmm_decision.as_ref().and_then(|decision| decision.question.as_ref()) {
             if !idmm_notice::question_is_current_tx(&mut tx, session_id, question).await? {
@@ -867,7 +891,7 @@ impl AgentSessionStore {
         };
         let message_result = self.append_event_tx(&mut tx, &message, None).await?;
         let turn_result = self.append_event_tx(&mut tx, &turn, None).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok((message_result, turn_result))
     }
 
@@ -904,7 +928,7 @@ impl AgentSessionStore {
                 "chat completion append has an invalid terminal event shape".to_owned(),
             ));
         }
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, message.agent_session_id.as_ref()).await?;
         if message.agent_session_id != turn.agent_session_id {
             return Err(SessionStoreError::InvalidEvent(
@@ -935,7 +959,7 @@ impl AgentSessionStore {
         }
         let message_result = self.append_event_tx(&mut tx, message, None).await?;
         let turn_result = self.append_event_tx(&mut tx, turn, None).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok((message_result, turn_result))
     }
 
@@ -956,7 +980,7 @@ impl AgentSessionStore {
                 "turn terminal append has an invalid event shape".to_owned(),
             ));
         }
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, append.agent_session_id.as_ref()).await?;
         let duplicate = duplicate_event_tx(&mut tx, append).await?;
         if duplicate.is_none() {
@@ -972,7 +996,7 @@ impl AgentSessionStore {
             .await?;
         }
         let result = self.append_event_tx(&mut tx, append, None).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
@@ -1040,7 +1064,7 @@ impl AgentSessionStore {
         expected_native:Option<&NativeTurnMutationFence>,
         hold_input_queue:bool,
     ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
 
         if let Some(existing) = event_by_producer_key_tx(
@@ -1085,7 +1109,7 @@ impl AgentSessionStore {
                 ));
             }
             if let Some(fence)=expected_native {native_mutation_fence::validate_replay(&record.payload,fence)?;}
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok((
                 target,
                 SessionEventAppendResult {
@@ -1101,7 +1125,7 @@ impl AgentSessionStore {
         if let (Some(target),Some(fence))=(requested_target,expected_native) {native_mutation_fence::validate_tx(&mut tx,session_id,target,fence).await?;}
         let (target_operation_id, closed) = mutation_target_tx(&mut tx, session_id, requested_target).await?;
         if let Some(closed) = closed {
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok((target_operation_id, closed));
         }
         let turn_event = sqlx::query_as::<_, StoredEventRow>(
@@ -1145,7 +1169,7 @@ impl AgentSessionStore {
             },
         };
         let result = self.append_event_tx(&mut tx, &append, None).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok((target_operation_id, result))
     }
 
@@ -1245,7 +1269,7 @@ impl AgentSessionStore {
         expected_wait:Option<(&str,u64)>,
     ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
         let expected_wait_value=expected_wait.map(|(turn_id,wait_seq)|json!({"turn_id":turn_id,"wait_seq":wait_seq}));
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
         if let Some(existing) = event_by_producer_key_tx(
             &mut tx,
@@ -1258,7 +1282,7 @@ impl AgentSessionStore {
             let target=validate_steering_replay(&record,session_id,requested_target,&input,
                 expected_wait_value.as_ref(),expected_native,voice_immediate)?;
             let ack = event_ack(&record);
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok((
                 target,
                 SessionEventAppendResult {
@@ -1273,7 +1297,7 @@ impl AgentSessionStore {
         if let (Some(target),Some(fence))=(requested_target,expected_native) {native_mutation_fence::validate_tx(&mut tx,session_id,target,fence).await?;}
         let (target_operation_id, closed) = mutation_target_tx(&mut tx, session_id, requested_target).await?;
         if let Some(closed) = closed {
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok((target_operation_id, closed));
         }
         // A retained checkpoint is not a live inbox. Paused input is admitted
@@ -1343,7 +1367,7 @@ impl AgentSessionStore {
             },
         };
         let result = self.append_event_tx(&mut tx, &append, None).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok((target_operation_id, result))
     }
 
@@ -1557,6 +1581,7 @@ impl AgentSessionStore {
             Some(nomifun_agent_contracts::SessionPurpose::Conversation), Some(workspace_root), None).await
     }
 
+    #[tracing::instrument(name = "canonical.list_sessions", skip_all)]
     async fn list_live_sessions_inner(
         &self, owner: &PrincipalRef, cursor: Option<&str>, limit: u32,
         purpose: Option<nomifun_agent_contracts::SessionPurpose>,
@@ -1573,7 +1598,9 @@ impl AgentSessionStore {
             validate_uuidv7(cursor, "cursor")?;
         }
         let owner_json = serde_json::to_string(owner)?;
+        let db_observation = nomifun_db::DatabaseOperationGuard::new(&self.pool);
         let mut tx = self.pool.begin().await?;
+        db_observation.acquired();
         const ROW_SELECT: &str = "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
             agent_binding_json, remote_binding_id, remote_binding_version, parent_agent_session_id, \
             fork_base_payload_id, reasoning_effort, next_seq, created_at, deleted_at, \
@@ -1654,6 +1681,7 @@ impl AgentSessionStore {
             .then(|| items.last().map(|item| item.session.agent_session_id.as_ref().to_owned()))
             .flatten();
         tx.commit().await?;
+        db_observation.released();
         Ok(AgentSessionListPage {
             items,
             total: as_u64(total, "AgentSession list total")?,
@@ -1684,7 +1712,7 @@ impl AgentSessionStore {
                 "AgentSession title must contain 1-200 UTF-8 bytes".to_owned(),
             ));
         }
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
         require_owner(&row, owner)?;
         if row.state != "live" {
@@ -1709,7 +1737,7 @@ impl AgentSessionStore {
             ));
         }
         let updated = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(updated)
     }
 
@@ -1722,7 +1750,7 @@ impl AgentSessionStore {
         effort: Option<ReasoningEffort>,
     ) -> Result<AgentSessionLiveRecord, SessionStoreError> {
         validate_principal(owner)?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
         require_owner(&row, owner)?;
         if row.state != "live" {
@@ -1743,7 +1771,7 @@ impl AgentSessionStore {
             ));
         }
         let updated = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(updated)
     }
 
@@ -1787,7 +1815,7 @@ impl AgentSessionStore {
         }
 
         let replacement_json = serde_json::to_string(&replacement)?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
         require_owner(&row, owner)?;
         if row.state != "live" {
@@ -1843,7 +1871,7 @@ impl AgentSessionStore {
             ));
         }
         let updated = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(updated)
     }
 
@@ -1904,7 +1932,7 @@ impl AgentSessionStore {
         }
 
         let replacement_json = serde_json::to_string(&replacement)?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
         require_owner(&row, owner)?;
         if row.state != "live" {
@@ -1963,7 +1991,7 @@ impl AgentSessionStore {
             &mut tx, session_id, owner, &replacement.typed_resource_bindings,
         ).await?;
         let updated = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(updated)
     }
 
@@ -2076,7 +2104,7 @@ impl AgentSessionStore {
             "agent-binding-changed:{}",
             request.transition_id.as_ref()
         ));
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
 
         if let Some(existing) = event_by_producer_key_tx(
             &mut tx,
@@ -2131,7 +2159,7 @@ impl AgentSessionStore {
             })?;
             let transition_ack = event_ack(&record);
             let active_set_ack = event_ack(&event_from_row(active)?);
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok(SessionAgentBindingTransitionResult {
                 session,
                 transition,
@@ -2302,7 +2330,7 @@ impl AgentSessionStore {
             self.append_event_tx(&mut tx, &active_append, None).await?,
         )?;
         let session = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(SessionAgentBindingTransitionResult {
             session,
             transition,
@@ -2454,24 +2482,29 @@ impl AgentSessionStore {
         Ok(current)
     }
 
+    #[tracing::instrument(name = "canonical.read_events", skip_all, fields(session_id = %session_id.as_ref()))]
     pub async fn read_events(
         &self,
         session_id: &AgentSessionId,
         after: Option<&SessionEventCursor>,
         limit: u32,
     ) -> Result<SessionEventPage, SessionStoreError> {
+        let db_observation = nomifun_db::DatabaseOperationGuard::new(&self.pool);
         let mut tx = self.pool.begin().await?;
+        db_observation.acquired();
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
         let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
         let after_seq = validate_cursor(session_id, after)?;
         let page =
             Self::read_event_page_tx(&mut tx, session_id, after_seq, head.last_seq, limit).await?;
         tx.commit().await?;
+        db_observation.released();
         Ok(page)
     }
 
     /// Resolve exact canonical facts for an internal consumer in one snapshot. The events'
     /// stored representation is not a second public tool-details interface.
+    #[tracing::instrument(name = "canonical.resolve_payloads", skip_all, fields(session_id = %session_id.as_ref()))]
     pub async fn resolved_event_payloads(
         &self,
         session_id: &AgentSessionId,
@@ -2480,9 +2513,12 @@ impl AgentSessionStore {
         if event_ids.len() as u64 > nomifun_agent_contracts::MAX_NATIVE_APPROVED_JOURNAL_RECORDS + 4000 {
             return Err(SessionStoreError::InvalidPayload("resolved event batch exceeds its record budget".into()));
         }
+        let db_observation = nomifun_db::DatabaseOperationGuard::new(&self.pool);
         let mut tx = self.pool.begin().await?;
+        db_observation.acquired();
         let result=self.resolved_event_payloads_in_transaction(&mut tx,session_id,event_ids).await?;
         tx.commit().await?;
+        db_observation.released();
         Ok(result)
     }
 
@@ -2576,12 +2612,15 @@ impl AgentSessionStore {
     /// The first terminal fact wins; the write-side lifecycle fence prevents a
     /// later terminal from replacing it. No message content, projection state,
     /// or timeout is used to infer completion.
+    #[tracing::instrument(name = "canonical.read_turn_receipt", skip_all, fields(session_id = %session_id.as_ref(), operation_id = %operation_id.as_ref()))]
     pub async fn read_turn_receipt(
         &self,
         session_id: &AgentSessionId,
         operation_id: &OperationId,
     ) -> Result<TurnReceipt, SessionStoreError> {
+        let db_observation = nomifun_db::DatabaseOperationGuard::new(&self.pool);
         let mut tx = self.pool.begin().await?;
+        db_observation.acquired();
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
 
         let turn = sqlx::query_as::<_, StoredTurnRow>(
@@ -2595,6 +2634,7 @@ impl AgentSessionStore {
 
         let Some(turn) = turn else {
             tx.commit().await?;
+            db_observation.released();
             return Ok(TurnReceipt {
                 agent_session_id: session_id.clone(),
                 operation_id: operation_id.clone(),
@@ -2638,6 +2678,7 @@ impl AgentSessionStore {
         };
 
         tx.commit().await?;
+        db_observation.released();
         Ok(TurnReceipt {
             agent_session_id: session_id.clone(),
             operation_id: operation_id.clone(),
@@ -2759,6 +2800,7 @@ impl AgentSessionStore {
             .event_id)
     }
 
+    #[tracing::instrument(name = "canonical.observe", skip_all, fields(session_id = %session_id.as_ref()))]
     pub async fn observe(
         &self,
         session_id: &AgentSessionId,
@@ -2767,7 +2809,9 @@ impl AgentSessionStore {
     ) -> Result<SessionObservation, SessionStoreError> {
         // All response fields must describe one committed SQLite snapshot.
         // Reacquiring the pool between reads lets concurrent appends mix epochs.
+        let db_observation = nomifun_db::DatabaseOperationGuard::new(&self.pool);
         let mut tx = self.pool.begin().await?;
+        db_observation.acquired();
         let session = require_live_session_tx(&mut tx, session_id.as_ref()).await?;
         let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
         let after_seq = validate_cursor(session_id, after)?;
@@ -2779,6 +2823,7 @@ impl AgentSessionStore {
             None => None,
         };
         tx.commit().await?;
+        db_observation.released();
         Ok(SessionObservation {
             session,
             head,
@@ -2882,9 +2927,12 @@ impl AgentSessionStore {
         Ok((root, input))
     }
 
+    #[tracing::instrument(name = "canonical.causality_facts", skip_all, fields(session_id = %session_id.as_ref(), operation_id = %turn_operation_id.as_ref()))]
     async fn read_chat_causality_facts(&self, session_id: &AgentSessionId, turn_operation_id: &OperationId, scope: CausalityFactScope)
         -> Result<ChatCausalityFacts, SessionStoreError> {
+        let db_observation = nomifun_db::DatabaseOperationGuard::new(&self.pool);
         let mut tx = self.pool.begin().await?;
+        db_observation.acquired();
         let session = require_live_session_tx(&mut tx, session_id.as_ref()).await?;
         let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
         let rows = match scope {
@@ -2958,6 +3006,7 @@ impl AgentSessionStore {
         events.sort_by_key(|event|event.seq);
         let fork_context = if matches!(scope, CausalityFactScope::TurnOutput) { None } else { fork_context_tx(&mut tx, &session).await? };
         tx.commit().await?;
+        db_observation.released();
 
         Ok(ChatCausalityFacts {
             session,
@@ -3048,7 +3097,7 @@ impl AgentSessionStore {
             },
         };
 
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let _session = require_live_session_tx(&mut tx, request.agent_session_id.as_ref()).await?;
         if let Some(lease) = lease {
             native_execution::check_native_lease_tx(&mut tx, lease, true).await?;
@@ -3081,7 +3130,7 @@ impl AgentSessionStore {
                 return Err(SessionStoreError::ExecutionFenced);
             }
             let ack = event_ack(&record);
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok(SessionEventAppendResult {
                 cursor: ack.cursor.clone(),
                 record: Some(record),
@@ -3153,18 +3202,22 @@ impl AgentSessionStore {
         }
 
         let result = self.append_event_tx(&mut tx, &append, None).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
+    #[tracing::instrument(name = "canonical.head", skip_all, fields(session_id = %session_id.as_ref()))]
     pub async fn head(
         &self,
         session_id: &AgentSessionId,
     ) -> Result<SessionHeadProjection, SessionStoreError> {
+        let db_observation = nomifun_db::DatabaseOperationGuard::new(&self.pool);
         let mut tx = self.pool.begin().await?;
+        db_observation.acquired();
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
         let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
         tx.commit().await?;
+        db_observation.released();
         Ok(head)
     }
 
@@ -3215,6 +3268,7 @@ impl AgentSessionStore {
         self.read_message_projection_page_before(session_id, before_seq, limit, true).await
     }
 
+    #[tracing::instrument(name = "canonical.message_page", skip_all, fields(session_id = %session_id.as_ref()))]
     async fn read_message_projection_page_before(&self, session_id: &AgentSessionId, before_seq: Option<u64>, limit: u32,
         renderer_metadata: bool) -> Result<(Vec<MessageProjection>, bool, u64), SessionStoreError> {
         if limit == 0 || limit > MAX_EVENT_PAGE_SIZE {
@@ -3222,7 +3276,9 @@ impl AgentSessionStore {
                 "message projection page limit must be between 1 and {MAX_EVENT_PAGE_SIZE}",
             )));
         }
+        let db_observation = nomifun_db::DatabaseOperationGuard::new(&self.pool);
         let mut tx = self.pool.begin().await?;
+        db_observation.acquired();
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
         let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
         let boundary = before_seq.unwrap_or(head.last_seq.saturating_add(1));
@@ -3265,6 +3321,7 @@ impl AgentSessionStore {
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
+        db_observation.released();
         Ok((messages, has_more, as_u64(total, "message projection total")?))
     }
 
@@ -3651,7 +3708,7 @@ impl AgentSessionStore {
         &self,
         mut append: SessionEventAppend,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if let Some(existing) = event_by_event_id_tx(&mut tx, append.event_id.as_ref()).await? {
             let existing = event_from_row(existing)?;
             if existing.agent_session_id == append.agent_session_id && existing.kind == append.semantic_event.kind {
@@ -3675,7 +3732,7 @@ impl AgentSessionStore {
                 AppendSessionStatePolicy::EffectSettlement,
             )
             .await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
@@ -3715,7 +3772,7 @@ impl AgentSessionStore {
                 }))),
             },
         };
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let result = self
             .append_event_tx_with_policy(
                 &mut tx,
@@ -3724,7 +3781,7 @@ impl AgentSessionStore {
                 AppendSessionStatePolicy::DeleteCleanupUncertainty,
             )
             .await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
@@ -3754,7 +3811,7 @@ impl AgentSessionStore {
                 }))),
             },
         };
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if duplicate_event_tx(&mut tx, &append).await?.is_none() {
             let blockers = delete_blockers_tx(&mut tx, session_id.as_ref()).await?;
             if !blockers
@@ -3786,7 +3843,7 @@ impl AgentSessionStore {
                 AppendSessionStatePolicy::DeleteCleanupUncertainty,
             )
             .await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
@@ -3828,7 +3885,7 @@ impl AgentSessionStore {
                 }))),
             },
         };
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if duplicate_event_tx(&mut tx, &append).await?.is_none() {
             let blockers = delete_blockers_tx(&mut tx, session_id.as_ref()).await?;
             if !blockers
@@ -3849,7 +3906,7 @@ impl AgentSessionStore {
                 AppendSessionStatePolicy::DeleteCleanupUncertainty,
             )
             .await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
@@ -3862,7 +3919,7 @@ impl AgentSessionStore {
         recorded_at: i64,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         validate_cleanup_reconciliation(owner_domain, evidence_digest, recorded_at)?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
         require_owner(&row, owner)?;
         if row.state != "deleting" {
@@ -3888,7 +3945,7 @@ impl AgentSessionStore {
                 ));
             }
             let ack = event_ack(&record);
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok(SessionEventAppendResult {
                 record: Some(record),
                 ack: Some(ack.clone()),
@@ -3933,7 +3990,7 @@ impl AgentSessionStore {
                 AppendSessionStatePolicy::DeleteCleanupUncertainty,
             )
             .await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
@@ -3952,7 +4009,7 @@ impl AgentSessionStore {
                 "effect reconciliation requires a canonical effect_id".to_owned(),
             ));
         }
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let session_row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
         require_owner(&session_row, owner)?;
         if session_row.state != "deleting" {
@@ -3992,7 +4049,7 @@ impl AgentSessionStore {
                 ));
             }
             let ack = event_ack(&record);
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok(SessionEventAppendResult {
                 record: Some(record),
                 ack: Some(ack.clone()),
@@ -4075,7 +4132,7 @@ impl AgentSessionStore {
                 AppendSessionStatePolicy::EffectSettlement,
             )
             .await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
@@ -4118,7 +4175,7 @@ impl AgentSessionStore {
                 }))),
             },
         };
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
         require_owner(&row, owner)?;
         if row.state != "deleting" {
@@ -4167,7 +4224,7 @@ impl AgentSessionStore {
                 AppendSessionStatePolicy::DeleteCleanupUncertainty,
             )
             .await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
@@ -4204,7 +4261,7 @@ impl AgentSessionStore {
                 }))),
             },
         };
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
         require_owner(&row, owner)?;
         if row.state != "deleting" {
@@ -4251,7 +4308,7 @@ impl AgentSessionStore {
                 AppendSessionStatePolicy::DeleteCleanupUncertainty,
             )
             .await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(result)
     }
 
@@ -4310,7 +4367,7 @@ impl AgentSessionStore {
                 "effect recovery timestamp must not be negative".to_owned(),
             ));
         }
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let session_row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
         require_owner(&session_row, owner)?;
         if session_row.state != "deleting" {
@@ -4363,7 +4420,7 @@ impl AgentSessionStore {
                 causation_event_id: Some(effect.started_event_id),
                 payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
                     "outcome": "unknown",
-                    "recovery": "process_restart_external_reconciliation_required",
+                    "recovery": "native_recovery_external_reconciliation_required",
                 }))),
             };
             let append = effect_append(request, "effect/uncertain")?;
@@ -4376,7 +4433,7 @@ impl AgentSessionStore {
             .await?;
             quarantined = quarantined.saturating_add(1);
         }
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(quarantined)
     }
 
@@ -4435,7 +4492,7 @@ impl AgentSessionStore {
         request: CommitAgentSessionAutomationConfig,
     ) -> Result<AgentSessionAutomationConfig, SessionStoreError> {
         validate_automation_config_request(&request)?;
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, request.agent_session_id.as_ref()).await?;
         require_owner(&row, &request.owner_ref)?;
         require_live_row(row)?;
@@ -4464,7 +4521,7 @@ impl AgentSessionStore {
                         "AutoWork config operation was replayed with different input".to_owned(),
                     ));
                 }
-                tx.commit().await?;
+                db_write_observation.commit(tx).await?;
                 return Ok(committed);
             }
         }
@@ -4478,7 +4535,7 @@ impl AgentSessionStore {
             && current.tag == request.tag
             && current.max_requirements == request.max_requirements;
         if unchanged && request.operation_id.is_none() {
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok(current);
         }
         let revision = if unchanged {
@@ -4522,7 +4579,7 @@ impl AgentSessionStore {
             },
         };
         self.append_event_tx(&mut tx, &append, None).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(committed)
     }
 
@@ -4583,7 +4640,7 @@ impl AgentSessionStore {
             ));
         }
 
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if let Some(receipt) = existing_fork_receipt_tx(&mut tx, &request.child_owner_ref, parent_session_id,
             request.parent_through_seq, request.child_metadata.title.as_deref(), &request.producer_id, &request.idempotency_key).await? {
             if receipt.child_session.metadata.purpose != request.child_metadata.purpose
@@ -4591,7 +4648,7 @@ impl AgentSessionStore {
                 || receipt.child_session.metadata.companion != request.child_metadata.companion {
                 return Err(SessionStoreError::IdempotencyConflict("fork replay changed its product purpose".into()));
             }
-            tx.commit().await?;
+            db_write_observation.commit(tx).await?;
             return Ok(receipt);
         }
         let parent = require_live_session_tx(&mut tx, parent_session_id.as_ref()).await?;
@@ -4767,7 +4824,7 @@ impl AgentSessionStore {
         if fork_ack != predicted_fork_ack { return Err(SessionStoreError::Conflict("fork receipt sequence changed within its transaction".into())); }
         let child_session =
             live_session_by_id_tx(&mut tx, request.child_session_id.as_ref()).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
 
         Ok(ForkResult {
             child_session,
@@ -4798,7 +4855,7 @@ impl AgentSessionStore {
         // Read the deletion state only after obtaining the writer lock. A
         // deferred transaction can fail its read-to-write upgrade immediately
         // when another Session deletion or domain owner has written in WAL.
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, command.agent_session_id.as_ref()).await?;
         require_owner(&row, &command.owner_ref)?;
         match row.state.as_str() {
@@ -4809,7 +4866,7 @@ impl AgentSessionStore {
             }
             "deleting" => {
                 let live = live_from_row(row)?;
-                tx.commit().await?;
+                db_write_observation.commit(tx).await?;
                 return Ok(AgentSessionDeletingRecord {
                     live,
                     delete_operation_id: command.operation_id.clone(),
@@ -4836,7 +4893,7 @@ impl AgentSessionStore {
                 command.agent_session_id.0.clone(),
             ));
         }
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
         Ok(AgentSessionDeletingRecord {
             live,
             delete_operation_id: command.operation_id.clone(),
@@ -4857,7 +4914,7 @@ impl AgentSessionStore {
 
         // Blockers, private-content purge and tombstone validation must share
         // a writer-owned snapshot even when other Sessions delete in parallel.
-        let mut tx = self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let row = session_row_by_id_tx(&mut tx, command.agent_session_id.as_ref()).await?;
         require_owner(&row, &command.owner_ref)?;
         match row.state.as_str() {
@@ -4904,7 +4961,7 @@ impl AgentSessionStore {
         .execute(&mut *tx)
         .await?;
         assert_tombstone_exact_tx(&mut tx, command.agent_session_id.as_ref()).await?;
-        tx.commit().await?;
+        db_write_observation.commit(tx).await?;
 
         Ok(DeleteResult {
             tombstone: AgentSessionTombstone {
@@ -5023,13 +5080,20 @@ impl AgentSessionStore {
         .await
     }
 
-    async fn append_event_tx_with_policy(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        append: &SessionEventAppend,
-        payload: Option<&SessionPayloadRecord>,
+    // All canonical writers share this heap boundary. Keep validation in the
+    // caller's original transaction without embedding its complete async state
+    // through every create, Turn and Effect caller.
+    fn append_event_tx_with_policy<'a, 'connection>(
+        &'a self,
+        tx: &'a mut Transaction<'connection, Sqlite>,
+        append: &'a SessionEventAppend,
+        payload: Option<&'a SessionPayloadRecord>,
         state_policy: AppendSessionStatePolicy,
-    ) -> Result<SessionEventAppendResult, SessionStoreError> {
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<SessionEventAppendResult, SessionStoreError>> + Send + 'a>>
+    where
+        'connection: 'a,
+    {
+        Box::pin(async move {
         validate_event_append(append)?;
         let existing_payload = if payload.is_none()
             && matches!(append.semantic_event.kind.0.as_str(), "runtime/progress-recorded" | "tool/result-recorded") {
@@ -5285,6 +5349,7 @@ impl AgentSessionStore {
             ack: Some(ack),
             persisted: true,
             duplicate: false,
+        })
         })
     }
 }
@@ -6553,6 +6618,21 @@ async fn validate_predecessor_tx(
     Ok(())
 }
 
+#[derive(PartialEq,Eq)]
+enum ManagedUncertaintyProof { NativeRecovery, HistoricalProcessRestart, OwnerVerified }
+
+fn managed_uncertainty_proof(label:Option<&str>)->Option<ManagedUncertaintyProof> {
+    match label {
+        Some("native_recovery_external_reconciliation_required")=>Some(ManagedUncertaintyProof::NativeRecovery),
+        // A valid immutable fact from this current schema may carry the old
+        // label. Only reconciliation of that original fact can consume it;
+        // new uncertainty admission never accepts this spelling.
+        Some("process_restart_external_reconciliation_required")=>Some(ManagedUncertaintyProof::HistoricalProcessRestart),
+        Some("native_owner_verified_reconciliation")=>Some(ManagedUncertaintyProof::OwnerVerified),
+        _=>None,
+    }
+}
+
 async fn validate_effect_transition_tx(
     tx: &mut Transaction<'_, Sqlite>,
     append: &SessionEventAppend,
@@ -6638,15 +6718,15 @@ async fn validate_effect_transition_tx(
                     .get("recovery")
                     .and_then(Value::as_str);
                 if append.producer_id.as_ref() != "runtime_supervisor"
-                    || !matches!(recovery,Some("process_restart_external_reconciliation_required"|"native_owner_verified_reconciliation"))
+                    || !matches!(managed_uncertainty_proof(recovery),Some(ManagedUncertaintyProof::NativeRecovery|ManagedUncertaintyProof::OwnerVerified))
                 {
                     return Err(SessionStoreError::InvalidEvent(
-                        "managed effects require process-restart proof before becoming uncertain"
+                        "managed effects require native recovery proof before becoming uncertain"
                             .to_owned(),
                     ));
                 }
             }
-            if terminal_kind == "effect/uncertain" && effect_payload_from_append(append)?.get("recovery").and_then(Value::as_str) == Some("native_owner_verified_reconciliation") {
+            if terminal_kind == "effect/uncertain" && managed_uncertainty_proof(effect_payload_from_append(append)?.get("recovery").and_then(Value::as_str)) == Some(ManagedUncertaintyProof::OwnerVerified) {
                 let payload = effect_payload_from_append(append)?;
                 let id = payload.get("reconciliation_event_id").and_then(Value::as_str).ok_or_else(||SessionStoreError::InvalidEvent("owner verification audit missing".into()))?;
                 let audit = event_by_event_id_tx(tx,id).await?.ok_or_else(||SessionStoreError::InvalidEvent("owner verification audit missing".into()))?;
@@ -6674,11 +6754,11 @@ async fn validate_effect_transition_tx(
                 let terminal_payload = effect_payload_from_event(
                     terminal.expect("reconciled effect has uncertain terminal"),
                 )?;
-                if !matches!(terminal_payload.get("recovery").and_then(Value::as_str),
-                    Some("process_restart_external_reconciliation_required"|"native_owner_verified_reconciliation"))
+                if terminal.expect("reconciled effect has uncertain terminal").producer_id.as_ref()!="runtime_supervisor"
+                    ||managed_uncertainty_proof(terminal_payload.get("recovery").and_then(Value::as_str)).is_none()
                 {
                     return Err(SessionStoreError::InvalidEvent(
-                        "managed effect reconciliation requires a process-restart uncertainty"
+                        "managed effect reconciliation requires native recovery uncertainty"
                             .to_owned(),
                     ));
                 }

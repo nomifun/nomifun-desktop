@@ -82,6 +82,9 @@ pub fn agent_execution_routes(engine: Arc<AgentExecutionEngine>) -> Router {
             "/api/agent-executions/{execution_id}/steps/{step_id}/retry",
             post(retry_execution_step),
         )
+        .route("/api/agent-executions/{execution_id}/steps/{step_id}/recheck",post(recheck_execution_step))
+        .route("/api/agent-executions/{execution_id}/steps/{step_id}/restart",post(restart_execution_step))
+        .route("/api/agent-executions/{execution_id}/steps/{step_id}/replace-with-existing",post(replace_execution_step_with_existing))
         .route(
             "/api/agent-executions/{execution_id}/steps/{step_id}/cancel",
             post(cancel_execution_step),
@@ -352,6 +355,33 @@ async fn cancel_execution_step(
             )
             .await?,
     )))
+}
+
+async fn recheck_execution_step(
+    State(engine):State<Arc<AgentExecutionEngine>>,Extension(user):Extension<CurrentUser>,
+    Path((execution,step)):Path<(AgentExecutionId,AgentExecutionStepId)>,
+    body:Result<Json<RetryExecutionStepRequest>,JsonRejection>,
+)->Result<Json<ApiResponse<AgentExecutionDetail>>,AppError> {
+    let Json(request)=json_body(body)?;
+    Ok(Json(ApiResponse::ok(engine.recheck_step(&user.id,&user_actor(&user),execution.as_str(),step.as_str(),request).await?)))
+}
+
+async fn restart_execution_step(
+    State(engine):State<Arc<AgentExecutionEngine>>,Extension(user):Extension<CurrentUser>,
+    Path((execution,step)):Path<(AgentExecutionId,AgentExecutionStepId)>,
+    body:Result<Json<nomifun_api_types::RestartExecutionStepRequest>,JsonRejection>,
+)->Result<Json<ApiResponse<crate::AgentExecutionMessageReceipt>>,AppError> {
+    let Json(request)=json_body(body)?;
+    Ok(Json(ApiResponse::ok(engine.restart_step(&user.id,&user_actor(&user),execution.as_str(),step.as_str(),request).await?)))
+}
+
+async fn replace_execution_step_with_existing(
+    State(engine):State<Arc<AgentExecutionEngine>>,Extension(user):Extension<CurrentUser>,
+    Path((execution,step)):Path<(AgentExecutionId,AgentExecutionStepId)>,
+    body:Result<Json<nomifun_api_types::ReplaceExecutionStepWithExistingRequest>,JsonRejection>,
+)->Result<Json<ApiResponse<AgentExecutionDetail>>,AppError> {
+    let Json(request)=json_body(body)?;
+    Ok(Json(ApiResponse::ok(engine.replace_step_with_existing(&user.id,&user_actor(&user),execution.as_str(),step.as_str(),request).await?)))
 }
 
 async fn adopt_execution_step_output(

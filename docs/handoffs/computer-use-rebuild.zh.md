@@ -4,7 +4,7 @@
 
 本文件是本专项唯一现役施工与验收说明。目标是在**下一个发布版本**（建议 0.9.0，由发布负责人确定）中用 Cua Driver **全新实现** Computer Use：底层从零开始，旧实现整体删除；不迁移、不兼容旧数据与旧契约；依赖旧 Computer 的会话直接放弃并提示用户新建会话。
 
-启动入口见[启动 prompt](computer-use-rebuild.start-prompt.zh.md)。实施前阅读根目录 [AGENTS.md](../../AGENTS.md)、[Agent Session](../architecture/agent-session.zh.md)、[全局 OS 能力](../architecture/global-os-capabilities.zh.md)、[系统许可](../architecture/system-permissions.zh.md)、[生命周期可靠性方案](agent-lifecycle-reliability.zh.md)（U01–U13 同样适用）与[开发验证](../contributing/development.md)。
+启动入口见[启动 prompt](computer-use-rebuild.start-prompt.zh.md)。实施前阅读根目录 [AGENTS.md](../../AGENTS.md)、[Agent Session](../architecture/agent-session.zh.md)、[全局 OS 能力](../architecture/global-os-capabilities.zh.md)、[系统许可](../architecture/system-permissions.zh.md)、[Agent Execution 生命周期约束](../architecture/agent-execution.zh.md#生命周期约束)（U01–U13 同样适用）与[开发验证](../contributing/development.md)。
 
 **2026-10-20 用户修订依据与执行规则**：先在 Windows 本机贯通 S1、S2、S3；macOS、Linux、Wayland、其他 DPI/架构和真实模型验证并行补齐。缺少机器、桌面、签名或受控模型凭据只记为待验，不阻塞本机代码接入。允许使用当前用户桌面的专用测试窗口和临时数据；隔离账户、虚拟机或私有显示服务按测试需要选择，不是开发前置条件。质量与完整替换要求保持；平台支持和发布声明以对应证据为准。本修订替代此前要求三端门槛全部通过后才继续本机开发的执行限制。
 

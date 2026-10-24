@@ -1,6 +1,11 @@
 pub mod agent_metadata;
 pub mod agent_execution;
 pub mod agent_execution_admission;
+pub mod agent_execution_restart_resume;
+mod agent_execution_observation;
+pub use agent_execution_observation::{AgentExecutionObservationHeader, AgentExecutionObservationStep,
+    AgentExecutionObservationAttempt, AgentExecutionObservationState, AgentExecutionObservationRows,
+    AgentCollaborationObservationRevisions};
 pub mod agent_execution_template;
 mod agent_preset_lineage;
 mod bind;
@@ -124,7 +129,7 @@ pub use remote_binding::{
 pub use settings::ISettingsRepository;
 pub use skill_tag::ISkillTagRepository;
 pub use sqlite_agent_metadata::SqliteAgentMetadataRepository;
-pub use sqlite_agent_execution::SqliteAgentExecutionRepository;
+pub use sqlite_agent_execution::{SqliteAgentExecutionRepository,original_attempt_creation_source_tx};
 pub use sqlite_agent_execution_template::SqliteAgentExecutionTemplateRepository;
 pub use sqlite_attachment::SqliteAttachmentRepository;
 pub use sqlite_channel::SqliteChannelRepository;

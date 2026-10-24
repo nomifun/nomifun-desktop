@@ -15,7 +15,7 @@ beforeEach(() => {
   spyOn(Context, 'useExecution').mockReturnValue({ conversationId: parseConversationId('0190f5fe-7c00-7a00-8000-000000000511'),
     executionId: parseExecutionId('0190f5fe-7c00-7a00-8000-000000000512'), detail: null, refetch: async () => {},
     leadThinking: { phase: null, reasoning: '', active: false, textHeartbeat: false }, loading: false, projectedStepId: null,
-    projectedPayload: null, projectStep: () => {}, projectStepAsync: async () => {}, returnToMain: () => {}, canvasOpen: true, setCanvasOpen: () => {}, toggleCanvas: () => {} });
+    projectedPayload: null, projectStep: () => {}, projectStepAsync: async () => {}, returnToMain: () => {}, canvasOpen: true, setCanvasOpen: () => {}, toggleCanvas: () => {}, restartDrafts: new Map() });
   spyOn(Layout, 'default').mockImplementation(({ children, ...props }) => { captured = props; return <div>{children}</div>; });
   spyOn(Switcher, 'default').mockImplementation(({ children }) => <div data-testid='execution-switcher'>{children}</div>);
   spyOn(Panel, 'default').mockImplementation(() => <div data-testid='execution-top-panel' />);

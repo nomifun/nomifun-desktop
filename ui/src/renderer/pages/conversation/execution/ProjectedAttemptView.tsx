@@ -1,5 +1,5 @@
-import { Button, Dropdown, Input, Menu, Spin } from '@arco-design/web-react';
-import { Brain, CheckOne, Comment, Down, Help, Left, Redo } from '@icon-park/react';
+import { Button, Dropdown, Input, Menu, Select, Spin } from '@arco-design/web-react';
+import { Brain, CheckOne, Comment, Down, Help, Left } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
@@ -29,6 +29,7 @@ import ExecutionStepStopControl from './ExecutionStepStopControl';
 import { attemptRecoveryReview } from './attemptRecoveryReview';
 import { selectProjectedAttempt } from './projectedAttemptSelection';
 import TaskActivityDetails from './TaskActivityDetails';
+import ExecutionTaskRestartControl from './ExecutionTaskRestartControl';
 
 type ProjectedAttemptViewProps = { payload: OpenStepPayload };
 type StepConfigDraft = Pick<TConfigureExecutionStep, 'model' | 'preset_prompt'>;
@@ -57,13 +58,15 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
   const [message, messageContext] = useArcoMessage();
   const [conversation, setConversation] = useState<TChatConversation | null>(null);
   const [loading, setLoading] = useState(false);
-  const [retrying, setRetrying] = useState(false);
+  const [stoppedScope, setStoppedScope] = useState<string>();
   const [adopting, setAdopting] = useState(false);
   const [reassigning, setReassigning] = useState(false);
   const [decisionAnswer, setDecisionAnswer] = useState('');
   const [answering, setAnswering] = useState(false);
   const [steerText, setSteerText] = useState('');
   const [steering, setSteering] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+  const [replacementId, setReplacementId] = useState<string>();
 
   const step = useMemo(
     () => detail?.steps.find((candidate) => candidate.step_id === payload.step.step_id) ?? payload.step,
@@ -73,6 +76,7 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
   const historical = payload.attemptId !== undefined;
   const attempt = selectProjectedAttempt(attempts, step.step_id, payload.attemptId);
   const recoveryReview = attemptRecoveryReview(attempt?.runtime_state);
+  const nativePaused = recoveryReview?.kind === 'native_pause' && recoveryReview.receiptState === 'paused';
   const conversationId = detail ? attempt?.conversation_id : undefined;
   const participants = detail?.participants ?? payload.participants;
   const assignableParticipants = participants.filter(
@@ -86,17 +90,23 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
   useEffect(() => {
     setDecisionAnswer('');
     setSteerText('');
+    setReplacementId(undefined);
   }, [attempt?.attempt_id]);
   const automationControl = detail?.automation_control;
   const canConfigure = !historical && detail !== null && !automationControl && step.kind === 'agent' && step.status === 'pending';
   const attemptActive = attempt ? ['queued', 'running', 'waiting_input'].includes(attempt.status) : false;
   const canSteer = !historical && detail !== null && canSteerExecutionAttempt(attempt?.status, detail.execution.status);
   const executionCancelled = detail?.execution.status === 'cancelled';
-  const canRetry =
-    !historical && detail !== null && !automationControl && !executionCancelled &&
-    (['completed', 'failed', 'skipped'].includes(step.status) || (step.status === 'pending' && step.dispatch_after != null));
+  const taskScope = `${payload.executionId}:${step.step_id}:${attempt?.attempt_id ?? 'unstarted'}`;
+  const canRestart = !historical && detail !== null && !automationControl && !executionCancelled
+    && step.kind === 'agent' && step.superseded_in_revision == null && step.status !== 'cancelled'
+    && attempt?.status !== 'cancelled' && stoppedScope !== taskScope;
   const canAdopt =
     !historical && conversationId != null && Boolean(detail?.execution) && !automationControl && !executionCancelled && step.status !== 'cancelled' && !attemptActive;
+  const canReconcile = !historical && detail !== null && !automationControl && !isTerminalExecutionStatus(detail.execution.status)
+    && step.superseded_in_revision == null && step.status !== 'cancelled';
+  const replacements = (detail?.steps ?? []).filter(candidate => candidate.step_id !== step.step_id
+    && candidate.kind === 'agent' && candidate.status === 'completed' && candidate.superseded_in_revision == null);
 
   const projectReplacementStep = useCallback(
     (replacement: TExecutionStep) => {
@@ -223,36 +233,27 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
     };
   }, [conversationId]);
 
-  const retry = async () => {
-    if (retrying) return;
-    setRetrying(true);
+  const reconcile = async (replace: boolean) => {
+    if (recovering || !canReconcile || !detail) return;
+    const replacement = replacements.find(candidate => candidate.step_id === replacementId);
+    if (replace && !replacement) return;
+    setRecovering(true);
     try {
-      await ipcBridge.agentExecution.retry.invoke({
-        execution_id: payload.executionId,
-        step_id: step.step_id,
-        updates: {
-          expected_execution_version: detail?.execution.version ?? 0,
-          expected_step_version: step.version,
-        },
-      });
+      const target = { execution_id: payload.executionId, step_id: step.step_id,
+        updates: { expected_execution_version: detail.execution.version, expected_step_version: step.version } };
+      if (replacement && replace) {
+        await ipcBridge.agentExecution.replaceWithExisting.invoke({ ...target, updates: { ...target.updates,
+          replacement_step_id: replacement.step_id, expected_replacement_step_version: replacement.version } });
+      } else {
+        await ipcBridge.agentExecution.recheck.invoke(target);
+      }
       await refetch();
-      message.success({
-        content: t('agentExecution.retry.ok', { defaultValue: '任务已重试' }),
-        duration: TOAST_OK_MS,
-        className: TOAST_CLASS,
-      });
+      message.success({ content: t('agentExecution.recovery.accepted'), duration: TOAST_OK_MS, className: TOAST_CLASS });
     } catch (error) {
       await refreshOnVersionConflict(error, refetch);
-      message.error({
-        content: t('agentExecution.retry.error', {
-          defaultValue: '重试失败：{{error}}',
-          error: String(error),
-        }),
-        duration: TOAST_ERROR_MS,
-        className: TOAST_CLASS,
-      });
+      message.error({ content: t('agentExecution.recovery.error', { error: String(error) }), duration: TOAST_ERROR_MS, className: TOAST_CLASS });
     } finally {
-      setRetrying(false);
+      setRecovering(false);
     }
   };
 
@@ -398,10 +399,11 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
           {!historical && detail && <ExecutionStepStopControl key={step.step_id} executionId={payload.executionId}
             executionVersion={detail.execution.version} executionStatus={detail.execution.status}
             stepId={step.step_id} stepVersion={step.version} stepStatus={step.status}
-            delegatedOnly={automationControl?.root_step_id === step.step_id} refetch={refetch} />}
+            delegatedOnly={automationControl?.root_step_id === step.step_id} refetch={refetch}
+            onAccepted={scope => { if (scope !== 'delegated_work') setStoppedScope(taskScope); }} />}
           {!historical && detail && <ExecutionStopControl key={payload.executionId} executionId={payload.executionId}
             executionVersion={detail.execution.version} status={detail.execution.status} refetch={refetch}
-            automationControl={automationControl} />}
+            automationControl={automationControl} onAccepted={() => setStoppedScope(taskScope)} />}
           {canConfigure && assignableParticipants.length > 1 && (
             <Dropdown trigger='click' position='br' droplist={participantMenu}>
               <div
@@ -436,19 +438,8 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
               })}
             </div>
           )}
-          {canRetry && (
-            <div
-              role='button'
-              tabIndex={0}
-              aria-disabled={retrying}
-              className={styles.action}
-              onClick={retrying ? undefined : () => void retry()}
-              onKeyDown={(event) => activateOnKeyboard(event, () => void retry(), retrying)}
-            >
-              <Redo theme='outline' size='13' />
-              {t('agentExecution.retry.button', { defaultValue: '重试' })}
-            </div>
-          )}
+          {canRestart && <ExecutionTaskRestartControl executionId={payload.executionId} stepId={step.step_id}
+            attemptId={attempt?.attempt_id ?? null} executionVersion={detail.execution.version} stepVersion={step.version} refetch={refetch} />}
           <div
             role='button'
             tabIndex={0}
@@ -488,10 +479,19 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
         <div className={styles.questionBanner} role='status'>
           <span className={styles.questionIcon}><Help theme='filled' size='15' /></span>
           <div className={styles.questionBody}>
-            <span className={styles.questionEyebrow}>{t('agentExecution.recovery.title')}</span>
-            <span className={styles.questionContent}>{t('agentExecution.recovery.description')}</span>
-            <span className={styles.questionHint}>{t(isTerminalExecutionStatus(detail?.execution.status)
-              ? 'agentExecution.recovery.settledHint' : 'agentExecution.recovery.hint')}</span>
+            <span className={styles.questionEyebrow}>{t(nativePaused ? 'agentExecution.recovery.pausedTitle' : 'agentExecution.recovery.title')}</span>
+            <span className={styles.questionContent}>{t(nativePaused ? 'agentExecution.recovery.pausedDescription' : 'agentExecution.recovery.description')}</span>
+            <span className={styles.questionHint}>{t(nativePaused && canRestart ? 'agentExecution.recovery.pausedHint'
+              : isTerminalExecutionStatus(detail?.execution.status) ? 'agentExecution.recovery.settledHint' : 'agentExecution.recovery.hint')}</span>
+            {canReconcile && <div className={styles.questionActions}>
+              <Button size='small' loading={recovering} onClick={() => void reconcile(false)}>{t('agentExecution.recovery.recheck')}</Button>
+              {replacements.length > 0 && <>
+                <Select aria-label={t('agentExecution.recovery.replacement')} placeholder={t('agentExecution.recovery.replacement')}
+                  value={replacementId} onChange={setReplacementId} disabled={recovering}
+                  options={replacements.map(candidate => ({ label: candidate.title, value: candidate.step_id }))} />
+                <Button size='small' disabled={!replacementId || recovering} onClick={() => void reconcile(true)}>{t('agentExecution.recovery.replace')}</Button>
+              </>}
+            </div>}
             {recoveryReview.reason && <details className={styles.recoveryDetails}>
               <summary>{t('agentExecution.recovery.details')}</summary>
               <p>{recoveryReview.reason}</p>
@@ -543,7 +543,8 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
       )}
 
       {attempt && <TaskActivityDetails key={`${payload.executionId}:${step.step_id}:${attempt.attempt_id}`}
-        executionId={payload.executionId} stepId={step.step_id} attemptId={attempt.attempt_id} />}
+        executionId={payload.executionId} stepId={step.step_id} attemptId={attempt.attempt_id}
+        onTaskStopAccepted={() => setStoppedScope(taskScope)} />}
       <div className={styles.body}>
         <RouteErrorBoundary>
           {!detail ? (

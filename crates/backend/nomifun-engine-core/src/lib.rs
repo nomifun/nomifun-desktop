@@ -24,7 +24,7 @@ pub use system_permission::{SystemPermissionKind, SystemPermissionRequired, SYST
     project_system_permission_required, system_permission_error_carrier};
 pub use context_resource::{EngineContextContent, EngineContextResource, EngineResourceQuery, EngineResourceRead, EngineResourceImageRead, EngineResourcePort};
 pub use context_resource::mcp_template_variables_schema;
-pub use kernel::{EngineToolExposure, KernelEngineToolInvoker, compile_engine_tool_plan};
+pub use kernel::{EngineToolExposure, KernelEngineToolInvoker, compile_engine_tool_plan, engine_effect};
 pub use nomifun_chat_model_broker::{BrokerEngineModelPort, EngineModelPort, EngineModelStream};
 pub use nomi_process_runtime::MAX_PTY_DIMENSION;
 pub use process::{

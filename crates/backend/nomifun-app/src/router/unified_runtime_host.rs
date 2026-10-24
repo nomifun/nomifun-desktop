@@ -32,6 +32,16 @@ mod collaboration_inheritance;
 #[path = "robot_interaction.rs"]
 pub(super) mod robot_interaction;
 
+#[cfg(test)]
+struct ReceiptReadFault {
+    remaining:u8,
+    observed:Arc<std::sync::atomic::AtomicUsize>,
+    reached:Arc<tokio::sync::Notify>,
+    release:Arc<tokio::sync::Semaphore>,
+}
+#[cfg(test)]
+static RECEIPT_READ_FAULTS:std::sync::OnceLock<std::sync::Mutex<BTreeMap<String,ReceiptReadFault>>>=std::sync::OnceLock::new();
+
 fn error(value: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Nomi runtime host: {value}"))
 }
@@ -151,6 +161,24 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-runtime/src/user_input.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/wait.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/collaboration.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/collaboration_wait.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/collaboration_cursor.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/collaboration_observation.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/task_control.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/restart_step.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/planning_controls.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/scheduler_owned_jobs.rs"),
+                    include_str!("../../../nomifun-db/src/repository/agent_execution_observation.rs"),
+                    include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution_task_control.rs"),
+                    include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution_restart.rs"),
+                    include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution_pause.rs"),
+                    include_str!("../../../nomifun-db/src/repository/agent_execution_restart_resume.rs"),
+                    include_str!("../../../nomifun-db/src/availability.rs"),
+                    include_str!("../../../nomifun-db/src/error.rs"),
+                    include_str!("../../../nomifun-db/src/pool_diagnostics.rs"),
+                    include_str!("../../../nomifun-common/src/error.rs"),
+                    include_str!("../../../nomifun-common/src/database_unavailable.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/event_publisher.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/user_input.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/turn_outcome.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/shared_tool_content.rs"),
@@ -158,8 +186,11 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-execution/src/engine.rs"),
                     include_str!("../../../nomifun-agent-execution/src/source_continuation.rs"),
                     include_str!("../../../nomifun-agent-execution/src/scheduler.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/scheduler_step_recovery.rs"),
                     include_str!("../../../nomifun-agent-execution/src/production.rs"),
                     include_str!("../../../nomifun-db/src/repository/agent_execution.rs"),
+                    include_str!("../../../nomifun-db/src/models/agent_execution_effect.rs"),
+                    include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution_parent_reply.rs"),
                     include_str!("../../../nomifun-db/src/repository/agent_source_reply.rs"),
                     include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution.rs"),
                     include_str!("../../../nomifun-db/src/repository/sqlite_agent_execution_source.rs"),
@@ -176,6 +207,9 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-contracts/src/runtime.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/session.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/native_execution.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/session_path_label.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/collaboration_message.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/collaboration_task_control.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/system_execution.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/native_mutation.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/schema.rs"),
@@ -196,6 +230,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("session_admission.rs"),
                     include_str!("companion_report_delivery.rs"),
                     include_str!("runtime_collaboration.rs"),
+                    include_str!("collaboration_read_error.rs"),
                     include_str!("runtime_collaboration_inheritance.rs"),
                     include_str!("companion_decision_delivery.rs"),
                     include_str!("execution_question_playback.rs"),
@@ -282,6 +317,8 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-contracts/src/message_timeline.rs"),
                     include_str!("../../../nomifun-agent-session/src/message_timeline.rs"),
                     include_str!("../../../nomifun-ai-agent/src/unified_runtime.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/runtime_state.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/lib.rs"),
                     include_str!("../../../nomifun-ai-agent/src/engine_sdk.rs"),
                     include_str!("../../../nomifun-ai-agent/src/engine_tasks.rs"),
                     include_str!("../../../nomifun-engine-core/src/lib.rs"),
@@ -452,7 +489,19 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("engine_recovery.rs"),
                     include_str!("native_turn_recovery.rs"),
                     include_str!("native_execution_control.rs"),
+                    include_str!("execution_task_restart.rs"),
+                    include_str!("native_resume_waiter.rs"),
+                    include_str!("parent_question_reply.rs"),
+                    include_str!("attempt_input_owner.rs"),
+                    include_str!("empty_execution_retirement.rs"),
+                    include_str!("../../../nomifun-agent-session/src/empty_execution_creation.rs"),
                     include_str!("engine_journal.rs"),
+                    include_str!("engine_journal_settlement.rs"),
+                    include_str!("engine_journal_write.rs"),
+                    include_str!("turn_settlement_owner.rs"),
+                    include_str!("engine_owned_settlement.rs"),
+                    include_str!("engine_tool_return.rs"),
+                    include_str!("completed_runtime_retirement.rs"),
                     include_str!("engine_model_facts.rs"),
                     include_str!("engine_tool_host.rs"),
                     include_str!("engine_kernel_session.rs"),
@@ -481,6 +530,8 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-session/src/context_snapshot.rs"),
                     include_str!("../../../nomifun-agent-session/src/native_checkpoint.rs"),
                     include_str!("../../../nomifun-agent-session/src/native_execution.rs"),
+                    include_str!("../../../nomifun-agent-session/src/native_settlement.rs"),
+                    include_str!("../../../nomifun-agent-session/src/native_settlement_bundle.rs"),
                     include_str!("../../../nomifun-db/src/repository/agent_execution_admission.rs"),
                     include_str!("../../../nomifun-db/src/repository/remote_session_admission.rs"),
                     include_str!("../../../nomifun-agent-session/src/native_pause.rs"),
@@ -590,6 +641,7 @@ pub(crate) fn factory(
             .map_err(error)?;
             let host = Arc::new_cyclic(|weak| ConversationRuntimeHost {
                 self_reference: weak.clone(),
+                runtime_owner: std::sync::OnceLock::new(),
                 preparation: tokio::sync::Mutex::new(None),
                 session_host,
                 options: options.clone(),
@@ -610,7 +662,7 @@ pub(crate) fn factory(
                 principal,
                 capability_state: active,
                 active: tokio::sync::Mutex::new(None),
-                last_terminal_root: std::sync::Mutex::new(None),
+                last_committed_exit: std::sync::Mutex::new(None),
                 pending_writeback_release: std::sync::Mutex::new(None),
                 unstarted_cancelled_root: std::sync::Mutex::new(None),
                 model_configuration: Default::default(),
@@ -623,9 +675,11 @@ pub(crate) fn factory(
             let model = host.session_host.compose_model_port_with_projection(
                 host.clone(), Some(host.model_configuration.clone()), host.resources.model_attempt_projection(),
             )?;
-            let runtime =
-                UnifiedAgentRuntime::new(&options, engine, engine_binding, model, tools, host)?;
-            Ok(Arc::new(runtime) as Arc<dyn nomifun_ai_agent::OfficialAgentRuntime>)
+            let runtime:Arc<dyn nomifun_ai_agent::OfficialAgentRuntime>=Arc::new(
+                UnifiedAgentRuntime::new(&options,engine,engine_binding,model,tools,host.clone())?);
+            host.runtime_owner.set(Arc::downgrade(&runtime))
+                .map_err(|_|error("the original SDK owner was already bound to this Host"))?;
+            Ok(runtime)
         })
     })
 }
@@ -659,6 +713,9 @@ impl Drop for PreparationCompletion {
 
 struct ConversationRuntimeHost {
     self_reference: std::sync::Weak<ConversationRuntimeHost>,
+    /// The SDK built with this Host, including while the registry hides its
+    /// broken transport. Weak ownership does not keep a retired carrier alive.
+    runtime_owner: std::sync::OnceLock<std::sync::Weak<dyn nomifun_ai_agent::OfficialAgentRuntime>>,
     preparation: tokio::sync::Mutex<Option<PreparationFlight>>,
     session_host: Arc<super::engine_session_host::EngineSessionHost>,
     options: AgentRuntimeBuildOptions,
@@ -679,13 +736,21 @@ struct ConversationRuntimeHost {
     principal: PrincipalRef,
     capability_state: Arc<SessionCapabilityState>,
     active: tokio::sync::Mutex<Option<ActiveTurn>>,
-    last_terminal_root: std::sync::Mutex<Option<String>>,
+    last_committed_exit: std::sync::Mutex<Option<CommittedTurnExit>>,
     pending_writeback_release: std::sync::Mutex<Option<(String, tokio::sync::oneshot::Sender<()>)>>,
     unstarted_cancelled_root: std::sync::Mutex<Option<String>>,
     model_configuration: super::chat_broker_host::TurnModelConfiguration,
     tools: Arc<JoinedTools>,
     resources: Arc<super::engine_kernel_session::EngineKernelSession>,
     supervision: Arc<dyn nomifun_idmm::IdmmProgressSink>,
+}
+
+#[derive(Clone)]
+struct CommittedTurnExit {
+    root:String,
+    task:nomifun_ai_agent::AgentRuntimeTurn,
+    operation:nomifun_agent_contracts::OperationId,
+    generation:u64,
 }
 
 struct UserInputRequestPort {
@@ -725,6 +790,35 @@ impl AgentUserInputRequestPort for UserInputRequestPort {
 }
 
 impl ConversationRuntimeHost {
+    #[cfg(test)]
+    fn fail_first_two_receipt_reads_for_test(&self)->(Arc<tokio::sync::Notify>,Arc<tokio::sync::Semaphore>,Arc<std::sync::atomic::AtomicUsize>) {
+        let reached=Arc::new(tokio::sync::Notify::new());
+        let release=Arc::new(tokio::sync::Semaphore::new(0));
+        let observed=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        RECEIPT_READ_FAULTS.get_or_init(Default::default).lock().unwrap().insert(self.options.conversation_id.clone(),
+            ReceiptReadFault {remaining:2,observed:observed.clone(),reached:reached.clone(),release:release.clone()});
+        (reached,release,observed)
+    }
+
+    #[cfg(test)]
+    async fn receipt_read_fault_for_test(&self)->Option<AppError> {
+        let last={
+            let mut faults=RECEIPT_READ_FAULTS.get_or_init(Default::default).lock().unwrap();
+            let fault=faults.get_mut(&self.options.conversation_id)?;
+            fault.observed.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+            fault.remaining-=1;
+            if fault.remaining==0 {faults.remove(&self.options.conversation_id)} else {None}
+        };
+        if let Some(fault)=last {
+            // Hold the second failed read before returning to the real SDK
+            // cleanup. The test observes active=None with its actual claimed
+            // generation, then lets the original settlement bridge proceed.
+            fault.reached.notify_one();
+            fault.release.acquire().await.unwrap().forget();
+        }
+        Some(nomifun_db::DbError::Query(nomifun_db::sqlx::Error::PoolTimedOut).into())
+    }
+
     fn preparation_error(&self, root: &str, stage: &'static str, error: AppError) -> AppError {
         // Preserve the first preparation failure even if subsequent cleanup
         // cannot prove settlement. Never log input, credentials or raw options.
@@ -747,11 +841,31 @@ impl ConversationRuntimeHost {
             .unwrap_or(&message.msg_id)
     }
 
-    fn terminal_already_recorded(&self, root: &str) -> Result<bool, AppError> {
-        self.last_terminal_root
+    fn committed_exit_already_recorded(&self, root: &str) -> Result<bool, AppError> {
+        Ok(self.committed_turn_exit(root)?.is_some())
+    }
+
+    fn original_runtime(&self)->Result<nomifun_ai_agent::AgentRuntimeHandle,AppError> {
+        self.runtime_owner.get().and_then(std::sync::Weak::upgrade)
+            .map(nomifun_ai_agent::AgentRuntimeHandle::official)
+            .ok_or_else(||error("the original SDK owner is no longer available"))
+    }
+
+    fn original_task_identity(&self)->Result<nomifun_ai_agent::AgentRuntimeTurn,AppError> {
+        self.original_runtime()?.as_runtime().current_task_identity()
+            .ok_or_else(||error("the original SDK task identity is unavailable"))
+    }
+
+    fn committed_turn_exit(&self,root:&str)->Result<Option<CommittedTurnExit>,AppError> {
+        let cached=self.last_committed_exit
             .lock()
-            .map(|last| last.as_deref() == Some(root))
-            .map_err(|_| error("terminal root state poisoned"))
+            .map(|last| last.as_ref().filter(|exit|exit.root==root).cloned())
+            .map_err(|_| error("committed exit state poisoned"))?;
+        let Some(exit)=cached else {return Ok(None);};
+        // Resume keeps the root and SDK but starts a different SDK task. A
+        // registry admission may already be released before a late cleanup
+        // ACK; only this exact original task can reuse its committed exit.
+        Ok((self.original_task_identity()?==exit.task).then_some(exit))
     }
 
     fn release_pending_knowledge_writeback(&self, root: &str) -> Result<(), AppError> {
@@ -763,12 +877,12 @@ impl ConversationRuntimeHost {
     }
 
     async fn confirm_unstarted_cancellation(&self, message: &SendMessageData) -> Result<bool, AppError> {
-        let previous_terminal = self.last_terminal_root.lock()
-            .map_err(|_| error("terminal root state poisoned"))?.clone();
+        let previous_terminal = self.last_committed_exit.lock()
+            .map_err(|_| error("committed exit state poisoned"))?.clone();
         if let Some(previous) = previous_terminal {
             // An unstarted successor must not replace the only trusted proof
             // identifying a prior terminal whose native release still needs retry.
-            self.resources.finish_browser_turn(&previous).await?;
+            self.resources.finish_browser_turn(&previous.root).await?;
         }
         // Keep publication of ActiveTurn excluded until the read-only proof
         // and its local acknowledgement are complete. This opens no resource
@@ -781,7 +895,6 @@ impl ConversationRuntimeHost {
         ).await? { return Ok(false); }
         let root = self.root(message).to_owned();
         *self.unstarted_cancelled_root.lock().map_err(|_| error("unstarted cancellation state poisoned"))? = Some(root.clone());
-        *self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))? = Some(root);
         Ok(true)
     }
 
@@ -837,12 +950,12 @@ impl ConversationRuntimeHost {
         cancellation: CancellationToken,
     ) -> Result<super::engine_session_host::EngineTurnReceipt, AppError> {
         let root = self.root(message);
-        let previous_terminal = self.last_terminal_root.lock()
-            .map_err(|_| error("terminal root state poisoned"))?.clone();
+        let previous_terminal = self.last_committed_exit.lock()
+            .map_err(|_| error("committed exit state poisoned"))?.clone();
         if let Some(previous) = previous_terminal {
             // A terminal may be durable while native input release still
             // needs a retry. Finish that exact owner before claiming a new root.
-            self.resources.finish_browser_turn(&previous).await
+            self.resources.finish_browser_turn(&previous.root).await
                 .map_err(|error| self.preparation_error(root, "previous_browser_release", error))?;
         }
         tracing::info!(
@@ -853,6 +966,10 @@ impl ConversationRuntimeHost {
             stage = "receipt_read",
             "Nomi Turn preparation started",
         );
+        #[cfg(test)]
+        if let Some(error)=self.receipt_read_fault_for_test().await {
+            return Err(self.preparation_error(root,"receipt_read",error));
+        }
         let mut admitted = self.session_host.read_turn_receipt(
             &self.options,
             &self.binding,
@@ -896,7 +1013,7 @@ impl ConversationRuntimeHost {
             writeback_configuration: Ok(None),
         });
         journal.attach_runtime(active.as_ref().expect("published above").cancellation.clone())?;
-        *self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))? = None;
+        *self.last_committed_exit.lock().map_err(|_| error("committed exit state poisoned"))? = None;
         *self.unstarted_cancelled_root.lock().map_err(|_| error("unstarted cancellation state poisoned"))? = None;
         drop(active);
         // Register frozen resource authority before later preflight can fail.
@@ -908,6 +1025,8 @@ impl ConversationRuntimeHost {
         journal.refresh_budget().await
             .map_err(|error| self.preparation_error(root, "budget_refresh", error))?;
         if cancellation.is_cancelled() { return Ok(admitted); }
+        journal.restore_public_projection().await
+            .map_err(|error| self.preparation_error(root, "public_projection_restore", error))?;
         admitted = self.session_host.read_turn_receipt(&self.options, &self.binding, &self.snapshot_ref, message).await
             .map_err(|error| self.preparation_error(root, "receipt_revalidate", error))?;
         journal.validate_receipt(&admitted)
@@ -925,6 +1044,9 @@ impl ConversationRuntimeHost {
         model_operation: Option<&str>,
         terminal: bool,
     ) -> Result<Option<u64>, AppError> {
+        #[cfg(test)]
+        let parallel_admission = serde_json::from_str::<Value>(&payload).ok()
+            .is_some_and(|value| value["event"] == "public_output_committed");
         let mut active = self.active.lock().await;
         let turn = active
             .as_mut()
@@ -932,11 +1054,19 @@ impl ConversationRuntimeHost {
         if root != turn.root {
             return Err(error("event root mismatch"));
         }
+        let task=terminal.then(||self.original_task_identity()).transpose()?;
         let event_seq = self.append_locked_record(turn, payload, model_operation, terminal).await?;
+        #[cfg(test)]
+        if parallel_admission {
+            reliability_tests::parallel_admission_cutpoint(&self.options.conversation_id).await;
+        }
         if terminal {
             self.model_configuration.clear(&turn.operation)
                 .map_err(|_| error("terminal model configuration belongs to another Turn"))?;
-            *self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))? = Some(root.to_owned());
+            *self.last_committed_exit.lock().map_err(|_| error("committed exit state poisoned"))? = Some(CommittedTurnExit {
+                root:root.to_owned(),task:task.expect("terminal task checked before append"),
+                operation:turn.operation.clone().into(),generation:turn.journal.generation(),
+            });
             *active = None;
             drop(active);
             // Retire Turn authority and any browser work still awaiting final
@@ -963,6 +1093,37 @@ impl ConversationRuntimeHost {
         }
         Ok(())
     }
+
+    async fn flush_original_initialization(&self,turn:&mut ActiveTurn)->Result<(),AppError> {
+        let before=turn.journal.sequence();
+        if before<=1&&!turn.journal.recovered() {
+            // A Progress write can have committed before its reply was lost.
+            // Confirm that exact prefix before changing its write class or
+            // allocating another producer sequence for the same initialization.
+            turn.journal.retry_pending_owner_observations().await?;
+            if turn.journal.sequence()>before
+                &&matches!(turn.cleanup_records.front(),Some(AgentEngineEvent::TurnStarted {..}|AgentEngineEvent::TurnInputScope {..})) {
+                turn.cleanup_records.pop_front();
+            }
+        }
+        if turn.journal.sequence()==0&&turn.cleanup_records.is_empty() {
+            turn.cleanup_records.push_back(AgentEngineEvent::TurnStarted {
+                binding:self.engine_binding.clone(),turn_operation_id:turn.operation.clone().into(),
+            });
+            turn.cleanup_records.push_back(AgentEngineEvent::TurnInputScope {wire_turn_id:turn.wire_id.clone()});
+        } else if turn.journal.sequence()==1&&!turn.journal.recovered()&&turn.cleanup_records.is_empty() {
+            turn.cleanup_records.push_back(AgentEngineEvent::TurnInputScope {wire_turn_id:turn.wire_id.clone()});
+        }
+        // These are the immutable initialization facts of the already claimed
+        // Turn. Finish them before changing its fence; a technical settlement
+        // capability deliberately cannot introduce another Runtime prefix.
+        while matches!(turn.cleanup_records.front(),Some(AgentEngineEvent::TurnStarted {..}|AgentEngineEvent::TurnInputScope {..})) {
+            let payload=serde_json::to_string(turn.cleanup_records.front().expect("checked above")).map_err(error)?;
+            self.append_locked_record(turn,payload,None,false).await?;
+            turn.cleanup_records.pop_front();
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -974,19 +1135,92 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             .and_then(|turn| turn.journal.recovery()).map(|recovery|recovery.last_model_step()))
     }
 
-    async fn suspend_after_cleanup_failure(&self, message:&SendMessageData) -> Result<bool,AppError> {
-        let mut active = self.active.lock().await;
-        let Some(turn) = active.as_ref() else { return Ok(false); };
-        if turn.root != self.root(message) { return Err(error("cleanup suspension targets another Turn")); }
-        turn.journal.pause_with_unproven_cleanup().await?;
-        self.model_configuration.clear(&turn.operation)
-            .map_err(|_| error("paused model configuration belongs to another Turn"))?;
-        *self.last_terminal_root.lock().map_err(|_|error("terminal root state poisoned"))? = Some(turn.root.clone());
-        *active = None;
-        Ok(true)
+    async fn handoff_turn_settlement(&self, message: &SendMessageData,
+        outcome: &nomifun_ai_agent::engine_sdk::EngineTurnOutcome, first_failure: &str,
+    ) -> Result<nomifun_ai_agent::engine_sdk::EngineSettlementHandoff, AppError> {
+        let (journal,operation) = {
+            let active = self.active.lock().await;
+            let Some(turn) = active.as_ref() else {
+                drop(active);
+                let owner = self.session_host.session_owner()?;
+                let session = AgentSessionId::from(self.options.conversation_id.clone());
+                let committed=self.committed_turn_exit(self.root(message))?;
+                // Even the original receipt read/claim can have failed. Retain
+                // this exact Runtime before any database access and before the
+                // SDK marks its transport broken. The worker may only finish
+                // this source's pending result; it never runs its input again.
+                owner.schedule_unclaimed_turn_settlement(self.principal.principal_id.clone(),session.clone(),
+                    self.root(message).to_owned(),
+                    committed.as_ref().map(|exit|(exit.operation.clone(),exit.generation)),self.original_runtime()?)?;
+                if let Some(committed)=committed {
+                    let receipt = self.session_host.canonical_store()?.read_turn_receipt(&session, &committed.operation).await.map_err(error)?;
+                    if let Some(terminal)=receipt.terminal_event {
+                    return Ok(nomifun_ai_agent::engine_sdk::EngineSettlementHandoff::Retained {
+                        event_id: terminal.event_id.as_ref().to_owned(),
+                    });
+                    }
+                }
+                return Ok(nomifun_ai_agent::engine_sdk::EngineSettlementHandoff::Unsupported);
+            };
+            if turn.root != self.root(message) { return Err(error("settlement handoff targets another Turn")); }
+            (turn.journal.clone(),turn.operation.clone())
+        };
+        // Install the existing Session owner's exact-runtime supervisor even
+        // if durable storage is temporarily unavailable. No task is rerun and
+        // no completion is awaited from this callback into its own SDK task.
+        let owner = self.session_host.session_owner()?;
+        let supervision = owner.schedule_turn_settlement(self.principal.principal_id.clone(),
+            self.options.conversation_id.clone().into(),operation.into(),self.root(message).to_owned(),journal.generation(),self.original_runtime()?);
+        {
+            let mut active=self.active.lock().await;
+            let turn=active.as_mut().filter(|turn|turn.root==self.root(message)&&turn.journal.generation()==journal.generation())
+                .ok_or_else(||error("settlement lost its original initialization owner"))?;
+            turn.cleanup_started=true;
+            self.flush_original_initialization(turn).await?;
+        }
+        let receipt = journal.handoff_failed_cleanup(
+            StrictJsonValue(serde_json::to_value(outcome).map_err(error)?), first_failure,
+        ).await?;
+        supervision?;
+        // The active host, journal tail and original result remain owned until
+        // the Session worker confirms cleanup and the original canonical exit.
+        Ok(nomifun_ai_agent::engine_sdk::EngineSettlementHandoff::Retained {
+            event_id: receipt.event_id.as_ref().to_owned(),
+        })
     }
 
     fn supports_execution_checkpoints(&self) -> bool { true }
+
+    async fn retained_turn_outcome(&self, message: &SendMessageData,
+        outcome: &nomifun_ai_agent::engine_sdk::EngineTurnOutcome,
+        _control: nomifun_ai_agent::engine_sdk::EngineSettlementControl,
+    ) -> Result<nomifun_ai_agent::engine_sdk::EngineTurnOutcome, AppError> {
+        let owner = self.session_host.session_owner()?;
+        let session: AgentSessionId = self.options.conversation_id.clone().into();
+        let original:Option<(nomifun_agent_contracts::OperationId,u64)>={
+            let active=self.active.lock().await;
+            active.as_ref().filter(|turn|turn.root==self.root(message))
+                .map(|turn|(turn.operation.clone().into(),turn.journal.generation()))
+        }.or(self.committed_turn_exit(self.root(message))?.map(|exit|(exit.operation,exit.generation)));
+        let operation = match &original {Some((operation,_))=>operation.clone(),None=>owner.original_turn_operation_for_settlement(&session, self.root(message)).await?};
+        let store = self.session_host.canonical_store()?;
+        let receipt = store.read_turn_receipt(&session, &operation).await.map_err(error)?;
+        let mut resolved = outcome.clone();
+        if receipt.status == nomifun_agent_session::TurnReceiptStatus::Cancelled {
+            resolved.terminal = nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Cancelled;
+        } else if receipt.status == nomifun_agent_session::TurnReceiptStatus::Running {
+            if let Some(settlement) = store.read_native_turn_settlement(&self.principal, &session, &operation).await.map_err(error)?
+                && original.as_ref().is_some_and(|(_,generation)|*generation==settlement.generation())
+                && (store.native_turn_settlement_user_pause_committed(&settlement).await.map_err(error)?
+                    ||(store.native_turn_settlement_current(&settlement).await.map_err(error)?
+                        &&store.native_turn_settlement_requires_user_pause(&settlement).await.map_err(error)?)) {
+                resolved.terminal = nomifun_ai_agent::engine_sdk::EngineTurnTerminal::Paused {
+                    reason: nomifun_agent_runtime::AgentExecutionStopReason::UserRequested.code().into(),
+                };
+            }
+        }
+        Ok(resolved)
+    }
 
     fn requires_turn_boundary_recycle(&self) -> bool {
         // A device reconnect ends the old physical tool lease. Rebuild only
@@ -1127,6 +1361,10 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             &self.options.conversation_id.clone().into(),receipt).await?;
         let execution_source_context = self.session_host.read_execution_source_context(
             &self.principal, &self.options.conversation_id.clone().into()).await?;
+        let intent_scope=if execution_source_context.is_some() {
+            super::automatic_turn_intent::ExecutionSourceScope::VerifiedDelegatedTask
+        } else {super::automatic_turn_intent::ExecutionSourceScope::NoDelegationSource};
+        let turn_intent = super::automatic_turn_intent::TurnIntentInput::from_accepted(receipt,admitted.source_event(),&self.principal,intent_scope).map_err(error)?;
         let scheduled_instructions = super::nomi_core_session::scheduled_turn_instructions(
             &self.principal, &self.options.conversation_id.clone().into(),
             admitted.operation_id(), receipt)?;
@@ -1273,7 +1511,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             instructions.push(robot_interaction_context(&turn_plan)?);
         }
         let collaboration = super::automatic_collaboration_route::route(
-            &message.content,
+            &turn_intent,
             self.options.delegation_policy,
             turn_plan,
         );
@@ -1287,7 +1525,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let mut preactivated_tools = selected_application_tools(&turn_plan);
         {
             if let Some(route) =
-                super::automatic_creation_route::classify(&message.content).filter(|route| {
+                super::automatic_creation_route::classify(turn_intent.task()).filter(|route| {
                     turn_plan
                         .model_name_for_action(
                             super::engine_creation_tools::CREATION_CAPABILITY_ID,
@@ -1407,6 +1645,10 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         message: &SendMessageData,
         event: &AgentEngineEvent,
     ) -> Result<Option<u64>, AppError> {
+        #[cfg(test)]
+        if let AgentEngineEvent::ToolCompleted { result, .. } = event {
+            reliability_tests::parallel_result_consuming(&self.options.conversation_id, result.call_id.as_ref());
+        }
         if let AgentEngineEvent::VoiceModelStepSuperseded {step,model_operation_id,cleanup,..}=event {
             let port={let active=self.active.lock().await;let turn=active.as_ref().ok_or_else(||error("voice supersede has no active Turn"))?;
                 if model_operation_id.as_ref()!=format!("{}:model:{step}",turn.operation)||cleanup.operation_id!=*model_operation_id||turn.steering.has_admitted_model_tools(*step){return Err(error("voice supersede has a different model operation or an admitted effect"));}
@@ -1429,7 +1671,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 return Ok(None);
             }
 
-            if self.terminal_already_recorded(self.root(message))? {
+            if self.committed_exit_already_recorded(self.root(message))? {
                 if !self.session_host.confirm_published_terminal(
                     &self.options, &self.binding, &self.snapshot_ref, message, event,
                 ).await? {
@@ -1556,7 +1798,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let event_seq = match recorded {
             Ok(event_seq) => event_seq,
             Err(record_error) => {
-                if terminal && self.terminal_already_recorded(self.root(message))?
+                if terminal && self.committed_exit_already_recorded(self.root(message))?
                     && let Some(release) = writeback_release.take() {
                     *self.pending_writeback_release.lock().map_err(|_| error("Knowledge release ownership poisoned"))? =
                         Some((self.root(message).to_owned(), release));
@@ -1630,7 +1872,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             return if self.confirm_unstarted_cancellation(message).await? { Ok(()) }
                 else { Err(error("unstarted cancellation no longer matches its durable proof")) };
         }
-        if self.terminal_already_recorded(root)? {
+        if self.committed_exit_already_recorded(root)? {
             return self.resources.finish_browser_turn(root).await;
         }
         if self.active.lock().await.is_none() {
@@ -1650,15 +1892,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 return Err(error("cleanup targets a different accepted root"));
             }
             turn.cleanup_started = true;
-            if turn.journal.sequence() == 0 && turn.cleanup_records.is_empty() {
-                turn.cleanup_records.push_back(AgentEngineEvent::TurnStarted {
-                    binding: self.engine_binding.clone(),
-                    turn_operation_id: turn.operation.clone().into(),
-                });
-                turn.cleanup_records.push_back(AgentEngineEvent::TurnInputScope {
-                    wire_turn_id: turn.wire_id.clone(),
-                });
-            }
+            self.flush_original_initialization(turn).await?;
             // Initialization can commit only its first record. Keep the
             // remaining exact record independently of the journal sequence.
             self.flush_cleanup_records(turn).await?;
@@ -1704,8 +1938,8 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
     async fn cleanup_session(&self, reason:Option<nomifun_common::AgentKillReason>) -> Result<(), AppError> {
         self.resources.cleanup_session(!retains_session_processes(reason)).await?;
         self.pending_writeback_release.lock().map_err(|_| error("Knowledge release ownership poisoned"))?.take();
-        let terminal_root = self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))?.clone();
-        if let Some(root) = terminal_root { self.resources.finish_browser_turn(&root).await?; }
+        let terminal = self.last_committed_exit.lock().map_err(|_| error("committed exit state poisoned"))?.clone();
+        if let Some(exit) = terminal { self.resources.finish_browser_turn(&exit.root).await?; }
         self.session_host.retire_kernel_session_after_teardown(
             &self.options.conversation_id, &self.resources,
         )?;
@@ -1857,10 +2091,30 @@ mod build_identity_tests {
         for required in [
             "../../../nomifun-agent-runtime/src/lib.rs",
             "../../../nomifun-agent-runtime/src/collaboration.rs",
+            "../../../nomifun-agent-runtime/src/collaboration_wait.rs",
+            "../../../nomifun-agent-runtime/src/collaboration_cursor.rs",
+            "../../../nomifun-agent-execution/src/collaboration_observation.rs",
+            "../../../nomifun-agent-execution/src/task_control.rs",
+            "../../../nomifun-agent-execution/src/restart_step.rs",
+            "../../../nomifun-agent-execution/src/planning_controls.rs",
+            "../../../nomifun-agent-execution/src/scheduler_owned_jobs.rs",
+            "../../../nomifun-db/src/repository/agent_execution_observation.rs",
+            "../../../nomifun-db/src/repository/sqlite_agent_execution_task_control.rs",
+            "../../../nomifun-db/src/repository/sqlite_agent_execution_restart.rs",
+            "../../../nomifun-db/src/repository/sqlite_agent_execution_pause.rs",
+            "../../../nomifun-db/src/repository/agent_execution_restart_resume.rs",
+            "../../../nomifun-db/src/availability.rs",
+            "../../../nomifun-db/src/error.rs",
+            "../../../nomifun-db/src/pool_diagnostics.rs",
+            "../../../nomifun-common/src/error.rs",
+            "../../../nomifun-common/src/database_unavailable.rs",
+            "../../../nomifun-agent-execution/src/event_publisher.rs",
+            "collaboration_read_error.rs",
             "../../../nomifun-agent-contracts/src/shared_tool_content.rs",
             "../../../nomifun-agent-execution/src/engine.rs",
             "../../../nomifun-agent-execution/src/source_continuation.rs",
             "../../../nomifun-agent-execution/src/scheduler.rs",
+            "../../../nomifun-agent-execution/src/scheduler_step_recovery.rs",
             "../../../nomifun-agent-execution/src/production.rs",
             "../../../nomifun-db/src/repository/agent_source_reply.rs",
             "../../../nomifun-db/src/repository/sqlite_agent_execution_source.rs",
@@ -1914,6 +2168,10 @@ mod build_identity_tests {
             "../../../nomifun-agent-session/src/context_clear.rs",
             "../../../nomifun-agent-session/src/context_snapshot.rs",
             "../../../nomifun-agent-contracts/src/native_execution.rs",
+            "../../../nomifun-agent-contracts/src/session_path_label.rs",
+            "../../../nomifun-agent-contracts/src/collaboration_message.rs",
+            "../../../nomifun-agent-contracts/src/collaboration_task_control.rs",
+            "../../../nomifun-ai-agent/src/runtime_sessions.rs",
             "../../../nomifun-agent-contracts/src/system_execution.rs",
             "../../../nomifun-agent-contracts/src/native_mutation.rs",
             "../../../nomifun-agent-runtime/src/checkpoint.rs",
@@ -1928,10 +2186,30 @@ mod build_identity_tests {
             "../../../nomifun-agent-runtime/src/segments.rs",
             "../../../nomifun-agent-domain-wave5/src/lib.rs",
             "engine_recovery.rs",
+            "engine_session_host.rs",
+            "../../../nomifun-ai-agent/src/lib.rs",
+            "../../../nomifun-ai-agent/src/runtime_state.rs",
+            "../../../nomifun-ai-agent/src/runtime_handle.rs",
+            "../../../nomifun-ai-agent/src/unified_runtime.rs",
+            "../../../nomifun-ai-agent/src/engine_sdk.rs",
             "native_turn_recovery.rs",
+            "engine_journal_settlement.rs",
+            "engine_journal_write.rs",
+            "turn_settlement_owner.rs",
+            "engine_owned_settlement.rs",
+            "engine_tool_return.rs",
+            "completed_runtime_retirement.rs",
+            "../../../nomifun-agent-session/src/native_settlement.rs",
+            "../../../nomifun-agent-session/src/native_settlement_bundle.rs",
             "native_execution_control.rs",
+            "execution_task_restart.rs",
+            "native_resume_waiter.rs",
+            "parent_question_reply.rs",
+            "attempt_input_owner.rs",
             "../../../nomifun-agent-session/src/native_execution.rs",
             "../../../nomifun-db/src/repository/agent_execution_admission.rs",
+            "../../../nomifun-db/src/models/agent_execution_effect.rs",
+            "../../../nomifun-db/src/repository/sqlite_agent_execution_parent_reply.rs",
             "../../../nomifun-db/src/repository/sqlite_agent_execution_stop.rs",
             "../../../nomifun-db/src/repository/sqlite_agent_execution_cleanup.rs",
             "../../../nomifun-db/src/repository/sqlite_agent_execution_retirement.rs",

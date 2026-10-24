@@ -36,12 +36,18 @@ use tokio::sync::{Notify, watch};
 
 use crate::attempt_runner::{
     AttemptDisposition, AttemptOutcome, AttemptRunner, AttemptSessionTarget, RecoveredAttemptOutcome, MISSING_DELIVERY_RECEIPT_CODE,
+    initial_input_admission_is_pending,
 };
 use crate::control_steps::{self, ControlResolution};
 use crate::conversation_effect::{AttemptConversationEffects, PendingConversationEffect};
 use crate::domain_mapper;
 use crate::event_publisher::AgentExecutionEventPublisher;
 use crate::engine::is_automation_initial_plan;
+#[path = "scheduler_step_recovery.rs"]
+mod step_recovery;
+#[path = "scheduler_owned_jobs.rs"]
+mod owned_jobs;
+use owned_jobs::OwnedStepJob;
 use crate::lifecycle::AgentExecutionLifecycle;
 
 pub(crate) const DEFAULT_MAX_PARALLEL: i64 = 4;
@@ -222,7 +228,7 @@ struct AttemptSettlementFence {
     attempt_version: i64,
 }
 
-type ScheduledAgentJobs = FuturesUnordered<BoxFuture<'static, (String, Result<(), AppError>)>>;
+type ScheduledAgentJobs = FuturesUnordered<BoxFuture<'static, String>>;
 
 #[async_trait]
 pub(crate) trait ConversationEffects: Send + Sync {
@@ -304,6 +310,11 @@ struct SchedulerInner {
     /// Tasks remain owned by the lifecycle when a scheduler generation exits.
     conversation_controls: DashMap<String, ()>,
     conversation_control_changed: Notify,
+    step_jobs: DashMap<(String,String),Arc<OwnedStepJob>>,
+    #[cfg(test)]
+    observerless_paused_polls:std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    initial_link_errors:Arc<Mutex<VecDeque<AppError>>>,
 }
 
 struct ActiveHandle {
@@ -312,6 +323,7 @@ struct ActiveHandle {
     wake: Arc<Notify>,
     restart_requested: bool,
     lease: Option<AgentExecutionLeaseToken>,
+    task_owner:std::sync::Weak<()>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,6 +331,9 @@ enum SchedulerLoopExit {
     Normal,
     LeaseLost,
 }
+
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+enum LeaseObservation { Confirmed, Unconfirmed, Fenced }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SchedulerFailureAuthority {
@@ -337,6 +352,11 @@ impl ExecutionScheduler {
                 cleanup_reconciliation_running: DashMap::new(),
                 conversation_controls: DashMap::new(),
                 conversation_control_changed: Notify::new(),
+                step_jobs: DashMap::new(),
+                #[cfg(test)]
+                observerless_paused_polls:std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                initial_link_errors:Arc::new(Mutex::new(VecDeque::new())),
             }),
         }
     }
@@ -350,6 +370,11 @@ impl ExecutionScheduler {
         let (cancel, receiver) = watch::channel(false);
         match self.inner.active.entry(execution_id.clone()) {
             Entry::Occupied(mut entry) => {
+                if entry.get().task_owner.strong_count()==0 {
+                    entry.remove();
+                    self.start(owner_id,execution_id);
+                    return;
+                }
                 // A stop followed immediately by start (resume, replan,
                 // adjust) must not lose the new scheduling request while the
                 // prior generation is still unwinding. Remember one durable
@@ -365,16 +390,19 @@ impl ExecutionScheduler {
             }
             Entry::Vacant(entry) => {
                 let wake = Arc::new(Notify::new());
+                let task_owner=Arc::new(());
                 entry.insert(ActiveHandle {
                     generation: generation.clone(),
                     cancel,
                     wake: wake.clone(),
                     restart_requested: false,
                     lease: None,
+                    task_owner:Arc::downgrade(&task_owner),
                 });
                 let scheduler = self.clone();
                 let lifecycle = scheduler.inner.deps.lifecycle.clone();
                 lifecycle.spawn(async move {
+                    let _task_owner=task_owner;
                     if let Err(error) = scheduler
                         .execute_loop(
                             &owner_id,
@@ -408,6 +436,13 @@ impl ExecutionScheduler {
         if let Some(handle) = self.inner.active.get(execution_id) {
             let _ = handle.cancel.send(true);
         }
+    }
+
+    /// An actual tracked dispatch/lease-confirmation future, not a cached
+    /// Running status or an unexpired database lease.
+    pub(crate) fn has_dispatch_owner(&self,execution_id:&str)->bool {
+        !self.inner.deps.lifecycle.is_cancelled()&&self.inner.active.get(execution_id).is_some_and(|handle|
+            !*handle.cancel.borrow()&&handle.task_owner.upgrade().is_some())
     }
 
     pub(crate) fn generation(&self, execution_id: &str) -> Option<String> {
@@ -519,6 +554,8 @@ impl ExecutionScheduler {
         let cancel_repository = self.inner.deps.repository.clone();
         let acknowledge_repository = self.inner.deps.repository.clone();
         let conversation_effects = self.inner.deps.conversation_effects.clone();
+        let native_observations=self.inner.deps.publisher.clone();
+        let cleanup_observations=self.inner.deps.publisher.clone();
         let completed = reconcile_cleanup_batch(
             page.cleanups,
             cleanup_unit_key,
@@ -557,6 +594,7 @@ impl ExecutionScheduler {
             move |cleanup| {
                 let repository = cancel_repository.clone();
                 let conversation_effects = conversation_effects.clone();
+                let observations=native_observations.clone();
                 let cleanup = cleanup.clone();
                 Box::pin(async move {
                     cancel_with_generation_fence(
@@ -569,7 +607,15 @@ impl ExecutionScheduler {
                             )
                             .await;
                             match cancelled {
-                                Ok(Ok(())) => true,
+                                Ok(Ok(())) => {
+                                    // Domain cancellation may already have
+                                    // woken a parent while this original Turn
+                                    // was still running. Its proven native
+                                    // exit is a new observation, not a new
+                                    // Execution outcome or model poll.
+                                    observations.notify_observation_changed(&cleanup.user_id,&cleanup.execution_id);
+                                    true
+                                },
                                 Ok(Err(error)) => {
                                     tracing::warn!(
                                         link_id = cleanup.link_id,
@@ -601,13 +647,17 @@ impl ExecutionScheduler {
             },
             move |cleanup| {
                 let repository = acknowledge_repository.clone();
+                let observations=cleanup_observations.clone();
                 let cleanup = cleanup.clone();
                 Box::pin(async move {
                     match repository
                         .mark_conversation_cleanup_completed_exact(&cleanup, now_ms())
                         .await
                     {
-                        Ok(true) => true,
+                        Ok(true) => {
+                            observations.notify_observation_changed(&cleanup.user_id,&cleanup.execution_id);
+                            true
+                        },
                         Ok(false) => {
                             tracing::warn!(
                                 link_id = cleanup.link_id,
@@ -716,7 +766,7 @@ impl ExecutionScheduler {
     /// Attempt cleanup remains durable, independent work and does not postpone
     /// an already verified result while an inactive Session is being stopped.
     pub async fn after_terminal_commit(&self, owner_id: &str, execution_id: &str) {
-        self.publish().await;
+        self.notify_publication();
         if let Ok(detail) = self.detail(owner_id, execution_id).await {
             if detail.execution.status.is_terminal() {
                 if let Err(error) = self.reconcile_lead_report(owner_id, &detail).await {
@@ -725,6 +775,26 @@ impl ExecutionScheduler {
             }
         }
         self.reconcile_conversation_cleanup(Some(execution_id)).await;
+    }
+
+    pub(crate) async fn terminal_transition_payload(
+        &self,
+        owner_id: &str,
+        execution: &AgentExecution,
+        status: AgentExecutionStatus,
+        reason: Option<&str>,
+    ) -> Result<serde_json::Value, AppError> {
+        let row = self.inner.deps.repository.get_execution(owner_id, &execution.execution_id).await?
+            .ok_or_else(|| AppError::NotFound(format!("Agent Execution {}", execution.execution_id)))?;
+        let mut payload = json!({"status": status});
+        // A source Turn consumes exact child results itself. No suppressed
+        // report, delivery ACK or retry protocol exists for that path.
+        if execution.lead_conversation_id.is_some() && should_project_lead_report(&row.initial_plan_input)? {
+            payload["lead_report_operation_id"] = json!(lead_report_operation_id(
+                &execution.execution_id, execution.event_sequence + 1));
+        }
+        if let Some(reason) = reason { payload["reason"] = json!(reason); }
+        Ok(payload)
     }
 
     async fn reconcile_lead_report_once(
@@ -752,11 +822,7 @@ impl ExecutionScheduler {
                     detail.execution.execution_id
                 ))
             })?;
-        // An AutoWork Attempt already ran in the lead AgentSession. Projecting
-        // the aggregate summary back into that same Session would duplicate the
-        // assistant result that the user just watched in the main conversation.
-        let suppress_projection =
-            !should_project_lead_report(&execution_row.initial_plan_input)?;
+        if !should_project_lead_report(&execution_row.initial_plan_input)? { return Ok(()); }
         let mut after_sequence = 0;
         let mut requested_operation_id: Option<String> = None;
         let mut delivered_operation_ids = HashSet::new();
@@ -804,13 +870,11 @@ impl ExecutionScheduler {
         if delivered_operation_ids.contains(&operation_id) {
             return Ok(());
         }
-        if !suppress_projection {
-            self.inner
-                .deps
-                .conversation_effects
-                .report_lead(owner_id, detail, &operation_id)
-                .await?;
-        }
+        self.inner
+            .deps
+            .conversation_effects
+            .report_lead(owner_id, detail, &operation_id)
+            .await?;
         let current = self.detail(owner_id, &detail.execution.execution_id).await?;
         self.inner
             .deps
@@ -826,12 +890,11 @@ impl ExecutionScheduler {
                     json!({
                         "change":"lead_report_delivered",
                         "operation_id":operation_id,
-                        "projection_suppressed": suppress_projection,
                     }),
                 ),
             )
             .await?;
-        self.publish().await;
+        self.notify_publication();
         Ok(())
     }
 
@@ -863,7 +926,7 @@ impl ExecutionScheduler {
             self.inner.deps.repository.append_event(owner_id,&detail.execution.execution_id,current.execution.version,
                 &system_event(AgentExecutionEventKind::StatusChanged,Some(&attempt.step_id),Some(&attempt.attempt_id),
                     json!({"change":"lead_input_notice_reconciled","request_event_sequence":request.sequence}))).await?;
-            self.publish().await;
+            self.notify_publication();
         }
         Ok(())
     }
@@ -961,19 +1024,20 @@ impl ExecutionScheduler {
                 .await;
             return Ok(());
         }
+        self.adopt_step_jobs(execution_id,&lease);
         let (lease_stop, lease_stopped) = watch::channel(false);
-        let (lease_lost, mut lease_loss) = watch::channel(false);
+        let (lease_state, mut lease_observation) = watch::channel(LeaseObservation::Confirmed);
         let heartbeat = self.spawn_lease_heartbeat(
-            execution_id.to_owned(),
+            owner_id.to_owned(),execution_id.to_owned(),
             lease.owner().to_owned(),
             expiry.clone(),
             lease_stopped,
-            lease_lost,
+            lease_state,
         );
 
-        let result: Result<SchedulerLoopExit, AppError> = async {
+        let result: Result<SchedulerLoopExit, AppError> = loop { let observed = async {
             let mut running_jobs = ScheduledAgentJobs::new();
-            let mut in_flight_step_ids = HashSet::new();
+            let mut in_flight_step_ids = self.owned_step_ids(execution_id);
             // Decision answers and steers are write-ahead effects in attempt
             // runtime_state.  Recover them before classifying a running
             // attempt as process-interrupted.
@@ -981,8 +1045,12 @@ impl ExecutionScheduler {
                 if self.inner.deps.lifecycle.is_cancelled() || *cancelled.borrow() {
                     return Ok(SchedulerLoopExit::Normal);
                 }
-                if *lease_loss.borrow() {
+                if *lease_observation.borrow()==LeaseObservation::Fenced {
                     return Ok(SchedulerLoopExit::LeaseLost);
+                }
+                if *lease_observation.borrow()==LeaseObservation::Unconfirmed {
+                    tokio::select! {_=cancelled.changed()=>{},_=self.inner.deps.lifecycle.cancelled()=>{},_=lease_observation.changed()=>{}}
+                    continue;
                 }
                 // Session control can itself stall while the native owner is
                 // stopping. Keep its write-ahead intent pending, and allow
@@ -991,7 +1059,7 @@ impl ExecutionScheduler {
                     biased;
                     _ = cancelled.changed() => return Ok(SchedulerLoopExit::Normal),
                     _ = self.inner.deps.lifecycle.cancelled() => return Ok(SchedulerLoopExit::Normal),
-                    _ = lease_loss.changed() => return Ok(SchedulerLoopExit::LeaseLost),
+                    _ = lease_observation.changed() => continue,
                     result = self.process_one_pending_conversation_effect(
                         owner_id, execution_id, &lease, &mut running_jobs, &mut in_flight_step_ids,
                     ) => result?,
@@ -1001,47 +1069,18 @@ impl ExecutionScheduler {
                 }
             }
             self.recover_interrupted(owner_id, execution_id, &lease, &mut running_jobs, &mut in_flight_step_ids).await?;
-            let mut deferred_error: Option<AppError> = None;
             loop {
                 if self.inner.deps.lifecycle.is_cancelled() || *cancelled.borrow() {
                     return Ok(SchedulerLoopExit::Normal);
                 }
-                if *lease_loss.borrow() {
+                if *lease_observation.borrow()==LeaseObservation::Fenced {
                     return Ok(SchedulerLoopExit::LeaseLost);
                 }
-                // A failed job must not drop unrelated live model calls. Stop
-                // dispatching new work, drain the already-reserved jobs, then
-                // hand the first error to the normal recovery/fatal path.
-                if deferred_error.is_some() {
-                    if running_jobs.is_empty() {
-                        return Err(deferred_error.take().expect("checked above"));
-                    }
-                    tokio::select! {
-                        outcome = running_jobs.next() => {
-                            if let Some((step_id, outcome)) = outcome {
-                                in_flight_step_ids.remove(&step_id);
-                                if let Err(error) = outcome {
-                                    tracing::warn!(%execution_id, %step_id, %error, "additional Agent step failed while draining in-flight work");
-                                }
-                            }
-                        }
-                        changed = cancelled.changed() => {
-                            if changed.is_err() || *cancelled.borrow() {
-                                return Ok(SchedulerLoopExit::Normal);
-                            }
-                        }
-                        _ = self.inner.deps.lifecycle.cancelled() => {
-                            return Ok(SchedulerLoopExit::Normal);
-                        }
-                        changed = lease_loss.changed() => {
-                            if changed.is_err() || *lease_loss.borrow() {
-                                return Ok(SchedulerLoopExit::LeaseLost);
-                            }
-                        }
-                        _ = wake.notified() => {}
-                    }
+                if *lease_observation.borrow()==LeaseObservation::Unconfirmed {
+                    tokio::select! {_=cancelled.changed()=>{},_=self.inner.deps.lifecycle.cancelled()=>{},_=lease_observation.changed()=>{}}
                     continue;
                 }
+                in_flight_step_ids=self.owned_step_ids(execution_id);
                 let mut detail = self.detail(owner_id, execution_id).await?;
                 match detail.execution.status {
                     AgentExecutionStatus::Running | AgentExecutionStatus::WaitingInput | AgentExecutionStatus::Paused => {}
@@ -1055,7 +1094,7 @@ impl ExecutionScheduler {
                     biased;
                     _ = cancelled.changed() => return Ok(SchedulerLoopExit::Normal),
                     _ = self.inner.deps.lifecycle.cancelled() => return Ok(SchedulerLoopExit::Normal),
-                    _ = lease_loss.changed() => return Ok(SchedulerLoopExit::LeaseLost),
+                    _ = lease_observation.changed() => continue,
                     result = self.process_one_pending_conversation_effect(
                         owner_id, execution_id, &lease, &mut running_jobs, &mut in_flight_step_ids,
                     ) => result?,
@@ -1066,19 +1105,18 @@ impl ExecutionScheduler {
                 self.recover_interrupted(owner_id, execution_id, &lease, &mut running_jobs, &mut in_flight_step_ids).await?;
                 detail = self.detail(owner_id, execution_id).await?;
                 if detail.execution.status == AgentExecutionStatus::Paused {
-                    if running_jobs.is_empty() { return Ok(SchedulerLoopExit::Normal); }
+                    if running_jobs.is_empty() && in_flight_step_ids.is_empty() { return Ok(SchedulerLoopExit::Normal); }
                     // This is a dispatch pause. Already admitted work keeps
                     // its original future/owner and settles under this lease.
+                    #[cfg(test)]
+                    if running_jobs.is_empty() {self.inner.observerless_paused_polls.fetch_add(1,Ordering::SeqCst);}
                     tokio::select! {
-                        outcome = running_jobs.next() => {
-                            if let Some((step_id, outcome)) = outcome {
-                                in_flight_step_ids.remove(&step_id);
-                                if let Err(error) = outcome { deferred_error = Some(error); }
-                            }
+                        outcome = running_jobs.next(), if !running_jobs.is_empty() => {
+                            if let Some(step_id) = outcome { in_flight_step_ids.remove(&step_id); }
                         }
                         _ = cancelled.changed() => {},
                         _ = self.inner.deps.lifecycle.cancelled() => {},
-                        _ = lease_loss.changed() => {},
+                        _ = lease_observation.changed() => {},
                         _ = wake.notified() => {},
                     }
                     continue;
@@ -1100,14 +1138,25 @@ impl ExecutionScheduler {
                 // ready control inline and immediately reload canonical state.
                 if let Some(control) = ready
                     .iter()
-                    .find(|step| step.kind != ExecutionStepKind::Agent)
+                    .find(|step| step.kind != ExecutionStepKind::Agent && !in_flight_step_ids.contains(&step.step_id))
                     .copied()
                 {
+                    let mut attempt = None;
                     if let Err(error) = self
-                        .execute_control_step(owner_id, &detail, control, &lease)
+                        .execute_control_step_scoped(owner_id, &detail, control, &lease, &mut attempt)
                         .await
                     {
-                        deferred_error = Some(error);
+                        in_flight_step_ids.insert(control.step_id.clone());
+                        let scheduler=self.clone();
+                        let step_id=control.step_id.clone();
+                        let pending_version=control.version;
+                        let owner_id=owner_id.to_owned();
+                        let execution_id=execution_id.to_owned();
+                        let lease=lease.clone();
+                        self.retain_step_job(execution_id.clone(),step_id.clone(),pending_version,attempt.clone(),lease.clone(),&mut running_jobs,async move {
+                            scheduler.recover_failed_step(owner_id,execution_id,step_id.clone(),pending_version,attempt,lease,error).await;
+                            step_id
+                        }.boxed());
                     }
                     continue;
                 }
@@ -1127,25 +1176,22 @@ impl ExecutionScheduler {
                     let owner_id = owner_id.to_owned();
                     let execution_id = execution_id.to_owned();
                     let lease = lease.clone();
-                    running_jobs.push(async move {
-                        let outcome = scheduler
-                            .execute_agent_step(&owner_id, &execution_id, step, &lease)
-                            .await;
-                        (step_id, outcome)
+                    self.retain_step_job(execution_id.clone(),step_id.clone(),step.version,None,lease.clone(),&mut running_jobs,async move {
+                        let pending_version=step.version;
+                        let mut attempt=None;
+                        if let Err(error)=scheduler.execute_agent_step_scoped(&owner_id,&execution_id,step,&lease,&mut attempt).await {
+                            scheduler.recover_failed_step(owner_id,execution_id,step_id.clone(),pending_version,attempt,lease,error).await;
+                        }
+                        step_id
                     }.boxed());
                 }
-                if !running_jobs.is_empty() {
+                if !running_jobs.is_empty() || !in_flight_step_ids.is_empty() {
                     let queued_input = detail.attempts.iter().any(|attempt| attempt.status == ExecutionAttemptStatus::WaitingInput
                         && attempt.runtime_state.as_ref().is_some_and(|state| state.get("pending_conversation_effects").and_then(serde_json::Value::as_array)
                             .is_some_and(|effects| effects.iter().any(|effect| effect.get("kind").and_then(serde_json::Value::as_str) == Some("decision_input")))));
                     tokio::select! {
-                        outcome = running_jobs.next() => {
-                            if let Some((step_id, outcome)) = outcome {
-                                in_flight_step_ids.remove(&step_id);
-                                if let Err(error) = outcome {
-                                    deferred_error = Some(error);
-                                }
-                            }
+                        outcome = running_jobs.next(), if !running_jobs.is_empty() => {
+                            if let Some(step_id) = outcome { in_flight_step_ids.remove(&step_id); }
                         }
                         changed = cancelled.changed() => {
                             if changed.is_err() || *cancelled.borrow() {
@@ -1155,8 +1201,8 @@ impl ExecutionScheduler {
                         _ = self.inner.deps.lifecycle.cancelled() => {
                             return Ok(SchedulerLoopExit::Normal);
                         }
-                        changed = lease_loss.changed() => {
-                            if changed.is_err() || *lease_loss.borrow() {
+                        changed = lease_observation.changed() => {
+                            if changed.is_err() || *lease_observation.borrow()==LeaseObservation::Fenced {
                                 return Ok(SchedulerLoopExit::LeaseLost);
                             }
                         }
@@ -1179,7 +1225,7 @@ impl ExecutionScheduler {
                         _ = wake.notified() => {},
                         _ = cancelled.changed() => {},
                         _ = self.inner.deps.lifecycle.cancelled() => {},
-                        _ = lease_loss.changed() => {},
+                        _ = lease_observation.changed() => {},
                     }
                     continue;
                 }
@@ -1195,8 +1241,8 @@ impl ExecutionScheduler {
                         _ = self.inner.deps.lifecycle.cancelled() => {
                             return Ok(SchedulerLoopExit::Normal);
                         }
-                        changed = lease_loss.changed() => {
-                            if changed.is_err() || *lease_loss.borrow() {
+                        changed = lease_observation.changed() => {
+                            if changed.is_err() || *lease_observation.borrow()==LeaseObservation::Fenced {
                                 return Ok(SchedulerLoopExit::LeaseLost);
                             }
                         }
@@ -1211,9 +1257,18 @@ impl ExecutionScheduler {
             }
         }
         .await;
+            if matches!(&observed,Err(AppError::DatabaseUnavailable{..})) {
+                // The tasks themselves live in the lifecycle. Retry this
+                // scheduler's read/coordination boundary under the same lease.
+                tokio::select! {_=cancelled.changed()=>{},_=self.inner.deps.lifecycle.cancelled()=>{},_=tokio::time::sleep(EFFECT_RETRY_MIN)=>{}}
+                continue;
+            }
+            break observed;
+        };
 
         let lease_was_lost = matches!(&result, Ok(SchedulerLoopExit::LeaseLost))
-            || *lease_loss.borrow();
+            || *lease_observation.borrow()==LeaseObservation::Fenced;
+        self.fence_step_jobs(execution_id,&lease);
         if let Err(error) = &result {
             tracing::warn!(%execution_id, %error, "Agent Execution scheduler iteration aborted");
             if scheduler_error_is_recoverable(error) || lease_was_lost {
@@ -1302,11 +1357,12 @@ impl ExecutionScheduler {
 
     fn spawn_lease_heartbeat(
         &self,
+        principal: String,
         execution_id: String,
         owner: String,
         expiry: Arc<AtomicI64>,
         mut stopped: watch::Receiver<bool>,
-        lease_lost: watch::Sender<bool>,
+        lease_state: watch::Sender<LeaseObservation>,
     ) -> tokio::task::JoinHandle<()> {
         let repository = self.inner.deps.repository.clone();
         let lifecycle = self.inner.deps.lifecycle.clone();
@@ -1327,16 +1383,27 @@ impl ExecutionScheduler {
                         if changed.is_err() || *stopped.borrow() { return; }
                     }
                     result = renew => match result {
-                        Ok(Some(_)) => expiry.store(new, Ordering::SeqCst),
-                        Ok(None) => {
-                            let _ = lease_lost.send(true);
-                            return;
-                        }
+                        Ok(Some(row)) => {expiry.store(row.lease_expires_at.unwrap_or(new), Ordering::SeqCst);lease_state.send_replace(LeaseObservation::Confirmed);},
+                        Ok(None) => {lease_state.send_replace(LeaseObservation::Unconfirmed);}
                         Err(error) => {
-                            tracing::warn!(%execution_id, %owner, %error, "execution lease heartbeat failed");
-                            let _ = lease_lost.send(true);
-                            return;
+                            tracing::warn!(%execution_id, %owner, %error, "execution lease renewal is unconfirmed; original jobs remain owned");
+                            lease_state.send_replace(LeaseObservation::Unconfirmed);
                         }
+                    }
+                }
+                if *lease_state.borrow()==LeaseObservation::Unconfirmed {
+                    // A successful CAS may have lost only its reply. Read the
+                    // original owner/expiry before deciding that it was fenced.
+                    match repository.get_execution(&principal,&execution_id).await {
+                        Ok(Some(row)) if row.lease_owner.as_deref()==Some(owner.as_str())
+                            &&matches!(row.status.as_str(),"running"|"waiting_input"|"paused")=>{
+                            if let Some(actual)=row.lease_expires_at {
+                                expiry.store(actual,Ordering::SeqCst);
+                                if actual>now_ms() {lease_state.send_replace(LeaseObservation::Confirmed);}
+                            }
+                        }
+                        Ok(_)=>{lease_state.send_replace(LeaseObservation::Fenced);return;}
+                        Err(error)=>tracing::warn!(%execution_id,%error,"execution lease observation remains unconfirmed"),
                     }
                 }
             }
@@ -1399,9 +1466,17 @@ impl ExecutionScheduler {
                     ))
                 },
             )?;
-            if effects.review_blocked.is_some() {
+            if matches!(effects.pending_conversation_effects.first(),Some(PendingConversationEffect::InitialInput {..})) {
+                if self.inner.deps.repository.acknowledge_initial_input_admission(owner_id,execution_id,
+                    &step.step_id,&attempt.attempt_id,attempt.version,lease,
+                    &system_event(AgentExecutionEventKind::StepChanged,Some(&step.step_id),Some(&attempt.attempt_id),json!({}))).await? {
+                    self.notify_publication();return Ok(true);
+                }
+                // No accepted+started pair exists yet. The original input
+                // owner retains admission; a later control cannot skip it.
                 continue;
             }
+            if effects.review_blocked.is_some() { continue; }
             if detail.execution.status == AgentExecutionStatus::Paused && effects.pending_conversation_effects.first()
                 .is_some_and(|effect| matches!(effect, PendingConversationEffect::DecisionInput { .. })) {
                 continue;
@@ -1418,7 +1493,7 @@ impl ExecutionScheduler {
                 Some(PendingConversationEffect::DecisionInput { .. })) {
                 if self.inner.deps.repository.admit_waiting_attempt_input(owner_id, execution_id, &step.step_id, &attempt.attempt_id, lease,
                     &system_event(AgentExecutionEventKind::AttemptChanged, Some(&step.step_id), Some(&attempt.attempt_id), json!({"change":"decision_input_admitted"})),
-                ).await?.is_some() { self.publish().await; return Ok(true); }
+                ).await?.is_some() { self.notify_publication(); return Ok(true); }
                 continue;
             }
             if owns_deliverable_write_ahead(&detail, attempt) {
@@ -1437,9 +1512,11 @@ impl ExecutionScheduler {
         })?;
         let effect = effects.pending_conversation_effects.remove(0);
         match effect {
+            PendingConversationEffect::InitialInput {..}=>unreachable!("initial input is reconciled before delivery"),
             PendingConversationEffect::DecisionInput {
                 operation_id,
                 content,
+                parent_reply,
             } => {
                 // A decision resumes the existing model turn.  Keep the
                 // write-ahead state intact until attempt settlement; transport
@@ -1451,29 +1528,25 @@ impl ExecutionScheduler {
                 let lease = lease.clone();
                 let step_id = step.step_id.clone();
                 in_flight_step_ids.insert(step_id.clone());
-                running_jobs.push(async move {
-                    let outcome = scheduler.inner.deps.attempt_runner
-                        .continue_with_input(
-                            &owner_id,
-                            &conversation_id,
-                            &operation_id,
-                            AgentExecutionTurnAuthority {
+                self.retain_step_job(execution_id.clone(),step_id.clone(),step.version,Some(attempt.attempt_id.clone()),lease.clone(),running_jobs,async move {
+                    let authority=AgentExecutionTurnAuthority {
                                 execution_id: execution_id.clone(),
                                 step_id: step.step_id.clone(),
                                 attempt_id: attempt.attempt_id.clone(),
                                 expected_step_version: step.version,
                                 expected_attempt_version: attempt.version,
                                 lease_owner: lease.owner().to_owned(),
-                            },
-                            &content,
-                            scheduler.inner.deps.attempt_timeout,
-                        )
-                        .await
-                        .map_err(|error| {
-                            AppError::BadGateway(format!(
-                                "durable decision delivery {operation_id} failed: {error}"
-                            ))
-                        });
+                    };
+                    // The runner cannot stop admission. It consumes this token
+                    // only in read-only observation after the exact Session ACK.
+                    let observation_stop=scheduler.inner.deps.lifecycle.cancellation_child();
+                    let outcome=if let Some(source)=parent_reply {
+                            scheduler.inner.deps.attempt_runner.continue_with_parent_reply(&owner_id,&conversation_id,&operation_id,
+                                authority,&content,&source,scheduler.inner.deps.attempt_timeout,observation_stop).await
+                        } else {
+                            scheduler.inner.deps.attempt_runner.continue_with_input(&owner_id,&conversation_id,&operation_id,
+                                authority,&content,scheduler.inner.deps.attempt_timeout,observation_stop).await
+                        };
                     let result = match outcome {
                         Ok(outcome) => scheduler.settle_agent_outcome(
                             &owner_id,
@@ -1489,12 +1562,17 @@ impl ExecutionScheduler {
                             Some(&lease),
                         ).await,
                         Err(error) => {
-                            tracing::warn!(%execution_id, %step_id, %error, "durable decision remains pending; unrelated Attempts continue");
+                            if scheduler.inner.deps.lifecycle.is_cancelled() {return step_id;}
+                            tracing::warn!(%execution_id, %step_id, %operation_id, %error, "durable decision remains pending; unrelated Attempts continue");
                             tokio::time::sleep(EFFECT_RETRY_MIN).await;
                             Ok(())
                         },
                     };
-                    (step_id, result)
+                    if let Err(error)=result {
+                        scheduler.recover_failed_step(owner_id,execution_id,step_id.clone(),step.version,
+                            Some(attempt.attempt_id),lease,error).await;
+                    }
+                    step_id
                 }.boxed());
                 return Ok(true);
             }
@@ -1524,6 +1602,17 @@ impl ExecutionScheduler {
                     Ok(true) => { delay = EFFECT_RETRY_MIN; }
                     Ok(false) => break,
                     Err(error) => {
+                        if matches!(error,AppError::Conflict(_)) {
+                            // A technical native pause may be observed only by
+                            // this original control owner after cold recovery.
+                            // Reconcile its exact canonical boundary before
+                            // retrying a Steer that has no live input consumer.
+                            match scheduler.review_control_boundary(&owner_id,&execution_id,&attempt_id).await {
+                                Ok(true)=>break,
+                                Ok(false)=>{},
+                                Err(review)=>tracing::warn!(%execution_id,%attempt_id,%review,"original control boundary observation remains pending"),
+                            }
+                        }
                         tracing::warn!(%execution_id, %attempt_id, %error, "durable control remains pending; unrelated Attempts continue");
                         tokio::select! {
                             _ = scheduler.inner.deps.lifecycle.cancelled() => break,
@@ -1539,6 +1628,21 @@ impl ExecutionScheduler {
                 handle.wake.notify_one();
             }
         });
+    }
+
+    async fn review_control_boundary(&self,owner:&str,execution:&str,attempt_id:&str)->Result<bool,AppError> {
+        let Some(lease)=self.lease_token(execution) else {return Ok(false);};
+        let detail=self.detail(owner,execution).await?;
+        let Some(attempt)=detail.attempts.iter().find(|attempt|attempt.attempt_id==attempt_id&&attempt.status==ExecutionAttemptStatus::Running) else {return Ok(false);};
+        let Some(step)=detail.steps.iter().find(|step|step.step_id==attempt.step_id&&step.superseded_in_revision.is_none()) else {return Ok(false);};
+        let effects=AttemptConversationEffects::decode(attempt.runtime_state.clone().map(|state|state.to_string()).as_deref())?;
+        if !matches!(effects.pending_conversation_effects.first(),Some(PendingConversationEffect::Steer {..})) {return Ok(false);}
+        let key=self.inner.deps.repository.execution_attempt_turn_operation_key(owner,execution,&step.step_id,attempt_id).await?;
+        let reviewed=self.inner.deps.repository.reconcile_recovered_attempt(owner,execution,&step.step_id,step.version,attempt_id,
+            attempt.version,&lease,None,&system_event(AgentExecutionEventKind::AttemptChanged,Some(&step.step_id),Some(attempt_id),
+                json!({"reason":"original_control_boundary_observation","reconciliation":"initial_turn_receipt","turn_operation_key":key}))).await?;
+        if reviewed.disposition==AgentExecutionAttemptRecoveryDisposition::ReviewBlocked {self.notify_publication();return Ok(true);}
+        Ok(false)
     }
 
     /// Return true after one exact queue head is acknowledged. A successful
@@ -1570,7 +1674,7 @@ impl ExecutionScheduler {
         let (operation_id, effect_name) = match &effect {
             PendingConversationEffect::StopTurn { operation_id, .. } => (operation_id, "stop_turn"),
             PendingConversationEffect::Steer { operation_id, .. } => (operation_id, "steer"),
-            PendingConversationEffect::DecisionInput { .. } => return Ok(false),
+            PendingConversationEffect::InitialInput { .. } | PendingConversationEffect::DecisionInput { .. } => return Ok(false),
         };
         let conversation_id = attempt.conversation_id.as_deref()
             .ok_or_else(|| AppError::Conflict("durable control has no exact Session link".into()))?;
@@ -1594,12 +1698,12 @@ impl ExecutionScheduler {
                                 attempt_id,operation_id,&target).await?;
                             *delivered=None;
                             self.inner.conversation_control_changed.notify_waiters();
-                            self.publish().await;
+                            self.notify_publication();
                             return Ok(true);
                         },
                     }
                 }
-                PendingConversationEffect::DecisionInput { .. } => unreachable!(),
+                PendingConversationEffect::InitialInput { .. } | PendingConversationEffect::DecisionInput { .. } => unreachable!(),
             }
             *delivered = Some(effect.clone());
             // The native wait can overlap enqueue/cancel. Reread before the
@@ -1616,7 +1720,7 @@ impl ExecutionScheduler {
         ).await?;
         *delivered = None;
         self.inner.conversation_control_changed.notify_waiters();
-        self.publish().await;
+        self.notify_publication();
         Ok(true)
     }
 
@@ -1628,40 +1732,41 @@ impl ExecutionScheduler {
         running_jobs: &mut ScheduledAgentJobs,
         in_flight_step_ids: &mut HashSet<String>,
     ) -> Result<(), AppError> {
+        self.recover_interrupted_scope(owner_id,execution_id,lease,running_jobs,in_flight_step_ids,None).await
+    }
+
+    async fn recover_interrupted_scope(&self,owner_id:&str,execution_id:&str,lease:&AgentExecutionLeaseToken,
+        running_jobs:&mut ScheduledAgentJobs,in_flight_step_ids:&mut HashSet<String>,target:Option<(&str,&str)>) ->Result<(),AppError> {
+        let mut observed_attempts=HashSet::new();
         loop {
             let detail = self.detail(owner_id, execution_id).await?;
             let Some(attempt) = detail.attempts.iter().find(|attempt| {
-                matches!(attempt.status, ExecutionAttemptStatus::Queued | ExecutionAttemptStatus::Running)
+                target.is_none_or(|(step,id)| attempt.step_id==step&&attempt.attempt_id==id)
+                    && !observed_attempts.contains(&attempt.attempt_id)
+                    && (matches!(attempt.status, ExecutionAttemptStatus::Queued | ExecutionAttemptStatus::Running)
+                        ||attempt.status==ExecutionAttemptStatus::WaitingInput&&attempt.runtime_state.as_ref().is_some_and(|state|state.get("review_blocked").is_some()))
                     && !in_flight_step_ids.contains(&attempt.step_id)
+                    && (target.is_some()||!self.has_step_job(execution_id,&attempt.step_id,None,None))
                     && !self.inner.conversation_controls.contains_key(&attempt.attempt_id)
                     && !owns_recoverable_pending_effects(&detail, attempt)
             }) else {
                 return Ok(());
             };
+            observed_attempts.insert(attempt.attempt_id.clone());
             let Some(step) = detail.steps.iter().find(|step| step.step_id == attempt.step_id) else {
                 return Err(AppError::Internal(format!("attempt {} has no step", attempt.attempt_id)));
             };
-            // Queued means the concrete Agent invocation never started. It is
-            // safe to cancel that reservation and reschedule the step under
-            // both fixed and adaptive policies. Only an actually-running
-            // invocation consumes the fixed policy's single attempt.
+            // A Queued reservation keeps its exact original Attempt and
+            // durable initial input. Recovery never cancels it merely to
+            // manufacture another reservation or infer an invocation.
             let was_queued = attempt.status == ExecutionAttemptStatus::Queued;
-            if was_queued {
-                self.inner
-                    .deps
-                    .attempt_runner
-                    .discard_unlinked_creation(owner_id, &attempt.attempt_id)
-                    .await?;
-            }
             let recovered_output = if was_queued {
                 None
             } else {
                 self.recover_attempt_output(owner_id, attempt).await?
             };
-            let recovered_turn_key = attempt.runtime_state.clone()
-                .map(serde_json::from_value::<AttemptConversationEffects>).transpose()
-                .map_err(|error| AppError::Internal(format!("invalid recovered Attempt effects: {error}")))?
-                .unwrap_or_default().current_turn_operation_key(&attempt.attempt_id)?;
+            let recovered_turn_key=self.inner.deps.repository.execution_attempt_turn_operation_key(
+                owner_id,execution_id,&step.step_id,&attempt.attempt_id).await?;
             let recovered = self.inner
                 .deps
                 .repository
@@ -1679,7 +1784,7 @@ impl ExecutionScheduler {
                         Some(&step.step_id),
                         Some(&attempt.attempt_id),
                         json!({
-                            "reason": if was_queued { "queued_before_restart" } else { "process_restart" },
+                            "reason": if target.is_some() { "scheduler_job_receipt_recovery" } else { "scheduler_owner_reconciliation" },
                             "reconciliation":"initial_turn_receipt",
                             "turn_operation_key": recovered_turn_key,
                         }),
@@ -1688,6 +1793,10 @@ impl ExecutionScheduler {
                 .await?;
             match recovered.disposition {
                 AgentExecutionAttemptRecoveryDisposition::OngoingTurnObserved => {
+                    // A local receipt owner observes this exact Turn itself in
+                    // a flat retry loop; it must not recursively install a new
+                    // recovery future after every observation error.
+                    if target.is_some() { return Ok(()); }
                     let conversation_id = attempt.conversation_id.clone().ok_or_else(||
                         AppError::Conflict("ongoing Attempt has no exact Session".into()))?;
                     let scheduler = self.clone();
@@ -1695,11 +1804,12 @@ impl ExecutionScheduler {
                     let execution_id = execution_id.to_owned();
                     let step_id = step.step_id.clone();
                     let attempt_id = attempt.attempt_id.clone();
-                    let attempt_no = attempt.attempt_no;
-                    let fence = AttemptSettlementFence { step_version: step.version, attempt_version: attempt.version };
+                    let attempt_no = attempt.attempt_no+1;
+                    let current=recovered.detail.current_attempt.as_ref().ok_or_else(||AppError::Conflict("observed original Attempt missing".into()))?;
+                    let fence = AttemptSettlementFence { step_version: recovered.detail.step.version, attempt_version: current.attempt.version };
                     let lease = lease.clone();
                     in_flight_step_ids.insert(step_id.clone());
-                    running_jobs.push(async move {
+                    self.retain_step_job(execution_id.clone(),step_id.clone(),fence.step_version,Some(attempt_id.clone()),lease.clone(),running_jobs,async move {
                         let observed = scheduler.inner.deps.attempt_runner.observe_existing_turn(
                             &owner_id, &conversation_id, &recovered_turn_key,
                         ).await;
@@ -1710,11 +1820,41 @@ impl ExecutionScheduler {
                             // state. Never turn it into retryable business output.
                             Err(error) => Err(error),
                         };
-                        (step_id, result)
+                        if let Err(error)=result {
+                            scheduler.recover_failed_step(owner_id,execution_id,step_id.clone(),fence.step_version,
+                                Some(attempt_id),lease,error).await;
+                        }
+                        step_id
                     }.boxed());
                     continue;
                 }
-                AgentExecutionAttemptRecoveryDisposition::QueuedRescheduled => {}
+                AgentExecutionAttemptRecoveryDisposition::QueuedReservationRetained
+                | AgentExecutionAttemptRecoveryDisposition::InitialDeliveryPending => {
+                    let saved=recovered.detail;
+                    let fresh_step=domain_mapper::step(saved.step.clone())?;
+                    let original=saved.current_attempt.as_ref().ok_or_else(||AppError::Conflict("retained Attempt missing".into()))?;
+                    let original_id=original.attempt.attempt_id.clone();
+                    let initial=matches!(recovered.disposition,AgentExecutionAttemptRecoveryDisposition::InitialDeliveryPending);
+                    let scheduler=self.clone();let owner=owner_id.to_owned();let execution=execution_id.to_owned();
+                    let step_id=fresh_step.step_id.clone();let assigned=lease.clone();
+                    let future=async move {
+                        let pending_version=fresh_step.version;
+                        let mut original=Some(original_id);
+                        let result=if initial {scheduler.deliver_original_initial_input(&owner,&execution,fresh_step,&assigned,&saved).await}
+                            else {scheduler.execute_agent_step_admitted(&owner,&execution,fresh_step,&assigned,&mut original,Some(saved)).await};
+                        if let Err(error)=result {scheduler.recover_failed_step(owner,execution,step_id.clone(),pending_version,original,assigned,error).await;}
+                        step_id
+                    }.boxed();
+                    if target.is_some() {future.await;return Ok(());}
+                    in_flight_step_ids.insert(step.step_id.clone());
+                    self.retain_step_job(execution_id.into(),step.step_id.clone(),step.version,Some(attempt.attempt_id.clone()),lease.clone(),running_jobs,future);
+                    return Ok(());
+                }
+                AgentExecutionAttemptRecoveryDisposition::ReReadRequired => {
+                    observed_attempts.remove(&attempt.attempt_id);
+                    tokio::select! {_=self.inner.deps.lifecycle.cancelled()=>return Ok(()),_=tokio::time::sleep(EFFECT_RETRY_MIN)=>{}}
+                    continue;
+                }
                 AgentExecutionAttemptRecoveryDisposition::CompletedReceiptAdopted => {
                     tracing::info!(
                         %execution_id,
@@ -1730,11 +1870,11 @@ impl ExecutionScheduler {
                         %execution_id,
                         step_id = %step.step_id,
                         attempt_id = %attempt.attempt_id,
-                        "interrupted initial turn was parked for review; automatic retry is blocked"
+            "original invocation requires exact fact review; business replay is blocked"
                     );
                 }
             }
-            self.publish().await;
+            self.notify_publication();
             self.reconcile_conversation_cleanup(Some(execution_id)).await;
         }
     }
@@ -1753,7 +1893,8 @@ impl ExecutionScheduler {
             .any(|effect| matches!(effect, PendingConversationEffect::Steer { .. }))) {
             return Ok(None);
         }
-        let operation_key = effects.unwrap_or_default().current_turn_operation_key(&attempt.attempt_id)?;
+        let operation_key=self.inner.deps.repository.execution_attempt_turn_operation_key(
+            owner_id,&attempt.execution_id,&attempt.step_id,&attempt.attempt_id).await?;
         let Some(conversation_id) = attempt.conversation_id.as_deref() else {
             return Ok(None);
         };
@@ -1921,7 +2062,7 @@ impl ExecutionScheduler {
                 ),
             )
             .await?;
-        self.publish().await;
+        self.notify_publication();
         Ok(true)
     }
 
@@ -1972,13 +2113,14 @@ impl ExecutionScheduler {
                         ),
                     )
                     .await?;
-                self.publish().await;
+                self.notify_publication();
                 return Ok(true);
             }
         }
         Ok(false)
     }
 
+    #[cfg(test)]
     async fn execute_agent_step(
         &self,
         owner_id: &str,
@@ -1986,6 +2128,37 @@ impl ExecutionScheduler {
         step: ExecutionStep,
         lease: &AgentExecutionLeaseToken,
     ) -> Result<(), AppError> {
+        self.execute_agent_step_scoped(owner_id,execution_id,step,lease,&mut None).await
+    }
+
+    async fn deliver_original_initial_input(&self,owner_id:&str,execution_id:&str,step:ExecutionStep,
+        lease:&AgentExecutionLeaseToken,saved:&nomifun_db::AgentExecutionStepDetailRow)->Result<(),AppError> {
+        let original=saved.current_attempt.as_ref().ok_or_else(||AppError::Conflict("original initial delivery has no Attempt".into()))?;
+        let effects=AttemptConversationEffects::decode(original.attempt.runtime_state.as_deref())?;
+        let Some(PendingConversationEffect::InitialInput {request})=effects.pending_conversation_effects.first() else {
+            return Err(AppError::Conflict("original initial input is not pending".into()));
+        };
+        let request:nomifun_api_types::SendMessageRequest=serde_json::from_value(request.clone())
+            .map_err(|error|AppError::Conflict(format!("original prepared input is invalid: {error}")))?;
+        let session=original.conversation_id.as_deref().ok_or_else(||AppError::Conflict("original initial input has no linked Session".into()))?;
+        let key=format!("{}:initial-turn",original.attempt.attempt_id);
+        self.bind_step_job_attempt(execution_id,&step.step_id,&original.attempt.attempt_id)?;
+        let authority=AgentExecutionTurnAuthority {execution_id:execution_id.into(),step_id:step.step_id.clone(),
+            attempt_id:original.attempt.attempt_id.clone(),expected_step_version:step.version,
+            expected_attempt_version:original.attempt.version,lease_owner:lease.owner().into()};
+        let outcome=self.inner.deps.attempt_runner.deliver_initial_input(owner_id,session,&key,authority,request,self.inner.deps.attempt_timeout).await?;
+        self.settle_agent_outcome(owner_id,execution_id,&step.step_id,&original.attempt.attempt_id,Ok(outcome),
+            original.attempt.attempt_no+1,AttemptSettlementFence {step_version:step.version,attempt_version:original.attempt.version},Some(lease)).await
+    }
+
+    async fn execute_agent_step_scoped(&self,owner_id:&str,execution_id:&str,step:ExecutionStep,
+        lease:&AgentExecutionLeaseToken,attempt_scope:&mut Option<String>) ->Result<(),AppError> {
+        self.execute_agent_step_admitted(owner_id,execution_id,step,lease,attempt_scope,None).await
+    }
+
+    async fn execute_agent_step_admitted(&self,owner_id:&str,execution_id:&str,step:ExecutionStep,
+        lease:&AgentExecutionLeaseToken,attempt_scope:&mut Option<String>,
+        admitted:Option<nomifun_db::AgentExecutionStepDetailRow>) ->Result<(),AppError> {
         let detail = self.detail(owner_id, execution_id).await?;
         if !matches!(
             detail.execution.status,
@@ -2054,6 +2227,13 @@ impl ExecutionScheduler {
             .filter(|attempt| attempt.step_id == step.step_id)
             .count() as i64;
         let brief = compose_brief(&detail, current_step);
+        let canonical=participant.agent_snapshot.as_ref().is_some_and(|snapshot|snapshot.canonical_binding.is_some());
+        let (content,origin,hidden)=crate::attempt_runner::attempt_turn_input(&session_target,canonical,&brief,&step.spec)?;
+        let original_input=nomifun_api_types::SendMessageRequest {content,files:vec![],inject_skills:vec![],hidden,
+            origin:Some(origin.into()),channel_platform:None};
+        let initial_effects=AttemptConversationEffects {pending_conversation_effects:vec![PendingConversationEffect::InitialInput {
+            request:serde_json::to_value(&original_input).map_err(|error|AppError::Internal(error.to_string()))?,
+        }],review_blocked:None};
         let effective_config = json!({
             "participant_id": &participant.participant_id,
             "provider_id": &participant.provider_id,
@@ -2065,7 +2245,17 @@ impl ExecutionScheduler {
             "timeout_ms": self.inner.deps.attempt_timeout.as_millis(),
             "session_kind": session_kind.relation(),
         });
-        let created = self
+        let created = if let Some(saved)=admitted {
+            let original=saved.current_attempt.as_ref().ok_or_else(||AppError::Conflict("original admitted Attempt is missing".into()))?;
+            let config:serde_json::Value=serde_json::from_str(&original.attempt.effective_config)
+                .map_err(|error|AppError::Conflict(format!("original Attempt config is invalid: {error}")))?;
+            if saved.step.version!=current_step.version || saved.step.step_id!=step.step_id
+                || original.attempt.status!="queued" || original.conversation_id.is_some()
+                || config!=effective_config {
+                return Err(AppError::Conflict("original uninvoked Attempt no longer matches its admitted configuration".into()));
+            }
+            saved
+        } else { self
             .inner
             .deps
             .repository
@@ -2081,7 +2271,7 @@ impl ExecutionScheduler {
                     trigger_reason: if previous_attempts == 0 { "initial" } else { "retry" }.to_owned(),
                     effective_config: effective_config.to_string(),
                     retry_after: None,
-                    runtime_state: None,
+                    runtime_state: Some(initial_effects.encode()?),
                 },
                 &system_event(
                     AgentExecutionEventKind::AttemptChanged,
@@ -2090,13 +2280,22 @@ impl ExecutionScheduler {
                     json!({"status":"queued"}),
                 ),
             )
-            .await?;
-        self.publish().await;
+            .await? };
+        self.notify_publication();
         let created_attempt = created
             .current_attempt
             .as_ref()
             .ok_or_else(|| AppError::Internal("create_attempt returned no attempt".to_owned()))?;
         let attempt_id = created_attempt.attempt.attempt_id.clone();
+        let attempt_no=created_attempt.attempt.attempt_no+1;
+        *attempt_scope=Some(attempt_id.clone());
+        self.bind_step_job_attempt(execution_id,&step.step_id,&attempt_id)?;
+        let original_effects=AttemptConversationEffects::decode(created_attempt.attempt.runtime_state.as_deref())?;
+        let [PendingConversationEffect::InitialInput {request}]=original_effects.pending_conversation_effects.as_slice() else {
+            return Err(AppError::Conflict("original queued Attempt has no unique durable initial input".into()));
+        };
+        let original_input:nomifun_api_types::SendMessageRequest=serde_json::from_value(request.clone())
+            .map_err(|error|AppError::Conflict(format!("original queued input is invalid: {error}")))?;
         let conversation_slot = Arc::new(Mutex::new(None::<String>));
         let slot = conversation_slot.clone();
         let settlement_step_version = Arc::new(AtomicI64::new(created.step.version));
@@ -2113,11 +2312,20 @@ impl ExecutionScheduler {
         let expected_step_version = created.step.version;
         let expected_attempt_version = created_attempt.attempt.version;
         let callback_lease = lease.clone();
-        let on_started = Box::new(move |conversation_id: String| {
+        #[cfg(test)]
+        let initial_link_errors=self.inner.initial_link_errors.clone();
+        let on_linked = Box::new(move |conversation_id: String,operation_key:String,request:nomifun_api_types::SendMessageRequest| {
             if let Ok(mut stored) = slot.lock() {
                 *stored = Some(conversation_id.clone());
             }
             Box::pin(async move {
+                #[cfg(test)]
+                if let Some(error)={initial_link_errors.lock().unwrap().pop_front()} {return Err(error);}
+                if operation_key!=format!("{callback_attempt_id}:initial-turn") {
+                    return Err(AppError::Conflict("initial link targets another original invocation".into()));
+                }
+                let initial=PendingConversationEffect::InitialInput {request:serde_json::to_value(request)
+                    .map_err(|error|AppError::Internal(error.to_string()))?};
                 let started = repository
                     .start_attempt(
                         &owner,
@@ -2129,11 +2337,12 @@ impl ExecutionScheduler {
                         &conversation_id,
                         session_kind,
                         Some(&callback_lease),
+                        Some(&initial),
                         &system_event(
                             AgentExecutionEventKind::AttemptChanged,
                             Some(&step_id),
                             Some(&callback_attempt_id),
-                            json!({"status":"running"}),
+                            json!({"status":"running","turn_operation_key":operation_key}),
                         ),
                     )
                     .await?;
@@ -2145,7 +2354,8 @@ impl ExecutionScheduler {
                 })?;
                 callback_attempt_version
                     .store(started_attempt.attempt.version, Ordering::SeqCst);
-                publisher.drain(repository.clone()).await;
+                publisher.notify_pending(repository.clone());
+                publisher.notify_observation_changed(&owner,&execution);
                 Ok(AgentExecutionTurnAuthority {
                     execution_id: execution.clone(),
                     step_id: step_id.clone(),
@@ -2178,8 +2388,9 @@ impl ExecutionScheduler {
                 &attempt_id,
                 &brief,
                 &step.spec,
+                original_input,
                 self.inner.deps.attempt_timeout,
-                on_started,
+                on_linked,
             )
             .await;
         let conversation_id = conversation_slot
@@ -2189,14 +2400,14 @@ impl ExecutionScheduler {
         if let Err(error) = &outcome
             && conversation_id.is_none()
         {
-            tracing::warn!(%execution_id, step_id = %step.step_id, %error, "Agent attempt failed before starting");
+            tracing::warn!(%execution_id, step_id = %step.step_id, %error, "Agent attempt returned before linking; no startup or business outcome is implied");
         }
         if let Err(error) = &outcome {
             tracing::warn!(
                 %execution_id,
                 step_id = %step.step_id,
                 attempt_id = %attempt_id,
-                attempt_no = previous_attempts + 1,
+                attempt_no,
                 conversation_id = ?conversation_id,
                 error = %error,
                 error_code = error.error_code(),
@@ -2204,11 +2415,12 @@ impl ExecutionScheduler {
             );
         }
         let outcome = match outcome {
-            // Once a Session link was admitted, a plain transport/query error
-            // is not a canonical terminal failure. Preserve the invocation for
-            // exact receipt observation; only structured terminal outcomes can
-            // authorize business retry or retirement.
-            Err(error) if conversation_id.is_some() => return Err(error),
+            // A retained Queued reservation already owns its exact initial
+            // input, even before on_linked can report a Session. Temporary
+            // storage/admission observations return to that same job rather
+            // than becoming a business failure. After linking, all plain
+            // transport/query errors require original receipt reconciliation.
+            Err(error) if conversation_id.is_some() || initial_input_admission_is_pending(&error) => return Err(error),
             outcome => outcome,
         };
         self.settle_agent_outcome(
@@ -2217,7 +2429,7 @@ impl ExecutionScheduler {
             &step.step_id,
             &attempt_id,
             outcome,
-            previous_attempts + 1,
+            attempt_no,
             AttemptSettlementFence {
                 step_version: settlement_step_version.load(Ordering::SeqCst),
                 attempt_version: settlement_attempt_version.load(Ordering::SeqCst),
@@ -2228,16 +2440,79 @@ impl ExecutionScheduler {
     }
 
     async fn settle_agent_outcome(
+        &self,owner_id:&str,execution_id:&str,step_id:&str,attempt_id:&str,outcome:Result<AttemptOutcome,AppError>,
+        attempt_no:i64,settlement_fence:AttemptSettlementFence,lease:Option<&AgentExecutionLeaseToken>)->Result<(),AppError> {
+        let mut delay=EFFECT_RETRY_MIN;
+        loop {
+            let assigned=lease.and_then(|lease|self.step_job_lease(execution_id,step_id,lease));
+            if lease.is_some()&&assigned.is_none() {
+                match self.detail(owner_id,execution_id).await {
+                    Ok(detail)=>{
+                        if detail.execution.status.is_terminal() || detail.attempts.iter().find(|attempt|attempt.attempt_id==attempt_id)
+                            .is_some_and(|attempt|attempt.status.is_terminal()||attempt.status==ExecutionAttemptStatus::WaitingInput) {return Ok(());}
+                        self.start(owner_id.into(),execution_id.into());
+                    }
+                    Err(error) if scheduler_error_is_recoverable(&error)=>tracing::warn!(%execution_id,%step_id,%error,"original computed outcome is retained while handoff observation is unavailable"),
+                    Err(error)=>return Err(error),
+                }
+            } else {
+                match self.settle_agent_outcome_once(owner_id,execution_id,step_id,attempt_id,&outcome,attempt_no,settlement_fence,assigned.as_ref()).await {
+                    Ok(())=>return Ok(()),
+                    Err(AppError::ExecutionAdmissionPending)=>return Err(AppError::ExecutionAdmissionPending),
+                    Err(error) if scheduler_error_is_recoverable(&error)=>{
+                        tracing::warn!(%execution_id,%step_id,%attempt_id,%error,"original computed Attempt outcome retained until settlement acknowledgement");
+                    }
+                    Err(error)=>return Err(error),
+                }
+            }
+            tokio::select! {_=self.inner.deps.lifecycle.cancelled()=>return Ok(()),_=tokio::time::sleep(delay)=>{}}
+            delay=next_effect_retry_delay(delay);
+        }
+    }
+
+    async fn settle_agent_outcome_once(
         &self,
         owner_id: &str,
         execution_id: &str,
         step_id: &str,
         attempt_id: &str,
-        outcome: Result<AttemptOutcome, AppError>,
+        outcome: &Result<AttemptOutcome, AppError>,
         attempt_no: i64,
         settlement_fence: AttemptSettlementFence,
         lease: Option<&AgentExecutionLeaseToken>,
     ) -> Result<(), AppError> {
+        if let Ok(observed)=outcome && (observed.intervention.is_some()
+            ||observed.disposition==AttemptDisposition::InterventionRequired) {
+            if observed.intervention.as_ref().is_none_or(|boundary|!boundary.requires_intervention())
+                ||observed.disposition!=AttemptDisposition::InterventionRequired||observed.canonical_terminal.is_some() {
+                return Err(AppError::Conflict("nonterminal intervention lost its exact original boundary".into()));
+            }
+            let detail=self.detail(owner_id,execution_id).await?;
+            if detail.execution.status.is_terminal() {return Ok(());}
+            let step=detail.steps.iter().find(|step|step.step_id==step_id&&step.superseded_in_revision.is_none())
+                .ok_or_else(||AppError::NotFound("original intervention Step".into()))?;
+            let attempt=detail.attempts.iter().find(|attempt|attempt.attempt_id==attempt_id&&attempt.step_id==step_id)
+                .ok_or_else(||AppError::NotFound("original intervention Attempt".into()))?;
+            if attempt.status.is_terminal() {return Ok(());}
+            let lease=lease.ok_or_else(||AppError::Conflict("original intervention requires its scheduler writer lease".into()))?;
+            let key=self.inner.deps.repository.execution_attempt_turn_operation_key(owner_id,execution_id,step_id,attempt_id).await?;
+            let output=self.recover_attempt_output(owner_id,attempt).await?;
+            let reconciled=self.inner.deps.repository.reconcile_recovered_attempt(owner_id,execution_id,step_id,step.version,
+                attempt_id,attempt.version,lease,output.as_ref(),&system_event(AgentExecutionEventKind::AttemptChanged,
+                    Some(step_id),Some(attempt_id),json!({"reason":"original_native_decision_boundary",
+                        "reconciliation":"initial_turn_receipt","turn_operation_key":key}))).await?;
+            self.notify_publication();
+            return match reconciled.disposition {
+                AgentExecutionAttemptRecoveryDisposition::OngoingTurnObserved
+                |AgentExecutionAttemptRecoveryDisposition::ReReadRequired
+                |AgentExecutionAttemptRecoveryDisposition::InitialDeliveryPending
+                |AgentExecutionAttemptRecoveryDisposition::QueuedReservationRetained=>Err(AppError::ExecutionAdmissionPending),
+                AgentExecutionAttemptRecoveryDisposition::ReviewBlocked
+                |AgentExecutionAttemptRecoveryDisposition::CompletedReceiptAdopted
+                |AgentExecutionAttemptRecoveryDisposition::CancelledReceiptAdopted
+                |AgentExecutionAttemptRecoveryDisposition::UserInputRequested=>Ok(()),
+            };
+        }
         let detail = loop {
             let changed = self.inner.conversation_control_changed.notified();
             tokio::pin!(changed);
@@ -2294,7 +2569,10 @@ impl ExecutionScheduler {
             || attempt.version < settlement_fence.attempt_version
             || attempt.step_id != step_id
         {
-            return Ok(());
+            // A changed generation is not a settlement acknowledgement.
+            // The same tracked job now reconciles the exact canonical receipt
+            // through the original Attempt reducer instead of losing its tail.
+            return Err(AppError::ExecutionAdmissionPending);
         }
         let expected_attempt_version = attempt.version;
 
@@ -2320,7 +2598,7 @@ impl ExecutionScheduler {
                     json!({"attempt_status":"cancelled","step_status":"cancelled",
                         "canonical_operation_id":canonical_operation_id,"terminal_event_id":terminal_event_id})),
             ).await?;
-            self.publish().await;
+            self.notify_publication();
             self.reconcile_conversation_cleanup(Some(execution_id)).await;
             return Ok(());
         }
@@ -2358,7 +2636,7 @@ impl ExecutionScheduler {
                             "terminal_event_id":terminal_event_id,"question":request.question,"user_input_request":request,
                         })),
                 ).await?;
-                self.publish().await;
+                self.notify_publication();
                 return Ok(());
         }
 
@@ -2368,8 +2646,8 @@ impl ExecutionScheduler {
                 ExecutionAttemptStatus::Completed,
                 ExecutionStepStatus::Completed,
                 None,
-                outcome.text,
-                outcome.output_files,
+                outcome.text.clone(),
+                outcome.output_files.clone(),
                 outcome.tokens,
                 None,
             ),
@@ -2451,10 +2729,8 @@ impl ExecutionScheduler {
                 )
             }
         };
-        let settled_turn_key = attempt.runtime_state.clone()
-            .map(serde_json::from_value::<AttemptConversationEffects>).transpose()
-            .map_err(|error| AppError::Internal(format!("invalid settled Attempt effects: {error}")))?
-            .unwrap_or_default().current_turn_operation_key(attempt_id)?;
+        let settled_turn_key=self.inner.deps.repository.execution_attempt_turn_operation_key(
+            owner_id,execution_id,step_id,attempt_id).await?;
         let output_files = serde_json::to_string(&output_files)
             .map_err(|error| AppError::Internal(format!("encode verified attempt output files: {error}")))?;
         let settled = self.inner
@@ -2511,7 +2787,7 @@ impl ExecutionScheduler {
             }
         }
         settled?;
-        self.publish().await;
+        self.notify_publication();
         // The Attempt's canonical output is already settled. Native cleanup
         // remains in its durable inactive-link outbox, while this job returns
         // so the aggregate can finalize and deliver that verified result.
@@ -2525,27 +2801,15 @@ impl ExecutionScheduler {
         Ok(())
     }
 
-    async fn execute_control_step(
+    async fn execute_control_step_scoped(
         &self,
         owner_id: &str,
         detail: &AgentExecutionDetail,
         step: &ExecutionStep,
         lease: &AgentExecutionLeaseToken,
+        attempt_scope: &mut Option<String>,
     ) -> Result<(), AppError> {
-        let dependencies: Vec<&ExecutionStep> = detail
-            .dependencies
-            .iter()
-            .filter(|dependency| {
-                dependency.superseded_in_revision.is_none() && dependency.blocked_step_id == step.step_id
-            })
-            .filter_map(|dependency| {
-                detail
-                    .steps
-                    .iter()
-                    .find(|candidate| candidate.step_id == dependency.blocker_step_id)
-            })
-            .collect();
-        let resolution = control_steps::evaluate(step, &dependencies, &detail.attempts);
+        let resolution = step_recovery::control_resolution(detail,step);
         let created = self
             .inner
             .deps
@@ -2574,7 +2838,13 @@ impl ExecutionScheduler {
                 ),
             )
             .await?;
-        self.publish().await;
+        self.notify_publication();
+        *attempt_scope=created.current_attempt.as_ref().map(|attempt|attempt.attempt.attempt_id.clone());
+        self.settle_control_step(owner_id,detail,step,lease,&created,resolution).await
+    }
+
+    async fn settle_control_step(&self,owner_id:&str,detail:&AgentExecutionDetail,step:&ExecutionStep,
+        lease:&AgentExecutionLeaseToken,created:&nomifun_db::AgentExecutionStepDetailRow,resolution:ControlResolution) ->Result<(),AppError> {
         let current = created
             .current_attempt
             .as_ref()
@@ -2649,7 +2919,7 @@ impl ExecutionScheduler {
                 ),
             )
             .await?;
-        self.publish().await;
+        self.notify_publication();
         Ok(())
     }
 
@@ -2665,6 +2935,9 @@ impl ExecutionScheduler {
             .filter(|step| step.superseded_in_revision.is_none())
             .collect();
         if active.is_empty() || active.iter().any(|step| !step.status.is_terminal()) {
+            return Ok(false);
+        }
+        if !self.inner.deps.repository.pending_step_restarts(owner_id,&detail.execution.execution_id).await?.is_empty() {
             return Ok(false);
         }
         let status = if active.iter().any(|step| {
@@ -2705,7 +2978,7 @@ impl ExecutionScheduler {
                     AgentExecutionEventKind::StatusChanged,
                     None,
                     None,
-                    terminal_transition_payload(&detail.execution, status, None),
+                    self.terminal_transition_payload(owner_id, &detail.execution, status, None).await?,
                 ),
             )
             .await?;
@@ -2763,6 +3036,14 @@ impl ExecutionScheduler {
         detail: &AgentExecutionDetail,
         lease: &AgentExecutionLeaseToken,
     ) -> Option<SchedulerLoopExit> {
+        match self.inner.deps.repository.pending_step_restarts(owner_id,execution_id).await {
+            Ok(pending) if !pending.is_empty()=>return Some(SchedulerLoopExit::Normal),
+            Ok(_)=>{},
+            Err(error)=>{
+                tracing::warn!(%execution_id,%error,"original restart custody observation is unavailable; no unschedulable failure is inferred");
+                return Some(SchedulerLoopExit::Normal);
+            }
+        }
         if detail.attempts.iter().any(|attempt| owns_deliverable_write_ahead(detail, attempt)) {
             return None;
         }
@@ -2792,8 +3073,11 @@ impl ExecutionScheduler {
         if !status_is_active_for_scheduler_failure(detail.execution.status) {
             return true;
         }
-        let event = system_event(AgentExecutionEventKind::StatusChanged, None, None,
-            terminal_transition_payload(&detail.execution, AgentExecutionStatus::Failed, Some(REASON)));
+        let payload = match self.terminal_transition_payload(owner_id, &detail.execution, AgentExecutionStatus::Failed, Some(REASON)).await {
+            Ok(payload) => payload,
+            Err(error) => { tracing::warn!(%execution_id, %error, "failed to prepare scheduler failure"); return true; }
+        };
+        let event = system_event(AgentExecutionEventKind::StatusChanged, None, None, payload);
         match self.inner.deps.repository
             .fail_active_execution(owner_id, execution_id, detail.execution.version, lease, REASON, &event).await
         {
@@ -2830,6 +3114,10 @@ impl ExecutionScheduler {
             if !status_is_active_for_scheduler_failure(detail.execution.status) {
                 return;
             }
+            let payload = match self.terminal_transition_payload(owner_id, &detail.execution, AgentExecutionStatus::Failed, Some(reason)).await {
+                Ok(payload) => payload,
+                Err(error) => { tracing::warn!(%execution_id, %error, "failed to prepare scheduler failure"); return; }
+            };
             match self
                 .inner
                 .deps
@@ -2844,11 +3132,7 @@ impl ExecutionScheduler {
                         AgentExecutionEventKind::StatusChanged,
                         None,
                         None,
-                        terminal_transition_payload(
-                            &detail.execution,
-                            AgentExecutionStatus::Failed,
-                            Some(reason),
-                        ),
+                        payload,
                     ),
                 )
                 .await
@@ -2869,12 +3153,8 @@ impl ExecutionScheduler {
         self.after_terminal_commit(owner_id, execution_id).await;
     }
 
-    async fn publish(&self) {
-        self.inner
-            .deps
-            .publisher
-            .drain(self.inner.deps.repository.clone())
-            .await;
+    fn notify_publication(&self) {
+        self.inner.deps.publisher.notify_pending(self.inner.deps.repository.clone());
     }
 }
 
@@ -2969,7 +3249,8 @@ fn scheduler_error_is_recoverable(error: &AppError) -> bool {
         // Aggregate/step CAS drift, deletion, and lease fencing are ordinary
         // concurrent state changes. The successor must reload, never turn
         // them into a business failure.
-        AppError::Conflict(_) | AppError::NotFound(_) | AppError::ExecutionAdmissionPending => true,
+        AppError::Conflict(_) | AppError::NotFound(_) | AppError::ExecutionAdmissionPending
+            | AppError::DatabaseUnavailable { .. } => true,
         // Provider/transient transport errors are normally settled at the
         // attempt boundary; if one escapes before an attempt starts, reload.
         AppError::RateLimited | AppError::BadGateway(_) | AppError::Timeout(_) => true,
@@ -3002,6 +3283,7 @@ fn owns_deliverable_write_ahead(detail: &AgentExecutionDetail, attempt: &nomifun
         && current_agent_effects(detail, attempt)
             .is_some_and(|effects| effects.review_blocked.is_none() && match effects.pending_conversation_effects.first() {
                 None => false,
+                Some(PendingConversationEffect::InitialInput { .. })=>false,
                 Some(PendingConversationEffect::DecisionInput { .. }) => attempt.status == ExecutionAttemptStatus::Running
                     && detail.execution.status != AgentExecutionStatus::Paused,
                 Some(_) => true,
@@ -3012,7 +3294,7 @@ fn owns_recoverable_pending_effects(detail: &AgentExecutionDetail, attempt: &nom
     attempt.status == ExecutionAttemptStatus::Running
         && current_agent_effects(detail, attempt)
             .is_some_and(|effects| effects.review_blocked.is_none()
-                && !effects.pending_conversation_effects.is_empty())
+                && effects.pending_conversation_effects.first().is_some_and(|effect|!matches!(effect,PendingConversationEffect::InitialInput {..})))
 }
 
 fn attempt_error_transition(
@@ -3370,24 +3652,6 @@ fn retry_backoff_ms(attempt_no: i64) -> i64 {
 
 fn lead_report_operation_id(execution_id: &str, terminal_event_sequence: i64) -> String {
     format!("exec-lead-report:{execution_id}:event:{terminal_event_sequence}")
-}
-
-pub(crate) fn terminal_transition_payload(
-    execution: &AgentExecution,
-    status: AgentExecutionStatus,
-    reason: Option<&str>,
-) -> serde_json::Value {
-    let mut payload = json!({
-        "status": status,
-        "lead_report_operation_id": execution
-            .lead_conversation_id
-            .as_ref()
-            .map(|_| lead_report_operation_id(&execution.execution_id, execution.event_sequence + 1)),
-    });
-    if let Some(reason) = reason {
-        payload["reason"] = json!(reason);
-    }
-    payload
 }
 
 fn compose_brief(detail: &AgentExecutionDetail, step: &ExecutionStep) -> String {
@@ -4046,7 +4310,7 @@ mod tests {
     #[test]
     fn only_explicit_transient_provider_outcomes_are_retryable() {
         let transient = |error_code: &str| AttemptOutcome {
-            user_input_request: None, canonical_terminal: None,
+            intervention: None, user_input_request: None, canonical_terminal: None,
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000202".to_owned(),
             text: None,
             output_files: Vec::new(),
@@ -4116,7 +4380,7 @@ mod tests {
     #[test]
     fn missing_canonical_receipt_is_persisted_as_outcome_unknown() {
         let outcome = AttemptOutcome {
-            user_input_request: None, canonical_terminal: None,
+            intervention: None, user_input_request: None, canonical_terminal: None,
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000203".to_owned(),
             text: None,
             output_files: Vec::new(),
@@ -4140,7 +4404,7 @@ mod tests {
     #[test]
     fn canonical_failure_and_empty_delivery_cannot_complete() {
         let mut outcome = AttemptOutcome {
-            user_input_request: None, canonical_terminal: None,
+            intervention: None, user_input_request: None, canonical_terminal: None,
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000201".to_owned(),
             text: Some("authoritative public answer".to_owned()),
             output_files: Vec::new(),
@@ -4170,7 +4434,7 @@ mod tests {
             user_input_request: Some(nomifun_agent_contracts::AgentUserInputRequest {
                 request_id:"ask-name".into(), question:"姓名？".into(), remaining_work:"生成 PPT。".into(),
             }),
-            canonical_terminal: Some(("operation".into(),"terminal".into())),
+            intervention: None, canonical_terminal: Some(("operation".into(),"terminal".into())),
             text: Some("请补充姓名后继续。".into()), output_files: vec!["/workspace/draft.pptx".into()],
             disposition:AttemptDisposition::InputRequired, tokens:None, error:None, error_code:None, error_retryable:Some(false),
         };
@@ -4192,7 +4456,7 @@ mod tests {
         // snake-game-ui.md as inputs while delivering index.html. Settlement
         // must not manufacture a competing Markdown-output requirement.
         let outcome = AttemptOutcome {
-            user_input_request: None, canonical_terminal: None,
+            intervention: None, user_input_request: None, canonical_terminal: None,
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000201".to_owned(),
             text: Some("已完成 index.html，参考设计文档 snake-game-design.md 和 snake-game-ui.md".to_owned()),
             output_files: vec!["/workspace/index.html".to_owned()],
@@ -4246,6 +4510,9 @@ mod tests {
         assert!(scheduler_error_is_recoverable(&AppError::Conflict(
             "lease changed".to_owned()
         )));
+        assert!(scheduler_error_is_recoverable(&AppError::DatabaseUnavailable {
+            reason:nomifun_common::DatabaseUnavailableReason::Busy,
+        }));
         assert!(!scheduler_error_is_recoverable(&AppError::BadRequest(
             "invalid persisted graph".to_owned()
         )));
@@ -4428,6 +4695,14 @@ mod tests {
         UserInputHandoff,
         CanonicalCancellation,
         ReceiptQueryFailure,
+        PrelinkAdmissionPending {
+            error:Arc<Mutex<Option<AppError>>>,
+            attempts:Arc<Mutex<Vec<String>>>,
+        },
+        LocalReceiptRecovery {
+            waiting_started:Arc<AtomicBool>, ready_started:Arc<AtomicBool>, release:Arc<Notify>,
+            receipts:Arc<Mutex<HashMap<String,RecoveredAttemptOutcome>>>,
+        },
     }
 
     #[derive(Clone)]
@@ -4614,8 +4889,9 @@ mod tests {
             attempt_creation_key: &str,
             brief: &str,
             _step_spec: &str,
+            initial_input: nomifun_api_types::SendMessageRequest,
             _timeout: Duration,
-            on_started: crate::attempt_runner::AttemptStarted,
+            on_linked: crate::attempt_runner::AttemptLinked,
         ) -> Result<AttemptOutcome, AppError> {
             self.workspace_dirs
                 .lock()
@@ -4625,6 +4901,10 @@ mod tests {
                 .lock()
                 .expect("harness brief log is not poisoned")
                 .push((step_title.to_owned(), brief.to_owned()));
+            if let HarnessRunnerMode::PrelinkAdmissionPending {error,attempts}=&self.mode {
+                attempts.lock().unwrap().push(attempt_creation_key.to_owned());
+                if let Some(error)=error.lock().unwrap().take() {return Err(error);}
+            }
             let creates_child = !matches!(&session_target, AttemptSessionTarget::AutomationLead { .. } | AttemptSessionTarget::ExistingChild { .. });
             let conversation_id = match session_target {
                 AttemptSessionTarget::ChildAttempt | AttemptSessionTarget::SourceChildAttempt { .. } => {
@@ -4675,7 +4955,7 @@ mod tests {
                     return Err(AppError::NotFound("original harness AutoWork lead Session".into()));
                 }
             }
-            on_started(conversation_id.clone()).await?;
+            on_linked(conversation_id.clone(),format!("{attempt_creation_key}:initial-turn"),initial_input).await?;
 
             self.calls
                 .lock()
@@ -4683,6 +4963,30 @@ mod tests {
                 .push(step_title.to_owned());
             if matches!(&self.mode, HarnessRunnerMode::ReceiptQueryFailure) {
                 return Err(AppError::Timeout("the original receipt query failed after admission".into()));
+            }
+            if let HarnessRunnerMode::LocalReceiptRecovery {waiting_started,ready_started,release,receipts}=&self.mode {
+                if step_title=="waiting" {
+                    waiting_started.store(true,Ordering::SeqCst);
+                    release.notified().await;
+                } else if step_title=="fault" {
+                    while !waiting_started.load(Ordering::SeqCst) {tokio::task::yield_now().await;}
+                    let operation=format!("turn:user:{owner_id}:{conversation_id}:{attempt_creation_key}:initial-turn");
+                    let start=generate_id();let terminal=generate_id();
+                    for (seq,id,kind) in [(1,&start,"turn/started"),(2,&terminal,"turn/completed")] {
+                        sqlx::query("INSERT INTO agent_events(session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,inline_json) VALUES(?,?,?,'receipt-fixture',?,?,1,?,'{}')")
+                            .bind(&conversation_id).bind(seq).bind(id).bind(id).bind(kind).bind(&operation).execute(&pool).await.unwrap();
+                    }
+                    sqlx::query("INSERT INTO agent_turns(session_id,turn_id,operation_id,idempotency_key,state,started_event_id,terminal_event_id,accepted_at,started_at,finished_at) VALUES(?,?,?,?,'completed',?,?,1,1,2)")
+                        .bind(&conversation_id).bind(&operation).bind(&operation).bind(&operation).bind(&start).bind(&terminal).execute(&pool).await.unwrap();
+                    sqlx::query("INSERT INTO agent_session_heads(session_id,status,active_set_generation,last_seq,unread_count) VALUES(?,'ready',0,2,0)")
+                        .bind(&conversation_id).execute(&pool).await.unwrap();
+                    receipts.lock().unwrap().insert(conversation_id.clone(),RecoveredAttemptOutcome {
+                        canonical_operation_id:operation.clone(),terminal_event_id:terminal.clone(),outcome:AttemptOutcome {
+                            intervention: None, conversation_id,user_input_request:None,canonical_terminal:Some((operation,terminal)),text:Some("original fault-task result".into()),
+                            output_files:vec![],disposition:AttemptDisposition::Delivered,tokens:Some(1),error:None,error_code:None,error_retryable:None,
+                        }});
+                    return Err(AppError::Timeout("the original terminal receipt reply was lost".into()));
+                } else if step_title=="ready" {ready_started.store(true,Ordering::SeqCst);}
             }
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             update_max_active(&self.max_active, active);
@@ -4702,7 +5006,8 @@ mod tests {
                 HarnessRunnerMode::ParallelRoots { .. } | HarnessRunnerMode::OverlapProbe
                     | HarnessRunnerMode::DecisionContinuation { .. } | HarnessRunnerMode::SteeredTurn { .. }
                     | HarnessRunnerMode::UserInputHandoff | HarnessRunnerMode::CanonicalCancellation
-                    | HarnessRunnerMode::ReceiptQueryFailure => false,
+                    | HarnessRunnerMode::ReceiptQueryFailure | HarnessRunnerMode::PrelinkAdmissionPending {..}
+                    | HarnessRunnerMode::LocalReceiptRecovery {..} => false,
             };
             if failure {
                 let (error, error_code, retryable) = match &self.mode {
@@ -4719,7 +5024,7 @@ mod tests {
                 };
                 finish(self);
                 return Ok(AttemptOutcome {
-                    user_input_request: None, canonical_terminal: None,
+                    intervention: None, user_input_request: None, canonical_terminal: None,
                     conversation_id: format!("harness-{step_title}"),
                     text: None,
                     output_files: Vec::new(),
@@ -4753,7 +5058,7 @@ mod tests {
                     .bind(&conversation_id).execute(&pool).await.map_err(|error|AppError::Internal(error.to_string()))?;
                 finish(self);
                 return Ok(AttemptOutcome {
-                    conversation_id, user_input_request:request, canonical_terminal:Some((operation,terminal)),
+                    intervention: None, conversation_id, user_input_request:request, canonical_terminal:Some((operation,terminal)),
                     text:(!cancelled).then(||"请提供姓名后继续。".into()),output_files:Vec::new(),
                     disposition:if cancelled {AttemptDisposition::Cancelled} else {AttemptDisposition::InputRequired}, tokens:Some(1),
                     error:None,error_code:None,error_retryable:Some(false),
@@ -4784,7 +5089,7 @@ mod tests {
             self.completed_successes.fetch_add(1, Ordering::SeqCst);
             finish(self);
             Ok(AttemptOutcome {
-                user_input_request: None, canonical_terminal: None,
+                intervention: None, user_input_request: None, canonical_terminal: None,
                 conversation_id: format!("harness-{step_title}"),
                 text: Some(format!("completed {step_title}")),
                 output_files: Vec::new(),
@@ -4794,6 +5099,12 @@ mod tests {
                 error_code: None,
                 error_retryable: None,
             })
+        }
+
+        async fn recover_outcome(&self,owner_id:&str,conversation_id:&str,operation_id:&str)->Result<Option<RecoveredAttemptOutcome>,AppError> {
+            let HarnessRunnerMode::LocalReceiptRecovery {receipts,..}=&self.mode else {return Ok(None);};
+            Ok(receipts.lock().unwrap().get(conversation_id).filter(|receipt|
+                receipt.canonical_operation_id==format!("turn:user:{owner_id}:{conversation_id}:{operation_id}")).cloned())
         }
 
         async fn observe_existing_turn(
@@ -4816,7 +5127,7 @@ mod tests {
                 .bind(conversation_id).execute(&pool).await.unwrap();
             Ok(AttemptOutcome {
                 conversation_id: conversation_id.into(), user_input_request: None,
-                canonical_terminal: Some((operation, terminal)), text: Some("original recovered result".into()),
+                intervention: None, canonical_terminal: Some((operation, terminal)), text: Some("original recovered result".into()),
                 output_files: Vec::new(), disposition: AttemptDisposition::Delivered,
                 tokens: Some(3), error: None, error_code: None, error_retryable: None,
             })
@@ -4830,6 +5141,7 @@ mod tests {
             _authority: AgentExecutionTurnAuthority,
             _input: &str,
             _timeout: Duration,
+            observation_stop:tokio_util::sync::CancellationToken,
         ) -> Result<AttemptOutcome, AppError> {
             if matches!(&self.mode,HarnessRunnerMode::UserInputHandoff) {
                 let answer_no = {
@@ -4858,7 +5170,7 @@ mod tests {
                 sqlx::query("UPDATE agent_session_heads SET last_seq=? WHERE session_id=?")
                     .bind(base+2).bind(conversation_id).execute(&pool).await.unwrap();
                 return Ok(AttemptOutcome {
-                    conversation_id:conversation_id.into(),canonical_terminal:request.as_ref().map(|_|(operation,terminal)),
+                    intervention: None, conversation_id:conversation_id.into(),canonical_terminal:request.as_ref().map(|_|(operation,terminal)),
                     user_input_request:request.clone(),text:Some("本轮已结束。".into()),output_files:Vec::new(),disposition:if request.is_some() {AttemptDisposition::InputRequired} else {AttemptDisposition::Delivered},tokens:Some(1),
                     error:None,error_code:None,error_retryable:Some(false),
                 });
@@ -4868,9 +5180,14 @@ mod tests {
             };
             calls.fetch_add(1, Ordering::SeqCst);
             started.store(true, Ordering::SeqCst);
-            release.notified().await;
+            // This fixture has acknowledged input and now holds only its
+            // read-only terminal observer, matching the production boundary.
+            tokio::select! {biased;
+                _=observation_stop.cancelled()=>return Err(AppError::ExecutionAdmissionPending),
+                _=release.notified()=>{},
+            }
             Ok(AttemptOutcome {
-                user_input_request: None, canonical_terminal: None,
+                intervention: None, user_input_request: None, canonical_terminal: None,
                 conversation_id: conversation_id.to_owned(),
                 text: Some("completed decision continuation".to_owned()),
                 output_files: Vec::new(),
@@ -5089,6 +5406,42 @@ mod tests {
         .await
     }
 
+    #[tokio::test]
+    async fn source_completion_has_no_report_intent_or_suppressed_delivery_ack() {
+        let runner=Arc::new(HarnessAttemptRunner::parallel());
+        let (mut scheduler,repository,_,data_dir,owner)=make_scheduler_harness(
+            runner,&["child"],&[],1,AdaptationPolicy::Fixed,None).await;
+        let effects=Arc::new(NoopConversationEffects::default());
+        Arc::get_mut(&mut scheduler.inner).unwrap().deps.conversation_effects=effects.clone();
+        let pool=sqlx::SqlitePool::connect_with(sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(data_dir.path().join("harness.sqlite"))).await.unwrap();
+        let lead=generate_id();
+        sqlx::query("INSERT INTO agent_sessions(agent_session_id,owner_ref_json,state,title,archived,pinned,agent_binding_json,next_seq,created_at) VALUES(?,?,'live','parent',0,0,'{}',1,1)")
+            .bind(&lead).bind(json!({"principal_kind":"user","principal_id":owner}).to_string()).execute(&pool).await.unwrap();
+        let execution=repository.create_execution_with_participants(&owner,&CreateAgentExecutionParams {
+            goal:"original delegated work".into(),status:AgentExecutionStatus::Completed,adaptation_policy:AdaptationPolicy::Fixed,
+            decision_policy:DecisionPolicy::Automatic,delegation_policy:DelegationPolicy::Automatic,max_parallel:1,
+            work_dir:None,lead_conversation_id:Some(lead.clone()),initial_plan_input:r#"{"mode":"explicit","plan":{"steps":[]}}"#.into(),
+        },&[harness_participant(generate_id())],&system_event(AgentExecutionEventKind::Created,None,None,
+            json!({"lead_report_operation_id":"old-source-report-intent"}))).await.unwrap();
+        let execution_id=execution.execution_id;
+        let source=json!({"mode":"explicit","source":{"agent_session_id":lead,"turn_operation_id":"parent-turn",
+            "tool_operation_id":"original-delegate","effect_id":"original-effect"},"plan":{"steps":[]}});
+        sqlx::query("UPDATE agent_executions SET initial_plan_input=? WHERE execution_id=?")
+            .bind(source.to_string()).bind(&execution_id).execute(&pool).await.unwrap();
+        let detail=scheduler.detail(&owner,&execution_id).await.unwrap();
+        let payload=scheduler.terminal_transition_payload(&owner,&detail.execution,AgentExecutionStatus::Completed,None).await.unwrap();
+        assert_eq!(payload,json!({"status":"completed"}));
+        let before=repository.list_events(&owner,&execution_id,0,500).await.unwrap();
+        scheduler.reconcile_lead_report(&owner,&detail).await.unwrap();
+        let after=repository.list_events(&owner,&execution_id,0,500).await.unwrap();
+        assert_eq!(before.len(),after.len());
+        assert!(effects.report_operations.lock().unwrap().is_empty());
+        assert!(!scheduler.inner.pending_lead_reports.contains_key(&execution_id));
+        scheduler.shutdown().await.unwrap();
+        pool.close().await;
+    }
+
         #[tokio::test]
         async fn failed_lead_projection_retries_and_marks_the_same_operation_delivered() {
             let runner = Arc::new(HarnessAttemptRunner::parallel());
@@ -5186,7 +5539,7 @@ mod tests {
         repository.start_attempt(
             &owner, &execution_id, &step.step_id, created.step.version,
             attempt_id, created.current_attempt.as_ref().unwrap().attempt.version,
-            &conversation_id, AgentExecutionAttemptSessionKind::ChildAttempt, None,
+            &conversation_id, AgentExecutionAttemptSessionKind::ChildAttempt, None, None,
             &system_event(AgentExecutionEventKind::AttemptChanged, Some(&step.step_id), Some(attempt_id), json!({})),
         ).await.unwrap();
         let lease = AgentExecutionLeaseToken::new("effects-test".into());
@@ -5418,7 +5771,7 @@ mod tests {
             &system_event(AgentExecutionEventKind::AttemptChanged,None,None,json!({}))).await.unwrap();
         let attempt=&queued.current_attempt.as_ref().unwrap().attempt;
         repository.start_attempt(&owner,&created.execution_id,&root.step_id,queued.step.version,&attempt.attempt_id,attempt.version,&session,
-            AgentExecutionAttemptSessionKind::AutomationLead,None,&system_event(AgentExecutionEventKind::AttemptChanged,None,None,json!({}))).await.unwrap();
+            AgentExecutionAttemptSessionKind::AutomationLead,None, None,&system_event(AgentExecutionEventKind::AttemptChanged,None,None,json!({}))).await.unwrap();
         let current=repository.get_execution(&owner,&created.execution_id).await.unwrap().unwrap();
         repository.delete_execution(&owner,&created.execution_id,current.version,&system_event(AgentExecutionEventKind::Deleted,None,None,json!({}))).await.unwrap();
         assert!(repository.get_attempt(&owner,&created.execution_id,&root.step_id,&attempt.attempt_id).await.unwrap().is_none());
@@ -5465,10 +5818,134 @@ mod tests {
         repository.start_attempt(
             owner, execution_id, &step.step_id, created.step.version,
             &attempt.attempt_id, attempt.version, &conversation_id,
-            AgentExecutionAttemptSessionKind::ChildAttempt, None,
+            AgentExecutionAttemptSessionKind::ChildAttempt, None, None,
             &system_event(AgentExecutionEventKind::AttemptChanged, Some(&step.step_id), Some(&attempt.attempt_id), json!({})),
         ).await.unwrap();
         (step.step_id.clone(), attempt.attempt_id.clone(), conversation_id, pool)
+    }
+
+    async fn admitted_control_fixture(pool:&SqlitePool,owner:&str,execution:&str,attempt:&str,session:&str,
+        paused:bool)->String {
+        let operation=format!("turn:user:{owner}:{session}:{attempt}:initial-turn");
+        let identity=format!("user:{owner}:{session}:{attempt}:initial-turn");
+        let opening=generate_id();let accepted=generate_id();let started=generate_id();
+        sqlx::query("INSERT INTO agent_events(session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,inline_json) VALUES(?,1,?,'session_api',?,'session/opening',1,?,'{}')")
+            .bind(session).bind(&opening).bind(format!("fixture-opening:{session}")).bind(session).execute(pool).await.unwrap();
+        let request=json!({"content":"original exact input","files":[],"inject_skills":[],"hidden":false,"origin":"agent_execution","channel_platform":null});
+        for (seq,id,key,kind,correlation,cause,body) in [
+            (2,&accepted,format!("{identity}:message"),"message/user-accepted",accepted.as_str(),opening.as_str(),request.clone()),
+            (3,&started,format!("{identity}:turn"),"turn/started",operation.as_str(),accepted.as_str(),json!({"operation_id":operation,"source_message_id":accepted})),
+        ] {
+            sqlx::query("INSERT INTO agent_events(session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json) VALUES(?,?,?,'session_api',?,?,1,?,?,?)")
+                .bind(session).bind(seq).bind(id).bind(key).bind(kind).bind(correlation).bind(cause).bind(body.to_string()).execute(pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO agent_turns(session_id,turn_id,operation_id,idempotency_key,state,source_message_id,started_event_id,accepted_at,started_at,execution_lease_until) VALUES(?,?,?,?,'running',?,?,1,1,0)")
+            .bind(session).bind(&operation).bind(&operation).bind(&operation).bind(accepted).bind(&started).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO agent_session_heads(session_id,status,active_turn_id,active_set_generation,last_seq,unread_count) VALUES(?,'running',?,0,3,0)")
+            .bind(session).bind(&operation).execute(pool).await.unwrap();
+        let effects=AttemptConversationEffects {pending_conversation_effects:vec![
+            PendingConversationEffect::InitialInput {request},PendingConversationEffect::Steer {operation_id:"pending-steer".into(),
+                target_operation_id:operation.clone(),content:"original correction".into()}],review_blocked:None};
+        sqlx::query("UPDATE agent_execution_attempts SET runtime_state=? WHERE execution_id=? AND attempt_id=?")
+            .bind(effects.encode().unwrap()).bind(execution).bind(attempt).execute(pool).await.unwrap();
+        if paused {
+            let pause=nomifun_agent_contracts::NativePauseState {revision:1,reason:"EXECUTION_INTERVENTION_REQUIRED".into(),
+                checkpoint_revision:0,checkpoint_digest:None,execution_fence:1,cleanup_proven:false,paused_at_ms:3};
+            let id=format!("native-paused:{session}:{operation}:1");
+            sqlx::query("INSERT INTO agent_events(session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json) VALUES(?,4,?,'runtime_supervisor',?,'turn/paused',1,?,?,?)")
+                .bind(session).bind(&id).bind(&id).bind(&operation).bind(started).bind(json!({"pause":pause}).to_string()).execute(pool).await.unwrap();
+            sqlx::query("UPDATE agent_turns SET native_pause_json=?,native_pause_revision=1,execution_fence=1 WHERE session_id=? AND operation_id=?")
+                .bind(serde_json::to_string(&pause).unwrap()).bind(session).bind(&operation).execute(pool).await.unwrap();
+            sqlx::query("UPDATE agent_session_heads SET status='paused',last_seq=4 WHERE session_id=?").bind(session).execute(pool).await.unwrap();
+        }
+        operation
+    }
+
+    #[tokio::test]
+    async fn initial_admission_ack_releases_steer_before_the_original_business_turn_finishes() {
+        let runner=Arc::new(HarnessAttemptRunner::overlap_probe());
+        let (mut scheduler,repository,execution,data,owner)=make_scheduler_harness(runner.clone(),&["original"],&[],1,AdaptationPolicy::Fixed,None).await;
+        let effects=Arc::new(NoopConversationEffects::default());
+        Arc::get_mut(&mut scheduler.inner).unwrap().deps.conversation_effects=effects.clone();
+        let (step,attempt,session,pool)=start_harness_attempt(&scheduler,&repository,&owner,&execution,&data,"original",None).await;
+        let operation=admitted_control_fixture(&pool,&owner,&execution,&attempt,&session,false).await;
+        let current=scheduler.detail(&owner,&execution).await.unwrap();let lease=AgentExecutionLeaseToken::new("admission-ack-owner".into());
+        repository.try_acquire_lease(&execution,current.execution.version,lease.owner(),now_ms()+30_000).await.unwrap().unwrap();
+        let mut jobs=ScheduledAgentJobs::new();let mut in_flight=HashSet::from([step.clone()]);
+        assert!(scheduler.process_one_pending_conversation_effect(&owner,&execution,&lease,&mut jobs,&mut in_flight).await.unwrap());
+        let after=scheduler.detail(&owner,&execution).await.unwrap();
+        assert!(matches!(after.attempts[0].runtime_state.as_ref().unwrap()["pending_conversation_effects"].as_array().unwrap().as_slice(),[value] if value["kind"]=="steer"));
+        assert!(scheduler.process_one_pending_conversation_effect(&owner,&execution,&lease,&mut jobs,&mut in_flight).await.unwrap());
+        tokio::time::timeout(Duration::from_secs(2),async {loop {
+            if effects.conversation_operations.lock().unwrap().as_slice()==["pending-steer"] {break;}
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }}).await.expect("an admitted input cannot hold ordinary control behind business completion");
+        assert_eq!(runner.call_count("original"),0);
+        assert_eq!(scheduler.detail(&owner,&execution).await.unwrap().attempts.len(),1);
+        let state:String=sqlx::query_scalar("SELECT state FROM agent_turns WHERE session_id=? AND operation_id=?").bind(&session).bind(operation).fetch_one(&pool).await.unwrap();
+        assert_eq!(state,"running");scheduler.shutdown().await.unwrap();pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn original_native_intervention_bypasses_pending_steer_wait_and_keeps_the_exact_attempt_for_review() {
+        let runner=Arc::new(HarnessAttemptRunner::overlap_probe());
+        let (scheduler,repository,execution,data,owner)=make_scheduler_harness(runner.clone(),&["original"],&[],1,AdaptationPolicy::Fixed,None).await;
+        let (step,attempt,session,pool)=start_harness_attempt(&scheduler,&repository,&owner,&execution,&data,"original",None).await;
+        let operation=admitted_control_fixture(&pool,&owner,&execution,&attempt,&session,true).await;
+        let current=scheduler.detail(&owner,&execution).await.unwrap();let lease=AgentExecutionLeaseToken::new("native-review-owner".into());
+        repository.try_acquire_lease(&execution,current.execution.version,lease.owner(),now_ms()+30_000).await.unwrap().unwrap();
+        let outcome=AttemptOutcome {conversation_id:session.clone(),user_input_request:None,canonical_terminal:None,
+            intervention:Some(nomifun_agent_session::TurnProgressSuspension::NativePause {revision:1,reason:"EXECUTION_INTERVENTION_REQUIRED".into(),checkpoint_revision:0,execution_fence:1,cleanup_proven:false}),
+            text:None,output_files:vec![],disposition:AttemptDisposition::InterventionRequired,tokens:None,error:None,error_code:None,error_retryable:None};
+        tokio::time::timeout(Duration::from_secs(2),scheduler.settle_agent_outcome_once(&owner,&execution,&step,&attempt,&Ok(outcome),1,
+            AttemptSettlementFence {step_version:current.steps[0].version,attempt_version:current.attempts[0].version},Some(&lease))).await.unwrap().unwrap();
+        let after=scheduler.detail(&owner,&execution).await.unwrap();assert_eq!(after.steps[0].status,ExecutionStepStatus::WaitingInput);
+        assert_eq!(after.attempts.len(),1);assert_eq!(after.attempts[0].attempt_id,attempt);
+        assert_eq!(after.attempts[0].runtime_state.as_ref().unwrap()["review_blocked"]["kind"],"native_pause");
+        assert_eq!(after.attempts[0].runtime_state.as_ref().unwrap()["pending_conversation_effects"].as_array().unwrap().len(),2);
+        assert!(repository.resolve_conversation_link(&owner,&session).await.unwrap()[0].active);
+        assert_eq!(runner.call_count("original"),0);
+        let state:(String,Option<String>)=sqlx::query_as("SELECT state,terminal_event_id FROM agent_turns WHERE session_id=? AND operation_id=?").bind(&session).bind(operation).fetch_one(&pool).await.unwrap();
+        assert_eq!(state,("running".into(),None));scheduler.shutdown().await.unwrap();pool.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn original_native_cleanup_wakes_a_parent_after_the_domain_cancellation_was_already_observed() {
+        let runner=Arc::new(HarnessAttemptRunner::overlap_probe());
+        let (mut scheduler,repository,execution_id,data_dir,owner)=make_scheduler_harness(
+            runner.clone(),&["original-cancelled-work"],&[],1,AdaptationPolicy::Fixed,None).await;
+        let effects=Arc::new(NoopConversationEffects::default());
+        effects.block_cleanup.store(true,Ordering::SeqCst);
+        Arc::get_mut(&mut scheduler.inner).unwrap().deps.conversation_effects=effects.clone();
+        let (_,attempt_id,session,pool)=start_harness_attempt(&scheduler,&repository,&owner,&execution_id,&data_dir,"original-cancelled-work",None).await;
+        let changed=scheduler.inner.deps.publisher.changed_for(&owner,&execution_id);
+        let domain=changed.notified();tokio::pin!(domain);domain.as_mut().enable();
+        let current=scheduler.detail(&owner,&execution_id).await.unwrap();
+        repository.cancel_execution(&owner,&execution_id,current.execution.version,
+            &system_event(AgentExecutionEventKind::StatusChanged,None,None,json!({"status":"cancelled"}))).await.unwrap();
+        scheduler.notify_publication();
+        tokio::time::timeout(Duration::from_secs(1),domain).await.unwrap();
+        // Publication is now an independent owner. Finish the committed
+        // domain prefix before arming the separate native-cleanup observer.
+        scheduler.inner.deps.publisher.drain(repository.clone()).await;
+        let sequence=scheduler.detail(&owner,&execution_id).await.unwrap().execution.event_sequence;
+        // The parent consumed that domain notification while the original
+        // native owner was still closing. It now arms a distinct observation.
+        let native=changed.notified();tokio::pin!(native);native.as_mut().enable();
+        let cleanup_scheduler=scheduler.clone();let cleanup_execution=execution_id.clone();
+        let cleanup=tokio::spawn(async move {cleanup_scheduler.reconcile_conversation_cleanup_strict(&cleanup_execution).await});
+        tokio::time::timeout(Duration::from_secs(1),async {while !effects.cleanup_started.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }}).await.unwrap();
+        assert!(native.as_mut().now_or_never().is_none(),"dispatching cleanup is not proof that native observation changed");
+        effects.cleanup_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1),native).await.expect("proven original cleanup wakes its observer without waiting for sparse fallback or another domain event");
+        cleanup.await.unwrap().unwrap();
+        assert_eq!(scheduler.detail(&owner,&execution_id).await.unwrap().execution.event_sequence,sequence,"native cleanup cannot append a second domain outcome");
+        assert!(repository.list_pending_conversation_cleanups(Some(&execution_id),None,100).await.unwrap().cleanups.is_empty());
+        assert_eq!(*effects.cancelled_targets.lock().unwrap(),[(attempt_id.clone(),format!("turn:user:{owner}:{session}:{attempt_id}:initial-turn"))]);
+        assert_eq!(runner.call_count("original-cancelled-work"),0,"an observation hint cannot replay the original business input");
+        scheduler.shutdown().await.unwrap();pool.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5511,6 +5988,138 @@ mod tests {
         effects.stop_release.notify_one();
         scheduler.shutdown().await.unwrap();
         pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn lost_queued_admission_receipt_preserves_frozen_input_and_reuses_the_same_attempt() {
+        for receipt_returned in [false,true] {
+            let runner=Arc::new(HarnessAttemptRunner::overlap_probe());
+            let (scheduler,repository,execution_id,_data_dir,owner)=make_scheduler_harness(
+                runner.clone(), &["original"], &[], 1, AdaptationPolicy::Fixed, None).await;
+            let detail=scheduler.detail(&owner,&execution_id).await.unwrap();
+            let step=&detail.steps[0];let participant=&detail.participants[0];
+            let config=json!({"participant_id":participant.participant_id,"provider_id":participant.provider_id,
+                "model":participant.model,"role":step.role,"tool_policy":step.tool_policy,
+                "delegation_policy":detail.execution.delegation_policy,"decision_policy":detail.execution.decision_policy,
+                "timeout_ms":scheduler.inner.deps.attempt_timeout.as_millis(),"session_kind":"attempt"});
+            let created=repository.create_attempt(&owner,&execution_id,&step.step_id,step.version,None,
+                &CreateAgentExecutionAttemptParams{participant_id:step.assigned_participant_id.clone(),start_immediately:false,
+                    trigger_reason:"initial".into(),effective_config:config.to_string(),retry_after:None,
+                    runtime_state:Some(AttemptConversationEffects {pending_conversation_effects:vec![PendingConversationEffect::InitialInput {
+                        request:json!({"content":step.spec,"files":[],"inject_skills":[],"hidden":false,"origin":"agent_execution","channel_platform":null})
+                    }],review_blocked:None}.encode().unwrap())},
+                &system_event(AgentExecutionEventKind::AttemptChanged,Some(&step.step_id),None,json!({"status":"queued"}))).await.unwrap();
+            let id=created.current_attempt.unwrap().attempt.attempt_id;
+            let current=scheduler.detail(&owner,&execution_id).await.unwrap();
+            let lease=AgentExecutionLeaseToken::new("lost-admission-receipt".into());
+            repository.try_acquire_lease(&execution_id,current.execution.version,lease.owner(),now_ms()+30_000).await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(5),scheduler.recover_failed_step(owner.clone(),execution_id.clone(),step.step_id.clone(),
+                step.version,receipt_returned.then(||id.clone()),lease,AppError::Timeout("lost original admission receipt".into()))).await.unwrap();
+            let after=scheduler.detail(&owner,&execution_id).await.unwrap();
+            assert_eq!(after.attempts.len(),1);
+            assert_eq!(after.attempts[0].attempt_id,id);
+            assert_eq!(runner.call_count("original"),1,"the returned sender never admitted an input; its exact retained reservation is invoked once");
+            assert_eq!(after.steps[0].status,ExecutionStepStatus::Completed);
+            assert_eq!(after.attempts[0].status,ExecutionAttemptStatus::Completed);
+            scheduler.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_prelink_admission_failure_retains_attempt_zero_and_original_job_until_delivery() {
+        for error in [AppError::DatabaseUnavailable {reason:nomifun_common::DatabaseUnavailableReason::Busy},
+            AppError::ExecutionAdmissionPending] {
+            let attempts=Arc::new(Mutex::new(Vec::new()));
+            let mut mode=HarnessAttemptRunner::overlap_probe();
+            mode.mode=HarnessRunnerMode::PrelinkAdmissionPending {error:Arc::new(Mutex::new(Some(error))),attempts:attempts.clone()};
+            let runner=Arc::new(mode);
+            let (scheduler,repository,execution_id,_data_dir,owner)=make_scheduler_harness(
+                runner.clone(),&["original"],&[],1,AdaptationPolicy::Fixed,None).await;
+            scheduler.start(owner.clone(),execution_id.clone());
+            let done=tokio::time::timeout(Duration::from_secs(5),async {loop {
+                let detail=scheduler.detail(&owner,&execution_id).await.unwrap();
+                assert!(!matches!(detail.execution.status,AgentExecutionStatus::Failed|AgentExecutionStatus::Cancelled),
+                    "a pending original admission is not an Agent failure");
+                if detail.execution.status==AgentExecutionStatus::Completed {break detail;}
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }}).await.expect("the same tracked job resumes the original pending input without business retry");
+            assert_eq!(done.attempts.len(),1);
+            assert_eq!(done.attempts[0].attempt_no,0);
+            assert_eq!(done.attempts[0].status,ExecutionAttemptStatus::Completed);
+            assert_eq!(done.steps[0].status,ExecutionStepStatus::Completed);
+            assert_eq!(*attempts.lock().unwrap(),vec![done.attempts[0].attempt_id.clone();2],
+                "preparation reuses the exact original reservation rather than creating a retry Attempt");
+            assert_eq!(runner.call_count("original"),1);
+            let events=repository.list_events(&owner,&execution_id,0,500).await.unwrap();
+            assert!(events.iter().all(|event| {
+                let payload:serde_json::Value=serde_json::from_str(&event.payload).unwrap();
+                payload["attempt_status"]!="cancelled"&&payload["step_status"]!="failed"
+            }));
+            scheduler.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn later_permanent_link_refusal_replaces_a_temporary_preparation_observation_without_retrying_business() {
+        let runner=Arc::new(HarnessAttemptRunner::overlap_probe());
+        let (scheduler,repository,execution_id,_data_dir,owner)=make_scheduler_harness(
+            runner.clone(),&["original"],&[],1,AdaptationPolicy::Fixed,None).await;
+        scheduler.inner.initial_link_errors.lock().unwrap().extend([
+            AppError::DatabaseUnavailable {reason:nomifun_common::DatabaseUnavailableReason::Busy},
+            AppError::BadRequest("original prepared input is permanently invalid".into()),
+        ]);
+        scheduler.start(owner.clone(),execution_id.clone());
+        let done=tokio::time::timeout(Duration::from_secs(5),async {loop {
+            let detail=scheduler.detail(&owner,&execution_id).await.unwrap();
+            if detail.execution.status.is_terminal() {break detail;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.expect("a permanent original preparation refusal must not retry forever under the first Busy classification");
+        assert_eq!(done.execution.status,AgentExecutionStatus::Failed);
+        assert_eq!(done.attempts.len(),1);
+        assert_eq!(done.attempts[0].attempt_no,0);
+        assert_eq!(done.steps[0].status,ExecutionStepStatus::Failed);
+        assert!(done.attempts[0].error.as_deref().is_some_and(|error|error.contains("original prepared input is permanently invalid")),
+            "the final receipt preserves the later permanent refusal, not the earlier Busy");
+        assert_eq!(runner.call_count("original"),0);
+        assert!(scheduler.inner.initial_link_errors.lock().unwrap().is_empty());
+        assert!(repository.list_conversation_links(&owner,&execution_id).await.unwrap().is_empty(),
+            "the refusal happened before the original link/input ACK");
+        scheduler.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn one_receipt_failure_and_a_waiting_sibling_do_not_block_an_independent_ready_step() {
+        let waiting_started=Arc::new(AtomicBool::new(false));let ready_started=Arc::new(AtomicBool::new(false));
+        let release=Arc::new(Notify::new());
+        let mut mode=HarnessAttemptRunner::overlap_probe();
+        mode.mode=HarnessRunnerMode::LocalReceiptRecovery {waiting_started:waiting_started.clone(),ready_started:ready_started.clone(),
+            release:release.clone(),receipts:Default::default()};
+        let runner=Arc::new(mode);
+        let (scheduler,repository,execution_id,_data_dir,owner)=make_scheduler_harness(
+            runner.clone(),&["fault","waiting","ready"],&[],2,AdaptationPolicy::Fixed,None).await;
+        scheduler.start(owner.clone(),execution_id.clone());
+        let before_release=tokio::time::timeout(Duration::from_secs(8),async {loop {
+            let detail=scheduler.detail(&owner,&execution_id).await.unwrap();
+            if ["ready","fault"].iter().all(|title|detail.steps.iter().any(|step|step.title==*title&&step.status==ExecutionStepStatus::Completed)) {break detail;}
+            assert!(!matches!(detail.execution.status,AgentExecutionStatus::Failed|AgentExecutionStatus::Cancelled));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.expect("an unrelated waiting owner cannot become a global error-drain barrier");
+        assert!(waiting_started.load(Ordering::SeqCst)&&ready_started.load(Ordering::SeqCst));
+        assert_eq!(before_release.steps.iter().find(|step|step.title=="waiting").unwrap().status,ExecutionStepStatus::Running);
+        assert_eq!(before_release.steps.iter().find(|step|step.title=="fault").unwrap().status,ExecutionStepStatus::Completed);
+        assert_eq!(before_release.attempts.len(),3);
+        assert_eq!(runner.call_count("fault"),1);
+        assert_eq!(runner.call_count("waiting"),1);
+        assert_eq!(runner.call_count("ready"),1);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(8),async {loop {
+            let detail=scheduler.detail(&owner,&execution_id).await.unwrap();
+            if detail.execution.status==AgentExecutionStatus::Completed {assert_eq!(detail.attempts.len(),3);break;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }}).await.unwrap();
+        let events=repository.list_events(&owner,&execution_id,0,500).await.unwrap();
+        assert!(events.iter().any(|event|serde_json::from_str::<serde_json::Value>(&event.payload).unwrap()["reconciliation"]=="initial_turn_receipt"));
+        scheduler.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -5577,8 +6186,7 @@ mod tests {
         }
         assert_eq!(runner.call_count("original"), 0, "recovery cannot execute the Step again");
         release.notify_one();
-        let (finished_step, outcome) = next.await.unwrap();
-        outcome.unwrap();
+        let finished_step = next.await.unwrap();
         assert_eq!(finished_step, step_id);
         let detail = scheduler.detail(&owner, &execution_id).await.unwrap();
         assert_eq!(detail.attempts.len(), 1);
@@ -5674,7 +6282,7 @@ mod tests {
         let step = detail.steps.iter().find(|step| step.title == "decision-step").unwrap();
         let pending = AttemptConversationEffects {
             pending_conversation_effects: vec![PendingConversationEffect::DecisionInput {
-                operation_id: "decision-answer".into(), content: "continue".into(),
+                operation_id: "decision-answer".into(), content: "continue".into(),parent_reply:None,
             }],
             ..Default::default()
         };
@@ -5699,7 +6307,7 @@ mod tests {
         repository.start_attempt(
             &owner, &execution_id, &step.step_id, created.step.version,
             &attempt.attempt_id, attempt.version, &conversation_id,
-            AgentExecutionAttemptSessionKind::ChildAttempt, None,
+            AgentExecutionAttemptSessionKind::ChildAttempt, None, None,
             &system_event(AgentExecutionEventKind::AttemptChanged, Some(&step.step_id), Some(&attempt.attempt_id), json!({})),
         ).await.unwrap();
         scheduler.start(owner.clone(), execution_id.clone());
@@ -5725,6 +6333,8 @@ mod tests {
         let decision = current.attempts.iter().find(|attempt| attempt.step_id == step.step_id).unwrap();
         assert_eq!(decision.status, ExecutionAttemptStatus::Running);
         assert!(decision.runtime_state.is_some(), "cancellation must retain the durable continuation identity");
+        assert_eq!(serde_json::from_value::<AttemptConversationEffects>(decision.runtime_state.clone().unwrap()).unwrap(),pending,
+            "shutdown cannot acknowledge, rewrite, or discard the original continuation outbox");
         pool.close().await;
     }
 
@@ -6262,13 +6872,13 @@ mod tests {
         let (old_cancel,_old_receiver)=watch::channel(false);
         scheduler.inner.active.insert(execution_id.clone(),ActiveHandle {
             generation:"captured-generation".into(),cancel:old_cancel,wake:Arc::new(Notify::new()),
-            restart_requested:false,lease:None,
+            restart_requested:false,lease:None,task_owner:std::sync::Weak::new(),
         });
         let captured=scheduler.generation(&execution_id).unwrap();
         let (successor_cancel,successor_receiver)=watch::channel(false);
         scheduler.inner.active.insert(execution_id.clone(),ActiveHandle {
             generation:"successor-generation".into(),cancel:successor_cancel,wake:Arc::new(Notify::new()),
-            restart_requested:false,lease:None,
+            restart_requested:false,lease:None,task_owner:std::sync::Weak::new(),
         });
         scheduler.stop_generation(&execution_id,&captured);
         assert!(!*successor_receiver.borrow(),"an earlier cancellation cannot signal the replacement scheduler");
@@ -6677,4 +7287,199 @@ mod tests {
             "manual start should wake the retry loop instead of waiting for backoff"
         );
     }
+
+    #[tokio::test]
+    async fn borrowed_job_counterexample_and_tracked_job_survive_a_real_sqlite_commit_without_a_polling_observer() {
+        let runner=Arc::new(HarnessAttemptRunner::overlap_probe());
+        let (scheduler,_repository,execution,_directory,owner)=make_scheduler_harness(
+            runner.clone(),&["probe"],&[],1,AdaptationPolicy::Fixed,None).await;
+        let pool=runner.pool.lock().unwrap().clone().unwrap();
+        sqlx::query("CREATE TABLE owner_poll_probe(id INTEGER PRIMARY KEY)").execute(&pool).await.unwrap();
+        let step=scheduler.detail(&owner,&execution).await.unwrap().steps[0].step_id.clone();
+        // Reproduce the original ownership shape with a real SQLite commit:
+        // native I/O finishes, but the sole borrowed caller is no longer polled.
+        let mut writer=pool.begin().await.unwrap();
+        sqlx::query("INSERT INTO owner_poll_probe VALUES(0)").execute(&mut *writer).await.unwrap();
+        let (started,ready)=tokio::sync::oneshot::channel();
+        let (committed,receipt)=tokio::sync::oneshot::channel();
+        let db=pool.clone();
+        let original_io=tokio::spawn(async move {let _=started.send(());
+            sqlx::query("INSERT INTO owner_poll_probe VALUES(1)").execute(&db).await.unwrap();let _=committed.send(());});
+        ready.await.unwrap();
+        let old_done=Arc::new(AtomicBool::new(false));let done=old_done.clone();
+        let mut borrowed=ScheduledAgentJobs::new();
+        borrowed.push(async move {original_io.await.unwrap();done.store(true,Ordering::SeqCst);"borrowed".into()}.boxed());
+        assert!(borrowed.next().now_or_never().is_none());
+        writer.commit().await.unwrap();receipt.await.unwrap();
+        assert!(!old_done.load(Ordering::SeqCst),"a committed native result cannot advance an unpolled borrowed business future");
+        assert_eq!(borrowed.next().await.as_deref(),Some("borrowed"));
+        assert!(old_done.load(Ordering::SeqCst));
+
+        let mut writer=pool.begin().await.unwrap();
+        sqlx::query("INSERT INTO owner_poll_probe VALUES(2)").execute(&mut *writer).await.unwrap();
+        let db=pool.clone();let (started,ready)=tokio::sync::oneshot::channel();
+        let original_io=tokio::spawn(async move {let _=started.send(());
+            sqlx::query("INSERT INTO owner_poll_probe VALUES(3)").execute(&db).await.unwrap();});
+        ready.await.unwrap();
+        let (owned_done,done)=tokio::sync::oneshot::channel();
+        let returned_step=step.clone();let mut notifications=ScheduledAgentJobs::new();
+        scheduler.retain_step_job(execution.clone(),step.clone(),0,None,AgentExecutionLeaseToken::new("probe-original-owner".into()),
+            &mut notifications,async move {original_io.await.unwrap();let _=owned_done.send(());returned_step}.boxed());
+        assert!(scheduler.has_step_job(&execution,&step,None,None));
+        drop(notifications);
+        writer.commit().await.unwrap();done.await.unwrap();
+        while scheduler.has_step_job(&execution,&step,None,None) {tokio::task::yield_now().await;}
+        let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM owner_poll_probe").fetch_one(&pool).await.unwrap();
+        assert_eq!(count,4);assert_eq!(runner.call_count("probe"),0,"a registry notification cannot start a business invocation");
+        scheduler.shutdown().await.unwrap();pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn linking_and_attempt_settlement_do_not_wait_for_unrelated_outbox_publication() {
+        let runner=Arc::new(HarnessAttemptRunner::overlap_probe());
+        let (scheduler,repository,execution,_directory,owner)=make_scheduler_harness(
+            runner.clone(),&["input-handoff"],&[],1,AdaptationPolicy::Fixed,None).await;
+        let detail=scheduler.detail(&owner,&execution).await.unwrap();let step=detail.steps[0].clone();
+        let lease=AgentExecutionLeaseToken::new("blocked-publication-original-sender".into());
+        repository.try_acquire_lease(&execution,detail.execution.version,lease.owner(),now_ms()+LEASE_DURATION_MS).await.unwrap().unwrap();
+        let blocked=scheduler.inner.deps.publisher.hold_drain_for_test().await;
+        tokio::time::timeout(Duration::from_secs(3),scheduler.execute_agent_step(&owner,&execution,step,&lease))
+            .await.expect("the real original sender must not wait for the publisher's unrelated drain gate").unwrap();
+        let detail=scheduler.detail(&owner,&execution).await.unwrap();
+        assert_eq!(detail.attempts.len(),1);assert_eq!(detail.attempts[0].status,ExecutionAttemptStatus::Completed);
+        assert_eq!(runner.call_count("input-handoff"),1);
+        assert!(!repository.list_unpublished_events(100).await.unwrap().is_empty(),"business ACK precedes independent durable publication");
+        drop(blocked);scheduler.inner.deps.publisher.drain(repository.clone()).await;
+        assert!(repository.list_unpublished_events(100).await.unwrap().is_empty());
+        scheduler.shutdown().await.unwrap();runner.pool.lock().unwrap().clone().unwrap().close().await;
+    }
+
+    #[tokio::test]
+    async fn busy_lease_renewal_keeps_original_owner_unconfirmed_until_the_writer_can_be_observed() {
+        let runner=Arc::new(HarnessAttemptRunner::overlap_probe());
+        let (scheduler,repository,execution,_directory,principal)=make_scheduler_harness(
+            runner.clone(),&["lease-probe"],&[],1,AdaptationPolicy::Fixed,None).await;
+        let pool=runner.pool.lock().unwrap().clone().unwrap();
+        let row=repository.get_execution(&principal,&execution).await.unwrap().unwrap();
+        let owner="lease-probe-original".to_owned();let expiration=now_ms()+LEASE_DURATION_MS;
+        repository.try_acquire_lease(&execution,row.version,&owner,expiration).await.unwrap().unwrap();
+        let mut writer=pool.begin().await.unwrap();
+        sqlx::query("UPDATE agent_executions SET updated_at=updated_at WHERE execution_id=?").bind(&execution)
+            .execute(&mut *writer).await.unwrap();
+        let (stop,stopped)=watch::channel(false);let (state,mut observation)=watch::channel(LeaseObservation::Confirmed);
+        let heartbeat=scheduler.spawn_lease_heartbeat(principal.clone(),execution.clone(),owner.clone(),
+            Arc::new(AtomicI64::new(expiration)),stopped,state);
+        tokio::time::timeout(LEASE_RENEW_INTERVAL+Duration::from_secs(10),observation.changed()).await.unwrap().unwrap();
+        assert_ne!(*observation.borrow(),LeaseObservation::Fenced,"a real SQLite Busy does not prove a replacement owner");
+        assert!(!heartbeat.is_finished(),"the heartbeat must retain its original lease confirmation duty");
+        writer.commit().await.unwrap();
+        let _=stop.send(true);heartbeat.await.unwrap();
+        let row=repository.get_execution(&principal,&execution).await.unwrap().unwrap();
+        assert_eq!(row.lease_owner.as_deref(),Some(owner.as_str()));
+        assert!(row.lease_expires_at.unwrap()>=expiration);
+        scheduler.shutdown().await.unwrap();pool.close().await;
+    }
+
+
+    #[tokio::test]
+    async fn original_job_registration_covers_the_committed_queued_attempt_before_its_reply_is_bound() {
+        let runner=Arc::new(HarnessAttemptRunner::overlap_probe());
+        let (scheduler,repository,execution,_directory,owner)=make_scheduler_harness(
+            runner.clone(),&["queued-bind-window"],&[],1,AdaptationPolicy::Fixed,None).await;
+        let row=scheduler.detail(&owner,&execution).await.unwrap();let step=row.steps[0].clone();
+        let (release,held)=tokio::sync::oneshot::channel();let mut notifications=ScheduledAgentJobs::new();
+        let returned=step.step_id.clone();
+        scheduler.retain_step_job(execution.clone(),step.step_id.clone(),step.version,None,AgentExecutionLeaseToken::new("registered-before-queued".into()),
+            &mut notifications,async move {let _=held.await;returned}.boxed());
+        let created=repository.create_attempt(&owner,&execution,&step.step_id,step.version,None,
+            &CreateAgentExecutionAttemptParams {participant_id:step.assigned_participant_id.clone(),start_immediately:false,
+                trigger_reason:"initial".into(),effective_config:"{}".into(),retry_after:None,runtime_state:None},
+            &system_event(AgentExecutionEventKind::AttemptChanged,Some(&step.step_id),None,json!({"status":"queued"}))).await.unwrap();
+        let original=&created.current_attempt.as_ref().unwrap().attempt;
+        assert_eq!(created.step.version,step.version+1);
+        assert!(scheduler.has_step_job(&execution,&step.step_id,Some(&original.attempt_id),Some(created.step.version)),
+            "the original unique create CAS proves the current queued receipt before bind ACK returns");
+        assert!(!scheduler.has_step_job(&execution,&step.step_id,Some(&original.attempt_id),Some(created.step.version+1)));
+        scheduler.bind_step_job_attempt(&execution,&step.step_id,&original.attempt_id).unwrap();
+        assert!(!scheduler.has_step_job(&execution,&step.step_id,Some("foreign-attempt"),Some(created.step.version)));
+        assert!(scheduler.has_step_job(&execution,&step.step_id,Some(&original.attempt_id),Some(created.step.version)));
+        repository.cancel_step(&owner,&execution,repository.get_execution(&owner,&execution).await.unwrap().unwrap().version,
+            &step.step_id,created.step.version,nomifun_common::AgentExecutionCancellationScope::Task,
+            &NewAgentExecutionEvent {event_type:AgentExecutionEventKind::StepChanged,step_id:Some(step.step_id.clone()),attempt_id:None,
+                actor:nomifun_common::AgentExecutionActor::user(&owner),payload:"{}".into()}).await.unwrap();
+        let _=release.send(());assert_eq!(notifications.next().await.as_deref(),Some(step.step_id.as_str()));
+        assert!(!scheduler.has_step_job(&execution,&step.step_id,None,None));
+        scheduler.shutdown().await.unwrap();let pool=runner.pool.lock().unwrap().clone().unwrap();pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_committed_lease_renewal_with_a_lost_reply_is_confirmed_under_its_original_owner() {
+        let runner=Arc::new(HarnessAttemptRunner::overlap_probe());
+        let (scheduler,repository,execution,_directory,principal)=make_scheduler_harness(
+            runner.clone(),&["lease-ack"],&[],1,AdaptationPolicy::Fixed,None).await;
+        let row=repository.get_execution(&principal,&execution).await.unwrap().unwrap();
+        let owner="original-lease-ack".to_owned();let original=now_ms()+LEASE_DURATION_MS;
+        repository.try_acquire_lease(&execution,row.version,&owner,original).await.unwrap().unwrap();
+        let actual=original+1000;
+        repository.renew_lease(&execution,&owner,original,actual).await.unwrap().unwrap();
+        let expiry=Arc::new(AtomicI64::new(original));let (stop,stopped)=watch::channel(false);
+        let (state,mut observed)=watch::channel(LeaseObservation::Confirmed);
+        let heartbeat=scheduler.spawn_lease_heartbeat(principal.clone(),execution.clone(),owner.clone(),expiry.clone(),stopped,state);
+        tokio::time::timeout(LEASE_RENEW_INTERVAL+Duration::from_secs(10),observed.changed()).await.unwrap().unwrap();
+        while *observed.borrow()==LeaseObservation::Unconfirmed {observed.changed().await.unwrap();}
+        assert_eq!(*observed.borrow(),LeaseObservation::Confirmed);
+        assert_eq!(expiry.load(Ordering::SeqCst),actual,"CAS None may be the original commit's lost ACK");
+        assert!(!heartbeat.is_finished());let _=stop.send(true);heartbeat.await.unwrap();
+        scheduler.shutdown().await.unwrap();let pool=runner.pool.lock().unwrap().clone().unwrap();pool.close().await;
+    }
+
+
+    #[tokio::test]
+    async fn paused_takeover_without_local_observers_parks_and_keeps_the_original_job_settling() {
+        let runner=Arc::new(HarnessAttemptRunner::steered_turn());
+        let HarnessRunnerMode::SteeredTurn {started,release}=&runner.mode else {unreachable!()};
+        let started=started.clone();let release=release.clone();
+        let (scheduler,repository,execution,_directory,owner)=make_scheduler_harness(
+            runner.clone(),&["paused-original"],&[],1,AdaptationPolicy::Fixed,None).await;
+        scheduler.start(owner.clone(),execution.clone());
+        tokio::time::timeout(Duration::from_secs(3),async {while !started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }}).await.unwrap();
+        let original=scheduler.detail(&owner,&execution).await.unwrap();
+        let attempt=original.attempts[0].clone();let step=original.steps[0].clone();
+        let generation=scheduler.generation(&execution).unwrap();
+        let original_lease=scheduler.lease_token(&execution).unwrap();
+        repository.pause_execution(&owner,&execution,original.execution.version,
+            &system_event(AgentExecutionEventKind::StatusChanged,None,None,json!({"status":"paused"}))).await.unwrap();
+        // Lose the old generation's FU observers, while its real lifecycle
+        // task still awaits the original runner. The successor adopts that
+        // task and necessarily starts with an empty notification collection.
+        scheduler.stop_generation(&execution,&generation);
+        scheduler.start(owner.clone(),execution.clone());
+        tokio::time::timeout(Duration::from_secs(3),async {loop {
+            if scheduler.generation(&execution).as_deref()!=Some(generation.as_str())
+                &&scheduler.inner.observerless_paused_polls.load(Ordering::SeqCst)>0 {break;}
+            tokio::task::yield_now().await;
+        }}).await.expect("the new generation must reach the paused branch without original FU observers");
+        let successor=scheduler.lease_token(&execution).unwrap();
+        assert_ne!(successor.owner(),original_lease.owner());
+        assert!(scheduler.has_step_job(&execution,&step.step_id,Some(&attempt.attempt_id),Some(step.version)));
+        let polls=scheduler.inner.observerless_paused_polls.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(scheduler.inner.observerless_paused_polls.load(Ordering::SeqCst),polls,
+            "an empty FU is not a ready event: paused takeover must not repeat canonical reads");
+        assert_eq!(runner.call_count("paused-original"),1);
+        release.notify_one();
+        let settled=tokio::time::timeout(Duration::from_secs(3),async {loop {
+            let detail=scheduler.detail(&owner,&execution).await.unwrap();
+            if detail.attempts[0].status==ExecutionAttemptStatus::Completed {break detail;}
+            tokio::task::yield_now().await;
+        }}).await.expect("the original task must settle despite its vanished observation future");
+        assert_eq!(settled.execution.status,AgentExecutionStatus::Paused,"takeover must preserve the user's dispatch pause");
+        assert_eq!(settled.attempts.len(),1);assert_eq!(settled.attempts[0].attempt_id,attempt.attempt_id);
+        assert_eq!(settled.steps[0].status,ExecutionStepStatus::Completed);
+        assert_eq!(runner.call_count("paused-original"),1);
+        scheduler.shutdown().await.unwrap();let pool=runner.pool.lock().unwrap().clone().unwrap();pool.close().await;
+    }
+
 }

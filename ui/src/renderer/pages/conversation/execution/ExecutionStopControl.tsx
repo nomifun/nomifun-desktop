@@ -17,8 +17,9 @@ const ExecutionStopControl: React.FC<{
   refetch: () => Promise<void>;
   disabled?: boolean;
   onBusyChange?: (busy: boolean) => void;
+  onAccepted?: () => void;
   automationControl?: TExecutionAutomationControl | null;
-}> = ({ executionId, executionVersion, status, refetch, disabled = false, onBusyChange, automationControl }) => {
+}> = ({ executionId, executionVersion, status, refetch, disabled = false, onBusyChange, onAccepted, automationControl }) => {
   const { t } = useTranslation();
   const [message, messageContext] = useArcoMessage();
   const [stopping, setStopping] = useState(false);
@@ -42,6 +43,7 @@ const ExecutionStopControl: React.FC<{
         throw new Error('Cancellation did not return the stopped collaboration');
       }
       setConfirmedCancelledId(executionId);
+      onAccepted?.();
       message.success(t('agentExecution.controls.cancelOk'));
       try {
         await refetch();

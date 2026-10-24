@@ -1112,7 +1112,7 @@ async fn channel_guest_active_or_unknown_effect_sessions_cannot_adopt_a_narrower
                         producer_id: "runtime_supervisor".into(),
                         causation_event_id: Some(effect_started),
                         payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(
-                            json!({"recovery":"process_restart_external_reconciliation_required"}),
+                            json!({"recovery":"native_recovery_external_reconciliation_required"}),
                         )),
                         ..effect
                     },

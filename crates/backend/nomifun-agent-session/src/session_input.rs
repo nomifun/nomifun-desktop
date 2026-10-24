@@ -501,13 +501,13 @@ impl AgentSessionStore {
             return Err(SessionStoreError::InvalidPayload("invalid permanent Session input envelope".into()));
         }
         let key=command_key(owner,session,&key)?;
-        let mut tx=self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let live=live_session_by_id_tx(&mut tx,session.as_ref()).await?;
         if live.owner_ref!=*owner {return Err(SessionStoreError::ExecutionFenced);}
         if let Some(row)=event_by_producer_key_tx(&mut tx,producer.as_ref(),key.as_ref()).await? {
             let record=event_from_row(row)?;let accepted=accepted_input_tx(&mut tx,session,&record.event_id).await?;
             if accepted.input!=input {return Err(SessionStoreError::IdempotencyConflict("Session input key was reused with different content".into()));}
-            let ack=event_ack(&record);tx.commit().await?;
+            let ack=event_ack(&record);db_write_observation.commit(tx).await?;
             return Ok(SessionEventAppendResult {record:Some(record),ack:Some(ack.clone()),cursor:ack.cursor,persisted:true,duplicate:true});
         }
         session_input_queue::validate_delivery_envelope_tx(&mut tx,session,&input.0).await?;
@@ -528,7 +528,7 @@ impl AgentSessionStore {
         let event=SessionEventAppend {agent_session_id:session.clone(),event_id:id.clone(),producer_id:producer,idempotency_key:key,
             semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {kind:SessionEventKind("message/user-accepted".into()),kind_version:1,
                 correlation_id:CorrelationId::from(id.as_ref()),causation_event_id:Some(cause),payload:SessionEventPayloadRef::InlineJson(input)}};
-        let result=self.append_event_tx(&mut tx,&event,None).await?;tx.commit().await?;Ok(result)
+        let result=self.append_event_tx(&mut tx,&event,None).await?;db_write_observation.commit(tx).await?;Ok(result)
     }
 
     /// Filter persistent delivery eligibility before bounding a dispatch batch.
@@ -561,19 +561,19 @@ impl AgentSessionStore {
 
     pub async fn try_claim_session_input_as_turn(&self,owner:&PrincipalRef,session:&AgentSessionId,input:&EventId,operation:&OperationId,
         admission:StrictJsonValue)->Result<Option<SessionEventAppendResult>,SessionStoreError> {
-        let mut tx=self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if live_session_by_id_tx(&mut tx,session.as_ref()).await?.owner_ref!=*owner {return Err(SessionStoreError::ExecutionFenced);}
         let accepted=accepted_input_tx(&mut tx,session,input).await?;
         session_input_queue::validate_selected_replacement_tx(&mut tx,session,input).await?;
-        if cancelled_input_tx(&mut tx,&accepted.event).await?.is_some() {tx.commit().await?;return Ok(None);}
+        if cancelled_input_tx(&mut tx,&accepted.event).await?.is_some() {db_write_observation.commit(tx).await?;return Ok(None);}
         let queue=session_input_queue::queue_state_tx(&mut tx,session).await?;
-        if queue.held(&accepted)? {tx.commit().await?;return Ok(None);}
+        if queue.held(&accepted)? {db_write_observation.commit(tx).await?;return Ok(None);}
         let floor:i64=sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=? AND kind='context/cleared'")
             .bind(session.as_ref()).fetch_one(&mut *tx).await?;
-        if accepted.event.seq<=as_u64(floor,"input context floor")? {tx.commit().await?;return Ok(None);}
-        if input_claimed_tx(&mut tx,session,input).await? {tx.commit().await?;return Ok(None);}
+        if accepted.event.seq<=as_u64(floor,"input context floor")? {db_write_observation.commit(tx).await?;return Ok(None);}
+        if input_claimed_tx(&mut tx,session,input).await? {db_write_observation.commit(tx).await?;return Ok(None);}
         let head=head_by_id_tx(&mut tx,session.as_ref()).await?;
-        if head.status!="ready" || head.active_turn_id.is_some() {tx.commit().await?;return Ok(None);}
+        if head.status!="ready" || head.active_turn_id.is_some() {db_write_observation.commit(tx).await?;return Ok(None);}
         let unsettled:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_effects WHERE session_id=? AND state IN ('pending','unknown'))")
             .bind(session.as_ref()).fetch_one(&mut *tx).await?;
         if unsettled {return Err(SessionStoreError::RecoveryRequiresReconciliation);}
@@ -583,7 +583,7 @@ impl AgentSessionStore {
                 if !queue.held(&candidate)? {eligible.push(candidate);}
             }
             queue.sort(&mut eligible)?;
-            if eligible.first().is_none_or(|candidate|candidate.event.event_id!=*input) {tx.commit().await?;return Ok(None);}
+            if eligible.first().is_none_or(|candidate|candidate.event.event_id!=*input) {db_write_observation.commit(tx).await?;return Ok(None);}
         }
         let mut payload=json!({"operation_id":operation,"source_message_id":input,"admission":admission});
         for field in ["route_identity","resolved_snapshot_ref"] {if let Some(value)=admission.0.get(field) {payload[field]=value.clone();}}
@@ -591,7 +591,7 @@ impl AgentSessionStore {
             idempotency_key:format!("session-input-claim:{}",input.as_ref()).into(),semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {
                 kind:SessionEventKind("turn/started".into()),kind_version:1,correlation_id:CorrelationId::from(operation.as_ref()),
                 causation_event_id:Some(accepted.event.event_id),payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(payload))}};
-        let result=self.append_event_tx(&mut tx,&event,None).await?;tx.commit().await?;Ok(Some(result))
+        let result=self.append_event_tx(&mut tx,&event,None).await?;db_write_observation.commit(tx).await?;Ok(Some(result))
     }
 
     pub async fn claim_session_input_as_steering(&self,owner:&PrincipalRef,session:&AgentSessionId,input:&EventId,target:&OperationId)
@@ -602,19 +602,19 @@ impl AgentSessionStore {
 
     pub async fn try_claim_session_input_as_steering(&self,owner:&PrincipalRef,session:&AgentSessionId,input:&EventId,target:&OperationId)
         ->Result<Option<SessionEventAppendResult>,SessionStoreError> {
-        let mut tx=self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         if live_session_by_id_tx(&mut tx,session.as_ref()).await?.owner_ref!=*owner {return Err(SessionStoreError::ExecutionFenced);}
         let accepted=accepted_input_tx(&mut tx,session,input).await?;
         session_input_queue::validate_selected_replacement_tx(&mut tx,session,input).await?;
-        if cancelled_input_tx(&mut tx,&accepted.event).await?.is_some() {tx.commit().await?;return Ok(None);}
+        if cancelled_input_tx(&mut tx,&accepted.event).await?.is_some() {db_write_observation.commit(tx).await?;return Ok(None);}
         let head=head_by_id_tx(&mut tx,session.as_ref()).await?;
-        if head.status!="running" || head.active_turn_id.as_deref()!=Some(target.as_ref()) {tx.commit().await?;return Ok(None);}
+        if head.status!="running" || head.active_turn_id.as_deref()!=Some(target.as_ref()) {db_write_observation.commit(tx).await?;return Ok(None);}
         let queue=session_input_queue::queue_state_tx(&mut tx,session).await?;
-        if !session_input_queue::steering_eligible_tx(&mut tx,session,&accepted,target,&queue).await? {tx.commit().await?;return Ok(None);}
+        if !session_input_queue::steering_eligible_tx(&mut tx,session,&accepted,target,&queue).await? {db_write_observation.commit(tx).await?;return Ok(None);}
         let floor:i64=sqlx::query_scalar("SELECT COALESCE(MAX(seq),0) FROM agent_events WHERE session_id=? AND kind='context/cleared'")
             .bind(session.as_ref()).fetch_one(&mut *tx).await?;
-        if accepted.event.seq<=as_u64(floor,"input context floor")? {tx.commit().await?;return Ok(None);}
-        if input_claimed_tx(&mut tx,session,input).await? {tx.commit().await?;return Ok(None);}
+        if accepted.event.seq<=as_u64(floor,"input context floor")? {db_write_observation.commit(tx).await?;return Ok(None);}
+        if input_claimed_tx(&mut tx,session,input).await? {db_write_observation.commit(tx).await?;return Ok(None);}
         let unknown:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_effects WHERE session_id=? AND state='unknown')")
             .bind(session.as_ref()).fetch_one(&mut *tx).await?;
         if unknown {return Err(SessionStoreError::RecoveryRequiresReconciliation);}
@@ -622,20 +622,20 @@ impl AgentSessionStore {
             idempotency_key:format!("session-input-claim:{}",input.as_ref()).into(),semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {
                 kind:SessionEventKind("turn/steer-accepted".into()),kind_version:2,correlation_id:CorrelationId::from(target.as_ref()),
                 causation_event_id:Some(input.clone()),payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"input_event_id":input,"target_operation_id":target})))}};
-        let result=self.append_event_tx(&mut tx,&event,None).await?;tx.commit().await?;Ok(Some(result))
+        let result=self.append_event_tx(&mut tx,&event,None).await?;db_write_observation.commit(tx).await?;Ok(Some(result))
     }
 
     pub async fn mark_session_input_blocked(&self,session:&AgentSessionId,input:&EventId,reason:SessionInputBlockedReason)
         ->Result<(),SessionStoreError> {
-        let mut tx=self.begin_write_transaction().await?;
+        let (mut tx, db_write_observation) = self.begin_write_transaction().await?;
         let accepted=accepted_input_tx(&mut tx,session,input).await?;
-        if cancelled_input_tx(&mut tx,&accepted.event).await?.is_some() {tx.commit().await?;return Ok(());}
-        if input_claimed_tx(&mut tx,session,input).await? {tx.commit().await?;return Ok(());}
+        if cancelled_input_tx(&mut tx,&accepted.event).await?.is_some() {db_write_observation.commit(tx).await?;return Ok(());}
+        if input_claimed_tx(&mut tx,session,input).await? {db_write_observation.commit(tx).await?;return Ok(());}
         let identity=format!("session-input-blocked:{}:{}",input.as_ref(),reason.identity());
         let event=SessionEventAppend {agent_session_id:session.clone(),event_id:identity.clone().into(),producer_id:"runtime_supervisor".into(),idempotency_key:identity.into(),
             semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {kind:SessionEventKind("message/input-blocked".into()),kind_version:1,
                 correlation_id:CorrelationId::from(input.as_ref()),causation_event_id:Some(input.clone()),
                 payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"input_event_id":input,"reason":reason})))}};
-        self.append_event_tx(&mut tx,&event,None).await?;tx.commit().await?;Ok(())
+        self.append_event_tx(&mut tx,&event,None).await?;db_write_observation.commit(tx).await?;Ok(())
     }
 }

@@ -46,6 +46,8 @@ mod live_input_queue;
 mod live_scheduled_tasks;
 #[path = "support/live_subagent.rs"]
 mod live_subagent;
+#[path = "support/live_subagent_eight.rs"]
+mod live_subagent_eight;
 
 #[cfg(all(feature = "browser-use", feature = "computer-use"))]
 #[path = "support/live_general_desktop.rs"]
@@ -89,6 +91,7 @@ struct LiveFixture {
 #[derive(Clone, Copy)]
 enum LiveCase {
     SubagentIntegration,
+    SubagentEightIntegration,
     ScheduledTasks,
     SelectedModel,
     WorkspaceFile,
@@ -3264,6 +3267,7 @@ fn live_case_future<'a>(case: LiveCase, router: &'a Router, api_key: &'a str,
 ) -> futures_util::future::LocalBoxFuture<'a, Result<(), SmokeFailure>> {
     match case {
         LiveCase::SubagentIntegration => live_subagent::run(router, api_key, model, root, work_dir).boxed_local(),
+        LiveCase::SubagentEightIntegration => live_subagent_eight::run(router, api_key, model, root, work_dir).boxed_local(),
         LiveCase::ScheduledTasks => live_scheduled_tasks::run(router, api_key, model, root, work_dir).boxed_local(),
         LiveCase::WorkspaceFile | LiveCase::CodingPreset | LiveCase::SnakeGame => run_live_workspace_file_chain(
             router, api_key, model, work_dir,
@@ -3284,16 +3288,32 @@ fn live_case_future<'a>(case: LiveCase, router: &'a Router, api_key: &'a str,
     }
 }
 
+fn retained_subagent_parent(path:&Path)->Result<std::path::PathBuf,SmokeFailure> {
+    let invalid=||SmokeFailure::new("bootstrap","NATIVE_FIXTURE_PARENT_INVALID",400);
+    let git=nomifun_common::paths::canonicalize_simplified(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../.git")).map_err(|_|invalid())?;
+    let parent=nomifun_common::paths::canonicalize_simplified(path).map_err(|_|invalid())?;
+    if !path.is_absolute()||!git.is_dir()||!parent.is_dir()||parent==git||!parent.starts_with(&git) {return Err(invalid());}
+    Ok(parent)
+}
+
+fn live_fixture_root(case:LiveCase)->Result<(TempDir,bool),SmokeFailure> {
+    let retain=std::env::var_os("NOMIFUN_LIVE_RETAIN_NATIVE_FIXTURE");
+    let result=if let Some(retain)=retain {
+        if retain!="1"||!matches!(case,LiveCase::SubagentIntegration|LiveCase::SubagentEightIntegration) {
+            return Err(SmokeFailure::new("bootstrap","NATIVE_FIXTURE_MODE_INVALID",400));
+        }
+        let parent=std::env::var_os("NOMIFUN_LIVE_FIXTURE_PARENT")
+            .ok_or_else(||SmokeFailure::new("bootstrap","NATIVE_FIXTURE_PARENT_INVALID",400))?;
+        let parent=retained_subagent_parent(Path::new(&parent))?;
+        tempfile::Builder::new().prefix("subagent-native-").tempdir_in(parent).map(|root|(root,true))
+    } else {tempfile::tempdir().map(|root|(root,false))};
+    result.map_err(|_|SmokeFailure::new("bootstrap","TEMP_ROOT_CREATE_FAILED",500))
+}
+
 async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
     let model = live_model()?;
     let api_key = required_secret_from_stdin()?;
-    let root = tempfile::tempdir().map_err(|_| {
-        SmokeFailure::new(
-            "bootstrap",
-            "TEMP_ROOT_CREATE_FAILED",
-            StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-        )
-    })?;
+    let (root,retain_native)=live_fixture_root(case)?;
     let local_proof = matches!(case, LiveCase::AppHosting | LiveCase::AppWorkspaceUiFixture).then(|| uuid::Uuid::new_v4().to_string());
     let fixture = build_fixture(&root, local_proof.as_deref()).await?;
     // Only the internal test driver receives a proof automatically. The actual
@@ -3378,6 +3398,15 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
     if let Some(proof) = local_proof {
         ensure_secret_not_persisted(root.path(), proof.as_bytes()).await?;
     }
+    // Retention is diagnostic only, after the real Host has closed and the
+    // existing plaintext credential audit has passed. The original failure
+    // remains a failure; its canonical facts and encrypted provider storage
+    // stay together inside this one disposable fixture.
+    if retain_native&&close_result.is_ok() {
+        let retained=root.keep();
+        eprintln!("NOMIFUN_LIVE_SMOKE_NATIVE_FIXTURE {}",json!({"fixture_root":retained,
+            "data_root":retained.join("data"),"work_root":retained.join("work")}));
+    }
     result?;
     close_result
 }
@@ -3395,6 +3424,15 @@ async fn nomi_core_scheduled_tasks_reach_live_stepfun() {
 #[ignore = "requires an authorized Step Plan credential on stdin; use the runner --subagent-smoke"]
 async fn nomi_core_subagent_integration_reaches_live_stepfun() {
     if let Err(error)=run_live_provider_smoke(LiveCase::SubagentIntegration).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {error}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an authorized Step Plan credential on stdin; use the runner --subagent-eight-smoke"]
+async fn nomi_core_eight_subagent_integration_reaches_live_stepfun() {
+    if let Err(error)=run_live_provider_smoke(LiveCase::SubagentEightIntegration).await {
         eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {error}");
         panic!("NOMIFUN_LIVE_SMOKE_FAILED");
     }
@@ -3548,6 +3586,16 @@ async fn nomi_core_general_desktop_reaches_live_stepfun() {
 #[cfg(test)]
 mod evidence_tests {
     use super::*;
+
+    #[test]
+    fn retained_subagent_fixture_parent_is_an_exact_isolated_repository_child() {
+        let git=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../.git");
+        let parent=tempfile::Builder::new().prefix("subagent-retention-self-test-").tempdir_in(&git).unwrap();
+        assert_eq!(retained_subagent_parent(parent.path()).unwrap(),nomifun_common::paths::canonicalize_simplified(parent.path()).unwrap());
+        assert!(retained_subagent_parent(&git).is_err());
+        assert!(retained_subagent_parent(Path::new(".")).is_err());
+        let outside=tempfile::tempdir().unwrap();assert!(retained_subagent_parent(outside.path()).is_err());
+    }
 
     #[test]
     fn live_driver_future_frames_are_bounded_without_larger_thread_stacks() {
