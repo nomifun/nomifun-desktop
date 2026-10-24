@@ -7,6 +7,13 @@ use crate::DbError;
 
 const AGENT_SELECTION_PREFERENCES: &[&str] = &["guid.defaultAgentSelection", "guid.agentSelection"];
 
+/// An explicit caller-owned migration stage, never inferred from missing
+/// columns. The baseline branch requires the clean-cut lineage/schema proof.
+pub(crate) enum CronResetSchema {
+    Current,
+    PreservedBaseline,
+}
+
 pub(crate) const RESET_ORDER: &[&str] = &[
     "agent_effects",
     "agent_turns",
@@ -69,13 +76,14 @@ pub struct AgentDataResetReport {
 /// drift or preservation mismatch aborts the transaction.
 pub async fn reset_agent_data(pool: &SqlitePool) -> Result<AgentDataResetReport, DbError> {
     let mut tx = pool.begin().await?;
-    let report = reset_agent_data_in_transaction(&mut tx).await?;
+    let report = reset_agent_data_in_transaction(&mut tx,CronResetSchema::Current).await?;
     tx.commit().await?;
     Ok(report)
 }
 
 pub(crate) async fn reset_agent_data_in_transaction(
     tx: &mut Transaction<'_, Sqlite>,
+    cron_schema: CronResetSchema,
 ) -> Result<AgentDataResetReport, DbError> {
     let manifest = agent_store_schema_manifest_payload();
     let reset_tables = manifest
@@ -175,9 +183,16 @@ pub(crate) async fn reset_agent_data_in_transaction(
         0
     };
     let cron_jobs_detached = if existing_tables.contains("cron_jobs") {
-        sqlx::query(
-            "UPDATE cron_jobs SET enabled=0,conversation_id=NULL,conversation_title=NULL,agent_selection=NULL,agent_binding=NULL,configuration_error='CRON_CONFIGURATION_RESELECTION_REQUIRED',next_run_at=NULL,schedule_revision=schedule_revision+1,last_run_at=NULL,last_run_id=NULL,last_status=NULL,last_error=NULL,run_count=0 WHERE conversation_id IS NOT NULL OR agent_binding IS NOT NULL OR agent_selection IS NOT NULL OR last_run_at IS NOT NULL OR last_run_id IS NOT NULL OR last_status IS NOT NULL OR last_error IS NOT NULL OR run_count<>0"
-        )
+        let sql=match cron_schema {
+            CronResetSchema::Current=>
+                "UPDATE cron_jobs SET enabled=0,conversation_id=NULL,conversation_title=NULL,agent_selection=NULL,agent_binding=NULL,configuration_error='CRON_CONFIGURATION_RESELECTION_REQUIRED',next_run_at=NULL,schedule_revision=schedule_revision+1,last_run_at=NULL,last_run_id=NULL,last_status=NULL,last_error=NULL,run_count=0 WHERE conversation_id IS NOT NULL OR agent_binding IS NOT NULL OR agent_selection IS NOT NULL OR last_run_at IS NOT NULL OR last_run_id IS NOT NULL OR last_status IS NOT NULL OR last_error IS NOT NULL OR run_count<>0",
+            // This runs before migration 012 adds canonical Cron bindings.
+            // Delete opaque retired Agent values without reading/converting
+            // them. The following forward migration records reselection.
+            CronResetSchema::PreservedBaseline=>
+                "UPDATE cron_jobs SET enabled=0,conversation_id=NULL,conversation_title=NULL,preset_id=NULL,preset_revision=NULL,agent_snapshot=NULL,agent_config=NULL,next_run_at=NULL,schedule_revision=schedule_revision+1,last_run_at=NULL,last_status=NULL,last_error=NULL,run_count=0,retry_count=0 WHERE enabled<>0 OR next_run_at IS NOT NULL OR conversation_id IS NOT NULL OR preset_id IS NOT NULL OR preset_revision IS NOT NULL OR agent_snapshot IS NOT NULL OR agent_config IS NOT NULL OR last_run_at IS NOT NULL OR last_status IS NOT NULL OR last_error IS NOT NULL OR run_count<>0 OR retry_count<>0",
+        };
+        sqlx::query(sql)
         .execute(&mut **tx)
         .await?
         .rows_affected()

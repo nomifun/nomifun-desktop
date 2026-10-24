@@ -8,7 +8,7 @@ use sqlx::{Connection, Row, SqliteConnection, SqlitePool, Transaction};
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
 use crate::DbError;
-use crate::agent_store_reset::{RESET_ORDER, reset_agent_data_in_transaction};
+use crate::agent_store_reset::{RESET_ORDER, CronResetSchema, reset_agent_data_in_transaction};
 
 // Published generation-6 receipts identify the only retired data generation
 // eligible for a clean cut. They authorize deletion, never data conversion.
@@ -121,7 +121,7 @@ pub(crate) async fn clean_cut_agent_store(conn: &mut SqliteConnection, migrator:
     let locked_generation: i64 = sqlx::query_scalar("SELECT data_generation FROM schema_metadata WHERE singleton_key='canonical'").fetch_one(&mut *tx).await?;
     if !exact_retired_receipts(&locked_rows, locked_generation) { return Err(DbError::Conflict("Agent clean-cut authority changed before the transaction".into())); }
     verify_preserved_schema(&mut tx, &definitions, &owned).await?;
-    reset_agent_data_in_transaction(&mut tx).await?;
+    reset_agent_data_in_transaction(&mut tx,CronResetSchema::PreservedBaseline).await?;
     for table in RESET_ORDER {
         sqlx::query(&format!("DROP TABLE {table}")).execute(&mut *tx).await?;
     }
@@ -162,6 +162,17 @@ mod tests {
 
     static MIGRATOR: Migrator = sqlx::migrate!();
     const SESSION: &str = "0190f5fe-7c00-7a00-8000-000000000211";
+    const CRON: &str = "0190f5fe-7c00-7a00-8000-000000000215";
+
+    async fn cron_definition(pool:&SqlitePool)->String {
+        sqlx::query_scalar("SELECT json_object('id',cron_job_id,'owner',user_id,'name',name,'kind',schedule_kind,'value',schedule_value,'tz',schedule_tz,'schedule_description',schedule_description,'message',payload_message,'mode',execution_mode,'created_by',created_by,'skill',skill_content,'description',description,'created_at',created_at,'updated_at',updated_at) FROM cron_jobs WHERE cron_job_id=?")
+            .bind(CRON).fetch_one(pool).await.unwrap()
+    }
+
+    async fn retired_cron_state(pool:&SqlitePool)->String {
+        sqlx::query_scalar("SELECT json_object('enabled',enabled,'session',conversation_id,'title',conversation_title,'preset',preset_id,'revision',preset_revision,'snapshot',agent_snapshot,'config',agent_config,'schedule_revision',schedule_revision,'next',next_run_at,'last',last_run_at,'status',last_status,'error',last_error,'runs',run_count,'retries',retry_count) FROM cron_jobs WHERE cron_job_id=?")
+            .bind(CRON).fetch_one(pool).await.unwrap()
+    }
 
     async fn retired_generation_fixture() -> TestDatabase {
         // The retired lineage predates forward product migrations. Build its
@@ -208,6 +219,8 @@ mod tests {
             .execute(pool).await.unwrap();
         sqlx::query("INSERT INTO knowledge_bases(knowledge_base_id,name,root_path,created_at,updated_at) VALUES ('0190f5fe-7c00-7a00-8000-000000000213','User knowledge','user knowledge root',1,1)")
             .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO cron_jobs(cron_job_id,user_id,name,enabled,schedule_kind,schedule_value,schedule_tz,schedule_description,payload_message,execution_mode,agent_config,preset_id,preset_revision,agent_snapshot,conversation_id,conversation_title,agent_type,created_by,skill_content,description,created_at,updated_at,next_run_at,last_run_at,last_status,last_error,run_count,retry_count,schedule_revision) VALUES(?,'0190f5fe-7c00-7a00-8000-000000000214','Preserved schedule',1,'every','60','Asia/Shanghai','Every minute','Original author request','existing','{\"retired_agent\":\"opaque\"}','0190f5fe-7c00-7a00-8000-000000000299',4,'opaque retired snapshot without a current JSON representation',?,'Old Session','nomi','user','Original skill','Original description',1,2,100,90,'ok','Old runtime detail',7,2,3)")
+            .bind(CRON).bind(SESSION).execute(pool).await.unwrap();
         database
     }
 
@@ -216,10 +229,16 @@ mod tests {
         let database = retired_generation_fixture().await;
         let pool = database.pool();
         let owner_before = crate::installation_owner_id(pool).await.unwrap();
+        let cron_before=cron_definition(pool).await;
         assert!(requires_agent_store_clean_cut(pool).await.unwrap());
         let mut conn = pool.acquire().await.unwrap();
         clean_cut_agent_store(&mut conn, &MIGRATOR).await.unwrap();
         drop(conn);
+        let cleared:(bool,Option<String>,Option<String>,Option<i64>,Option<String>,Option<String>,Option<i64>,i64,i64)=sqlx::query_as(
+            "SELECT enabled,conversation_id,preset_id,preset_revision,agent_snapshot,agent_config,next_run_at,run_count,retry_count FROM cron_jobs WHERE cron_job_id=?")
+            .bind(CRON).fetch_one(pool).await.unwrap();
+        assert_eq!(cleared,(false,None,None,None,None,None,None,0,0),"retired Agent values are removed before forward migrations can inspect them");
+        assert_eq!(cron_definition(pool).await,cron_before);
         let mut conn = pool.acquire().await.unwrap();
         sqlx::query("PRAGMA foreign_keys = OFF").execute(&mut *conn).await.unwrap();
         MIGRATOR.run(&mut *conn).await.unwrap();
@@ -252,6 +271,11 @@ mod tests {
         assert_eq!(old_choices, 0);
         assert_eq!(credential, "encrypted user credential");
         assert_eq!(knowledge, "user knowledge root");
+        assert_eq!(cron_definition(pool).await,cron_before,"the Cron author definition survives the Agent-only cut and migrations");
+        let cron:(bool,Option<String>,Option<String>,Option<String>,Option<String>,Option<i64>)=sqlx::query_as(
+            "SELECT enabled,conversation_id,agent_selection,agent_binding,configuration_error,next_run_at FROM cron_jobs WHERE cron_job_id=?")
+            .bind(CRON).fetch_one(pool).await.unwrap();
+        assert_eq!(cron,(false,None,None,None,Some("CRON_CONFIGURATION_RESELECTION_REQUIRED".into()),None),"a preserved definition cannot silently acquire a replacement Agent");
         // A repeated startup accepts only the new baseline and cannot reset
         // Sessions created in the current generation.
         sqlx::query("INSERT INTO agent_sessions(agent_session_id,owner_ref_json,state,archived,pinned,agent_binding_json,next_seq,created_at) VALUES (?,'{}','live',0,0,'{}',1,1)")
@@ -305,6 +329,8 @@ mod tests {
     async fn deletion_failure_rolls_back_rows_schema_and_lineage_together() {
         let database = retired_generation_fixture().await;
         let pool = database.pool();
+        let cron_before=retired_cron_state(pool).await;
+        let definition_before=cron_definition(pool).await;
         sqlx::query("CREATE TRIGGER reject_test_cutover BEFORE DELETE ON agent_sessions BEGIN SELECT RAISE(ABORT,'fixture deletion failure'); END")
             .execute(pool).await.unwrap();
         let mut conn = pool.acquire().await.unwrap();
@@ -318,5 +344,42 @@ mod tests {
         assert_eq!(generations, 6);
         let receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations").fetch_one(pool).await.unwrap();
         assert_eq!(receipts, 11);
+        assert_eq!(retired_cron_state(pool).await,cron_before,"earlier Cron detachment rolls back with Agent deletion");
+        assert_eq!(cron_definition(pool).await,definition_before);
+    }
+
+    #[tokio::test]
+    async fn unknown_preserved_schema_and_ordinary_reset_never_guess_a_retired_stage() {
+        for ordinary_reset in [true,false] {
+            let database=retired_generation_fixture().await;
+            let pool=database.pool();
+            let cron_before=retired_cron_state(pool).await;
+            let definition_before=cron_definition(pool).await;
+            if ordinary_reset {
+                assert!(crate::reset_agent_data(pool).await.is_err(),"the ordinary current-schema reset has no clean-cut stage authority");
+            } else {
+                sqlx::query("ALTER TABLE cron_jobs ADD COLUMN unrecognized_configuration TEXT").execute(pool).await.unwrap();
+                let mut conn=pool.acquire().await.unwrap();
+                assert!(matches!(clean_cut_agent_store(&mut conn,&MIGRATOR).await,Err(DbError::Init(_))),"schema drift must fail before deleting any Agent value");
+            }
+            assert_eq!(retired_cron_state(pool).await,cron_before);
+            assert_eq!(cron_definition(pool).await,definition_before);
+            assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_sessions").fetch_one(pool).await.unwrap(),1);
+            assert!(requires_agent_store_clean_cut(pool).await.unwrap(),"no new lineage was installed");
+        }
+    }
+
+    #[tokio::test]
+    async fn baseline_jobs_with_implicit_old_agent_defaults_are_disabled_without_reading_them() {
+        let database=retired_generation_fixture().await;let pool=database.pool();
+        let job="0190f5fe-7c00-7a00-8000-000000000216";
+        sqlx::query("INSERT INTO cron_jobs(cron_job_id,user_id,name,enabled,schedule_kind,schedule_value,payload_message,execution_mode,agent_type,created_by,created_at,updated_at,next_run_at) VALUES(?,'0190f5fe-7c00-7a00-8000-000000000214','Implicit old Agent',1,'every','60','Keep author text','new_conversation','retired-implicit-agent','user',1,1,100)")
+            .bind(job).execute(pool).await.unwrap();
+        let mut conn=pool.acquire().await.unwrap();
+        clean_cut_agent_store(&mut conn,&MIGRATOR).await.unwrap();drop(conn);
+        let retained:(String,String,bool,Option<i64>,Option<String>,Option<String>)=sqlx::query_as(
+            "SELECT name,payload_message,enabled,next_run_at,agent_config,agent_snapshot FROM cron_jobs WHERE cron_job_id=?")
+            .bind(job).fetch_one(pool).await.unwrap();
+        assert_eq!(retained,("Implicit old Agent".into(),"Keep author text".into(),false,None,None,None));
     }
 }
