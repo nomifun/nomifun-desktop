@@ -27,6 +27,21 @@
   background: var(--bg-base);
 }
 
+.entry[data-labeled='true'] {
+  margin-left: 0;
+  padding-left: 0;
+  border-left: 0;
+}
+
+.entry[data-labeled='true'] .trigger {
+  width: auto;
+  gap: 6px;
+  padding: 0 11px;
+  border-radius: 999px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
 .trigger:hover,
 .trigger[aria-expanded='true'] {
   border-color: color-mix(in srgb, var(--brand) 24%, var(--border-base));

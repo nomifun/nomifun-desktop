@@ -24,17 +24,13 @@
   "outputLimitCustomHint": "Choose a common limit, or select Custom to enter a value and unit; clearing it restores the default.",
   "outputLimitRequired": "This protocol requires a numeric output limit. No provider/model recommendation is available; enter the documented value instead of guessing.",
   "skillsHub": {
-    "title": "Skills Hub",
-    "railTitle": "Skills",
-    "description": "Manage independent Agent Skill packages that any preset can reference.",
     "mySkillsTitle": "My Skills",
     "noSkills": "No skills found. Import some to get started.",
     "custom": "Custom",
     "builtin": "Built-in",
     "manualImport": "Import Skills",
     "importZip": "Import .zip",
-    "tipTitle": "Usage Tip:",
-    "tipContent": "Skills are installed independently and composed into presets as needed. Import a skill folder, parent folder, or zip archive.",
+    "tipContent": "Install skills independently and select them per Session. Import a skill folder, parent folder, or ZIP archive.",
     "fetchError": "Failed to fetch skills",
     "importSuccess": "Skill imported successfully",
     "importSuccessDetailed": "Imported {{count}} skill(s): {{names}}",
@@ -47,7 +43,7 @@
     "deleteErrorDetailed": "Error deleting skill: {{detail}}",
     "deleteConfirmTitle": "Delete Skill",
     "deleteConfirmContent": "Are you sure you want to delete \"{{name}}\"?",
-    "manageInHub": "Manage in Skills Hub",
+    "manageInHub": "Open MCP & Skills",
     "recommend": "Recommend Skills",
     "recommendSuccess": "Recommended successfully: {{count}} skills selected based on rules",
     "noRecommendations": "No matching skills found, please select manually",
@@ -58,10 +54,9 @@
     "searchPlaceholder": "Search skills...",
     "noSearchResults": "No matching skills found",
     "gridTitle": "Skills",
-    "gridDescription": "Independent capability packages reusable by Agents, presets and companions.",
     "noDescription": "No description provided.",
     "noMatch": "No skills match the current filters.",
-    "sourceAuto": "Auto",
+    "sourceAuto": "Default selection",
     "editTags": "Edit Tags",
     "editTagsTitle": "Tags",
     "editTagsDesc": "Tag this skill so it surfaces under the right audience and scenario filters.",
@@ -76,10 +71,6 @@
     "detailLoadFailedHint": "The file may have moved or is no longer readable. Refresh the skill list and try again.",
     "tagsSaved": "Tags saved",
     "tagsSaveFailed": "Failed to save tags"
-  },
-  "skillsPage": {
-    "libraryTab": "Installed Skills",
-    "marketTab": "Skill Market"
   },
   "skillsMarket": {
     "title": "Skill Market",
@@ -138,8 +129,6 @@
     "empty": "Refresh to load MCP market entries."
   },
   "mcpPage": {
-    "installedMcpTab": "Installed MCP",
-    "mcpMarketTab": "MCP Market",
     "loadFailed": "Failed to load MCP servers. Please retry."
   },
   "agentSkillImport": {
@@ -779,15 +768,24 @@
   "webui.qrLogin": "QR Code Login",
   "webui.qrLoginTitle": "Scan to Login",
   "webui.qrLoginHint": "Scan with a trusted device, or copy the login link to a remote desktop browser",
+  "webui.quickLoginTitle": "Sign in without a password",
+  "webui.quickLoginHint": "Scan with a trusted device, or open the login link on another computer. No password needed.",
+  "webui.loginAddress": "Login address",
   "webui.qrAddressPickerTitle": "The QR code will use this access URL",
   "webui.qrAddressPickerDesc": "If the remote browser cannot open the login link, choose the IP address on the same network as the remote computer.",
   "webui.qrExpires": "Expires at {{time}}",
   "webui.refreshQr": "Refresh QR Code",
-  "webui.copyQrLink": "Copy Link",
+  "webui.copyQrLink": "Copy login link",
   "webui.qrGenerateFailed": "Failed to generate QR code",
   "webui.accountInfo": "Account Info",
   "webui.username": "Username",
   "webui.initialPassword": "Initial Password",
+  "webui.password": "Password",
+  "webui.passwordConfigured": "Configured",
+  "webui.showPassword": "Show password",
+  "webui.hidePassword": "Hide password",
+  "webui.initialPasswordHint": "The initial password is kept temporarily for viewing and copying. After closing or refreshing the app, use a one-time login link to sign in.",
+  "webui.passwordUnavailableHint": "Saved passwords cannot be viewed. If you forget yours, copy a one-time login link from Desktop; no password change is needed.",
   "webui.initialPasswordDesc": "Password generated on first startup, please change it",
   "webui.changePassword": "Change Password",
   "webui.currentPassword": "Current Password",
@@ -1046,7 +1044,7 @@
   "mcpJsonUrlRequiredError": "HTTP and SSE MCP servers require a non-empty \"url\".",
   "mcpJsonStdioCommandRequiredError": "Stdio MCP servers require a non-empty \"command\".",
   "mcpGetApi": "Get API",
-  "mcpTestConnection": "Check MCP Availability",
+  "mcpTestConnection": "Test connection",
   "mcpEnabled": "Enabled",
   "mcpDisabled": "Disabled",
   "mcpEnableServer": "Enable {{name}}",
@@ -1593,11 +1591,6 @@
     "subtitle": "Save Agents, models, Skills and knowledge scope as reusable one-click configurations.",
     "railTitle": "Presets"
   },
-  "mcpHub": {
-    "title": "MCP",
-    "subtitle": "Register MCP servers and browse MCP markets.",
-    "railTitle": "MCP"
-  },
   "openCapabilities": {
     "flowWebuiTitle": "Turn on WebUI first",
     "flowWebuiDesc": "Decide whether desktop browsers on other computers can open NomiFun on this computer.",
@@ -1922,6 +1915,7 @@
     "phoneTask": "Connect a phone",
     "browserTask": "Other computer browsers",
     "toolsTask": "External tools",
+    "helpLabel": "About {{label}}",
     "thisDesktop": "Desktop you are connecting to",
     "desktopLoading": "Reading Desktop identity…",
     "desktopAuthority": "Data and execution host",
@@ -1952,8 +1946,8 @@
     "pairFailed": "Pairing did not complete on Desktop. Generate a new code and try again.",
     "pairFailedLimit": "This Desktop has reached its limit of paired phones. Remove a phone below, then generate a new code.",
     "passwordChangeSignsOutDevices": "Changing the password here signs out every browser session and all paired phones. Pair the phones again afterwards.",
-    "pairReady": "The connection is ready. Generate a phone pairing code to continue.",
-    "pairNotReady": "Finish network access or relay setup above before generating a pairing code.",
+    "pairReady": "Connection ready",
+    "pairNotReady": "Finish connection setup on the left to generate a phone pairing code.",
     "pairGenerateFailed": "Could not generate a pairing code. Check Desktop and the selected connection, then retry.",
     "pairStatusFailed": "Cannot confirm pairing. Check Desktop; successfully paired phones appear in the list below.",
     "devicesTitle": "Paired phones ({{count}})",
@@ -1973,6 +1967,8 @@
     "consoleOpenFailed": "Cannot open Console. Check the address and retry.",
     "relayDeploymentHint": "No relay yet? Deploy NomiRelay, or ask your administrator for the console address and enrollment code.",
     "relayDeploymentGuide": "Deployment guide",
+    "relaySetupHelp": "No relay yet?",
+    "relayEnrollmentHint": "Generate an enrollment code for this Desktop in Relay Console, then copy and paste it here to connect.",
     "envelopeLabel": "One-time relay enrollment code",
     "envelopeInvalid": "Paste a code from Relay Console. Generate a new one if it is invalid or expired.",
     "relayConnect": "Connect relay",
@@ -2257,5 +2253,16 @@
     "audio_capturing": "Recording system microphone",
     "audio_stopping": "Stopping system recording",
     "audio_error": "System recording failed"
+  },
+  "enhancedTools": {
+    "title": "MCP & Skills",
+    "skills": "Skills",
+    "add": "Add",
+    "searchMcp": "Search MCP servers",
+    "servers": "Servers",
+    "installedSkills": "Installed Skills",
+    "mcpHint": "Enable and test to discover tools, then select them in a Session.",
+    "skillsHint": "Installed independently and selected per Session.",
+    "backToList": "Back to list"
   }
 }

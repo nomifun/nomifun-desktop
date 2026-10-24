@@ -13,7 +13,7 @@ import * as agentHooks from '@/renderer/hooks/agent/useAgents';
 import * as themeContext from '@/renderer/hooks/context/ThemeContext';
 import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
-import McpPage from './index';
+import EnhancedToolsPage from '../enhancedTools';
 import McpMarketSettings, { isLocalMcpEndpoint } from './McpMarketSettings';
 import { attachMcpMarketOrigin, getMcpMarketOrigin } from '@/renderer/services/mcp/mcpMarket';
 
@@ -132,6 +132,9 @@ function fixture() {
   const logging = spyOn(console, 'error').mockImplementation(() => {});
   // The installed editor's unrelated agent and theme consumers stay isolated.
   const agents = spyOn(agentHooks, 'getAgents').mockResolvedValue([]);
+  const skills = spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([]);
+  const autoSkills = spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([]);
+  const skillPaths = spyOn(ipcBridge.fs.getSkillPaths, 'invoke').mockResolvedValue({ user_skills_dir: '/fixture/skills', builtin_skills_dir: '/fixture/builtin' });
   const theme = spyOn(themeContext, 'useThemeContext').mockReturnValue({
     theme: 'light',
     colorScheme: 'default',
@@ -152,10 +155,14 @@ function fixture() {
     successes,
     logging,
     agents,
+    skills,
+    autoSkills,
+    skillPaths,
     theme,
   ]) {
     restore.push(() => spy.mockRestore());
   }
+  const completed = mock((_servers: IMcpServer[]) => {});
   const save = mock(async (_servers: IMcpServer[] | ((previous: IMcpServer[]) => IMcpServer[])) => {});
   let navigate!: ReturnType<typeof useNavigate>;
   const Probe = () => {
@@ -163,7 +170,7 @@ function fixture() {
     const location = useLocation();
     return h('output', { 'data-testid': 'path' }, location.pathname + location.search);
   };
-  const mount = async (page = false, path = '/mcp?tab=market', installedServers: IMcpServer[] = []) => {
+  const mount = async (page = false, path = '/enhanced-tools?category=mcp&view=market', installedServers: IMcpServer[] = []) => {
     let view!: ReturnType<typeof render>;
     await act(async () => {
       view = render(
@@ -178,12 +185,13 @@ function fixture() {
               Routes,
               null,
               h(Route, {
-                path: '/mcp',
+                path: '/enhanced-tools',
                 element: page
-                  ? h(McpPage)
+                  ? h(EnhancedToolsPage)
                   : h(McpMarketSettings, {
                       mcpServers: installedServers,
                       saveMcpServers: save,
+                      onImported: completed,
                     }),
               }),
               h(Route, { path: '*', element: h('div', null, 'Other page') })
@@ -217,6 +225,7 @@ function fixture() {
     warnings,
     successes,
     save,
+    completed,
     go: (path: string) => navigate(path),
   };
 }
@@ -309,7 +318,7 @@ describe('MCP market request ownership with the real panel and CRUD hook', () =>
     expect(f.testing).not.toHaveBeenCalled();
     expect(f.toggling).not.toHaveBeenCalled();
     expect(f.warnings).toHaveBeenCalledTimes(1);
-    expect(v.getByTestId('path').textContent).toBe('/mcp');
+    expect(f.completed).toHaveBeenCalledWith([persistedServer()]);
   });
 
   test('failed installed market entries can replace their config without creating duplicates', async () => {
@@ -319,7 +328,7 @@ describe('MCP market request ownership with the real panel and CRUD hook', () =>
       last_test_status: 'error' as const,
       original_json: attachMcpMarketOrigin('{}', { id: 'mcpworld:alpha', name: 'alpha' }),
     };
-    const v = await f.mount(false, '/mcp?tab=market', [broken]);
+    const v = await f.mount(false, '/enhanced-tools?category=mcp&view=market', [broken]);
 
     expect(v.getByTestId('btn-add-market-skill-mcpworld-alpha').textContent).toContain(settings.mcpMarket.repair);
     v.add('alpha');
@@ -332,7 +341,7 @@ describe('MCP market request ownership with the real panel and CRUD hook', () =>
     expect(f.importing).not.toHaveBeenCalled();
     expect(f.updating.mock.calls[0]![0].mcp_server_id).toBe(broken.mcp_server_id);
     expect(f.updating.mock.calls[0]![0].data.name).toBe('alpha');
-    await waitFor(() => expect(v.getByTestId('path').textContent).toBe('/mcp'));
+    await waitFor(() => expect(f.completed).toHaveBeenCalledTimes(1));
   });
 
   test.each(['cancel', 'leave'] as const)('late import after %s cannot notify or navigate', async (action) => {
@@ -349,7 +358,8 @@ describe('MCP market request ownership with the real panel and CRUD hook', () =>
       f.imports[0]!.resolve([persistedServer()]);
     });
     expect(f.warnings).not.toHaveBeenCalled();
-    expect(v.getByTestId('path').textContent).toBe(action === 'cancel' ? '/mcp?tab=market' : '/elsewhere');
+    expect(f.completed).not.toHaveBeenCalled();
+    expect(v.getByTestId('path').textContent).toBe(action === 'cancel' ? '/enhanced-tools?category=mcp&view=market' : '/elsewhere');
     // Dismissal does not cancel an already dispatched backend write.
     expect(f.save).toHaveBeenCalledTimes(1);
   });
@@ -388,66 +398,53 @@ describe('MCP market request ownership with the real panel and CRUD hook', () =>
     await act(async () => {
       f.imports[1]!.resolve([persistedServer()]);
     });
-    expect(v.getByTestId('path').textContent).toBe('/mcp');
+    expect(f.completed).toHaveBeenCalledWith([persistedServer()]);
   });
 });
 
-describe('MCP page initial catalog boundary', () => {
-  test('switching to installed discards market review ownership and preserves other query params', async () => {
+describe('enhanced tools initial MCP catalog boundary', () => {
+  test('closing the market discards review ownership and preserves other query params', async () => {
     const f = fixture();
-    const v = await f.mount(true, '/mcp?tab=market&keep=1');
-    await act(async () => {
-      f.catalog.resolve([]);
-    });
-    expect(v.queryByTestId('mcp-page-header-actions')).toBeNull();
+    const v = await f.mount(true, '/enhanced-tools?category=mcp&view=market&keep=1');
+    await act(async () => { f.catalog.resolve([]); });
+    expect(v.getByTestId('enhanced-tools-add')).toBeTruthy();
     v.add('alpha');
-    fireEvent.click(v.getByRole('tab', { name: settings.mcpPage.installedMcpTab }));
-    expect(v.getByTestId('mcp-page-header-actions')).toBeTruthy();
-    await act(async () => {
-      f.resolutions[0]!.resolve(resolvedConfig('alpha'));
-    });
-    expect(v.getByTestId('path').textContent).toBe('/mcp?keep=1');
-    expect(v.queryByRole('dialog') === null).toBe(true);
+    fireEvent.click(v.getByRole('button', { name: locale.t('settings.enhancedTools.backToList') }));
+    await act(async () => { f.resolutions[0]!.resolve(resolvedConfig('alpha')); });
+    expect(v.getByTestId('path').textContent).toBe('/enhanced-tools?category=mcp&keep=1');
+    expect(v.queryByText('fixture-command')).toBeNull();
+    expect(f.importing).not.toHaveBeenCalled();
   });
 
-  test('installed editor is unavailable until the initial GET succeeds', async () => {
+  test('the header keeps import discoverable but unavailable until the initial GET succeeds', async () => {
     const f = fixture();
-    const v = await f.mount(true, '/mcp');
-    const prematureAdd = v.queryByRole('button', {
-      name: settings.mcpAddServer,
-    });
-    await act(async () => {
-      f.catalog.resolve([]);
-    });
-    expect(prematureAdd === null).toBe(true);
-    const addButton = v.getByRole('button', { name: settings.mcpAddServer });
-    expect(within(v.getByTestId('mcp-page-header-actions')).getByRole('button', {
-      name: settings.mcpAddServer,
-    })).toBe(addButton);
-    const installedSurface = within(v.getByTestId('mcp-installed-surface'));
-    expect(installedSurface.queryByText(settings.mcpSettings)).toBeNull();
-    expect(installedSurface.queryByRole('button', { name: settings.mcpAddServer })).toBeNull();
+    const v = await f.mount(true, '/enhanced-tools?category=mcp');
+    fireEvent.click(v.getByTestId('enhanced-tools-add'));
+    const importing = await v.findByTestId('enhanced-tools-import-json');
+    expect(importing.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(importing);
+    expect(v.queryByRole('dialog')).toBeNull();
+    await act(async () => { f.catalog.resolve([]); });
+    const header = v.getByRole('heading', { name: locale.t('settings.enhancedTools.title') }).closest('header')!;
+    expect(within(header).getByTestId('enhanced-tools-add')).toBeTruthy();
+    const installed = within(v.getByTestId('mcp-installed-surface'));
+    expect(installed.queryByTestId('enhanced-tools-add')).toBeNull();
+    expect(v.queryByRole('dialog')).toBeNull();
   });
 
   test('installed MCP servers paginate ten at a time', async () => {
     const f = fixture();
-    const v = await f.mount(true, '/mcp');
+    const v = await f.mount(true, '/enhanced-tools?category=mcp');
     const servers = Array.from({ length: 12 }, (_, index) => ({
       ...persistedServer(`server-${index + 1}`),
       mcp_server_id: parseMcpServerId(`0190f5fe-7c00-7a00-8000-${String(index + 1).padStart(12, '0')}`),
     }));
-
-    await act(async () => {
-      f.catalog.resolve(servers);
-    });
-
+    await act(async () => { f.catalog.resolve(servers); });
     const installed = within(v.getByTestId('mcp-installed-surface'));
     expect(installed.getByText('server-1')).toBeTruthy();
     expect(installed.getByText('server-10')).toBeTruthy();
     expect(installed.queryByText('server-11')).toBeNull();
-
     fireEvent.click(within(v.getByTestId('mcp-server-pagination')).getByText('2'));
-
     expect(installed.queryByText('server-1')).toBeNull();
     expect(installed.getByText('server-11')).toBeTruthy();
     expect(installed.getByText('server-12')).toBeTruthy();
@@ -455,15 +452,15 @@ describe('MCP page initial catalog boundary', () => {
 
   test('failed GET keeps installed editing and market Add closed', async () => {
     const f = fixture();
-    const v = await f.mount(true, '/mcp');
-    await act(async () => {
-      f.catalog.reject(new Error('fixture offline'));
-    });
-    expect(v.queryByRole('button', { name: settings.mcpAddServer }) === null).toBe(true);
-    expect(v.getByRole('alert').textContent).toContain('Failed to load MCP servers');
-    await act(async () => {
-      f.go('/mcp?tab=market');
-    });
+    const v = await f.mount(true, '/enhanced-tools?category=mcp');
+    await act(async () => { f.catalog.reject(new Error('fixture offline')); });
+    expect(v.getByRole('alert').textContent).toContain(settings.mcpPage.loadFailed);
+    fireEvent.click(v.getByTestId('enhanced-tools-add'));
+    const importing = await v.findByTestId('enhanced-tools-import-json');
+    expect(importing.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(importing);
+    expect(v.queryByRole('dialog')).toBeNull();
+    await act(async () => { f.go('/enhanced-tools?category=mcp&view=market'); });
     v.add('alpha');
     expect(f.resolving).not.toHaveBeenCalled();
   });

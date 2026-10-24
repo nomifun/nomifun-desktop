@@ -91,6 +91,22 @@ const rowFor = (view: RenderResult, run: CreativeTemplateRunAggregateV1) => {
 };
 
 describe('Template Run Center', () => {
+  test('opens from the shared resource task entry on its first mount', async () => {
+    const port = createPort([runFixture('running')]);
+    const view = render(<I18nextProvider i18n={testI18n}>
+      <TemplateRunCenter port={port} triggerLabel='Template tasks' initialOpen />
+    </I18nextProvider>);
+    const trigger = view.getByRole('button', { name: 'Template tasks' });
+    expect(trigger.textContent).toBe('Template tasks1');
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    const panel = await view.findByRole('dialog', { name: 'Template runs' });
+    expect(within(panel).getByText('running template')).toBeTruthy();
+    fireEvent.keyDown(panel, { key: 'Escape' });
+    await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'));
+    expect(port.resume).not.toHaveBeenCalled();
+    expect(port.retry).not.toHaveBeenCalled();
+  });
+
   test('keeps the entry visible and history closed, counts review and paused work, and returns focus when dismissed', async () => {
     const running = runFixture('running');
     const reviewing = runFixture('awaiting-review', IDS.idempotency, true);

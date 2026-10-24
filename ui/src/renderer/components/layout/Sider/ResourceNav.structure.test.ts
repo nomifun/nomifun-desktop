@@ -5,16 +5,18 @@ const router = readFileSync(new URL('../Router.tsx', import.meta.url), 'utf8');
 const titlebar = readFileSync(new URL('../Titlebar/index.tsx', import.meta.url), 'utf8');
 
 describe('desktop resource navigation', () => {
-  test('keeps global navigation and places canvases after companions, prompts/templates after assets', () => {
+  test('combines materials and templates in resource space while keeping prompts independent', () => {
     const companion = source.indexOf('<SiderNomiEntry');
     const canvas = source.indexOf("label={t('creativeStudio.navigation.canvases'");
-    const assets = source.indexOf('<SiderAssetLibraryEntry');
+    const resources = source.indexOf('<SiderResourceSpaceEntry');
     const prompts = source.indexOf("label={t('creativeStudio.navigation.prompts'");
-    const templates = source.indexOf("label={t('creativeStudio.navigation.templates'");
     expect(companion).toBeGreaterThan(-1);
     expect(canvas).toBeGreaterThan(companion);
-    expect(prompts).toBeGreaterThan(assets);
-    expect(templates).toBeGreaterThan(prompts);
+    expect(resources).toBeGreaterThan(canvas);
+    expect(prompts).toBeGreaterThan(resources);
+    expect(source).not.toContain("label={t('creativeStudio.navigation.templates'");
+    expect(source).toContain('resourceSpaceSectionForPath(pathname) !== null');
+    expect(source).toContain('navTo(lastResourcePathRef.current)');
     expect(source).not.toContain('CreativeStudioSider');
     expect(source).not.toContain('SiderCreativeStudioEntry');
   });
@@ -24,6 +26,8 @@ describe('desktop resource navigation', () => {
     }
     expect(router).not.toContain("path='/workshop");
     expect(router).not.toContain('workbenches/product');
+    expect(router).toContain('<Route element={withRouteFallback(ResourceSpaceRoute)}>');
+    expect(router).toContain('path={PROMPTS_PATH} element={withRouteFallback(CreativeStudioPromptsRoute)}');
     expect(existsSync(new URL('../../../pages/creativeStudio/workbenches', import.meta.url))).toBe(false);
   });
   test('keeps canvas save gating ahead of every primary rail and titlebar navigation', () => {

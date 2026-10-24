@@ -12,6 +12,8 @@ interface RouteErrorBoundaryProps {
   resetKey?: string;
   /** Root failures need an application reload; route failures can retry in place. */
   scope?: 'route' | 'application';
+  /** Lets a containing layout expose an error from an inactive panel. */
+  onError?: (error: Error) => void;
 }
 
 interface RouteErrorBoundaryState {
@@ -61,6 +63,7 @@ class RouteErrorBoundary extends React.Component<RouteErrorBoundaryProps, RouteE
       info.componentStack
     );
     this.setState({ componentStack: info.componentStack ?? null });
+    this.props.onError?.(error);
   }
 
   componentDidUpdate(previousProps: RouteErrorBoundaryProps): void {

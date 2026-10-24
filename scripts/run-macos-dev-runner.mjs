@@ -257,11 +257,13 @@ export async function main(args = process.argv.slice(2)) {
     generation = await acquireMacosDevGeneration(process.env.NOMIFUN_DEV_SUPERVISOR_SOCKET);
     const cwd = process.cwd();
     const compiler = await prepareMacosBuildEnvironment({ target: plan.target });
+    // Tauri's build script fingerprints the staged sidecar. Update that input
+    // before building the host so a worker change cannot dirty the next build.
+    const worker = await buildComputerWorker({ root: ROOT, target: compiler.target, profile: plan.profile, environment: compiler.environment });
     const artifacts = await runCargoArtifacts([...plan.build, '--example', 'macos_application_controller'],
       ['nomifun-desktop', 'macos_application_controller'], { cwd, environment: compiler.environment });
     const hostPath = artifacts['nomifun-desktop'];
     const systemFiles = await buildMacosSystemExecution({ root: ROOT, target: compiler.target, profile: plan.profile, bundleIdentifier: 'com.nomifun.desktop.dev', environment: compiler.environment });
-    const worker = await buildComputerWorker({ root: ROOT, target: compiler.target, profile: plan.profile, environment: compiler.environment });
     const program = await ensureMacosDevelopmentBundle({ hostPath, target: compiler.target, bundleFiles: { ...compiler.bundleFiles, ...systemFiles, 'MacOS/nomifun-computer-worker': worker.binary } });
     const controllerProgram = await freezeMacosDevelopmentController(artifacts.macos_application_controller);
     console.error(`[dev] native app: ${dirname(dirname(dirname(program)))}`);

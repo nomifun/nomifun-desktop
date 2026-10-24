@@ -1,7 +1,6 @@
 /**
- * Shared spacing contract for the Preset, Skill, MCP, and Plugin hubs.
- * Keep these surfaces visually dense because HubPageShell already provides
- * the page-level breathing room.
+ * Shared spacing for market catalogs. Installed skills and MCP servers use
+ * their own resource views inside the enhanced-tools page.
  */
 export const ENHANCED_TOOLS_PAGE_STACK_CLASS = 'space-y-12px pb-16px';
 

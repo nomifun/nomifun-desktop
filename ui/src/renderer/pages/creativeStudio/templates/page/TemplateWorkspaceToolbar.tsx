@@ -21,10 +21,32 @@ interface TemplateWorkspaceToolbarProps {
   count: number;
   total: number;
   disabled: boolean;
+  showSearch?: boolean;
   onKindChange: (kind: TemplateKindFilter) => void;
   onCategoryChange: (category: string) => void;
   onQueryChange: (query: string) => void;
   onReset: () => void;
+}
+
+export function TemplateWorkspaceSearch({
+  query,
+  disabled,
+  onQueryChange,
+}: Pick<TemplateWorkspaceToolbarProps, 'query' | 'disabled' | 'onQueryChange'>) {
+  const { t } = useTranslation();
+  return (
+    <NomiInput
+      className={styles.search}
+      size='small'
+      prefix={<Search theme='outline' size={14} fill='currentColor' />}
+      allowClear
+      value={query}
+      aria-label={t('creativeStudio.templates.workspace.searchPlaceholder', { defaultValue: 'Search names, categories, and descriptions' })}
+      placeholder={t('creativeStudio.templates.workspace.searchPlaceholder', { defaultValue: 'Search names, categories, and descriptions' })}
+      disabled={disabled}
+      onChange={onQueryChange}
+    />
+  );
 }
 
 /** Compact text filters with inline counts and shared input/select controls. */
@@ -48,17 +70,7 @@ export default function TemplateWorkspaceToolbar(props: TemplateWorkspaceToolbar
         <span className={styles.resultCount} role='status' aria-live='polite'>{t('creativeStudio.templates.workspace.resultCount', { visible: props.count, total: props.total, defaultValue: '{{visible}} of {{total}} templates' })}</span>
       </div>
       <div className={styles.searchFilters}>
-        <NomiInput
-          className={styles.search}
-          size='small'
-          prefix={<Search theme='outline' size={14} fill='currentColor' />}
-          allowClear
-          value={props.query}
-          aria-label={t('creativeStudio.templates.workspace.searchPlaceholder', { defaultValue: 'Search names, categories, and descriptions' })}
-          placeholder={t('creativeStudio.templates.workspace.searchPlaceholder', { defaultValue: 'Search names, categories, and descriptions' })}
-          disabled={props.disabled}
-          onChange={props.onQueryChange}
-        />
+        {props.showSearch !== false ? <TemplateWorkspaceSearch query={props.query} disabled={props.disabled} onQueryChange={props.onQueryChange} /> : null}
         <NomiSelect
           className={styles.categorySelect}
           size='small'

@@ -2,10 +2,11 @@ import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
-import { Modal } from '@arco-design/web-react';
+import { Message, Modal } from '@arco-design/web-react';
 import { connections, type ConnectionDevice } from '@/common/adapter/connections';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
 import * as webuiContext from '@/renderer/hooks/context/WebuiServerContext';
+import * as clipboard from '@/renderer/utils/ui/clipboard';
 import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
 import PhoneConnectionPanel from './PhoneConnectionPanel';
 
@@ -46,6 +47,10 @@ function fixture(rows: ConnectionDevice[] = [], native = true, allowed = true) {
 test('the LAN address value and arrow toggle the dropdown once per click', async () => {
   const view = fixture();
   await waitFor(() => expect(view.getByText('Work Desktop')).toBeTruthy());
+  const ready = view.getByRole('status');
+  expect(ready.textContent).toBe(settings.deviceConnections.pairReady);
+  expect(ready.closest('.arco-alert')).toBeNull();
+  expect(ready.parentElement?.contains(view.getByTestId('generate-phone-pairing'))).toBe(true);
   const select = view.getByRole('combobox', { name: settings.deviceConnections.addressLabel });
   const value = view.getByText('http://192.168.1.50:25808');
   const arrow = select.querySelector('svg')!;
@@ -61,15 +66,49 @@ test('the LAN address value and arrow toggle the dropdown once per click', async
   expect(select.getAttribute('aria-expanded')).toBe('false');
 });
 
-test('the LAN address caption, hint and surrounding content do not open the dropdown', async () => {
+test('connection help stays out of the layout and opens by hover or focus without opening the address dropdown', async () => {
   const view = fixture();
   await waitFor(() => expect(view.getByText('Work Desktop')).toBeTruthy());
   const select = view.getByRole('combobox', { name: settings.deviceConnections.addressLabel });
-  expect(document.getElementById(select.getAttribute('aria-describedby')!)?.textContent).toBe(settings.deviceConnections.addressHint);
-  for (const text of [settings.deviceConnections.addressLabel, settings.deviceConnections.addressHint, settings.deviceConnections.lanHint]) {
-    fireEvent.click(view.getByText(text));
+  const addressHelp = view.getByRole('button', { name: i18n.t('settings.deviceConnections.helpLabel', { label: settings.deviceConnections.addressLabel }) });
+  const pathHelp = view.getByRole('button', { name: i18n.t('settings.deviceConnections.helpLabel', { label: settings.deviceConnections.choosePath }) });
+  const permissionsHelp = view.getByRole('button', { name: i18n.t('settings.deviceConnections.helpLabel', { label: settings.deviceConnections.scanStep }) });
+  const pathHeading = view.getByRole('heading', { name: settings.deviceConnections.choosePath });
+  const scanHeading = view.getByRole('heading', { name: settings.deviceConnections.scanStep });
+  expect(pathHeading.nextElementSibling === pathHelp).toBe(true);
+  expect(scanHeading.nextElementSibling === permissionsHelp).toBe(true);
+  expect(Boolean(view.queryByText('Only pair your own trusted phones', { exact: true }))).toBe(false);
+  const addressDescription = document.getElementById(select.getAttribute('aria-describedby')!);
+  expect(addressDescription?.textContent).toBe(settings.deviceConnections.addressHint);
+  expect(addressHelp.getAttribute('aria-describedby')).toBe(addressDescription?.id);
+  const pathDescription = document.getElementById(pathHelp.getAttribute('aria-describedby')!);
+  expect(pathDescription?.textContent).toContain(settings.deviceConnections.lanHint);
+  expect(pathDescription?.textContent).toContain(settings.deviceConnections.crossHint);
+  for (const text of [settings.deviceConnections.phoneIntro, settings.deviceConnections.addressHint, settings.deviceConnections.lanHint, settings.deviceConnections.crossHint, settings.deviceConnections.phonePermissions, settings.deviceConnections.devicesHint]) {
+    expect(Boolean(view.getByText(text).closest('.sr-only'))).toBe(true);
+  }
+  for (const target of [view.getByText(settings.deviceConnections.addressLabel), addressHelp, pathHelp, permissionsHelp]) {
+    fireEvent.click(target);
     expect(select.getAttribute('aria-expanded')).toBe('false');
   }
+
+  expect(Boolean(view.queryByRole('tooltip'))).toBe(false);
+  fireEvent.mouseEnter(addressHelp);
+  await waitFor(() => expect(view.getByRole('tooltip').textContent).toBe(settings.deviceConnections.addressHint));
+  expect(select.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.mouseLeave(addressHelp);
+  await waitFor(() => expect(Boolean(view.queryByRole('tooltip'))).toBe(false));
+
+  await act(async () => pathHelp.focus());
+  expect(document.activeElement === pathHelp).toBe(true);
+  await waitFor(() => {
+    const tooltip = view.getByRole('tooltip');
+    expect(tooltip.textContent).toContain(settings.deviceConnections.lanHint);
+    expect(tooltip.textContent).toContain(settings.deviceConnections.crossHint);
+  });
+  expect(select.getAttribute('aria-expanded')).toBe('false');
+  await act(async () => pathHelp.blur());
+  await waitFor(() => expect(Boolean(view.queryByRole('tooltip'))).toBe(false));
 });
 
 test('selecting another LAN address clears the old code and generates pairing for that address', async () => {
@@ -94,6 +133,8 @@ test('selecting another LAN address clears the old code and generates pairing fo
 });
 
 test('a generated ticket waits for backend redemption instead of claiming the phone is online', async () => {
+  const copy = spyOn(clipboard, 'copyText').mockResolvedValue(undefined);
+  spyOn(Message, 'success').mockReturnValue(() => {});
   const view = fixture();
   await waitFor(() => expect(view.getByText('Work Desktop')).toBeTruthy());
   fireEvent.click(view.getByRole('button', { name: 'Generate phone pairing code' }));
@@ -101,7 +142,22 @@ test('a generated ticket waits for backend redemption instead of claiming the ph
   expect(view.pairing).toHaveBeenCalledWith({});
   expect(Boolean(view.queryByText('Phone has paired successfully'))).toBe(false);
   expect(Boolean(view.container.querySelector('[data-testid="phone-pairing-qr"] svg'))).toBe(true);
+  const copyButton = view.getByRole('button', { name: settings.deviceConnections.pairCopy });
+  const summary = view.getByText(settings.deviceConnections.pairManualCopy, { selector: 'summary' });
+  const details = summary.closest('details')!;
+  expect(copyButton.textContent?.trim()).toBe('');
+  expect(Boolean(copyButton.querySelector('svg'))).toBe(true);
+  expect(copyButton.parentElement === details.parentElement).toBe(true);
+  expect(Boolean(copyButton.closest('summary, details'))).toBe(false);
+  expect(details.open).toBe(false);
   const manualLink = view.getByTestId('phone-pairing-link') as HTMLTextAreaElement;
+  fireEvent.click(copyButton);
+  await waitFor(() => expect(copy).toHaveBeenCalledWith(manualLink.value));
+  expect(details.open).toBe(false);
+  fireEvent.click(summary);
+  expect(details.open).toBe(true);
+  expect(Boolean(view.queryByText(settings.deviceConnections.pairLinkLabel, { exact: true }))).toBe(false);
+  expect(view.getByRole('textbox', { name: settings.deviceConnections.pairLinkLabel }) === manualLink).toBe(true);
   expect(manualLink.readOnly).toBe(true);
   const inner = new URL(new URL(manualLink.value).searchParams.get('url')!);
   expect(inner.origin).toBe('http://192.168.1.50:25808');

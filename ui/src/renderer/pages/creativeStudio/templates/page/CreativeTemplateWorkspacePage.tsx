@@ -4,13 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Button, Message, Modal, Spin } from '@arco-design/web-react';
-import { Pic, Plus, Robot } from '@icon-park/react';
+import { Button, Dropdown, Menu, Message, Modal, Spin } from '@arco-design/web-react';
+import { Down, Pic, Plus, Robot } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import NomiPagination from '@/renderer/components/base/NomiPagination';
 
+import {
+  ResourceSpaceHeaderActions,
+  ResourceSpaceTaskActions,
+  useResourceSpaceChrome,
+} from '../../app/ResourceSpaceChrome';
 import type { CreativeModelCatalogSnapshot } from '../../models';
 import type { TemplateDraftPort } from '../agent';
 import {
@@ -25,7 +30,7 @@ import {
 } from '../services';
 import styles from './CreativeTemplateWorkspacePage.module.css';
 import TemplateWorkspaceCard from './TemplateWorkspaceCard';
-import TemplateWorkspaceToolbar, { type TemplateKindFilter } from './TemplateWorkspaceToolbar';
+import TemplateWorkspaceToolbar, { TemplateWorkspaceSearch, type TemplateKindFilter } from './TemplateWorkspaceToolbar';
 import TemplateWorkspaceEmptyIllustration from './TemplateWorkspaceEmptyIllustration';
 import TemplateAgentDraftModal from './TemplateAgentDraftModal';
 import TemplateEditorModal from './TemplateEditorModal';
@@ -98,6 +103,7 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
   onUploadReferenceImages,
 }) => {
   const { t, i18n } = useTranslation();
+  const resourceSpace = useResourceSpaceChrome();
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const copy = useMemo(() => createTemplateTranslationCopy(t), [t]);
   const [pageState, setPageState] = useState<PageState>(autoLoad ? 'loading' : 'ready');
@@ -314,28 +320,59 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
 
   const disabled = pageState !== 'ready' || action !== null;
   const agentDraftAvailable = Boolean(agentDraftPort && agentModelCatalog);
+  const WorkspaceElement = resourceSpace ? 'div' : 'main';
+  const changeQuery = (value: string) => { setQuery(value); setPage(1); };
+  const aiCreateButton = (
+    <Button
+      size='small'
+      icon={<Robot theme='outline' size={14} fill='currentColor' />}
+      disabled={disabled || !agentDraftAvailable}
+      title={agentDraftAvailable ? undefined : t('creativeStudio.templates.workspace.aiUnavailable', { defaultValue: 'AI draft service is unavailable' })}
+      onClick={() => setAgentDraftOpen(true)}
+    >{t('creativeStudio.templates.workspace.aiCreate', { defaultValue: 'Create with AI' })}</Button>
+  );
 
   return (
-    <main
-      className={styles.page}
+    <WorkspaceElement
+      className={`${styles.page}${resourceSpace ? ` ${styles.embeddedPage}` : ''}`}
       data-creative-template-workspace
       data-page-state={pageState}
       aria-busy={pageState === 'loading'}
     >
       <div className={styles.inner}>
-        <header className={styles.header}>
+        {resourceSpace ? (
+          <ResourceSpaceHeaderActions>
+            {resourceSpace.section === 'templates' ? <div className={`${styles.headerActions} ${styles.resourceHeaderActions}`}>
+              <TemplateWorkspaceSearch query={query} disabled={pageState !== 'ready'} onQueryChange={changeQuery} />
+              {aiCreateButton}
+              <Dropdown
+                trigger='click'
+                position='br'
+                droplist={<Menu onClickMenuItem={(key) => beginCreate(key as 'single-image' | 'multi-image-series')}>
+                  <Menu.Item key='single-image' disabled={disabled}>
+                    <Plus theme='outline' size={14} fill='currentColor' />{' '}
+                    {t('creativeStudio.templates.workspace.newSingle', { defaultValue: 'New template' })}
+                  </Menu.Item>
+                  <Menu.Item key='multi-image-series' disabled={disabled}>
+                    <Pic theme='outline' size={14} fill='currentColor' />{' '}
+                    {t('creativeStudio.templates.workspace.newMulti', { defaultValue: 'New multi-image template' })}
+                  </Menu.Item>
+                </Menu>}
+              >
+                <Button type='primary' size='small' icon={<Plus theme='outline' size={14} fill='currentColor' />} disabled={disabled} aria-haspopup='menu'>
+                  {t('creativeStudio.templates.workspace.newSingle', { defaultValue: 'New template' })}
+                  <Down theme='outline' size={12} fill='currentColor' />
+                </Button>
+              </Dropdown>
+            </div> : null}
+          </ResourceSpaceHeaderActions>
+        ) : <header className={styles.header}>
           <div className={styles.headerIdentity}>
             <h1>{t('creativeStudio.templates.workspace.title', { defaultValue: 'Template Studio' })}</h1>
             <p>{t('creativeStudio.templates.workspace.description', { defaultValue: 'Turn fixed prompts, variables, and model settings into reusable templates. Fill in the variables each time to generate in batches.' })}</p>
           </div>
           <div className={styles.headerActions}>
-            <Button
-              size='small'
-              icon={<Robot theme='outline' size={14} fill='currentColor' />}
-              disabled={disabled || !agentDraftAvailable}
-              title={agentDraftAvailable ? undefined : t('creativeStudio.templates.workspace.aiUnavailable', { defaultValue: 'AI draft service is unavailable' })}
-              onClick={() => setAgentDraftOpen(true)}
-            >{t('creativeStudio.templates.workspace.aiCreate', { defaultValue: 'Create with AI' })}</Button>
+            {aiCreateButton}
             <Button size='small' icon={<Pic theme='outline' size={14} fill='currentColor' />} disabled={disabled} onClick={() => beginCreate('multi-image-series')}>
               {t('creativeStudio.templates.workspace.newMulti', { defaultValue: 'New multi-image template' })}
             </Button>
@@ -344,14 +381,18 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
             </Button>
             {runCenter ? <TemplateRunCenter port={runCenter} /> : null}
           </div>
-        </header>
+        </header>}
+        {resourceSpace && runCenter ? <ResourceSpaceTaskActions>
+          <TemplateRunCenter port={runCenter} initialOpen={resourceSpace.openTaskCenterOnMount} triggerLabel={t('creativeStudio.resources.templateTasks', { defaultValue: 'Template tasks' })} />
+        </ResourceSpaceTaskActions> : null}
         <TemplateWorkspaceToolbar
           kind={kind} category={category} query={query}
+          showSearch={!resourceSpace}
           categories={categories.map((item) => ({ value: item, label: item === UNCATEGORIZED_CATEGORY ? uncategorized : item }))}
           count={filtered.length} total={templates.length} disabled={pageState !== 'ready'}
           onKindChange={(value) => { setKind(value); setPage(1); }}
           onCategoryChange={(value) => { setCategory(value); setPage(1); }}
-          onQueryChange={(value) => { setQuery(value); setPage(1); }}
+          onQueryChange={changeQuery}
           onReset={resetFilters}
         />
 
@@ -517,7 +558,7 @@ const CreativeTemplateWorkspacePage: React.FC<CreativeTemplateWorkspacePageProps
           defaultValue: 'Delete “{{name}}”? This action cannot be undone.',
         })}
       </Modal>
-    </main>
+    </WorkspaceElement>
   );
 };
 

@@ -29,6 +29,11 @@ export function resourceSectionForPath(path: string): ResourceSection | null {
   if (pathname === TEMPLATES_PATH) return 'templates';
   return null;
 }
+/** Prompts are an independent destination even though their URL shares a prefix. */
+export function resourceSpaceSectionForPath(path: string): 'assets' | 'templates' | null {
+  const section = resourceSectionForPath(path);
+  return section === 'assets' || section === 'templates' ? section : null;
+}
 /** One-way canvas resume import; this function is never mounted as a route. */
 export function migratedCreativeRoute(path: string): string | null {
   if (!path.startsWith('/') || path.startsWith('//') || path.length > 4096) return null;

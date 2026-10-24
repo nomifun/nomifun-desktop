@@ -9,6 +9,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import { useResourceSpaceChrome } from '../../app/ResourceSpaceChrome';
 import { creativeAssetClient } from '../client';
 import { subscribeCreativeAssetDeletion } from '../assetDeletion';
 import { saveCreativeAssetAs } from '../saveCreativeAsset';
@@ -19,7 +20,6 @@ import {
 } from '../components';
 import type {
   CreativeAssetKindFilter,
-  CreativeAssetViewMode,
   CreativeTextAssetFormValue,
 } from '../components';
 import { isCreativeAssetDeleted, type CreativeAsset, type CreativeAssetLibraryPort } from '../types';
@@ -182,11 +182,13 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   locale,
 }) => {
   const { t, i18n } = useTranslation();
+  const resourceSpaceChrome = useResourceSpaceChrome();
+  const embedded = resourceSpaceChrome?.section === 'assets';
+  const PageContainer = embedded ? 'section' : 'main';
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 220);
   const [submittedSearch, setSubmittedSearch] = useState<string | null>(null);
   const [kind, setKind] = useState<CreativeAssetKindFilter>('all');
-  const [view, setView] = useState<CreativeAssetViewMode>('grid');
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
   const [deletingAssets, setDeletingAssets] = useState<readonly CreativeAsset[]>([]);
@@ -442,7 +444,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   };
 
   return (
-    <main className={styles.root} data-creative-asset-library-page>
+    <PageContainer className={`${styles.root}${embedded ? ` ${styles.embedded}` : ''}`} data-creative-asset-library-page>
       <CreativeAssetLibrary
         className={styles.library}
         appearance='source-page'
@@ -451,7 +453,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         search={search}
         kind={kind}
         scope='library'
-        view={view}
+        view='grid'
         locale={locale ?? i18n.resolvedLanguage ?? i18n.language}
         selectedIds={selectedIds}
         uploads={uploads.items}
@@ -496,7 +498,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         }}
         onKindChange={setKind}
         onScopeChange={() => undefined}
-        onViewChange={setView}
+        onViewChange={() => undefined}
         onSelectionChange={setSelectedIds}
         onUploadFiles={handleUploadFiles}
         onCreateText={() => {
@@ -571,7 +573,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
           {deleteError ? <p className={styles.modalError} role='alert'>{deleteError}</p> : null}
         </div>
       </Modal>
-    </main>
+    </PageContainer>
   );
 };
 

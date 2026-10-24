@@ -74,8 +74,8 @@ For implementation details, see [Architecture Overview](../architecture/overview
   and runtime defaults; sessions run at `/agent-sessions/:id`.
 - **Creation**: infinite Canvases (`/nomi/canvases`), plus materials, prompts,
   and private templates in the asset library (`/asset-library/*`).
-- **Skills** (`/skills`): focused capability management.
-- **MCP**: local MCP server configuration.
+- **MCP & Skills** (`/enhanced-tools`): switch between MCP server management
+  and the Skills library, with imports and a market for each category.
 - **Connections & Devices** (`/connections`): pair phones (same network or relay),
   open Desktop from other computers' browsers, and connect external MCP/REST tools.
 - **Requirements / AutoWork**: backend-owned queue processing and completion

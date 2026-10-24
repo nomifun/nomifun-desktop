@@ -52,11 +52,14 @@ test('unreadable relay state hides reconnect controls and offers local forget', 
 });
 
 test('an existing relay connection hides the enrollment field and connect button', async () => {
-  const view = fixture({ state: 'connected', relay: 'relay.example.test:443' });
+  const view = fixture({ state: 'connected', relay: 'relay.example.test:443', health: { backendReachable: true, tunnelReachable: true, checkedAtMs: 1 } });
   await waitFor(() => expect(Boolean(view.queryByRole('button', { name: settings.deviceConnections.relayReconnect }))).toBe(true));
   expect(Boolean(view.container.querySelector('input[type="password"]'))).toBe(false);
   expect(Boolean(view.queryByRole('button', { name: settings.deviceConnections.relayConnect }))).toBe(false);
+  expect(view.getByLabelText(settings.deviceConnections.consoleUrl)).toBeTruthy();
   expect(view.getByRole('button', { name: settings.deviceConnections.consoleOpen })).toBeTruthy();
+  expect(view.getByText(settings.deviceConnections.backendReady)).toBeTruthy();
+  expect(view.getByText(settings.deviceConnections.tunnelReady)).toBeTruthy();
 });
 
 test('a refused second enrollment reports already-paired and keeps the field hidden', async () => {
@@ -94,10 +97,37 @@ test('enrollment starts while the read-only component inventory is still pending
 });
 
 test('a missing component connects through automatic preparation with no extra confirmation', async () => {
-  const view = fixture({ state: 'disconnected', runtimeAvailable: false });
+  const view = fixture({ state: 'disconnected', runtimeAvailable: false, health: { backendReachable: false, tunnelReachable: false, checkedAtMs: 1 } });
   const confirm = spyOn(Modal, 'confirm');
   await waitFor(() => expect(view.status).toHaveBeenCalled());
-  const envelope = view.container.querySelector('input[type="password"]') as HTMLInputElement;
+  expect(Boolean(view.queryByText(settings.deviceConnections.backendUnavailable))).toBe(false);
+  expect(Boolean(view.queryByText(settings.deviceConnections.tunnelUnavailable))).toBe(false);
+  expect(view.getByLabelText(settings.deviceConnections.consoleUrl)).toBeTruthy();
+  expect(view.getByText(settings.deviceConnections.consoleUrl)).toBeTruthy();
+  const envelope = view.getByLabelText(settings.deviceConnections.envelopeLabel) as HTMLInputElement;
+  const introHelp = view.getByRole('button', { name: i18n.t('settings.deviceConnections.helpLabel', { label: settings.deviceConnections.relayTitle }) });
+  const enrollmentHelp = view.getByRole('button', { name: i18n.t('settings.deviceConnections.helpLabel', { label: settings.deviceConnections.envelopeLabel }) });
+  const introDescription = document.getElementById(introHelp.getAttribute('aria-describedby')!);
+  const enrollmentDescription = document.getElementById(enrollmentHelp.getAttribute('aria-describedby')!);
+  expect(introDescription?.textContent).toBe(settings.deviceConnections.relayIntro);
+  expect(Boolean(introDescription?.classList.contains('sr-only'))).toBe(true);
+  expect(enrollmentDescription?.textContent).toBe(settings.deviceConnections.relayEnrollmentHint);
+  expect(Boolean(enrollmentDescription?.classList.contains('sr-only'))).toBe(true);
+  await act(async () => introHelp.focus());
+  await waitFor(() => expect(view.getByRole('tooltip').textContent).toBe(settings.deviceConnections.relayIntro));
+  await act(async () => introHelp.blur());
+  await waitFor(() => expect(Boolean(view.queryByRole('tooltip'))).toBe(false));
+  fireEvent.mouseEnter(enrollmentHelp);
+  await waitFor(() => expect(view.getByRole('tooltip').textContent).toBe(settings.deviceConnections.relayEnrollmentHint));
+  fireEvent.mouseLeave(enrollmentHelp);
+  await waitFor(() => expect(Boolean(view.queryByRole('tooltip'))).toBe(false));
+  const deploymentSummary = view.getByText(settings.deviceConnections.relaySetupHelp, { selector: 'summary' });
+  const deploymentDetails = deploymentSummary.closest('details')!;
+  expect(deploymentDetails.open).toBe(false);
+  fireEvent.click(deploymentSummary);
+  expect(deploymentDetails.open).toBe(true);
+  expect(view.getByText(settings.deviceConnections.relayDeploymentHint)).toBeTruthy();
+  expect(view.getByRole('button', { name: settings.deviceConnections.relayDeploymentGuide })).toBeTruthy();
   fireEvent.change(envelope, { target: { value: 'nomifun-relay-pair:v2:opaque' } });
   fireEvent.click(view.getByRole('button', { name: settings.deviceConnections.relayConnect }));
   await waitFor(() => expect(view.bootstrap).toHaveBeenCalledTimes(1));

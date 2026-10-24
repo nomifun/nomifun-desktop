@@ -49,6 +49,8 @@ export interface CreativeTemplateRunCenterPort {
 
 interface TemplateRunCenterProps {
   port: CreativeTemplateRunCenterPort;
+  triggerLabel?: string;
+  initialOpen?: boolean;
 }
 
 const ACTIVE = new Set(['requested', 'queued', 'running']);
@@ -199,12 +201,12 @@ const TemplateRunReviewModal: React.FC<{
   );
 };
 
-const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
+const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port, triggerLabel, initialOpen = false }) => {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const { snapshot } = port;
   const { runs } = snapshot;
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initialOpen);
   const [reviewing, setReviewing] = useState<CreativeTemplateRunAggregateV1 | null>(null);
   const [actingId, setActingId] = useState<string | null>(null);
   const [preview, setPreview] = useState<{ runId: string; index: number } | null>(null);
@@ -415,13 +417,14 @@ const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
     </section>
   );
 
-  return <div className={styles.entry} data-template-run-center>
+  return <div className={styles.entry} data-template-run-center data-labeled={Boolean(triggerLabel)}>
     <Popover trigger='click' position='br' popupVisible={open} unmountOnExit={false} escToClose={!overlayOpen} triggerProps={{ containerScrollToClose: true }}
       className={styles.popover} style={{ width: 360, maxWidth: 360 }} content={content}
       onVisibleChange={(visible) => { if (!overlayOpen) setOpen(visible); }} getPopupContainer={modalDefaults.getChildrenPopupContainer}>
-      <button ref={triggerRef} type='button' className={styles.trigger} aria-label={title} title={`${title} · ${unsettledLabel}`}
+      <button ref={triggerRef} type='button' className={styles.trigger} aria-label={triggerLabel ?? title} title={`${title} · ${unsettledLabel}`}
         aria-expanded={open} aria-haspopup='dialog' aria-controls={open ? popupId : undefined} onKeyDown={onListKeyDown}>
         <History theme='outline' size={17} fill='currentColor' />
+        {triggerLabel ? <span>{triggerLabel}</span> : null}
         {unsettledCount > 0 ? <span className={styles.badge} aria-hidden>{unsettledCount > 99 ? '99+' : unsettledCount}</span> : null}
       </button>
     </Popover>

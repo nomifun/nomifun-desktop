@@ -1,9 +1,9 @@
-import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
-import { act, cleanup, render, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
+import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { createElement as h } from 'react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { ipcBridge } from '@/common';
 import type { SkillInfo } from '@/common/types/skill';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
@@ -13,7 +13,8 @@ import {
   INSTALLED_MARKET_KEY,
   SKILL_MARKET_CACHE_KEY,
 } from '@/renderer/services/skills/skillMarketProvenance';
-import SkillsHubSettings from './SkillsHubSettings';
+import SkillsLibraryPanel from './SkillsLibraryPanel';
+import { useSkillsLibrary } from './useSkillsLibrary';
 
 const locale = createInstance();
 const restore: Array<() => void> = [];
@@ -78,22 +79,33 @@ function prepareMocks() {
   return { listing, paths, autoSkills };
 }
 
-function page(active: boolean, refreshToken: number) {
+function Library({ visible }: { visible: boolean }) {
+  const library = useSkillsLibrary();
+  const location = useLocation();
+  return h('div', null,
+    h('input', { 'aria-label': 'Search skills', value: library.searchQuery, onChange: (event) => library.setSearchQuery(event.target.value) }),
+    h('output', { 'data-testid': 'library-url' }, location.search),
+    h('button', { onClick: () => void library.refresh() }, 'Refresh library'),
+    h(SkillsLibraryPanel, { library, visible })
+  );
+}
+
+function page(mounted = true, visible = true, entry = '/enhanced-tools?category=skills') {
   return h(
     I18nextProvider,
     { i18n: locale },
     h(
       MemoryRouter,
-      { initialEntries: ['/settings/skills'] },
-      h(SkillsHubSettings, { active, refreshToken })
+      { initialEntries: [entry] },
+      mounted ? h(Library, { visible }) : null
     )
   );
 }
 
-describe('SkillsHubSettings active refresh', () => {
-  test('does not load while inactive and renders the latest library after activation', async () => {
+describe('Skills library refresh', () => {
+  test('loads the library once when mounted', async () => {
     const { listing, paths, autoSkills } = prepareMocks();
-    const view = render(page(false, 0));
+    const view = render(page(false));
 
     await act(async () => {});
     expect(listing).toHaveBeenCalledTimes(0);
@@ -101,7 +113,7 @@ describe('SkillsHubSettings active refresh', () => {
     expect(autoSkills).toHaveBeenCalledTimes(0);
 
     listing.mockResolvedValue([skill('newly-installed')]);
-    await act(async () => view.rerender(page(true, 0)));
+    await act(async () => view.rerender(page()));
 
     expect(await view.findByTestId('skill-card-newly-installed')).toBeTruthy();
     expect(listing).toHaveBeenCalledTimes(1);
@@ -109,14 +121,14 @@ describe('SkillsHubSettings active refresh', () => {
     expect(autoSkills).toHaveBeenCalledTimes(1);
   });
 
-  test('reloads the active library when its refresh token changes', async () => {
+  test('reloads the installed library after explicit refresh', async () => {
     const { listing } = prepareMocks();
     listing.mockResolvedValue([skill('before-install')]);
-    const view = render(page(true, 0));
+    const view = render(page());
     expect(await view.findByTestId('skill-card-before-install')).toBeTruthy();
 
     listing.mockResolvedValue([skill('after-install')]);
-    await act(async () => view.rerender(page(true, 1)));
+    fireEvent.click(view.getByRole('button', { name: 'Refresh library' }));
 
     expect(await view.findByTestId('skill-card-after-install')).toBeTruthy();
     expect(view.queryByTestId('skill-card-before-install')).toBeNull();
@@ -131,7 +143,7 @@ describe('SkillsHubSettings active refresh', () => {
     paths.mockRejectedValueOnce(new Error('paths unavailable'));
     autoSkills.mockRejectedValueOnce(new Error('auto metadata unavailable'));
 
-    const view = render(page(true, 0));
+    const view = render(page());
 
     expect(await view.findByTestId('skill-card-installed-without-metadata')).toBeTruthy();
     expect(logging).toHaveBeenCalledTimes(2);
@@ -144,10 +156,10 @@ describe('SkillsHubSettings active refresh', () => {
       .mockImplementationOnce(() => firstRequest.promise)
       .mockResolvedValueOnce([skill('fresh-result')]);
 
-    const view = render(page(true, 0));
+    const view = render(page());
     await waitFor(() => expect(listing).toHaveBeenCalledTimes(1));
 
-    await act(async () => view.rerender(page(true, 1)));
+    fireEvent.click(view.getByRole('button', { name: 'Refresh library' }));
     expect(await view.findByTestId('skill-card-fresh-result')).toBeTruthy();
 
     await act(async () => firstRequest.resolve([skill('stale-result')]));
@@ -156,14 +168,14 @@ describe('SkillsHubSettings active refresh', () => {
     expect(listing).toHaveBeenCalledTimes(2);
   });
 
-  test('does not let a request from the inactive tab erase newly installed provenance', async () => {
+  test('does not let a request from an unmounted library erase newly installed provenance', async () => {
     const { listing } = prepareMocks();
     const staleRequest = deferred<SkillInfo[]>();
     listing.mockImplementationOnce(() => staleRequest.promise);
-    const view = render(page(true, 0));
+    const view = render(page());
     await waitFor(() => expect(listing).toHaveBeenCalledTimes(1));
 
-    await act(async () => view.rerender(page(false, 0)));
+    await act(async () => view.rerender(page(false)));
     const installedState = {
       version: 2,
       items: {
@@ -183,7 +195,7 @@ describe('SkillsHubSettings active refresh', () => {
     expect(JSON.parse(localStorage.getItem(INSTALLED_MARKET_KEY) ?? '{}')).toEqual(installedState);
 
     listing.mockResolvedValueOnce([skill('new-skill')]);
-    await act(async () => view.rerender(page(true, 1)));
+    await act(async () => view.rerender(page()));
     const card = await view.findByTestId('skill-card-new-skill');
     expect(within(card).getByText('New Market Skill')).toBeTruthy();
   });
@@ -210,12 +222,60 @@ describe('SkillsHubSettings active refresh', () => {
       skill('canonical-skill', 'Canonical backend description that drives the skill runtime.'),
     ]);
 
-    const view = render(page(true, 0));
+    const view = render(page());
     const card = await view.findByTestId('skill-card-canonical-skill');
 
     expect(within(card).getByText('Market Display Name')).toBeTruthy();
     expect(within(card).getByText('Market display description.')).toBeTruthy();
     expect(within(card).queryByText('canonical-skill')).toBeNull();
     expect(within(card).queryByText('Canonical backend description that drives the skill runtime.')).toBeNull();
+  });
+
+  test('keeps the full installed library searchable rather than showing a fixed overview', async () => {
+    const { listing } = prepareMocks();
+    listing.mockResolvedValue(Array.from({ length: 28 }, (_, index) => skill(`installed-${index}`)));
+    const view = render(page());
+    await view.findByTestId('skill-card-installed-27');
+    expect(within(view.getByTestId('skills-library-grid')).getAllByTestId(/^skill-card-/)).toHaveLength(28);
+
+    fireEvent.change(view.getByRole('textbox', { name: 'Search skills' }), { target: { value: 'installed-27' } });
+    expect(view.getByTestId('skill-card-installed-27')).toBeTruthy();
+    expect(view.queryByTestId('skill-card-installed-0')).toBeNull();
+    expect(view.getByTestId('skill-paths-display').textContent).toBe('C:/skills');
+  });
+
+  test('shows a retryable load failure instead of an empty library', async () => {
+    const { listing } = prepareMocks();
+    const logging = spyOn(console, 'error').mockImplementation(() => {});
+    restore.push(() => logging.mockRestore());
+    listing.mockRejectedValueOnce(new Error('unavailable')).mockResolvedValueOnce([skill('after-retry')]);
+    const view = render(page());
+
+    const error = await view.findByTestId('skills-library-error');
+    expect(view.queryByTestId('skills-library-empty')).toBeNull();
+    fireEvent.click(within(error).getByRole('button', { name: 'Retry' }));
+    expect(await view.findByTestId('skill-card-after-retry')).toBeTruthy();
+    expect(view.queryByTestId('skills-library-error')).toBeNull();
+  });
+
+  test('waits for the visible skills category before scrolling to and consuming a deep-link highlight', async () => {
+    const { listing } = prepareMocks();
+    listing.mockResolvedValue([skill('highlight-me'), skill('other')]);
+    const originalScroll = HTMLElement.prototype.scrollIntoView;
+    const scrolling = mock(() => {});
+    HTMLElement.prototype.scrollIntoView = scrolling;
+    restore.push(() => { HTMLElement.prototype.scrollIntoView = originalScroll; });
+    const entry = '/enhanced-tools?category=skills&highlight=highlight-me';
+    const view = render(page(true, false, entry));
+    await view.findByTestId('skill-card-highlight-me');
+    expect(view.getByTestId('library-url').textContent).toContain('highlight=highlight-me');
+    expect(scrolling).not.toHaveBeenCalled();
+
+    fireEvent.change(view.getByRole('textbox', { name: 'Search skills' }), { target: { value: 'other' } });
+    expect(view.queryByTestId('skill-card-highlight-me')).toBeNull();
+    view.rerender(page(true, true, entry));
+    await waitFor(() => expect(scrolling).toHaveBeenCalledTimes(1));
+    expect(view.getByTestId('skill-card-highlight-me').className).toContain('enhanced-tools-skill-card--highlighted');
+    expect(view.getByTestId('library-url').textContent).toBe('?category=skills');
   });
 });

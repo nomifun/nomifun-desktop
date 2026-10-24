@@ -12,18 +12,20 @@ NomiFun 有两种容易混淆的扩展机制：
 
 | 能力 | 页面 |
 | --- | --- |
-| MCP server 管理 | `/mcp` |
-| 技能管理 | `/skills` |
+| MCP server 管理 | `/enhanced-tools?category=mcp` |
+| 技能管理 | `/enhanced-tools?category=skills` |
 | Agent 能力设计与试用 | `/agent` |
 | 外部工具接入（MCP / REST） | `/connections?task=tools` |
 
-旧 Settings URL 会重定向到这些页面。
+MCP 与技能共享侧栏的“MCP & 技能”入口，各自保留数据与业务操作。搜索框跟随当前分类，
+右上角“添加”菜单在 MCP 下提供从 JSON 导入、一键导入与 MCP 市场，在技能下提供
+从 Agent 导入、导入技能、导入 zip 与技能市场。市场以 `view=market` 打开，关闭后回到原分类。
+旧 `/mcp`、`/skills` 与 Settings URL 保留原市场选择、技能高亮和其他查询参数后重定向。
 
 ## MCP Server
 
-打开 `/mcp` 可以新增、导入、测试和启用/禁用 MCP server。
-
-![MCP 页面](../images/mcp-01-capabilities.png)
+打开“MCP & 技能 → MCP”（`/enhanced-tools?category=mcp`）可以新增、导入、测试和启用/禁用
+MCP server。每行保留连接检测、配置、授权、删除和工具列表操作。
 
 每条 server 记录包含：
 
@@ -159,9 +161,8 @@ MCP 调用继续校验服务器启停、连接配置和工具 schema。连接身
 
 ## 技能
 
-打开 `/skills`。
-
-![技能页](../images/mcp-03-skills.png)
+打开“MCP & 技能 → 技能”（`/enhanced-tools?category=skills`），技能列表保留描述、来源标记、
+详情查看与自定义技能删除操作。
 
 技能可以是单个 markdown 文件，也可以是包含 `SKILL.md` 的目录。
 
@@ -178,7 +179,7 @@ MCP 调用继续校验服务器启停、连接配置和工具 schema。连接身
 
 内置的 **飞书 CLI**（`lark-cli`）技能通过[飞书官方 CLI](https://github.com/larksuite/cli/blob/main/README.zh.md)
 操作消息、云文档、云空间、多维表格、电子表格、日历、任务、邮箱和知识库。
-在 `/skills` 中可以查看该技能，在会话输入框旁的技能列表中选择后即可让 Agent 按需使用；它不自动注入。
+在“MCP & 技能 → 技能”中可以查看该技能，在会话输入框旁的技能列表中选择后即可让 Agent 按需使用；它不自动注入。
 例如：“总结这篇飞书文档”“查询我下周的飞书日程”“把这些数据写入指定多维表格”。
 
 首次使用时，Agent 会先查找并复用本机已有的 `lark-cli`；确认未安装后，才把官方 npm 包

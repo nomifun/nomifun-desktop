@@ -1,8 +1,7 @@
-export { default as SiderAssetLibraryEntry } from './SiderAssetLibraryEntry';
+export { default as SiderResourceSpaceEntry } from './SiderResourceSpaceEntry';
 export { default as SiderAgentEntry } from './SiderAgentEntry';
-export { default as SiderSkillsEntry } from './SiderSkillsEntry';
+export { default as SiderEnhancedToolsEntry } from './SiderEnhancedToolsEntry';
 export { default as SiderConversationEntry } from './SiderConversationEntry';
-export { default as SiderMcpEntry } from './SiderMcpEntry';
 export { default as SiderKnowledgeEntry } from './SiderKnowledgeEntry';
 export { default as SiderModelHubEntry } from './SiderModelHubEntry';
 export { default as SiderNomiEntry } from './SiderNomiEntry';

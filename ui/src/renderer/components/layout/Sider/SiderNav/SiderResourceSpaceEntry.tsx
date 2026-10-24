@@ -9,12 +9,12 @@ import { useTranslation } from 'react-i18next';
 import { ImageFiles } from '@icon-park/react';
 import SiderNavItem, { type SiderNavItemProps } from './SiderNavItem';
 
-type SiderAssetLibraryEntryProps = Pick<SiderNavItemProps, 'isActive' | 'collapsed' | 'siderTooltipProps' | 'onClick'>;
+type SiderResourceSpaceEntryProps = Pick<SiderNavItemProps, 'isActive' | 'collapsed' | 'siderTooltipProps' | 'onClick'>;
 
-const SiderAssetLibraryEntry: React.FC<SiderAssetLibraryEntryProps> = ({ collapsed = false, ...props }) => {
+const SiderResourceSpaceEntry: React.FC<SiderResourceSpaceEntryProps> = ({ collapsed = false, ...props }) => {
   const { t } = useTranslation();
-  return <SiderNavItem {...props} collapsed={collapsed} label={t('assetLibrary.siderTitle', { defaultValue: t('creativeStudio.navigation.assets') })}
+  return <SiderNavItem {...props} collapsed={collapsed} label={t('creativeStudio.resources.title')}
     icon={<ImageFiles theme='outline' size={collapsed ? 20 : 16} fill='currentColor' />} />;
 };
 
-export default SiderAssetLibraryEntry;
+export default SiderResourceSpaceEntry;

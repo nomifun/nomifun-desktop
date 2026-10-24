@@ -69,8 +69,7 @@ The source of truth is
 | `/models` | Model and agent management. |
 | `/agent` | Agent settings and Agent Presets. |
 | `/agent-sessions/:agentSessionId` | Single Agent session page. |
-| `/skills` | Skills capability library. |
-| `/mcp` | MCP server management. |
+| `/enhanced-tools?category=mcp`, `/enhanced-tools?category=skills` | MCP & Skills: MCP server management and the Skills library. `view=market` opens the selected category's market. |
 | `/connections` | Connections & Devices: phone pairing and relay access, other-computer browser access, and external MCP/REST tools (`task` = `phone`, `browser`, or `tools`). |
 | `/scheduled`, `/scheduled/:cron_job_id` | Scheduled tasks. |
 | `/requirements`, `/requirements/extensions`, `/requirements/sources` | Requirements Platform, AutoWork, notification/source extensions. |
@@ -84,6 +83,8 @@ The source of truth is
 | `/apps` | Application hosting list, current run settings, import, commands and system-browser links. |
 | `/settings/system`, `/settings/execution-engines`, `/settings/ssh-hosts`, `/settings/permissions`, `/settings/about` | Settings surfaces. |
 
+Legacy `/mcp` and `/skills` links redirect to the corresponding MCP & Skills
+category, preserving market selection, skill highlighting, and other query state.
 Legacy settings paths such as `/settings/model`, `/settings/capabilities`,
 `/settings/skills-hub`, `/settings/tools`, `/settings/display`,
 `/settings/webui`, `/settings/computer-use`, `/settings/voice-input` and

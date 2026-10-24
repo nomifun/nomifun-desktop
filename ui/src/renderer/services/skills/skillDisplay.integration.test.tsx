@@ -139,7 +139,9 @@ describe('skill display across renderer surfaces', () => {
       expect(onGrant).toHaveBeenCalledWith(skill.name, true);
       fireEvent.click(view.getByRole('button', { name: 'Close' }));
 
-      fireEvent.click(view.getByTestId('skill-card-dev-expert'));
+      fireEvent.click(within(view.getByTestId('skill-card-dev-expert')).getByRole('button', {
+        name: `${settings.skillsHub.detailTitle}: ${item.name}`,
+      }));
       expectCopy(await view.findByTestId('skill-detail-content'));
       await waitFor(() => expect(readFile).toHaveBeenCalledWith({ path: skill.location }));
       expect(skill.name).toBe('dev-expert');

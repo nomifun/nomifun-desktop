@@ -5,31 +5,28 @@
  */
 
 import { WEBUI_DEFAULT_PORT } from '@/common/config/constants';
-import { shell, webui } from '@/common/adapter/ipcBridge';
+import { webui } from '@/common/adapter/ipcBridge';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import NomiModal from '@/renderer/components/base/NomiModal';
 import { fetchCurrentUser } from '@/renderer/hooks/context/AuthContext';
 import { useWebuiServer } from '@/renderer/hooks/context/WebuiServerContext';
 import { copyText } from '@/renderer/utils/ui/clipboard';
-import { Alert, Button, Form, Input, Message, Select, Switch, Tooltip } from '@arco-design/web-react';
-import { Copy, Earth, EditTwo, Info, Refresh } from '@icon-park/react';
-import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Button, Form, Input, Message, Switch, Tooltip } from '@arco-design/web-react';
+import { Copy, Earth, EditTwo, PreviewCloseOne, PreviewOpen } from '@icon-park/react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { buildWebuiQrLoginUrl, getWebuiQrBaseUrls } from './webuiQrLinks';
-
-const QRCodeSVGLazy = React.lazy(async () => {
-  const mod = await import('qrcode.react');
-  return { default: mod.QRCodeSVG };
-});
+import WebuiAccessAddresses from './WebuiAccessAddresses';
+import ConnectionHint from './ConnectionHint';
+import WebuiQrLoginPanel from './WebuiQrLoginPanel';
 
 /**
  * WebuiControlPanel — the full WebUI remote-access control body, shared by the
  * Open Capabilities page and the compact sider footer popover.
  *
- * Consumes the shared `useWebuiServer` state (single status subscription / single
- * start-stop path) and adds the credential modals + QR login, ported verbatim
- * from the former `WebuiModalContent` desktop panel. Browser sessions read their
- * authenticated account separately from the desktop listener's status.
+ * Consumes shared listener state and adds account dialogs and one-time login.
+ * Browser sessions read their authenticated account separately from the
+ * desktop listener's status.
  */
 interface WebuiControlPanelProps {
   mode?: 'popover' | 'page';
@@ -45,8 +42,12 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
   const { t } = useTranslation();
 
   // Shared WebUI server state (single subscription, single start/stop path).
-  const { status, running, starting, lifecycleSupported, initialPassword, accessUrls, start, stop, clearInitialPassword } = useWebuiServer();
+  const { status, running, starting, lifecycleSupported, initialPassword, accessUrls, start, stop, refresh, clearInitialPassword } = useWebuiServer();
   const port = WEBUI_DEFAULT_PORT;
+  const availablePassword = lifecycleSupported ? initialPassword : null;
+  const [passwordVisible, setPasswordVisible] = useState(false);
+
+  useEffect(() => setPasswordVisible(false), [availablePassword]);
 
   // 用户名即时覆盖（改密后调 clearInitialPassword 收起明文）。
   // Optimistic username override for immediate display after a change.
@@ -85,7 +86,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
   const handleCopy = (text: string) => {
     copyText(text)
       .then(() => Message.success(t('common.copySuccess')))
-      .catch((error) => console.error('[WebuiControlPanel] Copy failed:', error));
+      .catch(() => Message.error(t('common.copyFailed')));
   };
 
   // Browser lifecycle status is unavailable; it cannot establish an account.
@@ -137,6 +138,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
       // After a change, forget the one-time plaintext (hides it everywhere).
       clearInitialPassword();
       if (lifecycleSupported) {
+        void refresh();
         Message.success(t('settings.webui.passwordChanged'));
       } else {
         // All sessions (this one included) are now invalid — send the user to
@@ -282,20 +284,12 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
     }
   }, [status?.allowRemote, status?.running]);
 
-  // 格式化过期时间 / Format expiration time
-  const formatExpiresAt = (timestamp: number) => {
-    const date = new Date(timestamp);
-    return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  };
-
-  // 密码默认显示 ******，仅首次启动返回的一次性明文可见；改密后由 clearInitialPassword 收起。
-  // Password shows ****** by default; only the one-time plaintext from first start
-  // is visible, and a change forgets it (clearInitialPassword). When the backend
-  // reports no password has ever been set (passwordSet === false), show a
-  // "not set yet" hint instead of ****** so a fresh install does not imply a
-  // hidden credential. Defaults to "set" while status is loading to avoid a flash.
+  // Only the native first-enable result supplies a password that can be revealed.
+  // Persisted credentials are hashes; show their configured state truthfully.
   const passwordIsSet = status?.passwordSet ?? true;
-  const displayPassword = initialPassword ? initialPassword : passwordIsSet ? t('settings.webui.passwordHidden') : t('settings.webui.passwordNotSet');
+  const displayPassword = availablePassword
+    ? passwordVisible ? availablePassword : t('settings.webui.passwordHidden')
+    : passwordIsSet ? t('settings.webui.passwordConfigured') : t('settings.webui.passwordNotSet');
   const containerClass =
     mode === 'page'
       ? 'w-full overflow-visible flex flex-col gap-12px'
@@ -303,20 +297,15 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
 
   return (
     <div className={containerClass}>
-      {/* 标题 / Title */}
-      <div className='flex items-center gap-8px px-2px'>
-        <Earth theme='outline' size='16' className='text-primary-6 shrink-0' />
-        <span className='text-14px font-500 text-t-primary'>{t('settings.webui')}</span>
-      </div>
-
-      {/* WebUI 引导提示 / WebUI hint */}
-      {/* theme 里没有名为 line 的颜色，`border-line` 产出 0 条 CSS；再加上本仓库没有
-          全局 border reset，这一屏的每个提示框其实都是「无色无样式」的隐形边框。
-          There is no `line` colour and no global border reset: every hint box on this
-          panel had an invisible border until the colour and the style were spelled out. */}
-      <div className='rd-10px border border-solid border-arco-2 bg-fill-1 px-10px py-8px text-12px text-t-secondary leading-relaxed'>
-        {t('settings.webui.featureRemoteDesc')}
-      </div>
+      {mode === 'popover' && <>
+        <div className='flex items-center gap-8px px-2px'>
+          <Earth theme='outline' size='16' className='text-primary-6 shrink-0' />
+          <span className='text-14px font-500 text-t-primary'>{t('settings.webui')}</span>
+        </div>
+        <div className='rd-10px border border-solid border-arco-2 bg-fill-1 px-10px py-8px text-12px text-t-secondary leading-relaxed'>
+          {t('settings.webui.featureRemoteDesc')}
+        </div>
+      </>}
 
       {/* A browser is already served by its host and cannot control its listener. */}
       {!lifecycleSupported && (
@@ -343,70 +332,7 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
         />
       </div>}
 
-      {!lifecycleSupported && <div className='flex items-center gap-8px text-13px text-t-secondary'>
-        <code className='min-w-0 truncate'>{window.location.origin}</code>
-        <button type='button' className='bg-transparent border-none cursor-pointer text-primary-6' onClick={() => handleCopy(window.location.origin)}>{t('common.copy')}</button>
-      </div>}
-
-      {/* 访问地址：本机 + 每个网卡真实 IP 的快捷 URL / Access URLs */}
-      {lifecycleSupported && running && accessUrls.length > 0 && (
-        <div className='flex flex-col gap-6px'>
-          <div className='flex items-center gap-4px px-2px'>
-            <span className='text-12px font-500 text-t-tertiary'>{t('settings.webui.accessUrl')}</span>
-            {/* 浏览器缓存提示收拢进 tips / Browser-cache hint tucked into a tips tooltip */}
-            <Tooltip
-              position='top'
-              content={<div className='max-w-260px text-12px leading-relaxed'>{t('settings.webui.cacheHint')}</div>}
-            >
-              <span className='inline-flex items-center text-t-tertiary hover:text-t-primary cursor-help leading-none'>
-                <Info theme='outline' size='13' fill='currentColor' />
-              </span>
-            </Tooltip>
-          </div>
-          <div className='flex flex-col gap-6px'>
-            {accessUrls.map((url) => (
-              <div key={url} className='flex items-center gap-8px min-w-0'>
-                <button
-                  className='text-13px text-primary font-mono hover:underline cursor-pointer bg-transparent border-none p-0 truncate'
-                  onClick={() => shell.openExternal.invoke(url).catch(console.error)}
-                >
-                  {url}
-                </button>
-                <Tooltip content={t('common.copy')}>
-                  <button
-                    className='p-4px text-t-tertiary hover:text-t-primary cursor-pointer bg-transparent border-none'
-                    onClick={() => handleCopy(url)}
-                  >
-                    <Copy size={15} />
-                  </button>
-                </Tooltip>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* 一次性初始密码块 / One-time initial password block */}
-      {running && initialPassword && (
-        <div className='flex flex-col gap-4px'>
-          <div className='text-12px font-500 text-t-tertiary px-2px'>{t('settings.webui.initialPassword')}</div>
-          <div className={CREDENTIAL_PILL_CLASS}>
-            <span className='text-13px text-t-primary truncate flex-1'>{initialPassword}</span>
-            <div className={CREDENTIAL_ACTIONS_CLASS}>
-              <Tooltip content={t('common.copy')}>
-                <Button
-                  type='text'
-                  size='mini'
-                  className={CREDENTIAL_ICON_BUTTON_CLASS}
-                  onClick={() => handleCopy(initialPassword)}
-                >
-                  <Copy size={13} />
-                </Button>
-              </Tooltip>
-            </div>
-          </div>
-        </div>
-      )}
+      {mode === 'popover' && <WebuiAccessAddresses />}
 
       {/* 登录信息 / Login Info */}
       <div className='flex flex-col gap-4px'>
@@ -448,15 +374,41 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
 
         {/* 密码 / Password */}
         <div className='flex items-center justify-between gap-12px'>
-          <span className='text-13px text-t-secondary shrink-0'>{t('settings.webui.initialPassword')}:</span>
+          <div className='flex shrink-0 items-center gap-4px'>
+            <span className='text-13px text-t-secondary'>{t('settings.webui.password')}:</span>
+            {(availablePassword || passwordIsSet) && <ConnectionHint
+              label={t('settings.webui.password')}
+              content={t(availablePassword ? 'settings.webui.initialPasswordHint' : 'settings.webui.passwordUnavailableHint')}
+            />}
+          </div>
           <div className={CREDENTIAL_PILL_CLASS}>
             <span className='text-13px text-t-primary truncate'>{displayPassword}</span>
             <div className={CREDENTIAL_ACTIONS_CLASS}>
-              <Tooltip content={t('settings.webui.resetPasswordTooltip')}>
+              {availablePassword && <>
+                <Tooltip content={t(passwordVisible ? 'settings.webui.hidePassword' : 'settings.webui.showPassword')} trigger={['hover', 'focus']}>
+                  <Button
+                    type='text'
+                    size='mini'
+                    className={CREDENTIAL_ICON_BUTTON_CLASS}
+                    aria-label={t(passwordVisible ? 'settings.webui.hidePassword' : 'settings.webui.showPassword')}
+                    aria-pressed={passwordVisible}
+                    onClick={() => setPasswordVisible((visible) => !visible)}
+                  >
+                    {passwordVisible ? <PreviewCloseOne size={13} /> : <PreviewOpen size={13} />}
+                  </Button>
+                </Tooltip>
+                <Tooltip content={t('settings.webui.copyPasswordTooltip')} trigger={['hover', 'focus']}>
+                  <Button type='text' size='mini' className={CREDENTIAL_ICON_BUTTON_CLASS} aria-label={t('settings.webui.copyPasswordTooltip')} onClick={() => handleCopy(availablePassword)}>
+                    <Copy size={13} />
+                  </Button>
+                </Tooltip>
+              </>}
+              <Tooltip content={t('settings.webui.changePassword')}>
                 <Button
                   type='text'
                   size='mini'
                   className={CREDENTIAL_ICON_BUTTON_CLASS}
+                  aria-label={t('settings.webui.changePassword')}
                   onClick={handleResetPassword}
                 >
                   <EditTwo size={13} />
@@ -467,105 +419,15 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
         </div>
       </div>
 
-      {/* 二维码登录（仅生命周期可用、服务器运行且允许远程访问时显示）/ QR Code Login */}
-      {lifecycleSupported && status?.running && status.allowRemote && (
-        <div className='flex flex-col gap-6px'>
-          <div className='border-t border-t-solid border-arco-2' />
-          <div className='text-12px font-500 text-t-tertiary px-2px'>{t('settings.webui.qrLogin')}</div>
-          <div className='text-12px text-t-tertiary px-2px'>{t('settings.webui.qrLoginHint')}</div>
-
-          <div className='flex flex-col items-center gap-12px'>
-            {qrBaseUrls.length > 0 && (
-              <div className='qr-address-picker w-full rd-12px border border-solid border-[rgba(var(--primary-6),0.30)] bg-[rgba(var(--primary-6),0.07)] p-10px shadow-[0_8px_22px_rgba(var(--primary-6),0.08)]'>
-                <div className='flex items-start gap-8px'>
-                  <span className='mt-1px flex size-24px shrink-0 items-center justify-center rd-8px bg-primary-1 text-primary-6'>
-                    <Earth size={14} />
-                  </span>
-                  <div className='min-w-0 flex-1'>
-                    <div className='text-12px font-600 leading-18px text-t-primary'>
-                      {t('settings.webui.qrAddressPickerTitle')}
-                    </div>
-                    <div className='mt-2px text-11px leading-16px text-t-secondary'>
-                      {t('settings.webui.qrAddressPickerDesc')}
-                    </div>
-                  </div>
-                </div>
-                {qrBaseUrls.length > 1 ? (
-                  <Select
-                    size='mini'
-                    value={selectedQrBaseUrl ?? qrBaseUrls[0]}
-                    onChange={(value) => setSelectedQrBaseUrl(value)}
-                    className='mt-8px w-full'
-                  >
-                    {qrBaseUrls.map((url) => (
-                      <Select.Option key={url} value={url}>
-                        {url}
-                      </Select.Option>
-                    ))}
-                  </Select>
-                ) : (
-                  <div className='mt-8px flex min-h-28px items-center rd-8px border border-solid border-arco-2 bg-fill-0 px-9px'>
-                    <code className='truncate font-mono text-11px text-t-primary'>{selectedQrDisplayUrl}</code>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* 二维码显示区域 / QR Code display area */}
-            <div className='p-12px bg-fill-1 border border-solid border-arco-2 rd-10px'>
-              {qrLoading ? (
-                <div className='w-140px h-140px flex items-center justify-center'>
-                  <span className='text-13px text-t-tertiary'>{t('common.loading')}</span>
-                </div>
-              ) : qrUrl ? (
-                <div className='p-8px bg-white rd-8px'>
-                  <Suspense
-                    fallback={
-                      <div className='w-140px h-140px flex items-center justify-center'>
-                        <span className='text-13px text-t-tertiary'>{t('common.loading')}</span>
-                      </div>
-                    }
-                  >
-                    <QRCodeSVGLazy value={qrUrl} size={140} level='M' />
-                  </Suspense>
-                </div>
-              ) : (
-                <div className='w-140px h-140px flex items-center justify-center'>
-                  <span className='text-13px text-t-tertiary'>{t('settings.webui.qrGenerateFailed')}</span>
-                </div>
-              )}
-            </div>
-
-            {/* 过期时间、复制链接和刷新按钮 / Expiration time, copy link and refresh button */}
-            <div className='flex items-center gap-8px'>
-              {qrExpiresAt && (
-                <span className='text-12px text-t-tertiary'>
-                  {t('settings.webui.qrExpires', { time: formatExpiresAt(qrExpiresAt) })}
-                </span>
-              )}
-              {qrUrl && (
-                <Tooltip content={t('settings.webui.copyQrLink')}>
-                  <button
-                    className='p-4px bg-transparent border-none text-t-tertiary hover:text-t-primary cursor-pointer'
-                    onClick={() => handleCopy(qrUrl)}
-                  >
-                    <Copy size={15} />
-                  </button>
-                </Tooltip>
-              )}
-              <Tooltip content={t('settings.webui.refreshQr')}>
-                <button
-                  className='p-4px bg-transparent border-none text-t-tertiary hover:text-t-primary cursor-pointer'
-                  onClick={() => void generateQRCode()}
-                  disabled={qrLoading}
-                >
-                  <Refresh size={15} className={qrLoading ? 'animate-spin' : ''} />
-                </button>
-              </Tooltip>
-            </div>
-          </div>
-        </div>
-      )}
+      {lifecycleSupported && status?.running && status.allowRemote && <WebuiQrLoginPanel
+        baseUrls={qrBaseUrls}
+        selectedBaseUrl={selectedQrDisplayUrl}
+        onBaseUrlChange={setSelectedQrBaseUrl}
+        qrUrl={qrUrl}
+        expiresAt={qrExpiresAt}
+        loading={qrLoading}
+        onRefresh={() => void generateQRCode()}
+      />}
 
       {/* 设置新用户名弹窗 / Set New Username Modal */}
       <NomiModal

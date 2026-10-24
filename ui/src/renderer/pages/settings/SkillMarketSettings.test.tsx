@@ -74,7 +74,11 @@ function prepareMarketCache(items = [marketItem]) {
   }
 }
 
-function mount(onInstalled?: () => void, children?: ReactNode) {
+function market(onInstalled?: (skillNames: string[]) => void, children?: ReactNode, addedStateLoading = false) {
+  return h(I18nextProvider, { i18n: locale }, h(Fragment, null, h(SkillMarketSettings, { onInstalled, addedStateLoading }), children));
+}
+
+function mount(onInstalled?: (skillNames: string[]) => void, children?: ReactNode, addedStateLoading = false) {
   const messageHook = spyOn(arcoMessageHook, 'useArcoMessage').mockReturnValue([
     {
       success: () => () => {},
@@ -84,7 +88,7 @@ function mount(onInstalled?: () => void, children?: ReactNode) {
     null,
   ] as unknown as ReturnType<typeof arcoMessageHook.useArcoMessage>);
   restore.push(() => messageHook.mockRestore());
-  return render(h(I18nextProvider, { i18n: locale }, h(Fragment, null, h(SkillMarketSettings, { onInstalled }), children)));
+  return render(market(onInstalled, children, addedStateLoading));
 }
 
 describe('SkillMarketSettings controlled installation', () => {
@@ -93,9 +97,8 @@ describe('SkillMarketSettings controlled installation', () => {
     const skill = { name: 'different-manifest-name', description: 'Canonical summary', location: 'C:/skills/demo/SKILL.md', source: 'custom' as const, is_custom: true };
     writeInstalledMarketState(recordInstalledMarketItem({}, marketItem, [skill.name]));
     const refreshed = { ...marketItem, name: 'Refreshed official title', description: 'Refreshed official summary' };
-    const listing = spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([skill]);
     const syncing = spyOn(ipcBridge.fs.syncSkillMarketRankings, 'invoke').mockResolvedValue({ items: [refreshed], fetched_at: 2, errors: [] });
-    restore.push(() => listing.mockRestore(), () => syncing.mockRestore());
+    restore.push(() => syncing.mockRestore());
     const view = mount(undefined, h(SkillCard, { skill, localeKey: 'en-US', isAutoInjected: false, onOpenDetails: () => {}, onDelete: () => {} }));
     await view.findByRole('button', { name: common.added });
     const card = view.getByTestId('skill-card-different-manifest-name');
@@ -113,10 +116,8 @@ describe('SkillMarketSettings controlled installation', () => {
   test('sends only market identity, deduplicates pending clicks, and marks the exact item added', async () => {
     prepareMarketCache();
     const request = deferred<{ skill_names: string[] }>();
-    const listing = spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([]);
     const installing = spyOn(ipcBridge.fs.installSkillMarketItem, 'invoke').mockImplementation(() => request.promise);
     let installedNotifications = 0;
-    restore.push(() => listing.mockRestore());
     restore.push(() => installing.mockRestore());
 
     const view = mount(() => {
@@ -153,23 +154,24 @@ describe('SkillMarketSettings controlled installation', () => {
     expect(installedNotifications).toBe(1);
   });
 
-  test('a failed installed-state probe does not permanently disable Add', async () => {
+  test('waits for the authoritative library owner and never probes or reconciles its own snapshot', async () => {
     prepareMarketCache();
     const listing = spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockRejectedValue(new Error('catalog offline'));
     const installing = spyOn(ipcBridge.fs.installSkillMarketItem, 'invoke').mockResolvedValue({ skill_names: ['demo'] });
-    const logging = spyOn(console, 'error').mockImplementation(() => {});
     restore.push(() => listing.mockRestore());
     restore.push(() => installing.mockRestore());
-    restore.push(() => logging.mockRestore());
 
-    const view = mount();
+    const view = mount(undefined, undefined, true);
     const add = await view.findByRole('button', { name: common.add });
+    expect((add as HTMLButtonElement).disabled).toBe(true);
+    view.rerender(market(undefined, undefined, false));
     await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(add);
     await waitFor(() => expect(installing).toHaveBeenCalledTimes(1));
+    expect(listing).not.toHaveBeenCalled();
   });
 
-  test('reconciles persisted market provenance with the managed library', async () => {
+  test('uses the library owner’s persisted market provenance to prevent duplicate installation', async () => {
     prepareMarketCache();
     localStorage.setItem(
       INSTALLED_MARKET_KEY,
@@ -183,17 +185,7 @@ describe('SkillMarketSettings controlled installation', () => {
         },
       })
     );
-    const listing = spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([
-      {
-        name: 'different-manifest-name',
-        description: 'Fixture',
-        location: 'fixture',
-        is_custom: true,
-        source: 'custom',
-      },
-    ]);
     const installing = spyOn(ipcBridge.fs.installSkillMarketItem, 'invoke').mockResolvedValue({ skill_names: [] });
-    restore.push(() => listing.mockRestore());
     restore.push(() => installing.mockRestore());
 
     const view = mount();
@@ -217,17 +209,6 @@ describe('SkillMarketSettings controlled installation', () => {
         },
       })
     );
-    const listing = spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([
-      {
-        name: 'demo',
-        description: 'Fixture',
-        location: 'fixture',
-        is_custom: true,
-        source: 'custom',
-      },
-    ]);
-    restore.push(() => listing.mockRestore());
-
     const view = mount();
     const exact = await view.findByTestId('btn-add-market-skill-clawhub-owner-demo');
     const collision = await view.findByTestId('btn-add-market-skill-clawhub-other-owner-demo');

@@ -22,7 +22,7 @@ describe('capability hub navigation', () => {
     expect(enSettings.deviceConnections.title).toBe('Connections & Devices');
   });
 
-  test('exposes Agent as the public authoring destination and keeps Skills/MCP separate', () => {
+  test('exposes Agent authoring and one enhanced tools management destination', () => {
     const siderSource = readSource(new URL('./index.tsx', import.meta.url));
 
     expect(siderSource.includes('SiderAgentEntry')).toBe(true);
@@ -36,12 +36,11 @@ describe('capability hub navigation', () => {
     expect(siderSource.includes('SiderPresetEntry')).toBe(false);
     expect(siderSource.includes("navTo('/presets')")).toBe(false);
     expect(siderSource.includes("pathname.startsWith('/presets')")).toBe(false);
-    expect(siderSource.includes('SiderSkillsEntry')).toBe(true);
-    expect(siderSource.includes("navTo('/skills')")).toBe(true);
-    expect(siderSource.includes("pathname.startsWith('/skills')")).toBe(true);
-    expect(siderSource.includes('SiderMcpEntry')).toBe(true);
-    expect(siderSource.includes("navTo('/mcp')")).toBe(true);
-    expect(siderSource.includes("pathname.startsWith('/mcp')")).toBe(true);
+    expect(siderSource.includes('SiderEnhancedToolsEntry')).toBe(true);
+    expect(siderSource.includes("navTo(enhancedToolsUrl('mcp'))")).toBe(true);
+    expect(siderSource.includes('pathname.startsWith(ENHANCED_TOOLS_PATH)')).toBe(true);
+    expect(siderSource.includes('SiderSkillsEntry')).toBe(false);
+    expect(siderSource.includes('SiderMcpEntry')).toBe(false);
     expect(siderSource.includes('SiderOpenCapabilitiesEntry')).toBe(true);
     expect(siderSource.includes("navTo('/connections')")).toBe(true);
     expect(siderSource.includes("pathname.startsWith('/connections')")).toBe(true);
@@ -61,6 +60,9 @@ describe('capability hub navigation', () => {
     expect(routerSource.includes('getHashRouteRedirectUrl')).toBe(true);
     expect(routerSource.includes("return `${origin}/#${pathname}${search}`")).toBe(true);
     expect(routerSource.includes("path='/mcp'")).toBe(true);
+    expect(routerSource.includes("path='/enhanced-tools' element={withRouteFallback(EnhancedToolsPage)}")).toBe(true);
+    expect(routerSource.includes("path='/mcp' element={<LegacyEnhancedToolsRedirect category='mcp'")).toBe(true);
+    expect(routerSource.includes("path='/skills' element={<LegacyEnhancedToolsRedirect category='skills'")).toBe(true);
     expect(routerSource.includes("path='/agent'")).toBe(true);
     expect(routerSource.includes('LegacyAgentAuthoringRedirect')).toBe(false);
     expect(routerSource.includes("path='/presets'")).toBe(false);

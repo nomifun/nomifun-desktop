@@ -11,18 +11,24 @@ Current pages:
 
 | Capability | Page |
 | --- | --- |
-| MCP servers | `/mcp` |
-| Skills | `/skills` |
+| MCP servers | `/enhanced-tools?category=mcp` |
+| Skills | `/enhanced-tools?category=skills` |
 | Agent workbench | `/agent` |
 | External tool access (MCP / REST) | `/connections?task=tools` |
 
-Legacy settings URLs redirect to these pages.
+MCP and Skills share the **MCP & Skills** navigation entry, while retaining
+their own data and operations. Search follows the selected category. The header's
+Add menu exposes JSON import, one-click import, and MCP Market for MCP; or
+Import from Agent, Import Skills, Import .zip, and Skill Market for Skills.
+Markets open with `view=market`; closing them returns to the same category.
+Legacy `/mcp`, `/skills`, and settings URLs redirect here, preserving old market
+selection, skill highlighting, and other query state.
 
 ## MCP Servers
 
-Open `/mcp` to add, import, test, enable, and disable MCP servers.
-
-![MCP page](../images/mcp-01-capabilities.png)
+Open **MCP & Skills → MCP** (`/enhanced-tools?category=mcp`) to add, import,
+test, enable, and disable MCP servers. Each row keeps its connection check,
+configuration, authentication, deletion, and tool-list actions.
 
 Each server row owns:
 
@@ -201,9 +207,8 @@ permissions or MCP selections.
 
 ## Skills
 
-Open `/skills`.
-
-![Skills tab](../images/mcp-03-skills.png)
+Open **MCP & Skills → Skills** (`/enhanced-tools?category=skills`). Skills retain
+their descriptions, source labels, detail inspection, and custom-skill deletion.
 
 A skill is either a single markdown file or a directory containing `SKILL.md`.
 Sources:
@@ -222,7 +227,7 @@ The Skill Market Add action is owned by the Skill Library service: the backend v
 
 The bundled **Feishu CLI** (`lark-cli`, displayed as **飞书 CLI** in Chinese) skill uses the
 [official Lark CLI](https://github.com/larksuite/cli/blob/main/README.zh.md) for messages, cloud
-documents, Drive, Base, spreadsheets, calendars, tasks, mail and wikis. View it in `/skills`
+documents, Drive, Base, spreadsheets, calendars, tasks, mail and wikis. View it in **MCP & Skills → Skills**
 and select it from the conversation's skill picker. It is not auto-injected. Example requests
 include summarizing a linked Feishu document, reading next week's agenda, or updating a specified Base table.
 

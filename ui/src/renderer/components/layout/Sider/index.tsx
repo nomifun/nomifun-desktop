@@ -12,19 +12,19 @@ import { cleanupSiderTooltips, getSiderTooltipProps } from '@renderer/utils/ui/s
 import { useAuth } from '@renderer/hooks/context/AuthContext';
 import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
-import { CANVASES_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH } from '@renderer/pages/creativeStudio/app/resourceRoutes';
-import { FileText, FullScreen, PageTemplate } from '@icon-park/react';
+import { CANVASES_PATH, MATERIALS_PATH, PROMPTS_PATH, resourceSpaceSectionForPath } from '@renderer/pages/creativeStudio/app/resourceRoutes';
+import { ENHANCED_TOOLS_PATH, enhancedToolsUrl } from '@renderer/pages/enhancedTools/routes';
+import { FileText, FullScreen } from '@icon-park/react';
 import SiderNavItem from './SiderNav/SiderNavItem';
 import { requestCreativeStudioBeforeLeave } from '@renderer/pages/creativeStudio/app/beforeLeave';
 import { readCanvasResumeLocation, rememberCanvasResumeLocation } from '@renderer/pages/creativeStudio/app/canvasResumeLocation';
 import {
-  SiderAssetLibraryEntry,
+  SiderResourceSpaceEntry,
   SiderAgentEntry,
-  SiderSkillsEntry,
+  SiderEnhancedToolsEntry,
   SiderConversationEntry,
   SiderCustomerServiceEntry,
   SiderKnowledgeEntry,
-  SiderMcpEntry,
   SiderModelHubEntry,
   SiderNomiEntry,
   SiderOpenCapabilitiesEntry,
@@ -51,7 +51,7 @@ interface SiderProps {
  * reached via the "会话" entry. The rail holds top-level destinations grouped
  * by small-text section headers (`SiderSectionHeader`): 常用 (会话 / 桌面伙伴),
  * 数据空间 (知识库), 自动化 (定时任务 / 需求平台),
- * 增强工具 (设定 / Skill / MCP), 服务 (应用 / 客服), and a bottom-pinned 设置 group
+ * 扩展 (MCP & 技能), 服务 (应用 / 客服), and a bottom-pinned 设置 group
  * (模型管理 + the footer). Execution engines live as an
  * independent tab inside Settings rather than being mixed into model
  * management.
@@ -67,6 +67,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const currentPath = `${pathname}${search}${hash}`;
   const lastNonSettingsPathRef = useRef('/guid');
   const lastCanvasPathRef = useRef(readCanvasResumeLocation());
+  const lastResourcePathRef = useRef(MATERIALS_PATH);
   const pendingNavigationRef = useRef<{ target: string; replace: boolean; state?: unknown } | null>(null);
   const navigationInFlightRef = useRef(false);
   // Logout is a WebUI-only affordance: the bundled desktop shell (Electron or
@@ -82,6 +83,10 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   useEffect(() => {
     const remembered = rememberCanvasResumeLocation(currentPath);
     if (remembered) lastCanvasPathRef.current = remembered;
+  }, [currentPath]);
+
+  useEffect(() => {
+    if (resourceSpaceSectionForPath(currentPath)) lastResourcePathRef.current = currentPath;
   }, [currentPath]);
 
   const navTo = useCallback(
@@ -112,9 +117,9 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleScheduledClick = () => navTo('/scheduled');
   const handleRequirementsClick = () => navTo('/requirements');
   const handleKnowledgeClick = () => navTo('/knowledge');
-  const handleAssetLibraryClick = () => {
-    void preloadResourceRoute(MATERIALS_PATH);
-    navTo(MATERIALS_PATH);
+  const handleResourceSpaceClick = () => {
+    void preloadResourceRoute(lastResourcePathRef.current);
+    navTo(lastResourcePathRef.current);
   };
   const handleNomiClick = () => navTo('/nomi');
   const handleCanvasClick = () => {
@@ -123,9 +128,8 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   };
   const handleCustomerServiceClick = () => navTo('/customer-service');
   const handleAgentClick = () => navTo('/agent');
-  const handleSkillsClick = () => navTo('/skills');
+  const handleEnhancedToolsClick = () => navTo(enhancedToolsUrl('mcp'));
   const handleAppClick = () => navTo('/apps');
-  const handleMcpClick = () => navTo('/mcp');
   const handleOpenCapabilitiesClick = () => navTo('/connections');
   const handleModelHubClick = () => navTo('/models');
   const handleSettingsClick = () => navTo(isSettings ? lastNonSettingsPathRef.current || '/guid' : '/settings/system');
@@ -218,17 +222,17 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleKnowledgeClick}
             />
-            {/* Asset library — retained materials page. */}
+            {/* Materials and templates share one resource destination. */}
             <div
               className='shrink-0'
-              onMouseEnter={() => void preloadResourceRoute(MATERIALS_PATH)}
-              onFocusCapture={() => void preloadResourceRoute(MATERIALS_PATH)}
+              onMouseEnter={() => void preloadResourceRoute(lastResourcePathRef.current)}
+              onFocusCapture={() => void preloadResourceRoute(lastResourcePathRef.current)}
             >
-              <SiderAssetLibraryEntry
-                isActive={pathname === MATERIALS_PATH}
+              <SiderResourceSpaceEntry
+                isActive={resourceSpaceSectionForPath(pathname) !== null}
                 collapsed={collapsed}
                 siderTooltipProps={siderTooltipProps}
-                onClick={handleAssetLibraryClick}
+                onClick={handleResourceSpaceClick}
               />
             </div>
             <SiderNavItem
@@ -236,12 +240,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               icon={<FileText theme='outline' size={collapsed ? 20 : 16} fill='currentColor' />}
               isActive={pathname === PROMPTS_PATH} collapsed={collapsed} siderTooltipProps={siderTooltipProps}
               onClick={() => navTo(PROMPTS_PATH)}
-            />
-            <SiderNavItem
-              label={t('creativeStudio.navigation.templates', { defaultValue: '模板工作台' })}
-              icon={<PageTemplate theme='outline' size={collapsed ? 20 : 16} fill='currentColor' />}
-              isActive={pathname === TEMPLATES_PATH} collapsed={collapsed} siderTooltipProps={siderTooltipProps}
-              onClick={() => navTo(TEMPLATES_PATH)}
             />
             {/* 自动化 — automation platforms */}
             <SiderSectionHeader label={t('common.siderSection.automation')} collapsed={collapsed} />
@@ -259,21 +257,13 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleRequirementsClick}
             />
-            {/* 增强工具 — extension capabilities */}
+            {/* 扩展 — MCP & 技能 */}
             <SiderSectionHeader label={t('common.siderSection.tools')} collapsed={collapsed} />
-            {/* Skills and MCP remain platform capability destinations. */}
-            <SiderSkillsEntry
-              isActive={pathname.startsWith('/skills')}
+            <SiderEnhancedToolsEntry
+              isActive={pathname.startsWith(ENHANCED_TOOLS_PATH)}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
-              onClick={handleSkillsClick}
-            />
-            {/* MCP — MCP tool server configuration */}
-            <SiderMcpEntry
-              isActive={pathname.startsWith('/mcp')}
-              collapsed={collapsed}
-              siderTooltipProps={siderTooltipProps}
-              onClick={handleMcpClick}
+              onClick={handleEnhancedToolsClick}
             />
             {/* 服务 — hosted applications and public-facing customer service. */}
             <SiderSectionHeader label={t('common.siderSection.services')} collapsed={collapsed} />

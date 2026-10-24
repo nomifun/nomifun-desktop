@@ -1,0 +1,60 @@
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--text-secondary);
+}
+
+.input:global(.arco-input),
+.input :global(.arco-input-inner-wrapper) {
+  border: 1px solid var(--control-idle-border, var(--color-border-3));
+  border-radius: 6px;
+}
+
+.input:global(.arco-input):hover,
+.input:global(.arco-input):focus,
+.input:hover :global(.arco-input-inner-wrapper),
+.input:focus-within :global(.arco-input-inner-wrapper) {
+  border-color: rgb(var(--primary-6));
+}
+
+.health {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  border-top: 1px solid var(--color-border-2);
+  padding-top: 8px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-secondary);
+}
+
+.health > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.health > span::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background-color: var(--color-text-3);
+}
+
+.health > span[data-ready='true']::before {
+  background-color: rgb(var(--success-6));
+}
+
+.setupHelp {
+  border-top: 1px solid var(--color-border-2);
+  padding-top: 8px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-secondary);
+}
