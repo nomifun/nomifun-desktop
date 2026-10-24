@@ -5,6 +5,12 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.15 - 2026-10-24
+
+- **Upgrade notice:** back up or export important data before upgrading from
+  incompatible older database lineages; the existing destructive startup rules
+  rebuild those datasets without converting historical data. Agent clean cuts
+  preserve non-Agent configuration.
 - Add per-interface Chat image-input constraints. Disabling images selects the
   accessibility-only Computer surface; leaving the setting unset preserves
   defaults, and enabling it never expands protocol support.
@@ -15,6 +21,20 @@ notes at a high level rather than a complete historical log.
 - **Computer Use upgrade:** sessions bound to the retired Computer contract
   require a new session; existing history is retained. Reselect Computer
   actions in personal Agents. No previous Computer contract or data is migrated.
+- Make parallel delegation, parent coordination, cancellation, recovery and
+  restart reliable; preserve complete tool results and reasoning bodies across
+  canonical history replay and subsequent turns.
+- Unify scheduled tasks with the Agent workbench and fix retired cron bindings
+  interfering with Agent clean cuts.
+- Combine MCP and skills management, improve MCP OAuth, and add official Feishu
+  CLI skill support.
+- Combine materials and templates in Resource Space; streamline knowledge,
+  prompts, canvas, preferences and connections, including empty-library filters.
+- Refine queued conversation input and companion entry points, and add native
+  subtitle-keyboard and speech workflows.
+- Streamline browser WebUI access, passwordless login, phone pairing and relay
+  setup while preserving device identity across reauthorization.
+- Fix macOS AppKit PID API compilation and lifecycle cleanup details.
 
 ## v0.8.14 - 2026-10-18
 
