@@ -5,7 +5,7 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
-## v0.8.15 - 2026-10-24
+## v0.8.15 - 2026-10-25
 
 - **Upgrade notice:** back up or export important data before upgrading from
   incompatible older database lineages; the existing destructive startup rules
