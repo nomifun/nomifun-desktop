@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use nomifun_agent_runtime::{
     AgentEngine, AgentEngineError, AgentEngineEvent, AgentEventSink, AgentModelPort,
-    AgentToolInvoker, AgentTurnRequest, AgentTurnTerminal, EngineBinding,
+    AgentToolAdmission, AgentToolInvoker, AgentTurnRequest, AgentTurnTerminal, EngineBinding,
 };
 use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationStatus, TimestampMs};
 use tokio::sync::broadcast;
@@ -104,17 +104,18 @@ pub trait UnifiedRuntimeHost: Send + Sync {
     fn supports_canonical_timeline(&self) -> bool { false }
 
     /// Hosts accepting concurrent steering must override this and atomically
-    /// check the inbox and persist admission. False must record no ToolStarted.
+    /// check the inbox, reserve result storage and persist admission. Refusals
+    /// record no ToolStarted and must remain distinct from owner execution.
     async fn admit_tool(
         &self,
         message: &SendMessageData,
         event: &AgentEngineEvent,
-    ) -> Result<bool, AppError> {
+    ) -> Result<AgentToolAdmission, AppError> {
         if !matches!(event, AgentEngineEvent::ToolStarted { .. }) {
             return Err(AppError::BadRequest("tool admission requires ToolStarted".into()));
         }
         self.record_event(message, event).await?;
-        Ok(true)
+        Ok(AgentToolAdmission::Admitted)
     }
 
     /// Required on every exit, including preparation failure and cancellation.
@@ -269,10 +270,10 @@ impl AgentEventSink for TurnProjection {
         Ok(())
     }
 
-    async fn admit_tool(&self, event: AgentEngineEvent) -> Result<bool, AgentEngineError> {
+    async fn admit_tool(&self, event: AgentEngineEvent) -> Result<AgentToolAdmission, AgentEngineError> {
         let admitted = self.host.admit_tool(&self.message, &event).await
             .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
-        if admitted { self.project(event, None)?; self.publish_timeline().await; }
+        if admitted == AgentToolAdmission::Admitted { self.project(event, None)?; self.publish_timeline().await; }
         Ok(admitted)
     }
 }
@@ -754,6 +755,7 @@ mod tests {
         fail_terminal_record: AtomicBool,
         fail_record: AtomicBool,
         fail_timeline_read: AtomicBool,
+        tool_admission: Mutex<AgentToolAdmission>,
         canonical_timeline: AtomicBool,
         timelines: Mutex<Vec<nomifun_agent_contracts::MessageTimelineUpdate>>,
         timeline_reads: AtomicUsize,
@@ -781,6 +783,7 @@ mod tests {
                 fail_terminal_record: AtomicBool::new(false),
                 fail_record: AtomicBool::new(false),
                 fail_timeline_read: AtomicBool::new(false),
+                tool_admission: Mutex::new(AgentToolAdmission::Admitted),
                 canonical_timeline: AtomicBool::new(false),
                 timelines: Mutex::new(Vec::new()),
                 timeline_reads: AtomicUsize::new(0),
@@ -802,6 +805,11 @@ mod tests {
 
     #[async_trait]
     impl UnifiedRuntimeHost for Host {
+        async fn admit_tool(&self, message:&SendMessageData, event:&AgentEngineEvent) -> Result<AgentToolAdmission,AppError> {
+            let admission = *self.tool_admission.lock().unwrap();
+            if admission == AgentToolAdmission::Admitted { self.record_event(message, event).await?; }
+            Ok(admission)
+        }
         fn supports_canonical_timeline(&self) -> bool { self.canonical_timeline.load(Ordering::Acquire) }
         fn requires_turn_boundary_recycle(&self) -> bool {
             self.recycle_completed_turns.load(Ordering::Acquire)
@@ -1295,7 +1303,7 @@ mod tests {
         projection.emit(proposed.clone()).await.unwrap();
         let admitted = AgentEngineEvent::ToolStarted { step: 1, call_id: "read".into(),
             capability_id: "workspace.files".into(), action_id: "workspace.files/read".into() };
-        assert!(projection.admit_tool(admitted.clone()).await.unwrap());
+        assert_eq!(projection.admit_tool(admitted.clone()).await.unwrap(), AgentToolAdmission::Admitted);
         let completed = AgentEngineEvent::ToolCompleted { step: 1, runtime_hold: None,
             result: AgentToolResult::text("read".into(), "owner observation", false) };
         projection.emit(completed.clone()).await.unwrap();
@@ -1311,6 +1319,33 @@ mod tests {
         assert!(projection.emit(AgentEngineEvent::ReasoningDelta { step: 2, text: "uncommitted".into() }).await.is_err());
         assert_eq!(host.timeline_reads.load(Ordering::Acquire), 3, "failed canonical writes cannot trigger metadata publication");
         assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn refused_tool_admission_does_not_publish_running_or_refresh_its_timeline() {
+        for admission in [AgentToolAdmission::InputSuperseded, AgentToolAdmission::JournalBudget] {
+            let host = Host::new();
+            *host.tool_admission.lock().unwrap() = admission;
+            let state = AgentRuntimeState::new(SESSION, "refused-tool-workspace", 32);
+            let turn = state.reset_for_new_turn(ConversationStatus::Running);
+            let projection = TurnProjection {
+                host:host.clone(), message:message(), output:EngineTurnOutput::new(state.clone(), turn),
+                calls:Mutex::new(BTreeMap::new()), terminal:Mutex::new(None),
+                last_model_step:std::sync::atomic::AtomicU16::new(0),
+                pending_text:Mutex::new(VecDeque::new()), text_timeline:Mutex::new(None),
+            };
+            let mut events = state.subscribe();
+            let proposed = AgentEngineEvent::ToolCallCompleted { step:1,
+                call:nomifun_chat_model_broker::ChatToolCall { call_id:"read".into(), name:"read_file".into(),
+                    arguments:nomifun_agent_contracts::StrictJsonValue(serde_json::json!({"path":"a"})), provider_metadata:None } };
+            projection.emit(proposed.clone()).await.unwrap();
+            let timeline_reads = host.timeline_reads.load(Ordering::Acquire);
+            assert_eq!(projection.admit_tool(AgentEngineEvent::ToolStarted { step:1, call_id:"read".into(),
+                capability_id:"workspace.files".into(), action_id:"workspace.files/read".into() }).await.unwrap(), admission);
+            assert_eq!(host.events.lock().unwrap().as_slice(), &[proposed]);
+            assert_eq!(host.timeline_reads.load(Ordering::Acquire), timeline_reads);
+            assert!(events.try_recv().is_err());
+        }
     }
 
     #[tokio::test]

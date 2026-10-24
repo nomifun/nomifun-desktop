@@ -1,9 +1,10 @@
-//! Bounded persistence projection. UI deltas remain live; replay keeps display
-//! text, thinking, and completed calls without every provider fragment.
-use nomifun_chat_model_broker::{ChatContentPart, ChatToolCall, ToolCallId};
+//! Batch streaming content without changing canonical tool observations.
+//! Context presentation and compaction belong to the Runtime; this writer
+//! preserves their accepted facts independently of the model input budget.
+use nomifun_chat_model_broker::ToolCallId;
 use nomifun_agent_contracts::ChatOutputTextSource;
-use nomifun_agent_runtime::{AgentCompactedItem, AgentEngineEvent, AgentToolResult};
-use sha2::{Digest, Sha256};
+use nomifun_agent_runtime::AgentEngineEvent;
+use super::engine_tool_record::{durable_result, instruction_notice, instruction_result, is_instruction_read};
 use std::collections::{BTreeMap, BTreeSet};
 
 const FLUSH_BYTES: usize = 16 * 1024;
@@ -67,21 +68,6 @@ impl AgentEventBuffer {
             if self.thinking_step != Some(*step));
         if let Some(next) = transition { self.thinking_step = next; }
         match event {
-            AgentEngineEvent::ContextCompacted {
-                retained_context: Some(items),
-                ..
-            } => {
-                self.flush(&mut records);
-                let mut projected = event.clone();
-                if let AgentEngineEvent::ContextCompacted {
-                    retained_context: Some(context),
-                    ..
-                } = &mut projected
-                {
-                    *context = bounded_context(items);
-                }
-                records.push(projected);
-            }
             AgentEngineEvent::ModelStepStarted { .. } => {
                 self.flush(&mut records);
                 records.push(event.clone());
@@ -117,28 +103,25 @@ impl AgentEventBuffer {
                 self.flush(&mut records);
                 records.push(event.clone());
             }
-            AgentEngineEvent::ToolCompleted { step, result, runtime_hold }
-                if self.instruction_reads.remove(&result.call_id) =>
-            {
+            AgentEngineEvent::ToolCompleted { result, .. }
+            | AgentEngineEvent::ToolOutcomeReconciled { result, .. } => {
                 self.flush(&mut records);
-                records.push(AgentEngineEvent::ToolCompleted {
-                    step: *step,
-                    result: instruction_result(result),
-                    runtime_hold: *runtime_hold,
-                });
-            }
-            AgentEngineEvent::ToolCompleted { step, result, runtime_hold } => {
-                self.flush(&mut records);
-                records.push(AgentEngineEvent::ToolCompleted {
-                    step: *step,
-                    result: bounded_result(result),
-                    runtime_hold: *runtime_hold,
-                });
+                let instruction = self.instruction_reads.remove(&result.call_id);
+                let recorded = if instruction && matches!(event, AgentEngineEvent::ToolCompleted { .. }) {
+                    instruction_result(result)
+                } else { durable_result(result) };
+                let mut record = event.clone();
+                match &mut record {
+                    AgentEngineEvent::ToolCompleted { result, .. }
+                    | AgentEngineEvent::ToolOutcomeReconciled { result, .. } => *result = recorded,
+                    _ => unreachable!("selected result event"),
+                }
+                records.push(record);
             }
             AgentEngineEvent::InstructionsUpdated { context } => {
                 self.flush(&mut records);
                 records.push(AgentEngineEvent::InstructionsUpdated {
-                    context: digest_notice(context),
+                    context: instruction_notice(context),
                 });
             }
             AgentEngineEvent::OutputTextDelta { step, source, text } => {
@@ -206,110 +189,11 @@ impl AgentEventBuffer {
     }
 }
 
-pub(super) fn is_instruction_read(call: &ChatToolCall) -> bool {
-    call.call_id.as_ref().starts_with("agent-instructions:")
-        || (call.name == "read_file"
-            && call
-                .arguments
-                .0
-                .get("path")
-                .and_then(|v| v.as_str())
-                .is_some_and(|path| {
-                    path.rsplit(['/', '\\']).next().is_some_and(|name| {
-                        name.eq_ignore_ascii_case("AGENTS.md")
-                            || name.eq_ignore_ascii_case("AGENTS.override.md")
-                    })
-                }))
-}
-
-/// Compaction copies must obey the same durable observation policy as the
-/// original ToolCompleted records, including results from preceding turns.
-fn bounded_context(items: &[AgentCompactedItem]) -> Vec<AgentCompactedItem> {
-    let instructions = items
-        .iter()
-        .filter_map(|item| match item {
-            AgentCompactedItem::Message { message } => Some(message),
-            _ => None,
-        })
-        .flat_map(|message| &message.content)
-        .filter_map(|part| {
-            let ChatContentPart::ToolCall {
-                call_id,
-                name,
-                arguments,
-                ..
-            } = part
-            else {
-                return None;
-            };
-            let call = ChatToolCall {
-                call_id: call_id.clone(),
-                name: name.clone(),
-                arguments: arguments.clone(),
-                provider_metadata: None,
-            };
-            is_instruction_read(&call).then(|| call_id.clone())
-        })
-        .collect::<BTreeSet<_>>();
-    let mut projected = items.to_vec();
-    for item in &mut projected {
-        let AgentCompactedItem::Message { message } = item else {
-            continue;
-        };
-        for part in &mut message.content {
-            if let ChatContentPart::ToolResult {
-                call_id,
-                output,
-                is_error,
-            } = part
-            {
-                let result = AgentToolResult {
-                    call_id: call_id.clone(),
-                    output: output.clone(),
-                    is_error: *is_error,
-                };
-                let result = if instructions.contains(call_id) {
-                    instruction_result(&result)
-                } else {
-                    bounded_result(&result)
-                };
-                *output = result.output;
-            }
-        }
-    }
-    projected
-}
-
-fn digest_notice(text: &str) -> String {
-    format!(
-        "Repository instruction body omitted from durable history ({} UTF-8 bytes, sha256:{:x}). Re-read current rules through the authorized workspace tool; this digest grants no authority.",
-        text.len(),
-        Sha256::digest(text.as_bytes())
-    )
-}
-
-pub(super) fn instruction_result(
-    result: &nomifun_agent_runtime::AgentToolResult,
-) -> nomifun_agent_runtime::AgentToolResult {
-    nomifun_agent_runtime::AgentToolResult::text(
-        result.call_id.clone(),
-        digest_notice(&result.output_text()),
-        result.is_error,
-    )
-}
-
-/// A bounded replay observation, not a substitute for the live tool result.
-/// Binary tool output must not grow the evidence journal or be re-sent as if
-/// the historical image were still available to the model.
-pub(super) fn bounded_result(
-    result: &nomifun_agent_runtime::AgentToolResult,
-) -> nomifun_agent_runtime::AgentToolResult {
-    super::engine_tool_host::bounded_engine_tool_result(result)
-}
-
 #[cfg(test)]
 mod content_lifecycle_tests {
     use super::*;
+    use nomifun_agent_runtime::AgentToolResult;
+    use nomifun_chat_model_broker::ChatToolCall;
 
     #[test]
     fn first_narration_commits_before_publication_without_flushing_each_later_delta() {
@@ -417,7 +301,7 @@ mod content_lifecycle_tests {
     }
 
     #[test]
-    fn bounded_tool_results_preserve_runtime_hold_without_classifying_owner_errors() {
+    fn canonical_tool_results_preserve_full_text_and_runtime_hold() {
         for runtime_hold in [None, Some(nomifun_agent_runtime::RuntimeToolHoldReason::ArgumentsRejected)] {
             let event = AgentEngineEvent::ToolCompleted { step: 1, runtime_hold,
                 result: nomifun_agent_runtime::AgentToolResult::text("call".into(), "x".repeat(100_000), true) };
@@ -425,7 +309,7 @@ mod content_lifecycle_tests {
             assert_eq!(records.len(), 1);
             let AgentEngineEvent::ToolCompleted { runtime_hold: recorded, result, .. } = &records[0] else { panic!("missing tool result") };
             assert_eq!(*recorded, runtime_hold);
-            assert!(result.output_text().len() < 100_000);
+            assert_eq!(result.output_text(), "x".repeat(100_000));
             assert!(result.is_error);
         }
     }

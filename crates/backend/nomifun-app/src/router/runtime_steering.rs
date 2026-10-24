@@ -303,7 +303,8 @@ impl ConversationRuntimeHost {
         &self,
         message: &nomifun_ai_agent::types::SendMessageData,
         event: &AgentEngineEvent,
-    ) -> Result<bool, AppError> {
+    ) -> Result<nomifun_agent_runtime::AgentToolAdmission, AppError> {
+        use nomifun_agent_runtime::AgentToolAdmission;
         if !matches!(event, AgentEngineEvent::ToolStarted { step, .. } if *step > 0) {
             return Err(error(
                 "model tool admission requires a positive-step ToolStarted",
@@ -330,7 +331,7 @@ impl ConversationRuntimeHost {
             return Err(error("tool admission differs from the live input scope"));
         }
         if !turn.steering.pending.is_empty() {
-            return Ok(false);
+            return Ok(AgentToolAdmission::InputSuperseded);
         }
         // Same lock as accept_steer/take/close, held through durable admission
         // but never through execution. Later steering cannot revoke this call.
@@ -339,24 +340,30 @@ impl ConversationRuntimeHost {
             if turn.cancellation.is_cancelled() {
                 return Err(error("turn cancelled before tool admission"));
             }
+            let AgentEngineEvent::ToolStarted {call_id,..} = event else { unreachable!("validated above"); };
+            if !turn.journal.reserve_tool_return_capacity(call_id).await? {
+                return Ok(AgentToolAdmission::JournalBudget);
+            }
             self.append_locked_record(
                 turn,
                 serde_json::to_string(event).map_err(error)?,
                 None,
                 false,
             )
-            .await
+            .await?;
+            Ok(AgentToolAdmission::Admitted)
         }
         .await;
-        if let Err(error) = admission {
+        let admission = match admission { Ok(admission) => admission, Err(error) => {
             // An uncertain write must not be normalized into a recoverable
             // model tool error followed by further effects in this turn.
             turn.steering.open = false;
             turn.cancellation.cancel();
             return Err(error);
-        }
+        }};
+        if admission != AgentToolAdmission::Admitted { return Ok(admission); }
         if turn.voice_control.is_some()&&let AgentEngineEvent::ToolStarted {step,..}=event {turn.steering.admitted_model_steps.insert(*step);}
-        Ok(true)
+        Ok(AgentToolAdmission::Admitted)
     }
 
     pub(super) async fn open_steering(&self) -> Result<(), AppError> {

@@ -66,6 +66,34 @@ async fn production_journal_pure_child_wait_tail_reclaims_the_same_turn_without_
 }
 
 #[tokio::test]
+async fn oversized_progress_is_rejected_before_writing_without_poisoning_original_settlement() {
+    let (journal,pool)=test_fixture().await;
+    let before=journal.0.store.current_cursor(&journal.0.session).await.unwrap();
+    let payloads:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_payloads WHERE session_id=?")
+        .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    let oversized=AgentEngineEvent::ToolCompleted {step:1,runtime_hold:None,
+        result:nomifun_agent_runtime::AgentToolResult::text("oversized-observation".into(),
+            "x".repeat(nomifun_agent_session::MAX_SINGLE_PAYLOAD_BYTES),false)};
+    assert!(journal.append(serde_json::to_string(&oversized).unwrap(),None,EngineJournalWrite::Progress).await.is_err());
+    assert_eq!(journal.0.store.current_cursor(&journal.0.session).await.unwrap(),before);
+    let after_payloads:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_payloads WHERE session_id=?")
+        .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    assert_eq!(after_payloads,payloads,"rejected observations do not leave partial shared bodies");
+    {
+        let cursor=journal.0.cursor.lock().await;
+        assert!(!cursor.uncertain,"a known pre-write rejection is not an uncertain commit");
+        assert!(cursor.pending_write.is_none());
+        assert_eq!(cursor.sequence,0);
+    }
+    let next=AgentEngineEvent::ModelStepStarted {step:1,operation_id:format!("{}:model:1",journal.0.operation.as_ref()).into(),correction_source:None};
+    journal.append(serde_json::to_string(&next).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
+    journal.append(json!({"event":"host_cleanup_proven"}).to_string(),None,EngineJournalWrite::Cleanup).await.unwrap();
+    let terminal=AgentEngineEvent::TurnFailed {model_steps:1,message:"Oversized observation rejected before persistence".into(),failure:None};
+    journal.append(serde_json::to_string(&terminal).unwrap(),None,EngineJournalWrite::Terminal).await.unwrap();
+    assert_eq!(journal.0.store.read_turn_receipt(&journal.0.session,&journal.0.operation).await.unwrap().status,TurnReceiptStatus::Failed);
+}
+
+#[tokio::test]
 async fn fenced_progress_before_runtime_signal_does_not_poison_original_cleanup() {
     let(journal,pool)=test_fixture().await;
     journal.0.store.cancel_active_turn(&journal.0.session,"original-user-stop".into(),"session_api".into()).await.unwrap();
@@ -127,7 +155,7 @@ async fn shared_tool_bodies_preserve_journal_accounting_model_pairing_and_native
     checkpoint.model_steps=1;checkpoint.tool_call_count=1;checkpoint.segments=None;
     let call=ChatToolCall {call_id:"shared-write".into(),name:"write_file".into(),
         arguments:StrictJsonValue(json!({"path":"report.md","content":"Exact source😀".repeat(9000)})),provider_metadata:None};
-    let result=AgentToolResult::text(call.call_id.clone(),"Read result😀".repeat(800),false);
+    let result=AgentToolResult::text(call.call_id.clone(),"Read result😀".repeat(8000),false);
     let native=vec![
         AgentEngineEvent::TurnStarted {binding:checkpoint.binding.clone(),turn_operation_id:journal.0.operation.clone()},
         AgentEngineEvent::ModelStepStarted {step:1,operation_id:"turn:model:1".into(),correction_source:None},
@@ -146,8 +174,10 @@ async fn shared_tool_bodies_preserve_journal_accounting_model_pairing_and_native
         journal.append(payload,None,EngineJournalWrite::Progress).await.unwrap();
     }
     let completed=AgentEngineEvent::ToolCompleted {step:1,result:result.clone(),runtime_hold:None};
-    let payload=serde_json::to_string(&completed).unwrap();minimum_accounted+=payload.len()+256;
-    journal.append(payload,None,EngineJournalWrite::Progress).await.unwrap();
+    for event in super::super::runtime_event_buffer::AgentEventBuffer::default().project(&completed) {
+        let payload=serde_json::to_string(&event).unwrap();minimum_accounted+=payload.len()+256;
+        journal.append(payload,None,EngineJournalWrite::Progress).await.unwrap();
+    }
     assert_eq!(journal.0.cursor.lock().await.total_bytes,minimum_accounted,
         "content references must not shrink the original hydrated journal allowance");
     let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_payloads WHERE session_id=? AND media_type='application/vnd.nomifun.tool-output+json'")
@@ -180,37 +210,121 @@ async fn shared_tool_bodies_preserve_journal_accounting_model_pairing_and_native
 }
 
 #[tokio::test]
+async fn large_child_status_and_compacted_copy_keep_exact_sources_through_journal_and_replay() {
+    use nomifun_agent_contracts::digest_payload;
+    use nomifun_agent_runtime::{AgentCollaborationObservation,AgentCollaborationProgress,AgentCollaborationSnapshot,
+        AgentCompactedItem,AgentToolResult,replay_closed_turn};
+    use nomifun_chat_model_broker::{ChatContentPart,ChatMessage,ChatRole,ChatToolCall};
+    let (journal,pool)=test_fixture().await;
+    let body="Exact child source😀\"\\\n".repeat(750);
+    assert!(body.len()<32*1024,"each complete child body fits the owner page budget");
+    let mut children=Vec::new();let mut steps=Vec::new();let mut headers=serde_json::Map::new();
+    for index in 0..4 {
+        let step=format!("original-step-{index}");let attempt=format!("original-attempt-{index}");
+        let source=json!({"agent_session_id":format!("child-session-{index}"),"turn_operation_id":format!("child-turn-{index}"),"terminal_event_id":format!("child-terminal-{index}")});
+        let receipt=json!({"execution_id":"original-execution","execution_event_sequence":7,"step_id":step,"status":"completed"});
+        let identity=digest_payload(&json!({"terminal_receipt":receipt,"attempt_id":attempt,"source":source})).unwrap();
+        let page_source=digest_payload(&json!({"attempt_id":attempt,"source":source})).unwrap();
+        headers.insert(step.clone(),json!({"terminal_digest":identity,"page_source_digest":page_source,"ready_digest":identity}));
+        children.push(json!({"step_id":step,"attempt_id":attempt,"status":"completed","source":source,
+            "terminal_receipt":receipt,"workspace_change_sources":[],"result":body}));
+        steps.push(step);
+    }
+    let observation=AgentCollaborationObservation {state:"4".repeat(64),ready:"5".repeat(64)};
+    let snapshot=AgentCollaborationSnapshot {
+        cursor:AgentCollaborationSnapshot::observation_cursor(std::collections::BTreeMap::from([
+            ("original-execution".into(),observation.clone())])).unwrap(),
+        result:StrictJsonValue(json!({"executions":[{
+            "execution_id":"original-execution","sequence":7,"status":"completed","observation_cursor":observation,
+            "owned_step_ids":steps,"owned_terminal_step_ids":steps,
+            "step_observations":headers,"children":children
+        }],"all_ready":true})),
+    };
+    let call=ChatToolCall {call_id:"original-status".into(),name:"agent_status".into(),
+        arguments:StrictJsonValue(json!({"execution_ids":["original-execution"]})),provider_metadata:None};
+    let result=AgentToolResult::text(call.call_id.clone(),serde_json::to_string(&snapshot).unwrap(),false);
+    assert!(serde_json::to_vec(&result).unwrap().len()>64*1024,"the combined status crosses the stored-payload boundary");
+    let mut inherited=AgentCollaborationProgress::default();inherited.pending_child_executions.insert("original-execution".into());
+    let mut buffer=super::super::runtime_event_buffer::AgentEventBuffer::default();
+    for event in [
+        AgentEngineEvent::TurnStarted {binding:checkpoint(&journal,false).binding,turn_operation_id:journal.0.operation.clone()},
+        AgentEngineEvent::CollaborationInherited {progress:inherited},
+        AgentEngineEvent::ModelStepStarted {step:1,operation_id:format!("{}:model:1",journal.0.operation.as_ref()).into(),correction_source:None},
+        AgentEngineEvent::ToolCallCompleted {step:1,call:call.clone()},
+        AgentEngineEvent::ToolCompleted {step:1,result:result.clone(),runtime_hold:None},
+    ] {
+        for record in buffer.project(&event) {
+            journal.append(serde_json::to_string(&record).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
+        }
+    }
+    let compacted=AgentEngineEvent::ContextCompacted {
+        input_bytes_before:400_000,input_bytes_after:200_000,summary:"The exact original child result was read.".into(),
+        retained_tool_call_ids:vec![call.call_id.clone()],retained_context:Some(vec![
+            AgentCompactedItem::AcceptedInput {index:0},
+            AgentCompactedItem::Message {message:ChatMessage {role:ChatRole::Assistant,provider_round_id:None,
+                content:vec![ChatContentPart::ToolCall {call_id:call.call_id.clone(),name:call.name.clone(),
+                    arguments:call.arguments.clone(),provider_metadata:None}]}},
+            AgentCompactedItem::Message {message:ChatMessage {role:ChatRole::Tool,provider_round_id:None,
+                content:vec![ChatContentPart::ToolResult {call_id:call.call_id.clone(),output:result.output.clone(),is_error:false}]}},
+        ]),
+    };
+    for record in buffer.project(&compacted) {
+        journal.append(serde_json::to_string(&record).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
+    }
+    let facts=journal.0.store.native_recovery_facts(&journal.0.session,&journal.0.operation).await.unwrap();
+    let events=facts.events.iter().filter(|event|event.kind.0=="runtime/progress-recorded").map(|event|
+        serde_json::from_value::<AgentEngineEvent>(facts.event_payloads[event.event_id.as_ref()]["event"].clone()).unwrap()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::ToolCompleted {result:recorded,..} if recorded==&result)));
+    assert_eq!(events.last(),Some(&compacted),"a portable compaction replacement is persisted without a second lossy policy");
+    let bodies:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_payloads WHERE session_id=? AND media_type='application/vnd.nomifun.tool-output+json'")
+        .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    assert_eq!(bodies,1,"the original observation and retained context share the same canonical output bytes");
+    for retain_compaction in [false,true] {
+        let mut closed=events.iter().filter(|event|retain_compaction||!matches!(event,AgentEngineEvent::ContextCompacted {..})).cloned().collect::<Vec<_>>();
+        closed.push(AgentEngineEvent::TurnCompleted {model_steps:1,finish_reason:nomifun_chat_model_broker::ChatFinishReason::Completed});
+        let mut history=Vec::new();
+        replay_closed_turn(&mut history,ChatMessage {role:ChatRole::User,provider_round_id:None,
+            content:vec![ChatContentPart::Text {text:"Read the original child result".into()}]},&closed).unwrap();
+        let restored=history.iter().flat_map(|message|&message.content).find_map(|part|match part {
+            ChatContentPart::ToolResult {call_id,output,is_error} if call_id==&call.call_id=>
+                Some(AgentToolResult {call_id:call_id.clone(),output:output.clone(),is_error:*is_error}),_=>None,
+        }).unwrap();
+        assert_eq!(restored,result,"ordinary and compacted history retain the same exact child result");
+        assert_eq!(serde_json::from_str::<AgentCollaborationSnapshot>(&restored.output_text()).unwrap(),snapshot);
+    }
+}
+
+#[tokio::test]
 async fn large_process_stdout_keeps_typed_exit_timeout_and_cleanup_after_durable_hydration() {
-    use nomifun_agent_runtime::AgentToolResult;
-    use super::super::engine_tool_host::bounded_engine_tool_result;
-    use sha2::{Digest,Sha256};
+    use nomifun_agent_runtime::{AgentToolResult,replay_closed_turn};
+    use nomifun_chat_model_broker::{ChatContentPart,ChatMessage,ChatRole,ChatToolCall};
     let (journal,_pool)=test_fixture().await;
     let stdout="PRIVATE_STDOUT😀\\\"\n".repeat(6000);
-    let stdout_digest=format!("{:x}",Sha256::digest(stdout.as_bytes()));
-    for timed_out in [false,true] {
+    let started=AgentEngineEvent::TurnStarted {binding:checkpoint(&journal,false).binding,turn_operation_id:journal.0.operation.clone()};
+    journal.append(serde_json::to_string(&started).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
+    let mut expected=Vec::new();
+    for (index,timed_out) in [false,true].into_iter().enumerate() {
+        let step=(index+1) as u16;
         let call=if timed_out {"large-timeout"} else {"large-exit"};
         let original=json!({"state":if timed_out {"timed_out"} else {"exited"},"process_id":"owned-process","success":false,
             "exit_code":if timed_out {Value::Null} else {json!(7)},"signal":null,
             "output":{"text":stdout,"truncated":false,"retained_bytes":stdout.len(),"dropped_bytes":0,"next_cursor":stdout.len()},
             "cleanup":{"reaped":true,"errors":[],"interrupt_attempted":timed_out,"terminate_attempted":timed_out,"force_kill_attempted":false}});
         let live=AgentToolResult::text(call.into(),original.to_string(),true);
-        let unchanged=live.clone();
-        let bounded=bounded_engine_tool_result(&live);
-        assert_eq!(live,unchanged,"durable projection must not mutate the live model result");
-        assert!(serde_json::to_vec(&bounded).unwrap().len()<=32*1024);
-        let mut persisted:Value=serde_json::from_str(&bounded.output_text()).unwrap();
-        let excerpt=persisted["output"]["text"].as_str().unwrap();
-        assert!(excerpt.contains("Durable observation truncated: original"));
-        assert!(excerpt.contains(&stdout_digest));
-        let mut metadata=original.clone();metadata["output"]["text"]=Value::Null;persisted["output"]["text"]=Value::Null;
-        assert_eq!(persisted,metadata,"all owner state/cursor/truncation/cleanup metadata must remain unchanged");
+        assert!(serde_json::to_vec(&live).unwrap().len()>64*1024,"exercise stored canonical payloads rather than a small inline result");
+        for event in [
+            AgentEngineEvent::ModelStepStarted {step,operation_id:format!("{}:model:{step}",journal.0.operation.as_ref()).into(),correction_source:None},
+            AgentEngineEvent::ToolCallCompleted {step,call:ChatToolCall {call_id:call.into(),name:"start_process".into(),
+                arguments:StrictJsonValue(json!({"command":"fixture-process"})),provider_metadata:None}},
+            AgentEngineEvent::ToolStarted {step,call_id:call.into(),capability_id:"workspace.process".into(),action_id:"workspace.process/start".into()},
+        ] {journal.append(serde_json::to_string(&event).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();}
         for event in [json!({"event":"host_tool_dispatch","dispatch":{"operation_id":call,"call_id":call,
             "capability_id":"workspace.process","action_id":"workspace.process/start","model_name":"start_process"}}),
-            json!({"event":"host_tool_settled","operation_id":call,"call_id":call,"result":bounded,"error":null})] {
+            json!({"event":"host_tool_settled","operation_id":call,"call_id":call,"result":live,"error":null})] {
             journal.append(event.to_string(),None,EngineJournalWrite::Progress).await.unwrap();
         }
         let mut buffer=super::super::runtime_event_buffer::AgentEventBuffer::default();
-        for event in buffer.project(&AgentEngineEvent::ToolCompleted {step:1,result:live,runtime_hold:None}) {
+        for event in buffer.project(&AgentEngineEvent::ToolCompleted {step,result:live.clone(),runtime_hold:None}) {
             journal.append(serde_json::to_string(&event).unwrap(),None,EngineJournalWrite::Progress).await.unwrap();
         }
         let facts=journal.0.store.native_recovery_facts(&journal.0.session,&journal.0.operation).await.unwrap();
@@ -220,14 +334,37 @@ async fn large_process_stdout_keeps_typed_exit_timeout_and_cleanup_after_durable
             let result=event.get("result")?;
             (result.get("call_id").and_then(Value::as_str)==Some(call)).then(||serde_json::from_value::<AgentToolResult>(result.clone()).unwrap())
         }).unwrap();
-        assert_eq!(result,bounded,"host and Runtime persist the exact same bounded JSON bytes");
+        assert_eq!(result,live,"host and Runtime preserve the exact owner result, including the full stdout");
         let display=nomifun_engine_core::tool_result_display(Some("workspace.process"),Some("workspace.process/start"),&result);
         if timed_out {assert_eq!(display.command_timed_out,Some(true));assert_eq!(display.command_exit_code,None);}
         else {assert_eq!(display.command_exit_code,Some(7));assert_eq!(display.non_fatal_failure,Some(true));}
         let public=serde_json::to_string(&display).unwrap();
-        assert!(!public.contains("PRIVATE_STDOUT")&&!public.contains("output"),"product facts do not republish the stdout excerpt");
+        assert!(!public.contains("PRIVATE_STDOUT")&&!public.contains("output"),"product facts do not republish the private stdout");
         assert_eq!(nomifun_engine_core::tool_result_display(Some("mcp.server"),Some("mcp.tool/call"),&result).command_exit_code,None,
             "preserving JSON does not authorize another capability to impersonate process status");
+        expected.push((call,original));
+    }
+    let facts=journal.0.store.native_recovery_facts(&journal.0.session,&journal.0.operation).await.unwrap();
+    let mut events=facts.events.iter().filter(|event|event.kind.0=="runtime/progress-recorded").filter_map(|event| {
+        let value=facts.event_payloads[event.event_id.as_ref()]["event"].clone();
+        (!matches!(value["event"].as_str(),Some("host_tool_dispatch"|"host_tool_settled")))
+            .then(||serde_json::from_value::<AgentEngineEvent>(value).unwrap())
+    }).collect::<Vec<_>>();
+    events.push(AgentEngineEvent::TurnFailed {model_steps:2,message:"Original process observations retained".into(),failure:None});
+    let mut history=Vec::new();
+    replay_closed_turn(&mut history,ChatMessage {role:ChatRole::User,
+        content:vec![ChatContentPart::Text {text:"Inspect the original process results".into()}],provider_round_id:None},&events).unwrap();
+    for (call,mut original) in expected {
+        let output=history.iter().flat_map(|message|&message.content).find_map(|part|match part {
+            ChatContentPart::ToolResult {call_id,output,..} if call_id.as_ref()==call=>Some(output),_=>None,
+        }).unwrap();
+        let model=AgentToolResult {call_id:call.into(),output:output.clone(),is_error:true};
+        let mut projected:Value=serde_json::from_str(&model.output_text()).unwrap();
+        assert!(projected["_nomifun_context_excerpt"].is_object(),"only the model view applies the existing output budget");
+        assert!(projected["output"]["text"].as_str().unwrap().len()<stdout.len());
+        projected.as_object_mut().unwrap().remove("_nomifun_context_excerpt");
+        projected["output"]["text"]=Value::Null;original["output"]["text"]=Value::Null;
+        assert_eq!(projected,original,"model excerpts retain every operational field");
     }
 }
 

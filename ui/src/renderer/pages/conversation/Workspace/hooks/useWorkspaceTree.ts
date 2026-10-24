@@ -72,15 +72,23 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
   const filesRef = useRef(files);
   filesRef.current = files;
   const loadSeqRef = useRef(0);
-  const childRequestsRef = useRef(new Map<string, number>());
+  const rootRequestRef = useRef<AbortController | null>(null);
+  const childRequestsRef = useRef(new Map<string, { seq: number; controller: AbortController }>());
   const childSeqRef = useRef(0);
   const loadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelChildRequests = useCallback(() => {
+    for (const request of childRequestsRef.current.values()) request.controller.abort();
+    childRequestsRef.current.clear();
+  }, []);
 
   useEffect(() => () => {
     loadSeqRef.current += 1;
-    childRequestsRef.current.clear();
+    rootRequestRef.current?.abort();
+    rootRequestRef.current = null;
+    cancelChildRequests();
+    isFirstLoadRef.current = true;
     if (loadingTimerRef.current !== null) clearTimeout(loadingTimerRef.current);
-  }, []);
+  }, [treeSource.key, cancelChildRequests]);
 
   // Loading time tracker / 加载时间追踪
   const lastLoadingTime = useRef(Date.now());
@@ -130,21 +138,24 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
   const loadWorkspace = useCallback(
     (_path: string, search?: string) => {
       const seq = ++loadSeqRef.current;
-      childRequestsRef.current.clear();
+      rootRequestRef.current?.abort();
+      const controller = new AbortController();
+      rootRequestRef.current = controller;
+      cancelChildRequests();
       const source = sourceRef.current;
       const previousFiles = filesRef.current;
       lastQueryRef.current = { sourceKey: source.key, search: search || '' };
       const failures = failuresRef.current.filter((item) => item.sourceKey === source.key);
       const resolvedFailures = new Set(failures.map((item) => item.id));
       const retryPaths = new Set(failures.filter((item) => item.kind === 'directory').map((item) => item.path));
-      const isCurrent = () => seq === loadSeqRef.current && source.key === sourceRef.current.key;
+      const isCurrent = () => !controller.signal.aborted && seq === loadSeqRef.current && source.key === sourceRef.current.key;
       setLoadingHandler(true);
       return source
-        .listRoot(search || '')
+        .listRoot(search || '', controller.signal)
         .then(async (res) => {
           if (!isCurrent()) return null;
           const reconciled = (!search && !isFirstLoadRef.current) || retryPaths.size > 0
-            ? await reconcileLoadedChildren(res, search ? [] : previousFiles, (node) => source.listChildren(node), isCurrent, retryPaths)
+            ? await reconcileLoadedChildren(res, search ? [] : previousFiles, (node) => source.listChildren(node, controller.signal), isCurrent, retryPaths)
             : res;
           if (!isCurrent()) return null;
           setFiles(reconciled);
@@ -197,9 +208,10 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
         })
         .finally(() => {
           if (isCurrent()) setLoadingHandler(false);
+          if (rootRequestRef.current === controller) rootRequestRef.current = null;
         });
     },
-    [recordFailure, setLoadingHandler, updateReadFailures]
+    [cancelChildRequests, recordFailure, setLoadingHandler, updateReadFailures]
   );
 
   /**
@@ -227,11 +239,13 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
     const source = sourceRef.current;
     const rootSeq = loadSeqRef.current;
     const childSeq = ++childSeqRef.current;
-    childRequestsRef.current.set(targetRelPath, childSeq);
-    const isCurrent = () => rootSeq === loadSeqRef.current && source.key === sourceRef.current.key
-      && childRequestsRef.current.get(targetRelPath) === childSeq;
+    childRequestsRef.current.get(targetRelPath)?.controller.abort();
+    const controller = new AbortController();
+    childRequestsRef.current.set(targetRelPath, { seq: childSeq, controller });
+    const isCurrent = () => !controller.signal.aborted && rootSeq === loadSeqRef.current && source.key === sourceRef.current.key
+      && childRequestsRef.current.get(targetRelPath)?.seq === childSeq;
     return source
-      .listChildren({ fullPath: node.fullPath, relativePath: node.relativePath })
+      .listChildren({ fullPath: node.fullPath, relativePath: node.relativePath }, controller.signal)
       .then((res) => {
         if (!isCurrent()) return;
         const newChildren = res.find((item) => !item.isFile && item.relativePath === targetRelPath)?.children;
@@ -255,7 +269,7 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
         }
       })
       .finally(() => {
-        if (childRequestsRef.current.get(targetRelPath) === childSeq) childRequestsRef.current.delete(targetRelPath);
+        if (childRequestsRef.current.get(targetRelPath)?.seq === childSeq) childRequestsRef.current.delete(targetRelPath);
       });
   }, [recordFailure, updateReadFailures]);
 

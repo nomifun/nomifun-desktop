@@ -166,6 +166,7 @@ fn canvas_operation_error(error: AppError) -> String {
     match error {
         AppError::DatabaseUnavailable { .. } => "Creative Studio Canvas storage is temporarily unavailable".to_owned(),
         AppError::ExecutionAdmissionPending => "Agent continuation is waiting for execution capacity".to_owned(),
+        AppError::WorkspaceLifecycleBusy => "Workspace is temporarily unavailable during an Agent session lifecycle operation".to_owned(),
         AppError::SessionConfigurationChanged(_) => "Agent session configuration changed".to_owned(),
         AppError::AgentResourceBindingIncomplete { .. } => "The local Agent resource configuration is incomplete".to_owned(),
         AppError::SessionContractEvolutionRejected { .. } => {

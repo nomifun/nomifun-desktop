@@ -1100,12 +1100,7 @@ impl NomiCoreSessionOwner {
         let _operation_fence = self
             .session_operation_lock(session_id.as_ref())
             .try_read_owned()
-            .map_err(|_| {
-                AppError::Conflict(
-                    "AgentSession workspace is unavailable during a concurrent lifecycle mutation"
-                        .to_owned(),
-                )
-            })?;
+            .map_err(|_| AppError::WorkspaceLifecycleBusy)?;
         let observed = self
             .canonical
             .get(

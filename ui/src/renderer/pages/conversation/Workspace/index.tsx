@@ -55,21 +55,21 @@ const ChatWorkspace: React.FC<WorkspaceProps> = ({
   // --- Tree data provider (conversation getWorkspace endpoint) ---------------
   const tree = useMemo(
     () => ({
-      key: conversation_id,
+      key: JSON.stringify([conversation_id, workspace]),
       target: conversationTarget(conversation_id),
-      listRoot: (search?: string) =>
+      listRoot: (search?: string, signal?: AbortSignal) =>
         ipcBridge.conversation.getWorkspace.invoke({
           conversation_id,
           workspace,
           path: workspace,
           search: search || '',
-        }),
-      listChildren: (node: { fullPath: string; relativePath: string }) =>
+        }, signal),
+      listChildren: (node: { fullPath: string; relativePath: string }, signal?: AbortSignal) =>
         ipcBridge.conversation.getWorkspace.invoke({
           conversation_id,
           workspace,
           path: node.fullPath,
-        }),
+        }, signal),
     }),
     [conversation_id, workspace]
   );

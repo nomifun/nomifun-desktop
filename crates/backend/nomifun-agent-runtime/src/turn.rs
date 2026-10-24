@@ -3696,10 +3696,17 @@ async fn invoke_tool_calls(
                         return Ok(steering_deferred(call_id.clone()));
                     }
                 }
-                if !record_tool_admission(event_sink, model_step, &invocation).await? {
-                    if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
-                    runtime_hold = Some(crate::RuntimeToolHoldReason::InputSuperseded);
-                    return Ok(steering_deferred(call_id.clone()));
+                match record_tool_admission(event_sink, model_step, &invocation).await? {
+                    crate::AgentToolAdmission::Admitted => {},
+                    crate::AgentToolAdmission::InputSuperseded => {
+                        if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
+                        runtime_hold = Some(crate::RuntimeToolHoldReason::InputSuperseded);
+                        return Ok(steering_deferred(call_id.clone()));
+                    }
+                    crate::AgentToolAdmission::JournalBudget => {
+                        runtime_hold = Some(crate::RuntimeToolHoldReason::RuntimeGate);
+                        return Ok(journal_budget_deferred(call_id.clone()));
+                    }
                 }
                 invoker.invoke(invocation, cancellation.clone()).await
             }.await;
@@ -3801,13 +3808,23 @@ async fn invoke_tool_calls(
             continue;
         }
         let exact_armed=execution_plan.arm_exact_action(&invocation.call,event_sink).await?;
-        if !record_tool_admission(event_sink, model_step, &invocation).await? {
-            let result = steering_deferred(call_id.clone());
-            if exact_armed {execution_plan.settle_exact_action(&invocation.call,&result,true,event_sink).await?;}
-            if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
-            defer_remaining = Some((result.output_text(), crate::RuntimeToolHoldReason::InputSuperseded));
-            results.push(record_tool_result_with_hold(call_id, Ok(result), Some(crate::RuntimeToolHoldReason::InputSuperseded), event_sink, model_step).await?);
-            continue;
+        match record_tool_admission(event_sink, model_step, &invocation).await? {
+            crate::AgentToolAdmission::Admitted => {},
+            crate::AgentToolAdmission::InputSuperseded => {
+                let result = steering_deferred(call_id.clone());
+                if exact_armed {execution_plan.settle_exact_action(&invocation.call,&result,true,event_sink).await?;}
+                if voice_boundary_ready(voice_immediate,&model_request.causality,model_step).await?{return Err(AgentEngineError::VoiceCorrectionBoundary);}
+                defer_remaining = Some((result.output_text(), crate::RuntimeToolHoldReason::InputSuperseded));
+                results.push(record_tool_result_with_hold(call_id, Ok(result), Some(crate::RuntimeToolHoldReason::InputSuperseded), event_sink, model_step).await?);
+                continue;
+            }
+            crate::AgentToolAdmission::JournalBudget => {
+                let result = journal_budget_deferred(call_id.clone());
+                if exact_armed {execution_plan.settle_exact_action(&invocation.call,&result,true,event_sink).await?;}
+                defer_remaining = Some((result.output_text(), crate::RuntimeToolHoldReason::RuntimeGate));
+                results.push(record_tool_result_with_hold(call_id, Ok(result), Some(crate::RuntimeToolHoldReason::RuntimeGate), event_sink, model_step).await?);
+                continue;
+            }
         }
         let patch_call = (invocation.binding.action_id.as_ref() == "workspace.files/patch").then(|| invocation.call.clone());
         if let Some(call) = &patch_call {
@@ -3903,6 +3920,13 @@ fn steering_deferred(call_id: ToolCallId) -> AgentToolResult {
     AgentToolResult::text(call_id, "Not executed: new user input is waiting at the next model boundary; reconsider remaining calls.", true)
 }
 
+fn journal_budget_deferred(call_id: ToolCallId) -> AgentToolResult {
+    AgentToolResult::text(call_id, serde_json::json!({
+        "status":"not_executed", "code":"NATIVE_JOURNAL_BUDGET",
+        "message":"The host cannot currently reserve canonical storage for this result. No owner invocation or effect was started. Capacity is checked again after the original batch settles; insufficient remaining allowance pauses the same Turn. If another step is permitted, reconsider only unexecuted work in smaller batches. This observation does not grant more budget or authorize repeating settled effects."
+    }).to_string(), true)
+}
+
 fn validate_exact_declarations(call:&ChatToolCall,plan:&AgentToolPlan,tools:&[nomifun_chat_model_broker::ChatToolDefinition])->Option<String> {
     for (index,action) in call.arguments.0.get("exact_actions").and_then(serde_json::Value::as_array).into_iter().flatten().enumerate() {
         let tool=action["tool"].as_str()?;
@@ -3920,7 +3944,7 @@ fn validate_exact_declarations(call:&ChatToolCall,plan:&AgentToolPlan,tools:&[no
     None
 }
 
-async fn record_tool_admission(sink: &dyn AgentEventSink, step: u16, invocation: &crate::AgentToolInvocation) -> Result<bool, AgentEngineError> {
+async fn record_tool_admission(sink: &dyn AgentEventSink, step: u16, invocation: &crate::AgentToolInvocation) -> Result<crate::AgentToolAdmission, AgentEngineError> {
     let admitted = sink.admit_tool(AgentEngineEvent::ToolStarted {
         step, call_id: invocation.call.call_id.clone(), capability_id: invocation.binding.capability_id.clone(),
         action_id: invocation.binding.action_id.clone(),
@@ -3928,7 +3952,7 @@ async fn record_tool_admission(sink: &dyn AgentEventSink, step: u16, invocation:
     // Once the owner admitted a tool, voice correction cannot withdraw this
     // model step or replay its effects. Publish its exact public prefix now,
     // while the potentially long tool operation is still running.
-    if admitted { sink.emit(AgentEngineEvent::PublicOutputCommitted { step, source: None }).await?; }
+    if admitted == crate::AgentToolAdmission::Admitted { sink.emit(AgentEngineEvent::PublicOutputCommitted { step, source: None }).await?; }
     Ok(admitted)
 }
 
@@ -10843,4 +10867,5 @@ mod tests {
     include!("turn_user_input_continuation_tests.rs");
     include!("turn_silent_completion_tests.rs");
     include!("turn_collaboration_tests.rs");
+    include!("turn_tool_admission_tests.rs");
 }

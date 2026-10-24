@@ -447,6 +447,15 @@ mod reasoning_display_tests {
     }
 }
 
+/// Outcome of the host's atomic write-ahead tool admission. A refusal records
+/// no ToolStarted and grants no owner invocation, effect retry or extra budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentToolAdmission {
+    Admitted,
+    InputSuperseded,
+    JournalBudget,
+}
+
 #[async_trait]
 pub trait AgentEventSink: Send + Sync {
     async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError>;
@@ -464,17 +473,17 @@ pub trait AgentEventSink: Send + Sync {
     }
 
     /// Write-ahead admission, not an execution result. Hosts with concurrent
-    /// input must serialize this with their inbox: false means no admission
-    /// was recorded and the call must be deferred without invoking the tool.
+    /// input must serialize this with their inbox and result-storage capacity.
+    /// A refusal means no admission was recorded and the owner cannot run.
     /// The default is for sinks without a concurrent input owner.
-    async fn admit_tool(&self, event: AgentEngineEvent) -> Result<bool, AgentEngineError> {
+    async fn admit_tool(&self, event: AgentEngineEvent) -> Result<AgentToolAdmission, AgentEngineError> {
         if !matches!(event, AgentEngineEvent::ToolStarted { .. }) {
             return Err(AgentEngineError::InvalidContract(
                 "tool admission requires ToolStarted".into(),
             ));
         }
         self.emit(event).await?;
-        Ok(true)
+        Ok(AgentToolAdmission::Admitted)
     }
 }
 

@@ -731,6 +731,10 @@ fn replay_into(
 #[path = "protocol_history_tests.rs"]
 mod protocol_tests;
 
+#[cfg(test)]
+#[path = "history_context_projection_tests.rs"]
+mod context_projection_tests;
+
 #[derive(Default)]
 // Keep small canonical receipts that compaction removed from the tool suffix.
 // Whole selected fields or an explicit omission, within the existing history
@@ -943,9 +947,9 @@ impl ReplayBatch {
             let result = self.results.remove(&call_id).unwrap_or_else(|| AgentToolResult::text(
                 call_id.clone(), "No model-visible result was recorded before this turn ended. The effect may have occurred; inspect actual state before retrying.", true,
             ));
-            // The durable observation can already be bounded by the host.
-            // Apply the same model policy only to available admitted output;
-            // never reconstruct omitted text or change original event data.
+            // Domain reducers above consume the original canonical result.
+            // Apply the live model-window policy to this separate context
+            // copy without changing the stored observation or its authority.
             let mut result = match self.context_kinds.get(&call_id) {
                 Some(kind) => crate::tool_context::project(*kind, &result),
                 None => result,

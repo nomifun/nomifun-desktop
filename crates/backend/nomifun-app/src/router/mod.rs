@@ -46,6 +46,7 @@ pub mod engine_journal;
 pub mod engine_history;
 pub mod engine_model_facts;
 pub mod engine_tool_host;
+mod engine_tool_record;
 pub mod engine_kernel_session;
 mod engine_tool_discovery;
 mod engine_robot_tools;

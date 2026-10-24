@@ -327,7 +327,7 @@ impl AgentSessionStore {
                 | "tool_completed" | "work_status" | "plan_updated" | "patch_recovery_updated"
                 | "model_response_rejected" | "model_response_validated" | "model_output_truncated" | "context_compacted" | "compaction_usage" | "compaction_summary_rejected"
                 | "completion_observation" | "completion_reported" | "completion_delivered" | "silent_completion" | "instructions_updated" | "context_prepared"
-                | "runtime_modules_activated" | "completion_review" | "end_intent_review" | "execution_budget_prepared" | "tool_results_ordered" | "usage"
+                | "runtime_modules_activated" | "completion_review" | "end_intent_review" | "execution_budget_prepared" | "execution_budget_exhausted" | "tool_results_ordered" | "usage"
             )) { return Err(SessionStoreError::ExecutionFenced); }
         }
         let (mut tx, db_write_observation) = self.begin_write_transaction().await?;

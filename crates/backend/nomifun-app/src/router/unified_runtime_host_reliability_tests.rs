@@ -1039,10 +1039,10 @@ async fn system_permission_result_sequence_uses_the_real_host_ack_after_buffer_f
             call_id: call_id.clone().into(), name: "read_file".into(),
             arguments: StrictJsonValue(json!({"path":"README.md"})), provider_metadata: None,
         }}).await.unwrap();
-        assert!(host.admit_tool(&message, &AgentEngineEvent::ToolStarted {
+        assert_eq!(host.admit_tool(&message, &AgentEngineEvent::ToolStarted {
             step: 1, call_id: call_id.clone().into(), capability_id: "workspace.files".into(),
             action_id: "workspace.files/read".into(),
-        }).await.unwrap());
+        }).await.unwrap(), nomifun_agent_runtime::AgentToolAdmission::Admitted);
         host.record_event(&message, &AgentEngineEvent::OutputTextDelta {
             source: None, step: 1, text: "Source anchor. ".into(),
         }).await.unwrap().expect("first source fragment commits before live publication");

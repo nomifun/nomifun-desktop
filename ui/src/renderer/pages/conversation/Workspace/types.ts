@@ -122,8 +122,8 @@ export interface SelectedFile {
 export interface WorkspaceTreeSource {
   key: string;
   target: SessionTarget;
-  listRoot: (search?: string) => Promise<IDirOrFile[]>;
-  listChildren: (node: { fullPath: string; relativePath: string }) => Promise<IDirOrFile[]>;
+  listRoot: (search?: string, signal?: AbortSignal) => Promise<IDirOrFile[]>;
+  listChildren: (node: { fullPath: string; relativePath: string }, signal?: AbortSignal) => Promise<IDirOrFile[]>;
 }
 
 /**

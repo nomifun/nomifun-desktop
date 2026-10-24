@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use nomifun_agent_runtime::AgentEngineEvent;
 
 const MARKER:&str="NOMIFUN_SUBAGENT_INTEGRATION_OK";
+const CONTINUATION_MARKER:&str="NOMIFUN_SUBAGENT_CONTINUATION_OK";
 const INTEGRATED:&str="LEFT=17;RIGHT=29;SUM=46";
 
 fn failed(code:&'static str)->SmokeFailure { SmokeFailure::new("subagent.integration",code,422) }
@@ -206,11 +207,64 @@ pub(super) async fn run(router:&Router,key:&str,model:&str,root:&Path,work:&Path
         .iter().any(|(_,output)|output["process_id"].as_str().is_some_and(|id|verification_processes.contains(id))
             &&output["state"]=="exited"&&output["exit_code"]==0&&output.pointer("/cleanup/reaped")==Some(&json!(true)));
     if !verified_and_reaped {return Err(failed("SUBAGENT_VERIFICATION_EXIT_OR_CLEANUP_INVALID"));}
-    pool.close().await;
-    eprintln!("NOMIFUN_SUBAGENT_FACTS model={model} build_digest={build_digest} full_children=2 role_labeled_children=2 child_required_delegation_rejections=0 overlap_ms={overlap} parent_turns=1 native_write_sessions=3 final_projection=0 integrated=true verification_process=true attempts=2 delegations=1 exact_results_consumed=2 wait_calls={} status_calls={} waits={} wakes={} parent_model_steps={} wait_model_calls=0",wait.wait_calls,wait.status_calls,wait.waits,wait.wakes,wait.parent_model_steps);
     if !final_nonempty {return Err(failed("SUBAGENT_PARENT_FINAL_EMPTY"));}
     if !final_marked {return Err(failed("SUBAGENT_PARENT_FINAL_MARKER_MISSING"));}
-    eprintln!("NOMIFUN_SUBAGENT_LIVE_OK model={model} build_digest={build_digest} full_children=2 role_labeled_children=2 child_required_delegation_rejections=0 overlap_ms={overlap} parent_turns=1 native_write_sessions=3 final_projection=0 integrated=true verification_process=true attempts=2 delegations=1 exact_results_consumed=2 wait_calls={} status_calls={} waits={} wakes={} parent_model_steps={} wait_model_calls=0",wait.wait_calls,wait.status_calls,wait.waits,wait.wakes,wait.parent_model_steps);
+
+    // A successful first Turn does not prove its journal is readable. Submit
+    // a real follow-up to the same Session and require a fresh owner read.
+    let continuation=nomifun_agent_contracts::OperationId::from(start_session_turn(router,"subagent.continuation",
+        &session,&uuid::Uuid::now_v7().to_string(),format!(
+            "Perform a new read-only check yourself in this same workspace. Use read_file to read integrated.txt again in this Turn and verify that its exact content is {INTEGRATED}. Do not modify any files, launch processes, delegate, restart child work, or repeat the previous integration. Complete this check only after the actual read succeeds, and end your final answer with {CONTINUATION_MARKER}."
+        )).await?);
+    if continuation==operation {return Err(failed("SUBAGENT_CONTINUATION_IDENTITY_INVALID"));}
+    let deadline=tokio::time::Instant::now()+Duration::from_secs(180);
+    loop {
+        let state:Option<String>=sqlx::query_scalar("SELECT state FROM agent_turns WHERE session_id=? AND operation_id=?")
+            .bind(&session).bind(continuation.as_ref()).fetch_optional(&pool).await.map_err(|_|failed("SUBAGENT_CONTINUATION_READ_FAILED"))?;
+        match state.as_deref() {
+            Some("completed")=>break,
+            Some("failed"|"cancelled"|"interrupted")=>return Err(failed("SUBAGENT_CONTINUATION_DID_NOT_COMPLETE")),
+            _=>{},
+        }
+        if tokio::time::Instant::now()>=deadline {return Err(failed("SUBAGENT_CONTINUATION_DEADLINE"));}
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    let continued=store.chat_causality_facts(&sid,&continuation).await.map_err(|_|failed("SUBAGENT_CONTINUATION_FACTS_INVALID"))?;
+    let continuation_model_steps=continued.events.iter().filter(|event|event.kind.0=="runtime/progress-recorded"
+        &&event.correlation_id.as_ref()==continuation.as_ref()).filter_map(|event|continued.event_payloads.get(event.event_id.as_ref()))
+        .filter(|payload|payload.pointer("/event/event").and_then(Value::as_str)==Some("model_step_started")).count();
+    let dispatched=continued.events.iter().filter(|event|event.kind.0=="context/model-visible-applied")
+        .filter_map(|event|continued.event_payloads.get(event.event_id.as_ref()))
+        .any(|payload|payload["turn_operation_id"].as_str()==Some(continuation.as_ref()));
+    let expected_path=nomifun_common::paths::canonicalize_simplified(&work.join("integrated.txt"))
+        .map_err(|_|failed("SUBAGENT_CONTINUATION_FILE_UNAVAILABLE"))?;
+    let read=successful_calls(&continued,&continuation,&["workspace.files/read"]).iter().any(|(arguments,output)|{
+        let Some(path)=arguments["path"].as_str() else {return false;};
+        let path=if Path::new(path).is_absolute(){PathBuf::from(path)}else{work.join(path)};
+        nomifun_common::paths::canonicalize_simplified(&path).ok().as_ref()==Some(&expected_path)&&output["content"]==INTEGRATED
+    });
+    let continuation_effects:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_effects effect JOIN agent_turns turn ON turn.session_id=effect.session_id AND turn.turn_id=effect.turn_id WHERE turn.session_id=? AND turn.operation_id=? AND effect.action_id!='workspace.files/read'")
+        .bind(&session).bind(continuation.as_ref()).fetch_one(&pool).await.map_err(|_|failed("SUBAGENT_CONTINUATION_EFFECT_READ_FAILED"))?;
+    if continuation_model_steps==0||!dispatched||!read||continuation_effects!=0 {
+        return Err(failed("SUBAGENT_CONTINUATION_FRESH_READ_INVALID"));
+    }
+    let continued_receipt=store.read_turn_receipt(&sid,&continuation).await.map_err(|_|failed("SUBAGENT_CONTINUATION_RESULT_INVALID"))?;
+    let continued_result=nomifun_agent_session::canonical_turn_public_result(&continued,&continued_receipt)
+        .map_err(|_|failed("SUBAGENT_CONTINUATION_RESULT_INVALID"))?;
+    if continued_result.result_text.as_deref().is_none_or(|text|!text.contains(CONTINUATION_MARKER)) {
+        return Err(failed("SUBAGENT_CONTINUATION_FINAL_MARKER_MISSING"));
+    }
+    for (file,expected) in [("left.txt","LEFT=17"),("right.txt","RIGHT=29"),("integrated.txt",INTEGRATED)] {
+        if tokio::fs::read(work.join(file)).await.ok().as_deref()!=Some(expected.as_bytes()) {
+            return Err(failed("SUBAGENT_CONTINUATION_CHANGED_FILES"));
+        }
+    }
+    let counts:(i64,i64,i64,i64)=sqlx::query_as("SELECT (SELECT COUNT(*) FROM agent_turns WHERE session_id=?), (SELECT COUNT(*) FROM agent_executions WHERE json_extract(initial_plan_input,'$.source.agent_session_id')=?), (SELECT COUNT(*) FROM agent_execution_attempts WHERE execution_id=?), (SELECT COUNT(*) FROM agent_effects WHERE action_id='agent/delegate')")
+        .bind(&session).bind(&session).bind(&executions[0]).fetch_one(&pool).await.map_err(|_|failed("SUBAGENT_CONTINUATION_COUNTS_INVALID"))?;
+    if counts!=(2,1,2,1) {return Err(failed("SUBAGENT_CONTINUATION_REPEATED_WORK"));}
+    pool.close().await;
+    eprintln!("NOMIFUN_SUBAGENT_FACTS model={model} build_digest={build_digest} full_children=2 role_labeled_children=2 child_required_delegation_rejections=0 overlap_ms={overlap} parent_turns=2 native_write_sessions=3 final_projection=0 integrated=true continuation=true verification_process=true attempts=2 delegations=1 exact_results_consumed=2 wait_calls={} status_calls={} waits={} wakes={} parent_model_steps={} continuation_model_steps={continuation_model_steps} wait_model_calls=0",wait.wait_calls,wait.status_calls,wait.waits,wait.wakes,wait.parent_model_steps);
+    eprintln!("NOMIFUN_SUBAGENT_LIVE_OK model={model} build_digest={build_digest} full_children=2 role_labeled_children=2 child_required_delegation_rejections=0 overlap_ms={overlap} parent_turns=2 native_write_sessions=3 final_projection=0 integrated=true continuation=true verification_process=true attempts=2 delegations=1 exact_results_consumed=2 wait_calls={} status_calls={} waits={} wakes={} parent_model_steps={} continuation_model_steps={continuation_model_steps} wait_model_calls=0",wait.wait_calls,wait.status_calls,wait.waits,wait.wakes,wait.parent_model_steps);
     Ok(())
 }
 

@@ -14,7 +14,6 @@ use crate::error::EngineToolError;
 
 const MAX_TOOL_ARGUMENT_BYTES: usize = 512 * 1024;
 const MAX_TOOL_RESULT_BYTES: usize = 4 * 1024 * 1024;
-const TOOL_RESULT_TRUNCATION_MARKER: &str = "\n[output truncated]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -235,11 +234,12 @@ pub struct EngineToolResult {
 }
 
 impl EngineToolResult {
+    /// Preserve the owner's returned bytes. Admission validates size separately;
+    /// shortening a serialized result here would destroy its domain contract.
     pub fn text(call_id: ToolCallId, text: impl Into<String>, is_error: bool) -> Self {
-        let text = bounded_text(text.into());
         Self {
             call_id,
-            output: vec![ChatToolResultPart::Text { text }],
+            output: vec![ChatToolResultPart::Text { text: text.into() }],
             is_error,
         }
     }
@@ -352,51 +352,6 @@ pub fn tool_text_excerpt_ranges(text: &str, allowance: usize) -> (usize, usize) 
     (head,tail)
 }
 
-fn truncate_utf8(value: &mut String, max_bytes: usize) {
-    if value.len() <= max_bytes {
-        return;
-    }
-    let mut boundary = max_bytes;
-    while boundary > 0 && !value.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    value.truncate(boundary);
-}
-
-fn bounded_text(mut text: String) -> String {
-    if serialized_text_size(&text) <= MAX_TOOL_RESULT_BYTES {
-        return text;
-    }
-
-    let prefix_budget = MAX_TOOL_RESULT_BYTES.saturating_sub(TOOL_RESULT_TRUNCATION_MARKER.len());
-    truncate_utf8(&mut text, prefix_budget);
-
-    loop {
-        let mut candidate = text.clone();
-        candidate.push_str(TOOL_RESULT_TRUNCATION_MARKER);
-        let serialized_size = serialized_text_size(&candidate);
-        if serialized_size <= MAX_TOOL_RESULT_BYTES {
-            return candidate;
-        }
-
-        let excess = serialized_size - MAX_TOOL_RESULT_BYTES;
-        let next_length = text.len().saturating_sub(excess.max(1));
-        if next_length == text.len() {
-            text.clear();
-        } else {
-            truncate_utf8(&mut text, next_length);
-        }
-    }
-}
-
-fn serialized_text_size(text: &str) -> usize {
-    serde_json::to_vec(&vec![ChatToolResultPart::Text {
-        text: text.to_owned(),
-    }])
-    .map(|bytes| bytes.len())
-    .unwrap_or(usize::MAX)
-}
-
 fn is_digest(value: &DigestHex) -> bool {
     value.as_ref().len() == 64 && value.as_ref().bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -449,18 +404,34 @@ mod tests {
     }
 
     #[test]
-    fn text_result_is_bounded_without_invalid_utf8() {
-        let result = EngineToolResult::text(
-            ToolCallId::from("call-1"),
-            "界".repeat(MAX_TOOL_RESULT_BYTES),
-            false,
-        );
-        assert!(result.validate_for(&ToolCallId::from("call-1")).is_ok());
-        assert!(
-            result
-                .output_text()
-                .ends_with(TOOL_RESULT_TRUNCATION_MARKER)
-        );
+    fn oversized_utf8_json_remains_exact_when_result_admission_rejects_it() {
+        let original = json!({"result": "界".repeat(MAX_TOOL_RESULT_BYTES / 3)});
+        let text = original.to_string();
+        assert!(text.len() > MAX_TOOL_RESULT_BYTES);
+        let call_id = ToolCallId::from("call-1");
+        let result = EngineToolResult::text(call_id.clone(), text.clone(), false);
+
+        assert_eq!(result.output_text(), text);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&result.output_text()).unwrap(), original);
+        assert!(matches!(result.validate_for(&call_id),
+            Err(EngineToolError::ToolResultTooLarge { limit: MAX_TOOL_RESULT_BYTES })));
+        assert_eq!(result.output_text(), text, "validation cannot mutate an owner return");
+    }
+
+    #[test]
+    fn escaped_json_is_rejected_by_encoded_size_without_clipping_its_body() {
+        let original = json!({"result": "\"".repeat(MAX_TOOL_RESULT_BYTES / 3)});
+        let text = original.to_string();
+        assert!(text.len() < MAX_TOOL_RESULT_BYTES);
+        let call_id = ToolCallId::from("escaped-json");
+        let result = EngineToolResult::text(call_id.clone(), text.clone(), true);
+
+        assert!(serde_json::to_vec(&result.output).unwrap().len() > MAX_TOOL_RESULT_BYTES);
+        assert!(matches!(result.validate_for(&call_id),
+            Err(EngineToolError::ToolResultTooLarge { limit: MAX_TOOL_RESULT_BYTES })));
+        assert_eq!(result.output_text(), text);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&result.output_text()).unwrap(), original);
+        assert!(result.is_error);
     }
 
     #[test]

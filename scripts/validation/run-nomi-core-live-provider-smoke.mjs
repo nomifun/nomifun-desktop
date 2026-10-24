@@ -34,7 +34,8 @@
  * Feed the credential through the caller's private stdin pipe, close the pipe,
  * and never put it in shell source, command arguments or a temporary file.
  * Uses step-5-preview for two concurrent Full children, same-Turn parent join,
- * file integration and a real native verification process in a disposable workspace.
+ * file integration, a real native verification process, and a second parent
+ * Turn that reads the existing integration through replayed history.
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --subagent-eight-smoke --report eight-subagent.json
  * Independently verifies eight Full children, unchanged default parallelism,
  * exact result consumption and parent integration; it does not replace the two-child case.
@@ -512,13 +513,13 @@ function inputQueueEvidence(output) {
 
 function subagentEvidence(output) {
   const lines = output.split(/\r?\n/).filter(line => line.startsWith('NOMIFUN_SUBAGENT_LIVE_OK'));
-  const match = lines.length === 1 && lines[0].match(/^NOMIFUN_SUBAGENT_LIVE_OK model=step-5-preview build_digest=([a-f0-9]{64}) full_children=2 role_labeled_children=2 child_required_delegation_rejections=0 overlap_ms=([1-9][0-9]{0,8}) parent_turns=1 native_write_sessions=3 final_projection=0 integrated=true verification_process=true attempts=2 delegations=1 exact_results_consumed=2 wait_calls=([1-9][0-9]{0,5}) status_calls=([1-9][0-9]{0,5}) waits=([1-9][0-9]{0,5}) wakes=([1-9][0-9]{0,5}) parent_model_steps=([1-9][0-9]{0,5}) wait_model_calls=0$/);
+  const match = lines.length === 1 && lines[0].match(/^NOMIFUN_SUBAGENT_LIVE_OK model=step-5-preview build_digest=([a-f0-9]{64}) full_children=2 role_labeled_children=2 child_required_delegation_rejections=0 overlap_ms=([1-9][0-9]{0,8}) parent_turns=2 native_write_sessions=3 final_projection=0 integrated=true continuation=true verification_process=true attempts=2 delegations=1 exact_results_consumed=2 wait_calls=([1-9][0-9]{0,5}) status_calls=([1-9][0-9]{0,5}) waits=([1-9][0-9]{0,5}) wakes=([1-9][0-9]{0,5}) parent_model_steps=([1-9][0-9]{0,5}) continuation_model_steps=([1-9][0-9]{0,5}) wait_model_calls=0$/);
   if (!match || match[5] !== match[6]) throw new Error('subagent integration evidence incomplete');
-  return {model:'step-5-preview',full_children:2,overlap_ms:Number(match[2]),parent_turns:1,
+  return {model:'step-5-preview',full_children:2,overlap_ms:Number(match[2]),parent_turns:2,
     build_digest:match[1],role_labeled_children:2,child_required_delegation_rejections:0,
-    final_projection:0,integrated:true,verification_process:true,attempts:2,delegations:1,exact_results_consumed:2,
+    final_projection:0,integrated:true,continuation:true,verification_process:true,attempts:2,delegations:1,exact_results_consumed:2,
     wait_calls:Number(match[3]),status_calls:Number(match[4]),waits:Number(match[5]),wakes:Number(match[6]),
-    parent_model_steps:Number(match[7]),wait_model_calls:0};
+    parent_model_steps:Number(match[7]),continuation_model_steps:Number(match[8]),wait_model_calls:0};
 }
 
 function subagentEightEvidence(output) {
@@ -1426,7 +1427,7 @@ async function runSelfTest() {
     let rejected = false; try { inputQueueEvidence(invalid); } catch { rejected = true; }
     if (!rejected) throw new Error('incomplete input queue proof accepted');
   }
-  const subagentProof = `NOMIFUN_SUBAGENT_LIVE_OK model=step-5-preview build_digest=${'a'.repeat(64)} full_children=2 role_labeled_children=2 child_required_delegation_rejections=0 overlap_ms=1245 parent_turns=1 native_write_sessions=3 final_projection=0 integrated=true verification_process=true attempts=2 delegations=1 exact_results_consumed=2 wait_calls=1 status_calls=2 waits=1 wakes=1 parent_model_steps=10 wait_model_calls=0`;
+  const subagentProof = `NOMIFUN_SUBAGENT_LIVE_OK model=step-5-preview build_digest=${'a'.repeat(64)} full_children=2 role_labeled_children=2 child_required_delegation_rejections=0 overlap_ms=1245 parent_turns=2 native_write_sessions=3 final_projection=0 integrated=true continuation=true verification_process=true attempts=2 delegations=1 exact_results_consumed=2 wait_calls=1 status_calls=2 waits=1 wakes=1 parent_model_steps=10 continuation_model_steps=2 wait_model_calls=0`;
   const subagentParsed = subagentEvidence(subagentProof);
   const twoFacts = subagentProof.replace('NOMIFUN_SUBAGENT_LIVE_OK ', 'NOMIFUN_SUBAGENT_FACTS ');
   if (subagentDiagnostic(twoFacts)?.proof?.attempts!==2) throw new Error('two-child diagnostic proof missing');
@@ -1438,9 +1439,13 @@ async function runSelfTest() {
   if (subagentDiagnostic(emptyFinal)?.text_nonempty!==false || subagentDiagnostic(unmarkedFinal)?.text_nonempty!==true
       || subagentDiagnostic(unmarkedFinal+' secret=DO_NOT_EMIT')!==null) throw new Error('final diagnostics must distinguish empty from unmarked and redact arbitrary data');
   if (subagentParsed.overlap_ms !== 1245 || subagentParsed.build_digest !== 'a'.repeat(64)
-      || subagentParsed.role_labeled_children !== 2 || subagentParsed.child_required_delegation_rejections !== 0) throw new Error('subagent evidence self-test failed');
+      || subagentParsed.role_labeled_children !== 2 || subagentParsed.child_required_delegation_rejections !== 0
+      || subagentParsed.parent_turns !== 2 || subagentParsed.continuation !== true || subagentParsed.continuation_model_steps !== 2) throw new Error('subagent evidence self-test failed');
   for (const invalid of ['', subagentProof + '\n' + subagentProof, subagentProof.replace('overlap_ms=1245', 'overlap_ms=0'),
-      subagentProof.replace('parent_turns=1', 'parent_turns=2'), subagentProof.replace('integrated=true', 'integrated=false'),
+      subagentProof.replace('parent_turns=2', 'parent_turns=1'), subagentProof.replace('integrated=true', 'integrated=false'),
+      subagentProof.replace('continuation=true', 'continuation=false'),
+      subagentProof.replace('continuation_model_steps=2', 'continuation_model_steps=0'),
+      subagentProof.replace(' continuation=true', '').replace(' continuation_model_steps=2', ''),
       subagentProof.replace('role_labeled_children=2', 'role_labeled_children=1'),
       subagentProof.replace('child_required_delegation_rejections=0', 'child_required_delegation_rejections=1')]) {
     let rejected = false; try { subagentEvidence(invalid); } catch { rejected = true; }

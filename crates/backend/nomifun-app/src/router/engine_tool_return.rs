@@ -1,6 +1,6 @@
-//! A returned value can violate the observation contract without making its
-//! native resource immortal. Record a bounded rejection on the original call;
-//! its summaries identify rejected bytes and never authorize their use.
+//! Admit the original owner result to the canonical journal before the Runtime
+//! consumes it. Unsupported sizes get an explicit rejection on the same call;
+//! successful results are never silently converted into excerpts.
 use super::*;
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -9,11 +9,7 @@ enum Violation {
     OwnerCallMismatch,
     OwnerResultTooLarge,
     OwnerResultInvalid,
-    ObservationCallMismatch,
-    ObservationResultTooLarge,
-    ObservationResultInvalid,
-    ObservationClassificationChanged,
-    ObservationPolicyPanicked,
+    CanonicalResultTooLarge,
 }
 
 impl Violation {
@@ -22,11 +18,7 @@ impl Violation {
             Self::OwnerCallMismatch => "the original owner returned another call identity",
             Self::OwnerResultTooLarge => "the original owner return exceeded the result contract",
             Self::OwnerResultInvalid => "the original owner return violated the result contract",
-            Self::ObservationCallMismatch => "the observation policy changed the original call identity",
-            Self::ObservationResultTooLarge => "the observation exceeded the bounded journal result contract",
-            Self::ObservationResultInvalid => "the observation policy produced an invalid result",
-            Self::ObservationClassificationChanged => "the observation policy changed the original result classification",
-            Self::ObservationPolicyPanicked => "the observation policy panicked after the original owner returned",
+            Self::CanonicalResultTooLarge => "the original return exceeds the canonical payload contract; the owner must provide bounded pages",
         }
     }
 }
@@ -49,8 +41,6 @@ pub(super) struct ToolReturnRejection {
     kind: Violation,
     owner_returned: bool,
     original_return: ReturnSummary,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    rejected_observation: Option<ReturnSummary>,
 }
 
 impl ToolReturnRejection {
@@ -64,8 +54,9 @@ impl ToolReturnRejection {
 }
 
 pub(super) fn settlement_payload(dispatch: &EngineToolDispatchRecord, invocation: &EngineToolInvocation,
-    outcome: &Result<EngineToolResult, EngineToolError>, recorded: Option<&EngineToolResult>,
-    policy_panicked: bool, owner_invoked: bool) -> (String, Option<ToolReturnRejection>) {
+    outcome: &Result<EngineToolResult, EngineToolError>, owner_invoked: bool) -> (String, Option<ToolReturnRejection>) {
+    let recorded = outcome.as_ref().ok().map(|result|
+        super::super::engine_tool_record::for_call(&invocation.call, result));
     let message = outcome.as_ref().err().map(|error|
         bounded_error(&nomi_redact::redact_secrets_owned(error.to_string())));
     let mut payload = serde_json::json!({"event":"host_tool_settled","operation_id":dispatch.operation_id,
@@ -78,21 +69,28 @@ pub(super) fn settlement_payload(dispatch: &EngineToolDispatchRecord, invocation
                 Violation::OwnerResultTooLarge
             } else { Violation::OwnerResultInvalid });
         }
-        if policy_panicked { return Some(Violation::ObservationPolicyPanicked); }
-        if let Some(observed) = recorded {
-            if observed.call_id != original.call_id { return Some(Violation::ObservationCallMismatch); }
-            if observed.is_error != original.is_error { return Some(Violation::ObservationClassificationChanged); }
-            if let Err(error) = observed.validate_for(&invocation.call.call_id) {
-                return Some(if matches!(error, EngineToolError::ToolResultTooLarge {..}) {
-                    Violation::ObservationResultTooLarge
-                } else { Violation::ObservationResultInvalid });
-            }
-        }
-        (payload.to_string().len() > 64 * 1024).then_some(Violation::ObservationResultTooLarge)
+        // Include both the owner receipt and its possible recovery observation,
+        // with the actual Session/operation identities and largest sequence.
+        // This also bounds the smaller tool/result-recorded projection. The
+        // normal journal selects inline vs stored Payload; 64 KiB is only the
+        // inline threshold, never a limit on an otherwise valid owner result.
+        let recovered = nomifun_agent_runtime::AgentEngineEvent::ToolOutcomeReconciled {
+            step: u16::MAX,
+            result: recorded.as_ref().expect("original successful return has a canonical representation").clone(),
+            source: nomifun_agent_runtime::AgentReconciliationSource::OwnerReceipt,
+            evidence_event_id: Some(format!("runtime-progress:{}:{}:{}",
+                invocation.agent_session_id.as_ref(), invocation.turn_operation_id.as_ref(), u64::MAX)),
+            owner_operation_id: Some(invocation.operation_id.clone()),
+        };
+        [&payload, &serde_json::to_value(recovered).expect("typed recovery observation")].into_iter()
+            .any(|event| nomifun_agent_contracts::canonical_json_bytes(
+                &serde_json::json!({"producer_seq":u64::MAX,"event":event}))
+                .expect("typed tool observation has a canonical JSON representation").len()
+                > nomifun_agent_session::MAX_SINGLE_PAYLOAD_BYTES)
+            .then_some(Violation::CanonicalResultTooLarge)
     });
     let rejection = violation.map(|kind| ToolReturnRejection { kind, owner_returned: true,
-        original_return: ReturnSummary::of(outcome.as_ref().expect("a rejected return is an actual owner result")),
-        rejected_observation: recorded.map(ReturnSummary::of) });
+        original_return: ReturnSummary::of(outcome.as_ref().expect("a rejected return is an actual owner result")) });
     if let Some(rejection) = &rejection {
         payload["result"] = serde_json::Value::Null;
         payload["error"] = rejection.message().into();
@@ -101,3 +99,7 @@ pub(super) fn settlement_payload(dispatch: &EngineToolDispatchRecord, invocation
     }
     (payload.to_string(),rejection)
 }
+
+#[cfg(test)]
+#[path = "engine_tool_return_tests.rs"]
+mod tests;

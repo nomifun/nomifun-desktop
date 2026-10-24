@@ -25,7 +25,7 @@ use nomifun_agent_session::{
 };
 use nomifun_chat_model_broker::{
     ChatCausality, ChatCausalityGate, ChatModelError, ChatModelErrorCode,
-    ChatRetryDirective,
+    ChatRetryDirective, ToolCallId,
 };
 use nomifun_agent_runtime::AgentEngineEvent;
 use nomifun_common::{AppError, now_ms};
@@ -47,6 +47,20 @@ pub enum EngineJournalWrite {
     Cleanup,
     Terminal,
 }
+
+const TOOL_RETURN_CAPACITY_BYTES: u64 = nomifun_agent_contracts::CANONICAL_PAYLOAD_MAX_BYTES + 256;
+const CONTROL_SETTLEMENT_RESERVE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Transient capacity for one admitted call, never an execution or result fact.
+/// The original journal still proves dispatch, owner return and observation.
+struct ToolReturnCapacity {
+    owner: bool,
+    observation: bool,
+    dispatched: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ToolReturnPhase { Owner, Observation }
 
 #[derive(Default)]
 struct Cursor {
@@ -73,6 +87,69 @@ struct Cursor {
     assistant_message_id: Option<String>,
     thinking_messages: BTreeMap<u16, (String, u64)>,
     tool_message_ids: BTreeMap<String, String>,
+    tool_return_capacity: BTreeMap<String, ToolReturnCapacity>,
+    capacity_deferred: bool,
+}
+
+impl Cursor {
+    fn reserved_return_bytes(&self) -> u64 {
+        self.tool_return_capacity.values().map(|capacity|
+            (u64::from(capacity.owner) + u64::from(capacity.observation)) * TOOL_RETURN_CAPACITY_BYTES).sum()
+    }
+
+    fn reserved_owner_payload_bytes(&self) -> u64 {
+        self.tool_return_capacity.values().filter(|capacity| capacity.owner).count() as u64
+            * nomifun_agent_contracts::CANONICAL_PAYLOAD_MAX_BYTES
+    }
+
+    fn next_tool_capacity_stop(&self, payload_bytes: u64) -> Option<nomifun_agent_runtime::AgentExecutionStopReason> {
+        use nomifun_agent_runtime::AgentExecutionStopReason;
+        if (self.total_bytes as u64).saturating_add(self.reserved_return_bytes())
+            .saturating_add(2 * TOOL_RETURN_CAPACITY_BYTES)
+            > self.budget.journal_bytes.saturating_sub(CONTROL_SETTLEMENT_RESERVE_BYTES) {
+            Some(AgentExecutionStopReason::TurnJournalBudget)
+        } else if payload_bytes.saturating_add(self.reserved_owner_payload_bytes())
+            .saturating_add(nomifun_agent_contracts::CANONICAL_PAYLOAD_MAX_BYTES)
+            > self.budget.session_payload_bytes.saturating_sub(CONTROL_SETTLEMENT_RESERVE_BYTES) {
+            Some(AgentExecutionStopReason::SessionPayloadBudget)
+        } else { None }
+    }
+
+    fn result_capacity_for(&self, value: &Value, event: Option<&AgentEngineEvent>) -> Option<(String, ToolReturnPhase)> {
+        let (call, phase) = if value.get("event").and_then(Value::as_str) == Some("host_tool_settled") {
+            (value.get("call_id").and_then(Value::as_str)?, ToolReturnPhase::Owner)
+        } else if let Some(AgentEngineEvent::ToolCompleted {result,..} | AgentEngineEvent::ToolOutcomeReconciled {result,..}) = event {
+            (result.call_id.as_ref(), ToolReturnPhase::Observation)
+        } else { return None; };
+        let capacity = self.tool_return_capacity.get(call)?;
+        match phase {
+            ToolReturnPhase::Owner if capacity.owner => Some((call.into(), phase)),
+            ToolReturnPhase::Observation if capacity.observation => Some((call.into(), phase)),
+            _ => None,
+        }
+    }
+
+    fn acknowledge_result_capacity(&mut self, value: &Value, consumed: Option<(String, ToolReturnPhase)>) {
+        if value.get("event").and_then(Value::as_str) == Some("host_tool_dispatch")
+            && let Some(call) = value.pointer("/dispatch/call_id").and_then(Value::as_str)
+            && let Some(capacity) = self.tool_return_capacity.get_mut(call) {
+            capacity.dispatched = true;
+        }
+        if let Some((call, phase)) = consumed {
+            if let Some(capacity) = self.tool_return_capacity.get_mut(&call) {
+                match phase {
+                    ToolReturnPhase::Owner => capacity.owner = false,
+                    ToolReturnPhase::Observation => {
+                        capacity.observation = false;
+                        // The exact Runtime result closed a call without any
+                        // committed Host dispatch; no owner was invoked.
+                        if !capacity.dispatched { capacity.owner = false; }
+                    }
+                }
+                if !capacity.owner && !capacity.observation { self.tool_return_capacity.remove(&call); }
+            }
+        }
+    }
 }
 
 struct AssistantStepCursor {
@@ -656,19 +733,47 @@ impl EngineTurnJournal {
         Ok(())
     }
 
+    pub(super) async fn reserve_tool_return_capacity(&self, call: &ToolCallId) -> Result<bool, AppError> {
+        let mut cursor = self.0.cursor.lock().await;
+        if cursor.uncertain || cursor.terminal || cursor.draining || self.0.cancellation.is_cancelled() {
+            return Err(failure("tool capacity requested outside its live journal"));
+        }
+        if cursor.tool_return_capacity.contains_key(call.as_ref()) {
+            return Err(failure("tool return capacity was already reserved for this call"));
+        }
+        // Read under the same cursor lock as return writes: a just-committed
+        // owner body cannot disappear between the byte count and its reservation.
+        let payload_bytes = self.0.store.native_payload_bytes(&self.0.lease).await.map_err(failure)?;
+        if cursor.next_tool_capacity_stop(payload_bytes).is_some() {
+            cursor.capacity_deferred = true;
+            return Ok(false);
+        }
+        cursor.tool_return_capacity.insert(call.as_ref().into(), ToolReturnCapacity {
+            owner: true, observation: true, dispatched: false,
+        });
+        Ok(true)
+    }
+
     pub async fn execution_pressure(&self) -> Result<nomifun_agent_runtime::AgentExecutionPressure, AppError> {
         use nomifun_agent_runtime::{AgentExecutionPressure, AgentExecutionStopReason};
         let journal = &self.0;
-        let payload_bytes = journal.store.native_payload_bytes(&journal.lease).await.map_err(failure)?;
         let pause_requested = journal.store.native_pause_requested(&journal.lease).await.map_err(failure)?;
-        let cursor = journal.cursor.lock().await;
+        let mut cursor = journal.cursor.lock().await;
         if cursor.uncertain || cursor.terminal || cursor.draining { return Err(failure("execution budget requested on closed journal")); }
+        let payload_bytes = journal.store.native_payload_bytes(&journal.lease).await.map_err(failure)?;
+        // A short sibling return can release most of its reservation. Recheck
+        // actual capacity at the next safe boundary instead of permanently
+        // pausing merely because concurrent callers temporarily held it all.
+        let deferred_stop = cursor.capacity_deferred.then(|| cursor.next_tool_capacity_stop(payload_bytes)).flatten();
+        if deferred_stop.is_none() { cursor.capacity_deferred = false; }
         Ok(AgentExecutionPressure {
             // Leave room for the next bounded model/tool batch and its
             // checkpoint; settlement/cleanup also have a separate reserve.
             renew_window: cursor.sequence.saturating_sub(cursor.window_start_sequence) >= 2400 || cursor.bytes >= nomifun_agent_contracts::MAX_NATIVE_JOURNAL_WINDOW_BYTES / 2,
             stop: if pause_requested {
                 Some(AgentExecutionStopReason::UserRequested)
+            } else if deferred_stop.is_some() {
+                deferred_stop
             } else if cursor.total_bytes as u64 >= cursor.budget.journal_bytes.saturating_sub(4 * 1024 * 1024)
                 || cursor.sequence >= cursor.budget.journal_records.saturating_sub(12_000) {
                 Some(AgentExecutionStopReason::TurnJournalBudget)
@@ -702,6 +807,7 @@ impl EngineTurnJournal {
             if cursor.uncertain || cursor.terminal || cursor.draining || journal.cancellation.is_cancelled() {
                 return Err(failure("journal no longer admits a checkpoint"));
             }
+            if !cursor.tool_return_capacity.is_empty() { return Ok(None); }
             let next = cursor.sequence.checked_add(1).ok_or_else(|| failure("journal sequence exhausted"))?;
             let revision = cursor.checkpoint_revision.checked_add(1).ok_or_else(|| failure("checkpoint revision exhausted"))?;
             let metadata = serde_json::to_value(AgentEngineEvent::ExecutionCheckpointSaved {
@@ -717,7 +823,10 @@ impl EngineTurnJournal {
             if renew_window && checkpoint.segments.as_ref().is_none_or(|state| state.segment_start_step != checkpoint.model_steps) {
                 return Err(failure("execution window renewal needs this exact checkpoint boundary"));
             }
-            if next.saturating_sub(cursor.window_start_sequence) > 3200 || cursor.bytes.saturating_add(metadata_bytes) > nomifun_agent_contracts::MAX_NATIVE_JOURNAL_WINDOW_BYTES
+            // A completed original batch may cross the soft byte window. Its
+            // quiescent checkpoint closes/renews that window under the same
+            // cumulative budget; pending owner results still forbid this above.
+            if next.saturating_sub(cursor.window_start_sequence) > 3200
                 || cursor.total_bytes.saturating_add(metadata_bytes) as u64 > cursor.budget.journal_bytes || next > cursor.budget.journal_records {
                 return Err(failure("bounded evidence journal exhausted before checkpoint"));
             }
@@ -1362,18 +1471,31 @@ impl EngineTurnJournal {
             let reserved = matches!(kind, EngineJournalWrite::Cleanup | EngineJournalWrite::Terminal)
                 || (kind == EngineJournalWrite::Settlement
                     && (cursor.draining || journal.cancellation.is_cancelled()));
-            let (records, bytes) = if reserved {
-                (4095_u64, 8 * 1024 * 1024)
-            } else {
-                (3200_u64, nomifun_agent_contracts::MAX_NATIVE_JOURNAL_WINDOW_BYTES)
-            };
+            let records = if reserved { 4095_u64 } else { 3200_u64 };
             let accounted_bytes = canonical_json_bytes(&event_value).map_err(failure)?.len().saturating_add(256);
             let next_bytes = cursor.bytes.saturating_add(accounted_bytes);
             let next_total_bytes = cursor.total_bytes.saturating_add(accounted_bytes);
+            let consumed_capacity = cursor.result_capacity_for(&event_value, runtime_event.as_ref());
+            let reserved_after_write = cursor.reserved_return_bytes()
+                .saturating_sub(if consumed_capacity.is_some() { TOOL_RETURN_CAPACITY_BYTES } else { 0 });
             let total_limit = cursor.budget.journal_bytes.saturating_add(if reserved { 4 * 1024 * 1024 } else { 0 });
-            if cursor.sequence.saturating_sub(cursor.window_start_sequence) >= records || next_bytes > bytes
-                || next_total_bytes as u64 > total_limit || cursor.sequence >= cursor.budget.journal_records.saturating_add(if reserved { 4000 } else { 0 }) {
+            // The window bounds new computation, not the original owners'
+            // already-admitted returns. Large settled results can cross it;
+            // their settlement and final cleanup still consume the unchanged
+            // cumulative allowance, including only the existing cleanup reserve.
+            let window_exhausted = kind == EngineJournalWrite::Progress
+                && next_bytes > nomifun_agent_contracts::MAX_NATIVE_JOURNAL_WINDOW_BYTES;
+            if cursor.sequence.saturating_sub(cursor.window_start_sequence) >= records || window_exhausted
+                || (next_total_bytes as u64).saturating_add(reserved_after_write) > total_limit
+                || cursor.sequence >= cursor.budget.journal_records.saturating_add(if reserved { 4000 } else { 0 }) {
                 return Err(failure("bounded evidence journal exhausted"));
+            }
+            // Reject an unrepresentable fact before entering the uncertain
+            // write phase. No database operation has run, so this cannot leave
+            // the original owner waiting forever to confirm an impossible row.
+            let envelope = json!({"producer_seq":cursor.sequence.saturating_add(1),"event":&event_value});
+            if canonical_json_bytes(&envelope).map_err(failure)?.len() > nomifun_agent_session::MAX_SINGLE_PAYLOAD_BYTES {
+                return Err(failure("record exceeds canonical payload limit"));
             }
             cursor.pending_write = Some((serde_json::to_string(&event_value).map_err(failure)?,model_operation.clone(),kind));
             let was_uncertain=cursor.uncertain;
@@ -1432,6 +1554,7 @@ impl EngineTurnJournal {
                 cursor.bytes = next_bytes;
                 cursor.total_bytes = next_total_bytes;
             }
+            cursor.acknowledge_result_capacity(&event_value, consumed_capacity);
             cursor.draining |= matches!(kind, EngineJournalWrite::Cleanup | EngineJournalWrite::Terminal);
             cursor.terminal = kind == EngineJournalWrite::Terminal;
             cursor.uncertain = false;
@@ -1643,6 +1766,10 @@ pub(super) async fn test_fixture_for_operation(
 #[cfg(test)]
 #[path = "engine_journal_reliability_tests.rs"]
 mod reliability_tests;
+
+#[cfg(test)]
+#[path = "engine_journal_budget_tests.rs"]
+mod budget_tests;
 
 #[cfg(test)]
 mod history_display_tests {

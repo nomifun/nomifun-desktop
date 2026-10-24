@@ -22,7 +22,7 @@ use nomifun_engine_core::{EngineToolExposure, EngineToolPlan, KernelEngineToolIn
 
 use super::engine_journal::EngineTurnJournal;
 use super::engine_session_host::{AdmittedEngineSession, EngineTurnReceipt};
-use super::engine_tool_host::{EngineToolHost, EngineToolObservationPolicy};
+use super::engine_tool_host::EngineToolHost;
 
 type Completion = Shared<BoxFuture<'static, Result<(), String>>>;
 
@@ -1047,7 +1047,6 @@ impl EngineKernelSession {
     pub fn install_tools(
         &self,
         plan: EngineToolPlan,
-        policy: Arc<dyn EngineToolObservationPolicy>,
     ) -> Result<Arc<EngineToolHost>, AppError> {
         if plan.len() > 256 {
             return Err(failure("tool surface exceeds the platform bound"));
@@ -1151,7 +1150,7 @@ impl EngineKernelSession {
             wave2: self.wave2.clone(),
             git_root: self.git_root.clone(),
         };
-        let tools = Arc::new(EngineToolHost::new(Arc::new(invoker), policy));
+        let tools = Arc::new(EngineToolHost::new(Arc::new(invoker)));
         state.tools = Some(tools.clone());
         Ok(tools)
     }

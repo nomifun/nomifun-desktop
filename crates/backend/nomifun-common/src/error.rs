@@ -51,6 +51,11 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    /// A replaceable workspace read raced a Session lifecycle writer. Only
+    /// this pre-read contention permits a bounded retry of the observation.
+    #[error("AgentSession workspace is temporarily unavailable during a concurrent lifecycle mutation")]
+    WorkspaceLifecycleBusy,
+
     #[error("Agent execution continuation is waiting for its original reservation")]
     ExecutionAdmissionPending,
 
@@ -184,7 +189,7 @@ impl AppError {
                 "NATIVE_FILE_ACQUIRE_UNAVAILABLE" => StatusCode::UNPROCESSABLE_ENTITY,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
-            Self::Conflict(_) | Self::ExecutionAdmissionPending => StatusCode::CONFLICT,
+            Self::Conflict(_) | Self::WorkspaceLifecycleBusy | Self::ExecutionAdmissionPending => StatusCode::CONFLICT,
             Self::DatabaseUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::SessionContractEvolutionRejected { .. } => StatusCode::CONFLICT,
             Self::ComponentUnavailable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
@@ -244,6 +249,7 @@ impl AppError {
                 }
             }
             Self::Conflict(_) => "CONFLICT",
+            Self::WorkspaceLifecycleBusy => "WORKSPACE_LIFECYCLE_BUSY",
             Self::ExecutionAdmissionPending => "AGENT_EXECUTION_ADMISSION_PENDING",
             Self::DatabaseUnavailable { .. } => "DATABASE_UNAVAILABLE",
             Self::SessionContractEvolutionRejected { .. } => "AGENT_SESSION_CONTRACT_EVOLUTION_REJECTED",
@@ -591,6 +597,7 @@ mod tests {
         );
         assert_eq!(AppError::Forbidden("x".into()).status_code(), StatusCode::FORBIDDEN);
         assert_eq!(AppError::Conflict("x".into()).status_code(), StatusCode::CONFLICT);
+        assert_eq!(AppError::WorkspaceLifecycleBusy.status_code(), StatusCode::CONFLICT);
         assert_eq!(
             AppError::RevisionConflict("x".into()).status_code(),
             StatusCode::CONFLICT
@@ -635,6 +642,7 @@ mod tests {
             "PATH_OUTSIDE_SANDBOX"
         );
         assert_eq!(AppError::Conflict("x".into()).error_code(), "CONFLICT");
+        assert_eq!(AppError::WorkspaceLifecycleBusy.error_code(), "WORKSPACE_LIFECYCLE_BUSY");
         assert_eq!(
             AppError::RevisionConflict("x".into()).error_code(),
             "REVISION_CONFLICT"

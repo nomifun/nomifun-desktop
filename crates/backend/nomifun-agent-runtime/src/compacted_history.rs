@@ -1,5 +1,5 @@
 //! Portable model context only, never an effect receipt or recovery proof.
-use crate::AgentEngineError;
+use crate::{AgentEngineError, AgentEngineEvent};
 use nomifun_chat_model_broker::{
     ChatContentPart, ChatMessage, ChatRole, ChatToolResultPart, ToolCallId,
 };
@@ -19,6 +19,39 @@ pub enum AgentCompactedItem {
 
 fn invalid(message: impl std::fmt::Display) -> AgentEngineError {
     AgentEngineError::ReplayContract(format!("compaction replacement: {message}"))
+}
+
+/// Author one complete replacement inside the canonical native event budget.
+/// The model window may be larger than a stored payload. Size the exact journal
+/// wrapper with the widest producer sequence before choosing a retained suffix;
+/// never shorten its tool bodies after the model has consumed them. The reader's
+/// existing codec bound remains independent of this authoring constraint.
+pub(crate) fn prepare_event(
+    input_bytes_before: usize,
+    input_bytes_after: usize,
+    summary: String,
+    messages: &[ChatMessage],
+    requirements: &[ChatMessage],
+    call_ids: &[ToolCallId],
+) -> Result<Option<AgentEngineEvent>, AgentEngineError> {
+    let retained_context = capture(messages, requirements, call_ids)?;
+    let event = AgentEngineEvent::ContextCompacted {
+        input_bytes_before,
+        input_bytes_after,
+        summary,
+        retained_tool_call_ids: call_ids.to_vec(),
+        retained_context: Some(retained_context),
+    };
+    #[derive(Serialize)]
+    struct NativeProgress<'a> {
+        producer_seq: u64,
+        event: &'a AgentEngineEvent,
+    }
+    let envelope = NativeProgress { producer_seq: u64::MAX, event: &event };
+    Ok(crate::stream_limits::serialized_size(
+        &envelope,
+        nomifun_agent_contracts::CANONICAL_PAYLOAD_MAX_BYTES as usize,
+    ).is_ok().then_some(event))
 }
 
 /// Capture the selected replacement without its summary. Reverse matching

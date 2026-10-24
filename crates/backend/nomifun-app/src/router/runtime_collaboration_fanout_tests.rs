@@ -11,6 +11,8 @@ mod child_restart_tests;
 
 const FANOUT_ROOT: &str = "FANOUT_ROOT: Use four subagents to implement four independent modules. Integrate their exact results in fanout-integrated.txt and verify it with the native process tool.";
 const PAGED_ROOT: &str = "PAGED_ROOT: Use one subagent to return the requested large reference. Read every byte of its exact canonical result before delivering the complete digest.";
+const PAGED_FOLLOWUP: &str = "PAGED_FOLLOWUP: Confirm that the completed reference remains available in this conversation. Do not delegate or invoke any tool.";
+const PAGED_FOLLOWUP_RESULT: &str = "The original large reference was read from this conversation's history; no child work was restarted.";
 const SKILL: &str = "fanout-review";
 const SKILL_BODY: &str = "FROZEN_FANOUT_SKILL_48291: Preserve the exact assigned interface and verify actual file contents.";
 const ATTACHMENT: &str = "fanout-reference.txt";
@@ -176,7 +178,13 @@ impl FanoutServer {
         let router=axum::Router::new().route("/v1/chat/completions",axum::routing::post(|axum::extract::State(state):axum::extract::State<Arc<FanoutState>>,axum::Json(body):axum::Json<Value>|async move {
             let ordinal={let mut requests=state.requests.lock().unwrap();requests.push(body.clone());requests.len()};let users=user_text(&body);
             let child=(1..=4).find(|index|users.contains(&format!("FANOUT_CHILD_{index}")));
-            let (delta,reason)=if users.contains("PAGED_CHILD") {(json!({"role":"assistant","content":large_result()}),"stop")}
+            let (delta,reason)=if users.contains("PAGED_FOLLOWUP") {
+                assert!(users.contains("PAGED_ROOT"),"the next Turn retains the original accepted task as history");
+                assert!(body["messages"].as_array().unwrap().iter().any(|message|
+                    message["role"]=="tool"&&message["tool_call_id"].as_str().is_some_and(|id|id.starts_with("paged-status-"))),
+                    "the next model request is built from the persisted original child observations");
+                (json!({"role":"assistant","content":PAGED_FOLLOWUP_RESULT}),"stop")
+            } else if users.contains("PAGED_CHILD") {(json!({"role":"assistant","content":large_result()}),"stop")}
             else if let Some(index)=child {
                 if state.entered_mask.fetch_or(1<<index,Ordering::SeqCst)&(1<<index)==0 {
                     let active=state.active.fetch_add(1,Ordering::SeqCst)+1;state.peak.fetch_max(active,Ordering::SeqCst);state.entered.fetch_add(1,Ordering::SeqCst);
@@ -295,7 +303,7 @@ async fn four_full_role_labelled_children_overlap_inherit_and_integrate_without_
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=4)]
-async fn large_canonical_child_result_is_read_in_complete_utf8_pages_before_parent_completion() {
+async fn large_canonical_child_result_survives_parent_completion_and_the_next_turn() {
     paged_case(false).await;
 }
 
@@ -325,5 +333,19 @@ async fn paged_case(split_large_delta:bool) {
     let delivery=nomifun_agent_execution::canonical_turn_delivery(&facts,&receipt,false).unwrap();
     assert_eq!(delivery.result_text.as_deref(),Some(format!("Complete original reference: {} bytes; sha256={}",expected.len(),digest.as_ref()).as_str()));
     let counts:(i64,i64)=sqlx::query_as("SELECT (SELECT COUNT(*) FROM agent_executions),(SELECT COUNT(*) FROM agent_execution_steps)").fetch_one(fixture.pool()).await.unwrap();assert_eq!(counts,(1,1));
+    let followup=api(&fixture._router,&format!("/api/agent-sessions/{}/messages",session.as_ref()),
+        json!({"idempotency_key":"paged-history-followup","input":{"content":PAGED_FOLLOWUP}})).await;
+    let followup_operation=await_completion(&fixture,&session,&followup).await;
+    assert_ne!(followup_operation,operation);
+    let facts=fixture.owner.canonical().store().turn_output_facts(&session,&followup_operation).await.unwrap();
+    let receipt=fixture.owner.canonical().store().read_turn_receipt(&session,&followup_operation).await.unwrap();
+    assert_eq!(nomifun_agent_execution::canonical_turn_delivery(&facts,&receipt,false).unwrap().result_text.as_deref(),Some(PAGED_FOLLOWUP_RESULT));
+    let followup_requests=server.state.requests.lock().unwrap().iter().filter(|body|user_text(body).contains("PAGED_FOLLOWUP")).count();
+    assert_eq!(followup_requests,1,"history reconstruction reaches exactly one new model request without rerunning collaboration");
+    let counts:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT COUNT(*) FROM agent_executions),(SELECT COUNT(*) FROM agent_execution_steps),(SELECT COUNT(*) FROM agent_execution_attempts)").fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(counts,(1,1,1),"reading the stored status never resubmits the original child");
+    let effects:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_effects WHERE turn_id=(SELECT turn_id FROM agent_turns WHERE session_id=? AND operation_id=?)")
+        .bind(session.as_ref()).bind(followup_operation.as_ref()).fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(effects,0,"the follow-up is historical context only");
     fixture.voice_execution.shutdown().await.unwrap();fixture.finish().await;server.close().await;
 }

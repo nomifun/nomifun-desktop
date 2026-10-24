@@ -315,3 +315,82 @@ test('unmount prevents further reads in an unfinished reconciliation', async () 
   await refresh;
   expect(reads).toEqual(['first']);
 });
+
+function waitForCancellation(signal?: AbortSignal): Promise<IDirOrFile[]> {
+  if (!signal) throw new Error('Workspace request must have a cancellation owner');
+  return new Promise((_resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new DOMException('cancelled', 'AbortError')), { once: true });
+  });
+}
+
+test('a replacement root read cancels the obsolete read without reporting a failure', async () => {
+  let firstSignal: AbortSignal | undefined;
+  const treeSource = source((_search, signal) => {
+    if (!firstSignal) { firstSignal = signal; return waitForCancellation(signal); }
+    return Promise.resolve([directory('', [file('current.txt')])]);
+  }, async () => []);
+  const hook = renderHook(() => useWorkspaceTree({ treeSource }));
+  let previous!: Promise<IDirOrFile[] | null>;
+  act(() => { previous = hook.result.current.refreshWorkspace(); });
+  await act(async () => { await hook.result.current.refreshWorkspace(); await previous; });
+  expect(firstSignal?.aborted).toBe(true);
+  expect(hook.result.current.hasLoadError).toBe(false);
+  expect(hook.result.current.files[0].children).toEqual([file('current.txt')]);
+});
+
+test('a same-directory replacement and a root refresh cancel obsolete child reads', async () => {
+  const signals: AbortSignal[] = [];
+  const treeSource = source(async () => [directory('', [directory('nested')])], (_node, signal) => {
+    if (signal) signals.push(signal);
+    return waitForCancellation(signal);
+  });
+  const hook = renderHook(() => useWorkspaceTree({ treeSource }));
+  await act(async () => { await hook.result.current.refreshWorkspace(); });
+  let first!: Promise<void>;
+  let second!: Promise<void>;
+  act(() => { first = hook.result.current.loadChildren(directory('nested')); });
+  act(() => { second = hook.result.current.loadChildren(directory('nested')); });
+  expect(signals[0].aborted).toBe(true);
+  await act(async () => { await hook.result.current.refreshWorkspace(); await first; await second; });
+  expect(signals[1].aborted).toBe(true);
+  expect(hook.result.current.hasLoadError).toBe(false);
+});
+
+test('source changes cancel old reads and reset first-load reconciliation', async () => {
+  let firstSignal: AbortSignal | undefined;
+  let firstReads = 0;
+  const first = source((_search, signal) => {
+    if (++firstReads === 1) return Promise.resolve([directory('', [directory('nested', [])])]);
+    firstSignal = signal;
+    return waitForCancellation(signal);
+  }, async () => []);
+  let childReads = 0;
+  const second = { ...source(async () => [directory('', [directory('nested')])], async () => { childReads++; return []; }), key: 'new-workspace' };
+  const hook = renderHook(({ treeSource }) => useWorkspaceTree({ treeSource }), { initialProps: { treeSource: first } });
+  // A displayed tree from the previous source must not cause reads in the new root.
+  await act(async () => { await hook.result.current.refreshWorkspace(); });
+  let previous!: Promise<IDirOrFile[] | null>;
+  act(() => { previous = hook.result.current.refreshWorkspace(); });
+  hook.rerender({ treeSource: second });
+  await act(async () => { await previous; await hook.result.current.refreshWorkspace(); });
+  expect(firstSignal?.aborted).toBe(true);
+  expect(childReads).toBe(0);
+  expect(hook.result.current.hasLoadError).toBe(false);
+});
+
+test('unmount cancels active root and child requests', async () => {
+  const signals: AbortSignal[] = [];
+  const read = (signal?: AbortSignal) => { if (signal) signals.push(signal); return waitForCancellation(signal); };
+  const treeSource = source((_search, signal) => read(signal), (_node, signal) => read(signal));
+  const hook = renderHook(() => useWorkspaceTree({ treeSource }));
+  let root!: Promise<IDirOrFile[] | null>;
+  let child!: Promise<void>;
+  act(() => {
+    root = hook.result.current.refreshWorkspace();
+    child = hook.result.current.loadChildren(directory('nested'));
+  });
+  hook.unmount();
+  await Promise.all([root, child]);
+  expect(signals).toHaveLength(2);
+  expect(signals.every((signal) => signal.aborted)).toBe(true);
+});

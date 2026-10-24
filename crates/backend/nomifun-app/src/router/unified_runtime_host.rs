@@ -501,6 +501,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("turn_settlement_owner.rs"),
                     include_str!("engine_owned_settlement.rs"),
                     include_str!("engine_tool_return.rs"),
+                    include_str!("engine_tool_record.rs"),
                     include_str!("completed_runtime_retirement.rs"),
                     include_str!("engine_model_facts.rs"),
                     include_str!("engine_tool_host.rs"),
@@ -624,7 +625,7 @@ pub(crate) fn factory(
             let discovery = resources.tool_discovery_port()?.is_some();
             let full_plan = super::agent_tool_presentation::project(full_plan, discovery)?;
             let skills = session_host.read_selected_skills(&admitted).await?;
-            let tools = Arc::new(JoinedTools(resources.install_tools(full_plan.clone(), Arc::new(RuntimeToolObservation))?));
+            let tools = Arc::new(JoinedTools(resources.install_tools(full_plan.clone())?));
             let build = AgentEngineBuild {
                 build_id: binding.build_id.clone().into(),
                 build_digest: binding.build_digest.clone().into(),
@@ -1081,6 +1082,12 @@ impl ConversationRuntimeHost {
         use super::engine_journal::EngineJournalWrite;
         let kind = if terminal { EngineJournalWrite::Terminal }
             else if turn.cleanup_started { EngineJournalWrite::Cleanup }
+            else if serde_json::from_str::<AgentEngineEvent>(&payload).is_ok_and(|event| matches!(event,
+                AgentEngineEvent::ToolCompleted {..} | AgentEngineEvent::ToolOutcomeReconciled {..}
+                | AgentEngineEvent::ToolResultsOrdered {..} | AgentEngineEvent::CompletionObservation {..}
+                | AgentEngineEvent::WorkStatus {..} | AgentEngineEvent::PlanUpdated {..}
+                | AgentEngineEvent::PatchRecoveryUpdated {..} | AgentEngineEvent::RuntimeModulesActivated {..}
+                | AgentEngineEvent::ExecutionBudgetExhausted {..})) { EngineJournalWrite::Settlement }
             else { EngineJournalWrite::Progress };
         turn.journal.append_with_receipt(payload, model_operation.map(str::to_owned), kind).await
     }
@@ -1263,9 +1270,9 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         turn.journal.save_execution_checkpoint(checkpoint.clone(), self.principal.clone()).await
     }
 
-    async fn admit_tool(&self, message: &SendMessageData, event: &AgentEngineEvent) -> Result<bool, AppError> {
+    async fn admit_tool(&self, message: &SendMessageData, event: &AgentEngineEvent) -> Result<nomifun_agent_runtime::AgentToolAdmission, AppError> {
         let admitted = self.admit_steerable_tool(message, event).await?;
-        if admitted {
+        if admitted == nomifun_agent_runtime::AgentToolAdmission::Admitted {
             let operation = self.active.lock().await.as_ref().map(|turn| turn.operation.clone());
             self.supervision.note_progress(
                 &self.options.conversation_id,
@@ -1762,15 +1769,6 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         };
         let mut result_seq = None;
         for event in &records {
-        if let AgentEngineEvent::ContextCompacted { retained_context: Some(items), .. } = event {
-            // The host projection can change descriptor lengths. Reject an
-            // oversized replacement before persisting it or acknowledging the
-            // engine's write-ahead event; never store a checkpoint replay will
-            // reject merely because projection expanded an omission notice.
-            if serde_json::to_vec(items).map_err(error)?.len() > 2 * 1024 * 1024 {
-                return Err(error("projected compaction replacement exceeds replay budget"));
-            }
-        }
         let model_operation = match event {
             AgentEngineEvent::ModelStepStarted { operation_id, .. }
                 | AgentEngineEvent::CompactionStarted { operation_id, .. } => Some(operation_id.as_ref()),
@@ -1978,22 +1976,12 @@ impl ChatCausalityGate for ConversationRuntimeHost {
     }
 }
 
-/// The runtime supplies only its instruction-observation policy; tool lifetime,
-/// duplicate fencing and durable dispatch/settlement belong to the shared host.
+/// Tool lifetime, duplicate fencing and exact durable dispatch/settlement
+/// belong to the shared host. Context presentation stays inside the Runtime.
 struct JoinedTools(Arc<super::engine_tool_host::EngineToolHost>);
 impl std::ops::Deref for JoinedTools {
     type Target = super::engine_tool_host::EngineToolHost;
     fn deref(&self) -> &Self::Target { &self.0 }
-}
-struct RuntimeToolObservation;
-impl super::engine_tool_host::EngineToolObservationPolicy for RuntimeToolObservation {
-    fn project(&self, invocation: &AgentToolInvocation, result: &AgentToolResult) -> AgentToolResult {
-        if super::runtime_event_buffer::is_instruction_read(&invocation.call) {
-            super::runtime_event_buffer::instruction_result(result)
-        } else {
-            super::engine_tool_host::bounded_engine_tool_result(result)
-        }
-    }
 }
 #[async_trait]
 impl AgentToolInvoker for JoinedTools {
@@ -2198,6 +2186,7 @@ mod build_identity_tests {
             "turn_settlement_owner.rs",
             "engine_owned_settlement.rs",
             "engine_tool_return.rs",
+            "engine_tool_record.rs",
             "completed_runtime_retirement.rs",
             "../../../nomifun-agent-session/src/native_settlement.rs",
             "../../../nomifun-agent-session/src/native_settlement_bundle.rs",

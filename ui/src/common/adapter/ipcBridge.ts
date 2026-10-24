@@ -31,6 +31,7 @@ import type { StorageRelocationResponse } from '@/common/protocolBindings/Storag
 import type { SystemInfoResponse } from '@/common/protocolBindings/SystemInfoResponse';
 import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
 import type { McpConnectionTestRequest } from './mcpRequest';
+import { readConversationWorkspaceEntries } from './conversationWorkspaceRead';
 import {
   noopEmitter,
   shellEmitter,
@@ -1230,17 +1231,17 @@ export const conversation = {
   // Notification only: consumers re-read the canonical projection before lowering activity.
   turnPaused: wsMappedEmitter<ReturnType<typeof fromApiTurnPausedEvent>, unknown>('turn.paused', fromApiTurnPausedEvent),
   listChanged: wsEmitter<IConversationListChangedEvent>('conversation.listChanged'),
-  // Uses httpRequest directly (instead of httpGet + withResponseMap) because the
+  // Uses the cancellable workspace reader (instead of httpGet + withResponseMap) because the
   // response mapper needs `workspace` from params to build fullPath/relativePath,
   // and withResponseMap's map function does not receive the original params.
   getWorkspace: {
     provider: () => {},
-    invoke: (async (p: { conversation_id: ConversationId; workspace: string; path: string; search?: string }) => {
+    invoke: (async (p: { conversation_id: ConversationId; workspace: string; path: string; search?: string }, signal?: AbortSignal) => {
       const rel = absoluteToRelativePath(p.path, p.workspace);
       const url = `/api/agent-sessions/${p.conversation_id}/workspace?path=${encodeURIComponent(rel)}${p.search ? `&search=${encodeURIComponent(p.search)}` : ''}`;
-      const raw = await httpRequest<Array<{ name: string; type: string }>>('GET', url);
+      const raw = await readConversationWorkspaceEntries(url, signal);
       return fromBackendWorkspaceList(raw, p.workspace, rel);
-    }) as (p: { conversation_id: ConversationId; workspace: string; path: string; search?: string }) => Promise<IDirOrFile[]>,
+    }) as (p: { conversation_id: ConversationId; workspace: string; path: string; search?: string }, signal?: AbortSignal) => Promise<IDirOrFile[]>,
   },
   responseSearchWorkSpace: stubProvider<void, { file: number; dir: number; match?: IDirOrFile }>(
     'responseSearchWorkSpace',

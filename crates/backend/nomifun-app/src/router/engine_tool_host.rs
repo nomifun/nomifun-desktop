@@ -71,15 +71,6 @@ pub struct EngineToolDispatchRecord {
     pub model_name: String,
 }
 
-/// Trusted application policy for replay observations. The live result is
-/// unchanged; projection cannot grant authority or acknowledge observation.
-pub trait EngineToolObservationPolicy: Send + Sync {
-    fn project(
-        &self,
-        invocation: &EngineToolInvocation,
-        result: &EngineToolResult,
-    ) -> EngineToolResult;
-}
 struct Turn {
     operation: String,
     journal: EngineTurnJournal,
@@ -90,7 +81,6 @@ struct Turn {
 
 pub struct EngineToolHost {
     inner: Arc<dyn EngineToolInvoker>,
-    policy: Arc<dyn EngineToolObservationPolicy>,
     tasks: EngineTaskGroup,
     execution: Arc<tokio::sync::RwLock<()>>,
     turn: Mutex<Option<Turn>>,
@@ -154,9 +144,8 @@ impl EngineToolInvoker for EngineToolHost {
                 .insert(invocation.operation_id.as_ref().to_owned());
             turn.calls
                 .insert(invocation.call.call_id.as_ref().to_owned());
-            let (inner, policy, journal, settlements, unobserved) = (
+            let (inner, journal, settlements, unobserved) = (
                 self.inner.clone(),
-                self.policy.clone(),
                 turn.journal.clone(),
                 self.settlements.clone(),
                 self.unobserved.clone(),
@@ -204,14 +193,7 @@ impl EngineToolInvoker for EngineToolHost {
                     Ok(()) => (inner.invoke(invocation.clone(), effect_cancellation).await, true),
                     Err(error) => (Err(tool_error(format!("native invocation not started; original dispatch receipt unconfirmed: {error}"))), false),
                 };
-                let projection = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-                    result.as_ref().ok().map(|result| policy.project(&invocation, result))));
-                let (recorded, policy_panicked) = match projection {
-                    Ok(recorded) => (recorded, false),
-                    Err(_) => (None, true),
-                };
-                let (payload,rejection) = tool_return::settlement_payload(&dispatch,&invocation,&result,
-                    recorded.as_ref(),policy_panicked,owner_invoked);
+                let (payload,rejection) = tool_return::settlement_payload(&dispatch,&invocation,&result,owner_invoked);
                 let settlement = Arc::new(ToolSettlement { call_id: dispatch.call_id.clone(), rejection,
                     write: OwnedJournalSettlement::new(journal, payload, result) });
                 settlements.lock().map_err(|_| tool_error("settlement owner lock poisoned"))?
@@ -229,71 +211,6 @@ impl EngineToolInvoker for EngineToolHost {
     }
 }
 
-pub fn bounded_engine_tool_result(result: &EngineToolResult) -> EngineToolResult {
-    use nomifun_chat_model_broker::ChatToolResultPart;
-    let mut projected = result.clone();
-    for part in &mut projected.output {
-        match part {
-            ChatToolResultPart::Image {
-                media_type,
-                data_base64,
-            }
-            | ChatToolResultPart::Audio {
-                media_type,
-                data_base64,
-            } => {
-                *part = ChatToolResultPart::Text {
-                    text: format!(
-                        "[Historical media {media_type}, {} encoded bytes; binary body omitted from replay]",
-                        data_base64.len()
-                    ),
-                };
-            }
-            _ => {}
-        }
-    }
-    if serde_json::to_vec(&projected).is_ok_and(|bytes| bytes.len() <= 32 * 1024) {
-        return projected;
-    }
-    // Keep every operational JSON metadata value unchanged. Large process
-    // stdout is a string field, not a reason to turn exit/cleanup observations
-    // into an unparseable serialized-JSON excerpt. This grants no tool status;
-    // domain readers still validate the exact admitted Action and envelope.
-    if let [ChatToolResultPart::Text {text}] = projected.output.as_slice() {
-        if let Ok(mut value)=serde_json::from_str::<serde_json::Value>(text) {
-            if let Some(source)=value.pointer("/output/text").and_then(serde_json::Value::as_str).map(str::to_owned) {
-                let mut keep=8192usize.min(source.len()/2);
-                loop {
-                    *value.pointer_mut("/output/text").expect("selected output string retained")=
-                        serde_json::Value::String(durable_excerpt(&source,keep));
-                    let candidate=EngineToolResult {call_id:result.call_id.clone(),is_error:result.is_error,
-                        output:vec![ChatToolResultPart::Text {text:value.to_string()}]};
-                    if serde_json::to_vec(&candidate).is_ok_and(|bytes|bytes.len()<=32*1024) {return candidate;}
-                    // Metadata plus the mandatory omission notice cannot fit.
-                    if keep==0 {break;}
-                    keep/=2;
-                }
-            }
-        }
-    }
-    let text = projected.output_text();
-    let mut keep = 8192usize.min(text.len() / 2);
-    loop {
-        let output = durable_excerpt(&text,keep);
-        projected = EngineToolResult::text(result.call_id.clone(), output, result.is_error);
-        if keep == 0 || serde_json::to_vec(&projected).is_ok_and(|bytes| bytes.len() <= 32 * 1024) {
-            return projected;
-        }
-        keep /= 2;
-    }
-}
-
-fn durable_excerpt(text:&str,keep:usize)->String {
-    let(head,tail)=nomifun_engine_core::tool_text_excerpt_ranges(text,keep*2);
-    format!("{}\n[Durable observation truncated: original {} bytes, sha256:{:x}; do not infer omitted content]\n{}",
-        &text[..head],text.len(),Sha256::digest(text.as_bytes()),&text[tail..])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,15 +219,8 @@ mod tests {
     use nomifun_db::sqlx;
     use serde_json::Value;
 
-    struct BoundedEngineToolObservation;
-    impl EngineToolObservationPolicy for BoundedEngineToolObservation {
-        fn project(&self, _: &EngineToolInvocation, result: &EngineToolResult) -> EngineToolResult {
-            bounded_engine_tool_result(result)
-        }
-    }
-
     fn tools(inner: Arc<dyn EngineToolInvoker>) -> EngineToolHost {
-        EngineToolHost::new(inner, Arc::new(BoundedEngineToolObservation))
+        EngineToolHost::new(inner)
     }
     struct NeverInvoke;
     #[async_trait]
@@ -948,42 +858,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contract_rejection_records_an_error_observation_and_releases_the_original_return() {
-        struct ForeignProjection;
-        impl EngineToolObservationPolicy for ForeignProjection {
-            fn project(&self, _: &EngineToolInvocation, _: &EngineToolResult) -> EngineToolResult {
-                EngineToolResult::text("foreign-call".into(), "invalid observation", false)
-            }
-        }
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let owner = EngineToolHost::new(Arc::new(CountedReturn { calls: calls.clone() }), Arc::new(ForeignProjection));
-        let (journal, pool) = super::super::engine_journal::test_fixture().await;
-        owner.bind_turn("turn".into(), journal).unwrap();
-        let error = owner.invoke(cancellation_invocation(), CancellationToken::new()).await.unwrap_err();
-        assert!(matches!(error, EngineToolError::InvalidContract(ref message) if message.contains("HOST_TOOL_RETURN_CONTRACT_REJECTED")));
-        owner.close_turn().unwrap();
-        owner.join().await.unwrap();
-        owner.join().await.unwrap();
-        assert_eq!(calls.load(Ordering::Acquire), 1);
-        assert!(owner.settlements.lock().unwrap().is_empty(), "the original error observation was confirmed");
-        let records: Vec<String> = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='host_tool_settled'")
-            .fetch_all(&pool).await.unwrap();
-        assert_eq!(records.len(), 1);
-        let value: Value = serde_json::from_str(&records[0]).unwrap();
-        let event = &value["event"];
-        assert_eq!(event["call_id"], "queued-call");
-        assert!(event["result"].is_null(), "the foreign projection is not an accepted result");
-        assert_eq!(event["contract_rejection"]["kind"], "observation_call_mismatch");
-        assert_eq!(event["contract_rejection"]["owner_returned"], true);
-        let original = EngineToolResult::text("queued-call".into(), "original immutable owner result", false);
-        assert_eq!(event["contract_rejection"]["original_return"]["sha256"],
-            serde_json::to_value(nomifun_agent_contracts::digest_payload(&original).unwrap()).unwrap());
-        assert!(!records[0].contains("invalid observation"));
-        owner.discard_closed_observations().unwrap();
-        pool.close().await;
-    }
-
-    #[tokio::test]
     async fn stopped_call_keeps_rejected_native_return_until_its_error_observation_commits() {
         struct ForeignOwner { calls: Arc<std::sync::atomic::AtomicUsize> }
         #[async_trait]
@@ -1028,15 +902,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_observation_is_recorded_as_rejected_instead_of_pinning_cleanup() {
-        struct OversizedProjection;
-        impl EngineToolObservationPolicy for OversizedProjection {
-            fn project(&self, invocation: &EngineToolInvocation, _: &EngineToolResult) -> EngineToolResult {
-                EngineToolResult::text(invocation.call.call_id.clone(), "x".repeat(70*1024), false)
+    async fn oversized_canonical_return_is_rejected_without_clipping_or_pinning_cleanup() {
+        struct OversizedOwner { calls: Arc<std::sync::atomic::AtomicUsize> }
+        #[async_trait]
+        impl EngineToolInvoker for OversizedOwner {
+            async fn invoke(&self, invocation: EngineToolInvocation, _: CancellationToken)
+                -> Result<EngineToolResult, EngineToolError> {
+                self.calls.fetch_add(1,Ordering::AcqRel);
+                Ok(EngineToolResult::text(invocation.call.call_id.clone(),
+                    "x".repeat(nomifun_agent_session::MAX_SINGLE_PAYLOAD_BYTES), false))
             }
         }
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let owner = EngineToolHost::new(Arc::new(CountedReturn { calls: calls.clone() }),Arc::new(OversizedProjection));
+        let owner = tools(Arc::new(OversizedOwner { calls: calls.clone() }));
         let (journal,pool) = super::super::engine_journal::test_fixture().await;
         owner.bind_turn("turn".into(),journal).unwrap();
         assert!(matches!(owner.invoke(cancellation_invocation(),CancellationToken::new()).await,
@@ -1047,10 +925,42 @@ mod tests {
         let raw: String = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='host_tool_settled'")
             .fetch_one(&pool).await.unwrap();
         let value: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(value["event"]["contract_rejection"]["kind"],"observation_result_too_large");
+        assert_eq!(value["event"]["contract_rejection"]["kind"],"canonical_result_too_large");
         assert!(value["event"]["result"].is_null());
         assert!(raw.len()<4096);
-        assert!(value["event"]["contract_rejection"]["rejected_observation"]["bytes"].as_u64().unwrap()>64*1024);
+        assert!(value["event"]["contract_rejection"]["original_return"]["bytes"].as_u64().unwrap()
+            > nomifun_agent_session::MAX_SINGLE_PAYLOAD_BYTES as u64);
+        owner.discard_closed_observations().unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn large_owner_return_commits_exactly_before_live_delivery() {
+        struct LargeOwner(EngineToolResult);
+        #[async_trait]
+        impl EngineToolInvoker for LargeOwner {
+            async fn invoke(&self, _: EngineToolInvocation, _: CancellationToken)
+                -> Result<EngineToolResult, EngineToolError> { Ok(self.0.clone()) }
+        }
+        let original = EngineToolResult::text("queued-call".into(),
+            serde_json::json!({"cursor":"original-source","result":{"body":"代码😀\\\"\n".repeat(12_000)}}).to_string(), false);
+        assert!(serde_json::to_vec(&original).unwrap().len() > 64 * 1024);
+        let owner = tools(Arc::new(LargeOwner(original.clone())));
+        let (journal,pool) = super::super::engine_journal::test_fixture().await;
+        let store = journal.canonical_store();
+        let invocation = cancellation_invocation();
+        let session = invocation.agent_session_id.clone();
+        let operation = invocation.turn_operation_id.clone();
+        owner.bind_turn("turn".into(),journal).unwrap();
+        assert_eq!(owner.invoke(invocation,CancellationToken::new()).await.unwrap(), original);
+        let facts = store.native_recovery_facts(&session,&operation).await.unwrap();
+        let recorded = facts.event_payloads.values().find_map(|payload| {
+            let event = payload.get("event")?;
+            (event["event"] == "host_tool_settled").then(|| event["result"].clone())
+        }).expect("original owner settlement committed before delivery");
+        assert_eq!(serde_json::from_value::<EngineToolResult>(recorded).unwrap(), original);
+        owner.close_turn().unwrap();
+        owner.join().await.unwrap();
         owner.discard_closed_observations().unwrap();
         pool.close().await;
     }
@@ -1073,13 +983,9 @@ fn bounded_error(message: &str) -> String {
 }
 
 impl EngineToolHost {
-    pub fn new(
-        inner: Arc<dyn EngineToolInvoker>,
-        policy: Arc<dyn EngineToolObservationPolicy>,
-    ) -> Self {
+    pub fn new(inner: Arc<dyn EngineToolInvoker>) -> Self {
         Self {
             inner,
-            policy,
             tasks: EngineTaskGroup::new(128).expect("fixed engine task bound is valid"),
             execution: Arc::new(tokio::sync::RwLock::new(())),
             turn: Mutex::new(None),

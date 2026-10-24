@@ -66,9 +66,9 @@ impl VoiceAttemptTest {
 }
 #[async_trait]impl AgentEventSink for VoiceAttemptTest {
     async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError>{if matches!(event,AgentEngineEvent::ToolCallDelta {..}){self.old_observed.notify_one();}self.events.lock().unwrap().push(event);Ok(())}
-    async fn admit_tool(&self,event:AgentEngineEvent)->Result<bool,AgentEngineError>{
-        if self.correct_at_admission&&matches!(event,AgentEngineEvent::ToolStarted {step,..} if step>0){self.correct();return Ok(false);}
-        self.emit(event).await?;Ok(true)
+    async fn admit_tool(&self,event:AgentEngineEvent)->Result<crate::AgentToolAdmission,AgentEngineError>{
+        if self.correct_at_admission&&matches!(event,AgentEngineEvent::ToolStarted {step,..} if step>0){self.correct();return Ok(crate::AgentToolAdmission::InputSuperseded);}
+        self.emit(event).await?;Ok(crate::AgentToolAdmission::Admitted)
     }
 }
 #[tokio::test]

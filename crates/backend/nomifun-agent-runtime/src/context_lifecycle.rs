@@ -372,6 +372,11 @@ impl ContextLifecycle {
         let summary_limit = (input_limit / 2).min(8192)
             .min((self.budget.max_output_tokens as usize / 2).max(512));
         let summary_hard_limit = summary_limit.max((input_limit / 2).min(8 * 1024));
+        // A summary's UTF-8 limit is not its encoded JSON size. Reserve the
+        // largest escaping expansion so every accepted summary can be stored
+        // with the selected complete observations in the canonical payload.
+        let mut durable_summary_reserve = "\0".repeat(summary_hard_limit);
+        durable_summary_reserve.push_str(&incomplete_summary_notice(usize::MAX, usize::MAX));
         let mut source_messages = request.input.messages.as_slice();
         let mut retained_tool_call_ids = Vec::new();
         if let Some(mut exchange) = recent {
@@ -395,6 +400,10 @@ impl ContextLifecycle {
                         || candidate.messages.len() > self.resource.max_history_messages
                         || crate::media_context::estimate_tokens(&candidate, candidate_bytes) >= input_limit * 4 / 5
                     { break; }
+                    if crate::compacted_history::prepare_event(bytes, usize::MAX,
+                        durable_summary_reserve.clone(), &messages, requirements, &exchange.call_ids)?.is_none() {
+                        break;
+                    }
                     mandatory_messages = messages;
                     source_messages = exchange.prefix();
                     retained_tool_call_ids = exchange.call_ids.clone();
@@ -402,6 +411,12 @@ impl ContextLifecycle {
                     exchange = earlier;
                 }
             }
+        }
+        if crate::compacted_history::prepare_event(bytes, usize::MAX,
+            durable_summary_reserve, &mandatory_messages, requirements, &retained_tool_call_ids)?.is_none() {
+            return Err(AgentEngineError::Compaction(
+                "mandatory compaction replacement exceeds the canonical payload budget; no summary requested and original context kept".into(),
+            ));
         }
         // The output ceiling alone is not the note's available input room.
         // Reserve the exact selected prefix, required inputs/images and note
@@ -616,10 +631,7 @@ impl ContextLifecycle {
             }
         }
         if let Some(start) = omitted_source_start {
-            previous.push_str(&format!(
-                "\n[Automatic summary incomplete for transcript bytes {start}..{}. The accepted user request and active task state remain authoritative; earlier tool outcomes in this range are unverified here. Missing context does not authorize re-reading or rerunning settled work. Recover already-admitted output only through available authorized history tools when needed; otherwise disclose the missing verification. Preserve the user's prohibitions and unknown outcomes. Do not assume a prior action succeeded or that repeating it is safe.]",
-                source.len(),
-            ));
+            previous.push_str(&incomplete_summary_notice(start, source.len()));
         }
         let mut replacement_input_limit = replacement_accept_limit;
         if let Some(mut exchange) = crate::context_tail::latest(&request.input.messages)? {
@@ -656,6 +668,10 @@ impl ContextLifecycle {
                         || crate::media_context::estimate_tokens(&candidate, candidate_bytes)
                             >= candidate_token_limit
                     { break; }
+                    if crate::compacted_history::prepare_event(bytes, usize::MAX,
+                        previous.clone(), &messages, requirements, &exchange.call_ids)?.is_none() {
+                        break;
+                    }
                     // Optional headroom may limit older history, but must not
                     // discard a latest complete exchange that fits the frozen
                     // input envelope. Keep its exact call/result and error.
@@ -684,19 +700,12 @@ impl ContextLifecycle {
                 self.resource.max_context_bytes, replacement.messages.len(), self.resource.max_history_messages,
             )));
         }
-        let retained_context = crate::compacted_history::capture(
-            &replacement.messages[1..],
-            requirements,
-            &retained_tool_call_ids,
-        )?;
-        sink.emit(AgentEngineEvent::ContextCompacted {
-            input_bytes_before: bytes,
-            input_bytes_after: after,
-            summary: previous,
-            retained_tool_call_ids,
-            retained_context: Some(retained_context),
-        })
-        .await?;
+        let event = crate::compacted_history::prepare_event(bytes, after, previous,
+            &replacement.messages[1..], requirements, &retained_tool_call_ids)?
+            .ok_or_else(|| AgentEngineError::Compaction(
+                "compaction replacement exceeds the canonical payload budget; original context kept".into(),
+            ))?;
+        sink.emit(event).await?;
         request.input = replacement;
         self.compacted_byte_floor = Some(after);
         self.compacted_token_floor = Some(after_tokens);
@@ -706,6 +715,12 @@ impl ContextLifecycle {
         self.last_request_estimate = crate::media_context::estimate_tokens(&request.input, after);
         Ok(())
     }
+}
+
+fn incomplete_summary_notice(start: usize, end: usize) -> String {
+    format!(
+        "\n[Automatic summary incomplete for transcript bytes {start}..{end}. The accepted user request and active task state remain authoritative; earlier tool outcomes in this range are unverified here. Missing context does not authorize re-reading or rerunning settled work. Recover already-admitted output only through available authorized history tools when needed; otherwise disclose the missing verification. Preserve the user's prohibitions and unknown outcomes. Do not assume a prior action succeeded or that repeating it is safe.]"
+    )
 }
 
 pub(crate) fn fitting_summary_prompt_limit(
