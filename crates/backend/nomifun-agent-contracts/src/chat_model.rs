@@ -1103,13 +1103,17 @@ pub struct ModelFailureDiagnostic {
     /// Redacted locally authored OS/transport cause only, never provider prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_detail: Option<String>,
+    /// Bounded, credential-redacted message from a verified provider error
+    /// envelope. Display only: it never selects classification or retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_detail: Option<String>,
 }
 
 impl ModelFailureDiagnostic {
     pub fn new(reason: ModelFailureReason) -> Self {
         Self { reason, http_status: None, provider_code: None, provider_type: None, provider_param: None, provider_id: None, model_name: None, endpoint: None,
             request_id: None, retry_after_ms: None, protocol: None, auth_scheme: None,
-            content_type: None, transport_detail: None }
+            content_type: None, transport_detail: None, provider_detail: None }
     }
 }
 

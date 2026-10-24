@@ -618,6 +618,12 @@ fn sanitize_diagnostic(mut diagnostic: ModelFailureDiagnostic) -> ModelFailureDi
         nomifun_net::secret_redaction::redact_url_queries(&value).chars()
             .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
             .take(1024).collect::<String>()).filter(|value| !value.is_empty());
+    // Only the credential-aware transport attaches provider explanation.
+    // Preserve it separately from locally authored causes and classifications.
+    diagnostic.provider_detail = diagnostic.provider_detail.map(|value|
+        nomifun_net::secret_redaction::redact_url_queries(&value).chars()
+            .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+            .take(1000).collect::<String>()).filter(|value| !value.is_empty());
     diagnostic
 }
 
@@ -1252,6 +1258,7 @@ mod tests {
         diagnostic.auth_scheme = Some("bearer".to_owned());
         diagnostic.content_type = Some("application/json".to_owned());
         diagnostic.transport_detail = Some(format!("connection refused by https://user:password@api.example.test/?key=private-key-value#secret {}", "x".repeat(1100)));
+        diagnostic.provider_detail = Some(format!("temperature must be omitted; https://user:password@api.example.test/?key=private-key-value#secret {}", "x".repeat(1100)));
         error.diagnostic = Some(diagnostic);
         let error = sanitize_model_error(error);
         let diagnostic = error.diagnostic.as_ref().unwrap();
@@ -1263,6 +1270,8 @@ mod tests {
         assert_eq!(diagnostic.model_name.as_deref(), Some("accounts/123/models/Model Name v2"));
         assert_eq!(diagnostic.request_id.as_deref(), Some("req_123"));
         assert_eq!(diagnostic.transport_detail.as_ref().unwrap().chars().count(), 1024);
+        assert!(diagnostic.provider_detail.as_ref().unwrap().starts_with("temperature must be omitted"));
+        assert_eq!(diagnostic.provider_detail.as_ref().unwrap().chars().count(), 1000);
         let json = serde_json::to_string(&error).unwrap();
         assert!(json.contains("\"providerParam\":\"messages[0].content\""));
         assert!(json.contains("\"providerId\":\"provider-openai-123\""));

@@ -5,7 +5,7 @@
  */
 
 import type { AgentStreamErrorInfo } from '@/common/chat/chatLib';
-import { normalizeModelFailureDiagnostic } from '@/common/chat/providerDiagnostic';
+import { normalizeModelFailureDiagnostic, sanitizeDiagnosticDetail } from '@/common/chat/providerDiagnostic';
 import { normalizeSystemExecutionFailure } from '@/common/chat/systemExecutionError';
 import type { ConversationContextValue } from '@/renderer/hooks/context/ConversationContext';
 import { Attention, Down } from '@icon-park/react';
@@ -46,8 +46,11 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
   const diagnostic = error?.code === 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE' ? undefined : normalizeModelFailureDiagnostic(error?.providerDiagnostic);
   const systemError = normalizeSystemExecutionFailure(error?.systemExecutionError);
   const reason = code === 'NOMIFUN_TASK_INCOMPLETE' ? error?.taskIncompleteReason : undefined;
-  const copyKey = diagnostic
-    ? `conversation.agentError.providerReasons.${diagnostic.reason}`
+  // Route evidence can accompany a host rejection. It cannot replace the
+  // host's explicit classification with a model-provider explanation.
+  const providerCopy = error?.ownership === 'nomifun' ? undefined : diagnostic;
+  const copyKey = providerCopy
+    ? `conversation.agentError.providerReasons.${providerCopy.reason}`
     : reason ? `conversation.agentError.incompleteReasons.${reason}`
       : code ? `conversation.agentError.codes.${code}` : undefined;
   const title = copyKey
@@ -55,7 +58,7 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
         defaultValue: t('conversation.agentError.fallbackTitle'),
       })
     : t('conversation.agentError.fallbackTitle');
-  const hasPathExplanation = !diagnostic && error?.workspacePath
+  const hasPathExplanation = !providerCopy && error?.workspacePath
     && (code === 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED' || code === 'WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE');
   const body = copyKey
     ? t(
@@ -70,7 +73,24 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
     ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[error.agentTemplateKey]}.name`)
     : error?.agentLabel;
   const date = timestamp !== undefined ? new Date(timestamp) : undefined;
+  const source = systemError ? t('conversation.agentError.sources.operating_system')
+    : error?.ownership && error.ownership !== 'unknown_upstream'
+      ? t(`conversation.agentError.sources.${error.ownership}`)
+      : t('conversation.agentError.details.unavailable');
+  const stage = error?.failureStage ? t(`conversation.agentError.stages.${error.failureStage}`) : undefined;
+  // Use only evidence captured for this failure. Current model/provider settings
+  // can have changed since the request and cannot identify a historical source.
+  const visibleContext: DiagnosticMetadataRow[] = [
+    [t('conversation.agentError.details.source'), source],
+    ...(stage ? [[t('conversation.agentError.details.stage'), stage] as const] : []),
+    ...(diagnostic?.modelName || error?.modelName
+      ? [[t('conversation.agentError.details.model'), diagnostic?.modelName ?? error?.modelName] as const] : []),
+    ...(diagnostic?.endpoint ? [[t('conversation.agentError.details.endpoint'), diagnostic.endpoint] as const] : []),
+    ...(diagnostic?.httpStatus ? [[t('conversation.agentError.details.httpStatus'), String(diagnostic.httpStatus)] as const] : []),
+  ];
   const metadata: DiagnosticMetadataRow[] = [
+    [t('conversation.agentError.details.source'), source],
+    ...(stage ? [[t('conversation.agentError.details.stage'), stage] as const] : []),
     [t('conversation.agentError.details.agent'), agentLabel],
     [t('conversation.agentError.details.model'), diagnostic ? diagnostic.modelName : error?.modelName],
     ...(diagnostic && error?.modelName && diagnostic.modelName !== error.modelName
@@ -94,7 +114,7 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
     ...(creationTaskId ? [[t('conversation.agentError.details.creationTask'), creationTaskId] as const] : []),
     [t('conversation.agentError.details.workspace'), error?.workspacePath],
   ];
-  const diagnosticDetail = systemError?.message || diagnostic?.transportDetail || rawDetail;
+  const diagnosticDetail = sanitizeDiagnosticDetail(systemError?.message || diagnostic?.transportDetail || diagnostic?.providerDetail || rawDetail);
   const report = [title, body, code ? `code: ${code}` : '', diagnostic ? `reason: ${diagnostic.reason}` : '',
     ...metadata.map(([label, value]) => `${label}: ${value || t('conversation.agentError.details.unavailable')}`),
     diagnosticDetail ? `${t('conversation.agentError.details.rawDetail')}:\n${diagnosticDetail}` : '',
@@ -121,6 +141,13 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
       </div>
       {(!compact || detailsExpanded) && <div className='message-error-note__guidance'>
         <div className='message-error-note__body'>{body}</div>
+        <div className='message-error-note__origin' data-testid='error-source'>
+          {visibleContext.map(([label, value]) => <span key={label}>{label}: {value}</span>)}
+        </div>
+        {diagnosticDetail && <div className='message-error-note__diagnostic' data-testid='error-cause'>
+          <div className='message-error-note__detail-label'>{t('conversation.agentError.details.rawDetail')}</div>
+          <pre className='message-error-note__detail-body'>{diagnosticDetail}</pre>
+        </div>}
         {gatewayActionError(code) && <GatewayBillingAction code={code} reason={diagnostic?.reason} providerId={diagnostic?.providerId} model={currentModel} />}
         {!compact && controls}
       </div>}
@@ -132,7 +159,7 @@ const ConversationErrorNote: React.FC<ConversationErrorNoteProps> = ({
         aria-label={t('conversation.agentError.expandDetails')}
       >
         <ErrorDiagnosticDetails metadata={metadata} unavailable={t('conversation.agentError.details.unavailable')}
-          detail={diagnosticDetail} detailLabel={t('conversation.agentError.details.rawDetail')} />
+          detailLabel={t('conversation.agentError.details.rawDetail')} />
         {feedback && <div className='message-error-note__actions'>
           <FeedbackButton className='message-error-note__feedback' />
         </div>}

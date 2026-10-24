@@ -4000,7 +4000,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                     &request.agent_session_id,
                     &operation,
                     "Runtime owner was not recoverable after restart",
-                    AgentSendError::from_engine_turn_failure(
+                    AgentSendError::task_incomplete(nomifun_api_types::AgentTaskIncompleteReason::RecoveryGuard,
                         "NATIVE_RECOVERY_RUNTIME_OWNER_NOT_RECOVERABLE: Runtime owner was not recoverable after restart"
                     ).into_stream_error(),
                 )
@@ -6926,7 +6926,7 @@ mod session_boundary_tests {
     fn error_context_keeps_the_same_public_fields_in_stream_and_history() {
         let session_id = AgentSessionId::from(SESSION_ID);
         let root = "0190f5fe-7c00-7a00-8abc-012345678911";
-        let mut error = nomifun_ai_agent::AgentSendError::from_engine_turn_failure(
+        let mut error = nomifun_ai_agent::AgentSendError::task_incomplete(nomifun_api_types::AgentTaskIncompleteReason::StepLimit,
             "model step limit of 32 exceeded").into_stream_error();
         let captured = super::TurnErrorContext {
             agent_label: Some("Original Agent".into()),
@@ -15723,23 +15723,13 @@ fn canonical_message_response_with_observation(
             }));
         }
         if matches!(state, "failed" | "interrupted") {
-            let error = document.get("error").cloned().unwrap_or_else(|| {
-                json!({
-                    "message": "The upstream Agent failed while handling the request",
-                    "code": "UNKNOWN_UPSTREAM_ERROR",
-                    "ownership": "unknown_upstream",
-                    "retryable": true,
-                    "feedback_recommended": true,
-                    "resolution": {
-                        "kind": "send_feedback",
-                        "target": "feedback"
-                    }
-                })
-            });
-            let content = error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("The upstream Agent failed while handling the request");
+            let error = document.get("error").filter(|error| !error.is_null()).cloned().unwrap_or_else(|| json!({
+                "message": "The failure source was not recorded",
+                "code": "AGENT_FAILURE_SOURCE_UNRECORDED",
+                "retryable": false,
+            }));
+            let content = error.get("message").and_then(Value::as_str)
+                .unwrap_or("The failure source was not recorded");
             return Ok(Some(MessageResponse {
                 message_id: summary_message_id.to_owned(),
                 conversation_id: session_id.as_ref().to_owned(),

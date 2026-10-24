@@ -534,7 +534,9 @@ async fn run_broker(
 }
 
 fn with_attempt_identity(mut error: ChatModelError, route: &ResolvedChatRoute) -> ChatModelError {
-    if let Some(diagnostic) = &mut error.diagnostic {
+    {
+        let reason = crate::provider_errors::fallback_reason(error.code);
+        let diagnostic = error.diagnostic.get_or_insert_with(|| ModelFailureDiagnostic::new(reason));
         let provider_id = route.provider_id.as_ref();
         diagnostic.provider_id = (!provider_id.is_empty() && provider_id.len() <= 200
             && provider_id.bytes().all(|byte| byte.is_ascii_alphanumeric()
@@ -977,4 +979,30 @@ fn validate_completed_tool(
 
 fn contract_error_to_model_error(error: ChatContractError) -> ChatModelError {
     ChatModelError::invalid_request(error.to_string())
+}
+
+#[cfg(test)]
+mod failure_identity_tests {
+    use super::*;
+
+    #[test]
+    fn coarse_failures_keep_the_actual_attempt_identity_without_inventing_http_evidence() {
+        let route = crate::recorded::recorded_conformance_fixtures().into_iter().next().unwrap().route;
+        let error = ChatModelError::new(ChatModelErrorCode::AuthenticationFailed,
+            "an unrelated diagnostic says 429 or TLS failure", ChatRetryDirective::Never);
+        let actual = with_attempt_identity(error, &route);
+        assert_eq!(actual.code, ChatModelErrorCode::AuthenticationFailed);
+        assert_eq!(actual.retry, ChatRetryDirective::Never);
+        let diagnostic = actual.diagnostic.unwrap();
+        assert_eq!(diagnostic.reason, ModelFailureReason::AuthFailed);
+        assert_eq!(diagnostic.provider_id.as_deref(), Some(route.provider_id.as_ref()));
+        assert_eq!(diagnostic.model_name.as_deref(), Some(route.model.as_str()));
+        assert_eq!(diagnostic.http_status, None);
+        assert_eq!(diagnostic.provider_detail, None);
+
+        let mut original = ChatModelError::provider_unavailable("not a classifier");
+        original.diagnostic = Some(ModelFailureDiagnostic::new(ModelFailureReason::TlsFailure));
+        let actual = with_attempt_identity(original, &route);
+        assert_eq!(actual.diagnostic.unwrap().reason, ModelFailureReason::TlsFailure);
+    }
 }

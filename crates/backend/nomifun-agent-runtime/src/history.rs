@@ -1368,6 +1368,31 @@ mod tests {
     }
 
     #[test]
+    fn recorded_candidate_remains_read_only_history_and_cannot_be_promoted_to_delivery() {
+        let report = crate::AgentCompletionReport { plan_revision:1, observation_revision:1,
+            input_revision:1, workspace_epoch:0, summary:"Candidate historical account.".into(),
+            criteria:vec![], observed_tool_error_count:0, observed_command_failure_count:0,
+            requirements:vec![], delivery_items:vec![], public_format:None,historical_results:vec![] };
+        let mut events = vec![
+            AgentEngineEvent::TurnStarted { binding:binding(), turn_operation_id:OperationId::from("turn") },
+            AgentEngineEvent::ModelStepStarted { step:1, operation_id:OperationId::from("turn:model:1"), correction_source:None },
+            AgentEngineEvent::ToolCallCompleted { step:1, call:ChatToolCall { call_id:"completion".into(),
+                name:crate::completion::TOOL_NAME.into(), arguments:StrictJsonValue(serde_json::json!({})), provider_metadata:None } },
+            AgentEngineEvent::CompletionCandidateRecorded { report:report.clone() },
+            AgentEngineEvent::ToolCompleted { runtime_hold:None, step:1, result:AgentToolResult::text("completion".into(),"candidate recorded",false) },
+            AgentEngineEvent::TurnFailed { model_steps:1, message:"Original final report was rejected".into(),failure:None },
+        ];
+        let mut history = Vec::new();
+        replay_closed_turn(&mut history,requirement(),&events).unwrap();
+        assert!(serde_json::to_string(&history).unwrap().contains("Historical candidate account, NOT delivered"));
+        events.pop();
+        events.push(AgentEngineEvent::CompletionDelivered { step:1,text:report.delivery_text() });
+        events.push(AgentEngineEvent::TurnCompleted { model_steps:1,finish_reason:nomifun_chat_model_broker::ChatFinishReason::Completed });
+        assert!(replay_closed_turn(&mut Vec::new(),requirement(),&events).is_err(),
+            "a retained candidate is not an accepted completion report or a fallback answer");
+    }
+
+    #[test]
     fn completed_error_history_accepts_exact_current_and_legacy_disclosures() {
         let report = crate::AgentCompletionReport { plan_revision:1, observation_revision:1,
             input_revision:1, workspace_epoch:0, summary:"Known diagnostic result.".into(),

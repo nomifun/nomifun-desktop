@@ -189,7 +189,7 @@ pub(crate) fn resolve_runtime_model_selection(
 }
 
 fn invoke_error_to_app_error(error: nomifun_model_invoke::InvokeError) -> AppError {
-    AppError::BadRequest(error.to_string())
+    error.into()
 }
 
 /// Preserve the complete connection key ring for providers that rotate keys
@@ -554,7 +554,7 @@ pub enum DeltaKind {
 /// provider, and concatenates `TextDelta` events until `Done` is received.
 /// An absent `max_tokens` preserves the model's configured limit or the
 /// provider default; an explicit request can only lower a configured limit.
-/// Errors from the provider or the stream are mapped to `AppError::BadGateway`.
+/// Provider and stream errors preserve their typed model-invocation origin.
 pub async fn one_shot_completion(
     cfg: &Config,
     system: &str,
@@ -716,7 +716,7 @@ async fn drain_text_response_with_limit(
             }
             LlmEvent::Done { stop_reason, .. } => terminal = Some(stop_reason),
             LlmEvent::Error(msg) => {
-                return Err(AppError::BadGateway(format!("LLM stream error: {msg}")));
+                return Err(model_stream_error(msg));
             }
             LlmEvent::ThinkingDelta(_) | LlmEvent::ThinkingSignature(_) => {}
             LlmEvent::ToolUse { .. }
@@ -805,7 +805,7 @@ async fn drain_text_or_reasoning(
             }
             LlmEvent::Done { stop_reason, .. } => terminal = Some(stop_reason),
             LlmEvent::Error(msg) => {
-                return Err(AppError::BadGateway(format!("LLM stream error: {msg}")));
+                return Err(model_stream_error(msg));
             }
             LlmEvent::ThinkingSignature(_) => {}
             LlmEvent::ToolUse { .. }
@@ -849,8 +849,61 @@ async fn drain_text_or_reasoning(
     }
 }
 
-fn provider_error_to_app_error(e: ProviderError) -> AppError {
-    AppError::BadGateway(format!("LLM provider error: {e}"))
+pub(crate) fn model_stream_error(message: String) -> AppError {
+    use nomifun_agent_contracts::{ModelFailureDiagnostic, ModelFailureReason, ModelInvocationFailureKind};
+    // The provider already applied its credential-aware redactor before emitting
+    // this event. This additional display boundary never classifies its prose.
+    AppError::ModelInvocation {
+        kind:ModelInvocationFailureKind::ProviderError,
+        message:crate::protocol::send_error::sanitize_error_detail(&message),
+        diagnostic:ModelFailureDiagnostic::new(ModelFailureReason::ProviderUnavailable),
+    }
+}
+
+pub(crate) fn provider_error_to_app_error(error: ProviderError) -> AppError {
+    use nomifun_agent_contracts::{ModelFailureDiagnostic as D, ModelFailureReason as R, ModelInvocationFailureKind as K};
+    let (kind, reason) = match &error {
+        ProviderError::Config(_) => (K::Config,R::ConfigurationError),
+        ProviderError::Http(error) if error.is_builder() => (K::Config,R::InvalidEndpoint),
+        ProviderError::Http(error) if error.is_timeout() => (K::Timeout,R::RequestTimeout),
+        ProviderError::Http(error) if error.is_connect() => (K::Network,R::ConnectionFailed),
+        ProviderError::Http(_) => (K::Network,R::NetworkFailure),
+        ProviderError::Api {status,..} => match status {
+            401 => (K::Auth,R::AuthFailed),
+            403 => (K::Auth,R::PermissionDenied),
+            402 => (K::QuotaExhausted,R::BillingRequired),
+            404 => (K::ProviderError,R::EndpointMissing),
+            408 | 504 => (K::Timeout,R::RequestTimeout),
+            429 => (K::RateLimited,R::RateLimited),
+            400 | 422 => (K::InvalidParams,R::InvalidRequest),
+            500..=599 => (K::ProviderError,R::UpstreamServerError),
+            _ => (K::ProviderError,R::ProviderUnavailable),
+        },
+        ProviderError::Parse(_) => (K::ParseError,R::InvalidResponse),
+        ProviderError::RateLimited {..} => (K::RateLimited,R::RateLimited),
+        ProviderError::PromptTooLong(_) => (K::InvalidParams,R::PromptTooLong),
+        ProviderError::Connection(_) => (K::Network,R::ConnectionFailed),
+        ProviderError::StreamTruncated(_) => (K::ParseError,R::StreamInterrupted),
+        ProviderError::NonApiResponse {..} => (K::NonApiResponse,R::NonApiResponse),
+    };
+    let mut diagnostic = D::new(reason);
+    match &error {
+        ProviderError::Api {status,..} => diagnostic.http_status=Some(*status),
+        ProviderError::RateLimited {retry_after_ms,..} => {
+            diagnostic.http_status=Some(429);
+            diagnostic.retry_after_ms=Some(*retry_after_ms);
+        }
+        ProviderError::NonApiResponse {content_type,..} => diagnostic.content_type=content_type.clone(),
+        ProviderError::Http(error) => diagnostic.http_status=error.status().map(|status|status.as_u16()),
+        _ => {}
+    }
+    // Http URLs can carry credentials. The provider redacts its textual cases;
+    // remove reqwest's URL structurally before rendering its native cause.
+    let message = match error {
+        ProviderError::Http(error) => error.without_url().to_string(),
+        error => error.to_string(),
+    };
+    AppError::ModelInvocation {kind,message:crate::protocol::send_error::sanitize_error_detail(&message),diagnostic}
 }
 
 #[cfg(test)]
@@ -1479,7 +1532,8 @@ mod tests {
         let result = drain_text_response(rx).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, AppError::BadGateway(_)));
+        assert!(matches!(err,AppError::ModelInvocation {kind:nomifun_agent_contracts::ModelInvocationFailureKind::ProviderError,message,diagnostic}
+            if message=="rate limited"&&diagnostic.reason==nomifun_agent_contracts::ModelFailureReason::ProviderUnavailable));
     }
 
     #[tokio::test]
@@ -1629,9 +1683,15 @@ mod tests {
     }
 
     #[test]
-    fn provider_error_maps_to_bad_gateway() {
-        let err = provider_error_to_app_error(ProviderError::Connection("timeout".into()));
-        assert!(matches!(err, AppError::BadGateway(_)));
+    fn provider_error_preserves_typed_origin_without_classifying_its_message() {
+        use nomifun_agent_contracts::{ModelFailureReason as R,ModelInvocationFailureKind as K};
+        let error = provider_error_to_app_error(ProviderError::Connection("timeout; 401; invalid api key".into()));
+        assert!(matches!(error,AppError::ModelInvocation {kind:K::Network,diagnostic,..} if diagnostic.reason==R::ConnectionFailed));
+        let error = provider_error_to_app_error(ProviderError::Api {status:429,message:"configuration error".into()});
+        assert!(matches!(error,AppError::ModelInvocation {kind:K::RateLimited,diagnostic,..}
+            if diagnostic.reason==R::RateLimited&&diagnostic.http_status==Some(429)));
+        let error = provider_error_to_app_error(ProviderError::Config("provider returned 503".into()));
+        assert!(matches!(error,AppError::ModelInvocation {kind:K::Config,diagnostic,..} if diagnostic.reason==R::ConfigurationError));
     }
 
     // 会话10 fix: a reasoning-only stream (Done with EMPTY content) — as StepFun

@@ -8241,42 +8241,13 @@ async fn turn_history_projection_from_row(
         .and_then(Value::as_i64)
         .filter(|finished| *finished >= started_at_ms);
     let error = if row.state == "failed" {
-        terminal_payload
-            .as_ref()
-            .and_then(|payload| payload.get("error"))
-            .cloned()
-            .or_else(|| {
-                terminal_payload
-                    .as_ref()
-                    .and_then(|payload| payload.get("message"))
-                    .and_then(Value::as_str)
-                    .map(|message| {
-                        json!({
-                            "message": message,
-                            "code": "UNKNOWN_UPSTREAM_ERROR",
-                            "ownership": "unknown_upstream",
-                            "retryable": true,
-                            "feedback_recommended": true,
-                            "resolution": {
-                                "kind": "send_feedback",
-                                "target": "feedback"
-                            }
-                        })
-                    })
-            })
-            .unwrap_or_else(|| {
-                json!({
-                    "message": "The upstream Agent failed while handling the request",
-                    "code": "UNKNOWN_UPSTREAM_ERROR",
-                    "ownership": "unknown_upstream",
-                    "retryable": true,
-                    "feedback_recommended": true,
-                    "resolution": {
-                        "kind": "send_feedback",
-                        "target": "feedback"
-                    }
-                })
-            })
+        terminal_payload.as_ref().and_then(|payload| payload.get("error"))
+            .filter(|error| !error.is_null()).cloned().unwrap_or_else(|| json!({
+                "message": terminal_payload.as_ref().and_then(|payload| payload.get("message"))
+                    .and_then(Value::as_str).unwrap_or("The failure source was not recorded"),
+                "code": "AGENT_FAILURE_SOURCE_UNRECORDED",
+                "retryable": false,
+            }))
     } else {
         Value::Null
     };

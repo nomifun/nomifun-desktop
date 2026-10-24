@@ -117,27 +117,28 @@ describe('conversation error isolation red-team contracts', () => {
     }
   });
 
-  test('HTTP and nested configuration codes keep the same non-retryable recovery advice', () => {
-    for (const fields of [
-      {source:'send_failed',code:'NOMIFUN_SESSION_CONFIGURATION_CHANGED',error:undefined},
-      {error:{code:'NOMIFUN_SESSION_CONFIGURATION_CHANGED',message:'Configuration changed',detail:'Original local diagnostic',
-        agentLabel:'Original Agent',agentTemplateKey:'assistant.general',modelName:'original-model',workspacePath:'/original-workspace'}},
-    ]) {
-      const original=errorMessage('coded-local-config',messageId(9),400,'Configuration changed');
-      if(original.type!=='tips') throw new Error('expected error tip');
-      const normalized=normalizeDbMessage({...original,content:{...original.content,...fields}} as TMessage);
-      if(normalized.type!=='tips') throw new Error('expected error tip');
-      expect(normalized.content.error?.code).toBe('NOMIFUN_SESSION_CONFIGURATION_CHANGED');
-      expect(normalized.content.error?.ownership).toBe('nomifun');
-      expect(normalized.content.error?.retryable).toBe(false);
-      expect(normalized.content.error?.resolution).toEqual({kind:'start_new_session',target:'new_conversation'});
-      if (fields.error) {
-        expect(normalized.content.error?.agentLabel).toBe('Original Agent');
-        expect(normalized.content.error?.agentTemplateKey).toBe('assistant.general');
-        expect(normalized.content.error?.modelName).toBe('original-model');
-        expect(normalized.content.error?.workspacePath).toBe('/original-workspace');
-      }
+  test('unclassified history never fabricates ownership or retry permission from strings', () => {
+    for (const code of ['BAD_GATEWAY', 'INTERNAL_ERROR', 'NOMIFUN_SESSION_CONFIGURATION_CHANGED']) {
+      const original = errorMessage('unclassified-local-config', messageId(9), 400, 'Configuration changed');
+      if (original.type !== 'tips') throw new Error('expected error tip');
+      const normalized = normalizeDbMessage({ ...original, content: { ...original.content,
+        source: 'send_failed', code, error: undefined } } as TMessage);
+      if (normalized.type !== 'tips') throw new Error('expected error tip');
+      expect(normalized.content.error).toBeUndefined();
+      expect(normalized.content.content).toBe('Configuration changed');
     }
+  });
+
+  test('typed configuration history retains only the recovery advice it recorded', () => {
+    const original = errorMessage('coded-local-config', messageId(9), 400, 'Configuration changed');
+    if (original.type !== 'tips') throw new Error('expected error tip');
+    const error = { code: 'NOMIFUN_SESSION_CONFIGURATION_CHANGED', message: 'Configuration changed',
+      detail: 'Original local diagnostic', ownership: 'nomifun', retryable: false,
+      resolution: { kind: 'start_new_session', target: 'new_conversation' },
+      agentLabel: 'Original Agent', modelName: 'original-model', workspacePath: '/original-workspace' };
+    const normalized = normalizeDbMessage({ ...original, content: { ...original.content, error } } as TMessage);
+    if (normalized.type !== 'tips') throw new Error('expected error tip');
+    expect(normalized.content.error).toEqual(error);
   });
 
   test('engine guard diagnostic text preserves the stored code and ownership', () => {

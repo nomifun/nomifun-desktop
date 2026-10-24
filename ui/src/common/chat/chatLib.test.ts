@@ -31,6 +31,7 @@ describe('structured error diagnosis', () => {
       message: 'The Agent stopped', code: 'NOMIFUN_TASK_INCOMPLETE',
       detail: 'completion account contains blocked work; task cannot complete',
       taskIncompleteReason: 'blocked_work', agentLabel: 'Research Agent',
+      failureStage: 'completion_report',
       agentTemplateKey: 'assistant.general', modelName: 'used-model',
       workspacePath: '/workspace/research', retryable: false,
     };
@@ -42,6 +43,8 @@ describe('structured error diagnosis', () => {
     expect(normalizeAgentStreamError(data)?.taskIncompleteReason).toBeUndefined();
     expect(normalizeAgentStreamError({ ...data, taskIncompleteReason: 'made_up' })?.taskIncompleteReason).toBeUndefined();
     expect(normalizeAgentStreamError({ ...data, code: 'UNKNOWN_UPSTREAM_ERROR', taskIncompleteReason: 'blocked_work' })?.taskIncompleteReason).toBeUndefined();
+    expect(normalizeAgentStreamError({ ...data, failureStage: 'made_up' })?.failureStage).toBeUndefined();
+    expect(normalizeAgentStreamError({ ...data, failureStage: 'tool_validation' })?.failureStage).toBe('tool_validation');
   });
 });
 
@@ -532,13 +535,13 @@ describe('transformMessage runtime field normalization', () => {
     expect(message.content).toEqual([]);
   });
 
-  test('preserves disconnected agent status so historical rows stay hidden', () => {
+  test('unrecognized lifecycle status does not become a classified failure', () => {
     const message = transformMessage(
       baseWire({
         type: 'agent_status',
         data: {
           backend: { name: 'codex' },
-          status: 'disconnected',
+          status: 'unrecognized',
         },
       })
     );
@@ -546,7 +549,7 @@ describe('transformMessage runtime field normalization', () => {
     expect(message?.type).toBe('agent_status');
     if (message?.type !== 'agent_status') throw new Error('expected agent_status message');
     expect(message.content.backend).toBe('{\n  "name": "codex"\n}');
-    expect(message.content.status).toBe('disconnected');
+    expect(message.content.status).toBe('error');
   });
 
   test('keeps canonical turn wall-clock timing on status metadata', () => {

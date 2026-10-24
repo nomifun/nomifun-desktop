@@ -80,6 +80,18 @@ function mount(message = error, context: Partial<ConversationContextValue> = {},
 afterEach(() => { cleanup(); mock.restore(); });
 
 describe('compact message errors', () => {
+  test('missing retry permission never offers to resend an unclassified failure', () => {
+    const { page } = mount({ ...error, content: { type: 'error', content: 'No classified cause recorded' } });
+    expect(page.queryByTestId('message-error-retry')).toBeNull();
+    expect(page.getByTestId('error-source').textContent).toContain(conversation.agentError.details.unavailable);
+    expect(page.getByTestId('error-cause').textContent).toContain('No classified cause recorded');
+  });
+  test.each(['UNKNOWN_UPSTREAM_ERROR', 'AGENT_FAILURE_SOURCE_UNRECORDED'])('an old retry flag cannot authorize replay when the failure source is unclassified: %s', code => {
+    const { page } = mount({ ...error, content: { type: 'error', content: 'Unclassified original detail',
+      error: { message: 'Unclassified original detail', code, ownership: 'unknown_upstream', retryable: true } } });
+    expect(page.queryByTestId('message-error-retry')).toBeNull();
+    expect(page.getByTestId('error-cause').textContent).toContain('Unclassified original detail');
+  });
   test('a settled error cannot offer a retry for a later owner-cancelled accepted input', () => {
     const cancelled: IMessageText = { ...request, content: { ...request.content,
       input_delivery: { state: 'cancelled', reason: 'CANCELLED_BY_OWNER', event_seq: 20 } } };
@@ -137,11 +149,11 @@ describe('compact message errors', () => {
       });
       expect(page.getByRole('alert').textContent).toBe(copy.incompleteReasons.blocked_work.title);
       expect(page.getByText(copy.incompleteReasons.blocked_work.body).closest('[hidden]')).toBeNull();
-      expect(page.getByText(detail).closest('[hidden]')).not.toBeNull();
-      expect(page.queryByRole('button', { name: 'Retry' })).toBeNull();
+      expect(page.getByText(detail).closest('[hidden]')).toBeNull();
+      expect(page.queryByRole('button', { name: 'Edit and resend' })).toBeNull();
       fireEvent.click(page.getByRole('button', { name: copy.expandDetails }));
       const panel = page.getByRole('region', { name: copy.expandDetails });
-      for (const value of ['Research Agent', 'used-model', '1970-01-01T00:00:02.000Z', sourceId, conversationId, '/workspace/research', detail]) {
+      for (const value of ['Research Agent', 'used-model', '1970-01-01T00:00:02.000Z', sourceId, conversationId, '/workspace/research']) {
         expect(panel.textContent).toContain(value);
       }
       for (const value of ['Different Agent', 'different-model', '/different-workspace', 'NOMIFUN_TASK_INCOMPLETE', copy.incompleteReasons.blocked_work.body]) {
@@ -161,7 +173,7 @@ describe('compact message errors', () => {
     const panel = page.getByRole('region');
     expect(panel.textContent).toContain('General');
     expect(panel.textContent).not.toContain('Different Agent');
-    expect(page.getAllByText(conversation.agentError.details.unavailable).length).toBe(3);
+    expect(page.getByTestId('error-source').textContent).toContain(conversation.agentError.details.unavailable);
   });
 
   test('shows the typed gateway account action immediately while details remain collapsed', () => {
@@ -175,7 +187,7 @@ describe('compact message errors', () => {
       id: parseProviderId('0190f5fe-7c00-7a00-8000-000000000097'), platform: 'nomifun-model-gateway', use_model: 'mock-gpt',
     } });
     expect(page.getByText(conversation.agentError.codes.USER_LLM_PROVIDER_BILLING_REQUIRED.body).closest('[hidden]')).toBeNull();
-    expect(page.getByText('The model gateway subscription has expired. Renew the subscription to continue.').closest('[hidden]')).not.toBeNull();
+    expect(page.getByText('The model gateway subscription has expired. Renew the subscription to continue.').closest('[hidden]')).toBeNull();
     expect(page.getByRole('link', { name: settings.modelGateway.openSettings })).toBeDefined();
     expect(container.querySelector('.message-error-note__details')?.hasAttribute('hidden')).toBe(true);
     expect(container.querySelector('[data-testid="message-error-retry"]')).toBeNull();
@@ -238,7 +250,7 @@ describe('compact message errors', () => {
     expect(page.getByText('General → Minimal · effective from the next message')).toBeDefined();
   });
 
-  test('starts collapsed and exposes the full diagnosis and feedback only when expanded', () => {
+  test('shows the cause immediately while technical metadata and feedback start collapsed', () => {
     const { page } = mount();
     expect(page.getByRole('alert').textContent).toBe('Response interrupted');
     const toggle = page.getByRole('button', { name: 'Technical details' });
@@ -250,7 +262,7 @@ describe('compact message errors', () => {
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(panel.hidden).toBe(false);
     expect(panel.textContent).not.toContain('NOMIFUN_STREAM_BROKEN');
-    expect(panel.textContent).toContain('Diagnostic text');
+    expect(page.getByTestId('error-cause').textContent).toContain('Diagnostic text');
     expect(page.getByRole('button', { name: 'Report Issue' })).toBeDefined();
     fireEvent.click(page.getByRole('button', { name: 'Hide technical details' }));
     expect(panel.hidden).toBe(true);
@@ -259,7 +271,7 @@ describe('compact message errors', () => {
   test('retry still recalls the original request without expanding details', () => {
     const emit = spyOn(emitter, 'emit');
     const { page } = mount();
-    fireEvent.click(page.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(page.getByRole('button', { name: 'Edit and resend' }));
     expect(emit).toHaveBeenCalledWith('sendbox.edit', {
       msgId: sourceId, createdAt: 1, content: 'Please continue this task.',
     });
@@ -271,7 +283,7 @@ describe('compact message errors', () => {
     [parseMessageId('0190f5fe-7c00-7a00-8000-000000000099'), false],
   ] as const)('offers retry only when the latest request belongs to the failed Turn %s', (turnId, expected) => {
     const { page } = mount({ ...error, turn_id: turnId });
-    expect(page.queryByRole('button', { name: 'Retry' }) !== null).toBe(expected);
+    expect(page.queryByRole('button', { name: 'Edit and resend' }) !== null).toBe(expected);
   });
 
   test.each([
@@ -280,7 +292,7 @@ describe('compact message errors', () => {
     { executionPause: { turnId: sourceId, reason: undefined, cleanupProven: true, pausedAt: undefined } },
   ])('does not offer retry in a restricted context %j', (context) => {
     const { page } = mount(error, context);
-    expect(page.queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(page.queryByRole('button', { name: 'Edit and resend' })).toBeNull();
     expect(page.getByRole('button', { name: 'Technical details' })).toBeDefined();
   });
 
@@ -300,7 +312,7 @@ describe('compact message errors', () => {
 
   test('non-retryable errors keep their reason available', () => {
     const { page } = mount({ ...error, content: { ...error.content, error: { ...error.content.error!, retryable: false } } });
-    expect(page.queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(page.queryByRole('button', { name: 'Edit and resend' })).toBeNull();
     fireEvent.click(page.getByRole('button', { name: 'Technical details' }));
     expect(page.queryByText('Needs configuration')).toBeNull();
     expect(page.getByText(conversation.agentError.codes.NOMIFUN_STREAM_BROKEN.body).closest('[hidden]')).toBeNull();
@@ -315,7 +327,7 @@ describe('compact message errors', () => {
         recovery: { kind: 'continue_truncated', source_message_id: sourceId, failure_code: 'output_truncated' },
       },
     }, { isProcessing: true });
-    expect(page.queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(page.queryByRole('button', { name: 'Edit and resend' })).toBeNull();
     expect(page.queryByRole('button', { name: 'Continue execution' })).toBeNull();
   });
 
@@ -327,7 +339,7 @@ describe('compact message errors', () => {
     expect(panel.hidden).toBe(true);
     fireEvent.click(toggle);
     expect(panel.hidden).toBe(false);
-    expect(panel.textContent).toContain(content.startsWith('{') ? 'Legacy JSON diagnostic' : content);
+    expect(page.getByTestId('error-cause').textContent).toContain(content.startsWith('{') ? 'Legacy JSON diagnostic' : content);
   });
 
   test('each error controls its own details panel', () => {

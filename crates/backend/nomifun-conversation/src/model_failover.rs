@@ -76,7 +76,6 @@ pub fn is_provider_fault(code: AgentErrorCode) -> bool {
             | UserLlmProviderNetworkError
             | UserLlmProviderEmptyResponse
             | UserLlmProviderGatewayError
-            | UnknownUpstreamError
     )
 }
 
@@ -550,9 +549,11 @@ mod tests {
         assert!(is_provider_fault(AgentErrorCode::UserLlmProviderRateLimited));
         assert!(is_provider_fault(AgentErrorCode::UserLlmProviderGatewayError));
         assert!(is_provider_fault(AgentErrorCode::UserLlmProviderTimeout));
-        assert!(is_provider_fault(AgentErrorCode::UnknownUpstreamError));
+        assert!(!is_provider_fault(AgentErrorCode::UnknownUpstreamError));
+        assert!(!is_provider_fault(AgentErrorCode::AgentFailureSourceUnrecorded));
+        assert!(!is_provider_fault(AgentErrorCode::NomifunRuntimeFailed));
+        assert!(!is_provider_fault(AgentErrorCode::NomifunTaskIncomplete));
         // 非 provider 故障:用户取消 / 会话忙 等不应触发转移。
-        assert!(!is_provider_fault(AgentErrorCode::UserAgentNotInstalled));
         assert!(!is_provider_fault(AgentErrorCode::NomifunConversationBusy));
         assert!(!is_provider_fault(
             AgentErrorCode::NomifunToolResultEncodingError

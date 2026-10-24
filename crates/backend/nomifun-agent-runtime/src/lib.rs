@@ -31,7 +31,7 @@ mod compacted_history;
 pub use compacted_history::AgentCompactedItem;
 mod completion;
 pub use completion::{AgentCompletionCriterion, AgentCompletionObservation, AgentCompletionReport, AgentCriterionDisposition, AgentDeliveryItem, AgentDeliveryResult, AgentHistoricalDeliveryOrigin, AgentHistoricalDeliveryResult};
-mod delivery_review;
+mod delivery_items;
 mod completion_review;
 pub use completion_review::{AgentCompletionReviewState, AgentExecutionPhase};
 mod context;

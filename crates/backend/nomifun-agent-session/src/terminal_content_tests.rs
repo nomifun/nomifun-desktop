@@ -1,6 +1,27 @@
 use super::*;
 
 #[tokio::test]
+async fn unclassified_terminal_history_preserves_detail_without_inventing_source_or_retry_permission() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "unclassified-terminal").await;
+    let sid = &session.agent_session_id;
+    let operation = OperationId::from("unclassified-terminal-turn");
+    let (input, start) = store.start_turn(sid, "session_api".into(), "unclassified-terminal-input".into(), operation.clone(),
+        StrictJsonValue(json!({"content":"Inspect the cause"}))).await.unwrap();
+    let source = input.ack.unwrap().event_id;
+    store.append_event(&append(sid, "unclassified-terminal-failed", "runtime_supervisor", "unclassified-terminal-failed",
+        "turn/failed", operation.as_ref(), Some(start.ack.unwrap().event_id),
+        json!({"message":"Preserved original failure detail"}))).await.unwrap();
+    let facts = store.read_events(sid, None, 500).await.unwrap();
+    let summaries = store.turn_history_for_sources(sid, &[source.as_ref().to_owned()]).await.unwrap();
+    assert_eq!(summaries[0].projection["error"], json!({
+        "message":"Preserved original failure detail", "code":"AGENT_FAILURE_SOURCE_UNRECORDED", "retryable":false,
+    }));
+    store.rebuild_projections(sid).await.unwrap();
+    assert_eq!(store.read_events(sid, None, 500).await.unwrap(), facts);
+}
+
+#[tokio::test]
 async fn terminal_mirrors_are_absent_and_turn_summary_resolves_the_exact_canonical_payload() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     for (table, removed) in [("agent_turns", vec!["result_json", "error_json"]), ("agent_effects", vec!["bounded_observation_json"])] {

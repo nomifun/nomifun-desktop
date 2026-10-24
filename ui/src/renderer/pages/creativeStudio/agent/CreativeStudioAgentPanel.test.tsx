@@ -159,14 +159,14 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     expect(failed.includes('本地会话服务不可用')).toBe(true);
   });
 
-  test('keeps load-failure diagnostics collapsed and retries through shared controls', () => {
+  test('shows load-failure causes and retries through shared controls', () => {
     const retry = mock(noop);
     const page = render(<I18nextProvider i18n={testI18n}><CreativeStudioAgentPanel {...baseProps({
       loadState: 'failed', errorMessage: 'Original preparation diagnostic', onRetryLoad: retry,
     })} /></I18nextProvider>);
     expect(page.getByRole('alert').textContent).toBe(conversation.agentError.codes.CONVERSATION_PREPARATION_FAILED.title);
     const diagnostic = page.getByText('Original preparation diagnostic');
-    expect(diagnostic.closest('[hidden]')).not.toBeNull();
+    expect(diagnostic.closest('[hidden]')).toBeNull();
     const retryButton = page.getByRole('button', { name: 'Retry' });
     expect(retryButton.closest('.message-error-note__controls')).not.toBeNull();
     fireEvent.click(retryButton);
@@ -188,12 +188,12 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     expect(html.includes('Agent 会话保存失败')).toBe(true);
   });
 
-  test('ready-state local panel diagnostics remain inside collapsed technical details', () => {
+  test('ready-state local panel causes remain immediately visible', () => {
     const page = render(<I18nextProvider i18n={testI18n}><CreativeStudioAgentPanel {...baseProps({
       errorMessage: 'Original local panel diagnostic',
     })} /></I18nextProvider>);
     const diagnostic = page.getByText('Original local panel diagnostic');
-    expect(diagnostic.closest('[hidden]')).not.toBeNull();
+    expect(diagnostic.closest('[hidden]')).toBeNull();
     expect(page.getByRole('alert').textContent).toBe(conversation.agentError.codes.CONVERSATION_SEND_FAILED.title);
     fireEvent.click(page.getByRole('button', { name: conversation.agentError.expandDetails }));
     expect(diagnostic.closest('[hidden]')).toBeNull();
@@ -256,7 +256,7 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     expect(html.includes('Stop Agent')).toBe(true);
   });
 
-  test('shows canonical failure guidance and keeps the original diagnostic and identity collapsed', async () => {
+  test('shows canonical failure causes while keeping technical identity collapsed', async () => {
     const retry = mock(noop);
     const canonicalSessionId = '0190f5fe-7c00-7a00-8000-000000000110';
     const canonicalTurnId = '0190f5fe-7c00-7a00-8000-000000000111';
@@ -270,7 +270,7 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
     await act(async () => {});
     expect(page.getByRole('alert').textContent).toBe(conversation.agentError.codes.USER_LLM_PROVIDER_NETWORK_ERROR.title);
     const detail = page.getByText('Original provider diagnostic');
-    expect(detail.closest('[hidden]')).not.toBeNull();
+    expect(detail.closest('[hidden]')).toBeNull();
     fireEvent.click(page.getByRole('button', { name: conversation.agentError.expandDetails }));
     expect(detail.closest('[hidden]')).toBeNull();
     expect(page.getByText(canonicalSessionId)).toBeTruthy();

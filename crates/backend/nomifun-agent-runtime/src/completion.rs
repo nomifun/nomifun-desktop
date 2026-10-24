@@ -666,7 +666,7 @@ impl CompletionTracker {
     }
 
     pub(crate) fn add_delivery_schema(&self, tool: &mut ChatToolDefinition, inputs: &[ChatMessage]) {
-        let slots = crate::delivery_review::delivery_slots(inputs);
+        let slots = crate::delivery_items::delivery_slots(inputs);
         if slots.is_empty() { return; }
         let refs = self.delivery_results().into_keys().collect::<Vec<_>>();
         tool.input_schema.0["properties"]["summary"]["description"] = serde_json::json!(public_narrative_description(
@@ -699,7 +699,7 @@ impl CompletionTracker {
     }
 
     pub(crate) fn delivery_context(&self, inputs: &[ChatMessage]) -> Option<String> {
-        let slots = crate::delivery_review::delivery_slots(inputs);
+        let slots = crate::delivery_items::delivery_slots(inputs);
         if slots.is_empty() { return None; }
         // The exact selected bytes are retained for host publication, not
         // duplicated beside completion accounting in the mandatory model
@@ -716,7 +716,7 @@ impl CompletionTracker {
     }
 
     fn resolve_delivery(&self, items: &mut [AgentDeliveryItem], inputs: &[ChatMessage], criteria: &[AgentCompletionCriterion]) -> Result<(), String> {
-        let slots = crate::delivery_review::delivery_slots(inputs);
+        let slots = crate::delivery_items::delivery_slots(inputs);
         if items.is_empty() { return Ok(()); }
         let expected = slots.iter().map(|(id,_)|id.as_str()).collect::<BTreeSet<_>>();
         let mut seen = BTreeSet::new();
@@ -773,7 +773,7 @@ impl CompletionTracker {
         // Completion accounting context. Duplicating it in this definition
         // consumes the same frozen envelope needed for actual user results.
         // Keep every schema assertion and host validation unchanged.
-        tool.description = "Report actual values plainly in the user's language. Each criterion allows at most eight evidence_call_ids; use separate criteria for different results or more than eight IDs; never create an evidence-free supported criterion. For separate process calls use the matching call ID; if absent from available_evidence, use unverified; do not cite launch_call_id unless top-level eligible. Use unverified for current-state verification but deliver earlier facts. Advertised history tools recover already-seen output for the requested summary; this never makes that observation current or eligible. Nonempty rationale and exact counts required. Missing work stays blocked. Submit alone; a candidate may need one bounded report-only review before final delivery. No new authority or repeated operations.".into();
+        tool.description = "Report actual values plainly in the user's language. Each criterion allows at most eight evidence_call_ids; use separate criteria for different results or more than eight IDs; never create an evidence-free supported criterion. For separate process calls use the matching call ID; if absent from available_evidence, use unverified; do not cite launch_call_id unless top-level eligible. Use unverified for current-state verification but deliver earlier facts. Advertised history tools recover already-seen output for the requested summary; this never makes that observation current or eligible. Nonempty rationale and exact counts required. Missing work stays blocked. Check every accepted requirement; submit alone, with no second review. No new authority or repeated operations.".into();
         tool.input_schema.0["properties"]["observed_tool_error_count"]["const"] =
             serde_json::json!(work.failed_tools);
         tool.input_schema.0["properties"]["observed_command_failure_count"]["const"] =
@@ -1178,7 +1178,6 @@ impl CompletionTracker {
         input_revision: usize,
     ) -> Option<&AgentCompletionReport> {
         self.report.as_ref().filter(|report| {
-            !self.review.delivery_pending &&
             report.plan_revision == plan.revision
                 && report.observation_revision == self.revision
                 && report.input_revision == input_revision
@@ -1324,20 +1323,8 @@ impl CompletionTracker {
             sink.emit(AgentEngineEvent::PlanUpdated { plan: closing.clone() }).await?;
             *plan = closing;
         }
-        self.review.account_repair = false;
-        let candidate = report.delivery_items.is_empty() && report.historical_results.is_empty() && !report.is_blocked() && self.review.begin(inputs,
-            self.observations.iter().filter(|item| item.invocation_attempted).count());
-        if candidate {
-            sink.emit(AgentEngineEvent::CompletionCandidateRecorded { report: report.clone() }).await?;
-        } else {
-            sink.emit(AgentEngineEvent::CompletionReported { report: report.clone() }).await?;
-            self.review.delivery_pending = false;
-        }
+        sink.emit(AgentEngineEvent::CompletionReported { report: report.clone() }).await?;
         self.report = Some(report);
-        if candidate {
-            return Ok(AgentToolResult::text(call.call_id.clone(),
-                "Candidate account recorded, NOT delivered or completed. One bounded report-only delivery review follows within the existing budget. Reconcile every requested actual result against complete accepted inputs and existing observations, then submit report_completion alone; no operation may be repeated for this review.", false));
-        }
         Ok(AgentToolResult::text(
             call.call_id.clone(),
             "Completion account recorded, not independently verified. Disclose unverified/blocked items, declared scope changes and actual command scope. Scope changes are not proof the original work was completed; quotation checks establish origin only. A blocked plan/report cannot be published as task completion. Further tool results, plan changes or user input require a new report.",
@@ -2143,7 +2130,7 @@ mod tests {
     fn numbered_delivery_keeps_exact_values_and_refuses_generic_or_forged_accounts() {
         let inputs = vec![crate::context_lifecycle::text_message(nomifun_chat_model_broker::ChatRole::User,
             "1. 给出实际工作目录。\n2. 给出文件全部四行。".into())];
-        let slots = crate::delivery_review::delivery_slots(&inputs);
+        let slots = crate::delivery_items::delivery_slots(&inputs);
         let mut tracker = CompletionTracker::default();
         tracker.observations = vec![file_observation("pwd", "root", 0), file_observation("read", "app.mjs", 0)];
         let exact = "首行\n第二行\n第三行\n尾行\n";

@@ -595,7 +595,7 @@ impl EngineTurnJournal {
         use nomifun_ai_agent::engine_sdk::{EngineTurnOutcome,EngineTurnTerminal};
         let mut outcome=if let Some(recovery)=&self.0.recovery {
             EngineTurnOutcome {model_steps:recovery.last_model_step(),terminal:EngineTurnTerminal::Paused {reason:"EXECUTION_ATTACH_FAILED".into()}}
-        } else {EngineTurnOutcome::failed("Recovery could not attach an uninitialized runtime")};
+        } else {EngineTurnOutcome::failed("Recovery could not attach an uninitialized runtime", nomifun_agent_runtime::AgentTurnFailure::Runtime { stage:nomifun_agent_contracts::AgentFailureStage::Recovery })};
         let retained=self.0.settlement.lock().await.clone();
         let receipt=match retained {Some(receipt)=>receipt,None=>self.handoff_failed_cleanup(StrictJsonValue(serde_json::to_value(&outcome).map_err(failure)?),first_failure).await?};
         if self.0.cursor.lock().await.terminal {
@@ -1812,7 +1812,9 @@ mod history_display_tests {
         let terminal = AgentEngineEvent::TurnFailed {
             model_steps: 32,
             message: "model step limit of 32 exceeded".into(),
-            failure: None,
+            failure: Some(nomifun_agent_runtime::AgentTurnFailure::TaskIncomplete {
+                reason: nomifun_agent_contracts::AgentTaskIncompleteReason::StepLimit,
+            }),
         };
         journal.append(serde_json::to_string(&terminal).unwrap(), None, EngineJournalWrite::Terminal)
             .await.unwrap();

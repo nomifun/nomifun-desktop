@@ -1,6 +1,6 @@
 use nomifun_api_types::{
     AgentErrorCode, AgentErrorOwnership, AgentErrorResolution, AgentErrorResolutionKind, AgentErrorResolutionTarget,
-    AgentStreamErrorData, AgentTaskIncompleteReason, ModelFailureDiagnostic, ModelFailureReason,
+    AgentStreamErrorData, AgentFailureStage, AgentTaskIncompleteReason, ModelFailureDiagnostic, ModelFailureReason,
 };
 use nomifun_common::AppError;
 use nomifun_net::secret_redaction::redact_url_queries;
@@ -12,32 +12,34 @@ pub struct AgentSendError {
     stream_error: AgentStreamErrorData,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ClassifiedError {
-    message: &'static str,
-    code: AgentErrorCode,
-    ownership: AgentErrorOwnership,
-    retryable: bool,
-    feedback_recommended: bool,
-    resolution_kind: AgentErrorResolutionKind,
-    resolution_target: Option<AgentErrorResolutionTarget>,
-}
-
-impl ClassifiedError {
-    fn into_send_error(self, detail: String) -> AgentSendError {
-        AgentSendError::new(
-            self.message,
-            self.code,
-            self.ownership,
-            Some(detail),
-            self.retryable,
-            self.feedback_recommended,
-            resolution(self.resolution_kind, self.resolution_target),
-        )
-    }
-}
-
 impl AgentSendError {
+    pub(crate) fn invocation_code(kind: nomifun_agent_contracts::ModelInvocationFailureKind)
+        -> nomifun_chat_model_broker::ChatModelErrorCode {
+        use nomifun_agent_contracts::ModelInvocationFailureKind as K;
+        use nomifun_chat_model_broker::ChatModelErrorCode as C;
+        match kind {
+            K::Auth => C::AuthenticationFailed,
+            K::RateLimited => C::RateLimited,
+            K::UnsupportedTask | K::ContentPolicy | K::NotPollable => C::UnsupportedFeature,
+            K::NoAdapter => C::AdapterUnavailable,
+            K::MissingConnection | K::Config => C::RouteNotFound,
+            K::InvalidParams => C::InvalidRequest,
+            K::ParseError | K::NonApiResponse => C::ProtocolViolation,
+            K::QuotaExhausted | K::ProviderError | K::JobFailed | K::Network | K::Timeout => C::ProviderUnavailable,
+        }
+    }
+
+    fn from_invocation_failure(kind: nomifun_agent_contracts::ModelInvocationFailureKind,
+        message: &str, diagnostic: &ModelFailureDiagnostic) -> Self {
+        let mut error = Self::from_model_failure(Self::invocation_code(kind),Some(diagnostic));
+        if diagnostic.provider_detail.is_none() && diagnostic.transport_detail.is_none() {
+            // This owner boundary carries already credential-redacted invocation
+            // diagnostics. Keep them visible without treating prose as an envelope.
+            error.stream_error.detail = Some(sanitize_error_detail(message));
+        }
+        error
+    }
+
     /// The broker owns this classification. Provider prose cannot select an
     /// Agent code, and a finished Turn is never permission to replay effects.
     pub fn from_model_failure(
@@ -214,6 +216,12 @@ impl AgentSendError {
         let mut error = Self::new(message, agent_code, ownership, None, false,
             ownership == AgentErrorOwnership::Nomifun, resolution);
         error.stream_error.provider_diagnostic = diagnostic.cloned();
+        error.stream_error.failure_stage = Some(if matches!(code,
+            ChatModelErrorCode::RouteNotFound | ChatModelErrorCode::CredentialReferenceMissing
+            | ChatModelErrorCode::CredentialTargetMismatch | ChatModelErrorCode::RouteRevisionMismatch
+            | ChatModelErrorCode::AdapterUnavailable) {
+            AgentFailureStage::Preparation
+        } else { AgentFailureStage::ModelResponse });
         error
     }
 
@@ -226,18 +234,85 @@ impl AgentSendError {
         match failure {
             Some(AgentTurnFailure::SystemExecution { diagnostic }) => Self::from_system_execution_failure(diagnostic),
             Some(AgentTurnFailure::Model { code, diagnostic }) => Self::from_model_failure(*code, diagnostic.as_ref()),
+            Some(AgentTurnFailure::ModelInvocation { kind, diagnostic }) => Self::from_invocation_failure(*kind,&detail,diagnostic),
             Some(AgentTurnFailure::ModelStreamEndedWithoutTerminal) => Self::new(
                 "The model response ended before completion was confirmed", AgentErrorCode::UserLlmProviderStreamInterrupted,
                 AgentErrorOwnership::UserLlmProvider, Some(detail), false, false,
                 resolution(AgentErrorResolutionKind::Retry, None),
-            ),
+            ).at_stage(AgentFailureStage::ModelResponse),
             Some(AgentTurnFailure::InvalidModelEvent) => Self::new(
                 "The model returned an invalid response", AgentErrorCode::UserLlmProviderInvalidResponse,
                 AgentErrorOwnership::UserLlmProvider, Some(detail), false, false,
                 resolution(AgentErrorResolutionKind::ChangeModel, Some(AgentErrorResolutionTarget::ProviderSettings)),
-            ),
-            None => Self::from_engine_turn_failure(detail),
+            ).at_stage(AgentFailureStage::ModelResponse),
+            Some(AgentTurnFailure::TaskIncomplete { reason }) => Self::task_incomplete(*reason, detail),
+            Some(AgentTurnFailure::Runtime { stage }) => Self::runtime_failure(*stage, detail),
+            Some(AgentTurnFailure::ResourceBindingIncomplete { diagnostic }) => Self::resource_binding_failure(diagnostic, detail),
+            Some(AgentTurnFailure::SessionConfigurationChanged) => Self::session_configuration_changed(detail),
+            Some(AgentTurnFailure::WorkspacePathUnsupported { path }) => Self::workspace_failure(
+                AgentErrorCode::WorkspacePathEdgeWhitespaceRuntimeUnsupported, path, detail),
+            Some(AgentTurnFailure::WorkspaceDirectoryUnavailable { path }) => Self::workspace_failure(
+                AgentErrorCode::WorkspaceDirectoryRuntimeUnavailable, path, detail),
+            Some(AgentTurnFailure::HostPermissionDenied) => Self::permission_failure(detail),
+            None => Self::source_unrecorded(detail),
         }
+    }
+
+    /// Missing provenance is evidence missing from this fact, not a provider fault.
+    pub fn source_unrecorded(detail: impl Into<String>) -> Self {
+        let mut error = AgentStreamErrorData::legacy(
+            "The failure source was not recorded", Some(AgentErrorCode::AgentFailureSourceUnrecorded));
+        error.detail = Some(sanitize_error_detail(&detail.into()));
+        error.retryable = Some(false);
+        error.feedback_recommended = Some(true);
+        Self { stream_error: error }
+    }
+
+    pub fn runtime_failure(stage: AgentFailureStage, detail: impl Into<String>) -> Self {
+        Self::new("The local Agent runtime could not complete this operation", AgentErrorCode::NomifunRuntimeFailed,
+            AgentErrorOwnership::Nomifun, Some(detail.into()), false, true, None).at_stage(stage)
+    }
+
+    pub fn task_incomplete(reason: AgentTaskIncompleteReason, detail: impl Into<String>) -> Self {
+        use AgentTaskIncompleteReason as R;
+        let stage = match reason {
+            R::StepLimit | R::OutputTruncated => AgentFailureStage::ModelResponse,
+            R::RejectedControl | R::NoProgress | R::ExecutionGuard => AgentFailureStage::ToolExecution,
+            R::RecoveryGuard => AgentFailureStage::Recovery,
+            R::BlockedWork | R::UnresolvedPlan | R::UnverifiedChanges | R::RunningProcesses
+            | R::UnverifiedCompletion | R::CompletionReportRejected => AgentFailureStage::CompletionReport,
+        };
+        let mut error = Self::new("The Agent stopped before completing the task", AgentErrorCode::NomifunTaskIncomplete,
+            AgentErrorOwnership::Nomifun, Some(detail.into()), false, false, None).at_stage(stage);
+        error.stream_error.task_incomplete_reason = Some(reason);
+        error
+    }
+
+    fn at_stage(mut self, stage: AgentFailureStage) -> Self {
+        self.stream_error.failure_stage = Some(stage);
+        self
+    }
+
+    fn resource_binding_failure(diagnostic: &nomifun_api_types::AgentResourceBindingFailure, detail: String) -> Self {
+        let mut error = Self::new("The Agent's required resources were not prepared",
+            AgentErrorCode::NomifunAgentResourceBindingIncomplete, AgentErrorOwnership::Nomifun,
+            Some(detail), false, true, None).at_stage(AgentFailureStage::Preparation);
+        error.stream_error.resource_binding_failure = Some(diagnostic.clone());
+        error
+    }
+
+    fn workspace_failure(code: AgentErrorCode, path: &str, detail: String) -> Self {
+        let mut error = Self::new("The workspace is not available for execution", code,
+            AgentErrorOwnership::Nomifun, Some(detail), false, false,
+            resolution(AgentErrorResolutionKind::StartNewSession, Some(AgentErrorResolutionTarget::NewConversation)))
+            .at_stage(AgentFailureStage::Preparation);
+        error.stream_error.workspace_path = Some(path.into());
+        error
+    }
+
+    fn permission_failure(detail: String) -> Self {
+        Self::new("The local host refused this operation", AgentErrorCode::NomifunPermissionError,
+            AgentErrorOwnership::Nomifun, Some(detail), false, false, None)
     }
 
     /// Current canonical machine reasons only; manual pauses and unrelated
@@ -268,7 +343,7 @@ impl AgentSendError {
             false,
             resolution(AgentErrorResolutionKind::StartNewSession,
                 Some(AgentErrorResolutionTarget::NewConversation)),
-        )
+        ).at_stage(AgentFailureStage::Preparation)
     }
 
     /// An unrecoverable loss of the manager's permanent event relay. This is
@@ -287,129 +362,6 @@ impl AgentSendError {
                 Some(AgentErrorResolutionTarget::AgentSettings),
             ),
         )
-    }
-
-    /// A model/provider quality failure: the response claimed a required
-    /// deliverable was complete without the engine's machine evidence for it.
-    /// Retrying the same model automatically could duplicate real side effects,
-    /// so this remains non-retryable while directing the user to change model.
-    pub fn provider_unbacked_completion(detail: impl Into<String>) -> Self {
-        Self::new(
-            "The model reported completion without verified deliverable evidence",
-            AgentErrorCode::UserLlmProviderUnbackedCompletion,
-            AgentErrorOwnership::UserLlmProvider,
-            Some(detail.into()),
-            false,
-            false,
-            resolution(
-                AgentErrorResolutionKind::ChangeModel,
-                Some(AgentErrorResolutionTarget::ProviderSettings),
-            ),
-        )
-    }
-
-    /// The engine rejected an unsupported completion claim and restored its
-    /// accepted-turn root in memory, but the checked persistence write failed.
-    /// This code is intentionally narrower than the generic state-consistency
-    /// error: Conversation uses it as authority to retire the exact runtime and
-    /// reset only its generation-owned Nomi session before admitting a successor.
-    pub fn agent_session_inconsistent(detail: impl Into<String>) -> Self {
-        Self::new(
-            "The Agent conversation state could not be restored safely",
-            AgentErrorCode::NomifunAgentSessionInconsistent,
-            AgentErrorOwnership::Nomifun,
-            Some(detail.into()),
-            false,
-            true,
-            resolution(
-                AgentErrorResolutionKind::StartNewSession,
-                Some(AgentErrorResolutionTarget::NewConversation),
-            ),
-        )
-    }
-
-    /// The engine, not the upstream connection, stopped an unfinished task.
-    /// Do not offer a blind retry: the durable tool prefix may have changed
-    /// files before this guard fired.
-    pub fn from_engine_turn_failure(detail: impl Into<String>) -> Self {
-        let detail = detail.into();
-        if detail.starts_with("model emitted tool-call markup as text") {
-            return Self::new(
-                "The model emitted an invalid tool call",
-                AgentErrorCode::UserLlmProviderInvalidToolCall,
-                AgentErrorOwnership::UserLlmProvider,
-                Some(detail), false, false,
-                resolution(AgentErrorResolutionKind::ChangeModel, Some(AgentErrorResolutionTarget::ProviderSettings)),
-            );
-        }
-        if detail.starts_with("Internal error:") {
-            return Self::new(
-                "Nomi failed while executing the Agent turn",
-                AgentErrorCode::NomifunInternalError,
-                AgentErrorOwnership::Nomifun,
-                Some(detail),
-                true,
-                true,
-                resolution(
-                    AgentErrorResolutionKind::SendFeedback,
-                    Some(AgentErrorResolutionTarget::Feedback),
-                ),
-            );
-        }
-        if detail.starts_with("Forbidden:") {
-            return Self::new(
-                "Nomi blocked an Agent action",
-                AgentErrorCode::NomifunPermissionError,
-                AgentErrorOwnership::Nomifun,
-                Some(detail),
-                false,
-                true,
-                resolution(
-                    AgentErrorResolutionKind::SendFeedback,
-                    Some(AgentErrorResolutionTarget::Feedback),
-                ),
-            );
-        }
-        let task_incomplete_reason = if detail.starts_with("model step limit of ") {
-            Some(AgentTaskIncompleteReason::StepLimit)
-        } else if detail.starts_with("EXECUTION_") {
-            Some(AgentTaskIncompleteReason::ExecutionGuard)
-        } else if detail.starts_with("NATIVE_RECOVERY_") {
-            Some(AgentTaskIncompleteReason::RecoveryGuard)
-        } else if detail.starts_with("model output remained truncated after the bounded continuation budget;") {
-            Some(AgentTaskIncompleteReason::OutputTruncated)
-        } else if detail.starts_with("execution plan remains unresolved;") {
-            Some(AgentTaskIncompleteReason::UnresolvedPlan)
-        } else if detail.starts_with("failed patch targets have not been re-observed;") {
-            Some(AgentTaskIncompleteReason::UnverifiedChanges)
-        } else if detail.starts_with("processes remain running;") {
-            Some(AgentTaskIncompleteReason::RunningProcesses)
-        } else if detail.starts_with("completion account is missing or stale;") {
-            Some(AgentTaskIncompleteReason::UnverifiedCompletion)
-        } else if detail.starts_with("completion account contains blocked work;") {
-            Some(AgentTaskIncompleteReason::BlockedWork)
-        } else if detail.starts_with("engine control repeatedly rejected;") {
-            Some(AgentTaskIncompleteReason::RejectedControl)
-        } else if detail.starts_with("engine control made no progress;") {
-            Some(AgentTaskIncompleteReason::NoProgress)
-        } else {
-            None
-        };
-        if let Some(reason) = task_incomplete_reason {
-            let mut error = Self::new(
-                "The Agent stopped before completing the task",
-                AgentErrorCode::NomifunTaskIncomplete,
-                AgentErrorOwnership::Nomifun,
-                Some(detail),
-                false,
-                false,
-                None,
-            );
-            error.stream_error.task_incomplete_reason = Some(reason);
-            error
-        } else {
-            Self::from_app_error(AppError::Conflict(detail))
-        }
     }
 
     pub fn new(
@@ -439,181 +391,33 @@ impl AgentSendError {
     }
 
     pub fn from_app_error_ref(err: &AppError) -> Self {
-        let detail = strip_error_prefix(&err.to_string());
+        let detail = err.to_string();
         match err {
+            AppError::ModelInvocation { kind, message, diagnostic } => {
+                Self::from_invocation_failure(*kind, message, diagnostic)
+            }
             AppError::SystemExecution(failure) => Self::from_system_execution_failure(failure),
             AppError::SessionConfigurationChanged(_) => Self::session_configuration_changed(detail),
-            AppError::AgentResourceBindingIncomplete { missing_resource_kinds, missing_resource_operations, .. } => {
-                let mut error = Self::new(
-                    "The Agent's required resources were not prepared",
-                    AgentErrorCode::NomifunAgentResourceBindingIncomplete,
-                    AgentErrorOwnership::Nomifun,
-                    Some(detail),
-                    false,
-                    true,
-                    resolution(AgentErrorResolutionKind::SendFeedback, Some(AgentErrorResolutionTarget::Feedback)),
-                );
-                error.stream_error.resource_binding_failure = Some(nomifun_api_types::AgentResourceBindingFailure {
+            AppError::AgentResourceBindingIncomplete { missing_resource_kinds, missing_resource_operations, .. } =>
+                Self::resource_binding_failure(&nomifun_api_types::AgentResourceBindingFailure {
                     missing_resource_kinds: missing_resource_kinds.clone(),
                     missing_resource_operations: missing_resource_operations.clone(),
-                });
-                error
-            }
-            AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(path) => Self {
-                stream_error: AgentStreamErrorData {
-                    message: "This workspace path is no longer supported for execution".into(),
-                    code: Some(AgentErrorCode::WorkspacePathEdgeWhitespaceRuntimeUnsupported),
-                    ownership: Some(AgentErrorOwnership::Nomifun),
-                    detail: Some(sanitize_error_detail(&detail)),
-                    workspace_path: Some(path.clone()),
-                    agent_label: None,
-                    agent_template_key: None,
-                    model_name: None,
-                    task_incomplete_reason: None,
-                    provider_diagnostic: None,
-                    system_execution_error: None,
-                    resource_binding_failure: None,
-                    retryable: Some(false),
-                    feedback_recommended: Some(false),
-                    resolution: Some(AgentErrorResolution::new(
-                        AgentErrorResolutionKind::StartNewSession,
-                        Some(AgentErrorResolutionTarget::NewConversation),
-                    )),
-                },
-            },
-            AppError::WorkspaceDirectoryRuntimeUnavailable(path) => Self {
-                stream_error: AgentStreamErrorData {
-                    message: "This workspace directory is no longer available".into(),
-                    code: Some(AgentErrorCode::WorkspaceDirectoryRuntimeUnavailable),
-                    ownership: Some(AgentErrorOwnership::Nomifun),
-                    detail: Some(sanitize_error_detail(&detail)),
-                    workspace_path: Some(path.clone()),
-                    agent_label: None,
-                    agent_template_key: None,
-                    model_name: None,
-                    task_incomplete_reason: None,
-                    provider_diagnostic: None,
-                    system_execution_error: None,
-                    resource_binding_failure: None,
-                    retryable: Some(false),
-                    feedback_recommended: Some(false),
-                    resolution: Some(AgentErrorResolution::new(
-                        AgentErrorResolutionKind::StartNewSession,
-                        Some(AgentErrorResolutionTarget::NewConversation),
-                    )),
-                },
-            },
-            AppError::Internal(_) => Self::new(
-                "Nomi failed while sending the message",
-                AgentErrorCode::NomifunInternalError,
-                AgentErrorOwnership::Nomifun,
-                Some(detail),
-                true,
-                true,
-                resolution(
-                    AgentErrorResolutionKind::SendFeedback,
-                    Some(AgentErrorResolutionTarget::Feedback),
-                ),
-            ),
-            AppError::Forbidden(_) => Self::new(
-                "Nomi blocked the request before it reached the Agent",
-                AgentErrorCode::NomifunPermissionError,
-                AgentErrorOwnership::Nomifun,
-                Some(detail),
-                false,
-                true,
-                resolution(
-                    AgentErrorResolutionKind::SendFeedback,
-                    Some(AgentErrorResolutionTarget::Feedback),
-                ),
-            ),
-            AppError::Unauthorized(_) => Self::new(
-                "The selected Agent requires authentication",
-                AgentErrorCode::UserAgentAuthRequired,
-                AgentErrorOwnership::UserAgent,
-                Some(detail),
-                false,
-                false,
-                resolution(
-                    AgentErrorResolutionKind::CheckAgentLogin,
-                    Some(AgentErrorResolutionTarget::AgentSettings),
-                ),
-            ),
-            AppError::NotFound(msg) if msg.starts_with("Session not found") => Self::new(
-                "The Agent session was not found",
-                AgentErrorCode::UserAgentSessionNotFound,
-                AgentErrorOwnership::UserAgent,
-                Some(detail),
-                true,
-                false,
-                resolution(
-                    AgentErrorResolutionKind::StartNewSession,
-                    Some(AgentErrorResolutionTarget::NewConversation),
-                ),
-            ),
-            AppError::BadRequest(msg) if msg.contains("Method not supported") => Self::new(
-                "The selected Agent does not support this operation",
-                AgentErrorCode::UserAgentUnsupportedMethod,
-                AgentErrorOwnership::UserAgent,
-                Some(detail),
-                false,
-                false,
-                resolution(
-                    AgentErrorResolutionKind::CheckAgentVersion,
-                    Some(AgentErrorResolutionTarget::AgentSettings),
-                ),
-            ),
-            AppError::BadRequest(msg) if msg.contains("Invalid parameters") => Self::new(
-                "The selected Agent rejected the request parameters",
-                AgentErrorCode::UserAgentInvalidParams,
-                AgentErrorOwnership::UserAgent,
-                Some(detail),
-                false,
-                true,
-                resolution(
-                    AgentErrorResolutionKind::SendFeedback,
-                    Some(AgentErrorResolutionTarget::Feedback),
-                ),
-            ),
-            AppError::Timeout(_) => Self::new(
-                "The model provider did not respond in time",
-                AgentErrorCode::UserLlmProviderTimeout,
-                AgentErrorOwnership::UserLlmProvider,
-                Some(detail),
-                true,
-                false,
-                resolution(AgentErrorResolutionKind::Retry, None),
-            ),
-            AppError::RateLimited => Self::new(
-                "The model provider rate limited the request",
-                AgentErrorCode::UserLlmProviderRateLimited,
-                AgentErrorOwnership::UserLlmProvider,
-                Some(detail),
-                true,
-                false,
-                resolution(AgentErrorResolutionKind::Retry, None),
-            ),
-            AppError::BadGateway(_) => classify_upstream_detail(&detail),
-            AppError::Conflict(message) if message.starts_with("Agent Skills:") => {
-                classify_upstream_detail(&err.to_string())
-            }
-            // Registry admission refusals (build-failure cooldown, crash-loop
-            // pause, conversation-busy) surface as Conflict. Route them
-            // through the text classifier so the card carries an honest
-            // wait-and-retry state instead of the send-feedback catch-all.
-            AppError::Conflict(_) => classify_upstream_detail(&detail),
-            _ => Self::new(
-                "The upstream Agent failed while handling the request",
-                AgentErrorCode::UnknownUpstreamError,
-                AgentErrorOwnership::UnknownUpstream,
-                Some(detail),
-                true,
-                true,
-                resolution(
-                    AgentErrorResolutionKind::SendFeedback,
-                    Some(AgentErrorResolutionTarget::Feedback),
-                ),
-            ),
+                }, detail),
+            AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(path) => Self::workspace_failure(
+                AgentErrorCode::WorkspacePathEdgeWhitespaceRuntimeUnsupported, path, detail),
+            AppError::WorkspaceDirectoryRuntimeUnavailable(path) => Self::workspace_failure(
+                AgentErrorCode::WorkspaceDirectoryRuntimeUnavailable, path, detail),
+            AppError::Forbidden(_) | AppError::Unauthorized(_) | AppError::NativeSystemAccessDenied { .. } => Self::permission_failure(detail),
+            AppError::DatabaseUnavailable { .. } => Self::runtime_failure(AgentFailureStage::Persistence, detail),
+            AppError::Conflict(_) | AppError::RevisionConflict(_) => Self::new(
+                "The request conflicts with the current Agent state", AgentErrorCode::NomifunStateInconsistent,
+                AgentErrorOwnership::Nomifun, Some(detail), false, true, None),
+            AppError::Internal(_) => Self::new("The local host could not execute this operation",
+                AgentErrorCode::NomifunInternalError, AgentErrorOwnership::Nomifun, Some(detail), false, true, None),
+            // HTTP wrappers alone do not prove that the model provider failed.
+            // The owner must provide ModelInvocation or another typed cause.
+            AppError::BadGateway(_) | AppError::Timeout(_) | AppError::RateLimited => Self::source_unrecorded(detail),
+            _ => Self::runtime_failure(AgentFailureStage::Preparation, detail),
         }
     }
 
@@ -638,7 +442,7 @@ impl AgentSendError {
         let mut diagnostic = failure.clone();
         diagnostic.message = sanitize_error_detail(&diagnostic.message);
         error.stream_error.system_execution_error = Some(diagnostic);
-        error
+        error.at_stage(AgentFailureStage::ToolExecution)
     }
 
     pub fn into_stream_error(self) -> AgentStreamErrorData {
@@ -668,577 +472,11 @@ impl From<AppError> for AgentSendError {
     }
 }
 
-fn classify_upstream_detail(detail: &str) -> AgentSendError {
-    let lower = detail.to_ascii_lowercase();
-    let classified = classify_agent_lifecycle(&lower)
-        .or_else(|| classify_nomifun_tool_result_encoding(&lower))
-        .or_else(|| classify_provider_api(&lower))
-        .or_else(|| classify_nomifun_state(&lower))
-        .unwrap_or(ClassifiedError {
-            message: "The upstream Agent failed while handling the request",
-            code: AgentErrorCode::UnknownUpstreamError,
-            ownership: AgentErrorOwnership::UnknownUpstream,
-            retryable: true,
-            feedback_recommended: true,
-            resolution_kind: AgentErrorResolutionKind::SendFeedback,
-            resolution_target: Some(AgentErrorResolutionTarget::Feedback),
-        });
-
-    classified.into_send_error(detail.to_owned())
-}
-
-/// Gemini reserves JSON objects containing `$ref` inside a function response
-/// for references to named multimedia parts. A normal tool result can contain
-/// the same shape as JSON Schema data, which makes the provider reject Nomi's
-/// encoded follow-up request. Keep this signature deliberately conjunctive:
-/// ownership changes from the user's provider to Nomi only when the upstream
-/// 400 identifies every part of that exact encoding collision.
-fn classify_nomifun_tool_result_encoding(lower: &str) -> Option<ClassifiedError> {
-    let signature = [
-        "referenced name",
-        "function_response.response",
-        "display_name",
-        "function_response.parts",
-    ];
-    if identifies_http_400(lower) && signature.iter().all(|part| lower.contains(part)) {
-        return Some(ClassifiedError {
-            message: "Nomi could not encode a tool result for the selected model",
-            code: AgentErrorCode::NomifunToolResultEncodingError,
-            ownership: AgentErrorOwnership::Nomifun,
-            retryable: false,
-            feedback_recommended: true,
-            resolution_kind: AgentErrorResolutionKind::SendFeedback,
-            resolution_target: Some(AgentErrorResolutionTarget::Feedback),
-        });
-    }
-
-    None
-}
-
-fn identifies_http_400(lower: &str) -> bool {
-    contains_any(
-        lower,
-        &[
-            "api error 400",
-            "http 400",
-            "http status 400",
-            "status code 400",
-            "\"code\":400",
-            "\"code\": 400",
-            "\"code\":\"400\"",
-            "\"status\":400",
-            "\"status\": 400",
-            "\"status\":\"400\"",
-        ],
-    )
-}
-
-fn classify_agent_lifecycle(lower: &str) -> Option<ClassifiedError> {
-    if lower.contains("agent process exited before initialize handshake completed") {
-        return Some(agent_error(
-            "The selected Agent exited before it finished starting",
-            AgentErrorCode::UserAgentHandshakeFailed,
-            true,
-            AgentErrorResolutionKind::CheckAgentInstallation,
-        ));
-    }
-    if lower.contains("process exited with code") {
-        return Some(agent_error(
-            "The selected Agent process exited unexpectedly",
-            AgentErrorCode::UserAgentDisconnected,
-            true,
-            AgentErrorResolutionKind::ReconnectAgent,
-        ));
-    }
-    if lower.contains("initialize handshake timed out") {
-        return Some(agent_error(
-            "The selected Agent did not finish starting in time",
-            AgentErrorCode::UserAgentHandshakeTimeout,
-            true,
-            AgentErrorResolutionKind::ReconnectAgent,
-        ));
-    }
-    if lower.contains("cli found but acp initialization failed") || lower.contains("找到 cli 但 acp 初始化失败")
-    {
-        return Some(agent_error(
-            "The selected Agent CLI was found but could not initialize ACP",
-            AgentErrorCode::UserAgentAcpInitFailed,
-            false,
-            AgentErrorResolutionKind::CheckAgentInstallation,
-        ));
-    }
-    if lower.contains("protocol mismatch") || lower.contains("max reconnect attempts") {
-        return Some(agent_error(
-            "The selected Agent protocol is incompatible",
-            AgentErrorCode::UserAgentProtocolMismatch,
-            false,
-            AgentErrorResolutionKind::CheckAgentVersion,
-        ));
-    }
-    if lower.contains("no previous sessions found") {
-        return Some(agent_session_error(
-            "No previous Agent session was found for this project",
-            AgentErrorCode::UserAgentNoPreviousSession,
-        ));
-    }
-    if lower.contains("session not found") {
-        return Some(agent_session_error(
-            "The Agent session was not found",
-            AgentErrorCode::UserAgentSessionNotFound,
-        ));
-    }
-    if lower.contains("command not found") {
-        return Some(agent_error(
-            "The selected Agent command was not found",
-            AgentErrorCode::UserAgentCommandNotFound,
-            false,
-            AgentErrorResolutionKind::CheckLocalCommand,
-        ));
-    }
-    if lower.contains("missing environment variable") {
-        return Some(agent_error(
-            "The selected Agent is missing a required environment variable",
-            AgentErrorCode::UserAgentMissingEnv,
-            false,
-            AgentErrorResolutionKind::CheckAgentInstallation,
-        ));
-    }
-    // Registry pacing states: the runtime registry refuses a build during
-    // the escalating cooldown after repeated startup failures, or pauses
-    // respawn to break a crash loop. Both are transient wait-and-retry
-    // conditions on the user agent — never a send-feedback condition.
-    if lower.contains("failed to start repeatedly") && lower.contains("cooling down") {
-        return Some(ClassifiedError {
-            message: "The selected Agent failed to start repeatedly and is cooling down",
-            code: AgentErrorCode::UserAgentStartupFailed,
-            ownership: AgentErrorOwnership::UserAgent,
-            retryable: true,
-            feedback_recommended: false,
-            resolution_kind: AgentErrorResolutionKind::Retry,
-            resolution_target: None,
-        });
-    }
-    if lower.contains("paused to break a crash loop") {
-        return Some(ClassifiedError {
-            message: "The selected Agent is crash-looping and respawn is paused",
-            code: AgentErrorCode::UserAgentStartupFailed,
-            ownership: AgentErrorOwnership::UserAgent,
-            retryable: true,
-            feedback_recommended: false,
-            resolution_kind: AgentErrorResolutionKind::Retry,
-            resolution_target: None,
-        });
-    }
-
-    None
-}
-
-fn classify_provider_api(lower: &str) -> Option<ClassifiedError> {
-    if contains_any(
-        lower,
-        &[
-            "402",
-            "insufficient balance",
-            "credit balance is too low",
-            "purchase credits",
-            "plans & billing",
-            "plans and billing",
-        ],
-    ) {
-        return Some(provider_error(
-            "The model provider account requires billing attention",
-            AgentErrorCode::UserLlmProviderBillingRequired,
-            false,
-            AgentErrorResolutionKind::CheckProviderBilling,
-            Some(AgentErrorResolutionTarget::ProviderSettings),
-        ));
-    }
-    if contains_any(lower, &["403", "forbidden", "permission denied"]) {
-        return Some(provider_error(
-            "The model provider denied access to the request",
-            AgentErrorCode::UserLlmProviderPermissionDenied,
-            false,
-            AgentErrorResolutionKind::CheckProviderCredentials,
-            Some(AgentErrorResolutionTarget::ProviderSettings),
-        ));
-    }
-    if contains_any(
-        lower,
-        &[
-            "401",
-            "unauthorized",
-            "invalid api key",
-            "invalid_api_key",
-            "invalid x-api-key",
-            "invalid authentication credentials",
-        ],
-    ) {
-        return Some(provider_error(
-            "The model provider rejected the request",
-            AgentErrorCode::UserLlmProviderAuthFailed,
-            false,
-            AgentErrorResolutionKind::CheckProviderCredentials,
-            Some(AgentErrorResolutionTarget::ProviderSettings),
-        ));
-    }
-    if contains_any(
-        lower,
-        &[
-            "signable request",
-            "canonical request",
-            "signature",
-            "access key",
-            "secret key",
-            "base url",
-            "base_url",
-        ],
-    ) {
-        return Some(provider_error(
-            "The model provider configuration is invalid",
-            AgentErrorCode::UserLlmProviderConfigError,
-            false,
-            AgentErrorResolutionKind::CheckProviderBaseUrl,
-            Some(AgentErrorResolutionTarget::ProviderSettings),
-        ));
-    }
-    if contains_any(
-        lower,
-        &[
-            "function calling is not enabled",
-            "function calling disabled",
-            "unsupported model",
-        ],
-    ) {
-        return Some(provider_error(
-            "The configured model does not support this request",
-            AgentErrorCode::UserLlmProviderUnsupportedModel,
-            false,
-            AgentErrorResolutionKind::ChangeModel,
-            Some(AgentErrorResolutionTarget::ProviderSettings),
-        ));
-    }
-    if contains_any(
-        lower,
-        &[
-            "context window exceeds",
-            "context length",
-            "context too large",
-            "maximum context",
-            "prompt is too long",
-        ],
-    ) {
-        return Some(provider_error(
-            "The request is too large for the configured model context window",
-            AgentErrorCode::UserLlmProviderContextTooLarge,
-            false,
-            AgentErrorResolutionKind::ReduceContext,
-            None,
-        ));
-    }
-    if contains_any(
-        lower,
-        &[
-            "invalid schema",
-            "schema for function",
-            "tool schema",
-            "function schema",
-        ],
-    ) {
-        return Some(provider_error(
-            "The model provider rejected an internal tool schema",
-            AgentErrorCode::UserLlmProviderInvalidToolSchema,
-            true,
-            AgentErrorResolutionKind::Retry,
-            None,
-        ));
-    }
-    if contains_any(
-        lower,
-        &[
-            "model not found",
-            "model does not exist",
-            "unknown model",
-            "invalid model",
-            "model_not_found",
-            "model identifier is invalid",
-        ],
-    ) {
-        return Some(provider_error(
-            "The configured model was not found by the provider",
-            AgentErrorCode::UserLlmProviderModelNotFound,
-            false,
-            AgentErrorResolutionKind::ChangeModel,
-            Some(AgentErrorResolutionTarget::ProviderSettings),
-        ));
-    }
-    if lower.contains("404") || lower.contains("not found") {
-        return Some(provider_error(
-            "The model provider endpoint was not found",
-            AgentErrorCode::UserLlmProviderEndpointNotFound,
-            false,
-            AgentErrorResolutionKind::CheckProviderBaseUrl,
-            Some(AgentErrorResolutionTarget::ProviderSettings),
-        ));
-    }
-    if contains_any(lower, &["429", "rate limit", "rate_limit", "quota"]) {
-        return Some(provider_error(
-            "The model provider rate limited the request",
-            AgentErrorCode::UserLlmProviderRateLimited,
-            true,
-            AgentErrorResolutionKind::Retry,
-            None,
-        ));
-    }
-    if contains_any(
-        lower,
-        &["empty response from llm", "empty response", "response body was empty"],
-    ) {
-        return Some(provider_error(
-            "The model provider returned an empty response",
-            AgentErrorCode::UserLlmProviderEmptyResponse,
-            true,
-            AgentErrorResolutionKind::Retry,
-            None,
-        ));
-    }
-    // A clean HTTP EOF without the provider protocol's terminal marker is an
-    // upstream truncation, not evidence that the configured endpoint cannot
-    // be reached. Keep this ahead of generic timeout/network matching so the
-    // typed provider error cannot be misdirected to Base URL settings if its
-    // diagnostic happens to mention a transport detail.
-    if lower.contains("provider stream truncated") {
-        return Some(provider_error(
-            "The model provider returned a truncated response",
-            AgentErrorCode::UserLlmProviderGatewayError,
-            true,
-            AgentErrorResolutionKind::Retry,
-            None,
-        ));
-    }
-    if contains_any(lower, &["504", "timeout", "deadline exceeded", "gateway timeout"]) {
-        return Some(provider_error(
-            "The model provider did not respond in time",
-            AgentErrorCode::UserLlmProviderTimeout,
-            true,
-            AgentErrorResolutionKind::Retry,
-            None,
-        ));
-    }
-    if contains_any(
-        lower,
-        &[
-            "dns",
-            "connection refused",
-            "connection reset",
-            "tls",
-            "certificate",
-            "connection error",
-            "connect error",
-            "error decoding response body",
-            "decoding response body",
-            "error sending request",
-        ],
-    ) {
-        return Some(provider_error(
-            "The model provider could not be reached",
-            AgentErrorCode::UserLlmProviderNetworkError,
-            true,
-            AgentErrorResolutionKind::CheckProviderBaseUrl,
-            Some(AgentErrorResolutionTarget::ProviderSettings),
-        ));
-    }
-    // 图片不支持:上游对 image_url 内容反序列化失败 / 明确拒绝图片。必须排在
-    // 通用 invalid_request 分支之前(那条会吞掉 "invalid_request_error")。
-    // retryable=false + 不在 is_provider_fault → 由会话服务发送环专门"剔图重跑"。
-    if contains_any(
-        lower,
-        &[
-            "unknown variant `image_url`",
-            "unknown variant 'image_url'",
-            "does not support image",
-            "doesn't support image",
-            "image input is not supported",
-            "image inputs are not supported",
-            "unsupported image input",
-            "does not support multimodal",
-            "doesn't support multimodal",
-            "multimodal input is not supported",
-            "multimodal inputs are not supported",
-        ],
-    ) {
-        return Some(provider_error(
-            "当前模型不支持图片输入",
-            AgentErrorCode::UserLlmProviderImageUnsupported,
-            false,
-            AgentErrorResolutionKind::SendFeedback,
-            Some(AgentErrorResolutionTarget::Feedback),
-        ));
-    }
-    // A request-scoped tool authority violation is deterministic for the
-    // selected provider/model. Retrying the same turn with the same tool
-    // contract commonly reproduces the same hallucinated tool name and makes
-    // execution nodes repeat without progress. Keep the security boundary
-    // fail-closed, but stop automatic retries for this specific class.
-    if lower.contains("was not advertised in this request")
-        || lower.contains("not advertised in this request")
-    {
-        return Some(provider_error(
-            "The model returned a tool that was not advertised for this request",
-            AgentErrorCode::UserLlmProviderGatewayError,
-            false,
-            AgentErrorResolutionKind::ChangeModel,
-            Some(AgentErrorResolutionTarget::ProviderSettings),
-        ));
-    }
-    if contains_any(
-        lower,
-        &[
-            "invalid request",
-            "invalid_request",
-            "invalid_request_error",
-            "invalid assistant message",
-            "content is required",
-            "invalid input",
-        ],
-    ) {
-        return Some(provider_error(
-            "The model provider rejected the request",
-            AgentErrorCode::UserLlmProviderInvalidRequest,
-            false,
-            AgentErrorResolutionKind::SendFeedback,
-            Some(AgentErrorResolutionTarget::Feedback),
-        ));
-    }
-    if contains_any(
-        lower,
-        &[
-            "openai-compatible provider",
-            "anthropic-compatible provider",
-            "bedrock provider returned",
-            "provider stream protocol violation",
-        ],
-    ) {
-        return Some(provider_error(
-            "The model provider returned an incompatible response",
-            AgentErrorCode::UserLlmProviderGatewayError,
-            true,
-            AgentErrorResolutionKind::Retry,
-            None,
-        ));
-    }
-    if contains_any(lower, &["500", "502", "503", "bad gateway", "service unavailable"]) {
-        return Some(provider_error(
-            "The model provider returned a server error",
-            AgentErrorCode::UserLlmProviderGatewayError,
-            true,
-            AgentErrorResolutionKind::Retry,
-            None,
-        ));
-    }
-    if lower.contains("provider error") {
-        return Some(provider_error(
-            "The model provider returned an error",
-            AgentErrorCode::UserLlmProviderGatewayError,
-            true,
-            AgentErrorResolutionKind::Retry,
-            None,
-        ));
-    }
-
-    None
-}
-
-fn classify_nomifun_state(lower: &str) -> Option<ClassifiedError> {
-    if lower.starts_with("conflict: agent skills:") {
-        return Some(ClassifiedError {
-            message: "The selected Skill does not match this Agent session",
-            code: AgentErrorCode::NomifunStateInconsistent,
-            ownership: AgentErrorOwnership::Nomifun,
-            retryable: false,
-            feedback_recommended: false,
-            resolution_kind: AgentErrorResolutionKind::StartNewSession,
-            resolution_target: Some(AgentErrorResolutionTarget::NewConversation),
-        });
-    }
-    if lower.contains("conversation is already processing") {
-        return Some(ClassifiedError {
-            message: "The current response is still running",
-            code: AgentErrorCode::NomifunConversationBusy,
-            ownership: AgentErrorOwnership::Nomifun,
-            retryable: true,
-            feedback_recommended: false,
-            resolution_kind: AgentErrorResolutionKind::WaitForCurrentResponse,
-            resolution_target: Some(AgentErrorResolutionTarget::NewConversation),
-        });
-    }
-
-    None
-}
-
-fn agent_error(
-    message: &'static str,
-    code: AgentErrorCode,
-    retryable: bool,
-    resolution_kind: AgentErrorResolutionKind,
-) -> ClassifiedError {
-    ClassifiedError {
-        message,
-        code,
-        ownership: AgentErrorOwnership::UserAgent,
-        retryable,
-        feedback_recommended: false,
-        resolution_kind,
-        resolution_target: Some(AgentErrorResolutionTarget::AgentSettings),
-    }
-}
-
-fn agent_session_error(message: &'static str, code: AgentErrorCode) -> ClassifiedError {
-    ClassifiedError {
-        message,
-        code,
-        ownership: AgentErrorOwnership::UserAgent,
-        retryable: true,
-        feedback_recommended: false,
-        resolution_kind: AgentErrorResolutionKind::StartNewSession,
-        resolution_target: Some(AgentErrorResolutionTarget::NewConversation),
-    }
-}
-
-fn provider_error(
-    message: &'static str,
-    code: AgentErrorCode,
-    retryable: bool,
-    resolution_kind: AgentErrorResolutionKind,
-    resolution_target: Option<AgentErrorResolutionTarget>,
-) -> ClassifiedError {
-    ClassifiedError {
-        message,
-        code,
-        ownership: AgentErrorOwnership::UserLlmProvider,
-        retryable,
-        feedback_recommended: false,
-        resolution_kind,
-        resolution_target,
-    }
-}
-
 fn resolution(
     kind: AgentErrorResolutionKind,
     target: Option<AgentErrorResolutionTarget>,
 ) -> Option<AgentErrorResolution> {
     Some(AgentErrorResolution::new(kind, target))
-}
-
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
-}
-
-fn strip_error_prefix(message: &str) -> String {
-    message
-        .split_once(": ")
-        .map(|(_, rest)| rest)
-        .unwrap_or(message)
-        .to_owned()
 }
 
 pub(crate) fn sanitize_error_detail(input: &str) -> String {
@@ -1322,14 +560,13 @@ fn redact_secret_words(line: &str) -> String {
 }
 
 fn truncate_chars(value: &str, max: usize) -> String {
-    let mut out = String::new();
-    for ch in value.chars().take(max) {
-        out.push(ch);
-    }
     if value.chars().count() > max {
-        out.push_str("...");
+        let mut out: String = value.chars().take(max.saturating_sub(3)).collect();
+        out.extend("...".chars().take(max.min(3)));
+        out
+    } else {
+        value.to_owned()
     }
-    out
 }
 
 #[cfg(test)]
@@ -1422,8 +659,6 @@ mod tests {
             assert!(error.stream_error().provider_diagnostic.is_none(), "a recorded pause does not contain today's fine evidence");
         }
     }
-    use nomifun_api_types::{AgentErrorResolutionKind, AgentErrorResolutionTarget};
-
     #[test]
     fn typed_provider_reasons_select_precise_existing_codes_without_prose_inference() {
         use nomifun_chat_model_broker::ChatModelErrorCode;
@@ -1535,761 +770,103 @@ mod tests {
         assert_eq!(sanitize_error_detail("bearer-like ordinary message"), "bearer-like ordinary message");
     }
 
-    fn assert_classification(
-        detail: &str,
-        code: AgentErrorCode,
-        ownership: AgentErrorOwnership,
-        resolution: AgentErrorResolutionKind,
-    ) {
-        let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
-        assert_eq!(err.code(), Some(code));
-        assert_eq!(err.ownership(), Some(ownership));
-        assert_eq!(err.stream_error().resolution.map(|value| value.kind), Some(resolution));
-    }
-
-    fn assert_resolution_target(detail: &str, target: AgentErrorResolutionTarget) {
-        let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
-        assert_eq!(
-            err.stream_error().resolution.and_then(|value| value.target),
-            Some(target)
-        );
-    }
-
     #[test]
-    fn classifies_provider_auth_failure() {
-        let err = AgentSendError::from_app_error(AppError::BadGateway("provider returned 401 invalid api key".into()));
-
-        assert_eq!(err.code(), Some(AgentErrorCode::UserLlmProviderAuthFailed));
-        assert_eq!(err.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
-        assert_eq!(err.stream_error().feedback_recommended, Some(false));
-    }
-
-    #[test]
-    fn classifies_unknown_upstream_when_heuristics_do_not_match() {
-        let err = AgentSendError::from_app_error(AppError::BadGateway("agent exploded".into()));
-
-        assert_eq!(err.code(), Some(AgentErrorCode::UnknownUpstreamError));
-        assert_eq!(err.ownership(), Some(AgentErrorOwnership::UnknownUpstream));
-        assert_eq!(err.stream_error().feedback_recommended, Some(true));
-    }
-
-    #[test]
-    fn local_session_configuration_change_does_not_blame_or_retry_the_provider() {
-        let error = AgentSendError::from_app_error(AppError::SessionConfigurationChanged(
-            "Nomi Plugin Tool Kernel admission failed: capability provenance drifted; nested reason mentions provider error 503".into(),
-        ));
-        let stream = error.stream_error();
-        assert_eq!(serde_json::to_value(stream.code).unwrap(), serde_json::json!("NOMIFUN_SESSION_CONFIGURATION_CHANGED"));
-        assert_eq!(stream.ownership, Some(AgentErrorOwnership::Nomifun));
-        assert_eq!(stream.retryable, Some(false));
-        assert_eq!(stream.feedback_recommended, Some(false));
-        assert_eq!(stream.resolution, Some(AgentErrorResolution::new(
-            AgentErrorResolutionKind::StartNewSession, Some(AgentErrorResolutionTarget::NewConversation))));
-        assert!(stream.detail.as_ref().unwrap().contains("provenance drifted"));
-        let typed = AppError::SessionConfigurationChanged("provider error 503 mentioned inside a local guard reason".into());
-        assert_eq!(typed.status_code().as_u16(), 409);
-        assert_eq!(typed.error_code(), "NOMIFUN_SESSION_CONFIGURATION_CHANGED");
-        let error = AgentSendError::from_app_error(typed);
-        assert_eq!(error.code(), Some(AgentErrorCode::NomifunSessionConfigurationChanged));
+    fn local_typed_failures_keep_their_reason_regardless_of_diagnostic_words() {
+        use nomifun_agent_runtime::AgentTurnFailure;
+        let prose = "provider returned 401; timeout; model step limit; status delivered";
+        let error = AgentSendError::from_runtime_turn_failure(prose, Some(&AgentTurnFailure::TaskIncomplete {
+            reason: AgentTaskIncompleteReason::CompletionReportRejected,
+        }));
+        assert_eq!(error.code(), Some(AgentErrorCode::NomifunTaskIncomplete));
         assert_eq!(error.ownership(), Some(AgentErrorOwnership::Nomifun));
+        assert_eq!(error.stream_error().task_incomplete_reason, Some(AgentTaskIncompleteReason::CompletionReportRejected));
+        assert_eq!(error.stream_error().failure_stage, Some(AgentFailureStage::CompletionReport));
+        assert_eq!(error.stream_error().detail.as_deref(), Some(prose));
+        assert_eq!(error.stream_error().retryable, Some(false));
+        assert!(error.stream_error().provider_diagnostic.is_none());
+        let runtime = AgentSendError::from_runtime_turn_failure(prose, Some(&AgentTurnFailure::Runtime {
+            stage: AgentFailureStage::Persistence,
+        }));
+        assert_eq!(runtime.code(), Some(AgentErrorCode::NomifunRuntimeFailed));
+        assert_eq!(runtime.stream_error().failure_stage, Some(AgentFailureStage::Persistence));
+    }
+
+    #[test]
+    fn absent_provenance_and_untyped_http_wrappers_do_not_guess_or_offer_replay() {
+        let detail = "provider returned 401 invalid api key; model step limit of 32 exceeded";
+        for error in [
+            AgentSendError::from_runtime_turn_failure(detail, None),
+            AgentSendError::from_app_error(AppError::BadGateway(detail.into())),
+            AgentSendError::from_app_error(AppError::Timeout(detail.into())),
+        ] {
+            assert_eq!(error.code(), Some(AgentErrorCode::AgentFailureSourceUnrecorded));
+            assert_eq!(error.ownership(), None);
+            assert_eq!(error.stream_error().failure_stage, None);
+            assert_eq!(error.stream_error().retryable, Some(false));
+            assert!(error.stream_error().detail.as_ref().unwrap().contains("401"));
+            assert!(error.stream_error().provider_diagnostic.is_none());
+        }
+        let conflict = AgentSendError::from_app_error(AppError::Conflict(detail.into()));
+        assert_eq!(conflict.code(), Some(AgentErrorCode::NomifunStateInconsistent));
+        assert_eq!(conflict.ownership(), Some(AgentErrorOwnership::Nomifun));
+    }
+
+    #[test]
+    fn typed_invocation_diagnostic_survives_the_application_boundary() {
+        let mut diagnostic = ModelFailureDiagnostic::new(ModelFailureReason::InsufficientBalance);
+        diagnostic.http_status = Some(402);
+        diagnostic.provider_id = Some("actual-provider".into());
+        diagnostic.model_name = Some("actual-request-model".into());
+        diagnostic.provider_code = Some("insufficient_balance".into());
+        let error = AgentSendError::from_app_error(AppError::ModelInvocation {
+            kind: nomifun_agent_contracts::ModelInvocationFailureKind::QuotaExhausted,
+            message: "model emitted a completion report; private provider body".into(),
+            diagnostic: diagnostic.clone(),
+        });
+        assert_eq!(error.code(), Some(AgentErrorCode::UserLlmProviderBillingRequired));
+        assert_eq!(error.stream_error().provider_diagnostic, Some(diagnostic));
+        assert_eq!(error.stream_error().detail.as_deref(), Some("model emitted a completion report; private provider body"));
         assert_eq!(error.stream_error().retryable, Some(false));
     }
 
     #[test]
-    fn provider_diagnostic_cannot_impersonate_a_typed_local_configuration_refusal() {
-        let error = AgentSendError::from_app_error(AppError::BadGateway(
-            "NOMIFUN_SESSION_CONFIGURATION_CHANGED: provider error 503".into(),
-        ));
-        assert_eq!(error.code(), Some(AgentErrorCode::UserLlmProviderGatewayError));
-        assert_eq!(error.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
-    }
-
-    #[test]
-    fn preserves_runtime_workspace_validation_as_structured_nomifun_error() {
-        let err = AgentSendError::from_app_error(AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(
-            "/Users/test/Archive ".into(),
-        ));
-
-        assert_eq!(
-            err.code(),
-            Some(AgentErrorCode::WorkspacePathEdgeWhitespaceRuntimeUnsupported)
-        );
-        assert_eq!(err.ownership(), Some(AgentErrorOwnership::Nomifun));
-        assert_eq!(
-            err.stream_error().workspace_path.as_deref(),
-            Some("/Users/test/Archive ")
-        );
-        assert_eq!(err.stream_error().retryable, Some(false));
-        assert_eq!(err.stream_error().feedback_recommended, Some(false));
-        assert_eq!(
-            err.stream_error().resolution.map(|value| value.kind),
-            Some(AgentErrorResolutionKind::StartNewSession)
-        );
-    }
-
-    #[test]
-    fn preserves_missing_runtime_workspace_as_structured_nomifun_error() {
-        let err = AgentSendError::from_app_error(
-            AppError::WorkspaceDirectoryRuntimeUnavailable("/Users/test/removed".into()),
-        );
-
-        assert_eq!(
-            err.code(),
-            Some(AgentErrorCode::WorkspaceDirectoryRuntimeUnavailable)
-        );
-        assert_eq!(err.ownership(), Some(AgentErrorOwnership::Nomifun));
-        assert_eq!(
-            err.stream_error().workspace_path.as_deref(),
-            Some("/Users/test/removed")
-        );
-        assert_eq!(err.stream_error().retryable, Some(false));
-        assert_eq!(
-            err.stream_error().resolution.map(|value| value.kind),
-            Some(AgentErrorResolutionKind::StartNewSession)
-        );
-    }
-
-    #[test]
-    fn classifies_provider_error_without_specific_signal_as_provider_gateway() {
-        let err = AgentSendError::from_app_error(AppError::BadGateway("Provider error: upstream failed".into()));
-
-        assert_eq!(err.code(), Some(AgentErrorCode::UserLlmProviderGatewayError));
-        assert_eq!(err.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
-        assert_eq!(err.stream_error().feedback_recommended, Some(false));
-    }
-
-    #[test]
-    fn classifies_provider_protocol_failures_as_retryable_gateway_errors() {
-        for detail in [
-            "Nomi agent error: API error: OpenAI-compatible provider emitted non-usage data after finish_reason",
-            "Nomi agent error: API error: OpenAI-compatible provider returned a tool call with a missing function name (call `call_123`)",
-            "Nomi agent error: API error: Provider stream truncated: OpenAI-compatible stream ended before finish_reason",
+    fn invocation_message_is_visible_redacted_and_cannot_change_typed_classification() {
+        use nomifun_agent_contracts::ModelInvocationFailureKind as K;
+        let message = "provider returned 401; status delivered; sk-private-value";
+        for (kind,reason,expected,stage) in [
+            (K::Config,ModelFailureReason::ConfigurationError,AgentErrorCode::UserLlmProviderConfigError,AgentFailureStage::Preparation),
+            (K::ProviderError,ModelFailureReason::ProviderUnavailable,AgentErrorCode::UserLlmProviderUnavailable,AgentFailureStage::ModelResponse),
         ] {
-            let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
-            assert_eq!(err.code(), Some(AgentErrorCode::UserLlmProviderGatewayError));
-            assert_eq!(err.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
-            assert_eq!(err.stream_error().retryable, Some(true));
-            assert_eq!(err.stream_error().feedback_recommended, Some(false));
-            assert_eq!(
-                err.stream_error()
-                    .resolution
-                    .and_then(|resolution| resolution.target),
-                None,
-                "protocol/truncation errors must not send the user to Base URL settings"
-            );
+            let error = AgentSendError::from_runtime_turn_failure(message,Some(&nomifun_agent_runtime::AgentTurnFailure::ModelInvocation {
+                kind,diagnostic:ModelFailureDiagnostic::new(reason),
+            }));
+            assert_eq!(error.code(),Some(expected));
+            assert_eq!(error.stream_error().failure_stage,Some(stage));
+            assert_eq!(error.stream_error().retryable,Some(false));
+            let detail=error.stream_error().detail.as_ref().unwrap();
+            assert!(detail.contains("status delivered")&&!detail.contains("sk-private-value"));
+            assert!(error.stream_error().provider_diagnostic.as_ref().unwrap().provider_detail.is_none());
         }
     }
 
     #[test]
-    fn unadvertised_tool_protocol_failures_do_not_repeat_the_same_attempt() {
-        for detail in [
-            "Nomi agent error: API error: provider stream protocol violation: tool progress 'Bash' (call-123) was not advertised in this request",
-            "Nomi agent error: API error: provider stream protocol violation: tool progress 'update_plan' (call-456) was not advertised in this request",
-        ] {
-            let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
-            assert_eq!(
-                err.code(),
-                Some(AgentErrorCode::UserLlmProviderGatewayError)
-            );
-            assert_eq!(err.stream_error().retryable, Some(false));
-            assert_eq!(
-                err.stream_error().resolution.map(|resolution| resolution.kind),
-                Some(AgentErrorResolutionKind::ChangeModel)
-            );
-        }
+    fn structured_workspace_and_configuration_failures_are_local() {
+        let error = AgentSendError::from_app_error(AppError::WorkspaceDirectoryRuntimeUnavailable("/tmp/workspace".into()));
+        assert_eq!(error.code(), Some(AgentErrorCode::WorkspaceDirectoryRuntimeUnavailable));
+        assert_eq!(error.stream_error().workspace_path.as_deref(), Some("/tmp/workspace"));
+        assert_eq!(error.stream_error().failure_stage, Some(AgentFailureStage::Preparation));
+        let configuration = AgentSendError::from_app_error(AppError::SessionConfigurationChanged("provider returned 503".into()));
+        assert_eq!(configuration.code(), Some(AgentErrorCode::NomifunSessionConfigurationChanged));
+        assert_eq!(configuration.ownership(), Some(AgentErrorOwnership::Nomifun));
+        assert_eq!(configuration.stream_error().retryable, Some(false));
     }
 
     #[test]
-    fn classifies_provider_config_errors_as_not_retryable() {
-        let err = AgentSendError::from_app_error(AppError::BadGateway(
-            "Provider error: Connection error: Signable request error: failed to create canonical request".into(),
-        ));
-
-        assert_eq!(err.code(), Some(AgentErrorCode::UserLlmProviderConfigError));
-        assert_eq!(err.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
-        assert_eq!(err.stream_error().retryable, Some(false));
-        assert_eq!(err.stream_error().feedback_recommended, Some(false));
-    }
-
-    #[test]
-    fn unbacked_completion_is_a_non_retryable_provider_quality_failure() {
-        let err = AgentSendError::provider_unbacked_completion(
-            "The accepted request required 'plugin.html', but no durable evidence matched it.",
-        );
-
-        assert_eq!(
-            err.code(),
-            Some(AgentErrorCode::UserLlmProviderUnbackedCompletion)
-        );
-        assert_eq!(
-            err.ownership(),
-            Some(AgentErrorOwnership::UserLlmProvider)
-        );
-        assert_eq!(err.stream_error().retryable, Some(false));
-        assert_eq!(err.stream_error().feedback_recommended, Some(false));
-        assert_eq!(
-            err.stream_error().resolution,
-            Some(AgentErrorResolution::new(
-                AgentErrorResolutionKind::ChangeModel,
-                Some(AgentErrorResolutionTarget::ProviderSettings),
-            ))
-        );
-        assert_eq!(
-            err.stream_error().detail.as_deref(),
-            Some(
-                "The accepted request required 'plugin.html', but no durable evidence matched it."
-            )
-        );
-    }
-
-    #[test]
-    fn engine_completion_guard_is_not_reported_as_an_upstream_outage() {
-        let malformed = AgentSendError::from_engine_turn_failure("model emitted tool-call markup as text instead of a native tool call");
-        assert_eq!(malformed.code(), Some(AgentErrorCode::UserLlmProviderInvalidToolCall));
-        assert_eq!(malformed.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
-        assert_eq!(malformed.stream_error().retryable, Some(false));
-        for (detail, reason) in [
-            ("model step limit of 32 exceeded", AgentTaskIncompleteReason::StepLimit),
-            ("execution plan remains unresolved; completion was not accepted", AgentTaskIncompleteReason::UnresolvedPlan),
-            ("completion account is missing or stale; call report_completion", AgentTaskIncompleteReason::UnverifiedCompletion),
-            ("completion account contains blocked work; this turn cannot be published as task completion", AgentTaskIncompleteReason::BlockedWork),
-            ("engine control repeatedly rejected; report_completion failed four consecutive times", AgentTaskIncompleteReason::RejectedControl),
-            ("engine control made no progress; report_completion made no progress", AgentTaskIncompleteReason::NoProgress),
-            ("model output remained truncated after the bounded continuation budget; task completion was not accepted", AgentTaskIncompleteReason::OutputTruncated),
-            ("failed patch targets have not been re-observed; task completion was not accepted", AgentTaskIncompleteReason::UnverifiedChanges),
-            ("processes remain running; poll or cancel them explicitly before completion", AgentTaskIncompleteReason::RunningProcesses),
-            ("EXECUTION_PREPARATION_BLOCKED", AgentTaskIncompleteReason::ExecutionGuard),
-            ("NATIVE_RECOVERY_RECONCILIATION_REQUIRED", AgentTaskIncompleteReason::RecoveryGuard),
-        ] {
-            let error = AgentSendError::from_engine_turn_failure(detail);
-            assert_eq!(error.code(), Some(AgentErrorCode::NomifunTaskIncomplete));
-            assert_eq!(error.ownership(), Some(AgentErrorOwnership::Nomifun));
-            assert_eq!(error.stream_error().retryable, Some(false));
-            assert_eq!(error.stream_error().resolution, None);
-            assert_eq!(error.stream_error().task_incomplete_reason, Some(reason));
-            assert_eq!(error.stream_error().detail.as_deref(), Some(detail));
-        }
-        let unrelated = AgentSendError::from_engine_turn_failure("provider returned 503");
-        assert_eq!(unrelated.code(), Some(AgentErrorCode::UserLlmProviderGatewayError));
-        assert_eq!(unrelated.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
-        assert_eq!(unrelated.stream_error().task_incomplete_reason, None);
-        let local = AgentSendError::from_engine_turn_failure(
-            "Internal error: Nomi runtime: Nomi workspace context failed: instruction scope unavailable",
-        );
-        assert_eq!(local.code(), Some(AgentErrorCode::NomifunInternalError));
-        assert_eq!(local.ownership(), Some(AgentErrorOwnership::Nomifun));
-        let denied = AgentSendError::from_engine_turn_failure("Forbidden: workspace binding cannot write");
-        assert_eq!(denied.code(), Some(AgentErrorCode::NomifunPermissionError));
-        assert_eq!(denied.ownership(), Some(AgentErrorOwnership::Nomifun));
-    }
-
-    #[test]
-    fn skill_lock_conflict_is_a_local_session_error_not_an_upstream_retry() {
-        let detail = "Agent Skills: requested Skill is not in the Agent's immutable selected Skill locks";
-        for error in [
-            AgentSendError::from_app_error(AppError::Conflict(detail.to_owned())),
-            AgentSendError::from_engine_turn_failure(format!("Conflict: {detail}")),
-        ] {
-            assert_eq!(error.code(), Some(AgentErrorCode::NomifunStateInconsistent));
-            assert_eq!(error.ownership(), Some(AgentErrorOwnership::Nomifun));
-            assert_eq!(error.stream_error().retryable, Some(false));
-            assert_eq!(error.stream_error().resolution.as_ref().unwrap().kind,
-                AgentErrorResolutionKind::StartNewSession);
-            assert!(error.stream_error().message.contains("selected Skill"));
-        }
-        let upstream = AgentSendError::from_engine_turn_failure("provider reported a skill service failure");
-        assert_ne!(upstream.ownership(), Some(AgentErrorOwnership::Nomifun));
-    }
-
-    #[test]
-    fn agent_session_inconsistent_is_non_retryable_and_requires_a_new_session() {
-        let err = AgentSendError::agent_session_inconsistent(
-            "the accepted-turn root could not be persisted",
-        );
-
-        assert_eq!(
-            err.code(),
-            Some(AgentErrorCode::NomifunAgentSessionInconsistent)
-        );
-        assert_eq!(err.ownership(), Some(AgentErrorOwnership::Nomifun));
-        assert_eq!(err.stream_error().retryable, Some(false));
-        assert_eq!(
-            err.stream_error().resolution,
-            Some(AgentErrorResolution::new(
-                AgentErrorResolutionKind::StartNewSession,
-                Some(AgentErrorResolutionTarget::NewConversation),
-            ))
-        );
-    }
-
-    #[test]
-    fn sanitizes_secrets_and_query_strings() {
-        let detail = sanitize_error_detail(
-            "Authorization: Bearer sk-secret\nGET https://example.com/v1?api_key=sk-secret\ninvalid_api_key sk-secret",
-        );
-
-        assert!(!detail.contains("sk-secret"));
-        assert!(!detail.contains("api_key=sk"));
-        assert!(detail.contains("<redacted header>"));
-        assert_eq!(
-            redact_url_queries("GET https://example.com/v1?api_key=sk-secret"),
-            "GET https://example.com/v1?<redacted>"
-        );
-        assert_eq!(
-            redact_url_queries(
-                r#"Post "https://chatgpt.com/backend-api/codex/responses?access_token=sk-secret": EOF"#
-            ),
-            r#"Post "https://chatgpt.com/backend-api/codex/responses?<redacted>": EOF"#
-        );
-    }
-
-    #[test]
-    fn strip_markup_removes_html_tags_keeping_visible_text() {
-        let detail = sanitize_error_detail(
-            "Provider error: API error 504: <html>\r\n<head><title>504 Gateway Time-out</title></head>\r\n<body><center><h1>504 Gateway Time-out</h1></center>\r\n<hr><center>openresty</center></body></html>",
-        );
-
-        assert!(!detail.contains('<'));
-        assert!(!detail.contains('>'));
-        assert!(detail.contains("504 Gateway Time-out"));
-        assert!(detail.contains("openresty"));
-        assert!(detail.starts_with("Provider error: API error 504:"));
-    }
-
-    #[test]
-    fn strip_markup_is_identity_for_plain_text() {
-        let detail = sanitize_error_detail("Provider error: API error 504: error code: 524");
-
-        assert_eq!(detail, "Provider error: API error 504: error code: 524");
-    }
-
-    #[test]
-    fn redaction_runs_after_strip_markup() {
-        let detail = sanitize_error_detail(
-            "<html><body>Authorization: Bearer sk-secret\nGET https://example.com/v1?api_key=sk-secret</body></html>",
-        );
-
-        assert!(!detail.contains("sk-secret"));
-        assert!(!detail.contains("api_key=sk"));
-        assert!(detail.contains("<redacted header>"));
-        assert!(!detail.contains("<html"));
-        assert!(!detail.contains("</body>"));
-    }
-
-    #[test]
-    fn classifies_provider_504_html_body_as_timeout_with_stripped_detail() {
-        let raw = "Nomi agent error: Provider error: API error 504: <html>\r\n<head><title>504 Gateway Time-out</title></head>\r\n<body>\r\n<center><h1>504 Gateway Time-out</h1></center>\r\n<hr><center>openresty</center>\r\n</body>\r\n</html>";
-        let err = AgentSendError::from_app_error(AppError::BadGateway(raw.into()));
-
-        assert_eq!(err.code(), Some(AgentErrorCode::UserLlmProviderTimeout));
-        let detail = err.stream_error().detail.clone().expect("detail present");
-        assert!(!detail.contains('<'));
-        assert!(!detail.contains('>'));
+    fn detail_redaction_still_bounds_and_strips_untrusted_markup() {
+        let detail = sanitize_error_detail(&format!("<html>error</html>\nAuthorization: Bearer super-secret\nhttps://example.test/v1?api_key=private-value\n{}", "x".repeat(2000)));
+        assert!(!detail.contains("<html>"));
+        assert!(!detail.contains("super-secret"));
+        assert!(!detail.contains("private-value"));
         assert!(detail.chars().count() <= MAX_DETAIL_CHARS);
-        assert!(detail.contains("504 Gateway Time-out"));
-    }
-
-    #[test]
-    fn classifies_agent_lifecycle_before_bad_gateway_wrapper() {
-        assert_classification(
-            "Bad gateway: Agent process exited before initialize handshake completed (exit code 1)",
-            AgentErrorCode::UserAgentHandshakeFailed,
-            AgentErrorOwnership::UserAgent,
-            AgentErrorResolutionKind::CheckAgentInstallation,
-        );
-        assert_classification(
-            "Bad gateway: Initialize handshake timed out after 30s",
-            AgentErrorCode::UserAgentHandshakeTimeout,
-            AgentErrorOwnership::UserAgent,
-            AgentErrorResolutionKind::ReconnectAgent,
-        );
-    }
-
-    /// The manager now appends an allowlist-filtered stderr extract to the
-    /// InitTimeout detail ("…; agent stderr: …"). Even when that extract
-    /// contains provider-classifier keywords (timeout / dns / network /
-    /// download progress), the handshake-timeout classification must win —
-    /// `classify_agent_lifecycle` runs before `classify_provider_api`.
-    #[test]
-    fn handshake_timeout_classification_survives_appended_stderr_extract() {
-        for detail in [
-            "Bad gateway: Initialize handshake timed out after 120s; agent stderr: Resolving dependencies",
-            "Bad gateway: Initialize handshake timed out after 120s; agent stderr: dns error: connection timeout",
-            "Bad gateway: Initialize handshake timed out after 120s; agent stderr: error sending request over network",
-        ] {
-            assert_classification(
-                detail,
-                AgentErrorCode::UserAgentHandshakeTimeout,
-                AgentErrorOwnership::UserAgent,
-                AgentErrorResolutionKind::ReconnectAgent,
-            );
-        }
-    }
-
-    #[test]
-    fn classifies_mid_session_cli_exit_as_agent_disconnected() {
-        // Mid-session ACP CLI exit (e.g. Claude Code) surfaces as -32603 with
-        // `details: "Claude Code process exited with code 1"`. Previously this
-        // fell through to UNKNOWN_UPSTREAM_ERROR; it now maps to a retryable
-        // agent disconnect.
-        assert_classification(
-            "Agent internal error (code -32603) ({\"details\":\"Claude Code process exited with code 1\"})",
-            AgentErrorCode::UserAgentDisconnected,
-            AgentErrorOwnership::UserAgent,
-            AgentErrorResolutionKind::ReconnectAgent,
-        );
-        let err = AgentSendError::from_app_error(AppError::BadGateway(
-            "Agent internal error (code -32603) ({\"details\":\"Claude Code process exited with code 1\"})".into(),
-        ));
-        assert_eq!(err.stream_error().retryable, Some(true));
-        assert_eq!(err.stream_error().feedback_recommended, Some(false));
-    }
-
-    #[test]
-    fn classifies_agent_protocol_and_session_failures() {
-        assert_classification(
-            "Connection error: protocol mismatch Connection error: Max reconnect attempts (10) reached",
-            AgentErrorCode::UserAgentProtocolMismatch,
-            AgentErrorOwnership::UserAgent,
-            AgentErrorResolutionKind::CheckAgentVersion,
-        );
-        assert_classification(
-            "Agent internal error (code -32603) {\"details\":\"Session not found\"}",
-            AgentErrorCode::UserAgentSessionNotFound,
-            AgentErrorOwnership::UserAgent,
-            AgentErrorResolutionKind::StartNewSession,
-        );
-        assert_classification(
-            "Bad gateway: Agent internal error (code -32603) {\"details\":\"No previous sessions found for this project\"}",
-            AgentErrorCode::UserAgentNoPreviousSession,
-            AgentErrorOwnership::UserAgent,
-            AgentErrorResolutionKind::StartNewSession,
-        );
-    }
-
-    #[test]
-    fn classifies_agent_setup_failures() {
-        assert_classification(
-            "CLI found but ACP initialization failed.",
-            AgentErrorCode::UserAgentAcpInitFailed,
-            AgentErrorOwnership::UserAgent,
-            AgentErrorResolutionKind::CheckAgentInstallation,
-        );
-        assert_classification(
-            "找到 CLI 但 ACP 初始化失败",
-            AgentErrorCode::UserAgentAcpInitFailed,
-            AgentErrorOwnership::UserAgent,
-            AgentErrorResolutionKind::CheckAgentInstallation,
-        );
-        assert_classification(
-            "filesystem: Command not found: npx",
-            AgentErrorCode::UserAgentCommandNotFound,
-            AgentErrorOwnership::UserAgent,
-            AgentErrorResolutionKind::CheckLocalCommand,
-        );
-        assert_classification(
-            "Agent internal error (code -32603) {\"message\":\"Missing environment variable: 'OMLX API KEY'\"}",
-            AgentErrorCode::UserAgentMissingEnv,
-            AgentErrorOwnership::UserAgent,
-            AgentErrorResolutionKind::CheckAgentInstallation,
-        );
-    }
-
-    #[test]
-    fn classifies_provider_billing_auth_and_rate_limit() {
-        assert_classification(
-            "Nomi agent error: Provider error: API error 402: {\"error\":{\"message\":\"Insufficient Balance\"}}",
-            AgentErrorCode::UserLlmProviderBillingRequired,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::CheckProviderBilling,
-        );
-        assert_classification(
-            "Nomi agent error: Provider error: API error 400: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.\"}}",
-            AgentErrorCode::UserLlmProviderBillingRequired,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::CheckProviderBilling,
-        );
-        assert_classification(
-            "Nomi agent error: Provider error: API error 401: invalid x-api-key",
-            AgentErrorCode::UserLlmProviderAuthFailed,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::CheckProviderCredentials,
-        );
-        assert_classification(
-            "Nomi agent error: Provider error: Rate limited, retry after 5000ms",
-            AgentErrorCode::UserLlmProviderRateLimited,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::Retry,
-        );
-    }
-
-    #[test]
-    fn classifies_provider_auth_credentials_before_config() {
-        assert_classification(
-            "API error 401: Invalid authentication credentials",
-            AgentErrorCode::UserLlmProviderAuthFailed,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::CheckProviderCredentials,
-        );
-    }
-
-    #[test]
-    fn classifies_provider_permission_denied_separately_from_auth() {
-        for detail in [
-            "API error 403: forbidden",
-            "Provider error: permission denied",
-            "API error 403: You do not have permission to access this resource",
-        ] {
-            assert_classification(
-                detail,
-                AgentErrorCode::UserLlmProviderPermissionDenied,
-                AgentErrorOwnership::UserLlmProvider,
-                AgentErrorResolutionKind::CheckProviderCredentials,
-            );
-        }
-    }
-
-    #[test]
-    fn classifies_provider_request_model_and_context_errors() {
-        assert_classification(
-            "API error 400: Function calling is not enabled for this model",
-            AgentErrorCode::UserLlmProviderUnsupportedModel,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::ChangeModel,
-        );
-        assert_classification(
-            "API error 400: invalid params, context window exceeds limit",
-            AgentErrorCode::UserLlmProviderContextTooLarge,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::ReduceContext,
-        );
-        assert_classification(
-            "API error 400: Invalid schema for function 'nomi_list_models': None is not of type 'array'",
-            AgentErrorCode::UserLlmProviderInvalidToolSchema,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::Retry,
-        );
-    }
-
-    #[test]
-    fn classifies_gemini_tool_result_ref_collision_as_nomifun_encoding_error() {
-        let detail = r##"Nomi agent error: Provider error: API error 400: {"error":{"message":"The referenced name `#/$defs/ModelRefParam` in function_response.response does not match to a display_name in the function_response.parts.","type":"upstream_error","param":"","code":400}}"##;
-        let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
-
-        assert_eq!(
-            err.code(),
-            Some(AgentErrorCode::NomifunToolResultEncodingError)
-        );
-        assert_eq!(err.ownership(), Some(AgentErrorOwnership::Nomifun));
-        assert_eq!(err.stream_error().retryable, Some(false));
-        assert_eq!(err.stream_error().feedback_recommended, Some(true));
-        assert_eq!(
-            err.stream_error().resolution,
-            Some(AgentErrorResolution::new(
-                AgentErrorResolutionKind::SendFeedback,
-                Some(AgentErrorResolutionTarget::Feedback),
-            ))
-        );
-    }
-
-    #[test]
-    fn tool_result_encoding_classifier_requires_the_complete_400_signature() {
-        for detail in [
-            "API error 500: The referenced name schema400 in function_response.response does not match to a display_name in the function_response.parts.",
-            "API error 400: The referenced value x in function_response.response does not match to a display_name in the function_response.parts.",
-            "API error 400: The referenced name x in the response does not match to a display_name in the function_response.parts.",
-            "API error 400: The referenced name x in function_response.response does not match to a name in the function_response.parts.",
-            "API error 400: The referenced name x in function_response.response does not match to a display_name in the response parts.",
-        ] {
-            let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
-            assert_ne!(
-                err.code(),
-                Some(AgentErrorCode::NomifunToolResultEncodingError),
-                "partial signature must not transfer ownership to Nomi: {detail}"
-            );
-        }
-    }
-
-    #[test]
-    fn classifies_model_not_found_before_endpoint_404() {
-        assert_classification(
-            "API error 404: model not found for path /v1/chat/completions",
-            AgentErrorCode::UserLlmProviderModelNotFound,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::ChangeModel,
-        );
-    }
-
-    #[test]
-    fn classifies_bedrock_invalid_model_identifier_as_model_not_found() {
-        assert_classification(
-            "Nomi agent error: Provider error: API error 400: {\"message\":\"The provided model identifier is invalid.\"}",
-            AgentErrorCode::UserLlmProviderModelNotFound,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::ChangeModel,
-        );
-        assert_resolution_target(
-            "Nomi agent error: Provider error: API error 400: {\"message\":\"The provided model identifier is invalid.\"}",
-            AgentErrorResolutionTarget::ProviderSettings,
-        );
-    }
-
-    #[test]
-    fn classifies_generic_provider_invalid_requests() {
-        for detail in [
-            "API error 400: Invalid request: Invalid input",
-            "API error 400: Invalid assistant message: content or tool calls must be set",
-            "API error 400: content is required",
-            "Provider error: API error 400: {\"type\":\"invalid_request_error\",\"message\":\"bad payload\"}",
-        ] {
-            assert_classification(
-                detail,
-                AgentErrorCode::UserLlmProviderInvalidRequest,
-                AgentErrorOwnership::UserLlmProvider,
-                AgentErrorResolutionKind::SendFeedback,
-            );
-            let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
-            assert_eq!(err.stream_error().retryable, Some(false));
-        }
-    }
-
-    #[test]
-    fn classifies_image_unsupported_from_serde_variant_error() {
-        let detail = "Failed to deserialize the JSON body into the target type: \
-            messages[6]: unknown variant `image_url`, expected `text` at line 1 column 169755";
-        let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
-        assert_eq!(err.code(), Some(AgentErrorCode::UserLlmProviderImageUnsupported));
-    }
-
-    #[test]
-    fn malformed_or_oversized_images_do_not_disable_vision_support() {
-        for detail in [
-            "invalid_request_error: invalid image_url: payload is too large",
-            "invalid_request_error: malformed multimodal image input",
-        ] {
-            let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
-            assert_eq!(err.code(), Some(AgentErrorCode::UserLlmProviderInvalidRequest));
-        }
-    }
-
-    #[test]
-    fn plain_invalid_request_still_classifies_as_invalid_request() {
-        let detail = "invalid_request_error: content is required";
-        let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
-        assert_eq!(err.code(), Some(AgentErrorCode::UserLlmProviderInvalidRequest));
-    }
-
-    #[test]
-    fn non_retryable_agent_invalid_params_do_not_suggest_retry() {
-        let app_err =
-            AgentSendError::from_app_error(AppError::BadRequest("Invalid parameters: malformed request".into()));
-        assert_eq!(app_err.code(), Some(AgentErrorCode::UserAgentInvalidParams));
-        assert_eq!(app_err.stream_error().retryable, Some(false));
-        assert_eq!(app_err.stream_error().feedback_recommended, Some(true));
-        assert_eq!(
-            app_err.stream_error().resolution.map(|value| value.kind),
-            Some(AgentErrorResolutionKind::SendFeedback)
-        );
-    }
-
-    #[test]
-    fn classifies_provider_endpoint_network_timeout_and_empty_response() {
-        assert_classification(
-            "API error 404: {\"status\":404,\"error\":\"Not Found\",\"path\":\"/v4/v1/chat/completions\"}",
-            AgentErrorCode::UserLlmProviderEndpointNotFound,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::CheckProviderBaseUrl,
-        );
-        assert_resolution_target(
-            "API error 404: {\"status\":404,\"error\":\"Not Found\",\"path\":\"/v4/v1/chat/completions\"}",
-            AgentErrorResolutionTarget::ProviderSettings,
-        );
-        assert_classification(
-            "Nomi agent error: API error: Connection error: error decoding response body",
-            AgentErrorCode::UserLlmProviderNetworkError,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::CheckProviderBaseUrl,
-        );
-        assert_classification(
-            "Nomi agent error: API error: error sending request for url",
-            AgentErrorCode::UserLlmProviderNetworkError,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::CheckProviderBaseUrl,
-        );
-        assert_classification(
-            "Autocompact failed: Empty response from LLM",
-            AgentErrorCode::UserLlmProviderEmptyResponse,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::Retry,
-        );
-    }
-
-    #[test]
-    fn classifies_bare_provider_404_as_endpoint_not_found() {
-        let detail = "Nomi agent error: Provider error: API error 404: {\"detail\":\"Not Found\"}";
-        assert_classification(
-            detail,
-            AgentErrorCode::UserLlmProviderEndpointNotFound,
-            AgentErrorOwnership::UserLlmProvider,
-            AgentErrorResolutionKind::CheckProviderBaseUrl,
-        );
-        assert_resolution_target(detail, AgentErrorResolutionTarget::ProviderSettings);
-        let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
-        assert_eq!(err.stream_error().retryable, Some(false));
-    }
-
-    #[test]
-    fn classifies_nomifun_conversation_busy_after_agent_and_provider_checks() {
-        assert_classification(
-            "Conflict: Conversation is already processing a message",
-            AgentErrorCode::NomifunConversationBusy,
-            AgentErrorOwnership::Nomifun,
-            AgentErrorResolutionKind::WaitForCurrentResponse,
-        );
-    }
-
-    /// Registry admission refusals surface as `AppError::Conflict` and must
-    /// classify to honest wait-and-retry states — not the send-feedback
-    /// catch-all (UNKNOWN_UPSTREAM_ERROR) they previously fell into.
-    #[test]
-    fn classifies_registry_pacing_conflicts_as_retryable_agent_states() {
-        for (detail, expected_fragment) in [
-            (
-                "The agent for conversation 0190 failed to start repeatedly and is cooling down. \
-                 Try again in 27s (see the previous startup error for the underlying cause).",
-                "cooling down",
-            ),
-            (
-                "Agent for conversation 0190 crashed 3 times within 60s and is paused to break a \
-                 crash loop. Resolve the underlying failure (see the agent's exit code/signal in \
-                 the logs), then try again shortly.",
-                "crash-looping",
-            ),
-        ] {
-            let err = AgentSendError::from_app_error(AppError::Conflict(detail.into()));
-            assert_eq!(
-                err.code(),
-                Some(AgentErrorCode::UserAgentStartupFailed),
-                "detail: {detail}"
-            );
-            assert_eq!(err.ownership(), Some(AgentErrorOwnership::UserAgent));
-            assert_eq!(err.stream_error().retryable, Some(true));
-            assert_eq!(err.stream_error().feedback_recommended, Some(false));
-            assert_eq!(
-                err.stream_error().resolution.map(|value| value.kind),
-                Some(AgentErrorResolutionKind::Retry)
-            );
-            assert!(
-                err.stream_error().message.contains(expected_fragment),
-                "message must name the state, got: {}",
-                err.stream_error().message
-            );
-        }
-        // The conversation-busy Conflict also classifies now that Conflict
-        // routes through the detail classifier.
-        let err = AgentSendError::from_app_error(AppError::Conflict(
-            "Conversation is already processing a message".into(),
-        ));
-        assert_eq!(err.code(), Some(AgentErrorCode::NomifunConversationBusy));
     }
 }

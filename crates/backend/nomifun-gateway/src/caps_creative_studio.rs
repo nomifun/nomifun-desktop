@@ -189,6 +189,15 @@ fn canvas_operation_error(error: AppError) -> String {
         AppError::ProviderUnavailable(message) => {
             format!("No usable model provider is configured: {message}")
         }
+        AppError::ModelInvocation { kind, message, diagnostic } => {
+            // Keep the original sanitized cause and attempted route intact;
+            // a generic gateway label cannot identify this model failure.
+            let failure = nomifun_ai_agent::AgentSendError::from_app_error(
+                AppError::ModelInvocation { kind, message, diagnostic });
+            format!("Creative Studio model request failed: {}", json!({
+                "kind": kind, "failure": failure.stream_error(),
+            }))
+        }
         AppError::RateLimited => "Creative Studio Canvas operation was rate limited".to_owned(),
         AppError::Internal(_)
         | AppError::NativeFileAcquisition { .. }
@@ -875,6 +884,20 @@ mod tests {
         let summary = summarize_legacy_project(&project, &document);
         assert_eq!(summary["project_id"], CANVAS_ID);
         assert!(summary.get("canvas_id").is_none());
+    }
+
+    #[test]
+    fn model_parameter_errors_retain_the_specific_cause_without_provider_text_or_credentials() {
+        let failure = canvas_operation_error(AppError::ModelInvocation {
+            kind: nomifun_agent_contracts::ModelInvocationFailureKind::InvalidParams,
+            message: "width must be a multiple of 64; https://user:password@example.test/v1?key=private-value".into(),
+            diagnostic: nomifun_agent_contracts::ModelFailureDiagnostic::new(
+                nomifun_agent_contracts::ModelFailureReason::InvalidRequest),
+        });
+        assert!(failure.contains("width must be a multiple of 64"));
+        assert!(failure.contains("invalid_params"));
+        assert!(!failure.contains("password"));
+        assert!(!failure.contains("private-value"));
     }
 
     #[test]

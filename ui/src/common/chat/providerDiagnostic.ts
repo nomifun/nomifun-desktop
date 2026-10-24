@@ -29,6 +29,7 @@ export interface ModelFailureDiagnostic {
   authScheme?: string;
   contentType?: string;
   transportDetail?: string;
+  providerDetail?: string;
 }
 
 const credentialLike = (value: string) => /^(?:sk[-_]|AIza|AKIA|ASIA)/.test(value);
@@ -79,5 +80,7 @@ export function normalizeModelFailureDiagnostic(value: unknown): ModelFailureDia
     && !/[\x00-\x1f\x7f]/.test(data.contentType)) result.contentType = redactSensitiveText(data.contentType);
   const detail = sanitizeDiagnosticDetail(data.transportDetail);
   if (detail) result.transportDetail = detail;
+  const providerDetail = sanitizeDiagnosticDetail(data.providerDetail);
+  if (providerDetail) result.providerDetail = providerDetail;
   return result;
 }

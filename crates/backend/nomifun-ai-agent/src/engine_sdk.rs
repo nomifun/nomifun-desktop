@@ -167,14 +167,39 @@ impl EngineTurnOutcome {
             terminal: EngineTurnTerminal::Cancelled,
         }
     }
-    pub fn failed(message: impl Into<String>) -> Self {
+    pub fn failed(message: impl Into<String>, failure: nomifun_agent_runtime::AgentTurnFailure) -> Self {
         Self {
             model_steps: 0,
             terminal: EngineTurnTerminal::Failed {
                 message: message.into(),
-                failure: None,
+                failure: Some(failure),
             },
         }
+    }
+
+    fn failed_from_app_error(error: &AppError) -> Self {
+        use nomifun_agent_contracts::AgentFailureStage as Stage;
+        use nomifun_agent_runtime::AgentTurnFailure;
+        let failure = match error {
+            AppError::ModelInvocation { kind, diagnostic, .. } => AgentTurnFailure::ModelInvocation {
+                kind:*kind, diagnostic:diagnostic.clone(),
+            },
+            AppError::SystemExecution(diagnostic) => AgentTurnFailure::SystemExecution { diagnostic: diagnostic.clone() },
+            AppError::AgentResourceBindingIncomplete { missing_resource_kinds, missing_resource_operations, .. } =>
+                AgentTurnFailure::ResourceBindingIncomplete {
+                    diagnostic:nomifun_agent_contracts::AgentResourceBindingFailure {
+                        missing_resource_kinds:missing_resource_kinds.clone(),
+                        missing_resource_operations:missing_resource_operations.clone(),
+                    },
+                },
+            AppError::SessionConfigurationChanged(_) => AgentTurnFailure::SessionConfigurationChanged,
+            AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(path) => AgentTurnFailure::WorkspacePathUnsupported { path:path.clone() },
+            AppError::WorkspaceDirectoryRuntimeUnavailable(path) => AgentTurnFailure::WorkspaceDirectoryUnavailable { path:path.clone() },
+            AppError::Forbidden(_) | AppError::Unauthorized(_) | AppError::NativeSystemAccessDenied { .. } => AgentTurnFailure::HostPermissionDenied,
+            AppError::DatabaseUnavailable { .. } => AgentTurnFailure::Runtime { stage: Stage::Persistence },
+            _ => AgentTurnFailure::Runtime { stage: Stage::TurnExecution },
+        };
+        Self::failed(error.to_string(), failure)
     }
 }
 
@@ -415,7 +440,7 @@ impl AgentRuntimeControl for HostedAgentRuntime {
             }).catch_unwind().await.unwrap_or_else(|_| Err(AppError::Internal("Engine turn panicked".into())));
             let recorded_model_steps = output.close();
             task_cancellation.cancel();
-            let mut outcome = execution.unwrap_or_else(|error| EngineTurnOutcome::failed(error.to_string()));
+            let mut outcome = execution.unwrap_or_else(|error| EngineTurnOutcome::failed_from_app_error(&error));
             outcome.model_steps = outcome.model_steps.max(recorded_model_steps);
             if requested_cancellation.is_cancelled() { outcome.terminal = EngineTurnTerminal::Cancelled; }
             *shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = Some(PendingTurnSettlement {
@@ -740,6 +765,58 @@ pub type EngineDriverFactory = Arc<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn driver_failure_preserves_typed_invocation_and_never_classifies_local_words() {
+        use nomifun_agent_contracts::{AgentFailureStage, ModelFailureDiagnostic, ModelFailureReason, ModelInvocationFailureKind};
+        use nomifun_agent_runtime::AgentTurnFailure;
+        let mut diagnostic = ModelFailureDiagnostic::new(ModelFailureReason::RequestTimeout);
+        diagnostic.http_status = Some(504);
+        diagnostic.provider_id = Some("original-provider".into());
+        diagnostic.model_name = Some("original-model".into());
+        let outcome = EngineTurnOutcome::failed_from_app_error(&AppError::ModelInvocation {
+            kind:ModelInvocationFailureKind::Timeout, message:"original redacted cause".into(), diagnostic:diagnostic.clone(),
+        });
+        let EngineTurnTerminal::Failed { message, failure:Some(failure) } = outcome.terminal else {panic!("typed invocation required");};
+        assert_eq!(failure,AgentTurnFailure::ModelInvocation {kind:ModelInvocationFailureKind::Timeout,diagnostic:diagnostic.clone()});
+        let displayed=AgentSendError::from_runtime_turn_failure(message,Some(&failure)).into_stream_error();
+        assert_eq!(displayed.detail.as_deref(),Some("original redacted cause"));
+        assert_eq!(displayed.provider_diagnostic,Some(diagnostic));
+        let local = EngineTurnOutcome::failed_from_app_error(&AppError::Conflict("provider returned 401; timeout".into()));
+        assert!(matches!(local.terminal, EngineTurnTerminal::Failed { failure:Some(AgentTurnFailure::Runtime {
+            stage:AgentFailureStage::TurnExecution }), .. }));
+    }
+
+    #[test]
+    fn host_preparation_failure_keeps_resource_configuration_and_workspace_diagnostics() {
+        use nomifun_agent_runtime::AgentTurnFailure;
+        let missing = nomifun_agent_contracts::AgentResourceBindingFailure {
+            missing_resource_kinds:vec!["workspace".into()],
+            missing_resource_operations:std::collections::BTreeMap::from([
+                ("workspace".into(),std::collections::BTreeSet::from(["write".into()])),
+            ]),
+        };
+        let source = AppError::AgentResourceBindingIncomplete {
+            message:"the original workspace grant is unavailable".into(),
+            missing_resource_kinds:missing.missing_resource_kinds.clone(),
+            missing_resource_operations:missing.missing_resource_operations.clone(),
+        };
+        let outcome = EngineTurnOutcome::failed_from_app_error(&source);
+        let EngineTurnTerminal::Failed { message, failure:Some(failure) } = outcome.terminal else { panic!("typed host failure required"); };
+        assert_eq!(failure,AgentTurnFailure::ResourceBindingIncomplete { diagnostic:missing.clone() });
+        let displayed = AgentSendError::from_runtime_turn_failure(message,Some(&failure)).into_stream_error();
+        assert_eq!(displayed.resource_binding_failure,Some(missing));
+        assert_eq!(displayed.code,Some(nomifun_api_types::AgentErrorCode::NomifunAgentResourceBindingIncomplete));
+        for (source,expected) in [
+            (AppError::SessionConfigurationChanged("selected Skill changed".into()),AgentTurnFailure::SessionConfigurationChanged),
+            (AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported("/tmp/workspace ".into()),AgentTurnFailure::WorkspacePathUnsupported {path:"/tmp/workspace ".into()}),
+            (AppError::WorkspaceDirectoryRuntimeUnavailable("/tmp/gone".into()),AgentTurnFailure::WorkspaceDirectoryUnavailable {path:"/tmp/gone".into()}),
+            (AppError::Forbidden("original host permission refusal".into()),AgentTurnFailure::HostPermissionDenied),
+        ] {
+            let outcome = EngineTurnOutcome::failed_from_app_error(&source);
+            assert!(matches!(outcome.terminal,EngineTurnTerminal::Failed {failure:Some(actual),..} if actual==expected));
+        }
+    }
 
     struct RetainedSettlementDriver {
         runs: std::sync::atomic::AtomicUsize,

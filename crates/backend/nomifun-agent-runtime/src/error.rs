@@ -112,8 +112,8 @@ pub enum AgentEngineError {
     #[error("Agent Runtime turn panicked")]
     TurnPanicked,
 
-    #[error("Agent Runtime turn failed: {0}")]
-    TurnFailed(String),
+    #[error("Agent Runtime turn failed: {message}")]
+    TurnFailed { message: String, failure: crate::AgentTurnFailure },
 }
 
 impl AgentEngineError {

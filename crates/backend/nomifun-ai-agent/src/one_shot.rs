@@ -24,7 +24,7 @@ use nomi_types::tool::ToolDef;
 use nomifun_common::AppError;
 use nomifun_model_invoke::ModelInvokeService;
 
-use crate::factory::provider_config::resolve_provider_config;
+use crate::factory::provider_config::{resolve_provider_config,provider_error_to_app_error,model_stream_error};
 
 /// Upper bound on tool rounds inside one turn, so a looping model cannot spin
 /// forever below the wall-clock timeout.
@@ -167,7 +167,7 @@ async fn tool_loop(
         let mut rx = provider
             .stream(&request)
             .await
-            .map_err(|error| AppError::BadGateway(format!("LLM provider error: {error}")))?;
+            .map_err(provider_error_to_app_error)?;
 
         let mut text = String::new();
         let mut thinking = String::new();
@@ -201,7 +201,7 @@ async fn tool_loop(
                     terminal = Some(stop_reason);
                 }
                 LlmEvent::Error(message) => {
-                    return Err(AppError::BadGateway(format!("LLM stream error: {message}")));
+                    return Err(model_stream_error(message));
                 }
                 LlmEvent::ProviderRoundId(_) => {
                     return Err(AppError::BadGateway(
@@ -688,15 +688,15 @@ mod tests {
         ));
     }
 
-    /// 流错误映射为 BadGateway。
+    /// 流错误保留正式模型调用来源。
     #[tokio::test]
-    async fn stream_error_maps_to_bad_gateway() {
+    async fn stream_error_preserves_model_invocation_origin() {
         let provider =
             ScriptedProvider::new(vec![vec![LlmEvent::Error("rate limited".into())]]);
         let error = run_one_shot_turn_with_provider(provider, request(vec![], 30))
             .await
             .unwrap_err();
-        assert!(matches!(error, AppError::BadGateway(_)));
+        assert!(matches!(error, AppError::ModelInvocation { kind:nomifun_agent_contracts::ModelInvocationFailureKind::ProviderError,diagnostic,.. } if diagnostic.reason==nomifun_agent_contracts::ModelFailureReason::ProviderUnavailable));
     }
 
     /// history 角色映射与末尾 user_text 的窗口组装。

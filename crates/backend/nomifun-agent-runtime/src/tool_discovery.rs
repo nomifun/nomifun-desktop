@@ -260,8 +260,8 @@ pub(crate) async fn execute(
     {
         Ok(selected) => selected,
         Err(AgentEngineError::Cancelled) => return Err(AgentEngineError::Cancelled),
-        Err(AgentEngineError::TurnFailed(message)) => {
-            return Err(AgentEngineError::TurnFailed(message));
+        Err(error @ AgentEngineError::TurnFailed { .. }) => {
+            return Err(error);
         }
         Err(error) => {
             return Ok(AgentToolResult::text(

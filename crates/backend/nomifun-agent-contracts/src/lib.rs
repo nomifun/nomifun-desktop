@@ -5,6 +5,10 @@
 //! runtime crates.
 
 pub mod closure;
+pub mod model_invocation_failure;
+pub use model_invocation_failure::*;
+pub mod agent_failure;
+pub use agent_failure::*;
 pub mod companion_memory;
 pub use companion_memory::*;
 pub mod binding_evolution;

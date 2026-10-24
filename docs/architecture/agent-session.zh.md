@@ -125,7 +125,11 @@ Session 输入交接 ACK 只结束输入投递阶段；原 Step job 仍由 Execu
 
 ### 子 Agent 与父 Turn 的连续性
 
-需求采用编号，不自动要求模型发布逐项原始数据，也不强制事前声明 exact actions。完成报告省略 `delivery_items` 时，仍校验 criteria／真实 evidence，并经过现有一次有界交付审核。显式选择发布 `delivery_items` 时，仍校验编号覆盖、顺序、真实结果引用及原值；不能虚构引用或额外执行命令来满足格式。
+需求采用编号，不自动要求模型发布逐项原始数据，也不强制事前声明 exact actions。完成报告省略 `delivery_items` 时，仍校验 criteria、完整受理需求和真实 evidence；显式选择发布 `delivery_items` 时，仍校验编号覆盖、顺序、真实结果引用及原值。首次通过完整校验的报告直接沿原事件链交付，不再创建候选报告并追加一次模型终审。同一个模型再次复述不是独立完成证明；完整性仍受实际报告和原事实约束，不能虚构引用或额外执行命令来满足格式。
+
+完成报告参数纠错复用原 `CompletionReview` 阶段、原模型预算与控制拒绝上限。阶段保存在原 checkpoint／progress 事件中，恢复后仍只准报告与真实用户问题交接，不能因修复报告重开操作、重跑命令、重派孩子或重置计划。业务 Effect、子任务结果、完成报告和 Turn 生命周期分别保留原事实；报告未提交不能撤回已成功操作，也不能凭操作成功补造整项用户任务成功。已通过正式完成校验的结果不再被额外终审推翻。
+
+Runtime 的新失败在发生处携带 typed 来源与 `AgentFailureStage`；任务未完成还携带共享 `AgentTaskIncompleteReason`。SDK、HTTP 和展示边界保留原诊断，不从英文报错前缀、HTTP 类别或供应商文字猜责任。模型调用通过共享 `ModelInvocationFailureKind` 保留实际请求的服务地址、模型、HTTP 状态、供应商代码、请求编号及脱敏传输原因；正式供应商错误对象中的说明单独保留为 `providerDetail`，只用于展示，不参与分类、重试或完成判断。只有确切模型故障能触发模型故障转移；缺少来源的当前代历史只诚实呈现来源未记录，不补造上游故障或重试许可。界面直接展示具体原因、来源与发生阶段，详细技术标识按需展开。原当前代候选／替代事件继续只读解释其历史含义，不再写入或授予交付、恢复和执行权；不新增表、错误账本或旧数据迁移。
 
 子 Agent 使用独立 canonical Session 和 Runtime，继承原不可变 Revision／Snapshot、精确模型和 typed resource bindings，再应用该 Attempt 明确选择的权限上限。父工具的显示窗口、一次路由提示或暂时缺少某个 schema 不会成为子会话的新 binding。冻结授权、Session active capability、Attempt 权限上限和 Turn schema 呈现窗口分别校验；ToolSearch 只改变已有授权的呈现，不恢复未选能力，也不替代权限证明。
 

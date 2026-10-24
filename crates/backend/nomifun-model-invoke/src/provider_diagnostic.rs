@@ -1,5 +1,5 @@
-//! Bounded native evidence, not provider prose. These refinements are display
-//! data and never choose key rotation, retries or canonical settlement.
+//! Bounded native evidence and separately redacted provider explanation.
+//! Display data never chooses key rotation, retries or canonical settlement.
 use crate::error::{InvokeErrorKind, ModelFailureDiagnostic, ModelFailureReason};
 use nomifun_net::secret_redaction::{SecretRedactor, sanitized_endpoint};
 use serde_json::{Map, Value};
@@ -132,6 +132,11 @@ pub(crate) fn refine_from_body(
         .and_then(Value::as_str).and_then(|value| identifier(value, redactor));
     diagnostic.provider_param = object.get("param").and_then(Value::as_str)
         .and_then(|value| parameter(value, redactor));
+    diagnostic.provider_detail = object.get("message").and_then(Value::as_str)
+        .map(|message| redactor.redact(message).chars()
+            .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+            .take(1000).collect::<String>())
+        .filter(|message| !message.trim().is_empty());
     diagnostic
 }
 
@@ -187,6 +192,23 @@ mod tests {
             Some("openai.responses"), &SecretRedactor::new(["fixture-private-key"]));
         assert!(result.provider_code.is_none());
         assert!(result.provider_param.is_none());
+    }
+
+    #[test]
+    fn provider_explanation_is_redacted_bounded_and_never_selects_a_failure_reason() {
+        let detail = format!("temperature is not supported; fixture-private-key; https://user:pass@example.test/v1?token=secret {}", "x".repeat(1500));
+        let result = diagnose(400, json!({"error":{"code":"invalid_request_error","message":detail}}));
+        assert_eq!(result.reason, ModelFailureReason::InvalidRequest);
+        let explanation = result.provider_detail.unwrap();
+        assert!(explanation.starts_with("temperature is not supported"));
+        assert!(!explanation.contains("fixture-private-key"));
+        assert!(!explanation.contains("user:pass"));
+        assert!(!explanation.contains("token=secret"));
+        assert!(explanation.chars().count() <= 1000);
+        let invented = diagnose(403, json!({"error":{"message":"invalid_api_key 402 balance exhausted DNS failed"}}));
+        assert_eq!(invented.reason, ModelFailureReason::PermissionDenied);
+        let quoted = diagnose(403, json!({"choices":[{"text":"message"}],"error":{"message":"not an error envelope"}}));
+        assert!(quoted.provider_detail.is_none());
     }
 
     #[test]

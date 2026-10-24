@@ -257,8 +257,7 @@ fn reconcile_tail(
                 next.completion_review.input_revision = 1 + next.applied_steering_receipts.len();
             }
             AgentEngineEvent::CompletionReview { .. } => {
-                next.completion_review.phase = crate::AgentExecutionPhase::CompletionReview;
-                next.completion_review.input_revision = 1 + next.applied_steering_receipts.len();
+                next.completion_review.enter_report_only(1 + next.applied_steering_receipts.len());
             }
             AgentEngineEvent::TurnInputRequired { request, .. } => {
                 if next.pending_user_input.as_ref() != Some(request) { return Err(invalid("terminal input disposition has no pending source question")); }
@@ -355,7 +354,7 @@ fn reconcile_tail(
         observations.push(AgentEngineEvent::TurnWaitResolved { model_steps: step });
     }
     let discard_last = !keep_batch;
-    next.plan.needs_replan = true;
+    next.plan.needs_replan = !next.completion_review.is_report_only();
     crate::exact_actions::close_receivers(&mut next.plan.exact_actions);
     if next.plan != last_plan {
         observations.push(AgentEngineEvent::PlanUpdated {plan:next.plan.clone()});
@@ -369,7 +368,6 @@ fn reconcile_tail(
     next.model_steps = step;
     next.tool_call_count = next.tool_call_count.checked_add(new_results).ok_or_else(|| invalid("tool count exhausted"))?;
     next.accepted_input_count = 1 + next.applied_steering_receipts.len();
-    next.plan.needs_replan = true;
     // The caller must establish actual owner cleanup before committing this
     // proposal. No command/verification provenance survives the resume.
     next.work.running_processes.clear(); next.work.recent_commands.clear();

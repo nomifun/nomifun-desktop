@@ -160,17 +160,12 @@ export type IMessageText = IMessage<
   }
 >;
 
-type AgentErrorOwnership = 'nomifun' | 'user_agent' | 'user_llm_provider' | 'unknown_upstream';
+type AgentErrorOwnership = 'nomifun' | 'user_llm_provider' | 'unknown_upstream';
 
 type AgentErrorResolutionKind =
   | 'retry'
   | 'wait_for_current_response'
   | 'start_new_session'
-  | 'reconnect_agent'
-  | 'check_agent_login'
-  | 'check_agent_installation'
-  | 'check_agent_version'
-  | 'check_local_command'
   | 'check_provider_credentials'
   | 'check_provider_billing'
   | 'check_provider_base_url'
@@ -189,14 +184,22 @@ export const AGENT_TASK_INCOMPLETE_REASONS = [
   'blocked_work', 'step_limit', 'output_truncated', 'unresolved_plan',
   'unverified_changes', 'running_processes', 'unverified_completion',
   'rejected_control', 'no_progress', 'execution_guard', 'recovery_guard',
+  'completion_report_rejected',
 ] as const;
 export type AgentTaskIncompleteReason = (typeof AGENT_TASK_INCOMPLETE_REASONS)[number];
+
+export const AGENT_FAILURE_STAGES = [
+  'preparation', 'turn_execution', 'context_assembly', 'model_response', 'tool_validation', 'tool_execution',
+  'completion_report', 'persistence', 'resource_cleanup', 'recovery',
+] as const;
+export type AgentFailureStage = (typeof AGENT_FAILURE_STAGES)[number];
 
 export type AgentStreamErrorInfo = {
   message: string;
   code?: string;
   ownership?: AgentErrorOwnership;
   detail?: string;
+  failureStage?: AgentFailureStage;
   workspacePath?: string;
   taskIncompleteReason?: AgentTaskIncompleteReason;
   providerDiagnostic?: ModelFailureDiagnostic;
@@ -379,7 +382,6 @@ export type IMessageAgentStatus = IMessage<
       | 'session_active'
       | 'preparing'
       | 'prepared'
-      | 'disconnected'
       | 'error';
     /** Display name for the agent / Agent 显示名称 */
     agent_name?: string;
@@ -651,7 +653,6 @@ export type TMessage =
 // 统一所有需要用户交互的用户类型
 const AGENT_ERROR_OWNERSHIPS = new Set<AgentErrorOwnership>([
   'nomifun',
-  'user_agent',
   'user_llm_provider',
   'unknown_upstream',
 ]);
@@ -660,11 +661,6 @@ const AGENT_ERROR_RESOLUTION_KINDS = new Set<AgentErrorResolutionKind>([
   'retry',
   'wait_for_current_response',
   'start_new_session',
-  'reconnect_agent',
-  'check_agent_login',
-  'check_agent_installation',
-  'check_agent_version',
-  'check_local_command',
   'check_provider_credentials',
   'check_provider_billing',
   'check_provider_base_url',
@@ -711,6 +707,8 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
       ? (value.ownership as AgentErrorOwnership)
       : undefined;
   const detail = typeof value.detail === 'string' ? value.detail : undefined;
+  const failureStage = AGENT_FAILURE_STAGES.includes(value.failureStage as AgentFailureStage)
+    ? value.failureStage as AgentFailureStage : undefined;
   const workspacePath = typeof value.workspacePath === 'string' ? value.workspacePath : undefined;
   const taskIncompleteReason = code === 'NOMIFUN_TASK_INCOMPLETE'
     && AGENT_TASK_INCOMPLETE_REASONS.includes(value.taskIncompleteReason as AgentTaskIncompleteReason)
@@ -739,6 +737,7 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
     !code &&
     !ownership &&
     !detail &&
+    !failureStage &&
     !workspacePath &&
     !taskIncompleteReason &&
     !providerDiagnostic &&
@@ -758,6 +757,7 @@ export const normalizeAgentStreamError = (value: unknown): AgentStreamErrorInfo 
     ...(code ? { code } : {}),
     ...(ownership ? { ownership } : {}),
     ...(detail ? { detail } : {}),
+    ...(failureStage ? { failureStage } : {}),
     ...(workspacePath ? { workspacePath } : {}),
     ...(taskIncompleteReason ? { taskIncompleteReason } : {}),
     ...(providerDiagnostic ? { providerDiagnostic } : {}),
@@ -980,7 +980,6 @@ export const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus
     data.status === 'session_active' ||
     data.status === 'preparing' ||
     data.status === 'prepared' ||
-    data.status === 'disconnected' ||
     data.status === 'error'
       ? data.status
       : 'error';
@@ -1051,7 +1050,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
       const tipType = normalizeTipType(data.type);
       const structuredError =
         tipType === 'error'
-          ? (normalizeAgentStreamError(data.error) ?? normalizeAgentStreamError({ ...data, message: content }))
+          ? normalizeAgentStreamError(data.error)
           : undefined;
       const recovery = normalizeTruncatedTurnRecovery(data.recovery);
       const notice = normalizeIdmmDecisionNotice(data.idmm_notice);

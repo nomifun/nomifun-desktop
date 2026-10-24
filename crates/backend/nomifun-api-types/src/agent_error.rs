@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 pub use nomifun_agent_contracts::{ModelFailureDiagnostic, ModelFailureReason};
 pub use nomifun_agent_contracts::SystemExecutionFailure;
+pub use nomifun_agent_contracts::{AgentFailureStage, AgentTaskIncompleteReason, AgentResourceBindingFailure};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentErrorOwnership {
     Nomifun,
-    UserAgent,
     UserLlmProvider,
     UnknownUpstream,
 }
@@ -29,6 +29,11 @@ pub enum AgentErrorCode {
     NomifunAgentSessionInconsistent,
     NomifunPermissionError,
     NomifunInternalError,
+    /// A typed local Runtime failure; the stage identifies the failing boundary.
+    NomifunRuntimeFailed,
+    /// A current-generation fact did not record its originating component.
+    /// Diagnostic text must not be used to manufacture missing provenance.
+    AgentFailureSourceUnrecorded,
     SystemExecutionAuthenticationCancelled,
     SystemExecutionAuthenticationDenied,
     SystemExecutionAuthenticationTimedOut,
@@ -48,20 +53,6 @@ pub enum AgentErrorCode {
     NomifunToolResultEncodingError,
     WorkspacePathEdgeWhitespaceRuntimeUnsupported,
     WorkspaceDirectoryRuntimeUnavailable,
-    UserAgentHandshakeFailed,
-    UserAgentHandshakeTimeout,
-    UserAgentAcpInitFailed,
-    UserAgentProtocolMismatch,
-    UserAgentNotInstalled,
-    UserAgentStartupFailed,
-    UserAgentDisconnected,
-    UserAgentAuthRequired,
-    UserAgentSessionNotFound,
-    UserAgentNoPreviousSession,
-    UserAgentCommandNotFound,
-    UserAgentMissingEnv,
-    UserAgentUnsupportedMethod,
-    UserAgentInvalidParams,
     UserLlmProviderAuthFailed,
     UserLlmProviderPermissionDenied,
     UserLlmProviderBillingRequired,
@@ -93,35 +84,12 @@ pub enum AgentErrorCode {
     UnknownUpstreamError,
 }
 
-/// The engine's reason for stopping an unfinished task. This supplements the
-/// error code for presentation without changing retry or recovery authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskIncompleteReason {
-    BlockedWork,
-    StepLimit,
-    OutputTruncated,
-    UnresolvedPlan,
-    UnverifiedChanges,
-    RunningProcesses,
-    UnverifiedCompletion,
-    RejectedControl,
-    NoProgress,
-    ExecutionGuard,
-    RecoveryGuard,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentErrorResolutionKind {
     Retry,
     WaitForCurrentResponse,
     StartNewSession,
-    ReconnectAgent,
-    CheckAgentLogin,
-    CheckAgentInstallation,
-    CheckAgentVersion,
-    CheckLocalCommand,
     CheckProviderCredentials,
     CheckProviderBilling,
     CheckProviderBaseUrl,
@@ -154,13 +122,6 @@ impl AgentErrorResolution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentResourceBindingFailure {
-    pub missing_resource_kinds: Vec<String>,
-    pub missing_resource_operations: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentStreamErrorData {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -189,6 +150,9 @@ pub struct AgentStreamErrorData {
         skip_serializing_if = "Option::is_none"
     )]
     pub task_incomplete_reason: Option<AgentTaskIncompleteReason>,
+    /// Captured at the failing owner boundary; never inferred from prose.
+    #[serde(default, rename = "failureStage", skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<AgentFailureStage>,
     /// The original typed model/transport diagnosis, shared with the Broker.
     #[serde(default, rename = "providerDiagnostic", skip_serializing_if = "Option::is_none")]
     pub provider_diagnostic: Option<ModelFailureDiagnostic>,
@@ -218,6 +182,7 @@ impl AgentStreamErrorData {
             agent_template_key: None,
             model_name: None,
             task_incomplete_reason: None,
+            failure_stage: None,
             provider_diagnostic: None,
             system_execution_error: None,
             resource_binding_failure: None,
@@ -246,6 +211,7 @@ impl AgentStreamErrorData {
             agent_template_key: None,
             model_name: None,
             task_incomplete_reason: None,
+            failure_stage: None,
             provider_diagnostic: None,
             system_execution_error: None,
             resource_binding_failure: None,
@@ -259,6 +225,24 @@ impl AgentStreamErrorData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_failure_stage_and_completion_reason_use_the_shared_wire_contract() {
+        let mut error = AgentStreamErrorData::classified("Completion report was rejected",
+            AgentErrorCode::NomifunTaskIncomplete, AgentErrorOwnership::Nomifun,
+            Some("report_completion rejected an unexpected status field".into()), false, false, None);
+        error.failure_stage = Some(AgentFailureStage::CompletionReport);
+        error.task_incomplete_reason = Some(AgentTaskIncompleteReason::CompletionReportRejected);
+        let value = serde_json::to_value(&error).unwrap();
+        assert_eq!(value["failureStage"], "completion_report");
+        assert_eq!(value["taskIncompleteReason"], "completion_report_rejected");
+        assert!(value.get("failure_stage").is_none());
+        assert_eq!(serde_json::from_value::<AgentStreamErrorData>(value).unwrap(), error);
+        let missing = AgentStreamErrorData::legacy("Original failure", Some(AgentErrorCode::AgentFailureSourceUnrecorded));
+        let value = serde_json::to_value(missing).unwrap();
+        assert!(value.get("ownership").is_none());
+        assert!(value.get("failureStage").is_none());
+    }
 
     #[test]
     fn exact_turn_context_has_public_wire_keys_and_remains_optional() {
@@ -313,24 +297,6 @@ mod tests {
         let code = AgentErrorCode::UserLlmProviderImageUnsupported;
         let json = serde_json::to_string(&code).unwrap();
         assert_eq!(json, "\"USER_LLM_PROVIDER_IMAGE_UNSUPPORTED\"");
-        let back: AgentErrorCode = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, code);
-    }
-
-    #[test]
-    fn unbacked_completion_serde_roundtrip() {
-        let code = AgentErrorCode::UserLlmProviderUnbackedCompletion;
-        let json = serde_json::to_string(&code).unwrap();
-        assert_eq!(json, "\"USER_LLM_PROVIDER_UNBACKED_COMPLETION\"");
-        let back: AgentErrorCode = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, code);
-    }
-
-    #[test]
-    fn agent_session_inconsistent_serde_roundtrip() {
-        let code = AgentErrorCode::NomifunAgentSessionInconsistent;
-        let json = serde_json::to_string(&code).unwrap();
-        assert_eq!(json, "\"NOMIFUN_AGENT_SESSION_INCONSISTENT\"");
         let back: AgentErrorCode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, code);
     }
@@ -428,6 +394,7 @@ mod tests {
             agent_template_key: None,
             model_name: None,
             task_incomplete_reason: None,
+            failure_stage: None,
             provider_diagnostic: None,
             retryable: Some(false),
             system_execution_error: None,

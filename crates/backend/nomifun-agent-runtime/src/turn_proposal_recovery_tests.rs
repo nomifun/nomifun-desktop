@@ -137,7 +137,7 @@ mod proposal_recovery_tests {
         let result = run_turn(binding(), model.clone(), tools.clone(), sink.clone(),
             AgentTurnRequest::new(request(), tool_plan(), principal(), 0),
             AgentContextBudget::default(), CancellationToken::new()).await;
-        assert!(matches!(result, Err(AgentEngineError::TurnFailed(message)) if message.contains("protocol-correction budget")));
+        assert!(matches!(result, Err(AgentEngineError::TurnFailed { message, .. }) if message.contains("protocol-correction budget")));
         assert_eq!(model.requests.lock().unwrap().len(), 3);
         assert!(tools.0.lock().unwrap().is_empty());
         let continuations = sink.events.lock().unwrap().iter().filter_map(|event|
@@ -184,12 +184,9 @@ mod proposal_recovery_tests {
     }
 
     #[tokio::test]
-    async fn delivery_review_records_native_parameter_rejection_without_reopening_tools() {
+    async fn recovered_report_only_phase_repairs_native_parameters_without_reopening_tools() {
         let mut checkpoint = checkpoint();
-        checkpoint.completion_review = crate::AgentCompletionReviewState {
-            delivery_pending: true, delivery_used: true, input_revision: 1,
-            phase: AgentExecutionPhase::DeliveryReview, ..Default::default()
-        };
+        checkpoint.completion_review.enter_report_only(1);
         let recovery = crate::AgentTurnRecovery::new(checkpoint.clone(), 1, 2,
             checkpoint_prefix(&checkpoint), vec![], vec![]).unwrap();
         let mut invalid_report = malformed("invalid-report", ChatFinishReason::ToolCalls);
@@ -198,19 +195,112 @@ mod proposal_recovery_tests {
                 *name = "report_completion".into();
             }
         }
-        let model = model(vec![invalid_report, text_step("Must not run")]);
+        let model = model(vec![invalid_report, control_step("corrected-report", "report_completion", json!({
+            "summary":"The earlier observations are preserved without claiming fresh verification.",
+            "criteria":[{"disposition":"unverified","rationale":"No new check or effect was authorized."}],
+            "observed_tool_error_count":0,"observed_command_failure_count":0,
+        })), text_step("Must not run")]);
         let sink = Arc::new(Sink::default());
         let tools = Arc::new(Tools::default());
         let result = run_turn(binding(), model.clone(), tools.clone(), sink.clone(),
             AgentTurnRequest::new(request(), tool_plan(), principal(), 0).with_recovery(recovery),
-            AgentContextBudget::default(), CancellationToken::new()).await;
-        assert!(matches!(result, Err(AgentEngineError::TurnFailed(message)) if message.contains("invalid native tool arguments")));
-        assert_eq!(model.requests.lock().unwrap().len(), 1);
+            AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.input.tools.iter().map(|tool|tool.name.as_str())
+            .collect::<Vec<_>>() == ["report_completion"]));
         assert!(tools.0.lock().unwrap().is_empty());
         assert!(sink.events.lock().unwrap().iter().any(|event| matches!(event,
             AgentEngineEvent::ModelResponseRejected {
-                continuation: false, rejection: Some(AgentModelResponseRejection::ToolArguments { .. }), ..
+                continuation: true, rejection: Some(AgentModelResponseRejection::ToolArguments { .. }), ..
             })));
+    }
+
+    #[test]
+    fn recovered_report_diagnostic_requires_its_exact_call_and_does_not_cross_new_input() {
+        let refusal = AgentToolResult::text("report".into(),json!({
+            "code":"INVALID_TOOL_ARGUMENTS","issues":[{"schema_path":"/additionalProperties","parameter_path_template":"/"}],
+        }).to_string(),true);
+        let result = AgentEngineEvent::ToolCompleted { step:1,runtime_hold:Some(crate::RuntimeToolHoldReason::ArgumentsRejected),
+            result:refusal.clone() };
+        assert!(recorded_completion_rejection([&result]).is_none(),"unpaired tool output is not a report-failure source");
+        let mut events = vec![AgentEngineEvent::ToolCallCompleted { step:1,call:ChatToolCall {
+            call_id:"report".into(),name:"report_completion".into(),provider_metadata:None,
+            arguments:nomifun_agent_contracts::StrictJsonValue(json!({"status":"delivered"})),
+        } },result];
+        assert!(recorded_completion_rejection(&events).unwrap().contains("/additionalProperties"));
+        events.push(AgentEngineEvent::SteeringInputs { inputs:vec![serde_json::from_value(json!({
+            "receipt_operation_id":"new-input","message_id":"new-message","text":"Change the accepted scope.",
+        })).unwrap()] });
+        assert!(recorded_completion_rejection(&events).is_none(),"new accepted input cannot inherit an old report refusal");
+    }
+
+    #[tokio::test]
+    async fn crash_after_last_report_refusal_keeps_the_original_cause_without_another_model_or_tool() {
+        for rejections in [1, 4] {
+            let mut cp = checkpoint();
+            let mut prefix = vec![AgentEngineEvent::TurnStarted {
+                binding: cp.binding.clone(), turn_operation_id: cp.turn_operation_id.clone(),
+            }];
+            let start = |step| AgentEngineEvent::ModelStepStarted {
+                step, operation_id: format!("turn:model:{step}").into(), correction_source: None,
+            };
+            let proposal = |step, id: &str, name: &str, arguments| AgentEngineEvent::ToolCallCompleted {
+                step, call: ChatToolCall { call_id: id.into(), name: name.into(),
+                    arguments: nomifun_agent_contracts::StrictJsonValue(arguments), provider_metadata: None },
+            };
+            prefix.extend([start(1), proposal(1, "original-work", "start_process", json!({"command":"test-fixture","args":[]})),
+                AgentEngineEvent::ToolStarted { step:1,call_id:"original-work".into(),
+                    capability_id:"workspace.process".into(),action_id:"workspace.process/start".into() },
+                AgentEngineEvent::ToolCompleted { step:1,runtime_hold:None,
+                    result:AgentToolResult::text("original-work".into(), json!({
+                        "process_id":"original-work","state":"exited","exit_code":0,
+                        "success":true,"cleanup":{"reaped":true},"output":{"text":"27/27 PASS"},
+                    }).to_string(),false) },
+            ]);
+            cp.work.successful_commands = 1;
+            cp.completion_review.enter_report_only(1);
+            for index in 0..rejections {
+                let step = 2 + index;
+                let id = format!("last-report-{index}");
+                let result = AgentToolResult::text(id.clone().into(), json!({
+                    "status":"not_executed","code":"INVALID_TOOL_ARGUMENTS","tool":"report_completion",
+                    "issues":[{"schema_path":"/additionalProperties","parameter_path_template":"/"}],
+                }).to_string(),true);
+                prefix.extend([start(step), proposal(step, &id, "report_completion", json!({
+                    "summary":"Earlier work returned 27/27 PASS.","criteria":[],"status":"delivered",
+                })), AgentEngineEvent::ToolCompleted { step,runtime_hold:Some(crate::RuntimeToolHoldReason::ArgumentsRejected),
+                    result:result.clone() }]);
+                if index == 0 { prefix.push(AgentEngineEvent::CompletionReview { status:cp.work.clone() }); }
+                cp.work.failed_tools += 1;
+                cp.control_rejections.observe("report_completion", &result, false);
+                prefix.push(AgentEngineEvent::WorkStatus { status:cp.work.clone() });
+            }
+            cp.model_steps = 1 + rejections;
+            cp.tool_call_count = u32::from(cp.model_steps);
+            prefix.push(AgentEngineEvent::ExecutionCheckpointSaved { step:cp.model_steps,revision:1,digest:"c".repeat(64).into() });
+            let recovery = crate::AgentTurnRecovery::new(cp,1,2,prefix,vec![],vec![]).unwrap();
+            let model = model(vec![text_step("Must not run")]);
+            let tools = Arc::new(Tools::default()); let sink = Arc::new(Sink::default());
+            let plan = AgentToolPlan::new([tool_binding("start_process","workspace.process","workspace.process/start",
+                AgentEffectClass::ExternalUncertainEffect,false)]).unwrap();
+            let result = run_turn(binding(),model.clone(),tools.clone(),sink.clone(),
+                AgentTurnRequest::new(request(),plan,principal(),0).with_recovery(recovery)
+                    .with_max_model_steps(if rejections == 1 { 2 } else { 32 }),
+                AgentContextBudget::default(),CancellationToken::new()).await;
+            assert!(matches!(result,Err(AgentEngineError::TurnFailed { message,
+                failure:AgentTurnFailure::TaskIncomplete {
+                    reason:nomifun_agent_contracts::AgentTaskIncompleteReason::CompletionReportRejected,
+                },
+            }) if message.contains(&format!("last-report-{}",rejections-1))
+                && message.contains("INVALID_TOOL_ARGUMENTS") && message.contains("/additionalProperties")));
+            assert!(model.requests.lock().unwrap().is_empty(),"recovery cannot buy another correction request");
+            assert!(tools.0.lock().unwrap().is_empty(),"completed work is never replayed to recover its report error");
+            assert!(!sink.events.lock().unwrap().iter().any(|event| matches!(event,
+                AgentEngineEvent::ToolStarted { .. } | AgentEngineEvent::CompletionDelivered { .. }
+                    | AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnPaused { .. })));
+        }
     }
 
     #[tokio::test]

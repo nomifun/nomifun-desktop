@@ -14,7 +14,7 @@ use futures::future::BoxFuture;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use nomifun_api_types::{
-    AgentErrorCode, AgentExecution, AgentExecutionDetail, ExecutionModelRef,
+    AgentExecution, AgentExecutionDetail, ExecutionModelRef,
     ExecutionParticipant, ExecutionStep,
 };
 use nomifun_common::{
@@ -3254,6 +3254,11 @@ fn scheduler_error_is_recoverable(error: &AppError) -> bool {
         // Provider/transient transport errors are normally settled at the
         // attempt boundary; if one escapes before an attempt starts, reload.
         AppError::RateLimited | AppError::BadGateway(_) | AppError::Timeout(_) => true,
+        AppError::ModelInvocation { kind, .. } => matches!(kind,
+            nomifun_agent_contracts::ModelInvocationFailureKind::RateLimited
+            | nomifun_agent_contracts::ModelInvocationFailureKind::Network
+            | nomifun_agent_contracts::ModelInvocationFailureKind::Timeout
+            | nomifun_agent_contracts::ModelInvocationFailureKind::ProviderError),
         // DB connectivity is infrastructure state, not execution outcome.
         AppError::Internal(message) => {
             message.starts_with("Database error:")
@@ -3336,14 +3341,10 @@ fn attempt_error_transition(
 fn attempt_error_is_retryable(error: &AppError) -> bool {
     match error {
         AppError::RateLimited | AppError::Timeout(_) => true,
-        AppError::BadGateway(_) => {
-            let stream_error = nomifun_ai_agent::AgentSendError::from_app_error_ref(error);
-            stream_error.stream_error().retryable == Some(true)
-                && stream_error
-                    .stream_error()
-                    .code
-                    .is_some_and(is_transient_agent_error_code)
-        }
+        // A gateway label or model diagnostic alone does not prove that an
+        // accepted invocation had no effects. Only the original typed attempt
+        // receipt may authorize replay; presentation never manufactures it.
+        AppError::BadGateway(_) | AppError::ModelInvocation { .. } => false,
         // Invalid workspace/model/input/config errors are deterministic. A
         // retry would create another Attempt with the same guaranteed failure
         // and is exactly the repeated-node behavior seen in the field report.
@@ -3384,17 +3385,6 @@ fn durable_attempt_failure_reason(outcome: &AttemptOutcome, reason: String) -> S
     }
 }
 
-fn is_transient_agent_error_code(code: AgentErrorCode) -> bool {
-    matches!(
-        code,
-        AgentErrorCode::UserLlmProviderGatewayError
-            | AgentErrorCode::UserLlmProviderNetworkError
-            | AgentErrorCode::UserLlmProviderEmptyResponse
-            | AgentErrorCode::UserLlmProviderRateLimited
-            | AgentErrorCode::UserLlmProviderTimeout
-    )
-}
-
 fn is_transient_agent_error_code_name(code: &str) -> bool {
     matches!(
         code,
@@ -3414,7 +3404,7 @@ pub(crate) fn agent_outcome_can_complete(outcome: &AttemptOutcome) -> bool {
         .text
         .as_ref()
         .is_some_and(|text| !text.trim().is_empty());
-    // The canonical Runtime owns accepted requirements and delivery review.
+    // The canonical Runtime owns accepted requirements and completion validation.
     // A prose spec is task data, never a second inferred completion contract.
     has_text || !outcome.output_files.is_empty()
 }
@@ -4291,13 +4281,21 @@ mod tests {
         assert!(!attempt_error_is_retryable(&AppError::BadRequest(
             "workspace does not exist".to_owned()
         )));
-        assert!(attempt_error_is_retryable(&AppError::BadGateway(
+        assert!(!attempt_error_is_retryable(&AppError::BadGateway(
             "provider stream protocol violation".to_owned()
         )));
         assert!(!attempt_error_is_retryable(&AppError::BadGateway(
             "Nomi agent error: API error: provider stream protocol violation: tool progress 'Bash' was not advertised in this request"
                 .to_owned()
         )));
+        let failure = AppError::ModelInvocation {
+            kind: nomifun_agent_contracts::ModelInvocationFailureKind::Network,
+            message: "connection failed after an unconfirmed dispatch".into(),
+            diagnostic: nomifun_agent_contracts::ModelFailureDiagnostic::new(
+                nomifun_agent_contracts::ModelFailureReason::ConnectionFailed),
+        };
+        assert!(scheduler_error_is_recoverable(&failure), "reload original facts without replaying work");
+        assert!(!attempt_error_is_retryable(&failure));
         assert!(attempt_error_is_retryable(&AppError::RateLimited));
         assert!(attempt_error_is_retryable(&AppError::Timeout(
             "provider did not respond".to_owned()

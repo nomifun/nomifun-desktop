@@ -40,7 +40,7 @@ pub(crate) fn decode_with_context(
     Some(failure)
 }
 
-fn fallback_reason(code: ChatModelErrorCode) -> ModelFailureReason {
+pub(crate) fn fallback_reason(code: ChatModelErrorCode) -> ModelFailureReason {
     use ChatModelErrorCode as Code;
     use ModelFailureReason as Reason;
     match code {
@@ -50,8 +50,13 @@ fn fallback_reason(code: ChatModelErrorCode) -> ModelFailureReason {
         Code::InvalidRequest => Reason::InvalidRequest,
         Code::UnsupportedFeature => Reason::UnsupportedFeature,
         Code::ProtocolViolation => Reason::InvalidResponse,
-        Code::StreamInterrupted => Reason::StreamInterrupted,
-        _ => Reason::ProviderUnavailable,
+        Code::StreamInterrupted | Code::Cancelled => Reason::StreamInterrupted,
+        Code::CredentialReferenceMissing => Reason::CredentialsMissing,
+        Code::CredentialTargetMismatch => Reason::CredentialTargetMismatch,
+        Code::RouteNotFound | Code::RouteRevisionMismatch | Code::AdapterUnavailable
+        | Code::CausalityRejected | Code::DuplicateOperation | Code::ShadowNotPrimary
+        | Code::SessionTerminal | Code::Internal => Reason::ConfigurationError,
+        Code::ProviderUnavailable => Reason::ProviderUnavailable,
     }
 }
 

@@ -1139,7 +1139,8 @@ mod tests {
         let changed = service.invoke_at_task_configuration(&selected, &expected, image_request("reject changed key"))
             .await.unwrap_err();
         assert!(changed.is_task_configuration_changed());
-        assert!(matches!(nomifun_common::AppError::from(changed), nomifun_common::AppError::Conflict(_)));
+        assert!(matches!(nomifun_common::AppError::from(changed),
+            nomifun_common::AppError::SessionConfigurationChanged(_)));
 
         let current_config = service.resolve_task_config(&selected, ModelTask::ImageGeneration).await.unwrap();
         seed_model(&pool, &provider_id, "selected", r#"["image_generation"]"#, "{}", false).await;

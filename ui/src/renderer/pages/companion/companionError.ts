@@ -43,7 +43,6 @@ export function companionErrorKey(code: string): string {
     case 'USER_LLM_PROVIDER_TIMEOUT':
       return 'nomi.companion.err.timeout';
     case 'USER_LLM_PROVIDER_GATEWAY_ERROR':
-    case 'UNKNOWN_UPSTREAM_ERROR':
       return 'nomi.companion.err.gateway';
     case 'USER_LLM_PROVIDER_CONTEXT_TOO_LARGE':
       return 'nomi.companion.err.contextTooLarge';

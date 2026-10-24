@@ -85,7 +85,7 @@ async fn committed_user_pause_ack_loss_retries_the_same_original_exit_without_la
     let fixture=Fixture::new("settlement-owner-user-pause-ack-loss").await;
     fixture.host.admit_preparation(&fixture.message,CancellationToken::new()).await.unwrap();
     let journal=fixture.host.active.lock().await.as_ref().unwrap().journal.clone();
-    let original=EngineTurnOutcome::failed("original run exit retained for diagnosis");
+    let original=EngineTurnOutcome::failed("original run exit retained for diagnosis", nomifun_agent_runtime::AgentTurnFailure::Runtime { stage:nomifun_agent_contracts::AgentFailureStage::Recovery });
     sqlx::query("CREATE TRIGGER reject_original_cleanup BEFORE INSERT ON agent_events WHEN NEW.kind='runtime/progress-recorded' AND json_extract(NEW.inline_json,'$.event.event')='host_cleanup_proven' BEGIN SELECT RAISE(FAIL,'fixture cleanup proof storage failure'); END")
         .execute(fixture.pool()).await.unwrap();
     let failure=fixture.host.cleanup_turn(&fixture.message,&original.terminal).await.unwrap_err();

@@ -93,6 +93,15 @@ pub enum AppError {
     #[error("No usable model provider is configured: {0}")]
     ProviderUnavailable(String),
 
+    /// Original invocation classification and sanitized request diagnosis.
+    /// An HTTP boundary must not reduce this to gateway diagnostic text.
+    #[error("{message}")]
+    ModelInvocation {
+        kind: nomifun_agent_contracts::ModelInvocationFailureKind,
+        message: String,
+        diagnostic: nomifun_agent_contracts::ModelFailureDiagnostic,
+    },
+
     #[error("Rate limited")]
     RateLimited,
 
@@ -184,6 +193,18 @@ impl AppError {
             Self::RevisionConflict(_) => StatusCode::CONFLICT,
             Self::ProviderInUse(_) => StatusCode::CONFLICT,
             Self::ProviderUnavailable(_) => StatusCode::BAD_REQUEST,
+            Self::ModelInvocation { kind, .. } => {
+                use nomifun_agent_contracts::ModelInvocationFailureKind as K;
+                match kind {
+                    K::Auth | K::ProviderError | K::JobFailed | K::Network
+                    | K::QuotaExhausted | K::ParseError | K::Timeout => StatusCode::BAD_GATEWAY,
+                    K::NonApiResponse | K::UnsupportedTask | K::InvalidParams
+                    | K::MissingConnection | K::Config | K::NotPollable => StatusCode::BAD_REQUEST,
+                    K::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+                    K::ContentPolicy => StatusCode::UNPROCESSABLE_ENTITY,
+                    K::NoAdapter => StatusCode::INTERNAL_SERVER_ERROR,
+                }
+            },
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::KnowledgeExportDestinationInvalid(_) => StatusCode::BAD_REQUEST,
@@ -232,6 +253,7 @@ impl AppError {
             Self::RevisionConflict(_) => "REVISION_CONFLICT",
             Self::ProviderInUse(_) => "PROVIDER_IN_USE",
             Self::ProviderUnavailable(_) => "PROVIDER_UNAVAILABLE",
+            Self::ModelInvocation { .. } => "MODEL_INVOCATION_FAILED",
             Self::RateLimited => "RATE_LIMITED",
             Self::Internal(_) => "INTERNAL_ERROR",
             Self::KnowledgeExportDestinationInvalid(_) => "KNOWLEDGE_EXPORT_DESTINATION_INVALID",
@@ -261,6 +283,9 @@ impl AppError {
         match self {
             Self::DatabaseUnavailable { reason } => Some(json!({ "database_unavailable": reason })),
             Self::SystemExecution(failure) => Some(json!({"system_execution_error": failure})),
+            Self::ModelInvocation { kind, diagnostic, .. } => Some(json!({
+                "model_failure": { "kind": kind, "diagnostic": diagnostic },
+            })),
             Self::AgentResourceBindingIncomplete { missing_resource_kinds, missing_resource_operations, .. } => Some(json!({
                 "stage": "resource_preparation",
                 "ownership": "nomifun",

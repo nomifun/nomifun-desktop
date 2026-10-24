@@ -416,12 +416,13 @@ impl EngineSessionDriver for UnifiedSessionDriver {
             Err(AgentEngineError::Cancelled) => Ok(EngineTurnOutcome::cancelled(
                 match pending { Some(AgentEngineEvent::TurnCancelled { model_steps }) => model_steps,
                     _ => projection.last_model_step.load(std::sync::atomic::Ordering::Acquire) })),
-            Err(AgentEngineError::TurnFailed(message)) => {
+            Err(AgentEngineError::TurnFailed { message, failure }) => {
                 let model_steps = match pending {
-                    Some(AgentEngineEvent::TurnFailed { model_steps, message: recorded, failure: None }) if recorded == message => model_steps,
+                    Some(AgentEngineEvent::TurnFailed { model_steps, message: recorded, failure: Some(recorded_failure) })
+                        if recorded == message && recorded_failure == failure => model_steps,
                     _ => return Err(AppError::Conflict("Nomi failure has no matching terminal record".into())),
                 };
-                Ok(EngineTurnOutcome { model_steps, terminal: EngineTurnTerminal::Failed { message, failure: None } })
+                Ok(EngineTurnOutcome { model_steps, terminal: EngineTurnTerminal::Failed { message, failure: Some(failure) } })
             }
             Err(AgentEngineError::WaitOwnerUnavailable) => Ok(EngineTurnOutcome {
                 model_steps:projection.last_model_step.load(std::sync::atomic::Ordering::Acquire),
@@ -441,7 +442,13 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                     terminal: EngineTurnTerminal::Failed { message: diagnostic.message.clone(),
                         failure: Some(nomifun_agent_runtime::AgentTurnFailure::SystemExecution { diagnostic }) } })
             }
-            Err(error) => Err(contract_error(error)),
+            Err(error) => {
+                let stage = runtime_failure_stage(&error);
+                let mut outcome = EngineTurnOutcome::failed(error.to_string(),
+                    nomifun_agent_runtime::AgentTurnFailure::Runtime { stage });
+                outcome.model_steps = projection.last_model_step.load(std::sync::atomic::Ordering::Acquire);
+                Ok(outcome)
+            }
         }
     }
 
@@ -507,6 +514,25 @@ fn model_turn_failure(error: AgentEngineError) -> (String, nomifun_agent_runtime
         ),
         AgentEngineError::InvalidModelEvent(message) => (message, AgentTurnFailure::InvalidModelEvent),
         _ => unreachable!("only typed model failures enter model Turn settlement"),
+    }
+}
+
+fn runtime_failure_stage(error: &AgentEngineError) -> nomifun_agent_contracts::AgentFailureStage {
+    use nomifun_agent_contracts::AgentFailureStage as S;
+    use AgentEngineError as E;
+    match error {
+        E::WorkspaceContext(_) | E::ContextAssembly(_) | E::ContextTooLarge { .. }
+        | E::ReplayContract(_) | E::Compaction(_) | E::CompactionOutputLimit | E::CompactionInvalidSummary => S::ContextAssembly,
+        E::ToolNotExposed(_) | E::ToolArgumentsTooLarge { .. } | E::ToolSchemaDigestMismatch { .. }
+        | E::ToolPlan(_) => S::ToolValidation,
+        E::CapabilityKernel { .. } | E::Process(_) | E::ToolInvocation(_) | E::ToolResultTooLarge { .. }
+        | E::TurnPanicked | E::Cancelled => S::ToolExecution,
+        E::EventSink(_) => S::Persistence,
+        E::WaitOwnerUnavailable | E::ObservationUnavailable { .. } | E::CollaborationCommandRejected { .. } => S::Recovery,
+        E::Model { .. } | E::ModelStreamEndedWithoutTerminal | E::InvalidModelEvent(_) => S::ModelResponse,
+        E::TurnFailed { .. } => S::CompletionReport,
+        E::InvalidContract(_) | E::VoiceCorrectionBoundary | E::TurnAlreadyRunning
+        | E::SessionDisposed | E::TurnBindingMismatch { .. } => S::Preparation,
     }
 }
 

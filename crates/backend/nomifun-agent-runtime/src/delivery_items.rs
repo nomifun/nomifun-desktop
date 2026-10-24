@@ -1,5 +1,5 @@
-//! One bounded publication review for explicit multi-item action tasks.
-//! This is model interpretation, never semantic proof or execution authority.
+//! Numbered input selectors for optional exact-result publication.
+//! Source selectors never prove semantic coverage or grant execution authority.
 use nomifun_chat_model_broker::{ChatContentPart, ChatMessage, ChatRole};
 
 fn multi_item_input(input: &ChatMessage) -> bool {
@@ -51,48 +51,25 @@ pub(crate) fn delivery_slots(inputs: &[ChatMessage]) -> Vec<(String, String)> {
     slots
 }
 
-pub(crate) const INSTRUCTION: &str = concat!(
-    "A candidate completion account is awaiting its single delivery review; it has NOT been published as task completion. ",
-    "Compare the candidate summary with EVERY item and constraint in the complete accepted user inputs and the actual recorded results. ",
-    "Where the user requested actual values, deliver those values, not generic statements that an inspection succeeded. ",
-    "Distinguish earlier observed facts from later unchecked state without omitting the known earlier facts. ",
-    "Preserve exact bytes, operation order, actual exit codes and all recorded failures; successful later calls never erase failures. ",
-    "Use the user's language and plain public wording, not internal evidence eligibility, routing, schema or self-instructions. ",
-    "Submit the corrected report_completion alone, or the same report if all requested results are already complete. ",
-    "This phase exposes ONLY report_completion: do not execute, read, discover, retry or repeat any operation. ",
-    "Missing required work stays blocked; do not invent values, omit requirements or reinterpret partial work as success. ",
-    "This is one model assessment within the unchanged turn budget, not independent verification or new authority."
-);
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AgentCompletionReviewState;
 
     fn input(text: &str) -> Vec<ChatMessage> {
         vec![crate::context_lifecycle::text_message(ChatRole::User, text.into())]
     }
 
     #[test]
-    fn review_is_once_per_accepted_scope_not_per_repeated_report() {
+    fn numbered_result_slots_keep_source_identity_and_ignore_examples() {
         let inputs = input("1. Read the actual directory.\n2. Report its exact entries.");
-        let mut state = AgentCompletionReviewState::default();
-        assert!(!state.begin(&inputs, 2));
-        assert!(state.begin(&inputs, 3));
-        assert!(state.delivery_pending && state.delivery_used && state.valid_for(1));
-        assert!(!state.begin(&inputs, 3));
-        state.delivery_pending = false;
-        assert!(!state.begin(&inputs, 4));
-        let mut changed = inputs; changed.extend(input("Do not continue the old task."));
-        state.align_inputs(changed.len());
-        assert!(!state.delivery_pending && !state.delivery_used);
-    }
-
-    #[test]
-    fn examples_and_single_actions_do_not_create_a_publication_phase() {
+        assert_eq!(delivery_slots(&inputs), vec![
+            ("input_0_part_0_line_0".into(), "1. Read the actual directory.".into()),
+            ("input_0_part_0_line_1".into(), "2. Report its exact entries.".into()),
+        ]);
         for text in ["Read one file.", "1. Read one file.", "```text\n1. example\n2. example\n```", "> 1. quote\n> 2. quote"] {
-            assert!(!AgentCompletionReviewState::default().begin(&input(text), 8));
+            assert!(!multi_item_task(&input(text)));
+            assert!(delivery_slots(&input(text)).is_empty());
         }
-        assert!(AgentCompletionReviewState::default().begin(&input("1、读取\n2、报告"), 3));
+        assert!(multi_item_task(&input("1、读取\n2、报告")));
     }
 }

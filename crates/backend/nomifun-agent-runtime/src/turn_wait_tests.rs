@@ -347,7 +347,7 @@ async fn start_only_grant_settles_from_the_original_owner_without_minting_a_poll
 }
 
 #[tokio::test]
-async fn successful_owner_then_four_invalid_completion_reports_pauses_without_task_failure() {
+async fn rejected_completion_report_preserves_successful_owner_receipts() {
     let mut steps = vec![wait_ledger_step(), plan_step("in_progress", "inspect"),
         control_step("launch", "start_process", json!({"command":"helper", "wait_ms":0})), text_step("The helper is running."),text_step("The helper has not exited."),
         control_step("original-poll", "poll_process", json!({"process_id":"owned", "cursor":5})), plan_step("completed", "inspect")];
@@ -367,20 +367,19 @@ async fn successful_owner_then_four_invalid_completion_reports_pauses_without_ta
     *wait.observation.lock().unwrap() = Some(crate::AgentOwnedProcessObservation { process_id: "owned".into(),
         poll: nomifun_engine_core::EngineProcessPoll::Exited { exit_code: Some(0), signal: None, output, cleanup } });
     wait.wake.notify_one();
-    let result = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap();
-    assert!(matches!(result.terminal, AgentTurnTerminal::Paused { reason } if reason == "EXECUTION_INTERVENTION_REQUIRED"));
+    let result = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap();
+    assert!(matches!(result,Err(AgentEngineError::TurnFailed { ref message,
+        failure:crate::AgentTurnFailure::TaskIncomplete { reason:nomifun_agent_contracts::AgentTaskIncompleteReason::CompletionReportRejected },
+    }) if message.contains("invalid-report-3") && message.contains("INVALID_TOOL_ARGUMENTS")));
     assert_eq!(model.requests.lock().unwrap().len(), 11);
     assert_eq!(model.steps.lock().unwrap().len(), 1);
     let events = journal.events.lock().unwrap();
-    assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::TurnFailed { .. } | AgentEngineEvent::TurnCompleted { .. })));
-    let checkpoint = journal.checkpoints.lock().unwrap().last().cloned().unwrap();
-    assert_eq!(checkpoint.work.successful_commands, 1);
-    assert_eq!(checkpoint.work.failed_commands, 0);
-    assert_eq!(checkpoint.work.failed_tools, 4, "real declaration refusals stay recorded without becoming a task failure");
-    assert_eq!(checkpoint.control_rejections.consecutive, 4);
-    assert!(checkpoint.work.running_processes.is_empty());
-    assert!(checkpoint.completion_review.is_report_only(), "a paused declaration cannot reopen the action surface");
-    checkpoint.validate().unwrap();
+    assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::TurnCompleted { .. })));
+    let work = events.iter().rev().find_map(|event|if let AgentEngineEvent::WorkStatus {status}=event {Some(status)} else {None}).unwrap();
+    assert_eq!(work.successful_commands,1);
+    assert_eq!(work.failed_commands,0);
+    assert_eq!(work.failed_tools,4,"report refusals do not rewrite the successful original command");
+    assert!(work.running_processes.is_empty());
     assert_eq!(tools.calls.lock().unwrap().iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>(),
         ["read_file", "read_file", "start_process", "poll_process"], "no completed work, process or owner result may be replayed to repair a report");
     assert_eq!(events.iter().filter(|event| matches!(event, AgentEngineEvent::ToolCompleted { result, .. }

@@ -9,7 +9,6 @@ import { toDisplayText } from '@/common/chat/displayText';
 import { Badge, Typography } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import ConversationErrorNote from './ConversationErrorNote';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 
 const { Text } = Typography;
@@ -34,12 +33,9 @@ const MessageAgentStatus: React.FC<MessageAgentStatusProps> = ({ message }) => {
     conversation?.currentAgent?.label ||
     backendText.charAt(0).toUpperCase() + backendText.slice(1);
 
-  // Hide disconnected status from historical messages (no longer emitted but may exist in DB)
-  if ((status as string) === 'disconnected') return null;
-  if (status === 'error') return <ConversationErrorNote
-    error={{ message: '', agentLabel: agentNameText || undefined }}
-    timestamp={message.created_at} turnId={message.turn_id} sessionId={message.conversation_id}
-  />;
+  // Lifecycle status does not carry a failure cause. The exact canonical
+  // failed-Turn projection owns its error card; cancellation owns its notice.
+  if (status === 'error') return null;
 
   const getStatusBadge = () => {
     switch (status) {

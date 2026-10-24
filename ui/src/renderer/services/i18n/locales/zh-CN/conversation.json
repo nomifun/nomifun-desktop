@@ -112,7 +112,7 @@
     "expandDetails": "技术细节",
     "collapseDetails": "收起技术细节",
     "fallbackTitle": "本次请求未完成",
-    "fallbackBody": "本次请求失败，暂时无法确定具体原因。请查看技术细节；如果问题持续出现，请提交反馈并附上这些信息。",
+    "fallbackBody": "未记录可确认的错误来源。请检查下方原始详情和已有结果，再决定如何继续。",
     "details": {
       "rawDetail": "原始详情",
       "nativeCode": "原生错误码",
@@ -142,7 +142,9 @@
       "providerId": "服务商标识",
       "sessionModel": "会话所选模型",
       "missingResourceKinds": "缺少资源类型",
-      "missingResourceOperations": "缺少资源操作"
+      "missingResourceOperations": "缺少资源操作",
+      "source": "来源",
+      "stage": "发生位置"
     },
     "incompleteReasons": {
       "blocked_work": {
@@ -188,17 +190,16 @@
       "recovery_guard": {
         "title": "任务恢复校验未通过",
         "body": "应用未能确认任务可以安全恢复，本轮任务已停止。请检查已有文件和过程记录，再新建会话发送剩余任务。"
+      },
+      "completion_report_rejected": {
+        "title": "任务完成报告未通过检查",
+        "body": "模型提交的完成报告没有通过检查，本轮已停止。已完成的结果会保留，请检查未完成事项后继续。"
       }
     },
     "resolution": {
       "retry": "稍后重试，或重新发送这条消息。",
       "wait_for_current_response": "请等待当前回复结束后再发送下一条消息。",
       "start_new_session": "请新建一个对话后继续。",
-      "reconnect_agent": "请重启或重新连接所选 Agent 后重试。",
-      "check_agent_login": "请先登录所选 Agent，或刷新它的凭证。",
-      "check_agent_installation": "请检查 Agent 的安装状态和本地命令配置。",
-      "check_agent_version": "请更新 Agent，或修复协议版本不兼容问题。",
-      "check_local_command": "请安装缺失的命令，或确认它已经加入 PATH。",
       "check_provider_credentials": "请在设置中检查模型服务商的 API Key 或账号凭证。",
       "check_provider_billing": "请检查模型服务商的余额、额度或配额。",
       "check_provider_base_url": "请检查模型服务商的 Base URL、接口路径、代理和 API 兼容性。",
@@ -303,58 +304,6 @@
         "title": "会话正在处理上一条消息",
         "body": "当前会话还有回复未结束。请等待本次回复完成后再发送新的消息。"
       },
-      "USER_AGENT_NOT_INSTALLED": {
-        "title": "所选 Agent 未安装",
-        "body": "请先安装该 Agent 依赖的 CLI 或应用，然后在设置中重新连接。"
-      },
-      "USER_AGENT_STARTUP_FAILED": {
-        "title": "所选 Agent 启动失败",
-        "body": "Agent 进程在准备完成前退出了。请检查安装、登录状态和本地命令配置。"
-      },
-      "USER_AGENT_DISCONNECTED": {
-        "title": "所选 Agent 已断开连接",
-        "body": "Agent 在处理本次消息时断开了连接。请重启或重新连接 Agent 后重试。"
-      },
-      "USER_AGENT_AUTH_REQUIRED": {
-        "title": "所选 Agent 需要登录",
-        "body": "请先登录该 Agent 或刷新凭证，然后重新发送消息。"
-      },
-      "USER_AGENT_SESSION_NOT_FOUND": {
-        "title": "Agent 会话已丢失",
-        "body": "Agent 已无法识别当前会话。请新建对话或重新连接 Agent。"
-      },
-      "USER_AGENT_UNSUPPORTED_METHOD": {
-        "title": "所选 Agent 不支持该操作",
-        "body": "当前 Agent 无法处理这个请求。可以尝试切换 Agent 或升级当前 Agent。"
-      },
-      "USER_AGENT_INVALID_PARAMS": {
-        "title": "所选 Agent 拒绝了请求",
-        "body": "Agent 认为请求格式无效。可以简化消息内容，或切换到其他 Agent。"
-      },
-      "USER_AGENT_HANDSHAKE_FAILED": {
-        "title": "Agent 握手失败",
-        "body": "所选 Agent 未能完成启动握手。请重启或重新连接该 Agent 后重试。"
-      },
-      "USER_AGENT_HANDSHAKE_TIMEOUT": {
-        "title": "Agent 握手超时",
-        "body": "所选 Agent 未在预期时间内完成启动握手。请检查该 Agent 的运行环境，重启或重新连接后重试。"
-      },
-      "USER_AGENT_PROTOCOL_MISMATCH": {
-        "title": "Agent 协议版本不兼容",
-        "body": "所选 Agent 使用的协议版本不兼容。请升级 Agent，或切换到兼容的 Agent。"
-      },
-      "USER_AGENT_NO_PREVIOUS_SESSION": {
-        "title": "无法恢复上一次 Agent 会话",
-        "body": "Agent 无法恢复之前的会话状态。请新建对话后继续。"
-      },
-      "USER_AGENT_COMMAND_NOT_FOUND": {
-        "title": "找不到 Agent 命令",
-        "body": "未找到已配置的 Agent 命令。请先安装该命令，或在设置中更新命令路径。"
-      },
-      "USER_AGENT_MISSING_ENV": {
-        "title": "Agent 缺少必要环境变量",
-        "body": "该 Agent 需要的环境变量尚未配置。请在设置或 shell 环境中补齐后重新连接。"
-      },
       "USER_LLM_PROVIDER_AUTH_FAILED": {
         "title": "模型服务认证未通过",
         "body": "模型服务认证未通过，但暂时无法确定是凭证还是认证方式问题。请核对 API Key 所属服务商、有效期和认证方式后重试。"
@@ -430,8 +379,8 @@
         "bodyWithPath": "项目目录“{{workspacePath}}”已不存在或无法访问。请恢复目录，或选择其他项目新建会话或任务。"
       },
       "UNKNOWN_UPSTREAM_ERROR": {
-        "title": "上游 Agent 或模型服务商出错",
-        "body": "收到上游错误，但暂时无法准确分类。可以查看下方详情或提交反馈。"
+        "title": "本次请求未完成",
+        "body": "未记录可确认的错误来源。请检查下方原始详情和已有结果，再决定如何继续。"
       },
       "EXECUTION_MODEL_PROVIDER_UNAVAILABLE": {
         "title": "模型服务暂时不可用",
@@ -600,6 +549,14 @@
       "CAPABILITY_ACTION_NOT_MATERIALIZED": {
         "title": "请新建会话",
         "body": "此会话依赖已更新的能力，请新建会话继续；已有记录会保留"
+      },
+      "AGENT_FAILURE_SOURCE_UNRECORDED": {
+        "title": "本次请求失败，来源未记录",
+        "body": "已保存的记录缺少明确的错误原因，无法确认是否可以安全重试。请检查原始详情和已有结果。"
+      },
+      "NOMIFUN_RUNTIME_FAILED": {
+        "title": "任务执行过程中出错",
+        "body": "NomiFun 在处理本次任务时停止。请检查下方具体原因和已有结果，再继续处理剩余事项。"
       }
     },
     "adjustAndRetry": "调整后重试",
@@ -746,7 +703,25 @@
       }
     },
     "copyDetails": "复制技术细节",
-    "renewSubscription": "续订"
+    "renewSubscription": "续订",
+    "editAndResend": "编辑后重新发送",
+    "sources": {
+      "nomifun": "NomiFun",
+      "user_llm_provider": "模型服务",
+      "operating_system": "操作系统"
+    },
+    "stages": {
+      "preparation": "准备任务",
+      "context_assembly": "整理上下文",
+      "model_response": "接收模型回复",
+      "tool_validation": "检查工具请求",
+      "tool_execution": "执行工具",
+      "completion_report": "检查完成报告",
+      "persistence": "保存记录",
+      "resource_cleanup": "释放任务资源",
+      "recovery": "恢复任务",
+      "turn_execution": "处理本轮请求"
+    }
   },
   "workspace": {
     "title": "项目",

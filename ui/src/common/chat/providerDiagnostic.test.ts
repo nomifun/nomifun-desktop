@@ -32,3 +32,16 @@ test('diagnostic prose never supplies or changes a provider reason', () => {
   const typed = { reason: 'auth_failed' as const, httpStatus: 401 };
   expect(normalizeAgentStreamError({ ...error, providerDiagnostic: typed })?.providerDiagnostic).toEqual(typed);
 });
+
+test('provider envelope detail remains sanitized evidence and cannot change the typed cause', () => {
+  const providerDetail = 'Parameter temperature is not supported; quoted example says key expired. '
+    + 'https://user:password-secret@api.example.com/v1?token=query-secret\nAuthorization: Bearer header-secret';
+  const diagnostic = normalizeModelFailureDiagnostic({ reason: 'invalid_request', providerDetail });
+  expect(diagnostic?.reason).toBe('invalid_request');
+  expect(diagnostic?.providerDetail).toContain('Parameter temperature is not supported');
+  for (const secret of ['password-secret', 'query-secret', 'header-secret']) {
+    expect(diagnostic?.providerDetail).not.toContain(secret);
+  }
+  expect(normalizeModelFailureDiagnostic({ reason: 'invented', providerDetail })).toBeUndefined();
+  expect(normalizeModelFailureDiagnostic({ reason: 'invalid_request', providerDetail: 'a'.repeat(2500) })?.providerDetail?.length).toBe(2000);
+});

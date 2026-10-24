@@ -237,6 +237,16 @@
   min-width: 0;
 }
 
+.message-error-note__origin {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
 .message-error-note__context-row {
   display: grid;
   grid-template-columns: minmax(72px, max-content) minmax(0, 1fr);

@@ -327,7 +327,7 @@ test.each(['failed', 'canceled'] as const)('%s terminal tasks remove the running
   expect(page.queryByRole('button', { name: '预览图片：产物' })).toBeNull();
   if (status === 'failed') {
     expect(page.getByRole('alert').textContent).toBe(conversation.agentError.codes.CONVERSATION_GENERATION_FAILED.title);
-    expect(page.getByText('生成服务返回错误').closest('[hidden]')).not.toBeNull();
+    expect(page.getByText('生成服务返回错误').closest('[hidden]')).toBeNull();
     fireEvent.click(page.getByRole('button', { name: conversation.agentError.expandDetails }));
     expect(page.getByText('生成服务返回错误').closest('[hidden]')).toBeNull();
     expect(page.getAllByText('image-model').some(element => element.tagName === 'DD')).toBe(true);
@@ -341,7 +341,7 @@ test('task status-read failures use shared guidance and retry without creating a
   const page = renderTasks();
   expect(await page.findByRole('alert')).toBeTruthy();
   expect(page.getByRole('alert').textContent).toBe(conversation.agentError.codes.CONVERSATION_CREATION_STATUS_FAILED.title);
-  expect(page.getByText('Original status diagnostic').closest('[hidden]')).not.toBeNull();
+  expect(page.getByText('Original status diagnostic').closest('[hidden]')).toBeNull();
   list.mockResolvedValue([]);
   fireEvent.click(page.getByRole('button', { name: common.retry }));
   await waitFor(() => expect(page.queryByRole('alert')).toBeNull());
@@ -360,7 +360,7 @@ test.each(['expired_key', 'insufficient_quota', 'spend_limit_reached'] as const)
   const page = renderTasks();
   expect((await page.findByRole('alert')).textContent).toBe(conversation.agentError.providerReasons[reason].title);
   expect(page.getByText(conversation.agentError.providerReasons[reason].body)).toBeTruthy();
-  expect(page.getByText('Safe captured transport detail').closest('[hidden]')).not.toBeNull();
+  expect(page.getByText('Safe captured transport detail').closest('[hidden]')).toBeNull();
   expect(page.container.textContent).not.toContain('sk-do-not-display');
   fireEvent.click(page.getByRole('button', { name: conversation.agentError.expandDetails }));
   expect(page.getByText('Safe captured transport detail').closest('[hidden]')).toBeNull();

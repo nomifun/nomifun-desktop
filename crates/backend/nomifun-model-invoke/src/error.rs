@@ -5,53 +5,12 @@
 //! [`InvokeErrorKind`] so callers ("按错误语义自愈" loops: key rotation,
 //! failover, retry) can branch on semantics instead of parsing strings.
 
-use serde::Serialize;
 use nomifun_net::secret_redaction::redact_url_queries as transport_cause_detail;
 use nomifun_api_types::ModelTechnicalCapability;
 pub use nomifun_api_types::{ModelFailureDiagnostic, ModelFailureReason};
 pub use nomifun_net::provider_gateway_error::GatewayBusinessError;
 
-/// Machine-readable classification of an invocation failure.
-/// Wire values are snake_case (serialized into API error payloads/logs).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InvokeErrorKind {
-    /// Upstream rejected our credentials (401/403).
-    Auth,
-    /// Upstream rate limit (429); `retry_after_ms` may carry the parsed Retry-After.
-    RateLimited,
-    /// Account/billing quota exhausted (distinct from a transient 429).
-    QuotaExhausted,
-    /// The model does not declare the requested task.
-    UnsupportedTask,
-    /// No registered adapter serves the resolved (protocol, task).
-    NoAdapter,
-    /// The connection profile a route requires is not configured.
-    MissingConnection,
-    /// Caller-supplied parameters are malformed (also 400/422 upstream).
-    InvalidParams,
-    /// Provider refused the content on policy grounds.
-    ContentPolicy,
-    /// Provider-side failure (5xx or unclassified non-2xx).
-    ProviderError,
-    /// A remote async job reached a terminal failure state (reported by the
-    /// provider's job-status endpoint, not an HTTP-level error).
-    JobFailed,
-    /// Transport-level failure (DNS/connect/TLS/read).
-    Network,
-    /// The request timed out.
-    Timeout,
-    /// Provider response could not be understood.
-    ParseError,
-    /// The URL answered with a document (HTML/XML) instead of an API payload —
-    /// almost always a wrong path, not a provider fault. Kept distinct from
-    /// [`InvokeErrorKind::ParseError`] so the diagnosis can name the address.
-    NonApiResponse,
-    /// Poll was requested on an adapter/job that cannot be polled.
-    NotPollable,
-    /// Local provider/connection configuration is incomplete or invalid.
-    Config,
-}
+pub use nomifun_agent_contracts::ModelInvocationFailureKind as InvokeErrorKind;
 
 /// The invocation-layer error: a kind + human-readable message, optionally
 /// annotated with the upstream HTTP status and a parsed Retry-After hint.
@@ -317,6 +276,8 @@ impl InvokeError {
                 .map(|value| redactor.redact(value)).and_then(|value| nomifun_net::secret_redaction::sanitized_endpoint(&value));
             diagnostic.transport_detail = diagnostic.transport_detail.as_deref()
                 .map(|value| redactor.redact(value).chars().take(1000).collect());
+            diagnostic.provider_detail = diagnostic.provider_detail.as_deref()
+                .map(|value| redactor.redact(value).chars().take(1000).collect());
         }
         self
     }
@@ -348,48 +309,16 @@ fn native_cause_reason(error: &(dyn std::error::Error + 'static)) -> Option<Mode
 }
 
 impl From<InvokeError> for nomifun_common::AppError {
-    fn from(e: InvokeError) -> Self {
-        use InvokeErrorKind::*;
+    fn from(error: InvokeError) -> Self {
         use nomifun_common::AppError;
-        let msg = e.to_string();
-        if e.is_task_configuration_changed() {
-            return AppError::Conflict(msg);
+        if error.is_task_configuration_changed() {
+            return AppError::SessionConfigurationChanged(error.message);
         }
-        match e.kind {
-            // Upstream rejected our stored credentials — an operator problem, surfaced as a gateway failure.
-            Auth => AppError::BadGateway(msg),
-            // The provider itself failed (5xx / unclassified non-2xx).
-            ProviderError => AppError::BadGateway(msg),
-            // The remote async job reached a terminal failure state.
-            JobFailed => AppError::BadGateway(msg),
-            // Transport-level failure reaching the provider.
-            Network => AppError::BadGateway(msg),
-            // Upstream account quota exhausted — not the client's request, not retryable now.
-            QuotaExhausted => AppError::BadGateway(msg),
-            // The provider answered something we could not understand.
-            ParseError => AppError::BadGateway(msg),
-            // The configured address served a web page. This is a configuration
-            // fault the operator can fix, not an upstream outage.
-            NonApiResponse => AppError::BadRequest(msg),
-            // The model does not declare the requested task — a bad client request.
-            UnsupportedTask => AppError::BadRequest(msg),
-            // Caller-supplied parameters are malformed.
-            InvalidParams => AppError::BadRequest(msg),
-            // The connection profile this route needs is not configured for the provider.
-            MissingConnection => AppError::BadRequest(msg),
-            // Provider/connection configuration is incomplete or invalid.
-            Config => AppError::BadRequest(msg),
-            // Poll was requested for a job that cannot be polled.
-            NotPollable => AppError::BadRequest(msg),
-            // Preserve timeout semantics end to end.
-            Timeout => AppError::Timeout(msg),
-            // Preserve 429 semantics end to end (AppError::RateLimited carries no message).
-            RateLimited => AppError::RateLimited,
-            // Valid request refused by the provider's content policy.
-            ContentPolicy => AppError::UnprocessableEntity(msg),
-            // Server-side wiring gap: a route resolved to a protocol nothing registered.
-            NoAdapter => AppError::Internal(msg),
+        if error.is_catalog_failure() {
+            return AppError::Internal(error.message);
         }
+        let diagnostic = error.model_failure_diagnostic();
+        AppError::ModelInvocation { kind: error.kind, message: error.message, diagnostic }
     }
 }
 
@@ -475,30 +404,39 @@ mod tests {
     }
 
     #[test]
-    fn app_error_mapping_covers_every_kind() {
+    fn app_error_boundary_preserves_kinds_diagnostics_and_http_semantics() {
         use InvokeErrorKind::*;
-        type Check = fn(&AppError) -> bool;
-        let cases: Vec<(InvokeErrorKind, Check)> = vec![
-            (Auth, |a| matches!(a, AppError::BadGateway(_))),
-            (ProviderError, |a| matches!(a, AppError::BadGateway(_))),
-            (JobFailed, |a| matches!(a, AppError::BadGateway(_))),
-            (Network, |a| matches!(a, AppError::BadGateway(_))),
-            (QuotaExhausted, |a| matches!(a, AppError::BadGateway(_))),
-            (ParseError, |a| matches!(a, AppError::BadGateway(_))),
-            (UnsupportedTask, |a| matches!(a, AppError::BadRequest(_))),
-            (InvalidParams, |a| matches!(a, AppError::BadRequest(_))),
-            (MissingConnection, |a| matches!(a, AppError::BadRequest(_))),
-            (Config, |a| matches!(a, AppError::BadRequest(_))),
-            (NotPollable, |a| matches!(a, AppError::BadRequest(_))),
-            (Timeout, |a| matches!(a, AppError::Timeout(_))),
-            (RateLimited, |a| matches!(a, AppError::RateLimited)),
-            (ContentPolicy, |a| matches!(a, AppError::UnprocessableEntity(_))),
-            (NoAdapter, |a| matches!(a, AppError::Internal(_))),
-        ];
-        for (kind, check) in cases {
-            let app: AppError = InvokeError::new(kind, "boom").into();
-            assert!(check(&app), "kind {kind:?} mapped to unexpected {app:?}");
+        for (kind, status) in [
+            (Auth, 502), (ProviderError, 502), (JobFailed, 502), (Network, 502),
+            (QuotaExhausted, 502), (ParseError, 502), (Timeout, 502),
+            (NonApiResponse, 400), (UnsupportedTask, 400), (InvalidParams, 400),
+            (MissingConnection, 400), (Config, 400), (NotPollable, 400),
+            (RateLimited, 429), (ContentPolicy, 422), (NoAdapter, 500),
+        ] {
+            let mut diagnostic = ModelFailureDiagnostic::new(ModelFailureReason::TlsFailure);
+            diagnostic.provider_id = Some("exact-provider".into());
+            diagnostic.model_name = Some("actual-model".into());
+            diagnostic.endpoint = Some("https://example.test/v1/messages".into());
+            diagnostic.http_status = Some(503);
+            diagnostic.request_id = Some("original-request".into());
+            diagnostic.transport_detail = Some("certificate verification failed".into());
+            let mut invoke = InvokeError::new(kind, "original sanitized detail");
+            invoke.diagnostic = Some(diagnostic.clone());
+            let app: AppError = invoke.into();
+            assert_eq!(app.status_code().as_u16(), status, "kind {kind:?}");
+            assert_eq!(app.error_details().unwrap()["model_failure"]["diagnostic"],
+                serde_json::to_value(&diagnostic).unwrap());
+            assert!(matches!(app, AppError::ModelInvocation { kind: actual, message, diagnostic: cause }
+                if actual == kind && message == "original sanitized detail" && cause == diagnostic));
         }
+    }
+
+    #[test]
+    fn local_catalog_and_configuration_causes_do_not_become_provider_failures() {
+        let catalog: AppError = InvokeError::catalog("catalog database could not be read").into();
+        assert!(matches!(catalog, AppError::Internal(_)));
+        let changed: AppError = InvokeError::task_configuration_changed("the admitted route changed").into();
+        assert!(matches!(changed, AppError::SessionConfigurationChanged(_)));
     }
 
     #[test]

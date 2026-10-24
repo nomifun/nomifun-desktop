@@ -117,7 +117,7 @@ fn report_only_refusal(
         let reason = serde_json::json!({
             "status":"not_executed",
             "code":"REPORT_ONLY_ACTION_CLOSED",
-            "phase":match phase { AgentExecutionPhase::DeliveryReview => "delivery_review", AgentExecutionPhase::EndIntentReview => "end_intent_review", _ => "completion_review" },
+            "phase":match phase { AgentExecutionPhase::EndIntentReview => "end_intent_review", _ => "completion_review" },
             "tool":call.name,
             "message":"Only this newly proposed batch was held before dispatch because completion review is report-only. No call in this new batch ran. This is a phase restriction, not a missing capability or a command failure. Earlier calls in this same accepted turn retain their original receipts and invocation status; they were not erased, cancelled, or moved into an earlier turn. Determine whether original work ran from its original receipts, never from this refused new batch. Submit report_completion alone with a fresh call ID, using the original observations and unchanged runtime counts. Do not repeat settled actions, discover capabilities, or reopen the plan to repair this account. Missing or uncertain evidence and valid blockers remain unresolved."
         });
@@ -209,9 +209,6 @@ mod tests {
         assert_eq!(reject_tool_surface_batch(&calls, &definitions, &surface, AgentExecutionPhase::Execution).unwrap().disposition,
             ToolBatchDisposition::WorkAccounting, "the schema shape cannot choose the host phase");
         assert!(reject_tool_surface_batch(&calls[1..], &definitions, &surface, AgentExecutionPhase::CompletionReview).is_none());
-        let delivery = reject_tool_surface_batch(&calls, &definitions, &surface, AgentExecutionPhase::DeliveryReview).unwrap();
-        let payload: serde_json::Value = serde_json::from_str(&delivery.results[0].1.as_ref().unwrap().output_text()).unwrap();
-        assert_eq!(payload["phase"], "delivery_review");
     }
 
     #[test]

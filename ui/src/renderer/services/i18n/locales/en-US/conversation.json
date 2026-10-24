@@ -112,7 +112,7 @@
     "expandDetails": "Technical details",
     "collapseDetails": "Hide technical details",
     "fallbackTitle": "The request did not complete",
-    "fallbackBody": "This request failed, and the specific cause is not yet known. Review the technical details; if the problem persists, send feedback with that information.",
+    "fallbackBody": "The failure source was not recorded. Review the original detail and existing results before continuing.",
     "details": {
       "rawDetail": "Original detail",
       "nativeCode": "Native error code",
@@ -142,7 +142,9 @@
       "providerId": "Provider ID",
       "sessionModel": "Session-selected model",
       "missingResourceKinds": "Missing resource kinds",
-      "missingResourceOperations": "Missing resource operations"
+      "missingResourceOperations": "Missing resource operations",
+      "source": "Source",
+      "stage": "During"
     },
     "incompleteReasons": {
       "blocked_work": {
@@ -188,17 +190,16 @@
       "recovery_guard": {
         "title": "Task recovery validation failed",
         "body": "The app could not confirm that this task could be safely restored, so this turn stopped. Review the existing files and process record, then start a new conversation with the remaining task."
+      },
+      "completion_report_rejected": {
+        "title": "The completion report did not pass its checks",
+        "body": "The model submitted a completion report that did not pass its checks, so this turn stopped. Existing results are retained; review the unfinished work before continuing."
       }
     },
     "resolution": {
       "retry": "Retry later, or send this message again.",
       "wait_for_current_response": "Wait for the current response to finish before sending another message.",
       "start_new_session": "Start a new conversation before continuing.",
-      "reconnect_agent": "Restart or reconnect the selected agent, then retry.",
-      "check_agent_login": "Log in to the selected agent, or refresh its credentials.",
-      "check_agent_installation": "Check the agent installation and local command configuration.",
-      "check_agent_version": "Update the agent, or fix the protocol version incompatibility.",
-      "check_local_command": "Install the missing command, or confirm it has been added to PATH.",
       "check_provider_credentials": "Check the model provider API key or account credentials in settings.",
       "check_provider_billing": "Check the model provider balance, credits, or quota.",
       "check_provider_base_url": "Check the model provider Base URL, API path, proxy, and API compatibility.",
@@ -303,58 +304,6 @@
         "title": "Conversation is busy",
         "body": "Another response is still running. Wait for it to finish before sending a new message."
       },
-      "USER_AGENT_NOT_INSTALLED": {
-        "title": "The selected agent is not installed",
-        "body": "Install the CLI or app required by this agent, then reconnect it in settings."
-      },
-      "USER_AGENT_STARTUP_FAILED": {
-        "title": "The selected agent failed to start",
-        "body": "The agent process exited before it was ready. Check its installation, login status, and local command configuration."
-      },
-      "USER_AGENT_DISCONNECTED": {
-        "title": "The selected agent disconnected",
-        "body": "The agent connection closed while handling this message. Restart or reconnect the agent, then retry."
-      },
-      "USER_AGENT_AUTH_REQUIRED": {
-        "title": "The selected agent needs authentication",
-        "body": "Log in to the selected agent or refresh its credentials, then send the message again."
-      },
-      "USER_AGENT_SESSION_NOT_FOUND": {
-        "title": "The agent session was lost",
-        "body": "The agent no longer recognizes this session. Start a new chat or reconnect the agent."
-      },
-      "USER_AGENT_UNSUPPORTED_METHOD": {
-        "title": "The selected agent does not support this action",
-        "body": "This agent cannot handle the requested operation. Try another agent or update the current one."
-      },
-      "USER_AGENT_INVALID_PARAMS": {
-        "title": "The selected agent rejected the request",
-        "body": "The agent reported that the request format was invalid. Try simplifying the message or switching agents."
-      },
-      "USER_AGENT_HANDSHAKE_FAILED": {
-        "title": "Agent handshake failed",
-        "body": "The selected agent could not complete its startup handshake. Restart or reconnect the agent, then retry."
-      },
-      "USER_AGENT_HANDSHAKE_TIMEOUT": {
-        "title": "Agent handshake timed out",
-        "body": "The selected agent did not finish its startup handshake in time. Check its execution environment, then restart or reconnect the agent and retry."
-      },
-      "USER_AGENT_PROTOCOL_MISMATCH": {
-        "title": "Agent protocol versions are incompatible",
-        "body": "The selected agent is using an incompatible protocol version. Update the agent or switch to a compatible one."
-      },
-      "USER_AGENT_NO_PREVIOUS_SESSION": {
-        "title": "Previous agent session is unavailable",
-        "body": "The agent cannot resume the previous session. Start a new conversation to continue."
-      },
-      "USER_AGENT_COMMAND_NOT_FOUND": {
-        "title": "Agent command was not found",
-        "body": "The configured agent command could not be found. Install it or update the command path in settings."
-      },
-      "USER_AGENT_MISSING_ENV": {
-        "title": "Agent environment is missing required variables",
-        "body": "The agent needs environment variables that are not configured. Add them in settings or your shell environment, then reconnect."
-      },
       "USER_LLM_PROVIDER_AUTH_FAILED": {
         "title": "Model service authentication failed",
         "body": "Model service authentication failed, but the exact credential or authentication method issue is unconfirmed. Check the API key provider, expiration, and authentication method, then retry."
@@ -430,8 +379,8 @@
         "bodyWithPath": "The project directory \"{{workspacePath}}\" no longer exists or cannot be accessed. Restore it, or create a new conversation or task with another project."
       },
       "UNKNOWN_UPSTREAM_ERROR": {
-        "title": "The upstream agent or provider failed",
-        "body": "The app received an upstream error but could not classify it confidently. Review the details below or send feedback."
+        "title": "The request did not complete",
+        "body": "The failure source was not recorded. Review the original detail and existing results before continuing."
       },
       "EXECUTION_MODEL_PROVIDER_UNAVAILABLE": {
         "title": "The model service is temporarily unavailable",
@@ -600,6 +549,14 @@
       "CAPABILITY_ACTION_NOT_MATERIALIZED": {
         "title": "Start a new session",
         "body": "This session relies on capabilities that have changed. Start a new session to continue; your existing records will be kept."
+      },
+      "AGENT_FAILURE_SOURCE_UNRECORDED": {
+        "title": "The request failed; its source was not recorded",
+        "body": "The saved record has no classified failure cause, so a safe retry cannot be confirmed. Review the original detail and existing results."
+      },
+      "NOMIFUN_RUNTIME_FAILED": {
+        "title": "The task encountered an execution error",
+        "body": "NomiFun stopped while handling this task. Review the cause below and existing results before continuing the remaining work."
       }
     },
     "adjustAndRetry": "Adjust and retry",
@@ -746,7 +703,25 @@
       }
     },
     "copyDetails": "Copy technical details",
-    "renewSubscription": "Renew subscription"
+    "renewSubscription": "Renew subscription",
+    "editAndResend": "Edit and resend",
+    "sources": {
+      "nomifun": "NomiFun",
+      "user_llm_provider": "Model service",
+      "operating_system": "Operating system"
+    },
+    "stages": {
+      "preparation": "Preparing the task",
+      "context_assembly": "Preparing context",
+      "model_response": "Receiving the model response",
+      "tool_validation": "Checking a tool request",
+      "tool_execution": "Running a tool",
+      "completion_report": "Checking the completion report",
+      "persistence": "Saving records",
+      "resource_cleanup": "Releasing task resources",
+      "recovery": "Recovering the task",
+      "turn_execution": "Processing the current turn"
+    }
   },
   "workspace": {
     "title": "Project",

@@ -73,7 +73,11 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
     if (message.content.type !== 'error') return null;
     if (message.content.idmm_notice) return null;
     if (message.content.recovery || message.content.execution_pause || conversationContext?.executionPause) return null;
-    if (message.content.error?.retryable === false || message.content.error?.code === 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE') return null;
+    if (message.content.error?.retryable !== true || message.content.error?.code === 'NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE') return null;
+    // An unclassified historical flag cannot establish that replay is safe.
+    if (message.content.error.code === 'UNKNOWN_UPSTREAM_ERROR'
+      || message.content.error.code === 'AGENT_FAILURE_SOURCE_UNRECORDED'
+      || message.content.error.ownership === 'unknown_upstream') return null;
     if (conversationContext?.type !== 'nomi') return null;
     if (conversationContext.readOnly === true) return null;
     if (conversationContext.isProcessing === true) return null;
@@ -117,7 +121,7 @@ const MessageTips: React.FC<{ message: IMessageTips; compactError?: boolean }> =
   const retryButton = retry ? (
     <button type='button' className='message-error-note__retry' data-testid='message-error-retry' onClick={retry}>
       <Refresh theme='outline' size='14' fill='currentColor' aria-hidden='true' />
-      {t('common.retry', { defaultValue: 'Retry' })}
+      {t('conversation.agentError.editAndResend')}
     </button>
   ) : null;
 

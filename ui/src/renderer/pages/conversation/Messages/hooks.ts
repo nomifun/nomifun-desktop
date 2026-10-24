@@ -12,7 +12,6 @@ import {
 } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import type {
-  AgentStreamErrorInfo,
   IMessageText,
   IMessageThinking,
   IMessageTips,
@@ -518,117 +517,6 @@ const normalizeAgentTransition = (
   };
 };
 
-const normalizePersistedWorkspaceRuntimeError = (
-  parsed: Record<string, unknown>,
-  message: string
-): AgentStreamErrorInfo | undefined => {
-  if (parsed.code !== 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED') {
-    return undefined;
-  }
-
-  const details = isRecord(parsed.details) ? parsed.details : undefined;
-  const workspacePath = typeof details?.workspace_path === 'string' ? details.workspace_path : undefined;
-  if (!workspacePath) {
-    return undefined;
-  }
-
-  const persistedError = isRecord(parsed.error) ? parsed.error : undefined;
-  const detail = typeof persistedError?.detail === 'string' ? persistedError.detail : message;
-
-  return {
-    ...normalizeAgentStreamError(parsed.error),
-    message,
-    code: 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED',
-    ownership: 'nomifun',
-    detail,
-    workspacePath,
-    retryable: false,
-    feedback_recommended: false,
-  };
-};
-
-const normalizePersistedSessionConfigurationError = (
-  parsed: Record<string, unknown>, message: string
-): AgentStreamErrorInfo | undefined => {
-  const error = isRecord(parsed.error) ? parsed.error : undefined;
-  const code = error?.code ?? parsed.code;
-  if (code !== 'NOMIFUN_SESSION_CONFIGURATION_CHANGED') return undefined;
-  return { ...normalizeAgentStreamError(parsed.error), message, code:'NOMIFUN_SESSION_CONFIGURATION_CHANGED', ownership:'nomifun', detail:typeof error?.detail==='string' ? error.detail : message,
-    retryable:false, feedback_recommended:false, resolution:{kind:'start_new_session',target:'new_conversation'} };
-};
-
-const classifyPersistedSendFailure = (
-  parsed: Record<string, unknown>,
-  message: string
-): AgentStreamErrorInfo | undefined => {
-  if (typeof parsed.source !== 'string' && typeof parsed.code !== 'string') {
-    return undefined;
-  }
-
-  const persistedCode = typeof parsed.code === 'string' ? parsed.code : undefined;
-  if (persistedCode === 'BAD_GATEWAY') {
-    return {
-      message,
-      code: 'UNKNOWN_UPSTREAM_ERROR',
-      ownership: 'unknown_upstream',
-      detail: message,
-      retryable: true,
-      feedback_recommended: true,
-    };
-  }
-
-  if (persistedCode === 'INTERNAL_ERROR') {
-    return {
-      message,
-      code: 'NOMIFUN_INTERNAL_ERROR',
-      ownership: 'nomifun',
-      detail: message,
-      retryable: true,
-      feedback_recommended: true,
-    };
-  }
-
-  if (persistedCode?.startsWith('NOMIFUN_')) {
-    return { message, code: persistedCode, ownership: 'nomifun', detail: message, retryable: true };
-  }
-  if (persistedCode?.startsWith('USER_AGENT_')) {
-    return { message, code: persistedCode, ownership: 'user_agent', detail: message, retryable: true };
-  }
-  if (persistedCode?.startsWith('USER_LLM_PROVIDER_')) {
-    return {
-      message,
-      code: persistedCode,
-      ownership: 'user_llm_provider',
-      detail: message,
-      retryable: false,
-      feedback_recommended: false,
-    };
-  }
-  if (persistedCode === 'UNKNOWN_UPSTREAM_ERROR') {
-    return {
-      message,
-      code: persistedCode,
-      ownership: 'unknown_upstream',
-      detail: message,
-      retryable: true,
-      feedback_recommended: true,
-    };
-  }
-
-  if (parsed.source === 'send_failed') {
-    return {
-      message,
-      code: 'NOMIFUN_INTERNAL_ERROR',
-      ownership: 'nomifun',
-      detail: message,
-      retryable: true,
-      feedback_recommended: true,
-    };
-  }
-
-  return undefined;
-};
-
 const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
   if (msg.type !== 'tips') return msg;
   const parsed = parseJsonRecord(msg.content);
@@ -641,14 +529,7 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
       : 'error';
   const tipType = normalizeTipType(parsed.type, fallbackType);
   const turnId = msg.turn_id;
-  const structuredError =
-    tipType === 'error'
-      ? (normalizePersistedWorkspaceRuntimeError(parsed, parsed.content) ??
-        normalizePersistedSessionConfigurationError(parsed, parsed.content) ??
-        normalizeAgentStreamError(parsed.error) ??
-        classifyPersistedSendFailure(parsed, parsed.content) ??
-        normalizeAgentStreamError({ ...parsed, message: parsed.content }))
-      : undefined;
+  const structuredError = tipType === 'error' ? normalizeAgentStreamError(parsed.error) : undefined;
   const recovery = normalizeTruncatedTurnRecovery(parsed.recovery);
   const notice = normalizeIdmmDecisionNotice(parsed.idmm_notice);
   const userInputRequest = tipType !== 'error' ? normalizeAgentUserInputRequest(parsed.user_input_request) : undefined;

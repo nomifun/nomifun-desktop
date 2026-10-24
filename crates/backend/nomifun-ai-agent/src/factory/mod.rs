@@ -31,7 +31,7 @@ pub fn build_agent_model_config_resolver(
                     ModelTask::Chat,
                 )
                 .await
-                .map_err(|error| AppError::BadRequest(error.to_string()))?;
+                .map_err(AppError::from)?;
             Ok(RuntimeModelConfigBinding {
                 provider_id: resolved.provider_id,
                 model: resolved.model,

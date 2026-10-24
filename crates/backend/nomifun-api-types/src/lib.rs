@@ -63,7 +63,7 @@ pub use agent_discovery::{
 };
 pub use agent_error::{
     AgentErrorCode, AgentErrorOwnership, AgentErrorResolution, AgentErrorResolutionKind,
-    AgentErrorResolutionTarget, AgentStreamErrorData, AgentTaskIncompleteReason, AgentResourceBindingFailure,
+    AgentErrorResolutionTarget, AgentStreamErrorData, AgentFailureStage, AgentTaskIncompleteReason, AgentResourceBindingFailure,
     ModelFailureDiagnostic, ModelFailureReason, SystemExecutionFailure,
 };
 pub use agent_execution::{

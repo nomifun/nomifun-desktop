@@ -16,11 +16,11 @@ async fn held_external_writer()->(tempfile::TempDir,EngineTurnJournal,nomifun_db
 }
 
 fn failed_outcome()->StrictJsonValue {
-    StrictJsonValue(serde_json::to_value(nomifun_ai_agent::engine_sdk::EngineTurnOutcome::failed("original execution failure")).unwrap())
+    StrictJsonValue(serde_json::to_value(nomifun_ai_agent::engine_sdk::EngineTurnOutcome::failed("original execution failure", nomifun_agent_runtime::AgentTurnFailure::Runtime { stage:nomifun_agent_contracts::AgentFailureStage::Recovery })).unwrap())
 }
 
 fn failed_event()->String {
-    serde_json::to_string(&AgentEngineEvent::TurnFailed {model_steps:0,message:"original execution failure".into(),failure:None}).unwrap()
+    serde_json::to_string(&AgentEngineEvent::TurnFailed {model_steps:0,message:"original execution failure".into(),failure:Some(nomifun_agent_runtime::AgentTurnFailure::Runtime { stage:nomifun_agent_contracts::AgentFailureStage::Recovery })}).unwrap()
 }
 
 #[tokio::test]

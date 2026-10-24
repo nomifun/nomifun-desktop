@@ -30,6 +30,18 @@ pub enum AgentTurnFailure {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diagnostic: Option<nomifun_agent_contracts::ModelFailureDiagnostic>,
     },
+    TaskIncomplete { reason: nomifun_agent_contracts::AgentTaskIncompleteReason },
+    Runtime { stage: nomifun_agent_contracts::AgentFailureStage },
+    ModelInvocation {
+        #[serde(rename = "invocation_kind")]
+        kind: nomifun_agent_contracts::ModelInvocationFailureKind,
+        diagnostic: nomifun_agent_contracts::ModelFailureDiagnostic,
+    },
+    ResourceBindingIncomplete { diagnostic: nomifun_agent_contracts::AgentResourceBindingFailure },
+    SessionConfigurationChanged,
+    WorkspacePathUnsupported { path: String },
+    WorkspaceDirectoryUnavailable { path: String },
+    HostPermissionDenied,
     ModelStreamEndedWithoutTerminal,
     InvalidModelEvent,
     /// A fatal native preflight failure, preserving owner dispatch and cleanup
@@ -248,13 +260,13 @@ pub enum AgentEngineEvent {
     CompletionReported {
         report: crate::AgentCompletionReport,
     },
-    /// Valid accounting still awaits one bounded public-result review. This
-    /// is not an accepted delivery, terminal event or independent verification.
+    /// Read-only recognition of an already-recorded current-generation candidate.
+    /// New execution never writes this event or treats it as accepted delivery.
     CompletionCandidateRecorded {
         report: crate::AgentCompletionReport,
     },
-    /// A user correction superseded an in-flight report-only review. None
-    /// of that response's proposed calls was executed or delivered.
+    /// Read-only recognition of a superseded current-generation review response.
+    /// New execution never creates this retired review phase.
     DeliveryReviewSuperseded {
         step: u16,
         discarded_tool_call_ids: Vec<ToolCallId>,

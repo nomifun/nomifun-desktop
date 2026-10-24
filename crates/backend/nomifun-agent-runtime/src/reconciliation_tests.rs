@@ -199,6 +199,27 @@ fn real_tool_progress_after_end_review_restores_the_same_review_phase_as_live_ex
 }
 
 #[test]
+fn rejected_report_tail_retains_the_original_durable_report_only_lock() {
+    let mut cp = checkpoint();
+    cp.work.successful_commands = 1;
+    let mut work = cp.work.clone(); work.failed_tools = 1;
+    let tail = vec![started(), AgentEngineEvent::ToolCallCompleted { step:1, call:ChatToolCall {
+        call_id:"bad-report".into(), name:crate::completion::TOOL_NAME.into(), provider_metadata:None,
+        arguments:StrictJsonValue(json!({"summary":"Earlier result","status":"delivered"})),
+    } }, AgentEngineEvent::ToolCompleted { step:1, runtime_hold:Some(crate::RuntimeToolHoldReason::ArgumentsRejected),
+        result:AgentToolResult::text("bad-report".into(),json!({"status":"not_executed","code":"INVALID_TOOL_ARGUMENTS",
+            "tool":"report_completion","issues":[{"schema_path":"/additionalProperties"}]}).to_string(),true),
+    }, AgentEngineEvent::CompletionReview { status:cp.work.clone() }, AgentEngineEvent::WorkStatus { status:work }];
+    let recovered = reconcile_execution_tail(&cp,1,&tail,&Default::default(),&Default::default(),&Default::default()).unwrap();
+    assert!(recovered.checkpoint.completion_review.is_report_only());
+    assert_eq!(recovered.checkpoint.completion_review.input_revision,1);
+    assert!(!recovered.checkpoint.plan.needs_replan,"a report refusal cannot reopen settled work during reconciliation");
+    assert_eq!(recovered.checkpoint.work.successful_commands,1);
+    assert_eq!(recovered.checkpoint.work.failed_tools,1);
+    assert!(!recovered.observations.iter().any(|event|matches!(event,AgentEngineEvent::ToolStarted { .. })));
+}
+
+#[test]
 fn accepted_child_wait_recovers_its_exact_request_without_replaying_a_tool_or_resetting_budget() {
     let cursor=|value:char|crate::AgentCollaborationSnapshot::observation_cursor(BTreeMap::from([("owned".into(),crate::AgentCollaborationObservation{
         state:value.to_string().repeat(64),ready:value.to_string().repeat(64)})])).unwrap();
