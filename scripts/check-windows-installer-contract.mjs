@@ -23,7 +23,7 @@ const noticePath = resolve(root, 'NOTICE');
 const expectedCliVersion = '2.11.2';
 const expectedUpstreamCommit = '499df79be65ef8c0670abc0207cd9e37b55d8491';
 const expectedUpstreamSha256 = 'ee84148e405adc4d736a46456dd8345a644751bd1f28a335dd7fd833a32d7c3e';
-const expectedCustomSha256 = '646077ad9b18482820aab29237248a2585fbc1944525ff96393ad8c316415311';
+const expectedCustomSha256 = 'b95b2224ca916c8301120217cb3105ce49c10eaa568df54647961eb1c17fb9a9';
 const errors = [];
 
 function check(condition, message) {
@@ -140,7 +140,7 @@ let sourceBytes = Buffer.alloc(0);
 if (existsSync(templatePath)) {
   sourceBytes = readFileSync(templatePath);
   source = sourceBytes.toString('utf8');
-  check(sourceBytes.length === 31370, 'vendored template byte length changed unexpectedly');
+  check(sourceBytes.length === 33331, 'vendored template byte length changed unexpectedly');
   check(sha256(sourceBytes) === expectedCustomSha256, 'vendored template SHA-256 changed unexpectedly');
   check(source.split(/\r?\n/).length >= 940, 'vendored template looks incomplete');
 }
@@ -206,13 +206,26 @@ for (const token of [
   '{{association-description association.description ext}}',
   '!include "utils.nsh"',
   '!include "FileAssociation.nsh"',
-  'WriteUninstaller "$INSTDIR\\uninstall.exe"',
+  'WriteUninstaller "$PLUGINSDIR\\payload\\uninstall.exe"',
 ]) {
   checkIncludes(source, token, 'vendored template lost a Tauri packaging anchor: ' + token);
 }
 for (const mode of ['downloadBootstrapper', 'embedBootstrapper', 'offlineInstaller']) {
   checkIncludes(source, '"${INSTALLWEBVIEW2MODE}" == "' + mode + '"', 'vendored template lost WebView2 mode: ' + mode);
 }
+check(source.indexOf('WriteUninstaller "$PLUGINSDIR\\payload\\uninstall.exe"') < source.indexOf('!insertmacro NSIS_HOOK_PREINSTALL'),
+  'the complete payload must be extracted before pausing the old app');
+check(source.indexOf('Call NomiFunMaintenanceApply') < source.indexOf('; Save $INSTDIR in registry'),
+  'application file replacement must finish before publishing new installer metadata');
+check(source.indexOf('Call NomiFunMaintenanceCommit') < source.indexOf('; Save $INSTDIR in registry'),
+  'cancelled file replacement must not publish a new installed version or shortcuts');
+for (const token of ['Function .onInstFailed', 'Function .onGUIEnd', 'Call NomiFunMaintenanceAbort', 'Call NomiFunMaintenanceCommit']) {
+  checkIncludes(source, token, 'installer must retain recoverable maintenance lifecycle: ' + token);
+}
+const maintenanceHooks = readFileSync(resolve(root, 'apps/desktop/nsis/keyboard-hooks.nsh'), 'utf8');
+check(!maintenanceHooks.includes('--keyboard-stop'), 'installer must not send a new maintenance CLI to an unknown old application');
+checkIncludes(maintenanceHooks, 'NOMIFUN_MAINTENANCE_BINARY', 'installer must embed its own maintenance helper');
+checkIncludes(maintenanceHooks, 'command.next', 'maintenance commands must be published atomically');
 for (const hook of [
   'NSIS_HOOK_PREINSTALL',
   'NSIS_HOOK_POSTINSTALL',
@@ -246,7 +259,7 @@ if (renderedArg) {
     for (const target of Object.values(requiredResources)) {
       const path = target.replace(/[\\/]$/, '').replaceAll('/', '\\');
       const entry = /[\\/]$/.test(target)
-        ? `CreateDirectory "$INSTDIR\\${path}"`
+        ? `CreateDirectory "$PLUGINSDIR\\payload\\${path}"`
         : `File /a "/oname=${path}"`;
       checkIncludes(rendered, entry, 'rendered installer lost bundled resource: ' + target);
     }

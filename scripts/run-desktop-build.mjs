@@ -3,6 +3,7 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { buildComputerWorker, rustHostTarget } from './computer/build-worker.mjs';
+import { buildKeyboardMaintenance } from './build-keyboard-maintenance.mjs';
 
 export function desktopBuildCommand(platform, args) {
   if (platform === 'darwin' || platform === 'linux') {
@@ -19,6 +20,12 @@ if (import.meta.main) {
     const target = forwarded.find(argument => argument.startsWith('--target='))?.slice('--target='.length)
       ?? (targetIndex >= 0 ? forwarded[targetIndex + 1] : rustHostTarget());
     await buildComputerWorker({ target, profile: forwarded.includes('--debug') || forwarded.includes('-d') ? 'debug' : 'release' });
+    // Keep Cargo's implicit/explicit target selection identical to Tauri's so
+    // the helper is the actual sibling of MAINBINARYSRCPATH, including custom
+    // CARGO_TARGET_DIR and debug builds.
+    const explicitTarget = forwarded.some(argument => argument.startsWith('--target=')) || targetIndex >= 0;
+    await buildKeyboardMaintenance({ target: explicitTarget ? target : undefined,
+      profile: forwarded.includes('--debug') || forwarded.includes('-d') ? 'debug' : 'release' });
   }
   const invocation = desktopBuildCommand(process.platform, forwarded);
   const built = spawnSync(invocation.command, invocation.args, { stdio: 'inherit', env: { ...process.env, CI: 'true', NOMIFUN_EMBED_OFFICECLI: '1' } });

@@ -182,6 +182,7 @@ fn register_with_exit_at(
     stop: impl Fn() -> Result<()> + Send + Sync + 'static,
     exit: impl Fn() + Send + Sync + 'static,
 ) -> Result<DesktopGuard> {
+    let admission = crate::maintenance::admit_startup(&dir)?;
     let lock = open_lock(&dir)?;
     FileExt::try_lock_exclusive(&lock)
         .context("another desktop or maintenance operation owns GUI lifetime")?;
@@ -211,6 +212,7 @@ fn register_with_exit_at(
     )?;
     descriptor.sync_all()?;
     drop(descriptor);
+    drop(admission);
     let alive = Arc::new(AtomicBool::new(true));
     let active = alive.clone();
     let thread = std::thread::Builder::new()

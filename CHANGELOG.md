@@ -5,6 +5,11 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- Fix Windows upgrades from versions without the speech keyboard maintenance
+  command. Keep keyboard services paused through file replacement, restore the
+  previous application on cancellation or replacement failure, and recover
+  keyboard input and the retained update package after a failed preflight.
+
 ## v0.8.15 - 2026-10-25
 
 - **Upgrade notice:** back up or export important data before upgrading from

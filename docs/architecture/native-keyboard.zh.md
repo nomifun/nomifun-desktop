@@ -31,6 +31,7 @@ NomiFun Actor（字幕、OS 输入、模型、设置）
 | `crates/backend/nomifun-keyboard/src/protocol.rs` | 有界 JSON 帧、按键名解析及板载音频首部显式拒绝 |
 | `crates/backend/nomifun-keyboard/src/service.rs` | 严格 native v1/system 身份、单 owner、鉴权 IPC、NONE/Rearm、K1 冷启动、显示状态和设备停服 |
 | `crates/backend/nomifun-keyboard/src/desktop_control.rs` | GUI 停采端点、进程生命锁和退出证明 |
+| `crates/backend/nomifun-keyboard/src/maintenance/`、`maintenance.rs`、`bin/nomifun-keyboard-maintenance.rs` | 安装期间的启动门禁、文件替换/回滚、目标安装归属与运行恢复 |
 | `crates/backend/nomifun-keyboard/src/document.rs` | 文档/revision/操作状态机、选区插入、美化与取消协调 |
 | `apps/desktop/src/keyboard/mod.rs` | 按键/按钮共同 Actor、编辑保存屏障、音频与模型任务身份、字幕生命周期 |
 | `apps/desktop/src/keyboard/audio.rs`、`capture_input.rs`、`audio_dsp.rs` | 唯一原生输入 owner、首回调就绪、真实停止回执、有界 PCM 与重采样 |
@@ -69,7 +70,11 @@ StepFun 不强制 commit 后二遍纠错；未配置时使用供应商默认关�
 
 K3 在准备阶段撤销连接和起录，在录音阶段真实停采并丢弃本段，在识别阶段撤销提交/轮询和本地结果准入，在美化阶段取消请求并丢弃候选。普通 ASR 尚未上传时清空缓冲、不发请求；已提交的云端任务及流式已发送音频无法回收，但本地不再等待或接受其结果。K4 正常松开仍执行识别，不引入音量阈值猜测取消意图。
 
-禁用总开关或 K4 取消活动采集、阻止新录音，保留已定稿正文；总开关保留逐键偏好且不影响 K1。K2/K3 单键开关只更新主机操作授权，不重建设备释放屏障，不打断当前 K4 录音或吞掉松键。取消/关闭/锁屏/休眠/输入或设备丢失/退出撤销处理，恢复后重新按键。安装更新先通过鉴权端点确认 GUI 停采退出，再停串口 owner；失败或超时阻止换文件。完整卸载另清除登录登记，保留用户数据。
+禁用总开关或 K4 取消活动采集、阻止新录音，保留已定稿正文；总开关保留逐键偏好且不影响 K1。K2/K3 单键开关只更新主机操作授权，不重建设备释放屏障，不打断当前 K4 录音或吞掉松键。取消/关闭/锁屏/休眠/输入或设备丢失/退出撤销处理，恢复后重新按键。安装更新先通过鉴权端点确认 GUI 停采退出，再停串口 owner；失败或超时阻止换文件。完整卸载另清除属于该安装的登录登记，保留用户数据。
+
+Windows 安装器携带独立的 `nomifun-keyboard-maintenance`，在私有临时目录运行，不向未知旧版 exe 发送新命令，也不初始化数据库、模型或音频。安装包先完整解压新文件（含卸载器），维护进程持有 `maintenance.lock`、GUI 生命锁与设备 owner 锁，覆盖停服、文件替换和成功/失败/取消收尾。更新不先卸载旧版；只备份、替换本次 payload 声明的文件，失败或取消时逐文件核对恢复，不枚举用户数据。残留端点仅在取得生命锁后清理；旧版没有键盘服务是正常状态，旧 GUI 仍经安装器的应用退出检查处理。
+
+应用内更新使用可撤销的键盘暂停，撤销按住意图、等待真实停采、不等待云端完成，不把预检当成永久退出。预检失败或调用取消时恢复 Actor、重连和已验证安装包，系统锁屏状态仍有效，不自动开始录音。手动安装和应用内更新共用安装器维护协议；成功后按原运行意图和登录偏好恢复实际安装路径的服务，应用内更新的 GUI 重启保留 NSIS `/R` 和原始参数。卸载从删除文件开始后不再重启应用；无法确认回滚完整时要求修复，不能启动半更新程序。维护进程只在安装期间运行，不增加常驻服务或永久“更新中”标记。
 
 字幕错误位于正文外，简短状态可展开详情，不加入字数、编辑或复制。设置页只显示当前配置请求和本页主动测试反馈；系统输入状态与 ASR 操作失败保持分离。
 
@@ -83,12 +88,14 @@ K3 在准备阶段撤销连接和起录，在录音阶段真实停采并丢弃�
 | K1 | 原生显示/解除最小化，根 HWND 判断前台后隐藏 | AppKit 主线程激活或隐藏，Dock 重开 | GTK present/隐藏，由窗口管理器激活 |
 | 字幕 | 主线程 ShowWindow/SetWindowPos、原生可见性与置顶 | AppKit 显式首击编辑与原生隐藏回读 | GTK map WebKit、显式点击编辑、工作区定位与隐藏回读 |
 | 字幕编辑 | WebView2 系统选区复制、IME、Esc | WKWebView 的 Command+C、IME、Esc | WebKitGTK 系统选区复制、IME、Esc |
-| 安装/更新 | NSIS 换文件前调用 `--keyboard-stop` | 原生 updater 替换前停服，按实际新路径重新登记 | deb/rpm pre-install 以对应用户停服，升级保留登录偏好 |
-| 卸载 | 停服后 `--keyboard-unregister` 清专属 Run 值 | 随包 macOS 卸载脚本，先清登录服务 | deb/rpm pre-remove 区分升级/卸载；AppImage 使用随包脚本 |
+| 安装/更新 | 新安装包维护进程持锁停服、可恢复替换文件及恢复服务 | 原生 updater 替换前停服，按实际新路径重新登记 | deb/rpm pre-install 以对应用户停服，升级保留登录偏好 |
+| 卸载 | 包内维护工具停服并清理本安装拥有的 Run 值 | 随包 macOS 卸载脚本，先清登录服务 | deb/rpm pre-remove 区分升级/卸载；AppImage 使用随包脚本 |
 
 Linux 默认窗口路径使用 XWayland，GNOME/KDE 会话都需要相应服务端及系统剪贴板桥接，字幕通过 WebKitGTK 原生编辑路径使用它。正式 deb/rpm 提供 XWayland 依赖和专属 udev 规则；AppImage 的宿主依赖与权限由用户环境提供，具体安装步骤见[打包说明](../../apps/desktop/keyboard-packaging/README.md)。纯 Wayland 无 XWayland 不属于当前窗口后端。
 
-安装 hook 最多等待 90 秒，依次确认 GUI 停采退出、串口 owner 退出及 descriptor 自行清理；缺少串口 descriptor 不能跳过 GUI 停采。普通退出保留设备服务接收 K1，“退出全部服务”才退出 daemon。直接删除 .app/AppImage 不触发卸载回调，删除前执行随包脚本或 `--keyboard-unregister`；用户数据保留。
+Windows 安装器每个维护阶段最多等待 90 秒，依次确认 GUI 停采退出、串口 owner 退出及文件替换/回滚；缺少串口 descriptor 不能跳过 GUI 停采。普通退出保留设备服务接收 K1，“退出全部服务”才退出 daemon。直接删除 .app/AppImage 不触发卸载回调，删除前执行随包脚本或 `--keyboard-unregister`；用户数据保留。Windows 新维护流程的证据不能替代 macOS/Linux 原生包更新验收。
+
+Windows 的自动化、实际安装包和未覆盖范围见 [升级恢复验证](../validation/keyboard-upgrade-windows-2026-10-26.zh.md)。
 
 ## 构建与开发
 
@@ -98,6 +105,8 @@ Linux 默认窗口路径使用 XWayland，GNOME/KDE 会话都需要相应服务�
 | UI | `bun test --cwd ui src/renderer/pages/keyboardSubtitle/KeyboardSubtitle.test.tsx src/renderer/pages/keyboardSubtitle/subtitleText.test.ts src/renderer/pages/settings/KeyboardSettings.test.tsx` |
 | UI 合同 | `bun run typecheck`、`bun run check:desktop-ui-boundary`、`bun run check:i18n` |
 | 打包生命周期 | `bun test scripts/keyboard-packaging.test.mjs` |
+| Windows 安装原生回归 | `node scripts/validation/keyboard-upgrade-native-smoke.mjs --helper <绝对路径> --fixture <maintenance_fixture 绝对路径>`；独立 LOCALAPPDATA、真实 NSIS/锁/IPC，无音频、串口或真实登录项 |
+| Windows 更新暂停恢复 | `node scripts/validation/keyboard-native-update-recovery.mjs --binary <绝对路径> --mode streaming --frontend-build-id <当前 UUID> --report <绝对路径>`；另运行 `--mode platform`，合成输入、私有 WebView/模型 fixture、独立 Job 管理全部子进程 |
 | 原生 Actor | `keyboard_native_validation` example + `scripts/validation/keyboard-native-actor-smoke.mjs`（streaming/platform）；仅在 validation feature 和私有 profile 中注入合成输入 |
 | X11/Wayland 窗口与系统编辑 | `keyboard_window_validation` example；`scripts/validation/keyboard-x11-smoke.mjs`、`keyboard-wayland-smoke.mjs` |
 | 普通程序 | `cargo build -p nomifun-desktop --locked --features tauri/custom-protocol --bin nomifun-desktop -j3` |

@@ -143,6 +143,9 @@ foreach ($t in $triples) {
   $env:NOMIFUN_EMBED_OFFICECLI = '1'
   $workerPath = (& bun "$Root/scripts/computer/build-worker.mjs" --target $t --profile release | Select-Object -Last 1)
   if ($LASTEXITCODE -ne 0) { throw "Computer worker build failed for $t" }
+  $maintenanceProfile = if (($passthru -contains '--debug') -or ($passthru -contains '-d')) { 'debug' } else { 'release' }
+  $maintenancePath = (& bun "$Root/scripts/build-keyboard-maintenance.mjs" --target $t --profile $maintenanceProfile | Select-Object -Last 1)
+  if ($LASTEXITCODE -ne 0) { throw "Keyboard maintenance build failed for $t" }
   if ($signed) {
     $signTool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
     if (-not $signTool) { throw 'signtool.exe is required to sign the Computer worker before packaging' }
@@ -152,6 +155,10 @@ foreach ($t in $triples) {
     if ($LASTEXITCODE -ne 0) { throw 'Computer worker Authenticode signing failed' }
     & $signTool verify /pa $workerPath
     if ($LASTEXITCODE -ne 0) { throw 'Computer worker Authenticode verification failed' }
+    & $signTool @workerSignArgs $maintenancePath
+    if ($LASTEXITCODE -ne 0) { throw 'Keyboard maintenance Authenticode signing failed' }
+    & $signTool verify /pa $maintenancePath
+    if ($LASTEXITCODE -ne 0) { throw 'Keyboard maintenance Authenticode verification failed' }
   }
   # 第二个 --config 把 bundle.targets 锁成单一 NSIS(tauri.conf.json 里是全平台全列表)。
   # 用配置文件而非内联 JSON:PowerShell 5.1 会剥掉传给原生程序的双引号,内联 JSON 必坏。

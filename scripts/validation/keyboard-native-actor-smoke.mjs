@@ -46,7 +46,7 @@ function inspectBinary(options) {
   accessSync(options.binary, constants.X_OK);
   const file = openSync(options.binary, 'r');
   const hash = createHash('sha256');
-  const required = [options.buildId, '.synthetic-audio-fixture'];
+  const required = [options.buildId, '.synthetic-audio-fixture', 'successful_handoff_keeps_old_runtime_paused'];
   const seen = required.map(() => false);
   const buffer = Buffer.alloc(1024 * 1024);
   let tail = Buffer.alloc(0);
@@ -125,6 +125,12 @@ async function session(profile) {
     const result = await bounded(fixture.exited, 135000, 'Synthetic Actor fixture exceeded 135 seconds');
     const report = JSON.parse(readFileSync(fixtureReport, 'utf8'));
     if (result.code !== 0 || report.passed !== true || report.real_os_microphone !== false || report.asr_mode !== details.options.mode || !report.audio_source?.includes('synthetic')) throw new Error('Actor fixture failed or violated its requested synthetic mode');
+    const recovery = report.update_recovery;
+    if (recovery?.successful_handoff_keeps_old_runtime_paused !== true || recovery.cloud_completion_not_required !== true || recovery.automatic_recording_not_resumed !== true || recovery.disabled_and_unconfigured_keyboard_admit_maintenance !== true
+      || !Array.isArray(recovery.cases) || recovery.cases.length !== 4
+      || !['cancel_after_ready', 'cancel_during_native_stop', 'native_stop_timeout', 'external_native_stop_timeout'].every(scenario => recovery.cases.some(value => value.scenario === scenario && value.capture_recovered === true && value.old_hold_not_resumed === true && value.native_stop_proof_retained === true && value.preferences_preserved === true))) {
+      throw new Error('Actor fixture lacks successful handoff, failed-stop and cancelled-update recovery evidence');
+    }
     writeFileSync(join(profile, 'session-result.json'), JSON.stringify({ passed: true, fixtureExitCode: result.code, display, x11SocketPath: existsSync(`/tmp/.X11-unix/X${display}`) ? 'filesystem Unix socket' : 'abstract Unix socket', dbusSessionIsolated: true }));
   } finally {
     for (const value of children.reverse()) if (value.child.exitCode === null && value.child.signalCode === null) value.child.kill('SIGTERM');

@@ -171,7 +171,18 @@ pub(crate) fn token_equal(a: &str, b: &str) -> bool {
 pub fn run() -> Result<()> {
     run_at(runtime_dir()?, true)
 }
+/// Native package regression fixture. This entry is absent from production
+/// builds and never enumerates or opens a real serial device.
+#[cfg(feature = "maintenance-validation")]
+pub fn run_maintenance_fixture() -> Result<()> {
+    run_at(runtime_dir()?, false)
+}
 fn run_at(dir: PathBuf, scan_enabled: bool) -> Result<()> {
+    let admission = match crate::maintenance::admit_startup(&dir) {
+        Ok(admission) => admission,
+        Err(error) if error.is::<crate::maintenance::MaintenanceBusy>() => return Ok(()),
+        Err(error) => return Err(error),
+    };
     let lock_path = dir.join("owner.lock");
     ensure!(!lock_path.is_symlink(), "owner lock is a symlink");
     let lock = OpenOptions::new()
@@ -200,6 +211,7 @@ fn run_at(dir: PathBuf, scan_enabled: bool) -> Result<()> {
     serde_json::to_writer(&mut file, &descriptor)?;
     file.sync_all()?;
     drop(file);
+    drop(admission);
     let (tx, rx) = mpsc::sync_channel(64);
     let alive = Arc::new(AtomicBool::new(true));
     let accepting = alive.clone();
@@ -294,7 +306,7 @@ fn run_at(dir: PathBuf, scan_enabled: bool) -> Result<()> {
                             let _ = read_thread.join();
                             writing
                         })();
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "maintenance-validation"))]
                         if let Err(e) = &result {
                             eprintln!("IPC test connection: {e:#}");
                         }
@@ -381,7 +393,13 @@ pub fn request_shutdown_after_desktop_exit(
     proof: &crate::desktop_control::DesktopQuiescence,
 ) -> Result<()> {
     let dir = runtime_dir()?;
-    request_shutdown_with_proof_at(dir.join("owner.json"), Some(proof.proof_for(&dir)?))
+    request_shutdown_after_desktop_exit_in(&dir, proof)
+}
+pub(crate) fn request_shutdown_after_desktop_exit_in(
+    dir: &Path,
+    proof: &crate::desktop_control::DesktopQuiescence,
+) -> Result<()> {
+    request_shutdown_with_proof_at(dir.join("owner.json"), Some(proof.proof_for(dir)?))
 }
 fn request_shutdown_at(path: PathBuf) -> Result<()> {
     request_shutdown_with_proof_at(path, None)

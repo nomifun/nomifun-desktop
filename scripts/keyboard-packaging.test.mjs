@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { maintenanceBuildArgs } from './build-keyboard-maintenance.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const sourceDirectory = join(root, 'apps/desktop/keyboard-packaging');
@@ -48,10 +49,14 @@ describe('native keyboard packaging lifecycle', () => {
   test.skipIf(!makensis || !existsSync(makensis))('native NSIS compiler accepts both install and uninstall hooks', () => {
     const directory = mkdtempSync(join(tmpdir(), 'nomifun-keyboard-package-')); directories.push(directory);
     const source = join(directory, 'fixture.nsi');
+    const helper = join(directory, 'maintenance.exe');
+    writeFileSync(helper, 'MZ'); // compiler fixture only; native lifecycle runner executes the real helper
     writeFileSync(source, [
-      'Unicode true', 'RequestExecutionLevel user', '!include "LogicLib.nsh"', '!include "FileFunc.nsh"',
+      'Unicode true', 'SetCompress off', 'RequestExecutionLevel user', '!include "LogicLib.nsh"', '!include "FileFunc.nsh"',
       '!define MAINBINARYNAME "nomifun-desktop"', 'Var UpdateMode',
+      `!define NOMIFUN_MAINTENANCE_BINARY "${helper}"`,
       `!include "${join(root, 'apps/desktop/nsis/keyboard-hooks.nsh')}"`,
+      '!insertmacro NomiFunMaintenanceFunctions "" "no"', '!insertmacro NomiFunMaintenanceFunctions "un." "yes"',
       `OutFile "${join(directory, 'fixture.exe')}"`, 'Section', '!insertmacro NSIS_HOOK_PREINSTALL',
       'WriteUninstaller "$TEMP\\nomifun-keyboard-fixture-uninstall.exe"', 'SectionEnd', 'Section Uninstall',
       '!insertmacro NSIS_HOOK_PREUNINSTALL', 'SectionEnd',
@@ -72,11 +77,23 @@ describe('native keyboard packaging lifecycle', () => {
       for (const path of Object.values(config.bundle.linux[format].files)) expect(existsSync(join(root, 'apps/desktop', path))).toBe(true);
     }
     const hooks = readFileSync(join(root, 'apps/desktop/nsis/keyboard-hooks.nsh'), 'utf8');
-    expect(hooks).toContain('/TIMEOUT=90000');
-    expect(hooks).toContain('--keyboard-stop'); expect(hooks).toContain('--keyboard-unregister');
-    expect(hooks).toContain('keyboard-service\\desktop.json');
-    expect(hooks.indexOf('${FileExists} "$INSTDIR\\${MAINBINARYNAME}.exe"')).toBeLessThan(hooks.indexOf('nsExec::ExecToStack'));
+    expect(hooks).toContain('--parent-pid');
+    expect(hooks).toContain('NOMIFUN_MAINTENANCE_BINARY');
+    expect(hooks).toContain('NomiFunMaintenanceAbort');
+    expect(hooks).toContain('NomiFunMaintenanceCommit');
+    expect(hooks).not.toContain('nsExec::ExecToStack');
+    expect(hooks).not.toContain('--keyboard-stop');
     expect(readFileSync(join(sourceDirectory, '70-nomifun-keyboard.rules'), 'utf8')).not.toContain('0666');
+  });
+
+  test('maintenance builds beside the same implicit or explicit desktop target', () => {
+    const implicit = maintenanceBuildArgs({ profile: 'debug' });
+    expect(implicit).not.toContain('--target');
+    expect(implicit).toContain('dev');
+    const explicit = maintenanceBuildArgs({ target: 'x86_64-pc-windows-msvc' });
+    expect(explicit.slice(explicit.indexOf('--target'), explicit.indexOf('--target') + 2)).toEqual(['--target', 'x86_64-pc-windows-msvc']);
+    expect(explicit).toContain('release');
+    expect(() => maintenanceBuildArgs({ target: '../other' })).toThrow();
   });
 
   test.skipIf(process.platform === 'win32')('package scripts parse in a real POSIX shell', () => {

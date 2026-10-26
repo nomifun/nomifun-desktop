@@ -509,6 +509,31 @@ struct DownloadedUpdateCache<T> {
     slot: Mutex<DownloadedUpdateSlot<T>>,
 }
 
+/// Keep a claimed package recoverable while a cancellable native preflight is
+/// pending. Dropping the command future must not strand the slot in Installing.
+struct UpdatePreflightPackage<'a, T> {
+    cache: &'a DownloadedUpdateCache<T>,
+    version: String,
+    payload: Option<T>,
+}
+
+impl<'a, T> UpdatePreflightPackage<'a, T> {
+    fn new(cache: &'a DownloadedUpdateCache<T>, version: &str, payload: T) -> Self {
+        Self { cache, version: version.to_owned(), payload: Some(payload) }
+    }
+    fn handoff(mut self) -> T {
+        self.payload.take().expect("preflight package is handed off once")
+    }
+}
+
+impl<T> Drop for UpdatePreflightPackage<'_, T> {
+    fn drop(&mut self) {
+        if let Some(payload) = self.payload.take() {
+            self.cache.restore_before_handoff(&self.version, payload);
+        }
+    }
+}
+
 impl<T> Default for DownloadedUpdateCache<T> {
     fn default() -> Self {
         Self {
@@ -1009,16 +1034,26 @@ async fn install_update(
         Err(error) if error.handoff_may_have_started() => return Err(error.message()),
         Err(error) => return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: {}", error.message())),
     };
+    let preflight_package = UpdatePreflightPackage::new(&downloaded, &requested_version, package);
 
-    if !lifecycle_quit_fixture_active() {
-        if let Err(error) = keyboard::prepare_update(&app).await {
-            downloaded.restore_before_handoff(&requested_version, package);
-            return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: 键盘服务停止预检失败，安装包仍保留：{error}"));
+    let keyboard_pause = if !lifecycle_quit_fixture_active() {
+        match keyboard::prepare_update(&app).await {
+            Ok(pause) => pause,
+            Err(error) => {
+                return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: 键盘服务停止预检失败，安装包仍保留：{error}"));
+            }
         }
-    }
+    } else { None };
+    let package = preflight_package.handoff();
 
     #[cfg(target_os = "macos")]
-    return install_macos_update_retained(app, package, requested_version).await;
+    {
+        // The retained macOS worker may already have replaced bundle files on
+        // error. It owns final application exit, so an old runtime must not be
+        // resumed after handing that worker replacement authority.
+        if let Some(pause) = keyboard_pause { pause.commit(); }
+        return install_macos_update_retained(app, package, requested_version).await;
+    }
 
     #[cfg(not(target_os = "macos"))]
     {
@@ -1029,11 +1064,30 @@ async fn install_update(
     // failure can leave the app bundle half replaced. An Err here is NOT
     // recoverable in the renderer.
     if let Err(error) = package.update.install(&package.bytes) {
+        #[cfg(windows)]
+        {
+            // Upstream Windows install returns errors only while extracting
+            // the installer, before on_before_exit and process handoff. Keep
+            // both the downloaded package and existing keyboard usable.
+            let error = error.to_string();
+            downloaded.restore_before_handoff(&requested_version, package);
+            if let Some(pause) = keyboard_pause {
+                pause.cancel().await.map_err(|recovery| format!(
+                    "{UPDATE_NOT_RETAINED_ERROR}: {error}；键盘恢复未确认：{recovery}"
+                ))?;
+            }
+            return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: {error}"));
+        }
+        #[cfg(not(windows))]
+        {
+        if let Some(pause) = keyboard_pause { pause.commit(); }
         // Keep the slot claimed: a failed replacement is not an installable
         // package. The renderer reports the failure before its terminal exit.
         tracing::error!(version = %requested_version, %error, "desktop update installation failed");
         return Err(error.to_string());
+        }
     }
+    if let Some(pause) = keyboard_pause { pause.commit(); }
     downloaded.finish_install(&requested_version);
     Ok(())
     }
@@ -3379,6 +3433,21 @@ fn main() -> std::process::ExitCode {
     if let Some(code) = nomifun_app::commands::run_mcp_stdio_subcommand_if_present() {
         return code;
     }
+    // Ordinary launches during package replacement must return before touching
+    // storage, backend state or native windows. The admitted launcher keeps its
+    // shared gate until Keyboard publishes its GUI lifetime endpoint.
+    let keyboard_startup_admission = if lifecycle_quit_fixture_active() {
+        None
+    } else {
+        match nomifun_keyboard::maintenance::try_admit_startup() {
+            Ok(Some(admission)) => Some(admission),
+            Ok(None) => return std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("NomiFun startup admission failed: {error:#}");
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    };
     // SAFETY: all headless modes returned and no worker/native GUI has started.
     // Use the tested XWayland path on mixed Wayland/X11 sessions by default;
     // an explicit user GDK_BACKEND remains authoritative.
@@ -3838,6 +3907,7 @@ fn main() -> std::process::ExitCode {
         .manage(AwakeState(Mutex::new(None)))
         .manage(browser_surface::commands::BrowserSurfaceState::default())
         .manage(QuitFlag(AtomicBool::new(false)))
+        .manage(keyboard::StartupAdmissionState::new(keyboard_startup_admission))
         .manage(Arc::new(ExitCoordinator::default()))
         .manage(DownloadedUpdateState::default())
         .invoke_handler(browser_surface::security::app_commands_only(tauri::generate_handler![
@@ -4230,6 +4300,39 @@ mod tests {
         // concurrent download or a second install must still be refused.
         assert!(cache.begin_download("0.3.8", |_| 0).is_err());
         assert!(cache.take_ready("0.3.8").is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_native_preflight_retains_verified_package_for_retry() {
+        let cache = Arc::new(DownloadedUpdateCache::default());
+        cache.begin_download("0.8.16", |_| 0).unwrap();
+        cache.finish_download("0.8.16", vec![1, 2, 3]).unwrap();
+        let claimed = cache.clone();
+        let (waiting, ready) = tokio::sync::oneshot::channel();
+        let preflight = tokio::spawn(async move {
+            let package = claimed.take_ready("0.8.16").unwrap();
+            let _retained = UpdatePreflightPackage::new(&claimed, "0.8.16", package);
+            let _ = waiting.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        assert_eq!(cache.status().state, "installing");
+        preflight.abort();
+        assert!(preflight.await.unwrap_err().is_cancelled());
+        assert_eq!(cache.status().state, "ready");
+        assert_eq!(cache.take_ready("0.8.16").unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn package_handoff_does_not_recover_a_possibly_replacing_installer() {
+        let cache = DownloadedUpdateCache::default();
+        cache.begin_download("0.8.16", |_| 0).unwrap();
+        cache.finish_download("0.8.16", "verified bytes").unwrap();
+        let payload = cache.take_ready("0.8.16").unwrap();
+        let package = UpdatePreflightPackage::new(&cache, "0.8.16", payload).handoff();
+        assert_eq!(package, "verified bytes");
+        assert_eq!(cache.status().state, "installing");
+        assert!(cache.take_ready("0.8.16").is_err());
     }
 
     #[test]

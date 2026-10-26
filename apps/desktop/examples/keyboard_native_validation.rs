@@ -665,6 +665,98 @@ async fn caret_and_close(app: &tauri::AppHandle, fixture: &Fixture) -> Result<Va
     close(app).await?;
     Ok(json!({"utf16_caret_insertion":true,"close_discards_draft":true,"old_revision_close_allowed_same_document":true,"stale_close_rejected_new_document":true,"closed_late_final_isolated":true}))
 }
+async fn update_recovery(app: &tauri::AppHandle, fixture: &Fixture) -> Result<Value> {
+    action(app, "open").await?;
+    edit(app, "更新前已定稿。", None).await?;
+    let settings = keyboard::validation_snapshot(app)["settings"].clone();
+    let mut expected = "更新前已定稿。".to_owned();
+    let mut cases = Vec::new();
+
+    let original_settings: Settings = serde_json::from_value(settings.clone())?;
+    for enabled in [false, true] {
+        let mut unconfigured = original_settings.clone();
+        unconfigured.enabled = enabled;
+        unconfigured.asr_model = None;
+        unconfigured.text_model = None;
+        keyboard::validation_request(app, None, Some(unconfigured.clone())).await.map_err(anyhow::Error::msg)?;
+        let pause = keyboard::prepare_update(app).await.map_err(anyhow::Error::msg)?
+            .context("unconfigured actor did not admit maintenance")?;
+        pause.cancel().await.map_err(anyhow::Error::msg)?;
+        ensure!(keyboard::validation_snapshot(app)["settings"] == serde_json::to_value(unconfigured)?,
+            "maintenance changed an unconfigured keyboard's preferences");
+    }
+    keyboard::validation_request(app, None, Some(original_settings)).await.map_err(anyhow::Error::msg)?;
+
+    for scenario in ["cancel_after_ready", "cancel_during_native_stop", "native_stop_timeout", "external_native_stop_timeout"] {
+        let final_requests = count(&fixture.final_requests);
+        let uploads = count(&fixture.uploads);
+        let delayed_stop = scenario != "cancel_after_ready";
+        keyboard::validation_hold_capture_stop(app, delayed_stop).await.map_err(anyhow::Error::msg)?;
+        hardware(app, None).await?;
+        start(app, fixture, "维护取消的半句话不能写入").await?;
+
+        if scenario == "cancel_after_ready" {
+            let pause = keyboard::prepare_update(app).await.map_err(anyhow::Error::msg)?
+                .context("synthetic actor did not provide update guard")?;
+            settled(app, &expected).await?;
+            ensure!(keyboard::validation_update_paused(app), "ready preflight did not retain update admission");
+            // Keep the old physical key down during maintenance. Neither it nor
+            // another press can revive the capture cancelled by this update.
+            hardware(app, Some(true)).await?;
+            assert_stable(app, &expected).await?;
+            pause.cancel().await.map_err(anyhow::Error::msg)?;
+        } else if scenario == "cancel_during_native_stop" {
+            let copy = app.clone();
+            let pending = tauri::async_runtime::spawn(async move { keyboard::prepare_update(&copy).await });
+            wait_state(app, |state| state["audioState"]["state"] == "stopping").await?;
+            ensure!(keyboard::validation_update_paused(app), "preflight did not hold admission while native stop was pending");
+            pending.abort();
+            ensure!(pending.await.is_err(), "cancelled preflight unexpectedly completed");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            while keyboard::validation_update_paused(app) {
+                ensure!(tokio::time::Instant::now() < deadline, "cancelled preflight left admission paused");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            ensure!(keyboard::validation_snapshot(app)["audioState"]["state"] == "stopping",
+                "cancel claimed native capture released before its proof");
+        } else {
+            let failed = if scenario == "external_native_stop_timeout" {
+                keyboard::prepare_external_maintenance(app).await.is_err()
+            } else {
+                keyboard::prepare_update(app).await.is_err()
+            };
+            ensure!(failed, "update succeeded while native capture release was held");
+            ensure!(!keyboard::validation_update_paused(app), "failed update left reconnect admission paused");
+            ensure!(keyboard::validation_snapshot(app)["audioState"]["state"] == "stopping",
+                "failed update lost the pending native capture owner");
+        }
+
+        keyboard::validation_hold_capture_stop(app, false).await.map_err(anyhow::Error::msg)?;
+        assert_stable(app, &expected).await?;
+        ensure!(!keyboard::validation_update_paused(app), "cancel/failed update left admission paused");
+        ensure!(count(&fixture.final_requests) == final_requests && count(&fixture.uploads) == uploads,
+            "update stop waited for cloud recognition or uploaded its cancelled recording");
+        ensure!(keyboard::validation_snapshot(app)["settings"] == settings, "update modified keyboard preferences");
+        // A fresh user gesture must work after every cancellation/failure.
+        hardware(app, None).await?;
+        let text = format!("{scenario}后恢复。");
+        start(app, fixture, &text).await?;
+        hardware(app, Some(false)).await?;
+        expected.push_str(&text);
+        settled(app, &expected).await?;
+        cases.push(json!({"scenario":scenario,"capture_recovered":true,"old_hold_not_resumed":true,
+            "native_stop_proof_retained":true,"preferences_preserved":true}));
+    }
+
+    keyboard::prepare_external_maintenance(app).await.map_err(anyhow::Error::msg)?;
+    hardware(app, Some(true)).await?;
+    assert_stable(app, &expected).await?;
+    ensure!(keyboard::validation_update_paused(app), "committed handoff resumed the replaced runtime");
+    Ok(json!({"cases":cases,"successful_handoff_keeps_old_runtime_paused":true,
+        "cloud_completion_not_required":true,"automatic_recording_not_resumed":true,
+        "disabled_and_unconfigured_keyboard_admit_maintenance":true,
+        "scope":"production actor with synthetic capture; package file replacement is a separate witness"}))
+}
 async fn validate(app: &tauri::AppHandle, settings: Settings, fixture: &Fixture) -> Result<Value> {
     keyboard::validation_request(app, None, Some(settings)).await.map_err(anyhow::Error::msg)?;
     hardware(app, None).await?;
@@ -672,10 +764,12 @@ async fn validate(app: &tauri::AppHandle, settings: Settings, fixture: &Fixture)
     let boundaries = cancellation_boundaries(app, fixture).await.context("ASR/polish cancellation")?;
     let heavy = repeated_use(app, fixture).await.context("repeated K4/K3 use")?;
     let caret_close = caret_and_close(app, fixture).await.context("caret/close")?;
+    let update_recovery = update_recovery(app, fixture).await.context("update pause/cancel/failure recovery")?;
     Ok(json!({"passed":true,"asr_mode":if fixture.platform_asr{"platform"}else{"streaming"},
         "audio_source":"explicit synthetic PCM fixture; no OS microphone","real_os_microphone":false,
         "provider_requests_loopback_only":true,"editor":editor,"cancellation":boundaries,"heavy_use":heavy,
-        "caret_and_close":caret_close,"pcm_samples":count(&fixture.pcm),"uploads":count(&fixture.uploads),
+        "caret_and_close":caret_close,"update_recovery":update_recovery,
+        "pcm_samples":count(&fixture.pcm),"uploads":count(&fixture.uploads),
         "asr_final_requests":count(&fixture.final_requests),"polish_requests":count(&fixture.polish)}))
 }
 #[derive(Debug)]

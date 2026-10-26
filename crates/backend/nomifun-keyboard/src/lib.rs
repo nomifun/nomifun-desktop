@@ -2,5 +2,6 @@
 //! live in the device process. The reducer is shared by every desktop platform.
 pub mod document;
 pub mod desktop_control;
+pub mod maintenance;
 pub mod protocol;
 pub mod service;

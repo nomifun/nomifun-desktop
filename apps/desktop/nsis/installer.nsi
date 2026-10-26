@@ -3,7 +3,8 @@
 ; Upstream SHA-256: ee84148e405adc4d736a46456dd8345a644751bd1f28a335dd7fd833a32d7c3e
 ; Upstream source: https://raw.githubusercontent.com/tauri-apps/tauri/499df79be65ef8c0670abc0207cd9e37b55d8491/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi
 ; Modified by NomiFun: separate current-user binaries from durable data, reject
-; the legacy colliding install location, and preserve user data on uninstall.
+; the legacy colliding install location, preserve user data on uninstall, and
+; keep package-owned maintenance alive across recoverable file replacement.
 ; SPDX-License-Identifier: Apache-2.0
 
 Unicode true
@@ -77,6 +78,9 @@ Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
+
+!insertmacro NomiFunMaintenanceFunctions "" "no"
+!insertmacro NomiFunMaintenanceFunctions "un." "yes"
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -242,6 +246,11 @@ Function PageReinstall
     !insertmacro MUI_HEADER_TEXT "$(alreadyInstalled)" "$(chooseMaintenanceOption)"
   ; Upgrading
   ${ElseIf} $R0 = 1
+    ; Replace in place under the new package's maintenance transaction. Running
+    ; the previous uninstaller first would destroy the old rollback source.
+    ${If} $WixMode <> 1
+      Abort
+    ${EndIf}
     StrCpy $R1 "$(olderOrUnknownVersionInstalled)"
     StrCpy $R2 "$(uninstallBeforeInstalling)"
     StrCpy $R3 "$(dontUninstall)"
@@ -603,20 +612,16 @@ Section WebView2
 SectionEnd
 
 Section Install
-  SetOutPath $INSTDIR
-
-  !ifmacrodef NSIS_HOOK_PREINSTALL
-    !insertmacro NSIS_HOOK_PREINSTALL
-  !endif
-
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
-
-  ; Copy main executable
+  ; Extract and verify the complete payload before asking the old app to stop.
+  ; The maintenance helper backs up only these application-owned target paths.
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR\payload"
+  ClearErrors
   File "${MAINBINARYSRCPATH}"
 
   ; Copy resources
   {{#each resources_dirs}}
-    CreateDirectory "$INSTDIR\\{{this}}"
+    CreateDirectory "$PLUGINSDIR\payload\\{{this}}"
   {{/each}}
   {{#each resources}}
     File /a "/oname={{this.[1]}}" "{{no-escape @key}}"
@@ -627,6 +632,33 @@ Section Install
     File /a "/oname={{this}}" "{{no-escape @key}}"
   {{/each}}
 
+  ; Include the uninstaller in the same rollback transaction as the app files.
+  WriteUninstaller "$PLUGINSDIR\payload\uninstall.exe"
+  ${If} ${Errors}
+    MessageBox MB_OK|MB_ICONSTOP "NomiFun could not extract its complete installation payload. The installed application was not replaced." /SD IDOK
+    Abort
+  ${EndIf}
+
+  !ifmacrodef NSIS_HOOK_PREINSTALL
+    !insertmacro NSIS_HOOK_PREINSTALL
+  !endif
+
+  ; Pre-keyboard applications have no maintenance endpoint. Retain the normal
+  ; process-exit check, without ever probing their unsupported command line.
+  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  Call NomiFunMaintenanceApply
+  SetOutPath $INSTDIR
+
+  ; Auto close this page for passive mode
+  ${If} $PassiveMode = 1
+    SetAutoClose true
+  ${EndIf}
+SectionEnd
+
+Function .onInstSuccess
+  Call NomiFunMaintenanceCommit
+  ; Publish installer metadata only after the application transaction commits.
+  ; Failed/cancelled replacement therefore leaves the old registration intact.
   ; Create file associations
   {{#each file_associations as |association| ~}}
     {{#each association.ext as |ext| ~}}
@@ -641,9 +673,6 @@ Section Install
     WriteRegStr SHCTX "Software\Classes\\{{protocol}}\DefaultIcon" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\",0"
     WriteRegStr SHCTX "Software\Classes\\{{protocol}}\shell\open\command" "" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\" $\"%1$\""
   {{/each}}
-
-  ; Create uninstaller
-  WriteUninstaller "$INSTDIR\uninstall.exe"
 
   ; Save $INSTDIR in registry for future installations
   WriteRegStr SHCTX "${MANUPRODUCTKEY}" "" $INSTDIR
@@ -701,13 +730,6 @@ Section Install
     !insertmacro NSIS_HOOK_POSTINSTALL
   !endif
 
-  ; Auto close this page for passive mode
-  ${If} $PassiveMode = 1
-    SetAutoClose true
-  ${EndIf}
-SectionEnd
-
-Function .onInstSuccess
   ; Check for `/R` flag only in silent and passive installers because
   ; GUI installer has a toggle for the user to (re)start the app
   ${If} $PassiveMode = 1
@@ -718,6 +740,14 @@ Function .onInstSuccess
       nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" "$R0"
     ${EndIf}
   ${EndIf}
+FunctionEnd
+
+Function .onInstFailed
+  Call NomiFunMaintenanceAbort
+FunctionEnd
+
+Function .onGUIEnd
+  Call NomiFunMaintenanceAbort
 FunctionEnd
 
 Function un.onInit
@@ -747,6 +777,19 @@ Section Uninstall
   !endif
 
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+
+  ; After deletion starts an interrupted uninstall must never restart an app
+  ; whose resources may already be missing. Keep the maintenance locks held.
+  StrCpy $NomiFunMaintenanceCommand "remove"
+  Call un.NomiFunMaintenancePublish
+  ${If} $NomiFunMaintenanceResult == 0
+    Abort "$NomiFunMaintenanceDetail"
+  ${EndIf}
+  StrCpy $NomiFunMaintenanceExpected "removing"
+  Call un.NomiFunMaintenanceWait
+  ${If} $NomiFunMaintenanceResult != 1
+    Abort
+  ${EndIf}
 
   ; Delete the app directory and its content from disk
   ; Copy main executable
@@ -852,6 +895,14 @@ Section Uninstall
     SetAutoClose true
   ${EndIf}
 SectionEnd
+
+Function un.onUninstFailed
+  Call un.NomiFunMaintenanceAbort
+FunctionEnd
+
+Function un.onGUIEnd
+  Call un.NomiFunMaintenanceAbort
+FunctionEnd
 
 Function RestorePreviousInstallLocation
   ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
