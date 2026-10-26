@@ -81,10 +81,8 @@ pub fn agent_store_schema_manifest_payload() -> AgentStoreSchemaManifestPayload 
     }
 }
 
-/// Prove the one current-generation schema change that preserves Agent facts.
-/// Migration 010 only adds the two OAuth configuration owners. Their exact
-/// predecessor is derived from the formal manifest; neither unknown manifests
-/// nor reverse transitions obtain execution-binding evolution authority.
+/// Prove only the published current-generation product transitions. Office
+/// compaction does not change canonical Agent facts or grant rebuild authority.
 pub fn agent_store_schema_manifest_evolution_compatible(
     source: &crate::DigestHex,
     target: &crate::DigestHex,
@@ -93,9 +91,59 @@ pub fn agent_store_schema_manifest_evolution_compatible(
     let Ok(current_digest) = crate::digest_payload(&current) else { return false; };
     if target != &current_digest { return false; }
     if source == target { return true; }
-    oauth_authority_predecessor_manifest(&current)
+    if office_hub_v16_manifest(&current)
+        .and_then(|previous| crate::digest_payload(&previous).ok())
+        .is_some_and(|digest| source == &digest) { return true; }
+    let Some(before_office) = office_hub_predecessor_manifest(&current) else { return false; };
+    if crate::digest_payload(&before_office).ok().as_ref() == Some(source) { return true; }
+    oauth_authority_predecessor_manifest(&before_office)
         .and_then(|previous| crate::digest_payload(&previous).ok())
         .is_some_and(|previous_digest| source == &previous_digest)
+}
+
+fn office_hub_predecessor_manifest(
+    current: &AgentStoreSchemaManifestPayload,
+) -> Option<AgentStoreSchemaManifestPayload> {
+    if current.schema_version != "1.0.0" || current.data_generation != 7
+        || current.migration_head != 1 || current.projection_schema_version != 1 {
+        return None;
+    }
+    let owners = [
+        ("office_connections", "configuration"),
+        ("office_operations", "fact"),
+        ("office_operation_items", "fact"),
+        ("office_operation_receipts", "fact"),
+    ];
+    for (name, class) in owners {
+        let matches = current.tables.iter().filter(|table| table.table_name == name).collect::<Vec<_>>();
+        if matches.len() != 1 || matches[0].owner != "product.office-hub"
+            || matches[0].fact_class != class || matches[0].reset_scope != SchemaResetScope::Preserve {
+            return None;
+        }
+    }
+    let mut previous = current.clone();
+    previous.tables.retain(|table| !owners.iter().any(|(name, _)| table.table_name == *name));
+    Some(previous)
+}
+
+/// Exact migration-016 manifest, used only to validate its published forward
+/// transition. The retired product tables are not current runtime contracts.
+fn office_hub_v16_manifest(
+    current: &AgentStoreSchemaManifestPayload,
+) -> Option<AgentStoreSchemaManifestPayload> {
+    office_hub_predecessor_manifest(current)?;
+    let position=current.tables.iter().position(|table|table.table_name=="office_operation_receipts")?;
+    let mut previous=current.clone();
+    let replaced=[
+        ("office_operation_attempts","fact"),
+        ("office_operation_observations","fact"),
+        ("office_recent_resources","configuration"),
+    ].into_iter().map(|(name,class)|SchemaTableContract{
+        table_name:name.into(),owner:"product.office-hub".into(),fact_class:class.into(),
+        reset_scope:SchemaResetScope::Preserve,
+    });
+    previous.tables.splice(position..=position,replaced);
+    Some(previous)
 }
 
 fn oauth_authority_predecessor_manifest(
@@ -131,6 +179,10 @@ const TABLES: &[(&str, &str, &str, SchemaResetScope)] = &[
     ("mcp_servers", "plugin.mcp-connectors", "fact", SchemaResetScope::Preserve),
     ("mcp_oauth_clients", "plugin.mcp-connectors", "configuration", SchemaResetScope::Preserve),
     ("mcp_oauth_grants", "plugin.mcp-connectors", "configuration", SchemaResetScope::Preserve),
+    ("office_connections", "product.office-hub", "configuration", SchemaResetScope::Preserve),
+    ("office_operations", "product.office-hub", "fact", SchemaResetScope::Preserve),
+    ("office_operation_items", "product.office-hub", "fact", SchemaResetScope::Preserve),
+    ("office_operation_receipts", "product.office-hub", "fact", SchemaResetScope::Preserve),
     ("agent_preset_templates", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
     ("agent_presets", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
     ("agent_preset_revisions", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
@@ -207,6 +259,8 @@ mod tests {
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/016_office_hub.sql")).expect("Office hub migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/017_compact_office_receipts.sql")).expect("Office receipt compaction");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
@@ -237,6 +291,8 @@ mod tests {
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/016_office_hub.sql")).expect("Office hub migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/017_compact_office_receipts.sql")).expect("Office receipt compaction");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
@@ -286,7 +342,7 @@ mod tests {
     #[test]
     fn oauth_forward_migration_names_the_exact_preserved_manifest_transition() {
         let migration = include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql");
-        let current = agent_store_schema_manifest_payload();
+        let current = office_hub_predecessor_manifest(&agent_store_schema_manifest_payload()).unwrap();
         let digest = crate::digest_payload(&current).unwrap();
         assert!(migration.contains(&format!("SET canonical_schema_manifest_digest='{}'", digest.as_ref())),
             "migration must install the current manifest digest");
@@ -300,13 +356,54 @@ mod tests {
     }
 
     #[test]
-    fn schema_manifest_evolution_accepts_only_current_identity_and_exact_oauth_forward_transition() {
+    fn office_forward_migration_names_only_the_exact_preserved_manifest_transition() {
+        let migration = include_str!("../../nomifun-db/migrations/016_office_hub.sql");
+        let compact = agent_store_schema_manifest_payload();
+        let current = office_hub_v16_manifest(&compact).unwrap();
+        let previous = office_hub_predecessor_manifest(&compact).unwrap();
+        let current_digest = crate::digest_payload(&current).unwrap();
+        let previous_digest = crate::digest_payload(&previous).unwrap();
+        assert!(migration.contains(&format!("SET canonical_schema_manifest_digest='{}'", current_digest.as_ref())));
+        assert!(migration.contains(&format!("AND canonical_schema_manifest_digest='{}'", previous_digest.as_ref())));
+        assert!(migration.contains("AND data_generation=7 AND migration_head=1 AND projection_schema_version=1"));
+        let previous_agent = previous.tables.iter().filter(|t| t.reset_scope == SchemaResetScope::AgentData).collect::<Vec<_>>();
+        let current_agent = current.tables.iter().filter(|t| t.reset_scope == SchemaResetScope::AgentData).collect::<Vec<_>>();
+        assert_eq!(previous_agent, current_agent);
+    }
+
+    #[test]
+    fn office_compaction_changes_only_preserved_product_receipts() {
+        let migration=include_str!("../../nomifun-db/migrations/017_compact_office_receipts.sql");
+        let current=agent_store_schema_manifest_payload();
+        let previous=office_hub_v16_manifest(&current).unwrap();
+        let current_digest=crate::digest_payload(&current).unwrap();
+        let previous_digest=crate::digest_payload(&previous).unwrap();
+        assert!(migration.contains(&format!("SET canonical_schema_manifest_digest='{}'",current_digest.as_ref())));
+        assert!(migration.contains(&format!("AND canonical_schema_manifest_digest='{}'",previous_digest.as_ref())));
+        assert!(migration.contains("AND data_generation=7 AND migration_head=1 AND projection_schema_version=1"));
+        let agent=|manifest:&AgentStoreSchemaManifestPayload|manifest.tables.iter()
+            .filter(|table|table.reset_scope==SchemaResetScope::AgentData).cloned().collect::<Vec<_>>();
+        assert_eq!(agent(&previous),agent(&current));
+        assert_eq!(current.tables.iter().filter(|table|table.owner=="product.office-hub").count(),4);
+        assert!(!current.tables.iter().any(|table|matches!(table.table_name.as_str(),
+            "office_operation_attempts"|"office_operation_observations"|"office_recent_resources")));
+    }
+
+    #[test]
+    fn schema_manifest_evolution_accepts_only_current_identity_and_exact_known_forward_transitions() {
         let current = agent_store_schema_manifest_payload();
         let current_digest = crate::digest_payload(&current).unwrap();
-        let previous = oauth_authority_predecessor_manifest(&current).unwrap();
+        let previous = office_hub_predecessor_manifest(&current).unwrap();
         let previous_digest = crate::digest_payload(&previous).unwrap();
+        let before_oauth = oauth_authority_predecessor_manifest(&previous).unwrap();
+        assert!(agent_store_schema_manifest_evolution_compatible(&crate::digest_payload(&before_oauth).unwrap(), &current_digest));
         assert!(agent_store_schema_manifest_evolution_compatible(&current_digest, &current_digest));
         assert!(agent_store_schema_manifest_evolution_compatible(&previous_digest, &current_digest));
+        let v16_digest=crate::digest_payload(&office_hub_v16_manifest(&current).unwrap()).unwrap();
+        assert_eq!(v16_digest.as_ref(),"0ef8e3eeec9835238c865441913383bb80880bf89e3f0d78b538780c7534bdfc");
+        assert_eq!(current_digest.as_ref(),"565ff15ff4419e0fad8cf0fbcaa7ade3bd0f4fb50263851efed93f7a39921430");
+        assert!(agent_store_schema_manifest_evolution_compatible(&v16_digest,&current_digest));
+        assert!(!agent_store_schema_manifest_evolution_compatible(&current_digest,&v16_digest));
         assert!(!agent_store_schema_manifest_evolution_compatible(&current_digest, &previous_digest));
         assert!(!agent_store_schema_manifest_evolution_compatible(&previous_digest, &previous_digest));
         let unknown = crate::DigestHex::from("a".repeat(64));
@@ -328,7 +425,7 @@ mod tests {
         }
         let mut future = current;
         future.data_generation += 1;
-        assert!(oauth_authority_predecessor_manifest(&future).is_none());
+        assert!(office_hub_predecessor_manifest(&future).is_none());
     }
 
     #[test]
@@ -357,6 +454,10 @@ mod tests {
             "mcp_servers",
             "mcp_oauth_clients",
             "mcp_oauth_grants",
+            "office_connections",
+            "office_operations",
+            "office_operation_items",
+            "office_operation_receipts",
             "providers",
             "provider_models",
             "client_preferences",
@@ -375,6 +476,8 @@ mod tests {
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/016_office_hub.sql")).expect("Office hub migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/017_compact_office_receipts.sql")).expect("Office receipt compaction");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
@@ -404,6 +507,8 @@ mod tests {
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/016_office_hub.sql")).expect("Office hub migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/017_compact_office_receipts.sql")).expect("Office receipt compaction");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
@@ -483,6 +588,8 @@ mod tests {
             .execute_batch(AGENT_STORE_BASELINE_SQL)
             .expect("Agent Store baseline");
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/016_office_hub.sql")).expect("Office hub migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/017_compact_office_receipts.sql")).expect("Office receipt compaction");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");

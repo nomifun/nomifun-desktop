@@ -21,6 +21,7 @@ const Guid = React.lazy(() => import('@renderer/pages/guid'));
 const AgentSettingsPage = React.lazy(() => import('@renderer/pages/agentSettings'));
 const AgentSessionPage = React.lazy(() => import('@renderer/pages/agentSession/AgentSessionPage'));
 const EnhancedToolsPage = React.lazy(() => import('@renderer/pages/enhancedTools'));
+const OfficeHubPage = React.lazy(() => import('@renderer/pages/officeHub'));
 const ModelHubPage = React.lazy(() => import('@renderer/pages/modelHub'));
 const AppsPage = React.lazy(() => import('@renderer/pages/apps'));
 const AppWorkspaceRoute = React.lazy(() => import('@renderer/pages/apps/AppWorkspaceRoute'));
@@ -153,6 +154,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             </Route>
             {/* Agent authoring is public; platform capabilities remain separate destinations. */}
             <Route path='/agent' element={withRouteFallback(AgentSettingsPage)} />
+            <Route path='/office' element={withRouteFallback(OfficeHubPage)} />
             <Route path='/agent-sessions/:agentSessionId' element={withRouteFallback(AgentSessionPage)} />
             <Route path='/models' element={withRouteFallback(ModelHubPage)} />
             <Route path='/enhanced-tools' element={withRouteFallback(EnhancedToolsPage)} />

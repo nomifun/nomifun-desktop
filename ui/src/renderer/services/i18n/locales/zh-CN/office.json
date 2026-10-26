@@ -1,0 +1,302 @@
+{
+  "title": "办公",
+  "feishu": "飞书",
+  "host": "运行设备",
+  "hostHint": "CLI 和凭据保存在 NomiFun 后端电脑，这台电脑可能不是当前浏览器所在设备。",
+  "loading": "正在读取…",
+  "empty": "暂无内容。",
+  "saved": "已保存。",
+  "error": "办公操作失败。",
+  "tabs": {
+    "overview": "工作台",
+    "documents": "文档",
+    "agenda": "日程与任务",
+    "base": "多维表格",
+    "activity": "操作记录"
+  },
+  "actions": {
+    "new": "新建",
+    "create": "创建",
+    "createDocument": "新建文档",
+    "createTask": "创建任务",
+    "createEvent": "创建个人日程",
+    "close": "关闭",
+    "cancel": "取消",
+    "back": "返回",
+    "save": "保存",
+    "edit": "编辑",
+    "continue": "继续",
+    "search": "查找",
+    "refresh": "刷新",
+    "more": "下一页",
+    "previous": "上一页",
+    "loadMore": "加载更多",
+    "open": "在飞书打开",
+    "openHere": "打开",
+    "details": "查看",
+    "original": "查看原操作",
+    "reconcile": "核验结果",
+    "authorize": "授权",
+    "authorizeRead": "开通读取权限",
+    "connect": "连接飞书",
+    "disable": "停用连接",
+    "enable": "启用连接",
+    "prepare": "安装连接组件",
+    "check": "重新检查",
+    "select": "校验所选程序",
+    "copy": "复制命令"
+  },
+  "setup": {
+    "environment": "准备环境",
+    "connect": "连接飞书",
+    "permissions": "使用权限",
+    "environmentTitle": "先准备好连接环境",
+    "environmentHint": "检查后端电脑上的飞书 CLI。已有兼容安装直接复用，缺少时由你选择安装。",
+    "connectTitle": "接下来，用飞书完成连接",
+    "connectHint": "在飞书官方页面确认企业应用与登录身份。需要访问哪些内容，下一步再选择。",
+    "identityNext": "应用已就绪，请再次在飞书继续，确认个人身份；这一步不会开通业务内容权限。",
+    "identityReady": "个人身份已连接，接下来选择读取能力，也可以暂时跳过。",
+    "permissionsTitle": "你想先使用哪些内容？",
+    "permissionsHint": "先开通需要的读取能力，也可以稍后再设置。创建或修改内容时，会另外申请写入权限。",
+    "skip": "稍后设置",
+    "grant": "授权并进入工作台",
+    "finish": "进入工作台"
+  },
+  "connection": {
+    "welcome": "连接飞书，开始办公",
+    "welcomeHint": "准备组件、连接飞书，再选择需要使用的内容。",
+    "settings": "连接设置",
+    "unknownIdentity": "尚未验证用户身份",
+    "existingApp": "使用企业已有应用",
+    "useExisting": "选择已有应用配置",
+    "profile": "应用配置",
+    "chooseProfile": "请选择应用配置",
+    "manual": "手动填写应用信息",
+    "appId": "应用 ID",
+    "appSecret": "应用密钥",
+    "secretHint": "仅交给后端 CLI 完成本次连接，此页面不保存密钥。",
+    "advanced": "连接详情与排障"
+  },
+  "runtime": {
+    "title": "飞书 CLI",
+    "advanced": "环境详情与其他安装方式",
+    "notBundled": "仅在你选择安装后下载 CLI，不包含在 NomiFun 安装包中。已有兼容组件直接复用。",
+    "brokenHint": "损坏或不兼容的安装不等于缺失，请修复原安装或明确选择其他程序。",
+    "selectedPath": "已有程序的绝对路径",
+    "automatic": "恢复自动发现",
+    "retryPrepare": "重试准备",
+    "checkUpdate": "检查更新",
+    "versions": "已安装 {{installed}} · 最新 {{latest}} · 兼容 {{compatible}}",
+    "checkOnly": "检查不会安装或升级，外部安装继续由原工具链维护。",
+    "fullWizardHint": "官方完整安装向导还可能安装其他 Agent 的全局 Skills 并进入应用配置，请在自己的终端明确执行。",
+    "source": {
+      "shared_user": "共享用户安装",
+      "external": "外部安装",
+      "selected": "用户指定安装"
+    },
+    "phase": {
+      "missing": "尚未安装",
+      "ready": "已就绪",
+      "incompatible": "版本不兼容",
+      "broken": "安装损坏",
+      "preparing": "正在安装",
+      "error": "准备失败"
+    }
+  },
+  "permissions": {
+    "granted": "已授权",
+    "missing": "未授权",
+    "readMissing": "需要先开通读取权限，未授权不代表账号没有数据。",
+    "exactScopes": "本次申请的权限",
+    "groups": {
+      "documents": "查找与阅读文档",
+      "agenda": "查看日程与任务",
+      "base": "读取多维表格"
+    },
+    "groupHints": {
+      "documents": "搜索并阅读你有权访问的飞书云文档。",
+      "agenda": "查看日程、任务及可访问的任务清单。",
+      "base": "按数据表链接读取字段与记录。"
+    },
+    "capabilities": {
+      "documents": {
+        "search": "搜索文档",
+        "read": "读取文档",
+        "create": "创建文档",
+        "write": "编辑文档段落"
+      },
+      "people": {
+        "read": "查询可见成员"
+      },
+      "tasks": {
+        "read": "读取任务",
+        "write": "创建和更新任务"
+      },
+      "tasklists": {
+        "read": "读取任务清单"
+      },
+      "calendar": {
+        "read": "读取日历",
+        "write": "创建个人日程"
+      },
+      "base": {
+        "read": "读取记录",
+        "write": "更新记录"
+      }
+    }
+  },
+  "auth": {
+    "title": "飞书授权",
+    "open": "在飞书继续",
+    "admin": "打开管理员控制台",
+    "expires": "到期时间：{{time}}",
+    "resume": "恢复原授权流程",
+    "cancel": "取消授权",
+    "return": "返回当前输入",
+    "returnHint": "请返回当前输入再次保存，完成授权不会自动提交业务操作。",
+    "waitingHint": "请在飞书官方页面完成操作，这里会持续观察同一个授权流程。",
+    "adminHint": "需要企业管理员审批应用或开通权限。",
+    "cancellingHint": "取消已接受，原 CLI 仍在清理，清理结束前请继续观察，不要发起另一次授权。",
+    "phase": {
+      "starting": "正在发起",
+      "waiting_user": "等待用户确认",
+      "waiting_admin": "等待管理员",
+      "cancelling": "正在取消",
+      "complete": "授权完成",
+      "partial": "部分授权",
+      "cancelled": "已取消",
+      "denied": "用户拒绝授权",
+      "expired": "已过期",
+      "error": "授权失败"
+    }
+  },
+  "resources": {
+    "search": "搜索内容",
+    "searchDocuments": "搜索文档",
+    "searchRecent": "搜索最近打开",
+    "openLink": "通过链接打开",
+    "link": "文档或数据表链接",
+    "name": "名称",
+    "type": "类型",
+    "opened": "最近打开",
+    "firstDocument": "打开你的第一份文档",
+    "notFound": "没有匹配的内容。",
+    "filters": {
+      "all": "全部",
+      "document": "云文档",
+      "base": "多维表格"
+    },
+    "updated": "更新时间"
+  },
+  "documents": {
+    "title": "文档标题",
+    "content": "正文（可选）",
+    "paragraph": "编辑当前段落",
+    "editParagraph": "编辑段落：{{text}}",
+    "firstParagraph": "输入首段正文",
+    "finishParagraph": "请先保存或取消当前段落。",
+    "emptyParagraph": "请填写段落内容。",
+    "unsaved": "未保存",
+    "editing": "正在编辑",
+    "uneditable": "这里只编辑有确切块标识的普通正文段落，复杂内容请在飞书编辑。"
+  },
+  "tasks": {
+    "section": "任务",
+    "mine": "我的任务",
+    "assigned": "我负责的",
+    "created": "我创建的",
+    "tasklist": "指定清单",
+    "creator": "创建人",
+    "assignee": "负责人",
+    "due": "截止日期（可选）",
+    "list": "任务清单",
+    "noList": "不加入共享清单",
+    "chooseList": "请选择任务清单",
+    "readLists": "开通任务清单读取",
+    "listHint": "指定负责人不会自动授予该成员任务清单编辑权限。",
+    "title": "任务内容",
+    "otherPerson": "查找其他成员",
+    "personSearch": "按姓名查找成员",
+    "empty": "当前范围暂无任务。"
+  },
+  "calendar": {
+    "section": "日程",
+    "date": "日期",
+    "time": "开始时间",
+    "duration": "时长（分钟）",
+    "title": "日程标题",
+    "personal": "不添加参会人或视频会议",
+    "empty": "此日期暂无日程。",
+    "all": "全部日程与任务"
+  },
+  "base": {
+    "link": "飞书数据表链接",
+    "linkPlaceholder": "粘贴完整的飞书数据表链接",
+    "linkHint": "在飞书打开目标表后，复制包含 table 参数的完整 /base/ 链接。",
+    "incompleteLink": "请在飞书打开目标表后，复制包含 table 参数的完整 /base/ 链接。",
+    "invalidLink": "请使用飞书或 Lark 官方 HTTPS 数据表链接。",
+    "open": "打开数据表",
+    "empty": "打开一张数据表",
+    "selected": "已选 {{count}} 条",
+    "selectAvailable": "选择可操作记录",
+    "selectRecord": "选择{{title}}",
+    "writeState": "本次操作状态",
+    "batch": "修改记录",
+    "batchTitle": "修改 {{count}} 条记录",
+    "field": "要修改的字段",
+    "value": "新值",
+    "chooseValue": "选择新值",
+    "noWritable": "没有可在这里编辑的字段。",
+    "simpleFields": "支持文字、数值、复选框及已知选项字段；复杂字段请在飞书编辑。",
+    "record": "记录",
+    "before": "当前值",
+    "after": "新值"
+  },
+  "operation": {
+    "summary": {
+      "task_create": "创建任务 · {{count}}项",
+      "task_complete": "更新任务状态 · {{count}}项",
+      "document_create": "创建文档 · {{count}}项",
+      "document_save": "保存文档段落 · {{count}}项",
+      "calendar_create": "创建个人日程 · {{count}}项",
+      "base_update": "更新表格记录 · {{count}}项",
+      "mixed": "办公操作 · {{count}}项"
+    },
+    "results": "操作结果",
+    "actor": "执行身份：{{name}}",
+    "historyHint": "仅记录你在此工作台发起的操作。",
+    "action": "操作",
+    "result": "结果",
+    "time": "发起时间",
+    "empty": "还没有工作台操作。",
+    "identityChanged": "请切回原应用和用户身份后核验此操作。",
+    "identityChangedInput": "应用或用户身份已变化，请重新打开表单或重新读取文档后再保存。",
+    "networkHint": "请求可能仍在执行，请读取原请求的回执，不要再次提交。",
+    "saving": "正在保存…",
+    "processing": "正在处理…",
+    "checkReceipt": "检查原请求回执",
+    "notExecutedHint": "写入尚未发出，可修正输入后再次保存。",
+    "pendingHint": "正在观察原操作，不会重新发送。",
+    "unknownHint": "写入可能已发生，核验只读取原目标或回执，不会重发修改。",
+    "baseHint": "批次已接受，仍需要逐条读回原记录确认。",
+    "evidence": "原始回执与后续核验",
+    "attempt": "原始尝试 {{number}}",
+    "status": {
+      "queued": "等待执行",
+      "running": "正在执行",
+      "succeeded": "已确认",
+      "partial": "部分完成",
+      "not_executed": "明确未执行",
+      "unknown": "结果待核验",
+      "accepted_pending_confirmation": "待读回确认"
+    },
+    "readbackConfirmed": "已在原记录读回本次指定的字段值。"
+  },
+  "validation": {
+    "required": "请填写必填内容。",
+    "number": "请输入有限数值。",
+    "json": "字段值无效。",
+    "date": "请输入有效日期与时间。",
+    "batch": "请选择 1 到 200 条可操作记录。"
+  }
+}

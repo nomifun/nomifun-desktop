@@ -225,46 +225,57 @@ The Skill Market Add action is owned by the Skill Library service: the backend v
 
 ### Official Feishu / Lark CLI skill
 
-The bundled **Feishu CLI** (`lark-cli`, displayed as **飞书 CLI** in Chinese) skill uses the
-[official Lark CLI](https://github.com/larksuite/cli/blob/main/README.zh.md) for messages, cloud
-documents, Drive, Base, spreadsheets, calendars, tasks, mail and wikis. View it in **MCP & Skills → Skills**
-and select it from the conversation's skill picker. It is not auto-injected. Example requests
-include summarizing a linked Feishu document, reading next week's agenda, or updating a specified Base table.
+The bundled **Feishu CLI** (`lark-cli`, shown as **飞书 CLI** in Chinese) skill uses
+the [official Lark CLI](https://github.com/larksuite/cli/blob/v1.0.98/README.zh.md)
+for messages, documents, Drive, Base, spreadsheets, calendars, tasks, mail and wikis.
+Select it from the conversation skill picker; it is not automatically injected.
+Example requests include opening a linked document, reading next week's agenda
+or updating a specified Base table.
 
-On first use, the Agent discovers and reuses an existing `lark-cli` installation. Only when none
-exists does it install the official `@larksuite/cli` npm package into the current OS user's shared,
-durable tool directory. Local Agents, sessions and workspaces reuse the same absolute launcher;
-they do not install copies in projects, temporary directories or npx caches. The Host supplies
-the actual prefix through `NOMIFUN_USER_CLI_ROOT`. Typical locations are:
+Each Session discovers and reuses an existing absolute executable through the
+canonical process tools with literal arguments. A workbench path or profile
+selection is not automatically injected into Agent calls. Missing components go
+to **Office → Connection settings** in the upper right of `/office`, then the
+**Prepare environment** step of its three-step dialog. The skill does not launch
+a competing npm/npx installer or obtain trust tokens to call protected Host APIs.
 
-| Platform | Install prefix | Launcher |
+The CLI is prepared only after explicit user opt-in and is not bundled in NomiFun.
+The Host verifies and reuses compatible installations before preparing a missing
+fixed-version official npm package. The shared prefix is separate from projects,
+runtime caches and Agent data. `NOMIFUN_USER_CLI_ROOT` is its Host-derived hint:
+
+| Platform | Shared npm prefix | Launcher |
 | --- | --- | --- |
-| Windows | `%LOCALAPPDATA%\nomifun-user-tools\npm` | `lark-cli.cmd` under the prefix |
-| macOS | `~/Library/Application Support/nomifun-user-tools/npm` | `bin/lark-cli` under the prefix |
-| Linux | `${XDG_DATA_HOME:-~/.local/share}/nomifun-user-tools/npm` | `bin/lark-cli` under the prefix |
+| Windows | `%LOCALAPPDATA%\nomifun-user-tools\npm` | `lark-cli.cmd` |
+| macOS | `~/Library/Application Support/nomifun-user-tools/npm` | `bin/lark-cli` |
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/nomifun-user-tools/npm` | `bin/lark-cli` |
 
-Installation explicitly targets that prefix, independently of Node versions or npm's default prefix.
-Runtime upgrades and Agent-data cleanup retain it. Existing user installations are reused in place;
-the Agent does not install another copy to standardize location or automatically move/delete them.
+For the official npm package, the Host selects the already present native binary.
+A wrapper missing that binary is reported as broken rather than executed to
+trigger a download. Runtime upgrades and Agent cleanup retain the installation.
+The Host coordinates its own preparation with a shared-prefix lock; skill prose
+does not lock independent external npm operations.
 
-For initial account setup, the Agent checks existing configuration and provides login links
-and QR codes. Complete authorization in the
-browser and tell the Agent when finished so it can continue. Existing installations and account
-configuration are reused. The skill uses the Agent's existing process and file tools; selection
-does not grant tools or Feishu permissions. Access depends on application scopes, user consent
-and resource permissions.
+[Office Hub](office-hub.md) provides the three-step connection dialog, native
+paragraph editing and single-submit business saves. The skill remains an ordinary
+opt-in Agent capability through canonical processes. Its business responses often
+use `ok`/`data`; configuration, profiles and authorization have their own raw JSON
+shapes. Follow each installed command's contract.
 
-The CLI dependency is prepared when first needed and is not embedded in the NomiFun package.
-No separate MCP server or upstream skill installation into another agent's directories is required.
-Feishu channel bot configuration is managed separately from this skill's Agent-initiated operations.
+Credentials stay in the CLI's store. Application permissions, user consent and
+resource membership are separate. Selecting the skill grants no additional tools
+or Feishu access, and disabling Office Hub does not revoke remote authorization.
+Workbench activity covers its own operations only; channel bots remain separate.
 
-With this skill selected, ask “Check for Feishu CLI updates” or “Update Feishu CLI to the latest version.”
-The first request only reports installed/available versions and the installation path. The second
-checks first, installs the exact target version at the original prefix, and verifies the same
-launcher afterward, preserving account configuration and authorization. An already-current version
-does not trigger installation. The skill supplies no background auto-updater or separate update
-button; upstream notices during ordinary work do not authorize changing the installation.
-NomiFun's bundled skill instructions update with application releases; the CLI can update independently.
+The full official setup command, `npx @larksuite/cli@latest install`, is available
+for the user to run explicitly in their terminal. It may install global upstream
+skills and enter account setup; it is not a silent prerequisite.
+Workbench version checks do not install or synchronize skills. Host-shared
+preparation and compatibility policy stay with the workbench; external installs
+keep their original toolchain and verified prefix. An explicit external update
+request can update that installation in place and verify the same program.
+Missing upgrade paths are reported rather than bypassed with another installation.
+Bundled skill content continues to update with NomiFun releases.
 
 ## Skill API
 

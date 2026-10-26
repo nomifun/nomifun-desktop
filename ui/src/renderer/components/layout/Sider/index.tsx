@@ -21,6 +21,7 @@ import { readCanvasResumeLocation, rememberCanvasResumeLocation } from '@rendere
 import {
   SiderResourceSpaceEntry,
   SiderAgentEntry,
+  SiderOfficeEntry,
   SiderEnhancedToolsEntry,
   SiderConversationEntry,
   SiderCustomerServiceEntry,
@@ -128,6 +129,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   };
   const handleCustomerServiceClick = () => navTo('/customer-service');
   const handleAgentClick = () => navTo('/agent');
+  const handleOfficeClick = () => navTo('/office');
   const handleEnhancedToolsClick = () => navTo(enhancedToolsUrl('mcp'));
   const handleAppClick = () => navTo('/apps');
   const handleOpenCapabilitiesClick = () => navTo('/connections');
@@ -199,6 +201,12 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleAgentClick}
+            />
+            <SiderOfficeEntry
+              isActive={pathname === '/office' || pathname.startsWith('/office/')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleOfficeClick}
             />
             {/* Work partner (桌面伙伴) */}
             <SiderNomiEntry

@@ -8,6 +8,13 @@ installation.
 
 ## Reuse configuration
 
+Account setup can be managed in **Office → Connection settings**
+(`/office`). The workbench's selected connection is not an implicit
+selector for Agent process calls. Inspect `profile list`, use the profile the
+user selected, and pass `--profile <name>` explicitly to subsequent business
+and auth commands. Do not mutate the global default with `profile use`; if the
+intended profile is ambiguous, resolve that identity before reading or writing.
+
 Check `lark-cli auth status` when setting up or diagnosing authentication.
 Use the installed `config --help` / `auth --help` to diagnose a failure;
 an expired user login does not require replacing the configured application.
@@ -16,7 +23,7 @@ Do not reset a workspace or overwrite an existing application's credentials.
 Only when no application is configured (or the user requests a new one), run:
 
 ```text
-lark-cli config init --new
+lark-cli config init --new --name <new-profile>
 ```
 
 Start this as a supervised process with a short initial wait and enough total

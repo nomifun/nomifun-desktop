@@ -177,38 +177,43 @@ MCP 调用继续校验服务器启停、连接配置和工具 schema。连接身
 
 ### 飞书 CLI 官方技能
 
-内置的 **飞书 CLI**（`lark-cli`）技能通过[飞书官方 CLI](https://github.com/larksuite/cli/blob/main/README.zh.md)
-操作消息、云文档、云空间、多维表格、电子表格、日历、任务、邮箱和知识库。
-在“MCP & 技能 → 技能”中可以查看该技能，在会话输入框旁的技能列表中选择后即可让 Agent 按需使用；它不自动注入。
-例如：“总结这篇飞书文档”“查询我下周的飞书日程”“把这些数据写入指定多维表格”。
+内置 **飞书 CLI**（`lark-cli`）技能通过[官方 CLI](https://github.com/larksuite/cli/blob/v1.0.98/README.zh.md)
+操作消息、文档、云空间、多维表格、电子表格、日历、任务、邮箱和知识库。
+在会话技能列表中选择后按需使用，不自动注入。示例包括“打开这篇文档”“查询下周日程”
+或“把这些数据写入指定多维表格”。
 
-首次使用时，Agent 会先查找并复用本机已有的 `lark-cli`；确认未安装后，才把官方 npm 包
-`@larksuite/cli` 安装到当前系统用户共享的持久工具目录。所有本机 Agent、会话与工作区共用该安装，
-后续通过同一个启动器的绝对路径调用，不在项目、临时目录或 npx 缓存中重复安装。
-宿主通过 `NOMIFUN_USER_CLI_ROOT` 提供实际安装前缀，通常为：
+每个 Session 发现并复用现有程序的绝对路径，通过 canonical 进程工具传递字面参数。
+工作台选择的程序路径和 profile 不会自动注入 Agent 调用。缺失组件时进入 `/office`，
+点击右上角**连接设置**，在三步弹窗的**准备环境**中准备。
+技能不再自行启动另一条 npm/npx 安装，也不获取 trust token 调用受保护的宿主 API。
 
-| 平台 | 安装前缀 | 启动器 |
+用户明确启用后才按需供应 CLI，不打入 NomiFun 安装包。宿主先验证和复用现有兼容安装，
+确证缺失后才准备固定版本的官方 npm 包。共享 prefix 独立于项目、运行时缓存和 Agent 数据。
+`NOMIFUN_USER_CLI_ROOT` 是宿主提供的位置提示：
+
+| 平台 | 共享 npm 前缀 | 启动器 |
 | --- | --- | --- |
-| Windows | `%LOCALAPPDATA%\nomifun-user-tools\npm` | 前缀下的 `lark-cli.cmd` |
-| macOS | `~/Library/Application Support/nomifun-user-tools/npm` | 前缀下的 `bin/lark-cli` |
-| Linux | `${XDG_DATA_HOME:-~/.local/share}/nomifun-user-tools/npm` | 前缀下的 `bin/lark-cli` |
+| Windows | `%LOCALAPPDATA%\nomifun-user-tools\npm` | `lark-cli.cmd` |
+| macOS | `~/Library/Application Support/nomifun-user-tools/npm` | `bin/lark-cli` |
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/nomifun-user-tools/npm` | `bin/lark-cli` |
 
-安装时显式指定此前缀，不随 Node 版本或 npm 默认 prefix 变化；运行时升级和 Agent 数据清理不会删除它。
-已有用户安装会原地复用，不为统一目录另装一份，也不自动迁移或删除。
+宿主识别官方 npm 包后使用已存在的原生程序。wrapper 缺少该程序时报告损坏，不运行它触发下载。
+运行时升级和 Agent 数据清理保留共享安装。宿主供应器有共享 prefix 准备锁；技能文字不是锁，
+不协调用户在外部终端自行执行的 npm 操作。
 
-首次配置账号时，Agent 会检查已有配置，
-并提供应用配置与登录授权链接及二维码。用户需在浏览器完成飞书授权，回到会话告知完成后由 Agent 继续。
-已有安装和账号配置会复用。该技能使用 Agent 已有的进程与文件工具，选择技能不会增加工具或飞书权限；
-实际访问范围取决于飞书应用权限、用户授权和目标资源的访问权限。
+[办公工作台](office-hub.zh.md)提供三步连接、原生普通段落编辑与单次业务保存；
+技能仍通过既有 canonical 进程执行 Agent 任务。业务命令通常使用 `ok`／`data` 包装，
+配置、profile 和授权采用各自的原始 JSON 结构，以安装版本的真实命令合同为准。
 
-CLI 依赖在首次需要时准备，未内嵌到 NomiFun 包中。无需另建 MCP server，也无需把上游技能安装到其它 Agent 的目录。
-飞书渠道机器人的消息接入配置与此技能分别管理；此技能面向 Agent 主动使用飞书生态能力。
+凭据留在 CLI 自己的存储中。应用权限、用户授权和资源成员权限分别决定实际范围。
+选择技能不会增加工具或飞书权限，停用工作台也不撤销服务端授权。
+办公活动只展示工作台自己的操作，渠道机器人仍分别管理。
 
-选择该技能后，可以直接说“检查飞书 CLI 更新”或“把飞书 CLI 更新到最新版本”。
-前者只报告已安装版本、可用版本和安装位置；后者在检查后将确定的目标版本更新到原安装前缀，
-并通过同一启动器验证结果，保留已有账号配置和授权。已是目标版本时跳过安装。
-该技能不提供后台自动升级或独立的更新按钮；普通使用中发现上游更新提示时，不会自动改动安装。
-NomiFun 的内置 skill 指引随应用版本更新，CLI 程序可以独立更新。
+工作台提供完整官方向导命令 `npx @larksuite/cli@latest install` 供用户在自己终端显式执行。
+该向导可能全局安装上游 Skills 并进入账号配置，不是静默前置。
+工作台版本检查不安装或同步 Skills。共享组件的准备和兼容版本策略统一由工作台负责，
+外部安装继续由原工具链与已核实 prefix 维护；明确更新请求可在原位置更新确定版本并验证同一程序。
+没有所请求的升级路径时应说明限制，不能另装副本。内置技能内容仍随 NomiFun 应用更新。
 
 ## 技能 API
 

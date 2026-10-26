@@ -1,90 +1,90 @@
-# One installation shared by all local Agents
+# Discover once; let the Office Host prepare a missing component
 
-Resolve the executable once when first using Feishu in a session. Reuse that
-absolute launcher for the rest of the task, including help and authentication.
-New Agents and sessions repeat discovery, not installation. The CLI belongs
-to the current operating-system user; it is shared across NomiFun Agents,
-workspaces, sessions and application dataset directories on that host.
+Before the first Feishu operation, find and reuse one absolute executable.
+The CLI belongs to the current operating-system user, shared by local Agents,
+workspaces, sessions and application datasets. New sessions repeat discovery,
+not installation. Authentication errors never justify reinstalling the CLI.
 
-## Authoritative installation root
+## Read-only executable discovery
 
-The Host supplies `NOMIFUN_USER_CLI_ROOT` in each process environment. Read that
-single value through an authorized process, for example:
+1. Honor an absolute executable explicitly selected by the user. Otherwise
+   inspect the existing Host-shared launcher or use the platform's command
+   lookup (`Get-Command` on Windows, `command -v` on macOS/Linux).
+2. Resolve a real absolute launcher, not an alias. Probe it with `--version`
+   and inspect the needed command's `--help` / `schema`.
+   For the official npm package, prefer its already present native
+   `bin/lark-cli` (`bin/lark-cli.exe` on Windows) after checking the public
+   package manifest identifies `@larksuite/cli`. A launcher without that native
+   file is a broken installation: do not run its wrapper as a readiness probe,
+   because the wrapper may download the missing binary itself.
+3. If npm and Node are both already available, `npm prefix --global` can locate an existing
+   user installation missing from PATH. Read only that prefix, not the whole
+   environment or npm configuration.
+4. Reuse the working installation in place. Do not copy, move, delete, upgrade
+   or install a second copy to standardize its location.
 
-```json
-{"component":"node","args":["-p","process.env.NOMIFUN_USER_CLI_ROOT"]}
-```
+The Host's process environment may provide `NOMIFUN_USER_CLI_ROOT`, the
+authoritative persistent shared npm prefix. Read only that location hint
+through an existing authorized process; do not prepare Node solely to read an
+environment variable. Typical locations are explanatory:
 
-This uses NomiFun's existing Node component, not a Lark component. Validate
-that the returned value is a nonempty absolute path. Do not replace it with a
-path derived from the workspace, session, model, Node version or npm prefix.
-The normal platform locations below are explanatory; the Host-returned path
-is authoritative, including relocated user-data directories.
-
-| Platform | Shared npm prefix | Lark launcher relative to that prefix |
+| Platform | Shared prefix | Launcher |
 | --- | --- | --- |
 | Windows | `%LOCALAPPDATA%\nomifun-user-tools\npm` | `lark-cli.cmd` |
 | macOS | `~/Library/Application Support/nomifun-user-tools/npm` | `bin/lark-cli` |
 | Linux | `${XDG_DATA_HOME:-~/.local/share}/nomifun-user-tools/npm` | `bin/lark-cli` |
 
-This root is outside the replaceable Node/runtime cache and Agent datasets.
-It survives runtime upgrades and Agent-data cleanup. Do not redirect HOME,
-USERPROFILE or the CLI's credential directory; reuse the user's CLI account
-configuration separately from the executable installation.
+The workbench can select the official npm package's native executable after
+checking its identity and compatibility. Reuse the selected absolute path and
+literal arguments. Do not redirect HOME, USERPROFILE or credential directories.
+Runtime upgrades and Agent-data cleanup do not own this persistent installation.
 
-## Discover before installing
+## Missing, broken or incompatible installation
 
-1. Honor an executable path explicitly chosen by the user. Otherwise check
-   the shared launcher's absolute path and run it with `--version`.
-2. If that launcher is absent, look for an existing user installation with
-   the platform's command lookup (`Get-Command` on Windows, `command -v` on
-   macOS/Linux). Resolve a real absolute launcher rather than a shell alias.
-   Also inspect `npm prefix --global` for a pre-existing global launcher that
-   is missing from PATH. Do not dump the rest of the environment or npm config.
-3. If an existing launcher works, use that absolute path. Do not copy it into
-   the shared root or install another copy simply to standardize its location.
-4. Only install after these checks establish that no installation is present.
-   A failed launch, expired login, missing scope, network failure or unsupported
-   flag is not evidence that the CLI is absent. Diagnose an existing broken
-   installation in place; do not create a second installation as a fallback.
+If no executable is found, tell the user to open:
 
-If the Host root hint is unavailable, reuse a working existing installation
-or report that location discovery is unavailable. Do not guess a new install
-directory. If multiple installations already exist, select the applicable one
-and report their paths when relevant; do not automatically delete user tools.
+**Office → Connection settings → Prepare environment → Prepare component**
 
-## First installation into the fixed prefix
+The product route is `/office`. The Host performs discovery again,
+reuses a compatible installation, and prepares the fixed official npm package
+only when absent and explicitly requested. The component is not embedded in the
+NomiFun installer. Workspaces and Agents can discover and reuse that shared
+installation; the workbench's selected path and profile are not an implicit
+selector for Agent process calls.
 
-Use the exact official package `@larksuite/cli`. Replace the placeholder with
-the Host-returned absolute prefix; it is one literal argument, without shell
-quotes, tilde expansion or environment-variable syntax:
+The skill must not execute its own `npm install`, `npm exec`, `npx`, package
+download, install script or alternate-prefix repair for a missing component.
+Do not install per project, Session, temporary directory or npx cache.
+Do not try to obtain a local trust token, browser credential or owner credential
+to call the workbench's protected API from an Agent process. Direct the user to
+the authenticated product surface; no hidden API backchannel is needed.
 
-```json
-{"command":"npm","args":["install","--global","--prefix","<NOMIFUN_USER_CLI_ROOT>","@larksuite/cli"],"wait_ms":1000}
-```
+A failed launch, expired login, missing scope, network error or unsupported flag
+does not establish that the CLI is absent. Report the actual issue and direct
+component repair to the same workbench surface. Do not bypass an incompatible
+or broken installation by installing somewhere else. If location discovery is
+unavailable, report that condition rather than inventing a root.
 
-The explicit `--prefix` keeps this package in the same location even if
-system Node, nvm, `.npmrc` or `NPM_CONFIG_PREFIX` changes. It does not rewrite
-the user's global npm configuration. NomiFun supplies the Node/npm runtime
-when needed and preserves existing proxy/certificate settings.
+After the Host reports readiness, repeat read-only discovery and use the same
+absolute executable for the original task. Installation readiness does not
+authorize business writes or broaden the current Session's tool permissions.
 
-Observe this same install process until it exits, then verify `--version`
-and `--help` using the shared launcher's absolute path. A new Agent, workspace
-or missing PATH entry never justifies another install. If another install is
-known to be in progress, observe/wait for it and recheck that same prefix;
-do not launch a competing install or choose a different directory. Report
-actual download, permission or launch failures without retrying into a new root.
+## One Host supply entry, normal Agent execution
 
-Do not use a workspace-local `node_modules`, session or temporary directory,
-runtime cache, or `npx`/`npm exec` package cache to obtain another Lark CLI.
-Do not install on each task, run floating upgrades as a readiness check, or
-use administrator privileges to work around an installation error. An update
-or repair, when needed and authorized, targets the selected existing prefix.
-Use the [in-place update workflow](updates.md) for version checks and upgrades;
-do not use bare `lark-cli update` to maintain this npm installation.
+The Office supplier serializes its own preparation with the shared-prefix
+cross-process lock. This skill's text is not a lock and does not coordinate
+external npm processes. The skill delegates missing-component preparation
+instead of running a competing installer.
 
-The upstream `npx @larksuite/cli@latest install` wizard also installs upstream
-skills into other agents' directories. This bundled skill needs only the CLI.
-Do not run that wizard or `skills add -g` as a prerequisite. Requested extra
-upstream skills use NomiFun's existing import/discovery and selection flow;
-the active turn's frozen skill content does not change.
+Already-installed CLI business operations continue through the existing
+authorized canonical process tools with literal argv. Do not create a second
+Agent transcript or treat workbench activity as a record of all Agent calls.
+The workbench connection switch does not revoke permissions granted in Feishu
+or remove the user's ability to run their own CLI elsewhere.
+
+The workbench also offers the official full setup command for the user to run
+explicitly in their own terminal. That upstream wizard can install global
+skills for other Agents and enter account setup; it is not the skill's hidden
+installation prerequisite. NomiFun already bundles this opt-in skill.
+
+For requested checks or updates, read [component ownership and updates](updates.md).

@@ -18,7 +18,7 @@ mod shell_env;
 mod login_shell;
 
 pub use cache::{init, runtime_root};
-pub use environment::{PreparedProcessLaunch, ProcessEnvironmentTarget, prepare_process_launch, process_environment, process_environment_for, user_cli_root};
+pub use environment::{PreparedProcessLaunch, ProcessEnvironmentTarget, prepare_existing_process_launch, prepare_process_launch, process_environment, process_environment_for, user_cli_root};
 pub use managed::{
     PreparedComponentLaunch, ToolError, ToolId, ToolSource, VerifiedTool,
     begin_tool_preparation, cancel_tool_preparation, component_inventory,

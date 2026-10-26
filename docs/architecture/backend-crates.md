@@ -124,6 +124,7 @@ identifiers remain opaque.
 | [`nomifun-shell`](../../crates/backend/nomifun-shell/) | OS shell helpers: open files in the system, speech-to-text against Deepgram or OpenAI, clipboard / paste integration. |
 | [`nomifun-file`](../../crates/backend/nomifun-file/) | Sandboxed filesystem under the conversation work dir (`browse`, `path_safety`, `watch_service`, `snapshot_service`), zip helpers. |
 | [`nomifun-office`](../../crates/backend/nomifun-office/) | Managed OfficeCLI HTML artifacts: stable source snapshots, bounded shared rendering/cache, owner-scoped cancellable leases, sandbox delivery, and preview history. |
+| [`nomifun-office-hub`](../../crates/backend/nomifun-office-hub/) | [Feishu Office Hub](../guides/office-hub.md): three-step connection, lazy official CLI supply, native paragraph editing and single-submit saves. Four product tables retain configuration, submitted operations, items and business receipts; recent resources are thin connection configuration. Canonical Agent facts remain separate. |
 | [`nomifun-system`](../../crates/backend/nomifun-system/) | LLM provider / model lookup, app-level settings, sysinfo, app version-check / self-updater scaffold. |
 
 ## The composition root: `nomifun-app`

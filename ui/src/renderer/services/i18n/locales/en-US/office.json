@@ -1,0 +1,302 @@
+{
+  "title": "Office",
+  "feishu": "Feishu",
+  "host": "Run on",
+  "hostHint": "The CLI and credentials stay on the NomiFun backend computer, which may differ from this browser.",
+  "loading": "Loading…",
+  "empty": "No content.",
+  "saved": "Saved.",
+  "error": "The office operation failed.",
+  "tabs": {
+    "overview": "Workbench",
+    "documents": "Documents",
+    "agenda": "Calendar & tasks",
+    "base": "Base",
+    "activity": "Operations"
+  },
+  "actions": {
+    "new": "New",
+    "create": "Create",
+    "createDocument": "Create document",
+    "createTask": "Create task",
+    "createEvent": "Create personal event",
+    "close": "Close",
+    "cancel": "Cancel",
+    "back": "Back",
+    "save": "Save",
+    "edit": "Edit",
+    "continue": "Continue",
+    "search": "Search",
+    "refresh": "Refresh",
+    "more": "Next",
+    "previous": "Previous",
+    "loadMore": "Load more",
+    "open": "Open in Feishu",
+    "openHere": "Open",
+    "details": "View",
+    "original": "View original operation",
+    "reconcile": "Verify result",
+    "authorize": "Authorize",
+    "authorizeRead": "Enable reading",
+    "connect": "Connect Feishu",
+    "disable": "Disable connection",
+    "enable": "Enable connection",
+    "prepare": "Install component",
+    "check": "Check again",
+    "select": "Verify selected program",
+    "copy": "Copy command"
+  },
+  "setup": {
+    "environment": "Environment",
+    "connect": "Connect",
+    "permissions": "Permissions",
+    "environmentTitle": "Prepare the connection environment",
+    "environmentHint": "Reuse a compatible Feishu CLI on the backend computer, or explicitly install the component when missing.",
+    "connectTitle": "Continue in Feishu",
+    "connectHint": "Confirm the enterprise application and your identity on the official Feishu page. Select content permissions next.",
+    "identityNext": "The application is configured. Continue in Feishu once more to confirm your identity; this does not grant access to business content.",
+    "identityReady": "Your identity is connected. Continue to select reading capabilities, or skip them for now.",
+    "permissionsTitle": "What would you like to use first?",
+    "permissionsHint": "Enable only the reading capabilities you need, or skip for now. Creating or editing content requires separate permission.",
+    "skip": "Set up later",
+    "grant": "Authorize and open",
+    "finish": "Open workbench"
+  },
+  "connection": {
+    "welcome": "Connect Feishu to start working",
+    "welcomeHint": "Prepare the component, connect your account, then select the content you need.",
+    "settings": "Connection settings",
+    "unknownIdentity": "User identity not verified",
+    "existingApp": "Use an existing enterprise application",
+    "useExisting": "Choose an existing application",
+    "profile": "Application configuration",
+    "chooseProfile": "Choose a configuration",
+    "manual": "Enter application details",
+    "appId": "Application ID",
+    "appSecret": "Application secret",
+    "secretHint": "Used once by the backend CLI. This page does not store the secret.",
+    "advanced": "Connection details and troubleshooting"
+  },
+  "runtime": {
+    "title": "Feishu CLI",
+    "advanced": "Environment details and other installation options",
+    "notBundled": "The CLI is downloaded only after you choose to install it. It is not bundled with NomiFun. Compatible installations are reused.",
+    "brokenHint": "A broken or incompatible installation is not a missing installation. Repair it or explicitly select another program.",
+    "selectedPath": "Existing executable path",
+    "automatic": "Restore automatic discovery",
+    "retryPrepare": "Retry installation",
+    "checkUpdate": "Check updates",
+    "versions": "Installed {{installed}} · Latest {{latest}} · Compatible {{compatible}}",
+    "checkOnly": "Checking does not install or upgrade. External installations remain managed by their original tools.",
+    "fullWizardHint": "The official full setup command may also install global Agent Skills and enter application configuration. Run it explicitly in your own terminal.",
+    "source": {
+      "shared_user": "Shared user installation",
+      "external": "External installation",
+      "selected": "Selected installation"
+    },
+    "phase": {
+      "missing": "Not installed",
+      "ready": "Ready",
+      "incompatible": "Incompatible version",
+      "broken": "Broken installation",
+      "preparing": "Installing",
+      "error": "Preparation failed"
+    }
+  },
+  "permissions": {
+    "granted": "Granted",
+    "missing": "Not granted",
+    "readMissing": "Reading permission is required. This does not mean the account has no data.",
+    "exactScopes": "Requested permissions",
+    "groups": {
+      "documents": "Find and read documents",
+      "agenda": "Read calendar and tasks",
+      "base": "Read Base tables"
+    },
+    "groupHints": {
+      "documents": "Search and read Feishu documents you can access.",
+      "agenda": "Read your calendar, tasks and accessible task lists.",
+      "base": "Read the fields and records of a specified data table."
+    },
+    "capabilities": {
+      "documents": {
+        "search": "Search documents",
+        "read": "Read documents",
+        "create": "Create documents",
+        "write": "Edit document paragraphs"
+      },
+      "people": {
+        "read": "Find visible members"
+      },
+      "tasks": {
+        "read": "Read tasks",
+        "write": "Create and update tasks"
+      },
+      "tasklists": {
+        "read": "Read task lists"
+      },
+      "calendar": {
+        "read": "Read calendar",
+        "write": "Create personal events"
+      },
+      "base": {
+        "read": "Read records",
+        "write": "Update records"
+      }
+    }
+  },
+  "auth": {
+    "title": "Feishu permission",
+    "open": "Continue in Feishu",
+    "admin": "Open admin console",
+    "expires": "Expires: {{time}}",
+    "resume": "Resume authorization",
+    "cancel": "Cancel authorization",
+    "return": "Return to input",
+    "returnHint": "Return to your input and save again. Authorization never submits a business operation.",
+    "waitingHint": "Complete the steps on the official Feishu page. NomiFun observes the same authorization flow.",
+    "adminHint": "Your enterprise administrator needs to approve the application or permission.",
+    "cancellingHint": "Cancellation was accepted. The original CLI is still cleaning up; keep observing before starting another authorization.",
+    "phase": {
+      "starting": "Starting",
+      "waiting_user": "Waiting for confirmation",
+      "waiting_admin": "Waiting for administrator",
+      "cancelling": "Cancelling",
+      "complete": "Authorized",
+      "partial": "Partially authorized",
+      "cancelled": "Cancelled",
+      "denied": "Authorization denied",
+      "expired": "Expired",
+      "error": "Authorization failed"
+    }
+  },
+  "resources": {
+    "search": "Search content",
+    "searchDocuments": "Search documents",
+    "searchRecent": "Search recently opened",
+    "openLink": "Open from link",
+    "link": "Document or Base table link",
+    "name": "Name",
+    "type": "Type",
+    "opened": "Last opened",
+    "firstDocument": "Open your first document",
+    "notFound": "No matching content.",
+    "filters": {
+      "all": "All",
+      "document": "Documents",
+      "base": "Base tables"
+    },
+    "updated": "Updated"
+  },
+  "documents": {
+    "title": "Document title",
+    "content": "Body (optional)",
+    "paragraph": "Edit current paragraph",
+    "editParagraph": "Edit paragraph: {{text}}",
+    "firstParagraph": "Enter first paragraph",
+    "finishParagraph": "Save or cancel the current paragraph first.",
+    "emptyParagraph": "Enter paragraph content.",
+    "unsaved": "Unsaved",
+    "editing": "Editing",
+    "uneditable": "Only ordinary body paragraphs with a verified block ID can be edited here. Open complex content in Feishu."
+  },
+  "tasks": {
+    "section": "Task",
+    "mine": "My tasks",
+    "assigned": "Assigned to me",
+    "created": "Created by me",
+    "tasklist": "Specific task list",
+    "creator": "Creator",
+    "assignee": "Assignee",
+    "due": "Due date (optional)",
+    "list": "Task list",
+    "noList": "No shared list",
+    "chooseList": "Choose a task list",
+    "readLists": "Enable task list reading",
+    "listHint": "Assigning a person does not grant them edit permission on the shared list.",
+    "title": "Task content",
+    "otherPerson": "Find another member",
+    "personSearch": "Search members by name",
+    "empty": "No tasks in this scope."
+  },
+  "calendar": {
+    "section": "Event",
+    "date": "Date",
+    "time": "Start",
+    "duration": "Duration (minutes)",
+    "title": "Event title",
+    "personal": "No attendees or video meeting added",
+    "empty": "No events on this date.",
+    "all": "All events and tasks"
+  },
+  "base": {
+    "link": "Feishu Base table link",
+    "linkPlaceholder": "Paste the complete Feishu data table link",
+    "linkHint": "Open the intended table in Feishu and copy its complete /base/ link with a table parameter.",
+    "incompleteLink": "Open the intended table in Feishu and copy a complete /base/ link containing the table parameter.",
+    "invalidLink": "Use an official Feishu or Lark HTTPS data table link.",
+    "open": "Open table",
+    "empty": "Open a data table",
+    "selected": "{{count}} selected",
+    "selectAvailable": "Select available records",
+    "selectRecord": "Select {{title}}",
+    "writeState": "Operation status",
+    "batch": "Edit records",
+    "batchTitle": "Edit {{count}} records",
+    "field": "Field to edit",
+    "value": "New value",
+    "chooseValue": "Choose a value",
+    "noWritable": "No fields supported for editing here.",
+    "simpleFields": "Text, numbers, checkboxes and known selection fields can be edited here. Edit complex fields in Feishu.",
+    "record": "Record",
+    "before": "Current value",
+    "after": "New value"
+  },
+  "operation": {
+    "summary": {
+      "task_create": "Create tasks · {{count}}",
+      "task_complete": "Update task status · {{count}}",
+      "document_create": "Create documents · {{count}}",
+      "document_save": "Save paragraphs · {{count}}",
+      "calendar_create": "Create personal events · {{count}}",
+      "base_update": "Update records · {{count}}",
+      "mixed": "Office operations · {{count}}"
+    },
+    "results": "Operation result",
+    "actor": "Acting as {{name}}",
+    "historyHint": "Operations started in this workbench only.",
+    "action": "Operation",
+    "result": "Result",
+    "time": "Started",
+    "empty": "No workbench operations yet.",
+    "identityChanged": "Switch to the original application and user before verifying this operation.",
+    "identityChangedInput": "The application or user changed. Reopen this form or reread the document before saving.",
+    "networkHint": "The request may still be running. Read the original receipt; do not submit again.",
+    "saving": "Saving…",
+    "processing": "Processing…",
+    "checkReceipt": "Check original receipt",
+    "notExecutedHint": "No write was sent. Correct the input if needed, then save again.",
+    "pendingHint": "The original operation is being observed. It will not be sent again.",
+    "unknownHint": "The write may have happened. Verification reads the original target or receipt and never resends it.",
+    "baseHint": "The batch was accepted. Each original record still needs to be read back.",
+    "evidence": "Original receipt and verification",
+    "attempt": "Attempt {{number}}",
+    "status": {
+      "queued": "Queued",
+      "running": "Running",
+      "succeeded": "Confirmed",
+      "partial": "Partially completed",
+      "not_executed": "Not executed",
+      "unknown": "Result unverified",
+      "accepted_pending_confirmation": "Awaiting readback"
+    },
+    "readbackConfirmed": "The requested field values were observed at the original record."
+  },
+  "validation": {
+    "required": "Complete the required fields.",
+    "number": "Enter a finite number.",
+    "json": "Invalid field value.",
+    "date": "Enter a valid date and time.",
+    "batch": "Select between 1 and 200 available records."
+  }
+}

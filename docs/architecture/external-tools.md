@@ -68,7 +68,8 @@ Node uses its complete official distribution, including npm, npx, modules and la
 The application creates no Bun-as-Node aliases and does not modify the system PATH.
 
 `nomifun-runtime::prepare_process_launch` supplies the shared command and per-launch
-user tool environment for Agent native processes, Terminal and MCP stdio.
+user tool environment for Agent native processes, Terminal and MCP stdio, and may
+prepare a missing approved runtime for the requested launch.
 Explicit shell text remains shell text and receives the same composed environment;
 native executables retain literal argv. Each launch combines the caller's environment,
 current durable user CLI directories and verified runtime fallbacks without mutating
@@ -76,13 +77,25 @@ the multi-threaded host environment. Explicit PATH and available user toolchains
 precedence. The real HOME/USERPROFILE, user npm configuration, proxy and certificate
 settings remain available. Managed npm defaults to durable user tools outside the
 replaceable runtime cache, while an existing user prefix remains authoritative.
+
+`nomifun-runtime::prepare_existing_process_launch` accepts only an absolute,
+existing program file. It composes the same child environment and preserves literal
+argv, but never invokes managed supply or creates directories. Office workbench
+diagnostics, business calls and queries through an existing npm executable use this
+entry point. Only the workbench's explicit **Prepare component** operation may use
+the supplier-enabled entry point for a relative `npm` command. An existing native
+Feishu CLI needs no Node simply because it resides inside an npm prefix; an unknown
+script with a missing interpreter is unavailable rather than installing one during
+diagnosis. Existing Agent, Terminal and MCP preparation behavior is unchanged.
+
 Each child receives the host-derived, read-only `NOMIFUN_USER_CLI_ROOT` location
 hint for `dirs::data_local_dir()/nomifun-user-tools/npm`. It is shared across
 Agents and working directories. Skills that need a fixed installation location
 pass it explicitly as npm's `--prefix`; the hint does not change the user's npm
 prefix. Its command directory (the root on Windows, `bin` on macOS/Linux) is
-included after user command directories, and CLIs in either this root or a user
-npm prefix remain eligible for missing-Node preparation.
+included after user command directories. Through `prepare_process_launch`, CLIs
+in either this root or a user npm prefix remain eligible for missing-Node preparation;
+the existing-file entry point never grants that preparation authority.
 Runtime upgrades and Agent data reset do not own the installed user tools. Hosted applications prepare required Node/Bun from recognized project metadata or their built-in static preset, with custom Node taking priority and cancellation attached to the original operation. Arbitrary shell text is preserved.
 
 Terminal retains its existing Windows PowerShell shim adapter. The Windows native
@@ -152,6 +165,30 @@ Only the target architecture is delivered. Raising compression or deleting
 source files does not substitute for excluding Node/Bun blobs from the release
 payload. Compare actual App and DMG artifacts from the same release profile and
 compression format; compressed component sizes alone are not installer measurements.
+
+## Feishu workbench CLI
+
+The cloud [Office Hub](../guides/office-hub.md) uses the official
+`@larksuite/cli`, with 1.0.98 as its verified compatibility baseline. It is separate
+from the embedded OfficeCLI used for local file rendering. The Feishu CLI is not
+embedded or exposed as a managed `component` target.
+
+The connection dialog guides the user through environment preparation, connection
+and read permissions. Missing components use one Host supplier after explicit
+opt-in, reusing an existing compatible installation first. The fixed official npm
+package goes into `user_cli_root`, under the shared-prefix preparation lock.
+Existing external installations keep their original location and maintenance.
+The full upstream wizard is only a command for the user to run explicitly; it may
+also install global skills. Read-only update checks do not install or sync skills.
+
+All business queries and saves use this CLI. Native ordinary paragraph editing
+uses real block IDs and revisions; unsupported document structures remain
+read-only. Save submits one stable request, and a lost response is recovered by
+that request identity. Pending document and Base targets retain their SQL write
+fences across identity changes. The same process owner keeps retrying tree cleanup
+until completion is proved; cancelling execution cannot end that cleanup early.
+The workbench retains four product tables and thin recent locators, separately
+from canonical Agent facts; see the [active plan](../handoffs/office-feishu-workbench.zh.md).
 
 ## Office artifacts
 

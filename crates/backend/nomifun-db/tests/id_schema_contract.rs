@@ -74,6 +74,8 @@ fn migration_directory_contains_the_canonical_forward_migration_chain() {
         "013_model_input_constraints.sql",
         "014_retire_command_queue_setting.sql",
         "015_retire_execution_plan_gate.sql",
+        "016_office_hub.sql",
+        "017_compact_office_receipts.sql",
     ]);
 }
 
