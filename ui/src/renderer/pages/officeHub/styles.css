@@ -25,7 +25,7 @@
 .office-button--primary{background:var(--primary);border-color:var(--primary);color:var(--inverse)}
 .office-button--primary:hover{background:var(--primary);filter:brightness(.97)}
 .office-button--quiet{border-color:transparent;background:transparent;color:var(--text-secondary);padding:4px 6px}
-.office-button:focus-visible,.office-tabs>button:focus-visible,.office-filters>button:focus-visible,.office-resource:focus-visible,.office-input:focus-visible,.office-paragraph-button:focus-visible{outline:2px solid var(--primary);outline-offset:3px}
+.office-button:focus-visible,.office-tabs>button:focus-visible,.office-filters>button:focus-visible,.office-resource:focus-visible,.office-input:focus-visible{outline:2px solid var(--primary);outline-offset:3px}
 .office-badge{display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:1px 6px;border-radius:4px;background:var(--bg-2);color:var(--text-secondary);font-size:11px;line-height:18px;white-space:nowrap}
 .office-badge--good{color:color-mix(in srgb,var(--success) 60%,var(--text-primary));background:color-mix(in srgb,var(--success) 9%,var(--bg-base))}
 .office-badge--warning{color:color-mix(in srgb,var(--warning) 60%,var(--text-primary));background:color-mix(in srgb,var(--warning) 9%,var(--bg-base))}
@@ -44,6 +44,9 @@
 .office-resource-table{table-layout:fixed}
 .office-resource-table th:nth-child(2){width:85px}
 .office-resource-table th:nth-child(3){width:94px}
+.office-resource-table th:nth-child(4){width:160px}
+.office-button--danger{background:var(--danger);border-color:var(--danger);color:var(--inverse)}
+.office-button--danger:hover{background:var(--danger);filter:brightness(.97)}
 .office-resource{display:flex;align-items:center;gap:9px;width:100%;min-width:0;padding:0;border:0;background:transparent;color:var(--text-primary);text-align:left;font:inherit;cursor:pointer}
 .office-resource>strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .office-resource>span{flex:none;color:var(--primary)}
@@ -72,7 +75,7 @@
 .office-empty p{margin:6px 0 17px}
 .office-welcome{padding:65px 20px}
 .office-error{padding:8px 11px;margin:10px 20px;border-radius:5px;font-size:12px;line-height:1.7;overflow-wrap:anywhere;background:color-mix(in srgb,var(--danger) 7%,var(--bg-base));color:var(--danger)}
-.office-content>.office-error,.office-dialog .office-error,.office-document>.office-error{margin:8px 0}
+.office-content>.office-error,.office-dialog .office-error{margin:8px 0}
 .office-error .office-actions{margin-top:5px}
 .office-pagination{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
 .office-input{display:block;width:100%;min-width:0;min-height:33px;padding:6px 9px;border:1px solid var(--border-base);border-radius:5px;background:var(--bg-base);color:var(--text-primary);font:inherit;font-size:13px;line-height:20px}
@@ -84,7 +87,6 @@
 .office-form-row>.office-input{flex:1}
 .office-form-row>.office-button{margin-bottom:12px}
 .office-fieldset{border:0;margin:0;padding:0;min-width:0}
-.office-create-body{line-height:1.7;resize:vertical;max-height:260px}
 .office-link-open{display:flex;gap:8px;margin-bottom:15px;align-items:center;min-width:0}
 .office-link-open>.office-input{flex:1}
 .office-table-heading{margin:14px 0 7px}
@@ -92,27 +94,6 @@
 .office-base-table th:first-child{width:32px}
 .office-base-table td{max-width:240px}
 .office-base-table th:last-child{width:130px}
-.office-filebar{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:47px;padding:8px 20px;border-bottom:1px solid var(--border-base)}
-.office-file-name{display:flex;align-items:center;gap:8px;min-width:0;flex:1}
-.office-file-name>strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500}
-.office-file-name>.office-small{white-space:nowrap;flex:none}
-.office-filebar>.office-actions{flex:none;gap:6px}
-.office-document{padding:20px 24px 26px;font-size:14px;line-height:1.75;overflow-wrap:anywhere}
-.office-document-title{font-size:23px;line-height:32px;font-weight:600;margin:0 0 14px}
-.office-document p{font-size:14px;line-height:1.75;margin:6px 0}
-.office-document h2:not(.office-document-title){font-size:16px;line-height:25px;margin:18px 0 7px}
-.office-document h3{font-size:15px;line-height:24px;margin:16px 0 6px}
-.office-doc-block{margin:7px -9px;padding:2px 9px;border-radius:5px}
-.office-doc-block.active{border:1px solid var(--primary);padding:0}
-.office-native-text{white-space:pre-wrap;overflow-wrap:anywhere;min-height:25px}
-.office-native-heading{font-weight:600;font-size:16px}
-.office-readonly-reason{margin:0!important}
-.office-reload{padding:0 24px}
-.office-retained-input{max-height:180px;resize:vertical}
-.office-paragraph-button{display:block;width:100%;padding:0;border:0;background:transparent;text-align:left;color:var(--text-primary);font:inherit;line-height:1.75;cursor:pointer;border-radius:4px}
-.office-paragraph-button:hover{background:var(--bg-1)}
-.office-paragraph-button:disabled{cursor:default}
-.office-paragraph-editor{display:block;width:100%;min-height:64px;max-height:310px;resize:vertical;padding:9px 11px;border:0;border-radius:4px;background:var(--bg-base);color:var(--text-primary);font:inherit;font-size:14px;line-height:1.75}
 .office-dialog-overlay{position:absolute;z-index:40;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;background:color-mix(in srgb,var(--text-primary) 24%,transparent)}
 .office-dialog{display:flex;flex-direction:column;min-height:0;width:min(600px,100%);max-height:100%;border:1px solid var(--border-base);border-radius:9px;background:var(--bg-base);box-shadow:0 12px 42px color-mix(in srgb,var(--text-primary) 14%,transparent);overflow:hidden}
 .office-dialog__header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex:none;min-height:54px;padding:12px 20px;border-bottom:1px solid var(--border-base)}
@@ -141,4 +122,4 @@
 .office-receipt{padding:16px 0;border-bottom:1px solid var(--border-base)}
 .office-inline-result{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0;font-size:12px}
 @container (max-width:780px){.office-work-grid{display:block}.office-today{display:none}.office-header-search{width:154px}.office-connection-name{max-width:84px}.office-tabs{gap:19px}}
-@container (max-width:620px){.office-connection-name{display:none}.office-file-name>.office-small{display:none}.office-filebar{gap:6px}.office-filebar>.office-actions{gap:2px}}
+@container (max-width:620px){.office-connection-name{display:none}}

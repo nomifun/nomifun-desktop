@@ -17,6 +17,7 @@ pub fn office_hub_routes(service: Arc<OfficeHubService>) -> Router {
         .route("/api/office-hub/auth", post(start_auth))
         .route("/api/office-hub/auth/{id}", get(auth).delete(cancel_auth))
         .route("/api/office-hub/query", post(query))
+        .route("/api/office-hub/resources/recent", post(remember_resource))
         .route("/api/office-hub/operations", get(operations).post(execute))
         .route("/api/office-hub/operations/request/{request_id}", get(operation_by_request))
         .route("/api/office-hub/operations/{id}", get(operation))
@@ -56,6 +57,10 @@ async fn cancel_auth(State(service):HubState,_:User,Path(id):Path<String>)->Repl
 }
 async fn query(State(service):HubState,_:User,Json(request):Json<OfficeQuery>)->Reply<OfficeQueryResult>{
     Ok(Json(ApiResponse::ok(service.query(request).await?)))
+}
+async fn remember_resource(State(service):HubState,_:User,Json(request):Json<ResourceLink>)->Reply<()>{
+    service.remember_resource(request).await?;
+    Ok(Json(ApiResponse::ok(())))
 }
 async fn execute(State(service):HubState,_:User,Json(request):Json<ExecuteRequest>)->Reply<OfficeOperation>{
     Ok(Json(ApiResponse::ok(service.execute(request).await?)))

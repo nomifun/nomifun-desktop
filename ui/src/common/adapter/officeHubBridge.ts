@@ -2,7 +2,7 @@ import { httpRequest } from './httpBridge';
 import type {
   AuthStartRequest, AuthorizationFlow, ConnectionUpdate, OfficeConnection, OfficeOperation, OfficeProfile, OfficeQuery,
   OfficeQueryResult, OfficeStatus, OperationPage, ExecuteRequest,
-  RuntimeInfo, RuntimeUpdateInfo,
+  RuntimeInfo, RuntimeUpdateInfo, ResourceLink,
 } from '../types/officeHub';
 
 const root = '/api/office-hub';
@@ -20,6 +20,7 @@ export const officeHub = {
   auth: (id: string, signal?: AbortSignal) => httpRequest<AuthorizationFlow>('GET', root + '/auth/' + encodeURIComponent(id), undefined, { signal }),
   cancelAuth: (id: string) => httpRequest<AuthorizationFlow>('DELETE', root + '/auth/' + encodeURIComponent(id)),
   query: (body: OfficeQuery, signal?: AbortSignal) => httpRequest<OfficeQueryResult>('POST', root + '/query', body, { signal }),
+  rememberResource: (body: ResourceLink) => httpRequest<void>('POST', root + '/resources/recent', body),
   execute: (body: ExecuteRequest) => httpRequest<OfficeOperation>('POST', root + '/operations', body, { idempotencyKey: body.request_id }),
   operations: (cursor?: string | null, signal?: AbortSignal) => httpRequest<OperationPage>('GET', root + '/operations' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''), undefined, { signal }),
   operation: (id: string, signal?: AbortSignal) => httpRequest<OfficeOperation>('GET', operationPath(id), undefined, { signal }),

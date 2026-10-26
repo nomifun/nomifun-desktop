@@ -38,8 +38,8 @@ export interface AuthorizationFlow {
 export type TaskRelation = 'assigned' | 'created' | 'tasklist';
 export type OfficeQuery =
   | { kind: 'recent' }
+  | { kind: 'documents' }
   | { kind: 'search'; query: string; cursor: string | null }
-  | { kind: 'document'; document: string; editing?: boolean }
   | { kind: 'people'; query: string }
   | { kind: 'tasklists'; cursor: string | null }
   | { kind: 'tasks'; relation: TaskRelation; tasklist_id: string | null; cursor: string | null }
@@ -53,25 +53,16 @@ export interface OfficeItem {
   pending_operation_id: string | null; pending_status: ItemStatus | null;
   fields: Record<string, unknown>;
 }
-/** Native block text is kept literal; it is never Markdown editor source. */
-export interface OfficeDocumentBlock {
-  id: string | null; kind: 'paragraph' | 'heading' | 'unsupported'; content: string; editable: boolean;
-  readonly_reason: 'structure' | 'rich_text' | 'metadata' | null;
-}
-export interface DocumentEditBaseline { revision: string; blocks: OfficeDocumentBlock[]; can_insert_first: boolean }
-export interface OfficeDocument {
-  id: string; title: string; content: string; url: string | null;
-  edit_baseline: DocumentEditBaseline | null; pending_operation_id: string | null; pending_status: ItemStatus | null;
-}
+export interface ResourceLink { url: string; title: string | null }
 export interface OfficeField { id: string; name: string; field_type: string; writable: boolean; options: unknown | null }
 export interface OfficeQueryResult {
-  items: OfficeItem[]; document: OfficeDocument | null; fields: OfficeField[]; has_more: boolean; next_cursor: string | null; warnings: string[];
+  items: OfficeItem[]; fields: OfficeField[]; has_more: boolean; next_cursor: string | null; warnings: string[];
 }
 export type OfficeMutation =
   | { kind: 'task_create'; client_item_id: string; title: string; assignee_id: string; assignee_name: string | null; due: string | null; tasklist_id: string | null }
   | { kind: 'task_complete'; client_item_id: string; task_id: string; completed: boolean }
-  | { kind: 'document_create'; client_item_id: string; title: string; content: string }
-  | { kind: 'document_save'; client_item_id: string; document_id: string; revision: string; block_id: string | null; content: string }
+  | { kind: 'document_create'; client_item_id: string; title: string }
+  | { kind: 'document_delete'; client_item_id: string; document_id: string; document_type: string; title: string }
   | { kind: 'calendar_create'; client_item_id: string; title: string; start: string; end: string; timezone: string }
   | { kind: 'base_update'; client_item_id: string; base_token: string; table_id: string; record_id: string; fields: Record<string, unknown>; before: Record<string, unknown> };
 export interface ExecuteRequest { request_id: string; expected_actor: OfficeActor; profile: string; items: OfficeMutation[] }

@@ -22,9 +22,7 @@
     "createEvent": "Create personal event",
     "close": "Close",
     "cancel": "Cancel",
-    "back": "Back",
     "save": "Save",
-    "edit": "Edit",
     "continue": "Continue",
     "search": "Search",
     "refresh": "Refresh",
@@ -32,7 +30,6 @@
     "previous": "Previous",
     "loadMore": "Load more",
     "open": "Open in Feishu",
-    "openHere": "Open",
     "details": "View",
     "original": "View original operation",
     "reconcile": "Verify result",
@@ -44,7 +41,9 @@
     "prepare": "Install component",
     "check": "Check again",
     "select": "Verify selected program",
-    "copy": "Copy command"
+    "copy": "Copy command",
+    "openBrowser": "Open in browser",
+    "delete": "Delete"
   },
   "setup": {
     "environment": "Environment",
@@ -109,21 +108,21 @@
     "readMissing": "Reading permission is required. This does not mean the account has no data.",
     "exactScopes": "Requested permissions",
     "groups": {
-      "documents": "Find and read documents",
+      "documents": "List and search documents",
       "agenda": "Read calendar and tasks",
       "base": "Read Base tables"
     },
     "groupHints": {
-      "documents": "Search and read Feishu documents you can access.",
+      "documents": "List Drive documents and search accessible resources. Open content in your browser.",
       "agenda": "Read your calendar, tasks and accessible task lists.",
       "base": "Read the fields and records of a specified data table."
     },
     "capabilities": {
       "documents": {
         "search": "Search documents",
-        "read": "Read documents",
         "create": "Create documents",
-        "write": "Edit document paragraphs"
+        "list": "List documents",
+        "delete": "Delete documents"
       },
       "people": {
         "read": "Find visible members"
@@ -179,41 +178,26 @@
     "name": "Name",
     "type": "Type",
     "opened": "Last opened",
-    "firstDocument": "Open your first document",
+    "firstDocument": "No documents yet.",
     "notFound": "No matching content.",
     "filters": {
       "all": "All",
       "document": "Documents",
       "base": "Base tables"
     },
-    "updated": "Updated"
+    "updated": "Updated",
+    "actions": "Actions",
+    "browserHint": "Document content opens in your browser.",
+    "listHint": "Documents in your Drive root. Find other documents using search or a link.",
+    "invalidLink": "Use a complete official Feishu or Lark HTTPS document link.",
+    "missingLink": "No link is available. Search for the document or paste its complete link."
   },
   "documents": {
     "title": "Document title",
-    "content": "Body (optional)",
-    "paragraph": "Edit current paragraph",
-    "editParagraph": "Edit paragraph: {{text}}",
-    "firstParagraph": "Enter first paragraph",
-    "finishParagraph": "Save or cancel the current paragraph first.",
-    "emptyParagraph": "Enter paragraph content.",
-    "unsaved": "Unsaved",
-    "editing": "Editing",
-    "selectParagraph": "Select a paragraph",
-    "selectHint": "Click a body paragraph to edit its text, then save. Each save updates one paragraph.",
-    "readonly": "Read only",
-    "emptyBlock": "Empty paragraph — click to enter text",
-    "noDisplayText": "No text to display",
-    "retryRead": "Retry reading",
-    "reread": "Reread document",
-    "rereadHint": "Read the current document before editing again. Your unsaved text will be retained separately.",
-    "retainedInput": "Retained unsaved text",
-    "retainedHint": "Select a current paragraph and copy the text you still need. Retained text is never submitted automatically.",
-    "readonlyReason": {
-      "structure": "This block's structure is read only here. Edit it in Feishu.",
-      "rich_text": "This paragraph contains formatting or embedded content. Edit it in Feishu to preserve it.",
-      "metadata": "This block's metadata does not allow a verified text edit. Edit it in Feishu."
-    },
-    "uneditable": "Only ordinary body paragraphs with a verified block ID can be edited here. Open complex content in Feishu."
+    "createHint": "Create a blank document, then open it in your browser to write content.",
+    "deleteTitle": "Delete document",
+    "deleteNamed": "Delete document: {{title}}",
+    "deleteHint": "Delete this cloud document? It will be moved to the Feishu recycle bin."
   },
   "tasks": {
     "section": "Task",
@@ -272,10 +256,10 @@
       "task_create": "Create tasks · {{count}}",
       "task_complete": "Update task status · {{count}}",
       "document_create": "Create documents · {{count}}",
-      "document_save": "Save paragraphs · {{count}}",
       "calendar_create": "Create personal events · {{count}}",
       "base_update": "Update records · {{count}}",
-      "mixed": "Office operations · {{count}}"
+      "mixed": "Office operations · {{count}}",
+      "document_delete": "Delete document · {{count}} item(s)"
     },
     "results": "Operation result",
     "actor": "Acting as {{name}}",
@@ -285,7 +269,7 @@
     "time": "Started",
     "empty": "No workbench operations yet.",
     "identityChanged": "Switch to the original application and user before verifying this operation.",
-    "identityChangedInput": "The application or user changed. Reopen this form or reread the document before saving.",
+    "identityChangedInput": "The application or user changed. Reopen the form before submitting.",
     "networkHint": "The request may still be running. Read the original receipt; do not submit again.",
     "saving": "Saving…",
     "processing": "Processing…",
@@ -313,5 +297,6 @@
     "json": "Invalid field value.",
     "date": "Enter a valid date and time.",
     "batch": "Select between 1 and 200 available records."
-  }
+  },
+  "deleted": "Deleted."
 }

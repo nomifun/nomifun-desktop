@@ -1,6 +1,6 @@
 import { isBackendHttpError, redactSensitiveText } from '@/common/adapter/httpBridge';
 import { CANONICAL_UUID_V7 } from '@/common/types/ids';
-import type { AuthPhase, OfficeActor, OfficeField, OfficeMutation, OfficeOperation, OfficeStatus, OperationItem } from '@/common/types/officeHub';
+import type { AuthPhase, OfficeActor, OfficeField, OfficeItem, OfficeMutation, OfficeOperation, OfficeStatus, OperationItem } from '@/common/types/officeHub';
 
 export const OFFICE_TABS = ['overview', 'documents', 'agenda', 'base', 'activity'] as const;
 export type OfficeTab = typeof OFFICE_TABS[number];
@@ -8,7 +8,7 @@ export const officeTab = (value: string | null): OfficeTab => OFFICE_TABS.includ
 export const liveOperation = (operation: OfficeOperation) => operation.status === 'queued' || operation.status === 'running';
 export function operationKind(operation: Pick<OfficeOperation, 'items'>): string {
   const first = operation.items[0]?.mutation.kind;
-  return typeof first === 'string' && ['task_create', 'task_complete', 'document_create', 'document_save', 'calendar_create', 'base_update'].includes(first) && operation.items.every(item => item.mutation.kind === first) ? first : 'mixed';
+  return typeof first === 'string' && ['task_create', 'task_complete', 'document_create', 'document_delete', 'calendar_create', 'base_update'].includes(first) && operation.items.every(item => item.mutation.kind === first) ? first : 'mixed';
 }
 export const pendingItem = (item: OperationItem) => item.status === 'unknown' || item.status === 'accepted_pending_confirmation';
 export const terminalAuth = (phase: AuthPhase) => !['starting', 'waiting_user', 'waiting_admin', 'cancelling'].includes(phase);
@@ -21,13 +21,13 @@ export function mutationTitle(mutation: Record<string, unknown>): string {
 }
 const writeCapabilities: Record<OfficeMutation['kind'], string> = {
   task_create: 'tasks.write', task_complete: 'tasks.write', document_create: 'documents.create',
-  document_save: 'documents.write', calendar_create: 'calendar.write', base_update: 'base.write',
+  document_delete: 'documents.delete', calendar_create: 'calendar.write', base_update: 'base.write',
 };
 export function scopesFor(status: OfficeStatus | null, capabilities: string[]): string[] {
   return [...new Set((status?.permissions ?? []).filter(permission => capabilities.includes(permission.capability) && !permission.granted).flatMap(permission => permission.required_scopes))];
 }
 export const writeScopes = (status: OfficeStatus | null, items: OfficeMutation[]) => scopesFor(status, items.map(item => writeCapabilities[item.kind]));
-export const readGroups = { documents: ['documents.search', 'documents.read'], agenda: ['calendar.read', 'tasks.read', 'tasklists.read'], base: ['base.read'] };
+export const readGroups = { documents: ['documents.search', 'documents.list'], agenda: ['calendar.read', 'tasks.read', 'tasklists.read'], base: ['base.read'] };
 export const localDate = () => {
   const now = new Date();
   return [now.getFullYear(), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0')].join('-');
@@ -60,6 +60,24 @@ export function fieldDisplayText(value: unknown): string {
   if (Array.isArray(value) && value.every(item => typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean')) return value.map(String).join(', ');
   if (Array.isArray(value) && value.every(item => item && typeof item === 'object' && typeof item.text === 'string')) return value.map(item => item.text).join('');
   return fieldValueText(value);
+}
+export function officeResourceUrl(input: string): string {
+  const value = input.trim();
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error('office.resources.invalidLink'); }
+  const official = ['feishu.cn', 'larksuite.com', 'larkoffice.com'].some(domain => url.hostname === domain || url.hostname.endsWith('.' + domain));
+  if (url.protocol !== 'https:' || !official || url.username || url.password || url.port || /[\\\r\n]/.test(value) || !/^\/(docx|doc|docs|sheet|sheets|base|wiki|mindnote|slides|file)\/[A-Za-z0-9_-]+\/?$/.test(url.pathname)) throw new Error('office.resources.invalidLink');
+  return value;
+}
+export function documentTarget(item: OfficeItem): { document_id: string; document_type: string } | null {
+  const types = ['docx', 'doc', 'sheet', 'mindnote', 'slides', 'file'];
+  if (types.includes(item.kind) && /^[A-Za-z0-9_-]+$/.test(item.id)) return { document_id: item.id, document_type: item.kind };
+  if (!item.url) return null;
+  try {
+    const [, path, id] = new URL(officeResourceUrl(item.url)).pathname.split('/');
+    const kind = path === 'docs' ? 'doc' : path === 'sheets' ? 'sheet' : path;
+    return types.includes(kind) ? { document_id: id, document_type: kind } : null;
+  } catch { return null; }
 }
 export function parseBaseLink(input: string): { base_token: string; table_id: string } {
   let url: URL;

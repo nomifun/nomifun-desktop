@@ -11,14 +11,13 @@ function deferred<T>() {
   return { resolve, promise };
 }
 const result = (title: string): OfficeQueryResult => ({
-  items: [], fields: [], has_more: false, next_cursor: null, warnings: [],
-  document: { id: 'same-resource', title, content: title, url: null, edit_baseline: null, pending_operation_id: null, pending_status: null },
+  items: [], fields: [], has_more: false, next_cursor: null, warnings: [title],
 });
-test('a replaced connection cannot receive a stale response for the same document URL', async () => {
+test('a replaced connection cannot receive a stale response for the same document list', async () => {
   const first = deferred<OfficeQueryResult>(), second = deferred<OfficeQueryResult>();
   const query = spyOn(officeHub, 'query').mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
   try {
-    const view = renderHook(({ owner }) => useOfficeQuery({ kind: 'document', document: 'same-resource' }, owner), { initialProps: { owner: 'application-one/user-one' } });
+    const view = renderHook(({ owner }) => useOfficeQuery({ kind: 'documents' }, owner), { initialProps: { owner: 'application-one/user-one' } });
     await waitFor(() => expect(query).toHaveBeenCalledTimes(1));
     view.rerender({ owner: 'application-two/user-two' });
     await waitFor(() => expect(query).toHaveBeenCalledTimes(2));
@@ -26,6 +25,6 @@ test('a replaced connection cannot receive a stale response for the same documen
     await act(async () => { first.resolve(result('Old identity content')); });
     expect(view.result.current.data).toBeNull();
     await act(async () => { second.resolve(result('Current identity content')); });
-    expect(view.result.current.data?.document?.title).toBe('Current identity content');
+    expect(view.result.current.data?.warnings).toEqual(['Current identity content']);
   } finally { query.mockRestore(); }
 });

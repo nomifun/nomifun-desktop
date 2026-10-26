@@ -155,13 +155,13 @@ async fn old_unknown_inputs_remain_readable_but_cannot_execute_or_gain_false_con
     let (db,store,owner,c,a)=fixture().await;
     let op=submit(&store,&owner,&c,&a,vec![task("old","ou_a")]).await;
     let legacy=json!({"kind":"document_update","client_item_id":"old","document_id":"doc-real","revision":"12","content":"legacy append"});
-    let save=OfficeMutation::DocumentSave{client_item_id:"current-save".into(),document_id:"doc-real".into(),revision:"13".into(),block_id:Some("another-block".into()),content:"new paragraph content".into()};
+    let save=OfficeMutation::DocumentDelete{client_item_id:"current-delete".into(),document_id:"doc-real".into(),document_type:"docx".into(),title:"Document".into()};
     sqlx::query("UPDATE office_operation_items SET mutation_json=?,target_key=? WHERE item_id=?").bind(legacy.to_string()).bind(target_key(&a,"nomifun",&save).unwrap()).bind(&op.items[0].id).execute(db.pool()).await.unwrap();
     assert!(store.start_attempt(&owner,&op.id,&op.items[0].id).await.is_err());
     sqlx::query("UPDATE office_operation_items SET status='unknown' WHERE item_id=?").bind(&op.items[0].id).execute(db.pool()).await.unwrap();
     let read=store.get(&owner,&op.id).await.unwrap().unwrap();assert_eq!(read.items[0].mutation,legacy);
     assert_eq!(store.list(&owner,30,None).await.unwrap().items[0].items[0].mutation,legacy);
-    assert_eq!(store.create_submitted(&owner,&c.id,&a,"nomifun",&request(&a,vec![save])).await.unwrap_err().related_operation_id,Some(op.id.clone()),"a new block save cannot bypass the old document-wide unknown fence");
+    assert_eq!(store.create_submitted(&owner,&c.id,&a,"nomifun",&request(&a,vec![save])).await.unwrap_err().related_operation_id,Some(op.id.clone()),"a document deletion cannot bypass an existing unknown fence");
     assert!(store.append_observation(&owner,&op.id,&op.items[0].id,ObservationKind::TargetReadback,"text exists",Some(&json!({"id":"doc-real","content":"legacy append"})),true,Some("doc-real"),None).await.is_err());
     db.close().await;
 }

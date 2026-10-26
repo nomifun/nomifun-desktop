@@ -230,29 +230,13 @@ impl OfficeHubService {
         }
         let (connection, executable, identity) = self.ready().await?;
         require_permissions(&adapter::query_permissions(&query, &identity.scopes))?;
-        let mut result = if let OfficeQuery::Document { document, editing: true } = &query {
-            self.query_document_edit(document, connection.profile.as_deref(), &executable).await?
-        } else {
-            let commands = adapter::query_commands(&query, connection.profile.as_deref())?;
-            let mut outputs = Vec::with_capacity(commands.len());
-            for command in commands {
-                outputs.push(self.runtime.run(&executable, command, self.shutdown.child_token(), None).await?);
-            }
-            adapter::normalize_query(&query, &outputs)?
-        };
-        if let OfficeQuery::Document { .. } = &query {
-            if let Some(document) = &mut result.document {
-                let mut recent = OfficeItem::new(&document.id, "document", &document.title);
-                recent.url = document.url.clone();
-                self.store.remember_recent(&self.owner, &connection.id, &recent).await?;
-                let actor=identity.actor.as_ref().ok_or_else(||HubError::unavailable("User identity unavailable"))?;
-                let target=crate::store::target_key(actor,connection.profile.as_deref().unwrap_or_default(),&OfficeMutation::DocumentSave{
-                    client_item_id:document.id.clone(),document_id:document.id.clone(),revision:"0".into(),block_id:None,content:String::new()})?;
-                if let Some((operation,status))=self.store.pending_targets(&self.owner,&[target.clone()]).await?.get(&target){
-                    document.pending_operation_id=Some(operation.clone());document.pending_status=Some(status.clone());
-                }
-            }
-        } else if let OfficeQuery::BaseRecords { base_token, table_id, .. } = &query {
+        let commands = adapter::query_commands(&query, connection.profile.as_deref())?;
+        let mut outputs = Vec::with_capacity(commands.len());
+        for command in commands {
+            outputs.push(self.runtime.run(&executable, command, self.shutdown.child_token(), None).await?);
+        }
+        let mut result = adapter::normalize_query(&query, &outputs)?;
+        if let OfficeQuery::BaseRecords { base_token, table_id, .. } = &query {
             let mut recent = OfficeItem::new(format!("{base_token}/{table_id}"), "base", table_id);
             recent.base_token = Some(base_token.clone()); recent.table_id = Some(table_id.clone());
             self.store.remember_recent(&self.owner, &connection.id, &recent).await?;
@@ -265,6 +249,22 @@ impl OfficeHubService {
             let pending=self.store.pending_targets(&self.owner,&targets.values().cloned().collect::<Vec<_>>()).await?;
             for item in &mut result.items{
                 if let Some((operation,status))=targets.get(&item.id).and_then(|target|pending.get(target)){
+                    item.pending_operation_id=Some(operation.clone());item.pending_status=Some(status.clone());
+                }
+            }
+        } else if matches!(query,OfficeQuery::Documents|OfficeQuery::Search{..}) {
+            let actor=identity.actor.as_ref().ok_or_else(||HubError::unavailable("User identity unavailable"))?;
+            let targets=result.items.iter().filter_map(|item|adapter::document_target(item).map(|(kind,id)|(item,kind,id)))
+                .map(|(item,kind,id)|{
+                    crate::store::target_key(actor,connection.profile.as_deref().unwrap_or_default(),&OfficeMutation::DocumentDelete{
+                        client_item_id:item.id.clone(),document_id:id,document_type:kind,title:item.title.clone()})
+                        .map(|target|(item.id.clone(),target))
+                }).collect::<Result<BTreeMap<_,_>,HubError>>()?;
+            let keys=targets.values().cloned().collect::<Vec<_>>();
+            let mut pending=BTreeMap::new();
+            for keys in keys.chunks(200) { pending.extend(self.store.pending_targets(&self.owner,keys).await?); }
+            for item in &mut result.items {
+                if let Some((operation,status))=targets.get(&item.id).and_then(|target|pending.get(target)) {
                     item.pending_operation_id=Some(operation.clone());item.pending_status=Some(status.clone());
                 }
             }
@@ -284,41 +284,11 @@ impl OfficeHubService {
         Ok(result)
     }
 
-    /// Resolve URL/wiki references through the official shortcut, then read one
-    /// native revision. Pagination must never mix blocks from different edits.
-    async fn query_document_edit(&self, document: &str, profile: Option<&str>, executable: &str) -> Result<OfficeQueryResult, HubError> {
-        let query = OfficeQuery::Document { document: document.into(), editing: false };
-        let mut resolved_outputs = Vec::new();
-        for command in adapter::query_commands(&query, profile)? {
-            resolved_outputs.push(self.runtime.run(executable, command, self.shutdown.child_token(), None).await?);
-        }
-        let resolved = adapter::normalize_query(&query, &resolved_outputs)?.document
-            .ok_or_else(|| HubError::unavailable("The source document identity could not be resolved"))?;
-        let output = self.runtime.run(executable, adapter::document_metadata_command(&resolved.id, profile)?,
-            self.shutdown.child_token(), None).await?;
-        let metadata = adapter::normalize_document_metadata(&output)?;
-        if metadata.id != resolved.id {
-            return Err(HubError::unavailable("The native document metadata belongs to a different resource"));
-        }
-        let mut blocks = Vec::new();
-        let mut cursor = None;
-        let mut seen_cursors = HashSet::new();
-        for _ in 0..100 {
-            let output = self.runtime.run(executable,
-                adapter::document_blocks_command(&metadata.id, &metadata.revision, cursor.as_deref(), profile)?,
-                self.shutdown.child_token(), None).await?;
-            let page = adapter::normalize_document_blocks(&output)?;
-            if blocks.len() + page.blocks.len() > 10_000 {
-                return Err(HubError::unavailable("The document exceeds the supported native edit baseline size"));
-            }
-            blocks.extend(page.blocks);
-            match page.next_cursor {
-                None => return adapter::normalize_document_edit(document, &metadata, &blocks),
-                Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
-                Some(_) => return Err(HubError::unavailable("The native document pagination repeated a cursor; no edit baseline was accepted")),
-            }
-        }
-        Err(HubError::unavailable("The native document pagination exceeded the edit baseline limit"))
+    /// Thin navigation only. Opening a link never reads a document body.
+    pub async fn remember_resource(&self, link: ResourceLink) -> Result<(), HubError> {
+        let (connection, _, _) = self.ready().await?;
+        let item = adapter::resource_link(&link)?;
+        self.store.remember_recent(&self.owner, &connection.id, &item).await
     }
 
     pub async fn operation(&self, id: &str) -> Result<OfficeOperation, HubError> {
@@ -548,21 +518,6 @@ impl OfficeHubService {
                     if !adapter::tasklist_editable(&output,&actor.user_id)?{
                         return Err(HubError::invalid("The selected task list has no confirmed owner/editor access; refresh it or choose a different list"))
                     }
-                }
-                OfficeMutation::DocumentSave{document_id,revision,block_id,..}=>{
-                    let query=OfficeQuery::Document{document:document_id.clone(),editing:true};
-                    require_permissions(&adapter::query_permissions(&query,&identity.scopes))?;
-                    let current=self.query_document_edit(document_id,Some(profile),executable).await?.document
-                        .ok_or_else(||HubError::invalid("The exact source document could not be read before saving"))?;
-                    let baseline=current.edit_baseline.ok_or_else(||HubError::invalid("A full document edit baseline is required"))?;
-                    if current.id!=*document_id||baseline.revision!=*revision{
-                        return Err(HubError::conflict("The document changed; refresh it before editing again",None))
-                    }
-                    let target_valid=match block_id{
-                        Some(id)=>baseline.blocks.iter().any(|block|block.id.as_deref()==Some(id.as_str())&&block.editable&&block.kind==DocumentBlockKind::Paragraph),
-                        None=>baseline.can_insert_first,
-                    };
-                    if !target_valid{return Err(HubError::invalid("Only an actual ordinary paragraph, or the first paragraph of an empty document, can be saved here"))}
                 }
                 OfficeMutation::BaseUpdate{base_token,table_id,record_id,fields,before,..}=>{
                     let key=(base_token.clone(),table_id.clone());

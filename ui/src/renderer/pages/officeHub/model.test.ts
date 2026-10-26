@@ -11,8 +11,8 @@ describe('compact office boundaries', () => {
     expect(sameActor(actor, null)).toBe(false);
   });
   test('only missing exact capabilities contribute authorization scopes', () => {
-    const status = { permissions: [{ capability: 'documents.create', granted: true, required_scopes: ['create'] }, { capability: 'documents.write', granted: false, required_scopes: ['edit'] }] } as OfficeStatus;
-    expect(scopesFor(status, ['documents.write'])).toEqual(['edit']);
+    const status = { permissions: [{ capability: 'documents.create', granted: true, required_scopes: ['create'] }, { capability: 'documents.delete', granted: false, required_scopes: ['delete'] }] } as OfficeStatus;
+    expect(scopesFor(status, ['documents.delete'])).toEqual(['delete']);
     expect(scopesFor(status, ['documents.create'])).toEqual([]);
   });
   test('opaque historic mutation evidence cannot become a current executable kind', () => {

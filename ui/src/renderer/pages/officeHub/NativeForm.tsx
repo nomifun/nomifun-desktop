@@ -25,7 +25,6 @@ export function NativeForm({ kind, identity, ...services }: FormServices & { kin
   const { t } = useTranslation();
   const [clientId] = useState(uuidv7);
   const [title, setTitle] = useState('');
-  const [content, setContent] = useState('');
   const [assignee, setAssignee] = useState({ id: identity.actor.user_id, name: identity.actor.name });
   const [due, setDue] = useState('');
   const [tasklist, setTasklist] = useState('');
@@ -52,7 +51,7 @@ export function NativeForm({ kind, identity, ...services }: FormServices & { kin
     try {
       if (!title.trim() || changed || (kind === 'task' && !assignee.id)) throw new Error('office.validation.required');
       let item: OfficeMutation;
-      if (kind === 'document') item = { kind: 'document_create', client_item_id: clientId, title: title.trim(), content };
+      if (kind === 'document') item = { kind: 'document_create', client_item_id: clientId, title: title.trim() };
       else if (kind === 'task') item = { kind: 'task_create', client_item_id: clientId, title: title.trim(), assignee_id: assignee.id, assignee_name: assignee.name, due: due || null, tasklist_id: tasklist || null };
       else item = { kind: 'calendar_create', client_item_id: clientId, title: title.trim(), ...localEventTimes(date, time, duration), timezone };
       const scopes = writeScopes(services.status, [item]);
@@ -66,7 +65,7 @@ export function NativeForm({ kind, identity, ...services }: FormServices & { kin
     {changed && <p className='office-warning'>{t('office.operation.identityChangedInput')}</p>}{services.errorPanel(validation)}<WriteFeedback write={write} onResult={services.onResult} errorPanel={services.errorPanel} />
     <fieldset disabled={write.loading || write.locked || changed} className='office-fieldset'>
       <label className='office-label'>{t(kind === 'task' ? 'office.tasks.title' : kind === 'event' ? 'office.calendar.title' : 'office.documents.title')}<input className='office-input' autoFocus value={title} onChange={event => setTitle(event.target.value)} /></label>
-      {kind === 'document' && <label className='office-label'>{t('office.documents.content')}<textarea className='office-input office-create-body' rows={7} value={content} onChange={event => setContent(event.target.value)} /></label>}
+      {kind === 'document' && <p className='office-small office-muted'>{t('office.documents.createHint')}</p>}
       {kind === 'task' && <><div className='office-form-row'><label className='office-label'>{t('office.tasks.assignee')}<select className='office-input' value={assignee.id} onChange={event => setAssignee({ id: event.target.value, name: options.find(item => item.id === event.target.value)?.title ?? '' })}>{options.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><label className='office-label'>{t('office.tasks.due')}<input className='office-input' type='date' value={due} onChange={event => setDue(event.target.value)} /></label></div>
         <details><summary>{t('office.tasks.otherPerson')}</summary><div className='office-form-row'><input className='office-input' aria-label={t('office.tasks.personSearch')} value={peopleInput} onChange={event => setPeopleInput(event.target.value)} /><OfficeButton disabled={people.loading} onClick={() => hasPermission(services.status, 'people.read') ? setPeopleQuery(peopleInput.trim()) : services.authorize(scopesFor(services.status, ['people.read']))}>{t('office.actions.search')}</OfficeButton></div>{services.errorPanel(people.error)}</details>
         <label className='office-label'>{t('office.tasks.list')}<select className='office-input' value={tasklist} onChange={event => setTasklist(event.target.value)}><option value=''>{t('office.tasks.noList')}</option>{listCache.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>{!hasPermission(services.status, 'tasklists.read') && <OfficeButton quiet onClick={() => services.authorize(scopesFor(services.status, ['tasklists.read']))}>{t('office.tasks.readLists')}</OfficeButton>}{lists.data?.has_more && lists.data.next_cursor && <OfficeButton quiet onClick={() => setListCursor(lists.data!.next_cursor)}>{t('office.actions.loadMore')}</OfficeButton>}{services.errorPanel(lists.error)}<p className='office-small office-muted'>{t('office.tasks.listHint')}</p>

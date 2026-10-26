@@ -1,6 +1,6 @@
 # 办公工作台：飞书实施计划
 
-状态：按用户确认的 compact-v4 产品合同实施收敛，当前验证以[验收记录](../validation/office-feishu-workbench.zh.md)为准。
+状态：按用户 2026-10-26 的文档基础管理要求收敛，当前验证以[验收记录](../validation/office-feishu-workbench.zh.md)为准。
 本文是本功能唯一现役计划。真实飞书租户与各发行平台的验证分别记录，未执行不计为通过。
 所有业务读取和写入由官方飞书 CLI 完成。
 
@@ -10,7 +10,7 @@
 支持 Tauri 桌面和桌面 WebUI，最小视口 880×600，使用共享 PageHeader、主题和双语。
 
 - 概览：真实连接状态、已打开资源入口、当日日程和我负责的任务。
-- 文档：搜索、打开、新建，以及文档内的普通段落编辑。
+- 文档：列表、搜索、标题创建、删除与浏览器链接打开。NomiFun 不读取、预览或编辑文档正文。
 - 日程与任务：个人日程、我负责／我创建／指定清单的任务，创建、完成和重新打开。
 - 多维表格：链接定位、真实字段和记录分页、简单可写字段的批量修改。
 - 操作记录：当前工作台提交的结果、部分完成和待核验项。
@@ -56,25 +56,25 @@
 
 ### 文档
 
-新建表单包含标题和可选正文。空正文走 CLI 的标题专用创建能力。
-打开已有文档时在文档内显示原生内容，不把全文放入一个转换后的 Markdown 编辑框。
+文档页通过官方 CLI `drive files list` 列出当前用户云空间根目录的文档，
+根目录不支持分页；关键词搜索保留上一页／下一页。根目录列表不代表整个云空间，其他内容通过搜索或链接定位。
+工作台保留最近打开的薄导航；点击文档名或「浏览器打开」直接交给系统浏览器。
+文档列表中的多维表格链接也直接在浏览器打开，独立的多维表格页维持其既有合同。
+链接必须是飞书／Lark 官方 HTTPS 资源地址，知识库链接不解析成另一个可删除对象。
+没有可用链接时明确提示通过搜索或粘贴完整链接，不拼接未知租户地址。
 
-编辑前由官方 CLI 解析资源定位，再读取文档元数据和原生 blocks；每一页固定同一 revision，
-收齐并验证根节点与子节点顺序后才产生编辑基线。分页缺失、重复或截断不能成为空正文依据。
-只允许编辑已确认可处理的顶层普通纯文本段落，一次选择一个段落并点击保存。
-标题、行内富文本、评论、表格、嵌套和不支持的 block 显示只读原因；没有可编辑段落时不显示“正在编辑”。
-没有可靠编辑基线时提供阅读与在飞书打开，不伪造 block ID，也不把整篇内容重建成新文档。
-只有后端确认正文为空时，才允许新增首段。
+新建只填写标题，通过 CLI 的标题专用能力创建空白文档；创建后回到列表，正文在浏览器中编写。
+删除先显示具体标题和链接，用户点击删除后一次提交封闭请求。
+删除只对确切 token 与已支持类型的云文档开放，不删除文件夹、快捷方式、知识库节点或多维表格。
+使用官方 CLI `drive +delete --file-token ... --type ... --yes`，保留身份、幂等请求和原始回执。
+只有相同 token／type 的 `deleted=true` 终态回执才能确认成功；异步待完成、超时和不完整回执继续待核验，不能重发删除。
+成功创建／删除的最近入口变化与原回执在同一事务内提交。
 
-阅读使用 CLI 的 Markdown 导出，编辑值使用原生文本，两者不相互转换。
-UI/API 合同版本由当前 46 升至 47，避免旧页面把 Markdown 编辑值提交给新的原生文本写入链。
-保存通过 CLI 的原生 Block API `update_text_elements` 原地修改文本，保留 block ID 和段落样式；
-确认空正文后才调用原生 children 创建首段。字符、路径、Markdown 标记和软换行按文本保存，
-不把用户输入重新解释为格式或资源。删除被替代的 XML 编辑解析器与 Markdown 段落替换链路。
-
-保存绑定原文档、原 block 和选择时的 revision。提交前重新检查基线；源内容变化时保留输入并要求重新读取。
-一个文档存在 queued、running 或未解决结果时，整篇文档保持写保护，换段落不能绕过。
-原生段落写入仍可能与其他飞书客户端并发，不承诺跨程序的排他编辑。
+读取权限只申请列表元数据和搜索，创建／删除权限按需补充；不再申请正文读取或段落写入权限。
+移除文档详情页面、Markdown 导出阅读、原生 block 读取／分页／编辑、正文创建输入与对应 DTO、样式和测试。
+UI/API 合同从实际 HEAD 的 47 升为 48，旧 `document` 查询与 `document_save` 写入不再是可执行接口。
+已有操作的原始 JSON 回执保持只读证据，未解决的原文档栅栏继续阻止同一资源的新删除。
+不迁移数据库、不改变 Agent Session，不恢复旧执行合同。
 
 ### 日程与任务
 
@@ -110,7 +110,7 @@ UI/API 合同版本由当前 46 升至 47，避免旧页面把 Markdown 编辑�
 只有有未执行证明的项目才能修正后显式提交新请求，旧请求与旧回执保留。
 创建 nonce 跨 profile 和用户切换仍不能重复使用已成功或未解决的创建；新表单使用新 nonce。
 未取得任务 GUID 或确切创建回执时，不凭同名搜索宣布成功。
-待核验的已知资源使用跨身份目标栅栏；旧文档写入的未解决结果继续锁住整篇文档。
+待核验的已知资源使用跨身份目标栅栏；同一文档的未解决操作继续阻止新的删除。
 
 停用停止新业务准入并撤回尚未开始的项目，保留配置、最近入口和历史回执。
 已开始的 CLI 仍由原 owner 收尾，停用不等于撤销飞书服务端授权。
@@ -133,7 +133,7 @@ attempt 在启动前保存，running 只允许一次最终结算；observation �
 历史未知输入保留为只读 JSON 证据，不注册旧的可执行操作类型。
 
 最近入口放入连接的 `recent_resources_json`，最多 100 条，仅保存资源定位、标题与打开时间。
-不缓存正文、记录字段、权限和 pending 状态；每次打开仍从 CLI 读取当前数据。
+不缓存正文、记录字段、权限和 pending 状态；列表／搜索读取资源元数据，正文仅在浏览器打开。
 未提交表单不落库，已提交输入只为精确执行、幂等和未知结果核验保留。
 
 `016_office_hub.sql` 保持原文与 checksum。新增 `017_compact_office_receipts.sql` 做精确前向收敛：
@@ -176,7 +176,8 @@ API 前缀为 `/api/office-hub`，沿用 ApiResponse 与结构化业务错误。
 | `POST /runtime/check-update` | 只读上游版本检查 |
 | `PUT /connection` | 启停与 profile 选择 |
 | `POST /auth`、`GET /auth/{id}`、`DELETE /auth/{id}` | 开始、观察与取消原流程 |
-| `POST /query` | 封闭的文档、人员、任务、日历与 Base 查询 |
+| `POST /query` | 封闭的文档列表／搜索、人员、任务、日历与 Base 查询 |
+| `POST /resources/recent` | 仅记录已在浏览器打开资源的薄导航，不读取正文 |
 | `POST /operations` | 一次提交 ExecuteRequest |
 | `GET /operations/request/{request_id}` | 恢复原提交结果，不重发 |
 | `GET /operations`、`GET /operations/{id}` | 操作记录和逐项结果 |
@@ -188,8 +189,8 @@ API 前缀为 `/api/office-hub`，沿用 ApiResponse 与结构化业务错误。
 
 - 冷启动与状态读取无安装副作用；已有工具复用、坏安装、共享准备并发与取消。
 - 三步连接、权限稍后补充、管理员等待、拒绝、过期和精确收尾。
-- 普通段落使用真实 block 与 revision；复杂内容只读；可靠空正文才能插入首段。
-- 响应丢失按 request 查询；身份变化、重复创建、文档与 Base pending 围栏不能绕过。
+- 列表与搜索只读元数据；浏览器打开保留原链接；标题创建与删除确认不出现正文预览／编辑。
+- 响应丢失按 request 查询；身份变化、重复创建、删除与 Base pending 围栏不能绕过。
 - 部分完成、unknown 不重发、未执行的新请求、原回执不可改写与读回不假成功。
 - 016→017 历史输入／回执、序列高水位、坏形态原子拒绝、快照和 Agent 清理保留。
 - 880×600 与桌面宽窗、PageHeader、双语、主题、键盘弹窗和真实错误／空状态。
@@ -202,11 +203,8 @@ API 前缀为 `/api/office-hub`，沿用 ApiResponse 与结构化业务错误。
 - [官方 CLI 1.0.98](https://github.com/larksuite/cli/tree/v1.0.98)
 - [完整安装向导](https://github.com/larksuite/cli/blob/v1.0.98/scripts/install-wizard.js)
 - [文档创建](https://github.com/larksuite/cli/blob/v1.0.98/skills/lark-doc/references/lark-doc-create.md)
-- [CLI 原生 API 调用](https://github.com/larksuite/cli/blob/v1.0.98/cmd/api/api.go)
-- [文档元数据](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document/get)
-- [固定版本块分页](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document/list)
-- [原地更新块文本](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/patch)
-- [原生首段创建](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/create)
+- [Drive 列表](https://github.com/larksuite/cli/blob/v1.0.98/skills/lark-drive/references/lark-drive-files-list.md)
+- [Drive 删除](https://github.com/larksuite/cli/blob/v1.0.98/shortcuts/drive/drive_delete.go)
 - [任务创建](https://github.com/larksuite/cli/blob/v1.0.98/skills/lark-task/references/lark-task-create.md)
 - [个人日程行为](https://github.com/larksuite/cli/blob/v1.0.98/skills/lark-calendar/references/lark-calendar-create.md)
 - [Base 批次回执](https://github.com/larksuite/cli/blob/v1.0.98/shortcuts/base/record_batch_update.go)

@@ -72,7 +72,7 @@ pub struct OfficeProfile {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OfficePermission {
-    /// Product capability, e.g. documents.read; not a revocation switch.
+    /// Product capability, e.g. documents.list; not a revocation switch.
     pub capability: String,
     pub required_scopes: Vec<String>,
     pub granted: bool,
@@ -127,8 +127,8 @@ pub enum TaskRelation { Assigned, Created, Tasklist }
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OfficeQuery {
     Recent,
+    Documents,
     Search { query: String, cursor: Option<String> },
-    Document { document: String, #[serde(default)] editing: bool },
     People { query: String },
     Tasklists { cursor: Option<String> },
     Tasks { relation: TaskRelation, tasklist_id: Option<String>, cursor: Option<String> },
@@ -169,34 +169,10 @@ impl OfficeItem {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OfficeDocument {
-    pub id: String,
-    pub title: String,
-    pub content: String,
-    pub url: Option<String>,
-    pub edit_baseline: Option<DocumentEditBaseline>,
-    pub pending_operation_id: Option<String>,
-    pub pending_status: Option<ItemStatus>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocumentEditBaseline {
-    pub revision: String,
-    pub blocks: Vec<DocumentBlock>,
-    pub can_insert_first: bool,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all="snake_case")]
-pub enum DocumentBlockKind { Paragraph, Heading, Unsupported }
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all="snake_case")]
-pub enum DocumentReadonlyReason { Structure, RichText, Metadata }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocumentBlock {
-    pub id: Option<String>,
-    pub kind: DocumentBlockKind,
-    pub content: String,
-    pub editable: bool,
-    pub readonly_reason: Option<DocumentReadonlyReason>,
+#[serde(deny_unknown_fields)]
+pub struct ResourceLink {
+    pub url: String,
+    pub title: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OfficeField {
@@ -209,7 +185,6 @@ pub struct OfficeField {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OfficeQueryResult {
     pub items: Vec<OfficeItem>,
-    pub document: Option<OfficeDocument>,
     pub fields: Vec<OfficeField>,
     pub has_more: bool,
     pub next_cursor: Option<String>,
@@ -221,8 +196,8 @@ pub enum OfficeMutation {
     TaskCreate { client_item_id: String, title: String, assignee_id: String,
         assignee_name: Option<String>, due: Option<String>, tasklist_id: Option<String> },
     TaskComplete { client_item_id: String, task_id: String, completed: bool },
-    DocumentCreate { client_item_id: String, title: String, content: String },
-    DocumentSave { client_item_id: String, document_id: String, revision: String, block_id: Option<String>, content: String },
+    DocumentCreate { client_item_id: String, title: String },
+    DocumentDelete { client_item_id: String, document_id: String, document_type: String, title: String },
     CalendarCreate { client_item_id: String, title: String, start: String, end: String, timezone: String },
     BaseUpdate { client_item_id: String, base_token: String, table_id: String,
         record_id: String, fields: BTreeMap<String, Value>, before: BTreeMap<String, Value> },
@@ -230,12 +205,12 @@ pub enum OfficeMutation {
 impl OfficeMutation {
     pub fn client_item_id(&self) -> &str {
         match self { Self::TaskCreate { client_item_id, .. } | Self::TaskComplete { client_item_id, .. } |
-            Self::DocumentCreate { client_item_id, .. } | Self::DocumentSave { client_item_id, .. } |
+            Self::DocumentCreate { client_item_id, .. } | Self::DocumentDelete { client_item_id, .. } |
             Self::CalendarCreate { client_item_id, .. } | Self::BaseUpdate { client_item_id, .. } => client_item_id }
     }
     pub fn kind(&self) -> &'static str {
         match self { Self::TaskCreate { .. } => "task_create", Self::TaskComplete { .. } => "task_complete",
-            Self::DocumentCreate { .. } => "document_create", Self::DocumentSave { .. } => "document_save",
+            Self::DocumentCreate { .. } => "document_create", Self::DocumentDelete { .. } => "document_delete",
             Self::CalendarCreate { .. } => "calendar_create", Self::BaseUpdate { .. } => "base_update" }
     }
 }

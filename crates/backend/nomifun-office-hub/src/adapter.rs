@@ -3,10 +3,6 @@ use crate::{HubError, runtime::{CliCommand, CliOutput, PAYLOAD_FILE}, types::*};
 use chrono::DateTime;
 use serde_json::{Value, json};
 use std::{collections::{BTreeMap,BTreeSet}, time::Duration};
-#[path="document.rs"]
-mod document;
-pub use document::{NativeDocumentMetadata, NativeDocumentPage, document_metadata_command, normalize_document_metadata, document_blocks_command, normalize_document_blocks, normalize_document_edit};
-
 pub struct CliIdentity {
     pub actor: Option<OfficeActor>,
     pub phase: ConnectionPhase,
@@ -79,47 +75,8 @@ fn first_text(value: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| text(value.get(*key)))
 }
 
-/// The native Markdown export includes its document title as the opening H1.
-/// Separate only that title; matching paragraphs or later headings are body.
-fn markdown_document_parts(content:String,metadata_title:Option<String>)->(String,String){
-    let source=content.strip_prefix('\u{feff}').unwrap_or(&content);
-    let mut offset=0;
-    for line in source.split_inclusive('\n'){
-        let text=line.trim_end_matches(['\r','\n']);
-        if text.trim().is_empty(){offset+=line.len();continue}
-        let heading=text.trim_start_matches(' ');
-        if text.len()-heading.len()>3 {break}
-        let Some(heading)=heading.strip_prefix('#').and_then(|text|text.strip_prefix([' ','\t'])) else{break};
-        let heading=heading.trim();
-        if heading.is_empty(){break}
-        let mut chars=heading.chars().peekable();let mut title=String::new();
-        while let Some(character)=chars.next(){
-            if character=='\\'&&chars.peek().is_some_and(char::is_ascii_punctuation){title.push(chars.next().unwrap());}
-            else{title.push(character)}
-        }
-        if metadata_title.as_ref().is_some_and(|metadata|metadata!=&title){break}
-        return (metadata_title.unwrap_or(title),source[offset+line.len()..].to_owned());
-    }
-    (metadata_title.unwrap_or_else(||"飞书文档".into()),content)
-}
-fn valid_document_markdown(content:&str)->Result<(),HubError>{
-    valid_text(content,"文档内容",1_000_000)?;
-    let mut escaped=false;
-    let mut chars=content.chars().peekable();
-    while let Some(character)=chars.next(){
-        if escaped{escaped=false;continue}
-        if character=='\\'{escaped=true;continue}
-        if character=='<'||(character=='!'&&chars.peek()==Some(&'[')){
-            return Err(HubError::invalid("资源、XML 和图片请在飞书中编辑；此处支持普通正文"))
-        }
-    }
-    Ok(())
-}
 fn has_scope(scopes: &[String], required: &str) -> bool {
-    // Capabilities cover the complete workbench chain, including +fetch for
-    // resource resolution/reading. CLI v1.0.98 internal/auth/scope.go checks
-    // required shortcut scopes exactly, even when a native API accepts a
-    // broader alternative. Do not advertise a chain the CLI will reject.
+    // CLI shortcut preflight checks exact scopes, including delete metadata.
     scopes.iter().any(|scope| scope == required)
 }
 fn capability(name: &str, required: &[&str], granted: &[String]) -> OfficePermission {
@@ -127,11 +84,15 @@ fn capability(name: &str, required: &[&str], granted: &[String]) -> OfficePermis
         granted: required.iter().all(|scope| has_scope(granted, scope)) }
 }
 pub fn permissions(scopes: &[String]) -> Vec<OfficePermission> {
+    // Native files.list accepts alternatives; request its narrow list scope
+    // when absent, while reusing an already-granted native Drive read scope.
+    let mut listing=capability("documents.list", &["space:document:retrieve"], scopes);
+    listing.granted |= ["drive:drive", "drive:drive:readonly"].iter().any(|scope|has_scope(scopes,scope));
     vec![
         capability("documents.search", &["search:docs:read"], scopes),
-        capability("documents.read", &["docx:document:readonly"], scopes),
+        listing,
         capability("documents.create", &["docx:document:create"], scopes),
-        capability("documents.write", &["docx:document:write_only", "docx:document:readonly"], scopes),
+        capability("documents.delete", &["space:document:delete", "drive:drive.metadata:readonly"], scopes),
         capability("people.read", &["contact:user:search"], scopes),
         capability("tasks.read", &["task:task:read"], scopes),
         capability("tasks.write", &["task:task:write"], scopes),
@@ -154,7 +115,7 @@ pub fn query_permissions(query: &OfficeQuery, scopes: &[String]) -> Vec<OfficePe
     let names: &[&str] = match query {
         OfficeQuery::Recent => &[],
         OfficeQuery::Search { .. } => &["documents.search"],
-        OfficeQuery::Document { .. } => &["documents.read"],
+        OfficeQuery::Documents => &["documents.list"],
         OfficeQuery::People { .. } => &["people.read"],
         OfficeQuery::Tasklists { .. } => &["tasklists.read"],
         OfficeQuery::Tasks { relation: TaskRelation::Tasklist, .. } => &["tasklists.read"],
@@ -169,7 +130,7 @@ pub fn mutation_permissions(mutation: &OfficeMutation, scopes: &[String]) -> Vec
         OfficeMutation::TaskCreate { tasklist_id: Some(_), .. } => &["tasks.write", "tasklists.read"],
         OfficeMutation::TaskCreate { .. } | OfficeMutation::TaskComplete { .. } => &["tasks.write"],
         OfficeMutation::DocumentCreate { .. } => &["documents.create"],
-        OfficeMutation::DocumentSave { .. } => &["documents.write"],
+        OfficeMutation::DocumentDelete { .. } => &["documents.delete"],
         OfficeMutation::CalendarCreate { .. } => &["calendar.write"],
         OfficeMutation::BaseUpdate { .. } => &["base.read", "base.write"],
     };
@@ -237,6 +198,42 @@ pub fn official_url(value: &str) -> Option<String> {
     let allowed = ["feishu.cn", "larksuite.com", "larkoffice.com"].iter()
         .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")));
     allowed.then(|| value.to_owned())
+}
+
+pub fn document_type(kind: &str) -> bool {
+    matches!(kind, "docx" | "doc" | "sheet" | "mindnote" | "slides" | "file")
+}
+fn valid_resource_token(token: &str) -> Result<(), HubError> {
+    if token.is_empty() || token.len() > 512 || !token.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)) {
+        return Err(HubError::invalid("资源标识必须是确切的飞书 token"));
+    }
+    Ok(())
+}
+fn link_target(value: &str) -> Result<(String, String), HubError> {
+    let official=official_url(value).ok_or_else(||HubError::invalid("请使用飞书或 Lark 官方 HTTPS 文档链接"))?;
+    let url=url::Url::parse(&official).map_err(|_|HubError::invalid("文档链接格式不正确"))?;
+    let parts=url.path().trim_matches('/').split('/').collect::<Vec<_>>();
+    if parts.len()!=2 { return Err(HubError::invalid("请使用完整的飞书文档链接")); }
+    let kind=match parts[0] {"docs"=>"doc","sheets"=>"sheet","base"=>"bitable",kind=>kind};
+    if !document_type(kind) && !matches!(kind,"bitable"|"wiki") { return Err(HubError::invalid("此链接不是飞书文档资源")); }
+    valid_resource_token(parts[1])?;
+    Ok((kind.into(),parts[1].into()))
+}
+pub fn resource_link(link: &ResourceLink) -> Result<OfficeItem, HubError> {
+    let (kind,id)=link_target(&link.url)?;
+    let title=link.title.as_deref().unwrap_or(&id);
+    valid_text(title,"资源标题",500)?;
+    let mut item=OfficeItem::new(&id,if kind=="bitable"{"base"}else{"document"},title);
+    item.url=Some(link.url.clone());
+    if kind=="bitable" { let (base,table)=base_coordinates(&link.url);item.base_token=base;item.table_id=table; }
+    Ok(item)
+}
+pub fn document_target(item: &OfficeItem) -> Option<(String, String)> {
+    if document_type(&item.kind) && valid_resource_token(&item.id).is_ok() {
+        return Some((item.kind.clone(),item.id.clone()));
+    }
+    let (kind,id)=link_target(item.url.as_deref()?).ok()?;
+    document_type(&kind).then_some((kind,id))
 }
 
 fn json_values(text: &str) -> Vec<Value> {
@@ -406,10 +403,10 @@ pub fn query_commands(query: &OfficeQuery, profile: Option<&str>) -> Result<Vec<
             if let Some(cursor) = cursor { valid_id(cursor, "分页标识")?;args.extend(["--page-token".into(), cursor.clone()]); }
             vec![user_command(args, profile, false)?]
         }
-        OfficeQuery::Document { document, editing } => {
-            valid_id(document, "文档标识")?;
-            if *editing { return Err(HubError::invalid("编辑读取必须通过原生文档快照")); }
-            vec![user_command(["docs", "+fetch", "--doc", document, "--doc-format", "markdown", "--detail", "simple"], profile, false)?]
+        OfficeQuery::Documents => {
+            // The native root listing returns its direct entries without pagination.
+            vec![user_command(["drive", "files", "list", "--params", r#"{"folder_token":""}"#,
+                "--format", "json"], profile, false)?]
         }
         OfficeQuery::People { query } => {
             valid_text(query, "人员关键词", 50)?;
@@ -540,13 +537,16 @@ pub fn normalize_query(query: &OfficeQuery, outputs: &[CliOutput]) -> Result<Off
                 result.items.push(item);
             }
         }
-        OfficeQuery::Document { document, editing } => {
-            if *editing { return Err(HubError::invalid("编辑结果必须使用原生文档快照")); }
-            let doc=data.get("document").ok_or_else(|| HubError::unavailable("文档读取结果格式不兼容"))?;
-            let id=first_text(doc,&["document_id"]).ok_or_else(|| HubError::unavailable("文档结果缺少标识"))?;
-            let (title,content)=markdown_document_parts(text(doc.get("content")).unwrap_or_default(),first_text(doc,&["title"]));
-            result.document=Some(OfficeDocument {id,title,content,url:official_url(document),
-                edit_baseline:None,pending_operation_id:None,pending_status:None});
+        OfficeQuery::Documents => {
+            for entry in array_field(&data,"files","文档列表结果格式不兼容")? {
+                let kind=first_text(entry,&["type"]).ok_or_else(||HubError::unavailable("资源缺少类型"))?;
+                if !document_type(&kind) && kind!="bitable" { continue; }
+                let id=first_text(entry,&["token"]).ok_or_else(||HubError::unavailable("资源缺少标识"))?;
+                let mut item=OfficeItem::new(id,if kind=="bitable"{"base"}else{&kind},first_text(entry,&["name"]).unwrap_or_default());
+                item.url=entry.get("url").and_then(Value::as_str).and_then(official_url);
+                item.modified_at=first_text(entry,&["modified_time"]);
+                result.items.push(item);
+            }
         }
         OfficeQuery::People { .. } => {
             for user in array_field(&data,"users","人员结果格式不兼容")? {
@@ -661,20 +661,17 @@ pub fn mutation_command(mutation:&OfficeMutation,client_token:&str,profile:Optio
             valid_id(task_id,"任务标识")?;
             user_command(["task",if *completed{"+complete"}else{"+reopen"},"--task-id",task_id,"--format","json"],profile,true)
         }
-        OfficeMutation::DocumentCreate {title,content,..}=>{
+        OfficeMutation::DocumentCreate {title,..}=>{
             valid_text(title,"文档标题",500)?;
-            if content.trim().is_empty(){
-                // Upstream title-only create synthesizes <title> and must not
-                // receive an explicitly empty --content or an invented body.
-                return user_command(["docs","+create","--title",title,"--doc-format","xml",
-                    "--parent-position","my_library"],profile,true)
-            }
-            valid_document_markdown(content)?;
-            let mut result=user_command(["docs","+create","--title",title,"--doc-format","markdown",
-                "--content","-","--parent-position","my_library"],profile,true)?;
-            result.stdin=Some(content.as_bytes().to_vec());Ok(result)
+            user_command(["docs","+create","--title",title,"--doc-format","xml",
+                "--parent-position","my_library"],profile,true)
         }
-        OfficeMutation::DocumentSave {..}=>document::document_save_command(mutation,client_token,profile),
+        OfficeMutation::DocumentDelete {document_id,document_type:kind,title,..}=>{
+            valid_resource_token(document_id)?;
+            valid_text(title,"文档标题",500)?;
+            if !document_type(kind) { return Err(HubError::invalid("此资源类型不支持文档删除")); }
+            user_command(["drive","+delete","--file-token",document_id,"--type",kind,"--yes"],profile,true)
+        }
         OfficeMutation::CalendarCreate {title,start,end,timezone,..}=>{
             valid_text(title,"日程名称",500)?;valid_id(timezone,"时区")?;
             let from=parse_datetime(start)?;let to=parse_datetime(end)?;
@@ -703,7 +700,7 @@ pub fn normalize_mutation(mutation:&OfficeMutation,output:&CliOutput)->Result<Mu
         OfficeMutation::TaskCreate {..}|OfficeMutation::TaskComplete {..}=>
             (first_text(&data,&["guid"]),data.get("url").and_then(Value::as_str).and_then(official_url)),
         OfficeMutation::DocumentCreate {..}=>(text(data.pointer("/document/document_id")),data.pointer("/document/url").and_then(Value::as_str).and_then(official_url)),
-        OfficeMutation::DocumentSave {document_id,..}=>(Some(document_id.clone()),None),
+        OfficeMutation::DocumentDelete {document_id,..}=>(Some(document_id.clone()),None),
         OfficeMutation::CalendarCreate {..}=>(text(data.pointer("/event/event_id")),data.pointer("/event/app_link").and_then(Value::as_str).and_then(official_url)),
         OfficeMutation::BaseUpdate {record_id,..}=>(Some(record_id.clone()),None),
     };
@@ -724,8 +721,14 @@ pub fn normalize_mutation(mutation:&OfficeMutation,output:&CliOutput)->Result<Mu
         else if matches!(mutation,OfficeMutation::BaseUpdate{..}) {ItemStatus::AcceptedPendingConfirmation}
         else if !warning_messages.is_empty(){ItemStatus::Unknown}
         else if id.is_none(){ItemStatus::Unknown}
-        else if matches!(mutation,OfficeMutation::DocumentSave{..}) &&
-            (!document::document_save_confirmed(mutation,&data)||!warning_messages.is_empty()) {ItemStatus::Unknown}
+        else if let OfficeMutation::DocumentDelete {document_id,document_type,..}=mutation {
+            if data.get("deleted")==Some(&Value::Bool(true)) && data.get("file_token").and_then(Value::as_str)==Some(document_id)
+                && data.get("type").and_then(Value::as_str)==Some(document_type)
+                && data.get("ready")!=Some(&Value::Bool(false)) && data.get("timed_out")!=Some(&Value::Bool(true))
+                && data.get("failed")!=Some(&Value::Bool(true)) && data.get("status").and_then(Value::as_str).is_none_or(|status|status=="success")
+                && data.get("next_command").is_none() {ItemStatus::Succeeded}
+            else {ItemStatus::Unknown}
+        }
         else {ItemStatus::Succeeded};
     let message=if status==ItemStatus::Unknown {Some(if !warning_messages.is_empty(){warning_messages.join("；")}
             else if let Some(result)=result{format!("CLI 返回 {result}，尚不能确认完整结果；请核验原操作")}
@@ -813,16 +816,73 @@ mod tests {
         assert!(!p.iter().find(|p|p.capability=="calendar.read").unwrap().granted);
     }
     #[test]
-    fn workbench_scopes_follow_the_official_cli_shortcut_preflight(){
-        let p=permissions(&["docx:document".into()]);
-        for capability in ["documents.read","documents.write","documents.create"] {
-            assert!(!p.iter().find(|p|p.capability==capability).unwrap().granted);
+    fn documents_require_only_management_scopes(){
+        let scopes=vec!["space:document:retrieve".into(),"drive:drive.metadata:readonly".into(),"space:document:delete".into(),"docx:document:create".into()];
+        let p=permissions(&scopes);
+        for capability in ["documents.list","documents.delete","documents.create"] {
+            assert!(p.iter().find(|p|p.capability==capability).unwrap().granted);
         }
-        let p=permissions(&["docx:document:readonly".into()]);
-        assert!(p.iter().find(|p|p.capability=="documents.read").unwrap().granted);
-        assert!(!p.iter().find(|p|p.capability=="documents.write").unwrap().granted);
-        let p=permissions(&["docx:document:readonly".into(),"docx:document:write_only".into()]);
-        assert!(p.iter().find(|p|p.capability=="documents.write").unwrap().granted);
+        assert!(p.iter().all(|p|p.capability!="documents.read"&&p.capability!="documents.write"));
+        for scope in ["docx:document:readonly","docx:document:write_only"] {assert!(!allowed_scopes().contains(&scope.into()));}
+        let p=permissions(&["space:document:delete".into()]);
+        assert!(!p.iter().find(|p|p.capability=="documents.delete").unwrap().granted);
+        for scope in ["drive:drive", "drive:drive:readonly"] {
+            let p=permissions(&[scope.into()]);
+            assert!(p.iter().find(|p|p.capability=="documents.list").unwrap().granted);
+            assert!(!p.iter().find(|p|p.capability=="documents.delete").unwrap().granted);
+        }
+    }
+    #[test]
+    fn document_listing_uses_the_native_root_contract(){
+        let query=OfficeQuery::Documents;
+        let commands=query_commands(&query,Some("work")).unwrap();
+        assert_eq!(commands.len(),1);assert!(!commands[0].mutating);
+        let params:Value=serde_json::from_str(&commands[0].args[commands[0].args.iter().position(|a|a=="--params").unwrap()+1]).unwrap();
+        assert_eq!(params,json!({"folder_token":""}));
+        let result=normalize_query(&query,&[output(json!({"files":[
+            {"token":"doc_real","name":"Document","type":"docx","url":"https://team.feishu.cn/docx/doc_real","modified_time":"1793000000"},
+            {"token":"base_real","name":"Base","type":"bitable","url":"https://team.feishu.cn/base/base_real"},
+            {"token":"folder_real","name":"Folder","type":"folder"}],"has_more":false}))]).unwrap();
+        assert_eq!(result.items.len(),2);assert_eq!(result.items[0].id,"doc_real");assert_eq!(result.items[1].kind,"base");
+        assert!(result.next_cursor.is_none());assert!(!result.has_more);
+        assert!(result.items.iter().all(|item|item.description.is_none()));
+    }
+    #[test]
+    fn document_create_is_title_only_and_content_contracts_are_retired(){
+        let mutation=OfficeMutation::DocumentCreate{client_item_id:"create".into(),title:"New document".into()};
+        let cmd=mutation_command(&mutation,"request",Some("work")).unwrap();
+        assert!(cmd.stdin.is_none());assert!(cmd.input_file.is_none());assert!(!cmd.args.contains(&"--content".into()));
+        assert!(serde_json::from_value::<OfficeQuery>(json!({"kind":"document","document":"doc_real"})).is_err());
+        assert!(serde_json::from_value::<OfficeMutation>(json!({"kind":"document_save","client_item_id":"save","document_id":"doc_real","revision":"1","block_id":"block","content":"text"})).is_err());
+        assert!(serde_json::from_value::<OfficeMutation>(json!({"kind":"document_create","client_item_id":"create","title":"New","content":"retired"})).is_err());
+    }
+    #[test]
+    fn document_delete_requires_an_exact_terminal_receipt(){
+        let mutation=OfficeMutation::DocumentDelete{client_item_id:"delete".into(),document_id:"doc_real".into(),document_type:"docx".into(),title:"Document".into()};
+        let cmd=mutation_command(&mutation,"request",Some("work")).unwrap();
+        assert_eq!(cmd.args,vec!["--profile","work","drive","+delete","--file-token","doc_real","--type","docx","--yes","--as","user"]);
+        assert!(cmd.mutating);
+        let receipt=json!({"deleted":true,"file_token":"doc_real","type":"docx"});
+        assert_eq!(normalize_mutation(&mutation,&output(receipt.clone())).unwrap().status,ItemStatus::Succeeded);
+        for data in [json!({"task_id":"pending","ready":false}),json!({}),json!({"deleted":true,"file_token":"another","type":"docx"}),
+            json!({"deleted":true,"file_token":"doc_real","type":"docx","status":"processing"}),
+            json!({"deleted":true,"file_token":"doc_real","type":"docx","next_command":"untrusted command"})] {
+            assert_eq!(normalize_mutation(&mutation,&output(data)).unwrap().status,ItemStatus::Unknown);
+        }
+        let mut timed_out=output(receipt);timed_out.timed_out=true;
+        assert_eq!(normalize_mutation(&mutation,&timed_out).unwrap().status,ItemStatus::Unknown);
+        for kind in ["wiki","folder","shortcut","bitable"] {
+            let mut unsupported=mutation.clone();if let OfficeMutation::DocumentDelete{document_type,..}=&mut unsupported{*document_type=kind.into();}
+            assert!(mutation_command(&unsupported,"request",None).is_err());
+        }
+    }
+    #[test]
+    fn links_remember_navigation_without_reading_or_guessing_a_wiki_target(){
+        let item=resource_link(&ResourceLink{url:"https://team.feishu.cn/wiki/wiki_real?from=link".into(),title:Some("Wiki".into())}).unwrap();
+        assert_eq!(item.id,"wiki_real");assert!(document_target(&item).is_none());
+        for url in ["https://evil.test/docx/a","https://team.feishu.cn/docx/a/blocks","https://team.feishu.cn/","https://team.feishu.cn/docx/a%2Fb"] {
+            assert!(resource_link(&ResourceLink{url:url.into(),title:None}).is_err());
+        }
     }
     #[test]
     fn profile_and_status_use_their_real_unwrapped_contracts(){
@@ -895,37 +955,6 @@ mod tests {
         let body:Value=serde_json::from_str(&cmd.args[cmd.args.iter().position(|a|a=="--data").unwrap()+1]).unwrap();
         assert_eq!(body["vchat"]["vc_type"],"no_meeting");
         assert!(cmd.args.iter().any(|a|a.contains("stable-key")));
-    }
-    #[test]
-    fn markdown_read_separates_only_the_opening_exported_title_and_preserves_body(){
-        let query=OfficeQuery::Document{document:"doc_real".into(),editing:false};
-        let body="\nReport\n\n## Section\n\n# Report\n\n- First\n- Second\n\n```markdown\n# Report\n```\n";
-        let document=normalize_query(&query,&[output(json!({"document":{"document_id":"doc_real","title":"Report","content":format!("# Report\n{body}")}}))]).unwrap().document.unwrap();
-        assert_eq!(document.title,"Report");assert_eq!(document.content,body);
-        assert!(document.edit_baseline.is_none());
-        for (content,title,body) in [
-            ("# Report","Report",""),
-            ("\u{feff}\r\n  \r\n# 中文标题\r\n\r\n正文\r\n","中文标题","\r\n正文\r\n"),
-            ("# Project \\*plan\\*\n\nBody","Project *plan*","\nBody"),
-        ] {
-            let document=normalize_query(&query,&[output(json!({"document":{"document_id":"doc_real","content":content}}))]).unwrap().document.unwrap();
-            assert_eq!(document.title,title);assert_eq!(document.content,body);
-        }
-        let document=normalize_query(&query,&[output(json!({"document":{"document_id":"doc_real","title":"Project *plan*","content":"# Project \\*plan\\*\n\nBody"}}))]).unwrap().document.unwrap();
-        assert_eq!(document.title,"Project *plan*");assert_eq!(document.content,"\nBody");
-    }
-    #[test]
-    fn markdown_read_keeps_different_headings_and_never_infers_title_from_later_content(){
-        let query=OfficeQuery::Document{document:"doc_real".into(),editing:false};
-        for content in ["Report\n\n# Report","```markdown\n# Report\n```","    # Report","## Report","\\# Report"] {
-            for title in [None,Some("Report")] {
-                let document=normalize_query(&query,&[output(json!({"document":{"document_id":"doc_real","title":title,"content":content}}))]).unwrap().document.unwrap();
-                assert_eq!(document.title,title.unwrap_or("飞书文档"));assert_eq!(document.content,content);
-            }
-        }
-        let content="\n# Different heading\n\nReport\n\n# Report";
-        let document=normalize_query(&query,&[output(json!({"document":{"document_id":"doc_real","title":"Report","content":content}}))]).unwrap().document.unwrap();
-        assert_eq!(document.title,"Report");assert_eq!(document.content,content);
     }
     #[test]
     fn timeout_is_unknown_and_keeps_exact_original_resource_receipt(){

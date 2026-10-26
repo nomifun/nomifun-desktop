@@ -307,6 +307,9 @@ impl OfficeHubStore {
         sqlx::query("UPDATE office_operation_items SET status=?,message=?,remote_id=?,remote_url=? WHERE item_id=?")
             .bind(wire(&status)?).bind(message).bind(remote_id).bind(remote_url).bind(item_id)
             .execute(&mut *tx).await.map_err(HubError::storage)?;
+        if status==ItemStatus::Succeeded {
+            update_document_navigation(&mut tx,owner,&op,item,remote_id,remote_url).await?;
+        }
         update_summary(&mut tx,id).await?;
         let result = required_operation(&mut tx,owner,id).await?;
         tx.commit().await.map_err(HubError::storage)?;
@@ -385,6 +388,37 @@ impl OfficeHubStore {
         tx.commit().await.map_err(HubError::storage)?;
         Ok(recovered)
     }
+}
+
+/// Navigation changes settle atomically with the original receipt, so a lost
+/// response cannot leave a deleted resource in the recent list.
+async fn update_document_navigation(conn:&mut SqliteConnection,owner:&str,op:&OfficeOperation,item:&OperationItem,
+    remote_id:Option<&str>,remote_url:Option<&str>)->Result<(),HubError>{
+    let Ok(mutation)=serde_json::from_value::<OfficeMutation>(item.mutation.clone()) else{return Ok(())};
+    if !matches!(mutation,OfficeMutation::DocumentCreate{..}|OfficeMutation::DocumentDelete{..}) {return Ok(())}
+    let text:String=sqlx::query_scalar("SELECT recent_resources_json FROM office_connections WHERE owner_id=? AND connection_id=?")
+        .bind(owner).bind(&op.connection_id).fetch_one(&mut *conn).await.map_err(HubError::storage)?;
+    let mut resources:Vec<RecentResource>=parse(&text)?;
+    match mutation {
+        OfficeMutation::DocumentCreate{title,..}=>{
+            let Some(id)=remote_id else{return Ok(())};
+            let mut item=OfficeItem::new(id,"document",title);item.url=remote_url.map(str::to_owned);
+            let recent=RecentResource::from_item(&item)?;
+            resources.retain(|old|old.locator()!=recent.locator());
+            resources.insert(0,recent);resources.truncate(100);
+        }
+        OfficeMutation::DocumentDelete{document_id,..}=>{
+            resources.retain(|old|{
+                let mut item=OfficeItem::new(&old.id,&old.kind,&old.title);item.url=old.url.clone();
+                old.id!=document_id && !crate::adapter::document_target(&item).is_some_and(|(_,id)|id==document_id)
+            });
+        }
+        _=>{}
+    }
+    sqlx::query("UPDATE office_connections SET recent_resources_json=? WHERE owner_id=? AND connection_id=?")
+        .bind(bounded_json(&resources)?).bind(owner).bind(&op.connection_id)
+        .execute(&mut *conn).await.map_err(HubError::storage)?;
+    Ok(())
 }
 
 async fn stop_unstarted_tx(conn:&mut SqliteConnection,owner:&str,connection_id:&str,message:&str)->Result<usize,HubError>{
@@ -543,7 +577,7 @@ pub fn target_key(actor:&OfficeActor,profile:&str,item:&OfficeMutation)->Result<
         OfficeMutation::DocumentCreate{client_item_id,..}|OfficeMutation::CalendarCreate{client_item_id,..}=>
             json!(["feishu","create",actor.app_id,actor.user_id,profile,item.kind(),client_item_id]),
         OfficeMutation::TaskComplete{task_id,..}=>json!(["feishu","task",canonical_resource_id(task_id)?]),
-        OfficeMutation::DocumentSave{document_id,..}=>json!(["feishu","document",canonical_resource_id(document_id)?]),
+        OfficeMutation::DocumentDelete{document_id,..}=>json!(["feishu","document",canonical_resource_id(document_id)?]),
         OfficeMutation::BaseUpdate{base_token,table_id,record_id,..}=>json!(["feishu","base",canonical_resource_id(base_token)?,canonical_resource_id(table_id)?,canonical_resource_id(record_id)?]),
     };
     hash_json(&target)
@@ -568,9 +602,6 @@ fn target_readback_confirms(mutation:&Value,data:Option<&Value>,remote_id:Option
             same_resource_id(id,task_id)&&same_resource_id(remote_id,task_id)
                 &&data.get("completed").and_then(Value::as_bool)==Some(*completed)
         }
-        // Saves require their exact original terminal receipt. A later view
-        // cannot prove that this particular request produced its content.
-        OfficeMutation::DocumentSave{..}=>false,
         _=>false,
     }
 }

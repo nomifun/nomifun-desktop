@@ -8,7 +8,7 @@ import { useOfficeWrite } from './useOfficeWrite';
 
 const actor = { app_id: 'app', user_id: 'user', name: 'User' };
 const identity = { actor, profile: 'work', key: 'connection:work:app:user' };
-const items: OfficeMutation[] = [{ kind: 'document_create', client_item_id: 'logical-create', title: 'A document', content: '' }];
+const items: OfficeMutation[] = [{ kind: 'document_create', client_item_id: 'logical-create', title: 'A document' }];
 function receipt(request: ExecuteRequest, status: OfficeOperation['status']): OfficeOperation {
   return { id: 'operation', request_id: request.request_id, connection_id: 'connection', actor, profile: 'work', status, created_at: '2026-10-26T00:00:00Z', updated_at: '2026-10-26T00:00:00Z', items: request.items.map((mutation, index) => ({ id: String(index), mutation, target_key: 'target', status: status === 'partial' ? index === 0 ? 'succeeded' : 'unknown' : status, remote_id: null, remote_url: null, message: null, attempts: [], observations: [] })) };
 }
