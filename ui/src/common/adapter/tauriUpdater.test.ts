@@ -196,7 +196,7 @@ describe('desktop updater security boundary', () => {
     );
   });
 
-  test('a refused install is marked never-attempted, and a real failure never is', () => {
+  test('only failures before the platform replacement handoff are marked never-attempted', () => {
     // take_ready failures touch nothing; they must be distinguishable from a real
     // install failure, which may have left the app bundle half replaced.
     const installStart = desktopSource.indexOf('async fn install_update(');
@@ -206,12 +206,59 @@ describe('desktop updater security boundary', () => {
     expect(installEnd).toBeGreaterThan(installStart);
     expect(installCommand.includes('UPDATE_NOT_RETAINED_ERROR')).toBe(true);
 
-    // NEGATIVE: everything from the real installer handoff onwards must stay
-    // unmarked, or isInstallNotAttempted would swallow a half-replaced bundle and
-    // the fail-closed exit would be globally defeated.
-    const handoff = installCommand.slice(installCommand.indexOf('package.update.install('));
-    expect(handoff.length).toBeGreaterThan(0);
-    expect(handoff.includes('UPDATE_NOT_RETAINED_ERROR')).toBe(false);
+    // The platforms have different handoff boundaries. macOS transfers the
+    // retained package to its own worker before the other platforms' install
+    // call; that worker may already have replaced bundle files on failure.
+    const macosStart = installCommand.indexOf('#[cfg(target_os = "macos")]');
+    const otherPlatformsStart = installCommand.indexOf('#[cfg(not(target_os = "macos"))]');
+    const nativeInstall = installCommand.indexOf('package.update.install(');
+    const windowsFailureStart = installCommand.indexOf('#[cfg(windows)]', nativeInstall);
+    const otherFailureStart = installCommand.indexOf('#[cfg(not(windows))]', windowsFailureStart);
+    const macosWorkerStart = installCommand.indexOf('async fn install_macos_update_retained(');
+    expect(macosStart).toBeGreaterThan(-1);
+    expect(otherPlatformsStart).toBeGreaterThan(macosStart);
+    expect(nativeInstall).toBeGreaterThan(otherPlatformsStart);
+    expect(windowsFailureStart).toBeGreaterThan(nativeInstall);
+    expect(otherFailureStart).toBeGreaterThan(windowsFailureStart);
+    expect(macosWorkerStart).toBeGreaterThan(otherFailureStart);
+
+    const macosHandoff = installCommand.slice(macosStart, otherPlatformsStart);
+    expect(macosHandoff.indexOf('pause.commit()')).toBeGreaterThan(-1);
+    expect(macosHandoff.indexOf('return install_macos_update_retained(')).toBeGreaterThan(
+      macosHandoff.indexOf('pause.commit()')
+    );
+    expect(macosHandoff.includes('UPDATE_NOT_RETAINED_ERROR')).toBe(false);
+    expect(macosHandoff.includes('restore_before_handoff(')).toBe(false);
+    expect(macosHandoff.includes('pause.cancel()')).toBe(false);
+
+    // Windows returns extraction errors before on_before_exit/process handoff.
+    // Only that cfg branch may restore the package, await keyboard recovery,
+    // and return the recoverable marker instead of claiming replacement began.
+    const windowsFailure = installCommand.slice(windowsFailureStart, otherFailureStart);
+    const restorePackage = windowsFailure.indexOf('downloaded.restore_before_handoff(');
+    const resumeKeyboard = windowsFailure.indexOf('pause.cancel()');
+    expect(restorePackage).toBeGreaterThan(-1);
+    expect(resumeKeyboard).toBeGreaterThan(restorePackage);
+    expect(windowsFailure.indexOf('UPDATE_NOT_RETAINED_ERROR')).toBeGreaterThan(resumeKeyboard);
+    expect(windowsFailure.includes('return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: {error}"))')).toBe(true);
+    expect(windowsFailure.includes('pause.commit()')).toBe(false);
+    expect(windowsFailure.includes('finish_install(')).toBe(false);
+
+    // NEGATIVE: replacement errors on the remaining platform path and inside
+    // the retained macOS worker must never re-arm installation of the same
+    // package or turn a possibly half-replaced bundle into a refusal.
+    const replacementFailure = installCommand.slice(otherFailureStart, macosWorkerStart);
+    const macosWorker = installCommand.slice(macosWorkerStart);
+    for (const source of [replacementFailure, macosWorker]) {
+      expect(source.includes('UPDATE_NOT_RETAINED_ERROR')).toBe(false);
+      expect(source.includes('restore_before_handoff(')).toBe(false);
+      expect(source.includes('pause.cancel()')).toBe(false);
+    }
+    expect(replacementFailure.includes('pause.commit()')).toBe(true);
+    expect(replacementFailure.includes('return Err(error.to_string())')).toBe(true);
+    expect(macosWorker.includes('package.update.install(')).toBe(true);
+    expect(macosWorker.includes('DESKTOP_UPDATE_REPLACEMENT_FAILED')).toBe(true);
+    expect(macosWorker.includes('macos_lifecycle::release_installation(')).toBe(true);
 
     // An install already in flight is NOT recoverable: on macOS the running
     // bundle has already been renamed aside by that point. Pin the SPLIT, not
