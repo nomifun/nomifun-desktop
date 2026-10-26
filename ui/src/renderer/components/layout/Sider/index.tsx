@@ -52,7 +52,7 @@ interface SiderProps {
  * reached via the "会话" entry. The rail holds top-level destinations grouped
  * by small-text section headers (`SiderSectionHeader`): 常用 (会话 / 桌面伙伴),
  * 数据空间 (知识库), 自动化 (定时任务 / 需求平台),
- * 扩展 (MCP & 技能), 服务 (应用 / 客服), and a bottom-pinned 设置 group
+ * 扩展 (MCP & 技能), 服务 (办公 / 应用 / 客服), and a bottom-pinned 设置 group
  * (模型管理 + the footer). Execution engines live as an
  * independent tab inside Settings rather than being mixed into model
  * management.
@@ -202,12 +202,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleAgentClick}
             />
-            <SiderOfficeEntry
-              isActive={pathname === '/office' || pathname.startsWith('/office/')}
-              collapsed={collapsed}
-              siderTooltipProps={siderTooltipProps}
-              onClick={handleOfficeClick}
-            />
             {/* Work partner (桌面伙伴) */}
             <SiderNomiEntry
               isActive={pathname === '/nomi'}
@@ -273,8 +267,14 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleEnhancedToolsClick}
             />
-            {/* 服务 — hosted applications and public-facing customer service. */}
+            {/* 服务 — cloud office, hosted applications and public-facing customer service. */}
             <SiderSectionHeader label={t('common.siderSection.services')} collapsed={collapsed} />
+            <SiderOfficeEntry
+              isActive={pathname === '/office' || pathname.startsWith('/office/')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleOfficeClick}
+            />
             <SiderAppEntry
               isActive={pathname.startsWith('/apps')}
               collapsed={collapsed}
