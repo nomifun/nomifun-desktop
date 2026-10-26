@@ -1,6 +1,7 @@
 import type { OfficeDocument, OfficeDocumentBlock, OfficeMutation } from '@/common/types/officeHub';
 import { uuidv7 } from '@/common/utils/uuidv7';
 import MarkdownView from '@/renderer/components/Markdown';
+import { Message } from '@arco-design/web-react';
 import { ArrowLeft } from '@icon-park/react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -19,14 +20,13 @@ function DocumentBody({ content }: { content: string }) {
 export function DocumentView(services: DocumentServices) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState<WriteIdentity | null>(null);
-  const [saved, setSaved] = useState(false);
   const read = useOfficeQuery(hasPermission(services.status, 'documents.read') ? { kind: 'document', document: services.documentId, editing: false } : null, services.ownerKey + ':' + services.refreshKey);
   const document = read.data?.document;
-  if (editing) return <DocumentEdit {...services} identity={editing} onDone={confirmed => { setEditing(null); setSaved(!!confirmed); read.refresh(); }} />;
+  if (editing) return <DocumentEdit {...services} identity={editing} onDone={confirmed => { setEditing(null); if (confirmed) Message.success({ content: t('office.saved'), duration: 3000 }); read.refresh(); }} />;
   return <><div className='office-filebar'><div className='office-file-name'><OfficeButton quiet aria-label={t('office.actions.back')} onClick={services.onBack}><ArrowLeft size={16} /></OfficeButton><strong>{document?.title || t('office.tabs.documents')}</strong>{document?.pending_status && <span className='office-small office-warning'>{t('office.operation.status.' + document.pending_status)}</span>}</div><div className='office-actions'>
     {document?.pending_operation_id ? <OfficeButton onClick={() => services.onResultId?.(document.pending_operation_id!)}>{t('office.actions.reconcile')}</OfficeButton> : <OfficeButton disabled={!document || !captureIdentity(services.status)} onClick={() => setEditing(captureIdentity(services.status))}>{t('office.actions.edit')}</OfficeButton>}
     {document?.url && <OfficeButton quiet onClick={() => services.onOpen(document.url!)}>{t('office.actions.open')}</OfficeButton>}
-  </div></div>{saved && <p className='office-notice' role='status'>{t('office.saved')}</p>}{services.errorPanel(read.error)}{read.loading ? <p className='office-empty'>{t('office.loading')}</p> : document && <article className='office-document'><h2 className='office-document-title'>{document.title}</h2><DocumentBody content={document.content} /></article>}</>;
+  </div></div>{services.errorPanel(read.error)}{read.loading ? <p className='office-empty'>{t('office.loading')}</p> : document && <article className='office-document'><h2 className='office-document-title'>{document.title}</h2><DocumentBody content={document.content} /></article>}</>;
 }
 function DocumentEdit(services: DocumentServices & { identity: WriteIdentity; onDone: (confirmed?: boolean) => void }) {
   const { t } = useTranslation();

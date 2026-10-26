@@ -71,9 +71,7 @@
 .office-empty h3{color:var(--text-primary);margin-bottom:8px}
 .office-empty p{margin:6px 0 17px}
 .office-welcome{padding:65px 20px}
-.office-notice,.office-error{padding:8px 11px;margin:10px 20px;border-radius:5px;font-size:12px;line-height:1.7;overflow-wrap:anywhere}
-.office-notice{background:color-mix(in srgb,var(--primary) 6%,var(--bg-base));color:var(--text-secondary)}
-.office-error{background:color-mix(in srgb,var(--danger) 7%,var(--bg-base));color:var(--danger)}
+.office-error{padding:8px 11px;margin:10px 20px;border-radius:5px;font-size:12px;line-height:1.7;overflow-wrap:anywhere;background:color-mix(in srgb,var(--danger) 7%,var(--bg-base));color:var(--danger)}
 .office-content>.office-error,.office-dialog .office-error,.office-document>.office-error{margin:8px 0}
 .office-error .office-actions{margin-top:5px}
 .office-pagination{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}

@@ -154,6 +154,29 @@ fn markdown_literal(text:&str)->String{
 fn xml_document_title(source:&str)->Option<String>{
     xml_blocks(source).ok()?.into_iter().find(|node|node.name=="title").map(|node|node.text)
 }
+/// The native Markdown export includes its document title as the opening H1.
+/// Separate only that title; matching paragraphs or later headings are body.
+fn markdown_document_parts(content:String,metadata_title:Option<String>)->(String,String){
+    let source=content.strip_prefix('\u{feff}').unwrap_or(&content);
+    let mut offset=0;
+    for line in source.split_inclusive('\n'){
+        let text=line.trim_end_matches(['\r','\n']);
+        if text.trim().is_empty(){offset+=line.len();continue}
+        let heading=text.trim_start_matches(' ');
+        if text.len()-heading.len()>3 {break}
+        let Some(heading)=heading.strip_prefix('#').and_then(|text|text.strip_prefix([' ','\t'])) else{break};
+        let heading=heading.trim();
+        if heading.is_empty(){break}
+        let mut chars=heading.chars().peekable();let mut title=String::new();
+        while let Some(character)=chars.next(){
+            if character=='\\'&&chars.peek().is_some_and(char::is_ascii_punctuation){title.push(chars.next().unwrap());}
+            else{title.push(character)}
+        }
+        if metadata_title.as_ref().is_some_and(|metadata|metadata!=&title){break}
+        return (metadata_title.unwrap_or(title),source[offset+line.len()..].to_owned());
+    }
+    (metadata_title.unwrap_or_else(||"飞书文档".into()),content)
+}
 fn comment_anchors(document:&Value)->Option<BTreeSet<String>>{
     use quick_xml::{Reader,events::Event};
     let Some(comments)=document.pointer("/reference_map/comments")else{return Some(BTreeSet::new())};
@@ -663,15 +686,16 @@ pub fn normalize_query(query: &OfficeQuery, outputs: &[CliOutput]) -> Result<Off
             let doc=data.get("document").ok_or_else(|| HubError::unavailable("文档读取结果格式不兼容"))?;
             let id=first_text(doc,&["document_id"]).ok_or_else(|| HubError::unavailable("文档结果缺少标识"))?;
             let content=text(doc.get("content")).unwrap_or_default();
-            let title=first_text(doc,&["title"]).or_else(|| content.lines().find_map(|line| line.strip_prefix("# ").map(str::to_owned)))
-                .unwrap_or_else(|| "飞书文档".into());
+            let metadata_title=first_text(doc,&["title"]);
             let baseline=if *editing {
                 let mut baseline=document_edit_baseline(doc)?;
                 if !warnings(&data).is_empty(){baseline.can_insert_first=false;}
                 Some(baseline)
             }else{None};
-            let title=if *editing {xml_document_title(&content).unwrap_or(title)}else{title};
-            let content=baseline.as_ref().map(|baseline|baseline.blocks.iter().map(|block|block.content.as_str()).collect::<Vec<_>>().join("\n\n")).unwrap_or(content);
+            let (title,content)=if let Some(baseline)=&baseline {
+                (xml_document_title(&content).or(metadata_title).unwrap_or_else(||"飞书文档".into()),
+                    baseline.blocks.iter().map(|block|block.content.as_str()).collect::<Vec<_>>().join("\n\n"))
+            }else{markdown_document_parts(content,metadata_title)};
             result.document=Some(OfficeDocument {id,title,content,url:official_url(document),
                 edit_baseline:baseline,pending_operation_id:None,pending_status:None});
         }
@@ -1032,6 +1056,37 @@ mod tests {
         assert!(cmd.args.windows(2).any(|w|w==["--command","block_replace"]));
         assert!(cmd.args.windows(2).any(|w|w==["--block-id","dox_plain"]));
         assert!(cmd.args.windows(2).any(|w|w==["--revision-id","12"]));assert_eq!(cmd.stdin,Some(b"more".to_vec()));
+    }
+    #[test]
+    fn markdown_read_separates_only_the_opening_exported_title_and_preserves_body(){
+        let query=OfficeQuery::Document{document:"doc_real".into(),editing:false};
+        let body="\nReport\n\n## Section\n\n# Report\n\n- First\n- Second\n\n```markdown\n# Report\n```\n";
+        let document=normalize_query(&query,&[output(json!({"document":{"document_id":"doc_real","title":"Report","content":format!("# Report\n{body}")}}))]).unwrap().document.unwrap();
+        assert_eq!(document.title,"Report");assert_eq!(document.content,body);
+        assert!(document.edit_baseline.is_none());
+        for (content,title,body) in [
+            ("# Report","Report",""),
+            ("\u{feff}\r\n  \r\n# 中文标题\r\n\r\n正文\r\n","中文标题","\r\n正文\r\n"),
+            ("# Project \\*plan\\*\n\nBody","Project *plan*","\nBody"),
+        ] {
+            let document=normalize_query(&query,&[output(json!({"document":{"document_id":"doc_real","content":content}}))]).unwrap().document.unwrap();
+            assert_eq!(document.title,title);assert_eq!(document.content,body);
+        }
+        let document=normalize_query(&query,&[output(json!({"document":{"document_id":"doc_real","title":"Project *plan*","content":"# Project \\*plan\\*\n\nBody"}}))]).unwrap().document.unwrap();
+        assert_eq!(document.title,"Project *plan*");assert_eq!(document.content,"\nBody");
+    }
+    #[test]
+    fn markdown_read_keeps_different_headings_and_never_infers_title_from_later_content(){
+        let query=OfficeQuery::Document{document:"doc_real".into(),editing:false};
+        for content in ["Report\n\n# Report","```markdown\n# Report\n```","    # Report","## Report","\\# Report"] {
+            for title in [None,Some("Report")] {
+                let document=normalize_query(&query,&[output(json!({"document":{"document_id":"doc_real","title":title,"content":content}}))]).unwrap().document.unwrap();
+                assert_eq!(document.title,title.unwrap_or("飞书文档"));assert_eq!(document.content,content);
+            }
+        }
+        let content="\n# Different heading\n\nReport\n\n# Report";
+        let document=normalize_query(&query,&[output(json!({"document":{"document_id":"doc_real","title":"Report","content":content}}))]).unwrap().document.unwrap();
+        assert_eq!(document.title,"Report");assert_eq!(document.content,content);
     }
     #[test]
     fn timeout_is_unknown_and_keeps_exact_original_resource_receipt(){

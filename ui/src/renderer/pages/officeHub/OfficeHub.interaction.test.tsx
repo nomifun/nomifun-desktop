@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
+import { Message } from '@arco-design/web-react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
@@ -34,6 +35,7 @@ beforeAll(async () => { await locale.init({ lng: 'en-US', resources: { 'en-US': 
 afterEach(() => { cleanup(); restores.splice(0).reverse().forEach(restore => restore()); });
 function fixture(initial = status()) {
   let current = initial;
+  const success = track(spyOn(Message, 'success').mockReturnValue(() => {}));
   const getStatus = track(spyOn(officeHub, 'status').mockImplementation(async () => structuredClone(current)));
   const profiles = track(spyOn(officeHub, 'profiles').mockResolvedValue([{ name: 'work', app_id: actor.app_id, brand: 'feishu', user_name: actor.name, token_status: 'valid' }]));
   const query = track(spyOn(officeHub, 'query').mockImplementation(async () => empty()));
@@ -55,7 +57,7 @@ function fixture(initial = status()) {
     await waitFor(() => expect(getStatus).toHaveBeenCalled());
     return view;
   };
-  return { mount, getStatus, profiles, query, history, prepare, execute, request, reconcile, open, auth, startAuth, cancelAuth, updateConnection, setStatus: (next: OfficeStatus) => { current = next; } };
+  return { mount, success, getStatus, profiles, query, history, prepare, execute, request, reconcile, open, auth, startAuth, cancelAuth, updateConnection, setStatus: (next: OfficeStatus) => { current = next; } };
 }
 async function pressReady(view: ReturnType<typeof render>, name: string) {
   const button = await view.findByRole('button', { name });
@@ -187,6 +189,9 @@ describe('compact Office Hub with isolated real API boundaries', () => {
     const sent = f.execute.mock.calls[0][0];
     expect(sent.items).toHaveLength(1); expect(sent.items[0]).toMatchObject({ kind: 'document_create', title: 'An empty document', content: '' }); expect(sent.expected_actor).toEqual(actor);
     await waitFor(() => expect(view.queryByRole('dialog')).toBeNull());
+    expect(f.success).toHaveBeenCalledTimes(1);
+    expect(f.success).toHaveBeenCalledWith({ content: office.saved, duration: 3000 });
+    expect(view.queryByText(office.saved)).toBeNull();
   });
   for (const phase of ['loading', 'queued', 'running'] as const) test('ordinary save ' + phase + ' shows neutral progress without network recovery controls', async () => {
     const f = fixture(); let finish: () => void = () => {};
@@ -195,6 +200,7 @@ describe('compact Office Hub with isolated real API boundaries', () => {
     fireEvent.change(view.getByLabelText(office.documents.title), { target: { value: 'A normal save' } }); fireEvent.click(view.getByRole('button', { name: office.actions.create }));
     const modal = within(view.getByRole('dialog')); await modal.findByText(phase === 'loading' ? office.operation.saving : office.operation.processing);
     expect(modal.queryByText(office.operation.networkHint)).toBeNull(); expect(modal.queryByRole('button', { name: office.operation.checkReceipt })).toBeNull(); expect(modal.queryByRole('button', { name: office.actions.details })).toBeNull();
+    expect(f.success).not.toHaveBeenCalled();
     if (phase === 'loading') { await act(async () => { finish(); }); await waitFor(() => expect(view.queryByRole('dialog')).toBeNull()); }
   });
   test('a single task uses verified identity and optional due date without batch controls', async () => {
@@ -245,6 +251,25 @@ describe('compact Office Hub with isolated real API boundaries', () => {
     await view.findByText(office.operation.identityChangedInput);
     expect((view.getByRole('button', { name: office.actions.create }) as HTMLButtonElement).disabled).toBe(true); expect(f.execute).not.toHaveBeenCalled();
   });
+  test('document reading renders one title while preserving body text and Markdown structure', async () => {
+    const f = fixture();
+    const title = 'nomifun-test-3';
+    const content = [title, '正文包含 **重点** 和 [参考链接](https://example.com/reference)。', '## 后续章节', '- 第一项\n- 第二项', '| 列名 | 内容 |\n| --- | --- |\n| 状态 | 正常 |', '# 正文一级标题'].join('\n\n');
+    // The read API separates the native export title from its Markdown body.
+    f.query.mockImplementation(async query => query.kind === 'document' ? { ...empty(), document: { ...document(), title, content, edit_baseline: null } } : empty());
+    const view = await f.mount('/office?tab=documents&document=actual-document');
+    const article = await view.findByRole('article');
+    expect(within(article).getAllByRole('heading', { name: title })).toHaveLength(1);
+    const body = article.querySelector('.markdown-shadow')!.shadowRoot!;
+    expect(body.querySelector('p')?.textContent).toBe(title);
+    expect(body.querySelector('strong')?.textContent).toBe('重点');
+    expect(body.querySelector('a')?.getAttribute('href')).toBe('https://example.com/reference');
+    expect(body.querySelector('h2')?.textContent).toBe('后续章节');
+    expect(body.querySelectorAll('li')).toHaveLength(2);
+    expect(body.querySelector('td')?.textContent).toBe('状态');
+    expect(body.querySelector('h1')?.textContent).toBe('正文一级标题');
+    expect(f.execute).not.toHaveBeenCalled();
+  });
   test('paragraph save uses the real block ID and selection revision after authorization refresh', async () => {
     const s = status(); grant(s, 'documents.write', false); const f = fixture(s); let revision = '28';
     f.query.mockImplementation(async query => { if (query.kind !== 'document') return empty(); const doc = document(); doc.edit_baseline!.revision = revision; return { ...empty(), document: doc }; });
@@ -267,7 +292,9 @@ describe('compact Office Hub with isolated real API boundaries', () => {
     fireEvent.change(view.getByLabelText(office.documents.paragraph), { target: { value: 'One changed paragraph' } }); fireEvent.click(view.getByRole('button', { name: office.actions.save }));
     await waitFor(() => expect(view.getAllByText(office.operation.saving).length).toBe(2));
     expect(view.queryByText(office.operation.networkHint)).toBeNull(); expect(view.queryByRole('button', { name: office.operation.checkReceipt })).toBeNull();
-    await act(async () => { finish(); }); await view.findByText(office.saved);
+    await act(async () => { finish(); }); await waitFor(() => expect(f.success).toHaveBeenCalledTimes(1));
+    expect(f.success).toHaveBeenCalledWith({ content: office.saved, duration: 3000 });
+    expect(view.queryByText(office.saved)).toBeNull();
   });
   test('only a verified empty baseline offers first-paragraph insertion', async () => {
     const f = fixture(); f.query.mockImplementation(async query => query.kind === 'document' ? { ...empty(), document: { ...document(), content: '', edit_baseline: { revision: '1', blocks: [], can_insert_first: true } } } : empty());

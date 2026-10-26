@@ -2,6 +2,7 @@ import { ipcBridge } from '@/common';
 import { officeHub } from '@/common/adapter/officeHubBridge';
 import type { AuthStartRequest, OfficeItem, OfficeOperation, TaskRelation } from '@/common/types/officeHub';
 import PageHeader from '@/renderer/components/layout/PageHeader';
+import { Message } from '@arco-design/web-react';
 import { Add, FileText, LinkOne, Refresh, Search, SettingConfig, TableFile } from '@icon-park/react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -28,7 +29,6 @@ export default function OfficeHubPage() {
   const [authVisible, setAuthVisible] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<unknown>(null);
-  const [notice, setNotice] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
   const [searchInput, setSearchInput] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
@@ -66,7 +66,7 @@ export default function OfficeHubPage() {
   };
   const navigate = (next: string, document?: string) => {
     setParams(previous => { const value = new URLSearchParams(previous); value.set('tab', next); if (document) value.set('document', document); else value.delete('document'); return value; });
-    setActionError(null); setNotice('');
+    setActionError(null);
   };
   const openExternal = async (url: string) => { try { if (new URL(url).protocol !== 'https:') throw new Error(t('office.error')); await ipcBridge.shell.openExternal.invoke(url); } catch (error) { setActionError(error); } };
   const startAuth = async (request: AuthStartRequest) => {
@@ -90,7 +90,7 @@ export default function OfficeHubPage() {
   const closeAuth = () => { if (hub.flow?.phase === 'complete' || hub.flow?.phase === 'partial') void hub.refreshStatus(); setAuthVisible(false); };
   const showOperation = (id: string) => run(async () => { await hub.openOperation(id); setDialog('result'); });
   const showResult = (operation: OfficeOperation) => { hub.setOperation(operation); setDialog('result'); refresh(); };
-  const saved = (operation: OfficeOperation) => { hub.setOperation(operation); setDialog(null); setNotice(t('office.saved')); const created = operation.items.length === 1 && operation.items[0].mutation.kind === 'document_create' ? operation.items[0] : null; if (created && (created.remote_url || created.remote_id)) navigate('documents', created.remote_url || created.remote_id!); refresh(); };
+  const saved = (operation: OfficeOperation) => { hub.setOperation(operation); setDialog(null); Message.success({ content: t('office.saved'), duration: 3000 }); const created = operation.items.length === 1 && operation.items[0].mutation.kind === 'document_create' ? operation.items[0] : null; if (created && (created.remote_url || created.remote_id)) navigate('documents', created.remote_url || created.remote_id!); refresh(); };
   const errorPanel = (error: unknown) => {
     if (!error) return null;
     const details = errorDetails(error), original = relatedOperation(error), flow = relatedAuthorization(error);
@@ -110,7 +110,7 @@ export default function OfficeHubPage() {
       else if (item.url) { try { setBaseLocation(parseBaseLink(item.url)); navigate('base'); } catch (error) { setActionError(error); } }
     } else navigate('documents', item.url || item.id);
   };
-  const taskRows = (items: OfficeItem[], compact = false) => items.map(item => <TaskRow key={item.id + ':' + String(item.completed)} item={item} status={hub.status} compact={compact} authorize={authorize} onResult={showResult} onResultId={id => void showOperation(id)} onSaved={() => { setNotice(t('office.saved')); refresh(); }} errorPanel={errorPanel} />);
+  const taskRows = (items: OfficeItem[], compact = false) => items.map(item => <TaskRow key={item.id + ':' + String(item.completed)} item={item} status={hub.status} compact={compact} authorize={authorize} onResult={showResult} onResultId={id => void showOperation(id)} onSaved={() => { Message.success({ content: t('office.saved'), duration: 3000 }); refresh(); }} errorPanel={errorPanel} />);
   const resourceSource = tab === 'documents' && searchTerm ? search : recent;
   const searchingDocuments = tab === 'documents' && !!searchTerm;
   const resourceTime = (item: OfficeItem) => {
@@ -136,7 +136,7 @@ export default function OfficeHubPage() {
   return <div className='office-hub'>
     <PageHeader title={t('office.feishu')} className='office-page-header page-header--flush' actions={<>{listing && <><form className='office-header-search' onSubmit={event => { event.preventDefault(); setSearchTerm(searchInput.trim()); setSearchCursors([null]); }}><Search size={14} /><input aria-label={t('office.resources.search')} placeholder={t(tab === 'documents' ? 'office.resources.searchDocuments' : 'office.resources.searchRecent')} value={searchInput} onChange={event => setSearchInput(event.target.value)} /></form><OfficeButton primary onClick={() => newForm('document')}><Add size={14} />{t('office.actions.new')}</OfficeButton></>}{tab === 'agenda' && !documentId && <><OfficeButton onClick={() => newForm('event')}><Add size={14} />{t('office.calendar.section')}</OfficeButton><OfficeButton primary onClick={() => newForm('task')}><Add size={14} />{t('office.tasks.section')}</OfficeButton></>}<span className='office-connection-name' title={hub.status?.actor?.name || hub.status?.connection.name}>{hub.status?.actor?.name || hub.status?.connection.name}</span><OfficeButton quiet disabled={hub.statusLoading || busy} aria-label={t('office.actions.refresh')} onClick={() => { void hub.refreshStatus(); refresh(); }}><Refresh size={15} /></OfficeButton><OfficeButton quiet aria-label={t('office.connection.settings')} onClick={() => setDialog('connection')}><SettingConfig size={16} /></OfficeButton></>} />
     <nav className='office-tabs' role='tablist' aria-label={t('office.title')}>{OFFICE_TABS.map(value => <button type='button' key={value} role='tab' aria-selected={tab === value} onClick={() => navigate(value)}>{t('office.tabs.' + value)}</button>)}</nav>
-    <div className='office-body' inert={!!dialog || authVisible}>{errorPanel(hub.statusError)}{!dialog && !authVisible && errorPanel(actionError)}{notice && <p className='office-notice' role='status'>{notice}</p>}{hub.statusLoading && !hub.status ? <p className='office-empty'>{t('office.loading')}</p> : content}</div>
+    <div className='office-body' inert={!!dialog || authVisible}>{errorPanel(hub.statusError)}{!dialog && !authVisible && errorPanel(actionError)}{hub.statusLoading && !hub.status ? <p className='office-empty'>{t('office.loading')}</p> : content}</div>
     {dialog === 'connection' && hub.status && <ConnectionDialog status={hub.status} authorization={authorization} onStart={startAuth} refresh={hub.refreshStatus} onClose={() => setDialog(null)} onError={setActionError} />}
     {(dialog === 'document' || dialog === 'task' || dialog === 'event') && formIdentity && <NativeForm key={formIdentity.key + dialog} {...formServices} kind={dialog} identity={formIdentity} />}
     {dialog === 'base-edit' && baseEdit && <BaseEditForm {...formServices} selection={baseEdit} />}
