@@ -1,9 +1,8 @@
 use std::sync::Arc;
-use axum::{Json, Router, extract::{DefaultBodyLimit, Extension, Path, Query, State},
+use axum::{Json, Router, extract::{DefaultBodyLimit, Extension, Path, State},
     routing::{get, post, put}};
 use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
-use serde::Deserialize;
 use crate::*;
 
 pub fn office_hub_routes(service: Arc<OfficeHubService>) -> Router {
@@ -15,10 +14,10 @@ pub fn office_hub_routes(service: Arc<OfficeHubService>) -> Router {
         .route("/api/office-hub/runtime/check-update", post(check_update))
         .route("/api/office-hub/connection", put(connection))
         .route("/api/office-hub/auth", post(start_auth))
+        .route("/api/office-hub/auth/logout", post(logout))
         .route("/api/office-hub/auth/{id}", get(auth).delete(cancel_auth))
         .route("/api/office-hub/query", post(query))
-        .route("/api/office-hub/resources/recent", post(remember_resource))
-        .route("/api/office-hub/operations", get(operations).post(execute))
+        .route("/api/office-hub/operations", post(execute))
         .route("/api/office-hub/operations/request/{request_id}", get(operation_by_request))
         .route("/api/office-hub/operations/{id}", get(operation))
         .route("/api/office-hub/operations/{id}/reconcile", post(reconcile))
@@ -49,6 +48,10 @@ async fn connection(State(service):HubState,_:User,Json(request):Json<Connection
 async fn start_auth(State(service):HubState,_:User,Json(request):Json<AuthStartRequest>)->Reply<AuthorizationFlow>{
     Ok(Json(ApiResponse::ok(service.start_authorization(request).await?)))
 }
+async fn logout(State(service):HubState,_:User,Json(request):Json<LogoutRequest>)->Reply<()>{
+    service.logout(request).await?;
+    Ok(Json(ApiResponse::ok(())))
+}
 async fn auth(State(service):HubState,_:User,Path(id):Path<String>)->Reply<AuthorizationFlow>{
     Ok(Json(ApiResponse::ok(service.authorization(&id)?)))
 }
@@ -58,17 +61,8 @@ async fn cancel_auth(State(service):HubState,_:User,Path(id):Path<String>)->Repl
 async fn query(State(service):HubState,_:User,Json(request):Json<OfficeQuery>)->Reply<OfficeQueryResult>{
     Ok(Json(ApiResponse::ok(service.query(request).await?)))
 }
-async fn remember_resource(State(service):HubState,_:User,Json(request):Json<ResourceLink>)->Reply<()>{
-    service.remember_resource(request).await?;
-    Ok(Json(ApiResponse::ok(())))
-}
 async fn execute(State(service):HubState,_:User,Json(request):Json<ExecuteRequest>)->Reply<OfficeOperation>{
     Ok(Json(ApiResponse::ok(service.execute(request).await?)))
-}
-#[derive(Deserialize)]
-struct HistoryQuery { cursor: Option<String> }
-async fn operations(State(service):HubState,_:User,Query(query):Query<HistoryQuery>)->Reply<OperationPage>{
-    Ok(Json(ApiResponse::ok(service.operations(query.cursor.as_deref()).await?)))
 }
 async fn operation(State(service):HubState,_:User,Path(id):Path<String>)->Reply<OfficeOperation>{
     Ok(Json(ApiResponse::ok(service.operation(&id).await?)))

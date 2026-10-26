@@ -21,10 +21,10 @@ function status(): OfficeStatus {
   return { provider: 'feishu', connection: { id: 'connection', name: 'Work connection', enabled: true, profile: 'work', executable: null, created_at: '2026-10-26T00:00:00Z', updated_at: '2026-10-26T00:00:00Z' }, runtime: { phase: 'ready', executable: 'C:/tools/lark-cli.exe', version: '1.0.98', source: 'external', message: null, official_install_command: 'npx @larksuite/cli@latest install' }, phase: 'ready', actor: { ...actor }, host_name: 'backend-machine', host_os: 'windows', message: null, permissions: ['documents.browse','documents.create','documents.delete','people.read','tasks.read','tasks.write','tasklists.read','calendar.read','calendar.write','base.read','base.write'].map(capability => ({ capability, granted: true, required_scopes: [capability + '-scope'] })) };
 }
 function item(id: string, title: string): OfficeItem {
-  return { id, title, kind: 'task', url: null, description: null, modified_at: null, opened_at: null, assignee_ids: [actor.user_id], creator_id: actor.user_id, tasklist_ids: [], due: null, completed: false, start: null, end: null, calendar_id: null, base_token: null, table_id: null, pending_operation_id: null, pending_status: null, fields: {} };
+  return { id, title, kind: 'task', url: null, description: null, modified_at: null, assignee_ids: [actor.user_id], creator_id: actor.user_id, tasklist_ids: [], due: null, completed: false, start: null, end: null, calendar_id: null, base_token: null, table_id: null, pending_operation_id: null, pending_status: null, fields: {} };
 }
 function receipt(request: ExecuteRequest, state: OfficeOperation['status'] = 'succeeded'): OfficeOperation {
-  return { id: 'original-operation', request_id: request.request_id, connection_id: 'connection', actor: request.expected_actor, profile: request.profile, status: state, created_at: '2026-10-26T00:00:00Z', updated_at: '2026-10-26T00:00:00Z', items: request.items.map((mutation, index) => ({ id: 'item-' + index, mutation, target_key: 'target-' + index, status: state === 'partial' ? index ? 'unknown' : 'succeeded' : state, remote_id: null, remote_url: null, message: null, attempts: [], observations: [] })) };
+  return { id: 'original-operation', request_id: request.request_id, connection_id: 'connection', actor: request.expected_actor, profile: request.profile, status: state, items: request.items.map((mutation, index) => ({ id: 'item-' + index, mutation, target_key: 'target-' + index, status: state === 'partial' ? index ? 'unknown' : 'succeeded' : state, remote_id: null, remote_url: null, message: null, attempts: [], observations: [] })) };
 }
 function flow(phase: AuthorizationFlow['phase'] = 'waiting_user'): AuthorizationFlow {
   return { id: '0190f5fe-7c00-7a00-8000-000000000901', kind: 'login', phase, verification_url: 'https://open.feishu.cn/auth', expires_at: null, missing_scopes: [], console_url: null, message: null };
@@ -38,8 +38,6 @@ function fixture(initial = status()) {
   const profiles = track(spyOn(officeHub, 'profiles').mockResolvedValue([{ name: 'work', app_id: actor.app_id, brand: 'feishu', user_name: actor.name, token_status: 'valid' }]));
   const query = track(spyOn(officeHub, 'query').mockImplementation(async () => empty()));
   const external = track(spyOn(ipcBridge.shell.openExternal, 'invoke').mockResolvedValue(undefined));
-  const remember = track(spyOn(officeHub, 'rememberResource').mockResolvedValue(undefined));
-  const history = track(spyOn(officeHub, 'operations').mockResolvedValue({ items: [], next_cursor: null }));
   const prepare = track(spyOn(officeHub, 'prepare').mockResolvedValue(initial.runtime));
   const execute = track(spyOn(officeHub, 'execute').mockImplementation(async request => receipt(request)));
   const request = track(spyOn(officeHub, 'request').mockRejectedValue(new BackendHttpError({ method: 'GET', path: '/api/office-hub/operations/request/test', status: 404, body: { error: 'Not found' } })));
@@ -47,6 +45,9 @@ function fixture(initial = status()) {
   const open = track(spyOn(officeHub, 'operation').mockImplementation(async () => { throw new Error('Missing operation'); }));
   const auth = track(spyOn(officeHub, 'auth').mockResolvedValue(flow()));
   const startAuth = track(spyOn(officeHub, 'startAuth').mockResolvedValue(flow()));
+  const logout = track(spyOn(officeHub, 'logout').mockImplementation(async () => {
+    current = { ...current, actor: null, phase: 'needs_login', permissions: current.permissions.map(permission => ({ ...permission, granted: false })) };
+  }));
   const cancelAuth = track(spyOn(officeHub, 'cancelAuth').mockResolvedValue(flow('cancelling')));
   const updateConnection = track(spyOn(officeHub, 'updateConnection').mockImplementation(async body => { current = { ...current, phase: 'ready', connection: { ...current.connection, ...body } }; return current.connection; }));
   const mount = async (path = '/office') => {
@@ -57,10 +58,11 @@ function fixture(initial = status()) {
     await waitFor(() => expect(getStatus).toHaveBeenCalled());
     return view;
   };
-  return { mount, external, remember, success, getStatus, profiles, query, history, prepare, execute, request, reconcile, open, auth, startAuth, cancelAuth, updateConnection, setStatus: (next: OfficeStatus) => { current = next; } };
+  return { mount, external, success, getStatus, profiles, query, prepare, execute, request, reconcile, open, auth, startAuth, logout, cancelAuth, updateConnection, setStatus: (next: OfficeStatus) => { current = next; } };
 }
 async function pressReady(view: ReturnType<typeof render>, name: string) {
-  const button = await view.findByRole('button', { name });
+  const scope = view.queryByRole('dialog') ? within(view.getByRole('dialog')) : view;
+  const button = await scope.findByRole('button', { name });
   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
   await act(async () => { fireEvent.click(button); });
 }
@@ -70,11 +72,11 @@ describe('compact Office Hub with isolated real API boundaries', () => {
   test('document names open their exact browser link without an internal content query', async () => {
     const f = fixture(); const doc = { ...item('doc_real', 'Cloud document'), kind: 'docx', url: 'https://team.feishu.cn/docx/doc_real?from=search' };
     f.query.mockImplementation(async query => query.kind === 'documents' ? { ...empty(), items: [doc] } : empty());
-    const view = await f.mount('/office?tab=documents&document=retired-internal-route');
+    const view = await f.mount('/office?document=retired-internal-route');
+    expect(view.getByRole('tab', { name: office.tabs.documents }).getAttribute('aria-selected')).toBe('true');
     expect(f.external).not.toHaveBeenCalled();
     fireEvent.click(await view.findByRole('button', { name: 'Cloud document' }));
     await waitFor(() => expect(f.external).toHaveBeenCalledWith(doc.url));
-    expect(f.remember).toHaveBeenCalledWith({ url: doc.url, title: doc.title });
     expect(view.queryByRole('article')).toBeNull(); expect(view.queryByRole('textbox', { name: /paragraph/i })).toBeNull();
     expect(f.query.mock.calls.every(([query]) => query.kind === 'documents')).toBe(true); expect(f.execute).not.toHaveBeenCalled();
   });
@@ -83,6 +85,7 @@ describe('compact Office Hub with isolated real API boundaries', () => {
     f.query.mockResolvedValue({ ...empty(), items: [base] });
     const view = await f.mount('/office?tab=documents');
     expect(view.queryByRole('tab', { name: office.resources.filters.base })).toBeNull();
+    expect(view.getAllByRole('tab').map(tab => tab.textContent)).toEqual([office.tabs.documents, office.tabs.agenda]);
     fireEvent.click(view.getByRole('button', { name: office.resources.filters.base }));
     await waitFor(() => expect(f.query.mock.calls.at(-1)![0]).toMatchObject({ kind: 'documents', filter: 'base' }));
     fireEvent.click(await view.findByRole('button', { name: 'Cloud Base' }));
@@ -142,6 +145,13 @@ describe('compact Office Hub with isolated real API boundaries', () => {
     fireEvent.click(within(view.getByRole('dialog')).getByRole('button', { name: office.actions.cancel }));
     await waitFor(() => expect((view.getByRole('button', { name: 'Delete document: Pending document' }) as HTMLButtonElement).disabled).toBe(true));
     expect(view.getByRole('button', { name: office.actions.original })).toBeTruthy(); expect(f.execute).toHaveBeenCalledTimes(1);
+    const original = receipt(f.execute.mock.calls[0][0], 'unknown');
+    f.open.mockResolvedValue(original); f.reconcile.mockResolvedValue(original);
+    fireEvent.click(view.getByRole('button', { name: office.actions.original }));
+    const result = within(await view.findByRole('dialog', { name: office.operation.results }));
+    fireEvent.click(result.getByRole('button', { name: office.actions.reconcile }));
+    await waitFor(() => expect(f.reconcile).toHaveBeenCalledWith(original.id));
+    expect(f.execute).toHaveBeenCalledTimes(1);
   });
   test('existing documents browse and paginate without a keyword, then search resets the cursor', async () => {
     const f = fixture();
@@ -204,118 +214,177 @@ describe('compact Office Hub with isolated real API boundaries', () => {
     expect(view.getByText(office.permissions.readMissing)).toBeTruthy(); expect(view.queryByText(office.resources.queryEmpty)).toBeNull();
     expect(f.query).not.toHaveBeenCalled(); expect(f.startAuth).not.toHaveBeenCalled();
   });
-  test('opening a missing component never installs, authenticates or reads business data', async () => {
+  test('opening a missing component explains setup without installing, authenticating or reading data', async () => {
     const s = status(); s.runtime.phase = 'missing'; s.runtime.executable = null; s.phase = 'not_configured'; s.actor = null;
     const f = fixture(s), view = await f.mount();
+    expect(view.getByRole('heading', { name: office.connectScreen.missingTitle })).toBeTruthy();
+    expect(view.getByRole('button', { name: office.actions.prepare })).toBeTruthy();
+    expect(view.queryByRole('button', { name: office.actions.new })).toBeNull();
     expect(f.prepare).not.toHaveBeenCalled(); expect(f.startAuth).not.toHaveBeenCalled(); expect(f.query).not.toHaveBeenCalled();
-    fireEvent.click(view.getByRole('button', { name: office.actions.connect }));
-    const modal = await view.findByRole('dialog', { name: office.actions.connect });
-    expect(view.getAllByRole('dialog')).toHaveLength(1);
-    expect(within(modal).getByText(office.setup.environment)).toBeTruthy();
-    expect(within(modal).getByText('backend-machine · windows')).toBeTruthy();
-    expect(within(modal).getByText(office.runtime.fullWizardHint)).toBeTruthy();
+    fireEvent.click(view.getByRole('button', { name: office.connection.manage }));
+    const modal = within(await view.findByRole('dialog', { name: office.connection.manage }));
+    expect(modal.getByRole('button', { name: office.account.sections.advanced }).getAttribute('aria-current')).toBe('page');
+    fireEvent.click(modal.getByText(office.account.technicalDetails));
+    expect(modal.getByText('backend-machine · windows')).toBeTruthy(); expect(modal.getByText(office.runtime.fullWizardHint)).toBeTruthy();
   });
   test('failed initial preparation can be explicitly retried without another installation mode', async () => {
     const s = status(); s.runtime.phase = 'missing'; s.runtime.executable = null; s.phase = 'not_configured'; s.actor = null;
     const f = fixture(s), failed = structuredClone(s); failed.runtime.phase = 'error'; failed.runtime.message = 'Download failed';
-    f.prepare.mockImplementationOnce(async () => { f.setStatus(failed); throw new Error('Download failed'); }).mockImplementationOnce(async () => { const next = status(); next.actor = null; f.setStatus(next); return next.runtime; });
-    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.actions.connect }));
-    fireEvent.click(await view.findByRole('button', { name: office.actions.prepare }));
+    f.prepare.mockImplementationOnce(async () => { f.setStatus(failed); throw new Error('Download failed'); }).mockImplementationOnce(async () => { const next = status(); next.actor = null; next.phase = 'needs_login'; f.setStatus(next); return next.runtime; });
+    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.actions.prepare }));
     const retry = await view.findByRole('button', { name: office.runtime.retryPrepare });
     await waitFor(() => expect((retry as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(retry);
     await waitFor(() => expect(f.prepare).toHaveBeenCalledTimes(2));
-    expect(f.prepare.mock.calls.every(call => call.length === 0)).toBe(true); expect(f.execute).not.toHaveBeenCalled();
+    await view.findByRole('heading', { name: office.connectScreen.loginTitle });
+    expect(f.prepare.mock.calls.every(call => call.length === 0)).toBe(true); expect(f.execute).not.toHaveBeenCalled(); expect(f.startAuth).not.toHaveBeenCalled();
+  });
+  test('installation progress has one disabled action and cannot start another installation or login', async () => {
+    const s = status(); s.runtime.phase = 'preparing'; s.runtime.executable = null; s.phase = 'not_configured'; s.actor = null;
+    const f = fixture(s), view = await f.mount();
+    expect(view.getByRole('heading', { name: office.connectScreen.installingTitle })).toBeTruthy();
+    expect((view.getByRole('button', { name: office.connectScreen.installingAction }) as HTMLButtonElement).disabled).toBe(true);
+    expect(f.prepare).not.toHaveBeenCalled(); expect(f.startAuth).not.toHaveBeenCalled(); expect(f.query).not.toHaveBeenCalled();
   });
   for (const phase of ['broken','incompatible','error'] as const) test('an existing ' + phase + ' executable is never treated as a missing component', async () => {
     const s = status(); s.runtime.phase = phase; s.phase = 'error'; const f = fixture(s), view = await f.mount();
-    fireEvent.click(view.getByRole('button', { name: office.actions.connect }));
+    expect(view.getByRole('heading', { name: office.connectScreen.repairTitle })).toBeTruthy();
+    fireEvent.click(view.getByRole('button', { name: office.account.viewComponent }));
     expect(view.queryByRole('button', { name: office.actions.prepare })).toBeNull(); expect(view.queryByRole('button', { name: office.runtime.retryPrepare })).toBeNull(); expect(f.prepare).not.toHaveBeenCalled();
     expect(view.getByText(office.runtime.brokenHint)).toBeTruthy();
   });
-  test('business permissions may be skipped and do not imply empty data', async () => {
+  test('connected settings open the account section without restarting setup or requesting permissions', async () => {
+    const f = fixture(), view = await f.mount();
+    fireEvent.click(view.getByRole('button', { name: office.connection.manage }));
+    const modal = within(await view.findByRole('dialog', { name: office.connection.manage }));
+    expect(modal.getByRole('button', { name: office.account.sections.account }).getAttribute('aria-current')).toBe('page');
+    expect(modal.getByText(actor.name)).toBeTruthy(); expect(modal.getByRole('button', { name: office.account.switch })).toBeTruthy(); expect(modal.getByRole('button', { name: office.account.logout })).toBeTruthy();
+    expect(modal.queryByRole('checkbox')).toBeNull(); expect(f.profiles).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled(); expect(f.startAuth).not.toHaveBeenCalled();
+  });
+  test('permissions are optional and shown as actual per-feature grants without default checkboxes', async () => {
     const s = status(); s.permissions.forEach(permission => { permission.granted = false; });
-    const f = fixture(s), view = await f.mount();
-    fireEvent.click(view.getByRole('button', { name: office.connection.settings }));
-    const modal = await view.findByRole('dialog'); fireEvent.click(within(modal).getByRole('button', { name: office.setup.skip }));
-    expect(view.queryByRole('dialog')).toBeNull(); expect(view.getByText(office.permissions.readMissing)).toBeTruthy();
-    expect(f.startAuth).not.toHaveBeenCalled(); expect(f.execute).not.toHaveBeenCalled();
-    expect(f.query.mock.calls.every(([query]) => query.kind === 'recent')).toBe(true);
-  });
-  test('a disabled configured connection is explicitly enabled before its login flow', async () => {
-    const s = status(); s.connection.enabled = false; s.phase = 'disabled'; const f = fixture(s);
-    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.actions.connect }));
-    await pressReady(view, office.auth.open);
+    const f = fixture(s), view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.connection.manage }));
+    const modal = within(await view.findByRole('dialog')); fireEvent.click(modal.getByRole('button', { name: office.account.sections.access }));
+    expect(modal.queryByRole('checkbox')).toBeNull(); expect(modal.getAllByText(office.permissions.missing)).toHaveLength(2);
+    expect(f.startAuth).not.toHaveBeenCalled(); expect(f.query).not.toHaveBeenCalled();
+    fireEvent.click(modal.getAllByRole('button', { name: office.actions.authorizeRead })[0]);
     await waitFor(() => expect(f.startAuth).toHaveBeenCalledTimes(1));
-    expect(f.updateConnection.mock.calls[0][0]).toEqual({ name: 'Work connection', enabled: true, profile: 'work' });
-    expect(f.startAuth.mock.calls[0][0]).toMatchObject({ kind: 'login', profile: 'work' });
-    expect(f.startAuth.mock.calls[0][0].scopes).toEqual(['offline_access']);
+    expect(f.startAuth.mock.calls[0][0]).toMatchObject({ kind: 'login', profile: 'work', scopes: ['documents.browse-scope'] });
+    expect(f.execute).not.toHaveBeenCalled();
   });
-  test('first disabled connection independently loads real profiles before selection and identity-only login', async () => {
+  test('partial permission grants remain visible in settings and leave missing access available for another explicit request', async () => {
+    const s = status(); grant(s, 'documents.browse', false);
+    const f = fixture(s); f.startAuth.mockResolvedValue(flow('partial'));
+    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.connection.manage }));
+    const modal = within(await view.findByRole('dialog')); fireEvent.click(modal.getByRole('button', { name: office.account.sections.access }));
+    fireEvent.click(modal.getByRole('button', { name: office.actions.authorizeRead }));
+    await modal.findByText(office.auth.phase.partial); expect(modal.getByText(office.account.partialHint)).toBeTruthy();
+    expect(modal.getByRole('button', { name: office.account.sections.access }).getAttribute('aria-current')).toBe('page');
+    expect(!!modal.queryByRole('heading', { name: office.account.loginTitle })).toBe(false); expect(modal.queryAllByRole('checkbox')).toHaveLength(0);
+    const retry = modal.getByRole('button', { name: office.actions.authorizeRead });
+    await waitFor(() => expect((retry as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(retry);
+    await waitFor(() => expect(f.startAuth).toHaveBeenCalledTimes(2));
+    expect(f.startAuth.mock.calls.every(([request]) => request.profile === 'work' && request.scopes.length === 1 && request.scopes[0] === 'documents.browse-scope')).toBe(true);
+    expect(f.execute).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled(); expect(f.query).not.toHaveBeenCalled();
+  });
+  for (const phase of ['needs_login', 'expired'] as const) test(phase + ' shows the relevant sign-in state without querying business data', async () => {
+    const s = status(); s.actor = null; s.phase = phase; const f = fixture(s), view = await f.mount();
+    expect(view.getByRole('heading', { name: phase === 'expired' ? office.connectScreen.expiredTitle : office.connectScreen.loginTitle })).toBeTruthy();
+    expect(f.query).not.toHaveBeenCalled(); expect(f.startAuth).not.toHaveBeenCalled();
+    fireEvent.click(view.getByRole('button', { name: office.account.login })); await pressReady(view, office.account.login);
+    await waitFor(() => expect(f.startAuth).toHaveBeenCalledTimes(1));
+    expect(f.startAuth.mock.calls[0][0]).toMatchObject({ kind: 'login', profile: 'work', scopes: ['offline_access'] });
+  });
+  test('a disabled authenticated connection is explicitly enabled without forcing another login', async () => {
+    const s = status(); s.connection.enabled = false; s.phase = 'disabled'; const f = fixture(s);
+    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.connectScreen.enableAction }));
+    const modal = within(await view.findByRole('dialog', { name: office.connection.manage }));
+    expect(modal.getByText(office.account.connected)).toBeTruthy();
+    expect(f.updateConnection.mock.calls[0][0]).toEqual({ name: 'Work connection', enabled: true, profile: 'work' });
+    expect(f.updateConnection).toHaveBeenCalledTimes(1); expect(f.startAuth).not.toHaveBeenCalled(); expect(f.logout).not.toHaveBeenCalled();
+  });
+  test('opening settings for a disabled connection never silently enables or signs in', async () => {
+    const s = status(); s.connection.enabled = false; s.phase = 'disabled'; const f = fixture(s), view = await f.mount();
+    fireEvent.click(view.getByRole('button', { name: office.connection.settings }));
+    const modal = within(await view.findByRole('dialog', { name: office.connection.manage }));
+    expect(modal.getByText(office.account.disabledTitle)).toBeTruthy();
+    expect(f.updateConnection).not.toHaveBeenCalled(); expect(f.startAuth).not.toHaveBeenCalled(); expect(f.query).not.toHaveBeenCalled();
+  });
+  test('an unconfigured disabled connection reads existing profiles before selecting one and logging in', async () => {
     const s = status(); s.connection.enabled = false; s.connection.profile = null; s.actor = null; s.phase = 'disabled'; const f = fixture(s);
     f.profiles.mockResolvedValue([{ name: 'enterprise-ready', app_id: 'existing-app', brand: 'feishu', user_name: null, token_status: null }]);
-    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.actions.connect })); const modal = within(view.getByRole('dialog'));
-    fireEvent.click(modal.getByText(office.connection.existingApp)); fireEvent.click(modal.getByRole('checkbox', { name: office.connection.useExisting }));
+    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.connectScreen.enableAction })); const modal = within(await view.findByRole('dialog'));
     await modal.findByRole('option', { name: 'enterprise-ready · existing-app' });
-    expect(f.profiles).toHaveBeenCalledTimes(1); expect(f.updateConnection).not.toHaveBeenCalled(); expect(f.startAuth).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled();
-    fireEvent.change(modal.getByLabelText(office.connection.profile), { target: { value: 'enterprise-ready' } }); await pressReady(view, office.auth.open);
-    await waitFor(() => expect(f.startAuth).toHaveBeenCalledTimes(1));
-    expect(f.updateConnection.mock.calls[0][0]).toEqual({ name: 'Work connection', enabled: true, profile: 'enterprise-ready' });
+    expect(f.profiles).toHaveBeenCalledTimes(1); expect(f.updateConnection.mock.calls[0][0]).toEqual({ name: 'Work connection', enabled: true, profile: null }); expect(f.startAuth).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled();
+    await pressReady(view, office.account.login); await waitFor(() => expect(f.startAuth).toHaveBeenCalledTimes(1));
+    expect(f.updateConnection.mock.calls.at(-1)![0]).toEqual({ name: 'Work connection', enabled: true, profile: 'enterprise-ready' });
     expect(f.startAuth.mock.calls[0][0]).toMatchObject({ kind: 'login', profile: 'enterprise-ready', scopes: ['offline_access'] });
   });
   test('profile read failure retries only that read and new configuration uses the returned unique names', async () => {
     const s = status(); s.connection.profile = null; s.actor = null; s.phase = 'not_configured'; const f = fixture(s);
     f.profiles.mockRejectedValueOnce(new Error('Profile list unavailable')).mockResolvedValue([{ name: 'nomifun-office', app_id: 'existing-app', brand: 'feishu', user_name: null, token_status: null }]);
-    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.actions.connect }));
+    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.connection.manage }));
     const error = await view.findByRole('alert'); expect(error.textContent).toContain('Profile list unavailable'); expect(f.updateConnection).not.toHaveBeenCalled(); expect(f.startAuth).not.toHaveBeenCalled();
-    fireEvent.click(within(error).getByRole('button', { name: office.actions.check })); await pressReady(view, office.auth.open);
-    await waitFor(() => expect(f.startAuth).toHaveBeenCalledTimes(1)); expect(f.profiles).toHaveBeenCalledTimes(2);
+    fireEvent.click(within(error).getByRole('button', { name: office.actions.check })); await view.findByRole('option', { name: 'nomifun-office · existing-app' });
+    expect(f.profiles).toHaveBeenCalledTimes(2); fireEvent.click(view.getByRole('button', { name: office.account.otherConnection }));
+    await pressReady(view, office.account.connectApp); await waitFor(() => expect(f.startAuth).toHaveBeenCalledTimes(1));
     expect(f.startAuth.mock.calls[0][0]).toMatchObject({ kind: 'configure_new', profile: 'nomifun-office-1' }); expect(f.updateConnection).not.toHaveBeenCalled();
   });
-  test('new application configuration completes identity-only login before business reading can be skipped', async () => {
-    const s = status(); s.actor = null; s.phase = 'not_configured'; s.connection.profile = null; s.permissions.forEach(permission => { permission.granted = false; }); const f = fixture(s);
-    f.startAuth.mockImplementation(async request => {
-      if (request.kind === 'configure_new') {
-        s.connection.profile = request.profile; s.phase = 'needs_login'; f.setStatus(structuredClone(s)); return { ...flow('complete'), kind: 'configure_new' };
-      }
-      expect(request.scopes).toEqual(['offline_access']); s.actor = { ...actor }; s.phase = 'ready'; f.setStatus(structuredClone(s)); return flow('complete');
-    });
-    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.actions.connect }));
-    await pressReady(view, office.auth.open); await waitFor(() => expect(f.startAuth).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect((view.getByRole('button', { name: office.auth.open }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(view.getByRole('button', { name: office.auth.open })); await waitFor(() => expect(f.startAuth).toHaveBeenCalledTimes(2));
-    fireEvent.click(await view.findByRole('button', { name: office.actions.continue })); fireEvent.click(view.getByRole('button', { name: office.setup.skip }));
-    expect(view.queryByRole('dialog')).toBeNull(); expect(view.getByText(office.permissions.readMissing)).toBeTruthy();
-    expect(f.startAuth.mock.calls[0][0].kind).toBe('configure_new'); expect(f.startAuth.mock.calls[1][0].profile).toBe(f.startAuth.mock.calls[0][0].profile); expect(f.execute).not.toHaveBeenCalled();
-    expect(f.query.mock.calls.every(([query]) => query.kind === 'recent')).toBe(true);
-  });
-  test('an unfinished identity login reopens at the connection step and observes its original flow', async () => {
-    const s = status(); s.actor = null; s.phase = 'not_configured'; s.connection.profile = null; const f = fixture(s);
+  test('new application configuration requires identity-only login and has no permission step', async () => {
+    const s = status(); s.actor = null; s.phase = 'not_configured'; s.connection.profile = null; s.permissions.forEach(permission => { permission.granted = false; }); const f = fixture(s); f.profiles.mockResolvedValue([]);
     f.startAuth.mockImplementation(async request => {
       if (request.kind === 'configure_new') { s.connection.profile = request.profile; s.phase = 'needs_login'; f.setStatus(structuredClone(s)); return { ...flow('complete'), kind: 'configure_new' }; }
-      expect(request.scopes).toEqual(['offline_access']); return flow('waiting_user');
+      expect(request.scopes).toEqual(['offline_access']); s.actor = { ...actor }; s.phase = 'ready'; f.setStatus(structuredClone(s)); return flow('complete');
     });
-    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.actions.connect }));
-    await pressReady(view, office.auth.open); await waitFor(() => expect(f.startAuth).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect((view.getByRole('button', { name: office.auth.open }) as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(view.getByRole('button', { name: office.auth.open }));
-    await view.findByText(office.auth.phase.waiting_user); fireEvent.click(within(view.getByRole('dialog')).getAllByRole('button', { name: office.actions.close })[0]);
-    fireEvent.click(view.getByRole('button', { name: office.actions.connect })); const modal = within(view.getByRole('dialog'));
-    expect(modal.getByText(office.setup.connect).closest('li')?.getAttribute('aria-current')).toBe('step');
-    expect(modal.queryByText(office.setup.permissionsTitle)).toBeNull(); expect(modal.getByText(office.auth.phase.waiting_user)).toBeTruthy();
-    expect(f.startAuth).toHaveBeenCalledTimes(2); expect(f.execute).not.toHaveBeenCalled();
+    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.account.login }));
+    await pressReady(view, office.account.connectApp); await waitFor(() => expect(f.startAuth).toHaveBeenCalledTimes(1));
+    await pressReady(view, office.account.login); await waitFor(() => expect(f.startAuth).toHaveBeenCalledTimes(2));
+    const modal = within(view.getByRole('dialog')); expect(modal.getByText(office.account.connected)).toBeTruthy(); expect(modal.queryByRole('checkbox')).toBeNull();
+    fireEvent.click(modal.getByRole('button', { name: office.account.done }));
+    expect(view.queryByRole('dialog')).toBeNull(); expect(view.getByText(office.permissions.readMissing)).toBeTruthy();
+    expect(f.startAuth.mock.calls[1][0].profile).toBe(f.startAuth.mock.calls[0][0].profile); expect(f.execute).not.toHaveBeenCalled(); expect(f.query).not.toHaveBeenCalled();
+  });
+  test('an unfinished identity login reopens in account settings and observes its original flow', async () => {
+    const s = status(); s.actor = null; s.phase = 'needs_login'; const f = fixture(s);
+    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.account.login })); await pressReady(view, office.account.login);
+    await view.findByText(office.auth.phase.waiting_user); fireEvent.click(within(view.getByRole('dialog')).getByRole('button', { name: office.account.done }));
+    fireEvent.click(view.getByRole('button', { name: office.account.login })); const modal = within(view.getByRole('dialog'));
+    expect(modal.getByRole('button', { name: office.account.sections.account }).getAttribute('aria-current')).toBe('page');
+    expect(modal.getByText(office.auth.phase.waiting_user)).toBeTruthy(); expect(f.startAuth).toHaveBeenCalledTimes(1); expect(f.execute).not.toHaveBeenCalled();
     await waitFor(() => expect(f.auth).toHaveBeenCalledWith(flow().id, expect.any(AbortSignal)), { timeout: 1600 });
   });
-  test('switching a selected profile is not skipped because the old actor exists, and failed selection never logs in', async () => {
+  test('switching application configurations validates the selected profile before starting login', async () => {
     const f = fixture(); f.profiles.mockResolvedValue([{ name: 'work', app_id: actor.app_id, brand: 'feishu', user_name: actor.name, token_status: 'valid' }, { name: 'other', app_id: 'other-app', brand: 'feishu', user_name: null, token_status: null }]);
     f.updateConnection.mockRejectedValue(new Error('Cannot select configuration'));
-    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.connection.settings }));
-    let modal = view.getByRole('dialog'); fireEvent.click(within(modal).getByText(office.connection.advanced)); fireEvent.click(within(modal).getByRole('button', { name: office.actions.check }));
-    fireEvent.click(within(modal).getByRole('button', { name: office.actions.continue }));
-    modal = view.getByRole('dialog'); fireEvent.click(within(modal).getByText(office.connection.existingApp));
-    await within(modal).findByRole('option', { name: 'other · other-app' });
-    fireEvent.change(within(modal).getByLabelText(office.connection.profile), { target: { value: 'other' } });
-    fireEvent.click(within(modal).getByRole('button', { name: office.auth.open }));
-    await view.findByText('Cannot select configuration');
-    expect(f.updateConnection.mock.calls[0][0].profile).toBe('other'); expect(f.startAuth).not.toHaveBeenCalled();
+    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.connection.manage }));
+    fireEvent.click(view.getByRole('button', { name: office.account.otherConnection }));
+    const modal = within(view.getByRole('dialog')); await modal.findByRole('option', { name: 'other · other-app' });
+    fireEvent.change(modal.getByLabelText(office.account.application), { target: { value: 'other' } }); fireEvent.click(modal.getByRole('button', { name: office.account.login }));
+    await view.findByText('Cannot select configuration'); expect(f.updateConnection.mock.calls[0][0].profile).toBe('other'); expect(f.startAuth).not.toHaveBeenCalled();
+  });
+  test('sign out requires confirmation and never automatically starts another login', async () => {
+    const f = fixture(), view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.connection.manage }));
+    fireEvent.click(view.getByRole('button', { name: office.account.logout })); expect(f.logout).not.toHaveBeenCalled();
+    fireEvent.click(view.getByRole('button', { name: office.account.confirmLogout })); await waitFor(() => expect(f.logout).toHaveBeenCalledTimes(1));
+    expect(f.logout.mock.calls[0][0]).toEqual({ profile: 'work', expected_actor: actor });
+    await view.findByRole('heading', { name: office.account.loginTitle }); expect(f.startAuth).not.toHaveBeenCalled(); expect(f.execute).not.toHaveBeenCalled();
+  });
+  test('switch account waits for exact logout completion before starting the new login', async () => {
+    const f = fixture(); let finish!: () => void;
+    f.logout.mockImplementation(async () => await new Promise<void>(resolve => { finish = () => { const next = status(); next.actor = null; next.phase = 'needs_login'; next.permissions.forEach(permission => { permission.granted = false; }); f.setStatus(next); resolve(); }; }));
+    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.connection.manage })); fireEvent.click(view.getByRole('button', { name: office.account.switch }));
+    expect(f.logout).not.toHaveBeenCalled(); fireEvent.click(view.getByRole('button', { name: office.account.confirmSwitch }));
+    await waitFor(() => expect(f.logout).toHaveBeenCalledTimes(1)); expect(f.startAuth).not.toHaveBeenCalled();
+    expect((view.getByRole('button', { name: office.account.confirmSwitch }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { finish(); }); await waitFor(() => expect(f.startAuth).toHaveBeenCalledTimes(1));
+    expect(f.logout.mock.calls[0][0]).toEqual({ profile: 'work', expected_actor: actor });
+    expect(f.startAuth.mock.calls[0][0]).toMatchObject({ kind: 'login', profile: 'work', scopes: ['offline_access'] }); expect(f.execute).not.toHaveBeenCalled();
+  });
+  test('failed sign out keeps the current account and never starts another login', async () => {
+    const f = fixture(); f.logout.mockRejectedValue(new Error('The connection is busy'));
+    const view = await f.mount(); fireEvent.click(view.getByRole('button', { name: office.connection.manage })); fireEvent.click(view.getByRole('button', { name: office.account.switch }));
+    fireEvent.click(view.getByRole('button', { name: office.account.confirmSwitch })); await view.findByText('The connection is busy');
+    expect(f.startAuth).not.toHaveBeenCalled(); expect(f.logout).toHaveBeenCalledTimes(1); expect(f.execute).not.toHaveBeenCalled();
+    fireEvent.click(view.getByRole('button', { name: office.actions.cancel })); expect(within(view.getByRole('dialog')).getByText(actor.name)).toBeTruthy();
   });
   test('title-only document creation is a single explicit native save', async () => {
     const f = fixture(), view = await f.mount();
@@ -400,12 +469,5 @@ describe('compact Office Hub with isolated real API boundaries', () => {
     fireEvent.click(view.getByRole('button', { name: office.actions.create })); await view.findByRole('dialog', { name: office.auth.title });
     expect(f.startAuth).toHaveBeenCalledTimes(1); expect(f.execute).not.toHaveBeenCalled(); expect(view.getAllByRole('dialog')).toHaveLength(1);
     await waitFor(() => expect(f.auth).toHaveBeenCalled(), { timeout: 1600 });
-  });
-  test('history shows safe summaries and original pending receipt with no retry editor', async () => {
-    const f = fixture(); const op = receipt({ request_id: 'request', expected_actor: actor, profile: 'work', items: [{ kind: 'document_create', client_item_id: 'logical', title: 'Original title' }] }, 'unknown');
-    f.history.mockResolvedValue({ items: [op], next_cursor: null }); f.open.mockResolvedValue(op); f.reconcile.mockResolvedValue(op);
-    const view = await f.mount('/office?tab=activity'); fireEvent.click(await view.findByRole('button', { name: office.actions.details }));
-    await view.findByText('Original title'); expect(view.queryByRole('textbox')).toBeNull();
-    const verify = view.getByRole('button', { name: office.actions.reconcile }); expect((verify as HTMLButtonElement).disabled).toBe(false); fireEvent.click(verify); await waitFor(() => expect(f.reconcile).toHaveBeenCalledTimes(1)); expect(f.execute).not.toHaveBeenCalled();
   });
 });

@@ -76,6 +76,8 @@ fn migration_directory_contains_the_canonical_forward_migration_chain() {
         "015_retire_execution_plan_gate.sql",
         "016_office_hub.sql",
         "017_compact_office_receipts.sql",
+        "018_remove_office_activity.sql",
+        "019_remove_office_overview.sql",
     ]);
 }
 

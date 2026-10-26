@@ -8,10 +8,8 @@
   "saved": "Saved.",
   "error": "The office operation failed.",
   "tabs": {
-    "overview": "Workbench",
     "documents": "Documents",
-    "agenda": "Calendar & tasks",
-    "activity": "Operations"
+    "agenda": "Calendar & tasks"
   },
   "actions": {
     "new": "New",
@@ -45,36 +43,15 @@
     "delete": "Delete",
     "back": "Back"
   },
-  "setup": {
-    "environment": "Environment",
-    "connect": "Connect",
-    "permissions": "Permissions",
-    "environmentTitle": "Prepare the connection environment",
-    "environmentHint": "Reuse a compatible Feishu CLI on the backend computer, or explicitly install the component when missing.",
-    "connectTitle": "Continue in Feishu",
-    "connectHint": "Confirm the enterprise application and your identity on the official Feishu page. Select content permissions next.",
-    "identityNext": "The application is configured. Continue in Feishu once more to confirm your identity; this does not grant access to business content.",
-    "identityReady": "Your identity is connected. Continue to select reading capabilities, or skip them for now.",
-    "permissionsTitle": "What would you like to use first?",
-    "permissionsHint": "Enable only the reading capabilities you need, or skip for now. Creating or editing content requires separate permission.",
-    "skip": "Set up later",
-    "grant": "Authorize and open",
-    "finish": "Open workbench"
-  },
   "connection": {
     "welcome": "Connect Feishu to start working",
-    "welcomeHint": "Prepare the component, connect your account, then select the content you need.",
     "settings": "Connection settings",
-    "unknownIdentity": "User identity not verified",
-    "existingApp": "Use an existing enterprise application",
-    "useExisting": "Choose an existing application",
     "profile": "Application configuration",
-    "chooseProfile": "Choose a configuration",
     "manual": "Enter application details",
     "appId": "Application ID",
     "appSecret": "Application secret",
     "secretHint": "Used once by the backend CLI. This page does not store the secret.",
-    "advanced": "Connection details and troubleshooting"
+    "manage": "Feishu account and connection"
   },
   "runtime": {
     "title": "Feishu CLI",
@@ -169,12 +146,10 @@
   "resources": {
     "search": "Search content",
     "searchDocuments": "Search documents",
-    "searchRecent": "Search recently opened",
     "openLink": "Open from link",
     "link": "Document or Base table link",
     "name": "Name",
     "type": "Type",
-    "opened": "Last opened",
     "filters": {
       "all": "All",
       "document": "Documents",
@@ -187,7 +162,6 @@
     "invalidLink": "Use a complete official Feishu or Lark HTTPS document link.",
     "missingLink": "No link is available. Search for the document or paste its complete link.",
     "queryEmpty": "No documents match this query.",
-    "recentEmpty": "No matching recently opened resources.",
     "paginationError": "Invalid pagination information. Refresh and try again."
   },
   "documents": {
@@ -199,7 +173,6 @@
   },
   "tasks": {
     "section": "Task",
-    "mine": "My tasks",
     "assigned": "Assigned to me",
     "created": "Created by me",
     "tasklist": "Specific task list",
@@ -223,8 +196,7 @@
     "duration": "Duration (minutes)",
     "title": "Event title",
     "personal": "No attendees or video meeting added",
-    "empty": "No events on this date.",
-    "all": "All events and tasks"
+    "empty": "No events on this date."
   },
   "operation": {
     "summary": {
@@ -238,11 +210,6 @@
     },
     "results": "Operation result",
     "actor": "Acting as {{name}}",
-    "historyHint": "Operations started in this workbench only.",
-    "action": "Operation",
-    "result": "Result",
-    "time": "Started",
-    "empty": "No workbench operations yet.",
     "identityChanged": "Switch to the original application and user before verifying this operation.",
     "identityChangedInput": "The application or user changed. Reopen the form before submitting.",
     "networkHint": "The request may still be running. Read the original receipt; do not submit again.",
@@ -270,5 +237,75 @@
     "required": "Complete the required fields.",
     "date": "Enter a valid date and time."
   },
-  "deleted": "Deleted."
+  "deleted": "Deleted.",
+  "account": {
+    "sections": {
+      "account": "Feishu account",
+      "access": "Permissions",
+      "advanced": "Advanced"
+    },
+    "accountHint": "See who is signed in, or switch to another Feishu account.",
+    "privateHint": "Credentials stay with the official Feishu component",
+    "done": "Done",
+    "connected": "Connected",
+    "partialHint": "Some permissions were not granted. You can authorize them when needed.",
+    "ready": "Ready",
+    "currentAccount": "Current Feishu account",
+    "switch": "Switch account",
+    "logout": "Sign out",
+    "otherConnection": "Switch connection",
+    "switchTitle": "Sign out and switch account?",
+    "logoutTitle": "Sign out of Feishu?",
+    "logoutHint": "Sign out {{name}} from this connection. Documents, events and tasks in Feishu will remain unchanged.",
+    "switchHint": "Keep the application configuration and choose another account on the official Feishu page.",
+    "signedOutHint": "Reading stops after sign-out. You can sign in again whenever you need.",
+    "confirmSwitch": "Sign out and switch",
+    "confirmLogout": "Confirm sign out",
+    "installFirst": "Install the connection component before signing in.",
+    "viewComponent": "View component",
+    "loginTitle": "Sign in to your Feishu account",
+    "expiredTitle": "Your Feishu login has expired",
+    "disabledTitle": "This connection is disabled",
+    "addTitle": "Connect another enterprise application",
+    "loginHint": "Confirm your identity on the official Feishu page. Sign-in opens Documents; content access is requested separately.",
+    "disabledHint": "Enable the connection to sign in and read content. Disabling does not sign you out.",
+    "loadingApps": "Reading existing application configurations…",
+    "application": "Enterprise application",
+    "newAppHint": "First, link an enterprise application. Set it up on the official Feishu page, or use details provided by your administrator.",
+    "manualApp": "Have an application ID and secret?",
+    "login": "Sign in to Feishu",
+    "connectApp": "Connect Feishu application",
+    "accessHint": "Enable only the reading permissions you need. You do not have to select everything during sign-in.",
+    "loginFirst": "Sign in to see and manage your access permissions.",
+    "writeAccessHint": "Creating, deleting or updating content asks for write permission during that action.",
+    "componentTitle": "Connection component",
+    "componentHint": "The component communicates with Feishu. A compatible existing installation is reused.",
+    "installingHint": "Preparing the component. You can sign in when it is ready.",
+    "technicalDetails": "Component path and diagnostics",
+    "installationSource": "Installation source",
+    "connectionUse": "Use this connection",
+    "disableHint": "Disabling stops new reads and writes. It does not sign you out or revoke Feishu authorization."
+  },
+  "connectScreen": {
+    "missingTitle": "Install the Feishu connection component",
+    "missingHint": "A one-time setup. Then sign in with your Feishu account to access documents, events and tasks.",
+    "installingTitle": "Preparing the connection component",
+    "installingHint": "Sign-in will be available when preparation finishes. You do not need to install again or keep a dialog open.",
+    "repairTitle": "Check the connection component",
+    "repairHint": "The detected component is not ready. Repair the existing installation or select a working program in connection settings.",
+    "disabledTitle": "Your Feishu connection is disabled",
+    "disabledHint": "No Feishu content is being read or written. Enable the connection to continue with your account or sign in again.",
+    "expiredTitle": "Sign in to Feishu again",
+    "expiredHint": "Your login has expired. Confirm your identity to continue with your documents, events and tasks.",
+    "loginTitle": "Connect your Feishu account",
+    "loginHint": "Handle documents, events and tasks in one place. Use your own account and grant access only when needed.",
+    "component": "Prepare the connection component",
+    "componentHint": "Connect through the official component. Existing installations can be reused.",
+    "componentReady": "The component is ready for sign-in.",
+    "account": "Sign in with Feishu",
+    "accountHint": "Confirm your identity on the official page. No account password is entered here.",
+    "installingAction": "Preparing…",
+    "enableAction": "Enable and continue",
+    "privacy": "Only authorized content is accessed. Switch accounts or sign out at any time."
+  }
 }

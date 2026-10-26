@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqliteConnection, SqlitePool};
@@ -19,29 +19,6 @@ const MAX_OPERATION_BYTES: usize = 1024 * 1024;
 const MAX_ITEMS: usize = 200;
 const PENDING: &str = "('queued','running','unknown','accepted_pending_confirmation')";
 
-/// Navigation configuration only: no remote fields, content or grant state.
-#[derive(Serialize,Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecentResource {
-    kind:String, id:String, title:String, url:Option<String>,
-    base_token:Option<String>, table_id:Option<String>, opened_at:i64,
-}
-impl RecentResource {
-    fn from_item(item:&OfficeItem)->Result<Self,HubError>{
-        if !matches!(item.kind.as_str(),"document"|"doc"|"base"|"table"|"bitable") || item.id.trim().is_empty(){
-            return Err(HubError::invalid("Only an actually opened document or Base table can be remembered"))
-        }
-        Ok(Self{kind:item.kind.clone(),id:item.id.clone(),title:item.title.clone(),url:item.url.clone(),
-            base_token:item.base_token.clone(),table_id:item.table_id.clone(),opened_at:now_ms()})
-    }
-    fn locator(&self)->(&str,&str,&Option<String>,&Option<String>){(&self.kind,&self.id,&self.base_token,&self.table_id)}
-    fn into_item(self)->OfficeItem{
-        let mut item=OfficeItem::new(self.id,self.kind,self.title);item.url=self.url;
-        item.opened_at=DateTime::<Utc>::from_timestamp_millis(self.opened_at).map(|time|time.to_rfc3339());
-        item.base_token=self.base_token;item.table_id=self.table_id;item
-    }
-}
-
 #[derive(Clone)]
 pub struct OfficeHubStore { pool: SqlitePool }
 
@@ -51,6 +28,11 @@ impl OfficeHubStore {
     pub async fn connection(&self, owner: &str) -> Result<Option<OfficeConnection>, HubError> {
         let mut conn = self.pool.acquire().await.map_err(HubError::storage)?;
         load_connection(&mut conn, owner).await
+    }
+
+    pub async fn active_operation_id(&self, owner: &str, connection_id: &str) -> Result<Option<String>, HubError> {
+        sqlx::query_scalar("SELECT operation_id FROM office_operations WHERE owner_id=? AND connection_id=? AND status IN ('queued','running') LIMIT 1")
+            .bind(owner).bind(connection_id).fetch_optional(&self.pool).await.map_err(HubError::storage)
     }
 
     pub async fn save_connection(&self, owner: &str, value: &OfficeConnection) -> Result<(), HubError> {
@@ -99,31 +81,6 @@ impl OfficeHubStore {
         let stopped=stop_unstarted_tx(&mut tx,owner,connection_id,message).await?;
         tx.commit().await.map_err(HubError::storage)?;
         Ok(stopped)
-    }
-
-    pub async fn remember_recent(&self, owner: &str, connection_id: &str, item: &OfficeItem) -> Result<(), HubError> {
-        let recent = RecentResource::from_item(item)?;
-        let mut tx = self.pool.begin().await.map_err(HubError::storage)?;
-        sqlx::query("UPDATE office_connections SET updated_at=updated_at WHERE owner_id=? AND connection_id=?")
-            .bind(owner).bind(connection_id).execute(&mut *tx).await.map_err(HubError::storage)?;
-        require_connection(&mut tx, owner, connection_id, false).await?;
-        let text:String = sqlx::query_scalar("SELECT recent_resources_json FROM office_connections WHERE owner_id=? AND connection_id=?")
-            .bind(owner).bind(connection_id).fetch_one(&mut *tx).await.map_err(HubError::storage)?;
-        let mut resources:Vec<RecentResource> = parse(&text)?;
-        resources.retain(|old| old.locator() != recent.locator());
-        resources.insert(0,recent); resources.truncate(100);
-        sqlx::query("UPDATE office_connections SET recent_resources_json=? WHERE owner_id=? AND connection_id=?")
-            .bind(bounded_json(&resources)?).bind(owner).bind(connection_id)
-            .execute(&mut *tx).await.map_err(HubError::storage)?;
-        tx.commit().await.map_err(HubError::storage)
-    }
-
-    pub async fn recent(&self, owner: &str, connection_id: &str, limit: usize) -> Result<Vec<OfficeItem>, HubError> {
-        let mut conn = self.pool.acquire().await.map_err(HubError::storage)?;
-        require_connection(&mut conn, owner, connection_id, false).await?;
-        let text:String = sqlx::query_scalar("SELECT recent_resources_json FROM office_connections WHERE owner_id=? AND connection_id=?")
-            .bind(owner).bind(connection_id).fetch_one(&mut *conn).await.map_err(HubError::storage)?;
-        Ok(parse::<Vec<RecentResource>>(&text)?.into_iter().take(limit.clamp(1,100)).map(RecentResource::into_item).collect())
     }
 
     /// Presentation metadata from the same admitted-item facts that enforce
@@ -191,10 +148,10 @@ impl OfficeHubStore {
                 }
             }
         }
-        let id = new_id(); let now = now_ms();
-        sqlx::query("INSERT INTO office_operations(operation_id,owner_id,connection_id,request_id,actor_json,profile,digest,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'queued',?,?)")
+        let id = new_id();
+        sqlx::query("INSERT INTO office_operations(operation_id,owner_id,connection_id,request_id,actor_json,profile,digest,status) VALUES (?,?,?,?,?,?,?,'queued')")
             .bind(&id).bind(owner).bind(connection_id).bind(&request.request_id).bind(bounded_json(actor)?)
-            .bind(profile).bind(&digest).bind(now).bind(now).execute(&mut *tx).await.map_err(HubError::storage)?;
+            .bind(profile).bind(&digest).execute(&mut *tx).await.map_err(HubError::storage)?;
         for (ordinal, mutation) in request.items.iter().enumerate() {
             sqlx::query("INSERT INTO office_operation_items(item_id,operation_id,client_item_id,ordinal,mutation_json,target_key,status) VALUES (?,?,?,?,?,?,'queued')")
                 .bind(new_id()).bind(&id).bind(mutation.client_item_id()).bind(ordinal as i64)
@@ -221,31 +178,6 @@ impl OfficeHubStore {
         let result=load_operation(&mut tx,owner,id).await?;
         tx.commit().await.map_err(HubError::storage)?;
         Ok(result)
-    }
-
-    pub async fn list(&self, owner: &str, limit: usize, cursor: Option<&str>) -> Result<OperationPage, HubError> {
-        let limit = limit.clamp(1,100);
-        let mut conn = self.pool.begin().await.map_err(HubError::storage)?;
-        let boundary = if let Some(cursor) = cursor {
-            Some(sqlx::query_as::<_,(i64,String)>("SELECT created_at,operation_id FROM office_operations WHERE owner_id=? AND operation_id=?")
-                .bind(owner).bind(cursor).fetch_optional(&mut *conn).await.map_err(HubError::storage)?
-                .ok_or_else(|| HubError::invalid("Invalid office history cursor"))?)
-        } else { None };
-        let ids = if let Some((time,id)) = boundary {
-            sqlx::query_scalar::<_,String>("SELECT operation_id FROM office_operations WHERE owner_id=? AND (created_at<? OR (created_at=? AND operation_id<?)) ORDER BY created_at DESC,operation_id DESC LIMIT ?")
-                .bind(owner).bind(time).bind(time).bind(id).bind((limit+1) as i64)
-                .fetch_all(&mut *conn).await.map_err(HubError::storage)?
-        } else {
-            sqlx::query_scalar::<_,String>("SELECT operation_id FROM office_operations WHERE owner_id=? ORDER BY created_at DESC,operation_id DESC LIMIT ?")
-                .bind(owner).bind((limit+1) as i64).fetch_all(&mut *conn).await.map_err(HubError::storage)?
-        };
-        let more = ids.len()>limit; let mut items = Vec::new();
-        for id in ids.into_iter().take(limit) {
-            items.push(load_operation(&mut conn, owner, &id).await?.ok_or_else(|| HubError::storage("Office history changed during read"))?);
-        }
-        let page=OperationPage { next_cursor: more.then(|| items.last().unwrap().id.clone()), items };
-        conn.commit().await.map_err(HubError::storage)?;
-        Ok(page)
     }
 
     /// Called before dispatch. Its committed Running row is the start fence.
@@ -307,9 +239,6 @@ impl OfficeHubStore {
         sqlx::query("UPDATE office_operation_items SET status=?,message=?,remote_id=?,remote_url=? WHERE item_id=?")
             .bind(wire(&status)?).bind(message).bind(remote_id).bind(remote_url).bind(item_id)
             .execute(&mut *tx).await.map_err(HubError::storage)?;
-        if status==ItemStatus::Succeeded {
-            update_document_navigation(&mut tx,owner,&op,item,remote_id,remote_url).await?;
-        }
         update_summary(&mut tx,id).await?;
         let result = required_operation(&mut tx,owner,id).await?;
         tx.commit().await.map_err(HubError::storage)?;
@@ -360,7 +289,7 @@ impl OfficeHubStore {
     /// start_attempt's committed dispatch fence and is explicitly NotExecuted.
     pub async fn recover_interrupted(&self, owner:&str)->Result<usize,HubError>{
         let mut tx=self.pool.begin().await.map_err(HubError::storage)?;
-        sqlx::query("UPDATE office_operations SET updated_at=updated_at WHERE owner_id=?")
+        sqlx::query("UPDATE office_operations SET status=status WHERE owner_id=?")
             .bind(owner).execute(&mut *tx).await.map_err(HubError::storage)?;
         let ids=sqlx::query_scalar::<_,String>("SELECT operation_id FROM office_operations WHERE owner_id=? AND status IN ('queued','running')")
             .bind(owner).fetch_all(&mut *tx).await.map_err(HubError::storage)?;
@@ -388,37 +317,6 @@ impl OfficeHubStore {
         tx.commit().await.map_err(HubError::storage)?;
         Ok(recovered)
     }
-}
-
-/// Navigation changes settle atomically with the original receipt, so a lost
-/// response cannot leave a deleted resource in the recent list.
-async fn update_document_navigation(conn:&mut SqliteConnection,owner:&str,op:&OfficeOperation,item:&OperationItem,
-    remote_id:Option<&str>,remote_url:Option<&str>)->Result<(),HubError>{
-    let Ok(mutation)=serde_json::from_value::<OfficeMutation>(item.mutation.clone()) else{return Ok(())};
-    if !matches!(mutation,OfficeMutation::DocumentCreate{..}|OfficeMutation::DocumentDelete{..}) {return Ok(())}
-    let text:String=sqlx::query_scalar("SELECT recent_resources_json FROM office_connections WHERE owner_id=? AND connection_id=?")
-        .bind(owner).bind(&op.connection_id).fetch_one(&mut *conn).await.map_err(HubError::storage)?;
-    let mut resources:Vec<RecentResource>=parse(&text)?;
-    match mutation {
-        OfficeMutation::DocumentCreate{title,..}=>{
-            let Some(id)=remote_id else{return Ok(())};
-            let mut item=OfficeItem::new(id,"document",title);item.url=remote_url.map(str::to_owned);
-            let recent=RecentResource::from_item(&item)?;
-            resources.retain(|old|old.locator()!=recent.locator());
-            resources.insert(0,recent);resources.truncate(100);
-        }
-        OfficeMutation::DocumentDelete{document_id,..}=>{
-            resources.retain(|old|{
-                let mut item=OfficeItem::new(&old.id,&old.kind,&old.title);item.url=old.url.clone();
-                old.id!=document_id && !crate::adapter::document_target(&item).is_some_and(|(_,id)|id==document_id)
-            });
-        }
-        _=>{}
-    }
-    sqlx::query("UPDATE office_connections SET recent_resources_json=? WHERE owner_id=? AND connection_id=?")
-        .bind(bounded_json(&resources)?).bind(owner).bind(&op.connection_id)
-        .execute(&mut *conn).await.map_err(HubError::storage)?;
-    Ok(())
 }
 
 async fn stop_unstarted_tx(conn:&mut SqliteConnection,owner:&str,connection_id:&str,message:&str)->Result<usize,HubError>{
@@ -466,7 +364,7 @@ async fn require_operation_connection(conn:&mut SqliteConnection,owner:&str,op:&
     Ok(())
 }
 async fn lock_operation(conn:&mut SqliteConnection,owner:&str,id:&str)->Result<(),HubError>{
-    if sqlx::query("UPDATE office_operations SET updated_at=updated_at WHERE owner_id=? AND operation_id=?")
+    if sqlx::query("UPDATE office_operations SET status=status WHERE owner_id=? AND operation_id=?")
         .bind(owner).bind(id).execute(&mut *conn).await.map_err(HubError::storage)?.rows_affected()!=1 {
         return Err(not_found("Office operation not found"));
     }
@@ -490,8 +388,8 @@ async fn update_summary(conn:&mut SqliteConnection,id:&str)->Result<(),HubError>
         .bind(id).fetch_all(&mut *conn).await.map_err(HubError::storage)?;
     let statuses=statuses.iter().map(|s|parse_state::<ItemStatus>(s)).collect::<Result<Vec<_>,_>>()?;
     let status=aggregate(&statuses);
-    sqlx::query("UPDATE office_operations SET status=?,updated_at=? WHERE operation_id=?")
-        .bind(wire(&status)?).bind(now_ms()).bind(id).execute(&mut *conn).await.map_err(HubError::storage)?;
+    sqlx::query("UPDATE office_operations SET status=? WHERE operation_id=?")
+        .bind(wire(&status)?).bind(id).execute(&mut *conn).await.map_err(HubError::storage)?;
     Ok(())
 }
 fn aggregate(items:&[ItemStatus])->OperationStatus{
@@ -505,7 +403,7 @@ fn aggregate(items:&[ItemStatus])->OperationStatus{
 }
 
 async fn load_operation(conn:&mut SqliteConnection,owner:&str,id:&str)->Result<Option<OfficeOperation>,HubError>{
-    let row=sqlx::query("SELECT operation_id,request_id,connection_id,actor_json,profile,status,created_at,updated_at FROM office_operations WHERE owner_id=? AND operation_id=?")
+    let row=sqlx::query("SELECT operation_id,request_id,connection_id,actor_json,profile,status FROM office_operations WHERE owner_id=? AND operation_id=?")
         .bind(owner).bind(id).fetch_optional(&mut *conn).await.map_err(HubError::storage)?;
     let Some(row)=row else{return Ok(None)};
     let mut attempts:BTreeMap<String,Vec<OperationAttempt>>=BTreeMap::new();
@@ -560,8 +458,7 @@ async fn load_operation(conn:&mut SqliteConnection,owner:&str,id:&str)->Result<O
         actor:parse(&row.try_get::<String,_>("actor_json").map_err(HubError::storage)?)?,
         profile:row.try_get("profile").map_err(HubError::storage)?,
         status:parse_state(&row.try_get::<String,_>("status").map_err(HubError::storage)?)?,
-        items,created_at:stamp(row.try_get("created_at").map_err(HubError::storage)?)?,
-        updated_at:stamp(row.try_get("updated_at").map_err(HubError::storage)?)?}))
+        items}))
 }
 
 pub fn target_key(actor:&OfficeActor,profile:&str,item:&OfficeMutation)->Result<String,HubError>{

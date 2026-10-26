@@ -8,10 +8,8 @@
   "saved": "已保存。",
   "error": "办公操作失败。",
   "tabs": {
-    "overview": "工作台",
     "documents": "文档",
-    "agenda": "日程与任务",
-    "activity": "操作记录"
+    "agenda": "日程与任务"
   },
   "actions": {
     "new": "新建",
@@ -45,36 +43,15 @@
     "delete": "删除",
     "back": "返回"
   },
-  "setup": {
-    "environment": "准备环境",
-    "connect": "连接飞书",
-    "permissions": "使用权限",
-    "environmentTitle": "先准备好连接环境",
-    "environmentHint": "检查后端电脑上的飞书 CLI。已有兼容安装直接复用，缺少时由你选择安装。",
-    "connectTitle": "接下来，用飞书完成连接",
-    "connectHint": "在飞书官方页面确认企业应用与登录身份。需要访问哪些内容，下一步再选择。",
-    "identityNext": "应用已就绪，请再次在飞书继续，确认个人身份；这一步不会开通业务内容权限。",
-    "identityReady": "个人身份已连接，接下来选择读取能力，也可以暂时跳过。",
-    "permissionsTitle": "你想先使用哪些内容？",
-    "permissionsHint": "先开通需要的读取能力，也可以稍后再设置。创建或修改内容时，会另外申请写入权限。",
-    "skip": "稍后设置",
-    "grant": "授权并进入工作台",
-    "finish": "进入工作台"
-  },
   "connection": {
     "welcome": "连接飞书，开始办公",
-    "welcomeHint": "准备组件、连接飞书，再选择需要使用的内容。",
     "settings": "连接设置",
-    "unknownIdentity": "尚未验证用户身份",
-    "existingApp": "使用企业已有应用",
-    "useExisting": "选择已有应用配置",
     "profile": "应用配置",
-    "chooseProfile": "请选择应用配置",
     "manual": "手动填写应用信息",
     "appId": "应用 ID",
     "appSecret": "应用密钥",
     "secretHint": "仅交给后端 CLI 完成本次连接，此页面不保存密钥。",
-    "advanced": "连接详情与排障"
+    "manage": "飞书账号与连接"
   },
   "runtime": {
     "title": "飞书 CLI",
@@ -169,12 +146,10 @@
   "resources": {
     "search": "搜索内容",
     "searchDocuments": "搜索文档",
-    "searchRecent": "搜索最近打开",
     "openLink": "通过链接打开",
     "link": "文档或数据表链接",
     "name": "名称",
     "type": "类型",
-    "opened": "最近打开",
     "filters": {
       "all": "全部",
       "document": "云文档",
@@ -187,7 +162,6 @@
     "invalidLink": "请使用完整的飞书或 Lark 官方 HTTPS 文档链接。",
     "missingLink": "该资源没有可用链接，请通过搜索查找或粘贴完整文档链接。",
     "queryEmpty": "当前查询没有匹配的文档。",
-    "recentEmpty": "最近打开的入口中没有匹配内容。",
     "paginationError": "分页信息异常，请刷新后重试。"
   },
   "documents": {
@@ -199,7 +173,6 @@
   },
   "tasks": {
     "section": "任务",
-    "mine": "我的任务",
     "assigned": "我负责的",
     "created": "我创建的",
     "tasklist": "指定清单",
@@ -223,8 +196,7 @@
     "duration": "时长（分钟）",
     "title": "日程标题",
     "personal": "不添加参会人或视频会议",
-    "empty": "此日期暂无日程。",
-    "all": "全部日程与任务"
+    "empty": "此日期暂无日程。"
   },
   "operation": {
     "summary": {
@@ -238,11 +210,6 @@
     },
     "results": "操作结果",
     "actor": "执行身份：{{name}}",
-    "historyHint": "仅记录你在此工作台发起的操作。",
-    "action": "操作",
-    "result": "结果",
-    "time": "发起时间",
-    "empty": "还没有工作台操作。",
     "identityChanged": "请切回原应用和用户身份后核验此操作。",
     "identityChangedInput": "应用或用户身份已变化，请重新打开表单后再提交。",
     "networkHint": "请求可能仍在执行，请读取原请求的回执，不要再次提交。",
@@ -270,5 +237,75 @@
     "required": "请填写必填内容。",
     "date": "请输入有效日期与时间。"
   },
-  "deleted": "已删除。"
+  "deleted": "已删除。",
+  "account": {
+    "sections": {
+      "account": "飞书账号",
+      "access": "访问权限",
+      "advanced": "高级设置"
+    },
+    "accountHint": "查看当前登录身份，或切换到另一个飞书账号。",
+    "privateHint": "账号凭据由飞书官方组件保管",
+    "done": "完成",
+    "connected": "已连接",
+    "partialHint": "部分权限尚未开通，可在需要使用时继续授权。",
+    "ready": "已就绪",
+    "currentAccount": "当前飞书账号",
+    "switch": "更换账号",
+    "logout": "退出登录",
+    "otherConnection": "切换连接",
+    "switchTitle": "退出并更换飞书账号？",
+    "logoutTitle": "退出飞书登录？",
+    "logoutHint": "将退出 {{name}} 在当前连接中的登录。飞书中的文档、日程和任务不会被删除。",
+    "switchHint": "保留应用连接配置，在飞书官方页面选择并登录另一个账号。",
+    "signedOutHint": "退出后暂停读取飞书内容，需要时可以重新登录。",
+    "confirmSwitch": "退出并更换",
+    "confirmLogout": "确认退出",
+    "installFirst": "先安装连接组件，再登录你的飞书账号。",
+    "viewComponent": "查看连接组件",
+    "loginTitle": "登录你的飞书账号",
+    "expiredTitle": "飞书登录已过期",
+    "disabledTitle": "此连接已停用",
+    "addTitle": "连接另一个企业应用",
+    "loginHint": "在飞书官方页面确认身份。登录后即可进入文档，所需访问权限会单独申请。",
+    "disabledHint": "启用后可继续登录和读取内容。停用连接不会退出飞书账号。",
+    "loadingApps": "正在读取已有应用配置…",
+    "application": "使用的企业应用",
+    "newAppHint": "首次使用需先关联一个企业应用。你可以在飞书官方页面完成配置，也可以使用管理员提供的应用信息。",
+    "manualApp": "已有应用 ID 和密钥？",
+    "login": "登录飞书",
+    "connectApp": "连接飞书应用",
+    "accessHint": "按实际需要开通读取权限，登录时无需一次选择所有内容。",
+    "loginFirst": "登录飞书后，可以在这里查看和补充访问权限。",
+    "writeAccessHint": "新建、删除和更新内容时，会在对应操作中单独申请写入权限。",
+    "componentTitle": "连接组件",
+    "componentHint": "连接组件负责与飞书通信。已有兼容安装会直接复用。",
+    "installingHint": "正在准备组件，请稍候，完成后即可登录。",
+    "technicalDetails": "组件路径与诊断",
+    "installationSource": "安装来源",
+    "connectionUse": "使用此连接",
+    "disableHint": "停用后暂停新的读取和写入，不会退出登录或撤销飞书授权。"
+  },
+  "connectScreen": {
+    "missingTitle": "先安装飞书连接组件",
+    "missingHint": "只需准备一次。安装完成后，使用你的飞书账号登录，即可查看文档、日程和任务。",
+    "installingTitle": "正在准备连接组件",
+    "installingHint": "组件准备完成后，这里会出现登录入口。无需重复安装或保持弹窗打开。",
+    "repairTitle": "连接组件需要检查",
+    "repairHint": "检测到的组件暂时不可用。请检查现有安装，或在连接设置中选择可用的程序。",
+    "disabledTitle": "飞书连接已停用",
+    "disabledHint": "当前不会读取或写入飞书内容。启用连接后，可继续使用已有账号或重新登录。",
+    "expiredTitle": "重新登录飞书",
+    "expiredHint": "当前登录已过期。重新确认身份后，即可继续使用原有的文档、日程和任务。",
+    "loginTitle": "连接你的飞书账号",
+    "loginHint": "在一个地方处理文档、日程和任务。使用你自己的飞书账号，按实际需要授予访问权限。",
+    "component": "准备连接组件",
+    "componentHint": "通过官方组件连接飞书，已有安装可直接复用。",
+    "componentReady": "组件已就绪，可以开始登录。",
+    "account": "使用飞书账号登录",
+    "accountHint": "在飞书官方页面确认身份，不在这里输入账号密码。",
+    "installingAction": "正在准备…",
+    "enableAction": "启用并继续",
+    "privacy": "仅访问你已授权的内容。你可以随时更换账号或退出登录。"
+  }
 }

@@ -5,9 +5,11 @@ import { AGENT_FORWARD_MIGRATIONS, areKnownAgentMigrationPaths, officeHubMigrati
 
 test('the office extension is explicit and never authorizes an unknown forward migration', () => {
   const known = Object.values(AGENT_FORWARD_MIGRATIONS);
-  assert.equal(known.length, 17);
+  assert.equal(known.length, 19);
   assert(areKnownAgentMigrationPaths(known));
   assert(known.includes('crates/backend/nomifun-db/migrations/016_office_hub.sql'));
+  assert(known.includes('crates/backend/nomifun-db/migrations/018_remove_office_activity.sql'));
+  assert(known.includes('crates/backend/nomifun-db/migrations/019_remove_office_overview.sql'));
   assert(!areKnownAgentMigrationPaths(known.filter(path => path !== AGENT_FORWARD_MIGRATIONS.baseline)));
   for (const unknown of ['017_unknown.sql', '016_agent_compatibility.sql', '999_future.sql']) {
     assert(!areKnownAgentMigrationPaths([...known, 'crates/backend/nomifun-db/migrations/' + unknown]));

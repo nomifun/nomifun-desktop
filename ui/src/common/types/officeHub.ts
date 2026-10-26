@@ -18,6 +18,7 @@ export interface OfficeConnection {
 }
 export interface ConnectionUpdate { name: string; enabled: boolean; profile: string | null }
 export interface OfficeActor { app_id: string; user_id: string; name: string }
+export interface LogoutRequest { profile: string; expected_actor: OfficeActor | null }
 export interface OfficeProfile { name: string; app_id: string; brand: string; user_name: string | null; token_status: string | null }
 export interface OfficePermission { capability: string; required_scopes: string[]; granted: boolean }
 export type ConnectionPhase = 'disabled' | 'not_configured' | 'needs_login' | 'ready' | 'expired' | 'error';
@@ -38,7 +39,6 @@ export interface AuthorizationFlow {
 export type TaskRelation = 'assigned' | 'created' | 'tasklist';
 export type DocumentFilter = 'all' | 'document' | 'base';
 export type OfficeQuery =
-  | { kind: 'recent' }
   | { kind: 'documents'; query: string; filter: DocumentFilter; cursor: string | null }
   | { kind: 'people'; query: string }
   | { kind: 'tasklists'; cursor: string | null }
@@ -47,13 +47,12 @@ export type OfficeQuery =
   | { kind: 'calendar_event'; calendar_id: string; event_id: string }
   | { kind: 'base_records'; base_token: string; table_id: string; offset: number | null; filter: unknown | null };
 export interface OfficeItem {
-  id: string; kind: string; title: string; url: string | null; description: string | null; modified_at: string | null; opened_at: string | null;
+  id: string; kind: string; title: string; url: string | null; description: string | null; modified_at: string | null;
   assignee_ids: string[]; creator_id: string | null; tasklist_ids: string[]; due: string | null; completed: boolean | null;
   start: string | null; end: string | null; calendar_id: string | null; base_token: string | null; table_id: string | null;
   pending_operation_id: string | null; pending_status: ItemStatus | null;
   fields: Record<string, unknown>;
 }
-export interface ResourceLink { url: string; title: string | null }
 export interface OfficeField { id: string; name: string; field_type: string; writable: boolean; options: unknown | null }
 export interface OfficeQueryResult {
   items: OfficeItem[]; fields: OfficeField[]; has_more: boolean; next_cursor: string | null; warnings: string[];
@@ -81,6 +80,5 @@ export interface OperationItem {
 }
 export interface OfficeOperation {
   id: string; request_id: string; connection_id: string; actor: OfficeActor; profile: string; status: OperationStatus;
-  items: OperationItem[]; created_at: string; updated_at: string;
+  items: OperationItem[];
 }
-export interface OperationPage { items: OfficeOperation[]; next_cursor: string | null }

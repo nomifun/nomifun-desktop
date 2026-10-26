@@ -18,6 +18,8 @@ export const AGENT_FORWARD_MIGRATIONS = Object.freeze({
   executionPlanGateForwardMigration: 'crates/backend/nomifun-db/migrations/015_retire_execution_plan_gate.sql',
   officeHubForwardMigration: 'crates/backend/nomifun-db/migrations/016_office_hub.sql',
   officeCompactForwardMigration: 'crates/backend/nomifun-db/migrations/017_compact_office_receipts.sql',
+  officeActivityRetirementForwardMigration: 'crates/backend/nomifun-db/migrations/018_remove_office_activity.sql',
+  officeOverviewRetirementForwardMigration: 'crates/backend/nomifun-db/migrations/019_remove_office_overview.sql',
 });
 const KNOWN = new Set(Object.values(AGENT_FORWARD_MIGRATIONS));
 export function areKnownAgentMigrationPaths(paths) {

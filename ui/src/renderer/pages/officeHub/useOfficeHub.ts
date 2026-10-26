@@ -1,5 +1,5 @@
 import { officeHub } from '@/common/adapter/officeHubBridge';
-import type { AuthorizationFlow, OfficeOperation, OfficeQuery, OfficeQueryResult, OfficeStatus, OperationPage } from '@/common/types/officeHub';
+import type { AuthorizationFlow, OfficeOperation, OfficeQuery, OfficeQueryResult, OfficeStatus } from '@/common/types/officeHub';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { liveOperation } from './model';
 
@@ -37,9 +37,6 @@ export function useOfficeHub() {
   const [operationError, setOperationError] = useState<unknown>(null);
   const [flow, setFlow] = useState<AuthorizationFlow | null>(null);
   const [flowError, setFlowError] = useState<unknown>(null);
-  const [page, setPage] = useState<OperationPage>({ items: [], next_cursor: null });
-  const [historyError, setHistoryError] = useState<unknown>(null);
-  const [historyLoading, setHistoryLoading] = useState(false);
   const flowId = useRef<string | null>(null);
   flowId.current = flow?.id ?? null;
   const operationId = useRef<string | null>(null);
@@ -48,10 +45,9 @@ export function useOfficeHub() {
     setOperationState(value);
     setOperationError(null);
   }, []);
-  const historyGeneration = useRef(0);
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; statusObserver.current?.abort(); historyGeneration.current++; };
+    return () => { mounted.current = false; statusObserver.current?.abort(); };
   }, []);
   const refreshStatus = useCallback(async () => {
     statusObserver.current?.abort();
@@ -72,19 +68,6 @@ export function useOfficeHub() {
     const timer = setInterval(() => { void refreshStatus(); }, 1500);
     return () => clearInterval(timer);
   }, [status?.runtime.phase, refreshStatus]);
-  const refreshHistory = useCallback(async (cursor?: string | null) => {
-    const generation = ++historyGeneration.current;
-    setHistoryLoading(true); setHistoryError(null);
-    try {
-      const next = await officeHub.operations(cursor);
-      if (generation !== historyGeneration.current || !mounted.current) return;
-      setPage(previous => cursor ? {
-        items: [...previous.items, ...next.items.filter(item => !previous.items.some(existing => existing.id === item.id))],
-        next_cursor: next.next_cursor,
-      } : next);
-    } catch (error) { if (generation === historyGeneration.current && mounted.current) setHistoryError(error); }
-    finally { if (generation === historyGeneration.current && mounted.current) setHistoryLoading(false); }
-  }, []);
   const openOperation = useCallback(async (id: string) => {
     operationId.current = id; setOperationError(null);
     try {
@@ -106,7 +89,6 @@ export function useOfficeHub() {
         if (controller.signal.aborted || operationId.current !== id) return;
         setOperation(next); setOperationError(null);
         if (liveOperation(next)) timer = setTimeout(() => { void poll(); }, 1000);
-        else void refreshHistory();
       } catch (error) {
         if (!controller.signal.aborted && operationId.current === id) {
           setOperationError(error);
@@ -116,7 +98,7 @@ export function useOfficeHub() {
     };
     timer = setTimeout(() => { void poll(); }, 650);
     return () => { controller.abort(); clearTimeout(timer); };
-  }, [operation?.id, operation?.status, refreshHistory]);
+  }, [operation?.id, operation?.status]);
   useEffect(() => {
     if (!flow || !['starting', 'waiting_user', 'waiting_admin', 'cancelling'].includes(flow.phase)) return;
     const id = flow.id, controller = new AbortController();
@@ -141,6 +123,5 @@ export function useOfficeHub() {
     status, setStatus, statusError, statusLoading, refreshStatus,
     operation, setOperation, operationError, setOperationError, openOperation,
     flow, setFlow, flowError, setFlowError,
-    history: page.items, historyCursor: page.next_cursor, historyError, historyLoading, refreshHistory,
   };
 }

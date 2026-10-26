@@ -39,6 +39,52 @@ async fn attempt(pool:&SqlitePool,n:u64,op:u64,item:u64,number:i64,status:&str,m
 }
 
 #[tokio::test]
+async fn current_office_upgrade_removes_page_metadata_and_preserves_execution_facts(){
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("old-17.db");let pool=old(&path).await;
+    operation(&pool,10,"unknown").await;
+    let mutation=task("unresolved-creation","ou_owner");
+    item(&pool,20,10,"unknown",&mutation,&key(json!(["creation",20])),true).await;
+    attempt(&pool,120,10,20,1,"unknown",&mutation).await;
+    let migrator=sqlx::migrate!("./migrations");
+    let compact=migrator.iter().find(|migration|migration.version==17).unwrap();
+    sqlx::raw_sql(&compact.sql).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES (?,?,1,?,0)")
+        .bind(compact.version).bind(&compact.description).bind(compact.checksum.as_ref()).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE office_connections SET recent_resources_json=?")
+        .bind(json!([{"kind":"document","id":"doc-real","title":"Retired overview entry","url":"https://test.invalid/docx/doc-real","base_token":null,"table_id":null,"opened_at":99}]).to_string())
+        .execute(&pool).await.unwrap();
+    let queries=[
+        "SELECT json_array(id,connection_id,owner_id,name,enabled,profile,executable,created_at,updated_at) FROM office_connections ORDER BY id",
+        "SELECT json_array(id,operation_id,owner_id,connection_id,request_id,actor_json,profile,digest,status) FROM office_operations ORDER BY id",
+        "SELECT json_array(id,item_id,operation_id,client_item_id,ordinal,mutation_json,target_key,status,remote_id,remote_url,message) FROM office_operation_items ORDER BY id",
+        "SELECT json_array(id,receipt_id,item_id,record_kind,number,client_token,mutation_json,status,occurred_at,settled_at,message,data_json) FROM office_operation_receipts ORDER BY id",
+        "SELECT json_array(singleton_key,data_generation,root_instance_id,migration_head,seed_manifest_digest,canonical_schema_manifest_digest,projection_schema_version) FROM schema_metadata",
+        "SELECT json_array(name,seq) FROM sqlite_sequence WHERE name LIKE 'office_%' ORDER BY name",
+    ];
+    let mut before=Vec::new();
+    for query in queries {before.push(sqlx::query_scalar::<_,String>(query).fetch_all(&pool).await.unwrap());}
+    let payload:Vec<u8>=sqlx::query_scalar("SELECT body FROM agent_payloads WHERE payload_id='compact-payload'").fetch_one(&pool).await.unwrap();
+    let lineage:Vec<(i64,Vec<u8>)>=sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version").fetch_all(&pool).await.unwrap();
+    assert_eq!(nomifun_db::inspect_migration_lineage(&pool).await.unwrap(),nomifun_db::MigrationLineage::KnownPrefix);
+    pool.close().await;
+
+    let upgraded=nomifun_db::init_database(&path).await.unwrap();let pool=upgraded.pool();
+    let columns:Vec<String>=sqlx::query_scalar("SELECT name FROM pragma_table_info('office_operations')").fetch_all(pool).await.unwrap();
+    assert!(!columns.iter().any(|column|matches!(column.as_str(),"created_at"|"updated_at")));
+    let connection_columns:Vec<String>=sqlx::query_scalar("SELECT name FROM pragma_table_info('office_connections')").fetch_all(pool).await.unwrap();
+    assert!(!connection_columns.iter().any(|column|column=="recent_resources_json"));
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name='idx_office_operations_owner_history'").fetch_one(pool).await.unwrap(),0);
+    for (query,expected) in queries.into_iter().zip(before) {
+        assert_eq!(sqlx::query_scalar::<_,String>(query).fetch_all(pool).await.unwrap(),expected,"retiring pages must preserve connection settings, execution facts and metadata");
+    }
+    assert_eq!(sqlx::query_scalar::<_,Vec<u8>>("SELECT body FROM agent_payloads WHERE payload_id='compact-payload'").fetch_one(pool).await.unwrap(),payload);
+    assert_eq!(sqlx::query_as::<_,(i64,Vec<u8>)>("SELECT version,checksum FROM _sqlx_migrations WHERE version<18 ORDER BY version").fetch_all(pool).await.unwrap(),lineage);
+    nomifun_db::validate_id_schema_contract(pool).await.unwrap();nomifun_db::validate_id_data_contract(pool).await.unwrap();
+    assert!(!nomifun_db::requires_agent_store_clean_cut(pool).await.unwrap());
+    upgraded.close().await;
+}
+
+#[tokio::test]
 async fn compact_upgrade_preserves_all_submitted_evidence_pending_fences_and_sequence_highwater(){
     let dir=tempfile::tempdir().unwrap();let path=dir.path().join("old-16.db");let pool=old(&path).await;
     operation(&pool,10,"partial").await;
@@ -77,12 +123,12 @@ async fn compact_upgrade_preserves_all_submitted_evidence_pending_fences_and_seq
     assert_eq!(sqlx::query_scalar::<_,String>("SELECT target_key FROM office_operation_items WHERE item_id=?").bind(id(27)).fetch_one(pool).await.unwrap(),doc_key);
     for table in ["office_operations","office_operation_items"]{assert_eq!(sqlx::query_scalar::<_,i64>("SELECT seq FROM sqlite_sequence WHERE name=?").bind(table).fetch_one(pool).await.unwrap(),12000)}
     let observation:String=sqlx::query_scalar("SELECT data_json FROM office_operation_receipts WHERE receipt_id=?").bind(id(200)).fetch_one(pool).await.unwrap();let observation:Value=serde_json::from_str(&observation).unwrap();assert_eq!(observation["confirmed"],true);assert_eq!(observation["kind"],"original_receipt");assert_eq!(observation["data"]["attempt_id"],id(125));
-    let navigation:String=sqlx::query_scalar("SELECT recent_resources_json FROM office_connections").fetch_one(pool).await.unwrap();assert!(navigation.contains("Actual opened entrance"));assert!(!navigation.contains("private"));assert!(!navigation.contains("description"));assert!(!navigation.contains("pending_operation_id"));assert_eq!(serde_json::from_str::<Value>(&navigation).unwrap()[0]["opened_at"],99);
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM pragma_table_info('office_connections') WHERE name='recent_resources_json'").fetch_one(pool).await.unwrap(),0);
     nomifun_db::validate_id_schema_contract(pool).await.unwrap();nomifun_db::validate_id_data_contract(pool).await.unwrap();
     let reset=nomifun_db::reset_agent_data(pool).await.unwrap();for table in ["office_connections","office_operations","office_operation_items","office_operation_receipts"]{assert!(reset.preserved_rows.contains_key(table))}
     let snapshot=dir.path().join("snapshot.db");upgraded.snapshot_into(&snapshot).await.unwrap();let restored=nomifun_db::open_database_for_backup(&snapshot).await.unwrap();
     assert_eq!(sqlx::query_scalar::<_,String>("SELECT mutation_json FROM office_operation_items WHERE item_id=?").bind(id(27)).fetch_one(restored.pool()).await.unwrap(),legacy.to_string());
-    assert_eq!(sqlx::query_scalar::<_,String>("SELECT recent_resources_json FROM office_connections").fetch_one(restored.pool()).await.unwrap(),navigation);
+    assert_eq!(sqlx::query_scalar::<_,String>("SELECT name FROM office_connections").fetch_one(restored.pool()).await.unwrap(),"Feishu");
     restored.close().await;upgraded.close().await;
 }
 

@@ -2,9 +2,9 @@ import { isBackendHttpError, redactSensitiveText } from '@/common/adapter/httpBr
 import { CANONICAL_UUID_V7 } from '@/common/types/ids';
 import type { AuthPhase, OfficeActor, OfficeItem, OfficeMutation, OfficeOperation, OfficeStatus, OperationItem } from '@/common/types/officeHub';
 
-export const OFFICE_TABS = ['overview', 'documents', 'agenda', 'activity'] as const;
+export const OFFICE_TABS = ['documents', 'agenda'] as const;
 export type OfficeTab = typeof OFFICE_TABS[number];
-export const officeTab = (value: string | null): OfficeTab => OFFICE_TABS.includes(value as OfficeTab) ? value as OfficeTab : 'overview';
+export const officeTab = (value: string | null): OfficeTab => OFFICE_TABS.includes(value as OfficeTab) ? value as OfficeTab : 'documents';
 export const liveOperation = (operation: OfficeOperation) => operation.status === 'queued' || operation.status === 'running';
 export function operationKind(operation: Pick<OfficeOperation, 'items'>): string {
   const first = operation.items[0]?.mutation.kind;

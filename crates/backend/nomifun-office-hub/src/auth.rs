@@ -16,6 +16,56 @@ pub(crate) fn official_url(value: &str) -> bool {
 }
 
 impl OfficeHubService {
+    /// The host keeps the connection fence until the exact logout invocation
+    /// and its verification finish, even if the HTTP observer goes away.
+    pub async fn logout(self: &Arc<Self>, request: LogoutRequest) -> Result<(), HubError> {
+        let service = self.clone();
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        if !(self.spawn)(Box::pin(async move {
+            let result = service.logout_owned(request).await;
+            let _ = reply.send(result);
+        })) { return Err(HubError::unavailable("服务正在关闭，退出登录尚未开始")); }
+        receiver.await.map_err(|_| HubError::unknown("退出结果尚未确认，请刷新连接状态"))?
+    }
+
+    async fn logout_owned(&self, request: LogoutRequest) -> Result<(), HubError> {
+        let _admission = self.admission.lock().await;
+        if self.is_executing() || self.is_authorizing()
+            || lock(&self.prepare_view).as_ref().is_some_and(|view| view.phase == RuntimePhase::Preparing) {
+            return Err(HubError::conflict("请等待当前操作或授权流程结束后再退出登录", None));
+        }
+        if self.shutdown.is_cancelled() { return Err(HubError::unavailable("服务正在关闭，退出登录尚未开始")); }
+        validate_profile(&request.profile)?;
+        let connection = self.connection().await?;
+        if connection.profile.as_deref() != Some(request.profile.as_str()) {
+            return Err(HubError::conflict("连接已变化，请刷新后再退出登录", None));
+        }
+        if let Some(id) = self.store.active_operation_id(&self.owner, &connection.id).await? {
+            return Err(HubError::conflict("请等待已提交的办公操作结束后再退出登录", Some(id)));
+        }
+        let runtime = self.runtime.inspect(connection.executable.as_deref()).await;
+        if runtime.phase != RuntimePhase::Ready {
+            return Err(HubError::unavailable("连接组件不可用，请先修复组件后再退出登录"));
+        }
+        let executable = runtime.executable.ok_or_else(|| HubError::unavailable("连接组件路径不可用"))?;
+        let users = self.runtime.run(&executable, adapter::auth_users_command(&request.profile)?, self.shutdown.child_token(), None).await?;
+        let users = adapter::parse_auth_users(&users)?;
+        if users.len() > 1 {
+            return Err(HubError::conflict("此连接保存了多个账号，无法单独退出当前账号。请在“切换连接”中选择另一个配置", None));
+        }
+        let Some(actor) = users.first() else { return Ok(()); };
+        if request.expected_actor.as_ref().is_some_and(|expected| expected.app_id != actor.app_id || expected.user_id != actor.user_id) {
+            return Err(HubError::conflict("登录账号已变化，请刷新后确认要退出的账号", None));
+        }
+        let output = self.runtime.run(&executable, adapter::logout_command(&request.profile)?, self.shutdown.child_token(), None).await?;
+        adapter::parse_logout(&output)?;
+        let remaining = self.runtime.run(&executable, adapter::auth_users_command(&request.profile)?, self.shutdown.child_token(), None).await
+            .and_then(|output| adapter::parse_auth_users(&output))
+            .map_err(|_| HubError::unknown("退出请求已完成，但登录状态无法确认，请刷新连接状态"))?;
+        if !remaining.is_empty() { return Err(HubError::unknown("登录状态尚未退出，请刷新后重试")); }
+        Ok(())
+    }
+
     pub fn authorization(&self, id: &str) -> Result<AuthorizationFlow, HubError> {
         lock(&self.flows).get_mut(id).map(|entry| {
             if matches!(entry.flow.phase,AuthPhase::WaitingUser)

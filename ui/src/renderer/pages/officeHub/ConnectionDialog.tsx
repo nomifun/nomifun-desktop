@@ -1,93 +1,144 @@
 import { officeHub } from '@/common/adapter/officeHubBridge';
 import type { AuthStartRequest, OfficeProfile, OfficeStatus, RuntimeUpdateInfo } from '@/common/types/officeHub';
 import { copyText } from '@/renderer/utils/ui/clipboard';
-import { useEffect, useState } from 'react';
+import { CheckOne, Download, SettingConfig, Shield, User } from '@icon-park/react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AuthorizationPanel, OfficeBadge, OfficeButton, OfficeDialog, type AuthorizationProps } from './dialogs';
 import { officeError, readGroups, scopesFor, terminalAuth } from './model';
 
-export function ConnectionDialog({ status, authorization, onStart, refresh, onClose, onError }: {
+type ConnectionTab = 'account' | 'access' | 'advanced';
+export function ConnectionDialog({ status, authorization, onStart, refresh, onClose, onError, onSignedOut }: {
   status: OfficeStatus; authorization: AuthorizationProps; onStart: (request: AuthStartRequest) => Promise<void>;
-  refresh: () => Promise<OfficeStatus | null>; onClose: () => void; onError: (error: unknown) => void;
+  refresh: () => Promise<OfficeStatus | null>; onClose: () => void; onError: (error: unknown) => void; onSignedOut: () => void;
 }) {
   const { t } = useTranslation();
-  const [step, setStep] = useState(status.runtime.phase !== 'ready' ? 1 : authorization.flow && !terminalAuth(authorization.flow.phase) ? authorization.flow.kind === 'login' && status.actor ? 3 : 2 : status.actor && status.connection.enabled ? 3 : 2);
-  const [selected, setSelected] = useState<string[]>(['documents', 'agenda']);
-  const [existing, setExisting] = useState(!!status.connection.profile);
-  const [manual, setManual] = useState(false);
+  const [tab, setTab] = useState<ConnectionTab>(status.runtime.phase === 'ready' ? 'account' : 'advanced');
   const [profile, setProfile] = useState(status.connection.profile ?? '');
   const [profiles, setProfiles] = useState<OfficeProfile[] | null>(null);
   const [profilesLoading, setProfilesLoading] = useState(false);
   const [profilesError, setProfilesError] = useState<unknown>(null);
   const [profilesRevision, setProfilesRevision] = useState(0);
-  const [configuredProfile, setConfiguredProfile] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [choosing, setChoosing] = useState(false);
+  const [manual, setManual] = useState(false);
   const [appId, setAppId] = useState('');
   const [secret, setSecret] = useState('');
   const [path, setPath] = useState(status.runtime.executable ?? '');
   const [update, setUpdate] = useState<RuntimeUpdateInfo | null>(null);
   const [working, setWorking] = useState(false);
+  const [confirmation, setConfirmation] = useState<'switch' | 'logout' | null>(null);
   const active = !!authorization.flow && !terminalAuth(authorization.flow.phase);
-  const canPrepare = status.runtime.phase === 'missing' || (status.runtime.phase === 'error' && status.runtime.executable === null);
+  const runtimeReady = status.runtime.phase === 'ready';
+  const canPrepare = status.runtime.phase === 'missing' || (status.runtime.phase === 'error' && !status.runtime.executable);
+  const connected = runtimeReady && status.connection.enabled && status.phase === 'ready' && !!status.actor;
   const busy = working || authorization.busy;
-  const capabilities = selected.flatMap(key => readGroups[key as keyof typeof readGroups]);
-  const scopes = scopesFor(status, capabilities);
-  const desiredProfile = existing && !manual ? profile : configuredProfile;
-  const identityReady = !!status.actor && status.connection.enabled && !!desiredProfile && desiredProfile === status.connection.profile;
+  const locked = busy || active;
+  const previousRuntime = useRef(status.runtime.phase);
   useEffect(() => {
-    if (step !== 2) return;
+    if (previousRuntime.current === 'preparing' && runtimeReady) setTab('account');
+    previousRuntime.current = status.runtime.phase;
+  }, [status.runtime.phase, runtimeReady]);
+  useEffect(() => {
+    if (tab !== 'account' || !runtimeReady || (connected && !choosing && !adding)) return;
     const controller = new AbortController();
-    setProfilesLoading(true); setProfilesError(null); setProfiles(null);
-    void officeHub.profiles(controller.signal).then(value => { if (!controller.signal.aborted) setProfiles(value); })
-      .catch(error => { if (!controller.signal.aborted) setProfilesError(error); })
+    setProfilesLoading(true); setProfilesError(null);
+    void officeHub.profiles(controller.signal).then(value => {
+      if (controller.signal.aborted) return;
+      setProfiles(value); setProfile(previous => previous || status.connection.profile || value[0]?.name || '');
+    }).catch(error => { if (!controller.signal.aborted) setProfilesError(error); })
       .finally(() => { if (!controller.signal.aborted) setProfilesLoading(false); });
     return () => controller.abort();
-  }, [step, profilesRevision]);
+  }, [tab, runtimeReady, connected, choosing, adding, profilesRevision]);
   useEffect(() => {
-    if (configuredProfile && status.connection.profile === configuredProfile && authorization.flow?.phase === 'complete' && authorization.flow.kind !== 'login') {
-      setExisting(true); setManual(false); setProfile(configuredProfile); setSecret('');
+    if (authorization.flow?.phase === 'complete' && authorization.flow.kind !== 'login' && status.connection.profile) {
+      setProfile(status.connection.profile); setAdding(false); setManual(false); setSecret(''); setProfilesRevision(value => value + 1);
     }
-  }, [configuredProfile, status.connection.profile, authorization.flow?.id, authorization.flow?.phase]);
+  }, [authorization.flow?.id, authorization.flow?.phase, status.connection.profile]);
+  useEffect(() => {
+    if (authorization.flow?.kind === 'login' && ['complete', 'partial'].includes(authorization.flow.phase) && connected) {
+      setChoosing(false); setAdding(false);
+    }
+  }, [authorization.flow?.id, authorization.flow?.phase, connected]);
   const work = async (action: () => Promise<unknown>) => {
     if (busy) return false;
-    setWorking(true);
+    setWorking(true); onError(null);
     try { await action(); return true; } catch (error) { onError(error); return false; }
     finally { await refresh(); setWorking(false); }
   };
-  const connect = async () => {
-    if (!profiles) return;
-    if (configuredProfile && desiredProfile === configuredProfile && status.connection.profile === configuredProfile) {
-      await onStart({ kind: 'login', profile: configuredProfile, scopes: ['offline_access'], app_id: null, app_secret: null });
-    } else if (existing && !manual && profile) {
+  const login = async () => {
+    if (!profiles || locked) return;
+    if (!adding && profile) {
       const ok = await work(() => officeHub.updateConnection({ name: status.connection.name, enabled: true, profile }));
-      if (!ok) return;
-      await onStart({ kind: 'login', profile, scopes: ['offline_access'], app_id: null, app_secret: null });
-    } else {
-      let name = 'nomifun-office', suffix = 1;
-      while (profiles.some(item => item.name === name)) name = 'nomifun-office-' + suffix++;
-      const value = secret; setSecret('');
-      setConfiguredProfile(name);
-      await onStart({ kind: manual ? 'configure_existing' : 'configure_new', profile: name, scopes: [], app_id: manual ? appId.trim() : null, app_secret: manual ? value : null });
+      if (ok) await onStart({ kind: 'login', profile, scopes: ['offline_access'], app_id: null, app_secret: null });
+      return;
     }
+    let name = 'nomifun-office', suffix = 1;
+    while (profiles.some(item => item.name === name)) name = 'nomifun-office-' + suffix++;
+    const value = secret; setSecret('');
+    await onStart({ kind: manual ? 'configure_existing' : 'configure_new', profile: name, scopes: [], app_id: manual ? appId.trim() : null, app_secret: manual ? value : null });
   };
-  return <OfficeDialog title={t('office.actions.connect')} busy={busy} onClose={() => { setSecret(''); onClose(); }} className='office-connection-dialog' footer={<>
-    <OfficeButton quiet disabled={busy} onClick={() => step === 2 && !active ? setStep(1) : onClose()}>{t(step === 3 ? 'office.setup.skip' : step === 2 && !active ? 'office.actions.back' : 'office.actions.close')}</OfficeButton>
-    {step === 1 && <OfficeButton primary disabled={busy || active || status.runtime.phase === 'preparing'} onClick={() => status.runtime.phase === 'ready' ? setStep(2) : canPrepare ? void work(() => officeHub.prepare()) : void work(refresh)}>{t(status.runtime.phase === 'ready' ? 'office.actions.continue' : canPrepare ? status.runtime.phase === 'error' ? 'office.runtime.retryPrepare' : 'office.actions.prepare' : 'office.actions.check')}</OfficeButton>}
-    {step === 2 && <OfficeButton primary disabled={busy || active || (!identityReady && (profilesLoading || !profiles)) || (manual && !(configuredProfile && status.connection.profile === configuredProfile) && (!appId.trim() || !secret)) || (existing && !manual && !profile)} onClick={() => identityReady ? setStep(3) : void connect()}>{t(identityReady ? 'office.actions.continue' : 'office.auth.open')}</OfficeButton>}
-    {step === 3 && <OfficeButton primary disabled={busy || active || !selected.length} onClick={() => !scopes.length ? onClose() : void onStart({ kind: 'login', scopes, profile: status.connection.profile, app_id: null, app_secret: null })}>{t(!scopes.length ? 'office.setup.finish' : 'office.setup.grant')}</OfficeButton>}
+  const signOut = async () => {
+    if (!confirmation || !status.connection.profile || locked) return;
+    const mode = confirmation, selected = status.connection.profile;
+    const ok = await work(async () => {
+      await officeHub.logout({ profile: selected, expected_actor: status.actor });
+      onSignedOut(); setConfirmation(null); setAdding(false); setChoosing(false); setManual(false); setProfile(selected); setProfiles(null);
+    });
+    if (ok && mode === 'switch') await onStart({ kind: 'login', profile: selected, scopes: ['offline_access'], app_id: null, app_secret: null });
+  };
+  const prepare = () => work(async () => {
+    await officeHub.prepare();
+    const next = await refresh();
+    if (next?.runtime.phase === 'ready') setTab('account');
+  });
+  const showFlow = !!authorization.flow && authorization.flow.phase !== 'complete';
+  const icons = { account: User, access: Shield, advanced: SettingConfig };
+  return <OfficeDialog title={t('office.connection.manage')} busy={busy} onClose={() => { setSecret(''); onClose(); }} className='office-connection-dialog' footer={<>
+    <span className='office-small office-muted'>{t('office.account.privateHint')}</span><OfficeButton onClick={onClose} disabled={busy}>{t('office.account.done')}</OfficeButton>
   </>}>
-    <ol className='office-stepper'>{['environment', 'connect', 'permissions'].map((key, index) => <li key={key} aria-current={step === index + 1 ? 'step' : undefined} className={step >= index + 1 ? 'active' : ''}><b>{index + 1}</b>{t('office.setup.' + key)}</li>)}</ol>
-    {step === 1 ? <><h3>{t('office.setup.environmentTitle')}</h3><p className='office-muted'>{t('office.setup.environmentHint')}</p><div className='office-setting-row'><span>{t('office.host')}</span><span>{status.host_name} · {status.host_os}</span></div><div className='office-setting-row'><span>{t('office.runtime.title')}</span><OfficeBadge state={status.runtime.phase === 'ready' ? 'good' : 'warning'}>{t('office.runtime.phase.' + status.runtime.phase)}</OfficeBadge></div>
-      {status.runtime.message && <p className='office-warning'>{status.runtime.message}</p>}
-      <details className='office-advanced'><summary>{t('office.runtime.advanced')}</summary><p>{t('office.runtime.notBundled')}</p><p>{t('office.hostHint')}</p>{!canPrepare && status.runtime.phase !== 'ready' && <p>{t('office.runtime.brokenHint')}</p>}<p>{status.runtime.version} · {status.runtime.source && t('office.runtime.source.' + status.runtime.source)}</p>
-        <label className='office-label'>{t('office.runtime.selectedPath')}<input className='office-input' value={path} onChange={event => setPath(event.target.value)} disabled={active} /></label><div className='office-actions'><OfficeButton disabled={busy || active || !path.trim()} onClick={() => void work(() => officeHub.selectRuntime(path.trim()))}>{t('office.actions.select')}</OfficeButton>{status.connection.executable && <OfficeButton disabled={busy || active} onClick={() => void work(() => officeHub.selectRuntime(null))}>{t('office.runtime.automatic')}</OfficeButton>}<OfficeButton disabled={busy} onClick={() => void work(refresh)}>{t('office.actions.check')}</OfficeButton>{status.runtime.phase === 'ready' && <OfficeButton disabled={busy} onClick={() => void work(async () => { setUpdate(await officeHub.checkUpdate()); })}>{t('office.runtime.checkUpdate')}</OfficeButton>}</div>
-        {update && <p role='status'>{t('office.runtime.versions', { installed: update.installed_version ?? '—', latest: update.latest_version ?? '—', compatible: update.compatible_version })}<br />{t('office.runtime.checkOnly')}{update.message && <><br />{update.message}</>}</p>}
-        <p>{t('office.runtime.fullWizardHint')}</p><code className='office-command'>{status.runtime.official_install_command}</code><OfficeButton quiet onClick={() => void work(() => copyText(status.runtime.official_install_command))}>{t('office.actions.copy')}</OfficeButton>
-      </details></> : step === 2 ? <><h3>{t('office.setup.connectTitle')}</h3><p className='office-muted'>{t('office.setup.connectHint')}</p><div className='office-setting-row'><strong>{status.connection.name || t('office.title')}</strong><span>{status.actor?.name || t('office.connection.unknownIdentity')}</span></div>
-      {authorization.flow && <AuthorizationPanel {...authorization} error={undefined} completionHint={t(authorization.flow.kind === 'login' ? 'office.setup.identityReady' : 'office.setup.identityNext')} />}
-      {profilesLoading && <p className='office-small office-muted' role='status'>{t('office.loading')}</p>}{profilesError && <div className='office-error' role='alert'>{officeError(profilesError)}<OfficeButton quiet onClick={() => setProfilesRevision(value => value + 1)}>{t('office.actions.check')}</OfficeButton></div>}
-      <details className='office-advanced'><summary>{t('office.connection.existingApp')}</summary><label className='office-check-row'><input type='checkbox' checked={existing} disabled={active} onChange={event => setExisting(event.target.checked)} />{t('office.connection.useExisting')}</label>{existing && <><label className='office-label'>{t('office.connection.profile')}<select className='office-input' value={profile} disabled={active || profilesLoading || !profiles} onChange={event => setProfile(event.target.value)}><option value=''>{t('office.connection.chooseProfile')}</option>{profiles?.map(item => <option key={item.name} value={item.name}>{item.user_name || item.name} · {item.app_id}</option>)}</select></label><label className='office-check-row'><input type='checkbox' checked={manual} disabled={active} onChange={event => setManual(event.target.checked)} />{t('office.connection.manual')}</label>{manual && <><label className='office-label'>{t('office.connection.appId')}<input className='office-input' value={appId} disabled={active} onChange={event => setAppId(event.target.value)} /></label><label className='office-label'>{t('office.connection.appSecret')}<input className='office-input' type='password' autoComplete='new-password' value={secret} disabled={active} onChange={event => setSecret(event.target.value)} /></label><p className='office-small office-muted'>{t('office.connection.secretHint')}</p></>}</>}</details>
-    </> : <><h3>{t('office.setup.permissionsTitle')}</h3><p className='office-muted'>{t('office.setup.permissionsHint')}</p>{Object.keys(readGroups).map(key => <label key={key} className='office-permission-option'><input type='checkbox' checked={selected.includes(key)} disabled={active} onChange={event => setSelected(value => event.target.checked ? [...value, key] : value.filter(item => item !== key))} /><span><strong>{t('office.permissions.groups.' + key)}</strong><small>{t('office.permissions.groupHints.' + key)}</small></span></label>)}{authorization.flow?.kind === 'login' && authorization.flow.phase !== 'complete' && <AuthorizationPanel {...authorization} error={undefined} />}
-      <details className='office-advanced'><summary>{t('office.connection.advanced')}</summary><p>{status.actor?.name || status.connection.name}<br />{status.actor?.app_id}</p>{status.permissions.map(permission => <p key={permission.capability}>{t('office.permissions.capabilities.' + permission.capability)} · {t(permission.granted ? 'office.permissions.granted' : 'office.permissions.missing')}</p>)}<OfficeButton disabled={busy || active} onClick={() => setStep(1)}>{t('office.actions.check')}</OfficeButton><OfficeButton disabled={busy || active} onClick={() => void work(() => officeHub.updateConnection({ name: status.connection.name, profile: status.connection.profile, enabled: !status.connection.enabled }))}>{t(status.connection.enabled ? 'office.actions.disable' : 'office.actions.enable')}</OfficeButton></details>
-    </>}{authorization.error}
+    <div className='office-connection-layout'>
+      <nav className='office-settings-nav' aria-label={t('office.connection.settings')}>
+        {(['account', 'access', 'advanced'] as const).map(value => { const Icon = icons[value]; return <button type='button' key={value} aria-current={tab === value ? 'page' : undefined} onClick={() => { setTab(value); setConfirmation(null); }}><Icon size={17} /><span>{t('office.account.sections.' + value)}</span></button>; })}
+      </nav>
+      <div className='office-settings-content'>
+        {tab === 'account' && <section aria-label={t('office.account.sections.account')}>
+          <div className='office-section-heading'><h3>{t(connected && !choosing && !adding ? 'office.account.sections.account' : status.phase === 'expired' ? 'office.account.expiredTitle' : !status.connection.enabled ? 'office.account.disabledTitle' : adding ? 'office.account.addTitle' : 'office.account.loginTitle')}</h3><p>{t(connected && !choosing && !adding ? 'office.account.accountHint' : !status.connection.enabled ? 'office.account.disabledHint' : 'office.account.loginHint')}</p></div>
+          {!runtimeReady ? <div className='office-settings-notice'><Download size={24} /><p>{t('office.account.installFirst')}</p><OfficeButton primary onClick={() => setTab('advanced')}>{t('office.account.viewComponent')}</OfficeButton></div> : confirmation ? <div className='office-signout-confirm' role='alert'>
+            <h3>{t(confirmation === 'switch' ? 'office.account.switchTitle' : 'office.account.logoutTitle')}</h3><p>{t('office.account.logoutHint', { name: status.actor?.name || t('office.account.currentAccount') })}</p><p className='office-small office-muted'>{t(confirmation === 'switch' ? 'office.account.switchHint' : 'office.account.signedOutHint')}</p>
+            <div className='office-actions'><OfficeButton disabled={locked} onClick={() => setConfirmation(null)}>{t('office.actions.cancel')}</OfficeButton><OfficeButton className='office-button--danger' disabled={locked} onClick={() => void signOut()}>{t(confirmation === 'switch' ? 'office.account.confirmSwitch' : 'office.account.confirmLogout')}</OfficeButton></div>
+          </div> : <>
+            {connected && !choosing && !adding ? <>
+              <div className='office-account-card'><div className='office-account-avatar'><User size={25} /></div><div><strong>{status.actor!.name || status.actor!.user_id}</strong><div className='office-account-status'><span className='office-status-dot' />{t('office.account.connected')}</div></div></div>
+              <div className='office-account-controls'><OfficeButton disabled={locked} onClick={() => setConfirmation('switch')}>{t('office.account.switch')}</OfficeButton><OfficeButton quiet className='office-text-danger' disabled={locked} onClick={() => setConfirmation('logout')}>{t('office.account.logout')}</OfficeButton></div><p className='office-small office-muted'>{t('office.account.switchHint')}</p>
+              <OfficeButton quiet disabled={locked} onClick={() => setChoosing(true)}>{t('office.account.otherConnection')}</OfficeButton>
+            </> : <>
+              {profilesLoading && <p role='status' className='office-small office-muted'>{t('office.account.loadingApps')}</p>}{profilesError && <div className='office-error' role='alert'>{officeError(profilesError)}<OfficeButton quiet onClick={() => setProfilesRevision(value => value + 1)}>{t('office.actions.check')}</OfficeButton></div>}
+              {!adding && (profiles?.length || profile) ? <label className='office-label'>{t('office.account.application')}<select className='office-input' value={profile} disabled={locked || profilesLoading || !profiles} onChange={event => setProfile(event.target.value)}>{profile && !profiles?.some(item => item.name === profile) && <option value={profile}>{profile}</option>}{profiles?.map(item => <option key={item.name} value={item.name}>{item.name} · {item.app_id}</option>)}</select></label> : <p className='office-small office-muted'>{t('office.account.newAppHint')}</p>}
+              {(adding || (!profilesLoading && profiles?.length === 0)) && <details className='office-manual-application'><summary>{t('office.account.manualApp')}</summary><label className='office-check-row'><input type='checkbox' checked={manual} disabled={locked} onChange={event => setManual(event.target.checked)} />{t('office.connection.manual')}</label>{manual && <><label className='office-label'>{t('office.connection.appId')}<input className='office-input' value={appId} disabled={locked} onChange={event => setAppId(event.target.value)} /></label><label className='office-label'>{t('office.connection.appSecret')}<input className='office-input' type='password' autoComplete='new-password' value={secret} disabled={locked} onChange={event => setSecret(event.target.value)} /></label><p className='office-small office-muted'>{t('office.connection.secretHint')}</p></>}</details>}
+              <div className='office-actions office-login-actions'><OfficeButton primary disabled={locked || profilesLoading || !profiles || (manual && (!appId.trim() || !secret))} onClick={() => void login()}>{t(!adding && profile ? 'office.account.login' : 'office.account.connectApp')}</OfficeButton>{!adding && !!profiles?.length && <OfficeButton quiet disabled={locked} onClick={() => setAdding(true)}>{t('office.account.otherConnection')}</OfficeButton>}{adding && <OfficeButton quiet disabled={locked} onClick={() => { setAdding(false); setManual(false); setSecret(''); }}>{t('office.actions.back')}</OfficeButton>}</div>
+              {status.connection.profile && (status.actor || status.phase === 'expired') && <div className='office-account-controls'><OfficeButton quiet disabled={locked} onClick={() => setConfirmation('switch')}>{t('office.account.switch')}</OfficeButton><OfficeButton quiet className='office-text-danger' disabled={locked} onClick={() => setConfirmation('logout')}>{t('office.account.logout')}</OfficeButton></div>}
+            </>}
+          </>}
+        </section>}
+        {tab === 'access' && <section aria-label={t('office.account.sections.access')}>
+          <div className='office-section-heading'><h3>{t('office.account.sections.access')}</h3><p>{t('office.account.accessHint')}</p></div>
+          {!connected ? <div className='office-settings-notice'><Shield size={24} /><p>{t('office.account.loginFirst')}</p><OfficeButton onClick={() => setTab('account')}>{t('office.account.sections.account')}</OfficeButton></div> : Object.keys(readGroups).map(key => {
+            const scopes = scopesFor(status, readGroups[key as keyof typeof readGroups]);
+            return <div className='office-access-row' key={key}><div><strong>{t('office.permissions.groups.' + key)}</strong><p>{t('office.permissions.groupHints.' + key)}</p><OfficeBadge state={scopes.length ? 'neutral' : 'good'}>{t(scopes.length ? 'office.permissions.missing' : 'office.permissions.granted')}</OfficeBadge></div>{scopes.length ? <OfficeButton disabled={locked} onClick={() => void onStart({ kind: 'login', scopes, profile: status.connection.profile, app_id: null, app_secret: null })}>{t('office.actions.authorizeRead')}</OfficeButton> : <CheckOne size={18} className='office-access-check' />}</div>;
+          })}<p className='office-small office-muted office-access-note'>{t('office.account.writeAccessHint')}</p>
+        </section>}
+        {tab === 'advanced' && <section aria-label={t('office.account.sections.advanced')}>
+          <div className='office-section-heading'><h3>{t('office.account.componentTitle')}</h3><p>{t('office.account.componentHint')}</p></div>
+          <div className='office-component-summary'><span className='office-component-icon'><Download size={20} /></span><div><strong>{t('office.runtime.title')}</strong><p>{status.runtime.version ? 'v' + status.runtime.version : t('office.runtime.phase.' + status.runtime.phase)}</p></div><OfficeBadge state={runtimeReady ? 'good' : 'warning'}>{t('office.runtime.phase.' + status.runtime.phase)}</OfficeBadge></div>
+          {status.runtime.message && <p className='office-warning'>{status.runtime.message}</p>}{!runtimeReady && !canPrepare && status.runtime.phase !== 'preparing' && <p className='office-small office-muted'>{t('office.runtime.brokenHint')}</p>}
+          <div className='office-actions'>{canPrepare && <OfficeButton primary disabled={locked} onClick={() => void prepare()}>{t(status.runtime.phase === 'error' ? 'office.runtime.retryPrepare' : 'office.actions.prepare')}</OfficeButton>}<OfficeButton disabled={busy || status.runtime.phase === 'preparing'} onClick={() => void work(refresh)}>{t('office.actions.check')}</OfficeButton>{runtimeReady && <OfficeButton disabled={busy} onClick={() => void work(async () => { setUpdate(await officeHub.checkUpdate()); })}>{t('office.runtime.checkUpdate')}</OfficeButton>}</div>
+          {status.runtime.phase === 'preparing' && <p role='status'>{t('office.account.installingHint')}</p>}{update && <p role='status' className='office-small office-muted'>{t('office.runtime.versions', { installed: update.installed_version ?? '—', latest: update.latest_version ?? '—', compatible: update.compatible_version })}<br />{t('office.runtime.checkOnly')}{update.message && <><br />{update.message}</>}</p>}
+          <details className='office-advanced'><summary>{t('office.account.technicalDetails')}</summary><dl className='office-connection-facts'><dt>{t('office.host')}</dt><dd>{status.host_name} · {status.host_os}</dd>{status.runtime.source && <><dt>{t('office.account.installationSource')}</dt><dd>{t('office.runtime.source.' + status.runtime.source)}</dd></>}{status.connection.profile && <><dt>{t('office.connection.profile')}</dt><dd>{status.connection.profile}</dd></>}{status.actor && <><dt>{t('office.connection.appId')}</dt><dd>{status.actor.app_id}</dd></>}</dl><label className='office-label'>{t('office.runtime.selectedPath')}<input className='office-input' value={path} onChange={event => setPath(event.target.value)} disabled={locked} /></label><div className='office-actions'><OfficeButton disabled={locked || !path.trim()} onClick={() => void work(() => officeHub.selectRuntime(path.trim()))}>{t('office.actions.select')}</OfficeButton>{status.connection.executable && <OfficeButton disabled={locked} onClick={() => void work(() => officeHub.selectRuntime(null))}>{t('office.runtime.automatic')}</OfficeButton>}</div><p className='office-small office-muted'>{t('office.hostHint')}</p><p className='office-small office-muted'>{t('office.runtime.fullWizardHint')}</p><code className='office-command'>{status.runtime.official_install_command}</code><OfficeButton quiet onClick={() => void work(() => copyText(status.runtime.official_install_command))}>{t('office.actions.copy')}</OfficeButton></details>
+          <div className='office-connection-toggle'><div><strong>{t('office.account.connectionUse')}</strong><p>{t('office.account.disableHint')}</p></div><OfficeButton disabled={locked} onClick={() => void work(() => officeHub.updateConnection({ name: status.connection.name, profile: status.connection.profile, enabled: !status.connection.enabled }))}>{t(status.connection.enabled ? 'office.actions.disable' : 'office.actions.enable')}</OfficeButton></div>
+        </section>}
+        {showFlow && <div className='office-connection-flow'><AuthorizationPanel {...authorization} error={undefined} completionHint={t(authorization.flow?.phase === 'partial' ? 'office.account.partialHint' : 'office.account.connected')} /></div>}{authorization.error}
+      </div>
+    </div>
   </OfficeDialog>;
 }

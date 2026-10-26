@@ -261,6 +261,8 @@ mod tests {
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/016_office_hub.sql")).expect("Office hub migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/017_compact_office_receipts.sql")).expect("Office receipt compaction");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/018_remove_office_activity.sql")).expect("Office activity retirement");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/019_remove_office_overview.sql")).expect("Office overview retirement");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
@@ -293,6 +295,8 @@ mod tests {
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/016_office_hub.sql")).expect("Office hub migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/017_compact_office_receipts.sql")).expect("Office receipt compaction");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/018_remove_office_activity.sql")).expect("Office activity retirement");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/019_remove_office_overview.sql")).expect("Office overview retirement");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
@@ -478,6 +482,8 @@ mod tests {
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/016_office_hub.sql")).expect("Office hub migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/017_compact_office_receipts.sql")).expect("Office receipt compaction");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/018_remove_office_activity.sql")).expect("Office activity retirement");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/019_remove_office_overview.sql")).expect("Office overview retirement");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
@@ -509,6 +515,8 @@ mod tests {
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/016_office_hub.sql")).expect("Office hub migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/017_compact_office_receipts.sql")).expect("Office receipt compaction");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/018_remove_office_activity.sql")).expect("Office activity retirement");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/019_remove_office_overview.sql")).expect("Office overview retirement");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
@@ -590,6 +598,8 @@ mod tests {
         database.execute_batch(include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql")).expect("OAuth authority migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/016_office_hub.sql")).expect("Office hub migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/017_compact_office_receipts.sql")).expect("Office receipt compaction");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/018_remove_office_activity.sql")).expect("Office activity retirement");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/019_remove_office_overview.sql")).expect("Office overview retirement");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");

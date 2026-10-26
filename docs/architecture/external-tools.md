@@ -80,7 +80,7 @@ replaceable runtime cache, while an existing user prefix remains authoritative.
 
 `nomifun-runtime::prepare_existing_process_launch` accepts only an absolute,
 existing program file. It composes the same child environment and preserves literal
-argv, but never invokes managed supply or creates directories. Office workbench
+argv, but never invokes managed supply or creates directories. Office Hub
 diagnostics, business calls and queries through an existing npm executable use this
 entry point. Only the workbench's explicit **Prepare component** operation may use
 the supplier-enabled entry point for a relative `npm` command. An existing native
@@ -166,7 +166,7 @@ source files does not substitute for excluding Node/Bun blobs from the release
 payload. Compare actual App and DMG artifacts from the same release profile and
 compression format; compressed component sizes alone are not installer measurements.
 
-## Feishu workbench CLI
+## Feishu Office CLI
 
 The cloud [Office Hub](../guides/office-hub.md) uses the official
 `@larksuite/cli`, with 1.0.98 as its verified compatibility baseline. It is separate
@@ -181,14 +181,15 @@ Existing external installations keep their original location and maintenance.
 The full upstream wizard is only a command for the user to run explicitly; it may
 also install global skills. Read-only update checks do not install or sync skills.
 
-All business queries and saves use this CLI. Native ordinary paragraph editing
-uses real block IDs and revisions; unsupported document structures remain
-read-only. Save submits one stable request, and a lost response is recovered by
+All business queries and saves use this CLI. Documents and Base resources open
+in the browser; NomiFun offers document search, title creation and confirmed
+deletion. Save submits one stable request, and a lost response is recovered by
 that request identity. Pending document and Base targets retain their SQL write
 fences across identity changes. The same process owner keeps retrying tree cleanup
 until completion is proved; cancelling execution cannot end that cleanup early.
-The workbench retains four product tables and thin recent locators, separately
-from canonical Agent facts; see the [active plan](../handoffs/office-feishu-workbench.zh.md).
+Office retains four product tables for connections and submitted request
+receipts, separately from canonical Agent facts. Its two pages are Documents
+(the default) and Calendar & tasks; see the [active plan](../handoffs/office-feishu-workbench.zh.md).
 
 ## Office artifacts
 

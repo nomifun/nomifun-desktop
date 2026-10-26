@@ -6,8 +6,8 @@ import { OfficeButton } from './dialogs';
 import { identityKey, writeScopes } from './model';
 import { captureIdentity, useOfficeWrite, type WriteIdentity } from './useOfficeWrite';
 
-export function TaskRow({ item, status, compact, authorize, onResult, onResultId, onSaved, errorPanel }: {
-  item: OfficeItem; status: OfficeStatus | null; compact?: boolean; authorize: (scopes: string[]) => void;
+export function TaskRow({ item, status, authorize, onResult, onResultId, onSaved, errorPanel }: {
+  item: OfficeItem; status: OfficeStatus | null; authorize: (scopes: string[]) => void;
   onResult: (operation: OfficeOperation) => void; onResultId: (id: string) => void; onSaved: () => void;
   errorPanel: (error: unknown) => React.ReactNode;
 }) {
@@ -30,7 +30,7 @@ export function TaskRow({ item, status, compact, authorize, onResult, onResultId
     if (result && result.status !== 'succeeded') onResult(result);
   };
   const person = (id: string) => id === status?.actor?.user_id ? status.actor.name || id : id;
-  return <div className='office-task'><label><input type='checkbox' checked={write.result?.status === 'succeeded' && intent ? intent.completed : !!item.completed} disabled={!!item.pending_operation_id || write.loading || write.locked || (!!intent && intent.identity.key !== identityKey(status))} onChange={() => void toggle()} /><span>{item.title || item.id}</span></label>{!compact && <p className='office-small office-muted'>{t('office.tasks.assignee')}: {item.assignee_ids.map(person).join(', ') || '—'} · {t('office.tasks.creator')}: {item.creator_id ? person(item.creator_id) : '—'} · {item.tasklist_ids.join(', ') || t('office.tasks.noList')}</p>}{item.due && <p className='office-small office-muted'>{item.due}</p>}{errorPanel(error)}{errorPanel(write.error)}
+  return <div className='office-task'><label><input type='checkbox' checked={write.result?.status === 'succeeded' && intent ? intent.completed : !!item.completed} disabled={!!item.pending_operation_id || write.loading || write.locked || (!!intent && intent.identity.key !== identityKey(status))} onChange={() => void toggle()} /><span>{item.title || item.id}</span></label><p className='office-small office-muted'>{t('office.tasks.assignee')}: {item.assignee_ids.map(person).join(', ') || '—'} · {t('office.tasks.creator')}: {item.creator_id ? person(item.creator_id) : '—'} · {item.tasklist_ids.join(', ') || t('office.tasks.noList')}</p>{item.due && <p className='office-small office-muted'>{item.due}</p>}{errorPanel(error)}{errorPanel(write.error)}
     {item.pending_operation_id ? <OfficeButton quiet onClick={() => onResultId(item.pending_operation_id!)}>{t('office.operation.status.' + (item.pending_status ?? 'unknown'))}</OfficeButton> : write.result && write.result.status !== 'succeeded' ? <OfficeButton quiet onClick={() => onResult(write.result!)}>{t('office.operation.status.' + write.result.status)}</OfficeButton> : write.locked && !write.result ? <OfficeButton quiet disabled={write.loading} onClick={() => void write.recover()}>{t('office.operation.checkReceipt')}</OfficeButton> : null}
   </div>;
 }

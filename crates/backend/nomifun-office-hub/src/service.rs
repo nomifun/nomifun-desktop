@@ -223,11 +223,6 @@ impl OfficeHubService {
     }
 
     pub async fn query(&self, query: OfficeQuery) -> Result<OfficeQueryResult, HubError> {
-        let connection = self.connection().await?;
-        if matches!(query, OfficeQuery::Recent) {
-            if self.store.connection(&self.owner).await?.is_none() { return Ok(OfficeQueryResult::default()); }
-            return Ok(OfficeQueryResult { items: self.store.recent(&self.owner, &connection.id, 20).await?, ..Default::default() });
-        }
         let (connection, executable, identity) = self.ready().await?;
         require_permissions(&adapter::query_permissions(&query, &identity.scopes))?;
         let commands = adapter::query_commands(&query, connection.profile.as_deref())?;
@@ -237,9 +232,6 @@ impl OfficeHubService {
         }
         let mut result = adapter::normalize_query(&query, &outputs)?;
         if let OfficeQuery::BaseRecords { base_token, table_id, .. } = &query {
-            let mut recent = OfficeItem::new(format!("{base_token}/{table_id}"), "base", table_id);
-            recent.base_token = Some(base_token.clone()); recent.table_id = Some(table_id.clone());
-            self.store.remember_recent(&self.owner, &connection.id, &recent).await?;
             let actor=identity.actor.as_ref().ok_or_else(||HubError::unavailable("User identity unavailable"))?;
             let targets=result.items.iter().map(|item|{
                 let mutation=OfficeMutation::BaseUpdate{client_item_id:item.id.clone(),base_token:base_token.clone(),
@@ -284,21 +276,11 @@ impl OfficeHubService {
         Ok(result)
     }
 
-    /// Thin navigation only. Opening a link never reads a document body.
-    pub async fn remember_resource(&self, link: ResourceLink) -> Result<(), HubError> {
-        let (connection, _, _) = self.ready().await?;
-        let item = adapter::resource_link(&link)?;
-        self.store.remember_recent(&self.owner, &connection.id, &item).await
-    }
-
     pub async fn operation(&self, id: &str) -> Result<OfficeOperation, HubError> {
         self.store.get(&self.owner, id).await?.ok_or_else(|| operation_not_found())
     }
     pub async fn operation_by_request(&self, request_id:&str)->Result<OfficeOperation,HubError>{
         self.store.get_by_request(&self.owner,request_id).await?.ok_or_else(||operation_not_found())
-    }
-    pub async fn operations(&self, cursor: Option<&str>) -> Result<OperationPage, HubError> {
-        self.store.list(&self.owner, 30, cursor).await
     }
 
     async fn validate_original(&self, operation: &OfficeOperation) -> Result<(String, adapter::CliIdentity), HubError> {

@@ -105,6 +105,12 @@ pub struct AuthStartRequest {
     pub app_id: Option<String>,
     pub app_secret: Option<String>,
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogoutRequest {
+    pub profile: String,
+    pub expected_actor: Option<OfficeActor>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthPhase { Starting, WaitingUser, WaitingAdmin, Cancelling, Complete, Partial, Cancelled, Denied, Expired, Error }
@@ -129,7 +135,6 @@ pub enum DocumentFilter { All, Document, Base }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OfficeQuery {
-    Recent,
     Documents { query: String, filter: DocumentFilter, cursor: Option<String> },
     People { query: String },
     Tasklists { cursor: Option<String> },
@@ -146,7 +151,6 @@ pub struct OfficeItem {
     pub url: Option<String>,
     pub description: Option<String>,
     pub modified_at: Option<String>,
-    pub opened_at: Option<String>,
     pub assignee_ids: Vec<String>,
     pub creator_id: Option<String>,
     pub tasklist_ids: Vec<String>,
@@ -164,17 +168,11 @@ pub struct OfficeItem {
 impl OfficeItem {
     pub fn new(id: impl Into<String>, kind: impl Into<String>, title: impl Into<String>) -> Self {
         Self { id: id.into(), kind: kind.into(), title: title.into(), url: None,
-            description: None, modified_at: None, opened_at: None, assignee_ids: Vec::new(), creator_id: None,
+            description: None, modified_at: None, assignee_ids: Vec::new(), creator_id: None,
             tasklist_ids: Vec::new(), due: None, completed: None, start: None, end: None,
             calendar_id: None, base_token: None, table_id: None, pending_operation_id: None,
             pending_status: None, fields: BTreeMap::new() }
     }
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceLink {
-    pub url: String,
-    pub title: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OfficeField {
@@ -274,8 +272,4 @@ pub struct OfficeOperation {
     pub profile: String,
     pub status: OperationStatus,
     pub items: Vec<OperationItem>,
-    pub created_at: String,
-    pub updated_at: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OperationPage { pub items: Vec<OfficeOperation>, pub next_cursor: Option<String> }

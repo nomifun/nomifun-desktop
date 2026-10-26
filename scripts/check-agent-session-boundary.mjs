@@ -81,7 +81,8 @@ const { baseline, pluginForwardMigration, metadataForwardMigration, hostingForwa
   policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration,
   cronInputForwardMigration, mcpOAuthForwardMigration, cronCancellationForwardMigration,
   cronWorkbenchForwardMigration, modelInputConstraintsForwardMigration, queueSettingForwardMigration,
-  executionPlanGateForwardMigration, officeHubForwardMigration, officeCompactForwardMigration } = AGENT_FORWARD_MIGRATIONS;
+  executionPlanGateForwardMigration, officeHubForwardMigration, officeCompactForwardMigration,
+  officeActivityRetirementForwardMigration, officeOverviewRetirementForwardMigration } = AGENT_FORWARD_MIGRATIONS;
 if (!areKnownAgentMigrationPaths(migrations)) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward migrations');
 }
@@ -93,11 +94,25 @@ if (migrations.includes(officeHubForwardMigration)) {
 if (migrations.includes(officeCompactForwardMigration)) {
   failures.push(...officeCompactMigrationErrors(readFileSync(resolve(ROOT, officeCompactForwardMigration), 'utf8')));
 }
+if (migrations.includes(officeActivityRetirementForwardMigration)
+  && JSON.stringify(migrationStatements(officeActivityRetirementForwardMigration)) !== JSON.stringify([
+    'DROP INDEX idx_office_operations_owner_history',
+    'ALTER TABLE office_operations DROP COLUMN created_at',
+    'ALTER TABLE office_operations DROP COLUMN updated_at',
+  ])) {
+  failures.push('Office activity retirement may only drop history ordering and timestamps; request identities, receipts, pending targets and Agent facts stay unchanged');
+}
 if (migrations.includes(executionPlanGateForwardMigration)
   && JSON.stringify(migrationStatements(executionPlanGateForwardMigration)) !== JSON.stringify([
     'ALTER TABLE agent_executions DROP COLUMN plan_gate',
   ])) {
   failures.push('Execution plan gate retirement may only drop its unused column; identities, policies, canonical Agent facts and lineage receipts stay unchanged');
+}
+if (migrations.includes(officeOverviewRetirementForwardMigration)
+  && JSON.stringify(migrationStatements(officeOverviewRetirementForwardMigration)) !== JSON.stringify([
+    'ALTER TABLE office_connections DROP COLUMN recent_resources_json',
+  ])) {
+  failures.push('Office overview retirement may only drop its recent-resource cache; connection settings, requests, receipts and Agent facts stay unchanged');
 }
 if (migrations.includes(queueSettingForwardMigration)
   && JSON.stringify(migrationStatements(queueSettingForwardMigration)) !== JSON.stringify([

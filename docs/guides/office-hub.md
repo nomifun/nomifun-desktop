@@ -1,58 +1,71 @@
 # Office Hub: Feishu
 
-Open **Common → Office** for Feishu documents, calendars, tasks and Base.
+Open **Services → Office** for Feishu documents, calendars, tasks and Base.
+The page has **Documents** and **Calendar & tasks** tabs and opens on Documents.
 The Tauri desktop shell and desktop-class WebUI are supported. All business
 operations use the official Feishu CLI. Components and credentials belong to
 the backend machine, which may differ from the browser's computer.
 
 ## Connect Feishu
 
-The connection dialog has three steps:
+The page shows the next action for its current connection state:
 
-1. **Prepare environment**: check the backend host and component. Reuse a compatible
-   installation; prepare a missing component only after an explicit click. The CLI
-   is not included in the NomiFun installer.
-2. **Connect Feishu**: follow the official application setup or sign-in link.
-   Existing profiles, explicit executable paths and manual application details
-   are available in advanced settings.
-3. **Read permissions**: choose the documents, calendars, tasks or Base data you
-   need to browse, or grant access later. An administrator may need to approve
-   access. Write permissions are requested when you actually save.
+- **Component missing**: the main page explains installation and provides an
+  install action. Downloading begins only after you choose it. Installation has
+  progress and retry states. Compatible installations are reused; broken or
+  incompatible installations offer repair guidance.
+- **Application not connected**: select an existing connection or follow the
+  official Feishu application setup flow.
+- **Signed out or expired**: complete Feishu sign-in in your browser, then return
+  to see the current account.
 
-Step two signs in with the CLI's explicit `offline_access` scope, without
-requesting business permissions. You can skip step three and grant access when
-you first use the corresponding feature.
+Basic sign-in requests only `offline_access`. Document, calendar and task access
+is requested when you use those features. There is no mandatory permission
+checklist after sign-in.
 
-Granting access returns to the current input; Save still requires your action.
-Changing the application, user or profile prevents the old form from writing.
-Cancelling authorization waits for the original process to settle before another
-flow can begin.
+## Accounts and switching users
 
-Advanced settings provide a read-only update check, automatic discovery and the
-full official setup command to copy into your own terminal. The verified baseline
-is 1.0.98. Checks do not install or synchronize skills; external installations
-retain their original maintenance method. The full wizard may install global
-skills for other agents and is never run silently. Secrets and tokens remain in
-the CLI's own store.
+Click the current account in the header to open account information and actions:
+
+- **Change account**: confirm sign-out, then open a fresh Feishu sign-in flow and
+  choose the account to use.
+- **Sign out**: confirm sign-out from this connection without starting another
+  sign-in automatically.
+- **Switch connection**: choose another configured Feishu application connection.
+
+Sign-out retains application setup and submitted request results. Signing in
+again does not reinstall the component. Wait for active saves or authorization
+cleanup before signing out. The official CLI clears every user stored in the
+selected connection, so connections containing multiple users are not signed out
+automatically. Use **Switch connection** instead to avoid signing out other users.
+
+The permissions area shows granted and missing document, calendar and task
+access, without selecting permissions by default. Granting access returns to the
+current input; Save still requires your action. Changing the application, user or
+profile prevents the old form from writing. Cancelling authorization waits for
+the original process to settle before another flow can begin.
+
+Advanced settings contain the component host, version, path, read-only update
+check and connection disable action. **Disable connection** stops new business
+work while retaining sign-in; it is distinct from signing out. The verified
+baseline is 1.0.98. Checks do not install or synchronize skills; external
+installations retain their original maintenance method. The full official setup
+command is provided for you to copy into a terminal. It may install global skills
+for other agents and is never run silently. Secrets and tokens remain in the
+CLI's own store.
 
 ## Documents
 
-Search or paste a link to an accessible document. New documents require a title;
-body content is optional. Recent entries retain only an actually opened resource's
-locator, title and time. Opening one reads its current content from Feishu again.
+Browse accessible documents, search by title and filter by document type. Queries
+and filters apply to the server collection before pagination. Click a document
+name or **Open in browser**, or paste an official Feishu/Lark resource link, to
+open it in the browser. Document bodies are read and edited in Feishu.
 
-Click **Edit**, then select an ordinary body paragraph. Its input receives focus;
-change the text and click **Save**. Characters such as `*` and `#`, paths and soft
-line breaks remain literal text. The official CLI updates the native block in
-place, preserving its identity and paragraph style. Headings, inline rich text,
-comments and tables show their read-only reason; open Feishu to edit them.
-Without a reliable block/revision baseline, the document remains readable. A first
-paragraph can be inserted only into a body verified to be empty. If the source
-revision changes, reload it while retaining your current input, then select the
-paragraph again before saving.
-
-An unresolved save protects the whole document from another write. Selecting a
-different paragraph does not bypass that protection.
+Create a document by title; the blank document appears in the list and its body
+can be written in Feishu. Delete first shows the exact title and link for
+confirmation. Only supported cloud document types offer deletion; Wiki nodes and
+Base resources remain browser entries. An unresolved deletion blocks another
+write to the same resource and keeps access to its original result.
 
 ## Calendars and tasks
 
@@ -64,24 +77,13 @@ permissions. Completing or reopening a task also needs write access.
 
 ## Base
 
-Paste a complete Feishu link containing `/base/` and the `table` parameter. If it
-is incomplete, select the table in Feishu and copy its link again. Fields, options,
-record identities and pagination come from actual responses.
+Choose the **Base** filter in Documents, search for the resource and open it in
+the browser. Base has no separate page or record editor in NomiFun.
 
-Select records, enter supported simple field values and click **Save** once,
-for at most 200 records in one batch. System, formula and complex fields are not
-ordinary writable values. Original values are checked before writing, but this
-does not prevent simultaneous changes by another client.
+## Results
 
-An accepted batch initially remains **Pending verification**. Confirmation reads
-back the original records and fields. Values not yet visible are not proof of
-non-execution. Pending rows cannot be selected for another write; open their
-original operation to check again.
-
-## Results and disabling
-
-Save submits directly from the form. Activity includes work initiated by this
-workbench only.
+Save submits directly from the form and shows its result there. Unresolved
+operations remain accessible from the original resource for verification.
 
 - **Confirmed** retains real resource identities and original receipts.
 - **Proven not executed** allows corrected items to be submitted explicitly as
@@ -96,10 +98,9 @@ away or restarting does not replay writes. Without a task GUID or exact receipt,
 same-name search cannot establish creation. Original outcomes and later checks
 remain distinct.
 
-Disabling stops new business work and retains the connection, recent entries and
-history. Already-started remote work may complete. It does not revoke Feishu
-permissions; manage revocation in Feishu.
+Already-started remote work may complete even after disabling the connection.
+Disabling is distinct from signing out or revoking Feishu permissions.
 
 The opt-in [Feishu Skill](mcp-and-skills.md) continues through canonical process
-tools. Missing components use the same workbench supplier; the workbench's path
+tools. Missing components use the same Office supplier; the Office page's path
 and profile selections are not automatically injected into Agent sessions.

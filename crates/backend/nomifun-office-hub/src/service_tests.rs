@@ -13,8 +13,10 @@ struct RecordedCall { args:Vec<String>,mutating:bool,input:Option<Value> }
 struct FixtureExecutor {
     calls:Mutex<Vec<RecordedCall>>,
     scopes:Mutex<Vec<String>>,
+    users:Mutex<Vec<OfficeActor>>,
     requested_scopes:Mutex<Vec<String>>,
     task_creates:AtomicUsize,
+    logouts:AtomicUsize,
     base_batches:AtomicUsize,
     timeout_document:AtomicBool,
     document_deletes:AtomicUsize,
@@ -39,7 +41,8 @@ impl FixtureExecutor {
         Self{calls:Mutex::new(Vec::new()),scopes:Mutex::new(vec![
             "task:task:read".into(),"task:tasklist:read".into(),"search:docs:read".into(),
             "base:record:read".into(),"base:field:read".into()]),requested_scopes:Mutex::new(Vec::new()),
-            task_creates:AtomicUsize::new(0),base_batches:AtomicUsize::new(0),old_token_expired:AtomicBool::new(false),
+            users:Mutex::new(vec![OfficeActor{app_id:"cli_fixture".into(),user_id:"ou_owner".into(),name:"Owner".into()}]),
+            task_creates:AtomicUsize::new(0),logouts:AtomicUsize::new(0),base_batches:AtomicUsize::new(0),old_token_expired:AtomicBool::new(false),
             timeout_document:AtomicBool::new(false),document_deletes:AtomicUsize::new(0),document_pages:AtomicBool::new(false),
             timeout_tasks:AtomicBool::new(false),hold_task:AtomicBool::new(false),
             task_entered:Semaphore::new(0),task_release:Semaphore::new(0),task_returned:Semaphore::new(0),
@@ -110,9 +113,26 @@ impl CliExecutor for FixtureExecutor {
             if self.old_token_expired.load(Ordering::SeqCst){
                 return Ok(CliOutput::fixture(1,"",json!({"ok":false,"error":{"type":"authentication","subtype":"token_expired","message":"Expired fixture token"}}).to_string()))
             }
+            if lock(&self.users).is_empty(){
+                return Ok(CliOutput::fixture(0,json!({"appId":"cli_fixture","identity":"user",
+                    "identities":{"user":{"available":false,"status":"not_logged_in"}}}).to_string(),""))
+            }
             return Ok(CliOutput::fixture(0,json!({"appId":"cli_fixture","identity":"user","verified":true,
                 "identities":{"user":{"available":true,"status":"ready","verified":true,
                     "openId":"ou_owner","userName":"Owner","scope":lock(&self.scopes).clone()}}}).to_string(),""))
+        }
+        if contains(&args,&["auth","list"]){
+            assert_eq!(args,["--profile","work","auth","list","--json"]);
+            assert!(!command.mutating);
+            let users=lock(&self.users).iter().map(|user|json!({"appId":user.app_id,"userOpenId":user.user_id,
+                "userName":user.name,"tokenStatus":"valid"})).collect::<Vec<_>>();
+            return Ok(CliOutput::fixture(0,serde_json::to_string(&users).unwrap(),""))
+        }
+        if contains(&args,&["auth","logout"]){
+            assert_eq!(args,["--profile","work","auth","logout","--json"]);
+            assert!(command.mutating);self.logouts.fetch_add(1,Ordering::SeqCst);
+            lock(&self.users).clear();self.old_token_expired.store(false,Ordering::SeqCst);
+            return Ok(CliOutput::fixture(0,r#"{"ok":true,"loggedOut":true}"#,""))
         }
         if contains(&args,&["auth","login"]){
             assert!(!command.mutating);
@@ -131,6 +151,8 @@ impl CliExecutor for FixtureExecutor {
                 return Ok(CliOutput{started:true,cancelled:true,..Default::default()})
             }
             let granted=lock(&self.requested_scopes).clone();for scope in &granted{self.grant(scope)}
+            *lock(&self.users)=vec![OfficeActor{app_id:"cli_fixture".into(),user_id:"ou_owner".into(),name:"Owner".into()}];
+            self.old_token_expired.store(false,Ordering::SeqCst);
             return Ok(CliOutput::fixture(0,json!({"event":"authorization_complete","user_open_id":"ou_owner",
                 "user_name":"Owner","scope":granted,"missing":[]}).to_string(),""))
         }
@@ -253,11 +275,17 @@ async fn office_http_face_requires_the_exact_installation_owner_before_diagnosis
     assert!(f.executor.calls().is_empty(),"a matching display name cannot borrow the installation owner's authority");
     let mut owner=Request::builder().uri("/api/office-hub/status").body(Body::empty()).unwrap();
     owner.extensions_mut().insert(CurrentUser{id:nomifun_common::UserId::parse(&f.service.owner).unwrap(),username:"Renamed owner".into()});
-    let response=router.oneshot(owner).await.unwrap();
+    let response=router.clone().oneshot(owner).await.unwrap();
     assert_eq!(response.status(),StatusCode::OK);
     let body=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
     let value:Value=serde_json::from_slice(&body).unwrap();
     assert_eq!(value["data"]["phase"],"disabled");
+    let removed_recent=Request::builder().method("POST").uri("/api/office-hub/resources/recent")
+        .header("content-type","application/json").body(Body::from(r#"{"url":"https://example.feishu.cn/docx/doc_real"}"#)).unwrap();
+    assert_eq!(router.clone().oneshot(removed_recent).await.unwrap().status(),StatusCode::NOT_FOUND);
+    let mut retired_list=Request::builder().uri("/api/office-hub/operations").body(Body::empty()).unwrap();
+    retired_list.extensions_mut().insert(CurrentUser{id:nomifun_common::UserId::parse(&f.service.owner).unwrap(),username:"Owner".into()});
+    assert_eq!(router.oneshot(retired_list).await.unwrap().status(),StatusCode::METHOD_NOT_ALLOWED);
     assert!(f.executor.calls().iter().all(|call|!call.mutating));
     f.close().await;
 }
@@ -340,6 +368,59 @@ async fn an_expired_user_token_does_not_prevent_starting_a_fresh_login_for_the_c
     f.close().await;
 }
 
+fn logout_request()->LogoutRequest{
+    LogoutRequest{profile:"work".into(),expected_actor:Some(task_request().expected_actor)}
+}
+
+#[tokio::test]
+async fn logout_targets_only_the_selected_single_user_profile_and_allows_a_fresh_login(){
+    let f=Fixture::new(true).await;
+    let connection=f.service.connection().await.unwrap();
+    f.service.logout(logout_request()).await.unwrap();f.join_workers().await;
+    assert_eq!(f.executor.logouts.load(Ordering::SeqCst),1);
+    let status=f.service.status().await.unwrap();assert_eq!(status.phase,ConnectionPhase::NeedsLogin);assert!(status.actor.is_none());
+    assert_eq!(status.connection.id,connection.id);assert_eq!(status.connection.profile,connection.profile);
+    assert_eq!(status.connection.name,connection.name);assert!(status.connection.enabled);
+    assert_eq!(f.executor.calls().iter().filter(|call|contains(&call.args,&["auth","list"])).count(),2,"logout verifies the original profile before and after its one invocation");
+    let flow=f.service.start_authorization(AuthStartRequest{kind:AuthKind::Login,scopes:vec!["offline_access".into()],
+        profile:Some("work".into()),app_id:None,app_secret:None}).await.unwrap();f.join_workers().await;
+    assert_eq!(f.service.authorization(&flow.id).unwrap().phase,AuthPhase::Complete);
+    assert_eq!(f.service.status().await.unwrap().phase,ConnectionPhase::Ready);
+    assert_eq!(f.executor.task_creates.load(Ordering::SeqCst),0);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn logout_refuses_changed_identity_profile_and_multi_user_connections_without_touching_tokens(){
+    let f=Fixture::new(true).await;
+    let mut input=logout_request();input.profile="other".into();assert_eq!(f.service.logout(input).await.unwrap_err().code,"OFFICE_CONFLICT");
+    let mut input=logout_request();input.expected_actor.as_mut().unwrap().user_id="ou_other".into();
+    assert_eq!(f.service.logout(input).await.unwrap_err().code,"OFFICE_CONFLICT");
+    lock(&f.executor.users).push(OfficeActor{app_id:"cli_fixture".into(),user_id:"ou_other".into(),name:"Other user".into()});
+    let error=f.service.logout(logout_request()).await.unwrap_err();assert_eq!(error.code,"OFFICE_CONFLICT");assert!(error.message.contains("切换连接"));
+    assert_eq!(f.executor.logouts.load(Ordering::SeqCst),0);assert_eq!(lock(&f.executor.users).len(),2);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn logout_supports_an_expired_account_without_an_actor_and_is_a_noop_after_signout(){
+    let f=Fixture::new(true).await;f.executor.old_token_expired.store(true,Ordering::SeqCst);
+    let input=LogoutRequest{profile:"work".into(),expected_actor:None};
+    f.service.logout(input.clone()).await.unwrap();f.service.logout(input).await.unwrap();
+    assert_eq!(f.executor.logouts.load(Ordering::SeqCst),1);
+    assert_eq!(f.service.status().await.unwrap().phase,ConnectionPhase::NeedsLogin);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn logout_refuses_a_durably_queued_operation_without_a_live_worker(){
+    let f=Fixture::new(true).await;let input=task_request();let connection=f.service.connection().await.unwrap();
+    let queued=f.service.store.create_submitted(&f.service.owner,&connection.id,&input.expected_actor,"work",&input).await.unwrap();
+    let error=f.service.logout(logout_request()).await.unwrap_err();assert_eq!(error.related_operation_id,Some(queued.id));
+    assert_eq!(f.executor.logouts.load(Ordering::SeqCst),0);assert!(!f.executor.calls().iter().any(|call|contains(&call.args,&["auth","list"])));
+    f.close().await;
+}
+
 #[tokio::test]
 async fn cancelled_authorization_keeps_its_owner_fence_until_original_cli_cleanup_finishes(){
     let f=Fixture::new(true).await;
@@ -355,6 +436,8 @@ async fn cancelled_authorization_keeps_its_owner_fence_until_original_cli_cleanu
     assert_eq!(conflict.related_flow_id.as_deref(),Some(first.id.as_str()));
     assert!(f.service.update_connection(ConnectionUpdate{name:"Changed".into(),enabled:true,profile:Some("other".into())}).await.is_err());
     assert!(f.service.execute(retained.clone()).await.is_err());
+    assert!(f.service.logout(logout_request()).await.is_err());
+    assert_eq!(f.executor.logouts.load(Ordering::SeqCst),0);
     assert_eq!(f.executor.task_creates.load(Ordering::SeqCst),0);
     f.executor.auth_cleanup_release.add_permits(1);f.join_workers().await;
     assert_eq!(f.service.authorization(&first.id).unwrap().phase,AuthPhase::Cancelled);
@@ -389,7 +472,7 @@ async fn changed_expected_identity_or_profile_cannot_borrow_the_current_login(){
     let mut input=task_request();input.profile="different-profile".into();
     assert!(f.service.execute(input).await.is_err());
     assert_eq!(f.executor.task_creates.load(Ordering::SeqCst),0);
-    assert!(f.service.operations(None).await.unwrap().items.is_empty());
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM office_operations").fetch_one(f.database.pool()).await.unwrap(),0);
     f.close().await;
 }
 
@@ -401,6 +484,7 @@ async fn accepted_worker_outlives_the_request_waiter_and_repeated_request_does_n
     let admitted=tokio::time::timeout(Duration::from_secs(3),request).await.unwrap().unwrap().unwrap();
     let id=admitted.id;tokio::time::timeout(Duration::from_secs(3),f.executor.task_entered.acquire()).await.unwrap().unwrap().forget();
     assert_eq!(f.service.operation(&id).await.unwrap().items[0].status,ItemStatus::Running);
+    assert!(f.service.logout(logout_request()).await.is_err());assert_eq!(f.executor.logouts.load(Ordering::SeqCst),0);
     assert_eq!(f.service.execute(input).await.unwrap().id,id);
     assert_eq!(f.executor.task_creates.load(Ordering::SeqCst),1);
     f.executor.task_release.add_permits(1);f.join_workers().await;
@@ -510,7 +594,7 @@ async fn base_save_cannot_omit_the_original_value_of_any_written_field(){
         assert!(f.service.execute(input).await.is_err());
     }
     assert_eq!(f.executor.base_batches.load(Ordering::SeqCst),0);
-    assert!(f.service.operations(None).await.unwrap().items.is_empty());
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM office_operations").fetch_one(f.database.pool()).await.unwrap(),0);
     f.close().await;
 }
 
@@ -536,10 +620,8 @@ async fn shutdown_does_not_discard_a_known_receipt_while_its_original_owner_retr
 }
 
 #[tokio::test]
-async fn document_management_never_reads_content_and_successful_delete_removes_recent(){
+async fn document_deletion_preserves_its_single_result_and_never_reads_content(){
     let f=Fixture::new(true).await;
-    let link=ResourceLink{url:"https://example.feishu.cn/docx/doc_real".into(),title:Some("Fixture document".into())};
-    f.service.remember_resource(link).await.unwrap();
     let listed=f.service.query(OfficeQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:None}).await.unwrap();assert_eq!(listed.items[0].id,"doc_real");
     let input=request(vec![OfficeMutation::DocumentDelete{client_item_id:Uuid::now_v7().to_string(),document_id:"doc_real".into(),document_type:"docx".into(),title:"Fixture document".into()}]);
     let denied=f.service.execute(input.clone()).await.unwrap_err();assert_eq!(denied.code,"OFFICE_PERMISSION");
@@ -549,7 +631,7 @@ async fn document_management_never_reads_content_and_successful_delete_removes_r
     let submitted=f.service.execute(input.clone()).await.unwrap();f.join_workers().await;
     let settled=f.service.operation(&submitted.id).await.unwrap();assert_eq!(settled.status,OperationStatus::Succeeded);
     assert_eq!(settled.items[0].attempts.len(),1);
-    assert!(f.service.query(OfficeQuery::Recent).await.unwrap().items.is_empty());
+    assert_eq!(settled.items[0].remote_id.as_deref(),Some("doc_real"));
     f.service.execute(input).await.unwrap();f.join_workers().await;
     assert_eq!(f.executor.document_deletes.load(Ordering::SeqCst),1);
     assert!(f.executor.calls().iter().all(|call|!contains(&call.args,&["docs","+fetch"])&&!call.args.iter().any(|arg|arg.contains("/blocks"))));
@@ -559,14 +641,12 @@ async fn document_management_never_reads_content_and_successful_delete_removes_r
 #[tokio::test]
 async fn unknown_document_deletion_preserves_one_attempt_and_blocks_another_request(){
     let f=Fixture::new(true).await;f.executor.grant("space:document:delete");f.executor.grant("drive:drive.metadata:readonly");f.executor.timeout_document.store(true,Ordering::SeqCst);
-    f.service.remember_resource(ResourceLink{url:"https://example.feishu.cn/docx/doc_real".into(),title:None}).await.unwrap();
     let input=request(vec![OfficeMutation::DocumentDelete{client_item_id:Uuid::now_v7().to_string(),document_id:"doc_real".into(),document_type:"docx".into(),title:"Fixture document".into()}]);
     let submitted=f.service.execute(input.clone()).await.unwrap();f.join_workers().await;
     let original=f.service.operation(&submitted.id).await.unwrap();assert_eq!(original.items[0].status,ItemStatus::Unknown);
     let listed=f.service.query(OfficeQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:None}).await.unwrap();
     assert_eq!(listed.items[0].pending_operation_id.as_deref(),Some(submitted.id.as_str()));
     assert_eq!(listed.items[0].pending_status,Some(ItemStatus::Unknown));
-    assert_eq!(f.service.query(OfficeQuery::Recent).await.unwrap().items.len(),1);
     f.service.execute(input.clone()).await.unwrap();
     let mut other=input;other.request_id=Uuid::now_v7().to_string();
     assert_eq!(f.service.execute(other).await.unwrap_err().related_operation_id,Some(submitted.id.clone()));
@@ -577,13 +657,15 @@ async fn unknown_document_deletion_preserves_one_attempt_and_blocks_another_requ
 }
 
 #[tokio::test]
-async fn creating_a_blank_document_remembers_its_returned_link(){
+async fn creating_a_blank_document_returns_its_exact_resource_identity_and_link(){
     let f=Fixture::new(true).await;f.executor.grant("docx:document:create");
     let submitted=f.service.execute(request(vec![OfficeMutation::DocumentCreate{client_item_id:Uuid::now_v7().to_string(),title:"New document".into()}])).await.unwrap();
     f.join_workers().await;
-    assert_eq!(f.service.operation(&submitted.id).await.unwrap().status,OperationStatus::Succeeded);
-    let recent=f.service.query(OfficeQuery::Recent).await.unwrap();
-    assert_eq!(recent.items[0].title,"New document");assert_eq!(recent.items[0].url.as_deref(),Some("https://example.feishu.cn/docx/doc_real"));
+    let settled=f.service.operation(&submitted.id).await.unwrap();
+    assert_eq!(settled.status,OperationStatus::Succeeded);
+    assert_eq!(settled.items[0].mutation["title"],"New document");
+    assert_eq!(settled.items[0].remote_id.as_deref(),Some("doc_real"));
+    assert_eq!(settled.items[0].remote_url.as_deref(),Some("https://example.feishu.cn/docx/doc_real"));
     assert!(f.executor.calls().iter().all(|call|!call.args.contains(&"--content".into())));
     f.close().await;
 }

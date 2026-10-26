@@ -116,7 +116,6 @@ fn named_permissions(names: &[&str], scopes: &[String]) -> Vec<OfficePermission>
 }
 pub fn query_permissions(query: &OfficeQuery, scopes: &[String]) -> Vec<OfficePermission> {
     let names: &[&str] = match query {
-        OfficeQuery::Recent => &[],
         OfficeQuery::Documents { .. } => &["documents.browse"],
         OfficeQuery::People { .. } => &["people.read"],
         OfficeQuery::Tasklists { .. } => &["tasklists.read"],
@@ -147,6 +146,12 @@ pub fn status_command(profile: Option<&str>, verify: bool) -> CliCommand {
     command(args, profile, false).unwrap_or_else(|_| CliCommand::new(["--nomifun-invalid-profile"], false))
 }
 pub fn profiles_command() -> CliCommand { CliCommand::new(["profile", "list"], false) }
+pub fn auth_users_command(profile: &str) -> Result<CliCommand, HubError> {
+    command(["auth", "list", "--json"], Some(profile), false)
+}
+pub fn logout_command(profile: &str) -> Result<CliCommand, HubError> {
+    command(["auth", "logout", "--json"], Some(profile), true)
+}
 pub fn configure_command(request: &AuthStartRequest) -> Result<CliCommand, HubError> {
     let name = request.profile.as_deref().ok_or_else(|| HubError::invalid("新应用配置必须使用专用连接名称"))?;
     valid_id(name, "连接名称")?;
@@ -220,15 +225,6 @@ fn link_target(value: &str) -> Result<(String, String), HubError> {
     if !document_type(kind) && !matches!(kind,"bitable"|"wiki") { return Err(HubError::invalid("此链接不是飞书文档资源")); }
     valid_resource_token(parts[1])?;
     Ok((kind.into(),parts[1].into()))
-}
-pub fn resource_link(link: &ResourceLink) -> Result<OfficeItem, HubError> {
-    let (kind,id)=link_target(&link.url)?;
-    let title=link.title.as_deref().unwrap_or(&id);
-    valid_text(title,"资源标题",500)?;
-    let mut item=OfficeItem::new(&id,if kind=="bitable"{"base"}else{"document"},title);
-    item.url=Some(link.url.clone());
-    if kind=="bitable" { let (base,table)=base_coordinates(&link.url);item.base_token=base;item.table_id=table; }
-    Ok(item)
 }
 pub fn document_target(item: &OfficeItem) -> Option<(String, String)> {
     if document_type(&item.kind) && valid_resource_token(&item.id).is_ok() {
@@ -331,6 +327,33 @@ pub fn parse_profiles(output: &CliOutput) -> Result<Vec<OfficeProfile>, HubError
             user_name: text(item.get("user")), token_status: text(item.get("tokenStatus")) })
     }).collect()
 }
+/// v1.0.98 lists users only in the selected profile. Its logout clears all of
+/// those users, so the caller must prove this is a zero- or single-user profile.
+pub fn parse_auth_users(output: &CliOutput) -> Result<Vec<OfficeActor>, HubError> {
+    if !output.successful() { return Err(auth_output_error(output)); }
+    let value = output_value(output).ok_or_else(|| HubError::unavailable("无法核验此连接的登录账号，请刷新后重试"))?;
+    let entries = if let Some(entries) = value.as_array() { entries }
+        else if value.get("ok") == Some(&Value::Bool(true))
+            && matches!(value.get("reason").and_then(Value::as_str), Some("not_logged_in" | "not_configured")) {
+            value.get("users").and_then(Value::as_array).filter(|users| users.is_empty())
+                .ok_or_else(|| HubError::unavailable("飞书账号列表格式不兼容，请刷新后重试"))?
+        } else { return Err(HubError::unavailable("飞书账号列表格式不兼容，请刷新后重试")); };
+    entries.iter().map(|item| {
+        let app_id = text(item.get("appId")).ok_or_else(|| HubError::unavailable("登录账号缺少应用标识，无法安全退出"))?;
+        let user_id = text(item.get("userOpenId")).ok_or_else(|| HubError::unavailable("登录账号缺少用户标识，无法安全退出"))?;
+        Ok(OfficeActor { app_id, user_id, name: text(item.get("userName")).unwrap_or_default() })
+    }).collect()
+}
+pub fn parse_logout(output: &CliOutput) -> Result<(), HubError> {
+    if !output.successful() { return Err(output_error(output, true)); }
+    let value = output_value(output).ok_or_else(|| HubError::unknown("退出结果无法确认，请刷新连接状态后重试"))?;
+    if value.get("ok") == Some(&Value::Bool(true))
+        && (value.get("loggedOut") == Some(&Value::Bool(true))
+            || (value.get("loggedOut") == Some(&Value::Bool(false))
+                && matches!(value.get("reason").and_then(Value::as_str), Some("not_logged_in" | "not_configured")))) {
+        Ok(())
+    } else { Err(HubError::unknown("退出结果无法确认，请刷新连接状态后重试")) }
+}
 pub fn parse_identity(output: &CliOutput) -> Result<CliIdentity, HubError> {
     if !output.successful() {
         let problem = error_value(output).unwrap_or(Value::Null);
@@ -397,7 +420,6 @@ pub fn parse_configured(output: &CliOutput) -> Result<String, HubError> {
 
 pub fn query_commands(query: &OfficeQuery, profile: Option<&str>) -> Result<Vec<CliCommand>, HubError> {
     let commands = match query {
-        OfficeQuery::Recent => Vec::new(),
         OfficeQuery::Documents { query, filter, cursor } => {
             if query.chars().count() > 30 || query.contains('\0') { return Err(HubError::invalid("搜索关键词最多 30 个字符")); }
             // Empty-query browsing and keyword search share the official Search
@@ -518,14 +540,12 @@ fn array_field<'a>(value: &'a Value, key: &str, message: &str) -> Result<&'a [Va
     }
 }
 pub fn normalize_query(query: &OfficeQuery, outputs: &[CliOutput]) -> Result<OfficeQueryResult, HubError> {
-    if matches!(query,OfficeQuery::Recent) { return Ok(OfficeQueryResult::default()); }
     if outputs.is_empty() { return Err(HubError::unavailable("办公查询缺少 CLI 返回")); }
     let data = business_value(outputs.last().unwrap(),false)?;
     let mut result = OfficeQueryResult { has_more: data.get("has_more").and_then(Value::as_bool).unwrap_or(false),
         next_cursor: first_text(&data,&["page_token","next_page_token","next_offset"]),
         warnings: warnings(&data), ..OfficeQueryResult::default() };
     match query {
-        OfficeQuery::Recent => {},
         OfficeQuery::Documents { cursor, .. } => {
             result=normalize_documents(&data,cursor.as_deref())?;
         }
@@ -821,6 +841,21 @@ mod tests {
     use std::collections::BTreeMap;
     fn output(data:Value)->CliOutput{CliOutput::fixture(0,json!({"ok":true,"identity":"user","data":data}).to_string(),"")}
     #[test]
+    fn logout_uses_the_explicit_profile_and_requires_the_official_auth_response_shapes(){
+        let users=auth_users_command("work").unwrap();assert_eq!(users.args,["--profile","work","auth","list","--json"]);assert!(!users.mutating);
+        let logout=logout_command("work").unwrap();assert_eq!(logout.args,["--profile","work","auth","logout","--json"]);assert!(logout.mutating);
+        let users=parse_auth_users(&CliOutput::fixture(0,r#"[{"appId":"cli_x","userOpenId":"ou_x","userName":"User","tokenStatus":"expired"}]"#," ")).unwrap();
+        assert_eq!(users.len(),1);assert_eq!(users[0].app_id,"cli_x");assert_eq!(users[0].user_id,"ou_x");
+        assert!(parse_auth_users(&CliOutput::fixture(0,r#"{"ok":true,"users":[],"reason":"not_logged_in"}"#,"")).unwrap().is_empty());
+        for value in [json!({"ok":true,"users":[]}),json!([{"userName":"display name only"}]),json!({"ok":true,"data":[]})]{
+            assert!(parse_auth_users(&CliOutput::fixture(0,value.to_string(),"")).is_err());
+        }
+        assert!(parse_logout(&CliOutput::fixture(0,r#"{"ok":true,"loggedOut":true}"#,"")).is_ok());
+        assert!(parse_logout(&CliOutput::fixture(0,r#"{"ok":true,"loggedOut":false,"reason":"not_logged_in"}"#,"")).is_ok());
+        assert!(parse_logout(&CliOutput::fixture(0,r#"{"ok":true}"#,"")).is_err());
+        assert!(!parse_logout(&CliOutput{started:true,timed_out:true,..Default::default()}).unwrap_err().not_executed);
+    }
+    #[test]
     fn scope_mapping_separates_read_write_and_tasklist_permissions(){
         let p=permissions(&["task:task:read".into()]);
         assert!(p.iter().find(|p|p.capability=="tasks.read").unwrap().granted);
@@ -965,11 +1000,11 @@ mod tests {
         }
     }
     #[test]
-    fn links_remember_navigation_without_reading_or_guessing_a_wiki_target(){
-        let item=resource_link(&ResourceLink{url:"https://team.feishu.cn/wiki/wiki_real?from=link".into(),title:Some("Wiki".into())}).unwrap();
-        assert_eq!(item.id,"wiki_real");assert!(document_target(&item).is_none());
+    fn document_targets_never_infer_deletion_authority_from_a_wiki_or_invalid_link(){
+        let mut item=OfficeItem::new("wiki_real","wiki","Wiki");item.url=Some("https://team.feishu.cn/wiki/wiki_real?from=link".into());
+        assert!(document_target(&item).is_none());
         for url in ["https://evil.test/docx/a","https://team.feishu.cn/docx/a/blocks","https://team.feishu.cn/","https://team.feishu.cn/docx/a%2Fb"] {
-            assert!(resource_link(&ResourceLink{url:url.into(),title:None}).is_err());
+            item.url=Some(url.into());assert!(document_target(&item).is_none());
         }
     }
     #[test]

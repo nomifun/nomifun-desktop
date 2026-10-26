@@ -160,30 +160,26 @@ async fn old_unknown_inputs_remain_readable_but_cannot_execute_or_gain_false_con
     assert!(store.start_attempt(&owner,&op.id,&op.items[0].id).await.is_err());
     sqlx::query("UPDATE office_operation_items SET status='unknown' WHERE item_id=?").bind(&op.items[0].id).execute(db.pool()).await.unwrap();
     let read=store.get(&owner,&op.id).await.unwrap().unwrap();assert_eq!(read.items[0].mutation,legacy);
-    assert_eq!(store.list(&owner,30,None).await.unwrap().items[0].items[0].mutation,legacy);
     assert_eq!(store.create_submitted(&owner,&c.id,&a,"nomifun",&request(&a,vec![save])).await.unwrap_err().related_operation_id,Some(op.id.clone()),"a document deletion cannot bypass an existing unknown fence");
     assert!(store.append_observation(&owner,&op.id,&op.items[0].id,ObservationKind::TargetReadback,"text exists",Some(&json!({"id":"doc-real","content":"legacy append"})),true,Some("doc-real"),None).await.is_err());
     db.close().await;
 }
 
 #[tokio::test]
-async fn thin_navigation_and_unknown_receipts_survive_agent_reset_and_snapshot(){
+async fn connection_and_unknown_receipts_survive_agent_reset_and_snapshot(){
     let dir=tempfile::tempdir().unwrap();let db=nomifun_db::init_database(&dir.path().join("source.db")).await.unwrap();
     let owner:String=sqlx::query_scalar("SELECT owner_user_id FROM installation_identity").fetch_one(db.pool()).await.unwrap();
     let store=OfficeHubStore::new(db.pool().clone());
     let c=OfficeConnection{id:new_id(),name:"Feishu".into(),enabled:true,profile:Some("nomifun".into()),executable:None,created_at:String::new(),updated_at:String::new()};
     store.save_connection(&owner,&c).await.unwrap();let a=OfficeActor{app_id:"cli_test".into(),user_id:"ou_a".into(),name:"A".into()};
     let op=submit(&store,&owner,&c,&a,vec![base("snapshot")]).await;let op=finish(&store,&owner,&op,0,ItemStatus::Unknown).await;
-    let mut recent=OfficeItem::new("doc-real","document","Actual opened document");recent.description=Some("never cache this content".into());recent.fields.insert("remote-value".into(),json!("do not persist"));
-    store.remember_recent(&owner,&c.id,&recent).await.unwrap();recent.title="Updated navigation title".into();store.remember_recent(&owner,&c.id,&recent).await.unwrap();
-    let text:String=sqlx::query_scalar("SELECT recent_resources_json FROM office_connections").fetch_one(db.pool()).await.unwrap();
-    assert!(!text.contains("never cache"));assert!(!text.contains("remote-value"));assert!(text.contains("Updated navigation title"));
     let report=nomifun_db::reset_agent_data(db.pool()).await.unwrap();
     for table in ["office_connections","office_operations","office_operation_items","office_operation_receipts"]{assert!(report.preserved_rows.contains_key(table))}
     let snapshot=dir.path().join("snapshot.db");db.snapshot_into(&snapshot).await.unwrap();
     let copied=nomifun_db::open_database_for_backup(&snapshot).await.unwrap();let copied_store=OfficeHubStore::new(copied.pool().clone());
     assert_eq!(copied_store.get(&owner,&op.id).await.unwrap().unwrap().items[0].status,ItemStatus::Unknown);
-    let items=copied_store.recent(&owner,&c.id,20).await.unwrap();assert_eq!(items.len(),1);assert_eq!(items[0].title,recent.title);assert!(items[0].fields.is_empty());assert!(items[0].description.is_none());assert!(items[0].opened_at.is_some());assert!(items[0].modified_at.is_none());
+    let connection=copied_store.connection(&owner).await.unwrap().unwrap();
+    assert_eq!(connection.id,c.id);assert_eq!(connection.profile,c.profile);assert_eq!(connection.name,c.name);assert!(connection.enabled);
     copied.close().await;db.close().await;
 }
 

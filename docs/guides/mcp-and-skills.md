@@ -265,7 +265,6 @@ shapes. Follow each installed command's contract.
 Credentials stay in the CLI's store. Application permissions, user consent and
 resource membership are separate. Selecting the skill grants no additional tools
 or Feishu access, and disabling Office Hub does not revoke remote authorization.
-Workbench activity covers its own operations only; channel bots remain separate.
 
 The full official setup command, `npx @larksuite/cli@latest install`, is available
 for the user to run explicitly in their terminal. It may install global upstream

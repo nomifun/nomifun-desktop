@@ -80,7 +80,7 @@ Node 使用完整官方发行目录，包含 npm、npx、模块和启动器；�
 受管 npm 缺省安装到独立于可替换运行时缓存的持久用户工具目录，用户原有 prefix 仍优先。
 
 `nomifun-runtime::prepare_existing_process_launch` 只接受绝对路径的现存程序文件，
-组合相同的子进程环境并保留字面 argv，但不调用受管供应、不创建目录。办公工作台的
+组合相同的子进程环境并保留字面 argv，但不调用受管供应、不创建目录。办公页面的
 诊断、业务调用和已有 npm 程序的 prefix 查询使用此入口；只有显式「准备组件」操作中的
 相对 `npm` 命令可以使用允许供应的入口。飞书原生 CLI 不会因为位于 npm prefix 中而
 获得 Node 依赖；未知脚本缺少解释器时报告不可用，诊断不会替它安装。现有 Agent、
@@ -154,9 +154,9 @@ Office 转换使用内嵌 OfficeCLI，不需要 Node/Bun 下载或网络访问�
 体积验收须使用同一 release profile 和压缩格式实际构建 App、DMG 对比，不能把
 压缩组件大小直接当成安装包增量。
 
-## 飞书工作台 CLI
+## 飞书办公 CLI
 
-云端[办公工作台](../guides/office-hub.zh.md)使用官方 `@larksuite/cli`，
+云端[办公页面](../guides/office-hub.zh.md)使用官方 `@larksuite/cli`，
 已验证兼容基线为 1.0.98，与本地文件渲染使用的内嵌 OfficeCLI 分开。
 飞书 CLI 不进入安装包，也不是现役 `component` 调用目标。
 
@@ -165,11 +165,12 @@ Office 转换使用内嵌 OfficeCLI，不需要 Node/Bun 下载或网络访问�
 由共享 prefix 的准备锁串行；外部安装保留原路径和维护方式。
 上游完整向导仅提供命令供用户自行执行，可能另装全局 Skills；只读更新检查不安装或同步 Skills。
 
-业务查询与保存均由 CLI 执行。文档只编辑有真实 block ID 和 revision 的原生普通段落，
-不支持的结构只读。保存一次提交稳定请求，响应丢失按原请求身份恢复。
+业务查询与保存均由 CLI 执行。文档和多维表格在浏览器打开，NomiFun 提供文档搜索、
+标题创建及确切目标的删除确认。保存一次提交稳定请求，响应丢失按原请求身份恢复。
 文档与 Base 的待核验目标继续受 SQL 写入栅栏保护，身份变化不能绕过。
 同一个进程 owner 保持收尾，直到原进程树给出完成证明；取消执行不会提前结束收尾。
-工作台只保留四张产品表与薄导航配置，独立于 canonical Agent 事实，详见
+办公页面只保留文档、日程与任务两个页签，默认文档；四张产品表承载连接和已提交请求回执，
+独立于 canonical Agent 事实，详见
 [现役计划](../handoffs/office-feishu-workbench.zh.md)。
 
 ## Office 请求与缓存
