@@ -11,7 +11,6 @@
     "overview": "工作台",
     "documents": "文档",
     "agenda": "日程与任务",
-    "base": "多维表格",
     "activity": "操作记录"
   },
   "actions": {
@@ -43,7 +42,8 @@
     "select": "校验所选程序",
     "copy": "复制命令",
     "openBrowser": "浏览器打开",
-    "delete": "删除"
+    "delete": "删除",
+    "back": "返回"
   },
   "setup": {
     "environment": "准备环境",
@@ -109,20 +109,17 @@
     "exactScopes": "本次申请的权限",
     "groups": {
       "documents": "列出与搜索文档",
-      "agenda": "查看日程与任务",
-      "base": "读取多维表格"
+      "agenda": "查看日程与任务"
     },
     "groupHints": {
-      "documents": "列出云空间文档并搜索有权访问的内容，正文在浏览器中打开。",
-      "agenda": "查看日程、任务及可访问的任务清单。",
-      "base": "按数据表链接读取字段与记录。"
+      "documents": "列出和搜索当前账号可检索的云文档与知识库，正文在浏览器中打开。",
+      "agenda": "查看日程、任务及可访问的任务清单。"
     },
     "capabilities": {
       "documents": {
-        "search": "搜索文档",
         "create": "创建文档",
-        "list": "列出文档",
-        "delete": "删除文档"
+        "delete": "删除文档",
+        "browse": "列出与搜索可访问文档"
       },
       "people": {
         "read": "查询可见成员"
@@ -178,8 +175,6 @@
     "name": "名称",
     "type": "类型",
     "opened": "最近打开",
-    "firstDocument": "暂无文档。",
-    "notFound": "没有匹配的内容。",
     "filters": {
       "all": "全部",
       "document": "云文档",
@@ -188,9 +183,12 @@
     "updated": "更新时间",
     "actions": "操作",
     "browserHint": "文档内容在浏览器中打开。",
-    "listHint": "列出云空间根目录的文档；其他文档可通过搜索或链接打开。",
+    "listHint": "按更新时间列出当前账号可检索的文档，包含云空间和知识库。",
     "invalidLink": "请使用完整的飞书或 Lark 官方 HTTPS 文档链接。",
-    "missingLink": "该资源没有可用链接，请通过搜索查找或粘贴完整文档链接。"
+    "missingLink": "该资源没有可用链接，请通过搜索查找或粘贴完整文档链接。",
+    "queryEmpty": "当前查询没有匹配的文档。",
+    "recentEmpty": "最近打开的入口中没有匹配内容。",
+    "paginationError": "分页信息异常，请刷新后重试。"
   },
   "documents": {
     "title": "文档标题",
@@ -227,29 +225,6 @@
     "personal": "不添加参会人或视频会议",
     "empty": "此日期暂无日程。",
     "all": "全部日程与任务"
-  },
-  "base": {
-    "link": "飞书数据表链接",
-    "linkPlaceholder": "粘贴完整的飞书数据表链接",
-    "linkHint": "在飞书打开目标表后，复制包含 table 参数的完整 /base/ 链接。",
-    "incompleteLink": "请在飞书打开目标表后，复制包含 table 参数的完整 /base/ 链接。",
-    "invalidLink": "请使用飞书或 Lark 官方 HTTPS 数据表链接。",
-    "open": "打开数据表",
-    "empty": "打开一张数据表",
-    "selected": "已选 {{count}} 条",
-    "selectAvailable": "选择可操作记录",
-    "selectRecord": "选择{{title}}",
-    "writeState": "本次操作状态",
-    "batch": "修改记录",
-    "batchTitle": "修改 {{count}} 条记录",
-    "field": "要修改的字段",
-    "value": "新值",
-    "chooseValue": "选择新值",
-    "noWritable": "没有可在这里编辑的字段。",
-    "simpleFields": "支持文字、数值、复选框及已知选项字段；复杂字段请在飞书编辑。",
-    "record": "记录",
-    "before": "当前值",
-    "after": "新值"
   },
   "operation": {
     "summary": {
@@ -293,10 +268,7 @@
   },
   "validation": {
     "required": "请填写必填内容。",
-    "number": "请输入有限数值。",
-    "json": "字段值无效。",
-    "date": "请输入有效日期与时间。",
-    "batch": "请选择 1 到 200 条可操作记录。"
+    "date": "请输入有效日期与时间。"
   },
   "deleted": "已删除。"
 }

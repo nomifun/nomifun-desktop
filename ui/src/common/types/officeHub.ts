@@ -36,10 +36,10 @@ export interface AuthorizationFlow {
   missing_scopes: string[]; console_url: string | null; message: string | null;
 }
 export type TaskRelation = 'assigned' | 'created' | 'tasklist';
+export type DocumentFilter = 'all' | 'document' | 'base';
 export type OfficeQuery =
   | { kind: 'recent' }
-  | { kind: 'documents' }
-  | { kind: 'search'; query: string; cursor: string | null }
+  | { kind: 'documents'; query: string; filter: DocumentFilter; cursor: string | null }
   | { kind: 'people'; query: string }
   | { kind: 'tasklists'; cursor: string | null }
   | { kind: 'tasks'; relation: TaskRelation; tasklist_id: string | null; cursor: string | null }

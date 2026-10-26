@@ -87,13 +87,6 @@
 .office-form-row>.office-input{flex:1}
 .office-form-row>.office-button{margin-bottom:12px}
 .office-fieldset{border:0;margin:0;padding:0;min-width:0}
-.office-link-open{display:flex;gap:8px;margin-bottom:15px;align-items:center;min-width:0}
-.office-link-open>.office-input{flex:1}
-.office-table-heading{margin:14px 0 7px}
-.office-base-table{min-width:520px}
-.office-base-table th:first-child{width:32px}
-.office-base-table td{max-width:240px}
-.office-base-table th:last-child{width:130px}
 .office-dialog-overlay{position:absolute;z-index:40;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;background:color-mix(in srgb,var(--text-primary) 24%,transparent)}
 .office-dialog{display:flex;flex-direction:column;min-height:0;width:min(600px,100%);max-height:100%;border:1px solid var(--border-base);border-radius:9px;background:var(--bg-base);box-shadow:0 12px 42px color-mix(in srgb,var(--text-primary) 14%,transparent);overflow:hidden}
 .office-dialog__header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex:none;min-height:54px;padding:12px 20px;border-bottom:1px solid var(--border-base)}

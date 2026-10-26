@@ -18,6 +18,7 @@ struct FixtureExecutor {
     base_batches:AtomicUsize,
     timeout_document:AtomicBool,
     document_deletes:AtomicUsize,
+    document_pages:AtomicBool,
     old_token_expired:AtomicBool,
     timeout_tasks:AtomicBool,
     hold_task:AtomicBool,
@@ -36,10 +37,10 @@ struct FixtureExecutor {
 impl FixtureExecutor {
     fn new()->Self{
         Self{calls:Mutex::new(Vec::new()),scopes:Mutex::new(vec![
-            "task:task:read".into(),"task:tasklist:read".into(),"space:document:retrieve".into(),
+            "task:task:read".into(),"task:tasklist:read".into(),"search:docs:read".into(),
             "base:record:read".into(),"base:field:read".into()]),requested_scopes:Mutex::new(Vec::new()),
             task_creates:AtomicUsize::new(0),base_batches:AtomicUsize::new(0),old_token_expired:AtomicBool::new(false),
-            timeout_document:AtomicBool::new(false),document_deletes:AtomicUsize::new(0),
+            timeout_document:AtomicBool::new(false),document_deletes:AtomicUsize::new(0),document_pages:AtomicBool::new(false),
             timeout_tasks:AtomicBool::new(false),hold_task:AtomicBool::new(false),
             task_entered:Semaphore::new(0),task_release:Semaphore::new(0),task_returned:Semaphore::new(0),
             hold_auth_cleanup:AtomicBool::new(false),auth_poll_entered:Semaphore::new(0),
@@ -80,10 +81,21 @@ impl CliExecutor for FixtureExecutor {
             return Ok(CliOutput::fixture(0,json!({"ok":true,"current_version":"1.0.98",
                 "latest_version":"1.0.99","action":"update_available"}).to_string(),""))
         }
-        if contains(&args,&["drive","files","list"]){
+        if contains(&args,&["drive","+search"]){
             assert!(!command.mutating);
-            return Ok(Self::envelope(json!({"files":[{"token":"doc_real","type":"docx","name":"Fixture document",
-                "url":"https://example.feishu.cn/docx/doc_real","modified_time":"1793000000"}],"has_more":false})))
+            let entry=|id:&str,wiki:bool,kind:&str|json!({"entity_type":if wiki{"WIKI"}else{"DOC"},"title_highlighted":"Fixture document",
+                "summary_highlighted":"Not a body preview","result_meta":{"token":id,"doc_types":kind,
+                    "url":format!("https://example.feishu.cn/{}/{}",if wiki{"wiki"}else if kind=="BITABLE"{"base"}else{"docx"},id),"update_time":"1793000000"}});
+            if contains(&args,&["--doc-types","bitable"]){
+                return Ok(Self::envelope(json!({"results":[entry("base_real",false,"BITABLE")],"has_more":false})))
+            }
+            if self.document_pages.load(Ordering::SeqCst){
+                let next=args.windows(2).find(|pair|pair[0]=="--page-token");
+                let entries=if next.is_none(){(0..20).map(|n|entry(&format!("wiki_{n}"),true,"DOCX")).collect::<Vec<_>>()}
+                    else{assert_eq!(next.unwrap()[1],"documents-next");(20..25).map(|n|entry(&format!("resource_{n}"),n<23,"DOCX")).collect()};
+                return Ok(Self::envelope(json!({"results":entries,"has_more":next.is_none(),"page_token":"documents-next"})))
+            }
+            return Ok(Self::envelope(json!({"results":[entry("doc_real",false,"DOCX")],"has_more":false})))
         }
         if contains(&args,&["drive","+delete"]){
             assert!(command.mutating);self.document_deletes.fetch_add(1,Ordering::SeqCst);
@@ -528,7 +540,7 @@ async fn document_management_never_reads_content_and_successful_delete_removes_r
     let f=Fixture::new(true).await;
     let link=ResourceLink{url:"https://example.feishu.cn/docx/doc_real".into(),title:Some("Fixture document".into())};
     f.service.remember_resource(link).await.unwrap();
-    let listed=f.service.query(OfficeQuery::Documents).await.unwrap();assert_eq!(listed.items[0].id,"doc_real");
+    let listed=f.service.query(OfficeQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:None}).await.unwrap();assert_eq!(listed.items[0].id,"doc_real");
     let input=request(vec![OfficeMutation::DocumentDelete{client_item_id:Uuid::now_v7().to_string(),document_id:"doc_real".into(),document_type:"docx".into(),title:"Fixture document".into()}]);
     let denied=f.service.execute(input.clone()).await.unwrap_err();assert_eq!(denied.code,"OFFICE_PERMISSION");
     assert_eq!(denied.missing_scopes,vec!["drive:drive.metadata:readonly","space:document:delete"]);
@@ -551,7 +563,7 @@ async fn unknown_document_deletion_preserves_one_attempt_and_blocks_another_requ
     let input=request(vec![OfficeMutation::DocumentDelete{client_item_id:Uuid::now_v7().to_string(),document_id:"doc_real".into(),document_type:"docx".into(),title:"Fixture document".into()}]);
     let submitted=f.service.execute(input.clone()).await.unwrap();f.join_workers().await;
     let original=f.service.operation(&submitted.id).await.unwrap();assert_eq!(original.items[0].status,ItemStatus::Unknown);
-    let listed=f.service.query(OfficeQuery::Documents).await.unwrap();
+    let listed=f.service.query(OfficeQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:None}).await.unwrap();
     assert_eq!(listed.items[0].pending_operation_id.as_deref(),Some(submitted.id.as_str()));
     assert_eq!(listed.items[0].pending_status,Some(ItemStatus::Unknown));
     assert_eq!(f.service.query(OfficeQuery::Recent).await.unwrap().items.len(),1);
@@ -573,5 +585,23 @@ async fn creating_a_blank_document_remembers_its_returned_link(){
     let recent=f.service.query(OfficeQuery::Recent).await.unwrap();
     assert_eq!(recent.items[0].title,"New document");assert_eq!(recent.items[0].url.as_deref(),Some("https://example.feishu.cn/docx/doc_real"));
     assert!(f.executor.calls().iter().all(|call|!call.args.contains(&"--content".into())));
+    f.close().await;
+}
+
+#[tokio::test]
+async fn existing_wiki_documents_paginate_with_the_existing_login_and_server_type_filter(){
+    let f=Fixture::new(true).await;f.executor.document_pages.store(true,Ordering::SeqCst);
+    let status=f.service.status().await.unwrap();
+    assert!(status.permissions.iter().find(|permission|permission.capability=="documents.browse").unwrap().granted);
+    assert!(!lock(&f.executor.scopes).contains(&"space:document:retrieve".into()));
+    let first=f.service.query(OfficeQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:None}).await.unwrap();
+    assert_eq!(first.items.len(),20);assert!(first.items.iter().all(|item|item.kind=="wiki"));assert!(first.has_more);
+    let second=f.service.query(OfficeQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:first.next_cursor}).await.unwrap();
+    assert_eq!(second.items.len(),5);assert!(!second.has_more);assert!(second.next_cursor.is_none());
+    assert_eq!(second.items.iter().filter(|item|item.kind=="docx").count(),2);
+    let ids=first.items.iter().chain(&second.items).map(|item|&item.id).collect::<HashSet<_>>();assert_eq!(ids.len(),25);
+    let base=f.service.query(OfficeQuery::Documents{query:String::new(),filter:DocumentFilter::Base,cursor:None}).await.unwrap();
+    assert_eq!(base.items.len(),1);assert_eq!(base.items[0].kind,"base");
+    assert!(f.executor.calls().iter().all(|call|!call.mutating&&!contains(&call.args,&["drive","files","list"])&&!contains(&call.args,&["docs","+fetch"])));
     f.close().await;
 }

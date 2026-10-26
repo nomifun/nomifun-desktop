@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { BackendHttpError } from '@/common/adapter/httpBridge';
 import type { OfficeOperation, OfficeStatus } from '@/common/types/officeHub';
-import { baseInputText, editableFieldValue, mutationTitle, operationKind, parseBaseLink, relatedAuthorization, relatedOperation, sameActor, scopesFor, selectFieldOptions, terminalAuth } from './model';
+import { mutationTitle, operationKind, relatedAuthorization, relatedOperation, sameActor, scopesFor, terminalAuth } from './model';
 
 describe('compact office boundaries', () => {
   test('identity follows application and user, not display name', () => {
@@ -32,17 +32,5 @@ describe('compact office boundaries', () => {
   test('cancelling remains observable while denied is terminal', () => {
     expect(terminalAuth('cancelling')).toBe(false);
     expect(terminalAuth('denied')).toBe(true);
-  });
-  test('Base URLs require official HTTPS and an exact table', () => {
-    expect(parseBaseLink('https://team.feishu.cn/base/baseA?table=tblA')).toEqual({ base_token: 'baseA', table_id: 'tblA' });
-    for (const value of ['http://team.feishu.cn/base/a?table=b', 'https://feishu.cn.evil.test/base/a?table=b', 'https://team.feishu.cn/wiki/a?table=b', 'https://team.feishu.cn/base/a', 'https://team.feishu.cn/base/a?table=b&table=c', 'https://team.feishu.cn/base/a?table=tbl%2Fbad']) expect(() => parseBaseLink(value)).toThrow();
-  });
-  test('typed Base inputs preserve platform values and names', () => {
-    const field = { id: 'fld', name: 'Status', field_type: 'select', writable: true, options: [{ id: 'opt', name: 'Contacted' }, { id: 'opaque' }] };
-    expect(selectFieldOptions(field)).toEqual([{ value: 'Contacted', label: 'Contacted' }]);
-    expect(baseInputText(field, ['New', 'Contacted'])).toBe('["New","Contacted"]');
-    expect(editableFieldValue(field, '["Contacted"]')).toEqual(['Contacted']);
-    expect(editableFieldValue({ ...field, field_type: 'number' }, '12.5')).toBe(12.5);
-    expect(() => editableFieldValue({ ...field, field_type: 'number' }, 'NaN')).toThrow();
   });
 });

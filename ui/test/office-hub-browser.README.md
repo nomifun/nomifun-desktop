@@ -6,17 +6,24 @@ The page imports the actual Office Hub renderer. All business methods and the
 browser opener are simulated; it never accesses a backend, credentials, remote
 documents or external websites. The footer records writes and browser links.
 
-At 880×600 and a wider desktop viewport:
+At 880×600 and a wider desktop viewport, the top navigation contains only
+工作台、文档、日程与任务、操作记录. Base tables use the 多维表格 filter under 文档.
+
+Check the following:
 
 1. Click a document name or 浏览器打开. The footer records its exact URL;
    the document list remains visible without a content preview or editor.
-2. Search for a title and clear the search to return to the list.
+2. Search for a title and clear the search to return to the list. Filters apply
+   to the simulated server collection, before pagination.
 3. Create a document by title. Only the title is requested; it appears in the list.
 4. Open 删除, check the title and URL, then cancel. No write is recorded.
 5. Confirm deletion. The item disappears and exactly one write is recorded.
 6. Open `?scenario=pending`, confirm a deletion, close the dialog, and verify
    the row disables deletion and points to the original operation.
-7. Open `?scenario=empty` and verify the create and open-link entries remain usable.
+7. Open `?scenario=paged`; without a keyword, page through 25 existing documents.
+8. Open `?scenario=error`; verify a read error and retry entry without an empty
+   account claim.
+9. Open `?scenario=empty` and verify the create and open-link entries remain usable.
 
 Browser results use simulated business data. Rust integration tests separately
 cover permissions, CLI commands, committed receipts and pending fences.

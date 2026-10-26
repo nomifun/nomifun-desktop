@@ -1,8 +1,8 @@
 import { isBackendHttpError, redactSensitiveText } from '@/common/adapter/httpBridge';
 import { CANONICAL_UUID_V7 } from '@/common/types/ids';
-import type { AuthPhase, OfficeActor, OfficeField, OfficeItem, OfficeMutation, OfficeOperation, OfficeStatus, OperationItem } from '@/common/types/officeHub';
+import type { AuthPhase, OfficeActor, OfficeItem, OfficeMutation, OfficeOperation, OfficeStatus, OperationItem } from '@/common/types/officeHub';
 
-export const OFFICE_TABS = ['overview', 'documents', 'agenda', 'base', 'activity'] as const;
+export const OFFICE_TABS = ['overview', 'documents', 'agenda', 'activity'] as const;
 export type OfficeTab = typeof OFFICE_TABS[number];
 export const officeTab = (value: string | null): OfficeTab => OFFICE_TABS.includes(value as OfficeTab) ? value as OfficeTab : 'overview';
 export const liveOperation = (operation: OfficeOperation) => operation.status === 'queued' || operation.status === 'running';
@@ -27,7 +27,7 @@ export function scopesFor(status: OfficeStatus | null, capabilities: string[]): 
   return [...new Set((status?.permissions ?? []).filter(permission => capabilities.includes(permission.capability) && !permission.granted).flatMap(permission => permission.required_scopes))];
 }
 export const writeScopes = (status: OfficeStatus | null, items: OfficeMutation[]) => scopesFor(status, items.map(item => writeCapabilities[item.kind]));
-export const readGroups = { documents: ['documents.search', 'documents.list'], agenda: ['calendar.read', 'tasks.read', 'tasklists.read'], base: ['base.read'] };
+export const readGroups = { documents: ['documents.browse'], agenda: ['calendar.read', 'tasks.read', 'tasklists.read'] };
 export const localDate = () => {
   const now = new Date();
   return [now.getFullYear(), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0')].join('-');
@@ -55,12 +55,6 @@ export function officeError(error: unknown): string {
   }
   return redactSensitiveText(error instanceof Error ? error.message : String(error));
 }
-export const fieldValueText = (value: unknown) => value === null || value === undefined ? '' : typeof value === 'string' ? value : JSON.stringify(value);
-export function fieldDisplayText(value: unknown): string {
-  if (Array.isArray(value) && value.every(item => typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean')) return value.map(String).join(', ');
-  if (Array.isArray(value) && value.every(item => item && typeof item === 'object' && typeof item.text === 'string')) return value.map(item => item.text).join('');
-  return fieldValueText(value);
-}
 export function officeResourceUrl(input: string): string {
   const value = input.trim();
   let url: URL;
@@ -78,53 +72,6 @@ export function documentTarget(item: OfficeItem): { document_id: string; documen
     const kind = path === 'docs' ? 'doc' : path === 'sheets' ? 'sheet' : path;
     return types.includes(kind) ? { document_id: id, document_type: kind } : null;
   } catch { return null; }
-}
-export function parseBaseLink(input: string): { base_token: string; table_id: string } {
-  let url: URL;
-  try { url = new URL(input.trim()); } catch { throw new Error('office.base.incompleteLink'); }
-  const official = ['feishu.cn', 'larksuite.com', 'larkoffice.com'].some(domain => url.hostname === domain || url.hostname.endsWith('.' + domain));
-  if (url.protocol !== 'https:' || !official || url.username || url.password || url.port) throw new Error('office.base.invalidLink');
-  const match = /^\/base\/([A-Za-z0-9_-]+)\/?$/.exec(url.pathname);
-  const tables = url.searchParams.getAll('table');
-  if (!match || tables.length !== 1 || !/^[A-Za-z0-9_-]+$/.test(tables[0])) throw new Error('office.base.incompleteLink');
-  return { base_token: match[1], table_id: tables[0] };
-}
-export function selectFieldMode(field: OfficeField): 'single' | 'multiple' | null {
-  const type = field.field_type.toLowerCase().replace(/[\s_-]/g, '');
-  if (['singleselect', 'select', '3'].includes(type)) return 'single';
-  if (['multiselect', 'multiplechoice', 'multipleselect', '4'].includes(type)) return 'multiple';
-  return null;
-}
-export function selectFieldOptions(field: OfficeField): Array<{ value: string; label: string }> {
-  const value = field.options;
-  const options = Array.isArray(value) ? value : value && typeof value === 'object' && Array.isArray((value as Record<string, unknown>).options) ? (value as { options: unknown[] }).options : [];
-  const names = options.flatMap(option => {
-    if (typeof option === 'string') return [{ value: option, label: option }];
-    if (!option || typeof option !== 'object') return [];
-    const record = option as Record<string, unknown>;
-    const name = typeof record.name === 'string' ? record.name : null;
-    return name ? [{ value: name, label: name }] : [];
-  });
-  return names.filter((item, index) => names.findIndex(candidate => candidate.value === item.value) === index);
-}
-export function baseInputText(field: OfficeField, value: unknown): string {
-  if (selectFieldMode(field) && selectFieldOptions(field).length) {
-    return JSON.stringify(Array.isArray(value) ? value : typeof value === 'string' && value ? [value] : []);
-  }
-  if (['text', 'string', 'multiline_text', 'single_line_text', '1', 'number', 'currency', 'percent', '2'].includes(field.field_type.toLowerCase())) return fieldDisplayText(value);
-  return fieldValueText(value);
-}
-export function editableFieldValue(field: OfficeField, input: string): unknown {
-  const type = field.field_type.toLowerCase();
-  if (['text', 'string', 'multiline_text', 'single_line_text', '1'].includes(type)) return input;
-  if (['number', 'currency', 'percent', '2'].includes(type)) {
-    if (!input.trim()) return null;
-    const number = Number(input);
-    if (!Number.isFinite(number)) throw new Error('office.validation.number');
-    return number;
-  }
-  if (['checkbox', 'boolean', '7'].includes(type)) return input === 'true';
-  try { return JSON.parse(input); } catch { throw new Error('office.validation.json'); }
 }
 export function localRange(date: string): { start: string; end: string } {
   const start = new Date(date + 'T00:00:00');

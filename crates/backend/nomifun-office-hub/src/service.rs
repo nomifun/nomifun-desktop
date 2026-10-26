@@ -252,7 +252,7 @@ impl OfficeHubService {
                     item.pending_operation_id=Some(operation.clone());item.pending_status=Some(status.clone());
                 }
             }
-        } else if matches!(query,OfficeQuery::Documents|OfficeQuery::Search{..}) {
+        } else if matches!(query,OfficeQuery::Documents{..}) {
             let actor=identity.actor.as_ref().ok_or_else(||HubError::unavailable("User identity unavailable"))?;
             let targets=result.items.iter().filter_map(|item|adapter::document_target(item).map(|(kind,id)|(item,kind,id)))
                 .map(|(item,kind,id)|{

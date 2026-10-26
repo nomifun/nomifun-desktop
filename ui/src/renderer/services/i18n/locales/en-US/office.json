@@ -11,7 +11,6 @@
     "overview": "Workbench",
     "documents": "Documents",
     "agenda": "Calendar & tasks",
-    "base": "Base",
     "activity": "Operations"
   },
   "actions": {
@@ -43,7 +42,8 @@
     "select": "Verify selected program",
     "copy": "Copy command",
     "openBrowser": "Open in browser",
-    "delete": "Delete"
+    "delete": "Delete",
+    "back": "Back"
   },
   "setup": {
     "environment": "Environment",
@@ -109,20 +109,17 @@
     "exactScopes": "Requested permissions",
     "groups": {
       "documents": "List and search documents",
-      "agenda": "Read calendar and tasks",
-      "base": "Read Base tables"
+      "agenda": "Read calendar and tasks"
     },
     "groupHints": {
-      "documents": "List Drive documents and search accessible resources. Open content in your browser.",
-      "agenda": "Read your calendar, tasks and accessible task lists.",
-      "base": "Read the fields and records of a specified data table."
+      "documents": "List and search documents and Wiki resources available to this account. Open content in your browser.",
+      "agenda": "Read your calendar, tasks and accessible task lists."
     },
     "capabilities": {
       "documents": {
-        "search": "Search documents",
         "create": "Create documents",
-        "list": "List documents",
-        "delete": "Delete documents"
+        "delete": "Delete documents",
+        "browse": "List and search accessible documents"
       },
       "people": {
         "read": "Find visible members"
@@ -178,8 +175,6 @@
     "name": "Name",
     "type": "Type",
     "opened": "Last opened",
-    "firstDocument": "No documents yet.",
-    "notFound": "No matching content.",
     "filters": {
       "all": "All",
       "document": "Documents",
@@ -188,9 +183,12 @@
     "updated": "Updated",
     "actions": "Actions",
     "browserHint": "Document content opens in your browser.",
-    "listHint": "Documents in your Drive root. Find other documents using search or a link.",
+    "listHint": "Documents available to this account through search, including Drive and Wiki, ordered by update time.",
     "invalidLink": "Use a complete official Feishu or Lark HTTPS document link.",
-    "missingLink": "No link is available. Search for the document or paste its complete link."
+    "missingLink": "No link is available. Search for the document or paste its complete link.",
+    "queryEmpty": "No documents match this query.",
+    "recentEmpty": "No matching recently opened resources.",
+    "paginationError": "Invalid pagination information. Refresh and try again."
   },
   "documents": {
     "title": "Document title",
@@ -227,29 +225,6 @@
     "personal": "No attendees or video meeting added",
     "empty": "No events on this date.",
     "all": "All events and tasks"
-  },
-  "base": {
-    "link": "Feishu Base table link",
-    "linkPlaceholder": "Paste the complete Feishu data table link",
-    "linkHint": "Open the intended table in Feishu and copy its complete /base/ link with a table parameter.",
-    "incompleteLink": "Open the intended table in Feishu and copy a complete /base/ link containing the table parameter.",
-    "invalidLink": "Use an official Feishu or Lark HTTPS data table link.",
-    "open": "Open table",
-    "empty": "Open a data table",
-    "selected": "{{count}} selected",
-    "selectAvailable": "Select available records",
-    "selectRecord": "Select {{title}}",
-    "writeState": "Operation status",
-    "batch": "Edit records",
-    "batchTitle": "Edit {{count}} records",
-    "field": "Field to edit",
-    "value": "New value",
-    "chooseValue": "Choose a value",
-    "noWritable": "No fields supported for editing here.",
-    "simpleFields": "Text, numbers, checkboxes and known selection fields can be edited here. Edit complex fields in Feishu.",
-    "record": "Record",
-    "before": "Current value",
-    "after": "New value"
   },
   "operation": {
     "summary": {
@@ -293,10 +268,7 @@
   },
   "validation": {
     "required": "Complete the required fields.",
-    "number": "Enter a finite number.",
-    "json": "Invalid field value.",
-    "date": "Enter a valid date and time.",
-    "batch": "Select between 1 and 200 available records."
+    "date": "Enter a valid date and time."
   },
   "deleted": "Deleted."
 }

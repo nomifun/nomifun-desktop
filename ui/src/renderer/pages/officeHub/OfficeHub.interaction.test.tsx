@@ -18,7 +18,7 @@ const track = <T extends { mockRestore(): void }>(spy: T) => { restores.push(() 
 const actor = { app_id: 'real-app', user_id: 'real-user', name: 'Verified user' };
 const empty = (): OfficeQueryResult => ({ items: [], fields: [], has_more: false, next_cursor: null, warnings: [] });
 function status(): OfficeStatus {
-  return { provider: 'feishu', connection: { id: 'connection', name: 'Work connection', enabled: true, profile: 'work', executable: null, created_at: '2026-10-26T00:00:00Z', updated_at: '2026-10-26T00:00:00Z' }, runtime: { phase: 'ready', executable: 'C:/tools/lark-cli.exe', version: '1.0.98', source: 'external', message: null, official_install_command: 'npx @larksuite/cli@latest install' }, phase: 'ready', actor: { ...actor }, host_name: 'backend-machine', host_os: 'windows', message: null, permissions: ['documents.search','documents.list','documents.create','documents.delete','people.read','tasks.read','tasks.write','tasklists.read','calendar.read','calendar.write','base.read','base.write'].map(capability => ({ capability, granted: true, required_scopes: [capability + '-scope'] })) };
+  return { provider: 'feishu', connection: { id: 'connection', name: 'Work connection', enabled: true, profile: 'work', executable: null, created_at: '2026-10-26T00:00:00Z', updated_at: '2026-10-26T00:00:00Z' }, runtime: { phase: 'ready', executable: 'C:/tools/lark-cli.exe', version: '1.0.98', source: 'external', message: null, official_install_command: 'npx @larksuite/cli@latest install' }, phase: 'ready', actor: { ...actor }, host_name: 'backend-machine', host_os: 'windows', message: null, permissions: ['documents.browse','documents.create','documents.delete','people.read','tasks.read','tasks.write','tasklists.read','calendar.read','calendar.write','base.read','base.write'].map(capability => ({ capability, granted: true, required_scopes: [capability + '-scope'] })) };
 }
 function item(id: string, title: string): OfficeItem {
   return { id, title, kind: 'task', url: null, description: null, modified_at: null, opened_at: null, assignee_ids: [actor.user_id], creator_id: actor.user_id, tasklist_ids: [], due: null, completed: false, start: null, end: null, calendar_id: null, base_token: null, table_id: null, pending_operation_id: null, pending_status: null, fields: {} };
@@ -78,10 +78,14 @@ describe('compact Office Hub with isolated real API boundaries', () => {
     expect(view.queryByRole('article')).toBeNull(); expect(view.queryByRole('textbox', { name: /paragraph/i })).toBeNull();
     expect(f.query.mock.calls.every(([query]) => query.kind === 'documents')).toBe(true); expect(f.execute).not.toHaveBeenCalled();
   });
-  test('document-list Base entries also open in the browser', async () => {
+  test('Base has one document filter and browser entry, with no duplicate top-level tab', async () => {
     const f = fixture(); const base = { ...item('base_real', 'Cloud Base'), kind: 'base', url: 'https://team.feishu.cn/base/base_real?table=tbl_real', base_token: 'base_real', table_id: 'tbl_real' };
     f.query.mockResolvedValue({ ...empty(), items: [base] });
-    const view = await f.mount('/office?tab=documents'); fireEvent.click(await view.findByRole('button', { name: 'Cloud Base' }));
+    const view = await f.mount('/office?tab=documents');
+    expect(view.queryByRole('tab', { name: office.resources.filters.base })).toBeNull();
+    fireEvent.click(view.getByRole('button', { name: office.resources.filters.base }));
+    await waitFor(() => expect(f.query.mock.calls.at(-1)![0]).toMatchObject({ kind: 'documents', filter: 'base' }));
+    fireEvent.click(await view.findByRole('button', { name: 'Cloud Base' }));
     await waitFor(() => expect(f.external).toHaveBeenCalledWith(base.url));
     expect(f.query.mock.calls.some(([query]) => query.kind === 'base_records')).toBe(false);
     expect(view.queryByRole('button', { name: 'Delete document: Cloud Base' })).toBeNull();
@@ -139,18 +143,66 @@ describe('compact Office Hub with isolated real API boundaries', () => {
     await waitFor(() => expect((view.getByRole('button', { name: 'Delete document: Pending document' }) as HTMLButtonElement).disabled).toBe(true));
     expect(view.getByRole('button', { name: office.actions.original })).toBeTruthy(); expect(f.execute).toHaveBeenCalledTimes(1);
   });
-  test('search starts at its first page and preserves the returned cursor', async () => {
+  test('existing documents browse and paginate without a keyword, then search resets the cursor', async () => {
     const f = fixture();
-    f.query.mockImplementation(async query => ({ ...empty(), items: [{ ...item('doc_real', query.kind === 'search' ? 'Search result' : 'Listed document'), kind: 'docx', url: 'https://team.feishu.cn/docx/doc_real' }], has_more: true, next_cursor: query.kind === 'search' ? 'search-next' : 'list-next' }));
+    f.query.mockImplementation(async query => query.kind === 'documents' ? { ...empty(), items: [{ ...item('doc_real', query.query ? 'Search result' : query.cursor ? 'Another existing document' : 'Existing Wiki document'), kind: 'wiki', url: 'https://team.feishu.cn/wiki/wiki_real' }], has_more: true, next_cursor: query.query ? 'search-next' : query.cursor ? 'list-third' : 'list-next' } : empty());
     const view = await f.mount('/office?tab=documents');
-    await view.findByRole('button', { name: 'Listed document' });
-    expect(view.queryByRole('button', { name: office.actions.more })).toBeNull();
+    await view.findByRole('button', { name: 'Existing Wiki document' });
+    expect(f.query.mock.calls[0][0]).toEqual({ kind: 'documents', query: '', filter: 'all', cursor: null });
+    expect(f.startAuth).not.toHaveBeenCalled();
+    fireEvent.click(view.getByRole('button', { name: office.actions.more }));
+    await view.findByRole('button', { name: 'Another existing document' });
+    expect(f.query.mock.calls.some(([query]) => query.kind === 'documents' && query.query === '' && query.cursor === 'list-next')).toBe(true);
     fireEvent.change(view.getByLabelText(office.resources.search), { target: { value: 'Report' } });
     fireEvent.submit(view.getByLabelText(office.resources.search).closest('form')!);
     await view.findByRole('button', { name: 'Search result' });
-    expect(f.query.mock.calls.some(([query]) => query.kind === 'search' && query.query === 'Report' && query.cursor === null)).toBe(true);
+    expect(f.query.mock.calls.some(([query]) => query.kind === 'documents' && query.query === 'Report' && query.cursor === null)).toBe(true);
     fireEvent.click(view.getByRole('button', { name: office.actions.more }));
-    await waitFor(() => expect(f.query.mock.calls.some(([query]) => query.kind === 'search' && query.cursor === 'search-next')).toBe(true));
+    await waitFor(() => expect(f.query.mock.calls.some(([query]) => query.kind === 'documents' && query.cursor === 'search-next')).toBe(true));
+  });
+  test('type filters query the complete server scope and reset page state', async () => {
+    const f = fixture();
+    f.query.mockImplementation(async query => query.kind === 'documents' ? { ...empty(), items: [{ ...item('resource', query.filter === 'base' ? 'Existing Base outside the first page' : 'Existing document'), kind: query.filter === 'base' ? 'base' : 'docx', url: 'https://team.feishu.cn/docx/doc_real' }], has_more: true, next_cursor: query.cursor ? 'third' : 'second' } : empty());
+    const view = await f.mount('/office?tab=documents'); await view.findByRole('button', { name: 'Existing document' });
+    fireEvent.click(view.getByRole('button', { name: office.actions.more }));
+    await waitFor(() => expect(f.query.mock.calls.some(([query]) => query.kind === 'documents' && query.cursor === 'second')).toBe(true));
+    fireEvent.click(view.getByRole('button', { name: office.resources.filters.base }));
+    await view.findByRole('button', { name: 'Existing Base outside the first page' });
+    expect(f.query.mock.calls.at(-1)![0]).toEqual({ kind: 'documents', query: '', filter: 'base', cursor: null });
+    expect((view.getByRole('button', { name: office.actions.previous }) as HTMLButtonElement).disabled).toBe(true);
+  });
+  test('a failed list query stays an error and explicit retry never claims the account is empty', async () => {
+    const f = fixture(); let fail = true;
+    f.query.mockImplementation(async query => { if (query.kind !== 'documents') return empty(); if (fail) throw new Error('Search index unavailable'); return { ...empty(), items: [{ ...item('doc', 'Recovered document'), kind: 'docx', url: 'https://team.feishu.cn/docx/doc' }] }; });
+    const view = await f.mount('/office?tab=documents'); await view.findByText('Search index unavailable');
+    expect(view.queryByText(office.resources.queryEmpty)).toBeNull();
+    fail = false; fireEvent.click(view.getByRole('button', { name: office.actions.check }));
+    await view.findByRole('button', { name: 'Recovered document' }); expect(f.execute).not.toHaveBeenCalled();
+  });
+  test('switching the connected identity cannot reuse the previous accounts page cursor', async () => {
+    const f = fixture();
+    f.query.mockResolvedValue({ ...empty(), items: [{ ...item('doc', 'Existing document'), kind: 'docx', url: 'https://team.feishu.cn/docx/doc' }], has_more: true, next_cursor: 'second-page' });
+    const view = await f.mount('/office?tab=documents'); await view.findByRole('button', { name: 'Existing document' });
+    fireEvent.click(view.getByRole('button', { name: office.actions.more }));
+    await waitFor(() => expect(f.query.mock.calls.at(-1)![0]).toMatchObject({ cursor: 'second-page' }));
+    const other = status(); other.actor = { ...actor, user_id: 'another-user', name: 'Another user' }; f.setStatus(other);
+    fireEvent.click(view.getByRole('button', { name: office.actions.refresh }));
+    await view.findByText('Another user');
+    await waitFor(() => expect(f.query.mock.calls.at(-1)![0]).toEqual({ kind: 'documents', query: '', filter: 'all', cursor: null }));
+  });
+  test('a cursor loop disables forward paging without hiding the current resources', async () => {
+    const f = fixture();
+    f.query.mockResolvedValue({ ...empty(), items: [{ ...item('doc', 'Existing document'), kind: 'docx', url: 'https://team.feishu.cn/docx/doc' }], has_more: true, next_cursor: 'repeated-page' });
+    const view = await f.mount('/office?tab=documents'); await view.findByRole('button', { name: 'Existing document' });
+    fireEvent.click(view.getByRole('button', { name: office.actions.more }));
+    await view.findByText(office.resources.paginationError);
+    expect((view.getByRole('button', { name: office.actions.more }) as HTMLButtonElement).disabled).toBe(true);
+    expect(view.getByRole('button', { name: 'Existing document' })).toBeTruthy();
+  });
+  test('missing browse permission shows authorization and never an empty document claim', async () => {
+    const s = status(); grant(s, 'documents.browse', false); const f = fixture(s), view = await f.mount('/office?tab=documents');
+    expect(view.getByText(office.permissions.readMissing)).toBeTruthy(); expect(view.queryByText(office.resources.queryEmpty)).toBeNull();
+    expect(f.query).not.toHaveBeenCalled(); expect(f.startAuth).not.toHaveBeenCalled();
   });
   test('opening a missing component never installs, authenticates or reads business data', async () => {
     const s = status(); s.runtime.phase = 'missing'; s.runtime.executable = null; s.phase = 'not_configured'; s.actor = null;
@@ -339,16 +391,6 @@ describe('compact Office Hub with isolated real API boundaries', () => {
     await view.findByText(office.auth.phase.complete); fireEvent.click(view.getByRole('button', { name: office.auth.return }));
     await view.findByText(office.operation.identityChangedInput);
     expect((view.getByRole('button', { name: office.actions.create }) as HTMLButtonElement).disabled).toBe(true); expect(f.execute).not.toHaveBeenCalled();
-  });
-  test('Base row pending facts disable selection and typed selection saves actual field IDs', async () => {
-    const f = fixture(); const one = { ...item('row-one','First customer'), kind: 'base_record', fields: { fldActual: ['New'] } }; const pending = { ...item('row-pending','Pending customer'), kind: 'base_record', fields: { fldActual: ['New'] }, pending_operation_id: 'original', pending_status: 'accepted_pending_confirmation' as const };
-    f.query.mockImplementation(async query => query.kind === 'base_records' ? { ...empty(), fields: [{ id: 'fldActual', name: 'Status', field_type: 'select', writable: true, options: [{ id: 'opaque-option-id', name: 'Contacted' }, { name: 'New' }] }], items: [one, pending] } : empty());
-    const view = await f.mount('/office?tab=base'); fireEvent.change(view.getByLabelText(office.base.link), { target: { value: 'https://team.feishu.cn/base/baseA?table=tblA' } }); fireEvent.click(view.getByRole('button', { name: office.base.open }));
-    const pendingBox = await view.findByRole('checkbox', { name: 'Select Pending customer' }); expect((pendingBox as HTMLInputElement).disabled).toBe(true);
-    fireEvent.click(view.getByRole('checkbox', { name: office.base.selectAvailable })); fireEvent.click(view.getByRole('button', { name: office.base.batch }));
-    fireEvent.change(view.getByLabelText(office.base.value), { target: { value: 'Contacted' } }); fireEvent.click(view.getByRole('button', { name: office.actions.save }));
-    await waitFor(() => expect(f.execute).toHaveBeenCalledTimes(1)); expect(f.execute.mock.calls[0][0].items).toEqual([expect.objectContaining({ record_id: 'row-one', fields: { fldActual: ['Contacted'] }, before: { fldActual: ['New'] } })]);
-    expect(f.query.mock.calls.find(([query]) => query.kind === 'base_records')?.[0]).toMatchObject({ base_token: 'baseA', table_id: 'tblA', filter: null });
   });
   test('closing authorization keeps its original cancelling flow observable', async () => {
     const s = status(); grant(s, 'documents.create', false); const f = fixture(s); f.auth.mockResolvedValue(flow('cancelling'));

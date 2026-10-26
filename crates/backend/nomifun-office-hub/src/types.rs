@@ -72,7 +72,7 @@ pub struct OfficeProfile {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OfficePermission {
-    /// Product capability, e.g. documents.list; not a revocation switch.
+    /// Product capability, e.g. documents.browse; not a revocation switch.
     pub capability: String,
     pub required_scopes: Vec<String>,
     pub granted: bool,
@@ -124,11 +124,13 @@ pub struct AuthorizationFlow {
 #[serde(rename_all = "snake_case")]
 pub enum TaskRelation { Assigned, Created, Tasklist }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentFilter { All, Document, Base }
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OfficeQuery {
     Recent,
-    Documents,
-    Search { query: String, cursor: Option<String> },
+    Documents { query: String, filter: DocumentFilter, cursor: Option<String> },
     People { query: String },
     Tasklists { cursor: Option<String> },
     Tasks { relation: TaskRelation, tasklist_id: Option<String>, cursor: Option<String> },

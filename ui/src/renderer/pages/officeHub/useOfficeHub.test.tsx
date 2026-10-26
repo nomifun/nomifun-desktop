@@ -17,7 +17,7 @@ test('a replaced connection cannot receive a stale response for the same documen
   const first = deferred<OfficeQueryResult>(), second = deferred<OfficeQueryResult>();
   const query = spyOn(officeHub, 'query').mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
   try {
-    const view = renderHook(({ owner }) => useOfficeQuery({ kind: 'documents' }, owner), { initialProps: { owner: 'application-one/user-one' } });
+    const view = renderHook(({ owner }) => useOfficeQuery({ kind: 'documents', query: '', filter: 'all', cursor: null }, owner), { initialProps: { owner: 'application-one/user-one' } });
     await waitFor(() => expect(query).toHaveBeenCalledTimes(1));
     view.rerender({ owner: 'application-two/user-two' });
     await waitFor(() => expect(query).toHaveBeenCalledTimes(2));

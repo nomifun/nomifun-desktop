@@ -23,7 +23,7 @@ const status: OfficeStatus = {
   provider: 'feishu', connection: { id: 'qa-connection', name: 'QA SIMULATED', enabled: true, profile: 'qa', executable: null, created_at: now, updated_at: now },
   runtime: { phase: 'ready', executable: 'QA SIMULATED', version: '1.0.98', source: 'external', message: null, official_install_command: 'npx @larksuite/cli@latest install' },
   phase: 'ready', actor, host_name: 'QA SIMULATED', host_os: 'windows', message: null,
-  permissions: ['documents.list', 'documents.delete', 'documents.search', 'documents.create'].map(capability => ({ capability, granted: true, required_scopes: [] })),
+  permissions: ['documents.browse', 'documents.delete', 'documents.create'].map(capability => ({ capability, granted: true, required_scopes: [] })),
 };
 const resource = (id: string, title: string): OfficeItem => ({
   id, title, kind: 'docx', url: 'https://qa.feishu.cn/docx/' + id, modified_at: now, opened_at: null, description: null,
@@ -31,6 +31,7 @@ const resource = (id: string, title: string): OfficeItem => ({
   base_token: null, table_id: null, pending_operation_id: null, pending_status: null, fields: {},
 });
 let resources = scenario === 'empty' ? [] : [resource('qa-document', 'nomifun-test-3'), resource('qa-second', '项目计划与工作记录')];
+if (scenario === 'paged') resources = Array.from({ length: 25 }, (_, index) => resource('qa-' + index, '已有文档 ' + (index + 1)));
 const operations = new Map<string, OfficeOperation>();
 const browserLinks: string[] = [];
 const recent: OfficeItem[] = [];
@@ -42,7 +43,14 @@ ipcBridge.shell.openExternal.invoke = async url => { browserLinks.push(url); rep
 officeHub.rememberResource = async link => { const item = resources.find(item => item.url === link.url); if (item) recent.unshift(item); };
 officeHub.status = async () => structuredClone(status);
 officeHub.operations = async () => ({ items: [...operations.values()], next_cursor: null });
-officeHub.query = async query => ({ ...empty(), items: structuredClone(query.kind === 'recent' ? recent : query.kind === 'search' ? resources.filter(item => item.title.includes(query.query)) : query.kind === 'documents' ? resources : []) });
+officeHub.query = async query => {
+  if (query.kind === 'recent') return { ...empty(), items: structuredClone(recent) };
+  if (query.kind !== 'documents') return empty();
+  if (scenario === 'error') throw new Error('QA SIMULATED: document search is unavailable');
+  const matches = resources.filter(item => item.title.includes(query.query) && (query.filter === 'all' || (query.filter === 'base' ? item.kind === 'base' : item.kind !== 'base')));
+  const offset = Number(query.cursor ?? 0), items = matches.slice(offset, offset + 20), has_more = offset + items.length < matches.length;
+  return { ...empty(), items: structuredClone(items), has_more, next_cursor: has_more ? String(offset + items.length) : null };
+};
 officeHub.execute = async request => {
   const original = operations.get(request.request_id);
   if (original) return structuredClone(original);

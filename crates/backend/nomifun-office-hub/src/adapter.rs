@@ -39,6 +39,14 @@ fn valid_id(value: &str, label: &str) -> Result<(), HubError> {
     if value.chars().any(|c| c.is_control()) { return Err(HubError::invalid(format!("{label}包含控制字符"))); }
     Ok(())
 }
+fn valid_page_token(value:&str)->Result<(),HubError>{
+    // Provider continuation data is not a resource ID. Keep its exact bytes;
+    // the separate transport budget also fits a Windows CLI command line.
+    if value.is_empty() || value.len()>16*1024 || value.chars().any(char::is_control) {
+        return Err(HubError::invalid("分页令牌为空、超过传输上限或包含控制字符"));
+    }
+    Ok(())
+}
 fn command(args: impl IntoIterator<Item = impl Into<String>>, profile: Option<&str>,
     mutating: bool) -> Result<CliCommand, HubError>
 {
@@ -84,13 +92,8 @@ fn capability(name: &str, required: &[&str], granted: &[String]) -> OfficePermis
         granted: required.iter().all(|scope| has_scope(granted, scope)) }
 }
 pub fn permissions(scopes: &[String]) -> Vec<OfficePermission> {
-    // Native files.list accepts alternatives; request its narrow list scope
-    // when absent, while reusing an already-granted native Drive read scope.
-    let mut listing=capability("documents.list", &["space:document:retrieve"], scopes);
-    listing.granted |= ["drive:drive", "drive:drive:readonly"].iter().any(|scope|has_scope(scopes,scope));
     vec![
-        capability("documents.search", &["search:docs:read"], scopes),
-        listing,
+        capability("documents.browse", &["search:docs:read"], scopes),
         capability("documents.create", &["docx:document:create"], scopes),
         capability("documents.delete", &["space:document:delete", "drive:drive.metadata:readonly"], scopes),
         capability("people.read", &["contact:user:search"], scopes),
@@ -114,8 +117,7 @@ fn named_permissions(names: &[&str], scopes: &[String]) -> Vec<OfficePermission>
 pub fn query_permissions(query: &OfficeQuery, scopes: &[String]) -> Vec<OfficePermission> {
     let names: &[&str] = match query {
         OfficeQuery::Recent => &[],
-        OfficeQuery::Search { .. } => &["documents.search"],
-        OfficeQuery::Documents => &["documents.list"],
+        OfficeQuery::Documents { .. } => &["documents.browse"],
         OfficeQuery::People { .. } => &["people.read"],
         OfficeQuery::Tasklists { .. } => &["tasklists.read"],
         OfficeQuery::Tasks { relation: TaskRelation::Tasklist, .. } => &["tasklists.read"],
@@ -396,17 +398,20 @@ pub fn parse_configured(output: &CliOutput) -> Result<String, HubError> {
 pub fn query_commands(query: &OfficeQuery, profile: Option<&str>) -> Result<Vec<CliCommand>, HubError> {
     let commands = match query {
         OfficeQuery::Recent => Vec::new(),
-        OfficeQuery::Search { query, cursor } => {
+        OfficeQuery::Documents { query, filter, cursor } => {
             if query.chars().count() > 30 || query.contains('\0') { return Err(HubError::invalid("搜索关键词最多 30 个字符")); }
-            let mut args = vec!["drive".into(), "+search".into(), "--query".into(), query.clone(),
+            // Empty-query browsing and keyword search share the official Search
+            // v2 index. A Drive root's direct children are not a document list.
+            let types=match filter {
+                DocumentFilter::All=>"doc,docx,sheet,bitable,mindnote,file,wiki,slides",
+                DocumentFilter::Document=>"doc,docx,sheet,mindnote,file,wiki,slides",
+                DocumentFilter::Base=>"bitable",
+            };
+            let mut args=vec!["drive".into(), "+search".into(), "--query".into(), query.clone(),
+                "--doc-types".into(), types.into(), "--sort".into(), "edit_time".into(),
                 "--page-size".into(), "20".into(), "--format".into(), "json".into()];
-            if let Some(cursor) = cursor { valid_id(cursor, "分页标识")?;args.extend(["--page-token".into(), cursor.clone()]); }
-            vec![user_command(args, profile, false)?]
-        }
-        OfficeQuery::Documents => {
-            // The native root listing returns its direct entries without pagination.
-            vec![user_command(["drive", "files", "list", "--params", r#"{"folder_token":""}"#,
-                "--format", "json"], profile, false)?]
+            if let Some(cursor)=cursor { valid_page_token(cursor)?;args.extend(["--page-token".into(),cursor.clone()]); }
+            vec![user_command(args,profile,false)?]
         }
         OfficeQuery::People { query } => {
             valid_text(query, "人员关键词", 50)?;
@@ -415,7 +420,7 @@ pub fn query_commands(query: &OfficeQuery, profile: Option<&str>) -> Result<Vec<
         }
         OfficeQuery::Tasklists { cursor } => {
             let mut params = json!({"page_size":50,"user_id_type":"open_id"});
-            if let Some(cursor) = cursor { valid_id(cursor, "分页标识")?;params["page_token"] = json!(cursor); }
+            if let Some(cursor) = cursor { valid_page_token(cursor)?;params["page_token"] = json!(cursor); }
             vec![user_command(["task".into(), "tasklists".into(), "list".into(), "--params".into(),
                 params.to_string()], profile, false)?]
         }
@@ -427,11 +432,11 @@ pub fn query_commands(query: &OfficeQuery, profile: Option<&str>) -> Result<Vec<
                     let id = tasklist_id.as_deref().ok_or_else(|| HubError::invalid("请选择确切任务清单"))?;
                     valid_id(id, "任务清单标识")?;
                     let mut params = json!({"tasklist_guid":id,"page_size":50,"user_id_type":"open_id"});
-                    if let Some(cursor) = cursor { valid_id(cursor, "分页标识")?;params["page_token"] = json!(cursor); }
+                    if let Some(cursor) = cursor { valid_page_token(cursor)?;params["page_token"] = json!(cursor); }
                     return Ok(vec![user_command(["task".into(),"tasklists".into(),"tasks".into(),"--params".into(),params.to_string()],profile,false)?]);
                 }
             };
-            if let Some(cursor) = cursor { valid_id(cursor, "分页标识")?;args.extend(["--page-token".into(),cursor.clone()]); }
+            if let Some(cursor) = cursor { valid_page_token(cursor)?;args.extend(["--page-token".into(),cursor.clone()]); }
             vec![user_command(args, profile, false)?]
         }
         OfficeQuery::Agenda { start, end } => {
@@ -521,32 +526,8 @@ pub fn normalize_query(query: &OfficeQuery, outputs: &[CliOutput]) -> Result<Off
         warnings: warnings(&data), ..OfficeQueryResult::default() };
     match query {
         OfficeQuery::Recent => {},
-        OfficeQuery::Search { .. } => {
-            let entries = array_field(&data,"results","文档搜索结果格式不兼容")?;
-            for entry in entries {
-                let meta = entry.get("result_meta").unwrap_or(&Value::Null);
-                let url = meta.get("url").and_then(Value::as_str).and_then(official_url);
-                let id = url.clone().or_else(|| first_text(entry,&["entity_id","token","id"]))
-                    .ok_or_else(|| HubError::unavailable("搜索结果缺少资源标识"))?;
-                let kind = if url.as_ref().is_some_and(|u| u.contains("/base/")) ||
-                    meta.get("doc_types").is_some_and(|v| v.to_string().to_ascii_lowercase().contains("bitable")) { "base" } else { "document" };
-                let mut item = OfficeItem::new(id,kind,plain_highlight(&first_text(entry,&["title","title_highlighted"]).unwrap_or_default()));
-                item.url=url;item.modified_at=first_text(meta,&["update_time_iso","update_time"]);
-                item.description=first_text(entry,&["summary","snippet"]);
-                if kind=="base" { if let Some(url)=&item.url { let (base,table)=base_coordinates(url);item.base_token=base;item.table_id=table; } }
-                result.items.push(item);
-            }
-        }
-        OfficeQuery::Documents => {
-            for entry in array_field(&data,"files","文档列表结果格式不兼容")? {
-                let kind=first_text(entry,&["type"]).ok_or_else(||HubError::unavailable("资源缺少类型"))?;
-                if !document_type(&kind) && kind!="bitable" { continue; }
-                let id=first_text(entry,&["token"]).ok_or_else(||HubError::unavailable("资源缺少标识"))?;
-                let mut item=OfficeItem::new(id,if kind=="bitable"{"base"}else{&kind},first_text(entry,&["name"]).unwrap_or_default());
-                item.url=entry.get("url").and_then(Value::as_str).and_then(official_url);
-                item.modified_at=first_text(entry,&["modified_time"]);
-                result.items.push(item);
-            }
+        OfficeQuery::Documents { cursor, .. } => {
+            result=normalize_documents(&data,cursor.as_deref())?;
         }
         OfficeQuery::People { .. } => {
             for user in array_field(&data,"users","人员结果格式不兼容")? {
@@ -589,6 +570,40 @@ pub fn normalize_query(query: &OfficeQuery, outputs: &[CliOutput]) -> Result<Off
                 result.next_cursor=Some(offset.unwrap_or(0).saturating_add(result.items.len() as u32).to_string());
             }
         }
+    }
+    Ok(result)
+}
+/// Exact CLI v1.0.98 Search v2 projection. Result identity is the returned
+/// resource token; browser URLs and highlight markup never become identities.
+fn normalize_documents(data:&Value,cursor:Option<&str>)->Result<OfficeQueryResult,HubError>{
+    let has_more=data.get("has_more").and_then(Value::as_bool)
+        .ok_or_else(||HubError::unavailable("文档查询缺少有效的分页状态"))?;
+    let next_cursor=if has_more {
+        let next=text(data.get("page_token")).filter(|next|Some(next.as_str())!=cursor)
+            .ok_or_else(||HubError::unavailable("文档查询分页信息不完整或重复，请重新读取"))?;
+        valid_page_token(&next)?;
+        Some(next)
+    }else{None};
+    let mut result=OfficeQueryResult{has_more,next_cursor,warnings:warnings(data),..Default::default()};
+    let mut seen=BTreeSet::new();
+    for entry in array_field(data,"results","文档查询结果格式不兼容")? {
+        let meta=entry.get("result_meta").filter(|meta|meta.is_object())
+            .ok_or_else(||HubError::unavailable("文档查询缺少资源元数据"))?;
+        let id=text(meta.get("token")).ok_or_else(||HubError::unavailable("文档查询缺少资源 token"))?;
+        valid_resource_token(&id)?;
+        let native_type=meta.get("doc_types").and_then(Value::as_str)
+            .ok_or_else(||HubError::unavailable("文档查询缺少资源类型"))?.to_ascii_lowercase();
+        let url=meta.get("url").and_then(Value::as_str).and_then(official_url);
+        let wiki=entry.get("entity_type").and_then(Value::as_str)==Some("WIKI")
+            || url.as_deref().and_then(|url|link_target(url).ok()).is_some_and(|(kind,_)|kind=="wiki");
+        let kind=if native_type=="bitable"{"base"}else if wiki||native_type=="wiki"{"wiki"}
+            else if document_type(&native_type){native_type.as_str()}
+            else{return Err(HubError::unavailable("文档查询返回了不支持的资源类型"))};
+        if !seen.insert((kind.to_owned(),id.clone())) { continue; }
+        let mut item=OfficeItem::new(id,kind,plain_highlight(&first_text(entry,&["title","title_highlighted"]).unwrap_or_default()));
+        item.url=url;item.modified_at=first_text(meta,&["update_time_iso","update_time"]);
+        if kind=="base" { if let Some(url)=&item.url { let (base,table)=base_coordinates(url);item.base_token=base;item.table_id=table; } }
+        result.items.push(item);
     }
     Ok(result)
 }
@@ -816,36 +831,109 @@ mod tests {
         assert!(!p.iter().find(|p|p.capability=="calendar.read").unwrap().granted);
     }
     #[test]
-    fn documents_require_only_management_scopes(){
-        let scopes=vec!["space:document:retrieve".into(),"drive:drive.metadata:readonly".into(),"space:document:delete".into(),"docx:document:create".into()];
-        let p=permissions(&scopes);
-        for capability in ["documents.list","documents.delete","documents.create"] {
-            assert!(p.iter().find(|p|p.capability==capability).unwrap().granted);
-        }
-        assert!(p.iter().all(|p|p.capability!="documents.read"&&p.capability!="documents.write"));
-        for scope in ["docx:document:readonly","docx:document:write_only"] {assert!(!allowed_scopes().contains(&scope.into()));}
-        let p=permissions(&["space:document:delete".into()]);
-        assert!(!p.iter().find(|p|p.capability=="documents.delete").unwrap().granted);
-        for scope in ["drive:drive", "drive:drive:readonly"] {
-            let p=permissions(&[scope.into()]);
-            assert!(p.iter().find(|p|p.capability=="documents.list").unwrap().granted);
-            assert!(!p.iter().find(|p|p.capability=="documents.delete").unwrap().granted);
-        }
+    fn browse_reuses_the_connected_users_search_scope_without_drive_root_permission(){
+        let p=permissions(&["search:docs:read".into()]);
+        let browse=p.iter().find(|p|p.capability=="documents.browse").unwrap();
+        assert!(browse.granted);assert_eq!(browse.required_scopes,vec!["search:docs:read"]);
+        assert!(p.iter().all(|p|!matches!(p.capability.as_str(),"documents.list"|"documents.search"|"documents.read"|"documents.write")));
+        for scope in ["space:document:retrieve","docx:document:readonly","docx:document:write_only"] {assert!(!allowed_scopes().contains(&scope.into()));}
+        let old=permissions(&["space:document:retrieve".into(),"drive:drive:readonly".into()]);
+        assert!(!old.iter().find(|p|p.capability=="documents.browse").unwrap().granted);
+        let deleting=permissions(&["space:document:delete".into()]);
+        assert!(!deleting.iter().find(|p|p.capability=="documents.delete").unwrap().granted);
     }
     #[test]
-    fn document_listing_uses_the_native_root_contract(){
-        let query=OfficeQuery::Documents;
-        let commands=query_commands(&query,Some("work")).unwrap();
-        assert_eq!(commands.len(),1);assert!(!commands[0].mutating);
-        let params:Value=serde_json::from_str(&commands[0].args[commands[0].args.iter().position(|a|a=="--params").unwrap()+1]).unwrap();
-        assert_eq!(params,json!({"folder_token":""}));
-        let result=normalize_query(&query,&[output(json!({"files":[
-            {"token":"doc_real","name":"Document","type":"docx","url":"https://team.feishu.cn/docx/doc_real","modified_time":"1793000000"},
-            {"token":"base_real","name":"Base","type":"bitable","url":"https://team.feishu.cn/base/base_real"},
-            {"token":"folder_real","name":"Folder","type":"folder"}],"has_more":false}))]).unwrap();
-        assert_eq!(result.items.len(),2);assert_eq!(result.items[0].id,"doc_real");assert_eq!(result.items[1].kind,"base");
-        assert!(result.next_cursor.is_none());assert!(!result.has_more);
+    fn document_browse_and_search_share_the_official_cli_query_and_server_filters(){
+        for (filter,types) in [(DocumentFilter::All,"doc,docx,sheet,bitable,mindnote,file,wiki,slides"),
+            (DocumentFilter::Document,"doc,docx,sheet,mindnote,file,wiki,slides"),(DocumentFilter::Base,"bitable")] {
+            for keyword in ["","项目"] {
+                let query=OfficeQuery::Documents{query:keyword.into(),filter:filter.clone(),cursor:Some("page-two".into())};
+                let commands=query_commands(&query,Some("work")).unwrap();
+                assert_eq!(commands.len(),1);assert!(!commands[0].mutating);
+                assert_eq!(commands[0].args,vec!["--profile","work","drive","+search","--query",keyword,
+                    "--doc-types",types,"--sort","edit_time","--page-size","20","--format","json","--page-token","page-two","--as","user"]);
+                assert!(query_permissions(&query,&["search:docs:read".into()]).iter().all(|permission|permission.granted));
+            }
+        }
+    }
+    fn search_entry(token:&str,kind:&str,entity:&str,path:&str)->Value{
+        json!({"entity_type":entity,"title_highlighted":"Existing <hb>document</hb>","summary_highlighted":"Do not expose a body preview",
+            "result_meta":{"token":token,"doc_types":kind,"url":format!("https://team.feishu.cn/{path}/{token}"),
+                "update_time":1793000000,"update_time_iso":"2026-10-26T06:13:20+08:00"}})
+    }
+    #[test]
+    fn real_search_v2_shape_keeps_wiki_and_drive_resources_and_uses_stable_tokens(){
+        let query=OfficeQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:None};
+        let wiki=search_entry("wiki_real","DOCX","WIKI","wiki");
+        let mut duplicate=wiki.clone();duplicate["result_meta"]["url"]=json!("https://team.feishu.cn/wiki/wiki_real?from=another-link");
+        let result=normalize_query(&query,&[output(json!({"results":[wiki,search_entry("doc_real","DOCX","DOC","docx"),
+            search_entry("base_real","BITABLE","DOC","base"),duplicate],"has_more":true,"page_token":"page-two"}))]).unwrap();
+        assert_eq!(result.items.len(),3);assert_eq!(result.items[0].id,"wiki_real");assert_eq!(result.items[0].kind,"wiki");
+        assert_eq!(result.items[0].title,"Existing document");assert!(document_target(&result.items[0]).is_none());
+        assert_eq!(document_target(&result.items[1]),Some(("docx".into(),"doc_real".into())));
+        assert_eq!(result.items[2].kind,"base");assert_eq!(result.next_cursor.as_deref(),Some("page-two"));
         assert!(result.items.iter().all(|item|item.description.is_none()));
+    }
+    #[test]
+    fn incomplete_search_pages_and_retired_root_shapes_fail_instead_of_becoming_empty_lists(){
+        let query=OfficeQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:Some("same-page".into())};
+        for data in [json!({"results":[],"has_more":true}),json!({"results":[],"has_more":true,"page_token":"same-page"}),
+            json!({"results":[]}),json!({"files":[],"has_more":false}),
+            json!({"results":[{"result_meta":{"token":"bad/url","doc_types":"DOCX"}}],"has_more":false})] {
+            assert!(normalize_query(&query,&[output(data)]).is_err());
+        }
+        let empty=normalize_query(&query,&[output(json!({"results":null,"has_more":false,"page_token":"unused-last-page"}))]).unwrap();
+        assert!(empty.items.is_empty());assert!(!empty.has_more);assert!(empty.next_cursor.is_none());
+        assert!(serde_json::from_value::<OfficeQuery>(json!({"kind":"search","query":"","cursor":null})).is_err());
+        assert!(serde_json::from_value::<OfficeQuery>(json!({"kind":"documents"})).is_err());
+    }
+    #[test]
+    fn opaque_page_tokens_keep_the_provider_value_beyond_resource_id_limits(){
+        let cursor="opaque/+=\"".repeat(90);
+        assert!(cursor.len()>512);assert!(valid_id(&cursor,"resource").is_err());
+        let first=OfficeQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:None};
+        let page=normalize_query(&first,&[output(json!({"results":[],"has_more":true,"page_token":cursor}))]).unwrap();
+        assert_eq!(page.next_cursor.as_deref(),Some(cursor.as_str()));
+        let next=OfficeQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:page.next_cursor};
+        let command=query_commands(&next,Some("work")).unwrap().remove(0);
+        assert!(command.args.windows(2).any(|args|args[0]=="--page-token"&&args[1]==cursor));
+        for invalid in [String::new(),"bad\0cursor".into(),"bad\ncursor".into(),"x".repeat(16*1024+1)] {
+            assert!(valid_page_token(&invalid).is_err());
+        }
+    }
+    /// Opt-in contract evidence against an existing user login. It only reads
+    /// status and at most two metadata pages; no login, scope grant or write.
+    #[tokio::test]
+    #[ignore = "requires explicit CLI path/profile and an account with existing documents"]
+    async fn live_document_discovery_read_only(){
+        let executable=std::env::var("NOMIFUN_OFFICE_PROBE_CLI").expect("Set NOMIFUN_OFFICE_PROBE_CLI to the existing verified CLI");
+        let profile=std::env::var("NOMIFUN_OFFICE_PROBE_PROFILE").expect("Set NOMIFUN_OFFICE_PROBE_PROFILE to the existing connected profile");
+        let directory=tempfile::tempdir().unwrap();
+        let runtime=crate::runtime::CliRuntime::new(directory.path().to_path_buf());
+        let observed=runtime.inspect(Some(&executable)).await;
+        assert_eq!(observed.phase,RuntimePhase::Ready,"Use an existing compatible CLI; this probe never installs");
+        let executable=observed.executable.unwrap();
+        let cancel=tokio_util::sync::CancellationToken::new();
+        let identity=runtime.run(&executable,status_command(Some(&profile),false),cancel.child_token(),None).await.unwrap();
+        let identity=parse_identity(&identity).unwrap();assert_eq!(identity.phase,ConnectionPhase::Ready);
+        let mut cursor=None;let mut count=0;let mut kinds=BTreeMap::<String,usize>::new();
+        for page in 1..=2 {
+            let query=OfficeQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:cursor.clone()};
+            assert!(query_permissions(&query,&identity.scopes).iter().all(|permission|permission.granted),"Existing login needs search:docs:read; this probe never starts authorization");
+            let mut outputs=Vec::new();
+            for command in query_commands(&query,Some(&profile)).unwrap(){
+                assert!(!command.mutating);
+                outputs.push(runtime.run(&executable,command,cancel.child_token(),None).await.unwrap());
+            }
+            let result=normalize_query(&query,&outputs).unwrap();
+            assert!(result.items.iter().all(|item|item.description.is_none()));
+            println!("read-only page {page}: {} resources, has_more={}",result.items.len(),result.has_more);
+            count+=result.items.len();for item in &result.items{*kinds.entry(item.kind.clone()).or_default()+=1;}
+            if !result.has_more { break; }
+            cursor=result.next_cursor;
+        }
+        assert!(count>0,"Use an account with existing documents to reproduce the list regression");
+        println!("read-only projection: {count} resources; kinds={kinds:?}");
     }
     #[test]
     fn document_create_is_title_only_and_content_contracts_are_retired(){
