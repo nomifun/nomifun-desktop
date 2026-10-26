@@ -53,7 +53,11 @@ export interface OfficeItem {
   pending_operation_id: string | null; pending_status: ItemStatus | null;
   fields: Record<string, unknown>;
 }
-export interface OfficeDocumentBlock { id: string | null; kind: 'paragraph' | 'heading' | 'unsupported'; content: string; editable: boolean }
+/** Native block text is kept literal; it is never Markdown editor source. */
+export interface OfficeDocumentBlock {
+  id: string | null; kind: 'paragraph' | 'heading' | 'unsupported'; content: string; editable: boolean;
+  readonly_reason: 'structure' | 'rich_text' | 'metadata' | null;
+}
 export interface DocumentEditBaseline { revision: string; blocks: OfficeDocumentBlock[]; can_insert_first: boolean }
 export interface OfficeDocument {
   id: string; title: string; content: string; url: string | null;

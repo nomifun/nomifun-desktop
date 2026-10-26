@@ -198,6 +198,21 @@
     "emptyParagraph": "Enter paragraph content.",
     "unsaved": "Unsaved",
     "editing": "Editing",
+    "selectParagraph": "Select a paragraph",
+    "selectHint": "Click a body paragraph to edit its text, then save. Each save updates one paragraph.",
+    "readonly": "Read only",
+    "emptyBlock": "Empty paragraph — click to enter text",
+    "noDisplayText": "No text to display",
+    "retryRead": "Retry reading",
+    "reread": "Reread document",
+    "rereadHint": "Read the current document before editing again. Your unsaved text will be retained separately.",
+    "retainedInput": "Retained unsaved text",
+    "retainedHint": "Select a current paragraph and copy the text you still need. Retained text is never submitted automatically.",
+    "readonlyReason": {
+      "structure": "This block's structure is read only here. Edit it in Feishu.",
+      "rich_text": "This paragraph contains formatting or embedded content. Edit it in Feishu to preserve it.",
+      "metadata": "This block's metadata does not allow a verified text edit. Edit it in Feishu."
+    },
     "uneditable": "Only ordinary body paragraphs with a verified block ID can be edited here. Open complex content in Feishu."
   },
   "tasks": {

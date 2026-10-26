@@ -17,6 +17,11 @@ struct FixtureExecutor {
     task_creates:AtomicUsize,
     base_batches:AtomicUsize,
     document_revision:AtomicUsize,
+    document_content:Mutex<String>,
+    document_page_mode:AtomicUsize,
+    document_empty:AtomicBool,
+    timeout_document:AtomicBool,
+    document_saves:AtomicUsize,
     old_token_expired:AtomicBool,
     timeout_tasks:AtomicBool,
     hold_task:AtomicBool,
@@ -38,6 +43,8 @@ impl FixtureExecutor {
             "task:task:read".into(),"task:tasklist:read".into(),"docx:document:readonly".into(),
             "base:record:read".into(),"base:field:read".into()]),requested_scopes:Mutex::new(Vec::new()),
             task_creates:AtomicUsize::new(0),base_batches:AtomicUsize::new(0),document_revision:AtomicUsize::new(1),old_token_expired:AtomicBool::new(false),
+            document_content:Mutex::new("Existing plain text".into()),document_page_mode:AtomicUsize::new(0),
+            document_empty:AtomicBool::new(false),timeout_document:AtomicBool::new(false),document_saves:AtomicUsize::new(0),
             timeout_tasks:AtomicBool::new(false),hold_task:AtomicBool::new(false),
             task_entered:Semaphore::new(0),task_release:Semaphore::new(0),task_returned:Semaphore::new(0),
             hold_auth_cleanup:AtomicBool::new(false),auth_poll_entered:Semaphore::new(0),
@@ -48,6 +55,11 @@ impl FixtureExecutor {
     fn grant(&self,scope:&str){let mut scopes=lock(&self.scopes);if !scopes.iter().any(|s|s==scope){scopes.push(scope.into())}}
     fn calls(&self)->Vec<RecordedCall>{lock(&self.calls).clone()}
     fn envelope(data:Value)->CliOutput{CliOutput::fixture(0,json!({"ok":true,"identity":"user","data":data}).to_string(),"")}
+    fn document_paragraph(&self)->Value{
+        json!({"block_id":"blk_plain","block_type":2,"parent_id":"doc_real",
+            "text":{"elements":[{"text_run":{"content":lock(&self.document_content).clone(),"text_element_style":{}}}],
+                "style":{"align":1,"folded":false}}})
+    }
     fn matrix(&self,ids:Vec<String>)->CliOutput{
         let confirmed=lock(&self.confirmed_records);
         let rows=ids.iter().map(|id|json!([[if confirmed.contains(id){"Contacted"}else{"New"}]])).collect::<Vec<_>>();
@@ -62,7 +74,8 @@ fn contains(args:&[String],pair:&[&str])->bool{
 impl CliExecutor for FixtureExecutor {
     async fn execute(&self,_executable:&Path,command:CliCommand,cancel:CancellationToken,_observer:Option<CliObserver>)->Result<CliOutput,HubError>{
         let args=command.args.clone();
-        let input=command.input_file.as_ref().map(|bytes|serde_json::from_slice(bytes).expect("adapter writes valid JSON"));
+        let input=command.input_file.as_ref().or(command.stdin.as_ref())
+            .map(|bytes|serde_json::from_slice(bytes).expect("adapter writes valid JSON"));
         lock(&self.calls).push(RecordedCall{args:args.clone(),mutating:command.mutating,input});
         if args==["--version"]{return Ok(CliOutput::fixture(0,"lark-cli 1.0.98",""))}
         if args==["--help"]{return Ok(CliOutput::fixture(0,"auth docs task base calendar",""))}
@@ -79,13 +92,46 @@ impl CliExecutor for FixtureExecutor {
         }
         if contains(&args,&["docs","+fetch"]){
             return Ok(Self::envelope(json!({"document":{"document_id":"doc_real","revision_id":self.document_revision.load(Ordering::SeqCst),
-                "content":if contains(&args,&["--doc-format","xml"]){"<title>Fixture document</title><p id=\"blk_plain\">Existing plain text</p>"}else{"Existing plain text"}}})))
+                "title":"Fixture document","content":lock(&self.document_content).clone()}})))
         }
-        if contains(&args,&["docs","+update"]){
-            assert!(command.mutating);
-            assert!(contains(&args,&["--command","block_replace"]));
-            assert!(contains(&args,&["--block-id","blk_plain"]));
-            return Ok(Self::envelope(json!({"document":{"revision_id":2},"result":"success","updated_blocks_count":1,"warnings":[]})))
+        if contains(&args,&["api","GET","/open-apis/docx/v1/documents/doc_real"]){
+            assert!(!command.mutating);
+            return Ok(Self::envelope(json!({"document":{"document_id":"doc_real",
+                "revision_id":self.document_revision.load(Ordering::SeqCst),"title":"Fixture document"}})))
+        }
+        if contains(&args,&["api","GET","/open-apis/docx/v1/documents/doc_real/blocks"]){
+            assert!(!command.mutating);
+            let params:Value=serde_json::from_str(&args.windows(2).find(|pair|pair[0]=="--params").unwrap()[1]).unwrap();
+            assert_eq!(params["document_revision_id"].as_i64().or_else(||params["document_revision_id"].as_str().and_then(|value|value.parse().ok())),
+                Some(self.document_revision.load(Ordering::SeqCst) as i64));
+            let children=if self.document_empty.load(Ordering::SeqCst){Vec::<String>::new()}else{vec!["blk_plain".into()]};
+            let root=json!({"block_id":"doc_real","block_type":1,"children":children,
+                "page":{"elements":[{"text_run":{"content":"Fixture document"}}]}});
+            let paragraph=self.document_paragraph();
+            let data=match self.document_page_mode.load(Ordering::SeqCst){
+                1 if params.get("page_token").is_none()=>json!({"items":[root],"has_more":true,"page_token":"native-next"}),
+                1=>{assert_eq!(params["page_token"],"native-next");json!({"items":[paragraph],"has_more":false})},
+                2=>json!({"items":[root],"has_more":true,"page_token":"native-repeat"}),
+                3=>json!({"items":vec![paragraph;10_001],"has_more":false}),
+                4=>json!({"items":[root],"has_more":false}),
+                _=>json!({"items":if self.document_empty.load(Ordering::SeqCst){vec![root]}else{vec![root,paragraph]},"has_more":false}),
+            };
+            return Ok(Self::envelope(data))
+        }
+        if contains(&args,&["api","PATCH","/open-apis/docx/v1/documents/doc_real/blocks/blk_plain"])
+            || contains(&args,&["api","POST","/open-apis/docx/v1/documents/doc_real/blocks/doc_real/children"]){
+            assert!(command.mutating);self.document_saves.fetch_add(1,Ordering::SeqCst);
+            if self.timeout_document.load(Ordering::SeqCst){return Ok(CliOutput{started:true,timed_out:true,..Default::default()})}
+            let body=lock(&self.calls).last().unwrap().input.clone().unwrap();
+            let params:Value=serde_json::from_str(&args.windows(2).find(|pair|pair[0]=="--params").unwrap()[1]).unwrap();
+            let insert=contains(&args,&["api","POST"]);
+            let elements=if insert{&body["children"][0]["text"]["elements"]}else{&body["update_text_elements"]["elements"]};
+            *lock(&self.document_content)=elements.as_array().unwrap().iter()
+                .map(|element|element["text_run"]["content"].as_str().unwrap()).collect::<Vec<_>>().join("");
+            self.document_empty.store(false,Ordering::SeqCst);
+            let revision=self.document_revision.fetch_add(1,Ordering::SeqCst)+1;
+            return Ok(Self::envelope(if insert{json!({"children":[self.document_paragraph()],"document_revision_id":revision,"client_token":params["client_token"]})}
+                else{json!({"block":self.document_paragraph(),"document_revision_id":revision,"client_token":params["client_token"]})}))
         }
         if contains(&args,&["auth","status"]){
             if self.old_token_expired.load(Ordering::SeqCst){
@@ -469,7 +515,7 @@ async fn base_rows_share_one_native_batch_and_need_exact_readback_before_success
 }
 
 #[tokio::test]
-async fn document_save_binds_real_block_and_revision_without_an_append_or_preview(){
+async fn document_save_binds_the_native_block_and_revision(){
     let f=Fixture::new(true).await;f.executor.grant("docx:document:write_only");
     let read=f.service.query(OfficeQuery::Document{document:"doc_real".into(),editing:true}).await.unwrap();
     let doc=read.document.unwrap();let baseline=doc.edit_baseline.unwrap();
@@ -483,6 +529,94 @@ async fn document_save_binds_real_block_and_revision_without_an_append_or_previe
     let submitted=f.service.execute(input).await.unwrap();f.join_workers().await;
     assert_eq!(f.service.operation(&submitted.id).await.unwrap().status,OperationStatus::Succeeded);
     assert_eq!(f.executor.calls().iter().filter(|call|call.mutating).count(),1);
+    assert_eq!(f.executor.document_revision.load(Ordering::SeqCst),2);
+    assert_eq!(*lock(&f.executor.document_content),"Updated paragraph");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn document_native_pagination_builds_one_complete_revision(){
+    let f=Fixture::new(true).await;f.executor.document_page_mode.store(1,Ordering::SeqCst);
+    let result=f.service.query(OfficeQuery::Document{document:"https://example.feishu.cn/wiki/wiki_fixture".into(),editing:true}).await.unwrap();
+    let doc=result.document.unwrap();let baseline=doc.edit_baseline.unwrap();
+    assert_eq!(doc.id,"doc_real");assert_eq!(baseline.revision,"1");
+    assert_eq!(baseline.blocks.len(),1);assert_eq!(baseline.blocks[0].id.as_deref(),Some("blk_plain"));
+    assert!(baseline.blocks[0].editable);
+    let pages=f.executor.calls().into_iter().filter(|call|contains(&call.args,&["api","GET","/open-apis/docx/v1/documents/doc_real/blocks"])).collect::<Vec<_>>();
+    assert_eq!(pages.len(),2);
+    assert!(f.executor.calls().iter().all(|call|!call.mutating));
+    f.close().await;
+}
+
+#[tokio::test]
+async fn document_incomplete_repeated_or_oversized_native_pages_never_produce_an_edit_baseline(){
+    let f=Fixture::new(true).await;
+    for mode in [2,3,4]{
+        f.executor.document_page_mode.store(mode,Ordering::SeqCst);
+        assert!(f.service.query(OfficeQuery::Document{document:"doc_real".into(),editing:true}).await.is_err(),"pagination mode {mode}");
+    }
+    assert!(f.executor.calls().iter().all(|call|!call.mutating));
+    assert!(f.service.operations(None).await.unwrap().items.is_empty());
+    f.close().await;
+}
+
+#[tokio::test]
+async fn document_literal_text_remains_editable_after_repeated_native_saves(){
+    let f=Fixture::new(true).await;f.executor.grant("docx:document:write_only");
+    for content in [r"**literal bold** [literal link](https://example.com) <tag> & C:\Users\test", "再编辑一次"]{
+        let read=f.service.query(OfficeQuery::Document{document:"doc_real".into(),editing:true}).await.unwrap().document.unwrap();
+        let baseline=read.edit_baseline.unwrap();assert!(baseline.blocks[0].editable);
+        let submitted=f.service.execute(request(vec![OfficeMutation::DocumentSave{client_item_id:Uuid::now_v7().to_string(),
+            document_id:read.id,revision:baseline.revision,block_id:baseline.blocks[0].id.clone(),content:content.into()}])).await.unwrap();
+        f.join_workers().await;
+        assert_eq!(f.service.operation(&submitted.id).await.unwrap().status,OperationStatus::Succeeded);
+        let refreshed=f.service.query(OfficeQuery::Document{document:"doc_real".into(),editing:true}).await.unwrap().document.unwrap();
+        let refreshed=refreshed.edit_baseline.unwrap();
+        assert_eq!(refreshed.blocks[0].id.as_deref(),Some("blk_plain"));
+        assert_eq!(refreshed.blocks[0].content,content);assert!(refreshed.blocks[0].editable);
+    }
+    assert_eq!(f.executor.document_saves.load(Ordering::SeqCst),2);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn an_empty_document_inserts_its_first_native_paragraph_then_updates_that_identity(){
+    let f=Fixture::new(true).await;f.executor.grant("docx:document:write_only");
+    f.executor.document_empty.store(true,Ordering::SeqCst);
+    for content in ["First native paragraph","Revised native paragraph"]{
+        let read=f.service.query(OfficeQuery::Document{document:"doc_real".into(),editing:true}).await.unwrap().document.unwrap();
+        let baseline=read.edit_baseline.unwrap();
+        let block_id=baseline.blocks.first().and_then(|block|block.id.clone());
+        assert_eq!(baseline.can_insert_first,block_id.is_none());
+        let submitted=f.service.execute(request(vec![OfficeMutation::DocumentSave{client_item_id:Uuid::now_v7().to_string(),
+            document_id:read.id,revision:baseline.revision,block_id,content:content.into()}])).await.unwrap();
+        f.join_workers().await;
+        assert_eq!(f.service.operation(&submitted.id).await.unwrap().status,OperationStatus::Succeeded);
+    }
+    let writes=f.executor.calls().into_iter().filter(|call|call.mutating).collect::<Vec<_>>();
+    assert_eq!(writes.len(),2);
+    assert!(contains(&writes[0].args,&["api","POST","/open-apis/docx/v1/documents/doc_real/blocks/doc_real/children"]));
+    assert!(contains(&writes[1].args,&["api","PATCH","/open-apis/docx/v1/documents/doc_real/blocks/blk_plain"]));
+    f.close().await;
+}
+
+#[tokio::test]
+async fn an_unknown_native_document_save_keeps_the_original_attempt_and_document_fence(){
+    let f=Fixture::new(true).await;f.executor.grant("docx:document:write_only");f.executor.timeout_document.store(true,Ordering::SeqCst);
+    let input=request(vec![OfficeMutation::DocumentSave{client_item_id:Uuid::now_v7().to_string(),document_id:"doc_real".into(),
+        revision:"1".into(),block_id:Some("blk_plain".into()),content:"Uncertain native update".into()}]);
+    let submitted=f.service.execute(input.clone()).await.unwrap();f.join_workers().await;
+    let original=f.service.operation(&submitted.id).await.unwrap();assert_eq!(original.items[0].status,ItemStatus::Unknown);
+    let read=f.service.query(OfficeQuery::Document{document:"doc_real".into(),editing:true}).await.unwrap().document.unwrap();
+    assert_eq!(read.pending_operation_id.as_deref(),Some(submitted.id.as_str()));
+    assert_eq!(read.pending_status,Some(ItemStatus::Unknown));
+    f.service.execute(input.clone()).await.unwrap();
+    let mut different=input;different.request_id=Uuid::now_v7().to_string();
+    assert!(f.service.execute(different).await.is_err());
+    let observed=f.service.reconcile(&submitted.id).await.unwrap();
+    assert_eq!(observed.items[0].status,ItemStatus::Unknown);assert_eq!(observed.items[0].attempts.len(),1);
+    assert_eq!(observed.items[0].attempts[0].status,ItemStatus::Unknown);
+    assert_eq!(f.executor.document_saves.load(Ordering::SeqCst),1);
     f.close().await;
 }
 

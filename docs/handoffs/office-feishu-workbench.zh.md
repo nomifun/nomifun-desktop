@@ -59,10 +59,18 @@
 新建表单包含标题和可选正文。空正文走 CLI 的标题专用创建能力。
 打开已有文档时在文档内显示原生内容，不把全文放入一个转换后的 Markdown 编辑框。
 
-编辑前必须读到真实 revision 和原生 block 身份。只允许编辑已确认可写的普通纯文本段落，
-一次选择一个段落并点击保存；标题、复杂样式、表格、嵌套和不支持的 block 保持只读。
+编辑前由官方 CLI 解析资源定位，再读取文档元数据和原生 blocks；每一页固定同一 revision，
+收齐并验证根节点与子节点顺序后才产生编辑基线。分页缺失、重复或截断不能成为空正文依据。
+只允许编辑已确认可处理的顶层普通纯文本段落，一次选择一个段落并点击保存。
+标题、行内富文本、评论、表格、嵌套和不支持的 block 显示只读原因；没有可编辑段落时不显示“正在编辑”。
 没有可靠编辑基线时提供阅读与在飞书打开，不伪造 block ID，也不把整篇内容重建成新文档。
 只有后端确认正文为空时，才允许新增首段。
+
+阅读使用 CLI 的 Markdown 导出，编辑值使用原生文本，两者不相互转换。
+UI/API 合同版本由当前 46 升至 47，避免旧页面把 Markdown 编辑值提交给新的原生文本写入链。
+保存通过 CLI 的原生 Block API `update_text_elements` 原地修改文本，保留 block ID 和段落样式；
+确认空正文后才调用原生 children 创建首段。字符、路径、Markdown 标记和软换行按文本保存，
+不把用户输入重新解释为格式或资源。删除被替代的 XML 编辑解析器与 Markdown 段落替换链路。
 
 保存绑定原文档、原 block 和选择时的 revision。提交前重新检查基线；源内容变化时保留输入并要求重新读取。
 一个文档存在 queued、running 或未解决结果时，整篇文档保持写保护，换段落不能绕过。
@@ -194,6 +202,11 @@ API 前缀为 `/api/office-hub`，沿用 ApiResponse 与结构化业务错误。
 - [官方 CLI 1.0.98](https://github.com/larksuite/cli/tree/v1.0.98)
 - [完整安装向导](https://github.com/larksuite/cli/blob/v1.0.98/scripts/install-wizard.js)
 - [文档创建](https://github.com/larksuite/cli/blob/v1.0.98/skills/lark-doc/references/lark-doc-create.md)
+- [CLI 原生 API 调用](https://github.com/larksuite/cli/blob/v1.0.98/cmd/api/api.go)
+- [文档元数据](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document/get)
+- [固定版本块分页](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document/list)
+- [原地更新块文本](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/patch)
+- [原生首段创建](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/create)
 - [任务创建](https://github.com/larksuite/cli/blob/v1.0.98/skills/lark-task/references/lark-task-create.md)
 - [个人日程行为](https://github.com/larksuite/cli/blob/v1.0.98/skills/lark-calendar/references/lark-calendar-create.md)
 - [Base 批次回执](https://github.com/larksuite/cli/blob/v1.0.98/shortcuts/base/record_batch_update.go)

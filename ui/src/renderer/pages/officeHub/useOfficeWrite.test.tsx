@@ -22,6 +22,7 @@ test('a lost response reads its exact request and never replays even changed inp
     await act(async () => { await view.result.current.save(items, identity); });
     expect(CANONICAL_UUID_V7.test(original.request_id)).toBe(true);
     expect(read.mock.calls[0][0]).toBe(original.request_id);
+    expect(view.result.current.reset()).toBe(false);
     await act(async () => { await view.result.current.save([{ ...items[0], title: 'Changed input' } as OfficeMutation], identity); });
     expect(execute).toHaveBeenCalledTimes(1);
     expect(read).toHaveBeenCalledTimes(2);
@@ -35,6 +36,8 @@ test('positive not-executed proof permits another explicit save with a fresh req
     await act(async () => { await view.result.current.save(items, identity); });
     expect(execute).toHaveBeenCalledTimes(1);
     expect(view.result.current.locked).toBe(false);
+    act(() => { expect(view.result.current.reset()).toBe(true); });
+    expect(view.result.current.result).toBeNull();
     await act(async () => { await view.result.current.save(items, identity); });
     expect(execute.mock.calls[0][0].request_id).not.toBe(execute.mock.calls[1][0].request_id);
     expect(execute.mock.calls[1][0].items[0].client_item_id).toBe('logical-create');
@@ -48,6 +51,7 @@ test('success stays locked and another save only observes the original request',
   try {
     const view = renderHook(useOfficeWrite);
     await act(async () => { await view.result.current.save(items, identity); });
+    expect(view.result.current.reset()).toBe(false);
     await act(async () => { await view.result.current.save(items, identity); });
     expect(execute).toHaveBeenCalledTimes(1);
     expect(view.result.current.locked).toBe(true);

@@ -198,6 +198,21 @@
     "emptyParagraph": "请填写段落内容。",
     "unsaved": "未保存",
     "editing": "正在编辑",
+    "selectParagraph": "请选择要编辑的段落",
+    "selectHint": "点击正文段落即可编辑文字，再点击保存。每次保存更新一个段落。",
+    "readonly": "只读",
+    "emptyBlock": "空段落，点击输入文字",
+    "noDisplayText": "暂无可显示文字",
+    "retryRead": "重试读取",
+    "reread": "重新读取文档",
+    "rereadHint": "请先重新读取当前文档，再继续编辑。尚未保存的文字会单独保留。",
+    "retainedInput": "保留的未保存文字",
+    "retainedHint": "请重新选择当前段落，再复制需要的文字。保留的文字不会自动提交。",
+    "readonlyReason": {
+      "structure": "此内容的结构在这里只读，请在飞书中编辑。",
+      "rich_text": "此段落包含格式或嵌入内容，请在飞书中编辑以保留原内容。",
+      "metadata": "此内容的元数据不满足可靠文字编辑条件，请在飞书中编辑。"
+    },
     "uneditable": "这里只编辑有确切块标识的普通正文段落，复杂内容请在飞书编辑。"
   },
   "tasks": {

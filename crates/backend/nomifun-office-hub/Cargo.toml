@@ -16,7 +16,6 @@ nomifun-runtime.workspace = true
 nomi-process-runtime.workspace = true
 nomi-redact.workspace = true
 regex.workspace = true
-quick-xml = "0.39.4"
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true

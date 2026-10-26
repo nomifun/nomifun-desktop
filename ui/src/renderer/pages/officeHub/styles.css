@@ -104,6 +104,11 @@
 .office-document h3{font-size:15px;line-height:24px;margin:16px 0 6px}
 .office-doc-block{margin:7px -9px;padding:2px 9px;border-radius:5px}
 .office-doc-block.active{border:1px solid var(--primary);padding:0}
+.office-native-text{white-space:pre-wrap;overflow-wrap:anywhere;min-height:25px}
+.office-native-heading{font-weight:600;font-size:16px}
+.office-readonly-reason{margin:0!important}
+.office-reload{padding:0 24px}
+.office-retained-input{max-height:180px;resize:vertical}
 .office-paragraph-button{display:block;width:100%;padding:0;border:0;background:transparent;text-align:left;color:var(--text-primary);font:inherit;line-height:1.75;cursor:pointer;border-radius:4px}
 .office-paragraph-button:hover{background:var(--bg-1)}
 .office-paragraph-button:disabled{cursor:default}

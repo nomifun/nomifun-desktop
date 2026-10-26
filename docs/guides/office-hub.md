@@ -41,12 +41,15 @@ Search or paste a link to an accessible document. New documents require a title;
 body content is optional. Recent entries retain only an actually opened resource's
 locator, title and time. Opening one reads its current content from Feishu again.
 
-Select one editable ordinary paragraph inside a document, change its text and
-click **Save**. The workbench uses the real block identity and original revision.
-Headings, complex formatting and tables remain read-only; open Feishu to edit them.
+Click **Edit**, then select an ordinary body paragraph. Its input receives focus;
+change the text and click **Save**. Characters such as `*` and `#`, paths and soft
+line breaks remain literal text. The official CLI updates the native block in
+place, preserving its identity and paragraph style. Headings, inline rich text,
+comments and tables show their read-only reason; open Feishu to edit them.
 Without a reliable block/revision baseline, the document remains readable. A first
 paragraph can be inserted only into a body verified to be empty. If the source
-revision changes, reload it while retaining your current input.
+revision changes, reload it while retaining your current input, then select the
+paragraph again before saving.
 
 An unresolved save protects the whole document from another write. Selecting a
 different paragraph does not bypass that protection.

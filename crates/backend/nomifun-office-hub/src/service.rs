@@ -230,12 +230,16 @@ impl OfficeHubService {
         }
         let (connection, executable, identity) = self.ready().await?;
         require_permissions(&adapter::query_permissions(&query, &identity.scopes))?;
-        let commands = adapter::query_commands(&query, connection.profile.as_deref())?;
-        let mut outputs = Vec::with_capacity(commands.len());
-        for command in commands {
-            outputs.push(self.runtime.run(&executable, command, self.shutdown.child_token(), None).await?);
-        }
-        let mut result = adapter::normalize_query(&query, &outputs)?;
+        let mut result = if let OfficeQuery::Document { document, editing: true } = &query {
+            self.query_document_edit(document, connection.profile.as_deref(), &executable).await?
+        } else {
+            let commands = adapter::query_commands(&query, connection.profile.as_deref())?;
+            let mut outputs = Vec::with_capacity(commands.len());
+            for command in commands {
+                outputs.push(self.runtime.run(&executable, command, self.shutdown.child_token(), None).await?);
+            }
+            adapter::normalize_query(&query, &outputs)?
+        };
         if let OfficeQuery::Document { .. } = &query {
             if let Some(document) = &mut result.document {
                 let mut recent = OfficeItem::new(&document.id, "document", &document.title);
@@ -278,6 +282,43 @@ impl OfficeHubService {
             }
         }
         Ok(result)
+    }
+
+    /// Resolve URL/wiki references through the official shortcut, then read one
+    /// native revision. Pagination must never mix blocks from different edits.
+    async fn query_document_edit(&self, document: &str, profile: Option<&str>, executable: &str) -> Result<OfficeQueryResult, HubError> {
+        let query = OfficeQuery::Document { document: document.into(), editing: false };
+        let mut resolved_outputs = Vec::new();
+        for command in adapter::query_commands(&query, profile)? {
+            resolved_outputs.push(self.runtime.run(executable, command, self.shutdown.child_token(), None).await?);
+        }
+        let resolved = adapter::normalize_query(&query, &resolved_outputs)?.document
+            .ok_or_else(|| HubError::unavailable("The source document identity could not be resolved"))?;
+        let output = self.runtime.run(executable, adapter::document_metadata_command(&resolved.id, profile)?,
+            self.shutdown.child_token(), None).await?;
+        let metadata = adapter::normalize_document_metadata(&output)?;
+        if metadata.id != resolved.id {
+            return Err(HubError::unavailable("The native document metadata belongs to a different resource"));
+        }
+        let mut blocks = Vec::new();
+        let mut cursor = None;
+        let mut seen_cursors = HashSet::new();
+        for _ in 0..100 {
+            let output = self.runtime.run(executable,
+                adapter::document_blocks_command(&metadata.id, &metadata.revision, cursor.as_deref(), profile)?,
+                self.shutdown.child_token(), None).await?;
+            let page = adapter::normalize_document_blocks(&output)?;
+            if blocks.len() + page.blocks.len() > 10_000 {
+                return Err(HubError::unavailable("The document exceeds the supported native edit baseline size"));
+            }
+            blocks.extend(page.blocks);
+            match page.next_cursor {
+                None => return adapter::normalize_document_edit(document, &metadata, &blocks),
+                Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
+                Some(_) => return Err(HubError::unavailable("The native document pagination repeated a cursor; no edit baseline was accepted")),
+            }
+        }
+        Err(HubError::unavailable("The native document pagination exceeded the edit baseline limit"))
     }
 
     pub async fn operation(&self, id: &str) -> Result<OfficeOperation, HubError> {
@@ -511,11 +552,7 @@ impl OfficeHubService {
                 OfficeMutation::DocumentSave{document_id,revision,block_id,..}=>{
                     let query=OfficeQuery::Document{document:document_id.clone(),editing:true};
                     require_permissions(&adapter::query_permissions(&query,&identity.scopes))?;
-                    let mut outputs=Vec::new();
-                    for command in adapter::query_commands(&query,Some(profile))?{
-                        outputs.push(self.runtime.run(executable,command,self.shutdown.child_token(),None).await?);
-                    }
-                    let current=adapter::normalize_query(&query,&outputs)?.document
+                    let current=self.query_document_edit(document_id,Some(profile),executable).await?.document
                         .ok_or_else(||HubError::invalid("The exact source document could not be read before saving"))?;
                     let baseline=current.edit_baseline.ok_or_else(||HubError::invalid("A full document edit baseline is required"))?;
                     if current.id!=*document_id||baseline.revision!=*revision{

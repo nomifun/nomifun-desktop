@@ -3,6 +3,9 @@ use crate::{HubError, runtime::{CliCommand, CliOutput, PAYLOAD_FILE}, types::*};
 use chrono::DateTime;
 use serde_json::{Value, json};
 use std::{collections::{BTreeMap,BTreeSet}, time::Duration};
+#[path="document.rs"]
+mod document;
+pub use document::{NativeDocumentMetadata, NativeDocumentPage, document_metadata_command, normalize_document_metadata, document_blocks_command, normalize_document_blocks, normalize_document_edit};
 
 pub struct CliIdentity {
     pub actor: Option<OfficeActor>,
@@ -76,84 +79,6 @@ fn first_text(value: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| text(value.get(*key)))
 }
 
-struct XmlBlock { name:String, attributes:BTreeMap<String,String>, text:String, plain:bool }
-
-/// The upstream v1.0.98 docs_fetch_v2.go full export requests block IDs,
-/// style attributes and citation metadata from the native docs_ai exporter.
-/// Its XML IDs are `id` attributes (upstream larksuite/cli#828), not Markdown
-/// line positions. Unknown containers/styles/inline nodes stay read-only.
-fn xml_blocks(source:&str)->Result<Vec<XmlBlock>,HubError>{
-    use quick_xml::{Reader,events::Event};
-    let invalid=||HubError::unavailable("完整文档 XML 无法安全解析；请在飞书中编辑");
-    let mut reader=Reader::from_str(source);
-    let mut depth=0usize;let mut blocks=Vec::new();let mut current:Option<XmlBlock>=None;
-    loop {
-        let event=reader.read_event().map_err(|_|invalid())?;
-        let empty=matches!(&event,Event::Empty(_));
-        match event {
-            Event::Start(element)|Event::Empty(element)=>{
-                let name=std::str::from_utf8(element.name().as_ref()).map_err(|_|invalid())?.to_owned();
-                if matches!(name.as_str(),"fragment"|"excerpt"){return Err(invalid())}
-                if depth==0 {
-                    let mut attributes=BTreeMap::new();
-                    for attr in element.attributes(){
-                        let attr=attr.map_err(|_|invalid())?;
-                        let key=std::str::from_utf8(attr.key.as_ref()).map_err(|_|invalid())?.to_owned();
-                        let value=attr.decode_and_unescape_value(reader.decoder()).map_err(|_|invalid())?.into_owned();
-                        if attributes.insert(key,value).is_some(){return Err(invalid())}
-                    }
-                    current=Some(XmlBlock{name,attributes,text:String::new(),plain:true});
-                }else if let Some(block)=current.as_mut(){block.plain=false;}
-                if !empty {depth+=1;if depth>64{return Err(invalid())}}
-                else if depth==0 {blocks.push(current.take().ok_or_else(invalid)?);}
-            }
-            Event::End(_)=>{
-                depth=depth.checked_sub(1).ok_or_else(invalid)?;
-                if depth==0 {blocks.push(current.take().ok_or_else(invalid)?);}
-            }
-            Event::Text(value)=>{
-                let value=value.xml_content().map_err(|_|invalid())?;
-                if let Some(block)=current.as_mut(){block.text.push_str(&value)}
-                else if !value.trim().is_empty(){return Err(invalid())}
-            }
-            Event::GeneralRef(value)=>{
-                let value=if let Some(character)=value.resolve_char_ref().map_err(|_|invalid())?{character.to_string()}
-                    else{quick_xml::escape::resolve_xml_entity(&value.decode().map_err(|_|invalid())?).ok_or_else(invalid)?.to_owned()};
-                current.as_mut().ok_or_else(invalid)?.text.push_str(&value);
-            }
-            Event::CData(value)=>current.as_mut().ok_or_else(invalid)?.text.push_str(&value.decode().map_err(|_|invalid())?),
-            Event::Comment(_)=>{if let Some(block)=current.as_mut(){block.plain=false;}}
-            Event::Decl(_)=>{},
-            Event::DocType(_)|Event::PI(_)=>return Err(invalid()),
-            Event::Eof=>break,
-        }
-        if blocks.len()>10_000{return Err(invalid())}
-    }
-    if depth!=0||current.is_some(){return Err(invalid())}
-    Ok(blocks)
-}
-
-/// This is a literal-text encoder for the deliberately narrow editable XML
-/// subset, not a rich-document converter. Escape rules follow upstream
-/// skills/lark-doc/references/lark-doc-md.md; existing inline formatting is
-/// never flattened into an editable paragraph.
-fn markdown_literal(text:&str)->String{
-    text.split('\n').map(|line|{
-        let trimmed=line.trim_start();let offset=line.len()-trimmed.len();
-        let ordinal=trimmed.bytes().take_while(u8::is_ascii_digit).count();
-        let mut encoded=String::new();
-        for (index,character) in line.char_indices(){
-            let leading=index==offset&&matches!(character,'#'|'+'|'-'|'>'|'=');
-            let ordered=index==offset+ordinal&&ordinal>0&&matches!(character,'.'|')');
-            if leading||ordered||"\\`*_[]$~<&|".contains(character){encoded.push('\\');}
-            encoded.push(character);
-        }
-        encoded
-    }).collect::<Vec<_>>().join("\n")
-}
-fn xml_document_title(source:&str)->Option<String>{
-    xml_blocks(source).ok()?.into_iter().find(|node|node.name=="title").map(|node|node.text)
-}
 /// The native Markdown export includes its document title as the opening H1.
 /// Separate only that title; matching paragraphs or later headings are body.
 fn markdown_document_parts(content:String,metadata_title:Option<String>)->(String,String){
@@ -177,68 +102,7 @@ fn markdown_document_parts(content:String,metadata_title:Option<String>)->(Strin
     }
     (metadata_title.unwrap_or_else(||"飞书文档".into()),content)
 }
-fn comment_anchors(document:&Value)->Option<BTreeSet<String>>{
-    use quick_xml::{Reader,events::Event};
-    let Some(comments)=document.pointer("/reference_map/comments")else{return Some(BTreeSet::new())};
-    let comments=comments.as_object()?;let mut anchors=BTreeSet::new();
-    for (key,comment) in comments{
-        // Native comments.tips signals truncation. An incomplete or unfamiliar
-        // sidecar cannot prove that a paragraph has no protected discussion.
-        if key=="tips"{return None}
-        let mut reader=Reader::from_str(comment.get("data")?.as_str()?);
-        let mut found=false;
-        loop {
-            match reader.read_event().ok()?{
-                Event::Start(element)|Event::Empty(element) if element.name().as_ref()==b"comment"=>{
-                    let mut anchor=None;
-                    for attr in element.attributes(){
-                        let attr=attr.ok()?;
-                        if attr.key.as_ref()==b"block-id"{anchor=Some(attr.decode_and_unescape_value(reader.decoder()).ok()?.into_owned());}
-                    }
-                    let anchor=anchor.filter(|value|!value.is_empty())?;
-                    anchors.insert(anchor);found=true;
-                }
-                Event::DocType(_)|Event::PI(_)=>return None,
-                Event::Eof=>break,
-                _=>{},
-            }
-        }
-        if !found{return None}
-    }
-    Some(anchors)
-}
-fn document_edit_baseline(document:&Value)->Result<DocumentEditBaseline,HubError>{
-    let revision=text(document.get("revision_id")).filter(|value|value.parse::<u64>().is_ok_and(|v|v>0))
-        .ok_or_else(||HubError::unavailable("完整编辑基线缺少实际文档版本"))?;
-    let content=document.get("content").and_then(Value::as_str).ok_or_else(||HubError::unavailable("完整编辑基线缺少 XML 正文"))?;
-    let nodes=xml_blocks(content)?;
-    if nodes.iter().filter(|node|node.name=="title").count()!=1 {
-        return Err(HubError::unavailable("完整编辑基线必须包含唯一文档标题"));
-    }
-    let protected_comments=comment_anchors(document);
-    let mut ids=BTreeSet::new();let mut blocks=Vec::new();
-    for node in nodes.into_iter().filter(|node|node.name!="title") {
-        let id=node.attributes.get("id").cloned().filter(|id|!id.is_empty()&&!matches!(id.as_str(),"0"|"-1")&&id.bytes().all(|byte|byte.is_ascii_alphanumeric()||b"_-".contains(&byte)));
-        if let Some(id)=&id{if !ids.insert(id.clone()){return Err(HubError::unavailable("编辑基线包含重复段落标识"))}}
-        let kind=if node.name=="p"{DocumentBlockKind::Paragraph}
-            else if matches!(node.name.as_str(),"h1"|"h2"|"h3"|"h4"|"h5"|"h6"|"h7"|"h8"|"h9"){DocumentBlockKind::Heading}
-            else{DocumentBlockKind::Unsupported};
-        let plain_attributes=node.attributes.iter().all(|(key,value)|key=="id"||(key=="align"&&value=="left"));
-        // Replacing a comment anchor can discard a discussion. IDs come from
-        // the native comment XML in this same response, never text matching.
-        let has_comments=protected_comments.as_ref().is_none_or(|anchors|id.as_ref().is_some_and(|id|anchors.contains(id)));
-        let editable=kind==DocumentBlockKind::Paragraph&&id.is_some()&&node.plain&&plain_attributes&&!has_comments
-            &&!node.text.contains(['\n','\r','\t'])&&!node.text.starts_with("    ");
-        let content=if kind==DocumentBlockKind::Unsupported{
-            if node.text.trim().is_empty(){"此内容请在飞书查看".into()}else{markdown_literal(&node.text)}
-        }else{markdown_literal(&node.text)};
-        blocks.push(DocumentBlock{id,kind,content,editable});
-    }
-    let complete=warnings(document).is_empty()&&document.get("tips").is_none_or(|tips|tips.as_str().is_some_and(|text|text.trim().is_empty()));
-    Ok(DocumentEditBaseline{revision,can_insert_first:blocks.is_empty()&&complete&&protected_comments.as_ref().is_some_and(BTreeSet::is_empty),blocks})
-}
-
-fn valid_document_markdown(content:&str,paragraph:bool)->Result<(),HubError>{
+fn valid_document_markdown(content:&str)->Result<(),HubError>{
     valid_text(content,"文档内容",1_000_000)?;
     let mut escaped=false;
     let mut chars=content.chars().peekable();
@@ -249,19 +113,13 @@ fn valid_document_markdown(content:&str,paragraph:bool)->Result<(),HubError>{
             return Err(HubError::invalid("资源、XML 和图片请在飞书中编辑；此处支持普通正文"))
         }
     }
-    if paragraph {
-        for line in content.lines(){
-            let text=line.trim_start();let digits=text.bytes().take_while(u8::is_ascii_digit).count();
-            if text.is_empty()||line.starts_with("    ")||line.starts_with('\t')||text.starts_with(['#','>','|'])
-                ||text.starts_with("```")||text.starts_with("~~~")||["- ","+ ","* ","---","***","___"].iter().any(|prefix|text.starts_with(prefix))
-                ||(digits>0&&text.get(digits..).is_some_and(|rest|rest.starts_with(". ")||rest.starts_with(") "))){
-                return Err(HubError::invalid("一次保存一个普通正文段落；标题、列表和复杂内容请在飞书编辑"))
-            }
-        }
-    }
     Ok(())
 }
 fn has_scope(scopes: &[String], required: &str) -> bool {
+    // Capabilities cover the complete workbench chain, including +fetch for
+    // resource resolution/reading. CLI v1.0.98 internal/auth/scope.go checks
+    // required shortcut scopes exactly, even when a native API accepts a
+    // broader alternative. Do not advertise a chain the CLI will reject.
     scopes.iter().any(|scope| scope == required)
 }
 fn capability(name: &str, required: &[&str], granted: &[String]) -> OfficePermission {
@@ -550,8 +408,8 @@ pub fn query_commands(query: &OfficeQuery, profile: Option<&str>) -> Result<Vec<
         }
         OfficeQuery::Document { document, editing } => {
             valid_id(document, "文档标识")?;
-            vec![user_command(["docs", "+fetch", "--doc", document, "--doc-format", if *editing {"xml"}else{"markdown"},
-                "--detail", if *editing {"full"}else{"simple"}], profile, false)?]
+            if *editing { return Err(HubError::invalid("编辑读取必须通过原生文档快照")); }
+            vec![user_command(["docs", "+fetch", "--doc", document, "--doc-format", "markdown", "--detail", "simple"], profile, false)?]
         }
         OfficeQuery::People { query } => {
             valid_text(query, "人员关键词", 50)?;
@@ -683,21 +541,12 @@ pub fn normalize_query(query: &OfficeQuery, outputs: &[CliOutput]) -> Result<Off
             }
         }
         OfficeQuery::Document { document, editing } => {
+            if *editing { return Err(HubError::invalid("编辑结果必须使用原生文档快照")); }
             let doc=data.get("document").ok_or_else(|| HubError::unavailable("文档读取结果格式不兼容"))?;
             let id=first_text(doc,&["document_id"]).ok_or_else(|| HubError::unavailable("文档结果缺少标识"))?;
-            let content=text(doc.get("content")).unwrap_or_default();
-            let metadata_title=first_text(doc,&["title"]);
-            let baseline=if *editing {
-                let mut baseline=document_edit_baseline(doc)?;
-                if !warnings(&data).is_empty(){baseline.can_insert_first=false;}
-                Some(baseline)
-            }else{None};
-            let (title,content)=if let Some(baseline)=&baseline {
-                (xml_document_title(&content).or(metadata_title).unwrap_or_else(||"飞书文档".into()),
-                    baseline.blocks.iter().map(|block|block.content.as_str()).collect::<Vec<_>>().join("\n\n"))
-            }else{markdown_document_parts(content,metadata_title)};
+            let (title,content)=markdown_document_parts(text(doc.get("content")).unwrap_or_default(),first_text(doc,&["title"]));
             result.document=Some(OfficeDocument {id,title,content,url:official_url(document),
-                edit_baseline:baseline,pending_operation_id:None,pending_status:None});
+                edit_baseline:None,pending_operation_id:None,pending_status:None});
         }
         OfficeQuery::People { .. } => {
             for user in array_field(&data,"users","人员结果格式不兼容")? {
@@ -820,26 +669,12 @@ pub fn mutation_command(mutation:&OfficeMutation,client_token:&str,profile:Optio
                 return user_command(["docs","+create","--title",title,"--doc-format","xml",
                     "--parent-position","my_library"],profile,true)
             }
-            valid_document_markdown(content,false)?;
+            valid_document_markdown(content)?;
             let mut result=user_command(["docs","+create","--title",title,"--doc-format","markdown",
                 "--content","-","--parent-position","my_library"],profile,true)?;
             result.stdin=Some(content.as_bytes().to_vec());Ok(result)
         }
-        OfficeMutation::DocumentSave {document_id,revision,block_id,content,..}=>{
-            valid_id(document_id,"文档标识")?;valid_id(revision,"文档版本")?;
-            valid_document_markdown(content,true)?;
-            if revision.parse::<u64>().is_err(){return Err(HubError::invalid("保存必须使用编辑基线的确切版本"))}
-            if let Some(id)=block_id {
-                valid_id(id,"段落标识")?;
-                if matches!(id.as_str(),"0"|"-1")||!id.bytes().all(|byte|byte.is_ascii_alphanumeric()||b"_-".contains(&byte)){
-                    return Err(HubError::invalid("段落必须使用读取返回的真实单一标识"))
-                }
-            }
-            let mut result=user_command(["docs","+update","--doc",document_id,"--command",
-                if block_id.is_some(){"block_replace"}else{"block_insert_after"},"--block-id",block_id.as_deref().unwrap_or("-1"),
-                "--doc-format","markdown","--revision-id",revision,"--content","-"],profile,true)?;
-            result.stdin=Some(content.as_bytes().to_vec());Ok(result)
-        }
+        OfficeMutation::DocumentSave {..}=>document::document_save_command(mutation,client_token,profile),
         OfficeMutation::CalendarCreate {title,start,end,timezone,..}=>{
             valid_text(title,"日程名称",500)?;valid_id(timezone,"时区")?;
             let from=parse_datetime(start)?;let to=parse_datetime(end)?;
@@ -890,7 +725,7 @@ pub fn normalize_mutation(mutation:&OfficeMutation,output:&CliOutput)->Result<Mu
         else if !warning_messages.is_empty(){ItemStatus::Unknown}
         else if id.is_none(){ItemStatus::Unknown}
         else if matches!(mutation,OfficeMutation::DocumentSave{..}) &&
-            (result!=Some("success")||!warning_messages.is_empty()) {ItemStatus::Unknown}
+            (!document::document_save_confirmed(mutation,&data)||!warning_messages.is_empty()) {ItemStatus::Unknown}
         else {ItemStatus::Succeeded};
     let message=if status==ItemStatus::Unknown {Some(if !warning_messages.is_empty(){warning_messages.join("；")}
             else if let Some(result)=result{format!("CLI 返回 {result}，尚不能确认完整结果；请核验原操作")}
@@ -978,6 +813,18 @@ mod tests {
         assert!(!p.iter().find(|p|p.capability=="calendar.read").unwrap().granted);
     }
     #[test]
+    fn workbench_scopes_follow_the_official_cli_shortcut_preflight(){
+        let p=permissions(&["docx:document".into()]);
+        for capability in ["documents.read","documents.write","documents.create"] {
+            assert!(!p.iter().find(|p|p.capability==capability).unwrap().granted);
+        }
+        let p=permissions(&["docx:document:readonly".into()]);
+        assert!(p.iter().find(|p|p.capability=="documents.read").unwrap().granted);
+        assert!(!p.iter().find(|p|p.capability=="documents.write").unwrap().granted);
+        let p=permissions(&["docx:document:readonly".into(),"docx:document:write_only".into()]);
+        assert!(p.iter().find(|p|p.capability=="documents.write").unwrap().granted);
+    }
+    #[test]
     fn profile_and_status_use_their_real_unwrapped_contracts(){
         let profiles=parse_profiles(&CliOutput::fixture(0,r#"[{"name":"work","appId":"cli_x","brand":"feishu","user":"Lin"}]"#,"")).unwrap();
         assert_eq!(profiles[0].name,"work");
@@ -1050,14 +897,6 @@ mod tests {
         assert!(cmd.args.iter().any(|a|a.contains("stable-key")));
     }
     #[test]
-    fn document_save_targets_one_actual_block_and_never_overwrites(){
-        let mutation=OfficeMutation::DocumentSave {client_item_id:"i".into(),document_id:"doc_x".into(),revision:"12".into(),block_id:Some("dox_plain".into()),content:"more".into()};
-        let cmd=mutation_command(&mutation,"k",None).unwrap();
-        assert!(cmd.args.windows(2).any(|w|w==["--command","block_replace"]));
-        assert!(cmd.args.windows(2).any(|w|w==["--block-id","dox_plain"]));
-        assert!(cmd.args.windows(2).any(|w|w==["--revision-id","12"]));assert_eq!(cmd.stdin,Some(b"more".to_vec()));
-    }
-    #[test]
     fn markdown_read_separates_only_the_opening_exported_title_and_preserves_body(){
         let query=OfficeQuery::Document{document:"doc_real".into(),editing:false};
         let body="\nReport\n\n## Section\n\n# Report\n\n- First\n- Second\n\n```markdown\n# Report\n```\n";
@@ -1096,76 +935,5 @@ mod tests {
         assert_eq!(receipt.status,ItemStatus::Unknown);assert_eq!(receipt.remote_id.as_deref(),Some("original-guid"));
         let error=output_error(&CliOutput::fixture(1,"",r#"{"ok":false,"error":{"type":"api","message":"server failed"}}"#),true);
         assert!(!error.not_executed);
-    }
-    #[test]
-    fn full_xml_contract_keeps_real_ids_and_encodes_literal_text_without_flattening_rich_blocks(){
-        // docs_fetch_v2.go full export options and lark-doc-fetch.md document
-        // response; native XML id attributes are documented in upstream #828.
-        // These are offline contract values, not a claim of a live CLI fetch.
-        let xml=r#"<title>Editor &amp; CLI</title><p id="dox_plain">3 * 5; C:\Users\test[1]; foo_bar; $100; ~; &lt;tag&gt;; &amp;copy;</p><h2 id="dox_heading">Heading</h2><p id="dox_bold"><b>Bold</b></p><p id="dox_styled" align="center">Centered</p><p id="dox_cite"><cite type="user" user-id="ou_real"/></p><table id="dox_table"><tr><td><p id="dox_nested">Nested</p></td></tr></table><img id="dox_image" src="real_token"/>"#;
-        let query=OfficeQuery::Document{document:"doc_real".into(),editing:true};
-        let command=query_commands(&query,Some("work")).unwrap().pop().unwrap();
-        assert!(command.args.windows(2).any(|args|args==["--detail","full"]));
-        assert!(command.args.windows(2).any(|args|args==["--doc-format","xml"]));
-        let document=normalize_query(&query,&[output(json!({"document":{"document_id":"doc_real","revision_id":12,"content":xml,"reference_map":{}}}))]).unwrap().document.unwrap();
-        assert_eq!(document.title,"Editor & CLI");
-        let baseline=document.edit_baseline.unwrap();
-        assert_eq!(baseline.revision,"12");assert!(!baseline.can_insert_first);
-        assert_eq!(baseline.blocks.len(),7);
-        assert_eq!(baseline.blocks[0].id.as_deref(),Some("dox_plain"));
-        assert!(baseline.blocks[0].editable);
-        assert_eq!(baseline.blocks[0].content,r"3 \* 5; C:\\Users\\test\[1\]; foo\_bar; \$100; \~; \<tag>; \&copy;");
-        assert!(valid_document_markdown(&baseline.blocks[0].content,true).is_ok());
-        assert!(baseline.blocks[1..].iter().all(|block|!block.editable));
-        assert!(!baseline.blocks.iter().any(|block|block.id.as_deref()==Some("dox_nested")),"nested content is not promoted into a writable top-level paragraph");
-        assert_eq!(baseline.blocks[1].kind,DocumentBlockKind::Heading);
-        assert_eq!(baseline.blocks[5].kind,DocumentBlockKind::Unsupported);
-    }
-    #[test]
-    fn edit_baseline_rejects_fragments_missing_revisions_duplicate_ids_and_unknown_metadata(){
-        for document in [
-            json!({"revision_id":12,"content":"<fragment><p id=\"real\">x</p></fragment>"}),
-            json!({"content":"<title>Title</title><p id=\"real\">x</p>"}),
-            json!({"revision_id":12,"content":"<title>Title</title><p id=\"same\">a</p><p id=\"same\">b</p>"}),
-            json!({"revision_id":12,"content":"<!DOCTYPE p [<!ENTITY x SYSTEM 'file:///private'>]><title>Title</title><p id=\"real\">&x;</p>"}),
-        ]{assert!(document_edit_baseline(&document).is_err())}
-        let document=json!({"revision_id":12,"content":"<title>Title</title><p id=\"real\" font-size=\"20\">x</p><p>missing ID</p><p id=\"other\">plain</p>"});
-        let baseline=document_edit_baseline(&document).unwrap();
-        assert!(!baseline.blocks[0].editable);assert!(!baseline.blocks[1].editable);assert!(baseline.blocks[2].editable);
-        let comments=json!({"revision_id":12,"content":"<title>Title</title><p id=\"real\">x</p><p id=\"uncommented\">y</p>","reference_map":{"comments":{"c1":{"data":"<comment block-id=\"real\"/>"}}}});
-        let baseline=document_edit_baseline(&comments).unwrap();
-        assert!(!baseline.blocks[0].editable);assert!(baseline.blocks[1].editable);
-        let mut truncated=comments;truncated["reference_map"]["comments"]["tips"]=json!({"data":"truncated"});
-        assert!(document_edit_baseline(&truncated).unwrap().blocks.iter().all(|block|!block.editable));
-    }
-    #[test]
-    fn empty_documents_and_optional_due_dates_use_only_the_native_explicit_contract(){
-        let baseline=document_edit_baseline(&json!({"revision_id":1,"content":"<title>Empty</title>"})).unwrap();
-        assert!(baseline.can_insert_first);assert!(baseline.blocks.is_empty());
-        let save=OfficeMutation::DocumentSave{client_item_id:"i".into(),document_id:"doc_real".into(),revision:"1".into(),block_id:None,content:"First paragraph".into()};
-        let command=mutation_command(&save,"key",None).unwrap();
-        assert!(command.args.windows(2).any(|args|args==["--command","block_insert_after"]));
-        assert!(command.args.windows(2).any(|args|args==["--block-id","-1"]));
-        let create=OfficeMutation::DocumentCreate{client_item_id:"new".into(),title:"Empty".into(),content:String::new()};
-        let command=mutation_command(&create,"key",None).unwrap();
-        assert!(command.args.windows(2).any(|args|args==["--doc-format","xml"]));
-        assert!(!command.args.iter().any(|arg|arg=="--content"));assert!(command.stdin.is_none());
-        let task=OfficeMutation::TaskCreate{client_item_id:"task".into(),title:"Title".into(),assignee_id:"ou_owner".into(),assignee_name:None,due:None,tasklist_id:None};
-        assert!(!mutation_command(&task,"key",None).unwrap().args.iter().any(|arg|arg=="--due"));
-    }
-    #[test]
-    fn paragraph_saves_reject_structural_or_resource_input_and_keep_partial_receipts_unknown(){
-        for content in ["<img src=\"token\"/>","![image](https://example.com/image.png)","# Heading","- list","1. item","a\n\nb","```code"]{
-            assert!(valid_document_markdown(content,true).is_err(),"{content}");
-        }
-        assert!(valid_document_markdown(r"**An explicit edit**; literal \<tag> and C:\\Users",true).is_ok());
-        let save=OfficeMutation::DocumentSave{client_item_id:"i".into(),document_id:"doc_real".into(),revision:"12".into(),block_id:Some("dox_plain".into()),content:"Updated".into()};
-        for result in ["failed","partial_success"]{
-            let receipt=normalize_mutation(&save,&output(json!({"result":result,"document":{"revision_id":13},"warnings":["Not all changes applied"]}))).unwrap();
-            assert_eq!(receipt.status,ItemStatus::Unknown);
-            assert_eq!(receipt.remote_id.as_deref(),Some("doc_real"));
-        }
-        assert_eq!(normalize_mutation(&save,&output(json!({"result":"success","warnings":["Content degraded"]}))).unwrap().status,ItemStatus::Unknown);
-        assert_eq!(normalize_mutation(&save,&output(json!({"result":"success","document":{"revision_id":13},"warnings":[]}))).unwrap().status,ItemStatus::Succeeded);
     }
 }

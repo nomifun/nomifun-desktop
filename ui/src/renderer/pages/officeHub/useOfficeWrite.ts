@@ -66,5 +66,11 @@ export function useOfficeWrite() {
       return null;
     } finally { active.current = false; if (mounted.current) setLoading(false); }
   };
-  return { save, recover, result, error, loading, locked };
+  const reset = () => {
+    if (active.current || (ticket.current && !ticket.current.safe)) return false;
+    ticket.current = null;
+    setResult(null); setError(null); setLocked(false);
+    return true;
+  };
+  return { save, recover, reset, result, error, loading, locked };
 }

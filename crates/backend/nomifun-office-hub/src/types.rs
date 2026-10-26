@@ -187,12 +187,16 @@ pub struct DocumentEditBaseline {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all="snake_case")]
 pub enum DocumentBlockKind { Paragraph, Heading, Unsupported }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all="snake_case")]
+pub enum DocumentReadonlyReason { Structure, RichText, Metadata }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentBlock {
     pub id: Option<String>,
     pub kind: DocumentBlockKind,
     pub content: String,
     pub editable: bool,
+    pub readonly_reason: Option<DocumentReadonlyReason>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OfficeField {

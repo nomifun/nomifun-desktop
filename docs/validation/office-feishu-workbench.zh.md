@@ -1,69 +1,82 @@
-# 办公工作台：紧凑版验收记录
+# 飞书工作台：文档编辑验收记录
 
 对应[现役实施计划](../handoffs/office-feishu-workbench.zh.md)。
-验证日期：2026-10-26；分支 codex/office-feishu-workbench。
-本记录仅描述本次 CLI 原生能力收敛后的代码，不沿用旧预览／模型生成版的通过数字。
+验证日期：2026-10-26。下述结果区分本地自动验证、真实浏览器与真实飞书租户。
+
+## 根因与修复边界
+
+截图显示进入编辑模式后没有输入框、保存不可用。代码审计确认三项可复现的设计缺陷：
+
+1. **状态与能力脱节**：只要文档与身份存在就能进入编辑；即使所有段落均只读，仍显示“正在编辑”，没有原因或选择提示。
+2. **读写模型不对称**：XML 纯文本先被转义为 Markdown，又直接作为输入值；保存允许生成行内格式，但下一次 XML 解析把任何行内节点标为只读。一次编辑可以使同段后续无法编辑。
+3. **替换粒度错误**：旧保存通过 `block_replace` 重建段落，使旧 block ID 失效，并需要额外的评论 XML 保护逻辑。
+
+浏览器验收还确认：共享 Markdown 组件会把标准 Markdown 的 `\[文字\]` 转义误当 LaTeX，导致保存后阅读失真。
+文档阅读现明确关闭聊天专用的 LaTeX 分隔符归一化，保持标准 Markdown 转义语义。
+
+没有读取截图对应真实文档，不能仅凭截图断言该段具体含有哪些原生属性。
+此次修复针对已经复现的架构问题，不把离线验收计为真实租户成功。
+
+## 当前架构
+
+- 业务访问仍全部依赖官方 `@larksuite/cli@1.0.98`；未增加宿主 HTTP SDK、凭据副本或另一套安装器。
+- 阅读沿用官方 Markdown 导出。编辑先由 CLI 解析文档链接／wiki 定位，再读取真实 metadata 与 blocks。
+- 原生分页固定同一 revision；拒绝重复 cursor、缺失块、重复 ID、不一致父子关系、超过 100 页或 10,000 块。
+- 编辑值是原始文本。普通顶层段落通过 `update_text_elements` 原地 PATCH，保留 block ID 和段落样式；确认空正文后才创建首段。
+- 标题、行内富文本、评论、嵌入资源和嵌套结构显示只读原因，不通过扁平化或重建全文绕过限制。
+- 移除 XML 编辑解析器、评论 XML sidecar、Markdown 字面编码与段落替换路径，并移除该 crate 的 quick-xml 依赖。
+- 身份、原 revision、请求幂等、原始回执和整篇文档 pending 围栏保留。未知结果不重发，也不把历史 Markdown 回执解释为新的原生 PATCH 成功。
+- UI/API 合同从实际 HEAD 的 46 升为 47，阻止旧界面继续发送旧编辑语义。Agent Session、数据库和操作账本均未改变。
+- 能力检查遵循官方 CLI shortcut 的精确 scope 预检；不以 OpenAPI 可接受的较宽 scope 推断整个工作台链可用。
 
 ## 自动验证
 
 | 检查 | 本次结果 |
 | --- | --- |
-| cargo test --locked -p nomifun-agent-contracts --lib schema::tests | 14 passed |
-| cargo test --locked -p nomifun-db --test office_receipts_compact --test office_hub_schema --test id_schema_contract --test agent_store_reset | 16 passed（5＋2＋6＋3） |
-| cargo test --locked -p nomifun-db --lib agent_store_clean_cut::tests | 6 passed |
-| node --test scripts/check-agent-session-boundary.test.mjs | 3 passed |
-| cargo test --locked -p nomifun-office-hub --lib | 54 passed、3 内部子进程 helper ignored（收敛全套，110.02 秒） |
-| cargo test --locked -p nomifun-office-hub --lib service::tests:: | profiles 拆分后 19 passed，68.44 秒 |
-| cargo test --locked -p nomifun-office-hub --lib store::tests:: | 导航时间显示收口后 11 passed，18.66 秒 |
-| cargo test --locked -p nomifun-skill-library --test lark_cli_builtin | 5 passed |
-| cargo test --locked -p nomifun-runtime --lib existing_ | 3 passed |
-| bun test --cwd ui src/renderer/pages/officeHub | 40 passed、0 failed、222 assertions，5.39 秒 |
-| bun run check | 完整检查通过；最终局部显示调整后 typecheck、i18n 另行通过 |
-| cargo build --locked -p nomifun-app --bin nomicore --no-default-features | 最新源构建通过；隔离实例启动成功 |
+| cargo test --locked -p nomifun-office-hub --lib service::tests:: | 24 passed，94.47 秒 |
+| cargo test --locked -p nomifun-office-hub --lib adapter:: | 21 passed，含 8 项原生文档契约测试和精确权限合同 |
+| bun test --cwd ui src/renderer/pages/officeHub src/renderer/components/Markdown/streamingMarkdown.test.tsx | 55 passed，339 assertions |
+| bun run typecheck | 通过 |
+| bun run check:desktop-ui-boundary | 通过，包含最终文档解析调整 |
+| bun run check:i18n | 已通过 |
+| bun run check:docs | 通过 |
+| bun run build:ui | 通过，25.70 秒；manifest 为 UI/API 47 |
 | git diff --check | 通过 |
 
-三项 ignored 是父测试显式调用的进程 helper，不是跳过的业务用例。
-最后的业务服务、Store 和 UI 修改已分别运行相关目标检查。
-现有 KaTeX 测试 harness 的 quirks-mode 警告及 ts-rs 对 deny_unknown_fields 的解析警告不影响这些测试结果。
+原生契约测试覆盖默认样式、纯文本／UTF-16 长度、换行和特殊字符、空段落与空正文的区分、全树完整性、PATCH／POST 请求体和严格保存回执。
+服务测试覆盖固定版本分页、坏基线拒绝、连续编辑保持同一块、首段插入后再编辑、版本冲突、超时后保留单次 attempt 与写保护。
+前端测试覆盖点击正文后焦点、全只读说明、原始输入、授权返回、失败重读及冲突后保留输入并重新选择目标。
 
-## 数据与架构证据
+未修改 Store、DB/schema、备份或 Agent Session，因此未重复运行这些域的全套检查。
 
-- 017 是 016 之后的前向迁移；不改已存在 migration 的 checksum。
-- 只收敛手工办公域，四张现役表为连接、操作、项目和回执。
-  原尝试／观察合并为回执；最近打开资源成为连接中的有限导航列表。
-- 从含未知、部分结果及历史输入的数据升级，逐项输入、原回执、UUID、
-  自增主键高水位和待核验目标围栏保留；无执行事实的旧 Draft 才会删除。
-- 有执行事实的 Draft、坏导航、坏回执或未知 manifest 会整体回滚。
-  SQLite NULL 不能绕过回执类别与证据检查。
-- schema manifest 只允许精确已知的非 Agent 转换；Agent generation/head 不变。
-  Agent clean cut 保留办公数据，不能把办公记录作为 Agent Session 或模型上下文。
-- 独立脚本检查同时限制迁移读取和写入的数据表；不允许从 Agent 表复制数据、
-  修改其他表的 sqlite_sequence 或扩大 schema_metadata 权限。
+## Windows 真实浏览器与离线业务边界
 
-## Windows 实际页面与离线 CLI
+使用[可重复运行的验收页](../../ui/test/office-hub-browser.README.md)，Vite 仅监听 `127.0.0.1:5191`。
+该页面导入实际 renderer，业务调用全部显式标记 QA SIMULATED，未访问后端、真实飞书账号或云端文档。
 
-使用本次构建的 nomicore 副本、独立 data/work 目录和仅监听 127.0.0.1 的实例。
-最终二进制 SHA-256：`b839605c4b7a7a3ea614eff679e3fdd91c557890565defa538770c8d2b62cff3`。
-页面为实际 Vite renderer，不是 HTML 原型；测试 CLI 明确为 QA SIMULATED，不访问飞书。
+已实际执行：
 
-已检查最小桌面 880×600 的入口、环境步骤、已有配置发现、精确 profile 选择、
-显式 `offline_access` 身份登录和可跳过的业务权限步骤。输入和页脚均在支持的桌面布局内。
-最新构建还实际完成：
+- 880×600：进入编辑显示选择提示，点击正文后输入框自动获得焦点；中文、Markdown 标记、Windows 路径与换行按原始文本保存。
+- 保存后再次进入编辑，同一测试 block 与原始内容仍可编辑，footer 仅记录一次写入。
+- 全只读场景明确显示“只读”及具体原因，保存不可用。
+- 确认空正文后创建首段，保存后可再次编辑；1200×800 宽桌面布局与焦点正常。
+- 标准 Markdown 方括号阅读已再次验证：`第一段 · 原始文本 # * [内容]` 原样显示，实际 Shadow DOM 中 `.katex` 节点数为 0。
 
-- 选择真实返回的段落 ID `blk_qa`，以旧 revision 保存一次，回到原文读回相同中文内容；
-  单项只有一次 attempt，界面无 Markdown 模式、分屏、修改对比或追加正文面板。
-- 正常保存只显示中性进度；错误和结果未知才提供原请求回执恢复入口。
-- 1200×800 的 Base 原生选项控件和同表两条记录单次保存；接受后先显示待读回确认。
-  只读核验后一条已确认、另一条仍待确认，汇总为部分完成；两项 attempt 均仍为 1。
-  重新查询表格时未解决项仍携带原 pending operation，已确认项没有 pending 标记。
-- 最近打开列表显示连接中的实际打开时间，搜索结果使用远端更新时间，两者不混用。
-- 实际主库恰有四张办公表，未产生持久 Draft；每个业务项目只有一次原始 attempt。
+## 外部证据与限制
 
-该实例曾因测试 PowerShell 的字符串附加属性、字符编码和并发日志文件锁产生不完整 JSON，
-宿主按未确认响应拒绝读取；修正隔离 fixture 后继续验收，不将其计作真实 CLI 成功。
+原生 API revision 参数允许操作历史版本，并不是跨客户端的严格 compare-and-swap。
+保存前检查最新版本可以拒绝已知冲突，但检查与请求之间仍有其他客户端并发修改的窗口；不承诺排他编辑。
 
-## 外部与平台证据边界
+本次没有真实飞书租户的 OAuth／管理员审批、资源 ACL、原生网络调用或云端写入证据。
+复杂富文本和完整协同编辑仍由飞书客户端提供。其他操作系统没有本次原生交互证据。
+当前运行的既有桌面进程未被终止或替换；前端构建与源码变更不等于已经安装新的桌面发行包。
 
-本次自动化使用隔离 SQLite、CLI 契约执行器和测试专属目录，未读取真实用户飞书凭据。
-真实企业应用创建、管理员审批、真实资源 ACL 与写入仍需在授权的飞书租户验收。
-离线成功不代表外部服务通过。其他操作系统发行与原生交互没有本次运行证据。
+## 官方契约
+
+- [CLI v1.0.98 raw API](https://github.com/larksuite/cli/blob/v1.0.98/cmd/api/api.go)
+- [CLI 输出响应封装](https://github.com/larksuite/cli/blob/v1.0.98/internal/client/response.go)
+- [CLI 精确 scope 预检](https://github.com/larksuite/cli/blob/v1.0.98/internal/auth/scope.go)
+- [文档元数据](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document/get)
+- [固定版本块分页](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document/list)
+- [原地更新块文本](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/patch)
+- [原生首段创建](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/create)

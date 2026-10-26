@@ -6285,7 +6285,6 @@ dependencies = [
  "nomifun-common",
  "nomifun-db",
  "nomifun-runtime",
- "quick-xml 0.39.4",
  "regex",
  "semver",
  "serde",
