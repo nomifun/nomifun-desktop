@@ -11,7 +11,7 @@ tauri = { path = "vendor/tauri" }
 tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
 
 [workspace.package]
-version = "0.8.15"
+version = "0.8.16"
 edition = "2024"
 license = "Apache-2.0"
 repository = "local/nomifun-tauri"

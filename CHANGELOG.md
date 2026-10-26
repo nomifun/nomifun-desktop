@@ -5,10 +5,17 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.16 - 2026-10-26
+
+- Keep verified desktop update packages available when a cancellable native
+  preflight is interrupted. Separate keyboard update suspension from final
+  shutdown, recover admission after cancellation or failure, and ignore stale
+  stop events after recovery; macOS replacement handoff remains authoritative.
 - Fix Windows upgrades from versions without the speech keyboard maintenance
   command. Keep keyboard services paused through file replacement, restore the
   previous application on cancellation or replacement failure, and recover
   keyboard input and the retained update package after a failed preflight.
+- Refresh the WeChat group QR code in the help entry.
 
 ## v0.8.15 - 2026-10-25
 
