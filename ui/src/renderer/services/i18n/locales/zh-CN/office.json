@@ -1,6 +1,15 @@
 {
   "title": "办公",
   "feishu": "飞书",
+  "appSwitcher": {
+    "label": "切换办公应用",
+    "title": "办公应用",
+    "hint": "当前仅支持飞书",
+    "unavailable": "暂未支持",
+    "wechat": "微信",
+    "wecom": "企业微信",
+    "dingtalk": "钉钉"
+  },
   "host": "运行设备",
   "hostHint": "CLI 和凭据保存在 NomiFun 后端电脑，这台电脑可能不是当前浏览器所在设备。",
   "loading": "正在读取…",

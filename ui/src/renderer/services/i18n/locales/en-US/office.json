@@ -1,6 +1,15 @@
 {
   "title": "Office",
   "feishu": "Feishu",
+  "appSwitcher": {
+    "label": "Switch office application",
+    "title": "Office applications",
+    "hint": "Only Feishu is available",
+    "unavailable": "Not supported yet",
+    "wechat": "WeChat",
+    "wecom": "WeCom",
+    "dingtalk": "DingTalk"
+  },
   "host": "Run on",
   "hostHint": "The CLI and credentials stay on the NomiFun backend computer, which may differ from this browser.",
   "loading": "Loading…",
