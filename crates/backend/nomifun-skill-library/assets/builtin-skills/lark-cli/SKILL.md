@@ -1,6 +1,6 @@
 ---
 name: lark-cli
-description: Use the official Lark CLI to work with Feishu / Lark messages, cloud documents, Drive, Base (bitable), spreadsheets, calendars, tasks, mail, contacts and wikis. Use for Feishu links, searches, reads and requested updates, or CLI installation, authorization, version checks and upgrades. Local Office files use the officecli skills.
+description: Use the official Lark CLI to work with Feishu / Lark messages, cloud documents, Drive, Base (bitable), spreadsheets, calendars, tasks, mail, contacts and wikis. Use for Feishu links, searches, reads and requested updates, component readiness, authorization, version checks or external-installation maintenance. Missing components are prepared through the Office workbench. Local Office files use the officecli skills.
 ---
 
 # Feishu / Lark CLI
@@ -14,9 +14,13 @@ This is an opt-in NomiFun skill. Its executable is `lark-cli`, distributed as
 
 Before the first Feishu operation in a session, follow
 [shared installation and executable discovery](references/installation.md).
-Reuse the existing installation or install once into the Host's persistent
-user CLI root. All local Agents share it; do not install per workspace or
-session. Authentication failures are not a reason to reinstall.
+Reuse an existing installation. If none is available, direct the user to
+**Office → Connection settings → Prepare environment → Prepare component**
+(`/office`). The Host supplies the component once in its persistent
+user CLI root. The skill must not launch a second npm/npx installation.
+Local Agents discover and reuse this shared installation in each Session; a
+workbench path or profile selection is not automatically injected into Agent
+commands. Authentication failures are not a reason to reinstall.
 
 Use the already-authorized `workspace.process/start` tool with the selected
 absolute launcher as `command` and literal `args`; use the exact tool name
@@ -41,8 +45,9 @@ do not install or reconfigure it on every task.
 
 For version checks, requested CLI upgrades or `_notice.update`, follow
 [in-place updates](references/updates.md). Check without installing when the
-user only asks about versions. An authorized upgrade replaces the existing
-installation at its original prefix and verifies the same launcher afterward.
+user only asks about versions. Host-supplied components remain under the
+workbench supplier. External user installations can be updated through their
+original toolchain when requested; verify that same launcher afterward.
 
 ## Working on a request
 
@@ -66,9 +71,11 @@ installation at its original prefix and verifies the same launcher afterward.
 
 ## Result and safety contract
 
-- JSON success uses `ok: true`, with results under `data`. Errors normally go
-  to stderr with a nonzero exit status and `error` details. Do not test for a
-  top-level `code == 0`; that belongs to the raw OpenAPI contract.
+- Most business commands wrap JSON as `ok: true` with results under `data`.
+  Configuration, profiles, authorization and `update --check --json` use their
+  own raw object or array shapes; follow that command's actual contract. Errors
+  normally use a nonzero exit status and typed details. Do not assume every
+  successful JSON response has `ok` or a top-level `code == 0`.
 - Exit code `10` with `confirmation_required` is the CLI's high-risk gate.
   Present the action, target and risk and obtain explicit approval for that
   concrete operation. Then append the confirmation flag indicated by the CLI

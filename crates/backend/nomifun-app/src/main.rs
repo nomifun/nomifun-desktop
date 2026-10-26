@@ -54,7 +54,9 @@ fn main() -> Result<ExitCode> {
             .enable_all()
             .build()?
     };
-    runtime.block_on(async_main(merged_path, cli))
+    // Server composition includes the domain stores' SQLx futures. Keep the
+    // root future on the heap instead of the Windows executable's 1 MiB stack.
+    runtime.block_on(Box::pin(async_main(merged_path, cli)))
 }
 
 async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode> {

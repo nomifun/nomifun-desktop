@@ -65,6 +65,9 @@ type MarkdownViewProps = {
   allowHtml?: boolean;
   /** Model/tool Markdown is not a verified artifact-delivery receipt. */
   allowUnverifiedImages?: boolean;
+  /** Model prose may use LaTeX delimiters. Native Markdown exports use these
+   * same backslashes to escape literal brackets and must opt out. */
+  normalizeLatexDelimiters?: boolean;
   /** Opt-in UTF-16 cursor into the full source. Parsing follows source revisions,
    * not reveal frames. Keep a full-length cursor when the stream settles. */
   revealOffset?: number;
@@ -82,6 +85,7 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
     variant = 'article',
     allowHtml,
     allowUnverifiedImages = true,
+    normalizeLatexDelimiters = true,
     revealOffset,
     children: childrenProp,
   }) => {
@@ -90,11 +94,11 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
     const openBrowserLink = useBrowserLink();
 
     const normalizedChildren = useMemo(() => {
-      if (typeof childrenProp === 'string') {
+      if (normalizeLatexDelimiters && typeof childrenProp === 'string') {
         return convertLatexDelimiters(childrenProp);
       }
       return childrenProp;
-    }, [childrenProp]);
+    }, [childrenProp, normalizeLatexDelimiters]);
 
     const handleLinkClick = useCallback(
       (e: React.MouseEvent<HTMLAnchorElement>) => {

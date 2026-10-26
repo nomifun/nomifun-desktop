@@ -17,6 +17,18 @@ afterEach(cleanup);
 
 const article = (container: HTMLElement) => container.querySelector('.markdown-shadow')!.shadowRoot!.querySelector('.markdown-article')!;
 
+test('native Markdown escaped brackets stay literal in static and streamed rendering', () => {
+  const source = '\\[内容\\] and ' + String.raw`C:\\Users\\test\[draft\]\\file\(1\).md`;
+  const expected = '[内容] and ' + String.raw`C:\Users\test[draft]\file(1).md`;
+  const view = (revealOffset?: number) => <MemoryRouter><MarkdownView normalizeLatexDelimiters={false} revealOffset={revealOffset}>{source}</MarkdownView></MemoryRouter>;
+  const page = render(view());
+  expect(article(page.container).querySelector('p')?.textContent).toBe(expected);
+  expect(article(page.container).querySelector('.katex')).toBeNull();
+  page.rerender(view(source.length));
+  expect(article(page.container).querySelector('p')?.textContent).toBe(expected);
+  expect(article(page.container).querySelector('.katex')).toBeNull();
+});
+
 test('reveal frames reuse one full-source parse and keep completed DOM blocks mounted', () => {
   let parses = 0;
   const countParse = () => () => { parses += 1; };

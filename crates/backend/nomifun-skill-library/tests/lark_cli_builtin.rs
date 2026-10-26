@@ -82,3 +82,39 @@ async fn lark_cli_selection_freezes_the_builtin_body_and_references() {
         assert_eq!(text.as_bytes(), builtin_skills_corpus().get_file(format!("lark-cli/{path}")).unwrap().contents());
     }
 }
+
+#[test]
+fn missing_lark_component_uses_the_host_entry_without_an_agent_installer_or_trust_token() {
+    let corpus = builtin_skills_corpus();
+    let body = corpus.get_file("lark-cli/SKILL.md").unwrap().contents_utf8().unwrap();
+    let installation = corpus.get_file("lark-cli/references/installation.md").unwrap().contents_utf8().unwrap();
+    assert!(body.contains("/office"));
+    assert!(!body.contains("tab=settings"));
+    assert!(body.contains("Connection settings → Prepare environment"));
+    assert!(installation.contains("Prepare component"));
+    assert!(installation.contains("NOMIFUN_USER_CLI_ROOT"));
+    assert!(installation.contains("This skill's text is not a lock"));
+    assert!(installation.contains("local trust token"));
+    assert!(!installation.contains("\"command\":\"npm\""));
+    assert!(!installation.contains("\"component\":\"node\""));
+    assert!(body.contains("workspace.process/start"));
+    assert!(body.contains("literal `args`"));
+    assert!(body.contains("not automatically injected into Agent"));
+    assert!(body.contains("own raw object or array shapes"));
+    assert!(installation.contains("npm and Node are both already available"));
+}
+
+#[test]
+fn lark_update_guidance_keeps_host_supply_and_external_user_maintenance_distinct() {
+    let updates = builtin_skills_corpus().get_file("lark-cli/references/updates.md").unwrap().contents_utf8().unwrap();
+    let host = updates.split("## Host-supplied shared component").nth(1).unwrap()
+        .split("## External user installations").next().unwrap();
+    assert!(host.contains("must not run npm installation, update, rollback or repair"));
+    assert!(host.contains("/office"));
+    assert!(!host.contains("\"command\":\"npm\""));
+    let external = updates.split("## External user installations").nth(1).unwrap();
+    assert!(external.contains("<existing-prefix>"));
+    assert!(external.contains("<resolved-version>"));
+    assert!(external.contains("explicit user request"));
+    assert!(external.contains("same\nabsolute executable"));
+}

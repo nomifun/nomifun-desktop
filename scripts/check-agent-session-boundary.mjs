@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { rustProductionText } from './check-uarc-boundary.mjs';
+import { AGENT_FORWARD_MIGRATIONS, areKnownAgentMigrationPaths, officeHubMigrationErrors, officeCompactMigrationErrors } from './lib/agent-migration-boundary.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const retiredPrefixes = [
@@ -76,26 +77,22 @@ for (const path of paths) {
 }
 
 const migrations = paths.filter((path) => path.startsWith('crates/backend/nomifun-db/migrations/') && path.endsWith('.sql'));
-const baseline = 'crates/backend/nomifun-db/migrations/001_canonical_baseline.sql';
-const pluginForwardMigration = 'crates/backend/nomifun-db/migrations/002_simplify_plugin_library.sql';
-const metadataForwardMigration = 'crates/backend/nomifun-db/migrations/003_remove_agent_handshake_cache.sql';
-const hostingForwardMigration = 'crates/backend/nomifun-db/migrations/004_retire_plugin_hosting.sql';
-const policyForwardMigration = 'crates/backend/nomifun-db/migrations/005_retire_side_question_policy.sql';
-const uploadForwardMigration = 'crates/backend/nomifun-db/migrations/006_retire_upload_workspace_preference.sql';
-const terminalForwardMigration = 'crates/backend/nomifun-db/migrations/007_retire_terminal_content_mirrors.sql';
-const payloadForwardMigration = 'crates/backend/nomifun-db/migrations/008_retire_payload_object_placeholder.sql';
-const cronInputForwardMigration = 'crates/backend/nomifun-db/migrations/009_cron_input_handoff.sql';
-const mcpOAuthForwardMigration = 'crates/backend/nomifun-db/migrations/010_mcp_oauth_authority.sql';
-const cronCancellationForwardMigration = 'crates/backend/nomifun-db/migrations/011_cron_run_cancellation.sql';
-const cronWorkbenchForwardMigration = 'crates/backend/nomifun-db/migrations/012_unify_cron_agent_binding.sql';
-const modelInputConstraintsForwardMigration = 'crates/backend/nomifun-db/migrations/013_model_input_constraints.sql';
-const queueSettingForwardMigration = 'crates/backend/nomifun-db/migrations/014_retire_command_queue_setting.sql';
-const executionPlanGateForwardMigration = 'crates/backend/nomifun-db/migrations/015_retire_execution_plan_gate.sql';
-if (!migrations.includes(baseline) || migrations.some((path) => ![baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration, policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration, cronInputForwardMigration, mcpOAuthForwardMigration, cronCancellationForwardMigration, cronWorkbenchForwardMigration, modelInputConstraintsForwardMigration, queueSettingForwardMigration, executionPlanGateForwardMigration].includes(path))) {
+const { baseline, pluginForwardMigration, metadataForwardMigration, hostingForwardMigration,
+  policyForwardMigration, uploadForwardMigration, terminalForwardMigration, payloadForwardMigration,
+  cronInputForwardMigration, mcpOAuthForwardMigration, cronCancellationForwardMigration,
+  cronWorkbenchForwardMigration, modelInputConstraintsForwardMigration, queueSettingForwardMigration,
+  executionPlanGateForwardMigration, officeHubForwardMigration, officeCompactForwardMigration } = AGENT_FORWARD_MIGRATIONS;
+if (!areKnownAgentMigrationPaths(migrations)) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward migrations');
 }
 const migrationStatements = (path) => readFileSync(resolve(ROOT, path), 'utf8')
   .replace(/--[^\r\n]*/g, '').split(';').map((statement) => statement.replace(/\s+/g, ' ').trim()).filter(Boolean);
+if (migrations.includes(officeHubForwardMigration)) {
+  failures.push(...officeHubMigrationErrors(readFileSync(resolve(ROOT, officeHubForwardMigration), 'utf8')));
+}
+if (migrations.includes(officeCompactForwardMigration)) {
+  failures.push(...officeCompactMigrationErrors(readFileSync(resolve(ROOT, officeCompactForwardMigration), 'utf8')));
+}
 if (migrations.includes(executionPlanGateForwardMigration)
   && JSON.stringify(migrationStatements(executionPlanGateForwardMigration)) !== JSON.stringify([
     'ALTER TABLE agent_executions DROP COLUMN plan_gate',

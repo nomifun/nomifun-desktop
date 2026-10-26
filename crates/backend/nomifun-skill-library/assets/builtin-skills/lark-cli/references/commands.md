@@ -70,7 +70,7 @@ result only covers the queried identity, calendars and range.
 ## Send a requested message
 
 Resolve the destination from `im`/`contact` search results, not a guessed ID.
-Inspect `im +messages-send --help`. When supported, preview the exact payload:
+Inspect `im +messages-send --help`. When supported, inspect the exact payload with `--dry-run`:
 
 ```text
 lark-cli im +messages-send --chat-id <resolved-chat-id> --text <requested-text> --as user --dry-run
@@ -102,7 +102,7 @@ If `has_more` or a cursor remains, state that the results are partial.
 
 Inspect warnings and per-item outcomes even with `ok: true`. For asynchronous
 operations, use the returned task/status command before claiming completion.
-A preview is not an applied change. For writes with an uncertain outcome,
+A dry run is not an applied change. For writes with an uncertain outcome,
 read the existing state rather than automatically replaying the request.
 
 Detailed upstream examples are available in the

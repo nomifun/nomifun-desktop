@@ -111,6 +111,7 @@ pub struct ModuleStates {
     pub agent_execution: Arc<AgentExecutionEngine>,
     pub terminal: TerminalRouterState,
     pub office: OfficeRouterState,
+    pub office_hub: Arc<nomifun_office_hub::OfficeHubService>,
     pub shell: ShellRouterState,
     /// Canonical Agent Settings/AgentSession/Remote adapter for the current
     /// Nomi-core product.  It shares the Session owner above and persists its
@@ -327,6 +328,9 @@ pub(crate) async fn try_build_module_states(
     let voice_service=Arc::new(nomifun_voice::VoiceSessionService::with_journal(voice_registry.registry.clone(),voice_work.clone(),voice_authority.clone(),voice_journal,voice_shutdown.clone()));
     Some(super::mobile_voice_host::VoiceRouterState{service:voice_service,registry:voice_registry,authority:voice_authority,allowed_origins:Arc::from([]),token_validator:services.instance_token_validator.clone(),jwt:services.jwt_service.clone(),shutdown:voice_shutdown,cleanup_registered:Arc::new(std::sync::atomic::AtomicBool::new(false))})
     },Err(error)=>{tracing::warn!(error=%error,"optional Mobile voice registration unavailable");None}};
+    // Keep the Office SQL recovery future off the already large desktop startup
+    // frame, and finish it before constructing the module-state aggregate.
+    let office_hub = Box::pin(super::office_hub::build(services)).await?;
     let states = ModuleStates {
         _robot_voice_work: voice_work,
         mobile_voice,
@@ -365,6 +369,7 @@ pub(crate) async fn try_build_module_states(
         agent_execution,
         terminal: build_terminal_state(services),
         office: build_office_state(services),
+        office_hub,
         shell: build_shell_state(services),
         nomi_core_agent_api,
         _session_management_state: session_management_state,

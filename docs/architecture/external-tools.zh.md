@@ -73,15 +73,25 @@ Bun 必须报告 Bun 引擎。将 Bun 命名为 `node`，或让它报告兼容�
 Node 使用完整官方发行目录，包含 npm、npx、模块和启动器；不创建 Bun-as-Node 别名，也不修改系统 PATH。
 
 `nomifun-runtime::prepare_process_launch` 是 Agent 原生进程、Terminal 与 MCP stdio 共用的
-命令准备和每次启动环境入口。明确 Shell 文本保留 Shell 语义并取得同一环境，原生程序保留 literal argv。
+命令准备和每次启动环境入口，允许为本次启动准备缺失的批准运行时。
+明确 Shell 文本保留 Shell 语义并取得同一环境，原生程序保留 literal argv。
 每次启动组合调用方环境、当前持久用户 CLI 目录与已验证运行时，不改写多线程宿主的全局环境。
 显式 PATH 与已有可用工具链优先，保留真实 HOME/USERPROFILE、npm 配置、代理与证书配置。
 受管 npm 缺省安装到独立于可替换运行时缓存的持久用户工具目录，用户原有 prefix 仍优先。
+
+`nomifun-runtime::prepare_existing_process_launch` 只接受绝对路径的现存程序文件，
+组合相同的子进程环境并保留字面 argv，但不调用受管供应、不创建目录。办公工作台的
+诊断、业务调用和已有 npm 程序的 prefix 查询使用此入口；只有显式「准备组件」操作中的
+相对 `npm` 命令可以使用允许供应的入口。飞书原生 CLI 不会因为位于 npm prefix 中而
+获得 Node 依赖；未知脚本缺少解释器时报告不可用，诊断不会替它安装。现有 Agent、
+Terminal 和 MCP 的准备行为保持不变。
+
 每个子进程获得宿主派生的只读位置提示 `NOMIFUN_USER_CLI_ROOT`，指向
 `dirs::data_local_dir()/nomifun-user-tools/npm`，所有 Agent 和工作目录共用。
 需要固定安装位置的 Skill 显式将它作为 npm 的 `--prefix`；该提示不改变用户 npm prefix。
 其命令目录（Windows 为根目录，macOS/Linux 为 `bin`）排在用户命令目录之后；
-该目录与用户自定义 npm prefix 中的 CLI 都能在缺少 Node 时触发现役运行时准备。
+通过 `prepare_process_launch` 调用时，该目录与用户自定义 npm prefix 中的 CLI 都能在
+缺少 Node 时触发现役运行时准备；只执行现存文件的入口不授予该准备权限。
 运行时升级与 Agent 数据清理不拥有这些已安装工具。托管应用按已识别项目元数据或内建静态预设备齐必需 Node/Bun，自定义 Node 优先，准备等待接入原操作取消；任意 Shell 文本不被改写。
 
 Terminal 保留现有 Windows PowerShell shim 适配。Windows Agent/MCP 的通用 `.cmd`/`.bat`
@@ -143,6 +153,24 @@ Office 转换使用内嵌 OfficeCLI，不需要 Node/Bun 下载或网络访问�
 只供应当前目标架构。提高压缩率、删除源文件不能代替从发行载荷移除 Node/Bun。
 体积验收须使用同一 release profile 和压缩格式实际构建 App、DMG 对比，不能把
 压缩组件大小直接当成安装包增量。
+
+## 飞书工作台 CLI
+
+云端[办公工作台](../guides/office-hub.zh.md)使用官方 `@larksuite/cli`，
+已验证兼容基线为 1.0.98，与本地文件渲染使用的内嵌 OfficeCLI 分开。
+飞书 CLI 不进入安装包，也不是现役 `component` 调用目标。
+
+连接弹窗依次完成准备环境、连接飞书和读取权限。用户明确启用并准备后，唯一 Host
+供应器才供应缺失组件，已有兼容安装优先复用。固定官方 npm 包安装到 `user_cli_root`，
+由共享 prefix 的准备锁串行；外部安装保留原路径和维护方式。
+上游完整向导仅提供命令供用户自行执行，可能另装全局 Skills；只读更新检查不安装或同步 Skills。
+
+业务查询与保存均由 CLI 执行。文档只编辑有真实 block ID 和 revision 的原生普通段落，
+不支持的结构只读。保存一次提交稳定请求，响应丢失按原请求身份恢复。
+文档与 Base 的待核验目标继续受 SQL 写入栅栏保护，身份变化不能绕过。
+同一个进程 owner 保持收尾，直到原进程树给出完成证明；取消执行不会提前结束收尾。
+工作台只保留四张产品表与薄导航配置，独立于 canonical Agent 事实，详见
+[现役计划](../handoffs/office-feishu-workbench.zh.md)。
 
 ## Office 请求与缓存
 

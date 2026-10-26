@@ -329,8 +329,57 @@ pub(crate) fn process_environment_in(
     Ok(environment)
 }
 
-/// Prepare the actual launch once for all process consumers. Native arguments
-/// remain literal; explicit shell calls arrive here as shell executable + argv.
+/// Prepare an existing absolute program without supplying runtimes or creating
+/// directories. Diagnostic callers use this entry point when executing an
+/// already discovered file must never trigger Node/Bun preparation.
+/// Arguments remain literal and the normal child-environment rules still apply.
+pub async fn prepare_existing_process_launch(
+    program: &Path,
+    args: &[String],
+    cwd: &Path,
+    configured: &HashMap<String, String>,
+) -> Result<PreparedProcessLaunch, ToolError> {
+    if !program.is_absolute() {
+        return Err(ToolError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "An existing process launch requires an absolute program path",
+        )));
+    }
+    if !std::fs::metadata(program)?.is_file() {
+        return Err(ToolError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "An existing process launch requires a program file",
+        )));
+    }
+    let program_text = program.to_str().ok_or_else(|| {
+        ToolError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "The existing program path cannot be represented by the UTF-8 process contract",
+        ))
+    })?;
+    let configured_owned = configured.clone();
+    let local_cwd = cwd.to_owned();
+    let mut environment = tokio::task::spawn_blocking(move || {
+        process_environment_in(&configured_owned, Some(&local_cwd))
+    })
+    .await
+    .map_err(|error| ToolError::Worker(error.to_string()))??;
+    finish_environment(
+        ProcessEnvironmentTarget::Program(program.as_os_str()),
+        configured,
+        &mut environment,
+    )?;
+    Ok(PreparedProcessLaunch {
+        program: program_text.to_owned(),
+        args: args.to_vec(),
+        environment,
+    })
+}
+
+/// Prepare the actual launch, supplying a missing approved runtime when needed.
+/// Native arguments remain literal; explicit shell calls arrive here as shell
+/// executable + argv. Read-only probes of existing files instead use
+/// `prepare_existing_process_launch` to avoid managed preparation side effects.
 pub async fn prepare_process_launch(
     command: &str,
     args: &[String],
@@ -461,6 +510,75 @@ pub async fn prepare_process_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn existing_launch_keeps_literal_argv_and_environment_without_creating_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let prefix = root.path().join("npm-prefix");
+        let native = prefix.join("node_modules/@larksuite/cli/bin/lark-cli.exe");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, b"existing native fixture").unwrap();
+        let cwd = root.path().join("cwd-not-created");
+        let home = root.path().join("home-not-created");
+        let unrelated_prefix = root.path().join("prefix-not-created");
+        let args = vec!["".into(), "有 空格".into(), "'\";$(printf injected)&".into()];
+        // Exercise both a native file inside an npm prefix (which must not
+        // trigger missing-Node supply) and an uncreated explicit prefix.
+        for npm_prefix in [&prefix, &unrelated_prefix] {
+            let configured = HashMap::from([
+                ("PATH".into(), "".into()),
+                ("NPM_CONFIG_PREFIX".into(), npm_prefix.to_str().unwrap().into()),
+                ("HOME".into(), home.to_str().unwrap().into()),
+                ("USERPROFILE".into(), home.to_str().unwrap().into()),
+                ("PSModulePath".into(), "".into()),
+                ("NODE_OPTIONS".into(), "--max-old-space-size=4096".into()),
+                ("NOMIFUN_TASK_VALUE".into(), "explicit-test-value".into()),
+            ]);
+            let expected = process_environment_in(&configured, Some(&cwd)).unwrap();
+            let prepared = prepare_existing_process_launch(&native, &args, &cwd, &configured).await.unwrap();
+            assert_eq!(prepared.program, native.to_str().unwrap());
+            assert_eq!(prepared.args, args);
+            assert_eq!(prepared.environment, expected);
+            assert_eq!(value(&prepared.environment, "PSModulePath"), Some(""));
+            assert_eq!(value(&prepared.environment, "NOMIFUN_USER_CLI_ROOT"), user_cli_root().as_ref().and_then(|path| path.to_str()));
+            assert!(!cwd.exists());
+            assert!(!home.exists());
+            assert!(!unrelated_prefix.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_launch_rejects_relative_missing_and_directory_programs_without_preparing_them() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("cwd-not-created");
+        let configured = HashMap::from([("PATH".into(), "".into())]);
+        for (program, kind) in [
+            (PathBuf::from("npm"), std::io::ErrorKind::InvalidInput),
+            (root.path().join("not-installed.exe"), std::io::ErrorKind::NotFound),
+            (root.path().to_owned(), std::io::ErrorKind::InvalidInput),
+        ] {
+            let error = prepare_existing_process_launch(&program, &[], &cwd, &configured).await.unwrap_err();
+            assert!(matches!(error, ToolError::Io(error) if error.kind() == kind));
+        }
+        assert!(!cwd.exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn existing_powershell_launch_finishes_the_same_environment_without_command_rewriting() {
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("existing literal script.ps1");
+        std::fs::write(&script, b"test fixture, not executed").unwrap();
+        let args = vec!["".into(), "literal & value".into()];
+        let configured = HashMap::from([("PATH".into(), "".into())]);
+        let mut expected = process_environment_in(&configured, Some(root.path())).unwrap();
+        finish_environment(ProcessEnvironmentTarget::Program(script.as_os_str()), &configured, &mut expected).unwrap();
+        let prepared = prepare_existing_process_launch(&script, &args, root.path(), &configured).await.unwrap();
+        assert_eq!(prepared.program, script.to_str().unwrap());
+        assert_eq!(prepared.args, args);
+        assert_eq!(prepared.environment, expected);
+    }
 
     #[cfg(windows)]
     #[test]
