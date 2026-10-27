@@ -6,6 +6,8 @@ import {
 } from './CreateStudio/sourceTypes';
 
 const typeRailSource = readFileSync(new URL('./CreateStudio/TypeRail.tsx', import.meta.url), 'utf8');
+const studioIndexSource = readFileSync(new URL('./CreateStudio/index.tsx', import.meta.url), 'utf8');
+const sourceConfigSource = readFileSync(new URL('./CreateStudio/SourceConfig.tsx', import.meta.url), 'utf8');
 const emptyStateSource = readFileSync(new URL('./KnowledgeEmptyState.tsx', import.meta.url), 'utf8');
 const listPageSource = readFileSync(new URL('./KnowledgeListPage/index.tsx', import.meta.url), 'utf8');
 
@@ -30,6 +32,16 @@ describe('Feishu knowledge entry', () => {
     });
     expect(canSubmitStudioSourceConfig('local', { rootPath: '/Users/developer/docs' })).toEqual({ ok: true });
     expect(canSubmitStudioSourceConfig('blank', {})).toEqual({ ok: true });
+  });
+
+  test('feishu creation collects basic info only — documents are curated afterwards', () => {
+    expect(canSubmitStudioSourceConfig('feishu', {})).toEqual({ ok: true });
+    // The studio submits an empty curated set; the link list lives on the
+    // detail page's add-content flow, not in the create dialog.
+    expect(studioIndexSource.includes("kind: 'feishu'")).toBe(true);
+    expect(studioIndexSource.includes('entries: [],')).toBe(true);
+    expect(sourceConfigSource.includes('feishuEntries')).toBe(false);
+    expect(sourceConfigSource.includes('knowledge.studio.feishuNote')).toBe(true);
   });
 
   test('keeps the Feishu empty-state tile enabled as a navigation entry', () => {

@@ -22,7 +22,7 @@ import { KnowledgeErrorNotice, showKnowledgeErrorMessage } from '../KnowledgeErr
 import { normalizeKnowledgeError, type KnowledgeErrorPresentation } from '../knowledgeError';
 import { useKnowledgeTags } from '../useKnowledgeTags';
 import KnowledgeModelSelector, { useKnowledgeAutogenModel } from '../KnowledgeModelSelector';
-import { MAX_FEISHU_SOURCE_ENTRIES, parseKnowledgeUrlDrafts } from '../knowledgeUrlEntries';
+import { parseKnowledgeUrlDrafts } from '../knowledgeUrlEntries';
 import { resolveLocalFolderTreeAccess } from '../knowledgeTreeAccess';
 import SourceConfig from './SourceConfig';
 import type { SourceConfigValue } from './SourceConfig';
@@ -259,36 +259,12 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
         }
         source = { kind: 'url', mode: urlMode, entries: parsed.entries };
       } else if (sourceType === 'feishu') {
-        // Curated links are optional at create time — an empty set produces a
-        // valid remote-backed base that gains documents on the detail page or
-        // from the Feishu workbench's "save into base" action.
-        const parsed = parseKnowledgeUrlDrafts(
-          sourceConfigValue.feishuEntries ?? [],
-          false,
-          MAX_FEISHU_SOURCE_ENTRIES,
-        );
-        if (!parsed.ok && parsed.reason !== 'empty') {
-          Message.warning(
-            t(
-              parsed.reason === 'duplicate'
-                ? 'knowledge.studio.webUrlDuplicate'
-                : parsed.reason === 'limit'
-                  ? 'knowledge.studio.feishuLinkLimit'
-                  : 'knowledge.studio.feishuLinkInvalid',
-              parsed.reason === 'duplicate'
-                ? { defaultValue: '网址重复，请只保留一条：{{url}}', url: parsed.url }
-                : parsed.reason === 'limit'
-                  ? { defaultValue: '最多添加 {{limit}} 个飞书文档', limit: parsed.limit }
-                  : { defaultValue: '链接格式不正确：{{url}}', url: parsed.url },
-            ),
-          );
-          setSubmitting(false);
-          return;
-        }
+        // Create-time form collects basic info only — documents are curated
+        // afterwards on the detail page or from the Feishu workbench.
         source = {
           kind: 'feishu',
           mode: 'snapshot',
-          entries: parsed.ok ? parsed.entries : [],
+          entries: [],
         };
       }
 

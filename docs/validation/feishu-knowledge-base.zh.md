@@ -27,16 +27,16 @@ URL 并自动解包；`drive +inspect` 提供索引刷新的元数据；`drive +
 | `nomifun-office-hub` | `documents.read`/`documents.inspect` capability；`knowledge_search_documents`/`knowledge_fetch_document`/`knowledge_resolve_link` 内部方法；Search v2/fetch/inspect typed 命令与解析器 |
 | `nomifun-knowledge` | `FeishuKnowledgePort` + fail-closed 默认；stub 投影（标题命名 + name_hint）；策展链接校验（官方域/doc|docx|wiki/≤64）；远端检索∩策展集；`.remote/feishu/` 伪路径 handle 与实时读取；远端正文写拒绝；挂载组装点索引刷新 + stale 标记；typed binding 冻结策展 token 集 |
 | `nomifun-app` | 组合根 `OfficeFeishuKnowledgePort::new(office_hub)` 注入 `KnowledgeService` |
-| UI | CreateStudio 第三方组「飞书文档」（链接可留空）；详情页「添加知识 → 飞书文档」（仅 feishu 库）；工作台行级「存入知识库」；kind 徽标/筛选/双语；`IKnowledgeBase.kind` 增 `'feishu'`；addContent `feishu` 变体；UI/API 合同 51 |
+| UI | CreateStudio 第三方组「飞书文档」（创建只填基本信息，文档创建后策展）；详情页「添加知识 → 飞书文档」（仅 feishu 库）；工作台行级「存入知识库」；kind 徽标/筛选/双语；`IKnowledgeBase.kind` 增 `'feishu'`；addContent `feishu` 变体；UI/API 合同 51 |
 
 ## 自动验证（已执行）
 
 | 检查 | 结果 |
 | --- | --- |
 | `cargo test -p nomifun-office-hub` | 72 passed，4 ignored（需真实 CLI/profile 的探针） |
-| `cargo test -p nomifun-knowledge --lib` | 365 passed（含 feishu 链接校验、stub 投影、策展集交集检索、实时读取、写拒绝、挂载 stale） |
+| `cargo test -p nomifun-knowledge --lib` | 366 passed（含 feishu 链接校验、空策展集建库、stub 投影、策展集交集检索、实时读取、写拒绝、挂载 stale） |
 | `cargo check -p nomifun-app` | 通过 |
-| `bun test --cwd ui src/renderer/pages/knowledge/` | 158 passed |
+| `bun test --cwd ui src/renderer/pages/knowledge/` | 159 passed |
 | `bun run typecheck` | 通过 |
 | `bun run check:i18n` | 通过（8459 键已重新生成） |
 | `bun run check:desktop-ui-boundary` | 通过 |
