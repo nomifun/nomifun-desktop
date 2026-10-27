@@ -260,18 +260,6 @@ impl OfficeHubService {
                     item.pending_operation_id=Some(operation.clone());item.pending_status=Some(status.clone());
                 }
             }
-        } else if matches!(query,OfficeQuery::Tasks{..}) {
-            let actor=identity.actor.as_ref().ok_or_else(||HubError::unavailable("User identity unavailable"))?;
-            let targets=result.items.iter().map(|item|{
-                crate::store::target_key(actor,connection.profile.as_deref().unwrap_or_default(),&OfficeMutation::TaskComplete{
-                    client_item_id:item.id.clone(),task_id:item.id.clone(),completed:true}).map(|target|(item.id.clone(),target))
-            }).collect::<Result<BTreeMap<_,_>,HubError>>()?;
-            let pending=self.store.pending_targets(&self.owner,&targets.values().cloned().collect::<Vec<_>>()).await?;
-            for item in &mut result.items {
-                if let Some((operation,status))=targets.get(&item.id).and_then(|target|pending.get(target)){
-                    item.pending_operation_id=Some(operation.clone());item.pending_status=Some(status.clone());
-                }
-            }
         }
         Ok(result)
     }
@@ -321,7 +309,7 @@ impl OfficeHubService {
             if request.items.iter().any(|item|!matches!(item,OfficeMutation::BaseUpdate{base_token:b,table_id:t,..} if b==base_token&&t==table_id)){
                 return Err(HubError::invalid("A Base save must target one data table"))
             }
-        }else if request.items.len()!=1{return Err(HubError::invalid("Save one document, task or calendar event at a time"))}
+        }else if request.items.len()!=1{return Err(HubError::invalid("Save one document change at a time"))}
         let (connection,executable,identity)=self.ready().await?;
         let actor=identity.actor.as_ref().ok_or_else(||HubError::unavailable("The user identity is unavailable"))?;
         let profile=connection.profile.as_deref().unwrap_or_default();
@@ -490,17 +478,10 @@ impl OfficeHubService {
         }
     }
 
-    async fn preflight(&self,items:&[OfficeMutation],profile:&str,actor:&OfficeActor,executable:&str,identity:&adapter::CliIdentity)->Result<(),HubError>{
-        let mut checked_lists=HashSet::new();
+    async fn preflight(&self,items:&[OfficeMutation],profile:&str,_actor:&OfficeActor,executable:&str,identity:&adapter::CliIdentity)->Result<(),HubError>{
         let mut checked_tables=HashMap::new();
         for mutation in items{
             match mutation{
-                OfficeMutation::TaskCreate{tasklist_id:Some(list),..} if checked_lists.insert(list.clone())=>{
-                    let output=self.runtime.run(executable,adapter::tasklist_get_command(list,Some(profile))?,self.shutdown.child_token(),None).await?;
-                    if !adapter::tasklist_editable(&output,&actor.user_id)?{
-                        return Err(HubError::invalid("The selected task list has no confirmed owner/editor access; refresh it or choose a different list"))
-                    }
-                }
                 OfficeMutation::BaseUpdate{base_token,table_id,record_id,fields,before,..}=>{
                     let key=(base_token.clone(),table_id.clone());
                     if !checked_tables.contains_key(&key){
@@ -545,14 +526,7 @@ impl OfficeHubService {
                     let confirmed = observed.is_some_and(|row| fields.iter().all(|(key,value)| row.fields.get(key) == Some(value)));
                     (ObservationKind::TargetReadback, confirmed,
                         if confirmed { "Observed the requested field values at the original record identity" } else { "The requested values are not yet visible; this is not evidence of non-execution" },
-                        serde_json::to_value(observed).map_err(HubError::storage)?, Some(record_id.as_str()), None)
-                }
-                Some(OfficeMutation::TaskComplete { task_id, completed, .. }) => {
-                    require_permissions(&adapter::query_permissions(&OfficeQuery::Tasks { relation: TaskRelation::Assigned, tasklist_id: None, cursor: None }, &identity.scopes))?;
-                    let output = self.runtime.run(&executable, adapter::task_get_command(task_id, Some(&operation.profile))?, self.shutdown.child_token(), None).await?;
-                    let observed = adapter::normalize_task_get(&output)?;
-                    (ObservationKind::TargetReadback, observed.completed == Some(*completed),
-                        "Read the completion state at the original task identity", serde_json::to_value(&observed).map_err(HubError::storage)?, Some(task_id.as_str()), observed.url)
+                        serde_json::to_value(observed).map_err(HubError::storage)?, Some(record_id.as_str()), None::<String>)
                 }
                 _ => (ObservationKind::Inconclusive, false,
                     "No exact original terminal receipt is available; historical or unknown mutations are not replayed or inferred from text or same-name search",

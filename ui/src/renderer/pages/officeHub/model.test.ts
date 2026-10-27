@@ -18,7 +18,7 @@ describe('compact office boundaries', () => {
   test('opaque historic mutation evidence cannot become a current executable kind', () => {
     const old = { items: [{ mutation: { kind: 'document_update', document_id: 'doc' } }] } as unknown as OfficeOperation;
     expect(operationKind(old)).toBe('mixed');
-    expect(mutationTitle({ title: { bad: 'shape' }, task_id: 'real-task' })).toBe('real-task');
+    expect(mutationTitle({ title: { bad: 'shape' }, document_id: 'real-document' })).toBe('real-document');
     expect(mutationTitle({ title: ['untrusted'] })).toBe('');
   });
   test('structured related references preserve credential redaction', () => {

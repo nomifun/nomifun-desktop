@@ -8,9 +8,8 @@ documents or external websites. The footer records simulated actions, writes and
 the exact browser links. It also provides scenario selection and explicit auth
 completion controls; those controls belong to the QA harness, not the product.
 
-At 880×600 and a wider desktop viewport, the top navigation contains only
-文档、日程与任务, and the default page is 文档. Base tables use the 多维表格 filter
-under 文档.
+At 880×600 and a wider desktop viewport, the page shows the 文档 list directly.
+Base tables use the 多维表格 filter under 文档.
 
 ## Connection states
 
@@ -34,7 +33,7 @@ Check the first-use and account-change flows:
    the footer's **模拟完成授权** button. The renderer observes completion through
    its normal auth polling. Browser-open actions only record a link.
 3. Identity-only login grants `offline_access` without business permissions.
-   Grant document or agenda reading from the corresponding product control, then
+   Grant document reading from the corresponding product control, then
    complete that distinct request with the same footer button. Configuration
    flows complete application setup first and leave user login as a separate step.
 4. In `connected`, open account settings and use **退出登录** or **更换账号**.

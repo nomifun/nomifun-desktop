@@ -1,6 +1,6 @@
 # 飞书办公：文档列表与页面收敛验收
 
-对应[现役实施计划](../handoffs/office-feishu-workbench.zh.md)。文档检索验证：2026-10-26；页面收敛与连接流程重设计：2026-10-27。
+对应[现役实施计划](../handoffs/office-feishu-workbench.zh.md)。文档检索验证：2026-10-26；页面收敛与连接流程重设计：2026-10-27；日程与任务整体移除见末节。
 
 ## 根因
 
@@ -156,6 +156,35 @@ HTTP 调用方离开不撤销原 Host owner 对退出与核验的责任。
 
 搜索结果仍由飞书 ACL、可见性与索引决定；新建文档进入索引可能有延迟。
 真实云端创建／删除本次未执行。已有桌面进程未被终止或替换，源码与 UI 构建不等于安装新发行包。
+
+## 日程与任务整体移除
+
+按用户要求，日程与任务的设计与代码整体退出当前合同：
+
+- 后端 `OfficeQuery` 仅剩 `documents` 与 `base_records`；`OfficeMutation` 仅剩
+  `document_create`、`document_delete`、`base_update`。任务、清单、人员检索和日历的
+  查询／变更、CLI 命令构造、解析、权限映射（`tasks.*`、`tasklists.*`、`calendar.*`、
+  `people.read`）及对应的准入、回执与核验分支已删除。
+- 前端移除「日程与任务」页签、任务列表行组件、任务／日程表单、日期选择、
+  权限分组和全部相关文案；页面直接展示文档列表，无业务页签。
+- 四张办公表不保存任务／日程专属结构，无 schema 变更；历史任务操作仅作为
+  不可执行的只读 JSON 回执证据保留，`task_create` 测试夹具已换成 `document_create`。
+- 运行时探针改用 `schema drive.files.search` 验证文档检索命令契约。
+
+本轮执行的验证：
+
+| 检查 | 结果 |
+| --- | --- |
+| `cargo test --locked -p nomifun-office-hub --lib -- --test-threads=2` | 66 passed，4 ignored |
+| `cargo test --locked -p nomifun-db --test office_receipts_compact` | 6 passed |
+| `bun test --cwd ui src/renderer/pages/officeHub` | 52 passed，326 assertions |
+| `bun run typecheck` | 通过 |
+| `bun run check:i18n` | 通过，i18n-keys 已重新生成 |
+| `bun run check:desktop-ui-boundary` | 通过，最小支持视口 880×600 |
+| `bun run check:docs` | 通过 |
+
+本轮未执行真实飞书账号操作与桌面浏览器验收；此前按日期记录的验收条目
+描述当时的页面结构，不代表当前合同。
 
 ## 官方基线
 

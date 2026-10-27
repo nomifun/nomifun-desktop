@@ -16,16 +16,10 @@
   "empty": "No content.",
   "saved": "Saved.",
   "error": "The office operation failed.",
-  "tabs": {
-    "documents": "Documents",
-    "agenda": "Calendar & tasks"
-  },
   "actions": {
     "new": "New",
     "create": "Create",
     "createDocument": "Create document",
-    "createTask": "Create task",
-    "createEvent": "Create personal event",
     "close": "Close",
     "cancel": "Cancel",
     "save": "Save",
@@ -94,32 +88,16 @@
     "readMissing": "Reading permission is required. This does not mean the account has no data.",
     "exactScopes": "Requested permissions",
     "groups": {
-      "documents": "List and search documents",
-      "agenda": "Read calendar and tasks"
+      "documents": "List and search documents"
     },
     "groupHints": {
-      "documents": "List and search documents and Wiki resources available to this account. Open content in your browser.",
-      "agenda": "Read your calendar, tasks and accessible task lists."
+      "documents": "List and search documents and Wiki resources available to this account. Open content in your browser."
     },
     "capabilities": {
       "documents": {
         "create": "Create documents",
         "delete": "Delete documents",
         "browse": "List and search accessible documents"
-      },
-      "people": {
-        "read": "Find visible members"
-      },
-      "tasks": {
-        "read": "Read tasks",
-        "write": "Create and update tasks"
-      },
-      "tasklists": {
-        "read": "Read task lists"
-      },
-      "calendar": {
-        "read": "Read calendar",
-        "write": "Create personal events"
       },
       "base": {
         "read": "Read records",
@@ -180,39 +158,9 @@
     "deleteNamed": "Delete document: {{title}}",
     "deleteHint": "Delete this cloud document? It will be moved to the Feishu recycle bin."
   },
-  "tasks": {
-    "section": "Task",
-    "assigned": "Assigned to me",
-    "created": "Created by me",
-    "tasklist": "Specific task list",
-    "creator": "Creator",
-    "assignee": "Assignee",
-    "due": "Due date (optional)",
-    "list": "Task list",
-    "noList": "No shared list",
-    "chooseList": "Choose a task list",
-    "readLists": "Enable task list reading",
-    "listHint": "Assigning a person does not grant them edit permission on the shared list.",
-    "title": "Task content",
-    "otherPerson": "Find another member",
-    "personSearch": "Search members by name",
-    "empty": "No tasks in this scope."
-  },
-  "calendar": {
-    "section": "Event",
-    "date": "Date",
-    "time": "Start",
-    "duration": "Duration (minutes)",
-    "title": "Event title",
-    "personal": "No attendees or video meeting added",
-    "empty": "No events on this date."
-  },
   "operation": {
     "summary": {
-      "task_create": "Create tasks · {{count}}",
-      "task_complete": "Update task status · {{count}}",
       "document_create": "Create documents · {{count}}",
-      "calendar_create": "Create personal events · {{count}}",
       "base_update": "Update records · {{count}}",
       "mixed": "Office operations · {{count}}",
       "document_delete": "Delete document · {{count}} item(s)"
@@ -243,8 +191,7 @@
     "readbackConfirmed": "The requested field values were observed at the original record."
   },
   "validation": {
-    "required": "Complete the required fields.",
-    "date": "Enter a valid date and time."
+    "required": "Complete the required fields."
   },
   "deleted": "Deleted.",
   "account": {
@@ -265,7 +212,7 @@
     "otherConnection": "Switch connection",
     "switchTitle": "Sign out and switch account?",
     "logoutTitle": "Sign out of Feishu?",
-    "logoutHint": "Sign out {{name}} from this connection. Documents, events and tasks in Feishu will remain unchanged.",
+    "logoutHint": "Sign out {{name}} from this connection. Documents and other content in Feishu will remain unchanged.",
     "switchHint": "Keep the application configuration and choose another account on the official Feishu page.",
     "signedOutHint": "Reading stops after sign-out. You can sign in again whenever you need.",
     "confirmSwitch": "Sign out and switch",
@@ -297,7 +244,7 @@
   },
   "connectScreen": {
     "missingTitle": "Install the Feishu connection component",
-    "missingHint": "A one-time setup. Then sign in with your Feishu account to access documents, events and tasks.",
+    "missingHint": "A one-time setup. Then sign in with your Feishu account to access documents and Base tables.",
     "installingTitle": "Preparing the connection component",
     "installingHint": "Sign-in will be available when preparation finishes. You do not need to install again or keep a dialog open.",
     "repairTitle": "Check the connection component",
@@ -305,9 +252,9 @@
     "disabledTitle": "Your Feishu connection is disabled",
     "disabledHint": "No Feishu content is being read or written. Enable the connection to continue with your account or sign in again.",
     "expiredTitle": "Sign in to Feishu again",
-    "expiredHint": "Your login has expired. Confirm your identity to continue with your documents, events and tasks.",
+    "expiredHint": "Your login has expired. Confirm your identity to continue with your documents and Base tables.",
     "loginTitle": "Connect your Feishu account",
-    "loginHint": "Handle documents, events and tasks in one place. Use your own account and grant access only when needed.",
+    "loginHint": "Handle documents and Base tables in one place. Use your own account and grant access only when needed.",
     "component": "Prepare the connection component",
     "componentHint": "Connect through the official component. Existing installations can be reused.",
     "componentReady": "The component is ready for sign-in.",

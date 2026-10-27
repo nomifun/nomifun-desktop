@@ -36,20 +36,13 @@ export interface AuthorizationFlow {
   id: string; kind: AuthKind; phase: AuthPhase; verification_url: string | null; expires_at: string | null;
   missing_scopes: string[]; console_url: string | null; message: string | null;
 }
-export type TaskRelation = 'assigned' | 'created' | 'tasklist';
 export type DocumentFilter = 'all' | 'document' | 'base';
 export type OfficeQuery =
   | { kind: 'documents'; query: string; filter: DocumentFilter; cursor: string | null }
-  | { kind: 'people'; query: string }
-  | { kind: 'tasklists'; cursor: string | null }
-  | { kind: 'tasks'; relation: TaskRelation; tasklist_id: string | null; cursor: string | null }
-  | { kind: 'agenda'; start: string; end: string }
-  | { kind: 'calendar_event'; calendar_id: string; event_id: string }
   | { kind: 'base_records'; base_token: string; table_id: string; offset: number | null; filter: unknown | null };
 export interface OfficeItem {
-  id: string; kind: string; title: string; url: string | null; description: string | null; modified_at: string | null;
-  assignee_ids: string[]; creator_id: string | null; tasklist_ids: string[]; due: string | null; completed: boolean | null;
-  start: string | null; end: string | null; calendar_id: string | null; base_token: string | null; table_id: string | null;
+  id: string; kind: string; title: string; url: string | null; modified_at: string | null;
+  base_token: string | null; table_id: string | null;
   pending_operation_id: string | null; pending_status: ItemStatus | null;
   fields: Record<string, unknown>;
 }
@@ -58,11 +51,8 @@ export interface OfficeQueryResult {
   items: OfficeItem[]; fields: OfficeField[]; has_more: boolean; next_cursor: string | null; warnings: string[];
 }
 export type OfficeMutation =
-  | { kind: 'task_create'; client_item_id: string; title: string; assignee_id: string; assignee_name: string | null; due: string | null; tasklist_id: string | null }
-  | { kind: 'task_complete'; client_item_id: string; task_id: string; completed: boolean }
   | { kind: 'document_create'; client_item_id: string; title: string }
   | { kind: 'document_delete'; client_item_id: string; document_id: string; document_type: string; title: string }
-  | { kind: 'calendar_create'; client_item_id: string; title: string; start: string; end: string; timezone: string }
   | { kind: 'base_update'; client_item_id: string; base_token: string; table_id: string; record_id: string; fields: Record<string, unknown>; before: Record<string, unknown> };
 export interface ExecuteRequest { request_id: string; expected_actor: OfficeActor; profile: string; items: OfficeMutation[] }
 export type ItemStatus = 'queued' | 'running' | 'succeeded' | 'not_executed' | 'unknown' | 'accepted_pending_confirmation';

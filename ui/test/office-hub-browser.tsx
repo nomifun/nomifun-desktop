@@ -21,9 +21,7 @@ const actor = { app_id: 'qa-app', user_id: 'qa-user', name: '离线验收' };
 const now = new Date().toISOString();
 const capabilityScopes: Record<string, string[]> = {
   'documents.browse': ['search:docs:read'], 'documents.create': ['docx:document:create'],
-  'documents.delete': ['space:document:delete', 'drive:drive.metadata:readonly'], 'people.read': ['contact:user:search'],
-  'tasks.read': ['task:task:read'], 'tasks.write': ['task:task:write'], 'tasklists.read': ['task:tasklist:read'],
-  'calendar.read': ['calendar:calendar.event:read'], 'calendar.write': ['calendar:calendar.event:create'],
+  'documents.delete': ['space:document:delete', 'drive:drive.metadata:readonly'],
   'base.read': ['base:record:read', 'base:field:read'], 'base.write': ['base:record:update'],
 };
 const status: OfficeStatus = {
@@ -52,8 +50,7 @@ const flows = new Map<string, PreviewAuth>();
 let activeFlowId: string | null = null;
 let lastAction = '尚未操作';
 const resource = (id: string, title: string): OfficeItem => ({
-  id, title, kind: 'docx', url: 'https://qa.feishu.cn/docx/' + id, modified_at: now, description: null,
-  assignee_ids: [], creator_id: null, tasklist_ids: [], due: null, completed: null, start: null, end: null, calendar_id: null,
+  id, title, kind: 'docx', url: 'https://qa.feishu.cn/docx/' + id, modified_at: now,
   base_token: null, table_id: null, pending_operation_id: null, pending_status: null, fields: {},
 });
 let resources = scenario === 'empty' ? [] : [resource('qa-document', 'nomifun-test-3'), resource('qa-second', '项目计划与工作记录')];

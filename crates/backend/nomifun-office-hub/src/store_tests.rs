@@ -10,9 +10,8 @@ async fn fixture()->(Database,OfficeHubStore,String,OfficeConnection,OfficeActor
     let actor=OfficeActor{app_id:"cli_test".into(),user_id:"ou_owner".into(),name:"Owner".into()};
     (db,store,owner.into_string(),connection,actor)
 }
-fn task(id:&str,assignee:&str)->OfficeMutation{
-    OfficeMutation::TaskCreate{client_item_id:id.into(),title:format!("Task {id}"),assignee_id:assignee.into(),
-        assignee_name:Some(assignee.into()),due:None,tasklist_id:None}
+fn doc(id:&str,title:&str)->OfficeMutation{
+    OfficeMutation::DocumentCreate{client_item_id:id.into(),title:title.into()}
 }
 fn base(id:&str)->OfficeMutation{
     OfficeMutation::BaseUpdate{client_item_id:id.into(),base_token:"base-real".into(),table_id:"table-real".into(),record_id:"record-real".into(),
@@ -32,7 +31,7 @@ async fn finish(store:&OfficeHubStore,owner:&str,op:&OfficeOperation,index:usize
 #[tokio::test]
 async fn submitted_request_is_exact_owner_scoped_and_idempotent_independent_of_display_names(){
     let (db,store,owner,c,a)=fixture().await;
-    let mut req=request(&a,vec![task("one","ou_a")]);
+    let mut req=request(&a,vec![doc("one","Document one")]);
     let op=store.create_submitted(&owner,&c.id,&a,"nomifun",&req).await.unwrap();
     assert_eq!(op.status,OperationStatus::Queued);
     assert!(op.items[0].attempts.is_empty());
@@ -40,7 +39,7 @@ async fn submitted_request_is_exact_owner_scoped_and_idempotent_independent_of_d
     assert_eq!(store.create_submitted(&owner,&c.id,&renamed,"nomifun",&req).await.unwrap().id,op.id);
     assert_eq!(store.get_by_request(&owner,&req.request_id).await.unwrap().unwrap().id,op.id);
     assert!(store.get_by_request(&new_id(),&req.request_id).await.unwrap().is_none());
-    req.items=vec![task("one","ou_b")];
+    req.items=vec![doc("one","Changed document")];
     assert_eq!(store.create_submitted(&owner,&c.id,&a,"nomifun",&req).await.unwrap_err().related_operation_id,Some(op.id));
     assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM office_operations").fetch_one(db.pool()).await.unwrap(),1);
     assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM office_operation_receipts").fetch_one(db.pool()).await.unwrap(),0);
@@ -66,9 +65,9 @@ async fn pending_base_target_stays_fenced_after_identity_switch_and_is_visible_t
 async fn creation_identity_cannot_duplicate_success_or_unknown_but_not_executed_can_be_resubmitted(){
     let (db,store,owner,c,a)=fixture().await;
     for (id,status,allowed) in [("success",ItemStatus::Succeeded,false),("unknown",ItemStatus::Unknown,false),("not-executed",ItemStatus::NotExecuted,true)]{
-        let op=submit(&store,&owner,&c,&a,vec![task(id,"ou_a")]).await;
+        let op=submit(&store,&owner,&c,&a,vec![doc(id,"A document")]).await;
         let op=finish(&store,&owner,&op,0,status).await;
-        let result=store.create_submitted(&owner,&c.id,&a,"nomifun",&request(&a,vec![task(id,"ou_a")])).await;
+        let result=store.create_submitted(&owner,&c.id,&a,"nomifun",&request(&a,vec![doc(id,"A document")])).await;
         if allowed{assert!(result.is_ok())}else{assert_eq!(result.unwrap_err().related_operation_id,Some(op.id))}
     }
     db.close().await;
@@ -78,10 +77,10 @@ async fn creation_identity_cannot_duplicate_success_or_unknown_but_not_executed_
 async fn creation_nonce_cannot_be_reused_by_switching_actor_or_profile(){
     let (db,store,owner,mut c,a)=fixture().await;
     for (nonce,status) in [("old-success",ItemStatus::Succeeded),("old-unknown",ItemStatus::Unknown)]{
-        let op=submit(&store,&owner,&c,&a,vec![task(nonce,"ou_a")]).await;finish(&store,&owner,&op,0,status).await;
+        let op=submit(&store,&owner,&c,&a,vec![doc(nonce,"Original")]).await;finish(&store,&owner,&op,0,status).await;
         c.profile=Some("other".into());store.save_connection(&owner,&c).await.unwrap();
         let other=OfficeActor{app_id:"other-app".into(),user_id:"ou_other".into(),name:"Other".into()};
-        let mut req=request(&other,vec![task(nonce,"ou_other")]);req.profile="other".into();
+        let mut req=request(&other,vec![doc(nonce,"Switched")]);req.profile="other".into();
         assert_eq!(store.create_submitted(&owner,&c.id,&other,"other",&req).await.unwrap_err().related_operation_id,Some(op.id));
         c.profile=Some("nomifun".into());store.save_connection(&owner,&c).await.unwrap();
     }
@@ -91,16 +90,16 @@ async fn creation_nonce_cannot_be_reused_by_switching_actor_or_profile(){
 #[tokio::test]
 async fn partial_outcomes_and_each_original_input_survive_new_request_retry(){
     let (db,store,owner,c,a)=fixture().await;
-    let op=submit(&store,&owner,&c,&a,vec![task("success","ou_a"),task("retry","unresolved"),task("unknown","ou_a")]).await;
+    let op=submit(&store,&owner,&c,&a,vec![doc("success","A"),doc("retry","B"),doc("unknown","C")]).await;
     finish(&store,&owner,&op,0,ItemStatus::Succeeded).await;
     finish(&store,&owner,&op,1,ItemStatus::NotExecuted).await;
     let original=finish(&store,&owner,&op,2,ItemStatus::Unknown).await;
     assert_eq!(original.status,OperationStatus::Partial);
-    let next=submit(&store,&owner,&c,&a,vec![task("retry","ou_resolved")]).await;
+    let next=submit(&store,&owner,&c,&a,vec![doc("retry","Resolved")]).await;
     assert_ne!(next.id,original.id);assert_ne!(next.request_id,original.request_id);
     finish(&store,&owner,&next,0,ItemStatus::Succeeded).await;
     let retained=store.get(&owner,&original.id).await.unwrap().unwrap();
-    assert_eq!(retained.items[1].mutation,serde_json::to_value(task("retry","unresolved")).unwrap());
+    assert_eq!(retained.items[1].mutation,serde_json::to_value(doc("retry","B")).unwrap());
     assert_eq!(retained.items[1].attempts[0].status,ItemStatus::NotExecuted);
     let attempt=&retained.items[2].attempts[0];
     assert!(store.finish_attempt(&owner,&retained.id,&retained.items[2].id,&attempt.id,ItemStatus::Succeeded,None,None,None,None).await.is_err());
@@ -127,7 +126,7 @@ async fn base_acceptance_needs_exact_readback_and_observation_never_rewrites_ori
 #[tokio::test]
 async fn restart_preserves_unknown_and_only_unstarted_work_becomes_not_executed(){
     let (db,store,owner,c,a)=fixture().await;
-    let op=submit(&store,&owner,&c,&a,vec![task("started","ou_a"),task("queued","ou_a")]).await;
+    let op=submit(&store,&owner,&c,&a,vec![doc("started","S"),doc("queued","Q")]).await;
     store.start_attempt(&owner,&op.id,&op.items[0].id).await.unwrap();
     assert_eq!(store.recover_interrupted(&owner).await.unwrap(),2);assert_eq!(store.recover_interrupted(&owner).await.unwrap(),0);
     let restored=store.get(&owner,&op.id).await.unwrap().unwrap();
@@ -140,7 +139,7 @@ async fn restart_preserves_unknown_and_only_unstarted_work_becomes_not_executed(
 #[tokio::test]
 async fn disabling_withdraws_only_queued_work_without_fabricating_cli_attempts(){
     let (db,store,owner,mut c,a)=fixture().await;
-    let op=submit(&store,&owner,&c,&a,vec![task("started","ou_a"),task("queued","ou_a")]).await;
+    let op=submit(&store,&owner,&c,&a,vec![doc("started","S"),doc("queued","Q")]).await;
     store.start_attempt(&owner,&op.id,&op.items[0].id).await.unwrap();
     c.enabled=false;store.save_connection(&owner,&c).await.unwrap();
     let op=store.get(&owner,&op.id).await.unwrap().unwrap();
@@ -153,7 +152,7 @@ async fn disabling_withdraws_only_queued_work_without_fabricating_cli_attempts()
 #[tokio::test]
 async fn old_unknown_inputs_remain_readable_but_cannot_execute_or_gain_false_confirmation(){
     let (db,store,owner,c,a)=fixture().await;
-    let op=submit(&store,&owner,&c,&a,vec![task("old","ou_a")]).await;
+    let op=submit(&store,&owner,&c,&a,vec![doc("old","Old")]).await;
     let legacy=json!({"kind":"document_update","client_item_id":"old","document_id":"doc-real","revision":"12","content":"legacy append"});
     let save=OfficeMutation::DocumentDelete{client_item_id:"current-delete".into(),document_id:"doc-real".into(),document_type:"docx".into(),title:"Document".into()};
     sqlx::query("UPDATE office_operation_items SET mutation_json=?,target_key=? WHERE item_id=?").bind(legacy.to_string()).bind(target_key(&a,"nomifun",&save).unwrap()).bind(&op.items[0].id).execute(db.pool()).await.unwrap();

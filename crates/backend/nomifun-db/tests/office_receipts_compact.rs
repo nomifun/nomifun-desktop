@@ -5,7 +5,7 @@ use serde_json::{Value,json};
 use std::path::Path;
 const OLD_DIGEST:&str="0ef8e3eeec9835238c865441913383bb80880bf89e3f0d78b538780c7534bdfc";
 fn id(number:u64)->String{format!("0190f5fe-7c00-7a00-8000-{number:012x}")}
-fn task(client:&str,assignee:&str)->Value{json!({"kind":"task_create","client_item_id":client,"title":client,"assignee_id":assignee,"assignee_name":assignee,"due":"2026-10-28","tasklist_id":null})}
+fn doc(client:&str)->Value{json!({"kind":"document_create","client_item_id":client,"title":client})}
 fn key(parts:Value)->String{format!("{:x}",Sha256::digest(serde_json::to_vec(&parts).unwrap()))}
 async fn old(path:&Path)->SqlitePool{
     let pool=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(path).create_if_missing(true)).await.unwrap();
@@ -42,7 +42,7 @@ async fn attempt(pool:&SqlitePool,n:u64,op:u64,item:u64,number:i64,status:&str,m
 async fn current_office_upgrade_removes_page_metadata_and_preserves_execution_facts(){
     let dir=tempfile::tempdir().unwrap();let path=dir.path().join("old-17.db");let pool=old(&path).await;
     operation(&pool,10,"unknown").await;
-    let mutation=task("unresolved-creation","ou_owner");
+    let mutation=doc("unresolved-creation");
     item(&pool,20,10,"unknown",&mutation,&key(json!(["creation",20])),true).await;
     attempt(&pool,120,10,20,1,"unknown",&mutation).await;
     let migrator=sqlx::migrate!("./migrations");
@@ -89,24 +89,24 @@ async fn compact_upgrade_preserves_all_submitted_evidence_pending_fences_and_seq
     let dir=tempfile::tempdir().unwrap();let path=dir.path().join("old-16.db");let pool=old(&path).await;
     operation(&pool,10,"partial").await;
     for (n,status) in [(20,"succeeded"),(21,"unknown"),(23,"not_executed")]{
-        let mutation=task(&format!("client-{n}"),"ou_owner");item(&pool,n,10,status,&mutation,&key(json!(["creation",n])),true).await;attempt(&pool,n+100,10,n,1,status,&mutation).await;
+        let mutation=doc(&format!("client-{n}"));item(&pool,n,10,status,&mutation,&key(json!(["creation",n])),true).await;attempt(&pool,n+100,10,n,1,status,&mutation).await;
     }
     operation(&pool,14,"accepted_pending_confirmation").await;
     let base=json!({"kind":"base_update","client_item_id":"base-accepted","base_token":"base-real","table_id":"table-real","record_id":"record-real","fields":{"fldStatus":["Done"]},"before":{"fldStatus":["Open"]}});
     item(&pool,22,14,"accepted_pending_confirmation",&base,&key(json!(["feishu","base","base-real","table-real","record-real"])),true).await;
     attempt(&pool,122,14,22,1,"accepted_pending_confirmation",&base).await;
     // A real retry retained both the original failed input and the new input.
-    let retry=task("retry","ou_resolved");item(&pool,24,10,"succeeded",&retry,&key(json!(["creation",24])),true).await;
-    attempt(&pool,124,10,24,1,"not_executed",&task("retry","unresolved")).await;attempt(&pool,125,10,24,2,"succeeded",&retry).await;
+    let retry=doc("retry-resolved");item(&pool,24,10,"succeeded",&retry,&key(json!(["creation",24])),true).await;
+    attempt(&pool,124,10,24,1,"not_executed",&doc("retry-original")).await;attempt(&pool,125,10,24,2,"succeeded",&retry).await;
     sqlx::query("INSERT INTO office_operation_observations(observation_id,operation_id,item_id,kind,message,data_json,confirmed,created_at) VALUES (?,?,?,'original_receipt','exact late receipt',?,1,3)")
         .bind(id(200)).bind(id(10)).bind(id(24)).bind(json!({"attempt_id":id(125),"guid":"real-guid"}).to_string()).execute(&pool).await.unwrap();
-    operation(&pool,11,"running").await;let running=task("running","ou_owner");let queued=task("queued","ou_owner");
+    operation(&pool,11,"running").await;let running=doc("running");let queued=doc("queued");
     item(&pool,25,11,"running",&running,&key(json!(["creation",25])),true).await;attempt(&pool,126,11,25,1,"running",&running).await;
     item(&pool,26,11,"queued",&queued,&key(json!(["creation",26])),true).await;
     operation(&pool,12,"unknown").await;
     let legacy=json!({"kind":"document_update","client_item_id":"legacy-doc","document_id":"doc-real","revision":"12","content":"old append input"});
     let doc_key=key(json!(["feishu","document","doc-real"]));item(&pool,27,12,"unknown",&legacy,&doc_key,true).await;attempt(&pool,127,12,27,1,"unknown",&legacy).await;
-    operation(&pool,13,"draft").await;item(&pool,28,13,"queued",&task("never-dispatched","ou_a"),&key(json!(["draft"])),false).await;
+    operation(&pool,13,"draft").await;item(&pool,28,13,"queued",&doc("never-dispatched"),&key(json!(["draft"])),false).await;
     sqlx::query("UPDATE sqlite_sequence SET seq=12000 WHERE name IN ('office_operations','office_operation_items')").execute(&pool).await.unwrap();
     let rich=json!({"id":"doc-real","kind":"document","title":"Actual opened entrance","url":"https://test.invalid/docx/doc-real","fields":{"private":"not a bookmark"},"description":"do not migrate remote contents","pending_operation_id":id(12),"base_token":null,"table_id":null});
     sqlx::query("INSERT INTO office_recent_resources(recent_resource_id,owner_id,connection_id,resource_key,resource_json,last_opened_at) VALUES (?,?,?,?,?,99)").bind(id(201)).bind(id(1)).bind(id(2)).bind("b".repeat(64)).bind(rich.to_string()).execute(&pool).await.unwrap();
@@ -135,7 +135,7 @@ async fn compact_upgrade_preserves_all_submitted_evidence_pending_fences_and_seq
 #[tokio::test]
 async fn compact_upgrade_refuses_a_draft_with_execution_facts_without_changing_its_source(){
     let dir=tempfile::tempdir().unwrap();let path=dir.path().join("contradictory-draft.db");let pool=old(&path).await;
-    operation(&pool,10,"draft").await;let mutation=task("draft","ou_a");item(&pool,20,10,"queued",&mutation,&key(json!(["draft"])),false).await;attempt(&pool,120,10,20,1,"unknown",&mutation).await;pool.close().await;
+    operation(&pool,10,"draft").await;let mutation=doc("draft");item(&pool,20,10,"queued",&mutation,&key(json!(["draft"])),false).await;attempt(&pool,120,10,20,1,"unknown",&mutation).await;pool.close().await;
     assert!(nomifun_db::init_database(&path).await.is_err());
     let pool=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path).create_if_missing(false)).await.unwrap();
     assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM office_operation_attempts").fetch_one(&pool).await.unwrap(),1);
@@ -146,7 +146,7 @@ async fn compact_upgrade_refuses_a_draft_with_execution_facts_without_changing_i
 #[tokio::test]
 async fn compact_upgrade_rejects_unknown_metadata_without_losing_unresolved_receipts(){
     let dir=tempfile::tempdir().unwrap();let path=dir.path().join("unknown-metadata.db");let pool=old(&path).await;
-    operation(&pool,10,"unknown").await;let mutation=task("unknown","ou_a");item(&pool,20,10,"unknown",&mutation,&key(json!(["unknown"])),true).await;attempt(&pool,120,10,20,1,"unknown",&mutation).await;
+    operation(&pool,10,"unknown").await;let mutation=doc("unknown");item(&pool,20,10,"unknown",&mutation,&key(json!(["unknown"])),true).await;attempt(&pool,120,10,20,1,"unknown",&mutation).await;
     sqlx::query("UPDATE schema_metadata SET canonical_schema_manifest_digest=?").bind("f".repeat(64)).execute(&pool).await.unwrap();pool.close().await;
     assert!(nomifun_db::init_database(&path).await.is_err());
     let pool=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path).create_if_missing(false)).await.unwrap();assert_eq!(sqlx::query_scalar::<_,String>("SELECT status FROM office_operation_attempts").fetch_one(&pool).await.unwrap(),"unknown");assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM _sqlx_migrations WHERE version=17").fetch_one(&pool).await.unwrap(),0);pool.close().await;

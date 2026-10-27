@@ -16,16 +16,10 @@
   "empty": "暂无内容。",
   "saved": "已保存。",
   "error": "办公操作失败。",
-  "tabs": {
-    "documents": "文档",
-    "agenda": "日程与任务"
-  },
   "actions": {
     "new": "新建",
     "create": "创建",
     "createDocument": "新建文档",
-    "createTask": "创建任务",
-    "createEvent": "创建个人日程",
     "close": "关闭",
     "cancel": "取消",
     "save": "保存",
@@ -94,32 +88,16 @@
     "readMissing": "需要先开通读取权限，未授权不代表账号没有数据。",
     "exactScopes": "本次申请的权限",
     "groups": {
-      "documents": "列出与搜索文档",
-      "agenda": "查看日程与任务"
+      "documents": "列出与搜索文档"
     },
     "groupHints": {
-      "documents": "列出和搜索当前账号可检索的云文档与知识库，正文在浏览器中打开。",
-      "agenda": "查看日程、任务及可访问的任务清单。"
+      "documents": "列出和搜索当前账号可检索的云文档与知识库，正文在浏览器中打开。"
     },
     "capabilities": {
       "documents": {
         "create": "创建文档",
         "delete": "删除文档",
         "browse": "列出与搜索可访问文档"
-      },
-      "people": {
-        "read": "查询可见成员"
-      },
-      "tasks": {
-        "read": "读取任务",
-        "write": "创建和更新任务"
-      },
-      "tasklists": {
-        "read": "读取任务清单"
-      },
-      "calendar": {
-        "read": "读取日历",
-        "write": "创建个人日程"
       },
       "base": {
         "read": "读取记录",
@@ -180,39 +158,9 @@
     "deleteNamed": "删除文档：{{title}}",
     "deleteHint": "确认删除此云文档？删除后文档会进入飞书回收站。"
   },
-  "tasks": {
-    "section": "任务",
-    "assigned": "我负责的",
-    "created": "我创建的",
-    "tasklist": "指定清单",
-    "creator": "创建人",
-    "assignee": "负责人",
-    "due": "截止日期（可选）",
-    "list": "任务清单",
-    "noList": "不加入共享清单",
-    "chooseList": "请选择任务清单",
-    "readLists": "开通任务清单读取",
-    "listHint": "指定负责人不会自动授予该成员任务清单编辑权限。",
-    "title": "任务内容",
-    "otherPerson": "查找其他成员",
-    "personSearch": "按姓名查找成员",
-    "empty": "当前范围暂无任务。"
-  },
-  "calendar": {
-    "section": "日程",
-    "date": "日期",
-    "time": "开始时间",
-    "duration": "时长（分钟）",
-    "title": "日程标题",
-    "personal": "不添加参会人或视频会议",
-    "empty": "此日期暂无日程。"
-  },
   "operation": {
     "summary": {
-      "task_create": "创建任务 · {{count}}项",
-      "task_complete": "更新任务状态 · {{count}}项",
       "document_create": "创建文档 · {{count}}项",
-      "calendar_create": "创建个人日程 · {{count}}项",
       "base_update": "更新表格记录 · {{count}}项",
       "mixed": "办公操作 · {{count}}项",
       "document_delete": "删除文档 · {{count}}项"
@@ -243,8 +191,7 @@
     "readbackConfirmed": "已在原记录读回本次指定的字段值。"
   },
   "validation": {
-    "required": "请填写必填内容。",
-    "date": "请输入有效日期与时间。"
+    "required": "请填写必填内容。"
   },
   "deleted": "已删除。",
   "account": {
@@ -265,7 +212,7 @@
     "otherConnection": "切换连接",
     "switchTitle": "退出并更换飞书账号？",
     "logoutTitle": "退出飞书登录？",
-    "logoutHint": "将退出 {{name}} 在当前连接中的登录。飞书中的文档、日程和任务不会被删除。",
+    "logoutHint": "将退出 {{name}} 在当前连接中的登录。飞书中的文档和其他内容不会被删除。",
     "switchHint": "保留应用连接配置，在飞书官方页面选择并登录另一个账号。",
     "signedOutHint": "退出后暂停读取飞书内容，需要时可以重新登录。",
     "confirmSwitch": "退出并更换",
@@ -297,7 +244,7 @@
   },
   "connectScreen": {
     "missingTitle": "先安装飞书连接组件",
-    "missingHint": "只需准备一次。安装完成后，使用你的飞书账号登录，即可查看文档、日程和任务。",
+    "missingHint": "只需准备一次。安装完成后，使用你的飞书账号登录，即可查看文档与多维表格。",
     "installingTitle": "正在准备连接组件",
     "installingHint": "组件准备完成后，这里会出现登录入口。无需重复安装或保持弹窗打开。",
     "repairTitle": "连接组件需要检查",
@@ -305,9 +252,9 @@
     "disabledTitle": "飞书连接已停用",
     "disabledHint": "当前不会读取或写入飞书内容。启用连接后，可继续使用已有账号或重新登录。",
     "expiredTitle": "重新登录飞书",
-    "expiredHint": "当前登录已过期。重新确认身份后，即可继续使用原有的文档、日程和任务。",
+    "expiredHint": "当前登录已过期。重新确认身份后，即可继续使用原有的文档与多维表格。",
     "loginTitle": "连接你的飞书账号",
-    "loginHint": "在一个地方处理文档、日程和任务。使用你自己的飞书账号，按实际需要授予访问权限。",
+    "loginHint": "在一个地方处理文档与多维表格。使用你自己的飞书账号，按实际需要授予访问权限。",
     "component": "准备连接组件",
     "componentHint": "通过官方组件连接飞书，已有安装可直接复用。",
     "componentReady": "组件已就绪，可以开始登录。",

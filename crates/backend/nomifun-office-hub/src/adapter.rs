@@ -1,6 +1,5 @@
 //! The verified v1.0.98 command/JSON boundary. No shell text or CLI hints execute.
 use crate::{HubError, runtime::{CliCommand, CliOutput, PAYLOAD_FILE}, types::*};
-use chrono::DateTime;
 use serde_json::{Value, json};
 use std::{collections::{BTreeMap,BTreeSet}, time::Duration};
 pub struct CliIdentity {
@@ -96,12 +95,6 @@ pub fn permissions(scopes: &[String]) -> Vec<OfficePermission> {
         capability("documents.browse", &["search:docs:read"], scopes),
         capability("documents.create", &["docx:document:create"], scopes),
         capability("documents.delete", &["space:document:delete", "drive:drive.metadata:readonly"], scopes),
-        capability("people.read", &["contact:user:search"], scopes),
-        capability("tasks.read", &["task:task:read"], scopes),
-        capability("tasks.write", &["task:task:write"], scopes),
-        capability("tasklists.read", &["task:tasklist:read"], scopes),
-        capability("calendar.read", &["calendar:calendar.event:read"], scopes),
-        capability("calendar.write", &["calendar:calendar.event:create"], scopes),
         capability("base.read", &["base:record:read", "base:field:read"], scopes),
         capability("base.write", &["base:record:update"], scopes),
     ]
@@ -117,22 +110,14 @@ fn named_permissions(names: &[&str], scopes: &[String]) -> Vec<OfficePermission>
 pub fn query_permissions(query: &OfficeQuery, scopes: &[String]) -> Vec<OfficePermission> {
     let names: &[&str] = match query {
         OfficeQuery::Documents { .. } => &["documents.browse"],
-        OfficeQuery::People { .. } => &["people.read"],
-        OfficeQuery::Tasklists { .. } => &["tasklists.read"],
-        OfficeQuery::Tasks { relation: TaskRelation::Tasklist, .. } => &["tasklists.read"],
-        OfficeQuery::Tasks { .. } => &["tasks.read"],
-        OfficeQuery::Agenda { .. } | OfficeQuery::CalendarEvent { .. } => &["calendar.read"],
         OfficeQuery::BaseRecords { .. } => &["base.read"],
     };
     named_permissions(names, scopes)
 }
 pub fn mutation_permissions(mutation: &OfficeMutation, scopes: &[String]) -> Vec<OfficePermission> {
     let names: &[&str] = match mutation {
-        OfficeMutation::TaskCreate { tasklist_id: Some(_), .. } => &["tasks.write", "tasklists.read"],
-        OfficeMutation::TaskCreate { .. } | OfficeMutation::TaskComplete { .. } => &["tasks.write"],
         OfficeMutation::DocumentCreate { .. } => &["documents.create"],
         OfficeMutation::DocumentDelete { .. } => &["documents.delete"],
-        OfficeMutation::CalendarCreate { .. } => &["calendar.write"],
         OfficeMutation::BaseUpdate { .. } => &["base.read", "base.write"],
     };
     named_permissions(names, scopes)
@@ -435,41 +420,6 @@ pub fn query_commands(query: &OfficeQuery, profile: Option<&str>) -> Result<Vec<
             if let Some(cursor)=cursor { valid_page_token(cursor)?;args.extend(["--page-token".into(),cursor.clone()]); }
             vec![user_command(args,profile,false)?]
         }
-        OfficeQuery::People { query } => {
-            valid_text(query, "人员关键词", 50)?;
-            vec![user_command(["contact", "+search-user", "--query", query,
-                "--exclude-external-users", "--page-size", "20", "--format", "json"], profile, false)?]
-        }
-        OfficeQuery::Tasklists { cursor } => {
-            let mut params = json!({"page_size":50,"user_id_type":"open_id"});
-            if let Some(cursor) = cursor { valid_page_token(cursor)?;params["page_token"] = json!(cursor); }
-            vec![user_command(["task".into(), "tasklists".into(), "list".into(), "--params".into(),
-                params.to_string()], profile, false)?]
-        }
-        OfficeQuery::Tasks { relation, tasklist_id, cursor } => {
-            let mut args = match relation {
-                TaskRelation::Assigned => vec!["task".into(), "+get-my-tasks".into(), "--page-limit".into(), "1".into(), "--format".into(), "json".into()],
-                TaskRelation::Created => vec!["task".into(), "+get-related-tasks".into(), "--created-by-me".into(), "--page-limit".into(), "1".into(), "--format".into(), "json".into()],
-                TaskRelation::Tasklist => {
-                    let id = tasklist_id.as_deref().ok_or_else(|| HubError::invalid("请选择确切任务清单"))?;
-                    valid_id(id, "任务清单标识")?;
-                    let mut params = json!({"tasklist_guid":id,"page_size":50,"user_id_type":"open_id"});
-                    if let Some(cursor) = cursor { valid_page_token(cursor)?;params["page_token"] = json!(cursor); }
-                    return Ok(vec![user_command(["task".into(),"tasklists".into(),"tasks".into(),"--params".into(),params.to_string()],profile,false)?]);
-                }
-            };
-            if let Some(cursor) = cursor { valid_page_token(cursor)?;args.extend(["--page-token".into(),cursor.clone()]); }
-            vec![user_command(args, profile, false)?]
-        }
-        OfficeQuery::Agenda { start, end } => {
-            let from = parse_datetime(start)?;let to = parse_datetime(end)?;
-            if to <= from || (to - from).num_days() > 90 { return Err(HubError::invalid("日程时间范围无效或超过 90 天")); }
-            vec![user_command(["calendar","+agenda","--start",start,"--end",end,"--format","json"],profile,false)?]
-        }
-        OfficeQuery::CalendarEvent { calendar_id, event_id } => {
-            valid_id(calendar_id,"日历标识")?;valid_id(event_id,"日程标识")?;
-            vec![user_command(["calendar","+get","--calendar-id",calendar_id,"--event-id",event_id,"--format","json"],profile,false)?]
-        }
         OfficeQuery::BaseRecords { base_token, table_id, offset, filter } => {
             valid_id(base_token,"多维表格标识")?;valid_id(table_id,"数据表标识")?;
             let fields = user_command(["base","+field-list","--base-token",base_token,"--table-id",table_id],profile,false)?;
@@ -489,37 +439,6 @@ pub fn query_commands(query: &OfficeQuery, profile: Option<&str>) -> Result<Vec<
 fn plain_highlight(value: &str) -> String {
     regex::Regex::new(r"</?h(?:b)?>").expect("static highlighted title pattern").replace_all(value,"").into_owned()
 }
-fn task_item(value: &Value) -> Result<OfficeItem, HubError> {
-    let id = first_text(value,&["guid","task_guid"]).ok_or_else(|| HubError::unavailable("任务结果缺少稳定标识"))?;
-    let mut item = OfficeItem::new(id,"task",first_text(value,&["summary","title"]).unwrap_or_default());
-    item.url = value.get("url").and_then(Value::as_str).and_then(official_url);
-    item.description = text(value.get("description"));
-    item.creator_id = value.pointer("/creator/id").and_then(Value::as_str).map(str::to_owned)
-        .or_else(|| text(value.get("creator_id")));
-    item.due = first_text(value,&["due_at"]).or_else(|| value.pointer("/due/timestamp").and_then(Value::as_str).map(str::to_owned));
-    item.completed = value.get("completed").and_then(Value::as_bool).or_else(|| {
-        value.get("completed_at").and_then(Value::as_str).map(|s| !s.is_empty() && s != "0")
-    });
-    item.start = first_text(value,&["start_at"]).or_else(|| text(value.pointer("/start/timestamp")));
-    if let Some(members) = value.get("members").and_then(Value::as_array) {
-        item.assignee_ids = members.iter().filter(|v| v.get("role").and_then(Value::as_str)==Some("assignee"))
-            .filter_map(|v| first_text(v,&["id","open_id"])).collect();
-    }
-    if let Some(lists) = value.get("tasklists").and_then(Value::as_array) {
-        item.tasklist_ids = lists.iter().filter_map(|v| first_text(v,&["tasklist_guid","guid"])).collect();
-    }
-    Ok(item)
-}
-fn event_item(value: &Value, calendar: Option<&str>) -> Result<OfficeItem, HubError> {
-    let id = first_text(value,&["event_id"]).ok_or_else(|| HubError::unavailable("日程缺少稳定标识"))?;
-    let mut item = OfficeItem::new(id,"calendar_event",first_text(value,&["summary","title"]).unwrap_or_default());
-    item.calendar_id = first_text(value,&["calendar_id"]).or_else(|| calendar.map(str::to_owned));
-    item.url = first_text(value,&["app_link","url"]).and_then(|url| official_url(&url));
-    item.description = first_text(value,&["description_rich","description"]);
-    let time = |key: &str| value.get(key).and_then(|v| first_text(v,&["datetime","date","timestamp"]));
-    item.start = time("start_time");item.end = time("end_time");
-    Ok(item)
-}
 fn warnings(data: &Value) -> Vec<String> {
     let mut result = strings(data.get("warnings"));
     if let Some(warnings) = data.get("warnings").and_then(Value::as_array) {
@@ -534,7 +453,7 @@ fn warnings(data: &Value) -> Vec<String> {
 fn array_field<'a>(value: &'a Value, key: &str, message: &str) -> Result<&'a [Value], HubError> {
     match value.get(key) {
         Some(Value::Array(items)) => Ok(items),
-        // Go's empty slice may serialize to null, notably +get-my-tasks.
+        // Go's empty slice may serialize to null instead of an empty array.
         Some(Value::Null) => Ok(&[]),
         _ => Err(HubError::unavailable(message)),
     }
@@ -542,46 +461,12 @@ fn array_field<'a>(value: &'a Value, key: &str, message: &str) -> Result<&'a [Va
 pub fn normalize_query(query: &OfficeQuery, outputs: &[CliOutput]) -> Result<OfficeQueryResult, HubError> {
     if outputs.is_empty() { return Err(HubError::unavailable("办公查询缺少 CLI 返回")); }
     let data = business_value(outputs.last().unwrap(),false)?;
-    let mut result = OfficeQueryResult { has_more: data.get("has_more").and_then(Value::as_bool).unwrap_or(false),
-        next_cursor: first_text(&data,&["page_token","next_page_token","next_offset"]),
-        warnings: warnings(&data), ..OfficeQueryResult::default() };
     match query {
-        OfficeQuery::Documents { cursor, .. } => {
-            result=normalize_documents(&data,cursor.as_deref())?;
-        }
-        OfficeQuery::People { .. } => {
-            for user in array_field(&data,"users","人员结果格式不兼容")? {
-                if user.get("is_cross_tenant")==Some(&Value::Bool(true)) { continue; }
-                let id=text(user.get("open_id")).ok_or_else(|| HubError::unavailable("人员结果缺少唯一身份"))?;
-                let mut item=OfficeItem::new(id,"person",first_text(user,&["localized_name","name"]).unwrap_or_default());
-                item.description=text(user.get("department"));result.items.push(item);
-            }
-        }
-        OfficeQuery::Tasklists { .. } => {
-            for list in array_field(&data,"items","任务清单格式不兼容")? {
-                let id=first_text(list,&["guid","tasklist_guid"]).ok_or_else(|| HubError::unavailable("任务清单缺少稳定标识"))?;
-                let mut item=OfficeItem::new(id,"tasklist",first_text(list,&["name","summary"]).unwrap_or_default());
-                item.url=list.get("url").and_then(Value::as_str).and_then(official_url);result.items.push(item);
-            }
-        }
-        OfficeQuery::Tasks { .. } => {
-            for task in array_field(&data,"items","任务列表格式不兼容")? {
-                result.items.push(task_item(task)?);
-            }
-        }
-        OfficeQuery::Agenda { .. } => {
-            for event in data.as_array().ok_or_else(|| HubError::unavailable("日程列表格式不兼容"))? {
-                result.items.push(event_item(event,Some("primary"))?);
-            }
-        }
-        OfficeQuery::CalendarEvent { calendar_id, .. } => {
-            let event=data.get("event").unwrap_or(&data);
-            result.items.push(event_item(event,Some(calendar_id))?);
-        }
+        OfficeQuery::Documents { cursor, .. } => normalize_documents(&data,cursor.as_deref()),
         OfficeQuery::BaseRecords { base_token,table_id,offset,.. } => {
             if outputs.len()!=2 { return Err(HubError::unavailable("表格查询必须包含字段结构与记录结果")); }
             let fields=business_value(&outputs[0],false)?;
-            result=normalize_matrix(&data)?;
+            let mut result=normalize_matrix(&data)?;
             if let Some(entries)=fields.get("fields").and_then(Value::as_array) {
                 result.fields=entries.iter().map(field).collect::<Result<_,_>>()?;
             }else{return Err(HubError::unavailable("表格字段结构格式不兼容"))}
@@ -589,9 +474,9 @@ pub fn normalize_query(query: &OfficeQuery, outputs: &[CliOutput]) -> Result<Off
             if result.has_more && result.next_cursor.is_none() {
                 result.next_cursor=Some(offset.unwrap_or(0).saturating_add(result.items.len() as u32).to_string());
             }
+            Ok(result)
         }
     }
-    Ok(result)
 }
 /// Exact CLI v1.0.98 Search v2 projection. Result identity is the returned
 /// resource token; browser URLs and highlight markup never become identities.
@@ -674,28 +559,9 @@ fn normalize_matrix(data: &Value) -> Result<OfficeQueryResult, HubError> {
     Ok(result)
 }
 
-fn parse_datetime(value:&str)->Result<DateTime<chrono::FixedOffset>,HubError>{
-        DateTime::parse_from_rfc3339(value)
-            .or_else(|_| DateTime::parse_from_str(value,"%Y-%m-%dT%H:%M%:z"))
-            .map_err(|_|HubError::invalid("日期时间必须包含明确时区偏移"))
-}
 pub fn mutation_command(mutation:&OfficeMutation,client_token:&str,profile:Option<&str>)->Result<CliCommand,HubError>{
     valid_id(client_token,"操作幂等标识")?;
     match mutation {
-        OfficeMutation::TaskCreate {title,assignee_id,due,tasklist_id,..}=>{
-            valid_text(title,"任务内容",2000)?;valid_id(assignee_id,"负责人标识")?;
-            if !assignee_id.starts_with("ou_"){return Err(HubError::invalid("负责人必须是已确认的飞书用户身份"))}
-            if let Some(due)=due { chrono::NaiveDate::parse_from_str(due,"%Y-%m-%d").map_err(|_|HubError::invalid("任务截止日期无效"))?; }
-            let mut args=vec!["task".into(),"+create".into(),"--summary".into(),title.clone(),"--assignee".into(),assignee_id.clone(),
-                "--idempotency-key".into(),client_token.into(),"--format".into(),"json".into()];
-            if let Some(due)=due { args.extend(["--due".into(),due.clone()]); }
-            if let Some(list)=tasklist_id {valid_id(list,"任务清单标识")?;args.extend(["--tasklist-id".into(),list.clone()]);}
-            user_command(args,profile,true)
-        }
-        OfficeMutation::TaskComplete {task_id,completed,..}=>{
-            valid_id(task_id,"任务标识")?;
-            user_command(["task",if *completed{"+complete"}else{"+reopen"},"--task-id",task_id,"--format","json"],profile,true)
-        }
         OfficeMutation::DocumentCreate {title,..}=>{
             valid_text(title,"文档标题",500)?;
             user_command(["docs","+create","--title",title,"--doc-format","xml",
@@ -706,16 +572,6 @@ pub fn mutation_command(mutation:&OfficeMutation,client_token:&str,profile:Optio
             valid_text(title,"文档标题",500)?;
             if !document_type(kind) { return Err(HubError::invalid("此资源类型不支持文档删除")); }
             user_command(["drive","+delete","--file-token",document_id,"--type",kind,"--yes"],profile,true)
-        }
-        OfficeMutation::CalendarCreate {title,start,end,timezone,..}=>{
-            valid_text(title,"日程名称",500)?;valid_id(timezone,"时区")?;
-            let from=parse_datetime(start)?;let to=parse_datetime(end)?;
-            if to<=from{return Err(HubError::invalid("日程结束时间必须晚于开始时间"))}
-            let data=json!({"summary":title,"start_time":{"timestamp":from.timestamp().to_string(),"timezone":timezone},
-                "end_time":{"timestamp":to.timestamp().to_string(),"timezone":timezone},"vchat":{"vc_type":"no_meeting"}});
-            user_command(["calendar".into(),"events".into(),"create".into(),"--params".into(),
-                json!({"calendar_id":"primary","idempotency_key":client_token,"user_id_type":"open_id"}).to_string(),
-                "--data".into(),data.to_string()],profile,true)
         }
         OfficeMutation::BaseUpdate {base_token,table_id,record_id,fields,before,..}=>{
             valid_id(base_token,"多维表格标识")?;valid_id(table_id,"数据表标识")?;valid_id(record_id,"记录标识")?;
@@ -732,11 +588,8 @@ pub fn normalize_mutation(mutation:&OfficeMutation,output:&CliOutput)->Result<Mu
     let envelope=output_value(output);
     let data=envelope.as_ref().and_then(|v|v.get("data")).cloned().unwrap_or(Value::Null);
     let (id,url)=match mutation {
-        OfficeMutation::TaskCreate {..}|OfficeMutation::TaskComplete {..}=>
-            (first_text(&data,&["guid"]),data.get("url").and_then(Value::as_str).and_then(official_url)),
         OfficeMutation::DocumentCreate {..}=>(text(data.pointer("/document/document_id")),data.pointer("/document/url").and_then(Value::as_str).and_then(official_url)),
         OfficeMutation::DocumentDelete {document_id,..}=>(Some(document_id.clone()),None),
-        OfficeMutation::CalendarCreate {..}=>(text(data.pointer("/event/event_id")),data.pointer("/event/app_link").and_then(Value::as_str).and_then(official_url)),
         OfficeMutation::BaseUpdate {record_id,..}=>(Some(record_id.clone()),None),
     };
     if !output.successful() || envelope.as_ref().and_then(|v|v.get("ok"))!=Some(&Value::Bool(true)) {
@@ -814,26 +667,6 @@ pub fn base_readback_command(base_token:&str,table_id:&str,record_ids:&[String],
 pub fn normalize_base_readback(output:&CliOutput)->Result<OfficeQueryResult,HubError>{
     normalize_matrix(&business_value(output,false)?)
 }
-pub fn task_get_command(task_id:&str,profile:Option<&str>)->Result<CliCommand,HubError>{
-    valid_id(task_id,"任务标识")?;
-    user_command(["task".into(),"tasks".into(),"get".into(),"--params".into(),
-        json!({"task_guid":task_id,"user_id_type":"open_id"}).to_string()],profile,false)
-}
-pub fn normalize_task_get(output:&CliOutput)->Result<OfficeItem,HubError>{
-    let data=business_value(output,false)?;task_item(data.get("task").unwrap_or(&data))
-}
-pub fn tasklist_get_command(tasklist_id:&str,profile:Option<&str>)->Result<CliCommand,HubError>{
-    valid_id(tasklist_id,"任务清单标识")?;
-    user_command(["task".into(),"tasklists".into(),"get".into(),"--params".into(),
-        json!({"tasklist_guid":tasklist_id,"user_id_type":"open_id"}).to_string()],profile,false)
-}
-pub fn tasklist_editable(output:&CliOutput,user_id:&str)->Result<bool,HubError>{
-    let data=business_value(output,false)?;let list=data.get("tasklist").unwrap_or(&data);
-    if list.pointer("/owner/id").and_then(Value::as_str)==Some(user_id){return Ok(true)}
-    Ok(list.get("members").and_then(Value::as_array).is_some_and(|members|members.iter().any(|member|
-        member.get("id").and_then(Value::as_str)==Some(user_id) &&
-            matches!(member.get("role").and_then(Value::as_str),Some("editor"|"owner")))))
-}
 
 #[cfg(test)]
 mod tests {
@@ -856,14 +689,13 @@ mod tests {
         assert!(!parse_logout(&CliOutput{started:true,timed_out:true,..Default::default()}).unwrap_err().not_executed);
     }
     #[test]
-    fn scope_mapping_separates_read_write_and_tasklist_permissions(){
-        let p=permissions(&["task:task:read".into()]);
-        assert!(p.iter().find(|p|p.capability=="tasks.read").unwrap().granted);
-        assert!(!p.iter().find(|p|p.capability=="tasks.write").unwrap().granted);
-        assert!(!p.iter().find(|p|p.capability=="tasklists.read").unwrap().granted);
-        let p=permissions(&["calendar:calendar.event:create".into()]);
-        assert!(p.iter().find(|p|p.capability=="calendar.write").unwrap().granted);
-        assert!(!p.iter().find(|p|p.capability=="calendar.read").unwrap().granted);
+    fn scope_mapping_separates_base_read_and_write_permissions(){
+        let p=permissions(&["base:record:read".into(),"base:field:read".into()]);
+        assert!(p.iter().find(|p|p.capability=="base.read").unwrap().granted);
+        assert!(!p.iter().find(|p|p.capability=="base.write").unwrap().granted);
+        let p=permissions(&["base:record:update".into()]);
+        assert!(p.iter().find(|p|p.capability=="base.write").unwrap().granted);
+        assert!(!p.iter().find(|p|p.capability=="base.read").unwrap().granted);
     }
     #[test]
     fn browse_reuses_the_connected_users_search_scope_without_drive_root_permission(){
@@ -907,7 +739,6 @@ mod tests {
         assert_eq!(result.items[0].title,"Existing document");assert!(document_target(&result.items[0]).is_none());
         assert_eq!(document_target(&result.items[1]),Some(("docx".into(),"doc_real".into())));
         assert_eq!(result.items[2].kind,"base");assert_eq!(result.next_cursor.as_deref(),Some("page-two"));
-        assert!(result.items.iter().all(|item|item.description.is_none()));
     }
     #[test]
     fn incomplete_search_pages_and_retired_root_shapes_fail_instead_of_becoming_empty_lists(){
@@ -961,7 +792,6 @@ mod tests {
                 outputs.push(runtime.run(&executable,command,cancel.child_token(),None).await.unwrap());
             }
             let result=normalize_query(&query,&outputs).unwrap();
-            assert!(result.items.iter().all(|item|item.description.is_none()));
             println!("read-only page {page}: {} resources, has_more={}",result.items.len(),result.has_more);
             count+=result.items.len();for item in &result.items{*kinds.entry(item.kind.clone()).or_default()+=1;}
             if !result.has_more { break; }
@@ -987,7 +817,7 @@ mod tests {
         assert!(cmd.mutating);
         let receipt=json!({"deleted":true,"file_token":"doc_real","type":"docx"});
         assert_eq!(normalize_mutation(&mutation,&output(receipt.clone())).unwrap().status,ItemStatus::Succeeded);
-        for data in [json!({"task_id":"pending","ready":false}),json!({}),json!({"deleted":true,"file_token":"another","type":"docx"}),
+        for data in [json!({"document_id":"pending","ready":false}),json!({}),json!({"deleted":true,"file_token":"another","type":"docx"}),
             json!({"deleted":true,"file_token":"doc_real","type":"docx","status":"processing"}),
             json!({"deleted":true,"file_token":"doc_real","type":"docx","next_command":"untrusted command"})] {
             assert_eq!(normalize_mutation(&mutation,&output(data)).unwrap().status,ItemStatus::Unknown);
@@ -1016,10 +846,10 @@ mod tests {
     }
     #[test]
     fn partial_login_is_not_discarded_as_a_generic_nonzero_failure(){
-        let value=json!({"event":"authorization_complete","user_open_id":"ou_x","user_name":"Lin","scope":"task:task:read","missing":["task:task:write"]});
+        let value=json!({"event":"authorization_complete","user_open_id":"ou_x","user_name":"Lin","scope":"search:docs:read","missing":["docx:document:create"]});
         let completion=parse_login_completion(&CliOutput::fixture(4,value.to_string(),""),"cli_x").unwrap();
         assert!(!completion.complete);assert!(completion.actor.is_some());
-        assert_eq!(completion.missing_scopes,["task:task:write"]);
+        assert_eq!(completion.missing_scopes,["docx:document:create"]);
     }
     #[test]
     fn original_auth_links_are_preserved_and_nonofficial_hosts_rejected(){
@@ -1071,18 +901,9 @@ mod tests {
         assert!(base_batch_command(&[first,second],None).is_err());
     }
     #[test]
-    fn calendar_creation_explicitly_disables_video_and_carries_idempotency(){
-        let mutation=OfficeMutation::CalendarCreate {client_item_id:"i".into(),title:"Review".into(),
-            start:"2026-10-28T14:00:00+08:00".into(),end:"2026-10-28T14:30:00+08:00".into(),timezone:"Asia/Shanghai".into()};
-        let cmd=mutation_command(&mutation,"stable-key",Some("work")).unwrap();
-        let body:Value=serde_json::from_str(&cmd.args[cmd.args.iter().position(|a|a=="--data").unwrap()+1]).unwrap();
-        assert_eq!(body["vchat"]["vc_type"],"no_meeting");
-        assert!(cmd.args.iter().any(|a|a.contains("stable-key")));
-    }
-    #[test]
     fn timeout_is_unknown_and_keeps_exact_original_resource_receipt(){
-        let mutation=OfficeMutation::TaskCreate {client_item_id:"i".into(),title:"T".into(),assignee_id:"ou_x".into(),assignee_name:None,due:Some("2026-10-28".into()),tasklist_id:None};
-        let mut partial=output(json!({"guid":"original-guid"}));partial.timed_out=true;
+        let mutation=OfficeMutation::DocumentCreate {client_item_id:"i".into(),title:"T".into()};
+        let mut partial=output(json!({"document":{"document_id":"original-guid"}}));partial.timed_out=true;
         let receipt=normalize_mutation(&mutation,&partial).unwrap();
         assert_eq!(receipt.status,ItemStatus::Unknown);assert_eq!(receipt.remote_id.as_deref(),Some("original-guid"));
         let error=output_error(&CliOutput::fixture(1,"",r#"{"ok":false,"error":{"type":"api","message":"server failed"}}"#),true);

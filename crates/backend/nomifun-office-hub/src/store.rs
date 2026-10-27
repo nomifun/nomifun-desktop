@@ -141,7 +141,7 @@ impl OfficeHubStore {
         for mutation in &request.items {
             let target=target_key(actor,profile,mutation)?;
             check_overlap(&mut tx,&target,"").await?;
-            if matches!(mutation,OfficeMutation::TaskCreate{..}|OfficeMutation::DocumentCreate{..}|OfficeMutation::CalendarCreate{..}) {
+            if matches!(mutation,OfficeMutation::DocumentCreate{..}) {
                 if let Some(id)=sqlx::query_scalar::<_,String>("SELECT item.operation_id FROM office_operation_items item JOIN office_operations op ON op.operation_id=item.operation_id WHERE op.owner_id=? AND item.client_item_id=? AND json_extract(item.mutation_json,'$.kind')=? AND item.status<>'not_executed' LIMIT 1")
                     .bind(owner).bind(mutation.client_item_id()).bind(mutation.kind()).fetch_optional(&mut *tx).await.map_err(HubError::storage)? {
                     return Err(HubError::conflict("This creation identity already has submitted work; open the original result",Some(id)))
@@ -467,13 +467,8 @@ pub fn target_key(actor:&OfficeActor,profile:&str,item:&OfficeMutation)->Result<
     // A creation has no remote object ID yet. Preserve its historical target-key
     // format; the separate creation-nonce check also spans actor/profile changes.
     let target=match item{
-        OfficeMutation::TaskCreate{client_item_id,tasklist_id,..}=>{
-            if let Some(list)=tasklist_id{canonical_resource_id(list)?;}
-            json!(["feishu","create",actor.app_id,actor.user_id,profile,item.kind(),client_item_id])
-        },
-        OfficeMutation::DocumentCreate{client_item_id,..}|OfficeMutation::CalendarCreate{client_item_id,..}=>
+        OfficeMutation::DocumentCreate{client_item_id,..}=>
             json!(["feishu","create",actor.app_id,actor.user_id,profile,item.kind(),client_item_id]),
-        OfficeMutation::TaskComplete{task_id,..}=>json!(["feishu","task",canonical_resource_id(task_id)?]),
         OfficeMutation::DocumentDelete{document_id,..}=>json!(["feishu","document",canonical_resource_id(document_id)?]),
         OfficeMutation::BaseUpdate{base_token,table_id,record_id,..}=>json!(["feishu","base",canonical_resource_id(base_token)?,canonical_resource_id(table_id)?,canonical_resource_id(record_id)?]),
     };
@@ -494,10 +489,6 @@ fn target_readback_confirms(mutation:&Value,data:Option<&Value>,remote_id:Option
             same_resource_id(id,record_id)&&same_resource_id(remote_id,record_id)
                 &&data.get("fields").and_then(Value::as_object).is_some_and(|observed|
                     fields.iter().all(|(key,value)|observed.get(key)==Some(value)))
-        }
-        OfficeMutation::TaskComplete{task_id,completed,..}=>{
-            same_resource_id(id,task_id)&&same_resource_id(remote_id,task_id)
-                &&data.get("completed").and_then(Value::as_bool)==Some(*completed)
         }
         _=>false,
     }

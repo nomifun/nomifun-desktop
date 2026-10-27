@@ -21,10 +21,6 @@
 .office-app-option>span{flex:1;min-width:0}
 .office-app-option>small{font-size:10px;line-height:18px;white-space:nowrap;color:var(--text-secondary)}
 .office-app-option>.i-icon{color:var(--primary);flex:none}
-.office-tabs{display:flex;align-items:center;flex:none;gap:22px;min-height:43px;padding:0 20px;border-bottom:1px solid var(--border-base)}
-.office-tabs>button{position:relative;padding:11px 0;border:0;background:transparent;color:var(--text-secondary);font:inherit;font-size:12px;line-height:20px;white-space:nowrap;cursor:pointer}
-.office-tabs>button[aria-selected=true]{color:var(--primary);font-weight:500}
-.office-tabs>button[aria-selected=true]::after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:2px;background:var(--primary)}
 .office-body{flex:1;min-height:0;min-width:0;overflow-y:auto;overflow-x:hidden}
 .office-content{padding:14px 20px 22px;min-width:0}
 .office-hub h3{margin:0;font-size:14px;line-height:22px;font-weight:600}
@@ -42,7 +38,7 @@
 .office-button--primary{background:var(--primary);border-color:var(--primary);color:var(--inverse)}
 .office-button--primary:hover{background:var(--primary);filter:brightness(.97)}
 .office-button--quiet{border-color:transparent;background:transparent;color:var(--text-secondary);padding:4px 6px}
-.office-button:focus-visible,.office-tabs>button:focus-visible,.office-filters>button:focus-visible,.office-resource:focus-visible,.office-input:focus-visible{outline:2px solid var(--primary);outline-offset:3px}
+.office-button:focus-visible,.office-filters>button:focus-visible,.office-resource:focus-visible,.office-input:focus-visible{outline:2px solid var(--primary);outline-offset:3px}
 .office-badge{display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:1px 6px;border-radius:4px;background:var(--bg-2);color:var(--text-secondary);font-size:11px;line-height:18px;white-space:nowrap}
 .office-badge--good{color:color-mix(in srgb,var(--success) 60%,var(--text-primary));background:color-mix(in srgb,var(--success) 9%,var(--bg-base))}
 .office-badge--warning{color:color-mix(in srgb,var(--warning) 60%,var(--text-primary));background:color-mix(in srgb,var(--warning) 9%,var(--bg-base))}
@@ -67,17 +63,7 @@
 .office-resource{display:flex;align-items:center;gap:9px;width:100%;min-width:0;padding:0;border:0;background:transparent;color:var(--text-primary);text-align:left;font:inherit;cursor:pointer}
 .office-resource>strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .office-resource>span{flex:none;color:var(--primary)}
-.office-task{padding:11px 0;border-bottom:1px solid var(--border-base);min-width:0;overflow-wrap:anywhere}
-.office-task>label{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:21px}
-.office-task>label>span{min-width:0;overflow-wrap:anywhere}
-.office-task p{margin:4px 0 0 22px}
-.office-task input[type=checkbox]{margin-top:4px;flex:none}
 .office-hub input[type=checkbox]{accent-color:var(--primary)}
-.office-calendar-list{margin-top:10px}
-.office-calendar-line{display:grid;grid-template-columns:110px minmax(0,1fr) auto;align-items:center;gap:15px;padding:12px 0;border-bottom:1px solid var(--border-base);font-size:13px}
-.office-calendar-line time{color:var(--text-secondary);font-size:12px}
-.office-calendar-line strong{min-width:0;overflow-wrap:anywhere;font-weight:500}
-.office-section-row{margin:22px 0 8px}
 .office-empty{padding:42px 16px;text-align:center;color:var(--text-secondary);font-size:13px}
 .office-empty h3{color:var(--text-primary);margin-bottom:8px}
 .office-empty p{margin:6px 0 17px}
@@ -87,12 +73,8 @@
 .office-pagination{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
 .office-input{display:block;width:100%;min-width:0;min-height:33px;padding:6px 9px;border:1px solid var(--border-base);border-radius:5px;background:var(--bg-base);color:var(--text-primary);font:inherit;font-size:13px;line-height:20px}
 .office-input::placeholder{color:var(--text-secondary)}
-.office-date-input{width:160px}
 .office-label{display:flex;flex:1;min-width:0;flex-direction:column;gap:5px;margin:12px 0;font-size:12px;color:var(--text-secondary)}
 .office-label>input,.office-label>textarea,.office-label>select{color:var(--text-primary)}
-.office-form-row{display:flex;align-items:flex-end;gap:12px;min-width:0}
-.office-form-row>.office-input{flex:1}
-.office-form-row>.office-button{margin-bottom:12px}
 .office-fieldset{border:0;margin:0;padding:0;min-width:0}
 .office-dialog-overlay{position:absolute;z-index:40;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;background:color-mix(in srgb,var(--text-primary) 24%,transparent)}
 .office-dialog{display:flex;flex-direction:column;min-height:0;width:min(600px,100%);max-height:100%;border:1px solid var(--border-base);border-radius:9px;background:var(--bg-base);box-shadow:0 12px 42px color-mix(in srgb,var(--text-primary) 14%,transparent);overflow:hidden}
@@ -174,4 +156,4 @@
 .office-connection-flow{margin-top:18px;padding:14px 16px;border:1px solid var(--border-base);border-radius:8px}
 .office-connection-flow .office-authorization{margin:0}
 .office-connection-flow p{font-size:12px}
-@container (max-width:780px){.office-header-search{width:154px}.office-tabs{gap:19px}}
+@container (max-width:780px){.office-header-search{width:154px}}

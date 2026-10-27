@@ -10,10 +10,10 @@
 支持 Tauri 桌面和桌面 WebUI，最小视口 880×600，使用共享 PageHeader、主题和双语。
 
 - 文档：列表、搜索、标题创建、删除与浏览器链接打开。NomiFun 不读取、预览或编辑文档正文。
-- 日程与任务：个人日程、我负责／我创建／指定清单的任务，创建、完成和重新打开。
 - 连接状态：主页面明确处理组件缺失、应用未连接、未登录与登录过期；已连接时从页头账号入口管理账号。
 
-页面只保留文档、日程与任务两个页签，默认进入文档。
+页面直接展示文档列表。日程与任务已按用户要求整体退出当前合同；
+历史任务／日程操作仅作为不可执行的只读 JSON 回执证据保留在既有四表中。
 
 不扩展完整飞书客户端、其他平台驱动、多人账号池或协同富文本编辑器。
 本地 Office 文件预览、渠道机器人和 Agent Session 的身份与事实链保持原合同。
@@ -53,7 +53,7 @@ HTTP 观察者离开不会取消原退出 owner，也不使另一次登录越过
 
 ### 权限按使用申请，组件与停用放入高级设置
 
-权限区显示文档、日程与任务所需的读取能力及真实授权状态，不默认勾选一组权限。
+权限区显示文档所需的读取能力及真实授权状态，不默认勾选一组权限。
 首次使用缺失能力时请求该范围；用户确认、管理员等待、拒绝和过期分别展示。
 读取权限不代表写权限；资源成员权限也不能由 OAuth scope 推导。
 实际保存缺少写权限时，围绕当前操作请求必要权限。授权结束回到原输入，仍需用户点击保存。
@@ -105,13 +105,6 @@ UI/API 合同为 50；根目录查询和独立搜索合同、文档正文查询�
 已有操作的原始 JSON 回执保持只读证据，未解决的原文档栅栏继续阻止同一资源的新删除。
 文档正文不落库，Agent Session 合同保持不变，不恢复旧执行合同。
 
-### 日程与任务
-
-个人日程明确时间与时区，不隐式添加参与者或视频会议。
-任务手工填写标题、真实人员 ID 和可选截止日期；创建人、负责人、目标清单分别显示。
-「我负责」和「我创建」用不同 CLI 查询；指定清单必须具备相应访问权。
-完成和重新打开任务同样需要写权限。
-
 ## 4. 单次保存与结果合同
 
 表单本身就是用户检查输入的位置。点击保存后只提交一次封闭业务请求，
@@ -127,7 +120,7 @@ UI/API 合同为 50；根目录查询和独立搜索合同、文档正文查询�
 
 只有有未执行证明的项目才能修正后显式提交新请求，旧请求与旧回执保留。
 创建 nonce 跨 profile 和用户切换仍不能重复使用已成功或未解决的创建；新表单使用新 nonce。
-未取得任务 GUID 或确切创建回执时，不凭同名搜索宣布成功。
+未取得确切创建回执时，不凭同名搜索宣布成功。
 待核验的已知资源使用跨身份目标栅栏；同一文档的未解决操作继续阻止新的删除。
 
 停用停止新业务准入并撤回尚未开始的项目，保留配置和已提交请求回执。
@@ -203,7 +196,7 @@ API 前缀为 `/api/office-hub`，沿用 ApiResponse 与结构化业务错误。
 | `PUT /connection` | 启停与 profile 选择 |
 | `POST /auth`、`GET /auth/{id}`、`DELETE /auth/{id}` | 开始、观察与取消原流程 |
 | `POST /auth/logout` | 按 profile、expected_actor 核验并退出当前单用户连接，保留应用配置 |
-| `POST /query` | 封闭的文档列表／搜索、人员、任务、日历与 Base 查询 |
+| `POST /query` | 封闭的文档列表／搜索与 Base 查询 |
 | `POST /operations` | 一次提交 ExecuteRequest |
 | `GET /operations/request/{request_id}` | 恢复原提交结果，不重发 |
 | `GET /operations/{id}` | 读取原提交的逐项结果 |
@@ -219,7 +212,7 @@ API 前缀为 `/api/office-hub`，沿用 ApiResponse 与结构化业务错误。
 - 管理员等待、拒绝、过期和精确收尾；停用与退出不互相冒充。
 - 已有知识库／云空间文档使用统一浏览查询；空关键词分页、服务端类型筛选、长游标和错误状态均有覆盖。
 - 浏览器打开保留原链接；标题创建与删除确认不出现正文预览／编辑。
-- 默认文档入口、文档与日程任务两个页签，文档浏览不触发日程或任务摘要读取。
+- 默认文档入口，无业务页签；日程与任务的查询、变更与权限已退出合同。
 - 响应丢失按 request 查询；身份变化、重复创建、删除与 Base pending 围栏不能绕过。
 - 部分完成、unknown 不重发、未执行的新请求、原回执不可改写与读回不假成功。
 - 016→017 历史输入／回执、序列高水位、坏形态原子拒绝、快照和 Agent 清理保留。
@@ -240,6 +233,4 @@ API 前缀为 `/api/office-hub`，沿用 ApiResponse 与结构化业务错误。
 - [统一资源检索](https://github.com/larksuite/cli/blob/v1.0.98/shortcuts/drive/drive_search.go)
 - [列表浏览与筛选合同](https://github.com/larksuite/cli/blob/v1.0.98/skills/lark-drive/references/lark-drive-search.md)
 - [Drive 删除](https://github.com/larksuite/cli/blob/v1.0.98/shortcuts/drive/drive_delete.go)
-- [任务创建](https://github.com/larksuite/cli/blob/v1.0.98/skills/lark-task/references/lark-task-create.md)
-- [个人日程行为](https://github.com/larksuite/cli/blob/v1.0.98/skills/lark-calendar/references/lark-calendar-create.md)
 - [Base 批次回执](https://github.com/larksuite/cli/blob/v1.0.98/shortcuts/base/record_batch_update.go)

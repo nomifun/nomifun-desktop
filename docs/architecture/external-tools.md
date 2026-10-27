@@ -188,8 +188,8 @@ that request identity. Pending document and Base targets retain their SQL write
 fences across identity changes. The same process owner keeps retrying tree cleanup
 until completion is proved; cancelling execution cannot end that cleanup early.
 Office retains four product tables for connections and submitted request
-receipts, separately from canonical Agent facts. Its two pages are Documents
-(the default) and Calendar & tasks; see the [active plan](../handoffs/office-feishu-workbench.zh.md).
+receipts, separately from canonical Agent facts. The page opens directly on
+Documents; see the [active plan](../handoffs/office-feishu-workbench.zh.md).
 
 ## Office artifacts
 

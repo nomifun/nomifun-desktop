@@ -126,9 +126,6 @@ pub struct AuthorizationFlow {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskRelation { Assigned, Created, Tasklist }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DocumentFilter { All, Document, Base }
@@ -136,11 +133,6 @@ pub enum DocumentFilter { All, Document, Base }
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OfficeQuery {
     Documents { query: String, filter: DocumentFilter, cursor: Option<String> },
-    People { query: String },
-    Tasklists { cursor: Option<String> },
-    Tasks { relation: TaskRelation, tasklist_id: Option<String>, cursor: Option<String> },
-    Agenda { start: String, end: String },
-    CalendarEvent { calendar_id: String, event_id: String },
     BaseRecords { base_token: String, table_id: String, offset: Option<u32>, filter: Option<Value> },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,16 +141,7 @@ pub struct OfficeItem {
     pub kind: String,
     pub title: String,
     pub url: Option<String>,
-    pub description: Option<String>,
     pub modified_at: Option<String>,
-    pub assignee_ids: Vec<String>,
-    pub creator_id: Option<String>,
-    pub tasklist_ids: Vec<String>,
-    pub due: Option<String>,
-    pub completed: Option<bool>,
-    pub start: Option<String>,
-    pub end: Option<String>,
-    pub calendar_id: Option<String>,
     pub base_token: Option<String>,
     pub table_id: Option<String>,
     pub pending_operation_id: Option<String>,
@@ -168,9 +151,7 @@ pub struct OfficeItem {
 impl OfficeItem {
     pub fn new(id: impl Into<String>, kind: impl Into<String>, title: impl Into<String>) -> Self {
         Self { id: id.into(), kind: kind.into(), title: title.into(), url: None,
-            description: None, modified_at: None, assignee_ids: Vec::new(), creator_id: None,
-            tasklist_ids: Vec::new(), due: None, completed: None, start: None, end: None,
-            calendar_id: None, base_token: None, table_id: None, pending_operation_id: None,
+            modified_at: None, base_token: None, table_id: None, pending_operation_id: None,
             pending_status: None, fields: BTreeMap::new() }
     }
 }
@@ -193,25 +174,19 @@ pub struct OfficeQueryResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OfficeMutation {
-    TaskCreate { client_item_id: String, title: String, assignee_id: String,
-        assignee_name: Option<String>, due: Option<String>, tasklist_id: Option<String> },
-    TaskComplete { client_item_id: String, task_id: String, completed: bool },
     DocumentCreate { client_item_id: String, title: String },
     DocumentDelete { client_item_id: String, document_id: String, document_type: String, title: String },
-    CalendarCreate { client_item_id: String, title: String, start: String, end: String, timezone: String },
     BaseUpdate { client_item_id: String, base_token: String, table_id: String,
         record_id: String, fields: BTreeMap<String, Value>, before: BTreeMap<String, Value> },
 }
 impl OfficeMutation {
     pub fn client_item_id(&self) -> &str {
-        match self { Self::TaskCreate { client_item_id, .. } | Self::TaskComplete { client_item_id, .. } |
-            Self::DocumentCreate { client_item_id, .. } | Self::DocumentDelete { client_item_id, .. } |
-            Self::CalendarCreate { client_item_id, .. } | Self::BaseUpdate { client_item_id, .. } => client_item_id }
+        match self { Self::DocumentCreate { client_item_id, .. } | Self::DocumentDelete { client_item_id, .. } |
+            Self::BaseUpdate { client_item_id, .. } => client_item_id }
     }
     pub fn kind(&self) -> &'static str {
-        match self { Self::TaskCreate { .. } => "task_create", Self::TaskComplete { .. } => "task_complete",
-            Self::DocumentCreate { .. } => "document_create", Self::DocumentDelete { .. } => "document_delete",
-            Self::CalendarCreate { .. } => "calendar_create", Self::BaseUpdate { .. } => "base_update" }
+        match self { Self::DocumentCreate { .. } => "document_create", Self::DocumentDelete { .. } => "document_delete",
+            Self::BaseUpdate { .. } => "base_update" }
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

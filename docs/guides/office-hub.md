@@ -1,7 +1,7 @@
 # Office Hub: Feishu
 
-Open **Services → Office** for Feishu documents, calendars, tasks and Base.
-The page has **Documents** and **Calendar & tasks** tabs and opens on Documents.
+Open **Services → Office** for Feishu documents and Base.
+The page opens directly on Documents.
 The Tauri desktop shell and desktop-class WebUI are supported. All business
 operations use the official Feishu CLI. Components and credentials belong to
 the backend machine, which may differ from the browser's computer.
@@ -19,7 +19,7 @@ The page shows the next action for its current connection state:
 - **Signed out or expired**: complete Feishu sign-in in your browser, then return
   to see the current account.
 
-Basic sign-in requests only `offline_access`. Document, calendar and task access
+Basic sign-in requests only `offline_access`. Document access
 is requested when you use those features. There is no mandatory permission
 checklist after sign-in.
 
@@ -39,7 +39,7 @@ cleanup before signing out. The official CLI clears every user stored in the
 selected connection, so connections containing multiple users are not signed out
 automatically. Use **Switch connection** instead to avoid signing out other users.
 
-The permissions area shows granted and missing document, calendar and task
+The permissions area shows granted and missing document
 access, without selecting permissions by default. Granting access returns to the
 current input; Save still requires your action. Changing the application, user or
 profile prevents the old form from writing. Cancelling authorization waits for
@@ -67,14 +67,6 @@ confirmation. Only supported cloud document types offer deletion; Wiki nodes and
 Base resources remain browser entries. An unresolved deletion blocks another
 write to the same resource and keeps access to its original result.
 
-## Calendars and tasks
-
-Personal events use explicit times and a timezone, without automatically adding
-participants or a video meeting. Tasks have a title, real assignee and optional
-due date. Creator, assignee and list are separate. **Assigned to me** and
-**Created by me** are different lists; choosing a shared list grants no new member
-permissions. Completing or reopening a task also needs write access.
-
 ## Base
 
 Choose the **Base** filter in Documents, search for the resource and open it in
@@ -94,7 +86,7 @@ operations remain accessible from the original resource for verification.
   be included in a new submission.
 
 A lost response is recovered by its original request ID. Reloading, navigating
-away or restarting does not replay writes. Without a task GUID or exact receipt,
+away or restarting does not replay writes. Without an exact receipt,
 same-name search cannot establish creation. Original outcomes and later checks
 remain distinct.
 

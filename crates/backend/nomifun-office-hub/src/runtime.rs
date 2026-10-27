@@ -349,7 +349,7 @@ impl CliRuntime {
                 format!("已安装版本 {version}；当前已验证的版本为 {FEISHU_CLI_VERSION}，不会静默替换现有安装"),
                 Some(path), Some(version));
         }
-        for args in [vec!["--help"], vec!["schema", "task.tasks.create"]] {
+        for args in [vec!["--help"], vec!["schema", "drive.files.search"]] {
             let command = CliCommand { timeout: Duration::from_secs(15), ..CliCommand::new(args.clone(), false) };
             let valid = match self.executor.execute(&path, command, CancellationToken::new(), None).await {
                 Ok(output) if output.successful() => {
