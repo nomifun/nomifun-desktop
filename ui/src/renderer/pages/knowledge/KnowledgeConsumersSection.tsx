@@ -208,7 +208,7 @@ const KnowledgeConsumersSection: React.FC<KnowledgeConsumersSectionProps> = ({ b
                     c.enabled ? 'text-[var(--color-text-2)]' : 'text-[var(--color-text-4)]'
                   )}
                 >
-                  <span className='shrink-0 text-[var(--color-text-3)]'>{kindIcon(c.target_kind)}</span>
+                  <span className='inline-flex shrink-0 items-center text-[var(--color-text-3)]'>{kindIcon(c.target_kind)}</span>
                   <span className='min-w-0 flex-1 truncate' title={label(c)}>
                     {label(c)}
                   </span>

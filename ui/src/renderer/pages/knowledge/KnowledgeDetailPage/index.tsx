@@ -1843,7 +1843,7 @@ const KnowledgeDetailPage: React.FC = () => {
                 {base?.name ?? '...'}
                 {/* Pen icon — edit entry point (actual editing in D5/Settings tab) */}
                 <span
-                  className='text-12px text-[var(--color-text-3)] cursor-pointer hover:text-primary-6'
+                  className='inline-flex items-center text-12px text-[var(--color-text-3)] cursor-pointer hover:text-primary-6'
                   onClick={() => setTab('set')}
                   title={t('knowledge.detail.editName', { defaultValue: '编辑名称' })}
                 >

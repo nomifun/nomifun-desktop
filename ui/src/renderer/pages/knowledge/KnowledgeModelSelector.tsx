@@ -114,8 +114,10 @@ const KnowledgeModelSelector: React.FC<KnowledgeModelSelectorProps> = ({
               className='text-12px text-t-secondary'
               onClick={() => navigate(modelProviderManagementRoute('chat'))}
             >
-              <Plus theme='outline' size='12' />
-              {t('settings.addModel')}
+              <span className='inline-flex items-center gap-4px'>
+                <Plus theme='outline' size='12' />
+                {t('settings.addModel')}
+              </span>
             </Menu.Item>,
           ]
         : groups.map(({ provider, models }) => {
@@ -163,7 +165,7 @@ const KnowledgeModelSelector: React.FC<KnowledgeModelSelectorProps> = ({
             : t('knowledge.form.modelSelectTooltip')
         }
       >
-        <span className='flex min-w-0 max-w-160px items-center gap-4px text-11px'>
+        <span className='flex h-full min-w-0 max-w-160px items-center gap-4px text-11px'>
           <Brain theme='outline' size='13' fill={iconColors.secondary} className='shrink-0' />
           <span className='truncate'>{buttonLabel}</span>
           <Down theme='outline' size='10' fill={iconColors.secondary} className='shrink-0' />

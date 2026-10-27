@@ -84,6 +84,31 @@ body {
   border-radius: 999px;
 }
 
+/* @icon-park glyphs render as <span class="i-icon"><svg/></span>, so inside
+   Arco buttons they never match the `svg + span` icon gap and sit on the text
+   baseline via `vertical-align: -0.125em` — visibly off-center and glued to
+   the label. Restrict flex centering and Arco's own per-size icon gap to
+   buttons that actually carry an icon-park icon so iconless buttons keep the
+   stock layout; loading swaps in a bare <svg> and returns to Arco's rules. */
+.arco-btn:has(> .i-icon) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.arco-btn-size-mini:has(> .i-icon) {
+  column-gap: 4px;
+}
+
+.arco-btn-size-small:has(> .i-icon) {
+  column-gap: 6px;
+}
+
+.arco-btn-size-default:has(> .i-icon),
+.arco-btn-size-large:has(> .i-icon) {
+  column-gap: 8px;
+}
+
 .arco-btn-primary:not(.arco-btn-disabled):not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(
     .arco-btn-status-success
   ) {
