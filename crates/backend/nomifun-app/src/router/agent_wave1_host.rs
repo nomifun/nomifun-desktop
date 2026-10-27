@@ -637,7 +637,7 @@ fn agent_knowledge_resource(
     let effective_operations =
         nomifun_agent_domain_wave1::effective_agent_knowledge_operations(binding)
             .map_err(Wave1HostPortError::invalid_request)?;
-    nomifun_knowledge::AgentKnowledgeResource::from_operation_names(
+    let mut resource = nomifun_knowledge::AgentKnowledgeResource::from_operation_names(
         binding.binding_id.as_ref(),
         binding.owner_id.clone(),
         knowledge_base_id,
@@ -645,7 +645,24 @@ fn agent_knowledge_resource(
         PathBuf::from(root),
         effective_operations.iter(),
     )
-    .map_err(wave1_application_error)
+    .map_err(wave1_application_error)?;
+    // A bound remote corpus must round-trip exactly; a malformed parameter is
+    // rejected rather than silently widening the base to local-only reads.
+    if let Some(encoded) = binding
+        .typed_parameters
+        .get(nomifun_agent_domain_wave1::KNOWLEDGE_REMOTE_LINKS_PARAMETER)
+    {
+        let links: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(encoded).map_err(|error| {
+                Wave1HostPortError::invalid_request(format!(
+                    "knowledge resource binding {} carries an invalid {} parameter: {error}",
+                    binding.binding_id.as_ref(),
+                    nomifun_agent_domain_wave1::KNOWLEDGE_REMOTE_LINKS_PARAMETER,
+                ))
+            })?;
+        resource = resource.with_remote_links(links);
+    }
+    Ok(resource)
 }
 
 fn exact_memory_binding(

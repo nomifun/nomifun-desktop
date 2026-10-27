@@ -121,6 +121,10 @@ pub const COMPANION_MEMORY_RESOURCE_KIND: &str = "companion_memory";
 pub const KNOWLEDGE_ROOT_PARAMETER: &str = "knowledge_root";
 pub const KNOWLEDGE_NAME_PARAMETER: &str = "knowledge_name";
 pub const KNOWLEDGE_DESCRIPTION_PARAMETER: &str = "knowledge_description";
+/// JSON object mapping curated Feishu remote tokens to their official links.
+/// Present only on bindings whose base has a Feishu source; the set is frozen
+/// at resolution so session reads stay inside the bound corpus.
+pub const KNOWLEDGE_REMOTE_LINKS_PARAMETER: &str = "knowledge_remote_links";
 pub const KNOWLEDGE_ENABLED_PARAMETER: &str = "knowledge_enabled";
 pub const KNOWLEDGE_WRITEBACK_PARAMETER: &str = "knowledge_writeback";
 pub const KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER: &str = "knowledge_writeback_eagerness";

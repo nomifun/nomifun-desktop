@@ -95,6 +95,10 @@ pub fn permissions(scopes: &[String]) -> Vec<OfficePermission> {
         capability("documents.browse", &["search:docs:read"], scopes),
         capability("documents.create", &["docx:document:create"], scopes),
         capability("documents.delete", &["space:document:delete", "drive:drive.metadata:readonly"], scopes),
+        // Knowledge-chain only: the workbench never routes body fetch or index
+        // metadata, and these capabilities stay off its query/mutation checks.
+        capability("documents.read", &["docx:document:readonly"], scopes),
+        capability("documents.inspect", &["drive:drive.metadata:readonly"], scopes),
         capability("base.read", &["base:record:read", "base:field:read"], scopes),
         capability("base.write", &["base:record:update"], scopes),
     ]
@@ -104,7 +108,7 @@ pub fn allowed_scopes() -> Vec<String> {
     result.insert("offline_access".into());
     result.into_iter().collect()
 }
-fn named_permissions(names: &[&str], scopes: &[String]) -> Vec<OfficePermission> {
+pub fn named_permissions(names: &[&str], scopes: &[String]) -> Vec<OfficePermission> {
     permissions(scopes).into_iter().filter(|p| names.contains(&p.capability.as_str())).collect()
 }
 pub fn query_permissions(query: &OfficeQuery, scopes: &[String]) -> Vec<OfficePermission> {
@@ -668,6 +672,100 @@ pub fn normalize_base_readback(output:&CliOutput)->Result<OfficeQueryResult,HubE
     normalize_matrix(&business_value(output,false)?)
 }
 
+/// Knowledge-chain projection of a curated document's remote metadata. These
+/// commands serve only the knowledge port; the workbench never routes them.
+#[derive(Debug, Clone)]
+pub struct FeishuDocMeta {
+    /// Canonical remote identity: the token embedded in the official URL. For
+    /// wiki links this stays the node_token; fetch/search unwrap as needed.
+    pub token: String,
+    pub kind: String,
+    pub title: String,
+    pub url: Option<String>,
+    pub modified_at: Option<String>,
+}
+#[derive(Debug, Clone)]
+pub struct FeishuDocBody {
+    /// Canonical object token returned by fetch (wiki links unwrap here).
+    pub document_id: String,
+    pub markdown: String,
+    pub revision_id: Option<i64>,
+}
+
+/// Curated corpus types; matches the phase-one whitelist.
+pub fn knowledge_doc_kind(kind: &str) -> bool { matches!(kind, "doc" | "docx" | "wiki") }
+
+/// Search v2 restricted to the curated kind set; the same normalizer and page
+/// token rules as workbench document browsing apply.
+pub fn knowledge_search_command(query:&str,cursor:Option<&str>,profile:Option<&str>)->Result<CliCommand,HubError>{
+    if query.chars().count()>30||query.contains('\0'){return Err(HubError::invalid("搜索关键词最多 30 个字符"))}
+    let mut args:Vec<String>=vec!["drive".into(),"+search".into(),"--query".into(),query.into(),
+        "--doc-types".into(),"doc,docx,wiki".into(),
+        "--sort".into(),"edit_time".into(),"--page-size".into(),"20".into(),"--format".into(),"json".into()];
+    if let Some(cursor)=cursor{valid_page_token(cursor)?;args.extend(["--page-token".into(),cursor.to_string()]);}
+    user_command(args,profile,false)
+}
+pub fn normalize_knowledge_search(output:&CliOutput,cursor:Option<&str>)->Result<OfficeQueryResult,HubError>{
+    normalize_documents(&business_value(output,false)?,cursor)
+}
+
+/// `drive +inspect` resolves an official URL (wiki unwrapped server-side) to
+/// type, title and canonical token through metas/batch_query.
+pub fn inspect_document_command(url:&str,profile:Option<&str>)->Result<CliCommand,HubError>{
+    let url=official_url(url).ok_or_else(||HubError::invalid("请使用飞书或 Lark 官方 HTTPS 文档链接"))?;
+    user_command(["drive","+inspect","--url",url.as_str(),"--format","json"],profile,false)
+}
+pub fn parse_inspect_document(output:&CliOutput)->Result<FeishuDocMeta,HubError>{
+    let data=business_value(output,false)?;
+    let metas=data.get("metas").and_then(Value::as_array)
+        .or_else(||data.pointer("/document/metas").and_then(Value::as_array))
+        .or_else(||data.pointer("/inspect/metas").and_then(Value::as_array));
+    let meta=metas.and_then(|metas|metas.first()).cloned()
+        .or_else(||data.get("meta").cloned()).or_else(||data.get("document").cloned());
+    let Some(meta)=meta.filter(|meta|meta.is_object()) else {
+        let failed=data.get("failed_list").and_then(Value::as_array);
+        if failed.is_some_and(|failed|!failed.is_empty()) {
+            return Err(HubError{code:"OFFICE_PERMISSION".into(),message:"该文档无法读取元数据，可能已被删除或当前账号无权访问".into(),
+                not_executed:true,missing_scopes:Vec::new(),console_url:None,related_operation_id:None,related_flow_id:None});
+        }
+        return Err(HubError::unavailable("文档元数据结果格式不兼容"));
+    };
+    let kind=first_text(&meta,&["doc_type","type","obj_type"]).unwrap_or_default().to_ascii_lowercase();
+    if !knowledge_doc_kind(&kind){return Err(HubError::invalid("仅支持 doc/docx/wiki 类型的飞书文档"))}
+    let token=first_text(&meta,&["doc_token","token","obj_token","node_token"])
+        .ok_or_else(||HubError::unavailable("文档元数据缺少资源标识"))?;
+    valid_resource_token(&token)?;
+    Ok(FeishuDocMeta{token,kind,
+        title:first_text(&meta,&["title","name"]).unwrap_or_default(),
+        url:meta.get("url").and_then(Value::as_str).and_then(official_url),
+        modified_at:first_text(&meta,&["latest_modify_time_iso","latest_modify_time","update_time_iso","update_time"])})
+}
+
+/// `docs +fetch` accepts an official doc/docx/wiki URL or a bare token and
+/// returns markdown content under data.document.
+pub fn fetch_document_command(doc:&str,profile:Option<&str>)->Result<CliCommand,HubError>{
+    let target=match official_url(doc){
+        Some(url)=>{let (kind,_)=link_target(&url)?;
+            if !knowledge_doc_kind(&kind){return Err(HubError::invalid("仅支持 doc/docx/wiki 类型的飞书文档"))}
+            url}
+        None=>{valid_resource_token(doc)?;doc.to_owned()}
+    };
+    user_command(["docs","+fetch","--doc",&target,"--doc-format","markdown","--format","json"],profile,false)
+}
+pub fn parse_fetch_document(output:&CliOutput)->Result<FeishuDocBody,HubError>{
+    let data=business_value(output,false)?;
+    let document=data.get("document").filter(|document|document.is_object())
+        .ok_or_else(||HubError::unavailable("文档正文结果缺少 document 数据"))?;
+    let markdown=document.get("content").and_then(Value::as_str)
+        .ok_or_else(||HubError::unavailable("文档正文缺少 markdown 内容"))?;
+    if markdown.len()>8*1024*1024{return Err(HubError::unavailable("文档正文超过知识读取上限"))}
+    let document_id=text(document.get("document_id"))
+        .ok_or_else(||HubError::unavailable("文档正文缺少资源标识"))?;
+    valid_resource_token(&document_id)?;
+    Ok(FeishuDocBody{document_id,markdown:markdown.to_owned(),
+        revision_id:document.get("revision_id").and_then(Value::as_i64)})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,8 +800,12 @@ mod tests {
         let p=permissions(&["search:docs:read".into()]);
         let browse=p.iter().find(|p|p.capability=="documents.browse").unwrap();
         assert!(browse.granted);assert_eq!(browse.required_scopes,vec!["search:docs:read"]);
-        assert!(p.iter().all(|p|!matches!(p.capability.as_str(),"documents.list"|"documents.search"|"documents.read"|"documents.write")));
-        for scope in ["space:document:retrieve","docx:document:readonly","docx:document:write_only"] {assert!(!allowed_scopes().contains(&scope.into()));}
+        // Knowledge-chain capabilities exist but stay off workbench checks.
+        assert!(p.iter().all(|p|!matches!(p.capability.as_str(),"documents.list"|"documents.search"|"documents.write")));
+        assert!(!p.iter().find(|p|p.capability=="documents.read").unwrap().granted);
+        assert!(!p.iter().find(|p|p.capability=="documents.inspect").unwrap().granted);
+        for scope in ["space:document:retrieve","docx:document:write_only"] {assert!(!allowed_scopes().contains(&scope.into()));}
+        assert!(allowed_scopes().contains(&"docx:document:readonly".to_string()));
         let old=permissions(&["space:document:retrieve".into(),"drive:drive:readonly".into()]);
         assert!(!old.iter().find(|p|p.capability=="documents.browse").unwrap().granted);
         let deleting=permissions(&["space:document:delete".into()]);
@@ -908,5 +1010,85 @@ mod tests {
         assert_eq!(receipt.status,ItemStatus::Unknown);assert_eq!(receipt.remote_id.as_deref(),Some("original-guid"));
         let error=output_error(&CliOutput::fixture(1,"",r#"{"ok":false,"error":{"type":"api","message":"server failed"}}"#),true);
         assert!(!error.not_executed);
+    }
+    #[test]
+    fn knowledge_capabilities_stay_separate_from_workbench_surfaces(){
+        let all=permissions(&["docx:document:readonly".into(),"drive:drive.metadata:readonly".into()]);
+        let read=all.iter().find(|p|p.capability=="documents.read").unwrap();
+        let inspect=all.iter().find(|p|p.capability=="documents.inspect").unwrap();
+        assert!(read.granted&&inspect.granted);
+        assert!(all.iter().find(|p|p.capability=="documents.browse").unwrap().granted==false);
+        for query in [OfficeQuery::Documents{query:"q".into(),filter:DocumentFilter::All,cursor:None}]{
+            assert!(!query_permissions(&query,&[]).iter().any(|p|p.capability=="documents.read"));
+        }
+        for mutation in [OfficeMutation::DocumentCreate{client_item_id:"i".into(),title:"T".into()}]{
+            assert!(!mutation_permissions(&mutation,&[]).iter().any(|p|p.capability=="documents.read"));
+        }
+        // Granted scopes stay requestable through the existing login flow.
+        assert!(allowed_scopes().contains(&"docx:document:readonly".to_string()));
+    }
+    #[test]
+    fn knowledge_commands_use_verified_lark_cli_098_shapes(){
+        let search=knowledge_search_command("规划",None,Some("work")).unwrap();
+        assert_eq!(search.args,["--profile","work","drive","+search","--query","规划",
+            "--doc-types","doc,docx,wiki","--sort","edit_time","--page-size","20","--format","json","--as","user"]);
+        assert!(!search.mutating);
+        let search=knowledge_search_command("q",Some("opaque-cursor"),Some("work")).unwrap();
+        assert!(search.args.windows(2).any(|w|w==["--page-token","opaque-cursor"]));
+        assert!(knowledge_search_command(&"x".repeat(31),None,None).is_err());
+
+        let inspect=inspect_document_command("https://tenant.feishu.cn/docx/AbCdEf-_123",Some("work")).unwrap();
+        assert_eq!(inspect.args,["--profile","work","drive","+inspect","--url",
+            "https://tenant.feishu.cn/docx/AbCdEf-_123","--format","json","--as","user"]);
+        assert!(inspect_document_command("https://evil.example.com/docx/x",None).is_err());
+        assert!(inspect_document_command("http://tenant.feishu.cn/docx/x",None).is_err());
+
+        let fetch=fetch_document_command("https://tenant.feishu.cn/wiki/WikiNodeToken_1",Some("work")).unwrap();
+        assert_eq!(fetch.args,["--profile","work","docs","+fetch","--doc",
+            "https://tenant.feishu.cn/wiki/WikiNodeToken_1","--doc-format","markdown","--format","json","--as","user"]);
+        let fetch=fetch_document_command("PlainToken_123",None).unwrap();
+        assert!(fetch.args.windows(2).any(|w|w==["--doc","PlainToken_123"]));
+        assert!(fetch_document_command("https://tenant.feishu.cn/sheets/SHTok",None).is_err());
+        assert!(fetch_document_command("not a token!",None).is_err());
+    }
+    #[test]
+    fn fetch_document_parses_real_markdown_envelope_and_rejects_bad_shapes(){
+        let body=parse_fetch_document(&output(json!({"document":{"content":"# 标题\n\n正文",
+            "document_id":"JXfjdJ4F2oMZ4UxiOjGc1mxAnbg","revision_id":4}}))).unwrap();
+        assert_eq!(body.document_id,"JXfjdJ4F2oMZ4UxiOjGc1mxAnbg");
+        assert_eq!(body.markdown,"# 标题\n\n正文");assert_eq!(body.revision_id,Some(4));
+        for data in [json!({}),json!({"document":{"document_id":"x"}}),
+            json!({"document":{"content":"t","document_id":"bad token!"}})]{
+            assert!(parse_fetch_document(&output(data)).is_err());
+        }
+        let missing_scope=CliOutput::fixture(3,"",r#"{"ok":false,"error":{"type":"authorization","subtype":"missing_scope","missing_scopes":["docx:document:readonly"]}}"#);
+        let error=parse_fetch_document(&missing_scope).unwrap_err();
+        assert_eq!(error.code,"OFFICE_PERMISSION");assert_eq!(error.missing_scopes,["docx:document:readonly"]);
+    }
+    #[test]
+    fn inspect_document_normalizes_metas_and_rejects_unsupported_kinds(){
+        let meta=parse_inspect_document(&output(json!({"metas":[{"doc_token":"Tok_1","doc_type":"docx",
+            "title":"产品规划","url":"https://tenant.feishu.cn/docx/Tok_1","latest_modify_time":"1793028710"}]}))).unwrap();
+        assert_eq!((meta.token.as_str(),meta.kind.as_str(),meta.title.as_str()),("Tok_1","docx","产品规划"));
+        assert_eq!(meta.modified_at.as_deref(),Some("1793028710"));
+        let meta=parse_inspect_document(&output(json!({"metas":[{"doc_token":"NodeTok","doc_type":"wiki","title":"知识库"}]}))).unwrap();
+        assert_eq!(meta.kind,"wiki");
+        assert!(parse_inspect_document(&output(json!({"metas":[{"doc_token":"SHT","doc_type":"sheet","title":"表"}]}))).is_err());
+        let failed=parse_inspect_document(&output(json!({"metas":[],"failed_list":[{"token":"x"}]}))).unwrap_err();
+        assert_eq!(failed.code,"OFFICE_PERMISSION");
+        assert!(parse_inspect_document(&output(json!({"unexpected":true}))).is_err());
+    }
+    #[test]
+    fn knowledge_search_reuses_the_verified_search_projection(){
+        let search=normalize_knowledge_search(&output(json!({"has_more":false,"results":[{
+            "entity_type":"WIKI","result_meta":{"token":"WikiTok_1","doc_types":"DOCX",
+            "url":"https://tenant.feishu.cn/wiki/WikiTok_1","update_time_iso":"2026-10-26T23:31:50+08:00"},
+            "title_highlighted":"计划<h>文档</h>","summary_highlighted":"摘要"}]})),None).unwrap();
+        assert_eq!(search.items.len(),1);
+        let item=&search.items[0];
+        assert_eq!((item.id.as_str(),item.kind.as_str(),item.title.as_str()),("WikiTok_1","wiki","计划文档"));
+        assert_eq!(item.modified_at.as_deref(),Some("2026-10-26T23:31:50+08:00"));
+        let failed=CliOutput::fixture(1,"","");
+        assert_eq!(normalize_knowledge_search(&failed,None).unwrap_err().code,"OFFICE_UNAVAILABLE");
     }
 }

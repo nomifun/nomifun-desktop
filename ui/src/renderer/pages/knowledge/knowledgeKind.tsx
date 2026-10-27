@@ -13,7 +13,7 @@
  * kind-specific badge and rounded-square icon presentation.
  */
 import type { TFunction } from 'i18next';
-import { Earth, EditTwo, FolderOpen } from '@icon-park/react';
+import { Earth, EditTwo, FolderOpen, LarkOne } from '@icon-park/react';
 import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
 
 export type KindConfig = {
@@ -37,6 +37,7 @@ export type KindTextVariant = 'accent' | 'neutral';
  * - blank = neutral/gray (fill-2 / text-2)
  * - local = primary (blue)
  * - web = success (green)
+ * - feishu = warning (orange) — remote-backed curated index
  */
 export function getKindConfig(
   kind: IKnowledgeBase['kind'],
@@ -63,6 +64,16 @@ export function getKindConfig(
         iconBg: 'rgba(var(--success-6),0.1)',
         iconBorder: 'rgba(var(--success-6),0.3)',
         iconColor: 'rgb(var(--success-5))',
+      };
+    case 'feishu':
+      return {
+        label: t('knowledge.card.kindFeishu', { defaultValue: '飞书文档' }),
+        bgClass: 'bg-[rgba(var(--warning-6),0.1)]',
+        textClass: textVariant === 'accent' ? 'text-warning-5' : 'text-[var(--color-text-1)]',
+        borderClass: 'border-[rgba(var(--warning-6),0.3)]',
+        iconBg: 'rgba(var(--warning-6),0.1)',
+        iconBorder: 'rgba(var(--warning-6),0.3)',
+        iconColor: 'rgb(var(--warning-5))',
       };
     case 'blank':
     default:
@@ -104,6 +115,7 @@ export function KindIcon({
     >
       {kind === 'local' && <FolderOpen {...iconProps} />}
       {kind === 'web' && <Earth {...iconProps} />}
+      {kind === 'feishu' && <LarkOne {...iconProps} />}
       {kind === 'blank' && <EditTwo {...iconProps} />}
     </div>
   );

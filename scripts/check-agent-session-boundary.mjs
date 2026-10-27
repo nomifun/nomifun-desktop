@@ -82,7 +82,8 @@ const { baseline, pluginForwardMigration, metadataForwardMigration, hostingForwa
   cronInputForwardMigration, mcpOAuthForwardMigration, cronCancellationForwardMigration,
   cronWorkbenchForwardMigration, modelInputConstraintsForwardMigration, queueSettingForwardMigration,
   executionPlanGateForwardMigration, officeHubForwardMigration, officeCompactForwardMigration,
-  officeActivityRetirementForwardMigration, officeOverviewRetirementForwardMigration } = AGENT_FORWARD_MIGRATIONS;
+  officeActivityRetirementForwardMigration, officeOverviewRetirementForwardMigration,
+  feishuSourceKindForwardMigration } = AGENT_FORWARD_MIGRATIONS;
 if (!areKnownAgentMigrationPaths(migrations)) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward migrations');
 }
@@ -107,6 +108,24 @@ if (migrations.includes(executionPlanGateForwardMigration)
     'ALTER TABLE agent_executions DROP COLUMN plan_gate',
   ])) {
   failures.push('Execution plan gate retirement may only drop its unused column; identities, policies, canonical Agent facts and lineage receipts stay unchanged');
+}
+if (migrations.includes(feishuSourceKindForwardMigration)) {
+  const allowed = [
+    /^CREATE TABLE knowledge_sources_next \(/,
+    /^INSERT INTO knowledge_sources_next \(/,
+    /^DROP TABLE knowledge_sources$/,
+    /^ALTER TABLE knowledge_sources_next RENAME TO knowledge_sources$/,
+    /^CREATE (?:UNIQUE )?INDEX (?:idx_knowledge_sources_default_parent_entry_id|idx_knowledge_sources_knowledge_base_id|uq_knowledge_sources_live_kind) ON knowledge_sources\b/,
+    /^CREATE TEMP TABLE feishu_source_integrity\b/,
+    /^INSERT INTO feishu_source_integrity SELECT COUNT\(\*\) FROM pragma_foreign_key_check$/,
+    /^DROP TABLE feishu_source_integrity$/,
+    /^PRAGMA legacy_alter_table = OFF$/,
+  ];
+  for (const statement of migrationStatements(feishuSourceKindForwardMigration)) {
+    if (!allowed.some(rule => rule.test(statement))) {
+      failures.push(`${feishuSourceKindForwardMigration}: may only widen the knowledge_sources kind constraint; canonical Agent facts and other tables stay unchanged (${statement.slice(0, 100)})`);
+    }
+  }
 }
 if (migrations.includes(officeOverviewRetirementForwardMigration)
   && JSON.stringify(migrationStatements(officeOverviewRetirementForwardMigration)) !== JSON.stringify([

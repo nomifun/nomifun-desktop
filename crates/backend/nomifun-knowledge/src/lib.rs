@@ -20,6 +20,7 @@
 pub mod autogen;
 pub mod agent_module;
 pub mod context;
+pub mod feishu;
 pub mod events;
 pub mod export;
 pub mod mcp_server;
@@ -64,6 +65,10 @@ pub use service::{
 pub use source_url::{
     BrowserRenderContent, BrowserRenderContentPort, BrowserRenderContentRequest, FetchedPage,
     HttpFetcher, PageFetcher, UnavailableBrowserRenderContentPort,
+};
+pub use feishu::{
+    FeishuDocContent, FeishuIndexHit, FeishuKnowledgePort, UnavailableFeishuKnowledgePort,
+    FEISHU_REMOTE_PREFIX, FEISHU_SOURCE_KIND, MAX_FEISHU_SOURCE_ENTRIES,
 };
 pub use state::KnowledgeRouterState;
 pub use autogen::{KnowledgeWritebackCompletion, KnowledgeWritebackCompletionError, KnowledgeWritebackCompletionRequest, KnowledgeWritebackLimits};

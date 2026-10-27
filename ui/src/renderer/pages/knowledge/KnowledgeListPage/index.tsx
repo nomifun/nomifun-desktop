@@ -181,11 +181,8 @@ const KnowledgeListPage: React.FC = () => {
   const [studioInitialKind, setStudioInitialKind] = useState<StudioInitialKind | undefined>(undefined);
 
   const openStudio = (initialKind?: KnowledgeKindShortcut) => {
-    // The Feishu tile opens the connector-backed space, not the create studio.
-    if (initialKind === 'feishu') {
-      navigate('/knowledge/feishu');
-      return;
-    }
+    // Feishu is a creatable base kind: the tile opens the studio pre-selected.
+    // The pinned FeishuKnowledgeCard still routes to the connector workbench.
     setStudioInitialKind(initialKind);
     setStudioVisible(true);
   };

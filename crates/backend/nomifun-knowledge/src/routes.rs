@@ -307,6 +307,9 @@ enum AddContentRequest {
         #[serde(default)]
         destination_parent_id: Option<KnowledgeEntryId>,
     },
+    /// Append curated Feishu document links to a Feishu-backed base. Stubs
+    /// are metadata-only; bodies stay remote.
+    Feishu { urls: Vec<String> },
 }
 
 #[derive(Serialize)]
@@ -331,6 +334,15 @@ enum AddContentResponse {
         errors: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         last_fetched_at: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        first_file: Option<String>,
+    },
+    Feishu {
+        added: usize,
+        duplicates: usize,
+        indexed: usize,
+        failed: usize,
+        errors: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         first_file: Option<String>,
     },
@@ -406,6 +418,28 @@ async fn add_content(
                 failed,
                 errors,
                 last_fetched_at,
+                first_file,
+            }
+        }
+        AddContentRequest::Feishu { urls } => {
+            let AppendUrlSourceSummary {
+                added,
+                duplicates,
+                fetched: indexed,
+                failed,
+                errors,
+                last_fetched_at: _,
+                first_file,
+            } = state
+                .service
+                .append_feishu_entries(knowledge_base_id.as_str(), urls)
+                .await?;
+            AddContentResponse::Feishu {
+                added,
+                duplicates,
+                indexed,
+                failed,
+                errors,
                 first_file,
             }
         }

@@ -178,6 +178,13 @@ pub fn build_knowledge_context(
         if let Some(summary) = m.summary.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             out.push_str(&format!("- Summary: {summary}\n"));
         }
+        if m.remote_index_stale {
+            out.push_str(
+                "- Remote index stale: this base's Feishu document index could not be refreshed \
+                 at mount time; entries below reflect the last good refresh and `knowledge_read` \
+                 may fail until the Feishu connection recovers.\n",
+            );
+        }
         let has_summary = m.summary.as_deref().map(str::trim).is_some_and(|s| !s.is_empty());
         if description.is_empty() && !has_summary {
             let hints = toc_topic_hints(&m.toc);
@@ -375,6 +382,7 @@ mod tests {
             toc: Vec::new(),
             summary: None,
             live_sources: Vec::new(),
+            remote_index_stale: false,
         }
     }
 

@@ -21,12 +21,13 @@ describe('adding content to an existing knowledge base', () => {
     expect(controlSource.includes('uploadTodo')).toBe(false);
   });
 
-  test('uses one append-only API contract for document, folder, and web content', () => {
+  test('uses one append-only API contract for document, folder, web, and feishu content', () => {
     expect(bridgeSource.includes("type: 'document'")).toBe(true);
     expect(bridgeSource.includes("type: 'local_folder'")).toBe(true);
     expect(bridgeSource.includes("type: 'web'")).toBe(true);
+    expect(bridgeSource.includes("type: 'feishu'")).toBe(true);
     expect(bridgeSource.includes('/content')).toBe(true);
-    expect(controlSource.match(/addKnowledgeContent\(knowledgeBaseId,/g)?.length).toBe(3);
+    expect(controlSource.match(/addKnowledgeContent\(knowledgeBaseId,/g)?.length).toBe(4);
     expect(knowledgeHookSource.includes('ipcBridge.knowledge.addContent.invoke')).toBe(true);
     expect(controlSource.includes('destination_parent_path: defaultFolderPath || undefined')).toBe(true);
     expect(controlSource.includes('destination_parent_id: defaultFolderEntryId')).toBe(true);

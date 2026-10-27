@@ -6,8 +6,8 @@
 
 import type { KnowledgeKind } from '../KnowledgeTagFilterBar';
 
-/** Kinds the create flow can be opened with. Feishu knowledge is a live
- * connector-backed space at /knowledge/feishu, not a creatable base kind. */
+/** Kinds the create flow can be opened with — includes 'feishu' (a managed
+ * base whose curated Feishu links index as metadata stubs). */
 export type StudioInitialKind = KnowledgeKind;
 
 /**

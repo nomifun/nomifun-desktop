@@ -9,6 +9,9 @@ const MAX_BOUND_KNOWLEDGE_SEARCH_DOCUMENTS: usize = 4_096;
 pub(super) const MAX_BOUND_KNOWLEDGE_SEARCH_FILE_BYTES: u64 =
     8 * 1024 * 1024;
 const MAX_BOUND_KNOWLEDGE_SEARCH_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+/// Synthetic score anchor for remote recall hits: server-ordered Search v2
+/// results rank above local keyword scores inside a remote-backed base.
+const REMOTE_SEARCH_SCORE_BASE: u32 = 1_000_000;
 
 /// One Fresh-v4 Knowledge resource resolved from an authorized typed binding.
 ///
@@ -19,6 +22,10 @@ pub struct BoundKnowledgeBase {
     knowledge_base_id: KnowledgeBaseId,
     name: String,
     root: PathBuf,
+    /// Curated remote corpus frozen at binding time: remote token → the
+    /// official link the read path resolves it through (`None` for purely
+    /// local bases). Remote search recall is intersected with this set.
+    remote_links: Option<BTreeMap<String, String>>,
 }
 
 impl BoundKnowledgeBase {
@@ -44,7 +51,16 @@ impl BoundKnowledgeBase {
             knowledge_base_id,
             name,
             root,
+            remote_links: None,
         })
+    }
+
+    /// Freeze the curated Feishu corpus into this binding. An empty map still
+    /// marks the base as remote-backed — remote failures must surface, not
+    /// degrade to an empty local search.
+    pub fn with_remote_links(mut self, links: BTreeMap<String, String>) -> Self {
+        self.remote_links = Some(links);
+        self
     }
 
     pub fn knowledge_base_id(&self) -> &KnowledgeBaseId {
@@ -77,12 +93,24 @@ pub struct BoundKnowledgeDocument {
 
 /// Database-independent, read-only access for a Knowledge resource that has
 /// already been selected by a Fresh-v4 typed resource binding.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct BoundKnowledgeReadService {
-    _private: (),
+    feishu: Arc<dyn FeishuKnowledgePort>,
+}
+
+impl Default for BoundKnowledgeReadService {
+    fn default() -> Self {
+        Self {
+            feishu: Arc::new(feishu::UnavailableFeishuKnowledgePort),
+        }
+    }
 }
 
 impl BoundKnowledgeReadService {
+    pub fn new(feishu: Arc<dyn FeishuKnowledgePort>) -> Self {
+        Self { feishu }
+    }
+
     pub(super) async fn load_documents(
         &self,
         knowledge_base: &BoundKnowledgeBase,
@@ -130,21 +158,62 @@ impl BoundKnowledgeReadService {
 
         let documents = self.load_documents(knowledge_base).await?;
 
-        Ok(local_keyword_candidates(documents, query, limit)
-            .into_iter()
-            .map(|candidate| {
-                let hit = candidate.hit;
-                BoundKnowledgeSearchHit {
-                    handle: encode_doc_handle(&hit.kb_id, &hit.rel_path),
-                    resource_id: hit.kb_id,
-                    knowledge_base_name: hit.kb_name,
-                    relative_path: hit.rel_path,
-                    heading: hit.heading,
-                    snippet: hit.snippet,
-                    score: hit.score,
+        let mut hits: Vec<BoundKnowledgeSearchHit> =
+            local_keyword_candidates(documents, query, limit)
+                .into_iter()
+                .map(|candidate| {
+                    let hit = candidate.hit;
+                    BoundKnowledgeSearchHit {
+                        handle: encode_doc_handle(&hit.kb_id, &hit.rel_path),
+                        resource_id: hit.kb_id,
+                        knowledge_base_name: hit.kb_name,
+                        relative_path: hit.rel_path,
+                        heading: hit.heading,
+                        snippet: hit.snippet,
+                        score: hit.score,
+                    }
+                })
+                .collect();
+
+        // Remote-backed bases union local stub recall with a live Search v2
+        // pass intersected against the curated token set. A port failure is
+        // propagated — a remote base must never degrade to a silent empty
+        // result that hides a broken connection.
+        if let Some(remote_links) = &knowledge_base.remote_links {
+            let remote_hits = self.feishu.search_documents(query).await?;
+            let mut seen_remote = HashSet::new();
+            for (rank, hit) in remote_hits
+                .into_iter()
+                .filter(|hit| remote_links.contains_key(&hit.token))
+                .take(limit)
+                .enumerate()
+            {
+                if !seen_remote.insert(hit.token.clone()) {
+                    continue;
                 }
-            })
-            .collect())
+                let rel_path = feishu::remote_rel_path(&hit.token);
+                hits.push(BoundKnowledgeSearchHit {
+                    handle: encode_doc_handle(&knowledge_base.knowledge_base_id, &rel_path),
+                    resource_id: knowledge_base.knowledge_base_id.clone(),
+                    knowledge_base_name: knowledge_base.name.clone(),
+                    relative_path: rel_path,
+                    heading: hit.title,
+                    snippet: hit.summary.unwrap_or_default(),
+                    // Remote recall keeps its server ranking above local
+                    // keyword scores for this remote-backed base.
+                    score: REMOTE_SEARCH_SCORE_BASE - rank as u32,
+                });
+            }
+            hits.sort_by(|left, right| {
+                right
+                    .score
+                    .cmp(&left.score)
+                    .then(left.relative_path.cmp(&right.relative_path))
+            });
+            hits.truncate(limit);
+        }
+
+        Ok(hits)
     }
 
     pub async fn read(
@@ -159,6 +228,31 @@ impl BoundKnowledgeReadService {
             return Err(AppError::Forbidden(
                 "knowledge document handle points to a different bound resource".into(),
             ));
+        }
+
+        // `.remote/` pseudo-paths resolve through the curated corpus frozen
+        // into the binding — the body is fetched live, never persisted.
+        if let Some(token) = feishu::remote_token(&rel_path) {
+            let link = knowledge_base
+                .remote_links
+                .as_ref()
+                .and_then(|links| links.get(token))
+                .ok_or_else(|| {
+                    AppError::Forbidden(
+                        "knowledge document handle is not part of this bound base's curated remote set"
+                            .into(),
+                    )
+                })?;
+            let document = self.feishu.fetch_document(link).await?;
+            let size = document.markdown.len() as u64;
+            return Ok(BoundKnowledgeDocument {
+                handle: encode_doc_handle(&knowledge_base.knowledge_base_id, &rel_path),
+                resource_id: knowledge_base.knowledge_base_id.clone(),
+                relative_path: rel_path,
+                content_sha256: sha256_text(&document.markdown),
+                content: document.markdown,
+                size,
+            });
         }
 
         let root = knowledge_base.root.clone();

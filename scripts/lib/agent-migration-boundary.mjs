@@ -20,6 +20,7 @@ export const AGENT_FORWARD_MIGRATIONS = Object.freeze({
   officeCompactForwardMigration: 'crates/backend/nomifun-db/migrations/017_compact_office_receipts.sql',
   officeActivityRetirementForwardMigration: 'crates/backend/nomifun-db/migrations/018_remove_office_activity.sql',
   officeOverviewRetirementForwardMigration: 'crates/backend/nomifun-db/migrations/019_remove_office_overview.sql',
+  feishuSourceKindForwardMigration: 'crates/backend/nomifun-db/migrations/020_feishu_knowledge_source_kind.sql',
 });
 const KNOWN = new Set(Object.values(AGENT_FORWARD_MIGRATIONS));
 export function areKnownAgentMigrationPaths(paths) {

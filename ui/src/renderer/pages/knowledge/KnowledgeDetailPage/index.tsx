@@ -1961,6 +1961,7 @@ const KnowledgeDetailPage: React.FC = () => {
                       ref={addContentControlRef}
                       knowledgeBaseId={id}
                       baseRootPath={base.root_path}
+                      baseKind={base.kind}
                       defaultFolderPath={defaultContentFolderPath}
                       defaultFolderEntryId={defaultContentFolderEntryId}
                       existingUrlCount={

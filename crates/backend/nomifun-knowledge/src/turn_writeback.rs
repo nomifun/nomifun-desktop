@@ -238,7 +238,7 @@ mod tests {
     fn extraction_budget_preserves_a_normal_cjk_answer_and_bounds_large_mounts() {
         let mount = KnowledgeMountInfo {
             knowledge_base_id: KnowledgeBaseId::new(), name: "Python 基础".into(), description: "可复用教程".into(),
-            rel_path: ".nomi/knowledge/python".into(), toc: vec![], summary: None, live_sources: vec![],
+            rel_path: ".nomi/knowledge/python".into(), toc: vec![], summary: None, live_sources: vec![], remote_index_stale: false,
         };
         let answer = "知".repeat(5000);
         let prompt = build_turn_writeback_prompt(std::slice::from_ref(&mount), WritebackEagerness::Auto, "解释 Python 正则", &answer, Default::default());
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn smaller_context_keeps_every_base_identity_and_answer_end_without_exhausting_output() {
         let first = KnowledgeMountInfo { knowledge_base_id: KnowledgeBaseId::new(), name: "First".into(), description: "d".repeat(5000),
-            rel_path: ".nomi/knowledge/first".into(), toc: vec!["long path".repeat(1000); 24], summary: Some("summary".repeat(1000)), live_sources: vec![] };
+            rel_path: ".nomi/knowledge/first".into(), toc: vec!["long path".repeat(1000); 24], summary: Some("summary".repeat(1000)), live_sources: vec![], remote_index_stale: false };
         let mut second = first.clone(); second.knowledge_base_id = KnowledgeBaseId::new(); second.name = "Second".into();
         let limits = crate::autogen::KnowledgeWritebackLimits::default().for_configuration(&crate::autogen::test_writeback_configuration(Some(8192), None)).unwrap();
         let answer = format!("Opening\n{}\nFinal durable conclusion", "知".repeat(12_000));
@@ -286,6 +286,7 @@ mod tests {
             toc: vec!["runbook.md — Runbook".into()],
             summary: None,
             live_sources: Vec::new(),
+            remote_index_stale: false,
         };
 
         let auto = build_turn_writeback_prompt(

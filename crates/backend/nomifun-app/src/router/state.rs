@@ -331,6 +331,9 @@ pub(crate) async fn try_build_module_states(
     // Keep the Office SQL recovery future off the already large desktop startup
     // frame, and finish it before constructing the module-state aggregate.
     let office_hub = Box::pin(super::office_hub::build(services)).await?;
+    services.knowledge_service.set_feishu_knowledge_port(Arc::new(
+        super::office_hub::OfficeFeishuKnowledgePort::new(office_hub.clone()),
+    ));
     let states = ModuleStates {
         _robot_voice_work: voice_work,
         mobile_voice,

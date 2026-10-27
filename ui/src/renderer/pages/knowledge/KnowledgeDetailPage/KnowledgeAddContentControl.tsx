@@ -6,14 +6,15 @@
 
 import React, { forwardRef, useCallback, useImperativeHandle, useState } from 'react';
 import { Button, Input, Message, Modal, Popover, Switch } from '@arco-design/web-react';
-import { FolderOpen, Info, LinkCloud, Plus, Upload } from '@icon-park/react';
+import { FolderOpen, Info, LarkOne, LinkCloud, Plus, Upload } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
-import type { IKnowledgeAddContentResult } from '@/common/adapter/ipcBridge';
+import type { IKnowledgeAddContentResult, IKnowledgeBase } from '@/common/adapter/ipcBridge';
 import type { KnowledgeBaseId, KnowledgeEntryId } from '@/common/types/ids';
 import { isDesktopShell } from '@renderer/utils/platform';
 import KnowledgeUrlEntriesEditor from '../KnowledgeUrlEntriesEditor';
 import {
+  MAX_FEISHU_SOURCE_ENTRIES,
   MAX_KNOWLEDGE_SOURCE_ENTRIES,
   parseKnowledgeUrlDrafts,
   type KnowledgeUrlDraft,
@@ -28,6 +29,7 @@ export interface KnowledgeAddContentControlHandle {
 interface KnowledgeAddContentControlProps {
   knowledgeBaseId: KnowledgeBaseId;
   baseRootPath: string;
+  baseKind?: IKnowledgeBase['kind'];
   defaultFolderPath: string;
   defaultFolderEntryId?: KnowledgeEntryId;
   existingUrlCount: number;
@@ -39,6 +41,7 @@ type AddKnowledgeMenuPanelProps = {
   onImportFolder: () => void;
   onImportWeb: () => void;
   webDisabled: boolean;
+  onImportFeishu?: () => void;
 };
 
 const AddKnowledgeMenuPanel: React.FC<AddKnowledgeMenuPanelProps> = ({
@@ -46,6 +49,7 @@ const AddKnowledgeMenuPanel: React.FC<AddKnowledgeMenuPanelProps> = ({
   onImportFolder,
   onImportWeb,
   webDisabled,
+  onImportFeishu,
 }) => {
   const { t } = useTranslation();
   const itemClass =
@@ -107,6 +111,21 @@ const AddKnowledgeMenuPanel: React.FC<AddKnowledgeMenuPanelProps> = ({
           </span>
         </span>
       </button>
+      {onImportFeishu && (
+        <button type='button' className={itemClass} onClick={onImportFeishu}>
+          <span className={iconClass}>
+            <LarkOne theme='outline' size='15' />
+          </span>
+          <span className='min-w-0'>
+            <span className='block text-12px font-600 leading-18px text-[var(--color-text-1)]'>
+              {t('knowledge.detail.docs.importFeishu', { defaultValue: '飞书文档' })}
+            </span>
+            <span className='block text-10px leading-16px text-[var(--color-text-3)]'>
+              {t('knowledge.detail.docs.importFeishuHint', { defaultValue: '添加飞书文档链接作实时索引' })}
+            </span>
+          </span>
+        </button>
+      )}
     </div>
   );
 };
@@ -118,7 +137,7 @@ const AddKnowledgeMenuPanel: React.FC<AddKnowledgeMenuPanelProps> = ({
 const KnowledgeAddContentControl = forwardRef<
   KnowledgeAddContentControlHandle,
   KnowledgeAddContentControlProps
->(({ knowledgeBaseId, baseRootPath, defaultFolderPath, defaultFolderEntryId, existingUrlCount, onAdded }, ref) => {
+>(({ knowledgeBaseId, baseRootPath, baseKind, defaultFolderPath, defaultFolderEntryId, existingUrlCount, onAdded }, ref) => {
   const { t } = useTranslation();
   const desktop = isDesktopShell();
   const [menuVisible, setMenuVisible] = useState(false);
@@ -132,6 +151,9 @@ const KnowledgeAddContentControl = forwardRef<
   const [webImportEntries, setWebImportEntries] = useState<KnowledgeUrlDraft[]>([{ url: '', title: '' }]);
   const [webImportRendered, setWebImportRendered] = useState(false);
   const [webImporting, setWebImporting] = useState(false);
+  const [feishuImportVisible, setFeishuImportVisible] = useState(false);
+  const [feishuImportEntries, setFeishuImportEntries] = useState<KnowledgeUrlDraft[]>([{ url: '', title: '' }]);
+  const [feishuImporting, setFeishuImporting] = useState(false);
 
   const remainingWebSourceSlots = Math.max(0, MAX_KNOWLEDGE_SOURCE_ENTRIES - existingUrlCount);
 
@@ -306,6 +328,65 @@ const KnowledgeAddContentControl = forwardRef<
     }
   };
 
+  const openFeishuImport = baseKind === 'feishu' ? () => {
+    setMenuVisible(false);
+    setFeishuImportEntries([{ url: '', title: '' }]);
+    setFeishuImportVisible(true);
+  } : undefined;
+
+  const handleFeishuImport = async () => {
+    if (feishuImporting) return;
+    const parsed = parseKnowledgeUrlDrafts(feishuImportEntries, false, MAX_FEISHU_SOURCE_ENTRIES);
+    if (!parsed.ok) {
+      if (parsed.reason === 'empty') {
+        Message.warning(t('knowledge.detail.docs.feishuLinkRequired', { defaultValue: '请至少填写一个飞书文档链接' }));
+      } else if (parsed.reason === 'duplicate') {
+        Message.warning(
+          t('knowledge.studio.webUrlDuplicate', { defaultValue: '网址重复，请只保留一条：{{url}}', url: parsed.url }),
+        );
+      } else if (parsed.reason === 'limit') {
+        Message.warning(
+          t('knowledge.detail.docs.feishuLinkLimit', { defaultValue: '最多添加 {{limit}} 个飞书文档', limit: parsed.limit }),
+        );
+      } else {
+        Message.warning(
+          t('knowledge.detail.docs.feishuLinkInvalid', { defaultValue: '链接格式不正确：{{url}}', url: parsed.url }),
+        );
+      }
+      return;
+    }
+
+    setFeishuImporting(true);
+    try {
+      const result = await addKnowledgeContent(knowledgeBaseId, {
+        type: 'feishu',
+        urls: parsed.entries.map((entry) => entry.url),
+      });
+      if (result.type !== 'feishu') throw new Error('Unexpected knowledge content response');
+      setFeishuImportVisible(false);
+      setFeishuImportEntries([{ url: '', title: '' }]);
+      await onAdded(result);
+      if (result.added === 0 && result.duplicates > 0) {
+        Message.info(
+          t('knowledge.detail.docs.importFeishuAllDuplicate', {
+            defaultValue: '这些文档已经在知识库中，无需重复添加',
+          }),
+        );
+      } else {
+        Message.success(
+          t('knowledge.detail.docs.importFeishuOk', {
+            defaultValue: '已索引 {{count}} 个飞书文档',
+            count: result.indexed,
+          }),
+        );
+      }
+    } catch (error) {
+      showKnowledgeErrorMessage(error, 'operation', t);
+    } finally {
+      setFeishuImporting(false);
+    }
+  };
+
   return (
     <>
       <Popover
@@ -321,6 +402,7 @@ const KnowledgeAddContentControl = forwardRef<
             onNewDocument={() => openDocument()}
             onImportFolder={openFolderImport}
             onImportWeb={openWebImport}
+            onImportFeishu={openFeishuImport}
           />
         )}
       >
@@ -482,6 +564,53 @@ const KnowledgeAddContentControl = forwardRef<
               </div>
             </div>
           </div>
+        </div>
+      </Modal>
+
+      <Modal
+        title={t('knowledge.detail.docs.importFeishu', { defaultValue: '飞书文档' })}
+        visible={feishuImportVisible}
+        onOk={() => void handleFeishuImport()}
+        onCancel={() => {
+          if (!feishuImporting) setFeishuImportVisible(false);
+        }}
+        okText={t('knowledge.detail.docs.importFeishuAction', { defaultValue: '添加索引' })}
+        cancelText={t('knowledge.actions.cancel', { defaultValue: '取消' })}
+        confirmLoading={feishuImporting}
+        okButtonProps={{
+          disabled: !feishuImportEntries.some((entry) => entry.url.trim().length > 0),
+        }}
+        closable={!feishuImporting}
+        maskClosable={!feishuImporting}
+        autoFocus={false}
+        unmountOnExit
+        style={{ width: 720, maxWidth: 'calc(100vw - 32px)' }}
+      >
+        <div className='space-y-14px py-2px'>
+          <div className='flex items-start justify-between gap-12px'>
+            <div>
+              <div className='text-12px font-600 text-[var(--color-text-1)]'>
+                {t('knowledge.detail.docs.feishuLinkList', { defaultValue: '飞书文档链接' })}
+              </div>
+              <div className='mt-3px text-10px leading-16px text-[var(--color-text-3)]'>
+                {t('knowledge.detail.docs.importFeishuDescription', {
+                  defaultValue: '库内保存文档名称索引，正文不落本地；检索与阅读经飞书连接器实时进行。支持 docx、docs 与 wiki 链接。',
+                })}
+              </div>
+            </div>
+            <span className='shrink-0 rounded-7px bg-[var(--color-fill-1)] px-7px py-3px text-10px text-[var(--color-text-3)]'>
+              {t('knowledge.detail.docs.feishuSlotsRemaining', {
+                defaultValue: '最多 {{count}} 条',
+                count: MAX_FEISHU_SOURCE_ENTRIES,
+              })}
+            </span>
+          </div>
+          <KnowledgeUrlEntriesEditor
+            entries={feishuImportEntries}
+            maxEntries={MAX_FEISHU_SOURCE_ENTRIES}
+            disabled={feishuImporting}
+            onChange={setFeishuImportEntries}
+          />
         </div>
       </Modal>
     </>

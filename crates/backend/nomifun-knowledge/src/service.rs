@@ -5,7 +5,7 @@
 //! out-of-band at any time, so file listings/stats are computed on demand
 //! rather than cached in the database.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
@@ -76,6 +76,10 @@ use crate::source_url::{
     self, BrowserRenderContentPort, BrowserRenderContentRequest, HttpFetcher, PageFetcher,
     UnavailableBrowserRenderContentPort,
 };
+use crate::feishu::{
+    self, FeishuIndexHit, FeishuKnowledgePort, UnavailableFeishuKnowledgePort,
+    FEISHU_SOURCE_KIND, MAX_FEISHU_SOURCE_ENTRIES,
+};
 use crate::workpath::{WORKPATH_BINDING_KIND, workpath_key};
 use crate::{KB_MANAGED_REL_DIR, KB_MOUNT_REL_DIR};
 
@@ -109,6 +113,13 @@ const REMOTE_RETRIEVAL_MAX_DOCUMENT_CHARS: usize = 4_000;
 const REMOTE_RETRIEVAL_MAX_TOTAL_CHARS: usize = 256_000;
 const REMOTE_EMBEDDING_BATCH_SIZE: usize = 32;
 const REMOTE_RERANK_MAX_CANDIDATES: usize = 64;
+/// Synthetic score anchor for remote recall hits so server-ordered Search v2
+/// results rank above local keyword scores in remote-backed bases.
+const REMOTE_SEARCH_SCORE_BASE: u32 = 1_000_000;
+/// Per-base mount-time Feishu index refresh budget. The wait stays bounded so
+/// an unreachable tenant degrades to the last-good index instead of blocking
+/// session startup.
+const FEISHU_MOUNT_REFRESH_BUDGET: Duration = Duration::from_secs(5);
 
 static ROOT_BLOCKING_INSPECTION_LOCKS:
     OnceLock<StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>> =
@@ -754,6 +765,10 @@ pub struct KnowledgeService {
     /// The default implementation fails
     /// closed; it is never replaced by the ordinary HTTP fetcher.
     browser_render_content_port: RwLock<Arc<dyn BrowserRenderContentPort>>,
+    /// Consumer-owned typed port for Feishu remote-backed knowledge reads
+    /// (index metadata, Search v2, live body fetch). The default fails
+    /// closed; nothing in this crate substitutes a local-only fallback.
+    feishu_port: RwLock<Arc<dyn FeishuKnowledgePort>>,
     /// mtime-keyed content cache for `search_bases` (perf only; see
     /// [`SearchCacheInner`]). Cloned into the search `spawn_blocking` closure.
     search_cache: Arc<RwLock<SearchCacheInner>>,
@@ -820,6 +835,21 @@ struct PreparedManagedSourceFile {
     final_url: String,
     title: Option<String>,
     content_hash: String,
+    /// Preferred display file name for first publication (Feishu stubs are
+    /// titled by document name). `None` keeps the URL-slug allocation.
+    name_hint: Option<String>,
+}
+
+/// One prepared item body: either a fetched URL page or a Feishu remote
+/// metadata card. `remote` carries the inspected document identity used to
+/// build the metadata stub and name the first publication.
+struct PreparedSourceBody {
+    title: Option<String>,
+    final_url: String,
+    truncated: bool,
+    body: String,
+    remote: Option<FeishuIndexHit>,
+    name_hint: Option<String>,
 }
 
 /// A fetched source snapshot that has not yet crossed the filesystem
@@ -898,6 +928,7 @@ impl KnowledgeService {
             browser_render_content_port: RwLock::new(Arc::new(
                 UnavailableBrowserRenderContentPort,
             )),
+            feishu_port: RwLock::new(Arc::new(UnavailableFeishuKnowledgePort)),
             search_cache: Arc::new(RwLock::new(SearchCacheInner::default())),
             relocate_idempotency: Arc::new(StdMutex::new(
                 RelocateIdempotencyCache::default(),
@@ -1959,6 +1990,183 @@ impl KnowledgeService {
             .clone()
     }
 
+    /// Late-wire the Feishu knowledge read port. The application composition
+    /// supplies an adapter over the office-hub service; Knowledge never
+    /// receives a CLI, profile, or credential handle.
+    pub fn set_feishu_knowledge_port(&self, port: Arc<dyn FeishuKnowledgePort>) {
+        *self
+            .feishu_port
+            .write()
+            .expect("knowledge feishu port lock poisoned") = port;
+    }
+
+    pub(crate) fn feishu_port(&self) -> Arc<dyn FeishuKnowledgePort> {
+        self.feishu_port
+            .read()
+            .expect("knowledge feishu port lock poisoned")
+            .clone()
+    }
+
+    /// Bound read service carrying this service's Feishu port. Typed-binding
+    /// owners build their read path from this so remote search/read share the
+    /// composed connection instead of a second wiring point.
+    pub fn bound_read_service(&self) -> BoundKnowledgeReadService {
+        BoundKnowledgeReadService::new(self.feishu_port())
+    }
+
+    /// The curated remote corpus of a base: remote token → official link,
+    /// derived from normalized active source items. `Ok(None)` when the base
+    /// has no active Feishu source; `Ok(Some(map))` freezes the exact set a
+    /// binding should carry.
+    pub async fn feishu_curated_links(
+        &self,
+        kb_id: &KnowledgeBaseId,
+    ) -> Result<Option<BTreeMap<String, String>>, AppError> {
+        self.require_base(kb_id.as_str()).await?;
+        let Some(repository) = self.source_repository() else {
+            return Ok(None);
+        };
+        let sources = repository
+            .list_sources_for_base(kb_id, false)
+            .await
+            .map_err(AppError::from)?;
+        if !sources
+            .iter()
+            .any(|source| {
+                source.kind == KnowledgeSourceKind::Feishu
+                    && source.state == KnowledgeSourceState::Active
+            })
+        {
+            return Ok(None);
+        }
+        let mut links = BTreeMap::new();
+        for source in sources.iter().filter(|source| {
+            source.kind == KnowledgeSourceKind::Feishu
+                && source.state == KnowledgeSourceState::Active
+        }) {
+            for item in repository
+                .list_source_items(&source.knowledge_source_id, false)
+                .await
+                .map_err(AppError::from)?
+                .into_iter()
+                .filter(|item| item.state == KnowledgeSourceState::Active)
+            {
+                if let Some((_kind, token)) = feishu::feishu_link_target(&item.requested_url) {
+                    links.insert(token, item.requested_url);
+                }
+            }
+        }
+        Ok(Some(links))
+    }
+
+    /// Mount-time remote index refresh: republish metadata stubs for every
+    /// active Feishu source item of the base. Bodies are never fetched — the
+    /// port's `inspect_link` is metadata-only. Returns `true` when a Feishu
+    /// index existed and refreshed cleanly.
+    pub async fn refresh_feishu_index(
+        &self,
+        kb_id: &str,
+    ) -> Result<bool, AppError> {
+        let mut row = self.require_base(kb_id).await?;
+        require_editable_knowledge_tree(&row)?;
+        let (Some(source_repository), Some(_)) =
+            (self.source_repository(), self.entry_repository())
+        else {
+            return Ok(false);
+        };
+        let parsed_kb = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(|error| {
+            AppError::Internal(format!(
+                "stored knowledge base id '{}' is invalid: {error}",
+                row.knowledge_base_id
+            ))
+        })?;
+        let sources = source_repository
+            .list_sources_for_base(&parsed_kb, false)
+            .await
+            .map_err(AppError::from)?;
+        let feishu_sources = sources
+            .into_iter()
+            .filter(|source| {
+                source.kind == KnowledgeSourceKind::Feishu
+                    && source.state == KnowledgeSourceState::Active
+            })
+            .collect::<Vec<_>>();
+        if feishu_sources.is_empty() {
+            return Ok(false);
+        }
+        self.ensure_projection_reconciled(&row).await?;
+        self.recover_pending_source_publications(&row).await?;
+        for source in feishu_sources {
+            let items = source_repository
+                .list_source_items(&source.knowledge_source_id, false)
+                .await
+                .map_err(AppError::from)?
+                .into_iter()
+                .filter(|item| item.state == KnowledgeSourceState::Active)
+                .collect::<Vec<_>>();
+            let (files, errors) = self.prepare_managed_source_items(&source, &items).await?;
+            let publication = self
+                .publish_managed_source_items(&mut row, &source, files)
+                .await;
+            if let Some(error) = publication.fatal_error {
+                return Err(error);
+            }
+            if !errors.is_empty() || !publication.errors.is_empty() {
+                let detail = errors
+                    .iter()
+                    .chain(publication.errors.iter())
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(AppError::Conflict(format!(
+                    "Feishu index refresh hit remote errors: {detail}"
+                )));
+            }
+        }
+        let info = self.row_to_info(row).await?;
+        self.emitter.emit_base_updated(&info);
+        Ok(true)
+    }
+
+    /// Mount-time hook: refresh a Feishu-backed base's metadata index within
+    /// a bounded wait. Returns `true` when the mount should mark its remote
+    /// index stale — refresh timed out or failed — while still mounting the
+    /// last-good stubs. Bases without an active Feishu source return `false`
+    /// immediately and never hit the network.
+    async fn mounted_feishu_index_stale(&self, row: &KnowledgeBaseRow) -> bool {
+        let has_feishu = matches!(
+            source_from_extra(&row.extra),
+            Ok(Some(source)) if source.kind == FEISHU_SOURCE_KIND
+        );
+        if !has_feishu {
+            return false;
+        }
+        match tokio::time::timeout(
+            FEISHU_MOUNT_REFRESH_BUDGET,
+            self.refresh_feishu_index(&row.knowledge_base_id),
+        )
+        .await
+        {
+            Ok(Ok(_)) => false,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    knowledge_base_id = %row.knowledge_base_id,
+                    %error,
+                    "Feishu index refresh failed; mounting last-good index"
+                );
+                true
+            }
+            Err(_) => {
+                tracing::warn!(
+                    knowledge_base_id = %row.knowledge_base_id,
+                    "Feishu index refresh timed out; mounting last-good index"
+                );
+                true
+            }
+        }
+    }
+
     fn completer(&self) -> Option<Arc<dyn KnowledgeCompleter>> {
         self.completer.read().ok().and_then(|guard| guard.clone())
     }
@@ -2308,9 +2516,12 @@ impl KnowledgeService {
         self.repo.insert_base(&row).await?;
         let info = self.row_to_info(row.clone()).await?;
         self.emitter.emit_base_created(&info);
-        // Only URL sources owe a create-time snapshot fetch.
-        let snapshot_source =
-            source.filter(|s| s.mode == KnowledgeSourceMode::Snapshot && s.kind == "url");
+        // URL sources owe a create-time snapshot fetch; Feishu sources owe a
+        // metadata stub publication through the same pipeline.
+        let snapshot_source = source.filter(|s| {
+            s.mode == KnowledgeSourceMode::Snapshot
+                && (s.kind == "url" || s.kind == FEISHU_SOURCE_KIND)
+        });
         Ok((row, info, snapshot_source))
     }
 
@@ -2512,7 +2723,7 @@ impl KnowledgeService {
                     })?;
                 drop(preparation);
                 let (files, mut errors) = self
-                    .prepare_managed_source_items(&normalized.items)
+                    .prepare_managed_source_items(&normalized.source, &normalized.items)
                     .await?;
                 let _publication = background::publication_guard().await?;
                 let publication = self
@@ -2529,6 +2740,11 @@ impl KnowledgeService {
                     publication.persisted_stamp,
                     publication.fatal_error,
                 )
+            } else if src.kind == FEISHU_SOURCE_KIND {
+                // Without the normalized source store there is no curated
+                // identity to publish stubs against — the index stays empty
+                // until a repository-backed refresh can run.
+                (0, Vec::new(), None, None)
             } else {
                 let (files, mut errors) =
                     self.prepare_source_snapshots(&mut src.entries).await;
@@ -2839,6 +3055,14 @@ impl KnowledgeService {
             .source_id
             .clone()
             .unwrap_or_else(KnowledgeSourceId::new);
+        // validate_source already ran; an unknown persisted kind fails closed
+        // instead of being reinterpreted as a URL source.
+        let persisted_kind = KnowledgeSourceKind::parse(&legacy.kind).map_err(|error| {
+            AppError::Internal(format!(
+                "stored knowledge source kind '{}' is invalid: {error}",
+                legacy.kind
+            ))
+        })?;
         let source = if let Some(existing) = repository
             .get_source(&requested_source_id)
             .await?
@@ -2849,7 +3073,7 @@ impl KnowledgeService {
                 .ensure_source(&EnsureKnowledgeSourceParams {
                     knowledge_source_id: requested_source_id,
                     knowledge_base_id,
-                    kind: KnowledgeSourceKind::Url,
+                    kind: persisted_kind,
                     mode: persisted_source_mode(legacy.mode),
                     default_parent_entry_id: legacy.default_parent_entry_id.clone(),
                     created_at: row.created_at.max(0),
@@ -4654,6 +4878,39 @@ impl KnowledgeService {
 
     pub async fn read_file(&self, id: &str, rel_path: &str) -> Result<KbFileContent, AppError> {
         let row = self.require_base(id).await?;
+        // `.remote/` pseudo-paths resolve through the Feishu port — the body
+        // is fetched live and never persisted. The token must belong to this
+        // base's curated set.
+        if let Some(token) = feishu::remote_token(rel_path) {
+            let kb_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(|error| {
+                AppError::Internal(format!(
+                    "stored knowledge base id '{}' is invalid: {error}",
+                    row.knowledge_base_id
+                ))
+            })?;
+            let link = self
+                .feishu_curated_links(&kb_id)
+                .await?
+                .and_then(|links| links.get(token).cloned())
+                .ok_or_else(|| {
+                    AppError::Forbidden(format!(
+                        "remote document {token} is not part of this base's curated Feishu set"
+                    ))
+                })?;
+            let document = self.feishu_port().fetch_document(&link).await?;
+            let content = document.markdown;
+            return Ok(KbFileContent {
+                rel_path: rel_path.to_owned(),
+                size: content.len() as u64,
+                content,
+                modified_at: None,
+                entry_id: None,
+                revision: None,
+                origin: None,
+                capabilities: KnowledgeEntryCapabilities::default(),
+                source: None,
+            });
+        }
         if self.entry_repository().is_some()
             && let Err(error) = self.ensure_projection_reconciled(&row).await
         {
@@ -5297,6 +5554,11 @@ impl KnowledgeService {
                 if !bound_kb_ids.iter().any(|b| b == &kb_id) {
                     return Err(AppError::Forbidden("handle points to a base not mounted in this session".into()));
                 }
+                if feishu::remote_token(&rel_path).is_some() {
+                    return Err(AppError::Forbidden(
+                        "remote Feishu documents are read-only; use copy-as-editable to create a local editable copy".into(),
+                    ));
+                }
                 validate_canonical_write_target(&rel_path)?;
                 let row = self.require_base(kb_id.as_str()).await?;
                 self.validate_content_write_target(&row, &rel_path).await?;
@@ -5328,6 +5590,11 @@ impl KnowledgeService {
                     return Err(AppError::Forbidden("target base is not mounted in this session".into()));
                 }
                 let canonical = deconfuse_rel_path(rel_path);
+                if feishu::remote_token(&canonical).is_some() {
+                    return Err(AppError::Forbidden(
+                        "remote Feishu documents are read-only; use copy-as-editable to create a local editable copy".into(),
+                    ));
+                }
                 validate_canonical_write_target(&canonical)?;
                 let row = self.require_base(kb_id.as_str()).await?;
                 self.validate_content_write_target(&row, &canonical).await?;
@@ -6183,7 +6450,7 @@ impl KnowledgeService {
                 ));
             }
             let (files, mut errors) = self
-                .prepare_managed_source_items(&normalized.items)
+                .prepare_managed_source_items(&normalized.source, &normalized.items)
                 .await?;
             let publication = self
                 .publish_managed_source_items(&mut row, &normalized.source, files)
@@ -6251,7 +6518,7 @@ impl KnowledgeService {
             ));
         }
         let (files, mut errors) = self
-            .prepare_managed_source_items(std::slice::from_ref(&resolved.item))
+            .prepare_managed_source_items(&resolved.source, std::slice::from_ref(&resolved.item))
             .await?;
         let publication = self
             .publish_managed_source_items(&mut row, &resolved.source, files)
@@ -6927,7 +7194,7 @@ impl KnowledgeService {
                 .filter(|item| accepted_urls.contains(&item.normalized_url))
                 .cloned()
                 .collect::<Vec<_>>();
-            let (files, mut errors) = self.prepare_managed_source_items(&new_items).await?;
+            let (files, mut errors) = self.prepare_managed_source_items(&normalized.source, &new_items).await?;
             let publication = self
                 .publish_managed_source_items(&mut row, &normalized.source, files)
                 .await;
@@ -6961,6 +7228,134 @@ impl KnowledgeService {
             return Err(error);
         }
 
+        let info = self.row_to_info(row).await?;
+        self.emitter.emit_base_updated(&info);
+        Ok(AppendUrlSourceSummary {
+            added,
+            duplicates,
+            fetched: publication.fetched,
+            failed: errors.len(),
+            errors,
+            last_fetched_at: source.last_fetched_at,
+            first_file: publication.published_paths.into_iter().next(),
+        })
+    }
+
+    /// Append curated Feishu document links to an existing Feishu source and
+    /// publish their metadata stubs. The base must already carry a `feishu`
+    /// source (created through `create_base`); this never bootstraps one.
+    /// Publication is metadata-only — bodies stay remote.
+    pub async fn append_feishu_entries(
+        &self,
+        kb_id: &str,
+        urls: Vec<String>,
+    ) -> Result<AppendUrlSourceSummary, AppError> {
+        if urls.is_empty() {
+            return Err(AppError::BadRequest(
+                "at least one Feishu document link is required".into(),
+            ));
+        }
+        if urls.len() > MAX_FEISHU_SOURCE_ENTRIES {
+            return Err(AppError::BadRequest(format!(
+                "Feishu entry batch exceeds the limit of {MAX_FEISHU_SOURCE_ENTRIES}"
+            )));
+        }
+        let mut row = self.require_base(kb_id).await?;
+        require_editable_knowledge_tree(&row)?;
+        let mut source = source_from_extra(&row.extra)
+            .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?
+            .filter(|source| source.kind == FEISHU_SOURCE_KIND)
+            .ok_or_else(|| {
+                AppError::BadRequest(
+                    "knowledge base has no Feishu source; create the base with kind=feishu first".into(),
+                )
+            })?;
+        if self.source_repository().is_none() || self.entry_repository().is_none() {
+            return Err(AppError::Conflict(
+                "Feishu curation requires the normalized source store".into(),
+            ));
+        }
+
+        let mut identities = HashSet::new();
+        for entry in &source.entries {
+            identities.insert(normalize_source_url(&entry.url).map_err(|error| {
+                AppError::Internal(format!(
+                    "stored Feishu source URL is invalid ({}): {error}",
+                    entry.url
+                ))
+            })?);
+        }
+        let mut accepted = Vec::new();
+        let mut duplicates = 0usize;
+        for url in urls {
+            let url = url.trim().to_owned();
+            if feishu::feishu_link_target(&url).is_none() {
+                return Err(AppError::BadRequest(format!(
+                    "only official doc/docx/wiki Feishu links are supported: {url}"
+                )));
+            }
+            let normalized_url = normalize_source_url(&url)?;
+            if !identities.insert(normalized_url) {
+                duplicates += 1;
+                continue;
+            }
+            accepted.push(KnowledgeSourceEntry {
+                url,
+                title: None,
+                sync_status: KnowledgeSourceSyncStatus::Pending,
+                last_success_at: None,
+                last_error: None,
+                rendered: false,
+                source_item_id: Some(KnowledgeSourceItemId::new()),
+                snapshot_entry_id: None,
+            });
+        }
+        if accepted.is_empty() {
+            return Ok(AppendUrlSourceSummary {
+                added: 0,
+                duplicates,
+                fetched: 0,
+                failed: 0,
+                errors: Vec::new(),
+                last_fetched_at: source.last_fetched_at,
+                first_file: None,
+            });
+        }
+        let added = accepted.len();
+        let accepted_urls = accepted
+            .iter()
+            .map(|entry| normalize_source_url(&entry.url))
+            .collect::<Result<HashSet<_>, _>>()?;
+        source.entries.extend(accepted);
+        validate_source(&source)?;
+
+        self.persist_source(&mut row, &source).await?;
+        let normalized = self
+            .ensure_normalized_source(&row)
+            .await?
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "knowledge source normalization did not produce an aggregate".into(),
+                )
+            })?;
+        let new_items = normalized
+            .items
+            .iter()
+            .filter(|item| accepted_urls.contains(&item.normalized_url))
+            .cloned()
+            .collect::<Vec<_>>();
+        let (files, mut errors) = self
+            .prepare_managed_source_items(&normalized.source, &new_items)
+            .await?;
+        let publication = self
+            .publish_managed_source_items(&mut row, &normalized.source, files)
+            .await;
+        errors.extend(publication.errors);
+        if let Some(error) = publication.fatal_error {
+            return Err(error);
+        }
+        self.refresh_legacy_source_cache(&mut row, &mut source)
+            .await?;
         let info = self.row_to_info(row).await?;
         self.emitter.emit_base_updated(&info);
         Ok(AppendUrlSourceSummary {
@@ -7067,6 +7462,7 @@ impl KnowledgeService {
 
     async fn prepare_managed_source_items(
         &self,
+        source: &KnowledgeSourceRow,
         items: &[KnowledgeSourceItemRow],
     ) -> Result<(Vec<PreparedManagedSourceFile>, Vec<String>), AppError> {
         let preparation = background::publication_guard().await?;
@@ -7074,6 +7470,7 @@ impl KnowledgeService {
             AppError::Internal("knowledge source identity repository is unavailable".into())
         })?;
         let completer = self.completer();
+        let feishu_port = self.feishu_port();
         let mut attempted_items = Vec::new();
         for item in items
             .iter()
@@ -7094,14 +7491,26 @@ impl KnowledgeService {
 
         let fetches = attempted_items.into_iter().map(|item| {
             let completer = completer.clone();
+            let feishu_port = feishu_port.clone();
             async move {
-                let result = self
-                    .prepare_snapshot_body(
+                let result = if source.kind == KnowledgeSourceKind::Feishu {
+                    self.prepare_feishu_stub(&item, feishu_port.as_ref()).await
+                } else {
+                    self.prepare_snapshot_body(
                         &item.requested_url,
                         item.rendered,
                         completer.as_deref(),
                     )
-                    .await;
+                    .await
+                    .map(|page| PreparedSourceBody {
+                        title: page.title,
+                        final_url: page.final_url,
+                        truncated: page.truncated,
+                        body: page.body,
+                        remote: None,
+                        name_hint: None,
+                    })
+                };
                 (item, result)
             }
         });
@@ -7119,15 +7528,24 @@ impl KnowledgeService {
                     let fetched_at = chrono::Utc::now()
                         .format("%Y-%m-%dT%H:%M:%SZ")
                         .to_string();
-                    let content = source_url::managed_snapshot_markdown(
-                        &item.knowledge_source_item_id,
-                        &item.requested_url,
-                        Some(&page.final_url),
-                        &fetched_at,
-                        title.as_deref(),
-                        page.truncated,
-                        &page.body,
-                    );
+                    let content = match page.remote.as_ref() {
+                        Some(meta) => feishu::feishu_stub_markdown(
+                            &item.knowledge_source_item_id,
+                            &item.requested_url,
+                            &source.knowledge_base_id,
+                            meta,
+                            &fetched_at,
+                        ),
+                        None => source_url::managed_snapshot_markdown(
+                            &item.knowledge_source_item_id,
+                            &item.requested_url,
+                            Some(&page.final_url),
+                            &fetched_at,
+                            title.as_deref(),
+                            page.truncated,
+                            &page.body,
+                        ),
+                    };
                     let content_hash = sha256_text(&content);
                     let staged_item = repository
                         .stage_sync_publication(&StageKnowledgeSourcePublicationParams {
@@ -7147,6 +7565,7 @@ impl KnowledgeService {
                         final_url: page.final_url,
                         title,
                         content_hash,
+                        name_hint: page.name_hint,
                     });
                 }
                 Err(error) => {
@@ -7380,6 +7799,43 @@ impl KnowledgeService {
             final_url,
             truncated: page.truncated,
             body,
+        })
+    }
+
+    /// Metadata-only "fetch" for a curated Feishu link: resolve type/title/
+    /// update time through the injected port and produce the index stub. The
+    /// remote body is never read here.
+    async fn prepare_feishu_stub(
+        &self,
+        item: &KnowledgeSourceItemRow,
+        port: &dyn FeishuKnowledgePort,
+    ) -> Result<PreparedSourceBody, String> {
+        background::ensure_open().map_err(|error| error.to_string())?;
+        let meta = port
+            .inspect_link(&item.requested_url)
+            .await
+            .map_err(|error| format!("{}: {error}", item.requested_url))?;
+        if meta.title.trim().is_empty() {
+            return Err(format!(
+                "{}: remote metadata returned no document title",
+                item.requested_url
+            ));
+        }
+        let title = meta
+            .title
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        Ok(PreparedSourceBody {
+            title: Some(title.clone()),
+            final_url: meta
+                .url
+                .clone()
+                .unwrap_or_else(|| item.requested_url.clone()),
+            truncated: false,
+            body: String::new(),
+            name_hint: Some(title),
+            remote: Some(meta),
         })
     }
 
@@ -7927,11 +8383,13 @@ impl KnowledgeService {
                 let allocation_root = root.clone();
                 let allocation_parent = destination_parent_path.clone();
                 let requested_url = item.requested_url.clone();
+                let name_hint = prepared.name_hint.clone();
                 match tokio::task::spawn_blocking(move || {
                     allocate_managed_source_rel_path(
                         &allocation_root,
                         &allocation_parent,
                         &requested_url,
+                        name_hint.as_deref(),
                     )
                 })
                 .await
@@ -8513,6 +8971,13 @@ impl KnowledgeService {
             }));
         }
 
+        let mut stale_bases = HashSet::new();
+        for (_, row) in &metas {
+            if self.mounted_feishu_index_stale(row).await {
+                stale_bases.insert(row.knowledge_base_id.clone());
+            }
+        }
+
         // Resolve mutable prompt metadata in the same ordered pass as the
         // legacy mount path, but never include it in binding authority.  A
         // write-back changing README/TOC must not make two runtimes with the
@@ -8551,6 +9016,7 @@ impl KnowledgeService {
                 toc,
                 summary,
                 live_sources,
+                remote_index_stale: stale_bases.contains(&row.knowledge_base_id),
             });
         }
 
@@ -8656,6 +9122,13 @@ impl KnowledgeService {
             .filter(|(link_name, _)| present.contains(link_name))
             .collect();
 
+        let mut stale_bases = HashSet::new();
+        for (_, row) in &kept {
+            if self.mounted_feishu_index_stale(row).await {
+                stale_bases.insert(row.knowledge_base_id.clone());
+            }
+        }
+
         // Full per-base listings first, then the shared per-KB/global budget
         // (`context::apply_toc_budgets`) so the prompt cost stays bounded no
         // matter how many bases are mounted.
@@ -8708,6 +9181,7 @@ impl KnowledgeService {
                 toc,
                 summary,
                 live_sources,
+                remote_index_stale: stale_bases.contains(&row.knowledge_base_id),
             });
         }
         MountOutcome {
@@ -8745,6 +9219,13 @@ impl KnowledgeService {
             metas.push((link_name, row));
         }
 
+        let mut stale_bases = HashSet::new();
+        for (_, row) in &metas {
+            if self.mounted_feishu_index_stale(row).await {
+                stale_bases.insert(row.knowledge_base_id.clone());
+            }
+        }
+
         let mut tocs = Vec::with_capacity(metas.len());
         for (_, row) in &metas {
             tocs.push(build_toc(Path::new(&row.root_path)).await);
@@ -8780,6 +9261,7 @@ impl KnowledgeService {
                 toc,
                 summary: read_base_summary(Path::new(&row.root_path)).await,
                 live_sources,
+                remote_index_stale: stale_bases.contains(&row.knowledge_base_id),
             });
         }
         Ok(mounts)
@@ -8891,7 +9373,73 @@ impl KnowledgeService {
                     .await?;
             }
         }
-        Ok(candidates.into_iter().map(|candidate| candidate.hit).collect())
+        let mut hits: Vec<KnowledgeSearchHit> =
+            candidates.into_iter().map(|candidate| candidate.hit).collect();
+        self.merge_feishu_remote_hits(&mut hits, kb_ids, query, limit)
+            .await?;
+        Ok(hits)
+    }
+
+    /// Union live Feishu Search v2 recall into the hit list for every
+    /// requested base that carries a Feishu source. Remote results are
+    /// intersected with each base's curated token set; a remote failure is
+    /// returned as an actionable error instead of a silently empty remote
+    /// corpus. A single remote query serves all Feishu bases in the request.
+    async fn merge_feishu_remote_hits(
+        &self,
+        hits: &mut Vec<KnowledgeSearchHit>,
+        kb_ids: &[KnowledgeBaseId],
+        query: &str,
+        limit: usize,
+    ) -> Result<(), AppError> {
+        let mut curated: Vec<(KnowledgeBaseId, String, BTreeMap<String, String>)> =
+            Vec::new();
+        for kb_id in kb_ids {
+            let Some(links) = self.feishu_curated_links(kb_id).await? else {
+                continue;
+            };
+            let name = self
+                .repo
+                .get_base(kb_id.as_str())
+                .await?
+                .map(|row| row.name)
+                .unwrap_or_default();
+            curated.push((kb_id.clone(), name, links));
+        }
+        if curated.is_empty() {
+            return Ok(());
+        }
+        let remote_hits = self.feishu_port().search_documents(query).await?;
+        for (kb_id, kb_name, links) in curated {
+            let mut seen = HashSet::new();
+            for (rank, hit) in remote_hits
+                .iter()
+                .filter(|hit| links.contains_key(&hit.token))
+                .take(limit)
+                .enumerate()
+            {
+                if !seen.insert(&hit.token) {
+                    continue;
+                }
+                hits.push(KnowledgeSearchHit {
+                    kb_id: kb_id.clone(),
+                    kb_name: kb_name.clone(),
+                    rel_path: feishu::remote_rel_path(&hit.token),
+                    heading: hit.title.clone(),
+                    snippet: hit.summary.clone().unwrap_or_default(),
+                    score: REMOTE_SEARCH_SCORE_BASE.saturating_sub(rank as u32),
+                });
+            }
+        }
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then(left.kb_id.as_str().cmp(right.kb_id.as_str()))
+                .then(left.rel_path.cmp(&right.rel_path))
+        });
+        hits.truncate(limit);
+        Ok(())
     }
 
     async fn remote_embedding_candidates(
@@ -9788,11 +10336,13 @@ fn tags_from_row(row: &KnowledgeBaseRow) -> Result<Vec<String>, AppError> {
 
 /// Derive the UI type discriminator for a knowledge base:
 /// - `"web"` when a URL source is attached (`kind == "url"`)
+/// - `"feishu"` when a Feishu remote source is attached (`kind == "feishu"`)
 /// - `"blank"` for managed bases with no source (user creates from scratch)
 /// - `"local"` for non-managed (user-referenced directory) bases
 fn derive_kind(managed: bool, source: Option<&KnowledgeSource>) -> &'static str {
     match source.map(|s| s.kind.as_str()) {
         Some("url") => "web",
+        Some(FEISHU_SOURCE_KIND) => "feishu",
         _ => if managed { "blank" } else { "local" },
     }
 }
@@ -9808,13 +10358,73 @@ fn derive_kind(managed: bool, source: Option<&KnowledgeSource>) -> &'static str 
 /// requires the Knowledge headless rendering port; a missing port is a
 /// visible fail-closed fetch error, never an HTTP fallback.
 fn validate_source(source: &KnowledgeSource) -> Result<(), AppError> {
-    if source.kind != "url" {
-        return Err(AppError::BadRequest(format!(
-            "unsupported source kind \"{}\" (only \"url\" is supported)",
+    match source.kind.as_str() {
+        "url" => validate_url_source(source),
+        FEISHU_SOURCE_KIND => validate_feishu_source(source),
+        _ => Err(AppError::BadRequest(format!(
+            "unsupported source kind \"{}\" (only \"url\" and \"feishu\" are supported)",
             source.kind
+        ))),
+    }
+}
+
+/// Syntactic validation of a Feishu curated source: official links only,
+/// doc/docx/wiki kinds only, bounded curated set. `live` mode is rejected —
+/// remote Feishu documents are indexed as metadata stubs and read live; a
+/// prompt-only "realtime" projection would have nothing to render.
+fn validate_feishu_source(source: &KnowledgeSource) -> Result<(), AppError> {
+    if source.mode != KnowledgeSourceMode::Snapshot {
+        return Err(AppError::BadRequest(
+            "feishu sources do not support live mode; documents are indexed as metadata stubs".into(),
+        ));
+    }
+    if source.entries.is_empty() {
+        return Err(AppError::BadRequest("source.entries must not be empty".into()));
+    }
+    if source.entries.len() > MAX_SOURCE_HISTORY_ENTRIES {
+        return Err(AppError::BadRequest(format!(
+            "source history exceeds the limit of {MAX_SOURCE_HISTORY_ENTRIES} entries"
         )));
     }
-    validate_url_source(source)
+    let active_entries = source
+        .entries
+        .iter()
+        .filter(|entry| entry.sync_status != KnowledgeSourceSyncStatus::Paused)
+        .count();
+    if active_entries > MAX_FEISHU_SOURCE_ENTRIES {
+        return Err(AppError::BadRequest(format!(
+            "active source.entries exceeds the limit of {MAX_FEISHU_SOURCE_ENTRIES} (got {active_entries})"
+        )));
+    }
+    for entry in &source.entries {
+        if entry.url.len() > 8192 || entry.url.contains('\0') {
+            return Err(AppError::BadRequest(
+                "source URL must be at most 8192 bytes and contain no NUL".into(),
+            ));
+        }
+        if entry.rendered {
+            return Err(AppError::BadRequest(
+                "feishu source entries cannot request rendered fetching".into(),
+            ));
+        }
+        if entry
+            .title
+            .as_ref()
+            .is_some_and(|title| title.len() > 1024 || title.contains('\0'))
+        {
+            return Err(AppError::BadRequest(
+                "source title must be at most 1024 bytes and contain no NUL".into(),
+            ));
+        }
+        let Some((kind, _token)) = feishu::feishu_link_target(&entry.url) else {
+            return Err(AppError::BadRequest(format!(
+                "feishu source entries must be official doc/docx/wiki document links: {}",
+                entry.url
+            )));
+        };
+        let _ = kind;
+    }
+    Ok(())
 }
 
 fn sanitize_source_entries(source: &mut KnowledgeSource) {
@@ -9997,6 +10607,7 @@ fn allocate_managed_source_rel_path(
     root: &Path,
     destination_parent_rel_path: &str,
     requested_url: &str,
+    name_hint: Option<&str>,
 ) -> Result<String, AppError> {
     validate_knowledge_root(root)?;
     let (parent, parent_rel_path) = if destination_parent_rel_path.is_empty() {
@@ -10037,7 +10648,11 @@ fn allocate_managed_source_rel_path(
             "stored knowledge source URL is invalid ({requested_url}): {error}"
         ))
     })?;
-    let base = source_url::slug_for_url(&parsed);
+    // Feishu stubs are named by document title; URL snapshots keep the
+    // deterministic ASCII slug so the same page re-allocates the same name.
+    let base = name_hint
+        .and_then(|hint| sanitize_title_file_stem(hint))
+        .unwrap_or_else(|| source_url::slug_for_url(&parsed));
     for sequence in 1..=10_000usize {
         let name = if sequence == 1 {
             format!("{base}.md")
@@ -10052,6 +10667,38 @@ fn allocate_managed_source_rel_path(
     Err(AppError::Conflict(
         "could not allocate a unique file name for the captured web page".into(),
     ))
+}
+
+/// Turn a remote document title into a portable file stem. Forbidden
+/// characters are replaced, whitespace collapses, and the result is bounded;
+/// `None` means the caller should fall back to the URL slug.
+fn sanitize_title_file_stem(title: &str) -> Option<String> {
+    let mut stem = String::new();
+    let mut last_was_space = true;
+    for ch in title.trim().chars() {
+        if ch.is_whitespace() {
+            if !last_was_space {
+                stem.push(' ');
+            }
+            last_was_space = true;
+            continue;
+        }
+        last_was_space = false;
+        stem.push(match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        });
+        if stem.chars().count() >= 120 {
+            break;
+        }
+    }
+    let stem = stem.trim_end_matches(['.', ' ']).to_owned();
+    if stem.is_empty() {
+        None
+    } else {
+        Some(stem)
+    }
 }
 
 fn allocate_copy_rel_path(
@@ -21497,6 +22144,7 @@ mod tests {
             toc: Vec::new(),
             summary: None,
             live_sources: Vec::new(),
+            remote_index_stale: false,
         }
     }
 
@@ -22598,15 +23246,307 @@ mod tests {
     async fn create_base_rejects_non_url_source_kinds() {
         let dir = tempfile::TempDir::new().unwrap();
         let (service, _repo) = service_with_repo(&dir.path().join("data"));
-        let source = KnowledgeSource {
-            kind: "feishu".into(),
+        for kind in ["ftp", "notion"] {
+            let source = KnowledgeSource {
+                kind: kind.into(),
+                mode: KnowledgeSourceMode::Snapshot,
+                entries: vec![],
+                last_fetched_at: None,
+                ..Default::default()
+            };
+            assert!(
+                service.create_base("x", "", None, Some(source)).await.is_err(),
+                "kind {kind} must be rejected"
+            );
+        }
+        assert!(service.list_bases().await.unwrap().is_empty(), "rejected base must not persist");
+    }
+
+    // ── Feishu remote-backed sources ──────────────────────────────────
+
+    #[derive(Clone, Default)]
+    struct FakeFeishuPort {
+        metas: Arc<StdMutex<HashMap<String, FeishuIndexHit>>>,
+        search: Arc<StdMutex<Vec<FeishuIndexHit>>>,
+        bodies: Arc<StdMutex<HashMap<String, feishu::FeishuDocContent>>>,
+        error: Arc<StdMutex<Option<String>>>,
+    }
+
+    impl FakeFeishuPort {
+        fn with_meta(self, url: &str, meta: FeishuIndexHit) -> Self {
+            self.metas.lock().unwrap().insert(url.to_owned(), meta);
+            self
+        }
+        fn fail(&self, error: AppError) {
+            *self.error.lock().unwrap() = Some(error.to_string());
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FeishuKnowledgePort for FakeFeishuPort {
+        async fn search_documents(&self, _query: &str) -> Result<Vec<FeishuIndexHit>, AppError> {
+            if let Some(error) = self.error.lock().unwrap().clone() {
+                return Err(AppError::Conflict(error));
+            }
+            Ok(self.search.lock().unwrap().clone())
+        }
+        async fn inspect_link(&self, url: &str) -> Result<FeishuIndexHit, AppError> {
+            if let Some(error) = self.error.lock().unwrap().clone() {
+                return Err(AppError::Conflict(error));
+            }
+            let metas = self.metas.lock().unwrap();
+            if let Some(meta) = metas.get(url) {
+                return Ok(meta.clone());
+            }
+            let Some((kind, token)) = feishu::feishu_link_target(url) else {
+                return Err(AppError::NotFound(format!("no remote document for {url}")));
+            };
+            Ok(FeishuIndexHit {
+                token,
+                kind,
+                title: format!("Fake {url}"),
+                url: Some(url.to_owned()),
+                modified_at: Some("2026-10-27T00:00:00+08:00".into()),
+                summary: None,
+            })
+        }
+        async fn fetch_document(&self, target: &str) -> Result<feishu::FeishuDocContent, AppError> {
+            if let Some(error) = self.error.lock().unwrap().clone() {
+                return Err(AppError::Conflict(error));
+            }
+            if let Some(document) = self.bodies.lock().unwrap().get(target) {
+                return Ok(document.clone());
+            }
+            Ok(feishu::FeishuDocContent {
+                document_id: target.to_owned(),
+                markdown: format!("# Live body\n\nremote content for {target}"),
+                revision_id: Some(7),
+            })
+        }
+    }
+
+    fn feishu_source(urls: &[&str]) -> KnowledgeSource {
+        KnowledgeSource {
+            kind: FEISHU_SOURCE_KIND.into(),
             mode: KnowledgeSourceMode::Snapshot,
-            entries: vec![],
+            entries: urls
+                .iter()
+                .map(|url| KnowledgeSourceEntry {
+                    url: (*url).to_owned(),
+                    title: None,
+                    rendered: false,
+                    source_item_id: None,
+                    snapshot_entry_id: None,
+                    sync_status: KnowledgeSourceSyncStatus::Pending,
+                    last_success_at: None,
+                    last_error: None,
+                })
+                .collect(),
             last_fetched_at: None,
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn feishu_source_validation_accepts_only_official_doc_links() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (service, _repo) = service_with_repo(&dir.path().join("data"));
+        // non-official hosts and unsupported document kinds are rejected
+        for url in [
+            "https://evil.example.com/docx/Tok_1",
+            "https://t.feishu.cn/sheets/SHT_1",
+            "https://t.feishu.cn/base/BASE_1",
+            "http://t.feishu.cn/docx/Tok_1",
+        ] {
+            let err = service
+                .create_base("bad", "", None, Some(feishu_source(&[url])))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, AppError::BadRequest(_)), "{url}: {err}");
+        }
+        // live mode and rendered flags have no meaning for a remote index
+        let mut live = feishu_source(&["https://t.feishu.cn/docx/Tok_1"]);
+        live.mode = KnowledgeSourceMode::Live;
+        assert!(service.create_base("bad", "", None, Some(live)).await.is_err());
+        let mut rendered = feishu_source(&["https://t.feishu.cn/docx/Tok_1"]);
+        rendered.entries[0].rendered = true;
+        assert!(service.create_base("bad", "", None, Some(rendered)).await.is_err());
+        assert!(service.list_bases().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn feishu_source_publish_is_metadata_only_and_title_named() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = nomifun_db::init_database(&dir.path().join("knowledge.db"))
+            .await
+            .unwrap();
+        let (service, _knowledge_repository, _operation_repository) = durable_sqlite_service(
+            &db,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        let port = FakeFeishuPort::default().with_meta(
+            "https://t.feishu.cn/docx/TokAlpha",
+            FeishuIndexHit {
+                token: "TokAlpha".into(),
+                kind: "docx".into(),
+                title: "产品 规划".into(),
+                url: Some("https://t.feishu.cn/docx/TokAlpha".into()),
+                modified_at: Some("2026-10-27T00:00:00+08:00".into()),
+                summary: None,
+            },
+        );
+        service.set_feishu_knowledge_port(Arc::new(port));
+        let info = service
+            .create_base(
+                "feishu-base",
+                "",
+                None,
+                Some(feishu_source(&["https://t.feishu.cn/docx/TokAlpha"])),
+            )
+            .await
+            .unwrap();
+        let root = PathBuf::from(&info.root_path);
+        let stub = root.join("snapshots").join("产品 规划.md");
+        let stub = if stub.exists() {
+            stub
+        } else {
+            // title stub may be allocated at the tree root when no default
+            // capture folder exists yet
+            std::fs::read_dir(&root)
+                .unwrap()
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .find(|path| path.extension().is_some_and(|ext| ext == "md"))
+                .expect("a feishu stub must be published")
         };
-        assert!(service.create_base("x", "", None, Some(source)).await.is_err());
-        assert!(service.list_bases().await.unwrap().is_empty(), "rejected base must not persist");
+        let content = std::fs::read_to_string(&stub).unwrap();
+        assert!(content.contains("nomifun_remote_backend**: feishu"));
+        assert!(content.contains("# 产品 规划"));
+        assert!(content.contains("knowledge_read"));
+        // The body is never fetched for index projection.
+        assert!(!content.contains("Live body"));
+    }
+
+    #[tokio::test]
+    async fn feishu_search_intersects_remote_recall_with_curated_tokens() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = nomifun_db::init_database(&dir.path().join("knowledge.db"))
+            .await
+            .unwrap();
+        let (service, _knowledge_repository, _operation_repository) = durable_sqlite_service(
+            &db,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        let port = FakeFeishuPort::default();
+        port.search.lock().unwrap().extend([
+            FeishuIndexHit {
+                token: "TokAlpha".into(),
+                kind: "docx".into(),
+                title: "Curated hit".into(),
+                url: None,
+                modified_at: None,
+                summary: Some("inside".into()),
+            },
+            FeishuIndexHit {
+                token: "TokOutside".into(),
+                kind: "docx".into(),
+                title: "Not curated".into(),
+                url: None,
+                modified_at: None,
+                summary: None,
+            },
+        ]);
+        service.set_feishu_knowledge_port(Arc::new(port));
+        let info = service
+            .create_base(
+                "feishu-base",
+                "",
+                None,
+                Some(feishu_source(&["https://t.feishu.cn/docx/TokAlpha"])),
+            )
+            .await
+            .unwrap();
+        let kb_id = info.knowledge_base_id.clone();
+        let hits = service
+            .search_bases(std::slice::from_ref(&kb_id), "anything", 10)
+            .await
+            .unwrap();
+        let remote: Vec<_> = hits
+            .iter()
+            .filter(|hit| hit.rel_path.starts_with(feishu::FEISHU_REMOTE_PREFIX))
+            .collect();
+        assert_eq!(remote.len(), 1, "only the curated token may surface: {hits:?}");
+        assert_eq!(remote[0].rel_path, feishu::remote_rel_path("TokAlpha"));
+    }
+
+    #[tokio::test]
+    async fn feishu_remote_read_fetches_live_body_and_write_is_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = nomifun_db::init_database(&dir.path().join("knowledge.db"))
+            .await
+            .unwrap();
+        let (service, _knowledge_repository, _operation_repository) = durable_sqlite_service(
+            &db,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        service.set_feishu_knowledge_port(Arc::new(FakeFeishuPort::default()));
+        let info = service
+            .create_base(
+                "feishu-base",
+                "",
+                None,
+                Some(feishu_source(&["https://t.feishu.cn/docx/TokAlpha"])),
+            )
+            .await
+            .unwrap();
+        let kb_id = info.knowledge_base_id;
+        let remote_path = feishu::remote_rel_path("TokAlpha");
+        let file = service.read_file(kb_id.as_str(), &remote_path).await.unwrap();
+        assert!(file.content.contains("Live body"));
+        assert!(!file.capabilities.edit_content);
+        let handle = encode_doc_handle(&kb_id, &remote_path);
+        let err = service
+            .resolve_write_target(
+                std::slice::from_ref(&kb_id),
+                &WriteTargetSpec::Handle(handle),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Forbidden(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn mount_marks_remote_index_stale_when_refresh_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = nomifun_db::init_database(&dir.path().join("knowledge.db"))
+            .await
+            .unwrap();
+        let (service, _knowledge_repository, _operation_repository) = durable_sqlite_service(
+            &db,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        let port = FakeFeishuPort::default();
+        service.set_feishu_knowledge_port(Arc::new(port.clone()));
+        let info = service
+            .create_base(
+                "feishu-base",
+                "",
+                None,
+                Some(feishu_source(&["https://t.feishu.cn/docx/TokAlpha"])),
+            )
+            .await
+            .unwrap();
+        let kb_id = info.knowledge_base_id;
+        port.fail(AppError::Conflict("tenant token expired".into()));
+        let mounts = service
+            .mount_info_for_bases(std::slice::from_ref(&kb_id))
+            .await
+            .unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert!(mounts[0].remote_index_stale, "failed refresh must mark stale");
     }
 
     /// A5: creating a base with tags persists them in the returned info.

@@ -5621,7 +5621,7 @@ export type KnowledgeSourceMode = 'live' | 'snapshot';
 /** URL source config of a base (wire shape: camelCase, `lastFetchedAt` epoch-ms). */
 export interface IKnowledgeSource {
   sourceId?: KnowledgeSourceId;
-  /** Source kind discriminator; "url" is the only kind today. */
+  /** Source kind discriminator; "url" or "feishu" (remote metadata-stub index). */
   kind: string;
   mode: KnowledgeSourceMode;
   revision?: number;
@@ -5690,6 +5690,11 @@ export type IKnowledgeAddContentInput =
       entries: IKnowledgeSourceEntry[];
       destination_parent_path?: string;
       destination_parent_id?: KnowledgeEntryId;
+    }
+  | {
+      /** Append curated Feishu document links; bodies stay remote (metadata stubs). */
+      type: 'feishu';
+      urls: string[];
     };
 
 /**
@@ -5707,6 +5712,7 @@ export interface IKnowledgeAddContentRequest {
   destination_parent_path?: string;
   destination_parent_id?: KnowledgeEntryId;
   entries?: IKnowledgeSourceEntry[];
+  urls?: string[];
 }
 
 /** Per-method outcome of adding content to an existing knowledge base. */
@@ -5725,7 +5731,16 @@ export type IKnowledgeAddContentResult =
       added: number;
       duplicates: number;
       first_file?: string;
-    } & IKnowledgeSourceFetchSummary);
+    } & IKnowledgeSourceFetchSummary)
+  | {
+      type: 'feishu';
+      added: number;
+      duplicates: number;
+      indexed: number;
+      failed: number;
+      errors: string[];
+      first_file?: string;
+    };
 
 /** Result of POST /api/knowledge/bases/{id}/autogen (AI overview generation). */
 export interface IKnowledgeAutogenOutcome {
@@ -5760,7 +5775,7 @@ export interface IKnowledgeBase {
   /** Tag keys attached to this base. */
   tags: string[];
   /** Source kind discriminator. */
-  kind: 'blank' | 'local' | 'web';
+  kind: 'blank' | 'local' | 'web' | 'feishu';
 }
 
 /** A knowledge-base tag (for categorization / filtering). */

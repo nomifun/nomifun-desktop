@@ -10,11 +10,12 @@ const emptyStateSource = readFileSync(new URL('./KnowledgeEmptyState.tsx', impor
 const listPageSource = readFileSync(new URL('./KnowledgeListPage/index.tsx', import.meta.url), 'utf8');
 
 describe('Feishu knowledge entry', () => {
-  test('CreateStudio only creates local bases; Feishu is not a source type', () => {
+  test('CreateStudio offers feishu as a curated remote-backed source type', () => {
     expect(normalizeStudioInitialKind('web')).toBe('web');
+    expect(normalizeStudioInitialKind('feishu')).toBe('feishu');
     expect(normalizeStudioInitialKind(undefined)).toBe('blank');
-    // 'feishu' is no longer a StudioSourceType — the rail must not offer it.
-    expect(typeRailSource.includes("key: 'feishu'")).toBe(false);
+    // 'feishu' is a StudioSourceType offered by the rail (third-party group).
+    expect(typeRailSource.includes("key: 'feishu'")).toBe(true);
     expect(typeRailSource.includes('FEISHU_KNOWLEDGE_CREATION_ENABLED')).toBe(false);
   });
 
@@ -37,8 +38,8 @@ describe('Feishu knowledge entry', () => {
     expect(emptyStateSource.includes('if (!k.disabled) onCreate(k.key);')).toBe(true);
   });
 
-  test('routes the Feishu shortcut to the knowledge space, not the studio', () => {
-    expect(listPageSource.includes("initialKind === 'feishu'")).toBe(true);
-    expect(listPageSource.includes("navigate('/knowledge/feishu')")).toBe(true);
+  test('routes the Feishu shortcut into the studio; the pinned card keeps the workbench route', () => {
+    expect(listPageSource.includes("navigate('/knowledge/feishu')")).toBe(false);
+    expect(listPageSource.includes('<FeishuKnowledgeCard />')).toBe(true);
   });
 });

@@ -433,6 +433,11 @@ pub struct KnowledgeMountInfo {
     /// `extra.source` when the base has a live-mode URL source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub live_sources: Vec<KnowledgeSourceEntry>,
+    /// Set when this base has a Feishu remote index that could not be
+    /// refreshed during the bounded mount-time window. The agent sees the
+    /// last-good index; `knowledge_read` may still fail until reconnected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remote_index_stale: bool,
 }
 
 /// A user-defined tag that can be assigned to knowledge bases for

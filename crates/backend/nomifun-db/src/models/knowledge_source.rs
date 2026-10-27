@@ -42,6 +42,8 @@ persisted_enum! {
     /// Adapter kind of a normalized source aggregate.
     pub enum KnowledgeSourceKind {
         Url => "url",
+        // Curated Feishu document index: metadata-only projection, bodies stay remote.
+        Feishu => "feishu",
     }
 }
 
@@ -279,6 +281,8 @@ mod tests {
     #[test]
     fn persisted_values_are_stable() {
         assert_eq!(KnowledgeSourceKind::Url.as_str(), "url");
+        assert_eq!(KnowledgeSourceKind::Feishu.as_str(), "feishu");
+        assert_eq!(KnowledgeSourceKind::parse("feishu").unwrap(), KnowledgeSourceKind::Feishu);
         assert_eq!(KnowledgeSourceMode::Snapshot.as_str(), "snapshot");
         assert_eq!(KnowledgeSourceState::Paused.as_str(), "paused");
         assert_eq!(KnowledgeSourceItemSyncStatus::Conflicted.as_str(), "conflicted");

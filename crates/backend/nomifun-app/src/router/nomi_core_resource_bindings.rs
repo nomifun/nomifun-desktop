@@ -1580,24 +1580,52 @@ impl ProductResourceAuthority {
         if info.source.is_some() {
             allowed.insert("sync".to_owned());
         }
+        let mut typed_parameters = BTreeMap::from([
+            (
+                nomifun_agent_domain_wave1::KNOWLEDGE_ROOT_PARAMETER.to_owned(),
+                info.root_path,
+            ),
+            (
+                nomifun_agent_domain_wave1::KNOWLEDGE_NAME_PARAMETER.to_owned(),
+                info.name,
+            ),
+            (
+                nomifun_agent_domain_wave1::KNOWLEDGE_DESCRIPTION_PARAMETER.to_owned(),
+                info.description,
+            ),
+        ]);
+        // A Feishu-backed base freezes its curated remote corpus into the
+        // binding so later session reads/search stay inside this exact set.
+        let remote_links = self
+            .dependencies
+            .knowledge
+            .feishu_curated_links(&info.knowledge_base_id)
+            .await
+            .map_err(|error| {
+                ResourceSelectionResolutionError::domain_error(
+                    self.kind,
+                    &request.resource_id,
+                    error,
+                )
+            })?;
+        if let Some(links) = remote_links {
+            let encoded = serde_json::to_string(&links).map_err(|error| {
+                ResourceSelectionResolutionError::resolution_failed(
+                    self.kind,
+                    &request.resource_id,
+                    error,
+                )
+            })?;
+            typed_parameters.insert(
+                nomifun_agent_domain_wave1::KNOWLEDGE_REMOTE_LINKS_PARAMETER.to_owned(),
+                encoded,
+            );
+        }
         Ok(ServerResolvedResource {
             resource_id: info.knowledge_base_id.as_ref().to_owned(),
             allowed_operations: allowed,
             connection_config_ref: None,
-            typed_parameters: BTreeMap::from([
-                (
-                    nomifun_agent_domain_wave1::KNOWLEDGE_ROOT_PARAMETER.to_owned(),
-                    info.root_path,
-                ),
-                (
-                    nomifun_agent_domain_wave1::KNOWLEDGE_NAME_PARAMETER.to_owned(),
-                    info.name,
-                ),
-                (
-                    nomifun_agent_domain_wave1::KNOWLEDGE_DESCRIPTION_PARAMETER.to_owned(),
-                    info.description,
-                ),
-            ]),
+            typed_parameters,
         })
     }
 

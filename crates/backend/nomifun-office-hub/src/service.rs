@@ -25,6 +25,9 @@ pub struct OfficeHubService {
     active: Mutex<HashSet<String>>,
     pub(crate) admission: tokio::sync::Mutex<()>,
     execution: tokio::sync::Mutex<()>,
+    /// Knowledge-chain CLI calls share a bounded pool so agent retrieval can
+    /// never flood the supervised runtime.
+    knowledge_limit: tokio::sync::Semaphore,
     default_connection: OfficeConnection,
 }
 
@@ -49,6 +52,7 @@ impl OfficeHubService {
             flows: Arc::new(Mutex::new(HashMap::new())), prepare_view: Arc::new(Mutex::new(None)),
             active: Mutex::new(HashSet::new()),
             admission: tokio::sync::Mutex::new(()), execution: tokio::sync::Mutex::new(()),
+            knowledge_limit: tokio::sync::Semaphore::new(4),
             default_connection: OfficeConnection { id: uuid::Uuid::now_v7().to_string(),
                 name: "Feishu".into(), enabled: false, profile: None, executable: None,
                 created_at: now(), updated_at: now() } }))
@@ -265,6 +269,42 @@ impl OfficeHubService {
             }
         }
         Ok(result)
+    }
+
+    /// Knowledge-chain internal reads. Each call re-checks the live connection,
+    /// profile and granted scopes through ready(); the workbench routes never
+    /// expose these, and each call holds a bounded concurrency permit so agent
+    /// retrieval cannot flood the supervised CLI runtime.
+    pub async fn knowledge_search_documents(&self, query:&str, cursor:Option<String>)
+        -> Result<OfficeQueryResult,HubError>
+    {
+        let _permit=self.knowledge_limit.acquire().await
+            .map_err(|_|HubError::unavailable("The host is shutting down; Feishu search is unavailable"))?;
+        let (connection,executable,identity)=self.ready().await?;
+        require_permissions(&adapter::named_permissions(&["documents.browse"],&identity.scopes))?;
+        let command=adapter::knowledge_search_command(query,cursor.as_deref(),connection.profile.as_deref())?;
+        let output=self.runtime.run(&executable,command,self.shutdown.child_token(),None).await?;
+        adapter::normalize_knowledge_search(&output,cursor.as_deref())
+    }
+    pub async fn knowledge_fetch_document(&self, doc:&str) -> Result<adapter::FeishuDocBody,HubError> {
+        let _permit=self.knowledge_limit.acquire().await
+            .map_err(|_|HubError::unavailable("The host is shutting down; Feishu document fetch is unavailable"))?;
+        let (connection,executable,identity)=self.ready().await?;
+        require_permissions(&adapter::named_permissions(&["documents.read"],&identity.scopes))?;
+        let command=adapter::fetch_document_command(doc,connection.profile.as_deref())?;
+        let output=self.runtime.run(&executable,command,self.shutdown.child_token(),None).await?;
+        adapter::parse_fetch_document(&output)
+    }
+    /// Resolves an official Feishu link to type/title/canonical token. Serves
+    /// both curated-link validation and index metadata refresh.
+    pub async fn knowledge_resolve_link(&self, url:&str) -> Result<adapter::FeishuDocMeta,HubError> {
+        let _permit=self.knowledge_limit.acquire().await
+            .map_err(|_|HubError::unavailable("The host is shutting down; Feishu metadata is unavailable"))?;
+        let (connection,executable,identity)=self.ready().await?;
+        require_permissions(&adapter::named_permissions(&["documents.inspect"],&identity.scopes))?;
+        let command=adapter::inspect_document_command(url,connection.profile.as_deref())?;
+        let output=self.runtime.run(&executable,command,self.shutdown.child_token(),None).await?;
+        adapter::parse_inspect_document(&output)
     }
 
     pub async fn operation(&self, id: &str) -> Result<OfficeOperation, HubError> {

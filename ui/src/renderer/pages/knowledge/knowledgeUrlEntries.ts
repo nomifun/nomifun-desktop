@@ -8,6 +8,9 @@ import type { IKnowledgeSourceEntry } from '@/common/adapter/ipcBridge';
 
 export const MAX_KNOWLEDGE_SOURCE_ENTRIES = 16;
 
+/** Curated Feishu document links per base (server-enforced bound). */
+export const MAX_FEISHU_SOURCE_ENTRIES = 64;
+
 export interface KnowledgeUrlDraft {
   url: string;
   title: string;

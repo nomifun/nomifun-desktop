@@ -39,7 +39,7 @@ export interface KnowledgeTagFilterBarProps {
   resultCount?: React.ReactNode;
 }
 
-const KIND_ORDER: KnowledgeKind[] = ['blank', 'local', 'web'];
+const KIND_ORDER: KnowledgeKind[] = ['blank', 'local', 'web', 'feishu'];
 const SORT_OPTIONS: KnowledgeSort[] = ['updated', 'created', 'name', 'size'];
 
 function getSortLabel(sort: KnowledgeSort, t: TFunction): string {
@@ -133,6 +133,8 @@ const KnowledgeTagFilterBar: React.FC<KnowledgeTagFilterBarProps> = ({
         return t('knowledge.filter.kindLocal', { defaultValue: '本地' });
       case 'web':
         return t('knowledge.filter.kindWeb', { defaultValue: '网页' });
+      case 'feishu':
+        return t('knowledge.filter.kindFeishu', { defaultValue: '飞书' });
     }
   };
 

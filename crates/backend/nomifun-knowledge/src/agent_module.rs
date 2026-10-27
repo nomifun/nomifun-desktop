@@ -113,6 +113,9 @@ pub struct AgentKnowledgeResource {
     name: String,
     root: PathBuf,
     operations: BTreeSet<KnowledgeResourceOperation>,
+    /// Curated remote corpus frozen at binding resolution: remote token →
+    /// official link. `Some` marks this base Feishu remote-backed.
+    remote_links: Option<BTreeMap<String, String>>,
 }
 
 impl AgentKnowledgeResource {
@@ -182,7 +185,16 @@ impl AgentKnowledgeResource {
             name,
             root,
             operations,
+            remote_links: None,
         })
+    }
+
+    /// Freeze the base's curated Feishu corpus (remote token → link) into the
+    /// resolved resource. Subsequent remote search/read operations stay inside
+    /// this exact set even if the source configuration changes mid-session.
+    pub fn with_remote_links(mut self, links: BTreeMap<String, String>) -> Self {
+        self.remote_links = Some(links);
+        self
     }
 
     pub fn binding_id(&self) -> &str {
@@ -215,11 +227,15 @@ impl AgentKnowledgeResource {
     }
 
     fn bound_base(&self) -> Result<BoundKnowledgeBase, AppError> {
-        BoundKnowledgeBase::new(
+        let base = BoundKnowledgeBase::new(
             self.knowledge_base_id.clone(),
             self.name.clone(),
             self.root.clone(),
-        )
+        )?;
+        Ok(match &self.remote_links {
+            Some(links) => base.with_remote_links(links.clone()),
+            None => base,
+        })
     }
 }
 
@@ -317,8 +333,8 @@ pub struct AuthorizedKnowledgeService {
 impl AuthorizedKnowledgeService {
     pub fn new(service: Arc<KnowledgeService>, authority: AgentKnowledgeAuthority) -> Self {
         Self {
+            reads: service.bound_read_service(),
             service,
-            reads: BoundKnowledgeReadService::default(),
             authority,
         }
     }

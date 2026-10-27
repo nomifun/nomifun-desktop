@@ -13,6 +13,39 @@ import PageHeader from '@/renderer/components/layout/PageHeader';
 import { Message } from '@arco-design/web-react';
 import { Add, Down, FileText, Left, LinkOne, Refresh, Search, TableFile, User } from '@icon-park/react';
 import { useCallback, useState } from 'react';
+import { addKnowledgeContent, useKnowledgeBases } from '../useKnowledge';
+
+/** Loads candidate Feishu bases only while the save dialog is mounted so the
+ * workbench page itself never issues knowledge requests. */
+function SaveToBaseDialog({ item, onClose, onError, onSaved }: {
+  item: OfficeItem;
+  onClose: () => void;
+  onError: (error: unknown) => void;
+  onSaved: () => void;
+}) {
+  const { t } = useTranslation();
+  const { bases } = useKnowledgeBases();
+  const [saving, setSaving] = useState(false);
+  const feishuBases = bases.filter(base => base.kind === 'feishu');
+  const confirm = async (knowledgeBaseId: Parameters<typeof addKnowledgeContent>[0]) => {
+    if (!item.url || saving) return;
+    setSaving(true);
+    try {
+      await addKnowledgeContent(knowledgeBaseId, { type: 'feishu', urls: [item.url] });
+      onSaved();
+      Message.success({ content: t('knowledge.feishu.savedToBase', { defaultValue: '已加入知识库索引' }), duration: 3000 });
+    } catch (error) { onError(error); }
+    finally { setSaving(false); }
+  };
+  return (
+    <OfficeDialog title={t('knowledge.feishu.saveToBase', { defaultValue: '存入知识库' })} onClose={() => { if (!saving) onClose(); }} footer={<OfficeButton onClick={onClose} disabled={saving}>{t('office.actions.cancel')}</OfficeButton>}>
+      <p className='office-small office-muted'>{t('knowledge.feishu.saveToBaseHint', { defaultValue: '把「{{title}}」加入一个飞书知识库的名称索引；正文保持远端，不落本地。', title: item.title || item.id })}</p>
+      {feishuBases.length === 0
+        ? <div className='office-empty'><h3>{t('knowledge.feishu.noFeishuBase', { defaultValue: '还没有飞书知识库' })}</h3><p>{t('knowledge.feishu.noFeishuBaseHint', { defaultValue: '先在知识库列表新建一个「飞书文档」类型的知识库。' })}</p></div>
+        : <div>{feishuBases.map(base => <button key={base.knowledge_base_id} type='button' className='office-resource' style={{ display: 'flex', width: '100%', padding: '8px 0' }} disabled={saving} onClick={() => void confirm(base.knowledge_base_id)}><FileText size={18} /><strong>{base.name}</strong></button>)}</div>}
+    </OfficeDialog>
+  );
+}
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { ConnectionDialog } from '@/renderer/pages/officeHub/ConnectionDialog';
@@ -26,7 +59,7 @@ import { useOfficeQuery } from '@/renderer/pages/officeHub/useOfficeHub';
 import { captureIdentity, type WriteIdentity } from '@/renderer/pages/officeHub/useOfficeWrite';
 import '@/renderer/pages/officeHub/styles.css';
 
-type Dialog = 'connection' | 'document' | 'document-delete' | 'result' | 'link' | null;
+type Dialog = 'connection' | 'document' | 'document-delete' | 'result' | 'link' | 'save-to-base' | null;
 
 export default function FeishuKnowledgePage() {
   const { t } = useTranslation();
@@ -42,6 +75,7 @@ export default function FeishuKnowledgePage() {
   const [deleteSelection, setDeleteSelection] = useState<DocumentDeleteSelection | null>(null);
   const [formIdentity, setFormIdentity] = useState<WriteIdentity | null>(null);
   const [link, setLink] = useState('');
+  const [saveTarget, setSaveTarget] = useState<OfficeItem | null>(null);
   const selectedConnection = identityKey(hub.status);
   const queryOwnerKey = selectedConnection + ':' + permissionKey(hub.status) + ':' + refreshKey;
   const ready = hub.status?.runtime.phase === 'ready' && hub.status.connection.enabled && !!hub.status.actor && hub.status.phase === 'ready';
@@ -75,6 +109,10 @@ export default function FeishuKnowledgePage() {
       await openExternal(officeResourceUrl(item.url));
     } catch (error) { setActionError(error); }
   };
+  const saveToBase = (item: OfficeItem) => {
+    if (!item.url) { setActionError(new Error('office.resources.missingLink')); return; }
+    setSaveTarget(item); setActionError(null); setDialog('save-to-base');
+  };
   const deleteResource = (item: OfficeItem) => {
     const identity = captureIdentity(hub.status);
     if (!identity || !ready) { setDialog('connection'); return; }
@@ -105,6 +143,8 @@ export default function FeishuKnowledgePage() {
           <td className='office-muted office-small'>{t(item.kind === 'base' || item.kind === 'bitable' ? 'office.resources.filters.base' : 'office.resources.filters.document')}</td>
           <td className='office-muted office-small'>{resourceTime(item)}</td>
           <td><div className='office-actions'><OfficeButton quiet disabled={!item.url} onClick={() => void openResource(item)}>{t('office.actions.openBrowser')}</OfficeButton>
+            {(item.kind === 'doc' || item.kind === 'docx' || item.kind === 'wiki') &&
+              <OfficeButton quiet disabled={!item.url} onClick={() => saveToBase(item)}>{t('knowledge.feishu.saveToBase', { defaultValue: '存入知识库' })}</OfficeButton>}
             {documentTarget(item) && <OfficeButton quiet disabled={!!item.pending_operation_id} aria-label={t('office.documents.deleteNamed', { title: item.title || item.id })} onClick={() => deleteResource(item)}>{t('office.actions.delete')}</OfficeButton>}
             {item.pending_operation_id && <OfficeButton quiet onClick={() => void showOperation(item.pending_operation_id!)}>{t('office.actions.original')}</OfficeButton>}
           </div></td>
@@ -132,6 +172,7 @@ export default function FeishuKnowledgePage() {
     {dialog === 'document' && formIdentity && <NativeForm key={formIdentity.key} {...formServices} identity={formIdentity} />}
     {dialog === 'document-delete' && deleteSelection && <DocumentDeleteDialog {...formServices} selection={deleteSelection} onClose={() => { setDialog(null); refresh(); }} />}
     {dialog === 'result' && hub.operation && <OperationDialog operation={hub.operation} status={hub.status} busy={busy} error={actionError || hub.operationError ? <>{errorView(actionError)}{errorView(hub.operationError)}</> : null} onClose={() => { setDialog(null); refresh(); }} onReconcile={() => void run(async () => { hub.setOperation(await officeHub.reconcile(hub.operation!.id)); refresh(); })} onRefresh={() => void showOperation(hub.operation!.id)} onOpen={url => void openExternal(url)} />}
+    {dialog === 'save-to-base' && saveTarget && <SaveToBaseDialog item={saveTarget} onClose={() => setDialog(null)} onError={setActionError} onSaved={() => { setDialog(null); setSaveTarget(null); refresh(); }} />}
     {dialog === 'link' && <OfficeDialog title={t('office.resources.openLink')} onClose={() => setDialog(null)} footer={<><OfficeButton onClick={() => setDialog(null)}>{t('office.actions.cancel')}</OfficeButton><OfficeButton primary disabled={!link.trim()} onClick={() => {
       try { const url = officeResourceUrl(link); setDialog(null); void openResource({ url }); } catch (error) { setActionError(error); }
     }}>{t('office.actions.openBrowser')}</OfficeButton></>}><label className='office-label'>{t('office.resources.link')}<input className='office-input' value={link} onChange={event => setLink(event.target.value)} /></label><p className='office-small office-muted'>{t('office.resources.browserHint')}</p>{errorView(actionError)}</OfficeDialog>}

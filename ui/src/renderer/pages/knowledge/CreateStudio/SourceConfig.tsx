@@ -11,6 +11,7 @@
  * - blank: informational note (no config needed)
  * - local: folder path selector
  * - web: snapshot/realtime segment + dynamic URL rows
+ * - feishu: curated document links (optional at create time)
  * - import: zip file selector
  *
  * Controlled: accepts `value` / `onChange` from parent (index.tsx holds state).
@@ -25,6 +26,7 @@ import { isDesktopShell } from '@renderer/utils/platform';
 import KnowledgeUrlEntriesEditor from '../KnowledgeUrlEntriesEditor';
 import { showKnowledgeErrorMessage } from '../KnowledgeErrorFeedback';
 import {
+  MAX_FEISHU_SOURCE_ENTRIES,
   MAX_KNOWLEDGE_SOURCE_ENTRIES,
   type KnowledgeUrlDraft,
 } from '../knowledgeUrlEntries';
@@ -49,6 +51,8 @@ export interface SourceConfigValue {
   urlMode?: UrlMode;
   urlEntries?: UrlEntry[];
   browserRender?: boolean;
+  /** feishu — curated official document links (metadata stubs, bodies live-remote). */
+  feishuEntries?: UrlEntry[];
   /** import */
   importPath?: string;
 }
@@ -275,6 +279,47 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
               defaultValue: '适合 JS 渲染的单页应用',
             })}
           </span>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Feishu ─────────────────────────────────────────────────────────────
+
+  if (sourceType === 'feishu') {
+    const entries = value.feishuEntries ?? [{ url: '', title: '' }];
+
+    return (
+      <div className={sourcePanelClass}>
+        <div className={sourceTitleClass}>
+          {t('knowledge.studio.srcTitleFeishu', { defaultValue: '来源 · 飞书文档' })}
+        </div>
+        <div className={sourceNoteClass}>
+          <Info theme='outline' size='14' className='mt-2px flex-none text-[var(--color-text-3)]' />
+          <div>
+            {t('knowledge.studio.feishuNote', {
+              defaultValue:
+                '库内保存的是选定飞书文档的名称索引，正文不落本地。挂载时会刷新索引；检索与阅读通过飞书连接器实时进行。也可先留空，之后在详情页或飞书工作台添加文档。',
+            })}
+          </div>
+        </div>
+        <div>
+          <label className={sourceLabelClass}>
+            {t('knowledge.studio.feishuLinkList', { defaultValue: '飞书文档链接' })}
+            <span className='ml-6px font-400 text-[var(--color-text-3)]'>
+              {t('knowledge.studio.feishuLinkMax', { defaultValue: '（最多 64 条，可留空）' })}
+            </span>
+          </label>
+          <KnowledgeUrlEntriesEditor
+            entries={entries}
+            maxEntries={MAX_FEISHU_SOURCE_ENTRIES}
+            onChange={(feishuEntries) => update({ feishuEntries })}
+          />
+          <div className='mt-6px text-11px text-[var(--color-text-3)]'>
+            {t('knowledge.studio.feishuLinkHint', {
+              defaultValue: '支持 docx、docs 与 wiki 链接，例如 https://example.feishu.cn/docx/…',
+            })}
+          </div>
         </div>
       </div>
     );
