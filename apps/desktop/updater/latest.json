@@ -1,7 +1,7 @@
 {
   "version": "0.8.17",
   "notes": "## 升级前请阅读 / Before upgrading\n\n- 从数据库谱系不兼容的旧版本跨代升级前，请备份或导出重要数据；应用沿用既有的数据集重建规则，不转换历史数据，Agent 数据清理保留非 Agent 配置。使用已退役 Computer 契约的会话需新建会话，原历史保留，个人 Agent 请重新选择 Computer 动作。\n- Back up or export important data before upgrading from an incompatible older database lineage. Existing dataset rebuild rules remain in effect without converting historical data; Agent clean cuts preserve non-Agent configuration. Retired Computer bindings require a new session and reselected actions for personal Agents; existing history is retained.\n\n## 更新内容\n\n- 新增飞书远程知识库：仅凭基本信息即可创建，详情页可维护精选集合，创建时允许空集合。\n- 飞书工作台并入知识与连接器：统一文档发现与导航，文档通过原生 CLI 块编辑，标题去重并配备保存提示；工作台移除日历与任务。\n- 精简 Office 页面、重设计账号连接、将 Office 入口移至服务，并加入应用切换占位。\n- 连接页设备标签更名为 WebUI 并开放能力项。\n- 恢复 icon-park 基础样式，使图标在 Arco 按钮内居中；Office 头部动作图标保持单行对齐。\n\n## Highlights\n\n- Add Feishu remote-backed knowledge bases: create bases from basic info only, curate the base set from the detail page, and allow an empty curated set on creation.\n- Merge the Feishu workbench into knowledge and connectors: unified document discovery and navigation, documents edit through native CLI blocks with deduplicated titles and save toasts, and Calendar & tasks leave the workbench.\n- Simplify office pages, redesign the account connection, move the office entry to services, and add application switcher placeholders.\n- Rename connection device tabs to WebUI and open capabilities.\n- Restore icon-park base styles so icons center inside Arco buttons, and keep office header action icons on one line.\n\n## Windows 下载 / Downloads\n\n- x64 安装包 / x64 installer: `NomiFun_0.8.17_x64-setup.exe`\n\n## macOS 下载 / Downloads\n\n- Apple Silicon: `NomiFun_0.8.17_aarch64.dmg`\n- Intel: `NomiFun_0.8.17_x64.dmg`\n- 最低系统 / Minimum OS: macOS 14.\n- 两个架构均提供独立自动更新包；此次不打包 AppImage。\n- Independent updater archives are provided for both architectures. No AppImage is built for this release.\n- 签名、公证、包完整性及本机验证结果见随附的 `release-validation-v0.8.17.json`；Intel 物理机和最低 macOS 14 实机的运行验收未执行。\n- Signing, notarization, package integrity and build-host validation are recorded in `release-validation-v0.8.17.json`. Runtime acceptance on physical Intel hardware and a physical macOS 14 system has not been performed.",
-  "pub_date": "2026-10-27T18:10:16.121Z",
+  "pub_date": "2026-10-27T22:52:42.258Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODlXdVdyZnFST1NhRUFCdFFSL3pGdEM4S0dsZC9TMjhQMHpwVFplWE5UTmNmYlhoaS9KbUNucVYwN3VzWUI0akwweGhYUklXSS9PTGhBSzZYTmZhMlFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTIxMjE3CWZpbGU6Tm9taUZ1bl8wLjguMTdfeDY0LXNldHVwLmV4ZQp5VGFrcXk5QTB0eGJHZ1JFb3B3NW9OM1g5dVZNQ1h3MEtVbU1wR1RzQmVRL250YjdvVHR1ZGxwbERmdnpWSzEvTUVmSndwN1VmZHJhcnlOb0FvOGFDdz09Cg==",
@@ -14,6 +14,22 @@
     "darwin-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODZZMUJxRzA5cXJSWnNIMVFpRzFqWWFBQTQyNm1xaTlsWitKTlhjQTZLVnMreE1mNlhJTkJvSll6ZlFXclhxaVF6aHo2eUdwcWRVODFKSnBFcDh6aHdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTI0MzkzCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CkdNV3hzQXR5QVJJK1p0ekVialFVRVI5QnJCSTBVMXNnRDc2QktwN1l2bW5ZVkM4ZGNNVko4bnQ0TDF1cUkzZnhUNDl2NHlhcmxLMmFjSmgzL242MURnPT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.17/NomiFun_0.8.17_x64.app.tar.gz"
+    },
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODdjSU9iRStneVYwV0c3R3FsZjQ5dzRwUzdidEhRUnJHMXpSUGczYWhXa2o4UEpQcEp3RStwVjluMjRZbmJKM0FXTkJ5VTBsZWxQMDNYY3BEL015TmdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTQxNTYwCWZpbGU6Tm9taUZ1bl8wLjguMTdfYW1kNjQuQXBwSW1hZ2UKSjRPcVdHSnFnMEM5VDkxd3pHZkhVbkt4TFhIUU1kNk5UNHdSQUxSMGY3amhjWmg4TmRsaStRQ2xnaS82NlBSbUpSWFNiTjg3QmY3WGkzazRPVjB0QWc9PQo=",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.17/NomiFun_0.8.17_amd64.AppImage"
+    },
+    "linux-x86_64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODdjSU9iRStneVYwV0c3R3FsZjQ5dzRwUzdidEhRUnJHMXpSUGczYWhXa2o4UEpQcEp3RStwVjluMjRZbmJKM0FXTkJ5VTBsZWxQMDNYY3BEL015TmdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTQxNTYwCWZpbGU6Tm9taUZ1bl8wLjguMTdfYW1kNjQuQXBwSW1hZ2UKSjRPcVdHSnFnMEM5VDkxd3pHZkhVbkt4TFhIUU1kNk5UNHdSQUxSMGY3amhjWmg4TmRsaStRQ2xnaS82NlBSbUpSWFNiTjg3QmY3WGkzazRPVjB0QWc9PQo=",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.17/NomiFun_0.8.17_amd64.AppImage"
+    },
+    "linux-x86_64-rpm": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOC8rRXhnbVA2aStFQXdVUGExdDZOV0tKNDQwWVI1VTYrZy80T2FWS0E2U2RBVkJtSHhtRCsvald6SExXblpnb201T2UwRDlrL3JqREd1OFhZNkZzTndjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTQxNTYwCWZpbGU6Tm9taUZ1bi0wLjguMTctMS54ODZfNjQucnBtCnpxazFtcDM3eitEVi9RS1g0Q2t0dHowUzdnM0l1SlorcnRyMHFLa2pZcXlCamoyeVI0dklCazlGOS81d09iSlNlMStmb0creHd3ayt1VEc1S25WbERnPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.17/NomiFun-0.8.17-1.x86_64.rpm"
+    },
+    "linux-x86_64-deb": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODhnYVVFL3lnVC9oMTc4c2MxMmFFUm1qQVUxcjV2M0ZkRytuWHk3RVNsSnBZcm54b0hzUmpwNXRkRzVWMG9QaFNNanR0dmgyeFNSd1k2NVZGZnp6QXdBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTQxNTYwCWZpbGU6Tm9taUZ1bl8wLjguMTdfYW1kNjQuZGViCndndHFzQksxS3crRHFoRGNkWmdsdXAzbzdrbmRhMTBKY1NJNHRpaXNzajg0bTk4ZC9xamRjbUxrWCtnTGJoWk5PcFFRcUVYNFE1czMrMkRNclM2dEN3PT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.17/NomiFun_0.8.17_amd64.deb"
     }
   }
 }
