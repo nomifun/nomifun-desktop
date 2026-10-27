@@ -5692,9 +5692,14 @@ export type IKnowledgeAddContentInput =
       destination_parent_id?: KnowledgeEntryId;
     }
   | {
-      /** Append curated Feishu document links; bodies stay remote (metadata stubs). */
+      /** Append curated Feishu documents; bodies stay remote (metadata stubs).
+       * `title` is picker-supplied metadata — it skips the remote inspect call
+       * so adding works before the inspect scope is granted. An empty
+       * destination places new stubs at the base root. */
       type: 'feishu';
-      urls: string[];
+      docs: { url: string; title?: string }[];
+      destination_parent_path?: string;
+      destination_parent_id?: KnowledgeEntryId;
     };
 
 /**
@@ -5712,7 +5717,7 @@ export interface IKnowledgeAddContentRequest {
   destination_parent_path?: string;
   destination_parent_id?: KnowledgeEntryId;
   entries?: IKnowledgeSourceEntry[];
-  urls?: string[];
+  docs?: { url: string; title?: string }[];
 }
 
 /** Per-method outcome of adding content to an existing knowledge base. */

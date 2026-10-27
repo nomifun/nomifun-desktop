@@ -16,6 +16,7 @@ use nomifun_common::{AppError, KnowledgeBaseId, KnowledgeEntryId};
 use serde::{Deserialize, Serialize};
 
 use crate::export::{self, ExportSummary};
+use crate::feishu;
 use crate::service::{
     AppendUrlSourceSummary, AutogenOutcome, ConsumerInfo, FolderImportSummary, KbFileContent,
     KbFileEntry, KbFileUpdateResult, KbTreeEntry, KnowledgeBaseInfo, KnowledgeBinding,
@@ -307,9 +308,27 @@ enum AddContentRequest {
         #[serde(default)]
         destination_parent_id: Option<KnowledgeEntryId>,
     },
-    /// Append curated Feishu document links to a Feishu-backed base. Stubs
-    /// are metadata-only; bodies stay remote.
-    Feishu { urls: Vec<String> },
+    /// Append curated Feishu documents to a Feishu-backed base. Stubs are
+    /// metadata-only; bodies stay remote. Picker-provided titles skip the
+    /// remote metadata call entirely. An empty destination places new stubs
+    /// at the base root and resets the stored default.
+    Feishu {
+        docs: Vec<FeishuDocHint>,
+        #[serde(default)]
+        destination_parent_path: String,
+        #[serde(default)]
+        destination_parent_id: Option<KnowledgeEntryId>,
+    },
+}
+
+/// One curated Feishu document on the add-content wire. `title` is the
+/// document name shown by the picker; it is optional for pasted links.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FeishuDocHint {
+    url: String,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -421,7 +440,11 @@ async fn add_content(
                 first_file,
             }
         }
-        AddContentRequest::Feishu { urls } => {
+        AddContentRequest::Feishu {
+            docs,
+            destination_parent_path,
+            destination_parent_id,
+        } => {
             let AppendUrlSourceSummary {
                 added,
                 duplicates,
@@ -432,7 +455,17 @@ async fn add_content(
                 first_file,
             } = state
                 .service
-                .append_feishu_entries(knowledge_base_id.as_str(), urls)
+                .append_feishu_entries_into(
+                    knowledge_base_id.as_str(),
+                    docs.into_iter()
+                        .map(|doc| feishu::FeishuCuratedDoc {
+                            url: doc.url,
+                            title: doc.title,
+                        })
+                        .collect(),
+                    &destination_parent_path,
+                    destination_parent_id,
+                )
                 .await?;
             AddContentResponse::Feishu {
                 added,
@@ -1776,5 +1809,168 @@ mod tests {
             replay["data"]["tree_revision"],
             first["data"]["tree_revision"]
         );
+    }
+
+    /// Feishu curation needs the normalized source store, which `test_app`'s
+    /// `make_service` (MemRepo) does not provide — build the service on a
+    /// real sqlite database with the same router wiring instead.
+    #[tokio::test]
+    async fn feishu_add_content_route_round_trips_picker_docs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = nomifun_db::init_database(&dir.path().join("knowledge.db"))
+            .await
+            .unwrap();
+        let repository = Arc::new(nomifun_db::SqliteKnowledgeRepository::new(
+            db.pool().clone(),
+        ));
+        let base_repository: Arc<dyn nomifun_db::IKnowledgeRepository> = repository.clone();
+        let service = crate::service::KnowledgeService::new(
+            base_repository,
+            &dir.path().join("data"),
+            crate::events::KnowledgeEventEmitter::new(
+                Arc::new(crate::testutil::NoopBroadcaster),
+                Arc::from(TEST_PROVIDER_ID),
+            ),
+        );
+        service.set_entry_repository(repository.clone());
+        service.set_source_repository(repository);
+        service.set_tree_operation_repository(Arc::new(
+            nomifun_db::SqliteKnowledgeTreeOperationRepository::new(db.pool().clone()),
+        ));
+        let app = knowledge_routes(KnowledgeRouterState::new(Arc::new(service))).layer(
+            Extension(CurrentUser {
+                id: nomifun_common::UserId::new(),
+                username: "u1".into(),
+            }),
+        );
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/api/knowledge/bases")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "feishu route",
+                            "description": "",
+                            "source": {"kind": "feishu", "mode": "snapshot", "entries": []},
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created = json_body(created).await;
+        let kb_id = created["data"]["knowledge_base_id"].as_str().unwrap();
+        assert_eq!(created["data"]["kind"], "feishu", "{created}");
+
+        let content_endpoint = format!("/api/knowledge/bases/{kb_id}/content");
+        let add = serde_json::json!({
+            "type": "feishu",
+            "docs": [{"url": "https://t.feishu.cn/docx/TokAlpha", "title": "Alpha 规划"}],
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(&content_endpoint)
+                    .header("content-type", "application/json")
+                    .body(Body::from(add.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let added = json_body(response).await;
+        assert_eq!(added["data"]["type"], "feishu", "{added}");
+        assert_eq!(added["data"]["added"], 1, "{added}");
+        assert_eq!(added["data"]["indexed"], 1, "{added}");
+        assert_eq!(added["data"]["failed"], 0, "{added}");
+        assert_eq!(added["data"]["first_file"], "Alpha 规划.md", "{added}");
+
+        // The same curated doc is a duplicate, never a second index entry.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(&content_endpoint)
+                    .header("content-type", "application/json")
+                    .body(Body::from(add.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let duplicate = json_body(response).await;
+        assert_eq!(duplicate["data"]["added"], 0, "{duplicate}");
+        assert_eq!(duplicate["data"]["duplicates"], 1, "{duplicate}");
+
+        // A folder selected through the picker destination lands inside it.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/knowledge/bases/{kb_id}/folder"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"path":"notes"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(&content_endpoint)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "type": "feishu",
+                            "docs": [{"url": "https://t.feishu.cn/docx/TokBeta", "title": "Beta 备忘"}],
+                            "destination_parent_path": "notes",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let placed = json_body(response).await;
+        assert_eq!(placed["data"]["first_file"], "notes/Beta 备忘.md", "{placed}");
+
+        // Untitled links still fail closed through the remote inspect port.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(&content_endpoint)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "type": "feishu",
+                            "docs": [{"url": "https://t.feishu.cn/docx/TokGamma"}],
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let failed = json_body(response).await;
+        assert_eq!(failed["data"]["failed"], 1, "{failed}");
+
+        // The retired `urls` wire shape is rejected outright.
+        let response = app
+            .oneshot(
+                Request::post(&content_endpoint)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"type":"feishu","urls":["https://t.feishu.cn/docx/TokAlpha"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

@@ -2577,6 +2577,34 @@ impl KnowledgeService {
                     continue;
                 }
             };
+            if source.is_none() && self.source_repository().is_some() {
+                // Bases broken while the empty-curated-set bug was live lost
+                // their `extra.source` cache even though a normalized Feishu
+                // source row stayed active — rebuild the cache from it.
+                match self.restore_feishu_source_cache(&mut row).await {
+                    Ok(true) => {
+                        source = match source_from_extra(&row.extra) {
+                            Ok(source) => source,
+                            Err(error) => {
+                                tracing::warn!(
+                                    knowledge_base_id = %row.knowledge_base_id,
+                                    %error,
+                                    "knowledge boot-resume: restored source cache is invalid"
+                                );
+                                continue;
+                            }
+                        };
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            knowledge_base_id = %row.knowledge_base_id,
+                            %error,
+                            "knowledge boot-resume: failed to restore a stripped source cache"
+                        );
+                    }
+                }
+            }
             if self.source_repository().is_some()
                 && let Some(cached) = source.as_mut()
             {
@@ -2692,6 +2720,58 @@ impl KnowledgeService {
                 tracing::warn!(kb_id = %kb_id, error = %e, "knowledge boot-resume fetch failed");
             }
         }
+    }
+
+    /// Rebuild a stripped `extra.source` cache from durable normalized state.
+    /// Restores ONLY the unambiguous layout — exactly one active source and
+    /// it is Feishu — so a cache can never be invented for a base whose
+    /// configuration is genuinely absent or disputed.
+    async fn restore_feishu_source_cache(
+        &self,
+        row: &mut KnowledgeBaseRow,
+    ) -> Result<bool, AppError> {
+        let Some(repository) = self.source_repository() else {
+            return Ok(false);
+        };
+        let knowledge_base_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(
+            |error| {
+                AppError::Internal(format!(
+                    "stored knowledge base id '{}' is invalid: {error}",
+                    row.knowledge_base_id
+                ))
+            },
+        )?;
+        let active_sources = repository
+            .list_sources_for_base(&knowledge_base_id, false)
+            .await?
+            .into_iter()
+            .filter(|source| source.state == KnowledgeSourceState::Active)
+            .collect::<Vec<_>>();
+        let [source_row] = active_sources.as_slice() else {
+            if active_sources.len() > 1 {
+                tracing::warn!(
+                    knowledge_base_id = %row.knowledge_base_id,
+                    count = active_sources.len(),
+                    "knowledge boot-resume: multiple active sources; the stripped source cache cannot be restored unambiguously"
+                );
+            }
+            return Ok(false);
+        };
+        if source_row.kind != KnowledgeSourceKind::Feishu {
+            return Ok(false);
+        }
+        let mut source = KnowledgeSource {
+            source_id: Some(source_row.knowledge_source_id.clone()),
+            kind: FEISHU_SOURCE_KIND.into(),
+            mode: api_source_mode(source_row.mode),
+            revision: source_row.revision,
+            default_parent_entry_id: source_row.default_parent_entry_id.clone(),
+            entries: vec![],
+            last_fetched_at: None,
+        };
+        self.persist_source(row, &source).await?;
+        self.refresh_legacy_source_cache(row, &mut source).await?;
+        Ok(true)
     }
 
     /// Create-time snapshot pipeline, shared by the synchronous REST create
@@ -6900,7 +6980,11 @@ impl KnowledgeService {
         let remaining_items = source_repository
             .list_source_items(&resolved.source.knowledge_source_id, false)
             .await?;
-        let source_removed = remaining_items.is_empty();
+        // An emptied curated set still defines a Feishu base — the source
+        // aggregate stays active (no tombstone) so the base remains
+        // curatable instead of falling back to "blank".
+        let source_removed = remaining_items.is_empty()
+            && resolved.source.kind != KnowledgeSourceKind::Feishu;
         if source_removed {
             if let Err(error) = source_repository
                 .update_source(&UpdateKnowledgeSourceParams {
@@ -7020,56 +7104,13 @@ impl KnowledgeService {
             },
         };
 
-        let destination_parent_path = normalize_tree_rel_path(destination_parent_path)?;
-        let resolved_destination_parent_id = if destination_parent_path.is_empty()
-            && destination_parent_id.is_none()
-        {
-            None
-        } else {
-            self.ensure_projection_reconciled(&row).await?;
-            let repository = self.entry_repository().ok_or_else(|| {
-                AppError::Conflict(
-                    "stable knowledge entry validation is unavailable for the selected web-capture destination"
-                        .into(),
-                )
-            })?;
-            let knowledge_base_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(
-                |error| {
-                    AppError::Internal(format!(
-                        "stored knowledge base id '{}' is invalid: {error}",
-                        row.knowledge_base_id
-                    ))
-                },
-            )?;
-            let entry = match destination_parent_id {
-                Some(entry_id) => repository
-                    .get_entry(&knowledge_base_id, &entry_id)
-                    .await?
-                    .filter(|entry| !entry.is_deleted())
-                    .ok_or_else(|| {
-                        AppError::Conflict(
-                            "the selected web-capture destination moved or disappeared".into(),
-                        )
-                    })?,
-                None => repository
-                    .get_entry_by_path(
-                        &knowledge_base_id,
-                        &portable_writeback_path_identity(&destination_parent_path),
-                    )
-                    .await?
-                    .ok_or_else(|| {
-                        AppError::NotFound(format!(
-                            "web-capture destination not found: {destination_parent_path}"
-                        ))
-                    })?,
-            };
-            if !entry.is_directory() {
-                return Err(AppError::BadRequest(
-                    "web-capture destination must be a directory".into(),
-                ));
-            }
-            Some(entry.knowledge_entry_id)
-        };
+        let resolved_destination_parent_id = self
+            .resolve_content_destination(
+                &row,
+                destination_parent_path,
+                destination_parent_id,
+            )
+            .await?;
         // `append_url_entries_into` always carries a placement decision. An
         // empty destination explicitly resets a stale/deleted default to the
         // root/default capture folder.
@@ -7168,26 +7209,11 @@ impl KnowledgeService {
                         "knowledge source normalization did not produce an aggregate".into(),
                     )
                 })?;
-            if normalized.source.default_parent_entry_id
-                != source.default_parent_entry_id
-            {
-                let repository = self.source_repository().ok_or_else(|| {
-                    AppError::Internal(
-                        "knowledge source identity repository is unavailable".into(),
-                    )
-                })?;
-                normalized.source = repository
-                    .update_source(&UpdateKnowledgeSourceParams {
-                        knowledge_source_id: normalized.source.knowledge_source_id.clone(),
-                        expected_revision: normalized.source.revision,
-                        mode: normalized.source.mode,
-                        state: normalized.source.state,
-                        default_parent_entry_id: source.default_parent_entry_id.clone(),
-                        removed_at: normalized.source.removed_at,
-                        updated_at: now_ms(),
-                    })
-                    .await?;
-            }
+            self.sync_source_default_parent(
+                &mut normalized,
+                source.default_parent_entry_id.clone(),
+            )
+            .await?;
             let new_items = normalized
                 .items
                 .iter()
@@ -7241,6 +7267,93 @@ impl KnowledgeService {
         })
     }
 
+    /// Resolve an add-content destination — a tree path, a stable entry id,
+    /// or both — to a live directory entry id. `("", None)` means "default
+    /// placement" and resolves to `None`.
+    async fn resolve_content_destination(
+        &self,
+        row: &KnowledgeBaseRow,
+        destination_parent_path: &str,
+        destination_parent_id: Option<KnowledgeEntryId>,
+    ) -> Result<Option<KnowledgeEntryId>, AppError> {
+        let destination_parent_path = normalize_tree_rel_path(destination_parent_path)?;
+        if destination_parent_path.is_empty() && destination_parent_id.is_none() {
+            return Ok(None);
+        }
+        self.ensure_projection_reconciled(row).await?;
+        let repository = self.entry_repository().ok_or_else(|| {
+            AppError::Conflict(
+                "stable knowledge entry validation is unavailable for the selected destination"
+                    .into(),
+            )
+        })?;
+        let knowledge_base_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(
+            |error| {
+                AppError::Internal(format!(
+                    "stored knowledge base id '{}' is invalid: {error}",
+                    row.knowledge_base_id
+                ))
+            },
+        )?;
+        let entry = match destination_parent_id {
+            Some(entry_id) => repository
+                .get_entry(&knowledge_base_id, &entry_id)
+                .await?
+                .filter(|entry| !entry.is_deleted())
+                .ok_or_else(|| {
+                    AppError::Conflict(
+                        "the selected destination moved or disappeared".into(),
+                    )
+                })?,
+            None => repository
+                .get_entry_by_path(
+                    &knowledge_base_id,
+                    &portable_writeback_path_identity(&destination_parent_path),
+                )
+                .await?
+                .ok_or_else(|| {
+                    AppError::NotFound(format!(
+                        "destination not found: {destination_parent_path}"
+                    ))
+                })?,
+        };
+        if !entry.is_directory() {
+            return Err(AppError::BadRequest(
+                "destination must be a directory".into(),
+            ));
+        }
+        Ok(Some(entry.knowledge_entry_id))
+    }
+
+    /// Persist a changed default placement on the normalized source
+    /// aggregate; a no-op when the stored value already matches.
+    async fn sync_source_default_parent(
+        &self,
+        normalized: &mut NormalizedSourceAggregate,
+        desired: Option<KnowledgeEntryId>,
+    ) -> Result<(), AppError> {
+        if normalized.source.default_parent_entry_id == desired {
+            return Ok(());
+        }
+        let repository = self.source_repository().ok_or_else(|| {
+            AppError::Internal(
+                "knowledge source identity repository is unavailable".into(),
+            )
+        })?;
+        normalized.source = repository
+            .update_source(&UpdateKnowledgeSourceParams {
+                knowledge_source_id: normalized.source.knowledge_source_id.clone(),
+                expected_revision: normalized.source.revision,
+                mode: normalized.source.mode,
+                state: normalized.source.state,
+                default_parent_entry_id: desired,
+                removed_at: normalized.source.removed_at,
+                updated_at: now_ms(),
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Append curated Feishu document links to an existing Feishu source and
     /// publish their metadata stubs. The base must already carry a `feishu`
     /// source (created through `create_base`); this never bootstraps one.
@@ -7248,14 +7361,30 @@ impl KnowledgeService {
     pub async fn append_feishu_entries(
         &self,
         kb_id: &str,
-        urls: Vec<String>,
+        docs: Vec<feishu::FeishuCuratedDoc>,
     ) -> Result<AppendUrlSourceSummary, AppError> {
-        if urls.is_empty() {
+        self.append_feishu_entries_into(kb_id, docs, "", None)
+            .await
+    }
+
+    /// Like [`Self::append_feishu_entries`] but with an explicit placement
+    /// decision: `destination_parent_path`/`destination_parent_id` select the
+    /// directory new stubs are published into and become the source's default
+    /// parent (an empty destination resets it). Feishu stubs default to the
+    /// knowledge-base root rather than the URL `snapshots/` capture folder.
+    pub async fn append_feishu_entries_into(
+        &self,
+        kb_id: &str,
+        docs: Vec<feishu::FeishuCuratedDoc>,
+        destination_parent_path: &str,
+        destination_parent_id: Option<KnowledgeEntryId>,
+    ) -> Result<AppendUrlSourceSummary, AppError> {
+        if docs.is_empty() {
             return Err(AppError::BadRequest(
                 "at least one Feishu document link is required".into(),
             ));
         }
-        if urls.len() > MAX_FEISHU_SOURCE_ENTRIES {
+        if docs.len() > MAX_FEISHU_SOURCE_ENTRIES {
             return Err(AppError::BadRequest(format!(
                 "Feishu entry batch exceeds the limit of {MAX_FEISHU_SOURCE_ENTRIES}"
             )));
@@ -7275,6 +7404,15 @@ impl KnowledgeService {
                 "Feishu curation requires the normalized source store".into(),
             ));
         }
+        // Every append carries a placement decision — an empty destination
+        // explicitly resets a stale default to the root.
+        source.default_parent_entry_id = self
+            .resolve_content_destination(
+                &row,
+                destination_parent_path,
+                destination_parent_id,
+            )
+            .await?;
 
         let mut identities = HashSet::new();
         for entry in &source.entries {
@@ -7287,8 +7425,8 @@ impl KnowledgeService {
         }
         let mut accepted = Vec::new();
         let mut duplicates = 0usize;
-        for url in urls {
-            let url = url.trim().to_owned();
+        for doc in docs {
+            let url = doc.url.trim().to_owned();
             if feishu::feishu_link_target(&url).is_none() {
                 return Err(AppError::BadRequest(format!(
                     "only official doc/docx/wiki Feishu links are supported: {url}"
@@ -7299,9 +7437,13 @@ impl KnowledgeService {
                 duplicates += 1;
                 continue;
             }
+            let title = doc
+                .title
+                .as_deref()
+                .and_then(normalize_feishu_entry_title);
             accepted.push(KnowledgeSourceEntry {
                 url,
-                title: None,
+                title,
                 sync_status: KnowledgeSourceSyncStatus::Pending,
                 last_success_at: None,
                 last_error: None,
@@ -7330,7 +7472,7 @@ impl KnowledgeService {
         validate_source(&source)?;
 
         self.persist_source(&mut row, &source).await?;
-        let normalized = self
+        let mut normalized = self
             .ensure_normalized_source(&row)
             .await?
             .ok_or_else(|| {
@@ -7338,6 +7480,11 @@ impl KnowledgeService {
                     "knowledge source normalization did not produce an aggregate".into(),
                 )
             })?;
+        self.sync_source_default_parent(
+            &mut normalized,
+            source.default_parent_entry_id.clone(),
+        )
+        .await?;
         let new_items = normalized
             .items
             .iter()
@@ -7805,16 +7952,48 @@ impl KnowledgeService {
     /// Metadata-only "fetch" for a curated Feishu link: resolve type/title/
     /// update time through the injected port and produce the index stub. The
     /// remote body is never read here.
+    ///
+    /// A first publish carrying a picker-supplied title skips the remote
+    /// inspect call entirely — the URL already encodes the stable kind/token
+    /// identity, so adding a document works even when the account has not
+    /// granted the inspect scope. Refreshes (and untitled pasted links) still
+    /// inspect remotely, and inspect errors stay failures so mount refresh
+    /// can mark the index stale instead of silently re-publishing last-good
+    /// metadata.
     async fn prepare_feishu_stub(
         &self,
         item: &KnowledgeSourceItemRow,
         port: &dyn FeishuKnowledgePort,
     ) -> Result<PreparedSourceBody, String> {
         background::ensure_open().map_err(|error| error.to_string())?;
-        let meta = port
-            .inspect_link(&item.requested_url)
-            .await
-            .map_err(|error| format!("{}: {error}", item.requested_url))?;
+        let provided_title = item
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "));
+        let first_publish_meta = if item.last_success_at.is_none() {
+            match (feishu::feishu_link_target(&item.requested_url), provided_title) {
+                (Some((kind, token)), Some(title)) => Some(FeishuIndexHit {
+                    token,
+                    kind,
+                    title,
+                    url: Some(item.requested_url.clone()),
+                    modified_at: None,
+                    summary: None,
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let meta = match first_publish_meta {
+            Some(meta) => meta,
+            None => port
+                .inspect_link(&item.requested_url)
+                .await
+                .map_err(|error| format!("{}: {error}", item.requested_url))?,
+        };
         if meta.title.trim().is_empty() {
             return Err(format!(
                 "{}: remote metadata returned no document title",
@@ -7947,7 +8126,12 @@ impl KnowledgeService {
         let mut items = repository
             .list_source_items(&normalized.source.knowledge_source_id, false)
             .await?;
-        if items.is_empty() || normalized.source.state == KnowledgeSourceState::Removed {
+        if normalized.source.state == KnowledgeSourceState::Removed {
+            return self.clear_legacy_source_cache(row).await;
+        }
+        // An empty curated set still defines a Feishu base — clearing the
+        // source would strip the base's kind and break later curation.
+        if items.is_empty() && normalized.source.kind != KnowledgeSourceKind::Feishu {
             return self.clear_legacy_source_cache(row).await;
         }
         items.sort_by(|left, right| {
@@ -8344,7 +8528,7 @@ impl KnowledgeService {
                     }
                 }
             } else {
-                let destination_parent_path = if let Some(parent_entry_id) =
+                let allocation_parent: Option<String> = if let Some(parent_entry_id) =
                     current_source.default_parent_entry_id.as_ref()
                 {
                     match entry_repository
@@ -8352,10 +8536,10 @@ impl KnowledgeService {
                         .await
                     {
                         Ok(Some(parent)) if !parent.is_deleted() && parent.is_directory() => {
-                            parent.rel_path
+                            Some(parent.rel_path)
                         }
                         _ => {
-                            let error = "the selected web-capture destination no longer exists";
+                            let error = "the selected destination no longer exists";
                             if let Err(db_error) = source_repository
                                 .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
                                     knowledge_source_item_id: item
@@ -8377,17 +8561,23 @@ impl KnowledgeService {
                             continue;
                         }
                     }
+                } else if current_source.kind == KnowledgeSourceKind::Feishu {
+                    // Feishu stubs are a curated name index — without a chosen
+                    // folder they land at the base root, not in `snapshots/`.
+                    Some(String::new())
                 } else {
-                    String::new()
+                    None
                 };
                 let allocation_root = root.clone();
-                let allocation_parent = destination_parent_path.clone();
                 let requested_url = item.requested_url.clone();
                 let name_hint = prepared.name_hint.clone();
                 match tokio::task::spawn_blocking(move || {
                     allocate_managed_source_rel_path(
                         &allocation_root,
-                        &allocation_parent,
+                        match &allocation_parent {
+                            None => ManagedSourcePlacement::DefaultCaptureDirectory,
+                            Some(path) => ManagedSourcePlacement::Directory(path.as_str()),
+                        },
                         &requested_url,
                         name_hint.as_deref(),
                     )
@@ -8419,7 +8609,7 @@ impl KnowledgeService {
                     Err(error) => {
                         background::record_join_failure(&error);
                         let message = format!(
-                            "web-capture path allocation task failed: {error}"
+                            "capture path allocation task failed: {error}"
                         );
                         if let Err(db_error) = source_repository
                             .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
@@ -10426,6 +10616,22 @@ fn validate_feishu_source(source: &KnowledgeSource) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Normalize a picker/paste-supplied Feishu title into a valid source entry
+/// title: strip NUL, collapse whitespace, and bound it to the
+/// `validate_feishu_source` byte limit without splitting a char. `None` means
+/// nothing usable remains and the add falls back to a remote inspect.
+fn normalize_feishu_entry_title(title: &str) -> Option<String> {
+    let collapsed = title
+        .replace('\0', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    Some(source_url::truncate_to_bytes(&collapsed, 1024).to_owned())
+}
+
 fn sanitize_source_entries(source: &mut KnowledgeSource) {
     for entry in &mut source.entries {
         entry.url = entry.url.trim().to_owned();
@@ -10602,45 +10808,56 @@ fn source_snapshot_rel_paths(entries: &[KnowledgeSourceEntry]) -> Vec<String> {
         .collect()
 }
 
+enum ManagedSourcePlacement<'a> {
+    /// URL sources without a chosen folder: the shared `snapshots/` capture directory.
+    DefaultCaptureDirectory,
+    /// A resolved tree directory; "" is the knowledge-base root.
+    Directory(&'a str),
+}
+
 fn allocate_managed_source_rel_path(
     root: &Path,
-    destination_parent_rel_path: &str,
+    placement: ManagedSourcePlacement<'_>,
     requested_url: &str,
     name_hint: Option<&str>,
 ) -> Result<String, AppError> {
     validate_knowledge_root(root)?;
-    let (parent, parent_rel_path) = if destination_parent_rel_path.is_empty() {
-        let directory_name = source_url::SNAPSHOT_REL_DIR;
-        let directory = match find_portable_tree_child(root, directory_name)? {
-            Some(existing) => {
-                if metadata_is_link_or_reparse(&existing.path, &existing.metadata)
-                    || !existing.metadata.is_dir()
-                {
-                    return Err(AppError::Conflict(
-                        "the default web-capture destination is not a real directory".into(),
-                    ));
+    let (parent, parent_rel_path) = match placement {
+        ManagedSourcePlacement::DefaultCaptureDirectory => {
+            let directory_name = source_url::SNAPSHOT_REL_DIR;
+            let directory = match find_portable_tree_child(root, directory_name)? {
+                Some(existing) => {
+                    if metadata_is_link_or_reparse(&existing.path, &existing.metadata)
+                        || !existing.metadata.is_dir()
+                    {
+                        return Err(AppError::Conflict(
+                            "the default capture destination is not a real directory".into(),
+                        ));
+                    }
+                    existing.path
                 }
-                existing.path
-            }
-            None => {
-                let path = root.join(directory_name);
-                std::fs::create_dir(&path).map_err(|error| {
-                    AppError::Internal(format!(
-                        "failed to create default web-capture directory: {error}"
-                    ))
-                })?;
-                path
-            }
-        };
-        (directory, directory_name.to_owned())
-    } else {
-        let (path, metadata) = resolve_tree_existing_path(root, destination_parent_rel_path)?;
-        if !metadata.is_dir() {
-            return Err(AppError::BadRequest(format!(
-                "web-capture destination is not a directory: {destination_parent_rel_path}"
-            )));
+                None => {
+                    let path = root.join(directory_name);
+                    std::fs::create_dir(&path).map_err(|error| {
+                        AppError::Internal(format!(
+                            "failed to create the default capture directory: {error}"
+                        ))
+                    })?;
+                    path
+                }
+            };
+            (directory, directory_name.to_owned())
         }
-        (path, destination_parent_rel_path.to_owned())
+        ManagedSourcePlacement::Directory("") => (root.to_path_buf(), String::new()),
+        ManagedSourcePlacement::Directory(rel_path) => {
+            let (path, metadata) = resolve_tree_existing_path(root, rel_path)?;
+            if !metadata.is_dir() {
+                return Err(AppError::BadRequest(format!(
+                    "capture destination is not a directory: {rel_path}"
+                )));
+            }
+            (path, rel_path.to_owned())
+        }
     };
     let parsed = Url::parse(requested_url).map_err(|error| {
         AppError::Internal(format!(
@@ -10683,14 +10900,18 @@ fn sanitize_title_file_stem(title: &str) -> Option<String> {
             continue;
         }
         last_was_space = false;
-        stem.push(match ch {
+        let sanitized = match ch {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
             c if c.is_control() => '-',
             c => c,
-        });
-        if stem.chars().count() >= 120 {
+        };
+        // Bound by chars AND bytes: the file name still gains ".md" (plus a
+        // "-N" duplicate suffix) inside the 255-byte portable component
+        // limit, so wide remote titles must not overflow it.
+        if stem.chars().count() >= 120 || stem.len() + sanitized.len_utf8() > 240 {
             break;
         }
+        stem.push(sanitized);
     }
     let stem = stem.trim_end_matches(['.', ' ']).to_owned();
     if stem.is_empty() {
@@ -23390,6 +23611,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn feishu_append_with_picker_title_needs_no_remote_inspect() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = nomifun_db::init_database(&dir.path().join("knowledge.db"))
+            .await
+            .unwrap();
+        let (service, _knowledge_repository, _operation_repository) = durable_sqlite_service(
+            &db,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        // Inspect is unavailable (e.g. the metadata scope is not granted yet);
+        // a picker-supplied title must still produce a title-named stub.
+        let port = FakeFeishuPort::default();
+        port.fail(AppError::Conflict("missing required scope(s): drive:drive.metadata:readonly".into()));
+        service.set_feishu_knowledge_port(Arc::new(port));
+        let info = service
+            .create_base("feishu-base", "", None, Some(feishu_source(&[])))
+            .await
+            .unwrap();
+        let summary = service
+            .append_feishu_entries(
+                &info.knowledge_base_id,
+                vec![feishu::FeishuCuratedDoc {
+                    url: "https://t.feishu.cn/docx/TokAlpha".into(),
+                    title: Some("产品 规划".into()),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!((summary.added, summary.fetched, summary.failed), (1, 1, 0), "{summary:?}");
+        let root = PathBuf::from(&info.root_path);
+        let stub = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .chain(
+                std::fs::read_dir(root.join("snapshots"))
+                    .map(|dir| dir.filter_map(|entry| entry.ok().map(|entry| entry.path())).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            )
+            .find(|path| path.extension().is_some_and(|ext| ext == "md"))
+            .expect("a feishu stub must be published");
+        let content = std::fs::read_to_string(&stub).unwrap();
+        assert!(content.contains("nomifun_remote_backend**: feishu"));
+        assert!(content.contains("# 产品 规划"));
+        // Without a supplied title the same call still fails closed.
+        let summary = service
+            .append_feishu_entries(
+                &info.knowledge_base_id,
+                vec![feishu::FeishuCuratedDoc {
+                    url: "https://t.feishu.cn/docx/TokBeta".into(),
+                    title: None,
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.failed, 1, "{summary:?}");
+        assert!(!summary.errors.is_empty());
+    }
+
+    #[tokio::test]
     async fn feishu_source_publish_is_metadata_only_and_title_named() {
         let dir = tempfile::TempDir::new().unwrap();
         let db = nomifun_db::init_database(&dir.path().join("knowledge.db"))
@@ -23562,6 +23843,314 @@ mod tests {
             .unwrap();
         assert_eq!(mounts.len(), 1);
         assert!(mounts[0].remote_index_stale, "failed refresh must mark stale");
+    }
+
+    #[tokio::test]
+    async fn feishu_empty_base_keeps_kind_and_accepts_picker_docs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = nomifun_db::init_database(&dir.path().join("knowledge.db"))
+            .await
+            .unwrap();
+        let (service, _knowledge_repository, _operation_repository) = durable_sqlite_service(
+            &db,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        service.set_feishu_knowledge_port(Arc::new(FakeFeishuPort::default()));
+        let info = service
+            .create_base("feishu-base", "", None, Some(feishu_source(&[])))
+            .await
+            .unwrap();
+        let created = service
+            .get_base_info(info.knowledge_base_id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(created.kind, "feishu");
+        assert_eq!(
+            created.source.as_ref().map(|source| source.entries.len()),
+            Some(0),
+            "an empty curated set must still expose a feishu source"
+        );
+
+        let doc_url = "https://t.feishu.cn/docx/TokAlpha";
+        let summary = service
+            .append_feishu_entries(
+                info.knowledge_base_id.as_str(),
+                vec![feishu::FeishuCuratedDoc {
+                    url: doc_url.into(),
+                    title: Some("Alpha 规划".into()),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!((summary.added, summary.fetched, summary.failed), (1, 1, 0), "{summary:?}");
+        let updated = service
+            .get_base_info(info.knowledge_base_id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(updated.kind, "feishu");
+        let entry = updated
+            .source
+            .as_ref()
+            .and_then(|source| source.entries.iter().find(|entry| entry.url == doc_url))
+            .expect("the appended doc must be in source.entries");
+        assert_eq!(entry.title.as_deref(), Some("Alpha 规划"));
+        // Feishu stubs land at the base root, not in the web `snapshots/` folder.
+        let root_entries = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap();
+        assert!(
+            root_entries
+                .iter()
+                .any(|entry| entry.rel_path == "Alpha 规划.md" && entry.is_file),
+            "root listing must contain the title-named stub: {root_entries:?}"
+        );
+        assert!(
+            PathBuf::from(&info.root_path).join("Alpha 规划.md").is_file()
+        );
+
+        let duplicate = service
+            .append_feishu_entries(
+                info.knowledge_base_id.as_str(),
+                vec![feishu::FeishuCuratedDoc {
+                    url: doc_url.into(),
+                    title: Some("Alpha 规划".into()),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!((duplicate.added, duplicate.duplicates), (0, 1), "{duplicate:?}");
+    }
+
+    #[tokio::test]
+    async fn feishu_removing_last_doc_keeps_the_base_curatable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = nomifun_db::init_database(&dir.path().join("knowledge.db"))
+            .await
+            .unwrap();
+        let (service, _knowledge_repository, _operation_repository) = durable_sqlite_service(
+            &db,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        service.set_feishu_knowledge_port(Arc::new(FakeFeishuPort::default()));
+        let info = service
+            .create_base("feishu-base", "", None, Some(feishu_source(&[])))
+            .await
+            .unwrap();
+        let doc_url = "https://t.feishu.cn/docx/TokAlpha";
+        service
+            .append_feishu_entries(
+                info.knowledge_base_id.as_str(),
+                vec![feishu::FeishuCuratedDoc {
+                    url: doc_url.into(),
+                    title: Some("Alpha 规划".into()),
+                }],
+            )
+            .await
+            .unwrap();
+        let stub = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.rel_path == "Alpha 规划.md")
+            .expect("the published stub must be listed");
+        let result = service
+            .remove_entry_source(
+                info.knowledge_base_id.as_str(),
+                stub.entry_id.as_ref().unwrap(),
+                stub.revision.unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(result.removed);
+        let updated = service
+            .get_base_info(info.knowledge_base_id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(updated.kind, "feishu");
+        assert_eq!(
+            updated.source.as_ref().map(|source| source.entries.len()),
+            Some(0),
+            "removing the last curated doc must keep an empty feishu source"
+        );
+        let readded = service
+            .append_feishu_entries(
+                info.knowledge_base_id.as_str(),
+                vec![feishu::FeishuCuratedDoc {
+                    url: doc_url.into(),
+                    title: Some("Alpha 规划".into()),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!((readded.added, readded.failed), (1, 0), "{readded:?}");
+    }
+
+    #[tokio::test]
+    async fn feishu_boot_restores_a_stripped_source_cache() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = nomifun_db::init_database(&dir.path().join("knowledge.db"))
+            .await
+            .unwrap();
+        let (service, knowledge_repository, _operation_repository) = durable_sqlite_service(
+            &db,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        let service = Arc::new(service);
+        service.set_feishu_knowledge_port(Arc::new(FakeFeishuPort::default()));
+        let info = service
+            .create_base("feishu-base", "", None, Some(feishu_source(&[])))
+            .await
+            .unwrap();
+
+        // Simulate bases damaged while the empty-curated-set bug was live:
+        // the normalized feishu source stays active but `extra.source` is gone.
+        let mut row = knowledge_repository
+            .get_base(info.knowledge_base_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap();
+        extra.as_object_mut().unwrap().remove("source");
+        row.extra = extra.to_string();
+        knowledge_repository.update_base(&row).await.unwrap();
+        let stripped = service
+            .get_base_info(info.knowledge_base_id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(stripped.kind, "blank", "stripped cache must hide the feishu kind");
+
+        Arc::clone(&service).resume_pending_source_fetches().await;
+
+        let repaired = service
+            .get_base_info(info.knowledge_base_id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(repaired.kind, "feishu");
+        assert!(repaired.source.is_some());
+        let summary = service
+            .append_feishu_entries(
+                info.knowledge_base_id.as_str(),
+                vec![feishu::FeishuCuratedDoc {
+                    url: "https://t.feishu.cn/docx/TokAlpha".into(),
+                    title: Some("Alpha 规划".into()),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!((summary.added, summary.failed), (1, 0), "{summary:?}");
+    }
+
+    #[tokio::test]
+    async fn feishu_append_into_selected_folder_places_the_stub_there() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = nomifun_db::init_database(&dir.path().join("knowledge.db"))
+            .await
+            .unwrap();
+        let (service, _knowledge_repository, _operation_repository) = durable_sqlite_service(
+            &db,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        service.set_feishu_knowledge_port(Arc::new(FakeFeishuPort::default()));
+        let info = service
+            .create_base("feishu-base", "", None, Some(feishu_source(&[])))
+            .await
+            .unwrap();
+        service
+            .create_folder(info.knowledge_base_id.as_str(), "notes")
+            .await
+            .unwrap();
+        let summary = service
+            .append_feishu_entries_into(
+                info.knowledge_base_id.as_str(),
+                vec![feishu::FeishuCuratedDoc {
+                    url: "https://t.feishu.cn/docx/TokAlpha".into(),
+                    title: Some("Alpha 规划".into()),
+                }],
+                "notes",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            summary.first_file.as_deref(),
+            Some("notes/Alpha 规划.md"),
+            "{summary:?}"
+        );
+        assert!(
+            PathBuf::from(&info.root_path)
+                .join("notes")
+                .join("Alpha 规划.md")
+                .is_file()
+        );
+        // An explicit empty destination resets the default: the next stub
+        // lands at the base root again.
+        let summary = service
+            .append_feishu_entries_into(
+                info.knowledge_base_id.as_str(),
+                vec![feishu::FeishuCuratedDoc {
+                    url: "https://t.feishu.cn/docx/TokBeta".into(),
+                    title: Some("Beta 备忘".into()),
+                }],
+                "",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.first_file.as_deref(), Some("Beta 备忘.md"), "{summary:?}");
+        assert!(
+            PathBuf::from(&info.root_path).join("Beta 备忘.md").is_file()
+        );
+    }
+
+    #[tokio::test]
+    async fn feishu_append_normalizes_oversized_picker_titles() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = nomifun_db::init_database(&dir.path().join("knowledge.db"))
+            .await
+            .unwrap();
+        let (service, _knowledge_repository, _operation_repository) = durable_sqlite_service(
+            &db,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        service.set_feishu_knowledge_port(Arc::new(FakeFeishuPort::default()));
+        let info = service
+            .create_base("feishu-base", "", None, Some(feishu_source(&[])))
+            .await
+            .unwrap();
+        // A remote title with an embedded NUL and more than the 1024-byte
+        // source-title limit must never reject the whole add.
+        let long_title = format!("T\0{}", "题".repeat(400));
+        let summary = service
+            .append_feishu_entries(
+                info.knowledge_base_id.as_str(),
+                vec![feishu::FeishuCuratedDoc {
+                    url: "https://t.feishu.cn/docx/TokAlpha".into(),
+                    title: Some(long_title),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!((summary.added, summary.failed), (1, 0), "{summary:?}");
+        let updated = service
+            .get_base_info(info.knowledge_base_id.as_str())
+            .await
+            .unwrap();
+        let stored = updated
+            .source
+            .as_ref()
+            .and_then(|source| source.entries.first())
+            .and_then(|entry| entry.title.as_deref())
+            .expect("the normalized title must be stored");
+        assert!(stored.len() <= 1024, "stored title must fit the limit: {}", stored.len());
+        assert!(!stored.contains('\0'));
+        assert!(stored.starts_with('T'));
     }
 
     /// A5: creating a base with tags persists them in the returned info.

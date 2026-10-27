@@ -31,7 +31,7 @@ function SaveToBaseDialog({ item, onClose, onError, onSaved }: {
     if (!item.url || saving) return;
     setSaving(true);
     try {
-      await addKnowledgeContent(knowledgeBaseId, { type: 'feishu', urls: [item.url] });
+      await addKnowledgeContent(knowledgeBaseId, { type: 'feishu', docs: [{ url: item.url, title: item.title || undefined }] });
       onSaved();
       Message.success({ content: t('knowledge.feishu.savedToBase', { defaultValue: '已加入知识库索引' }), duration: 3000 });
     } catch (error) { onError(error); }

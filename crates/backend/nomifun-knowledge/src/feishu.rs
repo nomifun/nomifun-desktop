@@ -36,6 +36,16 @@ pub struct FeishuIndexHit {
     pub summary: Option<String>,
 }
 
+/// One curated document supplied to `append_feishu_entries`. `title` is the
+/// optional picker-provided document name — when present on a first publish
+/// it makes the remote metadata call unnecessary, so adding works even when
+/// the account has not granted the inspect scope yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeishuCuratedDoc {
+    pub url: String,
+    pub title: Option<String>,
+}
+
 /// Live-fetched document body (never persisted by this crate).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeishuDocContent {

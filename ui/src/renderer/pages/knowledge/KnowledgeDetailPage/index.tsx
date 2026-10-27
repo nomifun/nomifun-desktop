@@ -46,6 +46,7 @@ import {
   EditTwo,
   FolderOpen,
   FolderPlus,
+  LarkOne,
   Left,
   LinkCloud,
   LinkOne,
@@ -92,6 +93,7 @@ import { getKindConfig, KindIcon, type KindConfig } from '../knowledgeKind';
 import KnowledgeAddContentControl, {
   type KnowledgeAddContentControlHandle,
 } from './KnowledgeAddContentControl';
+import FeishuDocPickerPanel from './FeishuDocPickerPanel';
 import {
   KnowledgeTreeDnd,
   KnowledgeTreeDndHandle,
@@ -596,6 +598,7 @@ const KnowledgeDetailPage: React.FC = () => {
   const [refreshingSource, setRefreshingSource] = useState(false);
   const [enablingLocalFolderEdits, setEnablingLocalFolderEdits] = useState(false);
   const [fileSearch, setFileSearch] = useState('');
+  const [feishuPickerOpen, setFeishuPickerOpen] = useState(true);
   const [treeAction, setTreeAction] = useState<'reveal' | 'expand' | null>(null);
   const [movingPath, setMovingPath] = useState<string | null>(null);
   const [moveTarget, setMoveTarget] = useState<IKnowledgeTreeEntry | null>(null);
@@ -677,6 +680,7 @@ const KnowledgeDetailPage: React.FC = () => {
     loadedDocumentPathRef.current = null;
     loadedDocumentVersionRef.current = null;
     lastTreeRevisionRef.current = null;
+    setFeishuPickerOpen(true);
     dispatchTree({ type: 'reset-base' });
   }, [id]);
 
@@ -949,6 +953,18 @@ const KnowledgeDetailPage: React.FC = () => {
         dispatchTree({ type: 'select-file', path: result.first_file });
       } else {
         dispatchTree({ type: 'select-folder', path: result.target_directory });
+      }
+      return;
+    }
+    if (result.type === 'feishu') {
+      // The picker stays open for continued curation — the new stub is only
+      // revealed in the tree (no file selection, so the panel does not
+      // switch back to the preview).
+      if (result.first_file) {
+        const parent = parentDirOfKnowledgePath(result.first_file);
+        await reloadTreePath(parent);
+        dispatchTree({ type: 'select-tree-key', path: result.first_file });
+        scrollCurrentTreeNodeIntoView();
       }
       return;
     }
@@ -1962,6 +1978,11 @@ const KnowledgeDetailPage: React.FC = () => {
                       knowledgeBaseId={id}
                       baseRootPath={base.root_path}
                       baseKind={base.kind}
+                      onBrowseFeishu={
+                        base.kind === 'feishu'
+                          ? () => setFeishuPickerOpen(true)
+                          : undefined
+                      }
                       defaultFolderPath={defaultContentFolderPath}
                       defaultFolderEntryId={defaultContentFolderEntryId}
                       existingUrlCount={
@@ -2097,6 +2118,7 @@ const KnowledgeDetailPage: React.FC = () => {
                             ?.props?.dataRef;
                           if (!dataRef) return;
                           if (dataRef.is_file) {
+                            setFeishuPickerOpen(false);
                             dispatchTree({ type: 'select-file', path: dataRef.rel_path });
                           } else {
                             dispatchTree({ type: 'select-folder', path: dataRef.rel_path });
@@ -2218,9 +2240,21 @@ const KnowledgeDetailPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* ─── Right: Viewer / editor panel ─── */}
+              {/* ─── Right: Viewer / editor panel (Feishu bases show a remote
+                  document picker that curates entries in one click) ─── */}
               <div className='knowledge-doc-panel-frame box-border min-h-0 min-w-0 flex-1 flex flex-col overflow-hidden rd-12px bg-transparent'>
-                {selectedPath == null ? (
+                {base?.kind === 'feishu' && id && (feishuPickerOpen || selectedPath == null) ? (
+                  <FeishuDocPickerPanel
+                    key={id}
+                    knowledgeBaseId={id}
+                    curatedUrls={source?.entries.map((entry) => entry.url) ?? []}
+                    destinationPath={defaultContentFolderPath}
+                    destinationEntryId={defaultContentFolderEntryId}
+                    hasSelection={selectedPath != null}
+                    onClose={() => setFeishuPickerOpen(false)}
+                    onAdded={handleContentAdded}
+                  />
+                ) : selectedPath == null ? (
                   <div className='flex-1 grid place-items-center'>
                     <Empty description={t('knowledge.selectFile')} />
                   </div>
@@ -2265,6 +2299,17 @@ const KnowledgeDetailPage: React.FC = () => {
                       </div>
                       {/* Right side controls */}
                       <div className='flex items-center gap-10px shrink-0'>
+                        {base?.kind === 'feishu' && (
+                          <Button
+                            size='small'
+                            icon={<LarkOne theme='outline' size='12' />}
+                            onClick={() => setFeishuPickerOpen(true)}
+                          >
+                            {t('knowledge.detail.feishu.browseDocs', {
+                              defaultValue: '飞书文档',
+                            })}
+                          </Button>
+                        )}
                         {/* Preview / Edit segmented toggle */}
                         <div className='inline-flex bg-[var(--color-fill-2)] border border-solid border-[var(--color-border-3)] rd-8px p-2px'>
                           <button

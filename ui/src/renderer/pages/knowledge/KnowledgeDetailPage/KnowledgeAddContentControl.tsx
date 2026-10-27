@@ -6,7 +6,7 @@
 
 import React, { forwardRef, useCallback, useImperativeHandle, useState } from 'react';
 import { Button, Input, Message, Modal, Popover, Switch } from '@arco-design/web-react';
-import { FolderOpen, Info, LarkOne, LinkCloud, Plus, Upload } from '@icon-park/react';
+import { FolderOpen, Info, LarkOne, LinkCloud, LinkOne, Plus, Upload } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { IKnowledgeAddContentResult, IKnowledgeBase } from '@/common/adapter/ipcBridge';
@@ -30,6 +30,8 @@ interface KnowledgeAddContentControlProps {
   knowledgeBaseId: KnowledgeBaseId;
   baseRootPath: string;
   baseKind?: IKnowledgeBase['kind'];
+  /** Opens the Feishu document picker panel (feishu bases only). */
+  onBrowseFeishu?: () => void;
   defaultFolderPath: string;
   defaultFolderEntryId?: KnowledgeEntryId;
   existingUrlCount: number;
@@ -41,6 +43,7 @@ type AddKnowledgeMenuPanelProps = {
   onImportFolder: () => void;
   onImportWeb: () => void;
   webDisabled: boolean;
+  onBrowseFeishu?: () => void;
   onImportFeishu?: () => void;
 };
 
@@ -49,6 +52,7 @@ const AddKnowledgeMenuPanel: React.FC<AddKnowledgeMenuPanelProps> = ({
   onImportFolder,
   onImportWeb,
   webDisabled,
+  onBrowseFeishu,
   onImportFeishu,
 }) => {
   const { t } = useTranslation();
@@ -111,14 +115,29 @@ const AddKnowledgeMenuPanel: React.FC<AddKnowledgeMenuPanelProps> = ({
           </span>
         </span>
       </button>
-      {onImportFeishu && (
-        <button type='button' className={itemClass} onClick={onImportFeishu}>
+      {onBrowseFeishu && (
+        <button type='button' className={itemClass} onClick={onBrowseFeishu}>
           <span className={iconClass}>
             <LarkOne theme='outline' size='15' />
           </span>
           <span className='min-w-0'>
             <span className='block text-12px font-600 leading-18px text-[var(--color-text-1)]'>
-              {t('knowledge.detail.docs.importFeishu', { defaultValue: '飞书文档' })}
+              {t('knowledge.detail.docs.browseFeishu', { defaultValue: '选择飞书文档' })}
+            </span>
+            <span className='block text-10px leading-16px text-[var(--color-text-3)]'>
+              {t('knowledge.detail.docs.browseFeishuHint', { defaultValue: '搜索并一键加入名称索引' })}
+            </span>
+          </span>
+        </button>
+      )}
+      {onImportFeishu && (
+        <button type='button' className={itemClass} onClick={onImportFeishu}>
+          <span className={iconClass}>
+            <LinkOne theme='outline' size='15' />
+          </span>
+          <span className='min-w-0'>
+            <span className='block text-12px font-600 leading-18px text-[var(--color-text-1)]'>
+              {t('knowledge.detail.docs.importFeishu', { defaultValue: '粘贴飞书链接' })}
             </span>
             <span className='block text-10px leading-16px text-[var(--color-text-3)]'>
               {t('knowledge.detail.docs.importFeishuHint', { defaultValue: '添加飞书文档链接作实时索引' })}
@@ -137,7 +156,7 @@ const AddKnowledgeMenuPanel: React.FC<AddKnowledgeMenuPanelProps> = ({
 const KnowledgeAddContentControl = forwardRef<
   KnowledgeAddContentControlHandle,
   KnowledgeAddContentControlProps
->(({ knowledgeBaseId, baseRootPath, baseKind, defaultFolderPath, defaultFolderEntryId, existingUrlCount, onAdded }, ref) => {
+>(({ knowledgeBaseId, baseRootPath, baseKind, onBrowseFeishu, defaultFolderPath, defaultFolderEntryId, existingUrlCount, onAdded }, ref) => {
   const { t } = useTranslation();
   const desktop = isDesktopShell();
   const [menuVisible, setMenuVisible] = useState(false);
@@ -360,7 +379,9 @@ const KnowledgeAddContentControl = forwardRef<
     try {
       const result = await addKnowledgeContent(knowledgeBaseId, {
         type: 'feishu',
-        urls: parsed.entries.map((entry) => entry.url),
+        docs: parsed.entries.map((entry) => ({ url: entry.url, title: entry.title })),
+        destination_parent_path: defaultFolderPath || undefined,
+        destination_parent_id: defaultFolderEntryId,
       });
       if (result.type !== 'feishu') throw new Error('Unexpected knowledge content response');
       setFeishuImportVisible(false);
@@ -402,6 +423,7 @@ const KnowledgeAddContentControl = forwardRef<
             onNewDocument={() => openDocument()}
             onImportFolder={openFolderImport}
             onImportWeb={openWebImport}
+            onBrowseFeishu={onBrowseFeishu}
             onImportFeishu={openFeishuImport}
           />
         )}
