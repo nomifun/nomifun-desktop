@@ -10378,9 +10378,8 @@ fn validate_feishu_source(source: &KnowledgeSource) -> Result<(), AppError> {
             "feishu sources do not support live mode; documents are indexed as metadata stubs".into(),
         ));
     }
-    if source.entries.is_empty() {
-        return Err(AppError::BadRequest("source.entries must not be empty".into()));
-    }
+    // An empty curated set is a valid remote-backed base: documents are added
+    // later through the detail page or the workbench's save-to-base action.
     if source.entries.len() > MAX_SOURCE_HISTORY_ENTRIES {
         return Err(AppError::BadRequest(format!(
             "source history exceeds the limit of {MAX_SOURCE_HISTORY_ENTRIES} entries"
@@ -23372,6 +23371,22 @@ mod tests {
         rendered.entries[0].rendered = true;
         assert!(service.create_base("bad", "", None, Some(rendered)).await.is_err());
         assert!(service.list_bases().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn feishu_source_allows_an_empty_curated_set() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (service, _repo) = service_with_repo(&dir.path().join("data"));
+        // An empty link list still produces a Feishu-kind base — documents are
+        // appended later through the detail page or the workbench.
+        let base = service
+            .create_base("feishu-empty", "", None, Some(feishu_source(&[])))
+            .await
+            .unwrap();
+        assert_eq!(base.kind, "feishu");
+        let bases = service.list_bases().await.unwrap();
+        assert_eq!(bases.len(), 1);
+        assert_eq!(bases[0].kind, "feishu");
     }
 
     #[tokio::test]
