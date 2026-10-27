@@ -159,6 +159,7 @@ CreateStudio/详情页                     mounts_for_* /                      k
 | 2026-10-27 | `7b288861` | 计划定稿 | 本文件 + start-prompt | 设计批准 | S1 |
 | 2026-10-27 | `7b288861` | S1 CLI 核定 | lark-cli 1.0.98 真实调用：`docs +fetch`(wiki URL 自动解包)、`docs +search`、`drive +inspect`、`wiki +node-get`；scope：inspect=`drive:drive.metadata:readonly`、node-get=`wiki:node:retrieve`（均实测 missing_scope），fetch/search 现有 token 可用 | §13 已回写真实命令面与响应结构 | adapter typed 命令 + service 方法 |
 | 2026-10-27 | `7b288861`+工作区 | S1/S2/S3 实现 | `cargo test -p nomifun-office-hub`（72 过/4 忽略环境用例）；`cargo test -p nomifun-knowledge --lib`（365 过）；`cargo check -p nomifun-app`；`bun test --cwd ui src/renderer/pages/knowledge/`（158 过）；`bun run typecheck`；`check:i18n`；`check:desktop-ui-boundary`；`check:agent-session-boundary`（登记 020 迁移+内容规则后通过） | 全栈接通：port 注入（`router/office_hub.rs` `OfficeFeishuKnowledgePort` + `state.rs` 组合根）、`derive_kind="feishu"`、`/api/knowledge/bases/{id}/content` `feishu` 变体、CreateStudio/详情页/工作台 UI、迁移 020 + boundary 注册、UI/API 合同 51 | S4：validation 文档 + 真实租户验收（待验） |
+| 2026-10-27 | `e67f44134` | S4 收尾 | `docs/validation/feishu-knowledge-base.zh.md` 已建；office handoff §3 合同修订已登记；`check:docs` 通过；`cargo test -p nomifun-app --lib knowledge`（58 过）。注：nomifun-knowledge 集成测试中有 1 个既有 real-http 检索用例失败，与本次改动无关（未触碰该路径）。真实飞书租户端到端验收仍待执行（需已连接连接器） | 提交 `e67f44134`（main，未推送） | 真实租户验收：建库→加文档→挂载→search/read |
 
 ## 13. 已核定命令面（lark-cli 1.0.98，真实调用验证于 2026-10-27）
 
