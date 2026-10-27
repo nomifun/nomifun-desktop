@@ -5,6 +5,20 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.17 - 2026-10-28
+
+- Add Feishu remote-backed knowledge bases: create bases from basic info only,
+  curate the base set from the detail page, and allow an empty curated set on
+  creation.
+- Merge the Feishu workbench into knowledge and connectors, with unified
+  document discovery and navigation, native CLI block editing, deduplicated
+  titles and save toasts; Calendar & tasks are removed from the workbench.
+- Simplify office pages, redesign the account connection, move the office
+  entry to services, and add application switcher placeholders.
+- Rename connection device tabs to WebUI and open capabilities.
+- Restore icon-park base styles so icons center inside Arco buttons, and keep
+  office header action icons on one line.
+
 ## v0.8.16 - 2026-10-26
 
 - Keep verified desktop update packages available when a cancellable native
