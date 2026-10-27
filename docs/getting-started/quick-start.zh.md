@@ -82,7 +82,7 @@ NomiFun 会创建新会话并进入 `/conversation/:id`，随后开始流式输�
 
 - `/agent`：Agent 工作台，创建与管理 Agent。
 - `/enhanced-tools`：MCP & 技能，管理 MCP 连接、检测、OAuth 与启停，或导入和查看技能，各自提供市场入口。
-- `/connections`：连接与设备，管理手机配对、其他电脑浏览器访问和外部工具接入。
+- `/connections`：连接与设备，管理手机配对、WebUI 访问和开放能力。
 - `/scheduled`：创建 cron 会话任务；支持从会话带上下文创建。
 - `/requirements`：AutoWork 需求看板。
 - `/nomi`：Nomi 伙伴、远程频道绑定和 companion 设置。

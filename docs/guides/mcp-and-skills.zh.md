@@ -15,7 +15,7 @@ NomiFun 有两种容易混淆的扩展机制：
 | MCP server 管理 | `/enhanced-tools?category=mcp` |
 | 技能管理 | `/enhanced-tools?category=skills` |
 | Agent 能力设计与试用 | `/agent` |
-| 外部工具接入（MCP / REST） | `/connections?task=tools` |
+| 开放能力（MCP / REST） | `/connections?task=tools` |
 
 MCP 与技能共享侧栏的“MCP & 技能”入口，各自保留数据与业务操作。搜索框跟随当前分类，
 右上角“添加”菜单在 MCP 下提供从 JSON 导入、一键导入与 MCP 市场，在技能下提供

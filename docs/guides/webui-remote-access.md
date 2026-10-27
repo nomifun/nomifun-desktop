@@ -5,8 +5,8 @@ Open **Connections & Devices** (`/connections`) in the primary navigation and ch
 | Task | Entry | Access provided |
 |---|---|---|
 | Use Desktop from a phone | **Connect a phone** | A one-time NomiFun Mobile pairing code and an independent device credential |
-| Use Desktop from another computer | **Other computer browsers** | WebUI address, administrator login, or a one-time browser login link |
-| Call Desktop from an external Agent or tool | **External tools** | MCP / REST configuration and an installation access token |
+| Use Desktop from another computer | **WebUI** | WebUI address, administrator login, or a one-time browser login link |
+| Call Desktop from an external Agent or tool | **Open capabilities** | MCP / REST configuration and an installation access token |
 
 Desktop owns the business data and execution. Mobile is a connected client; NomiRelay is optional transport.
 Configure IM channels and physical robots under each companion's **Channels & Robots**. Both destinations link to each other.
@@ -94,7 +94,7 @@ Only pair trusted phones you own, and protect the QR code and pairing link.
 
 ## Access from another computer's browser
 
-Open **Other computer browsers**, enable WebUI in the Desktop app, and copy its access address to a desktop browser on another computer.
+Open **WebUI**, enable WebUI in the Desktop app, and copy its access address to a desktop browser on another computer.
 Sign in with the administrator account, or copy the one-time **QR-code login** link in this task.
 
 Browser login codes and Mobile pairing codes have different purposes.
@@ -127,9 +127,9 @@ Authenticated `nomifun-web` retains its first-run setup flow. Complete owner set
 opening a dedicated deployment to untrusted visitors.
 Device credentials cannot issue or revoke credentials for other devices; use an owner account or the Desktop app for management.
 
-## External tools
+## Open capabilities
 
-Select the needed MCP / REST capability domains under **External tools** and copy the generated configuration.
+Select the needed MCP / REST capability domains under **Open capabilities** and copy the generated configuration.
 Issue the installation access token in the Desktop app. Its plaintext appears once and it can be revoked independently.
 This token belongs to the installation and is separate from phone credentials and browser sessions;
 it does not select or impersonate a companion.

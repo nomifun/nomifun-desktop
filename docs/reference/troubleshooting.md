@@ -37,7 +37,7 @@ Public login/setup routes are exempt; post-login mutations follow the active
 auth policy. Desktop uses the injected local-trust path.
 
 If a password is forgotten, the trusted Desktop app can manage its WebUI
-account from **Connections & Devices → Other computer browsers**.
+account from **Connections & Devices → WebUI**.
 A loopback browser or dedicated-host connection does not acquire desktop trust.
 For a dedicated host, preserve its data and collect the auth error/logs for
 maintainer-assisted recovery. Do not clear password hashes, delete the database,

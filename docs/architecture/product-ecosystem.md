@@ -47,7 +47,7 @@ connection status, and repair actions.
 On a LAN, Mobile connects to the authenticated listener inside Desktop. Pairing
 uses a short-lived, one-time phone pairing code that issues an independent
 device credential for that phone. Expired or redeemed codes cannot be reused;
-these codes differ from one-time login codes for other computer browsers.
+these codes differ from WebUI one-time login codes.
 
 Connection protocol 2 separates installation identity from authorization. Mobile
 persists a random 64-hex-character `installation_key` for each Desktop in secure

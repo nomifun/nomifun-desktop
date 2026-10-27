@@ -75,7 +75,7 @@ See [building and packaging](../contributing/building-and-packaging.md).
 ## I forgot the administrator password
 
 For Desktop WebUI, use the trusted in-app account/password controls in
-**Connections & Devices → Other computer browsers**.
+**Connections & Devices → WebUI**.
 A loopback browser request does not gain desktop local trust.
 Changing startup `NOMIFUN_ADMIN_PASSWORD` does not replace an existing account.
 

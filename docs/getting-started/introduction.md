@@ -77,7 +77,7 @@ For implementation details, see [Architecture Overview](../architecture/overview
 - **MCP & Skills** (`/enhanced-tools`): switch between MCP server management
   and the Skills library, with imports and a market for each category.
 - **Connections & Devices** (`/connections`): pair phones (same network or relay),
-  open Desktop from other computers' browsers, and connect external MCP/REST tools.
+  open Desktop from other computers through WebUI, and open capabilities for external MCP/REST tools.
 - **Requirements / AutoWork**: backend-owned queue processing and completion
   notifications.
 - **Scheduled tasks**: recurring or one-shot jobs.

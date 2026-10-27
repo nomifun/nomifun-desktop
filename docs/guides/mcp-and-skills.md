@@ -14,7 +14,7 @@ Current pages:
 | MCP servers | `/enhanced-tools?category=mcp` |
 | Skills | `/enhanced-tools?category=skills` |
 | Agent workbench | `/agent` |
-| External tool access (MCP / REST) | `/connections?task=tools` |
+| Open capabilities (MCP / REST) | `/connections?task=tools` |
 
 MCP and Skills share the **MCP & Skills** navigation entry, while retaining
 their own data and operations. Search follows the selected category. The header's
