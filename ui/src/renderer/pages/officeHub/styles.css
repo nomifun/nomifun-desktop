@@ -3,6 +3,8 @@
 .office-hub [hidden]{display:none!important}
 .office-page-header.page-header{align-items:center;flex:none;min-height:52px;margin:0;padding:10px 20px;border-bottom:1px solid var(--border-base)}
 .office-page-header .page-header__actions{min-width:0;gap:8px}
+.office-page-header .i-icon{display:inline-flex;align-items:center;justify-content:center;flex:none;line-height:0}
+.office-page-header .i-icon>svg{display:block}
 .office-app-trigger{display:inline-flex;align-items:center;gap:7px;min-height:30px;margin-left:5px;padding:4px 8px;border:1px solid var(--border-base);border-radius:6px;background:var(--bg-base);color:var(--text-primary);font:inherit;font-size:12px;line-height:20px;cursor:pointer}
 .office-app-trigger:hover,.office-app-trigger[aria-expanded=true]{background:var(--bg-hover)}
 .office-app-trigger:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
@@ -44,7 +46,7 @@
 .office-badge{display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:1px 6px;border-radius:4px;background:var(--bg-2);color:var(--text-secondary);font-size:11px;line-height:18px;white-space:nowrap}
 .office-badge--good{color:color-mix(in srgb,var(--success) 60%,var(--text-primary));background:color-mix(in srgb,var(--success) 9%,var(--bg-base))}
 .office-badge--warning{color:color-mix(in srgb,var(--warning) 60%,var(--text-primary));background:color-mix(in srgb,var(--warning) 9%,var(--bg-base))}
-.office-header-search{display:flex;align-items:center;gap:6px;width:180px;min-width:0;padding:5px 8px;border:1px solid var(--border-base);border-radius:5px;color:var(--text-secondary)}
+.office-header-search{display:flex;align-items:center;gap:6px;width:180px;min-width:0;min-height:30px;margin:0;padding:5px 8px;border:1px solid var(--border-base);border-radius:5px;color:var(--text-secondary)}
 .office-header-search input{min-width:0;width:100%;padding:0;border:0;outline:none;background:transparent;color:var(--text-primary);font:inherit;font-size:12px}
 .office-filterbar{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:30px;margin-bottom:7px}
 .office-filters{display:flex;align-items:center;flex-wrap:wrap;gap:4px}
