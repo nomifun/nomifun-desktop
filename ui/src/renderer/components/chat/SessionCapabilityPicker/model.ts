@@ -1,4 +1,5 @@
 import type { IMcpServer } from '@/common/config/storage';
+import type { ConnectorId } from '@/common/connectors';
 import type { SkillInfo } from '@/common/types/skill';
 import type { AgentSessionCapabilitySelection } from '@/common/types/agentPlatform';
 
@@ -12,6 +13,8 @@ export type SessionCapabilityCatalog = {
   autoSkillNames: ReadonlySet<string>;
   mcpServers: SessionMcpOption[];
   appSourceError?: string;
+  /** Connector readiness gates the skills those connectors provide. */
+  connectorsReady?: Partial<Record<ConnectorId, boolean>>;
 };
 
 export type SessionMcpOption = IMcpServer & { appSource?: boolean };

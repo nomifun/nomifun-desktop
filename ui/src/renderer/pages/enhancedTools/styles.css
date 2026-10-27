@@ -73,6 +73,29 @@
 .enhanced-tools-skill-tip { display: flex; align-items: flex-start; gap: 7px; color: var(--text-secondary); font-size: 12px; line-height: 19px; }
 .enhanced-tools-skill-tip > svg { margin-top: 2px; }
 
+.connectors-panel { position: relative; min-height: 100%; }
+.connector-card, .connector-card * { box-sizing: border-box; }
+.connector-card { display: flex; flex-direction: column; gap: 16px; max-width: 720px; padding: 18px 20px; border: 1px solid var(--color-border-2); border-radius: 12px; background: var(--color-bg-1); }
+.connector-card__header { display: flex; align-items: flex-start; gap: 12px; }
+.connector-card__logo { width: 34px; height: 34px; flex: none; object-fit: contain; }
+.connector-card__title { flex: 1; min-width: 0; }
+.connector-card__title h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; line-height: 21px; color: var(--text-primary); }
+.connector-card__title p { margin: 0; }
+.connector-card__meta { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--color-fill-2); }
+.connector-card__meta dt { display: inline; color: var(--text-tertiary); }
+.connector-card__meta dd { display: inline; margin: 0 0 0 6px; color: var(--text-primary); }
+.connector-card__capabilities h4 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.connector-card__capabilities ul { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.connector-capability { display: flex; width: 100%; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-bg-1); color: var(--text-primary); font: inherit; font-size: 12px; text-align: left; }
+button.connector-capability { cursor: pointer; }
+button.connector-capability:hover:not(:disabled) { border-color: var(--color-primary); }
+button.connector-capability:disabled { color: var(--text-tertiary); cursor: not-allowed; }
+.connector-capability > span { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
+.connector-capability > span small { font-size: 11px; }
+.connector-capability .i-icon { flex: none; color: var(--text-tertiary); }
+.connector-capability__name { flex: none; color: var(--text-tertiary); font-size: 11px; }
+.connector-card__actions { display: flex; align-items: center; gap: 8px; }
+
 .enhanced-tools-market-drawer .arco-drawer-body { padding: 20px; background: var(--color-bg-1); }
 .enhanced-tools-market-drawer .arco-drawer-header { background: var(--color-bg-1); }
 .enhanced-tools-market-drawer .arco-drawer-footer { text-align: right; background: var(--color-bg-1); }

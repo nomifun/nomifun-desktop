@@ -35,18 +35,20 @@ environment variable. Typical locations are explanatory:
 | Linux | `${XDG_DATA_HOME:-~/.local/share}/nomifun-user-tools/npm` | `bin/lark-cli` |
 
 The workbench can select the official npm package's native executable after
-checking its identity and compatibility. Reuse the selected absolute path and
+checking its identity. Reuse the selected absolute path and
 literal arguments. Do not redirect HOME, USERPROFILE or credential directories.
 Runtime upgrades and Agent-data cleanup do not own this persistent installation.
 
-## Missing, broken or incompatible installation
+## Missing or broken installation
 
 If no executable is found, tell the user to open:
 
-**Office → Connection settings → Prepare environment → Prepare component**
+**MCP & Skills → Connectors → Feishu Connector → Connection settings → Advanced
+→ Install component**
 
-The product route is `/office`. The Host performs discovery again,
-reuses a compatible installation, and prepares the fixed official npm package
+The product route is `/enhanced-tools?category=connectors`. The Host performs
+discovery again,
+reuses an existing official installation, and prepares the fixed official npm package
 only when absent and explicitly requested. The component is not embedded in the
 NomiFun installer. Workspaces and Agents can discover and reuse that shared
 installation; the workbench's selected path and profile are not an implicit
@@ -61,8 +63,10 @@ the authenticated product surface; no hidden API backchannel is needed.
 
 A failed launch, expired login, missing scope, network error or unsupported flag
 does not establish that the CLI is absent. Report the actual issue and direct
-component repair to the same workbench surface. Do not bypass an incompatible
-or broken installation by installing somewhere else. If location discovery is
+the user to the same surface's **Repair component** action, which installs a
+managed official copy without touching the existing installation. Do not
+bypass a broken
+or unrecognized installation by installing somewhere else. If location discovery is
 unavailable, report that condition rather than inventing a root.
 
 After the Host reports readiness, repeat read-only discovery and use the same

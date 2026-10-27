@@ -10,7 +10,8 @@ import { BackendHttpError } from '@/common/adapter/httpBridge';
 import type { AuthorizationFlow, ExecuteRequest, OfficeItem, OfficeOperation, OfficeQueryResult, OfficeStatus } from '@/common/types/officeHub';
 import office from '@/renderer/services/i18n/locales/en-US/office.json';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
-import OfficeHubPage from './index';
+import knowledge from '@/renderer/services/i18n/locales/en-US/knowledge.json';
+import FeishuKnowledgePage from './index';
 
 const locale = createInstance();
 const restores: Array<() => void> = [];
@@ -29,7 +30,7 @@ function receipt(request: ExecuteRequest, state: OfficeOperation['status'] = 'su
 function flow(phase: AuthorizationFlow['phase'] = 'waiting_user'): AuthorizationFlow {
   return { id: '0190f5fe-7c00-7a00-8000-000000000901', kind: 'login', phase, verification_url: 'https://open.feishu.cn/auth', expires_at: null, missing_scopes: [], console_url: null, message: null };
 }
-beforeAll(async () => { await locale.init({ lng: 'en-US', resources: { 'en-US': { translation: { office, common } } } }); });
+beforeAll(async () => { await locale.init({ lng: 'en-US', resources: { 'en-US': { translation: { office, common, knowledge } } } }); });
 afterEach(() => { cleanup(); restores.splice(0).reverse().forEach(restore => restore()); });
 function fixture(initial = status()) {
   let current = initial;
@@ -39,6 +40,10 @@ function fixture(initial = status()) {
   const query = track(spyOn(officeHub, 'query').mockImplementation(async () => empty()));
   const external = track(spyOn(ipcBridge.shell.openExternal, 'invoke').mockResolvedValue(undefined));
   const prepare = track(spyOn(officeHub, 'prepare').mockResolvedValue(initial.runtime));
+  const repair = track(spyOn(officeHub, 'repair').mockImplementation(async () => {
+    current = { ...current, phase: 'needs_login', actor: null, runtime: { ...current.runtime, phase: 'ready', message: null } };
+    return current.runtime;
+  }));
   const execute = track(spyOn(officeHub, 'execute').mockImplementation(async request => receipt(request)));
   const request = track(spyOn(officeHub, 'request').mockRejectedValue(new BackendHttpError({ method: 'GET', path: '/api/office-hub/operations/request/test', status: 404, body: { error: 'Not found' } })));
   const reconcile = track(spyOn(officeHub, 'reconcile').mockImplementation(async () => { throw new Error('Unexpected reconciliation'); }));
@@ -50,15 +55,15 @@ function fixture(initial = status()) {
   }));
   const cancelAuth = track(spyOn(officeHub, 'cancelAuth').mockResolvedValue(flow('cancelling')));
   const updateConnection = track(spyOn(officeHub, 'updateConnection').mockImplementation(async body => { current = { ...current, phase: 'ready', connection: { ...current.connection, ...body } }; return current.connection; }));
-  const mount = async (path = '/office') => {
-    const router = createMemoryRouter([{ path: '/office', element: <OfficeHubPage /> }], { initialEntries: [path] });
+  const mount = async (path = '/knowledge/feishu') => {
+    const router = createMemoryRouter([{ path: '/knowledge/feishu', element: <FeishuKnowledgePage /> }], { initialEntries: [path] });
     restores.push(() => router.dispose());
     let view!: ReturnType<typeof render>;
     await act(async () => { view = render(<I18nextProvider i18n={locale}><RouterProvider router={router} /></I18nextProvider>); });
     await waitFor(() => expect(getStatus).toHaveBeenCalled());
     return view;
   };
-  return { mount, external, success, getStatus, profiles, query, prepare, execute, request, reconcile, open, auth, startAuth, logout, cancelAuth, updateConnection, setStatus: (next: OfficeStatus) => { current = next; } };
+  return { mount, external, success, getStatus, profiles, query, prepare, repair, execute, request, reconcile, open, auth, startAuth, logout, cancelAuth, updateConnection, setStatus: (next: OfficeStatus) => { current = next; } };
 }
 async function pressReady(view: ReturnType<typeof render>, name: string) {
   const scope = view.queryByRole('dialog') ? within(view.getByRole('dialog')) : view;
@@ -68,11 +73,11 @@ async function pressReady(view: ReturnType<typeof render>, name: string) {
 }
 const grant = (source: OfficeStatus, capability: string, value: boolean) => { source.permissions.find(permission => permission.capability === capability)!.granted = value; };
 
-describe('compact Office Hub with isolated real API boundaries', () => {
+describe('Feishu knowledge space with isolated real API boundaries', () => {
   test('document names open their exact browser link without an internal content query', async () => {
     const f = fixture(); const doc = { ...item('doc_real', 'Cloud document'), kind: 'docx', url: 'https://team.feishu.cn/docx/doc_real?from=search' };
     f.query.mockImplementation(async query => query.kind === 'documents' ? { ...empty(), items: [doc] } : empty());
-    const view = await f.mount('/office?document=retired-internal-route');
+    const view = await f.mount('/knowledge/feishu?document=retired-internal-route');
     expect(f.external).not.toHaveBeenCalled();
     fireEvent.click(await view.findByRole('button', { name: 'Cloud document' }));
     await waitFor(() => expect(f.external).toHaveBeenCalledWith(doc.url));
@@ -243,12 +248,24 @@ describe('compact Office Hub with isolated real API boundaries', () => {
     expect((view.getByRole('button', { name: office.connectScreen.installingAction }) as HTMLButtonElement).disabled).toBe(true);
     expect(f.prepare).not.toHaveBeenCalled(); expect(f.startAuth).not.toHaveBeenCalled(); expect(f.query).not.toHaveBeenCalled();
   });
-  for (const phase of ['broken','incompatible','error'] as const) test('an existing ' + phase + ' executable is never treated as a missing component', async () => {
+  for (const phase of ['broken','error'] as const) test('an existing ' + phase + ' executable is repaired rather than treated as missing', async () => {
     const s = status(); s.runtime.phase = phase; s.phase = 'error'; const f = fixture(s), view = await f.mount();
     expect(view.getByRole('heading', { name: office.connectScreen.repairTitle })).toBeTruthy();
-    fireEvent.click(view.getByRole('button', { name: office.account.viewComponent }));
-    expect(view.queryByRole('button', { name: office.actions.prepare })).toBeNull(); expect(view.queryByRole('button', { name: office.runtime.retryPrepare })).toBeNull(); expect(f.prepare).not.toHaveBeenCalled();
-    expect(view.getByText(office.runtime.brokenHint)).toBeTruthy();
+    expect(view.queryByRole('button', { name: office.actions.prepare })).toBeNull(); expect(view.queryByRole('button', { name: office.runtime.retryPrepare })).toBeNull();
+    fireEvent.click(view.getByRole('button', { name: office.actions.repair }));
+    await waitFor(() => expect(f.repair).toHaveBeenCalledTimes(1));
+    expect(f.prepare).not.toHaveBeenCalled();
+    await waitFor(() => expect(view.queryByRole('heading', { name: office.connectScreen.repairTitle })).toBeNull());
+  });
+  test('the settings dialog still offers manual selection beside repair', async () => {
+    const s = status(); s.runtime.phase = 'broken'; s.phase = 'error'; const f = fixture(s), view = await f.mount();
+    fireEvent.click(view.getByRole('button', { name: office.connection.manage }));
+    const modal = within(await view.findByRole('dialog', { name: office.connection.manage }));
+    expect(modal.getByText(office.runtime.brokenHint)).toBeTruthy();
+    expect(modal.getByRole('button', { name: office.actions.repair })).toBeTruthy();
+    fireEvent.click(modal.getByRole('button', { name: office.actions.repair }));
+    await waitFor(() => expect(f.repair).toHaveBeenCalledTimes(1));
+    expect(f.prepare).not.toHaveBeenCalled();
   });
   test('connected settings open the account section without restarting setup or requesting permissions', async () => {
     const f = fixture(), view = await f.mount();

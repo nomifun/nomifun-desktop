@@ -2263,6 +2263,30 @@
     "installedSkills": "已安装技能",
     "mcpHint": "启用并检测通过、发现工具后，可在会话中选择使用。",
     "skillsHint": "独立安装，在会话中按需选择。",
-    "backToList": "返回列表"
+    "backToList": "返回列表",
+    "connectors": "连接器",
+    "connectorsHint": "统一管理第三方账号连接，供知识库与会话能力使用。"
+  },
+  "connectors": {
+    "capabilities": "提供的能力",
+    "configureFirst": "完成连接配置后，以下能力即可使用。",
+    "connectionName": "当前连接",
+    "knowledgeHint": "在知识库中浏览云端文档",
+    "skillHint": "在会话能力选择中勾选后使用",
+    "feishu": {
+      "name": "飞书连接器",
+      "description": "连接飞书账号，为「飞书知识库」和「飞书 CLI」提供统一凭据。",
+      "skillName": "飞书 CLI"
+    },
+    "status": {
+      "ready": "已连接",
+      "needs_login": "待登录",
+      "disabled": "已停用",
+      "not_configured": "未配置",
+      "expired": "已过期",
+      "error": "异常",
+      "preparing": "正在准备",
+      "runtime": "需安装组件"
+    }
   }
 }

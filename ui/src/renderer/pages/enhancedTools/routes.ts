@@ -1,6 +1,6 @@
 export const ENHANCED_TOOLS_PATH = '/enhanced-tools';
 
-export type EnhancedToolsCategory = 'mcp' | 'skills';
+export type EnhancedToolsCategory = 'mcp' | 'skills' | 'connectors';
 
 export const enhancedToolsUrl = (category: EnhancedToolsCategory, view?: 'market'): string => {
   const params = new URLSearchParams({ category });

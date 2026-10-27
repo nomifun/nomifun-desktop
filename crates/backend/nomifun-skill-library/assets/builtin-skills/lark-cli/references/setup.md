@@ -8,8 +8,9 @@ installation.
 
 ## Reuse configuration
 
-Account setup can be managed in **Office → Connection settings**
-(`/office`). The workbench's selected connection is not an implicit
+Account setup can be managed in **MCP & Skills → Connectors → Feishu Connector
+→ Connection settings** (`/enhanced-tools?category=connectors`). The
+connector's selected connection is not an implicit
 selector for Agent process calls. Inspect `profile list`, use the profile the
 user selected, and pass `--profile <name>` explicitly to subsequent business
 and auth commands. Do not mutate the global default with `profile use`; if the

@@ -7,16 +7,17 @@
 /**
  * TypeRail — Left rail of the CreateStudio dialog.
  *
- * Three groups: Regular (blank / local / web), Third-party (feishu-disabled /
- * notion-disabled), Migration (import). Selected item uses primary theme; hover
- * uses fill-2. Disabled items carry an availability badge.
+ * Three groups: Regular (blank / local / web), Third-party (notion-disabled —
+ * Feishu knowledge lives at /knowledge/feishu instead of a creatable kind),
+ * Migration (import). Selected item uses primary theme; hover uses fill-2.
+ * Disabled items carry an availability badge.
  *
  * Theme variables only; no hard-coded semantic colors.
  */
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { AllApplication, BookOne, Earth, FolderOpen, LarkOne, Upload } from '@icon-park/react';
-import { FEISHU_KNOWLEDGE_CREATION_ENABLED, type StudioSourceType } from './sourceTypes';
+import { AllApplication, BookOne, Earth, FolderOpen, Upload } from '@icon-park/react';
+import { type StudioSourceType } from './sourceTypes';
 
 // ─── Rail item definition ────────────────────────────────────────────────────
 
@@ -73,16 +74,6 @@ const TypeRail: React.FC<TypeRailProps> = ({ value, onChange }) => {
     {
       label: t('knowledge.studio.groupThirdParty', { defaultValue: '连接第三方' }),
       items: [
-        {
-          key: 'feishu',
-          icon: <LarkOne theme='outline' size='16' />,
-          title: t('knowledge.studio.typeFeishu', { defaultValue: '飞书知识空间' }),
-          description: t('knowledge.studio.typeFeishuDesc', { defaultValue: '同步 Wiki 文档' }),
-          disabled: !FEISHU_KNOWLEDGE_CREATION_ENABLED,
-          badge: !FEISHU_KNOWLEDGE_CREATION_ENABLED
-            ? t('knowledge.studio.temporarilyDisabled', { defaultValue: '暂不可用' })
-            : undefined,
-        },
         {
           key: 'notion',
           icon: <AllApplication theme='outline' size='16' />,

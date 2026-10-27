@@ -147,7 +147,7 @@ impl OfficeHubService {
     pub async fn check_update(&self)->Result<RuntimeUpdateInfo,HubError>{
         let connection=self.connection().await?;
         let runtime=self.runtime.inspect(connection.executable.as_deref()).await;
-        if runtime.phase!=RuntimePhase::Ready{return Err(HubError::unavailable("A verified CLI is needed to check its update source without installing another runtime"))}
+        if runtime.phase!=RuntimePhase::Ready{return Err(HubError::unavailable("The Feishu CLI must be ready before checking its update source; this check never installs another runtime"))}
         let executable=runtime.executable.as_deref().ok_or_else(||HubError::unavailable("CLI path unavailable"))?;
         // This exact upstream mode skips installation, stale-file cleanup and skills sync.
         let command=crate::runtime::CliCommand::new(["update","--check","--json"],false);
@@ -165,17 +165,20 @@ impl OfficeHubService {
             .map_err(|_|HubError::unavailable("Installed version is invalid"))?;
         Ok(RuntimeUpdateInfo{installed_version:Some(installed.into()),latest_version:Some(latest_version.to_string()),
             compatible_version:FEISHU_CLI_VERSION.into(),update_available:latest_version>installed_version,
-            message:Some("This check did not install or modify the CLI. The current adapter is verified for the compatible version; externally managed installations retain their original update method.".into())})
+            message:Some("This check did not install or modify the CLI. The verified version is the build NomiFun's managed installation pins; any official release remains usable, and externally managed installations retain their original update method.".into())})
     }
 
-    pub async fn prepare_runtime(self: &Arc<Self>) -> Result<RuntimeInfo, HubError> {
+    pub async fn prepare_runtime(self: &Arc<Self>, repair: bool) -> Result<RuntimeInfo, HubError> {
         let _admission=self.admission.lock().await;
         if self.is_executing()||self.is_authorizing(){return Err(HubError::conflict("Wait for existing office work before changing CLI preparation",None))}
         let connection = self.connection().await?;
         let observed = self.runtime.inspect(connection.executable.as_deref()).await;
         if observed.phase == RuntimePhase::Ready { return Ok(observed); }
-        if observed.phase != RuntimePhase::Missing { return Err(HubError::unavailable(
-            observed.message.unwrap_or_else(|| "An existing CLI must be repaired rather than replaced".into()))); }
+        let repairable = observed.phase == RuntimePhase::Broken;
+        if observed.phase != RuntimePhase::Missing && !(repair && repairable) {
+            return Err(HubError::unavailable(
+                observed.message.unwrap_or_else(|| "An existing CLI must be repaired rather than replaced".into())));
+        }
         {
             let mut view = lock(&self.prepare_view);
             if let Some(current) = view.as_ref().filter(|v| v.phase == RuntimePhase::Preparing) {
@@ -186,7 +189,7 @@ impl OfficeHubService {
         let service = self.clone();
         let selected = connection.executable.clone();
         if !(self.spawn)(Box::pin(async move {
-            let result = service.runtime.prepare(selected.as_deref(), service.shutdown.child_token()).await;
+            let result = service.runtime.prepare(selected.as_deref(), repair, service.shutdown.child_token()).await;
             let view = match result {
                 Ok(view) => {
                     if let Ok(mut connection) = service.connection().await {
@@ -212,7 +215,7 @@ impl OfficeHubService {
         if !connection.enabled { return Err(HubError::conflict("Enable the office connection before accessing Feishu", None)); }
         let profile = connection.profile.as_deref().ok_or_else(|| HubError::invalid("Select or configure a CLI profile"))?;
         let runtime = self.runtime.inspect(connection.executable.as_deref()).await;
-        if runtime.phase != RuntimePhase::Ready { return Err(HubError::unavailable(runtime.message.unwrap_or_else(|| "Compatible CLI is unavailable".into()))); }
+        if runtime.phase != RuntimePhase::Ready { return Err(HubError::unavailable(runtime.message.unwrap_or_else(|| "The Feishu CLI is not ready".into()))); }
         let executable = runtime.executable.ok_or_else(|| HubError::unavailable("CLI path is unavailable"))?;
         let output = self.runtime.run(&executable, adapter::status_command(Some(profile), false), self.shutdown.child_token(), None).await?;
         let identity = adapter::parse_identity(&output)?;

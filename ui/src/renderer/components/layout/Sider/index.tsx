@@ -21,7 +21,6 @@ import { readCanvasResumeLocation, rememberCanvasResumeLocation } from '@rendere
 import {
   SiderResourceSpaceEntry,
   SiderAgentEntry,
-  SiderOfficeEntry,
   SiderEnhancedToolsEntry,
   SiderConversationEntry,
   SiderCustomerServiceEntry,
@@ -129,7 +128,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   };
   const handleCustomerServiceClick = () => navTo('/customer-service');
   const handleAgentClick = () => navTo('/agent');
-  const handleOfficeClick = () => navTo('/office');
   const handleEnhancedToolsClick = () => navTo(enhancedToolsUrl('mcp'));
   const handleAppClick = () => navTo('/apps');
   const handleOpenCapabilitiesClick = () => navTo('/connections');
@@ -267,14 +265,8 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleEnhancedToolsClick}
             />
-            {/* 服务 — cloud office, hosted applications and public-facing customer service. */}
+            {/* 服务 — hosted applications and public-facing customer service. */}
             <SiderSectionHeader label={t('common.siderSection.services')} collapsed={collapsed} />
-            <SiderOfficeEntry
-              isActive={pathname === '/office' || pathname.startsWith('/office/')}
-              collapsed={collapsed}
-              siderTooltipProps={siderTooltipProps}
-              onClick={handleOfficeClick}
-            />
             <SiderAppEntry
               isActive={pathname.startsWith('/apps')}
               collapsed={collapsed}

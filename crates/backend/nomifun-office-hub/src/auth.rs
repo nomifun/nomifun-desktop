@@ -110,7 +110,7 @@ impl OfficeHubService {
         }
         let mut connection=self.connection().await?;
         let info=self.runtime.inspect(connection.executable.as_deref()).await;
-        if info.phase!=RuntimePhase::Ready { return Err(HubError::unavailable("Prepare a compatible CLI before connecting Feishu")); }
+        if info.phase!=RuntimePhase::Ready { return Err(HubError::unavailable("Prepare the Feishu CLI before connecting Feishu")); }
         let executable=info.executable.ok_or_else(|| HubError::unavailable("CLI path unavailable"))?;
         let profile=request.profile.clone().or_else(|| {
             if request.kind==AuthKind::Login { connection.profile.clone() }

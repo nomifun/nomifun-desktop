@@ -1,8 +1,10 @@
 import { isBackendHttpError, redactSensitiveText } from '@/common/adapter/httpBridge';
 import { CANONICAL_UUID_V7 } from '@/common/types/ids';
-import type { AuthPhase, OfficeActor, OfficeItem, OfficeMutation, OfficeOperation, OfficeStatus, OperationItem } from '@/common/types/officeHub';
+import type { AuthPhase, OfficeActor, OfficeItem, OfficeMutation, OfficeOperation, OfficeStatus, OperationItem, RuntimeInfo } from '@/common/types/officeHub';
 
 export const liveOperation = (operation: OfficeOperation) => operation.status === 'queued' || operation.status === 'running';
+export const runtimeCanPrepare = (runtime: RuntimeInfo) => runtime.phase === 'missing' || (runtime.phase === 'error' && !runtime.executable);
+export const runtimeCanRepair = (runtime: RuntimeInfo) => runtime.phase === 'broken' || (runtime.phase === 'error' && !!runtime.executable);
 export function operationKind(operation: Pick<OfficeOperation, 'items'>): string {
   const first = operation.items[0]?.mutation.kind;
   return typeof first === 'string' && ['document_create', 'document_delete', 'base_update'].includes(first) && operation.items.every(item => item.mutation.kind === first) ? first : 'mixed';

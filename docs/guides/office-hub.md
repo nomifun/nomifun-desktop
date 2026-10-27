@@ -1,7 +1,10 @@
-# Office Hub: Feishu
+# Feishu knowledge space
 
-Open **Services → Office** for Feishu documents and Base.
-The page opens directly on Documents.
+Open **Knowledge → Feishu knowledge** (`/knowledge/feishu`) for Feishu documents
+and Base. The former **Services → Office** entry was merged here and `/office`
+redirects to this page. Connection settings live globally under
+**MCP & Skills → Connectors → Feishu Connector**; both surfaces open the same
+connection dialog. The page opens directly on Documents.
 The Tauri desktop shell and desktop-class WebUI are supported. All business
 operations use the official Feishu CLI. Components and credentials belong to
 the backend machine, which may differ from the browser's computer.
@@ -12,8 +15,11 @@ The page shows the next action for its current connection state:
 
 - **Component missing**: the main page explains installation and provides an
   install action. Downloading begins only after you choose it. Installation has
-  progress and retry states. Compatible installations are reused; broken or
-  incompatible installations offer repair guidance.
+  progress and retry states. Existing official installations are reused (any
+  release works); installations that cannot launch or are not the official CLI
+  offer one-click repair into a managed official copy (the existing
+  installation is untouched), and a different program can always be selected
+  under Advanced.
 - **Application not connected**: select an existing connection or follow the
   official Feishu application setup flow.
 - **Signed out or expired**: complete Feishu sign-in in your browser, then return
@@ -47,12 +53,13 @@ the original process to settle before another flow can begin.
 
 Advanced settings contain the component host, version, path, read-only update
 check and connection disable action. **Disable connection** stops new business
-work while retaining sign-in; it is distinct from signing out. The verified
-baseline is 1.0.98. Checks do not install or synchronize skills; external
+work while retaining sign-in; it is distinct from signing out. Managed
+installations pin the verified 1.0.98 build, and any official release works as
+an external component. Checks do not install or synchronize skills; external
 installations retain their original maintenance method. The full official setup
 command is provided for you to copy into a terminal. It may install global skills
-for other agents and is never run silently. Secrets and tokens remain in the
-CLI's own store.
+for other agents and is never run silently by the product. Secrets and tokens
+remain in the CLI's own store.
 
 ## Documents
 
@@ -93,6 +100,8 @@ remain distinct.
 Already-started remote work may complete even after disabling the connection.
 Disabling is distinct from signing out or revoking Feishu permissions.
 
-The opt-in [Feishu Skill](mcp-and-skills.md) continues through canonical process
-tools. Missing components use the same Office supplier; the Office page's path
-and profile selections are not automatically injected into Agent sessions.
+The opt-in [Feishu Skill](mcp-and-skills.md) (`lark-cli`, provided by the
+Feishu connector) continues through canonical process tools and takes effect
+per session only when selected. Missing components use the same connector's
+supplier; the connector's path and profile selections are not automatically
+injected into Agent sessions.

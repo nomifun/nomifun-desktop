@@ -73,7 +73,7 @@ const SkillsLibraryPanel: React.FC<SkillsLibraryPanelProps> = ({ library, visibl
         <div className='enhanced-tools-empty' data-testid='skills-library-empty'>
           {library.loading
             ? t('common.loading', { defaultValue: 'Please wait...' })
-            : library.availableSkills.length === 0
+            : library.librarySkills.length === 0
               ? t('settings.skillsHub.noSkills', { defaultValue: 'No skills found. Import some to get started.' })
               : t('settings.skillsHub.noMatch', { defaultValue: 'No skills match the current filters.' })}
         </div>

@@ -37,6 +37,7 @@ import { useKnowledgeTags } from '../useKnowledgeTags';
 import { KnowledgeErrorNotice, showKnowledgeErrorMessage } from '../KnowledgeErrorFeedback';
 import KnowledgeEmptyState from '../KnowledgeEmptyState';
 import KnowledgeCard from '../KnowledgeCard';
+import FeishuKnowledgeCard from '../FeishuKnowledgeCard';
 import KnowledgeTagFilterBar, {
   type KnowledgeKind,
   type KnowledgeSort,
@@ -180,6 +181,11 @@ const KnowledgeListPage: React.FC = () => {
   const [studioInitialKind, setStudioInitialKind] = useState<StudioInitialKind | undefined>(undefined);
 
   const openStudio = (initialKind?: KnowledgeKindShortcut) => {
+    // The Feishu tile opens the connector-backed space, not the create studio.
+    if (initialKind === 'feishu') {
+      navigate('/knowledge/feishu');
+      return;
+    }
     setStudioInitialKind(initialKind);
     setStudioVisible(true);
   };
@@ -405,8 +411,9 @@ const KnowledgeListPage: React.FC = () => {
           <KnowledgeEmptyState onCreate={openStudio} onImport={() => void handleImport()} />
         ) : bases.length > 0 || !error ? (
           <>
-            {/* Card grid */}
+            {/* Card grid: the Feishu space entry is pinned only on the unfiltered view. */}
             <div className={styles.grid}>
+              {!kindFilter && tagFilter.length === 0 && !searchQuery.trim() && <FeishuKnowledgeCard />}
               {displayBases.map((base) => (
                 <KnowledgeCard
                   key={base.knowledge_base_id}

@@ -1,11 +1,14 @@
 # MCP & Skills
 
-NomiFun has two extension mechanisms that are easy to confuse:
+NomiFun has three extension mechanisms that are easy to confuse:
 
 - **MCP servers** are external tool servers. They expose callable tools over
   stdio, HTTP, or SSE.
 - **Skills** are markdown/folder knowledge bundles. They tell an agent how to do
   a workflow; they are not long-running tool servers.
+- **Connectors** are third-party account connections (such as Feishu). They
+  manage credentials in one place and offer capabilities to knowledge bases and
+  sessions.
 
 Current pages:
 
@@ -13,6 +16,7 @@ Current pages:
 | --- | --- |
 | MCP servers | `/enhanced-tools?category=mcp` |
 | Skills | `/enhanced-tools?category=skills` |
+| Connectors | `/enhanced-tools?category=connectors` |
 | Agent workbench | `/agent` |
 | Open capabilities (MCP / REST) | `/connections?task=tools` |
 
@@ -228,15 +232,16 @@ The Skill Market Add action is owned by the Skill Library service: the backend v
 The bundled **Feishu CLI** (`lark-cli`, shown as **飞书 CLI** in Chinese) skill uses
 the [official Lark CLI](https://github.com/larksuite/cli/blob/v1.0.98/README.zh.md)
 for messages, documents, Drive, Base, spreadsheets, calendars, tasks, mail and wikis.
-Select it from the conversation skill picker; it is not automatically injected.
+The Feishu connector provides it: once the connector is ready, select it in the
+conversation skill picker per session; it is not automatically injected.
 Example requests include opening a linked document, reading next week's agenda
 or updating a specified Base table.
 
 Each Session discovers and reuses an existing absolute executable through the
-canonical process tools with literal arguments. A workbench path or profile
+canonical process tools with literal arguments. A connector path or profile
 selection is not automatically injected into Agent calls. Missing components go
-to **Office → Connection settings** in the upper right of `/office`, then the
-**Prepare environment** step of its three-step dialog. The skill does not launch
+to **MCP & Skills → Connectors → Feishu connector**, open **Connection
+settings**, and use its **Prepare environment** step. The skill does not launch
 a competing npm/npx installer or obtain trust tokens to call protected Host APIs.
 
 The CLI is prepared only after explicit user opt-in and is not bundled in NomiFun.
@@ -256,25 +261,42 @@ trigger a download. Runtime upgrades and Agent cleanup retain the installation.
 The Host coordinates its own preparation with a shared-prefix lock; skill prose
 does not lock independent external npm operations.
 
-[Office Hub](office-hub.md) provides the three-step connection dialog, native
-paragraph editing and single-submit business saves. The skill remains an ordinary
+[Feishu Knowledge](office-hub.md) shares the same three-step connection dialog,
+native paragraph editing and single-submit business saves with the connector.
+The skill remains an ordinary
 opt-in Agent capability through canonical processes. Its business responses often
 use `ok`/`data`; configuration, profiles and authorization have their own raw JSON
 shapes. Follow each installed command's contract.
 
 Credentials stay in the CLI's store. Application permissions, user consent and
 resource membership are separate. Selecting the skill grants no additional tools
-or Feishu access, and disabling Office Hub does not revoke remote authorization.
+or Feishu access, and disabling the connector does not revoke remote authorization.
 
 The full official setup command, `npx @larksuite/cli@latest install`, is available
 for the user to run explicitly in their terminal. It may install global upstream
 skills and enter account setup; it is not a silent prerequisite.
-Workbench version checks do not install or synchronize skills. Host-shared
-preparation and compatibility policy stay with the workbench; external installs
+Connector version checks do not install or synchronize skills. Host-shared
+preparation and compatibility policy stay with the connector; external installs
 keep their original toolchain and verified prefix. An explicit external update
 request can update that installation in place and verify the same program.
 Missing upgrade paths are reported rather than bypassed with another installation.
 Bundled skill content continues to update with NomiFun releases.
+
+## Connectors
+
+**MCP & Skills → Connectors** (`/enhanced-tools?category=connectors`) manages
+third-party account connections in one place, replacing the former top-level
+"Office" entry. The first connector is the **Feishu connector**: it hosts the
+same three-step connection flow that used to live under Office (component
+preparation, app configuration, account sign-in and permissions) and surfaces
+the capabilities it provides — [Feishu Knowledge](office-hub.md)
+(`/knowledge/feishu`) and the `lark-cli` skill.
+
+Connection state, account and permissions exist exactly once; the connector card
+and the Feishu knowledge page header open the same connection settings. Until
+the connection is ready, `lark-cli` appears in the session skill picker as
+"pending connection" and cannot be checked. Once configured, it still requires
+an explicit per-session opt-in and is never injected automatically.
 
 ## Skill API
 

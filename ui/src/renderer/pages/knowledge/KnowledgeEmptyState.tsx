@@ -7,7 +7,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { BookOne, FolderOpen, Plus, Upload, Earth, LarkOne } from '@icon-park/react';
-import { FEISHU_KNOWLEDGE_CREATION_ENABLED } from './CreateStudio/sourceTypes';
 
 export type KnowledgeKindShortcut = 'blank' | 'local' | 'web' | 'feishu';
 
@@ -75,12 +74,8 @@ const KnowledgeEmptyState: React.FC<KnowledgeEmptyStateProps> = ({ onCreate, onI
     },
     {
       key: 'feishu',
-      label: t('knowledge.empty.kindFeishu', { defaultValue: '飞书文档' }),
+      label: t('knowledge.feishu.title', { defaultValue: '飞书知识库' }),
       icon: <LarkOne theme='outline' size='20' />,
-      disabled: !FEISHU_KNOWLEDGE_CREATION_ENABLED,
-      badge: !FEISHU_KNOWLEDGE_CREATION_ENABLED
-        ? t('knowledge.studio.temporarilyDisabled', { defaultValue: '暂不可用' })
-        : undefined,
     },
   ];
 

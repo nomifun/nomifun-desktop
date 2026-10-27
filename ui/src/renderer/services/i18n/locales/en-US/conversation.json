@@ -953,7 +953,10 @@
     "selectedCount_one": "{{count}} selected",
     "selectedCount_other": "{{count}} selected",
     "manageSkills": "Manage skills",
-    "manageMcp": "Manage MCP"
+    "manageMcp": "Manage MCP",
+    "connector": "Connector",
+    "connectorPending": "Connect first",
+    "connectorPendingHint": "Set up the Feishu connector under MCP & Skills → Connectors first"
   },
   "sendbox": {
     "hint": "Type / for commands, @ to reference files",

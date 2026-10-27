@@ -951,7 +951,10 @@
     "toolCount_other": "{{count}} 个工具",
     "selectedCount_other": "已选 {{count}} 项",
     "manageSkills": "管理技能",
-    "manageMcp": "管理 MCP"
+    "manageMcp": "管理 MCP",
+    "connector": "连接器",
+    "connectorPending": "待连接",
+    "connectorPendingHint": "先在「MCP & 技能 → 连接器」完成飞书连接"
   },
   "sendbox": {
     "hint": "输入 / 唤起命令，@ 引用文件",

@@ -2,7 +2,7 @@ import type { AuthorizationFlow, OfficeOperation, OfficeStatus } from '@/common/
 import { Close, LinkOne } from '@icon-park/react';
 import { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { mutationTitle, operationKind, pendingItem, sameActor, terminalAuth } from './model';
+import { errorDetails, mutationTitle, officeError, operationKind, pendingItem, relatedAuthorization, relatedOperation, sameActor, terminalAuth } from './model';
 
 export function OfficeButton({ children, primary, quiet, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { primary?: boolean; quiet?: boolean }) {
   return <button type='button' {...props} className={['office-button', primary ? 'office-button--primary' : '', quiet ? 'office-button--quiet' : '', props.className ?? ''].join(' ')}>{children}</button>;
@@ -32,6 +32,20 @@ export function OfficeDialog({ title, children, footer, onClose, busy, hidden = 
     <header className='office-dialog__header'><h2>{title}</h2><OfficeButton quiet disabled={busy} aria-label={t('office.actions.close')} onClick={onClose}><Close size={16} /></OfficeButton></header>
     <div className='office-dialog__body'>{children}</div>{footer && <footer className='office-dialog__footer'>{footer}</footer>}
   </section></div>;
+}
+/** Shared error block: message plus contextual recovery actions supplied by the host. */
+export function OfficeErrorPanel({ error, onShowOperation, onResumeFlow, onAuthorize, onOpenUrl }: {
+  error: unknown;
+  onShowOperation?: (id: string) => void;
+  onResumeFlow: (id: string) => void;
+  onAuthorize: (scopes: string[]) => void;
+  onOpenUrl: (url: string) => void;
+}) {
+  const { t } = useTranslation();
+  if (!error) return null;
+  const details = errorDetails(error), original = relatedOperation(error), flow = relatedAuthorization(error);
+  const scopes = Array.isArray(details.missing_scopes) ? details.missing_scopes.filter((value): value is string => typeof value === 'string') : [];
+  return <div className='office-error' role='alert'><span>{error instanceof Error && error.message.startsWith('office.') ? t(error.message) : officeError(error)}</span><div className='office-actions'>{original && onShowOperation && <OfficeButton quiet onClick={() => onShowOperation(original)}>{t('office.actions.original')}</OfficeButton>}{flow && <OfficeButton quiet onClick={() => onResumeFlow(flow)}>{t('office.auth.resume')}</OfficeButton>}{!!scopes.length && <OfficeButton quiet onClick={() => onAuthorize(scopes)}>{t('office.actions.authorize')}</OfficeButton>}{typeof details.console_url === 'string' && <OfficeButton quiet onClick={() => onOpenUrl(details.console_url as string)}>{t('office.auth.admin')}</OfficeButton>}</div></div>;
 }
 export interface AuthorizationProps {
   flow: AuthorizationFlow | null; busy: boolean; error?: React.ReactNode;

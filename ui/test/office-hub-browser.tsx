@@ -14,7 +14,7 @@ import type { AuthStartRequest, AuthorizationFlow, OfficeActor, OfficeItem, Offi
 import { uuidv7 } from '../src/common/utils/uuidv7';
 import office from '../src/renderer/services/i18n/locales/zh-CN/office.json';
 import common from '../src/renderer/services/i18n/locales/zh-CN/common.json';
-import OfficeHubPage from '../src/renderer/pages/officeHub';
+import FeishuKnowledgePage from '../src/renderer/pages/knowledge/FeishuKnowledgePage';
 
 const scenario = new URLSearchParams(location.search).get('scenario') ?? 'list';
 const actor = { app_id: 'qa-app', user_id: 'qa-user', name: '离线验收' };
@@ -94,6 +94,16 @@ officeHub.prepare = async () => {
   }, 800);
   return structuredClone(status.runtime);
 };
+officeHub.repair = async () => {
+  status.runtime.phase = 'preparing'; lastAction = '模拟修复组件'; report();
+  window.setTimeout(() => {
+    status.runtime = { ...status.runtime, phase: 'ready', executable: 'QA SIMULATED', version: '1.0.98', source: 'shared_user', message: null };
+    status.connection.executable = 'QA SIMULATED';
+    status.phase = status.actor ? 'ready' : 'needs_login';
+    lastAction = '模拟修复完成'; report();
+  }, 800);
+  return structuredClone(status.runtime);
+};
 officeHub.checkUpdate = async () => ({ installed_version: status.runtime.version, latest_version: '1.0.99', compatible_version: '1.0.98', update_available: true, message: 'QA SIMULATED: 只读版本检查，不会安装。' });
 officeHub.selectRuntime = async executable => {
   status.connection.executable = executable;
@@ -150,7 +160,7 @@ officeHub.reconcile = async id => { const operation = [...operations.values()].f
 
 const locale = createInstance();
 await locale.use(initReactI18next).init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: { office, common } } } });
-const router = createMemoryRouter([{ path: '/office', element: <OfficeHubPage /> }], { initialEntries: ['/office'] });
+const router = createMemoryRouter([{ path: '/knowledge/feishu', element: <FeishuKnowledgePage /> }], { initialEntries: ['/knowledge/feishu'] });
 createRoot(window.document.getElementById('root')!).render(<I18nextProvider i18n={locale}><RouterProvider router={router} /></I18nextProvider>);
 window.document.getElementById('root')!.style.cssText = 'height:calc(100vh - 76px);min-height:524px;min-width:880px';
 const note = window.document.createElement('aside');

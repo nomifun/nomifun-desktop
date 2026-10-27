@@ -1,4 +1,5 @@
 import type { IMcpServer } from '@/common/config/storage';
+import { isConnectorProvidedSkill } from '@/common/connectors';
 import { useSkillDisplay } from '@/renderer/services/skills/useSkillDisplay';
 import { useMcpDisplayName } from '@/renderer/services/mcp/useMcpDisplayName';
 import { enhancedToolsUrl } from '@/renderer/pages/enhancedTools/routes';
@@ -206,12 +207,16 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
             catalog.skills.map((skill) => {
               const display = getSkillDisplay(skill);
               const checked = selectedSkills.has(skill.name);
+              const connectorProvided = isConnectorProvidedSkill(skill.name);
+              const connectorBlocked = connectorProvided && catalog.connectorsReady?.feishu !== true;
               const unavailable = skill.session_available === false;
-              const rowDisabled = disabled || readOnlyKinds.includes('skills') || (unavailable && !checked);
+              const rowDisabled = disabled || readOnlyKinds.includes('skills') || ((unavailable || connectorBlocked) && !checked);
               const description = display.description || t('settings.skillsHub.noDescription', { defaultValue: 'No description provided.' });
               const unavailableReason = unavailable
                 ? skill.session_error?.trim() || t('conversation.capabilityPicker.unavailable')
-                : undefined;
+                : connectorBlocked
+                  ? t('conversation.capabilityPicker.connectorPendingHint', { defaultValue: '先在「MCP & 技能 → 连接器」完成飞书连接' })
+                  : undefined;
               return (
                 <div
                   key={skill.name}
@@ -225,12 +230,16 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
                     <strong>{display.name}</strong>
                     <CapabilityDescription>{description}</CapabilityDescription>
                   </span>
-                  <Tooltip content={unavailableReason} disabled={!unavailable} trigger={['hover', 'focus']} position='left' className={styles.descriptionTooltip}>
-                    <span title={unavailableReason} tabIndex={unavailable ? 0 : undefined} className={`${styles.status} ${unavailable ? styles.error : ''}`}>{unavailable
+                  <Tooltip content={unavailableReason} disabled={!unavailableReason} trigger={['hover', 'focus']} position='left' className={styles.descriptionTooltip}>
+                    <span title={unavailableReason} tabIndex={unavailable || connectorBlocked ? 0 : undefined} className={`${styles.status} ${unavailable ? styles.error : ''}`}>{unavailable
                       ? t('conversation.capabilityPicker.error', { defaultValue: '异常' })
-                      : skill.source === 'builtin'
-                      ? t('conversation.capabilityPicker.builtin', { defaultValue: '内置' })
-                      : t('conversation.capabilityPicker.installed', { defaultValue: '已安装' })}</span>
+                      : connectorProvided
+                        ? connectorBlocked
+                          ? t('conversation.capabilityPicker.connectorPending', { defaultValue: '待连接' })
+                          : t('conversation.capabilityPicker.connector', { defaultValue: '连接器' })
+                        : skill.source === 'builtin'
+                          ? t('conversation.capabilityPicker.builtin', { defaultValue: '内置' })
+                          : t('conversation.capabilityPicker.installed', { defaultValue: '已安装' })}</span>
                   </Tooltip>
                 </div>
               );

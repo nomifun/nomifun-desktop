@@ -5,22 +5,9 @@
 .office-page-header .page-header__actions{min-width:0;gap:8px}
 .office-page-header .i-icon{display:inline-flex;align-items:center;justify-content:center;flex:none;line-height:0}
 .office-page-header .i-icon>svg{display:block}
-.office-app-trigger{display:inline-flex;align-items:center;gap:7px;min-height:30px;margin-left:5px;padding:4px 8px;border:1px solid var(--border-base);border-radius:6px;background:var(--bg-base);color:var(--text-primary);font:inherit;font-size:12px;line-height:20px;cursor:pointer}
-.office-app-trigger:hover,.office-app-trigger[aria-expanded=true]{background:var(--bg-hover)}
-.office-app-trigger:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
-.office-app-trigger>img{width:18px;height:18px;object-fit:contain;flex:none}
-.office-app-popup{width:260px;padding:6px;border:1px solid var(--border-base);border-radius:9px;background:var(--bg-base);box-shadow:0 6px 24px color-mix(in srgb,var(--text-primary) 12%,transparent)}
-.office-app-popup-heading{display:flex;flex-direction:column;gap:5px;padding:9px 10px 12px}
-.office-app-popup-heading strong{font-size:12px;font-weight:500;color:var(--text-primary)}
-.office-app-popup-heading>span{font-size:11px;color:var(--text-secondary)}
-.office-app-menu.arco-menu{background:transparent;box-shadow:none}
-.office-app-menu .arco-menu-item{margin:3px 0;padding:0 10px;border-radius:5px}
-.office-app-menu .arco-menu-item.arco-menu-selected{background:var(--bg-2);color:var(--text-primary)}
-.office-app-option{display:flex;align-items:center;gap:10px;min-height:39px;width:100%;font-size:13px}
-.office-app-option>img{width:23px;height:23px;object-fit:contain;flex:none}
-.office-app-option>span{flex:1;min-width:0}
-.office-app-option>small{font-size:10px;line-height:18px;white-space:nowrap;color:var(--text-secondary)}
-.office-app-option>.i-icon{color:var(--primary);flex:none}
+.feishu-back{flex:none;padding:10px 20px 0}
+.feishu-badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary)}
+.feishu-badge>img{width:18px;height:18px;object-fit:contain;flex:none}
 .office-body{flex:1;min-height:0;min-width:0;overflow-y:auto;overflow-x:hidden}
 .office-content{padding:14px 20px 22px;min-width:0}
 .office-hub h3{margin:0;font-size:14px;line-height:22px;font-weight:600}

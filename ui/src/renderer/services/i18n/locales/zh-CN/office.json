@@ -1,15 +1,5 @@
 {
-  "title": "办公",
   "feishu": "飞书",
-  "appSwitcher": {
-    "label": "切换办公应用",
-    "title": "办公应用",
-    "hint": "当前仅支持飞书",
-    "unavailable": "暂未支持",
-    "wechat": "微信",
-    "wecom": "企业微信",
-    "dingtalk": "钉钉"
-  },
   "host": "运行设备",
   "hostHint": "CLI 和凭据保存在 NomiFun 后端电脑，这台电脑可能不是当前浏览器所在设备。",
   "loading": "正在读取…",
@@ -44,7 +34,8 @@
     "copy": "复制命令",
     "openBrowser": "浏览器打开",
     "delete": "删除",
-    "back": "返回"
+    "back": "返回",
+    "repair": "修复组件"
   },
   "connection": {
     "welcome": "连接飞书，开始办公",
@@ -59,13 +50,13 @@
   "runtime": {
     "title": "飞书 CLI",
     "advanced": "环境详情与其他安装方式",
-    "notBundled": "仅在你选择安装后下载 CLI，不包含在 NomiFun 安装包中。已有兼容组件直接复用。",
-    "brokenHint": "损坏或不兼容的安装不等于缺失，请修复原安装或明确选择其他程序。",
+    "notBundled": "仅在你选择安装后下载 CLI，不包含在 NomiFun 安装包中。已有官方组件直接复用。",
+    "brokenHint": "损坏的安装不等于缺失。可直接修复为官方组件（不改动原有安装），或在下方选择其他程序。",
     "selectedPath": "已有程序的绝对路径",
     "automatic": "恢复自动发现",
     "retryPrepare": "重试准备",
     "checkUpdate": "检查更新",
-    "versions": "已安装 {{installed}} · 最新 {{latest}} · 兼容 {{compatible}}",
+    "versions": "已安装 {{installed}} · 最新 {{latest}} · 已验证 {{compatible}}",
     "checkOnly": "检查不会安装或升级，外部安装继续由原工具链维护。",
     "fullWizardHint": "官方完整安装向导还可能安装其他 Agent 的全局 Skills 并进入应用配置，请在自己的终端明确执行。",
     "source": {
@@ -76,7 +67,6 @@
     "phase": {
       "missing": "尚未安装",
       "ready": "已就绪",
-      "incompatible": "版本不兼容",
       "broken": "安装损坏",
       "preparing": "正在安装",
       "error": "准备失败"
@@ -247,8 +237,8 @@
     "missingHint": "只需准备一次。安装完成后，使用你的飞书账号登录，即可查看文档与多维表格。",
     "installingTitle": "正在准备连接组件",
     "installingHint": "组件准备完成后，这里会出现登录入口。无需重复安装或保持弹窗打开。",
-    "repairTitle": "连接组件需要检查",
-    "repairHint": "检测到的组件暂时不可用。请检查现有安装，或在连接设置中选择可用的程序。",
+    "repairTitle": "连接组件需要修复",
+    "repairHint": "检测到的组件暂时不可用。可一键修复为官方组件（不改动原有安装），或在连接设置中选择其他程序。",
     "disabledTitle": "飞书连接已停用",
     "disabledHint": "当前不会读取或写入飞书内容。启用连接后，可继续使用已有账号或重新登录。",
     "expiredTitle": "重新登录飞书",

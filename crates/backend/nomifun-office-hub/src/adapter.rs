@@ -777,7 +777,7 @@ mod tests {
         let directory=tempfile::tempdir().unwrap();
         let runtime=crate::runtime::CliRuntime::new(directory.path().to_path_buf());
         let observed=runtime.inspect(Some(&executable)).await;
-        assert_eq!(observed.phase,RuntimePhase::Ready,"Use an existing compatible CLI; this probe never installs");
+        assert_eq!(observed.phase,RuntimePhase::Ready,"Use an existing ready CLI; this probe never installs");
         let executable=observed.executable.unwrap();
         let cancel=tokio_util::sync::CancellationToken::new();
         let identity=runtime.run(&executable,status_command(Some(&profile),false),cancel.child_token(),None).await.unwrap();

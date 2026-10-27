@@ -8,7 +8,7 @@ pub const OFFICIAL_INSTALL_COMMAND: &str = "npx @larksuite/cli@latest install";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RuntimePhase { Missing, Ready, Incompatible, Broken, Preparing, Error }
+pub enum RuntimePhase { Missing, Ready, Broken, Preparing, Error }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeSource { SharedUser, External, Selected }

@@ -32,7 +32,6 @@ import TagPicker from './TagPicker';
 import styles from './CreateStudio.module.css';
 import {
   canSubmitStudioSourceConfig,
-  canSubmitStudioSourceType,
   normalizeStudioInitialKind,
   type StudioInitialKind,
   type StudioSourceType,
@@ -171,15 +170,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
   const handleSubmit = async () => {
     const sourceValidation = canSubmitStudioSourceConfig(sourceType, sourceConfigValue);
     if (!sourceValidation.ok) {
-      const defaultValue =
-        sourceValidation.messageKey === 'knowledge.studio.localFolderRequired'
-          ? '请先选择本地文件夹'
-          : '飞书知识空间创建暂不可用';
-      Message.warning(t(sourceValidation.messageKey, { defaultValue }));
-      if (!canSubmitStudioSourceType(sourceType)) {
-        setSourceType('blank');
-        setSourceConfigValue({});
-      }
+      Message.warning(t(sourceValidation.messageKey, { defaultValue: '请先选择本地文件夹' }));
       return;
     }
 

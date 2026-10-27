@@ -2263,6 +2263,30 @@
     "installedSkills": "Installed Skills",
     "mcpHint": "Enable and test to discover tools, then select them in a Session.",
     "skillsHint": "Installed independently and selected per Session.",
-    "backToList": "Back to list"
+    "backToList": "Back to list",
+    "connectors": "Connectors",
+    "connectorsHint": "Manage third-party account connections for knowledge spaces and session capabilities."
+  },
+  "connectors": {
+    "capabilities": "Provided capabilities",
+    "configureFirst": "Finish the connection setup to enable the capabilities below.",
+    "connectionName": "Connection",
+    "knowledgeHint": "Browse cloud documents under Knowledge",
+    "skillHint": "Opt in per session from the capability picker",
+    "feishu": {
+      "name": "Feishu Connector",
+      "description": "Connect a Feishu account and share one credential with the Feishu knowledge space and the Feishu CLI skill.",
+      "skillName": "Feishu CLI"
+    },
+    "status": {
+      "ready": "Connected",
+      "needs_login": "Sign-in required",
+      "disabled": "Disabled",
+      "not_configured": "Not configured",
+      "expired": "Expired",
+      "error": "Error",
+      "preparing": "Preparing",
+      "runtime": "Runtime required"
+    }
   }
 }

@@ -168,15 +168,20 @@ compression format; compressed component sizes alone are not installer measureme
 
 ## Feishu Office CLI
 
-The cloud [Office Hub](../guides/office-hub.md) uses the official
-`@larksuite/cli`, with 1.0.98 as its verified compatibility baseline. It is separate
+The cloud [Feishu knowledge page and connector](../guides/office-hub.md) use the official
+`@larksuite/cli`; managed installs pin the verified 1.0.98 build. It is separate
 from the embedded OfficeCLI used for local file rendering. The Feishu CLI is not
 embedded or exposed as a managed `component` target.
 
-The connection dialog guides the user through environment preparation, connection
-and read permissions. Missing components use one Host supplier after explicit
-opt-in, reusing an existing compatible installation first. The fixed official npm
-package goes into `user_cli_root`, under the shared-prefix preparation lock.
+The connection dialog guides the user through its account, permissions and
+advanced sections. Missing components use one Host supplier after explicit
+opt-in, reusing an existing official installation first. Runtime probing only
+verifies that the executable launches and its `--version` output identifies the
+official lark-cli — any official release is usable and there is no version gate.
+Broken or unrecognized installations are remediated only through the explicit
+Repair action into the same managed copy, never by replacing the user's install.
+The fixed official npm package goes into `user_cli_root`, under the
+shared-prefix preparation lock.
 Existing external installations keep their original location and maintenance.
 The full upstream wizard is only a command for the user to run explicitly; it may
 also install global skills. Read-only update checks do not install or sync skills.
@@ -187,7 +192,7 @@ deletion. Save submits one stable request, and a lost response is recovered by
 that request identity. Pending document and Base targets retain their SQL write
 fences across identity changes. The same process owner keeps retrying tree cleanup
 until completion is proved; cancelling execution cannot end that cleanup early.
-Office retains four product tables for connections and submitted request
+Feishu Office retains four product tables for connections and submitted request
 receipts, separately from canonical Agent facts. The page opens directly on
 Documents; see the [active plan](../handoffs/office-feishu-workbench.zh.md).
 

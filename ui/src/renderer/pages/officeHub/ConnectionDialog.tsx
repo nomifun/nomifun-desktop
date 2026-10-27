@@ -5,7 +5,7 @@ import { CheckOne, Download, SettingConfig, Shield, User } from '@icon-park/reac
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AuthorizationPanel, OfficeBadge, OfficeButton, OfficeDialog, type AuthorizationProps } from './dialogs';
-import { officeError, readGroups, scopesFor, terminalAuth } from './model';
+import { officeError, readGroups, runtimeCanPrepare, runtimeCanRepair, scopesFor, terminalAuth } from './model';
 
 type ConnectionTab = 'account' | 'access' | 'advanced';
 export function ConnectionDialog({ status, authorization, onStart, refresh, onClose, onError, onSignedOut }: {
@@ -30,7 +30,8 @@ export function ConnectionDialog({ status, authorization, onStart, refresh, onCl
   const [confirmation, setConfirmation] = useState<'switch' | 'logout' | null>(null);
   const active = !!authorization.flow && !terminalAuth(authorization.flow.phase);
   const runtimeReady = status.runtime.phase === 'ready';
-  const canPrepare = status.runtime.phase === 'missing' || (status.runtime.phase === 'error' && !status.runtime.executable);
+  const canPrepare = runtimeCanPrepare(status.runtime);
+  const canRepair = runtimeCanRepair(status.runtime);
   const connected = runtimeReady && status.connection.enabled && status.phase === 'ready' && !!status.actor;
   const busy = working || authorization.busy;
   const locked = busy || active;
@@ -92,6 +93,11 @@ export function ConnectionDialog({ status, authorization, onStart, refresh, onCl
     const next = await refresh();
     if (next?.runtime.phase === 'ready') setTab('account');
   });
+  const repair = () => work(async () => {
+    await officeHub.repair();
+    const next = await refresh();
+    if (next?.runtime.phase === 'ready') setTab('account');
+  });
   const showFlow = !!authorization.flow && authorization.flow.phase !== 'complete';
   const icons = { account: User, access: Shield, advanced: SettingConfig };
   return <OfficeDialog title={t('office.connection.manage')} busy={busy} onClose={() => { setSecret(''); onClose(); }} className='office-connection-dialog' footer={<>
@@ -132,7 +138,7 @@ export function ConnectionDialog({ status, authorization, onStart, refresh, onCl
           <div className='office-section-heading'><h3>{t('office.account.componentTitle')}</h3><p>{t('office.account.componentHint')}</p></div>
           <div className='office-component-summary'><span className='office-component-icon'><Download size={20} /></span><div><strong>{t('office.runtime.title')}</strong><p>{status.runtime.version ? 'v' + status.runtime.version : t('office.runtime.phase.' + status.runtime.phase)}</p></div><OfficeBadge state={runtimeReady ? 'good' : 'warning'}>{t('office.runtime.phase.' + status.runtime.phase)}</OfficeBadge></div>
           {status.runtime.message && <p className='office-warning'>{status.runtime.message}</p>}{!runtimeReady && !canPrepare && status.runtime.phase !== 'preparing' && <p className='office-small office-muted'>{t('office.runtime.brokenHint')}</p>}
-          <div className='office-actions'>{canPrepare && <OfficeButton primary disabled={locked} onClick={() => void prepare()}>{t(status.runtime.phase === 'error' ? 'office.runtime.retryPrepare' : 'office.actions.prepare')}</OfficeButton>}<OfficeButton disabled={busy || status.runtime.phase === 'preparing'} onClick={() => void work(refresh)}>{t('office.actions.check')}</OfficeButton>{runtimeReady && <OfficeButton disabled={busy} onClick={() => void work(async () => { setUpdate(await officeHub.checkUpdate()); })}>{t('office.runtime.checkUpdate')}</OfficeButton>}</div>
+          <div className='office-actions'>{canPrepare && <OfficeButton primary disabled={locked} onClick={() => void prepare()}>{t(status.runtime.phase === 'error' ? 'office.runtime.retryPrepare' : 'office.actions.prepare')}</OfficeButton>}{canRepair && <OfficeButton primary disabled={locked} onClick={() => void repair()}>{t('office.actions.repair')}</OfficeButton>}<OfficeButton disabled={busy || status.runtime.phase === 'preparing'} onClick={() => void work(refresh)}>{t('office.actions.check')}</OfficeButton>{runtimeReady && <OfficeButton disabled={busy} onClick={() => void work(async () => { setUpdate(await officeHub.checkUpdate()); })}>{t('office.runtime.checkUpdate')}</OfficeButton>}</div>
           {status.runtime.phase === 'preparing' && <p role='status'>{t('office.account.installingHint')}</p>}{update && <p role='status' className='office-small office-muted'>{t('office.runtime.versions', { installed: update.installed_version ?? '—', latest: update.latest_version ?? '—', compatible: update.compatible_version })}<br />{t('office.runtime.checkOnly')}{update.message && <><br />{update.message}</>}</p>}
           <details className='office-advanced'><summary>{t('office.account.technicalDetails')}</summary><dl className='office-connection-facts'><dt>{t('office.host')}</dt><dd>{status.host_name} · {status.host_os}</dd>{status.runtime.source && <><dt>{t('office.account.installationSource')}</dt><dd>{t('office.runtime.source.' + status.runtime.source)}</dd></>}{status.connection.profile && <><dt>{t('office.connection.profile')}</dt><dd>{status.connection.profile}</dd></>}{status.actor && <><dt>{t('office.connection.appId')}</dt><dd>{status.actor.app_id}</dd></>}</dl><label className='office-label'>{t('office.runtime.selectedPath')}<input className='office-input' value={path} onChange={event => setPath(event.target.value)} disabled={locked} /></label><div className='office-actions'><OfficeButton disabled={locked || !path.trim()} onClick={() => void work(() => officeHub.selectRuntime(path.trim()))}>{t('office.actions.select')}</OfficeButton>{status.connection.executable && <OfficeButton disabled={locked} onClick={() => void work(() => officeHub.selectRuntime(null))}>{t('office.runtime.automatic')}</OfficeButton>}</div><p className='office-small office-muted'>{t('office.hostHint')}</p><p className='office-small office-muted'>{t('office.runtime.fullWizardHint')}</p><code className='office-command'>{status.runtime.official_install_command}</code><OfficeButton quiet onClick={() => void work(() => copyText(status.runtime.official_install_command))}>{t('office.actions.copy')}</OfficeButton></details>
           <div className='office-connection-toggle'><div><strong>{t('office.account.connectionUse')}</strong><p>{t('office.account.disableHint')}</p></div><OfficeButton disabled={locked} onClick={() => void work(() => officeHub.updateConnection({ name: status.connection.name, profile: status.connection.profile, enabled: !status.connection.enabled }))}>{t(status.connection.enabled ? 'office.actions.disable' : 'office.actions.enable')}</OfficeButton></div>

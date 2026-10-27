@@ -1,5 +1,6 @@
 /** One management destination; skills and MCP retain their independent owners. */
 import type { IMcpServer } from '@/common/config/storage';
+import { CONNECTORS } from '@/common/connectors';
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
 import { useMcpServers } from '@/renderer/hooks/mcp';
 import McpMarketSettings from '@/renderer/pages/mcp/McpMarketSettings';
@@ -10,20 +11,26 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import McpManagementPanel from './McpManagementPanel';
+import ConnectorsPanel from './ConnectorsPanel';
 import SkillsLibraryPanel from './SkillsLibraryPanel';
 import { type EnhancedToolsCategory } from './routes';
 import { useSkillsLibrary } from './useSkillsLibrary';
 import './styles.css';
 
-const getCategory = (params: URLSearchParams): EnhancedToolsCategory =>
-  params.get('category') === 'skills' ? 'skills' : 'mcp';
+const CATEGORIES: EnhancedToolsCategory[] = ['mcp', 'skills', 'connectors'];
+
+const getCategory = (params: URLSearchParams): EnhancedToolsCategory => {
+  const value = params.get('category');
+  return value === 'skills' || value === 'connectors' ? value : 'mcp';
+};
 
 export default function EnhancedToolsPage() {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
   const [importMode, setImportMode] = useState<'json' | 'oneclick' | null>(null);
   const category = getCategory(searchParams);
-  const marketVisible = searchParams.get('view') === 'market';
+  const isConnectors = category === 'connectors';
+  const marketVisible = !isConnectors && searchParams.get('view') === 'market';
   const viewOwner = useMemo(() => ({}), [category, marketVisible, importMode]);
   const currentViewOwner = useRef(viewOwner);
   currentViewOwner.current = viewOwner;
@@ -34,7 +41,7 @@ export default function EnhancedToolsPage() {
   const library = useSkillsLibrary();
   const { mcpServers, isMcpServersLoading, mcpServersLoadFailed, retryMcpServers, saveMcpServers } = useMcpServers();
   const panels = useRef<Partial<Record<EnhancedToolsCategory, HTMLDivElement | null>>>({});
-  const scrollPositions = useRef<Record<EnhancedToolsCategory, number>>({ mcp: 0, skills: 0 });
+  const scrollPositions = useRef<Record<EnhancedToolsCategory, number>>({ mcp: 0, skills: 0, connectors: 0 });
   const tabRefs = useRef<Partial<Record<EnhancedToolsCategory, HTMLButtonElement | null>>>({});
   const isMcp = category === 'mcp';
   const mcpUnavailable = isMcpServersLoading || mcpServersLoadFailed;
@@ -142,7 +149,7 @@ export default function EnhancedToolsPage() {
       title={t('settings.enhancedTools.title')}
       className='enhanced-tools-page'
       maxWidthClass='enhanced-tools-container'
-      actions={
+      actions={isConnectors ? undefined : (
         <>
           <Input
             allowClear
@@ -169,10 +176,10 @@ export default function EnhancedToolsPage() {
             </Button>
           </Dropdown>
         </>
-      }
+      )}
     >
       <div className='enhanced-tools-tabs' role='tablist' aria-label={t('settings.enhancedTools.title')}>
-        {(['mcp', 'skills'] as const).map((item) => (
+        {CATEGORIES.map((item) => (
           <button
             key={item}
             type='button'
@@ -186,21 +193,22 @@ export default function EnhancedToolsPage() {
             onKeyDown={(event) => {
               if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
               event.preventDefault();
-              const next = event.key === 'Home' ? 'mcp' : event.key === 'End' ? 'skills' : item === 'mcp' ? 'skills' : 'mcp';
+              const index = CATEGORIES.indexOf(item);
+              const next = event.key === 'Home' ? CATEGORIES[0] : event.key === 'End' ? CATEGORIES[CATEGORIES.length - 1] : CATEGORIES[event.key === 'ArrowLeft' ? Math.max(0, index - 1) : Math.min(CATEGORIES.length - 1, index + 1)];
               selectCategory(next);
               tabRefs.current[next]?.focus();
             }}
           >
-            {item === 'mcp' ? 'MCP' : t('settings.enhancedTools.skills')}
+            {item === 'mcp' ? 'MCP' : item === 'skills' ? t('settings.enhancedTools.skills') : t('settings.enhancedTools.connectors')}
             <span className='enhanced-tools-count'>
-              {item === 'mcp' ? isMcpServersLoading || mcpServersLoadFailed ? '—' : mcpServers.length : library.loading || library.error ? '—' : library.availableSkills.length}
+              {item === 'mcp' ? isMcpServersLoading || mcpServersLoadFailed ? '—' : mcpServers.length : item === 'skills' ? library.loading || library.error ? '—' : library.librarySkills.length : CONNECTORS.length}
             </span>
           </button>
         ))}
       </div>
       <div className='enhanced-tools-section-heading'>
-        <h2>{isMcp ? t('settings.enhancedTools.servers') : t('settings.enhancedTools.installedSkills')}</h2>
-        <span>{isMcp ? t('settings.enhancedTools.mcpHint') : t('settings.enhancedTools.skillsHint')}</span>
+        <h2>{isMcp ? t('settings.enhancedTools.servers') : isConnectors ? t('settings.enhancedTools.connectors') : t('settings.enhancedTools.installedSkills')}</h2>
+        <span>{isMcp ? t('settings.enhancedTools.mcpHint') : isConnectors ? t('settings.enhancedTools.connectorsHint') : t('settings.enhancedTools.skillsHint')}</span>
       </div>
       <div className='enhanced-tools-panels'>
         <div
@@ -235,11 +243,22 @@ export default function EnhancedToolsPage() {
           id='enhanced-tools-panel-skills'
           role='tabpanel'
           aria-labelledby='enhanced-tools-tab-skills'
-          hidden={isMcp}
+          hidden={category !== 'skills'}
           ref={(element) => { panels.current.skills = element; }}
-          onScroll={(event) => { if (!isMcp) scrollPositions.current.skills = event.currentTarget.scrollTop; }}
+          onScroll={(event) => { if (category === 'skills') scrollPositions.current.skills = event.currentTarget.scrollTop; }}
         >
-          <SkillsLibraryPanel library={library} visible={!isMcp && !marketVisible} />
+          <SkillsLibraryPanel library={library} visible={category === 'skills' && !marketVisible} />
+        </div>
+        <div
+          className='enhanced-tools-panel'
+          id='enhanced-tools-panel-connectors'
+          role='tabpanel'
+          aria-labelledby='enhanced-tools-tab-connectors'
+          hidden={!isConnectors}
+          ref={(element) => { panels.current.connectors = element; }}
+          onScroll={(event) => { if (isConnectors) scrollPositions.current.connectors = event.currentTarget.scrollTop; }}
+        >
+          {isConnectors && <ConnectorsPanel />}
         </div>
       </div>
       <Drawer

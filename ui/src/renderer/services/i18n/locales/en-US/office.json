@@ -1,15 +1,5 @@
 {
-  "title": "Office",
   "feishu": "Feishu",
-  "appSwitcher": {
-    "label": "Switch office application",
-    "title": "Office applications",
-    "hint": "Only Feishu is available",
-    "unavailable": "Not supported yet",
-    "wechat": "WeChat",
-    "wecom": "WeCom",
-    "dingtalk": "DingTalk"
-  },
   "host": "Run on",
   "hostHint": "The CLI and credentials stay on the NomiFun backend computer, which may differ from this browser.",
   "loading": "Loading…",
@@ -44,7 +34,8 @@
     "copy": "Copy command",
     "openBrowser": "Open in browser",
     "delete": "Delete",
-    "back": "Back"
+    "back": "Back",
+    "repair": "Repair component"
   },
   "connection": {
     "welcome": "Connect Feishu to start working",
@@ -59,13 +50,13 @@
   "runtime": {
     "title": "Feishu CLI",
     "advanced": "Environment details and other installation options",
-    "notBundled": "The CLI is downloaded only after you choose to install it. It is not bundled with NomiFun. Compatible installations are reused.",
-    "brokenHint": "A broken or incompatible installation is not a missing installation. Repair it or explicitly select another program.",
+    "notBundled": "The CLI is downloaded only after you choose to install it. It is not bundled with NomiFun. Existing official installations are reused.",
+    "brokenHint": "A broken installation is not a missing one. Repair installs the official component in the managed location without touching the existing installation, or select another program below.",
     "selectedPath": "Existing executable path",
     "automatic": "Restore automatic discovery",
     "retryPrepare": "Retry installation",
     "checkUpdate": "Check updates",
-    "versions": "Installed {{installed}} · Latest {{latest}} · Compatible {{compatible}}",
+    "versions": "Installed {{installed}} · Latest {{latest}} · Verified {{compatible}}",
     "checkOnly": "Checking does not install or upgrade. External installations remain managed by their original tools.",
     "fullWizardHint": "The official full setup command may also install global Agent Skills and enter application configuration. Run it explicitly in your own terminal.",
     "source": {
@@ -76,7 +67,6 @@
     "phase": {
       "missing": "Not installed",
       "ready": "Ready",
-      "incompatible": "Incompatible version",
       "broken": "Broken installation",
       "preparing": "Installing",
       "error": "Preparation failed"
@@ -247,8 +237,8 @@
     "missingHint": "A one-time setup. Then sign in with your Feishu account to access documents and Base tables.",
     "installingTitle": "Preparing the connection component",
     "installingHint": "Sign-in will be available when preparation finishes. You do not need to install again or keep a dialog open.",
-    "repairTitle": "Check the connection component",
-    "repairHint": "The detected component is not ready. Repair the existing installation or select a working program in connection settings.",
+    "repairTitle": "The connection component needs repair",
+    "repairHint": "The detected component is not ready. Repair it as a managed official component (the existing installation is untouched), or select another program in connection settings.",
     "disabledTitle": "Your Feishu connection is disabled",
     "disabledHint": "No Feishu content is being read or written. Enable the connection to continue with your account or sign in again.",
     "expiredTitle": "Sign in to Feishu again",

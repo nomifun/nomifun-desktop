@@ -117,8 +117,6 @@ const getTeachRows = (sourceType: StudioSourceType): TeachRow[] => {
           textDefault: '导入后即普通托管库，可编辑、挂载、再导出。',
         },
       ];
-    // 'feishu' stays in StudioSourceType only as a disabled placeholder in the
-    // type rail — it can never be selected, so it teaches nothing.
     default:
       return [];
   }

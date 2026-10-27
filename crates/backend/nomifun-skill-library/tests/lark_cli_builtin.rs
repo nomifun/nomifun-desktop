@@ -88,10 +88,11 @@ fn missing_lark_component_uses_the_host_entry_without_an_agent_installer_or_trus
     let corpus = builtin_skills_corpus();
     let body = corpus.get_file("lark-cli/SKILL.md").unwrap().contents_utf8().unwrap();
     let installation = corpus.get_file("lark-cli/references/installation.md").unwrap().contents_utf8().unwrap();
-    assert!(body.contains("/office"));
+    assert!(body.contains("category=connectors"));
     assert!(!body.contains("tab=settings"));
-    assert!(body.contains("Connection settings → Prepare environment"));
-    assert!(installation.contains("Prepare component"));
+    assert!(body.contains("Connection settings → Advanced"));
+    assert!(installation.contains("Install component"));
+    assert!(installation.contains("Repair component"));
     assert!(installation.contains("NOMIFUN_USER_CLI_ROOT"));
     assert!(installation.contains("This skill's text is not a lock"));
     assert!(installation.contains("local trust token"));
@@ -110,7 +111,7 @@ fn lark_update_guidance_keeps_host_supply_and_external_user_maintenance_distinct
     let host = updates.split("## Host-supplied shared component").nth(1).unwrap()
         .split("## External user installations").next().unwrap();
     assert!(host.contains("must not run npm installation, update, rollback or repair"));
-    assert!(host.contains("/office"));
+    assert!(host.contains("category=connectors"));
     assert!(!host.contains("\"command\":\"npm\""));
     let external = updates.split("## External user installations").nth(1).unwrap();
     assert!(external.contains("<existing-prefix>"));

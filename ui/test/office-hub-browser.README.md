@@ -2,7 +2,7 @@
 
 Run `bun run --cwd ui dev --port 5191 --host 127.0.0.1` from the repository root and open
 `http://127.0.0.1:5191/test/office-hub-browser.html` in a desktop browser.
-The page imports the actual Office Hub renderer. All business methods and the
+The page imports the actual Feishu knowledge renderer (`/knowledge/feishu`). All business methods and the
 browser opener are simulated; it never accesses a backend, credentials, remote
 documents or external websites. The footer records simulated actions, writes and
 the exact browser links. It also provides scenario selection and explicit auth

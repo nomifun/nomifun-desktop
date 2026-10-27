@@ -13,6 +13,7 @@ export const officeHub = {
   status: (signal?: AbortSignal) => httpRequest<OfficeStatus>('GET', root + '/status', undefined, { signal }),
   profiles: (signal?: AbortSignal) => httpRequest<OfficeProfile[]>('GET', root + '/profiles', undefined, { signal }),
   prepare: () => httpRequest<RuntimeInfo>('POST', root + '/runtime/prepare'),
+  repair: () => httpRequest<RuntimeInfo>('POST', root + '/runtime/repair'),
   checkUpdate: () => httpRequest<RuntimeUpdateInfo>('POST', root + '/runtime/check-update', {}),
   selectRuntime: (executable: string | null) => httpRequest<RuntimeInfo>('POST', root + '/runtime/select', { executable }),
   updateConnection: (body: ConnectionUpdate) => httpRequest<OfficeConnection>('PUT', root + '/connection', body),

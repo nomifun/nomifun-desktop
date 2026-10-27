@@ -1,6 +1,5 @@
 export { default as SiderResourceSpaceEntry } from './SiderResourceSpaceEntry';
 export { default as SiderAgentEntry } from './SiderAgentEntry';
-export { default as SiderOfficeEntry } from './SiderOfficeEntry';
 export { default as SiderEnhancedToolsEntry } from './SiderEnhancedToolsEntry';
 export { default as SiderConversationEntry } from './SiderConversationEntry';
 export { default as SiderKnowledgeEntry } from './SiderKnowledgeEntry';

@@ -1,5 +1,6 @@
 /** Skill library state shared by the enhanced-tools header and library panel. */
 import { ipcBridge } from '@/common';
+import { isConnectorProvidedSkill } from '@/common/connectors';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { SkillInfo } from '@/common/types/skill';
 import { resolveLocaleKey } from '@/common/utils';
@@ -75,14 +76,16 @@ export const useSkillsLibrary = () => {
     };
   }, [refresh]);
 
+  // Connector-provided skills (e.g. lark-cli) are managed on their connector card.
+  const librarySkills = useMemo(() => availableSkills.filter((skill) => !isConnectorProvidedSkill(skill.name)), [availableSkills]);
   const filteredSkills = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    if (!query) return availableSkills;
-    return availableSkills.filter((skill) => {
+    if (!query) return librarySkills;
+    return librarySkills.filter((skill) => {
       const display = getSkillDisplay(skill);
       return `${skill.name} ${skill.description} ${display.name} ${display.description}`.toLowerCase().includes(query);
     });
-  }, [availableSkills, getSkillDisplay, searchQuery]);
+  }, [librarySkills, getSkillDisplay, searchQuery]);
   const detailSkill = useMemo(
     () => availableSkills.find((skill) => skill.name === detailSkillName) ?? null,
     [availableSkills, detailSkillName]
@@ -170,7 +173,7 @@ export const useSkillsLibrary = () => {
   };
 
   return {
-    localeKey, loading, error, availableSkills, filteredSkills, skillPaths, autoInjectedNames,
+    localeKey, loading, error, availableSkills, librarySkills, filteredSkills, skillPaths, autoInjectedNames,
     searchQuery, setSearchQuery, refresh, importFolder, importZip,
     importFromAgent: () => setAgentImportVisible(true),
     openDetails: (skill: SkillInfo) => setDetailSkillName(skill.name),

@@ -336,35 +336,22 @@ impl CliRuntime {
                 version: Some(verified.version.clone()), source: Some(self.source(&path, source)),
                 message: None, official_install_command: OFFICIAL_INSTALL_COMMAND.into() };
         }
+        // The only probe is identity, not a version or command contract: the
+        // official CLI carries the workbench's whole command surface in every
+        // release, so any genuine lark-cli is usable. A missing command would
+        // surface the real CLI error at call time instead of a fake gate here.
         let command = CliCommand { timeout: Duration::from_secs(15), ..CliCommand::new(["--version"], false) };
         let output = match self.executor.execute(&path, command, CancellationToken::new(), None).await {
             Ok(output) if output.successful() => output,
             _ => return fail(RuntimePhase::Broken, "已有组件无法正常启动；请修复该安装，不会另装一份".into(), Some(path), None),
         };
-        let Some(version) = parse_cli_version(&output.stdout) else {
-            return fail(RuntimePhase::Incompatible, "无法确认这是受支持的官方飞书 CLI".into(), Some(path), None);
-        };
-        if version != FEISHU_CLI_VERSION {
-            return fail(RuntimePhase::Incompatible,
-                format!("已安装版本 {version}；当前已验证的版本为 {FEISHU_CLI_VERSION}，不会静默替换现有安装"),
-                Some(path), Some(version));
+        if !output.stdout.to_lowercase().contains("lark-cli") {
+            return fail(RuntimePhase::Broken, "无法确认这是官方飞书 CLI；若这是同名程序，请选择正确组件或修复".into(), Some(path), None);
         }
-        for args in [vec!["--help"], vec!["schema", "drive.files.search"]] {
-            let command = CliCommand { timeout: Duration::from_secs(15), ..CliCommand::new(args.clone(), false) };
-            let valid = match self.executor.execute(&path, command, CancellationToken::new(), None).await {
-                Ok(output) if output.successful() => {
-                    args.len() == 1 || serde_json::from_str::<serde_json::Value>(&output.stdout)
-                        .ok().is_some_and(|value| value.get("inputSchema").is_some() && value.get("_meta").is_some())
-                }
-                _ => false,
-            };
-            if !valid {
-                return fail(RuntimePhase::Incompatible, "组件缺少办公工作台需要的命令契约".into(), Some(path), Some(version));
-            }
-        }
-        self.verified.lock().await.insert(path.clone(), Verified { stamp, version: version.clone() });
+        let version = parse_cli_version(&output.stdout);
+        self.verified.lock().await.insert(path.clone(), Verified { stamp, version: version.clone().unwrap_or_default() });
         RuntimeInfo { phase: RuntimePhase::Ready, executable: Some(path.to_string_lossy().into_owned()),
-            version: Some(version), source: Some(self.source(&path, source)), message: None,
+            version, source: Some(self.source(&path, source)), message: None,
             official_install_command: OFFICIAL_INSTALL_COMMAND.into() }
     }
 
@@ -380,10 +367,15 @@ impl CliRuntime {
         else { Err(HubError::unavailable(info.message.unwrap_or_else(|| "组件不可用".into()))) }
     }
 
-    pub async fn prepare(&self, selected: Option<&str>, cancel: CancellationToken) -> Result<RuntimeInfo, HubError> {
+    /// Repair is an explicit remediation: it still never touches an existing
+    /// installation, but installs or refreshes the managed shared copy so an
+    /// unusable external or selected program stops blocking the workbench.
+    pub async fn prepare(&self, selected: Option<&str>, repair: bool, cancel: CancellationToken) -> Result<RuntimeInfo, HubError> {
+        let permitted = |existing: &RuntimeInfo| existing.phase == RuntimePhase::Missing
+            || (repair && existing.phase == RuntimePhase::Broken);
         let existing = self.inspect(selected).await;
         if existing.phase == RuntimePhase::Ready { return Ok(existing); }
-        if existing.phase != RuntimePhase::Missing {
+        if !permitted(&existing) {
             return Err(HubError::unavailable(existing.message.unwrap_or_else(|| "已有组件需修复；不会重复安装".into())));
         }
         let root = self.shared_root.as_ref().ok_or_else(|| HubError::unavailable("无法确定用户共享 CLI 安装目录"))?;
@@ -394,7 +386,7 @@ impl CliRuntime {
         let _guard = acquire_install_lock(file, &cancel).await?;
         let existing = self.inspect(selected).await;
         if existing.phase == RuntimePhase::Ready { return Ok(existing); }
-        if existing.phase != RuntimePhase::Missing { return Err(HubError::unavailable("并行准备后发现已有组件需要修复")); }
+        if !permitted(&existing) { return Err(HubError::unavailable("并行准备后发现已有组件需要修复")); }
 
         // Resolving npm here is the first point at which missing Node/npm may
         // be prepared. Keep the user's original npm prefix/config intact.
@@ -409,7 +401,11 @@ impl CliRuntime {
             if let Some(path) = candidate {
                 let info = self.probe(&path, RuntimeSource::External).await;
                 if info.phase == RuntimePhase::Ready { return Ok(info); }
-                return Err(HubError::unavailable(info.message.unwrap_or_else(|| "已有全局安装需要修复".into())));
+                if !repair {
+                    return Err(HubError::unavailable(info.message.unwrap_or_else(|| "已有全局安装需要修复".into())));
+                }
+                // Repair was explicit: a broken npm-global install cannot veto
+                // the managed shared copy that follows.
             }
         }
         let args = vec!["install".into(), "--global".into(), "--prefix".into(),
@@ -499,7 +495,7 @@ fn parse_cli_version(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct ProbeFixture { calls: AtomicUsize }
     #[async_trait]
@@ -511,8 +507,6 @@ mod tests {
             assert!(!command.mutating);
             match command.args.first().map(String::as_str) {
                 Some("--version") => Ok(CliOutput::fixture(0, "lark-cli 1.0.98", "")),
-                Some("--help") => Ok(CliOutput::fixture(0, "auth docs task base", "")),
-                Some("schema") => Ok(CliOutput::fixture(0, r#"{"inputSchema":{},"_meta":{}}"#, "")),
                 _ => panic!("unexpected installer during discovery"),
             }
         }
@@ -527,9 +521,9 @@ mod tests {
             temp.path().join("user-tools"), fixture.clone());
         let path = executable.to_str().unwrap();
         assert_eq!(runtime.inspect(Some(path)).await.phase, RuntimePhase::Ready);
-        assert_eq!(fixture.calls.load(Ordering::Relaxed), 3);
+        assert_eq!(fixture.calls.load(Ordering::Relaxed), 1);
         assert_eq!(runtime.inspect(Some(path)).await.phase, RuntimePhase::Ready);
-        assert_eq!(fixture.calls.load(Ordering::Relaxed), 3);
+        assert_eq!(fixture.calls.load(Ordering::Relaxed), 1);
         assert!(!temp.path().join("user-tools").exists());
     }
     #[tokio::test]
@@ -557,7 +551,7 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
-    enum PrepareProbe { Ready, Broken, OldVersion, MissingContract }
+    enum PrepareProbe { Ready, OtherVersion, Broken, Foreign }
     struct PrepareFixture {
         root: PathBuf,
         prefix: PathBuf,
@@ -565,6 +559,8 @@ mod tests {
         probe: PrepareProbe,
         install_fails: bool,
         hold_install: bool,
+        alt_executable: Option<PathBuf>,
+        repaired: AtomicBool,
         calls: std::sync::Mutex<Vec<(PathBuf, Vec<String>)>>,
         installs: AtomicUsize,
         prefix_entered: tokio::sync::Semaphore,
@@ -574,6 +570,7 @@ mod tests {
     impl PrepareFixture {
         fn new(root:PathBuf,prefix:PathBuf,npm:PathBuf,probe:PrepareProbe)->Self {
             Self { root, prefix, npm, probe, install_fails:false, hold_install:false,
+                alt_executable:None, repaired:AtomicBool::new(false),
                 calls:std::sync::Mutex::new(Vec::new()),installs:AtomicUsize::new(0),
                 prefix_entered:tokio::sync::Semaphore::new(0),install_entered:tokio::sync::Semaphore::new(0),
                 install_release:tokio::sync::Semaphore::new(0) }
@@ -611,19 +608,19 @@ mod tests {
                     std::fs::write(self.root.join("partial-install-diagnostic"),b"keep this failed install").unwrap();
                     return Ok(CliOutput::fixture(1,"","fixture install failed"));
                 }
+                self.repaired.store(true,Ordering::SeqCst);
                 return Ok(CliOutput::fixture(0,"offline fixture installed",""));
             }
-            assert_eq!(executable,npm_native(&self.root).canonicalize().unwrap());
+            let shared=npm_native(&self.root).canonicalize().ok();
+            assert!(Some(executable)==shared.as_deref()||self.alt_executable.as_deref()==Some(executable));
+            let probe=if self.repaired.load(Ordering::SeqCst){PrepareProbe::Ready}else{self.probe};
             match command.args.first().map(String::as_str) {
-                Some("--version")=>Ok(match self.probe {
+                Some("--version")=>Ok(match probe {
                     PrepareProbe::Broken=>CliOutput::fixture(1,"","fixture cannot start"),
-                    PrepareProbe::OldVersion=>CliOutput::fixture(0,"lark-cli 1.0.97",""),
+                    PrepareProbe::Foreign=>CliOutput::fixture(0,"same-named-tool 2.0.0",""),
+                    PrepareProbe::OtherVersion=>CliOutput::fixture(0,"lark-cli 9.9.9",""),
                     _=>CliOutput::fixture(0,format!("lark-cli {FEISHU_CLI_VERSION}"),""),
                 }),
-                Some("--help")=>Ok(CliOutput::fixture(0,"auth docs task base","")),
-                Some("schema")=>Ok(CliOutput::fixture(0,
-                    if matches!(self.probe,PrepareProbe::MissingContract){r#"{"unrecognized_contract":true}"#}
-                    else{r#"{"inputSchema":{},"_meta":{}}"#},"")),
                 _=>panic!("Unexpected offline prepare command"),
             }
         }
@@ -655,8 +652,12 @@ mod tests {
         run_prepare_case("concurrent");
     }
     #[test]
-    fn broken_or_incompatible_prepare_preserves_the_existing_install_without_a_fallback_copy() {
+    fn broken_prepare_preserves_the_existing_install_without_a_fallback_copy() {
         run_prepare_case("existing-unusable");
+    }
+    #[test]
+    fn repair_installs_a_managed_copy_for_unusable_external_or_selected_programs() {
+        run_prepare_case("repair");
     }
     #[test]
     fn failed_prepare_preserves_its_partial_install_and_does_not_reinstall_elsewhere() {
@@ -683,10 +684,10 @@ mod tests {
                         executor.hold_install=true;let executor=Arc::new(executor);
                         let first=Arc::new(CliRuntime::with_executor_and_root(root.join("first-data"),shared.clone(),executor.clone()));
                         let second=Arc::new(CliRuntime::with_executor_and_root(root.join("second-data"),shared.clone(),executor.clone()));
-                        let first=tokio::spawn(async move{first.prepare(None,CancellationToken::new()).await});
+                        let first=tokio::spawn(async move{first.prepare(None,false,CancellationToken::new()).await});
                         executor.install_entered.acquire().await.unwrap().forget();
                         while let Ok(permit)=executor.prefix_entered.try_acquire(){permit.forget();}
-                        let second=tokio::spawn(async move{second.prepare(None,CancellationToken::new()).await});
+                        let second=tokio::spawn(async move{second.prepare(None,false,CancellationToken::new()).await});
                         executor.prefix_entered.acquire().await.unwrap().forget();
                         assert_eq!(executor.installs.load(Ordering::SeqCst),1,"second prepare has entered while the original installer owns the lock");
                         assert!(!npm_native(&shared).exists(),"the installation is still incomplete");
@@ -702,21 +703,69 @@ mod tests {
                     },
                     "existing-unusable"=>{
                         for (label,probe,phase) in [("broken",PrepareProbe::Broken,RuntimePhase::Broken),
-                            ("version",PrepareProbe::OldVersion,RuntimePhase::Incompatible),
-                            ("contract",PrepareProbe::MissingContract,RuntimePhase::Incompatible)] {
+                            ("foreign",PrepareProbe::Foreign,RuntimePhase::Broken)] {
                             let shared=root.join(label);let native=publish_prepare_package(&shared);
                             let before=std::fs::read(&native).unwrap();
                             let prefix=root.join(format!("external-{label}"));
                             let executor=Arc::new(PrepareFixture::new(shared.clone(),prefix.clone(),npm.clone(),probe));
                             let runtime=CliRuntime::with_executor_and_root(root.join(format!("data-{label}")),shared.clone(),executor.clone());
                             assert_eq!(runtime.inspect(None).await.phase,phase);
-                            assert!(runtime.prepare(None,CancellationToken::new()).await.is_err());
+                            assert!(runtime.prepare(None,false,CancellationToken::new()).await.is_err());
                             assert_eq!(executor.installs.load(Ordering::SeqCst),0);
                             assert!(executor.calls.lock().unwrap().iter().all(|(path,args)|
-                                path==&native.canonicalize().unwrap()&&args.first().is_some_and(|arg|matches!(arg.as_str(),"--version"|"--help"|"schema"))));
+                                path==&native.canonicalize().unwrap()&&args.first().is_some_and(|arg|arg=="--version")));
                             assert_eq!(std::fs::read(&native).unwrap(),before);
                             assert!(!shared.join(".nomifun-lark-cli.install.lock").exists(),"known unusable installs never enter installation");
                             assert!(!prefix.exists());
+                        }
+                        // Any genuine lark-cli release is usable: an official
+                        // binary reporting a different version is ready, never
+                        // gated on a version or command contract.
+                        let shared=root.join("other-version");let native=publish_prepare_package(&shared);
+                        let prefix=root.join("external-other-version");
+                        let executor=Arc::new(PrepareFixture::new(shared.clone(),prefix.clone(),npm.clone(),PrepareProbe::OtherVersion));
+                        let runtime=CliRuntime::with_executor_and_root(root.join("data-other-version"),shared.clone(),executor.clone());
+                        let info=runtime.inspect(None).await;
+                        assert_eq!(info.phase,RuntimePhase::Ready);
+                        assert_eq!(info.version.as_deref(),Some("9.9.9"));
+                        assert_eq!(std::fs::read(&native).unwrap(),b"offline native fixture; executor never launches this file");
+                    },
+                    "repair"=>{
+                        for (label,probe,phase) in [("broken",PrepareProbe::Broken,RuntimePhase::Broken),
+                            ("foreign",PrepareProbe::Foreign,RuntimePhase::Broken)] {
+                            // A broken managed shared install is repaired in place.
+                            let shared=root.join(format!("repair-shared-{label}"));
+                            let prefix=root.join(format!("repair-prefix-{label}"));
+                            let native=publish_prepare_package(&shared);
+                            let before=std::fs::read(&native).unwrap();
+                            let executor=Arc::new(PrepareFixture::new(shared.clone(),prefix.clone(),npm.clone(),probe));
+                            let runtime=CliRuntime::with_executor_and_root(root.join(format!("repair-data-{label}")),shared.clone(),executor.clone());
+                            assert_eq!(runtime.inspect(None).await.phase,phase);
+                            let info=runtime.prepare(None,true,CancellationToken::new()).await.expect("explicit repair must remediate");
+                            assert_eq!(info.phase,RuntimePhase::Ready);
+                            assert_eq!(executor.installs.load(Ordering::SeqCst),1);
+                            assert_eq!(info.executable,Some(native.canonicalize().unwrap().to_string_lossy().into_owned()));
+                            assert_eq!(info.source,Some(RuntimeSource::SharedUser));
+                            assert_eq!(std::fs::read(&native).unwrap(),before,"repair stays inside the managed root");
+                            assert!(!prefix.exists());
+
+                            // An unusable explicitly selected program is repaired via
+                            // the managed copy; the external install is never touched.
+                            let shared=root.join(format!("repair-sel-shared-{label}"));
+                            let prefix=root.join(format!("repair-sel-prefix-{label}"));
+                            let selected_native=publish_prepare_package(&prefix);
+                            let mut fixture=PrepareFixture::new(shared.clone(),prefix.clone(),npm.clone(),probe);
+                            fixture.alt_executable=Some(selected_native.canonicalize().unwrap());
+                            let executor=Arc::new(fixture);
+                            let runtime=CliRuntime::with_executor_and_root(root.join(format!("repair-sel-data-{label}")),shared.clone(),executor.clone());
+                            let selected=selected_native.to_string_lossy().into_owned();
+                            assert_eq!(runtime.inspect(Some(&selected)).await.phase,phase);
+                            let info=runtime.prepare(Some(&selected),true,CancellationToken::new()).await.expect("repair must remediate a selected program");
+                            assert_eq!(info.phase,RuntimePhase::Ready);
+                            assert_eq!(executor.installs.load(Ordering::SeqCst),1);
+                            assert_eq!(info.executable,Some(npm_native(&shared).canonicalize().unwrap().to_string_lossy().into_owned()));
+                            assert_eq!(std::fs::read(&selected_native).unwrap(),b"offline native fixture; executor never launches this file");
+                            assert_eq!(runtime.inspect(None).await.phase,RuntimePhase::Ready,"the managed copy wins discovery");
                         }
                     },
                     "install-failure"=>{
@@ -724,10 +773,10 @@ mod tests {
                         let mut executor=PrepareFixture::new(shared.clone(),prefix.clone(),npm,PrepareProbe::Broken);
                         executor.install_fails=true;let executor=Arc::new(executor);
                         let runtime=CliRuntime::with_executor_and_root(root.join("data"),shared.clone(),executor.clone());
-                        assert!(runtime.prepare(None,CancellationToken::new()).await.is_err());
+                        assert!(runtime.prepare(None,false,CancellationToken::new()).await.is_err());
                         let diagnostic=std::fs::read(shared.join("partial-install-diagnostic")).unwrap();
                         assert_eq!(runtime.inspect(None).await.phase,RuntimePhase::Broken);
-                        assert!(runtime.prepare(None,CancellationToken::new()).await.is_err());
+                        assert!(runtime.prepare(None,false,CancellationToken::new()).await.is_err());
                         assert_eq!(executor.installs.load(Ordering::SeqCst),1);
                         assert_eq!(std::fs::read(shared.join("partial-install-diagnostic")).unwrap(),diagnostic);
                         assert!(!prefix.exists());

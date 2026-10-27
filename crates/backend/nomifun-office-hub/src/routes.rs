@@ -10,6 +10,7 @@ pub fn office_hub_routes(service: Arc<OfficeHubService>) -> Router {
         .route("/api/office-hub/status", get(status))
         .route("/api/office-hub/profiles", get(profiles))
         .route("/api/office-hub/runtime/prepare", post(prepare))
+        .route("/api/office-hub/runtime/repair", post(repair))
         .route("/api/office-hub/runtime/select", post(select))
         .route("/api/office-hub/runtime/check-update", post(check_update))
         .route("/api/office-hub/connection", put(connection))
@@ -34,7 +35,10 @@ async fn profiles(State(service):HubState,_:User)->Reply<Vec<OfficeProfile>>{
     Ok(Json(ApiResponse::ok(service.profiles().await?)))
 }
 async fn prepare(State(service):HubState,_:User)->Reply<RuntimeInfo>{
-    Ok(Json(ApiResponse::ok(service.prepare_runtime().await?)))
+    Ok(Json(ApiResponse::ok(service.prepare_runtime(false).await?)))
+}
+async fn repair(State(service):HubState,_:User)->Reply<RuntimeInfo>{
+    Ok(Json(ApiResponse::ok(service.prepare_runtime(true).await?)))
 }
 async fn select(State(service):HubState,_:User,Json(request):Json<RuntimeSelection>)->Reply<RuntimeInfo>{
     Ok(Json(ApiResponse::ok(service.select_runtime(request).await?)))

@@ -1,6 +1,6 @@
 ---
 name: lark-cli
-description: Use the official Lark CLI to work with Feishu / Lark messages, cloud documents, Drive, Base (bitable), spreadsheets, calendars, tasks, mail, contacts and wikis. Use for Feishu links, searches, reads and requested updates, component readiness, authorization, version checks or external-installation maintenance. Missing components are prepared through the Office workbench. Local Office files use the officecli skills.
+description: Use the official Lark CLI to work with Feishu / Lark messages, cloud documents, Drive, Base (bitable), spreadsheets, calendars, tasks, mail, contacts and wikis. Use for Feishu links, searches, reads and requested updates, component readiness, authorization, version checks or external-installation maintenance. Missing components are prepared through the Feishu connector. Local Office files use the officecli skills.
 ---
 
 # Feishu / Lark CLI
@@ -14,10 +14,12 @@ This is an opt-in NomiFun skill. Its executable is `lark-cli`, distributed as
 
 Before the first Feishu operation in a session, follow
 [shared installation and executable discovery](references/installation.md).
-Reuse an existing installation. If none is available, direct the user to
-**Office → Connection settings → Prepare environment → Prepare component**
-(`/office`). The Host supplies the component once in its persistent
-user CLI root. The skill must not launch a second npm/npx installation.
+Reuse an existing installation. If none is available, direct the user to **MCP
+& Skills → Connectors → Feishu Connector → Connection settings → Advanced
+→ Install component** (`/enhanced-tools?category=connectors`). The Host supplies
+the component once in its persistent
+user CLI root. A broken or unrecognized program is remediated from the same
+tab through **Repair component**. The skill must not launch a second npm/npx installation.
 Local Agents discover and reuse this shared installation in each Session; a
 workbench path or profile selection is not automatically injected into Agent
 commands. Authentication failures are not a reason to reinstall.

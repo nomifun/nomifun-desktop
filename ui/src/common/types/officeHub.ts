@@ -1,5 +1,5 @@
 /** Manual cloud-office product contracts; never an Agent transcript or checkpoint. */
-export type RuntimePhase = 'missing' | 'ready' | 'incompatible' | 'broken' | 'preparing' | 'error';
+export type RuntimePhase = 'missing' | 'ready' | 'broken' | 'preparing' | 'error';
 export type RuntimeSource = 'shared_user' | 'external' | 'selected';
 export interface RuntimeInfo {
   phase: RuntimePhase; executable: string | null; version: string | null; source: RuntimeSource | null;

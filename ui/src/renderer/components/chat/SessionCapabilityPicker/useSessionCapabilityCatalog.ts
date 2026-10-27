@@ -1,5 +1,7 @@
 import { ipcBridge } from '@/common';
 import { appHosting } from '@/common/adapter/appHostingBridge';
+import { officeHub } from '@/common/adapter/officeHubBridge';
+import type { ConnectorId } from '@/common/connectors';
 import { parseMcpServerId } from '@/common/types/ids';
 import { ensureBackendMcpCatalog, subscribeMcpCatalogChanged } from '@/renderer/hooks/mcp/catalog';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -9,6 +11,18 @@ const EMPTY_CATALOG: SessionCapabilityCatalog = {
   skills: [],
   autoSkillNames: new Set<string>(),
   mcpServers: [],
+  connectorsReady: {},
+};
+
+/** Connector-provided skills stay opt-in but only once the connector is usable. */
+const loadConnectorReadiness = async (): Promise<Partial<Record<ConnectorId, boolean>>> => {
+  try {
+    const status = await officeHub.status();
+    const ready = status.phase === 'ready' && status.connection.enabled && status.runtime.phase === 'ready' && !!status.actor;
+    return { feishu: ready };
+  } catch {
+    return {};
+  }
 };
 
 const mergeSkills = (
@@ -82,11 +96,12 @@ export const useSessionCapabilityCatalog = () => {
             mcpServers: mergeMcpSources(mcp, apps),
           }));
         } else {
-          const [available, auto, mcp, apps] = await Promise.all([
+          const [available, auto, mcp, apps, connectorsReady] = await Promise.all([
             ipcBridge.fs.listAvailableSkills.invoke(),
             ipcBridge.fs.listBuiltinAutoSkills.invoke(),
             ensureBackendMcpCatalog(),
             loadAppSources(),
+            loadConnectorReadiness(),
           ]);
           if (!active || requestGeneration !== generation) return;
           const merged = mergeSkills(available, auto);
@@ -95,6 +110,7 @@ export const useSessionCapabilityCatalog = () => {
             autoSkillNames: merged.autoSkillNames,
             appSourceError: apps.error,
             mcpServers: mergeMcpSources(mcp, apps),
+            connectorsReady,
           });
         }
         hasLoaded.current = true;

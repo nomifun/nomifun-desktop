@@ -296,7 +296,7 @@ async fn cold_status_observes_existing_runtime_without_installing_or_reading_acc
     assert_eq!(status.runtime.phase,RuntimePhase::Ready);
     assert!(status.actor.is_none());
     let calls=f.executor.calls();
-    assert_eq!(calls.len(),3,"only version, help and schema probes");
+    assert_eq!(calls.len(),1,"only the version/identity probe");
     assert!(calls.iter().all(|c|!c.mutating&&!c.args.iter().any(|a|matches!(a.as_str(),"install"|"auth"|"config"))));
     assert!(!f.shared_root.join(".nomifun-lark-cli.install.lock").exists());
     assert!(f.service.store.connection(&f.service.owner).await.unwrap().is_none(),"visiting disabled office does not write a connection");
@@ -311,7 +311,7 @@ async fn disabled_profile_discovery_is_explicit_read_only_and_never_reads_user_a
     assert_eq!(profiles[0].name,"work");
     assert_eq!(profiles[0].app_id,"cli_fixture");
     let calls=f.executor.calls();
-    assert_eq!(calls.len(),4,"only runtime probes and one explicit profile list");
+    assert_eq!(calls.len(),2,"only the runtime probe and one explicit profile list");
     assert_eq!(calls.iter().filter(|call|contains(&call.args,&["profile","list"])).count(),1);
     assert!(calls.iter().all(|call|!call.mutating&&!call.args.iter().any(|arg|matches!(arg.as_str(),"auth"|"install"|"config"))));
     assert!(f.service.store.connection(&f.service.owner).await.unwrap().is_none(),"discovery does not enable or create a connection");
