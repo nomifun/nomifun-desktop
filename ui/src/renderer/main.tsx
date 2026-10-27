@@ -26,6 +26,7 @@ import { modalDefaults } from './components/base/modalDefaults';
 // Configure Arco Design to use React 18's createRoot, fixing Message component's CopyReactDOM.render error
 import '@arco-design/web-react/es/_util/react-19-adapter';
 import '@arco-design/web-react/dist/css/arco.css';
+import '@icon-park/react/styles/index.css';
 import enUS from '@arco-design/web-react/es/locale/en-US';
 import zhCN from '@arco-design/web-react/es/locale/zh-CN';
 import { useTranslation } from 'react-i18next';
