@@ -5,6 +5,12 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.19 - 2026-10-28
+
+- Add a guided keyboard setup with local microphone checks, readiness
+  detection and automatic settings save; the subtitle keyboard reflects the
+  new capture state.
+
 ## v0.8.18 - 2026-10-28
 
 - Rename the office hub product surface to Feishu connector across the
