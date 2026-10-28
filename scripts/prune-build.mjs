@@ -5,8 +5,11 @@
  * Keeps build artifact directories bounded WITHOUT a scheduled/cron job.
  * "Cleanup cadence = build cadence": this runs once at the START of every build,
  * before this command's cargo starts. If any build tool is already running,
- * process enumeration fails, or an incremental session is still marked
- * working, automatic cleanup skips the entire pass. The growth driver IS the build, so
+ * process enumeration fails, or a FRESH incremental working session is seen,
+ * automatic cleanup skips the entire pass. Stale "-working" markers (a killed
+ * build's corpse, no compiler alive) are reclaimed instead — they previously
+ * vetoed every pass forever and let the cache grow unbounded (577 GB observed).
+ * The growth driver IS the build, so
  * hooking cleanup to the build makes the two cadences match by construction.
  *
  * What it does (dev/test preflight, in order):
@@ -110,6 +113,26 @@ const CAP_GB = capIdx >= 0 && args[capIdx + 1] ? Number(args[capIdx + 1]) : 36;
 const TAG = '[prune-build]';
 
 class WorkingSessionObserved extends Error {}
+
+// rustc continuously writes its "-working" session dir while that unit
+// compiles, so only a FRESH marker can belong to a live compile. After the
+// process snapshot reports idle, an older marker is just the corpse of a
+// killed build — treating it as live disabled every cleanup pass forever.
+// Single-unit incremental sessions finish in seconds-to-minutes here, so a
+// 30-minute mtime horizon can never misclassify an actual compile.
+const WORKING_SESSION_FRESH_MS = 30 * 60 * 1000;
+
+/**
+ * Freshness of a "-working" incremental session dir. Unreadable entries are
+ * treated as live: never reclaim what we cannot classify.
+ */
+function isWorkingSessionDirFresh(dirPath, now = Date.now()) {
+  try {
+    return now - statSync(dirPath).mtimeMs < WORKING_SESSION_FRESH_MS;
+  } catch {
+    return true;
+  }
+}
 
 function log(msg) {
   console.log(`${TAG} ${msg}`);
@@ -451,9 +474,10 @@ function rmGlob(dir, pattern, label) {
  * Per-unit incremental GC.
  *
  * Layout: incremental/<crate>-<hash>/s-<id>-<svh>/  (+ a 0-byte s-<id>.lock)
- * rustc loads only the newest *finalized* session per unit. A "-working" dir can
- * belong to a live compile, so the automatic entry guard skips the whole pass
- * when one exists. Explicit --release clean can reclaim leftovers after the
+ * rustc loads only the newest *finalized* session per unit. A fresh "-working"
+ * dir can belong to a live compile, so the pass aborts when one exists; stale
+ * working dirs (no live rustc could have left them) are reclaimed like dead
+ * sessions. Explicit --release clean can reclaim leftovers after the
  * process check confirms idle. We keep the newest finalized session per unit
  * (warmth preserved) and delete the rest. NEVER groups across units — every
  * <crate>-<hash> dir (incl. each per-crate build_script_build-*) is independent.
@@ -462,6 +486,7 @@ export function pruneIncrementalSessions(incrDir) {
   let units;
   try { units = readdirSync(incrDir); } catch { return; }
 
+  const now = Date.now();
   let pruned = 0;
   for (const unit of units) {
     const unitPath = join(incrDir, unit);
@@ -476,14 +501,20 @@ export function pruneIncrementalSessions(incrDir) {
       const p = join(unitPath, e);
       try {
         const s = statSync(p);
-        if (s.isDirectory()) {
-          sessions.push({ name: e, mtime: s.mtimeMs, working: e.endsWith('-working') });
+        if (!s.isDirectory()) continue;
+        const working = e.endsWith('-working');
+        if (working && !isWorkingSessionDirFresh(p, now)) {
+          // Corpse of a killed compile: reclaim it like any dead session.
+          try { rmSync(p, { recursive: true, force: true }); pruned++; } catch { /* skip */ }
+          continue;
         }
+        sessions.push({ name: e, mtime: s.mtimeMs, working });
       } catch { /* skip */ }
     }
     if (sessions.length === 0) continue;
-    // If a working session appears after the entry snapshot, abort the rest of
-    // this pass too. Merely skipping this unit would let LRU/cap deletion follow.
+    // If a live working session appears after the entry snapshot, abort the
+    // rest of this pass too. Merely skipping this unit would let LRU/cap
+    // deletion follow.
     if (sessions.some(session => session.working)) throw new WorkingSessionObserved();
 
     // Prefer the newest finalized session; fall back to newest overall.
@@ -521,6 +552,12 @@ function trimIncrementalUnitsToBudget(incrDirs, maxGB, label) {
       if (!ent.isDirectory()) continue;
       const unitPath = join(incrDir, ent.name);
       try {
+        // Never evict a unit a live rustc may still be writing: a fresh
+        // "-working" session dir can appear between the entry snapshot and now.
+        const sessionEntries = readdirSync(unitPath);
+        if (sessionEntries.some(
+          (name) => name.endsWith('-working') && isWorkingSessionDirFresh(join(unitPath, name)),
+        )) continue;
         const stat = statSync(unitPath);
         const bytes = dirSizeBytes(unitPath);
         totalBytes += bytes;
@@ -627,7 +664,12 @@ function boundedCleanup(initialSizes) {
   return { buildGB, targetGB };
 }
 
-/** Only a real working directory is a marker; finalized sessions keep .locks. */
+/**
+ * Only a FRESH working directory is a marker; finalized sessions keep .locks.
+ * Stale "-working" dirs are reclaimed by the per-unit GC below instead of
+ * vetoing cleanup forever (the previous blanket veto is what let the cache
+ * grow unbounded).
+ */
 function hasWorkingIncrementalSession() {
   for (const incrDir of incrementalCacheDirs()) {
     let units;
@@ -638,7 +680,11 @@ function hasWorkingIncrementalSession() {
     for (const unit of units) {
       if (!unit.isDirectory()) continue;
       const entries = readdirSync(join(incrDir, unit.name), { withFileTypes: true });
-      if (entries.some(entry => entry.isDirectory() && entry.name.endsWith('-working'))) return true;
+      if (entries.some(
+        (entry) => entry.isDirectory()
+          && entry.name.endsWith('-working')
+          && isWorkingSessionDirFresh(join(incrDir, unit.name, entry.name)),
+      )) return true;
     }
   }
   return false;

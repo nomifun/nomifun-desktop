@@ -35,7 +35,12 @@ linker = "rust-lld.exe"
 # Shared defaults stay portable; drive-specific Windows output belongs in
 # CARGO_TARGET_DIR or the developer's local Cargo configuration.
 build-dir = "{workspace-root}/build.noindex"
-jobs = 3
+# Parallel rustc jobs — one shared value for every host, so it must fit the
+# smallest supported dev machine: 10 saturates a 10-core Mac without
+# oversubscribing its unified memory, and is still ~3x faster than the old 3
+# on bigger Windows boxes. Repo config beats ~/.cargo/config.toml, so
+# per-machine overrides go through CARGO_BUILD_JOBS.
+jobs = 10
 
 # Enlarge rustc's compilation-thread stack. The release `tauri build` embeds the
 # entire frontend `ui/dist` (~34 MB, hundreds of files) into the `nomifun-desktop`

@@ -156,6 +156,18 @@ describe('real temporary build-cache cleanup', () => {
     expect(snapshot(root)).toEqual(before);
   });
 
+  test('a stale working marker is reclaimed instead of vetoing cleanup forever', () => {
+    const { root, old, current, unit } = fixture({ working: 'build.noindex/debug/incremental/nomifun_companion-hash' });
+    const staleWorking = join(root, unit, 's-active-ghi-working');
+    const past = new Date(Date.now() - 60 * 60 * 1000);
+    utimesSync(staleWorking, past, past);
+    const result = run(root);
+    expect(result.outcome).toEqual({ skipped: false });
+    expect(existsSync(staleWorking)).toBe(false);
+    expect(existsSync(join(root, old))).toBe(false);
+    expect(readFileSync(join(root, current, 'sentinel.bin'), 'utf8')).toBe(`sentinel:${current}/sentinel.bin`);
+  });
+
   test('idle cleanup removes old finalized sessions and staging while retaining the newest cache and its lock', () => {
     const { root, old, current, unit } = fixture();
     const result = run(root);
