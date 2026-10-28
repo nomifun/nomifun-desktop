@@ -28,7 +28,7 @@ nomifun-auth = { path = "crates/backend/nomifun-auth" }
 nomifun-system = { path = "crates/backend/nomifun-system" }
 nomifun-file = { path = "crates/backend/nomifun-file" }
 nomifun-office = { path = "crates/backend/nomifun-office" }
-nomifun-office-hub = { path = "crates/backend/nomifun-office-hub" }
+nomifun-feishu-connector = { path = "crates/backend/nomifun-feishu-connector" }
 nomifun-shell = { path = "crates/backend/nomifun-shell" }
 nomifun-ai-agent = { path = "crates/backend/nomifun-ai-agent" }
 nomifun-mcp = { path = "crates/backend/nomifun-mcp" }

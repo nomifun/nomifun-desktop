@@ -2,7 +2,7 @@
 
 日期：2026-10-27。状态：已批准设计，待实施。基线：main `7b2888610c95c9a6d786faffb065ab5545a8c848`；后续接续以实际 HEAD 为准。
 
-本文件是本专项唯一现役施工与验收说明。启动入口见[启动 prompt](feishu-knowledge-base.start-prompt.zh.md)。实施前阅读根目录 [AGENTS.md](../../AGENTS.md)、[办公飞书计划](office-feishu-workbench.zh.md)（本专项登记其合同修订，见 §2-F07）、[Agent Session](../architecture/agent-session.zh.md) 与[开发验证](../contributing/development.md)。
+本文件是本专项唯一现役施工与验收说明。启动入口见[启动 prompt](feishu-knowledge-base.start-prompt.zh.md)。实施前阅读根目录 [AGENTS.md](../../AGENTS.md)、[办公飞书计划](feishu-connector.zh.md)（本专项登记其合同修订，见 §2-F07）、[Agent Session](../architecture/agent-session.zh.md) 与[开发验证](../contributing/development.md)。
 
 **2026-10-27 用户决策依据**：同步模型选择**远端实时检索**（正文不落本地库）；一期文档类型仅 doc/docx + wiki 解析；批准新增 `documents.read` 能力但**仅限知识链路**（工作台 UI 仍不做正文预览/编辑）；新鲜度策略为**挂载时自动刷新索引**。产品形态：飞书知识库 = 本地一个文件夹（即一个知识库），其中"移入"若干选定的飞书文档名称作为索引；挂载知识库即挂载该选定文档集合，交互与现有知识库完全对齐。
 
@@ -14,7 +14,7 @@
 2. **挂载零新增机制**：飞书库复用既有 junction/symlink 挂载、绑定选择器、TOC 注入、prompt 合同、MCP 暴露；agent 看到的挂载目录中是按名称排列的文档索引。
 3. **检索远端实时**：`knowledge_search` 经飞书 Search v2 召回并与策展集求交；`knowledge_read` 经 CLI 实时取正文。正文不写入本地库目录。
 4. **挂载时自动刷新索引**：会话挂载前对飞书库做有界索引刷新（元数据级），目录投影随之更新；失败降级为上次索引并明确标注过期。
-5. **合同收敛**：`documents.read` 只服务知识库链路；办公工作台文档正文"浏览器打开"合同不变，仅在本文件登记该修订（office-feishu-workbench.zh.md §3 的"正文不落库"限定于工作台 UI，知识链路经由新能力读取）。
+5. **合同收敛**：`documents.read` 只服务知识库链路；办公工作台文档正文"浏览器打开"合同不变，仅在本文件登记该修订（feishu-connector.zh.md §3 的"正文不落库"限定于工作台 UI，知识链路经由新能力读取）。
 
 **本版本不做**（见 §10）：bitable/sheet/mindnote/slides 正文、账号全域检索库、定时刷新、写回飞书、live 模式源、工作台正文预览/编辑、正文快照落库、stub outline 注入。
 
@@ -26,7 +26,7 @@
 | F02 | 正文不落库 | 远端读取只进内存与 agent 上下文；stub 只含元数据与指引，不含正文。唯一例外是用户显式 `copy-as-editable`（D10）。 |
 | F03 | 挂载契约不变 | `.nomi/knowledge` junction、绑定类型、TOC 预算、写回语义、MCP 暴露全部复用；不新增第二套挂载/绑定机制。 |
 | F04 | 唯一事实链 | 复用 `knowledge_sources`/`knowledge_source_items`/`knowledge_entry_provenance`/`knowledge_entries` 投影；不新增平行账本；AgentSession/Turn/Event/Payload/Effect 不动。 |
-| F05 | 端口化依赖方向 | `nomifun-knowledge` 只定义 `FeishuKnowledgePort` trait 与 fail-closed 默认实现；`nomifun-app` 组合根注入 office-hub 实现。knowledge crate 不依赖 office-hub。 |
+| F05 | 端口化依赖方向 | `nomifun-knowledge` 只定义 `FeishuKnowledgePort` trait 与 fail-closed 默认实现；`nomifun-app` 组合根注入飞书连接器实现。knowledge crate 不依赖 `nomifun-feishu-connector`。 |
 | F06 | 失败降级可解释 | 索引刷新失败不阻塞会话启动；检索/读取远端失败返回可操作错误（含"连接失效请重新授权"类指引）；stale 索引进 context 标注。 |
 | F07 | 权限按用申请 | `documents.read` 新 capability 仅服务知识链路；缺 scope 走既有按需授权流；scope 集合以已安装 CLI 预检与官方文档核定后登记进 `adapter::permissions`/`allowed_scopes`。 |
 | F08 | 一期类型边界 | 只接受 doc/docx 文档链接与 wiki 节点链接（wiki 解析为底层文档）；sheet/bitable/mindnote/slides/file 在选择与建库时明确拒绝并提示后续支持。 |
@@ -45,7 +45,7 @@
 | D04 | **稳定 handle**：`encode_doc_handle(kb_id, ".remote/feishu/<norm-token>")`，伪路径只含规范化请求 token，不随 stub 改名失效。`.remote/` 为保留虚拟命名空间：`safe_md_path` 拒绝该前缀的物理读写；远端 read 路径（`knowledge_read`/MCP）解出 token 后查 item 行取 `final_url` token 再抓取；item 不存在时返回明确失效错误。 |
 | D05 | **检索分发**：库的远端属性由 `extra.source.kind == "feishu"` 派生，不单列字段、不双写。`BoundKnowledgeBase` 增加 remote 描述（随 typed binding 冻结进 `AgentKnowledgeResource`，`agent_resource_identity` 扩展返回后端标记，身份校验照旧）。`BoundKnowledgeReadService` 增加可选 remote port；search 命中 feishu 库 → 远端 `drive +search --doc-types doc,docx,wiki` ∩ 策展 token 集，并 ∪ 本地 stub 关键词兜底（兜飞书索引延迟），按 token 去重，远端结果优先排序；read 命中 `.remote/` → port.read。route 级 `POST /api/knowledge/search` 走同一分发。 |
 | D06 | **挂载时索引刷新**：在 mounts 组装点（`service.rs` mounts_for_* 与 `mount_info_for_bases` 的 TOC 计算之前）对每个含 feishu 源的库启动索引刷新：逐 item 校验可达性与元数据（标题/update_time），更新 item 行、改/建/清 stub（孤儿清理复用 `prune_orphan_snapshots`/`allocate_source_trash_path` 语义）。刷新等待有小超时（默认 5s）：及时完成则 TOC 用新索引；超时先挂载旧索引、后台继续、`KnowledgeMountInfo` 增加 `#[serde(default)]` optional 的 stale 标注字段（context.rs 渲染为一行说明）。索引刷新并发与全局限额沿用既有 source 并发原语 + port 内建信号量（≤4）。 |
-| D07 | **office-hub 出口**：adapter 新增 `docs +fetch`（doc/docx 正文）、wiki 节点解析（wiki token → obj_token）与元数据读取（按已安装 CLI `--help` 核定：优先 meta-only 命令，缺失时用受控轻量 fetch）的类型化封装；`permissions()` 增加 `documents.read` capability；service 暴露内部方法 `search_documents`/`fetch_document`/`resolve_link`（同进程调用，不进工作台 HTTP 合同），走 `ready()`（enabled+profile+runtime+actor）+ scope 检查 + `output_error` 分类。 |
+| D07 | **飞书连接器出口**：adapter 新增 `docs +fetch`（doc/docx 正文）、wiki 节点解析（wiki token → obj_token）与元数据读取（按已安装 CLI `--help` 核定：优先 meta-only 命令，缺失时用受控轻量 fetch）的类型化封装；`permissions()` 增加 `documents.read` capability；service 暴露内部方法 `search_documents`/`fetch_document`/`resolve_link`（同进程调用，不进工作台 HTTP 合同），走 `ready()`（enabled+profile+runtime+actor）+ scope 检查 + `output_error` 分类。 |
 | D08 | **条目上限**：feishu 源独立上限 `MAX_FEISHU_SOURCE_ENTRIES = 64`（每 item 一次远端调用，挂载刷新有界；超过拒绝并提示拆分多个库）。URL 源 `MAX_SOURCE_ENTRIES = 16` 不变。 |
 | D09 | **写回语义**：远端条目正文只读（managed）；agent/用户可在该库新建本地 `.md`（editable 树，`user` origin，与飞书索引并存）；不回推飞书。`knowledge_write` 对 `.remote/` handle 返回明确拒绝。 |
 | D10 | **copy-as-editable**：对 feishu 条目 = 一次 `docs +fetch` 取正文落本地副本（provenance=copy），复用现有 `copy_entry_as_editable` 管线，正文获取经 port。detach/remove-source 语义照旧（stub 进 `.nomifun-trash`）。 |
@@ -66,8 +66,8 @@
 | `kdoc_` handle 编解码 | `service.rs:123-144` |
 | agent 侧授权读取服务 | `src/agent_module.rs:311`（`AuthorizedKnowledgeService`）；`src/service/bound.rs:81`（`BoundKnowledgeReadService`） |
 | 源/条目管理路由 | `src/routes.rs:44-103`（`set_source`/`refresh-source`/`refresh_entry_source`/`copy-as-editable`/`detach-source`/`remove-source`） |
-| 办公侧命令边界 | `nomifun-office-hub/src/adapter.rs`：`permissions` 93、`query_commands` 406、`link_target`/`official_url` 183/204；`service.rs`：`ready()` 213、`query` 228 |
-| 办公合同"正文不落库"（本专项修订，见 F07） | `docs/handoffs/office-feishu-workbench.zh.md` §3（约 108-110 行） |
+| 办公侧命令边界 | `nomifun-feishu-connector/src/adapter.rs`：`permissions` 93、`query_commands` 406、`link_target`/`official_url` 183/204；`service.rs`：`ready()` 213、`query` 228 |
+| 办公合同"正文不落库"（本专项修订，见 F07） | `docs/handoffs/feishu-connector.zh.md` §3（约 108-110 行） |
 | app 组合根 | `nomifun-app/src/services.rs:2064-2127`（KnowledgeService 构建/仓注入/completer/MCP） |
 | UI 断言"feishu 非源类型"（随本计划退役） | `ui/src/renderer/pages/knowledge/feishuKnowledgeEntry.test.ts` |
 | lark-cli 上游能力参考（`docs +fetch`、wiki、分页） | `nomifun-skill-library/assets/builtin-skills/lark-cli/references/commands.md` |
@@ -91,7 +91,7 @@ CreateStudio/详情页                     mounts_for_* /                      k
                                            + TOC(文档名) + stale 标注
 ```
 
-依赖方向：`nomifun-knowledge` 定义 `FeishuKnowledgePort`（search/read/resolve/metadata）+ `UnavailableFeishuKnowledgePort` fail-closed；`nomifun-app` 注入 `OfficeFeishuKnowledgePort`（内持 `Arc<OfficeHubService>`，实例 owner 绑定，不暴露跨 owner 选择）。
+依赖方向：`nomifun-knowledge` 定义 `FeishuKnowledgePort`（search/read/resolve/metadata）+ `UnavailableFeishuKnowledgePort` fail-closed；`nomifun-app` 注入 `FeishuConnectorKnowledgePort`（内持 `Arc<FeishuConnectorService>`，实例 owner 绑定，不暴露跨 owner 选择）。
 
 ## 6. 分层改动
 
@@ -99,11 +99,11 @@ CreateStudio/详情页                     mounts_for_* /                      k
 | --- | --- |
 | `nomifun-api-types` | `KnowledgeSource` 接受 `kind:"feishu"`；条目 DTO 复用 `KnowledgeSourceEntry`（`url`=飞书链接、`title`=文档名、`rendered` 对 feishu 拒绝）；`KnowledgeMountInfo` 增 optional stale 字段（`#[serde(default)]`）；`derive_kind` 新值 `"feishu"` 的 TS 绑定。 |
 | `nomifun-db` | `KnowledgeSourceKind::Feishu` persisted enum；无新表。 |
-| `nomifun-office-hub` | adapter：`docs +fetch`、wiki 解析、元数据读取命令与解析器；`documents.read` capability + scope 登记；service：`search_documents`/`fetch_document`/`resolve_link` 内部方法。 |
+| `nomifun-feishu-connector` | adapter：`docs +fetch`、wiki 解析、元数据读取命令与解析器；`documents.read` capability + scope 登记；service：`search_documents`/`fetch_document`/`resolve_link` 内部方法。 |
 | `nomifun-knowledge` | `FeishuKnowledgePort` trait + 默认 fail-closed；`validate_source` 放行并校验 feishu（链接形态、类型白名单、≤64、禁 live/`rendered`）；`derive_kind`；stub 投影写入/改名/清理；索引刷新服务方法（复用 source 锁、状态机、trash）；挂载组装点挂钩；`BoundKnowledgeBase` remote 标记 + `agent_resource_identity` 扩展；`BoundKnowledgeReadService`/route 搜索远端分发与 `.remote/` read；写策略拒绝远端正文。 |
 | `nomifun-app` | 组合根 `set_feishu_knowledge_port(OfficeFeishuKnowledgePort)`；typed binding 解析处透传 remote 标记；MCP server 服务引用不变（同一 KnowledgeService）。 |
 | `ui` | CreateStudio `feishu` 类型 + 连接引导；详情页索引条目管理与"添加飞书文档"picker（复用 Documents 查询组件）；工作台"存入知识库"；`feishuKnowledgeEntry.test.ts` 等断言按本决策反转；i18n 双语。 |
-| 文档 | 本文件；office-feishu-workbench.zh.md §3 追加一行修订说明（`documents.read` 仅知识链路）；新建 `docs/validation/feishu-knowledge-base.zh.md` 记录验收。 |
+| 文档 | 本文件；feishu-connector.zh.md §3 追加一行修订说明（`documents.read` 仅知识链路）；新建 `docs/validation/feishu-knowledge-base.zh.md` 记录验收。 |
 
 ## 7. 交互流程
 
@@ -144,7 +144,7 @@ CreateStudio/详情页                     mounts_for_* /                      k
 
 ## 11. 验证
 
-- Rust 单测：office-hub adapter 新命令/解析（mock `CliOutput`）；knowledge：feishu 源校验与拒绝路径、item 生命周期、stub 投影与改名、孤儿清理、索引刷新成功/失败/超时降级、search∩策展集 + stub 兜底去重、`.remote/` handle 编解码与 read 分发、远端正文写拒绝、copy-as-editable、resume_pending 覆盖。
+- Rust 单测：飞书连接器 adapter 新命令/解析（mock `CliOutput`）；knowledge：feishu 源校验与拒绝路径、item 生命周期、stub 投影与改名、孤儿清理、索引刷新成功/失败/超时降级、search∩策展集 + stub 兜底去重、`.remote/` handle 编解码与 read 分发、远端正文写拒绝、copy-as-editable、resume_pending 覆盖。
 - 集成：nomifun-app port 接线、typed binding remote 冻结、MCP 暴露路径。
 - UI：CreateStudio/picker/详情页/工作台入口交互测试；退役断言更新。
 - 边界：`bun run check:desktop-ui-boundary`、`bun run check:agent-session-boundary`、受影响 canonical 测试。
@@ -158,10 +158,10 @@ CreateStudio/详情页                     mounts_for_* /                      k
 | --- | --- | --- | --- | --- | --- |
 | 2026-10-27 | `7b288861` | 计划定稿 | 本文件 + start-prompt | 设计批准 | S1 |
 | 2026-10-27 | `7b288861` | S1 CLI 核定 | lark-cli 1.0.98 真实调用：`docs +fetch`(wiki URL 自动解包)、`docs +search`、`drive +inspect`、`wiki +node-get`；scope：inspect=`drive:drive.metadata:readonly`、node-get=`wiki:node:retrieve`（均实测 missing_scope），fetch/search 现有 token 可用 | §13 已回写真实命令面与响应结构 | adapter typed 命令 + service 方法 |
-| 2026-10-27 | `7b288861`+工作区 | S1/S2/S3 实现 | `cargo test -p nomifun-office-hub`（72 过/4 忽略环境用例）；`cargo test -p nomifun-knowledge --lib`（365 过）；`cargo check -p nomifun-app`；`bun test --cwd ui src/renderer/pages/knowledge/`（158 过）；`bun run typecheck`；`check:i18n`；`check:desktop-ui-boundary`；`check:agent-session-boundary`（登记 020 迁移+内容规则后通过） | 全栈接通：port 注入（`router/office_hub.rs` `OfficeFeishuKnowledgePort` + `state.rs` 组合根）、`derive_kind="feishu"`、`/api/knowledge/bases/{id}/content` `feishu` 变体、CreateStudio/详情页/工作台 UI、迁移 020 + boundary 注册、UI/API 合同 51 | S4：validation 文档 + 真实租户验收（待验） |
-| 2026-10-27 | `e67f44134` | S4 收尾 | `docs/validation/feishu-knowledge-base.zh.md` 已建；office handoff §3 合同修订已登记；`check:docs` 通过；`cargo test -p nomifun-app --lib knowledge`（58 过）。注：nomifun-knowledge 集成测试中有 1 个既有 real-http 检索用例失败，与本次改动无关（未触碰该路径）。真实飞书租户端到端验收仍待执行（需已连接连接器） | 提交 `e67f44134`（main，未推送） | 真实租户验收：建库→加文档→挂载→search/read |
+| 2026-10-27 | `7b288861`+工作区 | S1/S2/S3 实现 | `cargo test -p nomifun-feishu-connector`（72 过/4 忽略环境用例）；`cargo test -p nomifun-knowledge --lib`（365 过）；`cargo check -p nomifun-app`；`bun test --cwd ui src/renderer/pages/knowledge/`（158 过）；`bun run typecheck`；`check:i18n`；`check:desktop-ui-boundary`；`check:agent-session-boundary`（登记 020 迁移+内容规则后通过） | 全栈接通：port 注入（`router/feishu_connector.rs` `FeishuConnectorKnowledgePort` + `state.rs` 组合根）、`derive_kind="feishu"`、`/api/knowledge/bases/{id}/content` `feishu` 变体、CreateStudio/详情页/工作台 UI、迁移 020 + boundary 注册、UI/API 合同 51 | S4：validation 文档 + 真实租户验收（待验） |
+| 2026-10-27 | `e67f44134` | S4 收尾 | `docs/validation/feishu-knowledge-base.zh.md` 已建；飞书连接器 handoff §3 合同修订已登记；`check:docs` 通过；`cargo test -p nomifun-app --lib knowledge`（58 过）。注：nomifun-knowledge 集成测试中有 1 个既有 real-http 检索用例失败，与本次改动无关（未触碰该路径）。真实飞书租户端到端验收仍待执行（需已连接连接器） | 提交 `e67f44134`（main，未推送） | 真实租户验收：建库→加文档→挂载→search/read |
 | 2026-10-27 | `ad4278725`/`8b5e7a5e7`+工作区 | 产品修复：空库可建 + 创建免链接 | `validate_feishu_source` 放行空策展集；CreateStudio 飞书类型只收基本信息；新增测试 `feishu_source_allows_an_empty_curated_set`；knowledge UI 159 过 | 提交 `ad4278725`、`8b5e7a5e7`（main） | 详情页文档挑选链路 |
-| 2026-10-27 | `8b5e7a5e7`+工作区 | picker 串联修复 | **根因（用户 dev 库实证：两个飞书库均为 normalized 飞书源 active、0 条目、`extra.source` 缺失 → kind=blank）**：`refresh_legacy_source_cache` 在 items 为空时清 `extra.source`；已改 Removed 才清。另修：移除最后一篇保留飞书源；启动修复为被剥离的库按唯一 active 飞书源重建缓存。**产品**：飞书库详情页右侧默认 `FeishuDocPickerPanel`（替换预览，不被树自动选中/加入动作切回）：office-hub `documents.browse` 搜索/分页/一键加入当前选中目录，仅 doc/docx/wiki、null-url 禁用、已策展标记、缺 scope 门控、未连接引导；加入后目录刷新并定位新 stub。**后端**：addContent `feishu` 线形 `{docs:[{url,title?}], destination_parent_path?, destination_parent_id?}`（合同 51→52，旧 `urls` 返回 400）；飞书 stub 默认落库根；picker 标题免 `drive +inspect` 且规范化；inspect 失败不回落旧标题（保留 stale）。测试：`cargo test -p nomifun-knowledge --lib` 373 过（feishu 16 + 路由级 1）、`cargo check -p nomifun-app`、`bun test` knowledge 173 过（picker 10 + 详情页 4）、typecheck/i18n(8475)/desktop-ui-boundary 通过。**真实租户 E2E 15/15**：隔离 `nomifun-web` + 新数据目录 + `nomifun-office-2` 只读，建空库→picker 查询→一键加入→重复→目录/stub→`.remote/feishu` 实时正文→search 远端∩策展→移除最后一篇仍为飞书库→再加入 | 本提交（main，未推送） | 模型侧挂载会话 `knowledge_search`/`knowledge_read` 真实调用待验；inspect scope 授权后复验挂载刷新 |
+| 2026-10-27 | `8b5e7a5e7`+工作区 | picker 串联修复 | **根因（用户 dev 库实证：两个飞书库均为 normalized 飞书源 active、0 条目、`extra.source` 缺失 → kind=blank）**：`refresh_legacy_source_cache` 在 items 为空时清 `extra.source`；已改 Removed 才清。另修：移除最后一篇保留飞书源；启动修复为被剥离的库按唯一 active 飞书源重建缓存。**产品**：飞书库详情页右侧默认 `FeishuDocPickerPanel`（替换预览，不被树自动选中/加入动作切回）：feishu-connector `documents.browse` 搜索/分页/一键加入当前选中目录，仅 doc/docx/wiki、null-url 禁用、已策展标记、缺 scope 门控、未连接引导；加入后目录刷新并定位新 stub。**后端**：addContent `feishu` 线形 `{docs:[{url,title?}], destination_parent_path?, destination_parent_id?}`（合同 51→52，旧 `urls` 返回 400）；飞书 stub 默认落库根；picker 标题免 `drive +inspect` 且规范化；inspect 失败不回落旧标题（保留 stale）。测试：`cargo test -p nomifun-knowledge --lib` 373 过（feishu 16 + 路由级 1）、`cargo check -p nomifun-app`、`bun test` knowledge 173 过（picker 10 + 详情页 4）、typecheck/i18n(8475)/desktop-ui-boundary 通过。**真实租户 E2E 15/15**：隔离 `nomifun-web` + 新数据目录 + `nomifun-office-2` 只读，建空库→picker 查询→一键加入→重复→目录/stub→`.remote/feishu` 实时正文→search 远端∩策展→移除最后一篇仍为飞书库→再加入 | 本提交（main，未推送） | 模型侧挂载会话 `knowledge_search`/`knowledge_read` 真实调用待验；inspect scope 授权后复验挂载刷新 |
 
 ## 13. 已核定命令面（lark-cli 1.0.98，真实调用验证于 2026-10-27）
 

@@ -18,10 +18,12 @@ async fn previous_database(path: &Path) -> SqlitePool {
         ..Migrator::DEFAULT
     };
     previous.run(&pool).await.unwrap();
+    // This fixture's schema predates migration 016, so its declared
+    // lineage is the pre-016 manifest digest, not the current manifest.
     sqlx::query("INSERT INTO schema_metadata(singleton_key,data_generation,root_instance_id,migration_head,seed_manifest_digest,canonical_schema_manifest_digest,projection_schema_version) VALUES('canonical',?,'main-sqlite-agent-store',?,?,?,?)")
         .bind(i64::from(AGENT_STORE_DATA_GENERATION)).bind(i64::from(AGENT_STORE_MIGRATION_HEAD))
         .bind(digest_payload(&official_preset_seed_manifest_payload()).unwrap().as_ref())
-        .bind(digest_payload(&agent_store_schema_manifest_payload()).unwrap().as_ref())
+        .bind("ce5cb186b9ba1a44c7c4699f4e1932542068537149c2a76ec880e2b8cc0bf8d9")
         .bind(i64::from(AGENT_STORE_PROJECTION_SCHEMA_VERSION)).execute(&pool).await.unwrap();
     sqlx::query("UPDATE system_settings SET language='zh-CN',notification_enabled=0,cron_notification_enabled=1,command_queue_enabled=1,updated_at=99")
         .execute(&pool).await.unwrap();
@@ -67,8 +69,10 @@ async fn forward_retirement_preserves_other_configuration_identity_and_receipts_
             .fetch_one(current.pool()).await.unwrap(), settings);
         assert_eq!(sqlx::query_as::<_, (String, String, i64)>("SELECT key,value,updated_at FROM client_preferences ORDER BY key")
             .fetch_all(current.pool()).await.unwrap(), preferences);
-        assert_eq!(sqlx::query_as::<_, (i64, i64, String)>("SELECT data_generation,migration_head,canonical_schema_manifest_digest FROM schema_metadata")
-            .fetch_one(current.pool()).await.unwrap(), metadata);
+        let after_metadata: (i64, i64, String) = sqlx::query_as("SELECT data_generation,migration_head,canonical_schema_manifest_digest FROM schema_metadata")
+            .fetch_one(current.pool()).await.unwrap();
+        assert_eq!((after_metadata.0, after_metadata.1), (metadata.0, metadata.1));
+        assert_eq!(after_metadata.2, digest_payload(&agent_store_schema_manifest_payload()).unwrap().as_ref());
         let current_receipts: Vec<(i64, Vec<u8>)> = sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
             .fetch_all(current.pool()).await.unwrap();
         assert_eq!(&current_receipts[..receipts.len()], receipts.as_slice());

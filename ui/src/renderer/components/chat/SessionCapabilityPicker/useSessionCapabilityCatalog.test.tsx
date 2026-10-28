@@ -3,8 +3,8 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { ipcBridge } from '@/common';
 import { appHosting } from '@/common/adapter/appHostingBridge';
-import { officeHub } from '@/common/adapter/officeHubBridge';
-import type { OfficeStatus } from '@/common/types/officeHub';
+import { feishuConnector } from '@/common/adapter/feishuConnectorBridge';
+import type { FeishuStatus } from '@/common/types/feishuConnector';
 import * as mcpCatalog from '@/renderer/hooks/mcp/catalog';
 import { useSessionCapabilityCatalog } from './useSessionCapabilityCatalog';
 import { defaultSessionCapabilityDraft } from './model';
@@ -18,7 +18,7 @@ test('catalog retains unavailable packages for inspection while auto defaults ex
   const good = { name: 'good-auto', description: 'Valid instructions', location: '', is_custom: false, source: 'builtin' as const };
   track(spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([bad, good]));
   track(spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([bad, good]));
-  track(spyOn(officeHub, 'status').mockRejectedValue(new Error('offline')));
+  track(spyOn(feishuConnector, 'status').mockRejectedValue(new Error('offline')));
   track(spyOn(mcpCatalog, 'ensureBackendMcpCatalog').mockResolvedValue({ allServers: [], builtinServers: [], userServers: [] }));
   track(spyOn(appHosting.mcpSources, 'invoke').mockResolvedValue([{ app_id: '0190f5fe-7c00-7a00-8000-000000000077', name: 'My app',
     url: 'http://127.0.0.1:4317/mcp', state: 'running', connection_status: 'connected', tools: [{ name: 'read' }], reason: null }]));
@@ -35,7 +35,7 @@ test('catalog retains unavailable packages for inspection while auto defaults ex
 test('MCP invalidation refreshes application sources without accepting a late older source response', async () => {
   track(spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([]));
   track(spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([]));
-  track(spyOn(officeHub, 'status').mockRejectedValue(new Error('offline')));
+  track(spyOn(feishuConnector, 'status').mockRejectedValue(new Error('offline')));
   track(spyOn(mcpCatalog, 'ensureBackendMcpCatalog').mockResolvedValue({ allServers: [], builtinServers: [], userServers: [] }));
   const source = { app_id: '0190f5fe-7c00-7a00-8000-000000000077', name: 'My app',
     url: 'http://127.0.0.1:4317/mcp', state: 'running' as const, connection_status: 'connected' as const,
@@ -55,8 +55,8 @@ test('MCP invalidation refreshes application sources without accepting a late ol
   expect(ipcBridge.fs.listAvailableSkills.invoke).toHaveBeenCalledTimes(1);
 });
 
-test('connector readiness reflects the office connection and fails closed', async () => {
-  const status = (phase: OfficeStatus['phase'], enabled = true): OfficeStatus => ({
+test('connector readiness reflects the Feishu connection and fails closed', async () => {
+  const status = (phase: FeishuStatus['phase'], enabled = true): FeishuStatus => ({
     provider: 'feishu',
     connection: { id: 'c', name: 'Work', enabled, profile: 'work', executable: null, created_at: '', updated_at: '' },
     runtime: { phase: 'ready', executable: '/x', version: '1.0.98', source: 'external', message: null, official_install_command: '' },
@@ -67,7 +67,7 @@ test('connector readiness reflects the office connection and fails closed', asyn
   track(spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([]));
   track(spyOn(mcpCatalog, 'ensureBackendMcpCatalog').mockResolvedValue({ allServers: [], builtinServers: [], userServers: [] }));
   track(spyOn(appHosting.mcpSources, 'invoke').mockResolvedValue([]));
-  track(spyOn(officeHub, 'status').mockResolvedValue(status('ready')));
+  track(spyOn(feishuConnector, 'status').mockResolvedValue(status('ready')));
   const hook = renderHook(() => useSessionCapabilityCatalog());
   await waitFor(() => expect(hook.result.current.loading).toBe(false));
   expect(hook.result.current.catalog.connectorsReady?.feishu).toBe(true);

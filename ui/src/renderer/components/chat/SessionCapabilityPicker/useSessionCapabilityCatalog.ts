@@ -1,6 +1,6 @@
 import { ipcBridge } from '@/common';
 import { appHosting } from '@/common/adapter/appHostingBridge';
-import { officeHub } from '@/common/adapter/officeHubBridge';
+import { feishuConnector } from '@/common/adapter/feishuConnectorBridge';
 import type { ConnectorId } from '@/common/connectors';
 import { parseMcpServerId } from '@/common/types/ids';
 import { ensureBackendMcpCatalog, subscribeMcpCatalogChanged } from '@/renderer/hooks/mcp/catalog';
@@ -17,7 +17,7 @@ const EMPTY_CATALOG: SessionCapabilityCatalog = {
 /** Connector-provided skills stay opt-in but only once the connector is usable. */
 const loadConnectorReadiness = async (): Promise<Partial<Record<ConnectorId, boolean>>> => {
   try {
-    const status = await officeHub.status();
+    const status = await feishuConnector.status();
     const ready = status.phase === 'ready' && status.connection.enabled && status.runtime.phase === 'ready' && !!status.actor;
     return { feishu: ready };
   } catch {

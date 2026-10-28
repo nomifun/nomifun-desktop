@@ -11,12 +11,15 @@ async fn previous_database(path: &std::path::Path) -> SqliteConnection {
     previous.run(&mut connection).await.unwrap();
     sqlx::query("PRAGMA foreign_keys=ON").execute(&mut connection).await.unwrap();
     use nomifun_agent_contracts::{AGENT_STORE_DATA_GENERATION, AGENT_STORE_MIGRATION_HEAD,
-        AGENT_STORE_PROJECTION_SCHEMA_VERSION, agent_store_schema_manifest_payload,
+        AGENT_STORE_PROJECTION_SCHEMA_VERSION,
         official_preset_seed_manifest_payload, digest_payload};
+    // This fixture's schema stops at migration 003, so its declared lineage is
+    // the pre-010 manifest. Seeding the current digest would claim a lineage
+    // the schema cannot prove and migration 010's guard would fail closed.
     sqlx::query("INSERT INTO schema_metadata(singleton_key,data_generation,root_instance_id,migration_head,seed_manifest_digest,canonical_schema_manifest_digest,projection_schema_version) VALUES ('canonical',?,'main-sqlite-agent-store',?,?,?,?)")
         .bind(i64::from(AGENT_STORE_DATA_GENERATION)).bind(i64::from(AGENT_STORE_MIGRATION_HEAD))
         .bind(digest_payload(&official_preset_seed_manifest_payload()).unwrap().as_ref())
-        .bind(digest_payload(&agent_store_schema_manifest_payload()).unwrap().as_ref())
+        .bind("181fba4223793ec7cfd298a8a3d026925c54b622172d1c962d5bf70816e1a019")
         .bind(i64::from(AGENT_STORE_PROJECTION_SCHEMA_VERSION)).execute(&mut connection).await.unwrap();
     connection
 }

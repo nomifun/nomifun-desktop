@@ -112,7 +112,7 @@
 | [`nomifun-shell`](../../crates/backend/nomifun-shell/) | 操作系统外壳辅助：用系统应用打开文件，针对 Deepgram 或 OpenAI 的语音转文字，剪贴板 / 粘贴集成。 |
 | [`nomifun-file`](../../crates/backend/nomifun-file/) | 在会话工作目录下的沙箱化文件系统（`browse`、`path_safety`、`watch_service`、`snapshot_service`），zip 辅助。 |
 | [`nomifun-office`](../../crates/backend/nomifun-office/) | 受管 OfficeCLI HTML 产物：稳定源快照、有界共享渲染／缓存、按用户归属的可取消租约、沙箱交付及预览历史。 |
-| [`nomifun-office-hub`](../../crates/backend/nomifun-office-hub/) | [飞书办公工作台](../guides/office-hub.zh.md)：三步连接、官方 CLI 按需供应、原生普通段落编辑与单次保存。四张产品表保留连接、已提交操作、操作项和业务回执，最近入口只作薄连接配置；不新增 Agent 事实链。 |
+| [`nomifun-feishu-connector`](../../crates/backend/nomifun-feishu-connector/) | [飞书连接器](../guides/feishu-connector.zh.md)：三步连接、官方 CLI 按需供应、文档与多维表格操作和单次提交保存。四张产品表保留连接、已提交操作、操作项和业务回执；不新增 Agent 事实链。 |
 | [`nomifun-system`](../../crates/backend/nomifun-system/) | LLM provider / 模型查询、应用级设置、sysinfo、应用版本检查 / 自更新框架。 |
 
 ## 组合根：`nomifun-app`

@@ -20,10 +20,12 @@ async fn previous_database(path: &Path) -> SqlitePool {
     ).await.unwrap();
     let previous = Migrator { migrations: Cow::Owned(MIGRATOR.iter().take(4).cloned().collect()), ..Migrator::DEFAULT };
     previous.run(&pool).await.unwrap();
+    // This fixture's schema predates migration 010, so its declared
+    // lineage is the pre-010 manifest digest, not the current manifest.
     sqlx::query("INSERT INTO schema_metadata(singleton_key,data_generation,root_instance_id,migration_head,seed_manifest_digest,canonical_schema_manifest_digest,projection_schema_version) VALUES('canonical',?,'main-sqlite-agent-store',?,?,?,?)")
         .bind(i64::from(AGENT_STORE_DATA_GENERATION)).bind(i64::from(AGENT_STORE_MIGRATION_HEAD))
         .bind(digest_payload(&official_preset_seed_manifest_payload()).unwrap().as_ref())
-        .bind(digest_payload(&agent_store_schema_manifest_payload()).unwrap().as_ref())
+        .bind("181fba4223793ec7cfd298a8a3d026925c54b622172d1c962d5bf70816e1a019")
         .bind(i64::from(AGENT_STORE_PROJECTION_SCHEMA_VERSION)).execute(&pool).await.unwrap();
     assert_eq!(inspect_migration_lineage(&pool).await.unwrap(), MigrationLineage::KnownPrefix);
     assert!(!validate_known_migration_lineage_prefix(&pool).await.unwrap());
@@ -59,6 +61,13 @@ async fn forward_005_retires_only_side_question_policy_and_preserves_schema_and_
         .fetch_all(&old).await.unwrap();
     let before_manifest: (i64, String) = sqlx::query_as("SELECT migration_head,canonical_schema_manifest_digest FROM schema_metadata")
         .fetch_one(&old).await.unwrap();
+    // Migration 005 changes only Agent metadata rows; every schema object must
+    // remain identical across just that migration (later product migrations
+    // legitimately change schema independently).
+    Migrator { migrations: Cow::Owned(MIGRATOR.iter().take(5).cloned().collect()), ..Migrator::DEFAULT }
+        .run(&old).await.unwrap();
+    assert_eq!(sqlx::query_as::<_, (String, String)>("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name<>'system_settings' ORDER BY name")
+        .fetch_all(&old).await.unwrap(), before_schema, "metadata data retirement must not change the schema");
     old.close().await;
 
     for _ in 0..2 {
@@ -81,12 +90,10 @@ async fn forward_005_retires_only_side_question_policy_and_preserves_schema_and_
         let saved: (String, bool) = sqlx::query_as("SELECT name,enabled FROM agent_metadata WHERE agent_id=?")
             .bind(NOMI).fetch_one(current.pool()).await.unwrap();
         assert_eq!(saved, ("Saved owner name".into(), false));
-        let schema: Vec<(String, String)> = sqlx::query_as("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name<>'system_settings' ORDER BY name")
-            .fetch_all(current.pool()).await.unwrap();
-        assert_eq!(schema, before_schema, "metadata data retirement must not change the schema");
         let manifest: (i64, String) = sqlx::query_as("SELECT migration_head,canonical_schema_manifest_digest FROM schema_metadata")
             .fetch_one(current.pool()).await.unwrap();
-        assert_eq!(manifest, before_manifest);
+        assert_eq!(manifest.0, before_manifest.0);
+        assert_eq!(manifest.1, digest_payload(&agent_store_schema_manifest_payload()).unwrap().as_ref().to_string());
         assert_eq!(manifest.0, 1, "product metadata migration does not advance the canonical Agent schema head");
         let receipts: Vec<(i64, Vec<u8>)> = sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
             .fetch_all(current.pool()).await.unwrap();

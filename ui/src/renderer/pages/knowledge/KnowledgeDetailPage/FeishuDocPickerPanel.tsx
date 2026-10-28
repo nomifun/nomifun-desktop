@@ -29,19 +29,19 @@ import {
 } from '@icon-park/react';
 import type { KnowledgeBaseId, KnowledgeEntryId } from '@/common/types/ids';
 import type { IKnowledgeAddContentResult } from '@/common/adapter/ipcBridge';
-import type { OfficeItem } from '@/common/types/officeHub';
-import { useOfficeConnection } from '@/renderer/pages/officeHub/useOfficeConnection';
-import { useOfficeQuery } from '@/renderer/pages/officeHub/useOfficeHub';
-import { AuthorizationPanel, OfficeButton, OfficeDialog } from '@/renderer/pages/officeHub/dialogs';
+import type { FeishuItem } from '@/common/types/feishuConnector';
+import { useFeishuConnection } from '@/renderer/pages/feishuConnector/useFeishuConnection';
+import { useFeishuQuery } from '@/renderer/pages/feishuConnector/useFeishuConnector';
+import { AuthorizationPanel, FeishuButton, FeishuDialog } from '@/renderer/pages/feishuConnector/dialogs';
 import {
   hasPermission,
   identityKey,
-  officeResourceUrl,
+  feishuResourceUrl,
   permissionKey,
   readGroups,
   scopesFor,
-} from '@/renderer/pages/officeHub/model';
-import '@/renderer/pages/officeHub/styles.css';
+} from '@/renderer/pages/feishuConnector/model';
+import '@/renderer/pages/feishuConnector/styles.css';
 import { addKnowledgeContent } from '../useKnowledge';
 import { showKnowledgeErrorMessage } from '../KnowledgeErrorFeedback';
 
@@ -61,9 +61,9 @@ function feishuDocKey(url: string): string {
   }
 }
 
-const itemKey = (item: OfficeItem) => `${item.kind}:${item.id}`;
+const itemKey = (item: FeishuItem) => `${item.kind}:${item.id}`;
 
-const resourceTime = (item: OfficeItem): string => {
+const resourceTime = (item: FeishuItem): string => {
   const value = item.modified_at;
   if (!value) return '—';
   const time = /^\d+$/.test(value)
@@ -97,7 +97,7 @@ const FeishuDocPickerPanel: React.FC<FeishuDocPickerPanelProps> = ({
 }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const connection = useOfficeConnection();
+  const connection = useFeishuConnection();
   const {
     hub, busy, authVisible, authorize, openExternal, errorPanel,
     authorization, closeAuth, setActionError,
@@ -117,7 +117,7 @@ const FeishuDocPickerPanel: React.FC<FeishuDocPickerPanelProps> = ({
     key: '',
     stack: [null],
   });
-  const [items, setItems] = useState<OfficeItem[]>([]);
+  const [items, setItems] = useState<FeishuItem[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
   const [adding, setAdding] = useState<Set<string>>(new Set());
   const [addedKeys, setAddedKeys] = useState<Set<string>>(new Set());
@@ -127,7 +127,7 @@ const FeishuDocPickerPanel: React.FC<FeishuDocPickerPanelProps> = ({
   const cursorStack = cursors.key === pageKey ? cursors.stack : [null];
   const activeCursor = cursorStack[cursorStack.length - 1];
 
-  const documents = useOfficeQuery(
+  const documents = useFeishuQuery(
     canBrowse ? { kind: 'documents', query: searchTerm, filter: 'document', cursor: activeCursor } : null,
     ownerKey,
   );
@@ -168,16 +168,16 @@ const FeishuDocPickerPanel: React.FC<FeishuDocPickerPanelProps> = ({
     setCursors({ key: pageKey, stack: [...cursorStack, nextCursor] });
   };
 
-  const openResource = async (item: OfficeItem) => {
+  const openResource = async (item: FeishuItem) => {
     try {
-      if (!item.url) throw new Error('office.resources.missingLink');
-      await openExternal(officeResourceUrl(item.url));
+      if (!item.url) throw new Error('feishu.resources.missingLink');
+      await openExternal(feishuResourceUrl(item.url));
     } catch (error) {
       setActionError(error);
     }
   };
 
-  const addToBase = async (item: OfficeItem) => {
+  const addToBase = async (item: FeishuItem) => {
     if (!item.url || adding.has(itemKey(item))) return;
     setAdding((previous) => new Set(previous).add(itemKey(item)));
     try {
@@ -227,7 +227,7 @@ const FeishuDocPickerPanel: React.FC<FeishuDocPickerPanelProps> = ({
 
   const body = () => {
     if (hub.statusLoading && !hub.status) {
-      return <p className='knowledge-detail-feishu-empty p-24px text-12px text-[var(--color-text-3)]'>{t('office.loading')}</p>;
+      return <p className='knowledge-detail-feishu-empty p-24px text-12px text-[var(--color-text-3)]'>{t('feishu.loading')}</p>;
     }
     if (!ready) {
       return (
@@ -249,7 +249,7 @@ const FeishuDocPickerPanel: React.FC<FeishuDocPickerPanelProps> = ({
         <div className='knowledge-detail-feishu-empty flex flex-1 flex-col items-center justify-center gap-10px p-24px text-center'>
           <DocDetail theme='outline' size='30' className='text-[var(--color-text-4)]' />
           <div className='text-12px leading-19px text-[var(--color-text-2)]'>
-            {t('office.permissions.groups.documents')} · {t('office.permissions.readMissing')}
+            {t('feishu.permissions.groups.documents')} · {t('feishu.permissions.readMissing')}
           </div>
           <Button
             size='small'
@@ -257,7 +257,7 @@ const FeishuDocPickerPanel: React.FC<FeishuDocPickerPanelProps> = ({
             disabled={busy}
             onClick={() => authorize(scopesFor(hub.status, readGroups.documents))}
           >
-            {t('office.actions.authorizeRead')}
+            {t('feishu.actions.authorizeRead')}
           </Button>
         </div>
       );
@@ -266,7 +266,7 @@ const FeishuDocPickerPanel: React.FC<FeishuDocPickerPanelProps> = ({
       return (
         <div className='p-12px'>
           {errorPanel(documents.error)}
-          <OfficeButton onClick={documents.refresh}>{t('office.actions.check')}</OfficeButton>
+          <FeishuButton onClick={documents.refresh}>{t('feishu.actions.check')}</FeishuButton>
         </div>
       );
     }
@@ -305,7 +305,7 @@ const FeishuDocPickerPanel: React.FC<FeishuDocPickerPanelProps> = ({
                   type='button'
                   className='min-w-0 flex-1 cursor-pointer border-0 bg-transparent p-0 text-left font-[inherit] disabled:cursor-default'
                   disabled={!item.url}
-                  title={t(item.url ? 'office.resources.browserHint' : 'office.resources.missingLink')}
+                  title={t(item.url ? 'feishu.resources.browserHint' : 'feishu.resources.missingLink')}
                   onClick={() => void openResource(item)}
                 >
                   <span className='block truncate text-12px font-600 leading-18px text-[var(--color-text-1)]'>
@@ -390,7 +390,7 @@ const FeishuDocPickerPanel: React.FC<FeishuDocPickerPanelProps> = ({
             placeholder={t('knowledge.detail.feishu.searchPlaceholder', {
               defaultValue: '搜索飞书文档…',
             })}
-            aria-label={t('office.resources.search')}
+            aria-label={t('feishu.resources.search')}
             value={searchInput}
             onChange={(event) => setSearchInput(event.target.value)}
           />
@@ -400,7 +400,7 @@ const FeishuDocPickerPanel: React.FC<FeishuDocPickerPanelProps> = ({
           size='mini'
           shape='circle'
           icon={<Refresh theme='outline' size='13' />}
-          aria-label={t('office.actions.refresh')}
+          aria-label={t('feishu.actions.refresh')}
           loading={documents.loading || hub.statusLoading || busy}
           onClick={() => {
             setRefreshKey((value) => value + 1);
@@ -432,18 +432,18 @@ const FeishuDocPickerPanel: React.FC<FeishuDocPickerPanelProps> = ({
       {errorPanel(connection.actionError)}
       <div className='flex min-h-0 flex-1 flex-col pt-6px'>{body()}</div>
       {authVisible && (
-        <OfficeDialog
-          title={t('office.auth.title')}
+        <FeishuDialog
+          title={t('feishu.auth.title')}
           onClose={closeAuth}
           busy={busy}
           footer={
-            <OfficeButton primary disabled={busy} onClick={closeAuth}>
-              {t('office.auth.return')}
-            </OfficeButton>
+            <FeishuButton primary disabled={busy} onClick={closeAuth}>
+              {t('feishu.auth.return')}
+            </FeishuButton>
           }
         >
           <AuthorizationPanel {...authorization} />
-        </OfficeDialog>
+        </FeishuDialog>
       )}
     </div>
   );

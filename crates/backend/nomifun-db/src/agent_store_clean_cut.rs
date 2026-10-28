@@ -135,7 +135,7 @@ pub(crate) async fn clean_cut_agent_store(conn: &mut SqliteConnection, migrator:
     let current_manifest=agent_store_schema_manifest_payload();
     let current_digest=digest_payload(&current_manifest).map_err(|e|DbError::Init(e.to_string()))?;
     let mut baseline_manifest=current_manifest;
-    baseline_manifest.tables.retain(|table|table.owner!="product.office-hub"
+    baseline_manifest.tables.retain(|table|table.owner!="product.feishu-connector"
         && !matches!(table.table_name.as_str(),"mcp_oauth_clients"|"mcp_oauth_grants"));
     let baseline_digest=digest_payload(&baseline_manifest).map_err(|e|DbError::Init(e.to_string()))?;
     if baseline_digest.as_ref()!="181fba4223793ec7cfd298a8a3d026925c54b622172d1c962d5bf70816e1a019" {

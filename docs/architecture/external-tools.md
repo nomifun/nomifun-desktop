@@ -80,9 +80,9 @@ replaceable runtime cache, while an existing user prefix remains authoritative.
 
 `nomifun-runtime::prepare_existing_process_launch` accepts only an absolute,
 existing program file. It composes the same child environment and preserves literal
-argv, but never invokes managed supply or creates directories. Office Hub
+argv, but never invokes managed supply or creates directories. Feishu connector
 diagnostics, business calls and queries through an existing npm executable use this
-entry point. Only the workbench's explicit **Prepare component** operation may use
+entry point. Only the connector's explicit **Prepare component** operation may use
 the supplier-enabled entry point for a relative `npm` command. An existing native
 Feishu CLI needs no Node simply because it resides inside an npm prefix; an unknown
 script with a missing interpreter is unavailable rather than installing one during
@@ -168,7 +168,7 @@ compression format; compressed component sizes alone are not installer measureme
 
 ## Feishu Office CLI
 
-The cloud [Feishu knowledge page and connector](../guides/office-hub.md) use the official
+The cloud [Feishu knowledge page and connector](../guides/feishu-connector.md) use the official
 `@larksuite/cli`; managed installs pin the verified 1.0.98 build. It is separate
 from the embedded OfficeCLI used for local file rendering. The Feishu CLI is not
 embedded or exposed as a managed `component` target.
@@ -192,9 +192,9 @@ deletion. Save submits one stable request, and a lost response is recovered by
 that request identity. Pending document and Base targets retain their SQL write
 fences across identity changes. The same process owner keeps retrying tree cleanup
 until completion is proved; cancelling execution cannot end that cleanup early.
-Feishu Office retains four product tables for connections and submitted request
+The Feishu connector retains four product tables for connections and submitted request
 receipts, separately from canonical Agent facts. The page opens directly on
-Documents; see the [active plan](../handoffs/office-feishu-workbench.zh.md).
+Documents; see the [active plan](../handoffs/feishu-connector.zh.md).
 
 ## Office artifacts
 

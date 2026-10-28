@@ -39,7 +39,7 @@ async fn attempt(pool:&SqlitePool,n:u64,op:u64,item:u64,number:i64,status:&str,m
 }
 
 #[tokio::test]
-async fn current_office_upgrade_removes_page_metadata_and_preserves_execution_facts(){
+async fn current_feishu_upgrade_removes_page_metadata_and_preserves_execution_facts(){
     let dir=tempfile::tempdir().unwrap();let path=dir.path().join("old-17.db");let pool=old(&path).await;
     operation(&pool,10,"unknown").await;
     let mutation=doc("unresolved-creation");
@@ -58,25 +58,36 @@ async fn current_office_upgrade_removes_page_metadata_and_preserves_execution_fa
         "SELECT json_array(id,operation_id,owner_id,connection_id,request_id,actor_json,profile,digest,status) FROM office_operations ORDER BY id",
         "SELECT json_array(id,item_id,operation_id,client_item_id,ordinal,mutation_json,target_key,status,remote_id,remote_url,message) FROM office_operation_items ORDER BY id",
         "SELECT json_array(id,receipt_id,item_id,record_kind,number,client_token,mutation_json,status,occurred_at,settled_at,message,data_json) FROM office_operation_receipts ORDER BY id",
-        "SELECT json_array(singleton_key,data_generation,root_instance_id,migration_head,seed_manifest_digest,canonical_schema_manifest_digest,projection_schema_version) FROM schema_metadata",
-        "SELECT json_array(name,seq) FROM sqlite_sequence WHERE name LIKE 'office_%' ORDER BY name",
     ];
+    let metadata="SELECT json_array(singleton_key,data_generation,root_instance_id,migration_head,seed_manifest_digest,canonical_schema_manifest_digest,projection_schema_version) FROM schema_metadata";
+    let sequence="SELECT json_array(name,seq) FROM sqlite_sequence WHERE name LIKE 'office_%' ORDER BY name";
     let mut before=Vec::new();
-    for query in queries {before.push(sqlx::query_scalar::<_,String>(query).fetch_all(&pool).await.unwrap());}
+    for query in queries.iter() {before.push(sqlx::query_scalar::<_,String>(query).fetch_all(&pool).await.unwrap());}
+    let before_sequence:String=sqlx::query_scalar(sequence).fetch_one(&pool).await.unwrap();
+    let before_metadata:String=sqlx::query_scalar(metadata).fetch_one(&pool).await.unwrap();
     let payload:Vec<u8>=sqlx::query_scalar("SELECT body FROM agent_payloads WHERE payload_id='compact-payload'").fetch_one(&pool).await.unwrap();
     let lineage:Vec<(i64,Vec<u8>)>=sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version").fetch_all(&pool).await.unwrap();
     assert_eq!(nomifun_db::inspect_migration_lineage(&pool).await.unwrap(),nomifun_db::MigrationLineage::KnownPrefix);
     pool.close().await;
 
     let upgraded=nomifun_db::init_database(&path).await.unwrap();let pool=upgraded.pool();
-    let columns:Vec<String>=sqlx::query_scalar("SELECT name FROM pragma_table_info('office_operations')").fetch_all(pool).await.unwrap();
+    let columns:Vec<String>=sqlx::query_scalar("SELECT name FROM pragma_table_info('feishu_operations')").fetch_all(pool).await.unwrap();
     assert!(!columns.iter().any(|column|matches!(column.as_str(),"created_at"|"updated_at")));
-    let connection_columns:Vec<String>=sqlx::query_scalar("SELECT name FROM pragma_table_info('office_connections')").fetch_all(pool).await.unwrap();
+    let connection_columns:Vec<String>=sqlx::query_scalar("SELECT name FROM pragma_table_info('feishu_connections')").fetch_all(pool).await.unwrap();
     assert!(!connection_columns.iter().any(|column|column=="recent_resources_json"));
     assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name='idx_office_operations_owner_history'").fetch_one(pool).await.unwrap(),0);
-    for (query,expected) in queries.into_iter().zip(before) {
-        assert_eq!(sqlx::query_scalar::<_,String>(query).fetch_all(pool).await.unwrap(),expected,"retiring pages must preserve connection settings, execution facts and metadata");
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name='idx_feishu_items_pending_target'").fetch_one(pool).await.unwrap(),1);
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name LIKE 'office_%'").fetch_one(pool).await.unwrap(),0);
+    for (query,expected) in queries.iter().map(|query|query.replace("office_","feishu_")).zip(before) {
+        assert_eq!(sqlx::query_scalar::<_,String>(&query).fetch_all(pool).await.unwrap(),expected,"retiring pages must preserve connection settings, execution facts and metadata");
     }
+    // Sequence high-water marks survive the rename under the new table names.
+    let after_sequence:String=sqlx::query_scalar(&sequence.replace("office_","feishu_")).fetch_one(pool).await.unwrap();
+    assert_eq!(after_sequence,before_sequence.replace("office_","feishu_"),"sequence high-water marks must survive the rename");
+    // The rename migration must advance only the declared manifest digest;
+    // every other metadata field is preserved byte-for-byte.
+    let after_metadata:String=sqlx::query_scalar(metadata).fetch_one(pool).await.unwrap();
+    assert_eq!(after_metadata,before_metadata.replace("565ff15ff4419e0fad8cf0fbcaa7ade3bd0f4fb50263851efed93f7a39921430","9ed5b23d0567152ba77d5a580b6c8af44a12917d6efc404ecb27ad8b8dc924cb"),"metadata may only advance the exact manifest digest");
     assert_eq!(sqlx::query_scalar::<_,Vec<u8>>("SELECT body FROM agent_payloads WHERE payload_id='compact-payload'").fetch_one(pool).await.unwrap(),payload);
     assert_eq!(sqlx::query_as::<_,(i64,Vec<u8>)>("SELECT version,checksum FROM _sqlx_migrations WHERE version<18 ORDER BY version").fetch_all(pool).await.unwrap(),lineage);
     nomifun_db::validate_id_schema_contract(pool).await.unwrap();nomifun_db::validate_id_data_contract(pool).await.unwrap();
@@ -114,21 +125,21 @@ async fn compact_upgrade_preserves_all_submitted_evidence_pending_fences_and_seq
     let checksums:Vec<(i64,Vec<u8>)>=sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version").fetch_all(&pool).await.unwrap();
     let bytes:Vec<u8>=sqlx::query_scalar("SELECT body FROM agent_payloads WHERE payload_id='compact-payload'").fetch_one(&pool).await.unwrap();pool.close().await;
     let upgraded=nomifun_db::init_database(&path).await.unwrap();let pool=upgraded.pool();
-    let after:Vec<(String,String,Option<String>)>=sqlx::query_as("SELECT receipt_id,mutation_json,data_json FROM office_operation_receipts WHERE record_kind='attempt' ORDER BY receipt_id").fetch_all(pool).await.unwrap();assert_eq!(before,after);
+    let after:Vec<(String,String,Option<String>)>=sqlx::query_as("SELECT receipt_id,mutation_json,data_json FROM feishu_operation_receipts WHERE record_kind='attempt' ORDER BY receipt_id").fetch_all(pool).await.unwrap();assert_eq!(before,after);
     assert_eq!(checksums,sqlx::query_as::<_,(i64,Vec<u8>)>("SELECT version,checksum FROM _sqlx_migrations WHERE version<=16 ORDER BY version").fetch_all(pool).await.unwrap());
     assert_eq!(bytes,sqlx::query_scalar::<_,Vec<u8>>("SELECT body FROM agent_payloads WHERE payload_id='compact-payload'").fetch_one(pool).await.unwrap());
-    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM office_operations").fetch_one(pool).await.unwrap(),4);
-    assert_eq!(sqlx::query_scalar::<_,String>("SELECT status FROM office_operation_items WHERE item_id=?").bind(id(25)).fetch_one(pool).await.unwrap(),"running");
-    assert_eq!(sqlx::query_scalar::<_,String>("SELECT status FROM office_operation_items WHERE item_id=?").bind(id(26)).fetch_one(pool).await.unwrap(),"queued");
-    assert_eq!(sqlx::query_scalar::<_,String>("SELECT target_key FROM office_operation_items WHERE item_id=?").bind(id(27)).fetch_one(pool).await.unwrap(),doc_key);
-    for table in ["office_operations","office_operation_items"]{assert_eq!(sqlx::query_scalar::<_,i64>("SELECT seq FROM sqlite_sequence WHERE name=?").bind(table).fetch_one(pool).await.unwrap(),12000)}
-    let observation:String=sqlx::query_scalar("SELECT data_json FROM office_operation_receipts WHERE receipt_id=?").bind(id(200)).fetch_one(pool).await.unwrap();let observation:Value=serde_json::from_str(&observation).unwrap();assert_eq!(observation["confirmed"],true);assert_eq!(observation["kind"],"original_receipt");assert_eq!(observation["data"]["attempt_id"],id(125));
-    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM pragma_table_info('office_connections') WHERE name='recent_resources_json'").fetch_one(pool).await.unwrap(),0);
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM feishu_operations").fetch_one(pool).await.unwrap(),4);
+    assert_eq!(sqlx::query_scalar::<_,String>("SELECT status FROM feishu_operation_items WHERE item_id=?").bind(id(25)).fetch_one(pool).await.unwrap(),"running");
+    assert_eq!(sqlx::query_scalar::<_,String>("SELECT status FROM feishu_operation_items WHERE item_id=?").bind(id(26)).fetch_one(pool).await.unwrap(),"queued");
+    assert_eq!(sqlx::query_scalar::<_,String>("SELECT target_key FROM feishu_operation_items WHERE item_id=?").bind(id(27)).fetch_one(pool).await.unwrap(),doc_key);
+    for table in ["feishu_operations","feishu_operation_items"]{assert_eq!(sqlx::query_scalar::<_,i64>("SELECT seq FROM sqlite_sequence WHERE name=?").bind(table).fetch_one(pool).await.unwrap(),12000)}
+    let observation:String=sqlx::query_scalar("SELECT data_json FROM feishu_operation_receipts WHERE receipt_id=?").bind(id(200)).fetch_one(pool).await.unwrap();let observation:Value=serde_json::from_str(&observation).unwrap();assert_eq!(observation["confirmed"],true);assert_eq!(observation["kind"],"original_receipt");assert_eq!(observation["data"]["attempt_id"],id(125));
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM pragma_table_info('feishu_connections') WHERE name='recent_resources_json'").fetch_one(pool).await.unwrap(),0);
     nomifun_db::validate_id_schema_contract(pool).await.unwrap();nomifun_db::validate_id_data_contract(pool).await.unwrap();
-    let reset=nomifun_db::reset_agent_data(pool).await.unwrap();for table in ["office_connections","office_operations","office_operation_items","office_operation_receipts"]{assert!(reset.preserved_rows.contains_key(table))}
+    let reset=nomifun_db::reset_agent_data(pool).await.unwrap();for table in ["feishu_connections","feishu_operations","feishu_operation_items","feishu_operation_receipts"]{assert!(reset.preserved_rows.contains_key(table))}
     let snapshot=dir.path().join("snapshot.db");upgraded.snapshot_into(&snapshot).await.unwrap();let restored=nomifun_db::open_database_for_backup(&snapshot).await.unwrap();
-    assert_eq!(sqlx::query_scalar::<_,String>("SELECT mutation_json FROM office_operation_items WHERE item_id=?").bind(id(27)).fetch_one(restored.pool()).await.unwrap(),legacy.to_string());
-    assert_eq!(sqlx::query_scalar::<_,String>("SELECT name FROM office_connections").fetch_one(restored.pool()).await.unwrap(),"Feishu");
+    assert_eq!(sqlx::query_scalar::<_,String>("SELECT mutation_json FROM feishu_operation_items WHERE item_id=?").bind(id(27)).fetch_one(restored.pool()).await.unwrap(),legacy.to_string());
+    assert_eq!(sqlx::query_scalar::<_,String>("SELECT name FROM feishu_connections").fetch_one(restored.pool()).await.unwrap(),"Feishu");
     restored.close().await;upgraded.close().await;
 }
 
@@ -155,11 +166,11 @@ async fn compact_upgrade_rejects_unknown_metadata_without_losing_unresolved_rece
 #[tokio::test]
 async fn receipt_checks_reject_null_discriminator_fields_and_missing_observation_proof(){
     let db=nomifun_db::init_database_memory().await.unwrap();
-    let bad=sqlx::query("INSERT INTO office_operation_receipts(receipt_id,item_id,record_kind,number,client_token,mutation_json,status,occurred_at) VALUES (?,?,'attempt',NULL,?,'{}','running',1)")
+    let bad=sqlx::query("INSERT INTO feishu_operation_receipts(receipt_id,item_id,record_kind,number,client_token,mutation_json,status,occurred_at) VALUES (?,?,'attempt',NULL,?,'{}','running',1)")
         .bind(id(500)).bind(id(501)).bind(id(502)).execute(db.pool()).await;
     assert!(bad.is_err(),"NULL attempt number must not pass a CHECK as unknown");
     for data in [json!({}),json!({"kind":"target_readback"}),json!({"confirmed":true}),json!({"kind":"target_readback","confirmed":0}),json!({"kind":"unsupported","confirmed":false})]{
-        assert!(sqlx::query("INSERT INTO office_operation_receipts(receipt_id,item_id,record_kind,message,data_json,occurred_at) VALUES (?,?,'observation','bad shape',?,1)")
+        assert!(sqlx::query("INSERT INTO feishu_operation_receipts(receipt_id,item_id,record_kind,message,data_json,occurred_at) VALUES (?,?,'observation','bad shape',?,1)")
             .bind(id(503)).bind(id(501)).bind(data.to_string()).execute(db.pool()).await.is_err(),"bad observation {data}");
     }
     db.close().await;

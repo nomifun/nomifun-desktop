@@ -21,6 +21,7 @@ export const AGENT_FORWARD_MIGRATIONS = Object.freeze({
   officeActivityRetirementForwardMigration: 'crates/backend/nomifun-db/migrations/018_remove_office_activity.sql',
   officeOverviewRetirementForwardMigration: 'crates/backend/nomifun-db/migrations/019_remove_office_overview.sql',
   feishuSourceKindForwardMigration: 'crates/backend/nomifun-db/migrations/020_feishu_knowledge_source_kind.sql',
+  feishuConnectorTablesForwardMigration: 'crates/backend/nomifun-db/migrations/021_feishu_connector_tables.sql',
 });
 const KNOWN = new Set(Object.values(AGENT_FORWARD_MIGRATIONS));
 export function areKnownAgentMigrationPaths(paths) {
@@ -116,6 +117,45 @@ export function officeCompactMigrationErrors(source) {
   for (const expected of special) {
     if (!statements.some(statement => compact(statement) === expected)) {
       errors.push('Office compaction must retain exact metadata and sequence transitions');
+    }
+  }
+  return errors;
+}
+
+// This migration only renames the Feishu connector product tables in place.
+// Rows, identities, sequence high-water marks and Agent facts stay unchanged.
+export function feishuConnectorRenameMigrationErrors(source) {
+  const SOURCE = '565ff15ff4419e0fad8cf0fbcaa7ade3bd0f4fb50263851efed93f7a39921430';
+  const TARGET = '9ed5b23d0567152ba77d5a580b6c8af44a12917d6efc404ecb27ad8b8dc924cb';
+  const statements = source.replace(/--[^\r\n]*/g, '').split(';').map(normalize).filter(Boolean);
+  const expectedGuard = "INSERT INTO feishu_connector_rename_guard SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM schema_metadata)"
+    + " OR EXISTS(SELECT 1 FROM schema_metadata WHERE singleton_key='canonical'"
+    + " AND data_generation=7 AND migration_head=1 AND projection_schema_version=1"
+    + " AND canonical_schema_manifest_digest IN ('" + SOURCE + "','" + TARGET + "')) THEN 1 ELSE 0 END";
+  const expectedUpdate = "UPDATE schema_metadata SET canonical_schema_manifest_digest='" + TARGET
+    + "' WHERE singleton_key='canonical' AND data_generation=7 AND migration_head=1 AND projection_schema_version=1"
+    + " AND canonical_schema_manifest_digest='" + SOURCE + "'";
+  const special = new Set([
+    compact('CREATE TEMP TABLE feishu_connector_rename_guard(valid INTEGER NOT NULL CHECK(valid=1))'),
+    compact(expectedGuard),
+    compact('DROP TABLE feishu_connector_rename_guard'),
+    compact('ALTER TABLE office_connections RENAME TO feishu_connections'),
+    compact('ALTER TABLE office_operations RENAME TO feishu_operations'),
+    compact('ALTER TABLE office_operation_items RENAME TO feishu_operation_items'),
+    compact('ALTER TABLE office_operation_receipts RENAME TO feishu_operation_receipts'),
+    compact('DROP INDEX idx_office_items_pending_target'),
+    compact("CREATE UNIQUE INDEX idx_feishu_items_pending_target ON feishu_operation_items(target_key) WHERE status IN ('queued','running','unknown','accepted_pending_confirmation')"),
+    compact(expectedUpdate),
+  ]);
+  const errors = [];
+  for (const statement of statements) {
+    if (!special.has(compact(statement))) {
+      errors.push('Feishu connector rename may only rename its declared product objects and apply the exact preserved manifest transition (' + statement.slice(0, 100) + ')');
+    }
+  }
+  for (const expected of special) {
+    if (!statements.some(statement => compact(statement) === expected)) {
+      errors.push('Feishu connector rename must retain its exact renames, metadata guard and manifest transition');
     }
   }
   return errors;

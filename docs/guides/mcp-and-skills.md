@@ -261,7 +261,7 @@ trigger a download. Runtime upgrades and Agent cleanup retain the installation.
 The Host coordinates its own preparation with a shared-prefix lock; skill prose
 does not lock independent external npm operations.
 
-[Feishu Knowledge](office-hub.md) shares the same three-step connection dialog,
+[Feishu Knowledge](feishu-connector.md) shares the same three-step connection dialog,
 native paragraph editing and single-submit business saves with the connector.
 The skill remains an ordinary
 opt-in Agent capability through canonical processes. Its business responses often
@@ -289,7 +289,7 @@ third-party account connections in one place, replacing the former top-level
 "Office" entry. The first connector is the **Feishu connector**: it hosts the
 same three-step connection flow that used to live under Office (component
 preparation, app configuration, account sign-in and permissions) and surfaces
-the capabilities it provides — [Feishu Knowledge](office-hub.md)
+the capabilities it provides — [Feishu Knowledge](feishu-connector.md)
 (`/knowledge/feishu`) and the `lark-cli` skill.
 
 Connection state, account and permissions exist exactly once; the connector card

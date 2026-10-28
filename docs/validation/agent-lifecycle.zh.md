@@ -120,7 +120,7 @@ bun run check:desktop-ui-boundary
 bun run check:docs
 ```
 
-macOS还使用原`darwin_registered`、`darwin_application`及[Browser原生入口](browser-platform.zh.md)，需要真实AppKit主循环、原controller与LaunchServices回执；打包或普通cargo run不替代原生运行。Linux沿现役Desktop features和[Linux验证记录](global-os-linux-2026-10-17.zh.md)核对实际X11/Wayland、portal及权限；不默认调用会安装依赖或打包的脚本。真实模型使用现役`run-nomi-core-live-provider-smoke.mjs --subagent-smoke`或`--subagent-eight-smoke`；凭据仅私有stdin，保留fixture必须先正常关停和通过明文审计。
+macOS还使用原`darwin_registered`、`darwin_application`及[Browser原生入口](browser-platform.zh.md)，需要真实AppKit主循环、原controller与LaunchServices回执；打包或普通cargo run不替代原生运行。Linux沿现役Desktop features和[全局操作系统能力](../architecture/global-os-capabilities.zh.md)核对实际X11/Wayland、portal及权限；不默认调用会安装依赖或打包的脚本。真实模型使用现役`run-nomi-core-live-provider-smoke.mjs --subagent-smoke`或`--subagent-eight-smoke`；凭据仅私有stdin，保留fixture必须先正常关停和通过明文审计。
 
 环境记录包含OS／架构、源码／构建身份、工具版本、普通／管理员身份、桌面会话、实际provider、权限、隔离范围、命令／非零用例数、失败与原生退出回执。资源稳态记录同负载多轮、合法长期任务、句柄／FD／进程／PTY、cleanup backlog、SQL量及可取得的CPU/RSS，不要求allocator立即返还全部内存。
 

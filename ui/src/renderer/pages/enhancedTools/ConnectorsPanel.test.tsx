@@ -3,11 +3,11 @@ import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-libra
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
-import { officeHub } from '@/common/adapter/officeHubBridge';
-import type { OfficeStatus } from '@/common/types/officeHub';
+import { feishuConnector } from '@/common/adapter/feishuConnectorBridge';
+import type { FeishuStatus } from '@/common/types/feishuConnector';
 import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
-import office from '@/renderer/services/i18n/locales/en-US/office.json';
+import feishu from '@/renderer/services/i18n/locales/en-US/feishu.json';
 import knowledge from '@/renderer/services/i18n/locales/en-US/knowledge.json';
 import ConnectorsPanel from './ConnectorsPanel';
 
@@ -15,7 +15,7 @@ const locale = createInstance();
 const restores: Array<() => void> = [];
 const track = <T extends { mockRestore: () => void }>(spy: T): T => { restores.push(() => spy.mockRestore()); return spy; };
 const actor = { app_id: 'cli_app', user_id: 'user_1', name: 'Ada' };
-const ready = (): OfficeStatus => ({
+const ready = (): FeishuStatus => ({
   provider: 'feishu',
   connection: { id: 'connection', name: 'Work connection', enabled: true, profile: 'work', executable: null, created_at: '2026-10-26T00:00:00Z', updated_at: '2026-10-26T00:00:00Z' },
   runtime: { phase: 'ready', executable: 'C:/tools/lark-cli.exe', version: '1.0.98', source: 'external', message: null, official_install_command: 'npx @larksuite/cli@latest install' },
@@ -23,7 +23,7 @@ const ready = (): OfficeStatus => ({
   permissions: ['documents.browse', 'documents.create', 'documents.delete', 'base.read', 'base.write'].map(capability => ({ capability, granted: true, required_scopes: [capability + '-scope'] })),
 });
 
-beforeAll(async () => { await locale.init({ lng: 'en-US', resources: { 'en-US': { translation: { settings, common, office, knowledge } } } }); });
+beforeAll(async () => { await locale.init({ lng: 'en-US', resources: { 'en-US': { translation: { settings, common, feishu, knowledge } } } }); });
 afterEach(() => { cleanup(); restores.splice(0).reverse().forEach(restore => restore()); });
 
 const mount = async () => {
@@ -36,7 +36,7 @@ const mount = async () => {
 
 describe('Connectors panel', () => {
   test('shows connector status, account and provided capabilities when connected', async () => {
-    track(spyOn(officeHub, 'status').mockResolvedValue(ready()));
+    track(spyOn(feishuConnector, 'status').mockResolvedValue(ready()));
     const view = await mount();
     const card = await view.findByTestId('connector-card-feishu');
     expect(card.textContent).toContain(settings.connectors.feishu.name);
@@ -50,7 +50,7 @@ describe('Connectors panel', () => {
   });
 
   test('keeps capabilities gated until the connection is configured', async () => {
-    track(spyOn(officeHub, 'status').mockResolvedValue({ ...ready(), phase: 'needs_login', actor: null }));
+    track(spyOn(feishuConnector, 'status').mockResolvedValue({ ...ready(), phase: 'needs_login', actor: null }));
     const view = await mount();
     const card = await view.findByTestId('connector-card-feishu');
     expect(card.textContent).toContain(settings.connectors.status.needs_login);
@@ -59,21 +59,21 @@ describe('Connectors panel', () => {
   });
 
   test('offers repair for an unusable component instead of a dead end', async () => {
-    track(spyOn(officeHub, 'status').mockResolvedValue({ ...ready(), runtime: { ...ready().runtime, phase: 'broken', message: 'component cannot launch' } }));
-    const repair = track(spyOn(officeHub, 'repair').mockResolvedValue(ready().runtime));
+    track(spyOn(feishuConnector, 'status').mockResolvedValue({ ...ready(), runtime: { ...ready().runtime, phase: 'broken', message: 'component cannot launch' } }));
+    const repair = track(spyOn(feishuConnector, 'repair').mockResolvedValue(ready().runtime));
     const view = await mount();
     const card = await view.findByTestId('connector-card-feishu');
-    expect(card.textContent).toContain(office.runtime.phase.broken);
-    fireEvent.click(within(card).getByRole('button', { name: office.actions.repair }));
+    expect(card.textContent).toContain(feishu.runtime.phase.broken);
+    fireEvent.click(within(card).getByRole('button', { name: feishu.actions.repair }));
     await waitFor(() => expect(repair).toHaveBeenCalledTimes(1));
   });
 
   test('opens the shared connection settings dialog from the card', async () => {
-    track(spyOn(officeHub, 'status').mockResolvedValue(ready()));
-    track(spyOn(officeHub, 'profiles').mockResolvedValue([{ name: 'work', app_id: actor.app_id, brand: 'feishu', user_name: actor.name, token_status: 'valid' }]));
+    track(spyOn(feishuConnector, 'status').mockResolvedValue(ready()));
+    track(spyOn(feishuConnector, 'profiles').mockResolvedValue([{ name: 'work', app_id: actor.app_id, brand: 'feishu', user_name: actor.name, token_status: 'valid' }]));
     const view = await mount();
     await view.findByTestId('connector-card-feishu');
-    fireEvent.click(view.getByRole('button', { name: office.connection.settings }));
+    fireEvent.click(view.getByRole('button', { name: feishu.connection.settings }));
     await waitFor(() => expect(view.getByRole('dialog')).toBeTruthy());
   });
 });

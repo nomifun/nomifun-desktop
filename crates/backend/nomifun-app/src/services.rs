@@ -773,7 +773,7 @@ pub struct AppServices {
     pub(crate) background_shutdown: CancellationToken,
     pub(crate) background_tasks: Arc<BackgroundTaskRegistry>,
     /// One manual-office owner across router rebuilds; startup recovery runs once.
-    pub(crate) office_hub: tokio::sync::OnceCell<Arc<nomifun_office_hub::OfficeHubService>>,
+    pub(crate) feishu_connector: tokio::sync::OnceCell<Arc<nomifun_feishu_connector::FeishuConnectorService>>,
     #[cfg(feature = "computer-use")]
     pub(crate) computer: Arc<nomifun_computer::Computer>,
     /// Channel plugin manager registered during router assembly. It is
@@ -2421,7 +2421,7 @@ impl AppServices {
             host_shutdown_stage: Default::default(),
             background_shutdown,
             background_tasks,
-            office_hub: tokio::sync::OnceCell::new(),
+            feishu_connector: tokio::sync::OnceCell::new(),
             #[cfg(feature = "computer-use")]
             computer: Arc::new(nomifun_computer::Computer::new(
                 nomifun_computer::WorkerConfig::new(

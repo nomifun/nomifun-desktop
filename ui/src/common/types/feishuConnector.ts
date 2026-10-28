@@ -1,0 +1,74 @@
+/** Manual cloud-office product contracts; never an Agent transcript or checkpoint. */
+export type RuntimePhase = 'missing' | 'ready' | 'broken' | 'preparing' | 'error';
+export type RuntimeSource = 'shared_user' | 'external' | 'selected';
+export interface RuntimeInfo {
+  phase: RuntimePhase; executable: string | null; version: string | null; source: RuntimeSource | null;
+  message: string | null; official_install_command: string;
+}
+export interface RuntimeUpdateInfo {
+  installed_version: string | null;
+  latest_version: string | null;
+  compatible_version: string;
+  update_available: boolean;
+  message: string | null;
+}
+export interface FeishuConnection {
+  id: string; name: string; enabled: boolean; profile: string | null; executable: string | null;
+  created_at: string; updated_at: string;
+}
+export interface ConnectionUpdate { name: string; enabled: boolean; profile: string | null }
+export interface FeishuActor { app_id: string; user_id: string; name: string }
+export interface LogoutRequest { profile: string; expected_actor: FeishuActor | null }
+export interface FeishuProfile { name: string; app_id: string; brand: string; user_name: string | null; token_status: string | null }
+export interface FeishuPermission { capability: string; required_scopes: string[]; granted: boolean }
+export type ConnectionPhase = 'disabled' | 'not_configured' | 'needs_login' | 'ready' | 'expired' | 'error';
+export interface FeishuStatus {
+  provider: string; connection: FeishuConnection; runtime: RuntimeInfo; phase: ConnectionPhase;
+  actor: FeishuActor | null; permissions: FeishuPermission[];
+  host_name: string; host_os: string; message: string | null;
+}
+export type AuthKind = 'configure_new' | 'configure_existing' | 'login';
+export interface AuthStartRequest {
+  kind: AuthKind; scopes: string[]; profile: string | null; app_id: string | null; app_secret: string | null;
+}
+export type AuthPhase = 'starting' | 'waiting_user' | 'waiting_admin' | 'cancelling' | 'complete' | 'partial' | 'cancelled' | 'denied' | 'expired' | 'error';
+export interface AuthorizationFlow {
+  id: string; kind: AuthKind; phase: AuthPhase; verification_url: string | null; expires_at: string | null;
+  missing_scopes: string[]; console_url: string | null; message: string | null;
+}
+export type DocumentFilter = 'all' | 'document' | 'base';
+export type FeishuQuery =
+  | { kind: 'documents'; query: string; filter: DocumentFilter; cursor: string | null }
+  | { kind: 'base_records'; base_token: string; table_id: string; offset: number | null; filter: unknown | null };
+export interface FeishuItem {
+  id: string; kind: string; title: string; url: string | null; modified_at: string | null;
+  base_token: string | null; table_id: string | null;
+  pending_operation_id: string | null; pending_status: ItemStatus | null;
+  fields: Record<string, unknown>;
+}
+export interface FeishuField { id: string; name: string; field_type: string; writable: boolean; options: unknown | null }
+export interface FeishuQueryResult {
+  items: FeishuItem[]; fields: FeishuField[]; has_more: boolean; next_cursor: string | null; warnings: string[];
+}
+export type FeishuMutation =
+  | { kind: 'document_create'; client_item_id: string; title: string }
+  | { kind: 'document_delete'; client_item_id: string; document_id: string; document_type: string; title: string }
+  | { kind: 'base_update'; client_item_id: string; base_token: string; table_id: string; record_id: string; fields: Record<string, unknown>; before: Record<string, unknown> };
+export interface ExecuteRequest { request_id: string; expected_actor: FeishuActor; profile: string; items: FeishuMutation[] }
+export type ItemStatus = 'queued' | 'running' | 'succeeded' | 'not_executed' | 'unknown' | 'accepted_pending_confirmation';
+export type OperationStatus = ItemStatus | 'partial';
+export interface OperationAttempt {
+  id: string; number: number; client_token: string; mutation: Record<string, unknown>; status: ItemStatus;
+  started_at: string; finished_at: string | null; message: string | null; result: unknown | null;
+}
+export interface OperationObservation {
+  id: string; kind: 'original_receipt' | 'target_readback' | 'inconclusive' | 'error'; created_at: string; message: string; data: unknown | null;
+}
+export interface OperationItem {
+  id: string; mutation: Record<string, unknown>; target_key: string; status: ItemStatus; remote_id: string | null; remote_url: string | null;
+  message: string | null; attempts: OperationAttempt[]; observations: OperationObservation[];
+}
+export interface FeishuOperation {
+  id: string; request_id: string; connection_id: string; actor: FeishuActor; profile: string; status: OperationStatus;
+  items: OperationItem[];
+}

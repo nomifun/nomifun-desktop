@@ -5,14 +5,14 @@ import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ipcBridge } from '@/common';
-import { officeHub } from '@/common/adapter/officeHubBridge';
+import { feishuConnector } from '@/common/adapter/feishuConnectorBridge';
 import type {
   IKnowledgeBase,
   IKnowledgeFileContent,
   IKnowledgeTreeEntry,
 } from '@/common/adapter/ipcBridge';
-import type { OfficeItem, OfficeQueryResult, OfficeStatus } from '@/common/types/officeHub';
-import office from '@/renderer/services/i18n/locales/en-US/office.json';
+import type { FeishuItem, FeishuQueryResult, FeishuStatus } from '@/common/types/feishuConnector';
+import feishu from '@/renderer/services/i18n/locales/en-US/feishu.json';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
 import knowledge from '@/renderer/services/i18n/locales/en-US/knowledge.json';
 import KnowledgeDetailPage from './index';
@@ -27,7 +27,7 @@ const track = <T extends { mockRestore(): void }>(spy: T) => {
 };
 const noopUnsub = () => () => {};
 const actor = { app_id: 'real-app', user_id: 'real-user', name: 'Verified user' };
-const empty = (): OfficeQueryResult => ({
+const empty = (): FeishuQueryResult => ({
   items: [],
   fields: [],
   has_more: false,
@@ -35,7 +35,7 @@ const empty = (): OfficeQueryResult => ({
   warnings: [],
 });
 
-function status(): OfficeStatus {
+function status(): FeishuStatus {
   return {
     provider: 'feishu',
     connection: {
@@ -68,7 +68,7 @@ function status(): OfficeStatus {
   };
 }
 
-function remoteDoc(id: string, title: string, url: string): OfficeItem {
+function remoteDoc(id: string, title: string, url: string): FeishuItem {
   return {
     id,
     title,
@@ -114,7 +114,7 @@ function fileContent(path: string): IKnowledgeFileContent {
 beforeAll(async () => {
   await locale.init({
     lng: 'en-US',
-    resources: { 'en-US': { translation: { office, common, knowledge } } },
+    resources: { 'en-US': { translation: { feishu, common, knowledge } } },
   });
 });
 afterEach(() => {
@@ -170,9 +170,9 @@ function fixture(initial: IKnowledgeBase) {
   track(spyOn(ipcBridge.mode.onProvidersChanged, 'on').mockImplementation(noopUnsub));
   track(spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(noopUnsub));
   const getStatus = track(
-    spyOn(officeHub, 'status').mockImplementation(async () => status()),
+    spyOn(feishuConnector, 'status').mockImplementation(async () => status()),
   );
-  const query = track(spyOn(officeHub, 'query').mockImplementation(async () => empty()));
+  const query = track(spyOn(feishuConnector, 'query').mockImplementation(async () => empty()));
 
   const mount = async () => {
     let view!: ReturnType<typeof render>;

@@ -1013,8 +1013,8 @@ fn create_nomi_core_router_with_all_state(
         &instance_owner_state,
     );
 
-    let office_hub_authenticated = protect_instance_owner(
-        nomifun_office_hub::office_hub_routes(states.office_hub.clone()),
+    let feishu_connector_authenticated = protect_instance_owner(
+        nomifun_feishu_connector::feishu_connector_routes(states.feishu_connector.clone()),
         &auth_mw_state,
         &instance_owner_state,
     );
@@ -1165,7 +1165,7 @@ fn create_nomi_core_router_with_all_state(
         .merge(agent_execution_template_authenticated)
         .merge(terminal_authenticated)
         .merge(office_authenticated)
-        .merge(office_hub_authenticated)
+        .merge(feishu_connector_authenticated)
         .merge(runtime_tools_authenticated)
         .merge(shell_authenticated);
     // Robot management face (owner-only), same group and same gates as the SSH

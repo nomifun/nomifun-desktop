@@ -82,8 +82,7 @@ macOS worker 由 App 直接启动，正式分发时与 App 同 Developer ID 签�
 | FDA / Automation / LAN | 全局不可可靠探测项保留 unknown，实际任务结果与对应设置入口 | 不套用 macOS TCC；系统完整性、账户和设备策略按实际操作报告 | 不套用 macOS TCC；显示会话、portal、SELinux 等按实际操作报告 |
 | 后台与持续产物 | 临时进程 owner 与原生 launchd 产物区分；服务完整生命周期另验 | SCM/Task Scheduler、用户桌面与服务 session 区分待平台交接 | systemd/发行打包、桌面会话与系统执行区分待平台交接 |
 
-Windows 和 Linux 的接续范围见[Windows 交接](../handoffs/global-os-windows.zh.md)与
-[Linux 交接](../handoffs/global-os-linux.zh.md)。交接文档只承接未完工程，不代表平台功能通过。
+上表中标注“待平台交接”的单元格为未完工程，按平台逐项接续验收；历史交接材料保留在 Git 历史，不代表平台功能已通过。
 
 ## 原生验收入口与证据
 
@@ -93,7 +92,7 @@ Windows 和 Linux 的接续范围见[Windows 交接](../handoffs/global-os-windo
 
 本轮正式签名、公证 App 的独立管理员七步验收已通过，覆盖真实 root cwd、只读指令发现、
 原生管理员进程的运行与输出、取消、reap 和清理；GUI 仍以登录用户 UID 501 运行。新版 App
-PID 69753 曾替换先前验收实例；完成后已协调退出，并通过签名 App 的原生 unregister 入口注销本次 helper，核验服务与原进程消失。各阶段实际 App、报告和未覆盖项见[本轮验证记录](../validation/global-os-2026-10-16.zh.md)。
+PID 69753 曾替换先前验收实例；完成后已协调退出，并通过签名 App 的原生 unregister 入口注销本次 helper，核验服务与原进程消失。各阶段实际 App、报告身份与未覆盖项的逐次证据保留在 Git 历史。
 
 系统许可验收使用同一 App 身份读取库存，按真实设备和桌面调用截图、AX 观察、聚焦、输入、
 剪贴板、网站媒体与 loopback/LAN；记录拒绝、撤回、重新授权以及必要重启后的任务继续。

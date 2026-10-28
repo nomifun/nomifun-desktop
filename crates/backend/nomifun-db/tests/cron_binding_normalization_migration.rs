@@ -276,8 +276,10 @@ async fn prefix(path: &std::path::Path) -> sqlx::SqlitePool {
     .run(&pool)
     .await
     .unwrap();
+    // This fixture's schema predates migration 016, so its declared
+    // lineage is the pre-016 manifest digest, not the current manifest.
     sqlx::query("INSERT INTO schema_metadata(singleton_key,data_generation,root_instance_id,migration_head,seed_manifest_digest,canonical_schema_manifest_digest,projection_schema_version) VALUES('canonical',?,'main-sqlite-agent-store',?,?,?,?)")
-        .bind(i64::from(AGENT_STORE_DATA_GENERATION)).bind(i64::from(AGENT_STORE_MIGRATION_HEAD)).bind(digest_payload(&official_preset_seed_manifest_payload()).unwrap().as_ref()).bind(digest_payload(&agent_store_schema_manifest_payload()).unwrap().as_ref()).bind(i64::from(AGENT_STORE_PROJECTION_SCHEMA_VERSION)).execute(&pool).await.unwrap();
+        .bind(i64::from(AGENT_STORE_DATA_GENERATION)).bind(i64::from(AGENT_STORE_MIGRATION_HEAD)).bind(digest_payload(&official_preset_seed_manifest_payload()).unwrap().as_ref()).bind("ce5cb186b9ba1a44c7c4699f4e1932542068537149c2a76ec880e2b8cc0bf8d9").bind(i64::from(AGENT_STORE_PROJECTION_SCHEMA_VERSION)).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO users(user_id,username,password_hash,created_at,updated_at) VALUES(?,'owner','hash',1,1)").bind(OWNER).execute(&pool).await.unwrap();
     sqlx::query(
         "INSERT INTO installation_identity(singleton_key,owner_user_id) VALUES('installation',?)",

@@ -14,10 +14,12 @@ async fn previous_database(path: &Path) -> SqlitePool {
         .take_while(|migration|migration.version<15).cloned().collect()),..Migrator::DEFAULT};
     previous.run(&pool).await.unwrap();
     let manifest=nomifun_agent_contracts::agent_store_schema_manifest_payload();
+    // This fixture's schema predates migration 016, so its declared lineage is
+    // the pre-016 manifest digest, not the current manifest.
     sqlx::query("INSERT INTO schema_metadata(singleton_key,data_generation,root_instance_id,migration_head,seed_manifest_digest,canonical_schema_manifest_digest,projection_schema_version) VALUES('canonical',?,'main-sqlite-agent-store',?,?,?,?)")
         .bind(i64::from(manifest.data_generation)).bind(i64::from(manifest.migration_head))
         .bind(nomifun_agent_contracts::digest_payload(&nomifun_agent_contracts::official_preset_seed_manifest_payload()).unwrap().as_ref())
-        .bind(nomifun_agent_contracts::digest_payload(&manifest).unwrap().as_ref())
+        .bind("ce5cb186b9ba1a44c7c4699f4e1932542068537149c2a76ec880e2b8cc0bf8d9")
         .bind(i64::from(manifest.projection_schema_version)).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO users(user_id,username,password_hash,created_at,updated_at) VALUES(?,'migration-fixture','fixture-only',1,1)")
         .bind(OWNER).execute(&pool).await.unwrap();
@@ -82,7 +84,11 @@ async fn forward_015_only_removes_the_unused_column_and_preserves_every_other_va
         .fetch_all(&old).await.unwrap();
     let receipts:Vec<(i64,Vec<u8>)>=sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
         .fetch_all(&old).await.unwrap();
-    MIGRATOR.run(&old).await.unwrap();
+    // Only migration 015 is under test: later product migrations legitimately
+    // add their own tables, so data and schema comparisons span just 015.
+    Migrator {migrations:Cow::Owned(MIGRATOR.iter()
+        .take_while(|migration|migration.version<=15).cloned().collect()),..Migrator::DEFAULT}
+        .run(&old).await.unwrap();
     assert_eq!(data_snapshot(&old).await,data);
     assert_eq!(sqlx::query_as::<_,(String,String)>("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name<>'agent_executions' ORDER BY name")
         .fetch_all(&old).await.unwrap(),schema);
@@ -96,7 +102,27 @@ async fn forward_015_only_removes_the_unused_column_and_preserves_every_other_va
         let columns:Vec<String>=sqlx::query_scalar("SELECT name FROM pragma_table_info('agent_executions')")
             .fetch_all(&current).await.unwrap();
         assert!(!columns.iter().any(|column|column=="plan_gate"));
-        assert_eq!(data_snapshot(&current).await,data);
+        // Later migrations added their own product tables; the originally
+        // snapshotted tables must survive the full upgrade unchanged. The
+        // schema_metadata row may only advance the declared manifest digest.
+        let current_digest:String=sqlx::query_scalar("SELECT canonical_schema_manifest_digest FROM schema_metadata")
+            .fetch_one(&current).await.unwrap();
+        assert_eq!(current_digest,nomifun_agent_contracts::digest_payload(&nomifun_agent_contracts::agent_store_schema_manifest_payload()).unwrap().as_ref());
+        let current_data=data_snapshot(&current).await;
+        for (table,expected) in &data {
+            let actual=current_data.get(table);
+            if table=="schema_metadata" {
+                let mut advanced=expected.clone();
+                for row in &mut advanced.1 {
+                    for value in row.iter_mut() {
+                        *value=value.replace("ce5cb186b9ba1a44c7c4699f4e1932542068537149c2a76ec880e2b8cc0bf8d9",&current_digest);
+                    }
+                }
+                assert_eq!(actual,Some(&advanced),"schema_metadata may only advance the declared manifest digest");
+            } else {
+                assert_eq!(actual,Some(expected),"{table} must survive the upgrade unchanged");
+            }
+        }
         let now:Vec<(i64,Vec<u8>)>=sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version")
             .fetch_all(&current).await.unwrap();
         assert_eq!(&now[..receipts.len()],receipts.as_slice());

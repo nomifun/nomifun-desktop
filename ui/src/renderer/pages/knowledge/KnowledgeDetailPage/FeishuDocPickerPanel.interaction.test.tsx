@@ -5,9 +5,9 @@ import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { ipcBridge } from '@/common';
-import { officeHub } from '@/common/adapter/officeHubBridge';
-import type { OfficeItem, OfficeQueryResult, OfficeStatus } from '@/common/types/officeHub';
-import office from '@/renderer/services/i18n/locales/en-US/office.json';
+import { feishuConnector } from '@/common/adapter/feishuConnectorBridge';
+import type { FeishuItem, FeishuQueryResult, FeishuStatus } from '@/common/types/feishuConnector';
+import feishu from '@/renderer/services/i18n/locales/en-US/feishu.json';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
 import knowledge from '@/renderer/services/i18n/locales/en-US/knowledge.json';
 import FeishuDocPickerPanel from './FeishuDocPickerPanel';
@@ -16,22 +16,22 @@ const locale = createInstance();
 const restores: Array<() => void> = [];
 const track = <T extends { mockRestore(): void }>(spy: T) => { restores.push(() => spy.mockRestore()); return spy; };
 const actor = { app_id: 'real-app', user_id: 'real-user', name: 'Verified user' };
-const empty = (): OfficeQueryResult => ({ items: [], fields: [], has_more: false, next_cursor: null, warnings: [] });
-function status(): OfficeStatus {
+const empty = (): FeishuQueryResult => ({ items: [], fields: [], has_more: false, next_cursor: null, warnings: [] });
+function status(): FeishuStatus {
   return { provider: 'feishu', connection: { id: 'connection', name: 'Work connection', enabled: true, profile: 'work', executable: null, created_at: '2026-10-26T00:00:00Z', updated_at: '2026-10-26T00:00:00Z' }, runtime: { phase: 'ready', executable: 'C:/tools/lark-cli.exe', version: '1.0.98', source: 'external', message: null, official_install_command: 'npx @larksuite/cli@latest install' }, phase: 'ready', actor: { ...actor }, host_name: 'backend-machine', host_os: 'windows', message: null, permissions: ['documents.browse'].map(capability => ({ capability, granted: true, required_scopes: [capability + '-scope'] })) };
 }
-function doc(id: string, title: string, kind: string, url: string | null): OfficeItem {
+function doc(id: string, title: string, kind: string, url: string | null): FeishuItem {
   return { id, title, kind, url, modified_at: null, base_token: null, table_id: null, pending_operation_id: null, pending_status: null, fields: {} };
 }
-beforeAll(async () => { await locale.init({ lng: 'en-US', resources: { 'en-US': { translation: { office, common, knowledge } } } }); });
+beforeAll(async () => { await locale.init({ lng: 'en-US', resources: { 'en-US': { translation: { feishu, common, knowledge } } } }); });
 afterEach(() => { cleanup(); restores.splice(0).reverse().forEach(restore => restore()); });
 function fixture(initial = status()) {
   let current = initial;
   track(spyOn(Message, 'success').mockReturnValue(() => {}));
   track(spyOn(Message, 'info').mockReturnValue(() => {}));
   track(spyOn(Message, 'warning').mockReturnValue(() => {}));
-  const getStatus = track(spyOn(officeHub, 'status').mockImplementation(async () => structuredClone(current)));
-  const query = track(spyOn(officeHub, 'query').mockImplementation(async () => empty()));
+  const getStatus = track(spyOn(feishuConnector, 'status').mockImplementation(async () => structuredClone(current)));
+  const query = track(spyOn(feishuConnector, 'query').mockImplementation(async () => empty()));
   const addContent = track(spyOn(ipcBridge.knowledge.addContent, 'invoke').mockResolvedValue({ type: 'feishu', added: 1, duplicates: 0, indexed: 1, failed: 0, errors: [] }));
   const mount = async (props?: Partial<Parameters<typeof FeishuDocPickerPanel>[0]>) => {
     const merged = {
@@ -72,8 +72,8 @@ describe('Feishu document picker inside a knowledge base', () => {
     f.query.mockImplementation(async () => ({ ...empty(), has_more: true, next_cursor: 'page-2' }));
     const view = await f.mount();
     await waitFor(() => expect(f.query).toHaveBeenCalledWith(expect.objectContaining({ kind: 'documents', filter: 'document', cursor: null }), expect.anything()));
-    fireEvent.change(view.getByLabelText(office.resources.search), { target: { value: 'roadmap' } });
-    fireEvent.submit(view.getByLabelText(office.resources.search).closest('form')!);
+    fireEvent.change(view.getByLabelText(feishu.resources.search), { target: { value: 'roadmap' } });
+    fireEvent.submit(view.getByLabelText(feishu.resources.search).closest('form')!);
     await waitFor(() => expect(f.query).toHaveBeenCalledWith(expect.objectContaining({ query: 'roadmap' }), expect.anything()));
     f.query.mockImplementation(async query => 'cursor' in query && query.cursor === 'page-2' ? { ...empty(), items: [doc('d2', 'Page two', 'docx', 'https://team.feishu.cn/docx/d2')] } : empty());
     fireEvent.click(await view.findByRole('button', { name: /Load more/ }));
@@ -111,7 +111,7 @@ describe('Feishu document picker inside a knowledge base', () => {
     denied.permissions = denied.permissions.map(permission => ({ ...permission, granted: false }));
     const f = fixture(denied);
     const view = await f.mount();
-    await view.findByRole('button', { name: office.actions.authorizeRead });
+    await view.findByRole('button', { name: feishu.actions.authorizeRead });
     expect(f.query).not.toHaveBeenCalled();
   });
 

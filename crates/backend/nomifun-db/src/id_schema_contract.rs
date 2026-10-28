@@ -126,10 +126,10 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "nomi_remote_sessions",
     "nomi_wave1_memory_action_receipts",
     "nomi_wave4_action_receipts",
-    "office_connections",
-    "office_operations",
-    "office_operation_items",
-    "office_operation_receipts",
+    "feishu_connections",
+    "feishu_operations",
+    "feishu_operation_items",
+    "feishu_operation_receipts",
     "product_agent_selections",
     "provider_connections",
     "provider_model_capabilities",
@@ -154,10 +154,10 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
 
 /// Business columns that carry a bare canonical UUIDv7 for every populated row.
 const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
-    ("office_connections", "connection_id"),
-    ("office_operations", "operation_id"),
-    ("office_operation_items", "item_id"),
-    ("office_operation_receipts", "receipt_id"),
+    ("feishu_connections", "connection_id"),
+    ("feishu_operations", "operation_id"),
+    ("feishu_operation_items", "item_id"),
+    ("feishu_operation_receipts", "receipt_id"),
     ("agent_execution_attempts", "attempt_id"),
     ("agent_execution_participants", "participant_id"),
     ("agent_execution_steps", "step_id"),
@@ -223,13 +223,13 @@ const UUIDV7_MANAGED_VALUE_COLUMNS: &[(&str, &str)] = &[
 /// opaque remote handles rather than relational links. Every other physical
 /// `_id` column must be present in [`LOGICAL_REFERENCES`].
 const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
-    ("office_connections", "connection_id"),
-    ("office_operations", "operation_id"),
-    ("office_operations", "request_id"),
-    ("office_operation_items", "item_id"),
-    ("office_operation_items", "client_item_id"),
-    ("office_operation_items", "remote_id"),
-    ("office_operation_receipts", "receipt_id"),
+    ("feishu_connections", "connection_id"),
+    ("feishu_operations", "operation_id"),
+    ("feishu_operations", "request_id"),
+    ("feishu_operation_items", "item_id"),
+    ("feishu_operation_items", "client_item_id"),
+    ("feishu_operation_items", "remote_id"),
+    ("feishu_operation_receipts", "receipt_id"),
     ("installation_role_bindings", "role_id"),
     ("agent_metadata", "agent_id"),
     ("agent_metadata", "yolo_id"),
@@ -314,8 +314,8 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
 
 const PARTIAL_UNIQUE_INDEXES: &[PartialUniqueIndexContract] = &[
     PartialUniqueIndexContract {
-        index_name: "idx_office_items_pending_target",
-        table: "office_operation_items",
+        index_name: "idx_feishu_items_pending_target",
+        table: "feishu_operation_items",
         columns: &["target_key"],
         predicate: "status IN ('queued','running','unknown','accepted_pending_confirmation')",
     },
@@ -408,8 +408,8 @@ macro_rules! unique_key {
 /// absent. Keep this registry separate from the physical index budget so an
 /// index-pruning pass cannot silently turn a valid upsert into a runtime 500.
 const UPSERT_CONFLICT_KEYS: &[UniqueKeyContract] = &[
-    unique_key!("office_connections", "owner_id"),
-    unique_key!("office_operations", "owner_id", "request_id"),
+    unique_key!("feishu_connections", "owner_id"),
+    unique_key!("feishu_operations", "owner_id", "request_id"),
     unique_key!("agent_bindings", "target_kind", "target_id"),
     unique_key!("agent_messages", "session_id", "projection_id"),
     unique_key!("agent_metadata", "agent_id"),
@@ -711,12 +711,12 @@ macro_rules! external_ref {
 /// part of this registry: relationship integrity and physical access paths are
 /// independent concerns.
 pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
-    text_ref!("office_connections", "owner_id" => "users", "user_id", false, Restrict),
-    text_ref!("office_operations", "owner_id" => "users", "user_id", false, Restrict),
-    text_ref!("office_operations", "connection_id" => "office_connections", "connection_id", false, Restrict)
+    text_ref!("feishu_connections", "owner_id" => "users", "user_id", false, Restrict),
+    text_ref!("feishu_operations", "owner_id" => "users", "user_id", false, Restrict),
+    text_ref!("feishu_operations", "connection_id" => "feishu_connections", "connection_id", false, Restrict)
         .with_aggregate_scope("child.owner_id = parent.owner_id"),
-    text_ref!("office_operation_items", "operation_id" => "office_operations", "operation_id", false, Restrict),
-    text_ref!("office_operation_receipts", "item_id" => "office_operation_items", "item_id", false, Restrict),
+    text_ref!("feishu_operation_items", "operation_id" => "feishu_operations", "operation_id", false, Restrict),
+    text_ref!("feishu_operation_receipts", "item_id" => "feishu_operation_items", "item_id", false, Restrict),
     external_ref!("installation_role_bindings", "provider_mount_id", Text, false, Opaque, KeepHistory),
     text_ref!("terminal_sessions", "user_id" => "users", "user_id", false, Cascade),
     text_ref!("ssh_hosts", "user_id" => "users", "user_id", false, Cascade),

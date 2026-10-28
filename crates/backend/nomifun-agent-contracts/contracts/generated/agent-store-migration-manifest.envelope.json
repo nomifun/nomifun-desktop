@@ -68,6 +68,30 @@
         "reset_scope": "preserve"
       },
       {
+        "table_name": "feishu_connections",
+        "owner": "product.feishu-connector",
+        "fact_class": "configuration",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "feishu_operations",
+        "owner": "product.feishu-connector",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "feishu_operation_items",
+        "owner": "product.feishu-connector",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "feishu_operation_receipts",
+        "owner": "product.feishu-connector",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
         "table_name": "agent_preset_templates",
         "owner": "platform.agent-preset",
         "fact_class": "configuration",
@@ -237,5 +261,5 @@
       "agent_preset_audit_events"
     ]
   },
-  "payload_digest": "ce5cb186b9ba1a44c7c4699f4e1932542068537149c2a76ec880e2b8cc0bf8d9"
+  "payload_digest": "9ed5b23d0567152ba77d5a580b6c8af44a12917d6efc404ecb27ad8b8dc924cb"
 }

@@ -689,7 +689,9 @@ mod tests {
         let current = crate::agent_store_schema_manifest_payload();
         let current_digest = crate::digest_payload(&current).unwrap();
         let mut previous = current;
-        previous.tables.retain(|table| !matches!(table.table_name.as_str(), "mcp_oauth_clients" | "mcp_oauth_grants"));
+        previous.tables.retain(|table| !matches!(table.table_name.as_str(),
+            "mcp_oauth_clients" | "mcp_oauth_grants"
+            | "feishu_connections" | "feishu_operations" | "feishu_operation_items" | "feishu_operation_receipts"));
         (crate::digest_payload(&previous).unwrap(), current_digest)
     }
 

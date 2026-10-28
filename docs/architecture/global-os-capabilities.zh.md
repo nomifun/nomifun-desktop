@@ -82,7 +82,7 @@ Linux 使用固定 `/usr/bin/pkexec --disable-internal-agent /usr/libexec/nomifu
 
 Linux 的 pkexec 必须由拥有原 child 整个寿命的专用创建线程启动；不能在返回后会被回收的临时 blocking thread 上创建。pkexec 的父线程死亡保护保持启用，client 关闭 stdin 后创建线程仍等待原 runner 完成 EOF cleanup 并实际退出回收。原生认证错误保留真实 exit code/signal 与有界 stderr 诊断，不把无回执或信号退出概括为密码错误。
 
-Linux `.deb`/`.rpm` 将 runner 和固定 action 安装为系统文件，开发构建与 AppImage 携带同版本显式安装入口。action 绑定固定 executable 和 `--stdio`，各 session 类型均使用系统的 `auth_admin_keep`，不安装 sudoers、不保存密码，也不由 GUI 启动时偷偷写系统目录。缺组件、无认证代理、拒绝、取消、超时与未知结果分别表达。实际认证和原生产品通过范围见 [Linux 验证](../validation/global-os-linux-2026-10-17.zh.md)。
+Linux `.deb`/`.rpm` 将 runner 和固定 action 安装为系统文件，开发构建与 AppImage 携带同版本显式安装入口。action 绑定固定 executable 和 `--stdio`，各 session 类型均使用系统的 `auth_admin_keep`，不安装 sudoers、不保存密码，也不由 GUI 启动时偷偷写系统目录。缺组件、无认证代理、拒绝、取消、超时与未知结果分别表达。逐次认证与原生产品验收证据保留在 Git 历史。
 
 三平台的实现、编译、系统认证和真实产品验收各自计证；某一平台的 runner 或隔离夹具不能代替另一平台的原生证明。
 
@@ -120,8 +120,6 @@ Browser 保持 Windows WebView2、macOS WKWebView 的现役结构。网站媒体
 
 ## 验证与平台接续
 
-完整证据、首次失败和三平台状态以[本轮验证记录](../validation/global-os-2026-10-16.zh.md)为准。确定性 fixture 不等于模型推理能力或正式 App 原生验收，单个文件/进程回归也不等于整个系统矩阵。
+确定性 fixture 不等于模型推理能力或正式 App 原生验收，单个文件/进程回归也不等于整个系统矩阵。逐次验收快照与历史交接材料由 Git 历史保留，不作为现役输入。
 
-Windows 本机实现、MSVC 构建、UAC 与产品链的后续独立证据见 [2026-10-17 Windows 原生接续记录](../validation/global-os-windows-2026-10-17.zh.md)。原 macOS 记录中的 Windows 待验状态是当时快照，不覆盖后续本机事实。
-
-可复制的新会话交接：[Windows](../handoffs/global-os-windows.zh.md)、[Linux](../handoffs/global-os-linux.zh.md)。交接完成仅表示接续材料齐全，不表示目标平台实现或验收完成。
+各平台未完工程按[系统许可](system-permissions.zh.md)平台表中标注“待平台交接”的单元格逐项承接；待验项不冒充已通过。

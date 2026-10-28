@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { rustProductionText } from './check-uarc-boundary.mjs';
-import { AGENT_FORWARD_MIGRATIONS, areKnownAgentMigrationPaths, officeHubMigrationErrors, officeCompactMigrationErrors } from './lib/agent-migration-boundary.mjs';
+import { AGENT_FORWARD_MIGRATIONS, areKnownAgentMigrationPaths, officeHubMigrationErrors, officeCompactMigrationErrors, feishuConnectorRenameMigrationErrors } from './lib/agent-migration-boundary.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const retiredPrefixes = [
@@ -83,7 +83,7 @@ const { baseline, pluginForwardMigration, metadataForwardMigration, hostingForwa
   cronWorkbenchForwardMigration, modelInputConstraintsForwardMigration, queueSettingForwardMigration,
   executionPlanGateForwardMigration, officeHubForwardMigration, officeCompactForwardMigration,
   officeActivityRetirementForwardMigration, officeOverviewRetirementForwardMigration,
-  feishuSourceKindForwardMigration } = AGENT_FORWARD_MIGRATIONS;
+  feishuSourceKindForwardMigration, feishuConnectorTablesForwardMigration } = AGENT_FORWARD_MIGRATIONS;
 if (!areKnownAgentMigrationPaths(migrations)) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward migrations');
 }
@@ -94,6 +94,9 @@ if (migrations.includes(officeHubForwardMigration)) {
 }
 if (migrations.includes(officeCompactForwardMigration)) {
   failures.push(...officeCompactMigrationErrors(readFileSync(resolve(ROOT, officeCompactForwardMigration), 'utf8')));
+}
+if (migrations.includes(feishuConnectorTablesForwardMigration)) {
+  failures.push(...feishuConnectorRenameMigrationErrors(readFileSync(resolve(ROOT, feishuConnectorTablesForwardMigration), 'utf8')));
 }
 if (migrations.includes(officeActivityRetirementForwardMigration)
   && JSON.stringify(migrationStatements(officeActivityRetirementForwardMigration)) !== JSON.stringify([
@@ -193,12 +196,15 @@ if (migrations.includes(mcpOAuthForwardMigration)) {
   ];
   const manifest = JSON.parse(readFileSync(resolve(ROOT,
     'crates/backend/nomifun-agent-contracts/contracts/generated/agent-store-migration-manifest.envelope.json'), 'utf8'));
+  // Migration 010's declared target is the post-010 manifest lineage (before
+  // product tables landed), not the ever-advancing current manifest digest.
+  const OAUTH_TARGET_DIGEST = 'ce5cb186b9ba1a44c7c4699f4e1932542068537149c2a76ec880e2b8cc0bf8d9';
   const digestUpdate = statements[8] ?? '';
   const exactDigestTransition = /^UPDATE schema_metadata SET canonical_schema_manifest_digest='[a-f0-9]{64}' WHERE singleton_key='canonical' AND data_generation=7 AND migration_head=1 AND projection_schema_version=1 AND canonical_schema_manifest_digest='[a-f0-9]{64}'$/;
   if (statements.length !== allowed.length
     || statements.some((statement, index) => !statement.startsWith(allowed[index]))
     || !exactDigestTransition.test(digestUpdate)
-    || !digestUpdate.startsWith(`UPDATE schema_metadata SET canonical_schema_manifest_digest='${manifest.payload_digest}' `)
+    || !digestUpdate.startsWith(`UPDATE schema_metadata SET canonical_schema_manifest_digest='${OAUTH_TARGET_DIGEST}' `)
     || !['mcp_oauth_clients', 'mcp_oauth_grants'].every(name => manifest.payload.tables.some(table =>
       table.table_name === name && table.reset_scope === 'preserve'))) {
     failures.push(`${mcpOAuthForwardMigration}: retire only unbound OAuth credentials, create the two preserved OAuth tables, and advance only the known non-Agent manifest digest; preserve Agent facts and other configuration`);

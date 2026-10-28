@@ -7,7 +7,7 @@
 //! intersected with the curated token set derived from source items.
 //!
 //! This crate deliberately knows nothing about lark-cli, profiles, or device
-//! flows; the application composition wires the office-hub adapter.
+//! flows; the application composition wires the Feishu connector adapter.
 
 use nomifun_common::{AppError, KnowledgeBaseId, KnowledgeSourceItemId};
 use url::Url;
@@ -56,7 +56,7 @@ pub struct FeishuDocContent {
 }
 
 /// Consumer-owned port for Feishu knowledge reads. Implementations dispatch
-/// through the supervised office-hub connection; Knowledge never sees a CLI,
+/// through the supervised Feishu connector connection; Knowledge never sees a CLI,
 /// profile, or credential.
 #[async_trait::async_trait]
 pub trait FeishuKnowledgePort: Send + Sync {
@@ -68,7 +68,7 @@ pub trait FeishuKnowledgePort: Send + Sync {
     async fn fetch_document(&self, target: &str) -> Result<FeishuDocContent, AppError>;
 }
 
-/// Default port used until the composition root wires the office hub. It is
+/// Default port used until the composition root wires the Feishu connector. It is
 /// deliberately an error, never a synthetic empty result.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UnavailableFeishuKnowledgePort;
@@ -117,7 +117,7 @@ pub fn feishu_link_target(url: &str) -> Option<(String, String)> {
 }
 
 /// Keep the exact URL after verifying an official HTTPS Feishu/Lark host.
-/// Mirrors the office-hub policy: no userinfo, no non-HTTPS, no encoded hosts.
+/// Mirrors the Feishu connector policy: no userinfo, no non-HTTPS, no encoded hosts.
 pub fn official_feishu_url(value: &str) -> Option<String> {
     let remaining = value.strip_prefix("https://")?;
     let authority = remaining.split(['/', '?', '#']).next()?;

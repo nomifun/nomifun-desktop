@@ -81,8 +81,9 @@ pub fn agent_store_schema_manifest_payload() -> AgentStoreSchemaManifestPayload 
     }
 }
 
-/// Prove only the published current-generation product transitions. Office
-/// compaction does not change canonical Agent facts or grant rebuild authority.
+/// Prove only the published current-generation product transitions. The
+/// connector table rename, office compaction and earlier migrations do not
+/// change canonical Agent facts or grant rebuild authority.
 pub fn agent_store_schema_manifest_evolution_compatible(
     source: &crate::DigestHex,
     target: &crate::DigestHex,
@@ -91,21 +92,57 @@ pub fn agent_store_schema_manifest_evolution_compatible(
     let Ok(current_digest) = crate::digest_payload(&current) else { return false; };
     if target != &current_digest { return false; }
     if source == target { return true; }
-    if office_hub_v16_manifest(&current)
+    let Some(before_rename) = feishu_connector_predecessor_manifest(&current) else { return false; };
+    if crate::digest_payload(&before_rename).ok().as_ref() == Some(source) { return true; }
+    if office_hub_v16_manifest(&before_rename)
         .and_then(|previous| crate::digest_payload(&previous).ok())
         .is_some_and(|digest| source == &digest) { return true; }
-    let Some(before_office) = office_hub_predecessor_manifest(&current) else { return false; };
+    let Some(before_office) = office_hub_predecessor_manifest(&before_rename) else { return false; };
     if crate::digest_payload(&before_office).ok().as_ref() == Some(source) { return true; }
     oauth_authority_predecessor_manifest(&before_office)
         .and_then(|previous| crate::digest_payload(&previous).ok())
         .is_some_and(|previous_digest| source == &previous_digest)
 }
 
-fn office_hub_predecessor_manifest(
+/// Exact pre-rename manifest: the same four product tables under their retired
+/// office_* names and `product.office-hub` owner, before migration 021 moved
+/// them to the Feishu connector contract. Used only to validate that published
+/// forward transition; the retired names are not current runtime contracts.
+fn feishu_connector_predecessor_manifest(
     current: &AgentStoreSchemaManifestPayload,
 ) -> Option<AgentStoreSchemaManifestPayload> {
     if current.schema_version != "1.0.0" || current.data_generation != 7
         || current.migration_head != 1 || current.projection_schema_version != 1 {
+        return None;
+    }
+    let owners = [
+        ("feishu_connections", "office_connections", "configuration"),
+        ("feishu_operations", "office_operations", "fact"),
+        ("feishu_operation_items", "office_operation_items", "fact"),
+        ("feishu_operation_receipts", "office_operation_receipts", "fact"),
+    ];
+    for (name, _, class) in owners {
+        let matches = current.tables.iter().filter(|table| table.table_name == name).collect::<Vec<_>>();
+        if matches.len() != 1 || matches[0].owner != "product.feishu-connector"
+            || matches[0].fact_class != class || matches[0].reset_scope != SchemaResetScope::Preserve {
+            return None;
+        }
+    }
+    let mut previous = current.clone();
+    for table in previous.tables.iter_mut() {
+        if let Some((_, legacy, _)) = owners.iter().find(|(name, _, _)| table.table_name == *name) {
+            table.table_name = (*legacy).into();
+            table.owner = "product.office-hub".into();
+        }
+    }
+    Some(previous)
+}
+
+fn office_hub_predecessor_manifest(
+    before_rename: &AgentStoreSchemaManifestPayload,
+) -> Option<AgentStoreSchemaManifestPayload> {
+    if before_rename.schema_version != "1.0.0" || before_rename.data_generation != 7
+        || before_rename.migration_head != 1 || before_rename.projection_schema_version != 1 {
         return None;
     }
     let owners = [
@@ -115,13 +152,13 @@ fn office_hub_predecessor_manifest(
         ("office_operation_receipts", "fact"),
     ];
     for (name, class) in owners {
-        let matches = current.tables.iter().filter(|table| table.table_name == name).collect::<Vec<_>>();
+        let matches = before_rename.tables.iter().filter(|table| table.table_name == name).collect::<Vec<_>>();
         if matches.len() != 1 || matches[0].owner != "product.office-hub"
             || matches[0].fact_class != class || matches[0].reset_scope != SchemaResetScope::Preserve {
             return None;
         }
     }
-    let mut previous = current.clone();
+    let mut previous = before_rename.clone();
     previous.tables.retain(|table| !owners.iter().any(|(name, _)| table.table_name == *name));
     Some(previous)
 }
@@ -129,11 +166,11 @@ fn office_hub_predecessor_manifest(
 /// Exact migration-016 manifest, used only to validate its published forward
 /// transition. The retired product tables are not current runtime contracts.
 fn office_hub_v16_manifest(
-    current: &AgentStoreSchemaManifestPayload,
+    before_rename: &AgentStoreSchemaManifestPayload,
 ) -> Option<AgentStoreSchemaManifestPayload> {
-    office_hub_predecessor_manifest(current)?;
-    let position=current.tables.iter().position(|table|table.table_name=="office_operation_receipts")?;
-    let mut previous=current.clone();
+    office_hub_predecessor_manifest(before_rename)?;
+    let position=before_rename.tables.iter().position(|table|table.table_name=="office_operation_receipts")?;
+    let mut previous=before_rename.clone();
     let replaced=[
         ("office_operation_attempts","fact"),
         ("office_operation_observations","fact"),
@@ -179,10 +216,10 @@ const TABLES: &[(&str, &str, &str, SchemaResetScope)] = &[
     ("mcp_servers", "plugin.mcp-connectors", "fact", SchemaResetScope::Preserve),
     ("mcp_oauth_clients", "plugin.mcp-connectors", "configuration", SchemaResetScope::Preserve),
     ("mcp_oauth_grants", "plugin.mcp-connectors", "configuration", SchemaResetScope::Preserve),
-    ("office_connections", "product.office-hub", "configuration", SchemaResetScope::Preserve),
-    ("office_operations", "product.office-hub", "fact", SchemaResetScope::Preserve),
-    ("office_operation_items", "product.office-hub", "fact", SchemaResetScope::Preserve),
-    ("office_operation_receipts", "product.office-hub", "fact", SchemaResetScope::Preserve),
+    ("feishu_connections", "product.feishu-connector", "configuration", SchemaResetScope::Preserve),
+    ("feishu_operations", "product.feishu-connector", "fact", SchemaResetScope::Preserve),
+    ("feishu_operation_items", "product.feishu-connector", "fact", SchemaResetScope::Preserve),
+    ("feishu_operation_receipts", "product.feishu-connector", "fact", SchemaResetScope::Preserve),
     ("agent_preset_templates", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
     ("agent_presets", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
     ("agent_preset_revisions", "platform.agent-preset", "configuration", SchemaResetScope::AgentData),
@@ -263,6 +300,8 @@ mod tests {
         database.execute_batch(include_str!("../../nomifun-db/migrations/017_compact_office_receipts.sql")).expect("Office receipt compaction");
         database.execute_batch(include_str!("../../nomifun-db/migrations/018_remove_office_activity.sql")).expect("Office activity retirement");
         database.execute_batch(include_str!("../../nomifun-db/migrations/019_remove_office_overview.sql")).expect("Office overview retirement");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/020_feishu_knowledge_source_kind.sql")).expect("Feishu source kind migration");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/021_feishu_connector_tables.sql")).expect("Feishu connector table rename");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");
@@ -346,7 +385,8 @@ mod tests {
     #[test]
     fn oauth_forward_migration_names_the_exact_preserved_manifest_transition() {
         let migration = include_str!("../../nomifun-db/migrations/010_mcp_oauth_authority.sql");
-        let current = office_hub_predecessor_manifest(&agent_store_schema_manifest_payload()).unwrap();
+        let before_rename = feishu_connector_predecessor_manifest(&agent_store_schema_manifest_payload()).unwrap();
+        let current = office_hub_predecessor_manifest(&before_rename).unwrap();
         let digest = crate::digest_payload(&current).unwrap();
         assert!(migration.contains(&format!("SET canonical_schema_manifest_digest='{}'", digest.as_ref())),
             "migration must install the current manifest digest");
@@ -362,7 +402,7 @@ mod tests {
     #[test]
     fn office_forward_migration_names_only_the_exact_preserved_manifest_transition() {
         let migration = include_str!("../../nomifun-db/migrations/016_office_hub.sql");
-        let compact = agent_store_schema_manifest_payload();
+        let compact = feishu_connector_predecessor_manifest(&agent_store_schema_manifest_payload()).unwrap();
         let current = office_hub_v16_manifest(&compact).unwrap();
         let previous = office_hub_predecessor_manifest(&compact).unwrap();
         let current_digest = crate::digest_payload(&current).unwrap();
@@ -378,7 +418,7 @@ mod tests {
     #[test]
     fn office_compaction_changes_only_preserved_product_receipts() {
         let migration=include_str!("../../nomifun-db/migrations/017_compact_office_receipts.sql");
-        let current=agent_store_schema_manifest_payload();
+        let current=feishu_connector_predecessor_manifest(&agent_store_schema_manifest_payload()).unwrap();
         let previous=office_hub_v16_manifest(&current).unwrap();
         let current_digest=crate::digest_payload(&current).unwrap();
         let previous_digest=crate::digest_payload(&previous).unwrap();
@@ -397,15 +437,18 @@ mod tests {
     fn schema_manifest_evolution_accepts_only_current_identity_and_exact_known_forward_transitions() {
         let current = agent_store_schema_manifest_payload();
         let current_digest = crate::digest_payload(&current).unwrap();
-        let previous = office_hub_predecessor_manifest(&current).unwrap();
+        let before_rename = feishu_connector_predecessor_manifest(&current).unwrap();
+        let before_rename_digest = crate::digest_payload(&before_rename).unwrap();
+        let previous = office_hub_predecessor_manifest(&before_rename).unwrap();
         let previous_digest = crate::digest_payload(&previous).unwrap();
         let before_oauth = oauth_authority_predecessor_manifest(&previous).unwrap();
         assert!(agent_store_schema_manifest_evolution_compatible(&crate::digest_payload(&before_oauth).unwrap(), &current_digest));
         assert!(agent_store_schema_manifest_evolution_compatible(&current_digest, &current_digest));
+        assert!(agent_store_schema_manifest_evolution_compatible(&before_rename_digest, &current_digest));
         assert!(agent_store_schema_manifest_evolution_compatible(&previous_digest, &current_digest));
-        let v16_digest=crate::digest_payload(&office_hub_v16_manifest(&current).unwrap()).unwrap();
+        let v16_digest=crate::digest_payload(&office_hub_v16_manifest(&before_rename).unwrap()).unwrap();
         assert_eq!(v16_digest.as_ref(),"0ef8e3eeec9835238c865441913383bb80880bf89e3f0d78b538780c7534bdfc");
-        assert_eq!(current_digest.as_ref(),"565ff15ff4419e0fad8cf0fbcaa7ade3bd0f4fb50263851efed93f7a39921430");
+        assert_eq!(before_rename_digest.as_ref(),"565ff15ff4419e0fad8cf0fbcaa7ade3bd0f4fb50263851efed93f7a39921430");
         assert!(agent_store_schema_manifest_evolution_compatible(&v16_digest,&current_digest));
         assert!(!agent_store_schema_manifest_evolution_compatible(&current_digest,&v16_digest));
         assert!(!agent_store_schema_manifest_evolution_compatible(&current_digest, &previous_digest));
@@ -429,7 +472,7 @@ mod tests {
         }
         let mut future = current;
         future.data_generation += 1;
-        assert!(office_hub_predecessor_manifest(&future).is_none());
+        assert!(feishu_connector_predecessor_manifest(&future).is_none());
     }
 
     #[test]
@@ -458,10 +501,10 @@ mod tests {
             "mcp_servers",
             "mcp_oauth_clients",
             "mcp_oauth_grants",
-            "office_connections",
-            "office_operations",
-            "office_operation_items",
-            "office_operation_receipts",
+            "feishu_connections",
+            "feishu_operations",
+            "feishu_operation_items",
+            "feishu_operation_receipts",
             "providers",
             "provider_models",
             "client_preferences",

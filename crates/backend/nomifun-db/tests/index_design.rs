@@ -33,8 +33,11 @@ async fn canonical_baseline_keeps_a_bounded_index_inventory() {
 
     // The published complete generation-6 schema had 116 explicit indexes:
     // 114 in its initial baseline plus the two Plugin Draft source indexes.
-    // Generation 7 preserves that audited inventory without adding an index.
-    assert_eq!(explicit_indexes, 116);
+    // Generation 7 preserves that audited inventory minus the seven indexes
+    // retired with the Plugin Draft, Office activity and overview objects.
+    // The Feishu connector rename keeps the count unchanged
+    // (`idx_feishu_items_pending_target` replaces `idx_office_items_pending_target`).
+    assert_eq!(explicit_indexes, 109);
 }
 
 #[tokio::test]
@@ -93,21 +96,6 @@ async fn hot_queries_use_the_curated_composite_and_partial_indexes() {
              WHERE cron_job_id = 'job' AND status = 'reserved' \
              ORDER BY created_at_ms, id LIMIT 1",
             "idx_cron_run_reservations_cron_job_id",
-        ),
-        (
-            "SELECT * FROM plugins WHERE owner_user_id = 'user' \
-             ORDER BY updated_at_ms DESC, plugin_id",
-            "idx_plugins_owner_updated",
-        ),
-        (
-            "SELECT * FROM plugin_drafts WHERE owner_user_id = 'user' \
-             AND source_conversation_id = 'session' LIMIT 1",
-            "idx_plugin_drafts_source_conversation",
-        ),
-        (
-            "SELECT * FROM plugin_drafts WHERE owner_user_id = 'user' \
-             AND source_operation_key = 'operation' LIMIT 1",
-            "idx_plugin_drafts_source_operation",
         ),
         (
             "SELECT * FROM conversation_execution_links \

@@ -1,0 +1,1094 @@
+//! The verified v1.0.98 command/JSON boundary. No shell text or CLI hints execute.
+use crate::{FeishuConnectorError, runtime::{CliCommand, CliOutput, PAYLOAD_FILE}, types::*};
+use serde_json::{Value, json};
+use std::{collections::{BTreeMap,BTreeSet}, time::Duration};
+pub struct CliIdentity {
+    pub actor: Option<FeishuActor>,
+    pub phase: ConnectionPhase,
+    pub scopes: Vec<String>,
+    pub message: Option<String>,
+}
+pub struct LoginStart {
+    pub verification_url: String,
+    pub device_code: String,
+    pub expires_in: u64,
+}
+pub struct LoginCompletion {
+    pub actor: Option<FeishuActor>,
+    pub missing_scopes: Vec<String>,
+    pub complete: bool,
+    pub message: Option<String>,
+}
+pub struct MutationReceipt {
+    pub status: ItemStatus,
+    pub remote_id: Option<String>,
+    pub remote_url: Option<String>,
+    pub message: Option<String>,
+    pub result: Value,
+}
+
+fn valid_text(value: &str, label: &str, max: usize) -> Result<(), FeishuConnectorError> {
+    if value.trim().is_empty() || value.chars().count() > max || value.contains('\0') {
+        return Err(FeishuConnectorError::invalid(format!("{label}为空、过长或含有非法字符")));
+    }
+    Ok(())
+}
+fn valid_id(value: &str, label: &str) -> Result<(), FeishuConnectorError> {
+    valid_text(value, label, 512)?;
+    if value.chars().any(|c| c.is_control()) { return Err(FeishuConnectorError::invalid(format!("{label}包含控制字符"))); }
+    Ok(())
+}
+fn valid_page_token(value:&str)->Result<(),FeishuConnectorError>{
+    // Provider continuation data is not a resource ID. Keep its exact bytes;
+    // the separate transport budget also fits a Windows CLI command line.
+    if value.is_empty() || value.len()>16*1024 || value.chars().any(char::is_control) {
+        return Err(FeishuConnectorError::invalid("分页令牌为空、超过传输上限或包含控制字符"));
+    }
+    Ok(())
+}
+fn command(args: impl IntoIterator<Item = impl Into<String>>, profile: Option<&str>,
+    mutating: bool) -> Result<CliCommand, FeishuConnectorError>
+{
+    let mut argv = Vec::new();
+    if let Some(profile) = profile {
+        valid_id(profile, "连接名称")?;
+        argv.extend(["--profile".into(), profile.into()]);
+    }
+    argv.extend(args.into_iter().map(Into::into));
+    Ok(CliCommand::new(argv, mutating))
+}
+fn user_command(args: impl IntoIterator<Item = impl Into<String>>, profile: Option<&str>,
+    mutating: bool) -> Result<CliCommand, FeishuConnectorError>
+{
+    let mut value = command(args, profile, mutating)?;
+    value.args.extend(["--as".into(), "user".into()]);
+    Ok(value)
+}
+fn strings(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::String(s)) => s.split_whitespace().filter(|s| !s.is_empty()).map(str::to_owned).collect(),
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+        _ => Vec::new(),
+    }
+}
+fn text(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    }
+}
+fn first_text(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| text(value.get(*key)))
+}
+
+fn has_scope(scopes: &[String], required: &str) -> bool {
+    // CLI shortcut preflight checks exact scopes, including delete metadata.
+    scopes.iter().any(|scope| scope == required)
+}
+fn capability(name: &str, required: &[&str], granted: &[String]) -> FeishuPermission {
+    FeishuPermission { capability: name.into(), required_scopes: required.iter().map(|s| (*s).into()).collect(),
+        granted: required.iter().all(|scope| has_scope(granted, scope)) }
+}
+pub fn permissions(scopes: &[String]) -> Vec<FeishuPermission> {
+    vec![
+        capability("documents.browse", &["search:docs:read"], scopes),
+        capability("documents.create", &["docx:document:create"], scopes),
+        capability("documents.delete", &["space:document:delete", "drive:drive.metadata:readonly"], scopes),
+        // Knowledge-chain only: the workbench never routes body fetch or index
+        // metadata, and these capabilities stay off its query/mutation checks.
+        capability("documents.read", &["docx:document:readonly"], scopes),
+        capability("documents.inspect", &["drive:drive.metadata:readonly"], scopes),
+        capability("base.read", &["base:record:read", "base:field:read"], scopes),
+        capability("base.write", &["base:record:update"], scopes),
+    ]
+}
+pub fn allowed_scopes() -> Vec<String> {
+    let mut result: BTreeSet<String> = permissions(&[]).into_iter().flat_map(|p| p.required_scopes).collect();
+    result.insert("offline_access".into());
+    result.into_iter().collect()
+}
+pub fn named_permissions(names: &[&str], scopes: &[String]) -> Vec<FeishuPermission> {
+    permissions(scopes).into_iter().filter(|p| names.contains(&p.capability.as_str())).collect()
+}
+pub fn query_permissions(query: &FeishuQuery, scopes: &[String]) -> Vec<FeishuPermission> {
+    let names: &[&str] = match query {
+        FeishuQuery::Documents { .. } => &["documents.browse"],
+        FeishuQuery::BaseRecords { .. } => &["base.read"],
+    };
+    named_permissions(names, scopes)
+}
+pub fn mutation_permissions(mutation: &FeishuMutation, scopes: &[String]) -> Vec<FeishuPermission> {
+    let names: &[&str] = match mutation {
+        FeishuMutation::DocumentCreate { .. } => &["documents.create"],
+        FeishuMutation::DocumentDelete { .. } => &["documents.delete"],
+        FeishuMutation::BaseUpdate { .. } => &["base.read", "base.write"],
+    };
+    named_permissions(names, scopes)
+}
+
+pub fn status_command(profile: Option<&str>, verify: bool) -> CliCommand {
+    let mut args:Vec<String> = vec!["auth".into(), "status".into(), "--json".into()];
+    if verify { args.push("--verify".into()); }
+    // An invalid selector must fail; dropping it could read the user's default
+    // account instead of the requested connection.
+    command(args, profile, false).unwrap_or_else(|_| CliCommand::new(["--nomifun-invalid-profile"], false))
+}
+pub fn profiles_command() -> CliCommand { CliCommand::new(["profile", "list"], false) }
+pub fn auth_users_command(profile: &str) -> Result<CliCommand, FeishuConnectorError> {
+    command(["auth", "list", "--json"], Some(profile), false)
+}
+pub fn logout_command(profile: &str) -> Result<CliCommand, FeishuConnectorError> {
+    command(["auth", "logout", "--json"], Some(profile), true)
+}
+pub fn configure_command(request: &AuthStartRequest) -> Result<CliCommand, FeishuConnectorError> {
+    let name = request.profile.as_deref().ok_or_else(|| FeishuConnectorError::invalid("新应用配置必须使用专用连接名称"))?;
+    valid_id(name, "连接名称")?;
+    let mut args:Vec<String> = vec!["config".into(), "init".into(), "--brand".into(), "feishu".into(),
+        "--name".into(), name.into()];
+    let mut stdin = None;
+    match request.kind {
+        AuthKind::ConfigureNew => args.push("--new".into()),
+        AuthKind::ConfigureExisting => {
+            let app_id = request.app_id.as_deref().ok_or_else(|| FeishuConnectorError::invalid("缺少应用 ID"))?;
+            valid_id(app_id, "应用 ID")?;
+            let secret = request.app_secret.as_deref().ok_or_else(|| FeishuConnectorError::invalid("缺少应用密钥"))?;
+            if secret.trim().is_empty() || secret.len() > 4096 || secret.contains(['\0', '\r', '\n']) {
+                return Err(FeishuConnectorError::invalid("应用密钥为空、过长或格式不正确"));
+            }
+            args.extend(["--app-id".into(), app_id.into(), "--app-secret-stdin".into()]);
+            stdin = Some(secret.as_bytes().to_vec());
+        }
+        AuthKind::Login => return Err(FeishuConnectorError::invalid("用户登录不使用应用配置命令")),
+    }
+    let mut result = CliCommand::new(args, false);
+    result.stdin = stdin;result.timeout = Duration::from_secs(900);
+    Ok(result)
+}
+pub fn login_command(scopes: &[String], profile: Option<&str>) -> Result<CliCommand, FeishuConnectorError> {
+    if scopes.is_empty() || scopes.len() > 64 { return Err(FeishuConnectorError::invalid("请选择具体飞书权限")); }
+    let allowed = allowed_scopes();
+    if scopes.iter().any(|scope| !allowed.contains(scope)) {
+        return Err(FeishuConnectorError::invalid("授权请求包含首期不支持的权限"));
+    }
+    let scopes: BTreeSet<&str> = scopes.iter().map(String::as_str).collect();
+    command(["auth".into(), "login".into(), "--scope".into(), scopes.into_iter().collect::<Vec<_>>().join(" "),
+        "--no-wait".into(), "--json".into()], profile, false)
+}
+pub fn poll_login_command(device_code: &str, profile: Option<&str>) -> Result<CliCommand, FeishuConnectorError> {
+    valid_text(device_code, "本次授权标识", 4096)?;
+    let mut result = command(["auth", "login", "--device-code", device_code, "--json"], profile, false)?;
+    result.timeout = Duration::from_secs(900);
+    Ok(result)
+}
+
+/// Keep the exact URL query. Never reconstruct an OAuth link or accept userinfo,
+/// non-HTTPS, an encoded host, or unrelated domains.
+pub fn official_url(value: &str) -> Option<String> {
+    let remaining = value.strip_prefix("https://")?;
+    let authority = remaining.split(['/', '?', '#']).next()?;
+    if authority.is_empty() || authority.contains('@') || value.contains(['\\', '\r', '\n']) { return None; }
+    let host = authority.strip_suffix(":443").unwrap_or(authority);
+    if !host.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-') { return None; }
+    let host = host.to_ascii_lowercase();
+    let allowed = ["feishu.cn", "larksuite.com", "larkoffice.com"].iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")));
+    allowed.then(|| value.to_owned())
+}
+
+pub fn document_type(kind: &str) -> bool {
+    matches!(kind, "docx" | "doc" | "sheet" | "mindnote" | "slides" | "file")
+}
+fn valid_resource_token(token: &str) -> Result<(), FeishuConnectorError> {
+    if token.is_empty() || token.len() > 512 || !token.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)) {
+        return Err(FeishuConnectorError::invalid("资源标识必须是确切的飞书 token"));
+    }
+    Ok(())
+}
+fn link_target(value: &str) -> Result<(String, String), FeishuConnectorError> {
+    let official=official_url(value).ok_or_else(||FeishuConnectorError::invalid("请使用飞书或 Lark 官方 HTTPS 文档链接"))?;
+    let url=url::Url::parse(&official).map_err(|_|FeishuConnectorError::invalid("文档链接格式不正确"))?;
+    let parts=url.path().trim_matches('/').split('/').collect::<Vec<_>>();
+    if parts.len()!=2 { return Err(FeishuConnectorError::invalid("请使用完整的飞书文档链接")); }
+    let kind=match parts[0] {"docs"=>"doc","sheets"=>"sheet","base"=>"bitable",kind=>kind};
+    if !document_type(kind) && !matches!(kind,"bitable"|"wiki") { return Err(FeishuConnectorError::invalid("此链接不是飞书文档资源")); }
+    valid_resource_token(parts[1])?;
+    Ok((kind.into(),parts[1].into()))
+}
+pub fn document_target(item: &FeishuItem) -> Option<(String, String)> {
+    if document_type(&item.kind) && valid_resource_token(&item.id).is_ok() {
+        return Some((item.kind.clone(),item.id.clone()));
+    }
+    let (kind,id)=link_target(item.url.as_deref()?).ok()?;
+    document_type(&kind).then_some((kind,id))
+}
+
+fn json_values(text: &str) -> Vec<Value> {
+    if let Ok(value) = serde_json::from_str(text.trim()) { return vec![value]; }
+    let mut values = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(['{', '[']) {
+        rest = &rest[start..];
+        let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+        if let Some(Ok(value)) = stream.next() {
+            let offset = stream.byte_offset();
+            if offset == 0 { break; }
+            values.push(value);rest = &rest[offset..];
+        } else {
+            // Increment along UTF-8 boundaries, never interpret surrounding text.
+            rest = &rest[rest.chars().next().map(char::len_utf8).unwrap_or(1)..];
+        }
+    }
+    values
+}
+fn output_value(output: &CliOutput) -> Option<Value> { json_values(&output.stdout).into_iter().last() }
+fn error_value(output: &CliOutput) -> Option<Value> {
+    json_values(&output.stderr).into_iter().rev().find(|v| v.get("error").is_some())
+        .or_else(|| json_values(&output.stdout).into_iter().rev().find(|v| v.get("error").is_some()))
+}
+fn safe_message(message: &str) -> String {
+    let scrubbed = nomi_redact::redact_secrets(message);
+    let pattern = regex::Regex::new(r#"(?i)(device[_-]?code|app[_-]?secret|access[_-]?token|refresh[_-]?token)(\s*[:=]\s*["']?)([^"'\s,&}]+)"#)
+        .expect("static auth redaction pattern");
+    let result = pattern.replace_all(&scrubbed, "$1$2[REDACTED]").into_owned();
+    result.chars().take(2000).collect()
+}
+pub fn output_error(output: &CliOutput, mutating: bool) -> FeishuConnectorError {
+    let envelope = error_value(output).unwrap_or(Value::Null);
+    let error = envelope.get("error").unwrap_or(&Value::Null);
+    let error_type = error.get("type").and_then(Value::as_str).unwrap_or("");
+    let subtype = error.get("subtype").and_then(Value::as_str).unwrap_or("");
+    let missing = strings(error.get("missing_scopes"));
+    let permission = matches!(error_type,"authorization"|"permission") || !missing.is_empty();
+    let confirmed_gate = subtype == "confirmation_required" && output.exit_code == Some(10);
+    let not_executed = !output.started || confirmed_gate;
+    let message = if output.cancelled { "操作已取消，未取得完整业务回执".into() }
+        else if output.timed_out { "飞书 CLI 等待回执超时，写入结果不能据此判定".into() }
+        else if output.truncated { "飞书 CLI 返回不完整，无法确认完整结果".into() }
+        else if output.cleanup_error.is_some() { "原业务进程的清理尚未得到确认".into() }
+        else { error.get("message").and_then(Value::as_str).map(safe_message)
+            .unwrap_or_else(|| "飞书 CLI 未返回可确认的结果".into()) };
+    FeishuConnectorError { code: if permission { "FEISHU_PERMISSION" } else if mutating && !not_executed {
+            "FEISHU_RESULT_UNKNOWN" } else { "FEISHU_UNAVAILABLE" }.into(),
+        message, not_executed: if mutating { not_executed } else { true }, missing_scopes: missing,
+        console_url: error.get("console_url").and_then(Value::as_str).and_then(official_url),
+        related_operation_id: None, related_flow_id: None }
+}
+fn business_value(output: &CliOutput, mutating: bool) -> Result<Value, FeishuConnectorError> {
+    let value = output_value(output).ok_or_else(|| output_error(output, mutating))?;
+    if !output.successful() || value.get("ok") != Some(&Value::Bool(true)) {
+        return Err(output_error(output, mutating));
+    }
+    value.get("data").cloned().ok_or_else(|| {
+        if mutating { FeishuConnectorError::unknown("飞书 CLI 成功回执缺少业务数据") }
+        else { FeishuConnectorError::unavailable("飞书 CLI 结果缺少业务数据") }
+    })
+}
+/// Auth presentation only. A typed credential/policy error does not prove that
+/// an unrelated mutation was never dispatched, so output_error remains the sole
+/// mutation classifier.
+pub fn auth_output_error(output:&CliOutput)->FeishuConnectorError{
+    let mut error=output_error(output,false);
+    if output.cancelled||output.timed_out||output.truncated||output.cleanup_error.is_some(){return error}
+    let envelope=error_value(output).unwrap_or(Value::Null);
+    let kind=envelope.pointer("/error/type").and_then(Value::as_str);
+    let subtype=envelope.pointer("/error/subtype").and_then(Value::as_str);
+    match (kind,subtype){
+        (Some("authentication"),Some("token_expired"|"refresh_token_expired"))=>{
+            error.code="FEISHU_AUTH_EXPIRED".into();
+        },
+        (Some("policy"),Some("access_denied"))=>{
+            error.code="FEISHU_AUTH_DENIED".into();
+        },
+        _=>{},
+    }
+    error
+}
+
+pub fn parse_profiles(output: &CliOutput) -> Result<Vec<FeishuProfile>, FeishuConnectorError> {
+    if !output.successful() { return Err(output_error(output, false)); }
+    let value = output_value(output).ok_or_else(|| FeishuConnectorError::unavailable("无法解析飞书连接列表"))?;
+    let entries = value.as_array().ok_or_else(|| FeishuConnectorError::unavailable("飞书连接列表格式不兼容"))?;
+    entries.iter().map(|item| {
+        let name = text(item.get("name")).ok_or_else(|| FeishuConnectorError::unavailable("连接条目缺少名称"))?;
+        let app_id = text(item.get("appId")).ok_or_else(|| FeishuConnectorError::unavailable("连接条目缺少应用标识"))?;
+        Ok(FeishuProfile { name, app_id, brand: text(item.get("brand")).unwrap_or_else(|| "feishu".into()),
+            user_name: text(item.get("user")), token_status: text(item.get("tokenStatus")) })
+    }).collect()
+}
+/// v1.0.98 lists users only in the selected profile. Its logout clears all of
+/// those users, so the caller must prove this is a zero- or single-user profile.
+pub fn parse_auth_users(output: &CliOutput) -> Result<Vec<FeishuActor>, FeishuConnectorError> {
+    if !output.successful() { return Err(auth_output_error(output)); }
+    let value = output_value(output).ok_or_else(|| FeishuConnectorError::unavailable("无法核验此连接的登录账号，请刷新后重试"))?;
+    let entries = if let Some(entries) = value.as_array() { entries }
+        else if value.get("ok") == Some(&Value::Bool(true))
+            && matches!(value.get("reason").and_then(Value::as_str), Some("not_logged_in" | "not_configured")) {
+            value.get("users").and_then(Value::as_array).filter(|users| users.is_empty())
+                .ok_or_else(|| FeishuConnectorError::unavailable("飞书账号列表格式不兼容，请刷新后重试"))?
+        } else { return Err(FeishuConnectorError::unavailable("飞书账号列表格式不兼容，请刷新后重试")); };
+    entries.iter().map(|item| {
+        let app_id = text(item.get("appId")).ok_or_else(|| FeishuConnectorError::unavailable("登录账号缺少应用标识，无法安全退出"))?;
+        let user_id = text(item.get("userOpenId")).ok_or_else(|| FeishuConnectorError::unavailable("登录账号缺少用户标识，无法安全退出"))?;
+        Ok(FeishuActor { app_id, user_id, name: text(item.get("userName")).unwrap_or_default() })
+    }).collect()
+}
+pub fn parse_logout(output: &CliOutput) -> Result<(), FeishuConnectorError> {
+    if !output.successful() { return Err(output_error(output, true)); }
+    let value = output_value(output).ok_or_else(|| FeishuConnectorError::unknown("退出结果无法确认，请刷新连接状态后重试"))?;
+    if value.get("ok") == Some(&Value::Bool(true))
+        && (value.get("loggedOut") == Some(&Value::Bool(true))
+            || (value.get("loggedOut") == Some(&Value::Bool(false))
+                && matches!(value.get("reason").and_then(Value::as_str), Some("not_logged_in" | "not_configured")))) {
+        Ok(())
+    } else { Err(FeishuConnectorError::unknown("退出结果无法确认，请刷新连接状态后重试")) }
+}
+pub fn parse_identity(output: &CliOutput) -> Result<CliIdentity, FeishuConnectorError> {
+    if !output.successful() {
+        let problem = error_value(output).unwrap_or(Value::Null);
+        if problem.pointer("/error/type").and_then(Value::as_str) == Some("config")
+            && problem.pointer("/error/subtype").and_then(Value::as_str) == Some("not_configured")
+        {
+            return Ok(CliIdentity { actor: None, phase: ConnectionPhase::NotConfigured, scopes: Vec::new(),
+                message: Some("请先配置飞书企业应用".into()) });
+        }
+        return Err(auth_output_error(output));
+    }
+    let value = output_value(output).ok_or_else(|| FeishuConnectorError::unavailable("无法解析飞书身份状态"))?;
+    let user = value.pointer("/identities/user").unwrap_or(&Value::Null);
+    let scopes = strings(user.get("scope"));
+    let status = user.get("status").and_then(Value::as_str).unwrap_or("");
+    let available = user.get("available").and_then(Value::as_bool).unwrap_or(false);
+    let verification_failed = user.get("verified") == Some(&Value::Bool(false))
+        || value.get("verified") == Some(&Value::Bool(false));
+    let actor = if available && !verification_failed {
+        match (text(value.get("appId")), text(user.get("openId"))) {
+            (Some(app_id), Some(user_id)) => Some(FeishuActor { app_id, user_id,
+                name: text(user.get("userName")).unwrap_or_else(|| "飞书用户".into()) }),
+            _ => None,
+        }
+    } else { None };
+    let phase = if actor.is_some() { ConnectionPhase::Ready }
+        else if matches!(status, "expired" | "refresh_expired") { ConnectionPhase::Expired }
+        else if verification_failed || status == "error" { ConnectionPhase::Error }
+        else { ConnectionPhase::NeedsLogin };
+    Ok(CliIdentity { actor, phase, scopes,
+        message: first_text(user, &["message", "hint"]).map(|s| safe_message(&s))
+            .or_else(|| text(value.get("note")).map(|s| safe_message(&s))) })
+}
+pub fn parse_login_start(output: &CliOutput) -> Result<LoginStart, FeishuConnectorError> {
+    if !output.successful() { return Err(auth_output_error(output)); }
+    let value = output_value(output).ok_or_else(|| FeishuConnectorError::unavailable("无法解析本次授权流程"))?;
+    let verification_url = value.get("verification_url").and_then(Value::as_str).and_then(official_url)
+        .ok_or_else(|| FeishuConnectorError::unavailable("CLI 未返回有效的飞书官方授权地址"))?;
+    let device_code = text(value.get("device_code")).ok_or_else(|| FeishuConnectorError::unavailable("本次授权缺少设备标识"))?;
+    let expires_in = value.get("expires_in").and_then(Value::as_u64).filter(|n| *n > 0 && *n <= 3600)
+        .ok_or_else(|| FeishuConnectorError::unavailable("本次授权缺少有效期"))?;
+    Ok(LoginStart { verification_url, device_code, expires_in })
+}
+pub fn parse_login_completion(output: &CliOutput, app_id: &str) -> Result<LoginCompletion, FeishuConnectorError> {
+    // Partial grants can be a nonzero exit and still be a completed login.
+    let value = json_values(&output.stdout).into_iter()
+        .find(|v| v.get("event").and_then(Value::as_str) == Some("authorization_complete"))
+        .ok_or_else(|| auth_output_error(output))?;
+    if output.timed_out || output.cancelled || output.truncated || output.cleanup_error.is_some() {
+        return Err(auth_output_error(output));
+    }
+    let user_id = text(value.get("user_open_id")).ok_or_else(|| FeishuConnectorError::unavailable("授权完成但缺少用户身份"))?;
+    let missing_scopes = strings(value.get("missing"));
+    let complete = missing_scopes.is_empty() && output.exit_code == Some(0);
+    Ok(LoginCompletion { actor: Some(FeishuActor { app_id: app_id.into(), user_id,
+            name: text(value.get("user_name")).unwrap_or_else(|| "飞书用户".into()) }),
+        missing_scopes, complete, message: value.pointer("/warning/hint").and_then(Value::as_str).map(safe_message) })
+}
+pub fn parse_configured(output: &CliOutput) -> Result<String, FeishuConnectorError> {
+    if !output.successful() { return Err(auth_output_error(output)); }
+    output_value(output).and_then(|v| text(v.get("appId")))
+        .ok_or_else(|| FeishuConnectorError::unavailable("应用配置未返回有效的应用标识"))
+}
+
+pub fn query_commands(query: &FeishuQuery, profile: Option<&str>) -> Result<Vec<CliCommand>, FeishuConnectorError> {
+    let commands = match query {
+        FeishuQuery::Documents { query, filter, cursor } => {
+            if query.chars().count() > 30 || query.contains('\0') { return Err(FeishuConnectorError::invalid("搜索关键词最多 30 个字符")); }
+            // Empty-query browsing and keyword search share the official Search
+            // v2 index. A Drive root's direct children are not a document list.
+            let types=match filter {
+                DocumentFilter::All=>"doc,docx,sheet,bitable,mindnote,file,wiki,slides",
+                DocumentFilter::Document=>"doc,docx,sheet,mindnote,file,wiki,slides",
+                DocumentFilter::Base=>"bitable",
+            };
+            let mut args=vec!["drive".into(), "+search".into(), "--query".into(), query.clone(),
+                "--doc-types".into(), types.into(), "--sort".into(), "edit_time".into(),
+                "--page-size".into(), "20".into(), "--format".into(), "json".into()];
+            if let Some(cursor)=cursor { valid_page_token(cursor)?;args.extend(["--page-token".into(),cursor.clone()]); }
+            vec![user_command(args,profile,false)?]
+        }
+        FeishuQuery::BaseRecords { base_token, table_id, offset, filter } => {
+            valid_id(base_token,"多维表格标识")?;valid_id(table_id,"数据表标识")?;
+            let fields = user_command(["base","+field-list","--base-token",base_token,"--table-id",table_id],profile,false)?;
+            let mut args = vec!["base".into(),"+record-list".into(),"--base-token".into(),base_token.clone(),
+                "--table-id".into(),table_id.clone(),"--format".into(),"json".into(),"--limit".into(),"100".into(),
+                "--offset".into(),offset.unwrap_or(0).to_string()];
+            if let Some(filter) = filter {
+                if !filter.is_object() || filter.to_string().len() > 4096 { return Err(FeishuConnectorError::invalid("表格筛选条件格式不正确或过长")); }
+                args.extend(["--filter-json".into(),filter.to_string()]);
+            }
+            vec![fields,user_command(args,profile,false)?]
+        }
+    };
+    Ok(commands)
+}
+
+fn plain_highlight(value: &str) -> String {
+    regex::Regex::new(r"</?h(?:b)?>").expect("static highlighted title pattern").replace_all(value,"").into_owned()
+}
+fn warnings(data: &Value) -> Vec<String> {
+    let mut result = strings(data.get("warnings"));
+    if let Some(warnings) = data.get("warnings").and_then(Value::as_array) {
+        for warning in warnings {
+            if let Some(message) = first_text(warning,&["message","hint"]) { result.push(safe_message(&message)); }
+            else if !warning.is_string(){result.push("CLI 返回了需核验的未识别警告".into());}
+        }
+    }
+    if let Some(notice) = text(data.get("notice")) { result.push(safe_message(&notice)); }
+    result
+}
+fn array_field<'a>(value: &'a Value, key: &str, message: &str) -> Result<&'a [Value], FeishuConnectorError> {
+    match value.get(key) {
+        Some(Value::Array(items)) => Ok(items),
+        // Go's empty slice may serialize to null instead of an empty array.
+        Some(Value::Null) => Ok(&[]),
+        _ => Err(FeishuConnectorError::unavailable(message)),
+    }
+}
+pub fn normalize_query(query: &FeishuQuery, outputs: &[CliOutput]) -> Result<FeishuQueryResult, FeishuConnectorError> {
+    if outputs.is_empty() { return Err(FeishuConnectorError::unavailable("飞书查询缺少 CLI 返回")); }
+    let data = business_value(outputs.last().unwrap(),false)?;
+    match query {
+        FeishuQuery::Documents { cursor, .. } => normalize_documents(&data,cursor.as_deref()),
+        FeishuQuery::BaseRecords { base_token,table_id,offset,.. } => {
+            if outputs.len()!=2 { return Err(FeishuConnectorError::unavailable("表格查询必须包含字段结构与记录结果")); }
+            let fields=business_value(&outputs[0],false)?;
+            let mut result=normalize_matrix(&data)?;
+            if let Some(entries)=fields.get("fields").and_then(Value::as_array) {
+                result.fields=entries.iter().map(field).collect::<Result<_,_>>()?;
+            }else{return Err(FeishuConnectorError::unavailable("表格字段结构格式不兼容"))}
+            for item in &mut result.items { item.base_token=Some(base_token.clone());item.table_id=Some(table_id.clone()); }
+            if result.has_more && result.next_cursor.is_none() {
+                result.next_cursor=Some(offset.unwrap_or(0).saturating_add(result.items.len() as u32).to_string());
+            }
+            Ok(result)
+        }
+    }
+}
+/// Exact CLI v1.0.98 Search v2 projection. Result identity is the returned
+/// resource token; browser URLs and highlight markup never become identities.
+fn normalize_documents(data:&Value,cursor:Option<&str>)->Result<FeishuQueryResult,FeishuConnectorError>{
+    let has_more=data.get("has_more").and_then(Value::as_bool)
+        .ok_or_else(||FeishuConnectorError::unavailable("文档查询缺少有效的分页状态"))?;
+    let next_cursor=if has_more {
+        let next=text(data.get("page_token")).filter(|next|Some(next.as_str())!=cursor)
+            .ok_or_else(||FeishuConnectorError::unavailable("文档查询分页信息不完整或重复，请重新读取"))?;
+        valid_page_token(&next)?;
+        Some(next)
+    }else{None};
+    let mut result=FeishuQueryResult{has_more,next_cursor,warnings:warnings(data),..Default::default()};
+    let mut seen=BTreeSet::new();
+    for entry in array_field(data,"results","文档查询结果格式不兼容")? {
+        let meta=entry.get("result_meta").filter(|meta|meta.is_object())
+            .ok_or_else(||FeishuConnectorError::unavailable("文档查询缺少资源元数据"))?;
+        let id=text(meta.get("token")).ok_or_else(||FeishuConnectorError::unavailable("文档查询缺少资源 token"))?;
+        valid_resource_token(&id)?;
+        let native_type=meta.get("doc_types").and_then(Value::as_str)
+            .ok_or_else(||FeishuConnectorError::unavailable("文档查询缺少资源类型"))?.to_ascii_lowercase();
+        let url=meta.get("url").and_then(Value::as_str).and_then(official_url);
+        let wiki=entry.get("entity_type").and_then(Value::as_str)==Some("WIKI")
+            || url.as_deref().and_then(|url|link_target(url).ok()).is_some_and(|(kind,_)|kind=="wiki");
+        let kind=if native_type=="bitable"{"base"}else if wiki||native_type=="wiki"{"wiki"}
+            else if document_type(&native_type){native_type.as_str()}
+            else{return Err(FeishuConnectorError::unavailable("文档查询返回了不支持的资源类型"))};
+        if !seen.insert((kind.to_owned(),id.clone())) { continue; }
+        let mut item=FeishuItem::new(id,kind,plain_highlight(&first_text(entry,&["title","title_highlighted"]).unwrap_or_default()));
+        item.url=url;item.modified_at=first_text(meta,&["update_time_iso","update_time"]);
+        if kind=="base" { if let Some(url)=&item.url { let (base,table)=base_coordinates(url);item.base_token=base;item.table_id=table; } }
+        result.items.push(item);
+    }
+    Ok(result)
+}
+fn base_coordinates(url: &str) -> (Option<String>,Option<String>) {
+    let base=url.split("/base/").nth(1).and_then(|s|s.split(['?','#','/']).next()).filter(|s|!s.is_empty()).map(str::to_owned);
+    let table=url.split('?').nth(1).and_then(|query|query.split('&').find_map(|p|p.strip_prefix("table="))).filter(|s|!s.is_empty()).map(str::to_owned);
+    (base,table)
+}
+fn writable_type(kind: &str) -> bool {
+    matches!(kind,"text"|"number"|"select"|"checkbox"|"datetime"|"phone"|"url")
+}
+fn field(value: &Value) -> Result<FeishuField, FeishuConnectorError> {
+    let id=first_text(value,&["id","field_id"]).ok_or_else(||FeishuConnectorError::unavailable("表格字段缺少标识"))?;
+    let kind=first_text(value,&["type"]).unwrap_or_else(||"not_support".into());
+    Ok(FeishuField {id,name:first_text(value,&["name","field_name"]).unwrap_or_default(),
+        writable:writable_type(&kind),field_type:kind,options:value.get("options").cloned()
+            .or_else(||value.pointer("/property/options").cloned())})
+}
+fn normalize_matrix(data: &Value) -> Result<FeishuQueryResult, FeishuConnectorError> {
+    let names=data.get("fields").and_then(Value::as_array).ok_or_else(||FeishuConnectorError::unavailable("表格结果缺少字段名称"))?;
+    let ids=data.get("field_id_list").and_then(Value::as_array).ok_or_else(||FeishuConnectorError::unavailable("表格结果缺少字段标识"))?;
+    let types=data.get("field_type_list").and_then(Value::as_array).ok_or_else(||FeishuConnectorError::unavailable("表格结果缺少字段类型"))?;
+    let record_ids=data.get("record_id_list").and_then(Value::as_array).ok_or_else(||FeishuConnectorError::unavailable("表格结果缺少记录标识"))?;
+    let rows=data.get("data").and_then(Value::as_array).ok_or_else(||FeishuConnectorError::unavailable("表格结果缺少记录矩阵"))?;
+    if names.len()!=ids.len()||ids.len()!=types.len()||record_ids.len()!=rows.len() {
+        return Err(FeishuConnectorError::unavailable("表格结果的结构长度不一致"));
+    }
+    let mut result=FeishuQueryResult {has_more:data.get("has_more").and_then(Value::as_bool).unwrap_or(false),
+        next_cursor:first_text(data,&["next_offset"]),warnings:warnings(data),..FeishuQueryResult::default()};
+    for n in 0..ids.len() {
+        let id=ids[n].as_str().ok_or_else(||FeishuConnectorError::unavailable("字段标识格式错误"))?;
+        let name=names[n].as_str().ok_or_else(||FeishuConnectorError::unavailable("字段名称格式错误"))?;
+        let kind=types[n].as_str().ok_or_else(||FeishuConnectorError::unavailable("字段类型格式错误"))?;
+        result.fields.push(FeishuField {id:id.into(),name:name.into(),field_type:kind.into(),
+            writable:writable_type(kind),options:None});
+    }
+    for (n,row) in rows.iter().enumerate() {
+        let id=record_ids[n].as_str().ok_or_else(||FeishuConnectorError::unavailable("记录标识格式错误"))?;
+        let row=row.as_array().filter(|row|row.len()==ids.len()).ok_or_else(||FeishuConnectorError::unavailable("表格记录列数与结构不一致"))?;
+        let title=row.iter().find_map(|v|v.as_str().filter(|s|!s.is_empty())).unwrap_or(id);
+        let mut item=FeishuItem::new(id,"base_record",title);
+        for (column,value) in result.fields.iter().zip(row) { item.fields.insert(column.id.clone(),value.clone()); }
+        result.items.push(item);
+    }
+    if let Some(missing)=data.get("record_not_found").and_then(Value::as_array) {
+        if !missing.is_empty() {result.warnings.push("部分原记录本次未读回；不能据此断言写入未执行".into());}
+    }
+    Ok(result)
+}
+
+pub fn mutation_command(mutation:&FeishuMutation,client_token:&str,profile:Option<&str>)->Result<CliCommand,FeishuConnectorError>{
+    valid_id(client_token,"操作幂等标识")?;
+    match mutation {
+        FeishuMutation::DocumentCreate {title,..}=>{
+            valid_text(title,"文档标题",500)?;
+            user_command(["docs","+create","--title",title,"--doc-format","xml",
+                "--parent-position","my_library"],profile,true)
+        }
+        FeishuMutation::DocumentDelete {document_id,document_type:kind,title,..}=>{
+            valid_resource_token(document_id)?;
+            valid_text(title,"文档标题",500)?;
+            if !document_type(kind) { return Err(FeishuConnectorError::invalid("此资源类型不支持文档删除")); }
+            user_command(["drive","+delete","--file-token",document_id,"--type",kind,"--yes"],profile,true)
+        }
+        FeishuMutation::BaseUpdate {base_token,table_id,record_id,fields,before,..}=>{
+            valid_id(base_token,"多维表格标识")?;valid_id(table_id,"数据表标识")?;valid_id(record_id,"记录标识")?;
+            validate_base_fields(fields,before)?;
+            for key in fields.keys(){valid_id(key,"字段标识")?}
+            let mut updates=serde_json::Map::new();updates.insert(record_id.clone(),json!(fields));
+            let mut result=user_command(["base".into(),"+record-batch-update".into(),"--base-token".into(),base_token.clone(),
+                "--table-id".into(),table_id.clone(),"--json".into(),format!("@{PAYLOAD_FILE}")],profile,true)?;
+            result.input_file=Some(json!({"update_records":updates}).to_string().into_bytes());Ok(result)
+        }
+    }
+}
+pub fn normalize_mutation(mutation:&FeishuMutation,output:&CliOutput)->Result<MutationReceipt,FeishuConnectorError>{
+    let envelope=output_value(output);
+    let data=envelope.as_ref().and_then(|v|v.get("data")).cloned().unwrap_or(Value::Null);
+    let (id,url)=match mutation {
+        FeishuMutation::DocumentCreate {..}=>(text(data.pointer("/document/document_id")),data.pointer("/document/url").and_then(Value::as_str).and_then(official_url)),
+        FeishuMutation::DocumentDelete {document_id,..}=>(Some(document_id.clone()),None),
+        FeishuMutation::BaseUpdate {record_id,..}=>(Some(record_id.clone()),None),
+    };
+    if !output.successful() || envelope.as_ref().and_then(|v|v.get("ok"))!=Some(&Value::Bool(true)) {
+        let error=output_error(output,true);
+        // An exact original resource identity remains useful even when output or
+        // native cleanup is incomplete. Keep it without manufacturing success.
+        if id.is_some() && !data.is_null() {
+            return Ok(MutationReceipt {status:ItemStatus::Unknown,remote_id:id,remote_url:url,
+                message:Some(error.message),result:envelope.unwrap_or(Value::Null)});
+        }
+        return Err(error);
+    }
+    if data.is_null(){return Err(FeishuConnectorError::unknown("成功回执缺少业务数据"))}
+    let result=data.get("result").and_then(Value::as_str);
+    let warning_messages=warnings(&data);
+    let status=if result.is_some_and(|result|result!="success") {ItemStatus::Unknown}
+        else if matches!(mutation,FeishuMutation::BaseUpdate{..}) {ItemStatus::AcceptedPendingConfirmation}
+        else if !warning_messages.is_empty(){ItemStatus::Unknown}
+        else if id.is_none(){ItemStatus::Unknown}
+        else if let FeishuMutation::DocumentDelete {document_id,document_type,..}=mutation {
+            if data.get("deleted")==Some(&Value::Bool(true)) && data.get("file_token").and_then(Value::as_str)==Some(document_id)
+                && data.get("type").and_then(Value::as_str)==Some(document_type)
+                && data.get("ready")!=Some(&Value::Bool(false)) && data.get("timed_out")!=Some(&Value::Bool(true))
+                && data.get("failed")!=Some(&Value::Bool(true)) && data.get("status").and_then(Value::as_str).is_none_or(|status|status=="success")
+                && data.get("next_command").is_none() {ItemStatus::Succeeded}
+            else {ItemStatus::Unknown}
+        }
+        else {ItemStatus::Succeeded};
+    let message=if status==ItemStatus::Unknown {Some(if !warning_messages.is_empty(){warning_messages.join("；")}
+            else if let Some(result)=result{format!("CLI 返回 {result}，尚不能确认完整结果；请核验原操作")}
+            else{"尚未取得可以确认完整结果的业务回执".into()})}
+        else if matches!(mutation,FeishuMutation::BaseUpdate{..}) {Some("批次已返回，尚需按原记录与字段读回确认".into())}
+        else if !warnings(&data).is_empty(){Some(warnings(&data).join("；"))}else{None};
+    Ok(MutationReceipt {status,remote_id:id,remote_url:url,message,result:envelope.unwrap_or(Value::Null)})
+}
+
+/// One real Base batch request; the domain owner preserves each item's distinct
+/// attempt and associates the shared batch acknowledgement with all of them.
+pub fn base_batch_command(items:&[FeishuMutation],profile:Option<&str>)->Result<CliCommand,FeishuConnectorError>{
+    if items.is_empty()||items.len()>200{return Err(FeishuConnectorError::invalid("单次表格更新必须包含 1 至 200 条记录"))}
+    let mut base=None;let mut table=None;let mut updates=serde_json::Map::new();
+    for mutation in items {
+        let FeishuMutation::BaseUpdate{base_token,table_id,record_id,fields,before,..}=mutation else{
+            return Err(FeishuConnectorError::invalid("表格批次不能混入其他飞书操作"))
+        };
+        valid_id(base_token,"多维表格标识")?;valid_id(table_id,"数据表标识")?;valid_id(record_id,"记录标识")?;
+        if base.is_some_and(|value:&str|value!=base_token)||table.is_some_and(|value:&str|value!=table_id){
+            return Err(FeishuConnectorError::invalid("表格批次必须属于同一个 Base 和数据表"))
+        }
+        base=Some(base_token.as_str());table=Some(table_id.as_str());
+        validate_base_fields(fields,before)?;
+        for key in fields.keys(){valid_id(key,"字段标识")?}
+        if updates.insert(record_id.clone(),json!(fields)).is_some(){
+            return Err(FeishuConnectorError::invalid("表格批次包含重复记录，拒绝覆盖其中一项"))
+        }
+    }
+    let mut result=user_command(["base".into(),"+record-batch-update".into(),"--base-token".into(),base.unwrap().into(),
+        "--table-id".into(),table.unwrap().into(),"--json".into(),format!("@{PAYLOAD_FILE}")],profile,true)?;
+    result.input_file=Some(json!({"update_records":updates}).to_string().into_bytes());Ok(result)
+}
+fn validate_base_fields(fields:&BTreeMap<String,Value>,before:&BTreeMap<String,Value>)->Result<(),FeishuConnectorError>{
+    if fields.is_empty()||fields.len()>50||fields.keys().ne(before.keys()){
+        return Err(FeishuConnectorError::invalid("每个待修改字段都必须携带读取时的确切原值；请刷新记录后再保存"))
+    }
+    Ok(())
+}
+pub fn base_readback_command(base_token:&str,table_id:&str,record_ids:&[String],profile:Option<&str>)->Result<CliCommand,FeishuConnectorError>{
+    valid_id(base_token,"多维表格标识")?;valid_id(table_id,"数据表标识")?;
+    if record_ids.is_empty()||record_ids.len()>200{return Err(FeishuConnectorError::invalid("读回必须指定 1 至 200 条确切记录"))}
+    let mut args:Vec<String>=vec!["base".into(),"+record-get".into(),"--base-token".into(),base_token.into(),
+        "--table-id".into(),table_id.into(),"--format".into(),"json".into()];
+    for id in record_ids {valid_id(id,"记录标识")?;args.extend(["--record-id".into(),id.clone()]);}
+    user_command(args,profile,false)
+}
+pub fn normalize_base_readback(output:&CliOutput)->Result<FeishuQueryResult,FeishuConnectorError>{
+    normalize_matrix(&business_value(output,false)?)
+}
+
+/// Knowledge-chain projection of a curated document's remote metadata. These
+/// commands serve only the knowledge port; the workbench never routes them.
+#[derive(Debug, Clone)]
+pub struct FeishuDocMeta {
+    /// Canonical remote identity: the token embedded in the official URL. For
+    /// wiki links this stays the node_token; fetch/search unwrap as needed.
+    pub token: String,
+    pub kind: String,
+    pub title: String,
+    pub url: Option<String>,
+    pub modified_at: Option<String>,
+}
+#[derive(Debug, Clone)]
+pub struct FeishuDocBody {
+    /// Canonical object token returned by fetch (wiki links unwrap here).
+    pub document_id: String,
+    pub markdown: String,
+    pub revision_id: Option<i64>,
+}
+
+/// Curated corpus types; matches the phase-one whitelist.
+pub fn knowledge_doc_kind(kind: &str) -> bool { matches!(kind, "doc" | "docx" | "wiki") }
+
+/// Search v2 restricted to the curated kind set; the same normalizer and page
+/// token rules as workbench document browsing apply.
+pub fn knowledge_search_command(query:&str,cursor:Option<&str>,profile:Option<&str>)->Result<CliCommand,FeishuConnectorError>{
+    if query.chars().count()>30||query.contains('\0'){return Err(FeishuConnectorError::invalid("搜索关键词最多 30 个字符"))}
+    let mut args:Vec<String>=vec!["drive".into(),"+search".into(),"--query".into(),query.into(),
+        "--doc-types".into(),"doc,docx,wiki".into(),
+        "--sort".into(),"edit_time".into(),"--page-size".into(),"20".into(),"--format".into(),"json".into()];
+    if let Some(cursor)=cursor{valid_page_token(cursor)?;args.extend(["--page-token".into(),cursor.to_string()]);}
+    user_command(args,profile,false)
+}
+pub fn normalize_knowledge_search(output:&CliOutput,cursor:Option<&str>)->Result<FeishuQueryResult,FeishuConnectorError>{
+    normalize_documents(&business_value(output,false)?,cursor)
+}
+
+/// `drive +inspect` resolves an official URL (wiki unwrapped server-side) to
+/// type, title and canonical token through metas/batch_query.
+pub fn inspect_document_command(url:&str,profile:Option<&str>)->Result<CliCommand,FeishuConnectorError>{
+    let url=official_url(url).ok_or_else(||FeishuConnectorError::invalid("请使用飞书或 Lark 官方 HTTPS 文档链接"))?;
+    user_command(["drive","+inspect","--url",url.as_str(),"--format","json"],profile,false)
+}
+pub fn parse_inspect_document(output:&CliOutput)->Result<FeishuDocMeta,FeishuConnectorError>{
+    let data=business_value(output,false)?;
+    let metas=data.get("metas").and_then(Value::as_array)
+        .or_else(||data.pointer("/document/metas").and_then(Value::as_array))
+        .or_else(||data.pointer("/inspect/metas").and_then(Value::as_array));
+    let meta=metas.and_then(|metas|metas.first()).cloned()
+        .or_else(||data.get("meta").cloned()).or_else(||data.get("document").cloned());
+    let Some(meta)=meta.filter(|meta|meta.is_object()) else {
+        let failed=data.get("failed_list").and_then(Value::as_array);
+        if failed.is_some_and(|failed|!failed.is_empty()) {
+            return Err(FeishuConnectorError{code:"FEISHU_PERMISSION".into(),message:"该文档无法读取元数据，可能已被删除或当前账号无权访问".into(),
+                not_executed:true,missing_scopes:Vec::new(),console_url:None,related_operation_id:None,related_flow_id:None});
+        }
+        return Err(FeishuConnectorError::unavailable("文档元数据结果格式不兼容"));
+    };
+    let kind=first_text(&meta,&["doc_type","type","obj_type"]).unwrap_or_default().to_ascii_lowercase();
+    if !knowledge_doc_kind(&kind){return Err(FeishuConnectorError::invalid("仅支持 doc/docx/wiki 类型的飞书文档"))}
+    let token=first_text(&meta,&["doc_token","token","obj_token","node_token"])
+        .ok_or_else(||FeishuConnectorError::unavailable("文档元数据缺少资源标识"))?;
+    valid_resource_token(&token)?;
+    Ok(FeishuDocMeta{token,kind,
+        title:first_text(&meta,&["title","name"]).unwrap_or_default(),
+        url:meta.get("url").and_then(Value::as_str).and_then(official_url),
+        modified_at:first_text(&meta,&["latest_modify_time_iso","latest_modify_time","update_time_iso","update_time"])})
+}
+
+/// `docs +fetch` accepts an official doc/docx/wiki URL or a bare token and
+/// returns markdown content under data.document.
+pub fn fetch_document_command(doc:&str,profile:Option<&str>)->Result<CliCommand,FeishuConnectorError>{
+    let target=match official_url(doc){
+        Some(url)=>{let (kind,_)=link_target(&url)?;
+            if !knowledge_doc_kind(&kind){return Err(FeishuConnectorError::invalid("仅支持 doc/docx/wiki 类型的飞书文档"))}
+            url}
+        None=>{valid_resource_token(doc)?;doc.to_owned()}
+    };
+    user_command(["docs","+fetch","--doc",&target,"--doc-format","markdown","--format","json"],profile,false)
+}
+pub fn parse_fetch_document(output:&CliOutput)->Result<FeishuDocBody,FeishuConnectorError>{
+    let data=business_value(output,false)?;
+    let document=data.get("document").filter(|document|document.is_object())
+        .ok_or_else(||FeishuConnectorError::unavailable("文档正文结果缺少 document 数据"))?;
+    let markdown=document.get("content").and_then(Value::as_str)
+        .ok_or_else(||FeishuConnectorError::unavailable("文档正文缺少 markdown 内容"))?;
+    if markdown.len()>8*1024*1024{return Err(FeishuConnectorError::unavailable("文档正文超过知识读取上限"))}
+    let document_id=text(document.get("document_id"))
+        .ok_or_else(||FeishuConnectorError::unavailable("文档正文缺少资源标识"))?;
+    valid_resource_token(&document_id)?;
+    Ok(FeishuDocBody{document_id,markdown:markdown.to_owned(),
+        revision_id:document.get("revision_id").and_then(Value::as_i64)})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    fn output(data:Value)->CliOutput{CliOutput::fixture(0,json!({"ok":true,"identity":"user","data":data}).to_string(),"")}
+    #[test]
+    fn logout_uses_the_explicit_profile_and_requires_the_official_auth_response_shapes(){
+        let users=auth_users_command("work").unwrap();assert_eq!(users.args,["--profile","work","auth","list","--json"]);assert!(!users.mutating);
+        let logout=logout_command("work").unwrap();assert_eq!(logout.args,["--profile","work","auth","logout","--json"]);assert!(logout.mutating);
+        let users=parse_auth_users(&CliOutput::fixture(0,r#"[{"appId":"cli_x","userOpenId":"ou_x","userName":"User","tokenStatus":"expired"}]"#," ")).unwrap();
+        assert_eq!(users.len(),1);assert_eq!(users[0].app_id,"cli_x");assert_eq!(users[0].user_id,"ou_x");
+        assert!(parse_auth_users(&CliOutput::fixture(0,r#"{"ok":true,"users":[],"reason":"not_logged_in"}"#,"")).unwrap().is_empty());
+        for value in [json!({"ok":true,"users":[]}),json!([{"userName":"display name only"}]),json!({"ok":true,"data":[]})]{
+            assert!(parse_auth_users(&CliOutput::fixture(0,value.to_string(),"")).is_err());
+        }
+        assert!(parse_logout(&CliOutput::fixture(0,r#"{"ok":true,"loggedOut":true}"#,"")).is_ok());
+        assert!(parse_logout(&CliOutput::fixture(0,r#"{"ok":true,"loggedOut":false,"reason":"not_logged_in"}"#,"")).is_ok());
+        assert!(parse_logout(&CliOutput::fixture(0,r#"{"ok":true}"#,"")).is_err());
+        assert!(!parse_logout(&CliOutput{started:true,timed_out:true,..Default::default()}).unwrap_err().not_executed);
+    }
+    #[test]
+    fn scope_mapping_separates_base_read_and_write_permissions(){
+        let p=permissions(&["base:record:read".into(),"base:field:read".into()]);
+        assert!(p.iter().find(|p|p.capability=="base.read").unwrap().granted);
+        assert!(!p.iter().find(|p|p.capability=="base.write").unwrap().granted);
+        let p=permissions(&["base:record:update".into()]);
+        assert!(p.iter().find(|p|p.capability=="base.write").unwrap().granted);
+        assert!(!p.iter().find(|p|p.capability=="base.read").unwrap().granted);
+    }
+    #[test]
+    fn browse_reuses_the_connected_users_search_scope_without_drive_root_permission(){
+        let p=permissions(&["search:docs:read".into()]);
+        let browse=p.iter().find(|p|p.capability=="documents.browse").unwrap();
+        assert!(browse.granted);assert_eq!(browse.required_scopes,vec!["search:docs:read"]);
+        // Knowledge-chain capabilities exist but stay off workbench checks.
+        assert!(p.iter().all(|p|!matches!(p.capability.as_str(),"documents.list"|"documents.search"|"documents.write")));
+        assert!(!p.iter().find(|p|p.capability=="documents.read").unwrap().granted);
+        assert!(!p.iter().find(|p|p.capability=="documents.inspect").unwrap().granted);
+        for scope in ["space:document:retrieve","docx:document:write_only"] {assert!(!allowed_scopes().contains(&scope.into()));}
+        assert!(allowed_scopes().contains(&"docx:document:readonly".to_string()));
+        let old=permissions(&["space:document:retrieve".into(),"drive:drive:readonly".into()]);
+        assert!(!old.iter().find(|p|p.capability=="documents.browse").unwrap().granted);
+        let deleting=permissions(&["space:document:delete".into()]);
+        assert!(!deleting.iter().find(|p|p.capability=="documents.delete").unwrap().granted);
+    }
+    #[test]
+    fn document_browse_and_search_share_the_official_cli_query_and_server_filters(){
+        for (filter,types) in [(DocumentFilter::All,"doc,docx,sheet,bitable,mindnote,file,wiki,slides"),
+            (DocumentFilter::Document,"doc,docx,sheet,mindnote,file,wiki,slides"),(DocumentFilter::Base,"bitable")] {
+            for keyword in ["","项目"] {
+                let query=FeishuQuery::Documents{query:keyword.into(),filter:filter.clone(),cursor:Some("page-two".into())};
+                let commands=query_commands(&query,Some("work")).unwrap();
+                assert_eq!(commands.len(),1);assert!(!commands[0].mutating);
+                assert_eq!(commands[0].args,vec!["--profile","work","drive","+search","--query",keyword,
+                    "--doc-types",types,"--sort","edit_time","--page-size","20","--format","json","--page-token","page-two","--as","user"]);
+                assert!(query_permissions(&query,&["search:docs:read".into()]).iter().all(|permission|permission.granted));
+            }
+        }
+    }
+    fn search_entry(token:&str,kind:&str,entity:&str,path:&str)->Value{
+        json!({"entity_type":entity,"title_highlighted":"Existing <hb>document</hb>","summary_highlighted":"Do not expose a body preview",
+            "result_meta":{"token":token,"doc_types":kind,"url":format!("https://team.feishu.cn/{path}/{token}"),
+                "update_time":1793000000,"update_time_iso":"2026-10-26T06:13:20+08:00"}})
+    }
+    #[test]
+    fn real_search_v2_shape_keeps_wiki_and_drive_resources_and_uses_stable_tokens(){
+        let query=FeishuQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:None};
+        let wiki=search_entry("wiki_real","DOCX","WIKI","wiki");
+        let mut duplicate=wiki.clone();duplicate["result_meta"]["url"]=json!("https://team.feishu.cn/wiki/wiki_real?from=another-link");
+        let result=normalize_query(&query,&[output(json!({"results":[wiki,search_entry("doc_real","DOCX","DOC","docx"),
+            search_entry("base_real","BITABLE","DOC","base"),duplicate],"has_more":true,"page_token":"page-two"}))]).unwrap();
+        assert_eq!(result.items.len(),3);assert_eq!(result.items[0].id,"wiki_real");assert_eq!(result.items[0].kind,"wiki");
+        assert_eq!(result.items[0].title,"Existing document");assert!(document_target(&result.items[0]).is_none());
+        assert_eq!(document_target(&result.items[1]),Some(("docx".into(),"doc_real".into())));
+        assert_eq!(result.items[2].kind,"base");assert_eq!(result.next_cursor.as_deref(),Some("page-two"));
+    }
+    #[test]
+    fn incomplete_search_pages_and_retired_root_shapes_fail_instead_of_becoming_empty_lists(){
+        let query=FeishuQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:Some("same-page".into())};
+        for data in [json!({"results":[],"has_more":true}),json!({"results":[],"has_more":true,"page_token":"same-page"}),
+            json!({"results":[]}),json!({"files":[],"has_more":false}),
+            json!({"results":[{"result_meta":{"token":"bad/url","doc_types":"DOCX"}}],"has_more":false})] {
+            assert!(normalize_query(&query,&[output(data)]).is_err());
+        }
+        let empty=normalize_query(&query,&[output(json!({"results":null,"has_more":false,"page_token":"unused-last-page"}))]).unwrap();
+        assert!(empty.items.is_empty());assert!(!empty.has_more);assert!(empty.next_cursor.is_none());
+        assert!(serde_json::from_value::<FeishuQuery>(json!({"kind":"search","query":"","cursor":null})).is_err());
+        assert!(serde_json::from_value::<FeishuQuery>(json!({"kind":"documents"})).is_err());
+    }
+    #[test]
+    fn opaque_page_tokens_keep_the_provider_value_beyond_resource_id_limits(){
+        let cursor="opaque/+=\"".repeat(90);
+        assert!(cursor.len()>512);assert!(valid_id(&cursor,"resource").is_err());
+        let first=FeishuQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:None};
+        let page=normalize_query(&first,&[output(json!({"results":[],"has_more":true,"page_token":cursor}))]).unwrap();
+        assert_eq!(page.next_cursor.as_deref(),Some(cursor.as_str()));
+        let next=FeishuQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:page.next_cursor};
+        let command=query_commands(&next,Some("work")).unwrap().remove(0);
+        assert!(command.args.windows(2).any(|args|args[0]=="--page-token"&&args[1]==cursor));
+        for invalid in [String::new(),"bad\0cursor".into(),"bad\ncursor".into(),"x".repeat(16*1024+1)] {
+            assert!(valid_page_token(&invalid).is_err());
+        }
+    }
+    /// Opt-in contract evidence against an existing user login. It only reads
+    /// status and at most two metadata pages; no login, scope grant or write.
+    #[tokio::test]
+    #[ignore = "requires explicit CLI path/profile and an account with existing documents"]
+    async fn live_document_discovery_read_only(){
+        let executable=std::env::var("NOMIFUN_FEISHU_PROBE_CLI").expect("Set NOMIFUN_FEISHU_PROBE_CLI to the existing verified CLI");
+        let profile=std::env::var("NOMIFUN_FEISHU_PROBE_PROFILE").expect("Set NOMIFUN_FEISHU_PROBE_PROFILE to the existing connected profile");
+        let directory=tempfile::tempdir().unwrap();
+        let runtime=crate::runtime::CliRuntime::new(directory.path().to_path_buf());
+        let observed=runtime.inspect(Some(&executable)).await;
+        assert_eq!(observed.phase,RuntimePhase::Ready,"Use an existing ready CLI; this probe never installs");
+        let executable=observed.executable.unwrap();
+        let cancel=tokio_util::sync::CancellationToken::new();
+        let identity=runtime.run(&executable,status_command(Some(&profile),false),cancel.child_token(),None).await.unwrap();
+        let identity=parse_identity(&identity).unwrap();assert_eq!(identity.phase,ConnectionPhase::Ready);
+        let mut cursor=None;let mut count=0;let mut kinds=BTreeMap::<String,usize>::new();
+        for page in 1..=2 {
+            let query=FeishuQuery::Documents{query:String::new(),filter:DocumentFilter::All,cursor:cursor.clone()};
+            assert!(query_permissions(&query,&identity.scopes).iter().all(|permission|permission.granted),"Existing login needs search:docs:read; this probe never starts authorization");
+            let mut outputs=Vec::new();
+            for command in query_commands(&query,Some(&profile)).unwrap(){
+                assert!(!command.mutating);
+                outputs.push(runtime.run(&executable,command,cancel.child_token(),None).await.unwrap());
+            }
+            let result=normalize_query(&query,&outputs).unwrap();
+            println!("read-only page {page}: {} resources, has_more={}",result.items.len(),result.has_more);
+            count+=result.items.len();for item in &result.items{*kinds.entry(item.kind.clone()).or_default()+=1;}
+            if !result.has_more { break; }
+            cursor=result.next_cursor;
+        }
+        assert!(count>0,"Use an account with existing documents to reproduce the list regression");
+        println!("read-only projection: {count} resources; kinds={kinds:?}");
+    }
+    #[test]
+    fn document_create_is_title_only_and_content_contracts_are_retired(){
+        let mutation=FeishuMutation::DocumentCreate{client_item_id:"create".into(),title:"New document".into()};
+        let cmd=mutation_command(&mutation,"request",Some("work")).unwrap();
+        assert!(cmd.stdin.is_none());assert!(cmd.input_file.is_none());assert!(!cmd.args.contains(&"--content".into()));
+        assert!(serde_json::from_value::<FeishuQuery>(json!({"kind":"document","document":"doc_real"})).is_err());
+        assert!(serde_json::from_value::<FeishuMutation>(json!({"kind":"document_save","client_item_id":"save","document_id":"doc_real","revision":"1","block_id":"block","content":"text"})).is_err());
+        assert!(serde_json::from_value::<FeishuMutation>(json!({"kind":"document_create","client_item_id":"create","title":"New","content":"retired"})).is_err());
+    }
+    #[test]
+    fn document_delete_requires_an_exact_terminal_receipt(){
+        let mutation=FeishuMutation::DocumentDelete{client_item_id:"delete".into(),document_id:"doc_real".into(),document_type:"docx".into(),title:"Document".into()};
+        let cmd=mutation_command(&mutation,"request",Some("work")).unwrap();
+        assert_eq!(cmd.args,vec!["--profile","work","drive","+delete","--file-token","doc_real","--type","docx","--yes","--as","user"]);
+        assert!(cmd.mutating);
+        let receipt=json!({"deleted":true,"file_token":"doc_real","type":"docx"});
+        assert_eq!(normalize_mutation(&mutation,&output(receipt.clone())).unwrap().status,ItemStatus::Succeeded);
+        for data in [json!({"document_id":"pending","ready":false}),json!({}),json!({"deleted":true,"file_token":"another","type":"docx"}),
+            json!({"deleted":true,"file_token":"doc_real","type":"docx","status":"processing"}),
+            json!({"deleted":true,"file_token":"doc_real","type":"docx","next_command":"untrusted command"})] {
+            assert_eq!(normalize_mutation(&mutation,&output(data)).unwrap().status,ItemStatus::Unknown);
+        }
+        let mut timed_out=output(receipt);timed_out.timed_out=true;
+        assert_eq!(normalize_mutation(&mutation,&timed_out).unwrap().status,ItemStatus::Unknown);
+        for kind in ["wiki","folder","shortcut","bitable"] {
+            let mut unsupported=mutation.clone();if let FeishuMutation::DocumentDelete{document_type,..}=&mut unsupported{*document_type=kind.into();}
+            assert!(mutation_command(&unsupported,"request",None).is_err());
+        }
+    }
+    #[test]
+    fn document_targets_never_infer_deletion_authority_from_a_wiki_or_invalid_link(){
+        let mut item=FeishuItem::new("wiki_real","wiki","Wiki");item.url=Some("https://team.feishu.cn/wiki/wiki_real?from=link".into());
+        assert!(document_target(&item).is_none());
+        for url in ["https://evil.test/docx/a","https://team.feishu.cn/docx/a/blocks","https://team.feishu.cn/","https://team.feishu.cn/docx/a%2Fb"] {
+            item.url=Some(url.into());assert!(document_target(&item).is_none());
+        }
+    }
+    #[test]
+    fn profile_and_status_use_their_real_unwrapped_contracts(){
+        let profiles=parse_profiles(&CliOutput::fixture(0,r#"[{"name":"work","appId":"cli_x","brand":"feishu","user":"Lin"}]"#,"")).unwrap();
+        assert_eq!(profiles[0].name,"work");
+        let identity=parse_identity(&CliOutput::fixture(0,json!({"appId":"cli_x","identity":"bot","identities":{"user":{"status":"missing","available":false},"bot":{"available":true}}}).to_string(),"")).unwrap();
+        assert!(identity.actor.is_none());assert_eq!(identity.phase,ConnectionPhase::NeedsLogin);
+    }
+    #[test]
+    fn partial_login_is_not_discarded_as_a_generic_nonzero_failure(){
+        let value=json!({"event":"authorization_complete","user_open_id":"ou_x","user_name":"Lin","scope":"search:docs:read","missing":["docx:document:create"]});
+        let completion=parse_login_completion(&CliOutput::fixture(4,value.to_string(),""),"cli_x").unwrap();
+        assert!(!completion.complete);assert!(completion.actor.is_some());
+        assert_eq!(completion.missing_scopes,["docx:document:create"]);
+    }
+    #[test]
+    fn original_auth_links_are_preserved_and_nonofficial_hosts_rejected(){
+        let url="https://accounts.feishu.cn/path?redirect_uri=a%2Fb&user_code=x";
+        assert_eq!(official_url(url).as_deref(),Some(url));
+        for bad in ["http://accounts.feishu.cn/a","https://accounts.feishu.cn.evil.test/a","https://accounts.feishu.cn@evil.test/a","https://accounts.feishu.cn\\@evil.test/a"]{assert!(official_url(bad).is_none())}
+    }
+
+    #[test]
+    fn auth_expiry_and_denial_use_typed_subtypes_without_mutation_shortcuts(){
+        let expired=CliOutput::fixture(4,"",r#"{"ok":false,"error":{"type":"authentication","subtype":"token_expired","message":"Expired"}}"#);
+        assert_eq!(auth_output_error(&expired).code,"FEISHU_AUTH_EXPIRED");
+        assert!(!output_error(&expired,true).not_executed);
+        assert_ne!(output_error(&expired,true).code,"FEISHU_AUTH_EXPIRED");
+        let denied=CliOutput::fixture(4,"",r#"{"ok":false,"error":{"type":"policy","subtype":"access_denied","message":"Denied"}}"#);
+        assert_eq!(auth_output_error(&denied).code,"FEISHU_AUTH_DENIED");
+        let unknown=CliOutput::fixture(4,"",r#"{"ok":false,"error":{"type":"authentication","subtype":"unknown","message":"Device code expired, authorization denied"}}"#);
+        assert_eq!(auth_output_error(&unknown).code,"FEISHU_UNAVAILABLE");
+    }
+    #[test]
+    fn base_matrix_uses_stable_field_ids_and_rejects_misaligned_rows(){
+        let data=json!({"timezone":"Asia/Shanghai","fields":["Name","Status"],"field_id_list":["fld_name","fld_status"],"field_type_list":["text","select"],"record_id_list":["rec_1"],"data":[["A",["Todo"]]],"has_more":false});
+        let result=normalize_base_readback(&output(data.clone())).unwrap();
+        assert_eq!(result.items[0].fields["fld_status"],json!(["Todo"]));
+        assert!(!result.items[0].fields.contains_key("Status"));
+        let mut malformed=data;malformed["data"]=json!([["A"]]);
+        assert!(normalize_base_readback(&output(malformed)).is_err());
+    }
+    #[test]
+    fn base_write_returns_pending_and_uses_a_private_json_file(){
+        let mutation=FeishuMutation::BaseUpdate {client_item_id:"i".into(),base_token:"base_x".into(),table_id:"tbl_x".into(),
+            record_id:"rec_1".into(),fields:BTreeMap::from([("fld_status".into(),json!(["Done"]))]),before:BTreeMap::from([("fld_status".into(),json!(["Todo"]))])};
+        let cmd=mutation_command(&mutation,"operation-token",Some("work")).unwrap();
+        assert!(cmd.args.contains(&format!("@{PAYLOAD_FILE}")));assert!(cmd.input_file.is_some());
+        let receipt=normalize_mutation(&mutation,&output(json!({}))).unwrap();
+        assert_eq!(receipt.status,ItemStatus::AcceptedPendingConfirmation);
+    }
+    #[test]
+    fn base_batch_is_one_request_and_rejects_duplicate_or_cross_table_records(){
+        let first=FeishuMutation::BaseUpdate{client_item_id:"i1".into(),base_token:"base".into(),table_id:"table".into(),
+            record_id:"rec1".into(),fields:BTreeMap::from([("fld".into(),json!(["Done"]))]),before:BTreeMap::from([("fld".into(),json!(["Todo"]))])};
+        let mut second=first.clone();
+        if let FeishuMutation::BaseUpdate{record_id,..}=&mut second{*record_id="rec2".into()}
+        let cmd=base_batch_command(&[first.clone(),second.clone()],None).unwrap();
+        let body:Value=serde_json::from_slice(cmd.input_file.as_ref().unwrap()).unwrap();
+        assert_eq!(body["update_records"].as_object().unwrap().len(),2);
+        assert!(base_batch_command(&[first.clone(),first.clone()],None).is_err());
+        if let FeishuMutation::BaseUpdate{table_id,..}=&mut second{*table_id="other".into()}
+        assert!(base_batch_command(&[first,second],None).is_err());
+    }
+    #[test]
+    fn timeout_is_unknown_and_keeps_exact_original_resource_receipt(){
+        let mutation=FeishuMutation::DocumentCreate {client_item_id:"i".into(),title:"T".into()};
+        let mut partial=output(json!({"document":{"document_id":"original-guid"}}));partial.timed_out=true;
+        let receipt=normalize_mutation(&mutation,&partial).unwrap();
+        assert_eq!(receipt.status,ItemStatus::Unknown);assert_eq!(receipt.remote_id.as_deref(),Some("original-guid"));
+        let error=output_error(&CliOutput::fixture(1,"",r#"{"ok":false,"error":{"type":"api","message":"server failed"}}"#),true);
+        assert!(!error.not_executed);
+    }
+    #[test]
+    fn knowledge_capabilities_stay_separate_from_workbench_surfaces(){
+        let all=permissions(&["docx:document:readonly".into(),"drive:drive.metadata:readonly".into()]);
+        let read=all.iter().find(|p|p.capability=="documents.read").unwrap();
+        let inspect=all.iter().find(|p|p.capability=="documents.inspect").unwrap();
+        assert!(read.granted&&inspect.granted);
+        assert!(all.iter().find(|p|p.capability=="documents.browse").unwrap().granted==false);
+        for query in [FeishuQuery::Documents{query:"q".into(),filter:DocumentFilter::All,cursor:None}]{
+            assert!(!query_permissions(&query,&[]).iter().any(|p|p.capability=="documents.read"));
+        }
+        for mutation in [FeishuMutation::DocumentCreate{client_item_id:"i".into(),title:"T".into()}]{
+            assert!(!mutation_permissions(&mutation,&[]).iter().any(|p|p.capability=="documents.read"));
+        }
+        // Granted scopes stay requestable through the existing login flow.
+        assert!(allowed_scopes().contains(&"docx:document:readonly".to_string()));
+    }
+    #[test]
+    fn knowledge_commands_use_verified_lark_cli_098_shapes(){
+        let search=knowledge_search_command("规划",None,Some("work")).unwrap();
+        assert_eq!(search.args,["--profile","work","drive","+search","--query","规划",
+            "--doc-types","doc,docx,wiki","--sort","edit_time","--page-size","20","--format","json","--as","user"]);
+        assert!(!search.mutating);
+        let search=knowledge_search_command("q",Some("opaque-cursor"),Some("work")).unwrap();
+        assert!(search.args.windows(2).any(|w|w==["--page-token","opaque-cursor"]));
+        assert!(knowledge_search_command(&"x".repeat(31),None,None).is_err());
+
+        let inspect=inspect_document_command("https://tenant.feishu.cn/docx/AbCdEf-_123",Some("work")).unwrap();
+        assert_eq!(inspect.args,["--profile","work","drive","+inspect","--url",
+            "https://tenant.feishu.cn/docx/AbCdEf-_123","--format","json","--as","user"]);
+        assert!(inspect_document_command("https://evil.example.com/docx/x",None).is_err());
+        assert!(inspect_document_command("http://tenant.feishu.cn/docx/x",None).is_err());
+
+        let fetch=fetch_document_command("https://tenant.feishu.cn/wiki/WikiNodeToken_1",Some("work")).unwrap();
+        assert_eq!(fetch.args,["--profile","work","docs","+fetch","--doc",
+            "https://tenant.feishu.cn/wiki/WikiNodeToken_1","--doc-format","markdown","--format","json","--as","user"]);
+        let fetch=fetch_document_command("PlainToken_123",None).unwrap();
+        assert!(fetch.args.windows(2).any(|w|w==["--doc","PlainToken_123"]));
+        assert!(fetch_document_command("https://tenant.feishu.cn/sheets/SHTok",None).is_err());
+        assert!(fetch_document_command("not a token!",None).is_err());
+    }
+    #[test]
+    fn fetch_document_parses_real_markdown_envelope_and_rejects_bad_shapes(){
+        let body=parse_fetch_document(&output(json!({"document":{"content":"# 标题\n\n正文",
+            "document_id":"JXfjdJ4F2oMZ4UxiOjGc1mxAnbg","revision_id":4}}))).unwrap();
+        assert_eq!(body.document_id,"JXfjdJ4F2oMZ4UxiOjGc1mxAnbg");
+        assert_eq!(body.markdown,"# 标题\n\n正文");assert_eq!(body.revision_id,Some(4));
+        for data in [json!({}),json!({"document":{"document_id":"x"}}),
+            json!({"document":{"content":"t","document_id":"bad token!"}})]{
+            assert!(parse_fetch_document(&output(data)).is_err());
+        }
+        let missing_scope=CliOutput::fixture(3,"",r#"{"ok":false,"error":{"type":"authorization","subtype":"missing_scope","missing_scopes":["docx:document:readonly"]}}"#);
+        let error=parse_fetch_document(&missing_scope).unwrap_err();
+        assert_eq!(error.code,"FEISHU_PERMISSION");assert_eq!(error.missing_scopes,["docx:document:readonly"]);
+    }
+    #[test]
+    fn inspect_document_normalizes_metas_and_rejects_unsupported_kinds(){
+        let meta=parse_inspect_document(&output(json!({"metas":[{"doc_token":"Tok_1","doc_type":"docx",
+            "title":"产品规划","url":"https://tenant.feishu.cn/docx/Tok_1","latest_modify_time":"1793028710"}]}))).unwrap();
+        assert_eq!((meta.token.as_str(),meta.kind.as_str(),meta.title.as_str()),("Tok_1","docx","产品规划"));
+        assert_eq!(meta.modified_at.as_deref(),Some("1793028710"));
+        let meta=parse_inspect_document(&output(json!({"metas":[{"doc_token":"NodeTok","doc_type":"wiki","title":"知识库"}]}))).unwrap();
+        assert_eq!(meta.kind,"wiki");
+        assert!(parse_inspect_document(&output(json!({"metas":[{"doc_token":"SHT","doc_type":"sheet","title":"表"}]}))).is_err());
+        let failed=parse_inspect_document(&output(json!({"metas":[],"failed_list":[{"token":"x"}]}))).unwrap_err();
+        assert_eq!(failed.code,"FEISHU_PERMISSION");
+        assert!(parse_inspect_document(&output(json!({"unexpected":true}))).is_err());
+    }
+    #[test]
+    fn knowledge_search_reuses_the_verified_search_projection(){
+        let search=normalize_knowledge_search(&output(json!({"has_more":false,"results":[{
+            "entity_type":"WIKI","result_meta":{"token":"WikiTok_1","doc_types":"DOCX",
+            "url":"https://tenant.feishu.cn/wiki/WikiTok_1","update_time_iso":"2026-10-26T23:31:50+08:00"},
+            "title_highlighted":"计划<h>文档</h>","summary_highlighted":"摘要"}]})),None).unwrap();
+        assert_eq!(search.items.len(),1);
+        let item=&search.items[0];
+        assert_eq!((item.id.as_str(),item.kind.as_str(),item.title.as_str()),("WikiTok_1","wiki","计划文档"));
+        assert_eq!(item.modified_at.as_deref(),Some("2026-10-26T23:31:50+08:00"));
+        let failed=CliOutput::fixture(1,"","");
+        assert_eq!(normalize_knowledge_search(&failed,None).unwrap_err().code,"FEISHU_UNAVAILABLE");
+    }
+}

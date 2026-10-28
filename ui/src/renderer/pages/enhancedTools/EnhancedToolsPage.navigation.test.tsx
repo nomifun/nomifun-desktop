@@ -6,7 +6,7 @@ import { I18nextProvider } from 'react-i18next';
 import { Message } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import { mcpService } from '@/common/adapter/ipcBridge';
-import { officeHub } from '@/common/adapter/officeHubBridge';
+import { feishuConnector } from '@/common/adapter/feishuConnectorBridge';
 import type { SkillInfo } from '@/common/types/skill';
 import * as themeContext from '@/renderer/hooks/context/ThemeContext';
 import settings from '@/renderer/services/i18n/locales/en-US/settings.json';
@@ -134,7 +134,7 @@ describe('Enhanced Tools navigation with the real page', () => {
 
   test('connectors tab lists the Feishu connector without library actions', async () => {
     const f = fixture();
-    track(spyOn(officeHub, 'status').mockRejectedValue(new Error('offline')));
+    track(spyOn(feishuConnector, 'status').mockRejectedValue(new Error('offline')));
     const view = await f.mount('/enhanced-tools?category=connectors&keep=1');
     expect(view.getByRole('tab', { name: /^Connectors/ }).getAttribute('aria-selected')).toBe('true');
     await view.findByTestId('connector-card-feishu');

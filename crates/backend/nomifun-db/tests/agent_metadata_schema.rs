@@ -24,12 +24,16 @@ async fn previous_database(path: &std::path::Path) -> sqlx::SqlitePool {
     }
     use nomifun_agent_contracts::{
         AGENT_STORE_DATA_GENERATION, AGENT_STORE_MIGRATION_HEAD, AGENT_STORE_PROJECTION_SCHEMA_VERSION,
-        agent_store_schema_manifest_payload, digest_payload, official_preset_seed_manifest_payload,
+        digest_payload, official_preset_seed_manifest_payload,
     };
+    // The previous-version lineage this fixture models only ran baseline and
+    // migration 002, so its declared manifest is the pre-010 lineage. Seeding
+    // the current manifest digest would claim a lineage the schema cannot
+    // prove and migration 010's metadata guard would fail closed.
     sqlx::query("INSERT INTO schema_metadata(singleton_key,data_generation,root_instance_id,migration_head,seed_manifest_digest,canonical_schema_manifest_digest,projection_schema_version) VALUES('canonical',?,'main-sqlite-agent-store',?,?,?,?)")
         .bind(i64::from(AGENT_STORE_DATA_GENERATION)).bind(i64::from(AGENT_STORE_MIGRATION_HEAD))
         .bind(digest_payload(&official_preset_seed_manifest_payload()).unwrap().as_ref())
-        .bind(digest_payload(&agent_store_schema_manifest_payload()).unwrap().as_ref())
+        .bind("181fba4223793ec7cfd298a8a3d026925c54b622172d1c962d5bf70816e1a019")
         .bind(i64::from(AGENT_STORE_PROJECTION_SCHEMA_VERSION)).execute(&pool).await.unwrap();
     sqlx::query("UPDATE agent_metadata SET name='Saved name',enabled=0,behavior_policy='{\"self_identity_sticky\":true}',agent_capabilities='{\"stale\":true}',available_models='[\"retired\"]' WHERE agent_id=?")
         .bind(NOMI).execute(&pool).await.unwrap();

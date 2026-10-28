@@ -3,7 +3,7 @@ use std::borrow::Cow;
 
 use nomifun_agent_contracts::{
     AGENT_STORE_DATA_GENERATION, AGENT_STORE_MIGRATION_HEAD, AGENT_STORE_PROJECTION_SCHEMA_VERSION,
-    agent_store_schema_manifest_payload, digest_payload, official_preset_seed_manifest_payload,
+    digest_payload, official_preset_seed_manifest_payload,
 };
 use nomifun_db::{MigrationLineage, inspect_migration_lineage};
 use sqlx::{SqlitePool, migrate::Migrator, sqlite::{SqliteConnectOptions, SqlitePoolOptions}};
@@ -27,10 +27,12 @@ async fn forward_009_preserves_cron_rows_indexes_sequences_and_supported_lineage
     ).await.unwrap();
     Migrator { migrations: Cow::Owned(MIGRATOR.iter().take(8).cloned().collect()), ..Migrator::DEFAULT }
         .run(&previous).await.unwrap();
+    // This fixture's schema predates migration 010, so its declared
+    // lineage is the pre-010 manifest digest, not the current manifest.
     sqlx::query("INSERT INTO schema_metadata(singleton_key,data_generation,root_instance_id,migration_head,seed_manifest_digest,canonical_schema_manifest_digest,projection_schema_version) VALUES('canonical',?,'main-sqlite-agent-store',?,?,?,?)")
         .bind(i64::from(AGENT_STORE_DATA_GENERATION)).bind(i64::from(AGENT_STORE_MIGRATION_HEAD))
         .bind(digest_payload(&official_preset_seed_manifest_payload()).unwrap().as_ref())
-        .bind(digest_payload(&agent_store_schema_manifest_payload()).unwrap().as_ref())
+        .bind("181fba4223793ec7cfd298a8a3d026925c54b622172d1c962d5bf70816e1a019")
         .bind(i64::from(AGENT_STORE_PROJECTION_SCHEMA_VERSION)).execute(&previous).await.unwrap();
     let job = "0190f5fe-7c00-7a00-8000-000000000001";
     let run = "0190f5fe-7c00-7a00-8000-000000000002";

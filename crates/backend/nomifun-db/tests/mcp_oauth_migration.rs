@@ -17,8 +17,13 @@ async fn previous_database_at(path: &Path, migration_count: usize) -> SqlitePool
     ).await.unwrap();
     Migrator { migrations: Cow::Owned(MIGRATOR.iter().take(migration_count).cloned().collect()), ..Migrator::DEFAULT }
         .run(&pool).await.unwrap();
+    // Fixture schemas stop before migration 010, so their declared lineage is
+    // the pre-010 manifest: current manifest minus the OAuth and Feishu
+    // connector tables later migrations added.
     let mut old_manifest = agent_store_schema_manifest_payload();
-    old_manifest.tables.retain(|table| !matches!(table.table_name.as_str(), "mcp_oauth_clients" | "mcp_oauth_grants"));
+    old_manifest.tables.retain(|table| !matches!(table.table_name.as_str(),
+        "mcp_oauth_clients" | "mcp_oauth_grants"
+        | "feishu_connections" | "feishu_operations" | "feishu_operation_items" | "feishu_operation_receipts"));
     sqlx::query("INSERT INTO schema_metadata(singleton_key,data_generation,root_instance_id,migration_head,seed_manifest_digest,canonical_schema_manifest_digest,projection_schema_version) VALUES('canonical',?,'main-sqlite-agent-store',?,?,?,?)")
         .bind(i64::from(AGENT_STORE_DATA_GENERATION)).bind(i64::from(AGENT_STORE_MIGRATION_HEAD))
         .bind(digest_payload(&official_preset_seed_manifest_payload()).unwrap().as_ref())

@@ -9638,6 +9638,13 @@
               "null"
             ]
           },
+          "providerDetail": {
+            "description": "Bounded, credential-redacted message from a verified provider error\nenvelope. Display only: it never selects classification or retry.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "providerId": {
             "type": [
               "string",

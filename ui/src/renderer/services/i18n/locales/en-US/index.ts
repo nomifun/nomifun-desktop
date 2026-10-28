@@ -36,7 +36,7 @@ import ssh from './ssh.json';
 import appHosting from './appHosting.json';
 import agentSettings from './agentSettings.json';
 import idmm from './idmm.json';
-import office from './office.json';
+import feishu from './feishu.json';
 
 export default {
   common,
@@ -72,5 +72,5 @@ export default {
   appHosting,
   agentSettings,
   idmm,
-  office,
+  feishu,
 };

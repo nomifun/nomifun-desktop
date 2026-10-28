@@ -80,7 +80,7 @@ Node 使用完整官方发行目录，包含 npm、npx、模块和启动器；�
 受管 npm 缺省安装到独立于可替换运行时缓存的持久用户工具目录，用户原有 prefix 仍优先。
 
 `nomifun-runtime::prepare_existing_process_launch` 只接受绝对路径的现存程序文件，
-组合相同的子进程环境并保留字面 argv，但不调用受管供应、不创建目录。办公页面的
+组合相同的子进程环境并保留字面 argv，但不调用受管供应、不创建目录。飞书连接器的
 诊断、业务调用和已有 npm 程序的 prefix 查询使用此入口；只有显式「准备组件」操作中的
 相对 `npm` 命令可以使用允许供应的入口。飞书原生 CLI 不会因为位于 npm prefix 中而
 获得 Node 依赖；未知脚本缺少解释器时报告不可用，诊断不会替它安装。现有 Agent、
@@ -154,9 +154,9 @@ Office 转换使用内嵌 OfficeCLI，不需要 Node/Bun 下载或网络访问�
 体积验收须使用同一 release profile 和压缩格式实际构建 App、DMG 对比，不能把
 压缩组件大小直接当成安装包增量。
 
-## 飞书办公 CLI
+## 飞书 CLI
 
-云端[飞书知识库与连接器](../guides/office-hub.zh.md)使用官方 `@larksuite/cli`，
+云端[飞书知识库与连接器](../guides/feishu-connector.zh.md)使用官方 `@larksuite/cli`，
 托管安装固定已验证版本 1.0.98，与本地文件渲染使用的内嵌 OfficeCLI 分开。
 飞书 CLI 不进入安装包，也不是现役 `component` 调用目标。
 
@@ -174,7 +174,7 @@ Office 转换使用内嵌 OfficeCLI，不需要 Node/Bun 下载或网络访问�
 同一个进程 owner 保持收尾，直到原进程树给出完成证明；取消执行不会提前结束收尾。
 飞书知识库页面直接展示文档列表；四张产品表承载连接和已提交请求回执，
 独立于 canonical Agent 事实，详见
-[现役计划](../handoffs/office-feishu-workbench.zh.md)。
+[现役计划](../handoffs/feishu-connector.zh.md)。
 
 ## Office 请求与缓存
 

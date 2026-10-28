@@ -78,6 +78,8 @@ fn migration_directory_contains_the_canonical_forward_migration_chain() {
         "017_compact_office_receipts.sql",
         "018_remove_office_activity.sql",
         "019_remove_office_overview.sql",
+        "020_feishu_knowledge_source_kind.sql",
+        "021_feishu_connector_tables.sql",
     ]);
 }
 
