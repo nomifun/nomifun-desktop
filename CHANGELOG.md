@@ -5,6 +5,21 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.18 - 2026-10-28
+
+- Rename the office hub product surface to Feishu connector across the
+  workbench, router, bridges and locales; the connector schema migration
+  renames the office_* tables to feishu_* in place.
+- Own the keyboard transport inside the desktop process: the standalone
+  keyboard daemon, cold launch, login controls and service recovery are
+  retired; bounded in-process ownership, native stop confirmation and
+  installation-scoped legacy retirement remain, with a macOS
+  session-detection fix.
+- List only real bases in the knowledge grid and offer an explicit
+  unmount-and-delete path when a live session still selects the base.
+- Restore dev compile throughput: raise shared cargo jobs and reclaim stale
+  build-session markers so incremental caches are pruned again.
+
 ## v0.8.17 - 2026-10-28
 
 - Add Feishu remote-backed knowledge bases: create bases from basic info only,
