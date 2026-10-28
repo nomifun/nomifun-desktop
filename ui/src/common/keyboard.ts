@@ -29,6 +29,20 @@ export interface KeyboardSettings {
   subtitleFontSize: number;
 }
 
+export interface KeyboardMicrophoneTest {
+  id: string | null;
+  deviceId: string | null;
+  state: 'idle' | 'starting' | 'listening' | 'stopping' | 'completed' | 'failed' | 'cancelled';
+  callbackObserved: boolean;
+  samples: number;
+  nonzero: number;
+  peak: number;
+  rms: number;
+  elapsedMs: number;
+  stopped: boolean;
+  detail: string | null;
+}
+
 /** Native snapshots are authoritative; the renderer never predicts policy or capture acknowledgements. */
 export interface KeyboardState {
   sequence: number;
@@ -50,6 +64,7 @@ export interface KeyboardState {
   notice: string | null;
   audioState: { state: 'stopped' | 'starting' | 'capturing' | 'stopping' | 'error'; detail: string | null };
   capturePreparing: boolean;
+  microphoneTest: KeyboardMicrophoneTest;
   device: {
     connected: boolean;
     id: string | null;
@@ -64,10 +79,13 @@ export interface KeyboardState {
 }
 
 export type KeyboardAction = 'stop' | 'cancel' | 'beautify' | 'restore_original' | 'close'
+  | 'microphone_test_start' | 'microphone_test_stop' | 'open_settings'
   | 'open' | 'reset_position' | 'test_start' | 'test_stop' | 'toggle_pin'
   | 'edit_begin' | 'edit' | 'edit_end' | 'edit_cancel';
 export interface KeyboardActionRequest {
   action: KeyboardAction;
+  testId?: string;
+  audioDeviceId?: string | null;
   documentId?: string | null;
   revision?: number;
   cancelGeneration?: number;

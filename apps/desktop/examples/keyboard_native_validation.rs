@@ -788,7 +788,117 @@ async fn update_recovery(app: &tauri::AppHandle, fixture: &Fixture) -> Result<Va
         "disabled_and_unconfigured_keyboard_admit_maintenance":true,
         "scope":"production actor with synthetic capture; package file replacement is a separate witness"}))
 }
+async fn local_microphone_checks(app: &tauri::AppHandle, settings: &Settings, fixture: &Fixture) -> Result<Value> {
+    let mut unconfigured = settings.clone();
+    unconfigured.enabled = false;
+    unconfigured.k4_enabled = false;
+    unconfigured.asr_model = None;
+    keyboard::validation_request(app, None, Some(unconfigured.clone())).await.map_err(anyhow::Error::msg)?;
+    let local_before = keyboard::validation_snapshot(app);
+    let provider_before = [count(&fixture.connections), count(&fixture.uploads), count(&fixture.final_requests), count(&fixture.pcm)];
+    keyboard::validation_microphone_test(app, "microphone_test_start", "local-initial", None)
+        .await.map_err(anyhow::Error::msg).context("local test must work without ASR, USB or K4")?;
+    let local = wait_state(app, |state| state["microphoneTest"]["state"] == "completed").await?;
+    ensure!(local["microphoneTest"]["stopped"] == true && local["microphoneTest"]["callbackObserved"] == true
+        && local["microphoneTest"]["samples"].as_u64().unwrap_or(0) > 0, "local test lacks callback/sample/native-stop proof");
+    for field in ["documentId", "revision", "text", "phase", "editSessionId", "settings"] {
+        ensure!(local[field] == local_before[field], "local test changed {field}");
+    }
+    ensure!(provider_before == [count(&fixture.connections), count(&fixture.uploads), count(&fixture.final_requests), count(&fixture.pcm)], "local-only test called a provider");
+    action(app, "open").await?;
+    edit(app, "本地检查保留正文🙂", None).await?;
+    editor(app, "edit_begin", "local-editor", None).await?;
+    let document_before = keyboard::validation_snapshot(app);
+    keyboard::validation_hold_capture_stop(app, true).await.map_err(anyhow::Error::msg)?;
+    keyboard::validation_microphone_test(app, "microphone_test_start", "local-held", Some("draft-test-device".into()))
+        .await.map_err(anyhow::Error::msg)?;
+    wait_state(app, |state| state["microphoneTest"]["state"] == "listening").await?;
+    ensure!(keyboard::validation_microphone_test(app, "microphone_test_start", "local-overlap", None).await.is_err(),
+        "a second local test acquired the same native slot");
+    keyboard::validation_microphone_test(app, "microphone_test_stop", "expired-test", None).await.map_err(anyhow::Error::msg)?;
+    ensure!(keyboard::validation_snapshot(app)["microphoneTest"]["state"] == "listening", "stale test ID stopped a new owner");
+    keyboard::validation_microphone_test(app, "microphone_test_stop", "local-held", None).await.map_err(anyhow::Error::msg)?;
+    let stopping = wait_state(app, |state| state["microphoneTest"]["state"] == "stopping").await?;
+    ensure!(stopping["microphoneTest"]["stopped"] == false, "stop request forged native stop proof");
+    ensure!(keyboard::validation_microphone_test(app, "microphone_test_start", "local-before-proof", None).await.is_err(),
+        "local start bypassed the pending native owner");
+    keyboard::validation_late_capture_callback(app).await.map_err(anyhow::Error::msg)?;
+    keyboard::validation_hold_capture_stop(app, false).await.map_err(anyhow::Error::msg)?;
+    let cancelled = wait_state(app, |state| state["microphoneTest"]["state"] == "cancelled" && state["microphoneTest"]["stopped"] == true).await?;
+    for field in ["documentId", "revision", "text", "phase", "editSessionId", "settings"] {
+        ensure!(cancelled[field] == document_before[field], "local cancellation changed {field}");
+    }
+    ensure!(cancelled["microphoneTest"]["deviceId"] == "draft-test-device" && cancelled["settings"]["audioDeviceId"].is_null(),
+        "local test saved its temporary draft device");
+    editor(app, "edit_cancel", "local-editor", None).await?;
+
+    keyboard::validation_microphone_test(app, "microphone_test_start", "local-suspend", None).await.map_err(anyhow::Error::msg)?;
+    keyboard::validation_suspend(app, true).await.map_err(anyhow::Error::msg)?;
+    wait_state(app, |state| state["microphoneTest"]["state"] == "cancelled" && state["microphoneTest"]["stopped"] == true).await?;
+    ensure!(keyboard::validation_microphone_test(app, "microphone_test_start", "local-while-locked", None).await.is_err(),
+        "local test started in a suspended session");
+    keyboard::validation_suspend(app, false).await.map_err(anyhow::Error::msg)?;
+
+    keyboard::validation_microphone_test(app, "microphone_test_start", "local-update", None).await.map_err(anyhow::Error::msg)?;
+    let pause = keyboard::prepare_update(app).await.map_err(anyhow::Error::msg)?.context("local test did not stop for update")?;
+    ensure!(keyboard::validation_snapshot(app)["microphoneTest"]["stopped"] == true, "update accepted before local stop proof");
+    pause.cancel().await.map_err(anyhow::Error::msg)?;
+
+    unconfigured.enabled = true;
+    unconfigured.k4_enabled = true;
+    keyboard::validation_request(app, None, Some(unconfigured)).await.map_err(anyhow::Error::msg)?;
+    hardware(app, None).await?;
+    keyboard::validation_microphone_test(app, "microphone_test_start", "local-k4", None).await.map_err(anyhow::Error::msg)?;
+    wait_state(app, |state| state["microphoneTest"]["state"] == "listening").await?;
+    let during_local = keyboard::validation_snapshot(app);
+    hardware(app, Some(true)).await?;
+    ensure!(keyboard::validation_snapshot(app)["phase"] == "idle" && keyboard::validation_snapshot(app)["operationId"] == during_local["operationId"],
+        "K4 created a second owner during local test");
+    keyboard::validation_microphone_test(app, "microphone_test_stop", "local-k4", None).await.map_err(anyhow::Error::msg)?;
+    wait_state(app, |state| state["microphoneTest"]["stopped"] == true).await?;
+    hardware(app, Some(false)).await?;
+    hardware(app, Some(true)).await?;
+    let missing = wait_state(app, |state| state["visible"] == true && state["error"].as_str().is_some_and(|error| error.contains("ASR"))).await?;
+    ensure!(missing["audioState"]["state"] == "stopped" && missing["phase"] == "idle", "missing ASR opened native capture");
+    hardware(app, Some(false)).await?;
+    ensure!(provider_before == [count(&fixture.connections), count(&fixture.uploads), count(&fixture.final_requests), count(&fixture.pcm)],
+        "local-only lifecycle or missing-model K4 called a provider");
+    let provider_after = [count(&fixture.connections), count(&fixture.uploads), count(&fixture.final_requests), count(&fixture.pcm)];
+    close(app).await?;
+    let mut configured = settings.clone();
+    configured.enabled = true;
+    configured.k4_enabled = true;
+    keyboard::validation_request(app, None, Some(configured)).await.map_err(anyhow::Error::msg)?;
+    keyboard::validation_arm_prewarm(app).await.map_err(anyhow::Error::msg)?;
+    if !fixture.platform_asr {
+        wait_counter(&fixture.connections, 1).await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while !keyboard::validation_asr_prepared(app).await.map_err(anyhow::Error::msg)? {
+            ensure!(tokio::time::Instant::now() < deadline, "Actor did not accept idle ASR prewarm");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+    let prewarm_before = [count(&fixture.connections), count(&fixture.uploads), count(&fixture.final_requests), count(&fixture.pcm)];
+    let prewarm_document = keyboard::validation_snapshot(app);
+    keyboard::validation_microphone_test(app, "microphone_test_start", "local-with-prewarm", None).await.map_err(anyhow::Error::msg)?;
+    wait_state(app, |state| state["microphoneTest"]["state"] == "completed").await?;
+    tokio::time::sleep(Duration::from_millis(1200)).await; // include at least one normal Actor Tick
+    let after_prewarm = keyboard::validation_snapshot(app);
+    let prewarm_after = [count(&fixture.connections), count(&fixture.uploads), count(&fixture.final_requests), count(&fixture.pcm)];
+    ensure!(prewarm_before == prewarm_after, "local test cancelled prewarm and caused a new provider request");
+    for field in ["documentId", "revision", "text", "phase", "editSessionId", "settings"] {
+        ensure!(after_prewarm[field] == prewarm_document[field], "prewarmed local test changed {field}");
+    }
+    Ok(json!({"without_asr_usb_or_k4":true,"five_second_auto_stop":true,"callback_and_pcm_evidence":local["microphoneTest"],
+        "no_provider_calls":true,"provider_counts_before":provider_before,
+        "provider_counts_after":provider_after,"prewarm_preserved_without_provider_reconnect":true,
+        "prewarm_counts_before":prewarm_before,"prewarm_counts_after":prewarm_after,
+        "document_settings_and_edit_lease_unchanged":true,"draft_device_not_saved":true,"stale_test_id_ignored":true,
+        "mutual_exclusion":true,"stop_proof_required_before_new_owner":true,"late_cancelled_callback_does_not_fail":true,"suspension_cancels_and_blocks":true,
+        "update_waits_for_local_stop":true,"k4_missing_model_visible_without_recording":true}))
+}
 async fn validate(app: &tauri::AppHandle, settings: Settings, fixture: &Fixture) -> Result<Value> {
+    let local_microphone = local_microphone_checks(app, &settings, fixture).await.context("local microphone checks")?;
     keyboard::validation_request(app, None, Some(settings)).await.map_err(anyhow::Error::msg)?;
     hardware(app, None).await?;
     let editor = preparation_and_editor(app, fixture).await.context("preparation/editor cancellation")?;
@@ -798,7 +908,7 @@ async fn validate(app: &tauri::AppHandle, settings: Settings, fixture: &Fixture)
     let update_recovery = update_recovery(app, fixture).await.context("update pause/cancel/failure recovery")?;
     Ok(json!({"passed":true,"asr_mode":if fixture.platform_asr{"platform"}else{"streaming"},
         "audio_source":"explicit synthetic PCM fixture; no OS microphone","real_os_microphone":false,
-        "provider_requests_loopback_only":true,"editor":editor,"cancellation":boundaries,"heavy_use":heavy,
+        "provider_requests_loopback_only":true,"local_microphone":local_microphone,"editor":editor,"cancellation":boundaries,"heavy_use":heavy,
         "caret_and_close":caret_close,"update_recovery":update_recovery,
         "pcm_samples":count(&fixture.pcm),"uploads":count(&fixture.uploads),
         "asr_final_requests":count(&fixture.final_requests),"polish_requests":count(&fixture.polish)}))

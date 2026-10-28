@@ -5,3 +5,17 @@
 .keyboard-field { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; font-size: 13px; border-top: 1px solid var(--color-border-2); }
 .keyboard-field small { color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
 .keyboard-form-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0; }
+.keyboard-setup-list { margin: 0; padding: 0; list-style: none; }
+.keyboard-setup-list > li + li { border-top: 1px solid var(--color-border-2); }
+.keyboard-setup-list .cv-row { border: 0; }
+.keyboard-section-target { scroll-margin-top: 96px; }
+.keyboard-section-target:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 4px; }
+.keyboard-inline-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.keyboard-test-section { border-top: 1px solid var(--color-border-2); padding-top: 16px; }
+.keyboard-test-section h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.keyboard-test-section [role='status'] { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.keyboard-blockers { margin: 0 0 12px; padding-left: 20px; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+.keyboard-meter { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; color: var(--text-secondary); font-size: 12px; }
+.keyboard-meter meter { width: 220px; max-width: 100%; }
+.keyboard-save-status { position: sticky; top: 0; z-index: 2; padding: 8px 12px; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-bg-1); display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+.keyboard-save-status p { margin: 0; overflow-wrap: anywhere; }

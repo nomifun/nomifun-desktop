@@ -4,9 +4,11 @@ mod audio;
 mod key_hold;
 mod lifecycle;
 mod models;
+mod microphone_check;
 mod platform;
 mod update_pause;
 use key_hold::KeyHold;
+use microphone_check::{MicrophoneCheck, MicrophoneTestState};
 use models::{
     DesktopModels, KeyboardModelSelection, StreamingAsrConfig, StreamingAsrEvent,
     StreamingAsrInput, StreamingAsrSession,
@@ -56,6 +58,7 @@ pub(crate) struct KeyboardState {
     service: ServiceState,
     audio_state: AudioState,
     capture_preparing: bool,
+    microphone_test: MicrophoneTestState,
     cancel_generation: u64,
     edit_session_id: Option<String>,
 }
@@ -116,11 +119,18 @@ enum Message {
     },
     #[cfg(feature = "native-keyboard-validation")]
     ValidationHoldStop(bool, oneshot::Sender<Result<(), String>>),
+    #[cfg(feature = "native-keyboard-validation")]
+    ValidationLateCaptureCallback(oneshot::Sender<Result<(), String>>),
+    #[cfg(feature = "native-keyboard-validation")]
+    ValidationAsrPrepared(oneshot::Sender<bool>),
     Connected(Commands),
     Disconnected(String),
     Device(Event),
     Suspend(bool),
     Tick,
+    MicrophoneTick(Identity),
+    #[cfg(feature = "native-keyboard-validation")]
+    SyntheticInputReady(Identity),
     Action {
         action: String,
         document: Option<String>,
@@ -129,6 +139,8 @@ enum Message {
         text: Option<String>,
         edit_id: Option<String>,
         selection: Option<TextSelection>,
+        test_id: Option<String>,
+        audio_device_id: Option<String>,
         reply: oneshot::Sender<Result<KeyboardState, String>>,
     },
     Settings(Settings, oneshot::Sender<Result<KeyboardState, String>>),
@@ -209,6 +221,7 @@ struct Actor {
     editor: Option<EditorLease>,
     text_cursor: Option<TextCursor>,
     dictation_cursor_revision: Option<(String, u64)>,
+    microphone_check: Option<MicrophoneCheck>,
     capture: Option<audio::CaptureHandle>,
     capture_start_gate: Option<audio::CaptureStartGate>,
     capture_canceller: Option<audio::CaptureCanceller>,
@@ -315,6 +328,7 @@ fn start_core(
             detail: None,
         },
         capture_preparing: false,
+        microphone_test: MicrophoneTestState::default(),
         cancel_generation: 0,
         edit_session_id: None,
     };
@@ -372,6 +386,7 @@ fn start_core(
         editor: None,
         text_cursor: None,
         dictation_cursor_revision: None,
+        microphone_check: None,
         capture: None,
         capture_start_gate: None,
         capture_canceller: None,
@@ -503,12 +518,49 @@ pub(crate) async fn validation_request(
                 text: None,
                 edit_id: None,
                 selection: None,
+                test_id: None,
+                audio_device_id: None,
                 reply: tx,
             })
             .await
             .map_err(|_| "actor stopped")?;
     }
     serde_json::to_value(rx.await.map_err(|_| "actor stopped")??).map_err(|e| e.to_string())
+}
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) async fn validation_microphone_test(
+    app: &tauri::AppHandle,
+    action: &str,
+    test_id: &str,
+    device_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let runtime = app.state::<KeyboardRuntime>();
+    let (reply, result) = oneshot::channel();
+    runtime.tx.send(Message::Action {
+        action: action.into(), document: None, revision: None, cancel_generation: None,
+        text: None, edit_id: None, selection: None, test_id: Some(test_id.into()),
+        audio_device_id: device_id, reply,
+    }).await.map_err(|_| "actor stopped")?;
+    serde_json::to_value(result.await.map_err(|_| "actor stopped")??).map_err(|error| error.to_string())
+}
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) async fn validation_suspend(app: &tauri::AppHandle, paused: bool) -> Result<(), String> {
+    app.state::<KeyboardRuntime>().urgent.send(Message::Suspend(paused)).map_err(|_| "actor stopped")?;
+    // An unrelated targeted no-op acknowledges that the urgent lifecycle edge
+    // has been consumed; it cannot cancel the current test by accident.
+    validation_microphone_test(app, "microphone_test_stop", "suspension-ack", None).await.map(|_| ())
+}
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) async fn validation_late_capture_callback(app: &tauri::AppHandle) -> Result<(), String> {
+    let (reply, result) = oneshot::channel();
+    app.state::<KeyboardRuntime>().urgent.send(Message::ValidationLateCaptureCallback(reply)).map_err(|_| "actor stopped")?;
+    result.await.map_err(|_| "actor stopped")?
+}
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) async fn validation_asr_prepared(app: &tauri::AppHandle) -> Result<bool, String> {
+    let (reply, result) = oneshot::channel();
+    app.state::<KeyboardRuntime>().tx.send(Message::ValidationAsrPrepared(reply)).await.map_err(|_| "actor stopped")?;
+    result.await.map_err(|_| "actor stopped".into())
 }
 /// Inject only downstream key edges in a marked, synthetic, disposable test.
 /// This never opens a serial port or substitutes for firmware/IPC validation.
@@ -772,6 +824,28 @@ impl Actor {
                     };
                     let _ = reply.send(result);
                 }
+                #[cfg(feature = "native-keyboard-validation")]
+                Message::ValidationAsrPrepared(reply) => {
+                    let _ = reply.send(self.asr.as_ref().is_some_and(|input| input.is_accepting()));
+                }
+                #[cfg(feature = "native-keyboard-validation")]
+                Message::ValidationLateCaptureCallback(reply) => {
+                    let result = if self.production || !self.synthetic_input || self.microphone_check.is_none()
+                        || self.stop_requested != Some(true) {
+                        Err("cancelled synthetic local owner required".into())
+                    } else {
+                        // Deterministically represent an input callback that
+                        // crossed its native gate before cancellation, then
+                        // finishes scalar ingress after the stop request.
+                        let append = self.capture_input.as_ref().ok_or("local input missing")
+                            .and_then(|(_, input)| input.append_pcm16_16k(&[0; 32]).map_err(|_| "admitted late input was closed early"));
+                        if let Some(id) = self.capture_id.clone() {
+                            let _ = self.urgent.send(Message::CaptureError(id, "late callback after cancellation fixture".into()));
+                        }
+                        append.map_err(str::to_owned)
+                    };
+                    let _ = reply.send(result);
+                }
                 Message::Shutdown(reply) => {
                     self.suspended = true;
                     self.rearm_hardware();
@@ -849,6 +923,7 @@ impl Actor {
                         self.asr_failed("实时识别准备超时".into(), false);
                     }
                     if self.capture_starting
+                        && self.microphone_check.is_none()
                         && self
                             .recording_at
                             .is_some_and(|at| at.elapsed() >= Duration::from_secs(15))
@@ -890,6 +965,13 @@ impl Actor {
                     }
                     self.prepare_asr();
                 }
+                Message::MicrophoneTick(id) => self.microphone_tick(&id),
+                #[cfg(feature = "native-keyboard-validation")]
+                Message::SyntheticInputReady(id) => {
+                    if self.microphone_check.as_ref().is_some_and(|check| check.owner == id) {
+                        self.microphone_check_ready(true);
+                    }
+                }
                 Message::Device(event) => self.device(event),
                 Message::Action {
                     action,
@@ -899,9 +981,11 @@ impl Actor {
                     text,
                     edit_id,
                     selection,
+                    test_id,
+                    audio_device_id,
                     reply,
                 } => {
-                    let result = self.action(&action, document, revision, cancel_generation, text, edit_id, selection);
+                    let result = self.action(&action, document, revision, cancel_generation, text, edit_id, selection, test_id, audio_device_id);
                     self.publish();
                     let _ = reply.send(result.map(|_| self.state.clone()));
                 }
@@ -1026,6 +1110,10 @@ impl Actor {
                         match result {
                             Ok(handle) => {
                                 let input_ready = handle.input_ready();
+                                if self.microphone_check.is_some() {
+                                    self.state.microphone_test.callback_observed |= handle.callback_observed();
+                                    if input_ready { self.microphone_check_ready(true); }
+                                }
                                 self.capture_canceller = Some(handle.canceller());
                                 self.capture = Some(handle);
                                 if let Some(cancel) = self.stop_requested {
@@ -1035,6 +1123,8 @@ impl Actor {
                                         state: "capturing".into(),
                                         detail: None,
                                     };
+                                } else if self.microphone_check.is_some() {
+                                    self.stop_microphone_check("failed", Some("系统麦克风未进入聆听状态".into()));
                                 } else {
                                     self.abort(false);
                                     self.state.document.error =
@@ -1051,7 +1141,14 @@ impl Actor {
                 }
                 Message::CaptureStopped(id, receipt) => self.capture_stopped(id, receipt),
                 Message::CaptureError(id, error) => {
-                    if self.capture_id.as_ref() == Some(&id)
+                    if self.microphone_check.as_ref().is_some_and(|check| check.owner == id) {
+                        // A callback can have passed native admission just
+                        // before cancellation. Its late fault cannot replace
+                        // the user's already-owned cancellation result.
+                        if self.stop_requested != Some(true) {
+                            self.stop_microphone_check("failed", Some(format!("系统麦克风：{error}")));
+                        }
+                    } else if self.capture_id.as_ref() == Some(&id)
                         && self.stop_requested != Some(true)
                         && self.state.document.matches(&id)
                     {
@@ -1427,6 +1524,10 @@ impl Actor {
         self.state.document.error = Some(message);
     }
     fn capture_failed(&mut self, id: Identity, failure: audio::CaptureStartFailure) {
+        if self.microphone_check.as_ref().is_some_and(|check| check.owner == id) {
+            self.microphone_check_failed(id, failure);
+            return;
+        }
         let cancelled = self.stop_requested == Some(true);
         if !cancelled || !failure.capture_stopped {
             self.state.document.fail(&id, failure.message.clone());
@@ -1460,6 +1561,10 @@ impl Actor {
         }
     }
     fn capture_stopped(&mut self, id: Identity, receipt: audio::StopReceipt) {
+        if self.microphone_check.as_ref().is_some_and(|check| check.owner == id) {
+            self.microphone_check_stopped(id, receipt);
+            return;
+        }
         if self.capture_id.as_ref() != Some(&id) {
             return;
         }
@@ -1611,13 +1716,176 @@ impl Actor {
             let _ = tx.send(Message::PlatformAsrFinished(id, result)).await;
         });
     }
+    fn start_microphone_check(&mut self, test_id: Option<String>, device: Option<String>) -> Result<(), String> {
+        let test_id = test_id.filter(|id| !id.trim().is_empty() && id.len() <= 128)
+            .ok_or("缺少有效麦克风检测标识")?;
+        if device.as_ref().is_some_and(|id| id.is_empty() || id.len() > 1024) {
+            return Err("系统麦克风选择无效".into());
+        }
+        if self.state.microphone_test.id.as_deref() == Some(&test_id) {
+            return Err("麦克风检测标识已使用，请重新开始检测".into());
+        }
+        if self.suspended || self.stop_flag.load(Ordering::Acquire) {
+            return Err("当前系统会话不可录音，请解锁或重新启动服务".into());
+        }
+        if self.capture_id.is_some() || self.pending_start.is_some() || self.close_pending
+            || self.state.document.phase != Phase::Idle || self.state.audio_state.state != "stopped" {
+            return Err("请先结束当前录音或处理，再检测麦克风".into());
+        }
+        // Keep idle provider preparation intact. A local test neither uses it
+        // nor cancels it, since cancellation would make the next idle tick
+        // reconnect and turn this local action into a new provider request.
+        self.key_hold.consume();
+        let owner = Identity { document_id: format!("microphone-test:{test_id}"), revision: 0,
+            operation_id: uuid::Uuid::now_v7().to_string() };
+        let meter = audio::MeterCapture::new();
+        let input = meter.input();
+        let timer = CancellationToken::new();
+        self.state.microphone_test = MicrophoneTestState { id: Some(test_id.clone()),
+            device_id: device.clone(), state: "starting".into(), stopped: false,
+            ..Default::default() };
+        self.microphone_check = Some(MicrophoneCheck { test_id, owner: owner.clone(), meter,
+            started_at: Instant::now(), listening_at: None, timer: timer.clone(), outcome: "completed" });
+        self.capture_id = Some(owner.clone());
+        self.capture_input = Some((owner.clone(), input.clone()));
+        self.capture_starting = true;
+        self.stop_requested = None;
+        self.state.audio_state = AudioState { state: "starting".into(), detail: None };
+        let ticks = self.tx.clone();
+        let tick_owner = owner.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = timer.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                        tokio::select! {
+                            _ = timer.cancelled() => break,
+                            result = ticks.send(Message::MicrophoneTick(tick_owner.clone())) => {
+                                if result.is_err() { break; }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        self.start_capture_owner(owner, input, device);
+        Ok(())
+    }
+    fn microphone_check_ready(&mut self, callback_observed: bool) {
+        let Some(check) = &mut self.microphone_check else { return; };
+        self.state.microphone_test.callback_observed |= callback_observed;
+        if self.stop_requested.is_none() {
+            check.listening_at.get_or_insert_with(Instant::now);
+            self.capture_starting = false;
+            self.state.microphone_test.state = "listening".into();
+            self.state.audio_state.state = "capturing".into();
+        }
+    }
+    fn measure_microphone_check(&mut self) {
+        let Some(check) = &self.microphone_check else { return; };
+        let stats = check.meter.stats();
+        let (peak, rms) = check.meter.levels();
+        let test = &mut self.state.microphone_test;
+        test.samples = stats.samples;
+        test.nonzero = stats.nonzero;
+        test.peak = peak;
+        test.rms = rms;
+        test.elapsed_ms = check.listening_at.map(|at| at.elapsed().as_millis() as u64).unwrap_or(0);
+        if let Some(gate) = &self.capture_start_gate {
+            test.callback_observed |= gate.callback_observed();
+        }
+    }
+    fn microphone_tick(&mut self, owner: &Identity) {
+        if !self.microphone_check.as_ref().is_some_and(|check| &check.owner == owner) { return; }
+        self.measure_microphone_check();
+        let check = self.microphone_check.as_ref().unwrap();
+        if self.stop_requested.is_some() { return; }
+        if check.listening_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(5)) {
+            self.stop_microphone_check("completed", None);
+        } else if check.listening_at.is_none() && check.started_at.elapsed() >= Duration::from_secs(15) {
+            self.stop_microphone_check("failed", Some("系统麦克风启动超时，正在等待原生停采回执".into()));
+        }
+    }
+    fn stop_microphone_check(&mut self, outcome: &'static str, detail: Option<String>) {
+        let Some(check) = &mut self.microphone_check else { return; };
+        // A later cleanup cannot downgrade an actual capture failure.
+        if check.outcome != "failed" { check.outcome = outcome; }
+        if detail.is_some() { self.state.microphone_test.detail = detail; }
+        // Keep scalar ingress open until native stop is proven: a callback may
+        // already have passed the gate when cancellation revokes admission.
+        // Closing first would turn its admitted append into a synthetic fault.
+        self.measure_microphone_check();
+        self.request_stop(outcome != "completed");
+    }
+    fn microphone_check_failed(&mut self, id: Identity, failure: audio::CaptureStartFailure) {
+        self.state.microphone_test.detail = Some(failure.message.clone());
+        if let Some(check) = &mut self.microphone_check {
+            if check.outcome != "cancelled" { check.outcome = "failed"; }
+        }
+        if failure.capture_stopped {
+            self.microphone_check_stopped(id, audio::StopReceipt {
+                capture_stopped: true, cancelled: self.stop_requested == Some(true), error: Some(failure.message),
+            });
+        } else {
+            self.capture_starting = false;
+            if let Some(handle) = failure.pending {
+                self.capture_canceller = Some(handle.canceller());
+                self.capture = Some(handle);
+            }
+            self.request_stop(true);
+        }
+    }
+    fn microphone_check_stopped(&mut self, id: Identity, receipt: audio::StopReceipt) {
+        if self.capture_id.as_ref() != Some(&id) { return; }
+        self.measure_microphone_check();
+        if !receipt.capture_stopped {
+            if let Some(check) = &mut self.microphone_check {
+                check.outcome = "failed";
+            }
+            self.state.microphone_test.state = "stopping".into();
+            self.state.microphone_test.detail = receipt.error.clone();
+            self.state.audio_state = AudioState { state: "error".into(), detail: receipt.error };
+            return; // Retain the only owner until its real terminal receipt.
+        }
+        let Some(check) = self.microphone_check.take() else { return; };
+        check.meter.close();
+        // Closing drains any in-flight meter ingress before the final sample
+        // snapshot, while the receipt independently proves native stop/join.
+        let stats = check.meter.stats();
+        self.state.microphone_test.samples = stats.samples;
+        self.state.microphone_test.nonzero = stats.nonzero;
+        self.state.microphone_test.state = if receipt.error.is_some() && check.outcome != "cancelled" {
+            "failed"
+        } else { check.outcome }.into();
+        self.state.microphone_test.stopped = true;
+        if receipt.error.is_some() { self.state.microphone_test.detail = receipt.error; }
+        self.capture_id = None;
+        self.capture_input = None;
+        self.capture_start_gate = None;
+        self.capture_starting = false;
+        self.capture = None;
+        self.capture_canceller = None;
+        self.stop_requested = None;
+        self.recording_at = None;
+        self.drain_at = None;
+        #[cfg(feature = "native-keyboard-validation")]
+        { self.synthetic_stop = None; }
+        self.state.audio_state = AudioState { state: "stopped".into(), detail: None };
+    }
     fn begin_capture(&mut self, hardware: bool) {
+        if self.microphone_check.is_some() {
+            self.key_hold.consume();
+            return;
+        }
         if hardware && !self.key_hold.waiting() {
             return;
         }
         if self.saved.settings.asr_model.is_none() {
             self.key_hold.consume();
             self.state.document.error = Some("请先在拓展键盘设置中选择当前模式的 ASR 模型".into());
+            if let Err(error) = self.show() {
+                self.state.document.error = Some(format!("请先选择 ASR 模型；字幕窗口打开失败：{error}"));
+            }
             return;
         }
         if self.suspended
@@ -1718,16 +1986,24 @@ impl Actor {
             );
             return;
         }
+        let device = self.saved.settings.audio_device_id.clone();
+        self.start_capture_owner(id, input, device);
+    }
+    fn start_capture_owner(&mut self, id: Identity, input: audio::CaptureInput, device: Option<String>) {
         #[cfg(feature = "native-keyboard-validation")]
         if self.synthetic_input {
             let control = Arc::new(std::sync::atomic::AtomicU8::new(0));
             self.synthetic_stop = Some(control.clone());
-            self.capture_starting = false;
-            self.state.audio_state.state = "capturing".into();
+            let local = self.microphone_check.is_some();
+            if !local {
+                self.capture_starting = false;
+                self.state.audio_state.state = "capturing".into();
+            }
             let tx = self.tx.clone();
             let stop_hold = self.synthetic_stop_hold.clone();
             tauri::async_runtime::spawn(async move {
                 let mut error = None;
+                let mut first = true;
                 while control.load(Ordering::Acquire) == 0 {
                     let samples: Vec<i16> = (0..960)
                         .map(|n| ((n as f64 * 0.1).sin() * 2000.0) as i16)
@@ -1735,6 +2011,10 @@ impl Actor {
                     if let Err(message) = input.append_pcm16_16k(&samples) {
                         error = Some(message);
                         break;
+                    }
+                    if local && first {
+                        first = false;
+                        let _ = tx.send(Message::SyntheticInputReady(id.clone())).await;
                     }
                     tokio::time::sleep(Duration::from_millis(60)).await;
                 }
@@ -1753,7 +2033,6 @@ impl Actor {
             });
             return;
         }
-        let device = self.saved.settings.audio_device_id.clone();
         let gate = audio::CaptureStartGate::new();
         self.capture_start_gate = Some(gate.clone());
         let ready_tx = self.urgent.clone();
@@ -1828,6 +2107,10 @@ impl Actor {
         self.prepare_asr();
     }
     fn request_stop(&mut self, cancel: bool) {
+        if self.microphone_check.is_some() {
+            self.state.microphone_test.state = "stopping".into();
+            self.state.microphone_test.stopped = false;
+        }
         if let Some(gate) = &self.capture_start_gate {
             gate.stop(cancel);
         }
@@ -1883,6 +2166,10 @@ impl Actor {
         }
     }
     fn abort(&mut self, close: bool) {
+        if self.microphone_check.is_some() {
+            self.stop_microphone_check("cancelled", None);
+            return;
+        }
         self.state.cancel_generation = self.state.cancel_generation.wrapping_add(1);
         if close {
             self.editor = None;
@@ -2229,6 +2516,8 @@ impl Actor {
         text: Option<String>,
         edit_id: Option<String>,
         selection: Option<TextSelection>,
+        test_id: Option<String>,
+        audio_device_id: Option<String>,
     ) -> Result<(), String> {
         if matches!(action, "cancel" | "close") {
             if document != self.state.document.document_id {
@@ -2263,6 +2552,13 @@ impl Actor {
             return Err("文稿已更新，请操作当前文稿".into());
         }
         match action {
+            "microphone_test_start" => self.start_microphone_check(test_id, audio_device_id)?,
+            "microphone_test_stop" => {
+                if self.microphone_check.as_ref().is_some_and(|check| Some(check.test_id.as_str()) == test_id.as_deref()) {
+                    self.stop_microphone_check("cancelled", None);
+                }
+            }
+            "open_settings" => platform::open_keyboard_settings(&self.app).map_err(|error| error.to_string())?,
             "edit_begin" => {
                 if self.state.document.phase != Phase::Idle
                     || self.capture_id.is_some()
@@ -2425,6 +2721,9 @@ impl Actor {
         let hardware_changed = old.enabled != settings.enabled
             || old.k4_enabled != settings.k4_enabled
             || audio_changed;
+        if audio_changed && self.microphone_check.is_some() {
+            self.stop_microphone_check("cancelled", None);
+        }
         let disabling =
             (!settings.enabled || !settings.k4_enabled) && (old.enabled && old.k4_enabled);
         if !settings.enabled && self.pending_origin == Some(true)
@@ -2630,6 +2929,8 @@ pub(crate) async fn keyboard_action(
     text: Option<String>,
     edit_id: Option<String>,
     selection: Option<TextSelection>,
+    test_id: Option<String>,
+    audio_device_id: Option<String>,
 ) -> Result<KeyboardState, String> {
     if window.label() == "keyboard-subtitle"
         && !matches!(
@@ -2644,6 +2945,8 @@ pub(crate) async fn keyboard_action(
                 | "edit"
                 | "edit_end"
                 | "edit_cancel"
+                | "open_settings"
+                | "microphone_test_stop"
         )
     {
         return Err("字幕窗口无权执行该操作".into());
@@ -2659,6 +2962,8 @@ pub(crate) async fn keyboard_action(
             text,
             edit_id,
             selection,
+            test_id,
+            audio_device_id,
             reply: tx,
         })
         .await
@@ -2683,6 +2988,8 @@ pub(crate) fn window_event(window: &tauri::Window, event: &tauri::WindowEvent) -
                     text: None,
                     edit_id: None,
                     selection: None,
+                    test_id: None,
+                    audio_device_id: None,
                     reply: tx,
                 });
             }
@@ -2821,6 +3128,8 @@ async fn validation_edit_action(
             text,
             edit_id,
             selection,
+            test_id: None,
+            audio_device_id: None,
             reply,
         })
         .await
@@ -2849,6 +3158,8 @@ pub(crate) async fn validation_document_operation(
         text: None,
         edit_id: None,
         selection: None,
+        test_id: None,
+        audio_device_id: None,
         reply,
     }).await.map_err(|_| "actor stopped")?;
     serde_json::to_value(result.await.map_err(|_| "actor stopped")??).map_err(|e| e.to_string())

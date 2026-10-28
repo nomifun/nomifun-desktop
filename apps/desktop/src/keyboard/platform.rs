@@ -2,7 +2,7 @@ use std::{path::{Path,PathBuf},time::Duration};
 #[cfg(target_os="macos")]
 use std::{io::Read,process::{Command,ExitStatus,Output,Stdio},time::Instant};
 use anyhow::{Result,ensure,Context};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg(target_os="linux")]
 fn default_gui_backend(gdk:Option<&std::ffi::OsStr>,display:Option<&std::ffi::OsStr>,wayland:Option<&std::ffi::OsStr>)->Option<&'static str>{
@@ -412,6 +412,16 @@ pub fn toggle_main(app:&tauri::AppHandle)->Result<()> {
         }
         #[cfg(target_os="linux")]{use gtk::prelude::*;on_main(&window,|window|{let native=window.gtk_window()?;native.set_accept_focus(true);native.set_focus_on_map(true);native.present();Ok(())})?;}
     }
+    Ok(())
+}
+
+/// A fixed in-app route; subtitle input never supplies a URL or route.
+pub fn open_keyboard_settings(app: &tauri::AppHandle) -> Result<()> {
+    let window = app.get_webview_window("main").context("主窗口尚未就绪")?;
+    window.unminimize()?;
+    window.show()?;
+    window.set_focus()?;
+    app.emit_to("main", "companion-navigate", "/settings/keyboard")?;
     Ok(())
 }
 

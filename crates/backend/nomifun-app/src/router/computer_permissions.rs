@@ -109,9 +109,9 @@ fn capture_state(camera: bool) -> SystemPermissionState {
 
 #[cfg(not(target_os = "macos"))]
 fn capture_state(_camera: bool) -> SystemPermissionState {
-    // Windows/Linux media capture is owned by the renderer and the OS/browser
-    // privacy layer. The settings UI offers a real, user-triggered microphone
-    // test there instead of presenting a guessed backend status.
+    // No truthful process-wide media permission probe is available here.
+    // Consumers verify their actual capture path on explicit user request:
+    // the keyboard uses native input, while WebView voice uses mediaDevices.
     SystemPermissionState::Unknown
 }
 

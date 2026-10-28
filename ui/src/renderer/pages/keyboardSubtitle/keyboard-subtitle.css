@@ -109,10 +109,18 @@ html.keyboard-subtitle-window,
 .keyboard-subtitle__toolbar svg { width: 16px; height: 16px; vertical-align: middle; pointer-events: none; }
 .keyboard-subtitle__issue {
   position: absolute; top: 4px; left: 50%; transform: translateX(-50%); z-index: 4;
+  display: flex; align-items: start; gap: 8px; width: max-content;
   max-width: calc(100% - 36px); color: #f1ca87; font-size: 12px; line-height: 20px;
   -webkit-text-stroke: 0; text-shadow: 0 1px 2px #372d22;
 }
+.keyboard-subtitle__issue-disclosure { min-width: 0; }
 .keyboard-subtitle__issue summary { cursor: pointer; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.keyboard-subtitle__setup {
+  flex-shrink: 0; padding: 0 6px; border: 1px solid currentColor; border-radius: 4px;
+  color: inherit; background: #332e29f5; font: inherit; line-height: 18px; cursor: pointer;
+}
+.keyboard-subtitle__setup:focus-visible { outline: 1px solid currentColor; outline-offset: 2px; }
+.keyboard-subtitle__setup:disabled { opacity: .5; cursor: default; }
 .keyboard-subtitle__issue-detail {
   box-sizing: border-box; position: absolute; top: 22px; left: 50%; transform: translateX(-50%);
   width: min(480px, calc(100vw - 24px)); max-height: calc(100vh - 40px); padding: 7px 10px;

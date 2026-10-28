@@ -1,5 +1,6 @@
 //! Native capture sinks share one ingress contract. Streaming uploads chunks;
-//! ordinary ASR retains one bounded in-memory recording until native stop.
+//! ordinary ASR retains one bounded in-memory recording until native stop;
+//! local microphone checks retain scalar measurements only.
 use super::super::models::StreamingAsrInput;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
@@ -11,6 +12,7 @@ const MAX_CHUNK_SAMPLES: usize = 960;
 enum Sink {
     Streaming(StreamingAsrInput),
     Buffered(BufferedCapture),
+    Meter(MeterCapture),
 }
 #[derive(Clone)]
 pub struct CaptureInput {
@@ -65,9 +67,99 @@ impl CaptureInput {
         match &self.sink {
             Sink::Streaming(input) => input.append_pcm16_16k(samples)?,
             Sink::Buffered(input) => input.append(samples)?,
+            Sink::Meter(input) => input.append(samples)?,
         };
         stats.accept(samples);
         Ok(())
+    }
+}
+
+struct Meter {
+    open: bool,
+    recent: AudioStats,
+}
+
+/// A local-only sink with no waveform allocation or retention. Each accepted
+/// chunk replaces the recent scalar window (at most 60 ms of 16 kHz input), so
+/// displayed levels can fall while cumulative evidence remains available.
+#[derive(Clone)]
+pub struct MeterCapture {
+    meter: Arc<Mutex<Meter>>,
+    stats: Arc<Mutex<AudioStats>>,
+}
+impl Default for MeterCapture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl MeterCapture {
+    pub fn new() -> Self {
+        Self {
+            meter: Arc::new(Mutex::new(Meter {
+                open: true,
+                recent: AudioStats::default(),
+            })),
+            stats: Arc::new(Mutex::new(AudioStats::default())),
+        }
+    }
+    pub fn input(&self) -> CaptureInput {
+        CaptureInput {
+            sink: Sink::Meter(self.clone()),
+            stats: self.stats.clone(),
+        }
+    }
+    fn append(&self, samples: &[i16]) -> Result<(), String> {
+        let mut meter = self
+            .meter
+            .lock()
+            .map_err(|_| "麦克风检测采样状态损坏".to_string())?;
+        if !meter.open {
+            return Err("麦克风检测已关闭，拒绝迟到采样".into());
+        }
+        if samples.is_empty() || samples.len() > MAX_CHUNK_SAMPLES {
+            meter.open = false;
+            return Err("麦克风检测需要每块1–960个16kHz单声道PCM16采样".into());
+        }
+        let mut recent = AudioStats::default();
+        recent.accept(samples);
+        meter.recent = recent;
+        Ok(())
+    }
+    /// Fence all callback clones and wait for admitted cumulative measurements.
+    /// This does not stop the native owner; callers must prove native stop
+    /// separately before releasing its capture slot.
+    pub fn close(&self) {
+        // Ingress takes stats before the sink. Keep the same order so close
+        // cannot return while an admitted append still has stats to publish.
+        let _stats = self
+            .stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.meter
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .open = false;
+    }
+    pub fn stats(&self) -> AudioStats {
+        *self
+            .stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+    /// Normalized peak and RMS from the most recent accepted chunk. Digital
+    /// zero remains distinct from no callback through cumulative sample counts.
+    pub fn levels(&self) -> (f64, f64) {
+        let recent = self
+            .meter
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recent;
+        if recent.samples == 0 {
+            return (0.0, 0.0);
+        }
+        let peak = f64::from(recent.peak) / 32768.0;
+        let rms = (recent.sum_squares as f64 / recent.samples as f64).sqrt() / 32768.0;
+        (peak, rms)
     }
 }
 
@@ -176,6 +268,82 @@ impl BufferedCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn meter_only_tracks_cumulative_stats_across_input_clones() {
+        let capture = MeterCapture::new();
+        let input = capture.input();
+        assert_eq!(capture.stats(), AudioStats::default());
+        assert_eq!(capture.levels(), (0.0, 0.0));
+        input.append_pcm16_16k(&[0, i16::MIN, i16::MAX]).unwrap();
+        input.clone().append_pcm16_16k(&[0, 1, -1]).unwrap();
+        let expected = AudioStats {
+            samples: 6,
+            nonzero: 4,
+            peak: 32768,
+            sum_squares: 2_147_418_115,
+        };
+        assert_eq!(capture.stats(), expected);
+        assert_eq!(input.stats(), expected);
+    }
+    #[test]
+    fn meter_only_levels_follow_recent_input_and_fall_after_digital_zero() {
+        let capture = MeterCapture::new();
+        let input = capture.input();
+        input.append_pcm16_16k(&[i16::MIN, 0]).unwrap();
+        let (peak, rms) = capture.levels();
+        assert_eq!(peak, 1.0);
+        assert!((rms - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+        input.append_pcm16_16k(&[8192, -8192]).unwrap();
+        assert_eq!(capture.levels(), (0.25, 0.25));
+        input.append_pcm16_16k(&[0; 960]).unwrap();
+        assert_eq!(capture.levels(), (0.0, 0.0));
+        assert_eq!(capture.stats().samples, 964);
+        assert_eq!(capture.stats().nonzero, 3);
+        assert_eq!(capture.stats().peak, 32768);
+    }
+    #[test]
+    fn meter_only_close_fences_existing_and_new_inputs_without_erasing_evidence() {
+        let capture = MeterCapture::new();
+        let input = capture.input();
+        let callback_clone = input.clone();
+        input.append_pcm16_16k(&[16384; 960]).unwrap();
+        let expected = capture.stats();
+        capture.clone().close();
+        capture.close();
+        assert!(callback_clone.append_pcm16_16k(&[1]).is_err());
+        assert!(capture.input().append_pcm16_16k(&[1]).is_err());
+        assert_eq!(capture.stats(), expected);
+        assert_eq!(capture.levels(), (0.5, 0.5));
+        let next = MeterCapture::new();
+        next.input().append_pcm16_16k(&[1]).unwrap();
+        assert_eq!(next.stats().samples, 1);
+        assert_eq!(capture.stats(), expected);
+    }
+    #[test]
+    fn meter_only_malformed_chunks_fail_closed_without_counting_rejected_input() {
+        for chunk in [Vec::new(), vec![0; 961]] {
+            let capture = MeterCapture::new();
+            let input = capture.input();
+            input.append_pcm16_16k(&[16384]).unwrap();
+            let expected = capture.stats();
+            assert!(input.append_pcm16_16k(&chunk).is_err());
+            assert!(input.clone().append_pcm16_16k(&[2]).is_err());
+            assert_eq!(capture.stats(), expected);
+            assert_eq!(capture.levels(), (0.5, 0.5));
+        }
+    }
+    #[test]
+    fn meter_only_close_and_append_linearize_without_late_stats() {
+        let capture = MeterCapture::new();
+        let input = capture.input();
+        let append = std::thread::spawn(move || input.append_pcm16_16k(&[8192; 960]));
+        capture.close();
+        let stopped_stats = capture.stats();
+        let accepted = append.join().unwrap().is_ok();
+        assert_eq!(capture.stats(), stopped_stats);
+        assert_eq!(stopped_stats.samples, if accepted { 960 } else { 0 });
+        assert!(capture.input().append_pcm16_16k(&[42]).is_err());
+    }
     #[test]
     fn meter_counts_only_successful_pcm_and_is_shared_without_retaining_audio() {
         let capture = BufferedCapture::with_limit(6);

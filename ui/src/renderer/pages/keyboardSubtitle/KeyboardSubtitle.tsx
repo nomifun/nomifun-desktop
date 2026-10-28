@@ -144,10 +144,14 @@ export default function KeyboardSubtitle() {
       </span> : <span className={captureStatus === 'preparing' ? 'keyboard-subtitle__prepare-spinner' : 'keyboard-subtitle__stop-dot'} aria-hidden='true' />}
       <span>{t(`settings.keyboard.recording_${captureStatus}`)}</span>
     </div>}
-    {failure && !captureStatus && <details key={failure} className='keyboard-subtitle__issue'>
-      <summary><span role='alert'>{t(editor.saveError ? 'settings.keyboard.editSaveError' : 'settings.keyboard.operationFailed')}</span></summary>
-      <div className='keyboard-subtitle__issue-detail'>{failure}</div>
-    </details>}
+    {failure && !captureStatus && <div className='keyboard-subtitle__issue'>
+      <details key={failure} className='keyboard-subtitle__issue-disclosure'>
+        <summary><span role='alert'>{failure}</span></summary>
+        <div className='keyboard-subtitle__issue-detail'>{failure}</div>
+      </details>
+      {available && state && <button type='button' className='keyboard-subtitle__setup'
+        disabled={busy} onClick={() => invoke('open_settings')}>{t('settings.keyboard.openSetup')}</button>}
+    </div>}
     <div className='keyboard-subtitle__content' ref={content} onScroll={(event) => {
       const node = event.currentTarget;
       followTail.current = node.scrollHeight - node.clientHeight - node.scrollTop < 36;
@@ -171,7 +175,12 @@ export default function KeyboardSubtitle() {
       onMouseDown={event => { if ((event.target as HTMLElement).closest('button:not(.keyboard-subtitle__drag)')) event.preventDefault(); }}>
       <button type='button' className='keyboard-subtitle__drag' data-tauri-drag-region
         aria-label={t('settings.keyboard.dragWindow')} title={t('settings.keyboard.dragWindow')}><IconDragDotVertical data-tauri-drag-region /></button>
-      {(recording || capturing || state?.capturePreparing) && <button type='button' aria-label={t('settings.keyboard.stop')} title={t('settings.keyboard.stop')} onClick={() => invoke('stop')}><IconRecordStop /></button>}
+      {(recording || capturing || state?.capturePreparing) && <button type='button' aria-label={t('settings.keyboard.stop')} title={t('settings.keyboard.stop')}
+        onClick={() => {
+          const check = state?.microphoneTest;
+          if (check?.id && !check.stopped) void action({ action: 'microphone_test_stop', testId: check.id });
+          else invoke('stop');
+        }}><IconRecordStop /></button>}
       {(active || beautifying) && <button type='button' aria-label={t('settings.keyboard.cancel')} title={t('settings.keyboard.cancel')} onClick={() => invoke('cancel')}><IconCloseCircle /></button>}
       <button type='button' aria-label={t('settings.keyboard.beautify')} title={t('settings.keyboard.beautify')} disabled={!canBeautify} onClick={() => invoke('beautify')}><IconBrush /></button>
       <button type='button' aria-label={t('settings.keyboard.restore')} title={t('settings.keyboard.restore')} disabled={!state || active || phase !== 'idle' || !state.originalText || state.originalText === state.text || busy}

@@ -4,7 +4,7 @@
 mod dsp;
 #[path = "capture_input.rs"]
 mod capture_input;
-pub use capture_input::{AudioStats, BufferedCapture, CaptureInput};
+pub use capture_input::{AudioStats, BufferedCapture, CaptureInput, MeterCapture};
 #[cfg(windows)]
 #[path = "windows_com.rs"]
 mod windows_com;
@@ -196,6 +196,10 @@ pub struct CaptureStartGate {
     input_ready: Arc<AtomicBool>,
 }
 impl CaptureStartGate {
+    /// Latched native input-ready proof survives a later stop request.
+    pub fn callback_observed(&self) -> bool {
+        self.input_ready.load(Ordering::Acquire)
+    }
     pub fn new() -> Self {
         Self {
             phase: Arc::new(AtomicU8::new(OPENING)),
@@ -306,6 +310,9 @@ pub struct CaptureHandle {
     gate: CaptureStartGate,
 }
 impl CaptureHandle {
+    pub fn callback_observed(&self) -> bool {
+        self.gate.callback_observed()
+    }
     /// Early cancellation can still return an owner handle for its stop proof.
     /// Such a handle is never permission to show the listening state.
     pub fn input_ready(&self) -> bool {
@@ -755,6 +762,33 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_meter_distinguishes_native_zero_callback_from_resampled_pcm() {
+        let meter = MeterCapture::new();
+        let input = meter.input();
+        let gate = CaptureStartGate::new();
+        let first = FirstInput::default();
+        let (tx, rx) = mpsc::sync_channel(4);
+        gate.bind(tx).unwrap();
+        assert!(gate.admit_play());
+        gate.played();
+        assert!(!gate.callback_observed());
+        let converter = Mutex::new(dsp::PcmConverter::new(16_000, 1).unwrap());
+        assert!(deliver_input(&[0_i16; 32], &converter, &input, &gate.live, &first).unwrap());
+        assert_eq!(wait_for_first_input(&gate, &first, &Mutex::new(None), &rx, Duration::from_secs(1)), InputStart::Ready);
+        assert!(gate.callback_observed());
+        assert_eq!(meter.stats().samples, 0, "a real callback precedes a complete PCM chunk");
+        gate.stop(false);
+        assert!(gate.callback_observed(), "native callback proof remains after stop");
+        for tail in converter.lock().unwrap().finish(true).unwrap() {
+            input.append_pcm16_16k(&tail).unwrap();
+        }
+        assert_eq!(meter.stats().samples, 32);
+        assert_eq!(meter.stats().nonzero, 0);
+        assert_eq!(meter.levels(), (0.0, 0.0));
+        meter.close();
+        assert!(input.append_pcm16_16k(&[7]).is_err());
+    }
     #[test]
     fn first_input_wait_requires_play_and_nonempty_native_data() {
         let gate = CaptureStartGate::new();

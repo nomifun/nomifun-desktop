@@ -18,6 +18,8 @@ const snapshot = (patch: Partial<KeyboardState> = {}): KeyboardState => ({
   originalText: '原文 👋\nSecond line', partial: '', candidate: '', visible: true, pendingAction: null,
   error: null, notice: null,
   audioState: { state: 'stopped', detail: null },
+  microphoneTest: { id: null, deviceId: null, state: 'idle', callbackObserved: false,
+    samples: 0, nonzero: 0, peak: 0, rms: 0, elapsedMs: 0, stopped: true, detail: null },
   capturePreparing: false,
   device: { connected: true, id: 'device-1', port: 'COM8', firmware: 'test',
     policyState: 'applied', captureState: 'stopped', detail: null },
@@ -300,7 +302,7 @@ describe('native subtitle coordination', () => {
     const close = await screen.findByRole('button', { name: 'Close subtitle board' });
     await waitFor(() => expect(close.hasAttribute('disabled')).toBe(false));
     fireEvent.click(close);
-    await screen.findByText('Cannot stop recording');
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('Cannot stop recording'));
     expect(screen.getByRole('textbox', { name: 'Final text' }).textContent).toBe('原文 👋\nSecond line');
     expect(close.hasAttribute('disabled')).toBe(false);
   });
@@ -310,8 +312,7 @@ describe('native subtitle coordination', () => {
     current = snapshot({ error: diagnostic });
     renderBoard();
     const issue = await screen.findByRole('alert');
-    expect(issue.textContent).toBe('Operation incomplete · Show details');
-    expect(issue.textContent).not.toContain('dBFS');
+    expect(issue.textContent).toBe(diagnostic);
     const details = issue.closest('details')!;
     expect(details.hasAttribute('open')).toBe(false);
     expect(details.textContent).toContain(diagnostic);
@@ -320,12 +321,40 @@ describe('native subtitle coordination', () => {
     expect(screen.getByRole('button', { name: 'Beautify' }).hasAttribute('disabled')).toBe(false);
   });
 
+  test('a blocked first K4 explains its cause and opens setup without recording or changing text', async () => {
+    const reason = 'Select an ASR model in keyboard settings before using K4.';
+    current = snapshot({ documentId: null, revision: 0, text: '', originalText: '', error: reason });
+    renderBoard();
+    const issue = await screen.findByRole('alert');
+    expect(issue.textContent).toBe(reason);
+    expect(issue.closest('details')!.hasAttribute('open')).toBe(false);
+    const setup = await screen.findByRole('button', { name: 'Check keyboard setup' });
+    fireEvent.click(setup);
+    await waitFor(() => expect(actions).toEqual([
+      { action: 'open_settings', documentId: null, revision: 0, cancelGeneration: 0 },
+    ]));
+    expect(screen.getByRole('textbox', { name: 'Final text' }).textContent).toBe('');
+    expect(current.audioState.state).toBe('stopped');
+  });
+
   test('a fresh capture keeps the listening indicator clear of an earlier issue detail', async () => {
     current = snapshot({ phase: 'recording', error: 'Previous operation interrupted', audioState: { state: 'capturing', detail: null } });
     renderBoard();
     await screen.findByText('Listening…');
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByRole('textbox', { name: 'Final text' }).textContent).toBe(current.text);
+  });
+
+  test('subtitle stop targets the local microphone check without borrowing the document identity', async () => {
+    current = snapshot({ audioState: { state: 'capturing', detail: null },
+      microphoneTest: { id: 'local-check-1', deviceId: null, state: 'listening', callbackObserved: true,
+        samples: 960, nonzero: 960, peak: .4, rms: .2, elapsedMs: 60, stopped: false, detail: null } });
+    renderBoard();
+    const stop = await screen.findByRole('button', { name: 'Stop recording' });
+    fireEvent.click(stop);
+    await waitFor(() => expect(actions).toEqual([{ action: 'microphone_test_stop', testId: 'local-check-1' }]));
+    expect(current.text).toBe('原文 👋\nSecond line');
+    expect(current.revision).toBe(3);
   });
 
   test('pinning uses only the subtitle action capability with current document identity', async () => {
