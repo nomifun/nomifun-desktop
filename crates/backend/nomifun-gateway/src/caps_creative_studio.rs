@@ -187,6 +187,9 @@ fn canvas_operation_error(error: AppError) -> String {
         AppError::ProviderInUse(_) => {
             "Creative Studio Canvas still references the selected provider".to_owned()
         }
+        AppError::KnowledgeBaseInUse { .. } => {
+            "Creative Studio Canvas knowledge base is still selected by Agent sessions".to_owned()
+        }
         AppError::ProviderUnavailable(message) => {
             format!("No usable model provider is configured: {message}")
         }

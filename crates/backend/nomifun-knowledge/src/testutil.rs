@@ -21,6 +21,13 @@ pub(crate) struct MemRepo {
     /// `knowledge_binding_bases` junction).
     pub bindings: Mutex<Vec<(KnowledgeBindingRow, Vec<String>)>>,
     pub tags: Mutex<Vec<KnowledgeTagRow>>,
+    /// Simulated live AgentSession selections as `(kb_id, session_id,
+    /// enabled)` tuples. Mirrors the SQLite consumer fence: `delete_base`
+    /// refuses while any entry selects the base.
+    pub session_selections: Mutex<Vec<(String, String, bool)>>,
+    /// Injected `DbError::Conflict` message for `delete_base`, used to drive
+    /// the non-session conflict fallback (no session selection involved).
+    pub forced_delete_conflict: Mutex<Option<String>>,
 }
 
 #[derive(Default)]
@@ -137,6 +144,21 @@ impl IKnowledgeRepository for MemRepo {
         }
     }
     async fn delete_base(&self, id: &str) -> Result<(), DbError> {
+        if let Some(message) = self.forced_delete_conflict.lock().unwrap().clone() {
+            return Err(DbError::Conflict(message));
+        }
+        let session_consumers = self
+            .session_selections
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(kb_id, _, _)| kb_id == id)
+            .count();
+        if session_consumers > 0 {
+            return Err(DbError::Conflict(format!(
+                "knowledge base is still selected by {session_consumers} AgentSession(s); unmount it from those conversations before deleting it"
+            )));
+        }
         let mut bases = self.bases.lock().unwrap();
         let before = bases.len();
         bases.retain(|r| r.knowledge_base_id != id);
@@ -229,6 +251,20 @@ impl IKnowledgeRepository for MemRepo {
             .collect();
         rows.sort_by(|a, b| a.target_kind.cmp(&b.target_kind).then(a.id.cmp(&b.id)));
         Ok(rows)
+    }
+
+    async fn list_agent_sessions_using_kb(
+        &self,
+        kb_id: &str,
+    ) -> Result<Vec<(String, bool)>, DbError> {
+        Ok(self
+            .session_selections
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _, _)| id == kb_id)
+            .map(|(_, session_id, enabled)| (session_id.clone(), *enabled))
+            .collect())
     }
 
     async fn list_knowledge_tags(&self) -> Result<Vec<KnowledgeTagRow>, DbError> {

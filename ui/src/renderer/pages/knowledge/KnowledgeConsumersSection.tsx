@@ -9,11 +9,13 @@ import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Message as ArcoMessage, Modal, Tooltip } from '@arco-design/web-react';
 import { Down, FolderOpen, LinkOne, Message, Robot, Terminal, Unlink, User } from '@icon-park/react';
-import { ipcBridge } from '@/common';
-import type { IKnowledgeBinding, IKnowledgeConsumer, KnowledgeBindingKind } from '@/common/adapter/ipcBridge';
+import type { IKnowledgeConsumer, KnowledgeBindingKind } from '@/common/adapter/ipcBridge';
 import { useKnowledgeConsumers } from './useKnowledge';
 import { KnowledgeErrorNotice, showKnowledgeErrorMessage } from './KnowledgeErrorFeedback';
+import { unmountConsumer } from './knowledgeUnmount';
 import type { KnowledgeBaseId } from '@/common/types/ids';
+
+export { removeBaseFromBinding } from './knowledgeUnmount';
 
 interface KnowledgeConsumersSectionProps {
   baseId: KnowledgeBaseId;
@@ -51,17 +53,6 @@ function consumerKey(c: IKnowledgeConsumer, fallback = 0): string {
   return `${c.target_kind}-${c.target_id ?? fallback}`;
 }
 
-export function removeBaseFromBinding(binding: IKnowledgeBinding, baseId: KnowledgeBaseId): IKnowledgeBinding {
-  const kbIds = binding.kb_ids.filter((id) => id !== baseId);
-  return {
-    ...binding,
-    enabled: kbIds.length > 0 ? binding.enabled : false,
-    writeback: kbIds.length > 0 ? binding.writeback : false,
-    writeback_eagerness: kbIds.length > 0 ? binding.writeback_eagerness : 'manual',
-    kb_ids: kbIds,
-  };
-}
-
 /** Compact "who is using this base?" list with a bounded expanded state. */
 const KnowledgeConsumersSection: React.FC<KnowledgeConsumersSectionProps> = ({ baseId }) => {
   const { t } = useTranslation();
@@ -89,7 +80,6 @@ const KnowledgeConsumersSection: React.FC<KnowledgeConsumersSectionProps> = ({ b
     if (!isSupportedBindingKind(consumer.target_kind) || !consumer.target_id) return;
 
     const targetKind = consumer.target_kind;
-    const targetId = consumer.target_id;
     const targetLabel = label(consumer);
 
     Modal.confirm({
@@ -117,32 +107,7 @@ const KnowledgeConsumersSection: React.FC<KnowledgeConsumersSectionProps> = ({ b
       onOk: async () => {
         setRemovingKey(rowKey);
         try {
-          if (targetKind === 'conversation') {
-            const binding = await ipcBridge.agentPlatform.sessions.getKnowledge.invoke({
-              agent_session_id: targetId,
-            });
-            const next = removeBaseFromBinding(
-              { ...binding, channel_write_enabled: false },
-              baseId
-            );
-            if (next.kb_ids.length !== binding.kb_ids.length || next.enabled !== binding.enabled) {
-              await ipcBridge.agentPlatform.sessions.updateKnowledge.invoke({
-                agent_session_id: targetId,
-                binding: {
-                  enabled: next.enabled,
-                  writeback: next.writeback,
-                  writeback_eagerness: next.writeback_eagerness,
-                  kb_ids: next.kb_ids,
-                },
-              });
-            }
-          } else {
-            const binding = await ipcBridge.knowledge.getBinding.invoke({ kind: targetKind, target_id: targetId });
-            const next = removeBaseFromBinding(binding, baseId);
-            if (next.kb_ids.length !== binding.kb_ids.length || next.enabled !== binding.enabled) {
-              await ipcBridge.knowledge.setBinding.invoke({ kind: targetKind, target_id: targetId, ...next });
-            }
-          }
+          await unmountConsumer(consumer, baseId);
           await refresh();
           ArcoMessage.success(t('knowledge.consumers.removeOk', { defaultValue: '已取消挂载' }));
         } catch (e) {

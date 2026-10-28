@@ -37,7 +37,6 @@ import { useKnowledgeTags } from '../useKnowledgeTags';
 import { KnowledgeErrorNotice, showKnowledgeErrorMessage } from '../KnowledgeErrorFeedback';
 import KnowledgeEmptyState from '../KnowledgeEmptyState';
 import KnowledgeCard from '../KnowledgeCard';
-import FeishuKnowledgeCard from '../FeishuKnowledgeCard';
 import KnowledgeTagFilterBar, {
   type KnowledgeKind,
   type KnowledgeSort,
@@ -49,6 +48,9 @@ import KnowledgeTagManagementModal from '../KnowledgeTagManagementModal';
 import KnowledgeRetrievalSettingsModal from '../KnowledgeRetrievalSettingsModal';
 import CreateStudio from '../CreateStudio';
 import type { StudioInitialKind } from '../CreateStudio/sourceTypes';
+import { canPurgeKnowledgeBase } from '../knowledgeBasePolicy';
+import { sessionConsumers, unmountSessionConsumers } from '../knowledgeUnmount';
+import type { IKnowledgeConsumer } from '@/common/adapter/ipcBridge';
 
 // ─── Filter pure function ────────────────────────────────────────────────────
 
@@ -182,7 +184,6 @@ const KnowledgeListPage: React.FC = () => {
 
   const openStudio = (initialKind?: KnowledgeKindShortcut) => {
     // Feishu is a creatable base kind: the tile opens the studio pre-selected.
-    // The pinned FeishuKnowledgeCard still routes to the connector workbench.
     setStudioInitialKind(initialKind);
     setStudioVisible(true);
   };
@@ -245,9 +246,15 @@ const KnowledgeListPage: React.FC = () => {
   // checkbox below manages its own checked state.
   const purgeRef = useRef(false);
 
-  const handleDelete = async (base: IKnowledgeBase) => {
+  const handleDelete = async (base: IKnowledgeBase, mounted: IKnowledgeConsumer[] = []) => {
     try {
-      await ipcBridge.knowledge.deleteBase.invoke({ knowledge_base_id: base.knowledge_base_id, purge: base.managed && purgeRef.current });
+      // AgentSession selections atomically fence base deletion, so any
+      // mounted sessions must be detached first — the user already confirmed
+      // this in the dialog that listed them.
+      if (mounted.length > 0) {
+        await unmountSessionConsumers(mounted, base.knowledge_base_id);
+      }
+      await ipcBridge.knowledge.deleteBase.invoke({ knowledge_base_id: base.knowledge_base_id, purge: canPurgeKnowledgeBase(base) && purgeRef.current });
       Message.success(t('knowledge.actions.deleteOk'));
       purgeRef.current = false;
       void refresh();
@@ -256,19 +263,47 @@ const KnowledgeListPage: React.FC = () => {
     }
   };
 
-  const handleCardDelete = (base: IKnowledgeBase, _e: React.MouseEvent) => {
+  const handleCardDelete = async (base: IKnowledgeBase, _e: React.MouseEvent) => {
     purgeRef.current = false;
+    let mounted: IKnowledgeConsumer[] = [];
+    try {
+      mounted = sessionConsumers(
+        await ipcBridge.knowledge.listConsumers.invoke({ knowledge_base_id: base.knowledge_base_id })
+      );
+    } catch {
+      // Consumer lookup is advisory: the repository's atomic fence is the
+      // authority, so a failed read must not block the delete attempt.
+    }
     Modal.confirm({
       title: t('knowledge.actions.deleteConfirm', { defaultValue: '确认删除？' }),
-      content: base.managed ? (
-        <PurgeFilesCheckbox
-          label={t('knowledge.actions.deleteWithFiles', { defaultValue: '同时删除文件' })}
-          onChange={(v) => {
-            purgeRef.current = v;
-          }}
-        />
-      ) : undefined,
-      onOk: () => handleDelete(base),
+      content: (
+        <>
+          {mounted.length > 0 && (
+            <p className='text-12px leading-18px text-[var(--color-text-2)] m-0 mb-8px'>
+              {t('knowledge.actions.deleteMountedWarning', {
+                defaultValue: '该知识库仍被 {{count}} 个会话挂载，删除前需要先取消这些挂载。',
+                count: mounted.length,
+              })}
+            </p>
+          )}
+          {canPurgeKnowledgeBase(base) ? (
+            <PurgeFilesCheckbox
+              label={t('knowledge.actions.deleteWithFiles', { defaultValue: '同时删除文件' })}
+              onChange={(v) => {
+                purgeRef.current = v;
+              }}
+            />
+          ) : base.kind === 'feishu' ? (
+            <span className='text-12px text-[var(--color-text-3)]'>
+              {t('knowledge.actions.deleteFeishuNote', { defaultValue: '库中的飞书文档均为云端文档，删除知识库不影响云端文件。' })}
+            </span>
+          ) : undefined}
+        </>
+      ),
+      okText: mounted.length > 0
+        ? t('knowledge.actions.unmountAndDelete', { defaultValue: '取消挂载并删除' })
+        : undefined,
+      onOk: () => handleDelete(base, mounted),
       onCancel: () => {
         purgeRef.current = false;
       },
@@ -408,9 +443,7 @@ const KnowledgeListPage: React.FC = () => {
           <KnowledgeEmptyState onCreate={openStudio} onImport={() => void handleImport()} />
         ) : bases.length > 0 || !error ? (
           <>
-            {/* Card grid: the Feishu space entry is pinned only on the unfiltered view. */}
             <div className={styles.grid}>
-              {!kindFilter && tagFilter.length === 0 && !searchQuery.trim() && <FeishuKnowledgeCard />}
               {displayBases.map((base) => (
                 <KnowledgeCard
                   key={base.knowledge_base_id}

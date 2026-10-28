@@ -82,6 +82,9 @@ import {
   notifySourceFetchResult,
   useKnowledgeBase,
 } from '../useKnowledge';
+import { canPurgeKnowledgeBase } from '../knowledgeBasePolicy';
+import { sessionConsumers, unmountSessionConsumers } from '../knowledgeUnmount';
+import type { IKnowledgeConsumer } from '@/common/adapter/ipcBridge';
 import { useKnowledgeTags } from '../useKnowledgeTags';
 import KnowledgeModelSelector, { useKnowledgeAutogenModel } from '../KnowledgeModelSelector';
 import KnowledgeConsumersSection from '../KnowledgeConsumersSection';
@@ -291,11 +294,32 @@ const SettingsTab: React.FC<SettingsTabProps> = ({
   const [deleteModalVisible, setDeleteModalVisible] = useState(false);
   const [purge, setPurge] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [mountedConsumers, setMountedConsumers] = useState<IKnowledgeConsumer[]>([]);
+
+  const openDeleteModal = () => {
+    setDeleteModalVisible(true);
+    // AgentSession selections atomically fence base deletion; surface them up
+    // front so the confirm can offer an unmount-and-delete path instead of a
+    // dead-end 409.
+    void (async () => {
+      try {
+        const consumers = await ipcBridge.knowledge.listConsumers.invoke({
+          knowledge_base_id: base.knowledge_base_id,
+        });
+        setMountedConsumers(sessionConsumers(consumers));
+      } catch {
+        setMountedConsumers([]);
+      }
+    })();
+  };
 
   const handleDelete = async () => {
     setDeleting(true);
     try {
-      await ipcBridge.knowledge.deleteBase.invoke({ knowledge_base_id: base.knowledge_base_id, purge });
+      if (mountedConsumers.length > 0) {
+        await unmountSessionConsumers(mountedConsumers, base.knowledge_base_id);
+      }
+      await ipcBridge.knowledge.deleteBase.invoke({ knowledge_base_id: base.knowledge_base_id, purge: canPurgeKnowledgeBase(base) && purge });
       Message.success(t('knowledge.detail.settings.deleteOk', { defaultValue: '已删除' }));
       navigate('/knowledge');
     } catch (e) {
@@ -444,10 +468,12 @@ const SettingsTab: React.FC<SettingsTabProps> = ({
             description={
               !base.managed
                 ? t('knowledge.detail.settings.deleteLocalHint', { defaultValue: '（本地引用目录不会被删除）' })
-                : undefined
+                : base.kind === 'feishu'
+                  ? t('knowledge.detail.settings.deleteFeishuHint', { defaultValue: '（云端文档不受影响）' })
+                  : undefined
             }
             controls={
-              <Button size='mini' status='danger' onClick={() => setDeleteModalVisible(true)}>
+              <Button size='mini' status='danger' onClick={openDeleteModal}>
                 {t('knowledge.detail.settings.deleteBtn', { defaultValue: '删除知识库' })}
               </Button>
             }
@@ -463,14 +489,24 @@ const SettingsTab: React.FC<SettingsTabProps> = ({
         onOk={() => void handleDelete()}
         confirmLoading={deleting}
         okButtonProps={{ status: 'danger' }}
-        okText={t('knowledge.detail.settings.deleteConfirm', { defaultValue: '确认删除' })}
+        okText={mountedConsumers.length > 0
+          ? t('knowledge.actions.unmountAndDelete', { defaultValue: '取消挂载并删除' })
+          : t('knowledge.detail.settings.deleteConfirm', { defaultValue: '确认删除' })}
       >
         <p className='text-13px text-[var(--color-text-2)] mb-12px'>
           {t('knowledge.detail.settings.deleteWarning', {
             defaultValue: '删除后无法恢复。知识库的所有文档、挂载关系将被清除。',
           })}
         </p>
-        {base.managed && (
+        {mountedConsumers.length > 0 && (
+          <p className='text-12px leading-18px text-[var(--color-text-2)] m-0 mb-12px'>
+            {t('knowledge.actions.deleteMountedWarning', {
+              defaultValue: '该知识库仍被 {{count}} 个会话挂载，删除前需要先取消这些挂载。',
+              count: mountedConsumers.length,
+            })}
+          </p>
+        )}
+        {canPurgeKnowledgeBase(base) && (
           <Checkbox checked={purge} onChange={setPurge}>
             <span className='text-12px text-[var(--color-text-3)]'>
               {t('knowledge.detail.settings.purgeOption', { defaultValue: '同时删除磁盘上的数据目录' })}
@@ -482,6 +518,13 @@ const SettingsTab: React.FC<SettingsTabProps> = ({
             {t('knowledge.detail.settings.deleteLocalNote', {
               defaultValue: '本知识库引用的外部目录（{{path}}）不会被删除，仅取消关联。',
               path: base.root_path,
+            })}
+          </p>
+        )}
+        {base.managed && base.kind === 'feishu' && (
+          <p className='text-12px text-[var(--color-text-3)] m-0 mt-8px'>
+            {t('knowledge.detail.settings.deleteFeishuNote', {
+              defaultValue: '本知识库中的飞书文档均为云端文档，删除知识库不影响云端文件。',
             })}
           </p>
         )}

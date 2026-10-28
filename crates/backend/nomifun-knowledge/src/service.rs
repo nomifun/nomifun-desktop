@@ -1991,7 +1991,7 @@ impl KnowledgeService {
     }
 
     /// Late-wire the Feishu knowledge read port. The application composition
-    /// supplies an adapter over the office-hub service; Knowledge never
+    /// supplies an adapter over the Feishu connector service; Knowledge never
     /// receives a CLI, profile, or credential handle.
     pub fn set_feishu_knowledge_port(&self, port: Arc<dyn FeishuKnowledgePort>) {
         *self
@@ -2997,7 +2997,25 @@ impl KnowledgeService {
                 )));
             }
         }
-        self.repo.delete_base(id).await?;
+        match self.repo.delete_base(id).await {
+            Err(nomifun_db::DbError::Conflict(message)) => {
+                // A live AgentSession selection is the only consumer the
+                // repository fences atomically; surface it as a dedicated
+                // error so clients can explain the block (and offer an
+                // unmount path) instead of reporting a bare refresh hint.
+                let sessions = self
+                    .repo
+                    .list_agent_sessions_using_kb(id)
+                    .await
+                    .map(|consumers| consumers.len())
+                    .unwrap_or(0);
+                if sessions > 0 {
+                    return Err(AppError::KnowledgeBaseInUse { sessions });
+                }
+                return Err(AppError::Conflict(message));
+            }
+            result => result?,
+        }
         self.projection_reconciled
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -23378,6 +23396,44 @@ mod tests {
         assert_eq!(terminal.target_id.as_deref(), Some(TEST_SESSION_ID));
         assert!(terminal.enabled);
         assert!(!consumers.iter().find(|c| c.target_kind == "workpath").unwrap().enabled, "disabled included");
+    }
+
+    /// A repository refusal driven by live AgentSession selections is
+    /// surfaced as `KnowledgeBaseInUse` so clients can explain the block;
+    /// other delete conflicts stay generic.
+    #[tokio::test]
+    async fn delete_base_maps_session_selection_conflict_to_in_use() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (service, repo) = service_with_repo(&dir.path().join("data"));
+        let kb = service.create_base("mounted", "", None, None).await.unwrap();
+        let kb_id = kb.knowledge_base_id.to_string();
+
+        repo.session_selections
+            .lock()
+            .unwrap()
+            .push((kb_id.clone(), "session-a".into(), true));
+        repo.session_selections
+            .lock()
+            .unwrap()
+            .push((kb_id.clone(), "session-b".into(), false));
+        let error = service.delete_base(&kb_id, false).await.unwrap_err();
+        match error {
+            AppError::KnowledgeBaseInUse { sessions } => assert_eq!(sessions, 2),
+            other => panic!("expected KnowledgeBaseInUse, got {other:?}"),
+        }
+        assert!(
+            service.get_base_info(&kb_id).await.is_ok(),
+            "a fenced base must remain registered"
+        );
+
+        repo.session_selections.lock().unwrap().clear();
+        *repo.forced_delete_conflict.lock().unwrap() =
+            Some("unrelated constraint failure".into());
+        let error = service.delete_base(&kb_id, false).await.unwrap_err();
+        assert!(
+            matches!(&error, AppError::Conflict(message) if message.contains("unrelated constraint failure")),
+            "non-session conflicts must not be recast as KnowledgeBaseInUse: {error:?}"
+        );
     }
 
     /// `derive_kind` covers all four UI type categories.

@@ -94,6 +94,14 @@ pub enum AppError {
     #[error("Provider is in use: {} reference(s)", .0.usages.len())]
     ProviderInUse(crate::provider_usage::ProviderInUseDetails),
 
+    /// A knowledge base cannot be deleted while live canonical AgentSessions
+    /// still select it. `sessions` is the consumer count at refusal time so
+    /// clients can explain the block instead of reporting a bare conflict.
+    #[error(
+        "Knowledge base is still selected by {sessions} AgentSession(s); unmount it from those conversations before deleting it"
+    )]
+    KnowledgeBaseInUse { sessions: usize },
+
     /// No usable (enabled) provider/model is configured to serve a request.
     #[error("No usable model provider is configured: {0}")]
     ProviderUnavailable(String),
@@ -197,6 +205,7 @@ impl AppError {
             Self::AgentResourceBindingIncomplete { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::RevisionConflict(_) => StatusCode::CONFLICT,
             Self::ProviderInUse(_) => StatusCode::CONFLICT,
+            Self::KnowledgeBaseInUse { .. } => StatusCode::CONFLICT,
             Self::ProviderUnavailable(_) => StatusCode::BAD_REQUEST,
             Self::ModelInvocation { kind, .. } => {
                 use nomifun_agent_contracts::ModelInvocationFailureKind as K;
@@ -258,6 +267,7 @@ impl AppError {
             Self::AgentResourceBindingIncomplete { .. } => "NOMIFUN_AGENT_RESOURCE_BINDING_INCOMPLETE",
             Self::RevisionConflict(_) => "REVISION_CONFLICT",
             Self::ProviderInUse(_) => "PROVIDER_IN_USE",
+            Self::KnowledgeBaseInUse { .. } => "KNOWLEDGE_BASE_IN_USE",
             Self::ProviderUnavailable(_) => "PROVIDER_UNAVAILABLE",
             Self::ModelInvocation { .. } => "MODEL_INVOCATION_FAILED",
             Self::RateLimited => "RATE_LIMITED",
@@ -328,6 +338,7 @@ impl AppError {
                 Some(workspace_directory_details(path, "runtime"))
             }
             Self::ProviderInUse(details) => Some(json!({ "usages": details.usages })),
+            Self::KnowledgeBaseInUse { sessions } => Some(json!({ "sessions": sessions })),
             Self::SessionContractEvolutionRejected { details, .. } => details.clone(),
             Self::ComponentUnavailable { component, .. } => {
                 Some(json!({ "component": component, "phase": "runtime_resolution" }))

@@ -34,6 +34,23 @@ describe('knowledge error presentation', () => {
     expect(knowledgeErrorText(sourceFailure, 'export')).not.toContain('保存位置');
   });
 
+  test('knowledge-base-in-use conflicts explain the mount block instead of a refresh hint', () => {
+    const inUse = new BackendHttpError({
+      method: 'DELETE', path: '/api/knowledge/bases/base-id', status: 409,
+      body: { success: false, code: 'KNOWLEDGE_BASE_IN_USE', error: 'still selected', details: { sessions: 2 } },
+    });
+    const message = knowledgeErrorText(inUse, 'operation');
+    expect(message).toContain('2');
+    expect(message).toContain('会话挂载');
+    expect(message).not.toContain('刷新');
+    const noDetails = new BackendHttpError({
+      method: 'DELETE', path: '/api/knowledge/bases/base-id', status: 409,
+      body: { success: false, code: 'KNOWLEDGE_BASE_IN_USE', error: 'still selected' },
+    });
+    expect(knowledgeErrorText(noDetails, 'operation')).toContain('取消挂载');
+    expect(knowledgeErrorText(http('CONFLICT', 409), 'operation')).toContain('刷新');
+  });
+
   test('transport failure does not claim that an export or mutation had no effect', () => {
     const timeout = normalizeKnowledgeError(new BackendRequestError('timeout', 'Backend request timed out'), 'export');
     const network = normalizeKnowledgeError(new BackendRequestError('network', 'connection lost'), 'operation');

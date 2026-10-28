@@ -10,6 +10,7 @@ const studioIndexSource = readFileSync(new URL('./CreateStudio/index.tsx', impor
 const sourceConfigSource = readFileSync(new URL('./CreateStudio/SourceConfig.tsx', import.meta.url), 'utf8');
 const emptyStateSource = readFileSync(new URL('./KnowledgeEmptyState.tsx', import.meta.url), 'utf8');
 const listPageSource = readFileSync(new URL('./KnowledgeListPage/index.tsx', import.meta.url), 'utf8');
+const detailPageSource = readFileSync(new URL('./KnowledgeDetailPage/index.tsx', import.meta.url), 'utf8');
 
 describe('Feishu knowledge entry', () => {
   test('CreateStudio offers feishu as a curated remote-backed source type', () => {
@@ -50,8 +51,21 @@ describe('Feishu knowledge entry', () => {
     expect(emptyStateSource.includes('if (!k.disabled) onCreate(k.key);')).toBe(true);
   });
 
-  test('routes the Feishu shortcut into the studio; the pinned card keeps the workbench route', () => {
+  test('routes the Feishu shortcut into the studio; the list renders only real bases', () => {
     expect(listPageSource.includes("navigate('/knowledge/feishu')")).toBe(false);
-    expect(listPageSource.includes('<FeishuKnowledgeCard />')).toBe(true);
+    // The knowledge list only renders bases the user actually created — the
+    // connector workbench stays reachable from the connectors panel, not a
+    // pinned pseudo-base card.
+    expect(listPageSource.includes('FeishuKnowledgeCard')).toBe(false);
+    expect(listPageSource.includes('primaryFeishuBase')).toBe(false);
+  });
+
+  test('remote-backed feishu bases never offer the cascade file-delete option', () => {
+    // Only bases whose documents live on disk offer the optional purge;
+    // feishu documents are cloud documents.
+    expect(listPageSource.includes('canPurgeKnowledgeBase')).toBe(true);
+    expect(listPageSource.includes('deleteFeishuNote')).toBe(true);
+    expect(detailPageSource.includes('canPurgeKnowledgeBase')).toBe(true);
+    expect(detailPageSource.includes('deleteFeishuNote')).toBe(true);
   });
 });

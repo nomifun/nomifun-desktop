@@ -10,8 +10,10 @@
     "createOk": "已创建",
     "delete": "删除",
     "deleteConfirm": "确认删除该知识库？",
+    "deleteFeishuNote": "库中的飞书文档均为云端文档，删除知识库不影响云端文件。",
     "deleteFileConfirm": "确认删除该文档？",
     "deleteFolderOk": "目录已删除",
+    "deleteMountedWarning": "该知识库仍被 {{count}} 个会话挂载，删除前需要先取消这些挂载。",
     "deleteOk": "已删除",
     "deleteWithFiles": "同时删除目录中的文件",
     "edit": "编辑",
@@ -26,6 +28,7 @@
     "renameOk": "已重命名",
     "save": "保存",
     "saveOk": "已保存",
+    "unmountAndDelete": "取消挂载并删除",
     "viewDetail": "查看详情"
   },
   "backToList": "返回知识库列表",
@@ -237,6 +240,8 @@
       "deleteBtn": "删除知识库",
       "deleteConfirm": "确认删除",
       "deleteDesc": "删除此知识库",
+      "deleteFeishuHint": "（云端文档不受影响）",
+      "deleteFeishuNote": "本知识库中的飞书文档均为云端文档，删除知识库不影响云端文件。",
       "deleteLocalHint": "（本地引用目录不会被删除）",
       "deleteLocalNote": "本知识库引用的外部目录（{{path}}）不会被删除，仅取消关联。",
       "deleteModalTitle": "确认删除知识库",
@@ -300,8 +305,6 @@
   "feishu": {
     "title": "飞书知识库",
     "description": "浏览飞书云文档与多维表格，正文在浏览器中打开。",
-    "connectorTag": "飞书连接器",
-    "browserHint": "云端内容，正文在浏览器中打开",
     "saveToBase": "存入知识库",
     "saveToBaseHint": "把「{{title}}」加入一个飞书知识库的名称索引；正文保持远端，不落本地。",
     "savedToBase": "已加入知识库索引",
@@ -574,6 +577,8 @@
     "notFound": "知识库或文件已不存在，请刷新页面后再试。",
     "conflict": "内容已发生变化，请刷新后再试。",
     "invalidInput": "操作未完成，请检查填写的内容或所选文件后再试。",
+    "inUse": "该知识库仍被会话挂载，请先取消挂载后再删除。",
+    "inUseCount": "该知识库仍被 {{count}} 个会话挂载，请先取消挂载后再删除。",
     "rateLimited": "操作过于频繁，请稍后再试。",
     "chooseLocation": "重新选择保存位置"
   }

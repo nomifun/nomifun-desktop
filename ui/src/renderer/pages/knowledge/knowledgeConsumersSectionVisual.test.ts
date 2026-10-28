@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 const consumersSource = readFileSync(new URL('./KnowledgeConsumersSection.tsx', import.meta.url), 'utf8');
+const unmountSource = readFileSync(new URL('./knowledgeUnmount.ts', import.meta.url), 'utf8');
 
 describe('Knowledge consumers section visual style', () => {
   test('shows a bounded preview list with explicit loading and empty states', () => {
@@ -21,8 +22,9 @@ describe('Knowledge consumers section visual style', () => {
 
   test('unmounts conversations through the dedicated AgentSession command', () => {
     expect(consumersSource.includes("'conversation',")).toBe(true);
-    expect(consumersSource.includes("targetKind === 'conversation'")).toBe(true);
-    expect(consumersSource.includes('sessions.getKnowledge.invoke')).toBe(true);
-    expect(consumersSource.includes('sessions.updateKnowledge.invoke')).toBe(true);
+    expect(consumersSource.includes('unmountConsumer')).toBe(true);
+    expect(unmountSource.includes("target_kind === 'conversation'")).toBe(true);
+    expect(unmountSource.includes('sessions.getKnowledge.invoke')).toBe(true);
+    expect(unmountSource.includes('sessions.updateKnowledge.invoke')).toBe(true);
   });
 });

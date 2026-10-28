@@ -96,6 +96,17 @@ export function normalizeKnowledgeError(
       case 'PROVIDER_UNAVAILABLE':
         message = text('knowledge.errors.providerUnavailable', '没有可用的模型服务，请检查模型配置后再试。');
         break;
+      case 'KNOWLEDGE_BASE_IN_USE': {
+        const sessions = error.details && typeof error.details === 'object'
+          ? (error.details as { sessions?: unknown }).sessions
+          : undefined;
+        const count = typeof sessions === 'number' && sessions > 0 ? sessions : 0;
+        const countFallback = `该知识库仍被 ${count} 个会话挂载，请先取消挂载后再删除。`;
+        message = count > 0
+          ? t('knowledge.errors.inUseCount', { defaultValue: countFallback, count }) || countFallback
+          : text('knowledge.errors.inUse', '该知识库仍被会话挂载，请先取消挂载后再删除。');
+        break;
+      }
       default:
         if (error.status === 401 || error.authExpired) {
           message = text('knowledge.errors.authExpired', '登录状态已失效，请重新登录后再试。');

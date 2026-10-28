@@ -10,8 +10,10 @@
     "createOk": "Created",
     "delete": "Delete",
     "deleteConfirm": "Delete this knowledge base?",
+    "deleteFeishuNote": "Documents in this base are Feishu cloud documents — deleting the base leaves the cloud files untouched.",
     "deleteFileConfirm": "Delete this document?",
     "deleteFolderOk": "Folder deleted",
+    "deleteMountedWarning": "This knowledge base is still mounted by {{count}} session(s) — they must be unmounted before it can be deleted.",
     "deleteOk": "Deleted",
     "deleteWithFiles": "Also delete files in the directory",
     "edit": "Edit",
@@ -26,6 +28,7 @@
     "renameOk": "Renamed",
     "save": "Save",
     "saveOk": "Saved",
+    "unmountAndDelete": "Unmount and delete",
     "viewDetail": "View details"
   },
   "backToList": "Back to knowledge bases",
@@ -237,6 +240,8 @@
       "deleteBtn": "Delete knowledge base",
       "deleteConfirm": "Confirm delete",
       "deleteDesc": "Delete this knowledge base",
+      "deleteFeishuHint": "(cloud documents are unaffected)",
+      "deleteFeishuNote": "Documents in this base are Feishu cloud documents — deleting the base leaves the cloud files untouched.",
       "deleteLocalHint": "(the referenced local directory will not be deleted)",
       "deleteLocalNote": "The external directory referenced by this base ({{path}}) will not be deleted — only the association is removed.",
       "deleteModalTitle": "Confirm delete knowledge base",
@@ -300,8 +305,6 @@
   "feishu": {
     "title": "Feishu knowledge",
     "description": "Browse Feishu docs and bases; content opens in the browser.",
-    "connectorTag": "Feishu connector",
-    "browserHint": "Cloud content · opens in the browser",
     "saveToBase": "Save to knowledge base",
     "saveToBaseHint": "Add “{{title}}” to a Feishu knowledge base index; content stays remote.",
     "savedToBase": "Added to the base index",
@@ -574,6 +577,8 @@
     "notFound": "The knowledge base or file no longer exists. Refresh the page and try again.",
     "conflict": "The content has changed. Refresh and try again.",
     "invalidInput": "The operation could not be completed. Check the entered information or selected files and try again.",
+    "inUse": "This knowledge base is still mounted by sessions. Unmount it before deleting.",
+    "inUseCount": "This knowledge base is still mounted by {{count}} session(s). Unmount them before deleting.",
     "rateLimited": "Too many requests. Please try again later.",
     "chooseLocation": "Choose another save location"
   }
